@@ -1,0 +1,59 @@
+{
+  "_note": "Observed QuantumLab result for the SAME script on the SAME symbol/timeframe, captured from QL Lab Run #749 on 2026-05-25. The params below are the optimizer's best-of-583 — note rsiOB=57 differs from the TV fixture's rsiOB=60. All other params match params.json. This is the headline divergence the parity work targets.",
+  "ql_run_id": 749,
+  "ql_run_date": "2026-05-25",
+  "ql_configs_tested": 583,
+  "symbol": "ETH",
+  "timeframe": "1h",
+  "ql_metrics": {
+    "net_profit_pct": 141.23,
+    "win_rate_pct": 83.8,
+    "max_drawdown_pct": 7.1,
+    "profit_factor": 2.16,
+    "trades": 240
+  },
+  "tv_metrics_for_comparison": {
+    "net_profit_pct": 59.17,
+    "win_rate_pct": 76.36,
+    "profit_factor": 1.419,
+    "trades_collapsed_to_position_events": 110,
+    "trade_fill_rows": 220
+  },
+  "headline_gap": {
+    "net_pct_absolute_pp": 82.06,
+    "net_pct_ratio_ql_over_tv": 2.39,
+    "wr_absolute_pp": 7.44,
+    "pf_ratio_ql_over_tv": 1.52,
+    "trade_count_ratio_ql_over_tv_positions": 2.18
+  },
+  "ql_optimized_params": {
+    "rsiOB": 57,
+    "rsiOS": 36,
+    "sdLen": 109,
+    "emaLen": 170,
+    "rsiLen": 6,
+    "sdMult": 1.2,
+    "useEMA": false,
+    "vwapLen": 174,
+    "beOffset": 0.4,
+    "slAtrLen": 22,
+    "tradeDir": "Long Only",
+    "slAtrMult": 3,
+    "tp1QtyPct": 20,
+    "volSmaLen": 8,
+    "backtestEnd": 1924905600000,
+    "cooldownBars": 3,
+    "trailAtrMult": 0.7,
+    "useVolFilter": false,
+    "volSurgeMult": 3.5,
+    "backtestStart": 1672531200000,
+    "useDateFilter": true
+  },
+  "interpretation_notes": [
+    "Trade count: QL 240 vs TV 110 collapsed (220 fill rows). QL records one trade per fill (TP1 partial + runner exit), so 110 positions × ~2 fills ≈ 220 — close to QL's 240 but not identical (extra ~20 likely from end-of-test forced close or pyramiding-by-accident).",
+    "Win rate inflation (84% vs 76%): consistent with QL undercharging commission so small wins that TV records as losses-after-fees stay green in QL.",
+    "PF ratio 1.52x: same mechanism — wins look bigger and losses look smaller when commission is wrong by ~20x.",
+    "Net % ratio 2.39x: dominated by the sizing+commission interaction described in F-01.",
+    "Max DD 7.1%: way below TV's intrabar max equity drawdown — this is the F-03 close-to-close vs intrabar metric mismatch."
+  ]
+}

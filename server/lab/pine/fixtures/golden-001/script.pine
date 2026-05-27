@@ -1,0 +1,382 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Kryptolytix — VSS: VWAP Snap Scalper v1
+// Mean reversion scalper for 5M crypto perpetuals on Drift/PerpDEX
+// Core logic: enters when price snaps back from rolling VWAP standard deviation extremes
+// Target: VWAP midline. Exit style: aggressive — TP1 at VWAP mid, breakeven shift, ATR trail on runner.
+// QL config: $100 fixed cash, 0.10% commission (low-TF Drift cost model)
+
+//@version=5
+strategy("VSS: VWAP Snap Scalper v1 [Kryptolytix]",
+     shorttitle="VSS v1",
+     overlay=true,
+     default_qty_type=strategy.cash,
+     default_qty_value=100,
+     initial_capital=100,
+     commission_type=strategy.commission.percent,
+     commission_value=0.10,
+     slippage=0,
+     calc_on_every_tick=false,
+     pyramiding=0,
+     process_orders_on_close=false)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  DATE FILTER  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+string g_date = "═══ BACKTEST DATE RANGE ═══"
+bool useDateFilter = input.bool(true, "Enable Date Filter", group=g_date)
+int  backtestStart = input.time(timestamp("1 Jan 2023"), "Start Date", group=g_date,
+     tooltip="Start date for backtesting. Uses exchange timezone.")
+int  backtestEnd   = input.time(timestamp("31 Dec 2030"), "End Date",   group=g_date,
+     tooltip="End date for backtesting. Uses exchange timezone.")
+
+bool inDateRange = not useDateFilter or (time >= backtestStart and time <= backtestEnd)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  DIRECTION CONTROL  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+string g_dir    = "═══ DIRECTION CONTROL ═══"
+string tradeDir = input.string("Long Only", "Trade Direction",
+     options=["Both", "Long Only", "Short Only"], group=g_dir)
+bool allowLong  = tradeDir == "Both" or tradeDir == "Long Only"
+bool allowShort = tradeDir == "Both" or tradeDir == "Short Only"
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  ROLLING VWAP + SD BANDS (Core Engine)  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+string g_vwap = "═══ VWAP SNAP ENGINE ═══"
+int   vwapLen  = input.int(174,  "Rolling VWAP Length",  minval=20, maxval=200, group=g_vwap,
+     tooltip="Bars for rolling VWAP anchor. 60 bars on 5M ≈ 5 hours. Higher = smoother, fewer signals.")
+float sdMult   = input.float(1.2, "SD Band Multiplier", minval=0.8, maxval=3.5, step=0.1, group=g_vwap,
+     tooltip="Price must breach this many standard deviations from VWAP to qualify for entry. 1.5–2.0 is typical.")
+int   sdLen    = input.int(109,  "SD Lookback Length",   minval=20, maxval=200, group=g_vwap,
+     tooltip="Lookback for standard deviation calculation. Match to VWAP length for consistency.")
+
+// Rolling VWAP = volume-weighted moving average of typical price (hlc3)
+float typicalPrice = hlc3
+float rollingVWAP  = ta.vwma(typicalPrice, vwapLen)
+
+// Standard deviation envelope around rolling VWAP
+float priceSD   = ta.stdev(close, sdLen) * sdMult
+float vwapUpper = rollingVWAP + priceSD
+float vwapLower = rollingVWAP - priceSD
+
+// Band breach state: was price outside the band on the prior bar?
+bool wasBelowLower = close[1] <= vwapLower[1]
+bool wasAboveUpper = close[1] >= vwapUpper[1]
+
+// Snap-back triggers: price crosses back inside the band from outside
+// Long: was below lower band, now crosses back above it → snap up expected
+// Short: was above upper band, now crosses back below it → snap down expected
+bool snapLong  = ta.crossover(close,  vwapLower) and wasBelowLower
+bool snapShort = ta.crossunder(close, vwapUpper) and wasAboveUpper
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  RSI EXHAUSTION CONFIRMATION  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+string g_rsi = "═══ RSI EXHAUSTION ═══"
+int   rsiLen = input.int(6,    "RSI Length",           minval=3,  maxval=21,  group=g_rsi,
+     tooltip="Short RSI catches exhaustion faster. 5–9 is ideal for 5M scalping.")
+float rsiOS  = input.float(36.0, "RSI Oversold Level", minval=20.0, maxval=48.0, step=1.0, group=g_rsi,
+     tooltip="RSI must have been at or below this on the bar BEFORE the snap, confirming prior exhaustion.")
+float rsiOB  = input.float(60.0, "RSI Overbought Level", minval=52.0, maxval=80.0, step=1.0, group=g_rsi,
+     tooltip="RSI must have been at or above this on the bar BEFORE the snap, confirming prior exhaustion.")
+
+float rsiVal       = ta.rsi(close, rsiLen)
+bool  rsiWasOS     = rsiVal[1] <= rsiOS   // was oversold the bar before snap — exhaustion confirmed
+bool  rsiWasOB     = rsiVal[1] >= rsiOB   // was overbought the bar before snap — exhaustion confirmed
+bool  rsiTurningUp = rsiVal > rsiVal[1]   // RSI beginning to recover
+bool  rsiTurningDn = rsiVal < rsiVal[1]   // RSI beginning to roll over
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  EMA TREND BIAS (optional higher-TF context)  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+string g_ema   = "═══ EMA TREND BIAS ═══"
+bool  useEMA   = input.bool(false, "Enable EMA Trend Bias", group=g_ema,
+     tooltip="When on: longs only above EMA, shorts only below. Aligns mean reversion with broader trend. Reduces trade count.")
+int   emaLen   = input.int(170, "EMA Length", minval=50, maxval=500, group=g_ema,
+     tooltip="200 on 5M ≈ ~16 hours of bias context. Increase for longer-bias filtering.")
+
+float emaTrend  = ta.ema(close, emaLen)
+bool  emaLongOk = not useEMA or close > emaTrend
+bool  emaShortOk = not useEMA or close < emaTrend
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  VOLUME CONFIRMATION  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+string g_vol      = "═══ VOLUME FILTER ═══"
+bool  useVolFilter  = input.bool(false, "Require Volume Surge on Entry Bar", group=g_vol,
+     tooltip="Snap bar must have elevated volume vs recent average. Confirms the reversal has conviction.")
+int   volSmaLen     = input.int(8, "Volume SMA Length", minval=5, maxval=50, group=g_vol)
+float volSurgeMult  = input.float(3.5, "Volume Surge Multiplier", minval=1.0, maxval=4.0, step=0.1, group=g_vol,
+     tooltip="Volume must exceed SMA × this value. 1.5 = 50% above average.")
+
+float volSma = ta.sma(volume, volSmaLen)
+bool  volOk  = not useVolFilter or volume > volSma * volSurgeMult
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  COOLDOWN FILTER  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+string g_entry   = "═══ ENTRY SETTINGS ═══"
+int cooldownBars = input.int(3, "Cooldown After Exit (bars)", minval=0, maxval=30, group=g_entry,
+     tooltip="Minimum bars to wait after closing a position before allowing a new entry. Avoids re-entry traps.")
+
+var int barsSinceExit = 999
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    barsSinceExit := 0
+else if strategy.position_size == 0
+    barsSinceExit += 1
+
+bool cooldownOk = barsSinceExit >= cooldownBars
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  ATR — STOP LOSS & TRAILING EXIT  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+string g_sl     = "═══ STOP LOSS ═══"
+int   slAtrLen  = input.int(22,  "SL ATR Length",      minval=5, maxval=30,  group=g_sl)
+float slAtrMult = input.float(3.0, "SL ATR Multiplier",minval=1.5, maxval=4.0, step=0.1, group=g_sl,
+     tooltip="Stop loss distance in ATR multiples. Minimum 1.5 ATR enforced — below this correlates with poor QL performance.")
+
+string g_trail      = "═══ TRAILING STOP ═══"
+float trailAtrMult  = input.float(0.7, "Trail ATR Multiplier", minval=0.5, maxval=3.5, step=0.1, group=g_trail,
+     tooltip="ATR multiple for trailing stop on runner (activated after TP1 / VWAP mid hit).")
+float beOffset      = input.float(0.4, "Breakeven Offset %",   minval=0.0, maxval=0.5, step=0.05, group=g_trail,
+     tooltip="Move stop to entry + this % when TP1 is reached. Locks in cost.")
+
+string g_tp     = "═══ TAKE PROFIT ═══"
+float tp1QtyPct = input.float(20.0, "TP1 Close % of Position", minval=20.0, maxval=100.0, step=10.0, group=g_tp,
+     tooltip="Percentage of position to close when price reaches VWAP midline. Runner stays open on trailing stop.")
+
+float slAtr = ta.atr(slAtrLen)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  ALERTS / WEBHOOKS  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+string g_alert       = "═══ ALERTS ═══"
+string alertLongEntry  = input.string("LONG_ENTRY",  "Long Entry Message",  group=g_alert)
+string alertShortEntry = input.string("SHORT_ENTRY", "Short Entry Message", group=g_alert)
+string alertLongExit   = input.string("LONG_EXIT",   "Long Exit Message",   group=g_alert)
+string alertShortExit  = input.string("SHORT_EXIT",  "Short Exit Message",  group=g_alert)
+string alertTP1        = input.string("TP1_HIT",     "TP1 Message",         group=g_alert)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  VISUAL TOGGLES  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+string g_vis    = "═══ VISUALS ═══"
+bool showVWAP   = true   // hardcoded — always show core signal lines
+bool showEMA    = true
+bool showSLTP   = true
+bool showTrail  = true
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  COMPOSITE ENTRY SIGNALS  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+bool longSetup  = snapLong  and rsiWasOS and rsiTurningUp and emaLongOk  and volOk and cooldownOk and inDateRange and allowLong  and strategy.position_size == 0
+bool shortSetup = snapShort and rsiWasOB and rsiTurningDn and emaShortOk and volOk and cooldownOk and inDateRange and allowShort and strategy.position_size == 0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  POSITION STATE  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var float entryPrice  = na
+var float stopLevel   = na
+var float trailLevel  = na
+var bool  tp1Hit      = false
+var bool  trailActive = false
+var bool  beActive    = false
+var float entryAtr    = na
+var bool  isLong      = true
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  ENTRY EXECUTION  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+if longSetup
+    entryPrice  := close
+    entryAtr    := slAtr
+    isLong      := true
+    stopLevel   := close - slAtr * slAtrMult
+    tp1Hit      := false
+    trailActive := false
+    trailLevel  := na
+    beActive    := false
+    strategy.entry("Long", strategy.long, alert_message=alertLongEntry)
+
+if shortSetup
+    entryPrice  := close
+    entryAtr    := slAtr
+    isLong      := false
+    stopLevel   := close + slAtr * slAtrMult
+    tp1Hit      := false
+    trailActive := false
+    trailLevel  := na
+    beActive    := false
+    strategy.entry("Short", strategy.short, alert_message=alertShortEntry)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  LONG POSITION MANAGEMENT  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+if strategy.position_size > 0 and isLong
+    // TP1: price reaches VWAP midline — primary snap-back target
+    if not tp1Hit and close >= rollingVWAP
+        strategy.close("Long", qty_percent=tp1QtyPct, comment="TP1 VWAP", alert_message=alertTP1)
+        tp1Hit    := true
+        stopLevel := entryPrice * (1 + beOffset / 100)   // shift stop to breakeven
+        beActive  := true
+
+    // Activate trailing stop on runner after TP1
+    if tp1Hit
+        trailActive := true
+        float newTrail = close - slAtr * trailAtrMult
+        trailLevel := na(trailLevel) ? newTrail : math.max(trailLevel, newTrail)
+        if trailLevel > stopLevel
+            stopLevel := trailLevel
+
+    // Hard stop / breakeven / trail check
+    if close <= stopLevel
+        strategy.close("Long", comment=beActive ? "BE Stop" : trailActive ? "Trail Stop" : "SL", alert_message=alertLongExit)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  SHORT POSITION MANAGEMENT  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+if strategy.position_size < 0 and not isLong
+    // TP1: price reaches VWAP midline — primary snap-back target
+    if not tp1Hit and close <= rollingVWAP
+        strategy.close("Short", qty_percent=tp1QtyPct, comment="TP1 VWAP", alert_message=alertTP1)
+        tp1Hit    := true
+        stopLevel := entryPrice * (1 - beOffset / 100)   // shift stop to breakeven
+        beActive  := true
+
+    // Activate trailing stop on runner after TP1
+    if tp1Hit
+        trailActive := true
+        float newTrail = close + slAtr * trailAtrMult
+        trailLevel := na(trailLevel) ? newTrail : math.min(trailLevel, newTrail)
+        if trailLevel < stopLevel
+            stopLevel := trailLevel
+
+    // Hard stop / breakeven / trail check
+    if close >= stopLevel
+        strategy.close("Short", comment=beActive ? "BE Stop" : trailActive ? "Trail Stop" : "SL", alert_message=alertShortExit)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  RESET STATE ON FLAT  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    entryPrice  := na
+    stopLevel   := na
+    trailLevel  := na
+    tp1Hit      := false
+    trailActive := false
+    beActive    := false
+    entryAtr    := na
+
+// Close all at end of backtest window
+if useDateFilter and time > backtestEnd and strategy.position_size != 0
+    strategy.close_all(comment="Date End")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  VISUAL PLOTS  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+color colBull    = #26a69a
+color colBear    = #ef5350
+color colNeutral = #78909c
+color colVWAP    = #7b1fa2
+color colUpper   = #ef5350
+color colLower   = #26a69a
+
+// Rolling VWAP and SD bands
+plot(rollingVWAP, "VWAP Mid",   color=color.new(colVWAP,  0), linewidth=2)
+plot(vwapUpper,   "VWAP Upper", color=color.new(colUpper, 40), linewidth=1)
+plot(vwapLower,   "VWAP Lower", color=color.new(colLower, 40), linewidth=1)
+
+// Band fill
+p_upper = plot(vwapUpper, display=display.none)
+p_lower = plot(vwapLower, display=display.none)
+fill(p_upper, p_lower, color=color.new(colVWAP, 92), title="VWAP Band Fill")
+
+// EMA bias line
+plot(useEMA ? emaTrend : na, "EMA Bias", color=color.new(#ff9800, 50), linewidth=1)
+
+// Entry markers
+plotshape(longSetup,  "Long Entry",  shape.triangleup,   location.belowbar, colBull, size=size.small)
+plotshape(shortSetup, "Short Entry", shape.triangledown, location.abovebar, colBear, size=size.small)
+
+// In-position levels
+bool inPos = strategy.position_size != 0
+plot(showSLTP   and inPos                  ? stopLevel  : na, "Stop Level", color=color.new(colBear,  20), style=plot.style_linebr, linewidth=1)
+plot(showTrail  and inPos and trailActive  ? trailLevel : na, "Trail Stop", color=color.new(#ff9800, 20), style=plot.style_linebr, linewidth=1)
+
+// Background: highlight when price is outside bands (active stretch zone)
+bgcolor(close < vwapLower ? color.new(colBull, 92) : na, title="Oversold Stretch")
+bgcolor(close > vwapUpper ? color.new(colBear, 92) : na, title="Overbought Stretch")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  INFO TABLE  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var table infoTable = table.new(position.top_right, 2, 9,
+     bgcolor=color.new(#1e1e1e, 10),
+     border_width=1, border_color=color.new(#333333, 0))
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "VSS: VWAP Snap Scalper v1", text_color=color.white, text_size=size.small, bgcolor=color.new(colVWAP, 20))
+    table.cell(infoTable, 1, 0, "[Kryptolytix]",             text_color=color.white, text_size=size.small, bgcolor=color.new(colVWAP, 20))
+
+    table.cell(infoTable, 0, 1, "VWAP Mid",     text_color=color.gray,    text_size=size.tiny)
+    table.cell(infoTable, 1, 1, str.tostring(rollingVWAP, "#.####"), text_color=colNeutral, text_size=size.tiny)
+
+    float pctFromVWAP = (close - rollingVWAP) / rollingVWAP * 100
+    table.cell(infoTable, 0, 2, "% from VWAP",  text_color=color.gray,    text_size=size.tiny)
+    table.cell(infoTable, 1, 2, str.tostring(pctFromVWAP, "#.##") + "%",
+         text_color=pctFromVWAP > 0 ? colBear : colBull, text_size=size.tiny)
+
+    table.cell(infoTable, 0, 3, "RSI (" + str.tostring(rsiLen) + ")", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 3, str.tostring(rsiVal, "#.#"),
+         text_color=rsiVal <= rsiOS ? colBull : rsiVal >= rsiOB ? colBear : colNeutral, text_size=size.tiny)
+
+    table.cell(infoTable, 0, 4, "ATR",           text_color=color.gray,    text_size=size.tiny)
+    table.cell(infoTable, 1, 4, str.tostring(slAtr, "#.####"), text_color=colNeutral, text_size=size.tiny)
+
+    bool aboveUpper = close > vwapUpper
+    bool belowLower = close < vwapLower
+    table.cell(infoTable, 0, 5, "Band State",    text_color=color.gray,    text_size=size.tiny)
+    table.cell(infoTable, 1, 5,
+         aboveUpper ? "▲ ABOVE UPPER" : belowLower ? "▼ BELOW LOWER" : "● INSIDE",
+         text_color=aboveUpper ? colBear : belowLower ? colBull : colNeutral, text_size=size.tiny)
+
+    if useEMA
+        table.cell(infoTable, 0, 6, "EMA Bias",  text_color=color.gray,    text_size=size.tiny)
+        table.cell(infoTable, 1, 6, close > emaTrend ? "▲ BULL" : "▼ BEAR",
+             text_color=close > emaTrend ? colBull : colBear, text_size=size.tiny)
+
+    if inPos
+        table.cell(infoTable, 0, 7, "Position",  text_color=color.gray,    text_size=size.tiny)
+        table.cell(infoTable, 1, 7, isLong ? "LONG" : "SHORT",
+             text_color=isLong ? colBull : colBear, text_size=size.tiny)
+
+        float pnlPct = isLong ? (close - entryPrice) / entryPrice * 100 : (entryPrice - close) / entryPrice * 100
+        table.cell(infoTable, 0, 8, "PnL %",     text_color=color.gray,    text_size=size.tiny)
+        table.cell(infoTable, 1, 8, str.tostring(pnlPct, "#.##") + "%",
+             text_color=pnlPct > 0 ? colBull : colBear, text_size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ██████  ALERTS  ██████
+// ═══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(longSetup,  "Long Entry Signal",  "VSS: Long Snap Entry")
+alertcondition(shortSetup, "Short Entry Signal", "VSS: Short Snap Entry")

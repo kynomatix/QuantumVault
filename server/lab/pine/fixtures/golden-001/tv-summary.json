@@ -1,0 +1,22 @@
+{
+  "symbol": "OKX:ETHUSDT.P",
+  "timeframe": "1 hour",
+  "trading_range": "Jan 26, 2023, 00:00 \u2014 May 20, 2026, 10:00",
+  "backtesting_range": "Dec 31, 2022, 11:00 \u2014 May 20, 2026, 10:00",
+  "initial_capital": 100,
+  "net_profit_usdt": 59.17,
+  "net_profit_pct": 59.17,
+  "gross_profit_usdt": 200.38,
+  "gross_loss_usdt": 141.2,
+  "commission_paid_usdt": 26.05,
+  "max_equity_runup_intrabar_pct": 70.59,
+  "total_trades": 220,
+  "winning_trades": 168,
+  "losing_trades": 52,
+  "percent_profitable": 76.36,
+  "ratio_avg_win_over_avg_loss": 0.439,
+  "avg_bars_in_trades": 27,
+  "sharpe_ratio": 0.266,
+  "sortino_ratio": 0.543,
+  "profit_factor": 1.419
+}
