@@ -2537,6 +2537,24 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
   // only; rate-limited per IP and per wallet, with a 30s response cache.
   app.get("/api/public/portfolio", publicPortfolioHandler);
 
+  // Public TVL endpoint — consumed by DeFiLlama's adapter.
+  // Returns the sum of the most recent portfolio snapshot per wallet
+  // (deployed Pacifica capital + uninvested agent wallet balance).
+  // No auth, rate-limited naturally by DeFiLlama polling cadence (~5 min).
+  app.get("/api/tvl", async (_req, res) => {
+    try {
+      const metrics = await getMetrics();
+      // DeFiLlama expects: { [tokenSymbol_or_coingeckoId]: usdAmount }
+      // Our TVL is USDC-denominated so we return the USDC coingecko id.
+      res.json({
+        usd_coin: metrics.tvl,
+      });
+    } catch (error) {
+      console.error("[TVL] Error:", error);
+      res.status(500).json({ error: "Failed to fetch TVL" });
+    }
+  });
+
   // Public API: Platform metrics (no auth required) - for landing page
   app.get("/api/metrics", async (req, res) => {
     try {
