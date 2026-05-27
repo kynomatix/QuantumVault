@@ -5,11 +5,16 @@
   "license": "MIT",
   "scripts": {
     "dev:client": "vite dev --port 5000",
+    "predev": "node scripts/check-og-image.mjs",
     "dev": "NODE_ENV=development tsx server/index.ts",
+    "prebuild": "node scripts/check-og-image.mjs",
     "build": "tsx script/build.ts",
+    "prestart": "node scripts/check-og-image.mjs",
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
-    "db:push": "drizzle-kit push"
+    "db:push": "drizzle-kit push",
+    "check:og": "node scripts/check-og-image.mjs",
+    "install:hooks": "git config core.hooksPath .githooks && echo 'Git hooks installed (.githooks/pre-commit active)'"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",

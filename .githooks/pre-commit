@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# OG image guard — blocks any commit that breaks the locked OG tags.
+# To enable locally: git config core.hooksPath .githooks
+set -e
+node scripts/check-og-image.mjs
