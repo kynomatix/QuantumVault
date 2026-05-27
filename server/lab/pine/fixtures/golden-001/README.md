@@ -19,7 +19,8 @@ See `tv-summary.json` and full per-trade list in `tv-trades.csv`.
 | Metric | Value |
 |---|---|
 | Total trades (fills, TV counts each chunk) | 220 |
-| Position events (entry → final exit) | 110 |
+| List-of-trades CSV rows (entry+exit pair per fill) | 440 |
+| Position events after collapsing entry+exit pairs | 130 |
 | Win rate | 76.36 % |
 | Net profit | +$59.17 (+59.17 %) |
 | Profit factor | 1.419 |
@@ -45,4 +46,14 @@ tsx server/lab/pine/parity-diff.ts golden-001
 It will fetch 1H ETH/USDT:USDT candles via `datafeed.ts`, run the script through the Pine engine, and diff headline metrics + first-N trades against `tv-trades.csv`. The CLI is read-only — it does not write fixtures or modify any engine code.
 
 ## Notes on TV's trade-list format
-TradingView splits a single position event into one List-of-Trades row per `strategy.close` fill. With `tp1QtyPct=20`, each position therefore produces two TV "trades": the 20 % TP1 slice and the 80 % runner. So 220 TV rows = 110 actual position lifecycles. The parity CLI normalises both sides to position lifecycles before diffing.
+TradingView splits a single position event into one List-of-Trades row per `strategy.close` fill. With `tp1QtyPct=20`, each position produces TP1 slice + runner fills, each yielding paired entry/exit rows. The CLI collapser groups by (entryTime, entryPrice, direction) which yields 130 position events from this fixture's 440 raw rows. The parity CLI normalises both sides to position lifecycles before diffing.
+
+## Current parity status (captured 2026-05-27)
+Running `tsx server/lab/pine/parity-diff.ts golden-001 --path both` against the engine on `main` (commit immediately after #148 merge + this README/CLI fix):
+
+| Metric | Interpreter | Compiled | TV |
+|---|---|---|---|
+| Total trades | 0 | 0 | 220 |
+| Net % | 0 | 0 | 59.17 |
+
+**The Pine engine fires zero entries on this fixture through either path.** This invalidates the F-01/F-03 commission/sizing hypothesis from `QL_PARITY_*` docs — those were never on main and were chasing a P&L drift; the real bug is that no `strategy.entry()` ever executes. Next investigation step: bisect which gate in `longSetup` (snapLong, rsiWasOS, rsiTurningUp, cooldownOk, inDateRange) evaluates `true` across the bar range — likely candidates are `ta.crossover` semantics, `var int` state accumulation, or `time >= timestamp(...)` comparison in the date filter.

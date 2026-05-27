@@ -17,7 +17,11 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { compilePine, runPineBacktest } from "./index.js";
+import { executePine } from "./runtime.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import type { OHLCV, PineEngineConfig } from "./runtime.js";
 import { fetchOHLCV } from "../datafeed.js";
 import { getCachedCandles, saveCandlesToDb } from "../candle-store.js";
@@ -62,6 +66,7 @@ function parseArgs() {
     fixture: positional[0],
     showTrades: parseInt(flags.trades ?? "10", 10),
     forceBars: flags.bars ? parseInt(flags.bars, 10) : undefined,
+    path: (flags.path ?? "compiled") as "compiled" | "interpreter" | "both",
   };
 }
 
@@ -228,7 +233,7 @@ function pctDiff(a: number, b: number): string {
 }
 
 async function main() {
-  const { fixture, showTrades } = parseArgs();
+  const { fixture, showTrades, path: enginePath } = parseArgs();
   if (!fixture) {
     console.error("Usage: tsx server/lab/pine/parity-diff.ts <fixture-name> [--trades N]");
     process.exit(2);
@@ -269,8 +274,32 @@ async function main() {
   };
 
   const plan = compilePine(script);
+  const runOne = (forceInterp: boolean) => {
+    const t = Date.now();
+    const r = executePine(plan.ast, candles, params, symbol, timeframe, config, undefined, undefined, forceInterp);
+    return { result: r, ms: Date.now() - t };
+  };
+
+  if (enginePath === "both") {
+    const a = runOne(true);
+    const b = runOne(false);
+    console.log(`\n--- Path comparison (both) ---`);
+    console.log(`${pad("Metric", 18)} ${pad("Interpreter", 14, true)} ${pad("Compiled", 14, true)} ${pad("TV", 14, true)}`);
+    console.log("-".repeat(64));
+    const fmt = (n: string, i: number, c: number, t: number) =>
+      console.log(`${pad(n, 18)} ${pad(i.toFixed(2), 14, true)} ${pad(c.toFixed(2), 14, true)} ${pad(t.toFixed(2), 14, true)}`);
+    fmt("Total trades", a.result.totalTrades, b.result.totalTrades, Number(summary.total_trades));
+    fmt("Net %",        a.result.netProfitPercent, b.result.netProfitPercent, Number(summary.net_profit_pct));
+    fmt("Win rate %",   a.result.winRatePercent,   b.result.winRatePercent,   Number(summary.percent_profitable));
+    fmt("Profit factor",a.result.profitFactor,     b.result.profitFactor,     Number(summary.profit_factor));
+    console.log(`\nInterpreter time: ${a.ms} ms   Compiled time: ${b.ms} ms   Compiled path used: ${b.result.compiledPath}`);
+    console.log(`\nDone.`);
+    return;
+  }
+
+  const forceInterp = enginePath === "interpreter";
   const t0 = Date.now();
-  const result = runPineBacktest(plan, candles, params, symbol, timeframe, config);
+  const result = executePine(plan.ast, candles, params, symbol, timeframe, config, undefined, undefined, forceInterp);
   const ms = Date.now() - t0;
 
   // -- Headline metrics
