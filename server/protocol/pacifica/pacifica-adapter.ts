@@ -2034,40 +2034,50 @@ export class PacificaAdapter implements ProtocolAdapter {
   ): Promise<{ builderApproved: boolean; referralClaimed: boolean }> {
     try {
       const { storage } = await import('../../storage.js');
-      // The Pacifica main account == our server-managed agent keypair public
-      // key. The `wallets` table primary key is the user's Solana address;
-      // the agent pubkey lives in `wallets.agent_public_key`. We must look up
-      // by that column or we'll silently miss every row.
+      // The Pacifica main account == whatever keypair is signing the order.
+      // Two cases:
+      //   1. User's server-managed agent key (legacy main-account trades) —
+      //      tracked on wallets.agent_public_key + wallets enrollment flags.
+      //   2. Per-bot subaccount key (Phase 4b — each bot is its OWN Pacifica
+      //      main account, key in trading_bots.protocol_subaccount_id) —
+      //      tracked on trading_bots enrollment flags.
+      // We must look up both and flip flags on whichever table matched.
       const wallet = await storage.getWalletByAgentPublicKey(agentPublicKey);
+      const bot = wallet ? null : await storage.getBotByAgentPublicKey(agentPublicKey);
+      const row = wallet ?? bot;
+      const kind: 'wallet' | 'bot' | null = wallet ? 'wallet' : bot ? 'bot' : null;
+
       // Steady-state fast path: both flags already true → no work.
-      if (wallet?.pacificaBuilderApproved && wallet?.pacificaReferralClaimed) {
+      if (row?.pacificaBuilderApproved && row?.pacificaReferralClaimed) {
         return { builderApproved: true, referralClaimed: true };
       }
-      // No wallet row means we have no row to flip — skip and treat as not
-      // enrolled. This path shouldn't fire in practice (the trade implies
-      // a known user) but we never want to block a trade on a missing row.
-      if (!wallet) {
+      // No matching row anywhere means we have nothing to flip — skip and
+      // treat as not enrolled. Shouldn't fire in practice (trade implies a
+      // known wallet or bot) but we never want to block a trade.
+      if (!row || !kind) {
         return { builderApproved: false, referralClaimed: false };
       }
 
-      // Per-wallet mutex: collapse concurrent callers into a single attempt.
+      // Per-key mutex: collapse concurrent callers into a single attempt.
       const existing = this.enrollmentInFlight.get(agentPublicKey);
       if (existing) return existing;
 
       const work = (async () => {
-        let builderApproved = !!wallet.pacificaBuilderApproved;
-        let referralClaimed = !!wallet.pacificaReferralClaimed;
+        let builderApproved = !!row.pacificaBuilderApproved;
+        let referralClaimed = !!row.pacificaReferralClaimed;
 
         if (!builderApproved && this.config.builderCode) {
           builderApproved = await this.approveBuilderCodeForUser({
             agentPublicKey,
             agentSecretKey,
+            accountKind: kind,
           });
         }
         if (!referralClaimed && this.config.referralAddress) {
           referralClaimed = await this.claimReferralCodeForUser({
             agentPublicKey,
             agentSecretKey,
+            accountKind: kind,
           });
         }
         return { builderApproved, referralClaimed };
@@ -2098,6 +2108,10 @@ export class PacificaAdapter implements ProtocolAdapter {
   async approveBuilderCodeForUser(input: {
     agentPublicKey: string;
     agentSecretKey: Uint8Array;
+    // Task 149: route the post-success flag flip to the correct table.
+    // Defaults to 'wallet' for backward-compat with the provision warm-up
+    // call site in routes.ts which always operates on the main agent key.
+    accountKind?: 'wallet' | 'bot';
   }): Promise<boolean> {
     const builderCode = this.config.builderCode;
     if (!builderCode) return false;
@@ -2127,7 +2141,11 @@ export class PacificaAdapter implements ProtocolAdapter {
     if (ok) {
       try {
         const { storage } = await import('../../storage.js');
-        await storage.markPacificaBuilderApproved(input.agentPublicKey);
+        if (input.accountKind === 'bot') {
+          await storage.markBotPacificaBuilderApproved(input.agentPublicKey);
+        } else {
+          await storage.markPacificaBuilderApproved(input.agentPublicKey);
+        }
       } catch (err: any) {
         console.error('[PacificaBuilderApprove] Flag persist failed (will retry next trade):', err?.message || err);
         return false;
@@ -2143,6 +2161,8 @@ export class PacificaAdapter implements ProtocolAdapter {
   async claimReferralCodeForUser(input: {
     agentPublicKey: string;
     agentSecretKey: Uint8Array;
+    // Task 149: see approveBuilderCodeForUser. Defaults to 'wallet'.
+    accountKind?: 'wallet' | 'bot';
   }): Promise<boolean> {
     const refAddress = this.config.referralAddress;
     if (!refAddress) return false;
@@ -2166,7 +2186,11 @@ export class PacificaAdapter implements ProtocolAdapter {
     if (ok) {
       try {
         const { storage } = await import('../../storage.js');
-        await storage.markPacificaReferralClaimed(input.agentPublicKey);
+        if (input.accountKind === 'bot') {
+          await storage.markBotPacificaReferralClaimed(input.agentPublicKey);
+        } else {
+          await storage.markPacificaReferralClaimed(input.agentPublicKey);
+        }
       } catch (err: any) {
         console.error('[PacificaReferralClaim] Flag persist failed (will retry next trade):', err?.message || err);
         return false;

@@ -104,6 +104,11 @@ export interface IStorage {
   updateWallet(address: string, updates: Partial<InsertWallet>): Promise<Wallet | undefined>;
   markPacificaBuilderApproved(agentPublicKey: string): Promise<void>;
   markPacificaReferralClaimed(agentPublicKey: string): Promise<void>;
+  // Task 149: per-bot Pacifica enrollment (each Phase 4b bot is its own
+  // Pacifica main account, keyed by trading_bots.protocol_subaccount_id).
+  getBotByAgentPublicKey(agentPublicKey: string): Promise<TradingBot | undefined>;
+  markBotPacificaBuilderApproved(agentPublicKey: string): Promise<void>;
+  markBotPacificaReferralClaimed(agentPublicKey: string): Promise<void>;
 
   getAllBots(): Promise<Bot[]>;
   getFeaturedBots(): Promise<Bot[]>;
@@ -442,6 +447,22 @@ export class DatabaseStorage implements IStorage {
 
   async markPacificaReferralClaimed(agentPublicKey: string): Promise<void> {
     await db.update(wallets).set({ pacificaReferralClaimed: true }).where(eq(wallets.agentPublicKey, agentPublicKey));
+  }
+
+  // Task 149: per-bot Pacifica enrollment helpers. The bot's Pacifica main
+  // account public key lives in trading_bots.protocol_subaccount_id (Phase 4b
+  // — each bot has its own keypair under bot_subaccount_key_encrypted_v3).
+  async getBotByAgentPublicKey(agentPublicKey: string): Promise<TradingBot | undefined> {
+    const result = await db.select().from(tradingBots).where(eq(tradingBots.protocolSubaccountId, agentPublicKey)).limit(1);
+    return result[0];
+  }
+
+  async markBotPacificaBuilderApproved(agentPublicKey: string): Promise<void> {
+    await db.update(tradingBots).set({ pacificaBuilderApproved: true }).where(eq(tradingBots.protocolSubaccountId, agentPublicKey));
+  }
+
+  async markBotPacificaReferralClaimed(agentPublicKey: string): Promise<void> {
+    await db.update(tradingBots).set({ pacificaReferralClaimed: true }).where(eq(tradingBots.protocolSubaccountId, agentPublicKey));
   }
 
   async getAllBots(): Promise<Bot[]> {

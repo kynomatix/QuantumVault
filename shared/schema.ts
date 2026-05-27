@@ -174,6 +174,15 @@ export const tradingBots = pgTable("trading_bots", {
   // Phase 4b: V3-encrypted bot subaccount key (subkey derived from owner UMK
   // with per-bot AAD). Legacy column remains during the Phase 5b/6 drop window.
   botSubaccountKeyEncryptedV3: text("bot_subaccount_key_encrypted_v3"),
+
+  // Task 149: Per-bot Pacifica enrollment flags. Each Phase 4b bot has its
+  // own Pacifica account (the keypair behind bot_subaccount_key_encrypted_v3,
+  // with the public key in protocol_subaccount_id). Enrollment must be
+  // tracked per-bot since each bot is a distinct main account upstream.
+  // Mirrors wallets.pacificaBuilderApproved / pacificaReferralClaimed.
+  pacificaBuilderApproved: boolean("pacifica_builder_approved").default(false).notNull(),
+  pacificaReferralClaimed: boolean("pacifica_referral_claimed").default(false).notNull(),
+
   subaccountStatus: text("subaccount_status").default("none"),
   subaccountAuthMode: text("subaccount_auth_mode").$type<'external_key' | 'main_plus_id'>().notNull(),
   

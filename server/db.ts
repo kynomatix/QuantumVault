@@ -211,6 +211,14 @@ export async function ensureSchema() {
       `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS pacifica_builder_approved boolean NOT NULL DEFAULT false`,
       `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS pacifica_referral_claimed boolean NOT NULL DEFAULT false`,
 
+      // --- Task 149: per-bot Pacifica enrollment flags ---
+      // Phase 4b bots are their own Pacifica main accounts (keypair behind
+      // bot_subaccount_key_encrypted_v3, pubkey in protocol_subaccount_id),
+      // so enrollment must be tracked per-bot. Mirrors the wallets flags
+      // above. Default false → migrated lazily on the bot's next trade.
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS pacifica_builder_approved boolean NOT NULL DEFAULT false`,
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS pacifica_referral_claimed boolean NOT NULL DEFAULT false`,
+
       `INSERT INTO lab_strategies (user_id, name, description, pine_script, parsed_inputs, groups, strategy_settings)
        SELECT 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez',
               src.name, src.description, src.pine_script, src.parsed_inputs, src.groups, src.strategy_settings
