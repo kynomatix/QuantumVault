@@ -49,11 +49,33 @@ It will fetch 1H ETH/USDT:USDT candles via `datafeed.ts`, run the script through
 TradingView splits a single position event into one List-of-Trades row per `strategy.close` fill. With `tp1QtyPct=20`, each position produces TP1 slice + runner fills, each yielding paired entry/exit rows. The CLI collapser groups by (entryTime, entryPrice, direction) which yields 130 position events from this fixture's 440 raw rows. The parity CLI normalises both sides to position lifecycles before diffing.
 
 ## Current parity status (captured 2026-05-27)
-Running `tsx server/lab/pine/parity-diff.ts golden-001 --path both` against the engine on `main` (commit immediately after #148 merge + this README/CLI fix):
+Running `tsx server/lab/pine/parity-diff.ts golden-001 --trades 20` against `main` after fixing the parity-diff CLI's `__dirname` bug, adding `--path both`, coercing ISO-date params to numeric ms, and collapsing QL's per-fill records into position events the same way TV's are collapsed:
 
-| Metric | Interpreter | Compiled | TV |
+### Headline (collapsed position events)
+| Metric | TV | QL | Gap |
 |---|---|---|---|
-| Total trades | 0 | 0 | 220 |
-| Net % | 0 | 0 | 59.17 |
+| Position events | 130 | 142 | +12 (+9%) |
+| Net % | 59.17 | 127.03 | **2.15×** |
+| Win rate % | 76.36 | 83.75 | +7.4pp |
+| Profit factor | 1.42 | 2.01 | +41% |
+| Interpreter vs compiled | — | identical | no path divergence |
 
-**The Pine engine fires zero entries on this fixture through either path.** This invalidates the F-01/F-03 commission/sizing hypothesis from `QL_PARITY_*` docs — those were never on main and were chasing a P&L drift; the real bug is that no `strategy.entry()` ever executes. Next investigation step: bisect which gate in `longSetup` (snapLong, rsiWasOS, rsiTurningUp, cooldownOk, inDateRange) evaluates `true` across the bar range — likely candidates are `ta.crossover` semantics, `var int` state accumulation, or `time >= timestamp(...)` comparison in the date filter.
+### Per-position alignment (first 20 positions)
+- **Entries: 100% match.** Every entry price and timestamp matches TV exactly. Entry logic in the Pine engine is correct.
+- **Exits: within $0.05–$2 of TV.** Trail-stop and TP1 mechanics align.
+- **PnL%: consistently +0.20pp (single-fill exits) or +0.40pp (TP1 + runner two-fill exits) higher than TV.**
+
+That last signature is the fingerprint of a specific bug: **trade record `pnlPercent` is reported GROSS, but TV's `Net P&L %` column is NET of commission.** The engine's headline `netProfitPercent` is correctly net (computed from equity, which uses `pnlDollar` and subtracts commission). But `recordClose` writes a gross `pnlPercent` to each trade, and downstream `winRatePercent` is classified by `pnlPercent > 0` — so trades that gross +0.1% but net -0.1% (commission > gross gain) wrongly count as wins. This explains WR 84 vs 76 and PF 2.01 vs 1.42.
+
+### Open root causes (in priority order)
+1. ~~`pnlPercent` displayed gross, should be net of commission.~~ **FIXED** in `recordClose` (now subtracts `2 × commission × 100`) and win classifier in `executePine` (now uses `pnlDollar > 0`). WR moved 83.75 → 80.83 (gap to TV halved from 7.4pp to 4.5pp). Headline net% and PF unchanged — both already net.
+2. **12 extra positions (+9%) and inflated per-position P&L.** The first 20 entries are identical to TV, so the extras are later in the time series, and the per-position gross P&L is also higher than TV. Likely candidates:
+   - `var int barsSinceExit` counter semantics — cooldown reset block in the script (`if position_size == 0 and position_size[1] != 0 → barsSinceExit := 0`) may not correctly access `position_size[1]` in our runtime.
+   - Trail-stop progression — `trailLevel := na(trailLevel) ? newTrail : math.max(trailLevel, newTrail)` carries across bars; if our `var float trailLevel` doesn't reset to `na` on position close, the next position inherits a stale trail and exits at a different price.
+   - Bigger wins per position would happen if our trail rides further before stopping out.
+   - Next investigation: write a debug script that logs `(barIndex, time, position_size, position_size[1], barsSinceExit, trailLevel, stopLevel)` per bar near a known TV entry, compare against TV's "Strategy Tester → Trades" CSV row for the same time. Look at positions #20+ where divergence starts.
+
+### Notes on the CLI
+- `parity-diff.ts` now coerces ISO-date params to ms (production sends ms; params.json keeps strings for human-readability).
+- Use `--path both` to verify interpreter and compiled paths still match — important regression check whenever the compiler is touched.
+- `debug-gates.ts` is a sibling harness that runs progressively-relaxed variants of this script to isolate which Pine gate stops trades firing. Run it after any change to compiler/runtime to make sure entries still flow.

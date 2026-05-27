@@ -243,6 +243,16 @@ async function main() {
 
   const summary: FixtureSummary = JSON.parse(fs.readFileSync(path.join(root, "tv-summary.json"), "utf8"));
   const params = JSON.parse(fs.readFileSync(path.join(root, "params.json"), "utf8"));
+  // Coerce ISO-date string params to numeric ms — production sends numeric ms,
+  // params.json keeps them human-readable. Any string parseable as a date
+  // becomes its UTC epoch ms; non-date strings pass through unchanged.
+  for (const k of Object.keys(params)) {
+    const v = params[k];
+    if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}T/.test(v)) {
+      const ms = Date.parse(v);
+      if (Number.isFinite(ms)) params[k] = ms;
+    }
+  }
   const script = fs.readFileSync(path.join(root, "script.pine"), "utf8");
   const tvRowsRaw = loadTvTrades(path.join(root, "tv-trades.csv"));
   const tvPositions = collapseTvPositions(tvRowsRaw);
@@ -329,8 +339,51 @@ async function main() {
   fmtRow("Profit factor",tv.pf,          ours.pf);
   console.log(`${pad("Max DD %", 18)} ${pad("(not in TV export)", 14, true)} ${pad(ours.dd.toFixed(2), 14, true)} ${pad("—", 14, true)}`);
 
-  // -- First-N trade-by-trade diff
-  const ourTrades = result.trades;
+  // Collapse our trade records the same way TV's per-fill rows are collapsed:
+  // group by (entryTime, entryPrice, direction); weight exit price by qty;
+  // sum pnl percent across the partials so a TP1 (e.g. 20%) + runner (80%)
+  // becomes one position event matching TV's collapsed view.
+  const collapseOur = (trades: typeof result.trades) => {
+    const map = new Map<string, { entryTime: number; entryPrice: number; direction: string; exitTimeMax: number; exitWeighted: number; qtySum: number; pnlPct: number; }>();
+    for (const t of trades) {
+      const enMs = Date.parse(t.entryTime);
+      const exMs = Date.parse(t.exitTime);
+      const dir = t.direction;
+      const k = `${enMs}|${t.entryPrice}|${dir}`;
+      // Each record's "qty" relative to a position is unknown to us here;
+      // partial closes show in pnlDollar but engine doesn't expose qty on the
+      // trade record. Use pnlDollar / (pnlPct/100 * positionSize) as qty proxy.
+      const qty = Math.abs(t.pnlDollar) > 0 && Math.abs(t.pnlPercent) > 1e-9
+        ? Math.abs(t.pnlDollar / (t.pnlPercent / 100 * config.positionSize))
+        : 1;
+      const cur = map.get(k);
+      if (!cur) {
+        map.set(k, { entryTime: enMs, entryPrice: t.entryPrice, direction: dir, exitTimeMax: exMs, exitWeighted: t.exitPrice * qty, qtySum: qty, pnlPct: t.pnlPercent });
+      } else {
+        cur.exitTimeMax = Math.max(cur.exitTimeMax, exMs);
+        cur.exitWeighted += t.exitPrice * qty;
+        cur.qtySum += qty;
+        cur.pnlPct += t.pnlPercent;
+      }
+    }
+    return [...map.values()].sort((a, b) => a.entryTime - b.entryTime).map(p => ({
+      ...p,
+      exitPrice: p.exitWeighted / Math.max(p.qtySum, 1e-9),
+    }));
+  };
+  const ourTradesRaw = result.trades;
+  const ourPositions = collapseOur(ourTradesRaw);
+  console.log(`\nQL trade records: ${ourTradesRaw.length}  →  collapsed position events: ${ourPositions.length}`);
+
+  // Re-print headline row showing collapsed-vs-collapsed trade count
+  console.log(`Trades (collapsed positions)  TV=${tvPositions.length}  Ours=${ourPositions.length}  Δ=${pctDiff(ourPositions.length, tvPositions.length)}`);
+
+  const ourTrades = ourPositions.map(p => ({
+    direction: p.direction,
+    entryPrice: p.entryPrice,
+    exitPrice: p.exitPrice,
+    pnlPercent: p.pnlPct,
+  }));
   const k = Math.min(showTrades, Math.max(ourTrades.length, tvPositions.length));
   console.log(`\n--- First ${k} position events (entry-time order) ---`);
   console.log(`${pad("#",3)} ${pad("dir",5)} ${pad("TV entry",10,true)} ${pad("our entry",10,true)} ${pad("TV exit",10,true)} ${pad("our exit",10,true)} ${pad("TV %",8,true)} ${pad("our %",8,true)} ${pad("match",5,true)}`);

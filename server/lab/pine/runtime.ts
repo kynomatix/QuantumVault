@@ -294,11 +294,14 @@ class Broker {
     if (!this.position) return;
     const pos = this.position;
     const isLong = pos.direction === "long";
-    const pnlPct = isLong
+    const grossPnlPct = isLong
       ? ((price - pos.avgPrice) / pos.avgPrice) * 100
       : ((pos.avgPrice - price) / pos.avgPrice) * 100;
-    const pnlDollar = qty * this.config.positionSize * (pnlPct / 100)
+    const pnlDollar = qty * this.config.positionSize * (grossPnlPct / 100)
       - 2 * qty * this.config.positionSize * this.config.commission;
+    // Report pnlPercent NET of commission so it matches TV's "Net P&L %" column.
+    // 2× commission accounts for the entry + exit fee charged on this slice.
+    const netPnlPct = grossPnlPct - 2 * this.config.commission * 100;
     this.equity += pnlDollar;
     this.trades.push({
       entryTime: new Date(pos.entryTime).toISOString(),
@@ -306,7 +309,7 @@ class Broker {
       direction: pos.direction,
       entryPrice: pos.avgPrice,
       exitPrice: price,
-      pnlPercent: Math.round(pnlPct * 100) / 100,
+      pnlPercent: Math.round(netPnlPct * 100) / 100,
       pnlDollar: Math.round(pnlDollar * 100) / 100,
       exitReason: reason,
       barsHeld: bar - pos.entryBar,
@@ -3869,7 +3872,9 @@ export function executePine(
   const trades = broker.trades;
   let winCount = 0, grossProfit = 0, grossLoss = 0;
   for (const t of trades) {
-    if (t.pnlPercent > 0) { winCount++; grossProfit += t.pnlDollar; }
+    // Classify wins/losses by NET dollar PnL so trades that gross positive but
+    // net negative after commission are correctly counted as losses (matches TV).
+    if (t.pnlDollar > 0) { winCount++; grossProfit += t.pnlDollar; }
     else grossLoss -= t.pnlDollar;
   }
 
