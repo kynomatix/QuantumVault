@@ -20,6 +20,10 @@ declare global {
         themeParams?: Record<string, string>;
         colorScheme?: "light" | "dark";
         BackButton?: { hide: () => void };
+        CloudStorage?: {
+          getItem: (key: string, cb: (err: unknown, value?: string) => void) => void;
+          setItem: (key: string, value: string, cb?: (err: unknown, ok?: boolean) => void) => void;
+        };
       };
     };
   }
@@ -84,6 +88,20 @@ function fmtPct(n: number | null | undefined): string {
 function fmtNum(n: number | null | undefined, digits = 4): string {
   if (n == null || !Number.isFinite(n)) return "—";
   return n.toLocaleString("en-US", { maximumFractionDigits: digits });
+}
+
+type PnlUnit = "usd" | "pct";
+
+// Single render site for any toggle-able PnL value. When the active unit's
+// input is missing/non-finite, renders an em-dash so we never show "NaN%".
+function formatPnl(
+  usd: number | null | undefined,
+  pct: number | null | undefined,
+  unit: PnlUnit,
+  opts: { sign?: boolean } = {},
+): string {
+  if (unit === "pct") return fmtPct(pct);
+  return fmtUsd(usd, opts);
 }
 
 function pnlClass(n: number): string {
@@ -281,7 +299,7 @@ function OverviewTab({ initData }: { initData: string }) {
   );
 }
 
-function PositionsTab({ initData }: { initData: string }) {
+function PositionsTab({ initData, pnlUnit }: { initData: string; pnlUnit: PnlUnit }) {
   const q = useTgFetch<PositionsResponse>("/api/tg/positions", initData, true);
   if (q.isLoading) return <Skeleton className="h-40" />;
   if (q.error) return <ErrorBanner message={(q.error as Error).message} onRetry={() => q.refetch()} />;
@@ -292,7 +310,11 @@ function PositionsTab({ initData }: { initData: string }) {
   }
   return (
     <div className="space-y-2">
-      {all.map((p, i) => (
+      {all.map((p, i) => {
+        // Position % = unrealizedPnl / notional (size * entryPrice). Falls back to — when denom missing/zero.
+        const notional = p.size * p.entryPrice;
+        const pct = notional > 0 ? (p.unrealizedPnl / notional) * 100 : null;
+        return (
         <Card key={`${p.walletAddress}-${i}`} testid={`card-position-${p.market}-${i}`}>
           <div className="flex items-start justify-between">
             <div>
@@ -305,7 +327,7 @@ function PositionsTab({ initData }: { initData: string }) {
               <div className="mt-0.5 text-xs text-[color:var(--tg-hint)]">{p.botName} · {p.walletShort}</div>
             </div>
             <div className={`text-right text-sm font-medium ${pnlClass(p.unrealizedPnl)}`} data-testid={`text-position-pnl-${i}`}>
-              {fmtUsd(p.unrealizedPnl, { sign: true })}
+              {formatPnl(p.unrealizedPnl, pct, pnlUnit, { sign: true })}
             </div>
           </div>
           <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
@@ -323,12 +345,13 @@ function PositionsTab({ initData }: { initData: string }) {
             </div>
           </div>
         </Card>
-      ))}
+        );
+      })}
     </div>
   );
 }
 
-function BotsTab({ initData }: { initData: string }) {
+function BotsTab({ initData, pnlUnit }: { initData: string; pnlUnit: PnlUnit }) {
   const q = useTgFetch<BotsResponse>("/api/tg/bots", initData, true);
   if (q.isLoading) return <Skeleton className="h-40" />;
   if (q.error) return <ErrorBanner message={(q.error as Error).message} onRetry={() => q.refetch()} />;
@@ -366,7 +389,8 @@ function BotsTab({ initData }: { initData: string }) {
             <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
               <div>
                 <div className="text-[color:var(--tg-hint)]">PnL</div>
-                <div className={pnlClass(b.totalPnl)}>{fmtUsd(b.totalPnl, { sign: true })}</div>
+                {/* Bot total PnL % needs deployed capital denominator from /api/tg/bots payload (not present today) — renders — in % mode until backend adds it. */}
+                <div className={pnlClass(b.totalPnl)}>{formatPnl(b.totalPnl, null, pnlUnit, { sign: true })}</div>
               </div>
               <div>
                 <div className="text-[color:var(--tg-hint)]">Trades</div>
@@ -377,18 +401,23 @@ function BotsTab({ initData }: { initData: string }) {
                 <div>{wr == null ? "—" : `${wr.toFixed(0)}%`}</div>
               </div>
             </div>
-            {b.openPosition && (
-              <div className="mt-3 rounded-lg border border-white/10 bg-white/5 p-2 text-xs">
-                <div className="flex justify-between">
-                  <span>
-                    Open {b.openPosition.side} · {fmtNum(b.openPosition.size)} @ {fmtUsd(b.openPosition.entryPrice)}
-                  </span>
-                  <span className={pnlClass(b.openPosition.unrealizedPnl)}>
-                    {fmtUsd(b.openPosition.unrealizedPnl, { sign: true })}
-                  </span>
+            {b.openPosition && (() => {
+              const op = b.openPosition;
+              const notional = op.size * op.entryPrice;
+              const opPct = notional > 0 ? (op.unrealizedPnl / notional) * 100 : null;
+              return (
+                <div className="mt-3 rounded-lg border border-white/10 bg-white/5 p-2 text-xs">
+                  <div className="flex justify-between">
+                    <span>
+                      Open {op.side} · {fmtNum(op.size)} @ {fmtUsd(op.entryPrice)}
+                    </span>
+                    <span className={pnlClass(op.unrealizedPnl)}>
+                      {formatPnl(op.unrealizedPnl, opPct, pnlUnit, { sign: true })}
+                    </span>
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
           </Card>
         );
       })}
@@ -396,7 +425,7 @@ function BotsTab({ initData }: { initData: string }) {
   );
 }
 
-function Last7dTab({ initData }: { initData: string }) {
+function Last7dTab({ initData, pnlUnit }: { initData: string; pnlUnit: PnlUnit }) {
   const q = useTgFetch<Last7dResponse>("/api/tg/last7d", initData, true);
   if (q.isLoading) return <Skeleton className="h-40" />;
   if (q.error) return <ErrorBanner message={(q.error as Error).message} onRetry={() => q.refetch()} />;
@@ -406,8 +435,9 @@ function Last7dTab({ initData }: { initData: string }) {
       <Card testid="card-last7d-totals">
         <div className="text-xs uppercase tracking-wide text-[color:var(--tg-hint)]">Last 7 days</div>
         <div className="mt-1 flex items-baseline gap-3">
+          {/* Last 7d % needs summed starting equity for the period from /api/tg/last7d (not present today) — renders — in % mode until backend adds it. */}
           <div className={`text-3xl font-semibold ${pnlClass(data.totals.realizedPnl)}`} data-testid="text-last7d-pnl">
-            {fmtUsd(data.totals.realizedPnl, { sign: true })}
+            {formatPnl(data.totals.realizedPnl, null, pnlUnit, { sign: true })}
           </div>
           <div className="text-xs text-[color:var(--tg-hint)]">realized</div>
         </div>
@@ -435,8 +465,9 @@ function Last7dTab({ initData }: { initData: string }) {
             <Card key={w.walletAddress} testid={`card-last7d-wallet-${w.walletAddress}`}>
               <div className="flex items-center justify-between">
                 <div className="font-mono text-sm">{w.walletShort}</div>
+                {/* Per-wallet 7d % needs wallet starting equity from /api/tg/last7d (not present today) — renders — in % mode until backend adds it. */}
                 <div className={`text-sm font-medium ${pnlClass(w.realizedPnl)}`}>
-                  {fmtUsd(w.realizedPnl, { sign: true })}
+                  {formatPnl(w.realizedPnl, null, pnlUnit, { sign: true })}
                 </div>
               </div>
               <div className="mt-1 text-xs text-[color:var(--tg-hint)]">
@@ -450,11 +481,42 @@ function Last7dTab({ initData }: { initData: string }) {
   );
 }
 
+const PNL_UNIT_KEY = "qv_tg_pnl_unit";
+
 export default function TelegramMiniApp() {
   const [ready, setReady] = useState(false);
   const [initData, setInitData] = useState<string | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
+  const [pnlUnit, setPnlUnitState] = useState<PnlUnit>(() => {
+    try {
+      const v = localStorage.getItem(PNL_UNIT_KEY);
+      return v === "pct" ? "pct" : "usd";
+    } catch {
+      return "usd";
+    }
+  });
+
+  // Hydrate from Telegram CloudStorage (preferred) once available; falls back to
+  // the localStorage value already seeded above.
+  useEffect(() => {
+    const cs = window.Telegram?.WebApp?.CloudStorage;
+    if (!cs) return;
+    try {
+      cs.getItem(PNL_UNIT_KEY, (err, value) => {
+        if (err) return;
+        if (value === "usd" || value === "pct") setPnlUnitState(value);
+      });
+    } catch {
+      // best-effort
+    }
+  }, [ready]);
+
+  const setPnlUnit = (next: PnlUnit) => {
+    setPnlUnitState(next);
+    try { localStorage.setItem(PNL_UNIT_KEY, next); } catch { /* ignore */ }
+    try { window.Telegram?.WebApp?.CloudStorage?.setItem(PNL_UNIT_KEY, next); } catch { /* ignore */ }
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -508,9 +570,42 @@ export default function TelegramMiniApp() {
       <header className="sticky top-0 z-10 border-b border-white/10 bg-[color:var(--tg-bg)]/95 px-4 py-3 backdrop-blur">
         <div className="flex items-center gap-3">
           <img src="/images/QV_Logo.webp" alt="QuantumVault" className="h-10 w-10 flex-shrink-0" />
-          <div>
+          <div className="flex-1">
             <div className="text-base font-semibold leading-tight">QuantumVault</div>
             <div className="text-xs text-[color:var(--tg-hint)]">Read-only dashboard</div>
+          </div>
+          <div
+            role="group"
+            aria-label="PnL unit"
+            className="flex overflow-hidden rounded-md border border-white/10 bg-white/5 text-[11px] font-medium"
+            data-testid="toggle-pnl-unit"
+          >
+            <button
+              type="button"
+              onClick={() => setPnlUnit("usd")}
+              aria-pressed={pnlUnit === "usd"}
+              className={`px-2.5 py-1 transition-colors ${
+                pnlUnit === "usd"
+                  ? "bg-[color:var(--tg-button)] text-[color:var(--tg-button-text)]"
+                  : "text-[color:var(--tg-hint)] hover:bg-white/10"
+              }`}
+              data-testid="toggle-pnl-unit-usd"
+            >
+              $
+            </button>
+            <button
+              type="button"
+              onClick={() => setPnlUnit("pct")}
+              aria-pressed={pnlUnit === "pct"}
+              className={`px-2.5 py-1 transition-colors ${
+                pnlUnit === "pct"
+                  ? "bg-[color:var(--tg-button)] text-[color:var(--tg-button-text)]"
+                  : "text-[color:var(--tg-hint)] hover:bg-white/10"
+              }`}
+              data-testid="toggle-pnl-unit-pct"
+            >
+              %
+            </button>
           </div>
         </div>
         <nav className="mt-3 flex gap-1" role="tablist">
@@ -538,9 +633,9 @@ export default function TelegramMiniApp() {
         ) : initData ? (
           <>
             {tab === "overview" && <OverviewTab initData={initData} />}
-            {tab === "positions" && <PositionsTab initData={initData} />}
-            {tab === "bots" && <BotsTab initData={initData} />}
-            {tab === "last7d" && <Last7dTab initData={initData} />}
+            {tab === "positions" && <PositionsTab initData={initData} pnlUnit={pnlUnit} />}
+            {tab === "bots" && <BotsTab initData={initData} pnlUnit={pnlUnit} />}
+            {tab === "last7d" && <Last7dTab initData={initData} pnlUnit={pnlUnit} />}
           </>
         ) : null}
       </main>
