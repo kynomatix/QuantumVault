@@ -13713,6 +13713,164 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       res.status(500).json({ error: "Failed to fetch wallets" });
     }
   });
+
+  // Enriched user/account view for the admin Users tab: who has actually
+  // converted from signup → wallet → bots → on-chain account. Shows the
+  // wallet pubkey (the "username" surrogate — no separate username system),
+  // display name / X handle if set, the wallet-level Pacifica subaccount
+  // pubkey (PDA), per-wallet bot count, and the key conversion flags
+  // (builder approved / referral claimed / execution enabled / Telegram
+  // connected). Counts are computed in a single grouped query to keep this
+  // cheap as the wallet table grows.
+  app.get("/api/admin/users", requireAdminAuth, async (_req, res) => {
+    try {
+      const rows = await db.select({
+        address: wallets.address,
+        displayName: wallets.displayName,
+        xUsername: wallets.xUsername,
+        protocolSubaccountId: wallets.protocolSubaccountId,
+        referralCode: wallets.referralCode,
+        referredBy: wallets.referredBy,
+        pacificaBuilderApproved: wallets.pacificaBuilderApproved,
+        pacificaReferralClaimed: wallets.pacificaReferralClaimed,
+        telegramConnected: wallets.telegramConnected,
+        executionEnabled: wallets.executionEnabled,
+        createdAt: wallets.createdAt,
+        lastSeen: wallets.lastSeen,
+      }).from(wallets).orderBy(desc(wallets.createdAt));
+
+      const botCountRows = await db.select({
+        walletAddress: tradingBots.walletAddress,
+        count: sql<number>`count(*)::int`,
+        activeCount: sql<number>`count(*) filter (where ${tradingBots.isActive} = true)::int`,
+      }).from(tradingBots).groupBy(tradingBots.walletAddress);
+      const botCountByWallet = new Map<string, { count: number; activeCount: number }>();
+      for (const r of botCountRows) {
+        botCountByWallet.set(r.walletAddress, { count: r.count, activeCount: r.activeCount });
+      }
+
+      const enriched = rows.map(r => {
+        const counts = botCountByWallet.get(r.address);
+        return {
+          ...r,
+          botCount: counts?.count ?? 0,
+          activeBotCount: counts?.activeCount ?? 0,
+        };
+      });
+      res.json(enriched);
+    } catch (error) {
+      console.error("[Admin] Users error:", error);
+      res.status(500).json({ error: "Failed to fetch users" });
+    }
+  });
+
+  // Revenue summary for the admin Revenue tab.
+  //
+  // Referral revenue: authoritative — sourced from the
+  // `referral_reward_events` ledger (status = paid/pending/failed).
+  //
+  // Builder-code revenue: ESTIMATED. We do not store the per-trade builder
+  // fee Pacifica grants us (no DB column for it, no `/builder_codes/earnings`
+  // call wired up yet). The figure shown is an upper-bound ceiling:
+  //   Σ(filled notional on Pacifica, for wallets with builder approval)
+  //     × pacificaBuilderMaxFeeRate (0.002 = 0.2%).
+  // Actual revenue is whatever Pacifica's allocator gives us per their
+  // fee_rate config (base 0.001) and may be lower. The UI labels this
+  // clearly as an estimate.
+  app.get("/api/admin/revenue", requireAdminAuth, async (_req, res) => {
+    try {
+      const refByStatus = await db.select({
+        status: referralRewardEvents.status,
+        totalUsdc: sql<string>`coalesce(sum(${referralRewardEvents.amountUsdc}), 0)::text`,
+        eventCount: sql<number>`count(*)::int`,
+      }).from(referralRewardEvents).groupBy(referralRewardEvents.status);
+
+      const refByEarner = await db.select({
+        earnerWallet: referralRewardEvents.earnerWallet,
+        totalUsdc: sql<string>`coalesce(sum(${referralRewardEvents.amountUsdc}) filter (where ${referralRewardEvents.status} = 'paid'), 0)::text`,
+        pendingUsdc: sql<string>`coalesce(sum(${referralRewardEvents.amountUsdc}) filter (where ${referralRewardEvents.status} = 'pending'), 0)::text`,
+        eventCount: sql<number>`count(*)::int`,
+      })
+        .from(referralRewardEvents)
+        .groupBy(referralRewardEvents.earnerWallet)
+        .orderBy(sql`sum(${referralRewardEvents.amountUsdc}) desc`)
+        .limit(20);
+
+      const referral = {
+        paidUsdc: 0,
+        pendingUsdc: 0,
+        failedUsdc: 0,
+        totalUsdc: 0,
+        paidCount: 0,
+        pendingCount: 0,
+        failedCount: 0,
+        topEarners: refByEarner.map(r => ({
+          earnerWallet: r.earnerWallet,
+          paidUsdc: parseFloat(r.totalUsdc) || 0,
+          pendingUsdc: parseFloat(r.pendingUsdc) || 0,
+          eventCount: r.eventCount,
+        })),
+      };
+      for (const r of refByStatus) {
+        const amt = parseFloat(r.totalUsdc) || 0;
+        referral.totalUsdc += amt;
+        if (r.status === 'paid') { referral.paidUsdc = amt; referral.paidCount = r.eventCount; }
+        else if (r.status === 'pending') { referral.pendingUsdc = amt; referral.pendingCount = r.eventCount; }
+        else if (r.status === 'failed') { referral.failedUsdc = amt; referral.failedCount = r.eventCount; }
+      }
+
+      // Builder-fee estimate (Pacifica only, wallets with builder approval).
+      // Clamp fee rate to a sane finite positive bound so a misconfigured env
+      // var can't NaN-poison the admin UI or produce absurd "revenue" numbers.
+      const rawFeeRate = parseFloat(process.env.PACIFICA_BUILDER_MAX_FEE_RATE || '0.002');
+      const BUILDER_MAX_FEE_RATE = Number.isFinite(rawFeeRate) && rawFeeRate > 0 && rawFeeRate <= 0.05
+        ? rawFeeRate
+        : 0.002;
+
+      // Count both `executed` and `recovered` — `recovered` is a successful
+      // fill that was originally marked failed and later reconciled on-chain.
+      // Excluding it would materially undercount builder notional. Prefer
+      // filledSizeBase × averageFillPrice when present (post-fill reconciled
+      // truth), fall back to requested size × submitted price.
+      const builderRows = await db.select({
+        notional: sql<string>`coalesce(sum(coalesce(${botTrades.filledSizeBase}, ${botTrades.size})::numeric * coalesce(${botTrades.averageFillPrice}, ${botTrades.price})::numeric), 0)::text`,
+        fillCount: sql<number>`count(*)::int`,
+      })
+        .from(botTrades)
+        .innerJoin(wallets, eq(botTrades.walletAddress, wallets.address))
+        .where(and(
+          eq(wallets.pacificaBuilderApproved, true),
+          eq(botTrades.protocol, 'pacifica'),
+          sql`${botTrades.status} in ('executed', 'recovered')`,
+        ));
+      const filledNotional = parseFloat(builderRows[0]?.notional ?? '0') || 0;
+      const builderFillCount = builderRows[0]?.fillCount ?? 0;
+
+      const approvedRows = await db.select({
+        approvedWallets: sql<number>`count(*) filter (where ${wallets.pacificaBuilderApproved} = true)::int`,
+        claimedRefWallets: sql<number>`count(*) filter (where ${wallets.pacificaReferralClaimed} = true)::int`,
+      }).from(wallets);
+
+      const builder = {
+        estimatedUsdc: filledNotional * BUILDER_MAX_FEE_RATE,
+        filledNotional,
+        feeRateCeiling: BUILDER_MAX_FEE_RATE,
+        fillCount: builderFillCount,
+        approvedWallets: approvedRows[0]?.approvedWallets ?? 0,
+        note: "Estimated ceiling. Pacifica controls the actual fee allocation per their fee_rate; we don't yet poll /builder_codes/earnings, so this is the upper bound (filled notional × max_fee_rate).",
+      };
+
+      const enrollment = {
+        builderApprovedWallets: approvedRows[0]?.approvedWallets ?? 0,
+        referralClaimedWallets: approvedRows[0]?.claimedRefWallets ?? 0,
+      };
+
+      res.json({ referral, builder, enrollment });
+    } catch (error) {
+      console.error("[Admin] Revenue error:", error);
+      res.status(500).json({ error: "Failed to fetch revenue" });
+    }
+  });
   
   // Subscription routing diagnostics - shows why signals might not be routing
   app.get("/api/admin/subscription-diagnostics", requireAdminAuth, async (req, res) => {

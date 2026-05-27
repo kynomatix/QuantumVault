@@ -2,7 +2,7 @@ import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
-import { Lock, Activity, Bot, Users, Webhook, TrendingUp, ArrowLeft, RefreshCw, Clock, CheckCircle, XCircle, AlertTriangle, Rocket, ExternalLink, Send, Eye, Copy, FlaskConical, Power } from 'lucide-react';
+import { Lock, Activity, Bot, Users, Webhook, TrendingUp, ArrowLeft, RefreshCw, Clock, CheckCircle, XCircle, AlertTriangle, Rocket, ExternalLink, Send, Eye, Copy, FlaskConical, Power, UserCheck, DollarSign } from 'lucide-react';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -172,6 +172,26 @@ function AdminPage() {
     enabled: authenticated && activeTab === 'profit-shares',
   });
 
+  const { data: users, isLoading: usersLoading, refetch: refetchUsers } = useQuery({
+    queryKey: ['admin-users'],
+    queryFn: async () => {
+      const res = await fetch('/api/admin/users', { headers: authHeaders });
+      if (!res.ok) throw new Error('Failed to fetch');
+      return safeResponseJson(res);
+    },
+    enabled: authenticated && activeTab === 'users',
+  });
+
+  const { data: revenue, isLoading: revenueLoading, refetch: refetchRevenue } = useQuery({
+    queryKey: ['admin-revenue'],
+    queryFn: async () => {
+      const res = await fetch('/api/admin/revenue', { headers: authHeaders });
+      if (!res.ok) throw new Error('Failed to fetch');
+      return safeResponseJson(res);
+    },
+    enabled: authenticated && activeTab === 'revenue',
+  });
+
   const handleLogin = async () => {
     setError('');
     sessionStorage.removeItem(ADMIN_KEY);
@@ -209,6 +229,8 @@ function AdminPage() {
       case 'subscriptions': refetchSubs(); break;
       case 'marketplace': refetchPubBots(); break;
       case 'profit-shares': refetchShares(); break;
+      case 'users': refetchUsers(); break;
+      case 'revenue': refetchRevenue(); break;
     }
   };
 
@@ -361,6 +383,8 @@ function AdminPage() {
             <TabsTrigger value="subscriptions" className="data-[state=active]:bg-violet-600"><Users className="w-4 h-4 mr-2" />Subscriptions</TabsTrigger>
             <TabsTrigger value="marketplace" className="data-[state=active]:bg-violet-600">Marketplace</TabsTrigger>
             <TabsTrigger value="profit-shares" className="data-[state=active]:bg-violet-600">Profit Shares</TabsTrigger>
+            <TabsTrigger value="users" className="data-[state=active]:bg-violet-600"><UserCheck className="w-4 h-4 mr-2" />Users</TabsTrigger>
+            <TabsTrigger value="revenue" className="data-[state=active]:bg-violet-600"><DollarSign className="w-4 h-4 mr-2" />Revenue</TabsTrigger>
             <TabsTrigger value="superteam" className="data-[state=active]:bg-emerald-600"><Rocket className="w-4 h-4 mr-2" />Grants</TabsTrigger>
           </TabsList>
 
@@ -676,6 +700,226 @@ function AdminPage() {
                 )}
               </CardContent>
             </Card>
+          </TabsContent>
+
+          <TabsContent value="users">
+            <Card className="bg-zinc-900/80 border-zinc-800">
+              <CardHeader>
+                <CardTitle className="text-white flex items-center gap-2">
+                  <UserCheck className="w-5 h-5 text-violet-400" />
+                  Users ({users?.length || 0})
+                </CardTitle>
+                <p className="text-xs text-zinc-500 mt-1">
+                  Signup → wallet → on-chain account funnel. Wallet pubkey is the user identity (no separate username system). PDA = wallet-level Pacifica subaccount.
+                </p>
+              </CardHeader>
+              <CardContent>
+                {usersLoading ? (
+                  <div className="text-center py-8 text-zinc-400">Loading...</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="border-zinc-700">
+                          <TableHead className="text-zinc-400">Wallet</TableHead>
+                          <TableHead className="text-zinc-400">Username</TableHead>
+                          <TableHead className="text-zinc-400">PDA</TableHead>
+                          <TableHead className="text-zinc-400 text-center">Bots</TableHead>
+                          <TableHead className="text-zinc-400 text-center">Builder</TableHead>
+                          <TableHead className="text-zinc-400 text-center">Referral</TableHead>
+                          <TableHead className="text-zinc-400 text-center">Exec</TableHead>
+                          <TableHead className="text-zinc-400 text-center">TG</TableHead>
+                          <TableHead className="text-zinc-400">Created</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {users?.map((u: any) => (
+                          <TableRow key={u.address} className="border-zinc-800" data-testid={`row-user-${u.address}`}>
+                            <TableCell className="text-zinc-300 font-mono text-xs">
+                              <div className="flex items-center gap-1">
+                                <span>{truncateAddress(u.address)}</span>
+                                <button
+                                  onClick={() => navigator.clipboard.writeText(u.address)}
+                                  className="text-zinc-500 hover:text-zinc-300"
+                                  title={u.address}
+                                >
+                                  <Copy className="w-3 h-3" />
+                                </button>
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-zinc-300 text-xs">
+                              {u.displayName || (u.xUsername ? `@${u.xUsername}` : <span className="text-zinc-600">—</span>)}
+                            </TableCell>
+                            <TableCell className="text-zinc-300 font-mono text-xs">
+                              {u.protocolSubaccountId
+                                ? <span title={u.protocolSubaccountId}>{truncateAddress(u.protocolSubaccountId)}</span>
+                                : <span className="text-zinc-600">—</span>}
+                            </TableCell>
+                            <TableCell className="text-center text-zinc-300 text-xs">
+                              {u.activeBotCount}/{u.botCount}
+                            </TableCell>
+                            <TableCell className="text-center">
+                              {u.pacificaBuilderApproved
+                                ? <CheckCircle className="w-4 h-4 text-green-400 inline" />
+                                : <XCircle className="w-4 h-4 text-zinc-600 inline" />}
+                            </TableCell>
+                            <TableCell className="text-center">
+                              {u.pacificaReferralClaimed
+                                ? <CheckCircle className="w-4 h-4 text-green-400 inline" />
+                                : <XCircle className="w-4 h-4 text-zinc-600 inline" />}
+                            </TableCell>
+                            <TableCell className="text-center">
+                              {u.executionEnabled
+                                ? <CheckCircle className="w-4 h-4 text-green-400 inline" />
+                                : <XCircle className="w-4 h-4 text-zinc-600 inline" />}
+                            </TableCell>
+                            <TableCell className="text-center">
+                              {u.telegramConnected
+                                ? <CheckCircle className="w-4 h-4 text-green-400 inline" />
+                                : <XCircle className="w-4 h-4 text-zinc-600 inline" />}
+                            </TableCell>
+                            <TableCell className="text-zinc-400 text-xs">{formatDate(u.createdAt)}</TableCell>
+                          </TableRow>
+                        ))}
+                        {(!users || users.length === 0) && (
+                          <TableRow>
+                            <TableCell colSpan={9} className="text-center text-zinc-500 py-8">No users found</TableCell>
+                          </TableRow>
+                        )}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="revenue" className="space-y-4">
+            {revenueLoading ? (
+              <div className="text-center py-12 text-zinc-400">Loading revenue...</div>
+            ) : revenue ? (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <Card className="bg-zinc-900/80 border-zinc-800">
+                    <CardHeader>
+                      <CardTitle className="text-white flex items-center gap-2">
+                        <Users className="w-5 h-5 text-violet-400" />
+                        Referral Revenue (paid out to referrers)
+                      </CardTitle>
+                      <p className="text-xs text-zinc-500 mt-1">
+                        Authoritative — sourced from the referral_reward_events ledger.
+                      </p>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="grid grid-cols-3 gap-3 mb-4">
+                        <div>
+                          <div className="text-xs text-zinc-500">Paid</div>
+                          <div className="text-2xl font-semibold text-green-400" data-testid="text-referral-paid">
+                            ${revenue.referral.paidUsdc.toFixed(2)}
+                          </div>
+                          <div className="text-xs text-zinc-500">{revenue.referral.paidCount} events</div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-zinc-500">Pending</div>
+                          <div className="text-2xl font-semibold text-yellow-400" data-testid="text-referral-pending">
+                            ${revenue.referral.pendingUsdc.toFixed(2)}
+                          </div>
+                          <div className="text-xs text-zinc-500">{revenue.referral.pendingCount} events</div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-zinc-500">Failed</div>
+                          <div className="text-2xl font-semibold text-red-400" data-testid="text-referral-failed">
+                            ${revenue.referral.failedUsdc.toFixed(2)}
+                          </div>
+                          <div className="text-xs text-zinc-500">{revenue.referral.failedCount} events</div>
+                        </div>
+                      </div>
+                      {revenue.referral.topEarners.length > 0 && (
+                        <div className="mt-4">
+                          <div className="text-xs uppercase tracking-wide text-zinc-500 mb-2">Top earners</div>
+                          <Table>
+                            <TableHeader>
+                              <TableRow className="border-zinc-700">
+                                <TableHead className="text-zinc-400">Wallet</TableHead>
+                                <TableHead className="text-zinc-400 text-right">Paid</TableHead>
+                                <TableHead className="text-zinc-400 text-right">Pending</TableHead>
+                                <TableHead className="text-zinc-400 text-right">Events</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {revenue.referral.topEarners.map((e: any) => (
+                                <TableRow key={e.earnerWallet} className="border-zinc-800">
+                                  <TableCell className="text-zinc-300 font-mono text-xs">{truncateAddress(e.earnerWallet)}</TableCell>
+                                  <TableCell className="text-right text-green-400 text-xs">${e.paidUsdc.toFixed(2)}</TableCell>
+                                  <TableCell className="text-right text-yellow-400 text-xs">${e.pendingUsdc.toFixed(2)}</TableCell>
+                                  <TableCell className="text-right text-zinc-400 text-xs">{e.eventCount}</TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+
+                  <Card className="bg-zinc-900/80 border-zinc-800">
+                    <CardHeader>
+                      <CardTitle className="text-white flex items-center gap-2">
+                        <DollarSign className="w-5 h-5 text-violet-400" />
+                        Builder Code Revenue (our cut)
+                      </CardTitle>
+                      <p className="text-xs text-amber-400/80 mt-1">
+                        Estimated ceiling — not authoritative.
+                      </p>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="mb-4">
+                        <div className="text-xs text-zinc-500">Estimated USDC</div>
+                        <div className="text-3xl font-semibold text-violet-300" data-testid="text-builder-estimated">
+                          ${revenue.builder.estimatedUsdc.toFixed(2)}
+                        </div>
+                        <div className="text-xs text-zinc-500 mt-1">
+                          ${revenue.builder.filledNotional.toFixed(0)} notional × {(revenue.builder.feeRateCeiling * 100).toFixed(2)}% ceiling
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 text-sm">
+                        <div>
+                          <div className="text-xs text-zinc-500">Fills counted</div>
+                          <div className="text-zinc-300 font-medium">{revenue.builder.fillCount}</div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-zinc-500">Approved wallets</div>
+                          <div className="text-zinc-300 font-medium">{revenue.builder.approvedWallets}</div>
+                        </div>
+                      </div>
+                      <div className="mt-4 p-3 rounded bg-amber-500/10 border border-amber-500/20 text-xs text-amber-200/90">
+                        {revenue.builder.note}
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                <Card className="bg-zinc-900/80 border-zinc-800">
+                  <CardHeader>
+                    <CardTitle className="text-white text-sm">Enrollment</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="grid grid-cols-2 gap-4 text-sm">
+                      <div>
+                        <div className="text-xs text-zinc-500">Builder-approved wallets</div>
+                        <div className="text-2xl font-semibold text-zinc-200">{revenue.enrollment.builderApprovedWallets}</div>
+                      </div>
+                      <div>
+                        <div className="text-xs text-zinc-500">Referral-claimed wallets</div>
+                        <div className="text-2xl font-semibold text-zinc-200">{revenue.enrollment.referralClaimedWallets}</div>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              </>
+            ) : (
+              <div className="text-center py-12 text-red-400">Failed to load revenue</div>
+            )}
           </TabsContent>
 
           <TabsContent value="superteam">
