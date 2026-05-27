@@ -420,6 +420,28 @@ function exportPineWithParams(pineScript: string, params: Record<string, any>, t
   downloadFile(injected, `${t}_${tf}_${sName}.pine`);
 }
 
+async function copyPineWithParams(pineScript: string, params: Record<string, any>): Promise<boolean> {
+  const injected = injectParamsIntoPineScript(pineScript, params);
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(injected);
+      return true;
+    }
+    // Fallback for older browsers / insecure contexts
+    const ta = document.createElement("textarea");
+    ta.value = injected;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 export default function QuantumLab() {
   const [mainTab, setMainTab] = useState<MainTab>("main");
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -3820,6 +3842,19 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
     exportPineWithParams(strat.pineScript, cfg.params, ticker, timeframe, strat.name);
   }, [strategyMap]);
 
+  const handleCopyPine = useCallback(async (cfg: any) => {
+    const strat = strategyMap.get(cfg.strategyId);
+    if (!strat?.pineScript) return;
+    const ok = await copyPineWithParams(strat.pineScript, cfg.params);
+    toast({
+      title: ok ? "Pine script copied" : "Copy failed",
+      description: ok
+        ? `${strat.name} with optimized params is on your clipboard.`
+        : "Couldn't write to clipboard. Try the download button instead.",
+      variant: ok ? "default" : "destructive",
+    });
+  }, [strategyMap, toast]);
+
   const handleRefine = useCallback(async (cfg: any, ticker: string, timeframe: string) => {
     if (!cfg.runId) return;
     const comboKey = `${ticker}|${timeframe}`;
@@ -4232,14 +4267,24 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
                           </button>
                         )}
                         {hasStrategy && (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleExportPine(cfg, selectedCell.ticker, selectedCell.timeframe); }}
-                            className="p-1 rounded hover:bg-violet-500/20 text-violet-400 hover:text-violet-300 transition-colors"
-                            title="Export .pine with optimized params"
-                            data-testid={`heatmap-export-pine-${idx}`}
-                          >
-                            <Download className="w-3.5 h-3.5" />
-                          </button>
+                          <>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleCopyPine(cfg); }}
+                              className="p-1 rounded hover:bg-violet-500/20 text-violet-400 hover:text-violet-300 transition-colors"
+                              title="Copy Pine script with optimized params to clipboard"
+                              data-testid={`heatmap-copy-pine-${idx}`}
+                            >
+                              <Copy className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleExportPine(cfg, selectedCell.ticker, selectedCell.timeframe); }}
+                              className="p-1 rounded hover:bg-violet-500/20 text-violet-400 hover:text-violet-300 transition-colors"
+                              title="Export .pine with optimized params"
+                              data-testid={`heatmap-export-pine-${idx}`}
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                            </button>
+                          </>
                         )}
                         {cfg.runId && onRefine && (
                           <button
