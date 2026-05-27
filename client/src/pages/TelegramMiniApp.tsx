@@ -165,6 +165,7 @@ interface BotsResponse {
     status: "running" | "paused";
     pauseReason: string | null;
     totalPnl: number;
+    totalInvestment: number;
     totalTrades: number;
     winningTrades: number;
     losingTrades: number;
@@ -179,10 +180,11 @@ interface Last7dResponse {
     walletShort: string;
     trades: number;
     realizedPnl: number;
+    startEquity: number | null;
     winning: number;
     losing: number;
   }>;
-  totals: { trades: number; realizedPnl: number; winning: number; losing: number };
+  totals: { trades: number; realizedPnl: number; startEquity: number | null; winning: number; losing: number };
 }
 
 function useTgFetch<T>(path: string, initData: string | null, enabled: boolean) {
@@ -389,8 +391,15 @@ function BotsTab({ initData, pnlUnit }: { initData: string; pnlUnit: PnlUnit }) 
             <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
               <div>
                 <div className="text-[color:var(--tg-hint)]">PnL</div>
-                {/* Bot total PnL % needs deployed capital denominator from /api/tg/bots payload (not present today) — renders — in % mode until backend adds it. */}
-                <div className={pnlClass(b.totalPnl)}>{formatPnl(b.totalPnl, null, pnlUnit, { sign: true })}</div>
+                {/* Bot total PnL %: totalPnl / totalInvestment × 100 (bot's configured starting capital). */}
+                <div className={pnlClass(b.totalPnl)}>
+                  {formatPnl(
+                    b.totalPnl,
+                    b.totalInvestment > 0 ? (b.totalPnl / b.totalInvestment) * 100 : null,
+                    pnlUnit,
+                    { sign: true },
+                  )}
+                </div>
               </div>
               <div>
                 <div className="text-[color:var(--tg-hint)]">Trades</div>
@@ -435,9 +444,16 @@ function Last7dTab({ initData, pnlUnit }: { initData: string; pnlUnit: PnlUnit }
       <Card testid="card-last7d-totals">
         <div className="text-xs uppercase tracking-wide text-[color:var(--tg-hint)]">Last 7 days</div>
         <div className="mt-1 flex items-baseline gap-3">
-          {/* Last 7d % needs summed starting equity for the period from /api/tg/last7d (not present today) — renders — in % mode until backend adds it. */}
+          {/* Last 7d %: realizedPnl / startEquity_7d_ago × 100, summed across wallets. */}
           <div className={`text-3xl font-semibold ${pnlClass(data.totals.realizedPnl)}`} data-testid="text-last7d-pnl">
-            {formatPnl(data.totals.realizedPnl, null, pnlUnit, { sign: true })}
+            {formatPnl(
+              data.totals.realizedPnl,
+              data.totals.startEquity && data.totals.startEquity > 0
+                ? (data.totals.realizedPnl / data.totals.startEquity) * 100
+                : null,
+              pnlUnit,
+              { sign: true },
+            )}
           </div>
           <div className="text-xs text-[color:var(--tg-hint)]">realized</div>
         </div>
@@ -465,9 +481,14 @@ function Last7dTab({ initData, pnlUnit }: { initData: string; pnlUnit: PnlUnit }
             <Card key={w.walletAddress} testid={`card-last7d-wallet-${w.walletAddress}`}>
               <div className="flex items-center justify-between">
                 <div className="font-mono text-sm">{w.walletShort}</div>
-                {/* Per-wallet 7d % needs wallet starting equity from /api/tg/last7d (not present today) — renders — in % mode until backend adds it. */}
+                {/* Per-wallet 7d %: realizedPnl / startEquity_7d_ago × 100. */}
                 <div className={`text-sm font-medium ${pnlClass(w.realizedPnl)}`}>
-                  {formatPnl(w.realizedPnl, null, pnlUnit, { sign: true })}
+                  {formatPnl(
+                    w.realizedPnl,
+                    w.startEquity && w.startEquity > 0 ? (w.realizedPnl / w.startEquity) * 100 : null,
+                    pnlUnit,
+                    { sign: true },
+                  )}
                 </div>
               </div>
               <div className="mt-1 text-xs text-[color:var(--tg-hint)]">

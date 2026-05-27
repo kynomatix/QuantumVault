@@ -295,6 +295,7 @@ export interface BotCardJson {
   status: 'running' | 'paused';
   pauseReason: string | null;
   totalPnl: number;
+  totalInvestment: number; // configured starting capital, used as denominator for totalPnl%
   totalTrades: number;
   winningTrades: number;
   losingTrades: number;
@@ -447,6 +448,7 @@ export async function buildBotsJsonForChat(walletAddresses: string[]): Promise<{
           status: b.isActive ? 'running' : 'paused',
           pauseReason: b.pauseReason ?? null,
           totalPnl: Number(stats.totalPnl ?? 0),
+          totalInvestment: parseFloat(b.totalInvestment ?? '0') || 0,
           totalTrades: Number(stats.totalTrades ?? 0),
           winningTrades: Number(stats.winningTrades ?? 0),
           losingTrades: Number(stats.losingTrades ?? 0),
@@ -474,44 +476,88 @@ export async function buildLast7dJsonForChat(walletAddresses: string[]): Promise
     walletShort: string;
     trades: number;
     realizedPnl: number;
+    startEquity: number | null; // wallet equity ~7 days ago; null when no snapshot available
     winning: number;
     losing: number;
   }>;
-  totals: { trades: number; realizedPnl: number; winning: number; losing: number };
+  totals: { trades: number; realizedPnl: number; startEquity: number | null; winning: number; losing: number };
 }> {
-  const since = new Date(Date.now() - 7 * DAY_MS);
+  const sevenDaysAgo = new Date(Date.now() - 7 * DAY_MS);
+  const since = sevenDaysAgo;
+  // Lookback a little wider than 7d so we tolerate snapshot cadence gaps.
+  const snapshotLookback = new Date(Date.now() - 9 * DAY_MS);
+  const snapshotsByWallet = await storage.getPortfolioDailySnapshotsBatch(walletAddresses, snapshotLookback);
+  const sevenDaysAgoMs = sevenDaysAgo.getTime();
   const wallets: Array<{
     walletAddress: string;
     walletShort: string;
     trades: number;
     realizedPnl: number;
+    startEquity: number | null;
     winning: number;
     losing: number;
   }> = [];
   let trades = 0;
   let realizedPnl = 0;
+  let totalStartEquity = 0;
+  // Track aggregate-percent eligibility: if any wallet has nonzero
+  // activity but no start-equity, the totals % would be numerator/partial-
+  // denominator (misleading). In that case emit totals.startEquity = null
+  // so the UI renders "—".
+  let totalsDenominatorComplete = true;
   let winning = 0;
   let losing = 0;
   for (const addr of walletAddresses) {
     try {
       const agg = await getTradeAggregate(addr, since);
+      // Pick the snapshot whose date is closest to exactly 7 days ago,
+      // not just the oldest in the lookback window (which biased toward
+      // ~9d-ago equity).
+      const snaps = snapshotsByWallet.get(addr) ?? [];
+      let startSnap: typeof snaps[number] | undefined;
+      let bestDelta = Infinity;
+      for (const s of snaps) {
+        const delta = Math.abs(new Date(s.snapshotDate).getTime() - sevenDaysAgoMs);
+        if (delta < bestDelta) {
+          bestDelta = delta;
+          startSnap = s;
+        }
+      }
+      const startEquity = startSnap ? parseFloat(startSnap.totalBalance) : null;
+      const validStart = startEquity != null && Number.isFinite(startEquity) && startEquity > 0 ? startEquity : null;
       wallets.push({
         walletAddress: addr,
         walletShort: truncate(addr),
         trades: agg.count,
         realizedPnl: agg.realizedPnl,
+        startEquity: validStart,
         winning: agg.winning,
         losing: agg.losing,
       });
       trades += agg.count;
       realizedPnl += agg.realizedPnl;
+      if (validStart != null) {
+        totalStartEquity += validStart;
+      } else if (agg.count > 0 || agg.realizedPnl !== 0) {
+        // Wallet contributes to the numerator but not the denominator.
+        totalsDenominatorComplete = false;
+      }
       winning += agg.winning;
       losing += agg.losing;
     } catch (err: any) {
       console.error(`[TelegramSummary] last7d build failed for ${addr.slice(0, 8)}:`, err?.message || err);
     }
   }
-  return { wallets, totals: { trades, realizedPnl, winning, losing } };
+  return {
+    wallets,
+    totals: {
+      trades,
+      realizedPnl,
+      startEquity: totalsDenominatorComplete && totalStartEquity > 0 ? totalStartEquity : null,
+      winning,
+      losing,
+    },
+  };
 }
 
 export async function buildTodayJsonForChat(walletAddresses: string[]): Promise<{
