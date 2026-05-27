@@ -41,21 +41,16 @@ export function getCloseReasonLabel(
 
 /**
  * Build the standard inline keyboard attached to outbound notifications and
- * the /menu home screen (Task #136). The 🚀 Open Mini App `web_app` button
- * deep-links into the QuantumVault Mini App via Telegram's WebApp surface;
- * 📊 Positions and 📈 Today reuse the existing text commands via
- * callback_query so the buttons work even before the user has opened the
- * Mini App for the first time. web_app buttons can only appear inside
- * `inline_keyboard` (not reply_keyboard) — keep the markup shape.
+ * the /menu home screen. Only the 🚀 Open Mini App `web_app` button is
+ * shipped — the previous 📊 Positions and 📈 Today callback_query buttons
+ * timed out on tap (no handler) so they were removed at user request.
+ * web_app buttons can only appear inside `inline_keyboard` (not
+ * reply_keyboard) — keep the markup shape.
  */
 export function buildDefaultInlineKeyboard(): Record<string, any> {
   const miniAppUrl = process.env.TELEGRAM_MINI_APP_URL || 'https://myquantumvault.com/tg';
   return {
     inline_keyboard: [
-      [
-        { text: '📊 Positions', callback_data: 'nav:positions' },
-        { text: '📈 Today', callback_data: 'nav:today' },
-      ],
       [
         { text: '🚀 Open Mini App', web_app: { url: miniAppUrl } },
       ],
