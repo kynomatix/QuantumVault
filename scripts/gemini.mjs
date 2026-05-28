@@ -3,23 +3,28 @@
  * Lightweight Gemini CLI for QuantumVault dev tooling.
  *
  * NOT wired into the production server — used by the agent (and you) for:
- *   - Plan/code audits        (text → text, gemini-2.5-pro)
- *   - UX critique             (text + screenshot → text, gemini-2.5-pro)
- *   - Mockup image generation (text → image, gemini-2.5-flash-image / "Nano Banana")
+ *   - Plan / code / UX audits (text → text)
+ *   - UX critique with screenshots (text + image → text)
+ *   - Mockup image generation (text → image)
  *
- * Auth: prefers GEMINI_API_KEY (direct Google AI Studio — supports Gemini 3 Pro and latest models).
- * Falls back to AI_INTEGRATIONS_GEMINI_API_KEY + AI_INTEGRATIONS_GEMINI_BASE_URL (Replit proxy, 2.5 family only).
+ * Auth: requires GEMINI_API_KEY (direct Google AI Studio key).
+ *   The old AI_INTEGRATIONS_GEMINI_* Replit-proxy fallback (Gemini 2.5
+ *   family only) has been removed — we pay for the direct API and only
+ *   use Gemini 3 Pro / 3 Flash Image.
  *
  * Usage:
  *   node scripts/gemini.mjs --prompt-file p.txt
  *   echo "audit this" | node scripts/gemini.mjs
  *   node scripts/gemini.mjs --prompt "critique this mockup" --image ui.png
  *   node scripts/gemini.mjs --image-out --prompt "Dark fintech dashboard, ..." --out mock.png
- *   node scripts/gemini.mjs --model gemini-2.5-flash --max-tokens 32000 --prompt-file p.txt
+ *   node scripts/gemini.mjs --model gemini-3.1-pro-preview --max-tokens 32000 --prompt-file p.txt
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { GoogleGenAI, Modality } from '@google/genai';
+
+const DEFAULT_TEXT_MODEL = 'gemini-3.1-pro-preview';
+const DEFAULT_IMAGE_MODEL = 'gemini-3.1-flash-image-preview';
 
 function parseArgs(argv) {
   const args = { model: null, maxTokens: 16384, imageOut: false };
@@ -63,16 +68,17 @@ async function main() {
     return;
   }
   const directKey = process.env.GEMINI_API_KEY;
-  const proxyKey = process.env.AI_INTEGRATIONS_GEMINI_API_KEY;
-  if (!directKey && !proxyKey) {
-    console.error('Missing GEMINI_API_KEY (direct) or AI_INTEGRATIONS_GEMINI_API_KEY (Replit proxy)');
+  if (!directKey) {
+    console.error('Missing GEMINI_API_KEY. Set a direct Google AI Studio key — the legacy Replit-proxy fallback (Gemini 2.5) has been removed.');
     process.exit(1);
   }
 
-  const useDirect = !!directKey;
-  const defaultTextModel = useDirect ? 'gemini-3.1-pro-preview' : 'gemini-2.5-pro';
-  const defaultImageModel = useDirect ? 'gemini-3.1-flash-image-preview' : 'gemini-2.5-flash-image';
-  const model = args.model || (args.imageOut ? defaultImageModel : defaultTextModel);
+  if (args.model && /gemini-2\./i.test(args.model)) {
+    console.error(`Refusing to use legacy model "${args.model}". This CLI is locked to Gemini 3.x. Remove --model to use the default (${args.imageOut ? DEFAULT_IMAGE_MODEL : DEFAULT_TEXT_MODEL}).`);
+    process.exit(2);
+  }
+
+  const model = args.model || (args.imageOut ? DEFAULT_IMAGE_MODEL : DEFAULT_TEXT_MODEL);
   let prompt = args.prompt || '';
   if (args.promptFile) prompt += (prompt ? '\n\n' : '') + await fs.readFile(args.promptFile, 'utf-8');
   if (!prompt) prompt = await readStdin();
@@ -81,12 +87,7 @@ async function main() {
   const parts = [{ text: prompt }];
   for (const p of (args.images || [])) parts.push(await loadImagePart(p));
 
-  const ai = useDirect
-    ? new GoogleGenAI({ apiKey: directKey })
-    : new GoogleGenAI({
-        apiKey: proxyKey,
-        httpOptions: { apiVersion: '', baseUrl: process.env.AI_INTEGRATIONS_GEMINI_BASE_URL },
-      });
+  const ai = new GoogleGenAI({ apiKey: directKey });
 
   const config = { maxOutputTokens: args.maxTokens };
   if (args.imageOut) config.responseModalities = [Modality.TEXT, Modality.IMAGE];
