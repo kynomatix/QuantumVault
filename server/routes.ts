@@ -13749,22 +13749,33 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         protocolSubaccountId: wallets.protocolSubaccountId,
         referralCode: wallets.referralCode,
         referredBy: wallets.referredBy,
-        pacificaBuilderApproved: wallets.pacificaBuilderApproved,
-        pacificaReferralClaimed: wallets.pacificaReferralClaimed,
         telegramConnected: wallets.telegramConnected,
         executionEnabled: wallets.executionEnabled,
         createdAt: wallets.createdAt,
         lastSeen: wallets.lastSeen,
       }).from(wallets).orderBy(desc(wallets.createdAt));
 
+      // Bot counts + per-wallet enrollment (Phase 4b truth). The wallet-level
+      // pacifica_builder_approved/pacifica_referral_claimed flags are never
+      // flipped under Phase 4b — enrollment happens on the trading_bots row
+      // because each Pacifica bot is its own main account. Aggregate bot-level
+      // flags up to the wallet so the admin "Users" tab shows accurate
+      // enrollment status (any approved bot ⇒ wallet shows green).
       const botCountRows = await db.select({
         walletAddress: tradingBots.walletAddress,
         count: sql<number>`count(*)::int`,
         activeCount: sql<number>`count(*) filter (where ${tradingBots.isActive} = true)::int`,
+        anyBuilderApproved: sql<boolean>`bool_or(${tradingBots.pacificaBuilderApproved})`,
+        anyReferralClaimed: sql<boolean>`bool_or(${tradingBots.pacificaReferralClaimed})`,
       }).from(tradingBots).groupBy(tradingBots.walletAddress);
-      const botCountByWallet = new Map<string, { count: number; activeCount: number }>();
+      const botCountByWallet = new Map<string, { count: number; activeCount: number; anyBuilderApproved: boolean; anyReferralClaimed: boolean }>();
       for (const r of botCountRows) {
-        botCountByWallet.set(r.walletAddress, { count: r.count, activeCount: r.activeCount });
+        botCountByWallet.set(r.walletAddress, {
+          count: r.count,
+          activeCount: r.activeCount,
+          anyBuilderApproved: !!r.anyBuilderApproved,
+          anyReferralClaimed: !!r.anyReferralClaimed,
+        });
       }
 
       const enriched = rows.map(r => {
@@ -13773,6 +13784,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           ...r,
           botCount: counts?.count ?? 0,
           activeBotCount: counts?.activeCount ?? 0,
+          // Field names preserved for API compatibility; semantics are now
+          // "any of this wallet's bots is enrolled" rather than wallet-level.
+          pacificaBuilderApproved: counts?.anyBuilderApproved ?? false,
+          pacificaReferralClaimed: counts?.anyReferralClaimed ?? false,
         };
       });
       res.json(enriched);
@@ -13850,24 +13865,41 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // Excluding it would materially undercount builder notional. Prefer
       // filledSizeBase × averageFillPrice when present (post-fill reconciled
       // truth), fall back to requested size × submitted price.
+      // Enrollment lives on `trading_bots`, NOT `wallets`. Under Phase 4b each
+      // Pacifica bot IS its own Pacifica main account (per-bot subaccount key
+      // signs orders), so `ensurePacificaEnrollment` flips the flag on the
+      // trading_bots row, not the wallet row. The previous query joined
+      // wallets and filtered on wallets.pacificaBuilderApproved — which is
+      // ALWAYS false in production (no wallet ever gets enrolled in Phase 4b),
+      // so the dashboard always showed $0. Join through trading_bots instead.
+      //
+      // protocol filter uses coalesce(..., 'pacifica') because historical rows
+      // (pre-2026-05-28) were inserted with protocol=NULL — no createBotTrade /
+      // updateBotTrade site set the column. Schema default added 2026-05-28
+      // so new rows are tagged correctly; old rows stay NULL until the next
+      // Publish flow propagates the default. Treating NULL as Pacifica is
+      // correct until a non-Pacifica adapter ships.
       const builderRows = await db.select({
         notional: sql<string>`coalesce(sum(coalesce(${botTrades.filledSizeBase}, ${botTrades.size})::numeric * coalesce(${botTrades.averageFillPrice}, ${botTrades.price})::numeric), 0)::text`,
         fillCount: sql<number>`count(*)::int`,
       })
         .from(botTrades)
-        .innerJoin(wallets, eq(botTrades.walletAddress, wallets.address))
+        .innerJoin(tradingBots, eq(botTrades.tradingBotId, tradingBots.id))
         .where(and(
-          eq(wallets.pacificaBuilderApproved, true),
-          eq(botTrades.protocol, 'pacifica'),
+          eq(tradingBots.activeProtocol, 'pacifica'),
+          eq(tradingBots.pacificaBuilderApproved, true),
+          sql`coalesce(${botTrades.protocol}, 'pacifica') = 'pacifica'`,
           sql`${botTrades.status} in ('executed', 'recovered')`,
         ));
       const filledNotional = parseFloat(builderRows[0]?.notional ?? '0') || 0;
       const builderFillCount = builderRows[0]?.fillCount ?? 0;
 
+      // Enrollment counts: report at the bot level (Phase 4b truth). Restrict
+      // to Pacifica bots — counting Drift bots would muddy the denominator.
       const approvedRows = await db.select({
-        approvedWallets: sql<number>`count(*) filter (where ${wallets.pacificaBuilderApproved} = true)::int`,
-        claimedRefWallets: sql<number>`count(*) filter (where ${wallets.pacificaReferralClaimed} = true)::int`,
-      }).from(wallets);
+        approvedWallets: sql<number>`count(*) filter (where ${tradingBots.pacificaBuilderApproved} = true)::int`,
+        claimedRefWallets: sql<number>`count(*) filter (where ${tradingBots.pacificaReferralClaimed} = true)::int`,
+      }).from(tradingBots).where(eq(tradingBots.activeProtocol, 'pacifica'));
 
       const builder = {
         estimatedUsdc: filledNotional * BUILDER_MAX_FEE_RATE,

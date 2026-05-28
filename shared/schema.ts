@@ -240,7 +240,7 @@ export const botTrades = pgTable("bot_trades", {
   protocolOrderId: text("protocol_order_id"),
   clientOrderId: text("client_order_id"),
   protocolFillId: text("protocol_fill_id").unique(),
-  protocol: text("protocol"),
+  protocol: text("protocol").default("pacifica"),
   protocolStatus: text("protocol_status"),
   submittedAt: timestamp("submitted_at"),
   acknowledgedAt: timestamp("acknowledged_at"),
