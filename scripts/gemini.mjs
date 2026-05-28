@@ -70,7 +70,7 @@ async function main() {
   }
 
   const useDirect = !!directKey;
-  const defaultTextModel = useDirect ? 'gemini-3-pro-preview' : 'gemini-2.5-pro';
+  const defaultTextModel = useDirect ? 'gemini-3.1-pro' : 'gemini-2.5-pro';
   const model = args.model || (args.imageOut ? 'gemini-2.5-flash-image' : defaultTextModel);
   let prompt = args.prompt || '';
   if (args.promptFile) prompt += (prompt ? '\n\n' : '') + await fs.readFile(args.promptFile, 'utf-8');
