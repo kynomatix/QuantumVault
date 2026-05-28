@@ -7,7 +7,8 @@
  *   - UX critique             (text + screenshot → text, gemini-2.5-pro)
  *   - Mockup image generation (text → image, gemini-2.5-flash-image / "Nano Banana")
  *
- * Reads AI_INTEGRATIONS_GEMINI_API_KEY and AI_INTEGRATIONS_GEMINI_BASE_URL from env.
+ * Auth: prefers GEMINI_API_KEY (direct Google AI Studio — supports Gemini 3 Pro and latest models).
+ * Falls back to AI_INTEGRATIONS_GEMINI_API_KEY + AI_INTEGRATIONS_GEMINI_BASE_URL (Replit proxy, 2.5 family only).
  *
  * Usage:
  *   node scripts/gemini.mjs --prompt-file p.txt
@@ -61,11 +62,16 @@ async function main() {
     console.log(await fs.readFile(new URL(import.meta.url), 'utf-8').then(s => s.split('*/')[0]));
     return;
   }
-  if (!process.env.AI_INTEGRATIONS_GEMINI_API_KEY) {
-    console.error('Missing AI_INTEGRATIONS_GEMINI_API_KEY'); process.exit(1);
+  const directKey = process.env.GEMINI_API_KEY;
+  const proxyKey = process.env.AI_INTEGRATIONS_GEMINI_API_KEY;
+  if (!directKey && !proxyKey) {
+    console.error('Missing GEMINI_API_KEY (direct) or AI_INTEGRATIONS_GEMINI_API_KEY (Replit proxy)');
+    process.exit(1);
   }
 
-  const model = args.model || (args.imageOut ? 'gemini-2.5-flash-image' : 'gemini-2.5-pro');
+  const useDirect = !!directKey;
+  const defaultTextModel = useDirect ? 'gemini-3-pro-preview' : 'gemini-2.5-pro';
+  const model = args.model || (args.imageOut ? 'gemini-2.5-flash-image' : defaultTextModel);
   let prompt = args.prompt || '';
   if (args.promptFile) prompt += (prompt ? '\n\n' : '') + await fs.readFile(args.promptFile, 'utf-8');
   if (!prompt) prompt = await readStdin();
@@ -74,10 +80,12 @@ async function main() {
   const parts = [{ text: prompt }];
   for (const p of (args.images || [])) parts.push(await loadImagePart(p));
 
-  const ai = new GoogleGenAI({
-    apiKey: process.env.AI_INTEGRATIONS_GEMINI_API_KEY,
-    httpOptions: { apiVersion: '', baseUrl: process.env.AI_INTEGRATIONS_GEMINI_BASE_URL },
-  });
+  const ai = useDirect
+    ? new GoogleGenAI({ apiKey: directKey })
+    : new GoogleGenAI({
+        apiKey: proxyKey,
+        httpOptions: { apiVersion: '', baseUrl: process.env.AI_INTEGRATIONS_GEMINI_BASE_URL },
+      });
 
   const config = { maxOutputTokens: args.maxTokens };
   if (args.imageOut) config.responseModalities = [Modality.TEXT, Modality.IMAGE];
