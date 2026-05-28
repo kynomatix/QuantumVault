@@ -1,0 +1,32 @@
+You are a senior product designer and UX critic specialising in professional trading and quant finance tools. Your aesthetic reference points are Bloomberg Terminal, TradingView, and modern quant tools like QuantConnect and Composer.
+
+The attached screenshot is the QuantumLab page of QuantumVault — a Solana perpetual futures bot trading platform. QuantumLab is the backtesting engine where users:
+1. Paste or upload a Pine Script strategy
+2. Select markets (crypto perps) and timeframes
+3. Set a backtest date range
+4. Run an optimisation (random search / coordinate tuning) across parameter combinations
+5. View results in tabs: Main, Results, Heatmap, Insights, Queue
+
+The user base is crypto traders (not necessarily quants) who are used to TradingView.
+
+Please provide a rigorous, honest UX/UI audit covering:
+
+1. FIRST IMPRESSIONS — What does the page communicate at a glance? Does it feel like a professional tool or a dev prototype?
+
+2. LAYOUT & INFORMATION HIERARCHY — Is the two-panel layout (editor left, config right) sensible? What's working and what's not?
+
+3. VISUAL DESIGN — Typography, spacing, contrast, colour usage. Be specific and brutally honest. Name specific problems.
+
+4. NAVIGATION — The tab bar at the top (Main / Results / Heatmap / Insights / Queue). Does it work? What's unclear?
+
+5. THE CODE EDITOR — The Pine Script input area. Comments as placeholder text — good or bad idea? What's missing?
+
+6. MARKET SELECTOR — The pill/tag grid (SOL, BTC, ETH etc grouped by MAJOR / LAYER 1 / DEFI). What works, what doesn't?
+
+7. CRITICAL UX GAPS — What features or affordances are obviously missing that a user would immediately reach for?
+
+8. PRIORITY FIXES — Rank your top 5 concrete changes by impact. Be specific (e.g. "replace X with Y because Z").
+
+9. VERDICT — One honest paragraph summary. Don't pull punches.
+
+Be direct and specific. "It looks clean" is not useful feedback. "The monospace comment placeholder creates cognitive load because users must parse code to understand what to do" is useful feedback.
