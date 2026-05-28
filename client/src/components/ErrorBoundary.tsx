@@ -43,7 +43,7 @@ export class ErrorBoundary extends Component<Props, State> {
           <img
             src="/images/oops.webp"
             alt="Something went wrong"
-            className="w-64 h-auto"
+            className="w-full h-auto"
             data-testid="img-error-oops"
           />
           <div className="space-y-2">
