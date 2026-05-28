@@ -2168,7 +2168,12 @@ export class PacificaAdapter implements ProtocolAdapter {
     if (!refAddress) return false;
 
     const signer = new PacificaSigner(input.agentSecretKey);
-    const operationData: Record<string, unknown> = { code: refAddress };
+    // Pacifica spec: POST /referral/user/code/claim — body field name is
+    // `referral_code`, NOT `code`. The signing payload must match exactly
+    // (Pacifica verifies the signature over the same JSON shape the body
+    // carries). Previously this was `{ code: refAddress }` and silently
+    // failed for 100% of bots — see ROOT CAUSE note above ensurePacificaEnrollment.
+    const operationData: Record<string, unknown> = { referral_code: refAddress };
 
     const ok = await this.postWithApprovalRetry(
       '/referral/user/code/claim',
