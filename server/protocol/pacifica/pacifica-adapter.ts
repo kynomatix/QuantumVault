@@ -2168,22 +2168,35 @@ export class PacificaAdapter implements ProtocolAdapter {
     if (!refAddress) return false;
 
     const signer = new PacificaSigner(input.agentSecretKey);
-    // Pacifica spec (confirmed via prod 400 error 2026-05-28): the request body
-    // expects a top-level `code` field, NOT `referral_code`. An earlier web-
-    // sourced doc page was wrong — production responded with:
-    //   "Json deserialize error: missing field `code` at line 1 column 270"
-    // when we sent `referral_code`. Source of truth is the server error.
+    // Pacifica spec (confirmed via gitbook docs + prod 400 error 2026-05-28):
+    //   - body top-level field is `code` (NOT `referral_code` — a stale 3rd-
+    //     party doc page misled an earlier fix)
+    //   - body MUST include explicit `agent_wallet: null` for this endpoint;
+    //     unlike approve_builder_code which tolerates the field being absent
+    //     (succeeds 3/11 in prod), claim_referral_code uses stricter Rust
+    //     serde deserialization that fails when the field is missing.
+    // The shared signer.buildRequestBody() helper deletes agent_wallet when
+    // null is passed, so we sign + assemble the body manually here to keep
+    // the field present.
     const operationData: Record<string, unknown> = { code: refAddress };
 
     const ok = await this.postWithApprovalRetry(
       '/referral/user/code/claim',
-      () => signer.buildRequestBody(
-        OPERATION_TYPES.CLAIM_REFERRAL_CODE,
-        operationData,
-        input.agentPublicKey,
-        null,
-        5000,
-      ),
+      () => {
+        const { signature, timestamp, expiryWindow } = signer.sign(
+          OPERATION_TYPES.CLAIM_REFERRAL_CODE,
+          operationData,
+          5000,
+        );
+        return {
+          account: input.agentPublicKey,
+          agent_wallet: null,
+          signature,
+          timestamp,
+          expiry_window: expiryWindow,
+          ...operationData,
+        };
+      },
       '[PacificaReferralClaim]',
       /already.*claim/i,
     );
