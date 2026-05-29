@@ -2046,9 +2046,22 @@ export class PacificaAdapter implements ProtocolAdapter {
       const row = wallet ?? bot;
       const kind: 'wallet' | 'bot' | null = wallet ? 'wallet' : bot ? 'bot' : null;
 
-      // Steady-state fast path: both flags already true → no work.
-      if (row?.pacificaBuilderApproved && row?.pacificaReferralClaimed) {
-        return { builderApproved: true, referralClaimed: true };
+      // Referral is a MAIN-ACCOUNT-only concern. Pacifica requires the claiming
+      // wallet to have itself deposited ("In order to claim a referral code you
+      // must deposit" — gitbook docs). In Phase 4b each bot is a SUBACCOUNT
+      // funded by an internal transfer from the user's main agent wallet, so it
+      // never deposits and Pacifica rejects its claim with 500 "Only main
+      // accounts can claim referral codes". Subaccount volume already aggregates
+      // under the master account that claimed, so claiming once on the main
+      // (kind==='wallet') account covers every bot beneath it. Builder-code
+      // approval is unaffected — it is authorized per-subaccount and works on
+      // bot keys. So: only attempt the referral claim for main accounts.
+      const referralApplicable = kind === 'wallet';
+
+      // Steady-state fast path: builder approved, and referral either already
+      // claimed or not applicable (bots) → no work.
+      if (row?.pacificaBuilderApproved && (!referralApplicable || row?.pacificaReferralClaimed)) {
+        return { builderApproved: true, referralClaimed: !!row?.pacificaReferralClaimed };
       }
       // No matching row anywhere means we have nothing to flip — skip and
       // treat as not enrolled. Shouldn't fire in practice (trade implies a
@@ -2072,7 +2085,7 @@ export class PacificaAdapter implements ProtocolAdapter {
             accountKind: kind,
           });
         }
-        if (!referralClaimed && this.config.referralAddress) {
+        if (referralApplicable && !referralClaimed && this.config.referralAddress) {
           referralClaimed = await this.claimReferralCodeForUser({
             agentPublicKey,
             agentSecretKey,

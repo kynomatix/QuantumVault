@@ -10,6 +10,7 @@ import { startPnlSnapshotJob } from "./pnl-snapshot-job";
 import { startRetryWorker, queueTradeRetry } from "./trade-retry-service";
 import { startProfitShareRetryJob } from "./profit-share-retry-job";
 import { startReferralRewardsRetryJob } from "./referral-rewards-retry-job";
+import { startPacificaReferralBackfillJob } from "./pacifica-referral-backfill-job";
 import { initLeverageCache, setOnCacheRefreshed } from "./leverage-cache-service";
 import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
 import { startTelegramDailySummaryJob } from "./telegram-daily-summary-job";
@@ -616,6 +617,8 @@ app.use((req, res, next) => {
         startProfitShareRetryJob();
         log('[Staggered startup] Starting referral rewards retry job');
         startReferralRewardsRetryJob();
+        log('[Staggered startup] Starting Pacifica referral backfill job');
+        startPacificaReferralBackfillJob();
         log('[Staggered startup] Starting Telegram daily summary job');
         startTelegramDailySummaryJob();
         log('[Staggered startup] Starting stats consistency monitor');
