@@ -233,6 +233,7 @@ export interface IStorage {
   getSubscriberBotsBySourceId(publishedBotId: string): Promise<TradingBot[]>;
   createBotSubscription(subscription: InsertBotSubscription): Promise<BotSubscription>;
   updateBotSubscription(id: string, updates: Partial<InsertBotSubscription>): Promise<BotSubscription | undefined>;
+  reactivateBotSubscription(id: string, updates: { subscriberBotId: string; capitalInvested: string }): Promise<BotSubscription | undefined>;
   cancelBotSubscription(id: string): Promise<void>;
   // V3 Phase 3b: mark a subscription paused with a reason. Used when fan-out
   // discovers a subscriber whose execution authorization has been revoked or
