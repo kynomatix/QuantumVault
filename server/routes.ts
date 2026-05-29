@@ -12105,9 +12105,15 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "This bot is no longer available" });
       }
 
-      // Check if already subscribed
+      // Check if already subscribed. Only a previously 'cancelled' row is
+      // eligible for reactivation below. 'active' and 'paused' both mean the
+      // user is still subscribed (paused = subscribed but execution disabled,
+      // recovered by re-enabling execution, NOT by re-subscribing). Allowing a
+      // re-subscribe over a paused row would create a duplicate copy bot and
+      // double-count subscriber/capital stats, since pausing never decrements
+      // incrementPublishedBotSubscribers.
       const existingSub = await storage.getBotSubscription(req.params.id, req.walletAddress!);
-      if (existingSub && existingSub.status === 'active') {
+      if (existingSub && existingSub.status !== 'cancelled') {
         return res.status(400).json({ error: "Already subscribed to this bot" });
       }
 
@@ -12332,14 +12338,22 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         notes: `Initial deposit for subscription to ${publishedBot.name}`,
       });
 
-      // Create subscription record
-      const subscription = await storage.createBotSubscription({
-        publishedBotId: req.params.id,
-        subscriberWalletAddress: req.walletAddress!,
-        subscriberBotId: subscriberBot.id,
-        capitalInvested: capitalInvested.toString(),
-        status: 'active',
-      });
+      // Create or reactivate subscription record. A previous unsubscribe leaves
+      // a 'cancelled' row in place (the publishedBotId + wallet unique
+      // constraint blocks a second INSERT), so re-subscribing must reactivate
+      // that existing row rather than inserting a new one.
+      const subscription = existingSub
+        ? await storage.reactivateBotSubscription(existingSub.id, {
+            subscriberBotId: subscriberBot.id,
+            capitalInvested: capitalInvested.toString(),
+          })
+        : await storage.createBotSubscription({
+            publishedBotId: req.params.id,
+            subscriberWalletAddress: req.walletAddress!,
+            subscriberBotId: subscriberBot.id,
+            capitalInvested: capitalInvested.toString(),
+            status: 'active',
+          });
 
       // Update published bot stats
       await storage.incrementPublishedBotSubscribers(req.params.id, 1, capitalInvested);

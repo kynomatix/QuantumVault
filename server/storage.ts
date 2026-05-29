@@ -1,4 +1,4 @@
-import { eq, desc, sql, and, or, ilike, gte, lte, inArray } from "drizzle-orm";
+import { eq, ne, desc, sql, and, or, ilike, gte, lte, inArray } from "drizzle-orm";
 import { createHash, randomBytes } from "crypto";
 import { db } from "./db";
 import Decimal from "decimal.js";
@@ -1680,7 +1680,13 @@ export class DatabaseStorage implements IStorage {
     })
     .from(botSubscriptions)
     .innerJoin(publishedBots, eq(botSubscriptions.publishedBotId, publishedBots.id))
-    .where(eq(botSubscriptions.subscriberWalletAddress, walletAddress))
+    .where(and(
+      eq(botSubscriptions.subscriberWalletAddress, walletAddress),
+      // Exclude cancelled subscriptions so the UI doesn't treat an
+      // unsubscribed bot as still subscribed. 'active' and 'paused' rows are
+      // kept so the paused-state banner still renders.
+      ne(botSubscriptions.status, 'cancelled'),
+    ))
     .orderBy(desc(botSubscriptions.subscribedAt));
 
     return results.map(r => ({
@@ -1737,6 +1743,26 @@ export class DatabaseStorage implements IStorage {
       status: 'cancelled',
       unsubscribedAt: sql`NOW()`,
     }).where(eq(botSubscriptions.id, id));
+  }
+
+  // Reactivate a previously cancelled/paused subscription row. The
+  // (publishedBotId, subscriberWalletAddress) unique constraint means we cannot
+  // INSERT a second row when re-subscribing, so the subscribe flow updates the
+  // existing row in place instead. Clears the unsubscribed timestamp and any
+  // pause reason and points it at the freshly-created subscriber bot.
+  async reactivateBotSubscription(
+    id: string,
+    updates: { subscriberBotId: string; capitalInvested: string },
+  ): Promise<BotSubscription | undefined> {
+    const result = await db.update(botSubscriptions).set({
+      status: 'active',
+      subscriberBotId: updates.subscriberBotId,
+      capitalInvested: updates.capitalInvested,
+      subscriptionStatusReason: null,
+      unsubscribedAt: null,
+      subscribedAt: sql`NOW()`,
+    }).where(eq(botSubscriptions.id, id)).returning();
+    return result[0];
   }
 
   async markBotSubscriptionPausedBySubscriberBotId(
