@@ -118,16 +118,15 @@ export interface PacificaAdapterConfig {
   // claim_referral_code. Independent of builder code — referral claim is
   // best-effort and never gates order flow.
   referralAddress?: string;
-  // Task 143: ceiling the user signs at builder-code approval time. Locked
-  // at 2x Pacifica's actual fee_rate (0.001) so we can raise our take to
-  // 0.002 in future without re-signing every existing user.
+  // Max fee rate the user signs at builder-code approval time.
+  // Matches our registered Pacifica fee_rate: 0.001 (10 bps / 0.1%).
   builderMaxFeeRate?: string;
 }
 
 const DEFAULT_CONFIG: PacificaAdapterConfig = {
   baseUrl: 'https://api.pacifica.fi/api/v1',
   wsUrl: 'wss://ws.pacifica.fi/ws',
-  builderMaxFeeRate: '0.002',
+  builderMaxFeeRate: '0.001',
 };
 
 export class PacificaAdapter implements ProtocolAdapter {
@@ -2115,7 +2114,7 @@ export class PacificaAdapter implements ProtocolAdapter {
   }): Promise<boolean> {
     const builderCode = this.config.builderCode;
     if (!builderCode) return false;
-    const maxFeeRate = this.config.builderMaxFeeRate ?? '0.002';
+    const maxFeeRate = this.config.builderMaxFeeRate ?? '0.001';
 
     const signer = new PacificaSigner(input.agentSecretKey);
     // Inner `data` dict ONLY — buildRequestBody wraps the envelope, sorts
