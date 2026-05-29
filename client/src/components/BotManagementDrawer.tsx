@@ -99,6 +99,7 @@ interface TradingBot {
   // pubkey. The old name implied an off-chain wallet role.
   botSubaccountIdentifier?: string | null;
   activeProtocol?: 'pacifica' | 'drift' | null;
+  sourcePublishedBotId?: string | null;
   profitReinvest?: boolean;
   autoWithdrawThreshold?: string | null;
   autoTopUp?: boolean;
@@ -1215,18 +1216,20 @@ export function BotManagementDrawer({
                   )}
                 </span>
               </Button>
-              <Button 
-                variant="default" 
-                size="icon"
-                onClick={() => setPublishModalOpen(true)}
-                className="group w-9 h-9 hover:w-[80px] transition-[width] duration-150 ease-out overflow-hidden bg-gradient-to-r from-primary to-accent hover:opacity-90"
-                data-testid="button-share"
-              >
-                <span className="flex items-center justify-center w-full">
-                  <Share2 className="w-4 h-4 flex-shrink-0" />
-                  <span className="w-0 opacity-0 group-hover:w-[40px] group-hover:opacity-100 group-hover:ml-1.5 transition-[width,opacity] duration-150 ease-out overflow-hidden whitespace-nowrap text-sm">Share</span>
-                </span>
-              </Button>
+              {!displayBot?.sourcePublishedBotId && (
+                <Button 
+                  variant="default" 
+                  size="icon"
+                  onClick={() => setPublishModalOpen(true)}
+                  className="group w-9 h-9 hover:w-[80px] transition-[width] duration-150 ease-out overflow-hidden bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                  data-testid="button-share"
+                >
+                  <span className="flex items-center justify-center w-full">
+                    <Share2 className="w-4 h-4 flex-shrink-0" />
+                    <span className="w-0 opacity-0 group-hover:w-[40px] group-hover:opacity-100 group-hover:ml-1.5 transition-[width,opacity] duration-150 ease-out overflow-hidden whitespace-nowrap text-sm">Share</span>
+                  </span>
+                </Button>
+              )}
             </div>
           </div>
         </SheetHeader>

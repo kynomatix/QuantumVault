@@ -11929,6 +11929,14 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(403).json({ error: "Not your bot" });
       }
 
+      // Block re-publishing of subscribed/copied bots. A bot with
+      // sourcePublishedBotId set is a copy of someone else's published bot
+      // (created via the marketplace subscribe flow), so republishing it would
+      // let a subscriber re-share another creator's strategy as their own.
+      if (tradingBot.sourcePublishedBotId) {
+        return res.status(403).json({ error: "Subscribed bots cannot be published to the marketplace" });
+      }
+
       // Check if already published
       const existing = await storage.getPublishedBotByTradingBotId(id);
       if (existing) {
