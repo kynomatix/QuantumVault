@@ -1,6 +1,6 @@
 export const DOCS_MARKDOWN = `# QuantumVault Documentation
 
-> **QuantumVault** — Automated perpetual futures trading on Solana via Drift Protocol.
+> **QuantumVault** — Automated perpetual futures trading on Solana.
 > Website: [https://myquantumvault.com](https://myquantumvault.com)
 
 ---
@@ -20,7 +20,7 @@ export const DOCS_MARKDOWN = `# QuantumVault Documentation
 7. [Marketplace](#marketplace)
 8. [Settings & Referrals](#settings--referrals)
 9. [Security](#security)
-10. [Swift Execution](#swift-execution)
+10. [Trade Execution](#trade-execution)
 11. [AI Agent Integration](#ai-agent-integration)
 12. [QuantumLab Overview](#quantumlab-overview)
 13. [Strategy Library](#strategy-library)
@@ -33,24 +33,24 @@ export const DOCS_MARKDOWN = `# QuantumVault Documentation
 
 ## Getting Started
 
-QuantumVault is an automated trading platform built on Solana that connects your TradingView alerts to Drift Protocol for perpetual futures trading. Execute trades automatically based on your technical analysis signals with minimal latency.
+QuantumVault is an automated trading platform built on Solana that connects your TradingView alerts to perpetual futures trading. Execute trades automatically based on your technical analysis signals with minimal latency.
 
 ### How It Works
 
-1. **Connect Wallet** — Connect your Phantom wallet to create your account and agent wallet.
+1. **Connect Wallet** — Connect your Solana wallet to create your account and agent wallet.
 2. **Fund Your Account** — Deposit SOL for transaction fees and USDC for trading.
 3. **Create a Bot** — Set up a trading bot with your preferred market and leverage settings.
 4. **Connect TradingView** — Set up webhook alerts in TradingView to trigger your bot's trades.
 
-> **Note:** All trades are executed on Drift Protocol, a decentralized perpetual futures exchange on Solana. Your funds remain in your control through your agent wallet.
+> **Note:** All trades are executed on decentralized perpetual futures exchanges on Solana. Your funds remain in your control through your agent wallet.
 
 ---
 
 ## Wallet Setup
 
-QuantumVault uses a two-wallet system for security and automation: your personal Phantom wallet for deposits/withdrawals, and a platform-managed agent wallet for executing trades.
+QuantumVault uses a two-wallet system for security and automation: your personal Solana wallet for deposits/withdrawals, and a platform-managed agent wallet for executing trades.
 
-### Your Phantom Wallet
+### Your Solana Wallet
 
 This is your personal Solana wallet that you connect to the platform. You use it to:
 
@@ -67,14 +67,14 @@ When you first connect, QuantumVault creates a dedicated agent wallet for you. T
 - Executes trades automatically when signals arrive
 - Is unique to your account and fully controlled by you
 
-> **Warning:** Never share your agent wallet's address publicly. While funds can only be withdrawn to your connected Phantom wallet, keeping your setup private adds an extra layer of security.
+> **Warning:** Never share your agent wallet's address publicly. While funds can only be withdrawn to your connected Solana wallet, keeping your setup private adds an extra layer of security.
 
 ### Connecting Your Wallet
 
-1. Install the Phantom wallet browser extension from phantom.app
-2. Create or import a Solana wallet in Phantom
+1. Install a Solana wallet — Phantom (phantom.app), Jupiter, or any Wallet Standard-compatible wallet
+2. On Solana Seeker, your on-device wallet is detected automatically via Mobile Wallet Adapter
 3. Visit QuantumVault and click "Connect Wallet"
-4. Approve the connection in the Phantom popup
+4. Approve the connection in your wallet
 5. Complete the welcome flow to fund your agent wallet
 
 ---
@@ -85,7 +85,7 @@ To start trading, you need to fund your agent wallet with both SOL (for transact
 
 ### SOL for Account Setup & Fees
 
-SOL covers a one-time account setup (~0.05 SOL for your Drift trading account and Swift execution authorization) plus ongoing transaction fees. We recommend depositing at least 0.1 SOL to cover setup and many trades. Most trades via Swift cost no gas at all.
+SOL covers a one-time account setup (~0.05 SOL for your trading account initialization) plus ongoing transaction fees. We recommend depositing at least 0.1 SOL to cover setup and many trades.
 
 | Item                     | Amount          |
 |--------------------------|-----------------|
@@ -94,17 +94,17 @@ SOL covers a one-time account setup (~0.05 SOL for your Drift trading account an
 
 ### USDC for Trading
 
-USDC is the trading currency on Drift Protocol. Your USDC is held in your agent wallet and can be allocated to individual bots or the Drift trading account.
+USDC is the trading currency. Your USDC is held in your agent wallet and can be allocated to individual bots or your trading account.
 
 ### Capital Flow
 
 \`\`\`
-Phantom Wallet → Agent Wallet → Drift Account
+Your Solana Wallet → Agent Wallet → Trading Account
 \`\`\`
 
-When you deposit to a bot, funds move from your agent wallet to that bot's Drift subaccount. Each bot has an isolated subaccount for safety.
+When you deposit to a bot, funds move from your agent wallet to that bot's trading subaccount. Each bot has an isolated subaccount for safety.
 
-> **Tip:** Your USDC earns interest while sitting in Drift! The current APY is displayed in your bot settings and adjusts based on market conditions.
+> **Tip:** Your USDC may earn interest while deposited in the exchange. The current APY (if available) is displayed in your bot settings.
 
 ---
 
@@ -269,7 +269,7 @@ The "contracts" value from TradingView is interpreted as a percentage of your bo
 
 When you set a $100 investment at 10x leverage, your theoretical max position is $1,000. However, actual trades open at approximately **90%** of this amount (~$900) for important reasons:
 
-- **Margin Buffer** — Drift requires a safety cushion to accept orders
+- **Margin Buffer** — The exchange requires a safety cushion to accept orders
 - **Trading Fees** — Opening fees reduce available margin
 - **Price Slippage** — Market orders may fill at slightly different prices
 - **Health Protection** — Prevents immediate liquidation risk on entry
@@ -438,8 +438,8 @@ Every referral you make is permanently recorded. As QuantumVault evolves, early 
 These actions are irreversible. Use with caution:
 
 - **Close All Trades** — Immediately closes all open positions across all your bots. Use this in emergencies to exit all trades at once.
-- **Reset Drift Account** — Closes all positions, withdraws funds, and deletes all bot subaccounts. Start fresh.
-- **Reset Agent Wallet** — Withdraws all funds to your Phantom wallet and creates a completely new agent wallet.
+- **Reset Trading Account** — Closes all positions, withdraws funds, and deletes all bot subaccounts. Start fresh.
+- **Reset Agent Wallet** — Withdraws all funds to your Solana wallet and creates a completely new agent wallet.
 
 ---
 
@@ -450,7 +450,7 @@ QuantumVault is built with institutional-grade security to protect your trading 
 ### Your Keys, Your Control
 
 - **You Own Your Agent Wallet** — Each user gets a dedicated Solana wallet for trading. You can back it up with a standard 24-word recovery phrase and restore it in any Solana wallet.
-- **Phantom Keys Never Shared** — Your main Phantom wallet keys are never stored or transmitted. We only ask you to sign messages to verify your identity — never transactions that could drain your wallet.
+- **Your Wallet Keys Stay Yours** — Your connected wallet's keys are never stored or transmitted. We only ask you to sign messages to verify your identity — never transactions that could drain your wallet.
 
 ### Bank-Grade Encryption
 
@@ -470,17 +470,17 @@ Every user has a unique User Master Key (UMK) that:
 - Is derived from your wallet signature (only you can generate it)
 - Encrypts all your sensitive data
 - Is never stored in plain text
-- Cannot be accessed without your Phantom wallet
+- Cannot be accessed without your connected Solana wallet
 
 ### Trade Execution Security
 
-- **Signature-Based Authorization** — Before any bot can trade, you must explicitly enable execution by signing a message with your Phantom wallet. You can revoke this at any time.
+- **Signature-Based Authorization** — Before any bot can trade, you must explicitly enable execution by signing a message with your Solana wallet. You can revoke this at any time.
 - **Bot Policy Protection** — Your trading limits (max position size, leverage, markets) are cryptographically protected. Any tampering is automatically detected and blocked.
 - **Emergency Stop** — One-click to revoke all execution authorization, close all positions, or reset your entire agent wallet if needed.
 
 ### What We Never Do
 
-- ❌ Store your Phantom private keys
+- ❌ Store your wallet's private keys
 - ❌ Access your main wallet
 - ❌ Log sensitive data
 - ❌ Share your encryption keys
@@ -509,86 +509,67 @@ Your agent wallet includes a 24-word recovery phrase that you can:
 - Set conservative limits initially
 - Check trade history for unexpected activity
 
-#### Secure Your Phantom Wallet
+#### Secure Your Solana Wallet
 
-- Consider using a hardware wallet (Ledger via Phantom)
-- Enable Phantom's auto-lock feature
+- Consider using a hardware wallet (Ledger via Phantom or Solflare)
+- Enable your wallet's auto-lock feature
 - Never sign unknown messages
 
 > QuantumVault's security has been reviewed by internal architects and AI-assisted security audits. We continuously update our security practices to protect your funds.
 
 ---
 
-## Swift Execution
+## Trade Execution
 
-Swift is a faster, cheaper way to execute your trades on Drift Protocol. Instead of sending transactions directly to the Solana blockchain, Swift sends your trade intent to professional market makers who compete to fill your order — resulting in gasless trades, better prices, and lower fees.
+QuantumVault executes your trades on decentralized perpetual futures exchanges on Solana. The platform handles order routing, retry logic, and position management so your signals are executed reliably with minimal latency.
 
-### Why Swift Is Better for You
+### How Trades Are Executed
 
-- **Gasless Trading** — No SOL burned per trade. Swift eliminates blockchain gas fees so you keep more of your profits.
-- **Better Fills** — Market makers compete in an auction to fill your order, often giving you price improvement over standard execution.
-- **Lower Fees** — Swift taker fees can be lower than standard on-chain execution, saving you money on every trade.
-- **Reduced RPC Pressure** — Fewer blockchain calls means more reliable execution, especially important for high-frequency strategies on 1-minute charts.
-
-### How It Works
+When a trading signal is received, QuantumVault handles the full execution pipeline automatically:
 
 1. Your bot receives a trading signal (from TradingView or AI agent)
-2. QuantumVault creates a signed trade intent and submits it to Swift's auction
-3. Professional market makers compete to fill your order at the best price
+2. QuantumVault validates the signal and checks your current position
+3. The trade is submitted to the exchange with optimized parameters
 4. Trade is settled on-chain — you can verify it on Solana explorer
 
-### Automatic Fallback & Trade Protection
+### Execution Features
 
-If Swift can't fill your trade (this is rare), QuantumVault automatically falls back to direct on-chain execution. Before switching, it verifies your current position to ensure the same trade isn't executed twice — protecting you from unintended double exposure. You don't need to configure anything — it's completely seamless and your trades will always go through safely.
+- **Low Latency** — Trades are submitted directly to the exchange with minimal delay from signal to execution.
+- **Automatic Retry** — Failed trades are automatically retried with RPC failover to ensure your signals get executed.
+- **Competitive Fees** — Trading fees are kept low through optimized exchange routing and fee tier management.
+- **Position Safety** — Before every trade, QuantumVault verifies your current position to prevent double exposure or conflicting orders.
 
-### Minimum Trade Size for Swift
-
-Swift routes trades through market maker auctions. For very small trades, market makers may not participate in the auction, so there's a minimum trade size of **$25 notional value** for Swift execution. Trades below this threshold automatically use direct on-chain execution instead.
+### Trade Size
 
 #### How Notional Value Is Calculated
 
-Notional value = number of contracts × current price. For example, trading 0.5 SOL-PERP at $120 = $60 notional — this qualifies for Swift execution.
+Notional value = number of contracts × current price. For example, trading 0.5 SOL-PERP at $120 = $60 notional value.
 
 | Parameter | Value |
 |---|---|
-| Swift Minimum | $25 notional value |
-
-> **Note:** If your trade is below the minimum, it still executes normally — just via direct on-chain transaction instead of Swift. The only difference is a small gas fee (~0.000005 SOL per trade).
-
-### Market Liquidity & Swift Availability
-
-Swift relies on professional market makers to compete in an auction and fill your trade. This works best on popular, high-volume markets where market makers are actively looking for orders to fill. On smaller or newer altcoin markets, there may be fewer market makers participating, which means Swift auctions are less likely to get filled.
-
-#### Best Markets for Swift
-
-High-volume markets like **SOL, BTC, ETH, SUI** and other major tokens tend to have the most active market makers, so Swift fills are more consistent.
-
-Smaller altcoin markets with lower trading volume may see Swift auctions go unfilled more frequently. When this happens, your trade automatically switches to direct on-chain execution — no action needed from you, and your trade still goes through.
-
-> **Note:** Even if Swift doesn't fill on a particular market, it doesn't cost you anything extra. The system simply falls back to direct on-chain execution seamlessly. As markets grow in popularity and attract more market makers, Swift fill rates will improve over time.
+| Minimum Trade Size | Varies by exchange |
 
 ### What You Need to Know
 
-- Swift is enabled by default for all trades above $25 notional value. No setup required on your end.
-- A one-time account setup (~0.05 SOL) is required when you first start trading. This covers both your Drift account and Swift authorization.
-- In rare edge cases, a trade may take a few extra seconds if Swift needs to fall back to direct execution. This is normal and your trade will still complete.
+- A one-time account setup (~0.05 SOL) is required when you first start trading. This covers your trading account initialization.
+- Each bot has its own isolated trading subaccount for safety. Funds are managed per-bot.
+- In rare edge cases, a trade may take a few extra seconds due to network conditions. This is normal and your trade will still complete.
 
-### Swift Status
+### Execution Status
 
 | Parameter | Value |
 |---|---|
-| Swift Status | ✅ Active |
-| Fallback | Automatic |
-| Minimum Trade Size | $25 notional |
-| Setup Required | None (auto-configured) |
+| Execution Status | ✅ Active |
+| Retry Logic | Automatic |
+| Setup Required | One-time account initialization |
 
 ---
 
 ## AI Agent Integration
 
-Connect AI trading agents like OpenClaw, AutoGPT, or custom LLM-powered bots to QuantumVault for automated perpetual futures trading on Drift Protocol. Your AI handles the intelligence, QuantumVault handles safe execution.
+Connect AI trading agents like OpenClaw, AutoGPT, or custom LLM-powered bots to QuantumVault for automated perpetual futures trading. Your AI handles the intelligence, QuantumVault handles safe execution.
 
-> **Note:** AI agents send webhook signals just like TradingView. QuantumVault executes trades on Drift Protocol with automatic retry, RPC failover, and position management.
+> **Note:** AI agents send webhook signals just like TradingView. QuantumVault executes trades with automatic retry, RPC failover, and position management.
 
 ### Why Use QuantumVault as Your Execution Layer?
 
@@ -599,7 +580,7 @@ Connect AI trading agents like OpenClaw, AutoGPT, or custom LLM-powered bots to 
 - Decision making
 
 **QuantumVault:**
-- Drift Protocol execution
+- Exchange execution
 - Position management
 - Auto retry & failover
 - Secure key handling
@@ -733,7 +714,7 @@ Common error codes your agent may receive:
 
 ### Supported Markets
 
-QuantumVault supports all Drift Protocol perpetual markets including:
+QuantumVault supports a wide range of perpetual markets including:
 
 \`SOL-PERP\` \`BTC-PERP\` \`ETH-PERP\` \`SUI-PERP\` \`APT-PERP\` \`ARB-PERP\` \`DOGE-PERP\` \`WIF-PERP\` \`BONK-PERP\` \`PEPE-PERP\` \`JUP-PERP\` \`RENDER-PERP\`
 
@@ -1257,6 +1238,6 @@ DELETE /api/lab/cache          — Clear the candle cache
 
 ---
 
-*QuantumVault — Built on Solana. Powered by Drift Protocol.*
+*QuantumVault — Built on Solana.*
 *Website: [https://myquantumvault.com](https://myquantumvault.com)*
 `;
