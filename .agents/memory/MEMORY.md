@@ -1,1 +1,0 @@
-- [Error-swallowing read helpers](error-swallowing-read-helpers.md) — getPerpPositions/getExchangeBalance/subaccountExists fail OPEN; in money paths call the adapter directly and fail closed.
