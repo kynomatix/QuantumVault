@@ -37,7 +37,7 @@ import type {
 } from '../protocol-types.js';
 import { SymbolRegistry, buildPacificaMappings } from '../symbol-registry.js';
 import { PacificaSigner, OPERATION_TYPES, buildSigningMessage } from './pacifica-signer.js';
-import { PACIFICA_USDC_MINT, PACIFICA_MIN_TRANSFER_USDC } from './pacifica-constants.js';
+import { PACIFICA_USDC_MINT, PACIFICA_MIN_TRANSFER_USDC, PACIFICA_RECYCLE_EMPTY_USDC } from './pacifica-constants.js';
 
 export { PACIFICA_MIN_TRANSFER_USDC } from './pacifica-constants.js';
 import {
@@ -1083,6 +1083,52 @@ export class PacificaAdapter implements ProtocolAdapter {
       }
       throw err;
     }
+  }
+
+  /**
+   * List resting (non-stop) open orders for an account. Recycling Plan §7.2/§8 —
+   * used to verify a subaccount holds no working orders before pooling it. A 404
+   * (no account / no orders) is treated as an empty list, mirroring getPositions.
+   */
+  async getOpenOrders(agentPublicKey: string, subaccountId?: string): Promise<Array<{ orderId: string; symbol: string }>> {
+    const params: Record<string, string> = { account: agentPublicKey };
+    if (subaccountId) params.subaccount_id = subaccountId;
+    try {
+      const response = await this.get('/orders/open', params);
+      if (!Array.isArray(response)) return [];
+      return response.map((o: any) => ({
+        orderId: String(o.order_id ?? o.id ?? ''),
+        symbol: String(o.symbol ?? ''),
+      }));
+    } catch (err: any) {
+      if (err.message && (err.message.includes('404') || err.message.includes('Not Found'))) {
+        return [];
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Recycling Plan §8 — a subaccount is "empty" (safe to pool/reuse) only when ALL
+   * hold: equity at/below the dust threshold, no open positions, no resting orders,
+   * no stop/TP-SL orders. We read equity (collateral + uPnL), not just balance, so an
+   * account carrying an underwater position can never read as empty. Any read here
+   * fails CLOSED — it throws so the caller aborts pooling rather than pooling blind.
+   */
+  async verifySubaccountEmpty(input: { agentPublicKey: string; subaccountId?: string }): Promise<boolean> {
+    const { agentPublicKey, subaccountId } = input;
+    const info = await this.getAccountInfo(agentPublicKey, subaccountId);
+    // A non-existent account holds nothing — empty by definition.
+    if (!info.exists) return true;
+    const equity = Number.isFinite(info.equity) ? info.equity : 0;
+    if (equity > PACIFICA_RECYCLE_EMPTY_USDC) return false;
+    const positions = await this.getPositions(agentPublicKey, subaccountId);
+    if (positions.some((p) => Math.abs(p.baseSize) > 0)) return false;
+    const openOrders = await this.getOpenOrders(agentPublicKey, subaccountId);
+    if (openOrders.length > 0) return false;
+    const stopOrders = await this.getOpenStopOrders(agentPublicKey, subaccountId);
+    if (stopOrders.length > 0) return false;
+    return true;
   }
 
   async cancelTpSlOrders(params: {

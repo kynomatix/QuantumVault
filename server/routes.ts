@@ -208,6 +208,241 @@ async function sweepPacificaSubaccount(
 }
 
 /**
+ * Subaccount Recycling Plan §7.2 / §10 (Phase D) — kill switch for "recycle on
+ * delete". Default OFF: when unset/false the delete path behaves exactly as it
+ * does today (sweep + delete, key discarded, nothing pooled). Set the env var
+ * `RECYCLE_ON_DELETE=true` to enable flattening + pooling swept-empty subaccounts.
+ * This is independent from `subaccountCaps.recyclable` (which gates reuse-on-create,
+ * Phase E) — pooling can run while reuse stays off.
+ */
+function isRecycleOnDeleteEnabled(): boolean {
+  const v = (process.env.RECYCLE_ON_DELETE || '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
+/**
+ * Phase D (§7.2) — decide whether a sweep result must BLOCK bot deletion.
+ *
+ * Every error-returning path in `sweepPacificaSubaccount` leaves the funds INTACT in
+ * the subaccount: the sub→main transfer either returned success:false, or it (or the
+ * pre-transfer balance read / key decrypt) threw before the move completed. The
+ * non-fatal main→wallet withdraw leg never sets `error`. So a set `error` always means
+ * "money may still be in the subaccount".
+ *
+ * - Recycling OFF: preserve the exact legacy gate (a real transfer failure with a
+ *   non-trivial balance) so the flag-off path stays byte-identical to today.
+ * - Recycling ON: fail CLOSED on ANY error — the caller will quarantine the subaccount
+ *   as stuck_funds and refuse to delete, so a thrown failure can never delete the bot
+ *   (and discard its key) while funds are still stranded.
+ */
+export function shouldBlockDeleteForSweep(
+  recycleOnDelete: boolean,
+  sweep: { error?: string; amount: number },
+): boolean {
+  if (recycleOnDelete) return !!sweep.error;
+  return !!sweep.error && sweep.amount > 0.01;
+}
+
+/**
+ * Phase D step 1 (§7.2) — flatten a Pacifica bot subaccount before sweeping:
+ * cancel ALL resting orders, cancel any stop/TP-SL orders, close every open
+ * position, then RE-VERIFY that no positions or orders remain. Returns ok:false
+ * if anything is still open after a short settle/retry so the caller aborts the
+ * delete (funds stay put) rather than sweeping a still-active account.
+ *
+ * Signing mirrors the trade path for external_key bots: the bot's own subaccount
+ * key signs, agentPublicKey = the subaccount pubkey, subaccountId = undefined.
+ */
+async function teardownPacificaSubaccountForDelete(
+  bot: TradingBot,
+  logPrefix: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const botCtx = getBotSubaccountContext(bot);
+  if (!botCtx) return { ok: true };
+  const adapter = getDefaultAdapter();
+  const acct = botCtx.botPublicKey;
+  let decrypted: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+  try {
+    decrypted = await _resolveBotSubaccountSecretKey(botCtx);
+    const sk = decrypted.secretKey;
+
+    // 1) Cancel all resting (non-stop) orders across every symbol.
+    try {
+      await adapter.cancelAllOrders({
+        agentPublicKey: acct,
+        agentSecretKey: sk,
+        mainWalletAddress: bot.walletAddress,
+      });
+    } catch (e: any) {
+      console.warn(`${logPrefix} teardown: cancelAllOrders failed: ${e.message}`);
+    }
+
+    // 2) Cancel any stop / TP-SL orders individually.
+    try {
+      const stops = adapter.getOpenStopOrders ? await adapter.getOpenStopOrders(acct) : [];
+      for (const s of stops) {
+        if (!adapter.cancelStopOrder) break;
+        try {
+          await adapter.cancelStopOrder({
+            agentPublicKey: acct,
+            agentSecretKey: sk,
+            mainWalletAddress: bot.walletAddress,
+            orderId: s.order_id,
+          });
+        } catch (e: any) {
+          console.warn(`${logPrefix} teardown: cancelStopOrder ${s.order_id} failed: ${e.message}`);
+        }
+      }
+    } catch (e: any) {
+      console.warn(`${logPrefix} teardown: stop-order listing failed: ${e.message}`);
+    }
+
+    // 3) Close every open position with a reduce-only market order.
+    try {
+      const positions = await adapter.getPositions(acct);
+      for (const p of positions) {
+        if (Math.abs(p.baseSize) === 0) continue;
+        try {
+          await adapter.closePosition({
+            agentPublicKey: acct,
+            agentSecretKey: sk,
+            mainWalletAddress: bot.walletAddress,
+            internalSymbol: p.internalSymbol,
+          });
+        } catch (e: any) {
+          console.warn(`${logPrefix} teardown: closePosition ${p.internalSymbol} failed: ${e.message}`);
+        }
+      }
+    } catch (e: any) {
+      console.warn(`${logPrefix} teardown: position listing failed: ${e.message}`);
+    }
+
+    // 4) Re-verify zero positions AND zero orders (balance is still funded here, so we
+    //    check positions/orders only — NOT verifySubaccountEmpty, which also gates on
+    //    balance). One short retry lets close fills settle on the exchange.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
+      const positions = await adapter.getPositions(acct);
+      if (positions.some((p) => Math.abs(p.baseSize) > 0)) continue;
+      const openOrders = adapter.getOpenOrders ? await adapter.getOpenOrders(acct) : [];
+      if (openOrders.length > 0) continue;
+      const stops = adapter.getOpenStopOrders ? await adapter.getOpenStopOrders(acct) : [];
+      if (stops.length > 0) continue;
+      return { ok: true };
+    }
+    return { ok: false, error: 'positions or orders still open after flatten + retry' };
+  } catch (e: any) {
+    return { ok: false, error: e.message };
+  } finally {
+    decrypted?.cleanup();
+  }
+}
+
+/**
+ * Result of attempting to recycle a deleted bot's subaccount.
+ * - `ok: true`  → the subaccount is verified EMPTY and it is SAFE to delete the bot
+ *   row. `pooled` says whether we also retained the key as a `spare` (best-effort).
+ * - `ok: false` → funds may still be in the subaccount (or we could not confirm it
+ *   empty). The caller MUST quarantine it as stuck_funds and NOT delete the bot, so
+ *   the signing key (on the bot row) is preserved for recovery.
+ */
+type RecycleOutcome =
+  | { ok: true; pooled: boolean }
+  | { ok: false; reason: string };
+
+/**
+ * Phase D (§7.2 / §8) — after a successful sweep, decide the fate of the deleted
+ * bot's Pacifica subaccount.
+ *
+ * SAFETY GATE (can block deletion): the subaccount MUST be verifiably empty before
+ * the bot row (which holds the signing key) is deleted. If it still holds funds /
+ * positions / orders — e.g. sub-min-transfer dust the sweep cannot move — or if the
+ * empty-check cannot be completed (read error → fail CLOSED), we return ok:false so
+ * the caller quarantines it as stuck_funds and refuses to delete. Never
+ * delete-and-lose-track of funds (safety invariant, §7.2).
+ *
+ * POOLING (best-effort, never blocks): once the account is verified empty we retain
+ * its signing key (re-bound from the transient BOT_UUID AAD to the stable POOLED
+ * subaccount-pubkey AAD) and upsert a `spare` registry row. V3-strict: a legacy-only
+ * key (no V3 ciphertext) or a missing owner UMK means we cannot retain the key — the
+ * account is still empty and safe to delete, we just lose the recycling opportunity
+ * (returns ok:true, pooled:false).
+ */
+async function recycleDeletedSubaccount(
+  bot: TradingBot,
+  agentPublicKey: string,
+  umk: Buffer | null,
+  logPrefix: string,
+): Promise<RecycleOutcome> {
+  const botCtx = getBotSubaccountContext(bot);
+  if (!botCtx) return { ok: true, pooled: false };
+  const acct = botCtx.botPublicKey;
+
+  // 1) SAFETY: confirm the subaccount is genuinely empty before any delete.
+  const adapter = getDefaultAdapter();
+  if (!adapter.verifySubaccountEmpty) {
+    // This path is Pacifica-only and the Pacifica adapter always implements
+    // verifySubaccountEmpty; if some adapter ever lacks it we cannot confirm empty,
+    // so don't pool — but don't block the existing delete behavior either.
+    console.warn(`${logPrefix} ${acct.slice(0, 8)}...: adapter lacks verifySubaccountEmpty, skipping recycle`);
+    return { ok: true, pooled: false };
+  }
+  let empty: boolean;
+  try {
+    empty = await adapter.verifySubaccountEmpty({ agentPublicKey: acct });
+  } catch (e: any) {
+    // Fail CLOSED: could not confirm empty ⇒ must not delete-and-discard the key.
+    return { ok: false, reason: `empty-check failed: ${e.message}` };
+  }
+  if (!empty) {
+    return { ok: false, reason: 'subaccount not empty after sweep (funds/positions/orders remain)' };
+  }
+
+  // 2) POOLING (best-effort): retain the key as a spare. Any failure here is logged
+  //    and swallowed — the account is empty, so deletion is safe regardless.
+  try {
+    if (!bot.botSubaccountKeyEncryptedV3) {
+      console.warn(`${logPrefix} Not pooling ${acct.slice(0, 8)}...: no V3 subaccount key to retain`);
+      return { ok: true, pooled: false };
+    }
+    if (!umk) {
+      console.warn(`${logPrefix} Not pooling ${acct.slice(0, 8)}...: owner UMK unavailable`);
+      return { ok: true, pooled: false };
+    }
+
+    const { rebindSubaccountKeyToPooledV3 } = await import('./session-v3');
+    const { SUBACCOUNT_AAD_VERSION } = await import('./crypto-v3');
+    const rebound = rebindSubaccountKeyToPooledV3({
+      umk,
+      currentEncryptedV3: bot.botSubaccountKeyEncryptedV3,
+      currentAadVersion: SUBACCOUNT_AAD_VERSION.BOT_UUID,
+      protocol: 'pacifica',
+      walletAddress: bot.walletAddress,
+      protocolSubaccountId: acct,
+      legacyBotId: bot.id,
+    });
+    if (!rebound) {
+      console.warn(`${logPrefix} Not pooling ${acct.slice(0, 8)}...: key rebind failed (AAD mismatch?)`);
+      return { ok: true, pooled: false };
+    }
+
+    await storage.poolSubaccountAsSpare({
+      walletAddress: bot.walletAddress,
+      protocol: 'pacifica',
+      protocolSubaccountId: acct,
+      agentPublicKey,
+      subaccountKeyEncryptedV3: rebound.encryptedV3,
+      aadVersion: rebound.aadVersion,
+    });
+    console.log(`${logPrefix} Pooled subaccount ${acct.slice(0, 8)}... as spare for reuse`);
+    return { ok: true, pooled: true };
+  } catch (e: any) {
+    console.error(`${logPrefix} Failed to pool subaccount as spare (non-fatal): ${e.message}`);
+    return { ok: true, pooled: false };
+  }
+}
+
+/**
  * Second leg of the Pacifica delete sweep: withdraw funds that were just moved
  * subaccount→main back out to the on-chain agent wallet.
  *
@@ -7510,6 +7745,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
   app.delete("/api/trading-bots/:id", requireWallet, async (req, res) => {
     let _deleteAgentKeyCleanup: (() => void) | null = null;
+    // Phase D: owner UMK, captured for eager key-rebind when pooling a spare. Valid
+    // until _deleteAgentKeyCleanup runs in the finally (which zeroizes it).
+    let _deleteOwnerUmk: Buffer | null = null;
     try {
       const bot = await storage.getTradingBotById(req.params.id);
       if (!bot) {
@@ -7536,6 +7774,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
         }
         agentSecret = _delKey.secretKey;
+        _deleteOwnerUmk = _delUmk.umk;
         _deleteAgentKeyCleanup = () => { _delKey.cleanup(); _delUmk.cleanup(); };
       }
       
@@ -7585,13 +7824,69 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       
       // Pacifica subaccount sweep — transfer funds back to agent wallet before deletion
       if (getBotSubaccountContext(bot) && agentAddress) {
+        const recycleOnDelete = isRecycleOnDeleteEnabled();
+
+        // Phase D (§7.2): when recycling is enabled, FLATTEN the subaccount first
+        // (cancel all orders, close positions, re-verify) so the sweep can move 100%
+        // of collateral and the account ends genuinely empty. Gated — flag OFF leaves
+        // today's behavior untouched.
+        if (recycleOnDelete) {
+          const teardown = await teardownPacificaSubaccountForDelete(bot, '[Delete]');
+          if (!teardown.ok) {
+            return res.status(500).json({
+              error: `Cannot delete bot - could not flatten Pacifica subaccount: ${teardown.error}`,
+              message: "Open positions or orders remain on this bot. Please close them and try again.",
+            });
+          }
+        }
+
         const sweepResult = await sweepPacificaSubaccount(bot, agentAddress, '[Delete]', agentSecret);
         if (sweepResult.handled) {
-          if (sweepResult.error && sweepResult.amount > 0.01) {
+          // Quarantine the subaccount as stuck_funds WITHOUT deleting the bot row — the
+          // signing key lives on the bot row, so not deleting preserves it for recovery.
+          // Best-effort: a registry-write failure is logged, never fatal.
+          const quarantineStuckFunds = async (reason: string) => {
+            const _stuckCtx = getBotSubaccountContext(bot);
+            if (!_stuckCtx) return;
+            try {
+              await storage.markSubaccountStuckFunds({
+                walletAddress: bot.walletAddress,
+                protocol: 'pacifica',
+                protocolSubaccountId: _stuckCtx.botPublicKey,
+                botId: bot.id,
+                agentPublicKey: agentAddress,
+                lastError: reason,
+              });
+            } catch (e: any) {
+              console.error(`[Delete] Failed to mark subaccount stuck_funds (non-fatal): ${e.message}`);
+            }
+          };
+
+          if (shouldBlockDeleteForSweep(recycleOnDelete, sweepResult)) {
+            // Sweep error ⇒ funds may still be in the subaccount, so it must NEVER be
+            // pooled or deleted. When recycling, quarantine it as stuck_funds for recovery.
+            if (recycleOnDelete) {
+              await quarantineStuckFunds(sweepResult.error ?? 'unknown sweep failure');
+            }
             return res.status(500).json({
               error: `Cannot delete bot - failed to sweep $${sweepResult.amount.toFixed(2)} from Pacifica subaccount: ${sweepResult.error}`,
               message: "Please withdraw funds manually before deleting."
             });
+          }
+          // Phase D (§7.2/§8): with recycling on, the subaccount MUST be verified empty
+          // before we delete the bot row (and its signing key). If funds remain — e.g.
+          // sub-min-transfer dust the sweep can't move, or the empty-check can't complete
+          // — quarantine as stuck_funds and refuse to delete (never delete-and-lose-track).
+          // If empty, retain the key as a spare (best-effort) and proceed.
+          if (recycleOnDelete) {
+            const outcome = await recycleDeletedSubaccount(bot, agentAddress, _deleteOwnerUmk, '[Delete]');
+            if (!outcome.ok) {
+              await quarantineStuckFunds(outcome.reason);
+              return res.status(409).json({
+                error: `Cannot delete bot - funds remain in the Pacifica subaccount: ${outcome.reason}`,
+                message: "The subaccount still holds funds (possibly below the minimum transfer amount). It's been flagged for recovery — please withdraw manually before deleting.",
+              });
+            }
           }
           await storage.deleteTradingBot(req.params.id);
           let message = 'Bot deleted';

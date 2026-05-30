@@ -126,6 +126,12 @@ export interface ProtocolAdapter {
   getWalletCollateralBalance?(walletAddress: string): Promise<number>;
   /** Static recycling capability descriptor (§4.1). Undefined ⇒ create-only adapter. */
   readonly subaccountCaps?: SubaccountCaps;
+  /** List resting (non-stop) open orders. Used by the recycler to verify a subaccount is empty before pooling (§7.2/§8). */
+  getOpenOrders?(agentPublicKey: string, subaccountId?: string): Promise<Array<{ orderId: string; symbol: string }>>;
+  /** List open stop / TP-SL orders. Used by the recycler's flatten + verify-empty steps (§7.2/§8). */
+  getOpenStopOrders?(agentPublicKey: string, subaccountId?: string, symbol?: string): Promise<Array<{ order_id: string; symbol: string }>>;
+  /** True only when the subaccount has no equity above dust, no open positions, and no open/stop orders (§8). */
+  verifySubaccountEmpty?(input: { agentPublicKey: string; subaccountId?: string }): Promise<boolean>;
   /**
    * Poll the main account until its collateral balance reaches `targetBalance`,
    * or the timeout elapses. Exists for exchanges (e.g. Pacifica) whose indexer

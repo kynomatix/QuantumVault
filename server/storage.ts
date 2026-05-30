@@ -7,6 +7,7 @@ import {
   wallets,
   bots,
   tradingBots,
+  protocolSubaccounts,
   botTrades,
   botPositions,
   equityEvents,
@@ -125,6 +126,28 @@ export interface IStorage {
   assignProtocolSubaccountId(botId: string, protocolSubaccountId: string, protocol: string): Promise<void>;
   clearProtocolSubaccount(botId: string): Promise<void>;
   findBotByProtocolSubaccount(walletAddress: string, protocolSubaccountId: string, protocol?: string): Promise<TradingBot | undefined>;
+  // Subaccount Recycling Plan §7.2 (Phase D). Pool a swept-empty subaccount as a
+  // reusable spare, retaining its re-bound (POOLED v2) signing key. Upserts on the
+  // unique (protocol, protocolSubaccountId) so a backfilled row is updated in place.
+  poolSubaccountAsSpare(params: {
+    walletAddress: string;
+    protocol: string;
+    protocolSubaccountId: string;
+    agentPublicKey: string | null;
+    subaccountKeyEncryptedV3: string;
+    aadVersion: number;
+  }): Promise<void>;
+  // Subaccount Recycling Plan §7.2.4 (Phase D). Quarantine a subaccount whose
+  // sub→main transfer failed: funds are stranded, so it must NOT be pooled. Keeps
+  // the bot link and records the error. Upserts on (protocol, protocolSubaccountId).
+  markSubaccountStuckFunds(params: {
+    walletAddress: string;
+    protocol: string;
+    protocolSubaccountId: string;
+    botId: string | null;
+    agentPublicKey: string | null;
+    lastError: string;
+  }): Promise<void>;
   createTradingBot(bot: InsertTradingBot): Promise<TradingBot>;
   updateTradingBot(id: string, updates: Partial<InsertTradingBot>): Promise<TradingBot | undefined>;
   // Phase 4b: write V3 ciphertext for per-bot subaccount key.
@@ -594,6 +617,75 @@ export class DatabaseStorage implements IStorage {
       .where(and(...conditions))
       .limit(1);
     return result[0];
+  }
+
+  async poolSubaccountAsSpare(params: {
+    walletAddress: string;
+    protocol: string;
+    protocolSubaccountId: string;
+    agentPublicKey: string | null;
+    subaccountKeyEncryptedV3: string;
+    aadVersion: number;
+  }): Promise<void> {
+    await db.insert(protocolSubaccounts)
+      .values({
+        walletAddress: params.walletAddress,
+        botId: null,
+        protocol: params.protocol,
+        protocolSubaccountId: params.protocolSubaccountId,
+        status: 'spare',
+        agentPublicKey: params.agentPublicKey,
+        subaccountKeyEncryptedV3: params.subaccountKeyEncryptedV3,
+        aadVersion: params.aadVersion,
+        releasedAt: sql`NOW()`,
+        lastVerifiedEmptyAt: sql`NOW()`,
+        lastError: null,
+      } as any)
+      .onConflictDoUpdate({
+        target: [protocolSubaccounts.protocol, protocolSubaccounts.protocolSubaccountId],
+        set: {
+          walletAddress: params.walletAddress,
+          // Detach from the (about-to-be-deleted) bot so the spare is unowned.
+          botId: null,
+          status: 'spare',
+          agentPublicKey: params.agentPublicKey,
+          subaccountKeyEncryptedV3: params.subaccountKeyEncryptedV3,
+          aadVersion: params.aadVersion,
+          releasedAt: sql`NOW()`,
+          lastVerifiedEmptyAt: sql`NOW()`,
+          lastError: null,
+        } as any,
+      });
+  }
+
+  async markSubaccountStuckFunds(params: {
+    walletAddress: string;
+    protocol: string;
+    protocolSubaccountId: string;
+    botId: string | null;
+    agentPublicKey: string | null;
+    lastError: string;
+  }): Promise<void> {
+    await db.insert(protocolSubaccounts)
+      .values({
+        walletAddress: params.walletAddress,
+        botId: params.botId,
+        protocol: params.protocol,
+        protocolSubaccountId: params.protocolSubaccountId,
+        status: 'stuck_funds',
+        agentPublicKey: params.agentPublicKey,
+        lastError: params.lastError,
+      } as any)
+      .onConflictDoUpdate({
+        target: [protocolSubaccounts.protocol, protocolSubaccounts.protocolSubaccountId],
+        set: {
+          walletAddress: params.walletAddress,
+          botId: params.botId,
+          status: 'stuck_funds',
+          agentPublicKey: params.agentPublicKey,
+          lastError: params.lastError,
+        } as any,
+      });
   }
 
   async createTradingBot(bot: InsertTradingBot): Promise<TradingBot> {

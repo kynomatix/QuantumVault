@@ -12,6 +12,14 @@ export const PACIFICA_USDC_MINT = IS_MAINNET
 // dust stuck in subaccounts.
 export const PACIFICA_MIN_TRANSFER_USDC = 10;
 
+/**
+ * Subaccount Recycling Plan §8 — a swept subaccount counts as "empty" only when
+ * its equity is at or below this dust threshold. After a full sweep of a >= $10
+ * balance the residue is sub-cent, so this is set conservatively small to ensure
+ * we never pool a subaccount that still holds material principal.
+ */
+export const PACIFICA_RECYCLE_EMPTY_USDC = 0.5;
+
 // Pacifica charges a flat $1 USDC fee on every on-chain withdrawal (deducted
 // by the exchange before funds land in the Solana wallet). Internal
 // subaccount-to-subaccount transfers do NOT incur this fee. We record it as
