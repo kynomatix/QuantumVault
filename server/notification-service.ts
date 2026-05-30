@@ -3,7 +3,7 @@ import { wallets } from "@shared/schema";
 import { eq } from "drizzle-orm";
 
 export interface TradeNotification {
-  type: 'trade_executed' | 'trade_failed' | 'position_closed';
+  type: 'trade_executed' | 'trade_failed' | 'position_closed' | 'partial_close';
   botName: string;
   market: string;
   side?: 'LONG' | 'SHORT';
@@ -13,6 +13,12 @@ export interface TradeNotification {
   error?: string;
   /** Human-readable close reason, only used for `position_closed`. */
   closeReason?: string;
+  /** Fraction of position closed [0,1], only used for `partial_close`. */
+  closedFraction?: number;
+  /** Original full position size before partial close, only for `partial_close`. */
+  originalPositionSize?: number;
+  /** Number of coalesced stages (multi-stage exit), only for `partial_close`. */
+  stageCount?: number;
 }
 
 /**
@@ -21,7 +27,7 @@ export interface TradeNotification {
  * exported so manual-close / reconciler / future callers stay consistent.
  */
 export function getCloseReasonLabel(
-  reason: 'tpsl' | 'liquidation' | 'external_close' | 'manual',
+  reason: 'tpsl' | 'liquidation' | 'external_close' | 'manual' | 'partial_tp' | 'partial_sl',
   tpslSubtype?: 'TP' | 'SL',
 ): string {
   switch (reason) {
@@ -29,6 +35,10 @@ export function getCloseReasonLabel(
       if (tpslSubtype === 'TP') return 'Closed by Take Profit';
       if (tpslSubtype === 'SL') return 'Closed by Stop Loss';
       return 'Closed by TP/SL';
+    case 'partial_tp':
+      return 'Partial Take Profit';
+    case 'partial_sl':
+      return 'Partial Stop Loss';
     case 'liquidation':
       return 'Liquidated';
     case 'manual':
@@ -127,7 +137,9 @@ export async function sendTradeNotification(
     const shouldNotify = 
       (notification.type === 'trade_executed' && wallet.notifyTradeExecuted) ||
       (notification.type === 'trade_failed' && wallet.notifyTradeFailed) ||
-      (notification.type === 'position_closed' && wallet.notifyPositionClosed);
+      (notification.type === 'position_closed' && wallet.notifyPositionClosed) ||
+      // partial_close ties to the same flag as position_closed
+      (notification.type === 'partial_close' && wallet.notifyPositionClosed);
 
     if (!shouldNotify) {
       console.log(`[Notifications] Notification type ${notification.type} disabled for ${walletAddress}`);
@@ -144,10 +156,6 @@ export async function sendTradeNotification(
     
     console.log(`[Notifications] Sending Telegram to ${walletAddress}: ${title} - ${body}`);
 
-    // Task #136: every outbound trade notification carries the standard
-    // inline keyboard (📊 Positions / 📈 Today / 🚀 Open Mini App) so the
-    // user can jump straight into the Mini App or fetch a fresh summary
-    // without leaving the chat.
     const success = await sendTelegramMessage(
       wallet.telegramChatId,
       message,
@@ -195,10 +203,108 @@ function formatNotificationMessage(notification: TradeNotification): { title: st
         body: `${emoji} ${botName}: ${market} ${pnlStr}${reasonSuffix}`.trim()
       };
     }
+
+    case 'partial_close': {
+      const fraction = notification.closedFraction ?? 0;
+      const pctStr = `${Math.round(fraction * 100)}%`;
+      const pnlStr = pnl !== undefined
+        ? (pnl >= 0 ? ` +$${pnl.toFixed(2)}` : ` -$${Math.abs(pnl).toFixed(2)}`)
+        : '';
+      const emoji = pnl !== undefined ? (pnl >= 0 ? '🟢' : '🔴') : '📉';
+      const priceStr = price ? ` @ $${price.toFixed(2)}` : '';
+      const stageNote = (notification.stageCount ?? 1) > 1
+        ? ` (${notification.stageCount} stages)` : '';
+      const sideStr = side ?? '';
+      return {
+        title: `📉 Partial Exit`,
+        body: `${emoji} ${botName}: closed ${pctStr} of ${sideStr} ${market}${priceStr}${pnlStr}${stageNote}`.trim()
+      };
+    }
     
     default:
       return { title: 'QuantumVault', body: `${botName}: ${type}` };
   }
+}
+
+// ── Partial-close notification debouncer ────────────────────────────────────
+// Multi-stage exits (e.g. 3 partials in 5 s) are coalesced into a single
+// alert so the user doesn't get spammed. The window is ~20 s; any additional
+// partial arriving within the window extends the timer and accumulates its PnL.
+
+interface PendingPartialNotif {
+  timer: ReturnType<typeof setTimeout>;
+  walletAddress: string;
+  botName: string;
+  market: string;
+  side: 'LONG' | 'SHORT';
+  totalClosedFraction: number;
+  totalRealizedPnl: number;
+  lastPrice: number;
+  stageCount: number;
+}
+
+const pendingPartialNotifs = new Map<string, PendingPartialNotif>();
+const PARTIAL_DEBOUNCE_MS = 20_000;
+
+/**
+ * Schedule a partial-close Telegram notification, coalescing multiple stages
+ * arriving within PARTIAL_DEBOUNCE_MS into a single message.
+ *
+ * Key: `${walletAddress}:${botId}:${market}` — each bot-market combo has its
+ * own debounce bucket so concurrent bots don't interfere.
+ */
+export function schedulePartialCloseNotification(opts: {
+  walletAddress: string;
+  botId: string;
+  botName: string;
+  market: string;
+  side: 'LONG' | 'SHORT';
+  closedFraction: number;
+  realizedPnl: number;
+  price: number;
+}): void {
+  const key = `${opts.walletAddress}:${opts.botId}:${opts.market}`;
+  const existing = pendingPartialNotifs.get(key);
+
+  if (existing) {
+    // Coalesce: accumulate and reset the timer.
+    clearTimeout(existing.timer);
+    existing.totalClosedFraction = Math.min(existing.totalClosedFraction + opts.closedFraction, 1);
+    existing.totalRealizedPnl += opts.realizedPnl;
+    existing.lastPrice = opts.price;
+    existing.stageCount += 1;
+    existing.timer = setTimeout(() => firePartialNotif(key), PARTIAL_DEBOUNCE_MS);
+  } else {
+    const pending: PendingPartialNotif = {
+      walletAddress: opts.walletAddress,
+      botName: opts.botName,
+      market: opts.market,
+      side: opts.side,
+      totalClosedFraction: opts.closedFraction,
+      totalRealizedPnl: opts.realizedPnl,
+      lastPrice: opts.price,
+      stageCount: 1,
+      timer: setTimeout(() => firePartialNotif(key), PARTIAL_DEBOUNCE_MS),
+    };
+    pendingPartialNotifs.set(key, pending);
+  }
+}
+
+function firePartialNotif(key: string): void {
+  const pending = pendingPartialNotifs.get(key);
+  if (!pending) return;
+  pendingPartialNotifs.delete(key);
+
+  sendTradeNotification(pending.walletAddress, {
+    type: 'partial_close',
+    botName: pending.botName,
+    market: pending.market,
+    side: pending.side,
+    price: pending.lastPrice,
+    pnl: pending.totalRealizedPnl,
+    closedFraction: pending.totalClosedFraction,
+    stageCount: pending.stageCount,
+  }).catch(err => console.error('[Notifications] Partial-close notification error:', err));
 }
 
 export async function updateNotificationSettings(

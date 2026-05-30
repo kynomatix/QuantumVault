@@ -2,7 +2,7 @@ import { storage, DatabaseStorage } from "./storage";
 import { normalizeMarket } from "./protocol/symbol-registry";
 import { getDefaultAdapter } from "./protocol/adapter-registry";
 import type { TradeRecord } from "./protocol/protocol-types";
-import { sendTradeNotification, getCloseReasonLabel } from "./notification-service";
+import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification } from "./notification-service";
 
 function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
@@ -597,6 +597,153 @@ export async function syncPositionFromOnChain(
 }
 
 
+/**
+ * Book realized PnL for a slice of a position that was partially closed
+ * on-chain without going through the webhook path (e.g. manual partial TP
+ * on the exchange, or an external order manager).
+ *
+ * Uses the existing `recordCloseEventAtomic` idempotency model:
+ * - Key: `partial-<botId>-<market>-<fillId>` (or a deterministic nosig hash)
+ * - Safe to re-run: second call hits the unique index and returns isNew=false
+ * - The webhook path uses `tx-<sig>` keys so the two paths never collide
+ */
+async function bookPartialReduction(opts: {
+  botId: string;
+  walletAddress: string;
+  market: string;
+  agentPublicKey: string;
+  botSubaccountPublicKey?: string;
+  dbBaseSize: number;
+  dbPosition: { avgEntryPrice: string; realizedPnl: string; totalFees: string; lastTradeAt?: Date | null };
+  closedSlice: number;
+  onChainBaseSize: number;
+}): Promise<void> {
+  const {
+    botId, walletAddress, market, agentPublicKey, botSubaccountPublicKey,
+    dbBaseSize, dbPosition, closedSlice,
+  } = opts;
+
+  const positionSide = dbBaseSize > 0 ? 'long' : 'short';
+  const closeSide = positionSide === 'long' ? 'short' : 'long';
+  const entryPrice = parseFloat(dbPosition.avgEntryPrice);
+  const normalizedMarket = normalizeMarket(market);
+  const readAccount = botSubaccountPublicKey || agentPublicKey;
+
+  // Fetch recent closing fills to price the slice.
+  let closingFills: TradeRecord[] = [];
+  for (const windowMs of [5 * 60 * 1000, 60 * 60 * 1000]) {
+    try {
+      const startTime = Date.now() - windowMs;
+      const trades = await getDefaultAdapter().getTradeHistory(readAccount, {
+        limit: 200,
+        startTime,
+      });
+      closingFills = trades
+        .filter(t =>
+          normalizeMarket(t.internalSymbol) === normalizedMarket &&
+          t.side === closeSide
+        )
+        .sort((a, b) => b.timestamp - a.timestamp);
+
+      const sumSize = closingFills.reduce((s, f) => s + f.size, 0);
+      if (sumSize >= closedSlice * 0.80) break;
+    } catch (err) {
+      console.log(`[Reconcile] Partial-reduction fill fetch failed for ${botId}: ${err instanceof Error ? err.message : err}`);
+      break;
+    }
+  }
+
+  // Accumulate fills that cover the slice.
+  let aggregatedSize = 0;
+  let weightedPriceSum = 0;
+  let totalFee = 0;
+  const matchedIds: string[] = [];
+  for (const fill of closingFills) {
+    aggregatedSize += fill.size;
+    weightedPriceSum += fill.price * fill.size;
+    totalFee += fill.fee;
+    matchedIds.push(fill.tradeId);
+    if (aggregatedSize >= closedSlice * 0.95) break;
+  }
+
+  const hasFills = aggregatedSize >= closedSlice * 0.80;
+  const avgFillPrice = hasFills && aggregatedSize > 0
+    ? weightedPriceSum / aggregatedSize
+    : entryPrice; // fallback: assume entry price (breakeven) when no fills
+
+  // PnL on the closed slice using average-entry semantics.
+  const slicePnl = positionSide === 'long'
+    ? (avgFillPrice - entryPrice) * closedSlice - totalFee
+    : (entryPrice - avgFillPrice) * closedSlice - totalFee;
+
+  // Classify as partial_tp or partial_sl based on sign of PnL.
+  const partialSubtype = slicePnl >= 0 ? 'partial_tp' : 'partial_sl';
+
+  // Canonical dedup key for reconciler-detected partials.
+  const dedupKey = DatabaseStorage.canonicalCloseFillId({
+    signature: matchedIds[0] ? `partial-${matchedIds[0]}` : undefined,
+    botId,
+    side: closeSide,
+    size: closedSlice,
+    market,
+    fillPrice: avgFillPrice,
+    timestampMs: closingFills[0]?.timestamp,
+  });
+
+  console.log(`[Reconcile] Partial reduction for bot ${botId} ${market}: slice=${closedSlice.toFixed(4)}, price=$${avgFillPrice.toFixed(4)}, pnl=$${slicePnl.toFixed(4)}, hasFills=${hasFills}, dedup=${dedupKey}`);
+
+  const { isNew } = await storage.recordCloseEventAtomic({
+    botId,
+    insert: {
+      tradingBotId: botId,
+      walletAddress,
+      market,
+      side: closeSide,
+      size: String(closedSlice),
+      price: String(avgFillPrice),
+      fee: String(totalFee),
+      pnl: String(slicePnl),
+      status: 'executed',
+      protocolFillId: dedupKey,
+      webhookPayload: {
+        reconciled: true,
+        closeReason: partialSubtype,
+        detectedAt: new Date().toISOString(),
+        matchedFillIds: matchedIds.join(','),
+        hasFills,
+      },
+      executionMethod: 'on-chain-detected',
+    },
+    deltas: {
+      totalPnlDelta: slicePnl,
+      totalVolumeDelta: closedSlice * avgFillPrice,
+      lastTradeAt: new Date().toISOString(),
+    },
+  });
+
+  if (!isNew) {
+    console.log(`[Reconcile] Partial reduction already booked for ${botId} ${market} (dedupKey=${dedupKey})`);
+    return;
+  }
+
+  // Fire notification (debounced so multi-stage exits don't spam).
+  try {
+    const botRow = await storage.getTradingBotById(botId);
+    schedulePartialCloseNotification({
+      walletAddress,
+      botId,
+      botName: botRow?.name ?? 'Bot',
+      market,
+      side: dbBaseSize > 0 ? 'LONG' : 'SHORT',
+      closedFraction: closedSlice / Math.abs(dbBaseSize),
+      realizedPnl: slicePnl,
+      price: avgFillPrice,
+    });
+  } catch (notifErr) {
+    console.error(`[Reconcile] Partial-reduction notification error for ${botId}:`, notifErr);
+  }
+}
+
 export async function reconcileBotPosition(
   botId: string,
   walletAddress: string,
@@ -777,16 +924,55 @@ export async function reconcileBotPosition(
       console.log(`[Reconcile] Bot ${botId}: DB=${dbBaseSize}, OnChain=${onChainBaseSize} - syncing`);
 
       if (onChainHasRealPosition) {
+        // ── Partial-reduction detection ─────────────────────────────────────
+        // Same sign but on-chain is meaningfully smaller → some contracts were
+        // closed externally (partial TP/SL, manual partial reduce). Book PnL
+        // for the closed slice using the average-entry price from the DB.
+        // Guard: 3-minute propagation lag (same as full-close path) prevents
+        // false positives right after an entry.
+        const sameSide =
+          (dbBaseSize > 0 && onChainBaseSize > 0) ||
+          (dbBaseSize < 0 && onChainBaseSize < 0);
+        const closedSlice = Math.abs(dbBaseSize) - Math.abs(onChainBaseSize);
+        const isPartialReduction =
+          sameSide &&
+          closedSlice / Math.abs(dbBaseSize) > 0.03 && // >3% reduction
+          closedSlice > 0.0001;
+
+        if (isPartialReduction) {
+          const positionAgeMs = dbPosition?.lastTradeAt
+            ? Date.now() - new Date(dbPosition.lastTradeAt).getTime()
+            : Infinity;
+
+          if (positionAgeMs >= 3 * 60 * 1000) {
+            await bookPartialReduction({
+              botId,
+              walletAddress,
+              market,
+              agentPublicKey,
+              botSubaccountPublicKey,
+              dbBaseSize,
+              dbPosition: dbPosition!,
+              closedSlice,
+              onChainBaseSize,
+            });
+          } else {
+            console.log(`[Reconcile] Partial reduction detected for bot ${botId} ${market} but position is only ${(positionAgeMs / 1000).toFixed(0)}s old — likely propagation lag, skipping`);
+          }
+        }
+
+        // Always sync position to on-chain state (with accumulated PnL from bookPartialReduction).
+        const refreshedDbPos = await storage.getBotPosition(botId, market);
         await storage.upsertBotPosition({
           tradingBotId: botId,
           walletAddress,
           market,
           baseSize: String(onChainBaseSize),
-          avgEntryPrice: String(onChainPos.entryPrice),
-          costBasis: String(Math.abs(onChainBaseSize) * onChainPos.entryPrice),
-          realizedPnl: dbPosition?.realizedPnl || "0",
-          totalFees: dbPosition?.totalFees || "0",
-          lastTradeId: dbPosition?.lastTradeId || null,
+          avgEntryPrice: String(onChainPos!.entryPrice),
+          costBasis: String(Math.abs(onChainBaseSize) * onChainPos!.entryPrice),
+          realizedPnl: refreshedDbPos?.realizedPnl ?? dbPosition?.realizedPnl ?? "0",
+          totalFees: refreshedDbPos?.totalFees ?? dbPosition?.totalFees ?? "0",
+          lastTradeId: refreshedDbPos?.lastTradeId ?? dbPosition?.lastTradeId ?? null,
           lastTradeAt: new Date(),
         });
       }

@@ -644,7 +644,8 @@ import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet } from "./agent-wallet";
 import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMinOrderSizeUsd, getMarketMaxLeverage } from "./market-liquidity-service";
 import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable } from "./leverage-cache-service";
-import { sendTradeNotification, getCloseReasonLabel, type TradeNotification, buildDefaultInlineKeyboard } from "./notification-service";
+import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification, type TradeNotification, buildDefaultInlineKeyboard } from "./notification-service";
+import { classifySignal } from "./trading/signal-classifier";
 import { registerTelegramMiniAppRoutes } from "./telegram-mini-app";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3 } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback, cancelRetryJobsForBot } from "./trade-retry-service";
@@ -1780,6 +1781,20 @@ function parseSignalForRouting(body: any): { action: string | null; contracts: s
 // can prompt them to re-enable execution. The subscribe endpoint enforces
 // executionEnabled up-front (412), so the steady-state expectation is that
 // every active subscriber has a usable V3 key.
+// ── Per-bot webhook serialization ─────────────────────────────────────────
+// Prevents concurrent partial-close signals from racing each other on the same
+// bot-market combination. The promise chain ensures only one webhook handler
+// for a given key runs at a time. Keys auto-expire when the handler returns.
+const botWebhookLocks = new Map<string, Promise<void>>();
+
+function acquireBotWebhookLock(key: string): Promise<() => void> {
+  let release!: () => void;
+  const current = botWebhookLocks.get(key) ?? Promise.resolve();
+  const next = current.then(() => new Promise<void>(resolve => { release = resolve; }));
+  botWebhookLocks.set(key, next.catch(() => {}));
+  return next.then(() => release);
+}
+
 async function routeSignalToSubscribers(
   sourceBotId: string,
   signal: {
@@ -1789,6 +1804,8 @@ async function routeSignalToSubscribers(
     price: string;
     isCloseSignal: boolean;
     strategyPositionSize: string | null;
+    /** Fraction of source position closed [0,1]; present for PARTIAL_CLOSE signals. */
+    partialCloseFraction?: number;
   }
 ): Promise<void> {
   try {
@@ -1814,7 +1831,7 @@ async function routeSignalToSubscribers(
     console.log(`[Subscriber Routing] Routing ${signal.action} (close=${signal.isCloseSignal}) to ${subscriberBots.length} subscribers IN PARALLEL`);
 
     // Result type for per-subscriber processing - collected and reduced after Promise.all
-    type SubscriberResult = 'skippedInactive' | 'skippedFlat' | 'tradeSuccess' | 'tradeFailed' | 'closeSuccess' | 'closeFailed' | 'error';
+    type SubscriberResult = 'skippedInactive' | 'skippedFlat' | 'skippedTooSmall' | 'tradeSuccess' | 'tradeFailed' | 'closeSuccess' | 'closeFailed' | 'partialCloseSuccess' | 'partialCloseFailed' | 'error';
 
     // Process subscriber function - returns result for aggregation after parallel execution
     const processSubscriber = async (subBot: typeof subscriberBots[0]): Promise<SubscriberResult> => {
@@ -2073,6 +2090,105 @@ async function routeSignalToSubscribers(
             }
 
             return 'closeFailed';
+          }
+        } else if (signal.partialCloseFraction !== undefined && signal.partialCloseFraction > 0) {
+          // ── Proportional partial close fan-out ──────────────────────────
+          // Close `fraction × subscriber_position_size` contracts (reduce-only).
+          const subPartialCtx = subCloseCtx;
+          const subPartialQueryAccount = subPartialCtx ? subPartialCtx.botPublicKey : subWallet.agentPublicKey;
+          const subPartialQuerySubId = subPartialCtx ? 0 : subAccountId;
+          const subPartialPosition = await PositionService.getPositionForExecution(
+            subBot.id,
+            subPartialQueryAccount,
+            subPartialQuerySubId,
+            subBot.market,
+            subPartialCtx?.botPublicKey
+          );
+
+          if (subPartialPosition.side === 'FLAT' || Math.abs(subPartialPosition.size) < 0.0001) {
+            console.log(`[Subscriber Routing] Partial close skipped for ${subBot.id} — no position`);
+            return 'skippedFlat';
+          }
+
+          const subPartialSize = signal.partialCloseFraction * Math.abs(subPartialPosition.size);
+          if (subPartialSize < 0.0001) {
+            console.log(`[Subscriber Routing] Partial close size too small for ${subBot.id}: ${subPartialSize.toFixed(6)}`);
+            return 'skippedTooSmall';
+          }
+
+          console.log(`[Subscriber Routing] Partial close for ${subBot.id}: fraction=${(signal.partialCloseFraction * 100).toFixed(1)}%, size=${subPartialSize.toFixed(4)}`);
+          const subPartialCloseSlippage = subWallet.slippageBps ?? 50;
+          const subPartialResult = await closePerpPosition(
+            subAgentSecretKey,
+            subBot.market,
+            subPartialQuerySubId,
+            subPartialSize,
+            subPartialCloseSlippage,
+            undefined,
+            subWallet.agentPublicKey || undefined,
+            subPartialPosition.side === 'LONG' ? 'long' : 'short',
+            subPartialCtx,
+            subBot.walletAddress,
+          );
+
+          if (subPartialResult.success) {
+            const subPartialFillPrice = subPartialResult.fillPrice ?? parseFloat(signal.price);
+            const subPartialEntryPrice = subPartialPosition.entryPrice || 0;
+            const subPartialNotional = subPartialSize * subPartialFillPrice;
+            const subPartialFee = subPartialNotional * getExchangeFeeRate();
+            const subPartialPnl = subPartialPosition.side === 'LONG'
+              ? (subPartialFillPrice - subPartialEntryPrice) * subPartialSize - subPartialFee
+              : (subPartialEntryPrice - subPartialFillPrice) * subPartialSize - subPartialFee;
+
+            const subPartialDedupKey = DatabaseStorage.canonicalCloseFillId({
+              signature: subPartialResult.signature ? `tx-${subPartialResult.signature}` : undefined,
+              botId: subBot.id,
+              side: subPartialPosition.side === 'LONG' ? 'short' : 'long',
+              size: subPartialSize,
+              market: subBot.market,
+              fillPrice: subPartialFillPrice,
+              timestampMs: Date.now(),
+            });
+
+            await storage.recordCloseEventAtomic({
+              botId: subBot.id,
+              insert: {
+                tradingBotId: subBot.id,
+                walletAddress: subBot.walletAddress,
+                market: subBot.market,
+                side: subPartialPosition.side === 'LONG' ? 'short' : 'long',
+                size: String(subPartialSize),
+                price: String(subPartialFillPrice),
+                fee: String(subPartialFee),
+                pnl: String(subPartialPnl),
+                status: 'executed',
+                txSignature: subPartialResult.signature || null,
+                protocolFillId: subPartialDedupKey,
+                webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, partialClose: true, fraction: signal.partialCloseFraction },
+                executionMethod: subPartialResult.executionMethod || 'legacy',
+              },
+              deltas: {
+                totalPnlDelta: subPartialPnl,
+                totalVolumeDelta: subPartialNotional,
+                lastTradeAt: new Date().toISOString(),
+              },
+            });
+
+            schedulePartialCloseNotification({
+              walletAddress: subBot.walletAddress,
+              botId: subBot.id,
+              botName: subBot.name,
+              market: subBot.market,
+              side: subPartialPosition.side as 'LONG' | 'SHORT',
+              closedFraction: signal.partialCloseFraction,
+              realizedPnl: subPartialPnl,
+              price: subPartialFillPrice,
+            });
+
+            return 'partialCloseSuccess';
+          } else {
+            console.error(`[Subscriber Routing] Partial close failed for ${subBot.id}: ${subPartialResult.error}`);
+            return 'partialCloseFailed';
           }
         } else {
           const oraclePrice = parseFloat(signal.price);
@@ -8499,7 +8615,33 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // TradingView sends strategy.position_size = 0 when closing a position
       const isCloseSignal = strategyPositionSize !== null && 
         (strategyPositionSize === "0" || parseFloat(strategyPositionSize) === 0);
-      
+
+      // ── Signal classifier (partial-close / flip disambiguation) ──────────
+      // Fetch the DB position BEFORE any on-chain read to avoid Pacifica's
+      // ~10s propagation lag that would cause a stale read to misclassify a
+      // partial reduce as OPEN or FLIP.
+      const dbPositionForClassification = await storage.getBotPosition(botId, bot.market);
+      const classifiedSignal = classifySignal(
+        {
+          side: dbPositionForClassification
+            ? (parseFloat(dbPositionForClassification.baseSize) > 0 ? 'LONG' : parseFloat(dbPositionForClassification.baseSize) < 0 ? 'SHORT' : 'FLAT')
+            : 'FLAT',
+          size: dbPositionForClassification ? Math.abs(parseFloat(dbPositionForClassification.baseSize)) : 0,
+          entryPrice: dbPositionForClassification ? parseFloat(dbPositionForClassification.avgEntryPrice) : 0,
+        },
+        {
+          action: side as 'buy' | 'sell',
+          contracts: parseFloat(contracts),
+          strategyPositionSize: strategyPositionSize !== null ? parseFloat(strategyPositionSize) : null,
+        },
+      );
+      const isPartialClose = !isCloseSignal && classifiedSignal.type === 'PARTIAL_CLOSE';
+      const partialCloseSize = isPartialClose ? classifiedSignal.closeSize : 0;
+      const partialCloseFraction = isPartialClose ? classifiedSignal.closedFraction : 0;
+      if (isPartialClose) {
+        console.log(`[Webhook] *** PARTIAL CLOSE DETECTED *** (slice=${partialCloseSize.toFixed(4)}, fraction=${(partialCloseFraction * 100).toFixed(1)}%, classified=${classifiedSignal.type})`);
+      }
+
       const webhookBotCtx = getBotSubaccountContext(bot);
       console.log(`[Webhook] Signal: action=${action}, contracts=${contracts}, close=${isCloseSignal}, published=${!!botPublishedInfo}, pacificaSubaccount=${!!webhookBotCtx}`);
       console.log(`[WEBHOOK-TRACE] ========== SIGNAL BRANCHING ==========`);
@@ -9078,11 +9220,142 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         // === END OUTER TRY/CATCH FOR CLOSE SIGNAL HANDLING ===
       }
 
+      // ── PARTIAL CLOSE HANDLER ──────────────────────────────────────────────
+      // Handles PARTIAL_CLOSE signals (TV sell 1 while LONG 3, tvSize=2 etc.).
+      // Must appear AFTER the full close block and BEFORE the defense-in-depth
+      // check so that partial closes are fully handled and returned before any
+      // open/flip logic runs.
+      if (isPartialClose) {
+        console.log(`[Webhook] *** PARTIAL CLOSE HANDLER *** size=${partialCloseSize.toFixed(4)}, fraction=${(partialCloseFraction * 100).toFixed(1)}%`);
+        const releaseBotLock = await acquireBotWebhookLock(`${botId}:${bot.market}`);
+        const lockTimer = setTimeout(() => releaseBotLock(), 30_000);
+        try {
+          const pcWallet = await storage.getWallet(bot.walletAddress);
+          if (!pcWallet?.agentPublicKey) {
+            await storage.updateWebhookLog(log.id, { errorMessage: "No agent wallet for partial close", processed: true });
+            return res.status(400).json({ error: "Agent wallet not configured" });
+          }
+
+          const pcSubAccountId = webhookBotCtx ? 0 : (bot.driftSubaccountId ?? 0);
+          const pcPositionSide = dbPositionForClassification
+            ? (parseFloat(dbPositionForClassification.baseSize) > 0 ? 'long' : 'short')
+            : 'long';
+
+          console.log(`[Webhook] Partial close: executing closePerpPosition(${partialCloseSize.toFixed(4)} ${pcPositionSide} ${bot.market}, reduceOnly)`);
+          const pcResult = await closePerpPosition(
+            agentKeyResult.secretKey,
+            bot.market,
+            pcSubAccountId,
+            partialCloseSize,
+            pcWallet.slippageBps ?? 50,
+            privateKeyBase58,
+            pcWallet.agentPublicKey!,
+            pcPositionSide,
+            webhookBotCtx,
+            bot.walletAddress,
+          );
+
+          if (!pcResult.success) {
+            console.error(`[Webhook] Partial close failed: ${pcResult.error}`);
+            await storage.updateWebhookLog(log.id, { errorMessage: `Partial close failed: ${pcResult.error}`, processed: true });
+            return res.status(500).json({ error: "Partial close failed", details: pcResult.error });
+          }
+
+          // Book realized PnL for the closed slice.
+          const pcFillPrice = pcResult.fillPrice ?? (signalPrice ? parseFloat(signalPrice) : 0);
+          const pcEntryPrice = dbPositionForClassification ? parseFloat(dbPositionForClassification.avgEntryPrice) : 0;
+          const pcFee = partialCloseSize * (pcFillPrice || pcEntryPrice) * getExchangeFeeRate();
+          const pcPnl = pcPositionSide === 'long'
+            ? (pcFillPrice - pcEntryPrice) * partialCloseSize - pcFee
+            : (pcEntryPrice - pcFillPrice) * partialCloseSize - pcFee;
+
+          const pcDedupKey = DatabaseStorage.canonicalCloseFillId({
+            signature: pcResult.signature ? `tx-${pcResult.signature}` : undefined,
+            botId,
+            side: pcPositionSide === 'long' ? 'short' : 'long',
+            size: partialCloseSize,
+            market: bot.market,
+            fillPrice: pcFillPrice,
+            timestampMs: Date.now(),
+          });
+
+          await storage.recordCloseEventAtomic({
+            botId,
+            insert: {
+              tradingBotId: botId,
+              walletAddress: bot.walletAddress,
+              market: bot.market,
+              side: pcPositionSide === 'long' ? 'short' : 'long',
+              size: String(partialCloseSize),
+              price: String(pcFillPrice),
+              fee: String(pcFee),
+              pnl: String(pcPnl),
+              status: 'executed',
+              txSignature: pcResult.signature || null,
+              protocolFillId: pcDedupKey,
+              webhookPayload: { ...payload, partialClose: true, fraction: partialCloseFraction },
+              executionMethod: pcResult.executionMethod || 'legacy',
+            },
+            deltas: {
+              totalPnlDelta: pcPnl,
+              totalVolumeDelta: partialCloseSize * pcFillPrice,
+              lastTradeAt: new Date().toISOString(),
+            },
+          });
+
+          // Sync position state from on-chain (reflects the new reduced size).
+          syncPositionFromOnChain(botId, bot.walletAddress, bot.market).catch(err =>
+            console.error(`[Webhook] Post-partial-close sync error:`, err));
+
+          // Schedule debounced Telegram notification.
+          schedulePartialCloseNotification({
+            walletAddress: bot.walletAddress,
+            botId,
+            botName: bot.name,
+            market: bot.market,
+            side: pcPositionSide === 'long' ? 'LONG' : 'SHORT',
+            closedFraction: partialCloseFraction,
+            realizedPnl: pcPnl,
+            price: pcFillPrice,
+          });
+
+          // Fan out to copy-trade subscribers proportionally.
+          if (botPublishedInfo?.isActive) {
+            routeSignalToSubscribers(botId, {
+              action: action as 'buy' | 'sell',
+              contracts,
+              positionSize,
+              price: signalPrice || String(pcFillPrice),
+              isCloseSignal: false,
+              strategyPositionSize,
+              partialCloseFraction,
+            }).catch(err => console.error(`[Subscriber Routing] Partial close routing error:`, err));
+          }
+
+          await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
+          return res.json({
+            status: "success",
+            type: "partial_close",
+            fraction: partialCloseFraction,
+            closedSize: partialCloseSize,
+            pnl: pcPnl,
+            signature: pcResult.signature,
+          });
+        } catch (pcErr: any) {
+          console.error(`[Webhook] Partial close handler error:`, pcErr);
+          await storage.updateWebhookLog(log.id, { errorMessage: `Partial close error: ${pcErr.message}`, processed: true });
+          return res.status(500).json({ error: "Partial close failed", details: pcErr.message });
+        } finally {
+          clearTimeout(lockTimer);
+          releaseBotLock();
+        }
+      }
+
       // DEFENSE-IN-DEPTH: Double-check we're not proceeding with a close signal
       // If isCloseSignal was true, all code paths above should have returned
       // This is a safety net to prevent any edge case from opening new positions on close signals
-      if (isCloseSignal) {
-        console.error(`[Webhook] CRITICAL: Close signal fell through without returning! This should never happen.`);
+      if (isCloseSignal || isPartialClose) {
+        console.error(`[Webhook] CRITICAL: Close/partial signal fell through without returning! This should never happen.`);
         await storage.updateWebhookLog(log.id, { 
           errorMessage: "Close signal fell through to regular execution - blocked for safety", 
           processed: true 
