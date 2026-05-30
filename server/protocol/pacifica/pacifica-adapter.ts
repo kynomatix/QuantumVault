@@ -1,4 +1,4 @@
-import type { ProtocolAdapter, CreateSubaccountInput, SubaccountCaps } from '../adapter.js';
+import type { ProtocolAdapter, CreateSubaccountInput, SubaccountCaps, ReuseSubaccountInput, ReuseSubaccountResult } from '../adapter.js';
 import type {
   ProtocolMarket,
   ProtocolPosition,
@@ -136,12 +136,12 @@ export class PacificaAdapter implements ProtocolAdapter {
   readonly collateralSymbol = 'USDC';
   readonly minTransferAmount = PACIFICA_MIN_TRANSFER_USDC;
   // Subaccount Recycling Plan §4.1 / §14.2. Pacifica has no delete-subaccount API (permanent)
-  // and a hard 10-cap per agent. `recyclable` stays false until Phase E implements
-  // verifySubaccountEmpty + reuseSubaccount — flip to true then so the orchestrator never
-  // routes to an unimplemented reuse path (§14.5 invariant). Nothing reads this yet (Phase B scaffolding).
+  // and a hard 10-cap per agent. `recyclable` is true now that Phase E implements the full
+  // sweep-empty → pool → reuse lifecycle (verifySubaccountEmpty + reuseSubaccount), so the
+  // orchestrator may route creates through the spare pool (§14.5 invariant).
   readonly subaccountCaps: SubaccountCaps = {
     permanent: true,
-    recyclable: false,
+    recyclable: true,
     maxPerAgent: 10,
     accountModel: 'subaccount',
   };
@@ -1667,6 +1667,131 @@ export class PacificaAdapter implements ProtocolAdapter {
     return {
       subaccountId,
       wasNewAccount,
+      transferSucceeded: true,
+      depositTxSignature,
+    };
+  }
+
+  /**
+   * Re-fund an existing (swept-empty, pooled) subaccount for reuse (§8). This is
+   * the create-path mirror of `provisionFundedSubaccount` MINUS the createSubaccount
+   * step — the subaccount already exists on Pacifica and its retained key is already
+   * held by the caller. We only:
+   *   1. top the main account up by the deposit gap (if any) and wait for the
+   *      indexer to reflect it (§7.1), then
+   *   2. transfer `fundingAmount` from main → the existing subaccount.
+   * Builder-code + referral enrollment is warmed best-effort (idempotent; a no-op
+   * once the main account is already enrolled) and never blocks reuse.
+   *
+   * Fund-safety: if the transfer fails the subaccount simply stays empty and funds
+   * remain in the main account (recoverable via Add Funds) — we return
+   * `transferSucceeded:false` with a warning rather than throwing. We NEVER create
+   * a new subaccount here, so reuse can never breach the per-agent cap.
+   */
+  async reuseSubaccount(input: ReuseSubaccountInput): Promise<ReuseSubaccountResult> {
+    if (!Number.isFinite(input.fundingAmount) || input.fundingAmount < PACIFICA_MIN_TRANSFER_USDC) {
+      throw new Error(
+        `reuseSubaccount: fundingAmount must be >= $${PACIFICA_MIN_TRANSFER_USDC} (Pacifica minimum). Got: ${input.fundingAmount}`,
+      );
+    }
+    if (!input.subaccountId) {
+      throw new Error('reuseSubaccount: subaccountId is required (reuse never creates a subaccount)');
+    }
+
+    // 1. Read current main-account state. The agent main account must already exist
+    // (a spare can only have been pooled from a previously-created bot), so a missing
+    // main account is a real inconsistency — bail rather than silently re-create.
+    const initialInfo = await this.getAccountInfo(input.agentPublicKey);
+    if (!initialInfo.exists) {
+      throw new Error(
+        `reuseSubaccount: main account ${input.agentPublicKey.slice(0, 8)}... not found on Pacifica; cannot reuse subaccount ${input.subaccountId}`,
+      );
+    }
+    const currentMainBalance = initialInfo.balance;
+
+    // 2. Deposit the gap into the main account if it can't cover the funding amount.
+    let depositTxSignature: string | undefined;
+    const rawGap = input.fundingAmount - currentMainBalance;
+    if (rawGap > 0) {
+      const depositAmount = Math.max(rawGap, PACIFICA_MIN_TRANSFER_USDC);
+      console.log(`[PacificaAdapter] reuseSubaccount: depositing $${depositAmount} (gap=$${rawGap.toFixed(2)}, mainBalance=$${currentMainBalance.toFixed(2)}, fundingAmount=$${input.fundingAmount}, subaccount=${input.subaccountId})`);
+
+      const depositResult = await this.executeDeposit({
+        agentPublicKey: input.agentPublicKey,
+        agentSecretKey: input.mainSecretKey,
+        amount: depositAmount,
+      });
+      if (!depositResult.success) {
+        throw new Error(`reuseSubaccount: deposit failed: ${depositResult.error}`);
+      }
+      depositTxSignature = depositResult.txSignature;
+
+      // 3. Wait for Pacifica to index the deposit before transferring. A timeout is
+      // fatal for the create path (we cannot fund from a balance we haven't confirmed)
+      // — funds are safe in main and the retry will see them already credited.
+      const waitResult = await this.waitForMainAccountBalance(input.agentPublicKey, input.fundingAmount, {
+        seedBalance: currentMainBalance,
+      });
+      if (!waitResult.indexed) {
+        throw new Error(
+          `reuseSubaccount: Pacifica did not index deposit within 90s. ` +
+          `Deposit txSignature=${depositTxSignature || 'unknown'}, lastObservedBalance=$${waitResult.lastBalance}. ` +
+          `Your funds are safe and will appear in your main account shortly — ` +
+          `simply retry bot creation in a moment and it will use the already-deposited funds.`,
+        );
+      }
+      console.log(`[PacificaAdapter] reuseSubaccount: Pacifica indexed deposit in ${(waitResult.elapsedMs / 1000).toFixed(1)}s, mainBalance=$${waitResult.lastBalance}`);
+    } else {
+      console.log(`[PacificaAdapter] reuseSubaccount: skipping deposit (mainBalance=$${currentMainBalance} already covers fundingAmount=$${input.fundingAmount})`);
+    }
+
+    // 4. Transfer fundingAmount from main → the existing subaccount. On failure the
+    // subaccount stays empty and funds remain in main (recoverable) — never fatal.
+    try {
+      const transferResult = await this.transferBetweenSubaccounts({
+        agentSecretKey: input.mainSecretKey,
+        mainWalletAddress: input.agentPublicKey,
+        fromSubaccountId: '', // empty = transfer from main account (adapter falls back to signer pubkey)
+        toSubaccountId: input.subaccountId,
+        amount: input.fundingAmount,
+      });
+      if (!transferResult.success) {
+        return {
+          subaccountId: input.subaccountId,
+          transferSucceeded: false,
+          depositTxSignature,
+          warning: `Reused subaccount but transfer failed: ${transferResult.error || 'unknown'}. Funds are safe in your main account — use Add Funds to retry.`,
+        };
+      }
+    } catch (err: any) {
+      return {
+        subaccountId: input.subaccountId,
+        transferSucceeded: false,
+        depositTxSignature,
+        warning: `Reused subaccount but transfer threw: ${err.message}. Funds are safe in your main account — use Add Funds to retry.`,
+      };
+    }
+
+    // 5. Warm builder-code + referral enrollment (idempotent; no-op once enrolled).
+    // Fail-OPEN: enrollment retries on the first trade, so never block reuse on it.
+    try {
+      await Promise.allSettled([
+        this.approveBuilderCodeForUser({
+          agentPublicKey: input.agentPublicKey,
+          agentSecretKey: input.mainSecretKey,
+        }),
+        this.claimReferralCodeForUser({
+          agentPublicKey: input.agentPublicKey,
+          agentSecretKey: input.mainSecretKey,
+        }),
+      ]);
+    } catch (enrollErr: any) {
+      console.warn('[PacificaAdapter] reuseSubaccount: enrollment warm-up failed (non-fatal, retries on next trade):', enrollErr?.message || enrollErr);
+    }
+
+    console.log(`[PacificaAdapter] reuseSubaccount: complete. subaccount=${input.subaccountId} funded=$${input.fundingAmount}`);
+    return {
+      subaccountId: input.subaccountId,
       transferSucceeded: true,
       depositTxSignature,
     };

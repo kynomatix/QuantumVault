@@ -44,6 +44,32 @@ export interface CreateSubaccountInput {
 }
 
 /**
+ * Input for re-funding an existing (swept-empty, pooled) subaccount for reuse
+ * (Subaccount Recycling Plan §8). Unlike create, the subaccount already exists
+ * on the exchange and we already hold its retained signing key — so reuse only
+ * tops the subaccount back up from the main account and performs NO create step.
+ */
+export interface ReuseSubaccountInput {
+  mainSecretKey: Uint8Array;
+  agentPublicKey: string;
+  /** The existing on-chain subaccount id being reused (a verified-empty spare). */
+  subaccountId: string;
+  fundingAmount: number;
+}
+
+/**
+ * Result of `reuseSubaccount`. Mirrors the funding-relevant fields of the create
+ * path: `transferSucceeded:false` means the subaccount exists but funds remain in
+ * the main account (recoverable via Add Funds) — never a fund-loss.
+ */
+export interface ReuseSubaccountResult {
+  subaccountId: string;
+  transferSucceeded: boolean;
+  depositTxSignature?: string;
+  warning?: string;
+}
+
+/**
  * Static capability descriptor read by the core recycling orchestrator
  * (Subaccount Recycling Plan §4.1 / §14.2). Adapters that leave this undefined
  * are treated as create-only (today's behavior) — no spare pool, no reuse.
@@ -132,6 +158,13 @@ export interface ProtocolAdapter {
   getOpenStopOrders?(agentPublicKey: string, subaccountId?: string, symbol?: string): Promise<Array<{ order_id: string; symbol: string }>>;
   /** True only when the subaccount has no equity above dust, no open positions, and no open/stop orders (§8). */
   verifySubaccountEmpty?(input: { agentPublicKey: string; subaccountId?: string }): Promise<boolean>;
+  /**
+   * Re-fund an existing (swept-empty, pooled) subaccount so it can back a new bot
+   * (§8). The subaccount already exists and its retained key is already held — this
+   * performs NO create step, only the deposit-gap top-up + main→subaccount transfer.
+   * Recyclable adapters only (those with `subaccountCaps.recyclable === true`).
+   */
+  reuseSubaccount?(input: ReuseSubaccountInput): Promise<ReuseSubaccountResult>;
   /**
    * Poll the main account until its collateral balance reaches `targetBalance`,
    * or the timeout elapses. Exists for exchanges (e.g. Pacifica) whose indexer

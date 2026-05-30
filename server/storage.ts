@@ -8,6 +8,7 @@ import {
   bots,
   tradingBots,
   protocolSubaccounts,
+  type ProtocolSubaccount,
   botTrades,
   botPositions,
   equityEvents,
@@ -87,6 +88,20 @@ import {
   type InsertReferralRewardEvent,
 } from "@shared/schema";
 
+/** A spare subaccount row atomically claimed for reuse (Subaccount Recycling Plan §5.1). */
+export type ClaimedSpare = {
+  id: number;
+  walletAddress: string;
+  protocol: string;
+  protocolSubaccountId: string | null;
+  agentPublicKey: string | null;
+  subaccountKeyEncryptedV3: string | null;
+  aadVersion: number | null;
+  botId: string | null;
+  claimToken: string | null;
+  status: string;
+};
+
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
@@ -147,7 +162,43 @@ export interface IStorage {
     botId: string | null;
     agentPublicKey: string | null;
     lastError: string;
-  }): Promise<void>;
+    // §5.1.4: when set, the quarantine is CAS-guarded on (status='reserving' AND
+    // claim_token) so a stale lease holder cannot clobber a reclaimed/finalized row.
+    // Returns false when the CAS is lost (lease no longer ours). Omit for paths that
+    // own the row outright (delete / fresh-provision).
+    claimToken?: string;
+  }): Promise<boolean>;
+  // Subaccount Recycling Plan §5.1 (Phase E). Atomically claim the oldest reusable
+  // spare for a given (wallet, protocol, agent), flipping it spare→reserving under a
+  // per-reservation token. Uses FOR UPDATE SKIP LOCKED so concurrent creates never
+  // hand out the same spare. Only claims rows that still have a retained key + id.
+  // Returns the claimed row, or undefined when the pool is empty.
+  claimSpareSubaccount(params: {
+    walletAddress: string;
+    protocol: string;
+    agentPublicKey: string;
+    claimToken: string;
+  }): Promise<ClaimedSpare | undefined>;
+  // §5.1. Finalize a reservation: reserving→active, attach the new bot, clear the
+  // token. CAS-guarded on (status='reserving' AND claim_token) so a lost race (token
+  // mismatch / already recovered) returns false instead of clobbering another owner.
+  finalizeReusedSubaccount(params: {
+    protocol: string;
+    protocolSubaccountId: string;
+    claimToken: string;
+    botId: string;
+  }): Promise<boolean>;
+  // §5.1.4. Return a still-reserving slot to the spare pool (verified empty). CAS on
+  // status='reserving' (+ optional token). Refreshes released_at/last_verified_empty_at.
+  releaseReservationToSpare(params: {
+    protocol: string;
+    protocolSubaccountId: string;
+    claimToken?: string;
+  }): Promise<boolean>;
+  // §5.1.4. Reservations whose lease (claimed_at) is older than ttlMs — recovery input.
+  findExpiredReservations(ttlMs: number): Promise<ProtocolSubaccount[]>;
+  // §8. Record a successful verify-empty check (advisory freshness for the next reuse).
+  markSubaccountVerifiedEmpty(protocol: string, protocolSubaccountId: string): Promise<void>;
   createTradingBot(bot: InsertTradingBot): Promise<TradingBot>;
   updateTradingBot(id: string, updates: Partial<InsertTradingBot>): Promise<TradingBot | undefined>;
   // Phase 4b: write V3 ciphertext for per-bot subaccount key.
@@ -665,7 +716,39 @@ export class DatabaseStorage implements IStorage {
     botId: string | null;
     agentPublicKey: string | null;
     lastError: string;
-  }): Promise<void> {
+    claimToken?: string;
+  }): Promise<boolean> {
+    // §5.1.4 CAS-guarded quarantine. When a claimToken is supplied the caller is a
+    // lease holder (reuse-on-create / lease-recovery). A TTL-based recovery assumes
+    // a slow holder is dead and can reclaim+re-finalize the slot to another owner;
+    // if the original (now stale) holder later quarantines, an UNCONDITIONAL write
+    // would clobber that new owner's active row and detach its bot. So guard on
+    // (status='reserving' AND claim_token) and no-op when we've lost the lease.
+    if (params.claimToken !== undefined) {
+      const result = await db.update(protocolSubaccounts)
+        .set({
+          status: 'stuck_funds',
+          botId: params.botId,
+          agentPublicKey: params.agentPublicKey,
+          lastError: params.lastError,
+          claimToken: null,
+          claimedAt: null,
+        } as any)
+        .where(and(
+          eq(protocolSubaccounts.protocol, params.protocol),
+          eq(protocolSubaccounts.protocolSubaccountId, params.protocolSubaccountId),
+          eq(protocolSubaccounts.status, 'reserving'),
+          eq(protocolSubaccounts.claimToken, params.claimToken),
+        ))
+        .returning({ id: protocolSubaccounts.id });
+      if (result.length === 0) {
+        console.warn(`[Storage] markSubaccountStuckFunds CAS lost for ${params.protocol}/${params.protocolSubaccountId} (lease reclaimed/finalized by another owner) — not clobbering current row`);
+        return false;
+      }
+      return true;
+    }
+    // Unconditional path: the caller owns the row outright (delete/fresh-provision),
+    // with no competing lease holder.
     await db.insert(protocolSubaccounts)
       .values({
         walletAddress: params.walletAddress,
@@ -686,6 +769,122 @@ export class DatabaseStorage implements IStorage {
           lastError: params.lastError,
         } as any,
       });
+    return true;
+  }
+
+  async claimSpareSubaccount(params: {
+    walletAddress: string;
+    protocol: string;
+    agentPublicKey: string;
+    claimToken: string;
+  }): Promise<ClaimedSpare | undefined> {
+    // Single atomic statement: lock the oldest eligible spare with SKIP LOCKED so
+    // concurrent creates fan out across distinct rows (never the same one), then
+    // flip it to 'reserving' under our claim token. Only rows that still have a
+    // retained key + on-chain id are eligible — a keyless spare can't be re-signed.
+    const result = await db.execute(sql`
+      UPDATE protocol_subaccounts
+      SET status = 'reserving', claim_token = ${params.claimToken}, claimed_at = NOW()
+      WHERE id = (
+        SELECT id FROM protocol_subaccounts
+        WHERE wallet_address = ${params.walletAddress}
+          AND protocol = ${params.protocol}
+          AND agent_public_key = ${params.agentPublicKey}
+          AND status = 'spare'
+          AND protocol_subaccount_id IS NOT NULL
+          AND subaccount_key_encrypted_v3 IS NOT NULL
+        ORDER BY released_at ASC NULLS FIRST
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
+      )
+      RETURNING id, wallet_address, protocol, protocol_subaccount_id, agent_public_key,
+                subaccount_key_encrypted_v3, aad_version, bot_id, claim_token, status
+    `);
+    const row: any = (result as any).rows?.[0] ?? (result as any)[0];
+    if (!row) return undefined;
+    return {
+      id: Number(row.id),
+      walletAddress: row.wallet_address,
+      protocol: row.protocol,
+      protocolSubaccountId: row.protocol_subaccount_id,
+      agentPublicKey: row.agent_public_key,
+      subaccountKeyEncryptedV3: row.subaccount_key_encrypted_v3,
+      aadVersion: row.aad_version == null ? null : Number(row.aad_version),
+      botId: row.bot_id,
+      claimToken: row.claim_token,
+      status: row.status,
+    };
+  }
+
+  async finalizeReusedSubaccount(params: {
+    protocol: string;
+    protocolSubaccountId: string;
+    claimToken: string;
+    botId: string;
+  }): Promise<boolean> {
+    const result = await db.update(protocolSubaccounts)
+      .set({
+        status: 'active',
+        botId: params.botId,
+        claimToken: null,
+        claimedAt: null,
+        confirmedAt: sql`NOW()`,
+        lastError: null,
+      } as any)
+      .where(and(
+        eq(protocolSubaccounts.protocol, params.protocol),
+        eq(protocolSubaccounts.protocolSubaccountId, params.protocolSubaccountId),
+        eq(protocolSubaccounts.status, 'reserving'),
+        eq(protocolSubaccounts.claimToken, params.claimToken),
+      ))
+      .returning({ id: protocolSubaccounts.id });
+    return result.length > 0;
+  }
+
+  async releaseReservationToSpare(params: {
+    protocol: string;
+    protocolSubaccountId: string;
+    claimToken?: string;
+  }): Promise<boolean> {
+    const conditions = [
+      eq(protocolSubaccounts.protocol, params.protocol),
+      eq(protocolSubaccounts.protocolSubaccountId, params.protocolSubaccountId),
+      eq(protocolSubaccounts.status, 'reserving'),
+    ];
+    if (params.claimToken) conditions.push(eq(protocolSubaccounts.claimToken, params.claimToken));
+    const result = await db.update(protocolSubaccounts)
+      .set({
+        status: 'spare',
+        botId: null,
+        claimToken: null,
+        claimedAt: null,
+        releasedAt: sql`NOW()`,
+        lastVerifiedEmptyAt: sql`NOW()`,
+        lastError: null,
+      } as any)
+      .where(and(...conditions))
+      .returning({ id: protocolSubaccounts.id });
+    return result.length > 0;
+  }
+
+  async findExpiredReservations(ttlMs: number): Promise<ProtocolSubaccount[]> {
+    const cutoffEpochSec = Math.floor((Date.now() - ttlMs) / 1000);
+    return await db.select()
+      .from(protocolSubaccounts)
+      .where(and(
+        eq(protocolSubaccounts.status, 'reserving'),
+        sql`${protocolSubaccounts.claimedAt} IS NOT NULL`,
+        sql`${protocolSubaccounts.claimedAt} < to_timestamp(${cutoffEpochSec})`,
+      ));
+  }
+
+  async markSubaccountVerifiedEmpty(protocol: string, protocolSubaccountId: string): Promise<void> {
+    await db.update(protocolSubaccounts)
+      .set({ lastVerifiedEmptyAt: sql`NOW()` } as any)
+      .where(and(
+        eq(protocolSubaccounts.protocol, protocol),
+        eq(protocolSubaccounts.protocolSubaccountId, protocolSubaccountId),
+      ));
   }
 
   async createTradingBot(bot: InsertTradingBot): Promise<TradingBot> {

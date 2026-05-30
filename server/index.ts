@@ -6,6 +6,7 @@ import { storage } from "./storage";
 import { ensureSchema, checkUmkStorageSecretHealth, logSecurityConfigSummary } from "./db";
 import { startPeriodicReconciliation } from "./reconciliation-service";
 import { startOrphanedSubaccountCleanup } from "./orphaned-subaccount-cleanup";
+import { startSubaccountLeaseRecoveryJob } from "./subaccount-lease-recovery";
 import { startPnlSnapshotJob } from "./pnl-snapshot-job";
 import { startRetryWorker, queueTradeRetry } from "./trade-retry-service";
 import { startProfitShareRetryJob } from "./profit-share-retry-job";
@@ -601,6 +602,8 @@ app.use((req, res, next) => {
       setTimeout(() => {
         log('[Staggered startup] Starting orphaned subaccount cleanup');
         startOrphanedSubaccountCleanup();
+        log('[Staggered startup] Starting subaccount lease-recovery job');
+        startSubaccountLeaseRecoveryJob();
       }, 30_000);
 
       // ~45s: periodic snapshot/retry jobs (don't need to run immediately)

@@ -1221,6 +1221,53 @@ export function rebindSubaccountKeyToPooledV3(params: {
 }
 
 /**
+ * Reuse rebind (§6.1) — the mirror of `rebindSubaccountKeyToPooledV3` for the
+ * create path. Takes a retained spare-row key (POOLED or legacy BOT_UUID), dual-
+ * reads it (which performs the mandatory pubkey-equals-`protocolSubaccountId`
+ * verification), then single-writes it under the NEW bot's UUID-bound AAD so the
+ * key can live on the new bot row and be read by the unchanged
+ * `decryptBotSubaccountKey` path — keeping the live read path on the bot row
+ * during transition (cutover-last, §6.1). Returns the new bot-row ciphertext, or
+ * `null` if the verified read fails (we never hand back a key that does not match
+ * the intended subaccount).
+ */
+export function rebindRetainedKeyToBotUuidV3(params: {
+  umk: Buffer;
+  currentEncryptedV3: string;
+  currentAadVersion: number;
+  protocol: string;
+  walletAddress: string;
+  protocolSubaccountId: string;
+  newBotId: string;
+  legacyBotId?: string | null;
+}): { encryptedV3: string } | null {
+  const { umk, currentEncryptedV3, currentAadVersion, protocol, walletAddress, protocolSubaccountId, newBotId, legacyBotId } = params;
+
+  const decrypted = decryptRetainedSubaccountKeyV3({
+    umk,
+    encryptedV3: currentEncryptedV3,
+    aadVersion: currentAadVersion,
+    protocol,
+    walletAddress,
+    protocolSubaccountId,
+    legacyBotId,
+  });
+  if (!decrypted) return null;
+
+  try {
+    const buf = Buffer.from(decrypted.secretKey);
+    try {
+      const encryptedV3 = encryptBotSubaccountKeyV3(umk, buf, walletAddress, newBotId);
+      return { encryptedV3 };
+    } finally {
+      zeroizeBuffer(buf);
+    }
+  } finally {
+    decrypted.cleanup();
+  }
+}
+
+/**
  * One-shot legacy→V3 migration for a single bot's subaccount key. Persists the
  * V3 ciphertext to `bot_subaccount_key_encrypted_v3`. The legacy column is left
  * intact until Phase 6 drops it.

@@ -11,6 +11,7 @@ import {
   encryptBotSubaccountKeyV3,
   decryptRetainedSubaccountKeyV3,
   rebindSubaccountKeyToPooledV3,
+  rebindRetainedKeyToBotUuidV3,
 } from '../../server/session-v3.js';
 
 const PROTOCOL = 'pacifica';
@@ -184,5 +185,100 @@ describe('pooled subaccount key crypto (Phase C)', () => {
     expect(res).not.toBeNull();
     expect(Buffer.from(res!.secretKey).equals(secret)).toBe(true);
     res!.cleanup();
+  });
+});
+
+describe('reverse rebind: POOLED → BOT_UUID (Phase E reuse-on-create, T001)', () => {
+  it('rebinds a POOLED spare key onto a new bot UUID, then reads via the bot-row path', () => {
+    const { umk, secret, protocolSubaccountId, walletAddress } = freshFixture();
+    const newBotId = 'new-bot-uuid-reuse';
+    // A spare key as written by the recycle-on-delete path.
+    const pooledCt = encryptPooledSubaccountKeyV3(umk, secret, PROTOCOL, walletAddress, protocolSubaccountId);
+
+    const rebound = rebindRetainedKeyToBotUuidV3({
+      umk,
+      currentEncryptedV3: pooledCt,
+      currentAadVersion: SUBACCOUNT_AAD_VERSION.POOLED_SUBACCOUNT,
+      protocol: PROTOCOL,
+      walletAddress,
+      protocolSubaccountId,
+      newBotId,
+    });
+    expect(rebound).not.toBeNull();
+
+    // Reads back under the BOT_UUID AAD bound to the NEW bot, yielding the same key.
+    const asBot = decryptRetainedSubaccountKeyV3({
+      umk,
+      encryptedV3: rebound!.encryptedV3,
+      aadVersion: SUBACCOUNT_AAD_VERSION.BOT_UUID,
+      protocol: PROTOCOL,
+      walletAddress,
+      protocolSubaccountId,
+      legacyBotId: newBotId,
+    });
+    expect(asBot).not.toBeNull();
+    expect(Buffer.from(asBot!.secretKey).equals(secret)).toBe(true);
+    asBot!.cleanup();
+  });
+
+  it('the rebound ciphertext no longer authenticates under the POOLED AAD', () => {
+    const { umk, secret, protocolSubaccountId, walletAddress } = freshFixture();
+    const newBotId = 'bot-uuid-binding-check';
+    const pooledCt = encryptPooledSubaccountKeyV3(umk, secret, PROTOCOL, walletAddress, protocolSubaccountId);
+    const rebound = rebindRetainedKeyToBotUuidV3({
+      umk, currentEncryptedV3: pooledCt, currentAadVersion: SUBACCOUNT_AAD_VERSION.POOLED_SUBACCOUNT,
+      protocol: PROTOCOL, walletAddress, protocolSubaccountId, newBotId,
+    });
+    expect(rebound).not.toBeNull();
+    const asPooled = decryptRetainedSubaccountKeyV3({
+      umk, encryptedV3: rebound!.encryptedV3, aadVersion: SUBACCOUNT_AAD_VERSION.POOLED_SUBACCOUNT,
+      protocol: PROTOCOL, walletAddress, protocolSubaccountId,
+    });
+    expect(asPooled).toBeNull();
+  });
+
+  it('rebinds a legacy BOT_UUID key onto a different bot UUID (delete→reuse without an intervening pool write)', () => {
+    const { umk, secret, protocolSubaccountId, walletAddress } = freshFixture();
+    const oldBotId = 'old-bot';
+    const newBotId = 'new-bot';
+    const legacyCt = encryptBotSubaccountKeyV3(umk, secret, walletAddress, oldBotId);
+
+    const rebound = rebindRetainedKeyToBotUuidV3({
+      umk,
+      currentEncryptedV3: legacyCt,
+      currentAadVersion: SUBACCOUNT_AAD_VERSION.BOT_UUID,
+      protocol: PROTOCOL,
+      walletAddress,
+      protocolSubaccountId,
+      newBotId,
+      legacyBotId: oldBotId,
+    });
+    expect(rebound).not.toBeNull();
+
+    const asNew = decryptRetainedSubaccountKeyV3({
+      umk, encryptedV3: rebound!.encryptedV3, aadVersion: SUBACCOUNT_AAD_VERSION.BOT_UUID,
+      protocol: PROTOCOL, walletAddress, protocolSubaccountId, legacyBotId: newBotId,
+    });
+    expect(asNew).not.toBeNull();
+    expect(Buffer.from(asNew!.secretKey).equals(secret)).toBe(true);
+    asNew!.cleanup();
+
+    // The OLD bot binding must no longer authenticate the rebound bytes.
+    const asOld = decryptRetainedSubaccountKeyV3({
+      umk, encryptedV3: rebound!.encryptedV3, aadVersion: SUBACCOUNT_AAD_VERSION.BOT_UUID,
+      protocol: PROTOCOL, walletAddress, protocolSubaccountId, legacyBotId: oldBotId,
+    });
+    expect(asOld).toBeNull();
+  });
+
+  it('FUND SAFETY: returns null when the source ciphertext fails to decrypt (wrong AAD)', () => {
+    const { umk, secret, protocolSubaccountId, walletAddress } = freshFixture();
+    const pooledCt = encryptPooledSubaccountKeyV3(umk, secret, PROTOCOL, walletAddress, protocolSubaccountId);
+    // Claim it is a BOT_UUID key — authentication must fail, so no rebind happens.
+    const rebound = rebindRetainedKeyToBotUuidV3({
+      umk, currentEncryptedV3: pooledCt, currentAadVersion: SUBACCOUNT_AAD_VERSION.BOT_UUID,
+      protocol: PROTOCOL, walletAddress, protocolSubaccountId, newBotId: 'whatever', legacyBotId: 'whatever',
+    });
+    expect(rebound).toBeNull();
   });
 });

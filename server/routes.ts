@@ -221,6 +221,20 @@ function isRecycleOnDeleteEnabled(): boolean {
 }
 
 /**
+ * Subaccount Recycling Plan §8 / §10 (Phase E) — kill switch for "reuse on
+ * create". Default OFF: when unset/false bot creation always provisions a fresh
+ * subaccount (today's behavior), regardless of how many spares are pooled. Set
+ * `REUSE_ON_CREATE=true` to let creates drain the spare pool first (claim → verify
+ * empty → re-fund → rebind key → finalize) and fall back to fresh provisioning when
+ * no usable spare exists. Independent of `RECYCLE_ON_DELETE`: pooling and reuse are
+ * gated separately, and reuse additionally requires `subaccountCaps.recyclable`.
+ */
+function isReuseOnCreateEnabled(): boolean {
+  const v = (process.env.REUSE_ON_CREATE || '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
+/**
  * Phase D (§7.2) — decide whether a sweep result must BLOCK bot deletion.
  *
  * Every error-returning path in `sweepPacificaSubaccount` leaves the funds INTACT in
@@ -1028,7 +1042,7 @@ import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable
 import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification, type TradeNotification, buildDefaultInlineKeyboard } from "./notification-service";
 import { classifySignal } from "./trading/signal-classifier";
 import { registerTelegramMiniAppRoutes } from "./telegram-mini-app";
-import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3 } from "./session-v3";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3, rebindRetainedKeyToBotUuidV3 } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback, cancelRetryJobsForBot } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { DOCS_MARKDOWN } from "./docs-markdown";
@@ -7117,6 +7131,19 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // value (not the pre-allocated `nextSubaccountId`) is persisted into the legacy
       // `driftSubaccountId` column to keep DB and on-chain state in sync.
       let adapterReturnedNumericSubaccountId: number | null = null;
+      // Subaccount Recycling Plan §8 (Phase E) — when a create reuses a pooled spare
+      // instead of provisioning fresh, this carries the claim across the bot insert so
+      // the post-insert block can rebind the retained key onto the new bot row and
+      // CAS-finalize the reservation. Null ⇒ a normal (fresh-provision) create.
+      let _reuseContext: {
+        claimToken: string;
+        protocol: string;
+        protocolSubaccountId: string;
+        agentPublicKey: string;
+        currentEncryptedV3: string;
+        currentAadVersion: number;
+        legacyBotId: string | null;
+      } | null = null;
 
       const defaultAdapter = getDefaultAdapter();
       const defaultCaps = defaultAdapter.getCapabilities();
@@ -7187,8 +7214,104 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
         console.log(`[Bot Creation] Creating ${adapter.protocolName} subaccount under agent ${agentKeypair.publicKey.toString()}${botKeypair ? ` with pre-generated sub key ${botKeypair.publicKey.toString()}` : ''}${usePacificaAtomicProvision ? ` (atomic provision, fundingAmount=$${fundingAmountNum})` : ''}`);
 
+        // Subaccount Recycling Plan §8 (Phase E) — reuse on create. Behind the
+        // REUSE_ON_CREATE kill switch (default OFF) AND the adapter's `recyclable`
+        // capability, try to drain the spare pool before provisioning fresh. ALL the
+        // Pacifica work (verify-empty + re-fund) happens HERE, outside any DB lock; the
+        // only DB writes are the atomic claim / quarantine / release. On success the
+        // post-insert block rebinds the retained key onto the new bot row and finalizes
+        // the claim. On no-spare / any failure we fall through to fresh provisioning so
+        // the user still gets a working bot.
+        let reuseHandled = false;
+        const attemptReuse =
+          isReuseOnCreateEnabled() &&
+          usePacificaAtomicProvision &&
+          adapter.subaccountCaps?.recyclable === true &&
+          typeof (adapter as any).reuseSubaccount === 'function' &&
+          typeof adapter.verifySubaccountEmpty === 'function';
+
+        if (attemptReuse) {
+          const { randomUUID } = await import('crypto');
+          const claimToken = randomUUID();
+          const agentPub = agentKeypair.publicKey.toString();
+          const spare = await storage.claimSpareSubaccount({
+            walletAddress: req.walletAddress!,
+            protocol: adapter.protocolName,
+            agentPublicKey: agentPub,
+            claimToken,
+          });
+          if (spare && spare.protocolSubaccountId && spare.subaccountKeyEncryptedV3 && spare.aadVersion != null) {
+            const subId = spare.protocolSubaccountId;
+            try {
+              const isEmpty = await adapter.verifySubaccountEmpty!({ agentPublicKey: agentPub, subaccountId: subId });
+              if (!isEmpty) {
+                // Residual funds/positions/orders — not safe to reuse. Quarantine the
+                // slot (out of the pool) and fall through to fresh provisioning.
+                console.warn(`[Bot Creation][Reuse] spare ${subId} failed verify-empty; quarantining and provisioning fresh`);
+                await storage.markSubaccountStuckFunds({
+                  walletAddress: req.walletAddress!,
+                  protocol: adapter.protocolName,
+                  protocolSubaccountId: subId,
+                  botId: null,
+                  agentPublicKey: agentPub,
+                  lastError: 'reuse verify-empty returned false (residual funds/positions/orders)',
+                  claimToken,
+                });
+              } else {
+                await storage.markSubaccountVerifiedEmpty(adapter.protocolName, subId);
+                const pacificaAdapter = adapter as import('./protocol/pacifica/pacifica-adapter').PacificaAdapter;
+                const reuseResult = await pacificaAdapter.reuseSubaccount!({
+                  mainSecretKey: agentKeypair.secretKey,
+                  agentPublicKey: agentPub,
+                  subaccountId: subId,
+                  fundingAmount: fundingAmountNum,
+                });
+                botSubaccountPublicKey = subId;
+                // Stay 'pending' until the post-insert rebind writes the bot-row key,
+                // mirroring the fresh-provision path's CHECK-constraint handling.
+                subaccountStatus = 'pending';
+                _reuseContext = {
+                  claimToken,
+                  protocol: adapter.protocolName,
+                  protocolSubaccountId: subId,
+                  agentPublicKey: agentPub,
+                  currentEncryptedV3: spare.subaccountKeyEncryptedV3,
+                  currentAadVersion: spare.aadVersion,
+                  legacyBotId: spare.botId,
+                };
+                (req as any)._pacificaProvisionResult = {
+                  funded: reuseResult.transferSucceeded,
+                  wasNewAccount: false,
+                  depositTxSignature: reuseResult.depositTxSignature,
+                  warning: reuseResult.warning,
+                  fundedAmount: reuseResult.transferSucceeded ? fundingAmountNum : 0,
+                };
+                reuseHandled = true;
+                console.log(`[Bot Creation][Reuse] reused spare subaccount=${subId} funded=${reuseResult.transferSucceeded}${reuseResult.warning ? ` warning="${reuseResult.warning}"` : ''}`);
+              }
+            } catch (reuseErr: any) {
+              // Reuse failed AFTER claiming. reuseSubaccount keeps funds safe in the
+              // main account on any failure, and the slot is still a verified-empty
+              // spare, so return it to the pool and fall through to fresh provisioning.
+              console.error(`[Bot Creation][Reuse] reuse failed for spare ${subId}, releasing and provisioning fresh:`, reuseErr?.message || reuseErr);
+              try {
+                await storage.releaseReservationToSpare({ protocol: adapter.protocolName, protocolSubaccountId: subId, claimToken });
+              } catch (relErr: any) {
+                console.error(`[Bot Creation][Reuse] failed to release reservation ${subId}:`, relErr?.message || relErr);
+              }
+            }
+          } else if (spare && spare.protocolSubaccountId) {
+            // Claimed a row missing its retained key/version (claim filters these out,
+            // so this is defensive). Return it to the pool rather than strand it.
+            console.warn(`[Bot Creation][Reuse] claimed spare ${spare.protocolSubaccountId} missing key/version; releasing`);
+            try {
+              await storage.releaseReservationToSpare({ protocol: adapter.protocolName, protocolSubaccountId: spare.protocolSubaccountId, claimToken });
+            } catch { /* best-effort */ }
+          }
+        }
+
         try {
-          if (usePacificaAtomicProvision) {
+          if (usePacificaAtomicProvision && !reuseHandled) {
             const pacificaAdapter = adapter as import('./protocol/pacifica/pacifica-adapter').PacificaAdapter;
             const result = await pacificaAdapter.provisionFundedSubaccount({
               mainSecretKey: agentKeypair.secretKey,
@@ -7236,7 +7359,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             } catch (enrollErr: any) {
               console.warn('[Bot Creation] Pacifica enrollment warm-up failed (non-fatal, retries on next trade):', enrollErr?.message || enrollErr);
             }
-          } else {
+          } else if (!usePacificaAtomicProvision) {
             const sub = await adapter.createSubaccount({
               mainSecretKey: agentKeypair.secretKey,
               subSecretKey: botKeypair?.secretKey,
@@ -7435,6 +7558,73 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           try { _botSubUmk?.cleanup(); } catch {}
           // Zeroize the secret key buffer we held in memory.
           try { pendingBotSecretKeyForV3.fill(0); } catch {}
+        }
+      } else if (_reuseContext) {
+        // Subaccount Recycling Plan §8 (Phase E) reuse finalize. Rebind the retained
+        // spare key onto the NEW bot row (under its bot-UUID AAD) so the unchanged
+        // read path keeps working, then CAS the reservation to active. The rebind
+        // re-verifies the key's pubkey matches the subaccount before writing
+        // (fund-safety) and never touches legacy crypto. Same UMK-source +
+        // try/finally zeroize discipline as the fresh-provision path above.
+        let _reuseUmk: { umk: Buffer; cleanup: () => void } | null = null;
+        try {
+          _reuseUmk = await getUmkForWebhook(req.walletAddress!);
+          let umkBuf: Buffer | null = _reuseUmk ? _reuseUmk.umk : null;
+          if (!umkBuf) {
+            const sessionRes = getSessionByWalletAddress(req.walletAddress!);
+            if (!sessionRes) {
+              throw new Error('No active session available to derive bot-subaccount subkey');
+            }
+            umkBuf = sessionRes.session.umk;
+          }
+          const rebind = rebindRetainedKeyToBotUuidV3({
+            umk: umkBuf,
+            currentEncryptedV3: _reuseContext.currentEncryptedV3,
+            currentAadVersion: _reuseContext.currentAadVersion,
+            protocol: _reuseContext.protocol,
+            walletAddress: req.walletAddress!,
+            protocolSubaccountId: _reuseContext.protocolSubaccountId,
+            newBotId: bot.id,
+            legacyBotId: _reuseContext.legacyBotId,
+          });
+          if (!rebind) {
+            throw new Error(`retained-key rebind failed (pubkey verification) for reused subaccount ${_reuseContext.protocolSubaccountId}`);
+          }
+          await storage.updateBotSubaccountKeyV3(bot.id, rebind.encryptedV3);
+          await storage.updateTradingBot(bot.id, { subaccountStatus: 'active' } as any);
+          const finalized = await storage.finalizeReusedSubaccount({
+            protocol: _reuseContext.protocol,
+            protocolSubaccountId: _reuseContext.protocolSubaccountId,
+            claimToken: _reuseContext.claimToken,
+            botId: bot.id,
+          });
+          if (!finalized) {
+            // Lease TTL (10m) ≫ reuse duration, so this is effectively unreachable. If
+            // it ever happens the recovery job reclaimed the slot mid-flight; the bot
+            // already holds the key and the funds are in the subaccount, so keep the bot
+            // active and log loudly for reconciliation rather than tear the bot down.
+            console.error(`[Bot Creation][Reuse] finalize CAS lost for ${_reuseContext.protocolSubaccountId} (bot ${bot.id}); registry not flipped to active — needs reconciliation`);
+          }
+        } catch (reuseKeyErr: any) {
+          console.error(`[Bot Creation][Reuse] failed to bind retained key for reused subaccount ${_reuseContext.protocolSubaccountId} (bot ${bot.id}):`, reuseKeyErr?.message || reuseKeyErr);
+          // Funds were transferred into the reused subaccount, but its key is still
+          // retained in the spare row (POOLED AAD) — recoverable, not a loss. Tear down
+          // the half-created bot and quarantine the slot for admin/recovery sweep.
+          try { await storage.deleteTradingBot(bot.id); } catch {}
+          try {
+            await storage.markSubaccountStuckFunds({
+              walletAddress: req.walletAddress!,
+              protocol: _reuseContext.protocol,
+              protocolSubaccountId: _reuseContext.protocolSubaccountId,
+              botId: null,
+              agentPublicKey: _reuseContext.agentPublicKey,
+              lastError: `reuse key-rebind failed: ${reuseKeyErr?.message || reuseKeyErr}`,
+              claimToken: _reuseContext.claimToken,
+            });
+          } catch { /* best-effort quarantine */ }
+          return res.status(500).json({ error: `Failed to secure reused subaccount key: ${reuseKeyErr?.message || reuseKeyErr}` });
+        } finally {
+          try { _reuseUmk?.cleanup(); } catch {}
         }
       }
 
