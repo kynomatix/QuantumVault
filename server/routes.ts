@@ -647,7 +647,7 @@ import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable
 import { sendTradeNotification, getCloseReasonLabel, type TradeNotification, buildDefaultInlineKeyboard } from "./notification-service";
 import { registerTelegramMiniAppRoutes } from "./telegram-mini-app";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3 } from "./session-v3";
-import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback } from "./trade-retry-service";
+import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback, cancelRetryJobsForBot } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { DOCS_MARKDOWN } from "./docs-markdown";
 
@@ -12374,26 +12374,272 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
     }
   });
 
-  // Unsubscribe from a published bot
+  // Unsubscribe from a published bot.
+  //
+  // This is a money-moving teardown, so it runs as an idempotent saga rather
+  // than a simple status flip:
+  //   1. Validate. Already-cancelled => 200 (absorb retries/double-clicks).
+  //   2. If the copy bot has an OPEN position, fail cleanly (409) BEFORE any
+  //      mutation so the user closes it first and can safely retry.
+  //   3. Settle pending creator profit-share IOUs (same gate as withdraw/delete)
+  //      so unsubscribing can't be used to dodge a creator payout.
+  //   4. Recover the bot's capital DIRECTLY from its own Drift subaccount to the
+  //      agent wallet (NOT the legacy sweep-through-main path that orphaned funds).
+  //   5. Deactivate (not delete) the copy bot so its trade/PnL history survives,
+  //      close its subaccount to reclaim rent, and null its subaccount link so the
+  //      portfolio snapshot job stops trying to read a closed subaccount (which
+  //      would otherwise skip the whole wallet's snapshot every cycle).
+  //   6. Cancel any queued retry jobs for the bot.
+  //   7. Finalize: cancel the subscription row + decrement marketplace stats once.
+  // Each step tolerates already-done state so a crash mid-saga is retry-safe.
   app.delete("/api/marketplace/:id/unsubscribe", requireWallet, async (req, res) => {
     try {
       const subscription = await storage.getBotSubscription(req.params.id, req.walletAddress!);
       if (!subscription) {
         return res.status(404).json({ error: "Subscription not found" });
       }
-      if (subscription.status !== 'active') {
-        return res.status(400).json({ error: "Subscription is not active" });
+      // Idempotent: a previous unsubscribe already finalized this row. Return
+      // success so retries/duplicate requests don't surface a confusing error.
+      if (subscription.status === 'cancelled') {
+        return res.json({ success: true, alreadyCancelled: true });
       }
 
-      // Cancel subscription
-      await storage.cancelBotSubscription(subscription.id);
-
-      // Update published bot stats
       const capitalInvested = parseFloat(subscription.capitalInvested);
-      await storage.incrementPublishedBotSubscribers(req.params.id, -1, -capitalInvested);
+      const subscriberBotId = subscription.subscriberBotId;
 
-      console.log(`[Marketplace] ${req.walletAddress} unsubscribed from ${req.params.id}`);
-      res.json({ success: true });
+      // Finalize helper: cancel the subscription row + decrement published-bot
+      // stats. Stats are only decremented when the row was still counted (i.e.
+      // not already cancelled), which we guaranteed above.
+      const finalize = async () => {
+        await storage.cancelBotSubscription(subscription.id);
+        await storage.incrementPublishedBotSubscribers(req.params.id, -1, -capitalInvested);
+      };
+
+      // No copy bot linked (legacy/partial row) — nothing to recover or tear down.
+      const bot = subscriberBotId ? await storage.getTradingBotById(subscriberBotId) : null;
+      if (!bot) {
+        await finalize();
+        console.log(`[Unsubscribe] ${req.walletAddress} unsubscribed from ${req.params.id} (no linked copy bot)`);
+        return res.json({ success: true });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Subscriber bot not owned by this wallet" });
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet?.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      const hasSubaccount = bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined;
+      const subId = hasSubaccount ? (bot.driftSubaccountId as number) : 0;
+
+      const umkResult = await getUmkForWebhook(req.walletAddress!);
+      if (!umkResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      const agentKeyResult = await decryptAgentKeyStrict(req.walletAddress!, umkResult.umk, wallet, wallet.agentPublicKey);
+      if (!agentKeyResult) {
+        umkResult.cleanup();
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+
+      try {
+        const agentSecret = agentKeyResult.secretKey;
+
+        // 1. Open-position guard — fail cleanly before mutating anything.
+        // Call the adapter DIRECTLY (not getPerpPositions, which swallows errors
+        // and returns []), so a data-source outage throws and we fail closed
+        // instead of falsely concluding "no open position".
+        if (hasSubaccount) {
+          let positions: any[];
+          try {
+            const raw = await getDefaultAdapter().getPositions(wallet.agentPublicKey, _subIdStr(subId));
+            positions = raw.map(_mapPositionToDrift);
+          } catch (posErr: any) {
+            console.error(`[Unsubscribe] Position check failed for bot ${bot.id}:`, posErr.message);
+            return res.status(502).json({ error: "Couldn't verify the bot's positions right now. Please try again in a moment." });
+          }
+          const open = positions.find((p: any) => Math.abs(p.baseAssetAmount) > 0.0001);
+          if (open) {
+            return res.status(409).json({
+              code: 'OPEN_POSITION',
+              error: `This bot has an open ${open.market} position. Please close it before unsubscribing, then try again.`,
+            });
+          }
+        }
+
+        // 2. Settle pending creator profit-share IOUs (block if unpayable).
+        const pendingIOUs = await storage.getPendingProfitSharesBySubscriberBot(bot.id);
+        if (pendingIOUs.length > 0) {
+          const totalOwed = pendingIOUs.reduce((sum, iou) => sum + parseFloat(iou.amount), 0);
+          console.log(`[Unsubscribe] Bot ${bot.id} has ${pendingIOUs.length} pending IOUs totaling $${totalOwed.toFixed(4)}`);
+          for (const iou of pendingIOUs) {
+            const iouAmount = parseFloat(iou.amount);
+            const transferResult = await transferUsdcToWallet(wallet.agentPublicKey, agentSecret, iou.creatorWalletAddress, iouAmount);
+            if (transferResult.success) {
+              await storage.updatePendingProfitShareStatus(iou.id, { status: 'paid', lastAttemptAt: new Date() });
+              console.log(`[Unsubscribe] Paid IOU ${iou.id}: $${iouAmount.toFixed(4)} to ${iou.creatorWalletAddress}`);
+            } else {
+              return res.status(400).json({
+                error: `Cannot unsubscribe yet — $${totalOwed.toFixed(2)} in creator profit share still needs to be paid. Ensure your agent wallet has enough USDC and SOL for fees, then try again.`,
+                pendingIOUs: pendingIOUs.length,
+                totalOwed,
+              });
+            }
+          }
+        }
+
+        // 3. Recover capital directly from the bot's subaccount to the agent wallet.
+        let recoveredAmount = 0;
+        let recoverTxSignature: string | null = null;
+        const minTransfer = getDefaultAdapter().minTransferAmount;
+        if (hasSubaccount) {
+          let balance = 0;
+          try {
+            // Adapter direct (not getExchangeBalance, which swallows errors and
+            // returns 0): a read failure must NOT look like an empty subaccount,
+            // or we'd skip recovery and finalize, stranding the user's capital.
+            const info = await getDefaultAdapter().getAccountInfo(wallet.agentPublicKey, _subIdStr(subId));
+            balance = info.balance;
+          } catch (balErr: any) {
+            console.error(`[Unsubscribe] Balance read failed for bot ${bot.id} subaccount ${subId}:`, balErr.message);
+            return res.status(502).json({ error: "Couldn't read the bot's balance right now. Please try again in a moment." });
+          }
+          if (balance >= minTransfer) {
+            const result = await executeAgentDriftWithdraw(
+              wallet.agentPublicKey,
+              agentSecret,
+              balance,
+              subId,
+              { tradingBotId: bot.id, context: 'Unsubscribe' },
+            );
+            if (!result.success) {
+              return res.status(400).json({ error: result.error || "Failed to recover funds. Nothing was changed — please try again." });
+            }
+            recoveredAmount = balance;
+            recoverTxSignature = result.signature || null;
+            if (recoverTxSignature) {
+              const existing = await storage.getEquityEventByTxSignature(recoverTxSignature);
+              if (!existing) {
+                try {
+                  await storage.createEquityEvent({
+                    walletAddress: req.walletAddress!,
+                    tradingBotId: bot.id,
+                    eventType: 'drift_withdraw',
+                    amount: String(-balance),
+                    txSignature: recoverTxSignature,
+                    notes: `Capital recovered on unsubscribe`,
+                  });
+                } catch (eventErr: any) {
+                  console.error(`[Unsubscribe] CRITICAL: withdraw succeeded (tx ${recoverTxSignature}) but equity event failed:`, eventErr.message);
+                }
+              }
+            }
+            console.log(`[Unsubscribe] Recovered $${balance.toFixed(2)} from bot ${bot.id} subaccount ${subId}`);
+          } else if (balance > 0) {
+            console.log(`[Unsubscribe] Bot ${bot.id} subaccount balance $${balance.toFixed(6)} below $${minTransfer} minimum — skipping recovery`);
+          }
+        }
+
+        // 4. Deactivate the bot, close its subaccount, and drop the subaccount link.
+        let rentReclaimed = false;
+        if (hasSubaccount && subId > 0) {
+          // Adapter direct so a listing failure is distinguishable from "gone".
+          let exists = false;
+          let existCheckFailed = false;
+          try {
+            const subs = await getDefaultAdapter().listSubaccounts(wallet.agentPublicKey);
+            exists = subs.some((s: any) => s.subaccountId === String(subId));
+          } catch (existErr: any) {
+            existCheckFailed = true;
+            console.warn(`[Unsubscribe] subaccount existence check failed for ${subId}:`, existErr.message);
+          }
+          if (exists) {
+            try {
+              const closeResult = await closeDriftSubaccount(agentSecret, subId);
+              if (closeResult.success) {
+                rentReclaimed = true;
+                console.log(`[Unsubscribe] Closed subaccount ${subId}, rent reclaimed: ${closeResult.signature}`);
+              } else {
+                console.error(`[Unsubscribe] Subaccount ${subId} close failed: ${closeResult.error}`);
+                try {
+                  await storage.createOrphanedSubaccount({
+                    walletAddress: req.walletAddress!,
+                    agentPublicKey: wallet.agentPublicKey,
+                    driftSubaccountId: subId,
+                    reason: closeResult.error,
+                  });
+                } catch (orphanErr: any) {
+                  console.error(`[Unsubscribe] Failed to track orphaned subaccount ${subId}:`, orphanErr.message);
+                }
+              }
+            } catch (closeErr: any) {
+              console.error(`[Unsubscribe] Subaccount ${subId} close threw:`, closeErr.message);
+              try {
+                await storage.createOrphanedSubaccount({
+                  walletAddress: req.walletAddress!,
+                  agentPublicKey: wallet.agentPublicKey,
+                  driftSubaccountId: subId,
+                  reason: closeErr.message,
+                });
+              } catch {}
+            }
+          } else if (existCheckFailed) {
+            // Couldn't confirm whether the subaccount is gone. Capital was
+            // already recovered (fail-closed above), but we're about to null the
+            // link below — so record the subaccount to reclaim its rent later
+            // instead of silently losing the reference.
+            try {
+              await storage.createOrphanedSubaccount({
+                walletAddress: req.walletAddress!,
+                agentPublicKey: wallet.agentPublicKey,
+                driftSubaccountId: subId,
+                reason: 'Existence check failed during unsubscribe',
+              });
+            } catch (orphanErr: any) {
+              console.error(`[Unsubscribe] Failed to track unverified subaccount ${subId}:`, orphanErr.message);
+            }
+          }
+        }
+
+        // Null the subaccount link so the snapshot job stops reading a dead
+        // subaccount (prevents skipping the whole wallet's snapshot).
+        await storage.clearTradingBotSubaccount(bot.id);
+        await storage.updateTradingBot(bot.id, {
+          isActive: false,
+          executionActive: false,
+          pauseReason: 'Unsubscribed from marketplace',
+        });
+
+        // 5. Cancel any queued retry jobs so none fire on the closed subaccount.
+        try {
+          await cancelRetryJobsForBot(bot.id);
+        } catch (retryErr: any) {
+          console.warn(`[Unsubscribe] Failed to cancel retry jobs for bot ${bot.id}:`, retryErr.message);
+        }
+
+        // 6. Finalize the subscription + marketplace stats.
+        await finalize();
+
+        console.log(`[Unsubscribe] ${req.walletAddress} unsubscribed from ${req.params.id}; recovered $${recoveredAmount.toFixed(2)}, bot ${bot.id} deactivated`);
+        let message = 'Unsubscribed. Your bot was stopped and kept for your records.';
+        if (recoveredAmount > 0) {
+          message = `Unsubscribed. $${recoveredAmount.toFixed(2)} was returned to your wallet`;
+          message += rentReclaimed ? ' and the trading account was closed.' : '.';
+        }
+        return res.json({
+          success: true,
+          recovered: recoveredAmount > 0,
+          recoveredAmount,
+          recoverTxSignature,
+          rentReclaimed,
+          message,
+        });
+      } finally {
+        agentKeyResult.cleanup();
+        umkResult.cleanup();
+      }
     } catch (error) {
       console.error("Unsubscribe error:", error);
       res.status(500).json({ error: "Failed to unsubscribe" });

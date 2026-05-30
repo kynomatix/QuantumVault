@@ -1418,6 +1418,31 @@ export function stopRetryWorker(): void {
   }
 }
 
+/**
+ * Cancel all pending retry jobs for a specific bot. Used when a bot is torn
+ * down (e.g. marketplace unsubscribe) so queued trades never fire against a
+ * closed/withdrawn subaccount. In-flight jobs are left to complete on their
+ * own — they re-check on-chain state before acting — but no further attempts
+ * are scheduled. Returns the number of pending jobs removed.
+ */
+export async function cancelRetryJobsForBot(botId: string): Promise<number> {
+  let removed = 0;
+  for (const job of Array.from(retryQueue.values())) {
+    if (job.botId !== botId) continue;
+    retryQueue.delete(job.id);
+    removed++;
+    try {
+      await storage.deleteTradeRetryJob(job.id);
+    } catch (err) {
+      console.warn(`[TradeRetry] Failed to delete persisted retry job ${job.id} for bot ${botId}:`, err);
+    }
+  }
+  if (removed > 0) {
+    console.log(`[TradeRetry] Cancelled ${removed} pending retry job(s) for bot ${botId}`);
+  }
+  return removed;
+}
+
 export function getQueueStatus(): { pending: number; inFlight: number; jobs: Array<{ id: string; market: string; side: string; priority: string; attempts: number; nextRetryIn: number; inFlight: boolean }> } {
   const jobs = Array.from(retryQueue.values()).map(job => ({
     id: job.id,

@@ -465,7 +465,15 @@ async function subscribeToPublishedBot(publishedBotId: string, data: { capitalIn
   return safeResponseJson(res);
 }
 
-async function unsubscribeFromBot(publishedBotId: string): Promise<void> {
+interface UnsubscribeResult {
+  success: boolean;
+  recovered?: boolean;
+  recoveredAmount?: number;
+  rentReclaimed?: boolean;
+  message?: string;
+}
+
+async function unsubscribeFromBot(publishedBotId: string): Promise<UnsubscribeResult> {
   const res = await fetch(`/api/marketplace/${publishedBotId}/unsubscribe`, {
     method: "DELETE",
     credentials: "include",
@@ -474,6 +482,7 @@ async function unsubscribeFromBot(publishedBotId: string): Promise<void> {
     const error = await safeResponseJson(res);
     throw new Error(error.error || "Failed to unsubscribe");
   }
+  return safeResponseJson(res);
 }
 
 // Marketplace hooks

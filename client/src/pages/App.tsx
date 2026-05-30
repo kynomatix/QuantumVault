@@ -251,6 +251,7 @@ export default function AppPage() {
   const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
   const [manageBotDrawerOpen, setManageBotDrawerOpen] = useState(false);
   const [selectedManagedBot, setSelectedManagedBot] = useState<TradingBot | null>(null);
+  const [showInactiveBots, setShowInactiveBots] = useState(false);
   const [expandedPositionBotId, setExpandedPositionBotId] = useState<string | null>(null);
   const [createBotOpen, setCreateBotOpen] = useState(false);
   const [tradeHistoryOpen, setTradeHistoryOpen] = useState(false);
@@ -2621,8 +2622,8 @@ export default function AppPage() {
                 </div>
 
                 {botsData && botsData.length > 0 ? (
-                  <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
-                    {botsData.map((bot: TradingBot) => {
+                  (() => {
+                    const renderBotCard = (bot: TradingBot) => {
                       const position = positionsData?.find((p: any) => p.botId === bot.id);
                       const hasPosition = position && Math.abs(position.baseAssetAmount) > 0.0001;
                       const unrealizedPnl = position?.unrealizedPnl ?? 0;
@@ -2730,8 +2731,41 @@ export default function AppPage() {
                           )}
                         </div>
                       );
-                    })}
-                  </div>
+                    };
+                    const activeBots = botsData.filter((b: TradingBot) => b.isActive);
+                    const inactiveBots = botsData.filter((b: TradingBot) => !b.isActive);
+                    return (
+                      <div className="space-y-6">
+                        {activeBots.length > 0 ? (
+                          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+                            {activeBots.map((bot: TradingBot) => renderBotCard(bot))}
+                          </div>
+                        ) : (
+                          <div className="gradient-border p-8 noise text-center">
+                            <p className="text-muted-foreground">No active bots right now.</p>
+                          </div>
+                        )}
+                        {inactiveBots.length > 0 && (
+                          <div className="space-y-4">
+                            <button
+                              type="button"
+                              onClick={() => setShowInactiveBots((v) => !v)}
+                              className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+                              data-testid="button-toggle-inactive-bots"
+                            >
+                              {showInactiveBots ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                              Inactive bots ({inactiveBots.length})
+                            </button>
+                            {showInactiveBots && (
+                              <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+                                {inactiveBots.map((bot: TradingBot) => renderBotCard(bot))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()
                 ) : (
                   <div className="gradient-border p-12 noise text-center">
                     <Bot className="w-12 h-12 mx-auto mb-4 text-muted-foreground opacity-50" />
@@ -3392,14 +3426,14 @@ export default function AppPage() {
                                 onClick={async () => {
                                   const ok = await confirm({
                                     title: 'Unsubscribe from this bot?',
-                                    description: 'This will stop copying trades from this bot. Any funds in your copy bot will remain in your account.',
+                                    description: 'This stops copying trades and returns any remaining funds from your copy bot to your wallet. Your copy bot will be deactivated but kept for your records.',
                                     confirmText: 'Unsubscribe',
                                     variant: 'destructive',
                                   });
                                   if (ok) {
                                     try {
-                                      await unsubscribeMutation.mutateAsync(bot.id);
-                                      toast({ title: 'Unsubscribed successfully' });
+                                      const result = await unsubscribeMutation.mutateAsync(bot.id);
+                                      toast({ title: 'Unsubscribed', description: result?.message });
                                       refetchMySubscriptions();
                                     } catch (error: any) {
                                       toast({ title: 'Failed to unsubscribe', description: error.message, variant: 'destructive' });
