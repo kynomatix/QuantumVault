@@ -13,6 +13,7 @@ replit.md
 .cache/
 .config/
 .local/
+.agents/
 .upm/
 vite-plugin-meta-images.ts
 generated-*
