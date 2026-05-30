@@ -6,6 +6,8 @@ import {
   deriveSubkey,
   buildAAD,
   buildBotSubaccountAAD,
+  buildPooledSubaccountAAD,
+  SUBACCOUNT_AAD_VERSION,
   encryptToBase64,
   decryptFromBase64,
   encryptBuffer,
@@ -1049,6 +1051,172 @@ export function decryptBotSubaccountKeyV3(
     return decryptBuffer(ciphertext, subkey, aad);
   } finally {
     zeroizeBuffer(subkey);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subaccount Recycling Plan §6 — Crypto re-binding (Phase C)
+//
+// A RETAINED (pooled) subaccount key must outlive the bot it was minted for, so
+// it is re-encrypted under an AAD bound to the STABLE subaccount pubkey instead
+// of the transient bot UUID. These helpers are the additive library only — they
+// are NOT wired into any live read/write path here (cutover is Phase D/E, §6.1).
+// All of this stays V3-strict: it never reaches the legacy AGENT_ENCRYPTION_KEY
+// path. The "dual-read" below is purely between two V3 AAD formats.
+// ---------------------------------------------------------------------------
+
+/**
+ * Single-write the retained key under the subaccount-bound AAD (§6).
+ * Same UMK-derived subkey as the bot-UUID format — only the AAD differs.
+ */
+export function encryptPooledSubaccountKeyV3(
+  umk: Buffer,
+  botSecretKey: Buffer,
+  protocol: string,
+  walletAddress: string,
+  protocolSubaccountId: string,
+): string {
+  const subkey = deriveSubkey(umk, SUBKEY_PURPOSES.BOT_SUBACCOUNT_PRIVKEY);
+  try {
+    const aad = buildPooledSubaccountAAD(protocol, walletAddress, protocolSubaccountId);
+    return encryptBuffer(botSecretKey, subkey, aad).toString('base64');
+  } finally {
+    zeroizeBuffer(subkey);
+  }
+}
+
+/**
+ * Read a key written under the subaccount-bound AAD (§6).
+ */
+export function decryptPooledSubaccountKeyV3(
+  umk: Buffer,
+  encryptedV3: string,
+  protocol: string,
+  walletAddress: string,
+  protocolSubaccountId: string,
+): Buffer {
+  const subkey = deriveSubkey(umk, SUBKEY_PURPOSES.BOT_SUBACCOUNT_PRIVKEY);
+  try {
+    const aad = buildPooledSubaccountAAD(protocol, walletAddress, protocolSubaccountId);
+    const ciphertext = Buffer.from(encryptedV3, 'base64');
+    return decryptBuffer(ciphertext, subkey, aad);
+  } finally {
+    zeroizeBuffer(subkey);
+  }
+}
+
+/**
+ * Dual-read the retained pool-row key (§6.1). Dispatches on `aadVersion`:
+ * - BOT_UUID: legacy, still bound to the old bot UUID → needs `legacyBotId`.
+ * - POOLED_SUBACCOUNT: bound to the stable subaccount pubkey.
+ *
+ * MANDATORY pubkey verification (fund-safety invariant): after decrypting, the
+ * derived public key MUST equal `protocolSubaccountId`. Any mismatch — or an
+ * unknown version, missing `legacyBotId`, decrypt failure, or wrong length —
+ * zeroizes the buffer and returns `null` (we never hand back a key that does not
+ * match the intended subaccount). The returned `secretKey` is a 64-byte
+ * ed25519 secret key; the caller MUST invoke `cleanup()` after use.
+ */
+export function decryptRetainedSubaccountKeyV3(params: {
+  umk: Buffer;
+  encryptedV3: string;
+  aadVersion: number;
+  protocol: string;
+  walletAddress: string;
+  protocolSubaccountId: string;
+  legacyBotId?: string | null;
+}): { secretKey: Uint8Array; cleanup: () => void } | null {
+  const { umk, encryptedV3, aadVersion, protocol, walletAddress, protocolSubaccountId, legacyBotId } = params;
+
+  let keyBuffer: Buffer;
+  try {
+    if (aadVersion === SUBACCOUNT_AAD_VERSION.POOLED_SUBACCOUNT) {
+      keyBuffer = decryptPooledSubaccountKeyV3(umk, encryptedV3, protocol, walletAddress, protocolSubaccountId);
+    } else if (aadVersion === SUBACCOUNT_AAD_VERSION.BOT_UUID) {
+      if (!legacyBotId) {
+        console.error(`[Security] Retained subaccount key for ${protocolSubaccountId} is BOT_UUID-bound but no legacyBotId was provided`);
+        return null;
+      }
+      keyBuffer = decryptBotSubaccountKeyV3(umk, encryptedV3, walletAddress, legacyBotId);
+    } else {
+      console.error(`[Security] Unknown aadVersion ${aadVersion} for retained subaccount key ${protocolSubaccountId}`);
+      return null;
+    }
+  } catch (err) {
+    console.error(`[Security] Retained subaccount key decrypt failed for ${protocolSubaccountId}:`, err);
+    return null;
+  }
+
+  if (keyBuffer.length !== 64) {
+    zeroizeBuffer(keyBuffer);
+    console.error(`[Security] Retained subaccount key for ${protocolSubaccountId} has wrong length: ${keyBuffer.length}`);
+    return null;
+  }
+
+  // Mandatory pubkey verification — never sign with a key that doesn't match the
+  // intended subaccount (§6.1).
+  try {
+    const derived = Keypair.fromSecretKey(keyBuffer).publicKey.toBase58();
+    if (derived !== protocolSubaccountId) {
+      zeroizeBuffer(keyBuffer);
+      console.error(`[Security] Retained subaccount keypair mismatch: derived ${derived} != stored ${protocolSubaccountId}`);
+      return null;
+    }
+  } catch (err) {
+    zeroizeBuffer(keyBuffer);
+    console.error(`[Security] Retained subaccount keypair validation failed for ${protocolSubaccountId}:`, err);
+    return null;
+  }
+
+  const secretKey = new Uint8Array(keyBuffer);
+  return {
+    secretKey,
+    cleanup: () => {
+      zeroizeBuffer(keyBuffer);
+      try { secretKey.fill(0); } catch { /* noop */ }
+    },
+  };
+}
+
+/**
+ * Re-bind a retained key to the subaccount-bound AAD (§6.1). Dual-reads (which
+ * verifies the pubkey matches `protocolSubaccountId`), then single-writes the
+ * POOLED format. Returns the new ciphertext plus the version to persist into
+ * `protocol_subaccounts.aad_version`, or `null` if the verified read fails.
+ * Idempotent: re-binding an already-POOLED key just re-verifies and re-encrypts.
+ */
+export function rebindSubaccountKeyToPooledV3(params: {
+  umk: Buffer;
+  currentEncryptedV3: string;
+  currentAadVersion: number;
+  protocol: string;
+  walletAddress: string;
+  protocolSubaccountId: string;
+  legacyBotId?: string | null;
+}): { encryptedV3: string; aadVersion: number } | null {
+  const { umk, currentEncryptedV3, currentAadVersion, protocol, walletAddress, protocolSubaccountId, legacyBotId } = params;
+
+  const decrypted = decryptRetainedSubaccountKeyV3({
+    umk,
+    encryptedV3: currentEncryptedV3,
+    aadVersion: currentAadVersion,
+    protocol,
+    walletAddress,
+    protocolSubaccountId,
+    legacyBotId,
+  });
+  if (!decrypted) return null;
+
+  try {
+    const buf = Buffer.from(decrypted.secretKey);
+    try {
+      const encryptedV3 = encryptPooledSubaccountKeyV3(umk, buf, protocol, walletAddress, protocolSubaccountId);
+      return { encryptedV3, aadVersion: SUBACCOUNT_AAD_VERSION.POOLED_SUBACCOUNT };
+    } finally {
+      zeroizeBuffer(buf);
+    }
+  } finally {
+    decrypted.cleanup();
   }
 }
 

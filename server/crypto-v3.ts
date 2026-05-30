@@ -100,6 +100,60 @@ export function buildBotSubaccountAAD(
   return Buffer.concat([header, Buffer.from(walletBytes), botIdBytes]);
 }
 
+/**
+ * Which AAD scheme a retained subaccount key is encrypted under. Stored in
+ * `protocol_subaccounts.aad_version` so the dual-read layer (§6) can pick the
+ * right AAD without trial decryption.
+ *
+ * - BOT_UUID (1): legacy — AAD bound to the transient bot UUID (`buildBotSubaccountAAD`).
+ *   Used for a not-yet-rebound spare that still carries the old bot's ciphertext.
+ * - POOLED_SUBACCOUNT (2): AAD bound to the STABLE subaccount pubkey
+ *   (`buildPooledSubaccountAAD`). The single-write target on rebind/reuse.
+ */
+export const SUBACCOUNT_AAD_VERSION = {
+  BOT_UUID: 1,
+  POOLED_SUBACCOUNT: 2,
+} as const;
+
+/**
+ * Subaccount Recycling Plan §6: AAD for a RETAINED (pooled) subaccount key,
+ * bound to the stable subaccount public key instead of a transient bot UUID, so
+ * a future bot can decrypt the same key under a different identity.
+ *
+ * Format: [version(4 LE)][record_type(1) = 0x06][protocol_len(1)][protocol utf8]
+ *         [wallet bytes(32)][protocolSubaccountId utf8].
+ *
+ * The protocol segment is length-prefixed because this AAD has TWO variable-length
+ * fields (protocol, protocolSubaccountId); without the prefix `('pa','cifica...')`
+ * and `('pacifica','...')` could collide. `protocol` qualifies the binding so a
+ * Drift and a Pacifica subaccount that share a numeric id during migration can
+ * never cross-decrypt (§6, belt-and-suspenders; the pubkey check is the real net).
+ */
+export function buildPooledSubaccountAAD(
+  protocol: string,
+  walletAddress: string,
+  protocolSubaccountId: string,
+  version: number = 1,
+): Buffer {
+  const walletBytes = bs58.decode(walletAddress);
+  if (walletBytes.length !== 32) {
+    throw new Error(`Invalid wallet address length: expected 32 bytes, got ${walletBytes.length}`);
+  }
+  const protocolBytes = Buffer.from(protocol, 'utf8');
+  if (protocolBytes.length === 0 || protocolBytes.length > 255) {
+    throw new Error(`Invalid protocol length: expected 1-255 bytes, got ${protocolBytes.length}`);
+  }
+  const subIdBytes = Buffer.from(protocolSubaccountId, 'utf8');
+  if (subIdBytes.length === 0) {
+    throw new Error('protocolSubaccountId is required to build a pooled subaccount AAD');
+  }
+  const header = Buffer.alloc(6);
+  header.writeUInt32LE(version, 0);
+  header.writeUInt8(0x06, 4); // POOLED_SUBACCOUNT record type
+  header.writeUInt8(protocolBytes.length, 5); // length-prefix to disambiguate the two var fields
+  return Buffer.concat([header, protocolBytes, Buffer.from(walletBytes), subIdBytes]);
+}
+
 export function encryptBuffer(
   plaintext: Buffer,
   key: Buffer,
