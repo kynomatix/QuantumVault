@@ -1,4 +1,4 @@
-import type { ProtocolAdapter, CreateSubaccountInput } from '../adapter.js';
+import type { ProtocolAdapter, CreateSubaccountInput, SubaccountCaps } from '../adapter.js';
 import type {
   ProtocolMarket,
   ProtocolPosition,
@@ -135,6 +135,16 @@ export class PacificaAdapter implements ProtocolAdapter {
   readonly collateralMint = PACIFICA_USDC_MINT;
   readonly collateralSymbol = 'USDC';
   readonly minTransferAmount = PACIFICA_MIN_TRANSFER_USDC;
+  // Subaccount Recycling Plan §4.1 / §14.2. Pacifica has no delete-subaccount API (permanent)
+  // and a hard 10-cap per agent. `recyclable` stays false until Phase E implements
+  // verifySubaccountEmpty + reuseSubaccount — flip to true then so the orchestrator never
+  // routes to an unimplemented reuse path (§14.5 invariant). Nothing reads this yet (Phase B scaffolding).
+  readonly subaccountCaps: SubaccountCaps = {
+    permanent: true,
+    recyclable: false,
+    maxPerAgent: 10,
+    accountModel: 'subaccount',
+  };
 
   private config: PacificaAdapterConfig;
   private registry: SymbolRegistry | null = null;

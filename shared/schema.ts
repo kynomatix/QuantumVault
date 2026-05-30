@@ -792,10 +792,26 @@ export const protocolSubaccounts = pgTable("protocol_subaccounts", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   confirmedAt: timestamp("confirmed_at"),
   lastError: text("last_error"),
+  // --- Subaccount Recycling Plan §5 (Phase B scaffolding). All nullable, no behavior change. ---
+  // Which agent (PDA) owns this subaccount — scopes the spare pool per (wallet, protocol, agent).
+  agentPublicKey: text("agent_public_key"),
+  // RETAINED subaccount signing key, re-bound AAD (§6). Populated in later phases, NOT during Phase B backfill.
+  subaccountKeyEncryptedV3: text("subaccount_key_encrypted_v3"),
+  // Crypto envelope version for the retained key (§6 dual-read/single-write).
+  aadVersion: integer("aad_version"),
+  // When the subaccount entered the spare pool (status='spare').
+  releasedAt: timestamp("released_at"),
+  // Last successful Pacifica verify-empty check before reuse.
+  lastVerifiedEmptyAt: timestamp("last_verified_empty_at"),
+  // Per-reservation claim token + lease start for concurrency-safe reuse (§5.1).
+  claimToken: text("claim_token"),
+  claimedAt: timestamp("claimed_at"),
 }, (table) => ([
   unique("uq_protocol_subaccount").on(table.protocol, table.protocolSubaccountId),
   index("idx_protocol_subaccounts_wallet_protocol").on(table.walletAddress, table.protocol),
   index("idx_protocol_subaccounts_status").on(table.status),
+  // Reuse hot path (§5): claim the oldest spare for a given (wallet, protocol, agent).
+  index("idx_protocol_subaccounts_reuse").on(table.walletAddress, table.protocol, table.agentPublicKey, table.status, table.releasedAt),
 ]));
 
 export const insertProtocolSubaccountSchema = createInsertSchema(protocolSubaccounts).omit({

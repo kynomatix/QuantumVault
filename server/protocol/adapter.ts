@@ -43,6 +43,32 @@ export interface CreateSubaccountInput {
   label?: string;
 }
 
+/**
+ * Static capability descriptor read by the core recycling orchestrator
+ * (Subaccount Recycling Plan §4.1 / §14.2). Adapters that leave this undefined
+ * are treated as create-only (today's behavior) — no spare pool, no reuse.
+ */
+export interface SubaccountCaps {
+  /** True when subaccounts cannot be deleted on the exchange side and must be recycled instead (Pacifica). */
+  permanent: boolean;
+  /**
+   * True ONLY when the adapter implements the full sweep-empty → pool → reuse
+   * lifecycle (verifySubaccountEmpty + reuseSubaccount). Keep false until those
+   * methods exist so the orchestrator never tries to reuse an unimplemented path.
+   */
+  recyclable: boolean;
+  /**
+   * Hard cap on accounts per agent wallet. null = no platform-enforced cap.
+   * Never hardcode this number in the orchestrator — always read it at runtime.
+   */
+  maxPerAgent: number | null;
+  /**
+   * 'subaccount' = child of a master agent wallet (Pacifica, Drift).
+   * 'independent_trader' = each bot keypair is its own registered trader (Flash, Phoenix).
+   */
+  accountModel: 'subaccount' | 'independent_trader';
+}
+
 export interface ProtocolAdapter {
   readonly protocolName: string;
   readonly protocolVersion: string;
@@ -98,6 +124,8 @@ export interface ProtocolAdapter {
   closeSubaccount?(agentPublicKey: string, subaccountId: string): Promise<void>;
   subaccountExists?(walletAddress: string, subaccountId: string): Promise<boolean>;
   getWalletCollateralBalance?(walletAddress: string): Promise<number>;
+  /** Static recycling capability descriptor (§4.1). Undefined ⇒ create-only adapter. */
+  readonly subaccountCaps?: SubaccountCaps;
   /**
    * Poll the main account until its collateral balance reaches `targetBalance`,
    * or the timeout elapses. Exists for exchanges (e.g. Pacifica) whose indexer
