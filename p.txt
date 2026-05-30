@@ -1,0 +1,3015 @@
+You are auditing an architecture planning document for QuantumVault — a Solana-based DeFi vault platform that lets users deploy trading bots, automatically manage collateral and borrowing across lending protocols (Jupiter Lend, Kamino, MarginFi), route idle USDC into yield strategies, and monitor protocol health.
+
+IMPORTANT CONTEXT ABOUT THIS CODEBASE:
+- The vault signer (a server-managed Solana wallet per user) is deliberately designed to sign transactions automatically on behalf of users. This is intentional, not a missing governance feature.
+- This is NOT a DAO or protocol with community governance. Config changes are made by the user through a UI. Suggestions for timelocks, multisigs, or DAO voting are not applicable.
+- All agent coordination runs on a single Node.js server. Suggestions for microservices or distributed consensus are out of scope.
+- The platform already uses Helius for RPC/webhooks. Suggestions to "add Helius" or "add RPC" infrastructure are not applicable.
+- Existing code already has: a protocol adapter abstraction layer, a cross-protocol state machine with compensating transactions, and a Telegram notification system. Do not suggest adding these.
+
+Please focus your audit on exactly three questions. Be specific and concrete. Do not give generic DeFi security advice.
+
+---
+
+QUESTION 1: AGENT COORDINATION GAPS
+Are there scenarios in this document where two or more agents could issue conflicting instructions on the same pool of capital simultaneously? For example: the Borrow Rate Migration agent recalling USDC from yield at the same moment the Negative Carry agent is also recalling USDC for repayment, or the Vault Guardian triggering an emergency withdrawal while the Yield Arbitrage agent is mid-rebalance. For each conflict scenario you identify, describe: (a) the exact sequence of events, (b) what the bad outcome would be, and (c) whether the document already addresses it or not.
+
+QUESTION 2: STATE MACHINE COMPLETENESS
+The document describes a cross-protocol orchestration state machine with compensating transactions. Are there stuck states — situations where the state machine could end up in a state with no valid forward or backward transition? For each stuck state you identify, describe what user action or on-chain condition would cause it, and what the vault's capital position would look like while stuck.
+
+QUESTION 3: PROTOCOL HEALTH MONITOR SIGNAL LOGIC
+The Protocol Health Monitor section defines on-chain signals (TVL drain rate, utilization spike, reserve balance, oracle deviation, protocol pause flag). Are there specific false-positive failure modes (legitimate market events that would incorrectly trigger an exploit-level alert and cause unnecessary emergency withdrawals) or false-negative failure modes (real exploits that would slip through without triggering any alert) in the current signal logic? For each failure mode, describe the market or exploit scenario and whether the two-signal requirement already mitigates it.
+
+---
+
+FORMAT:
+- Answer each question with a numbered list of findings
+- Each finding: a short title, 1-2 sentence description of the issue, and whether the document already addresses it (yes/partial/no)
+- If you find nothing substantive for a question, say so — do not pad with generic advice
+- Do not comment on code style, test coverage, monitoring tooling, or anything outside the three questions
+
+---
+
+DOCUMENT TO AUDIT:
+
+# QuantumVault Vaults Architecture
+
+> **Consolidated source of truth (May 2026).** This document is the single canonical Vaults plan. It is the protocol-agnostic V2 architecture (the spine) with the still-relevant agent logic and effort estimates from the original V1 design folded in (see Appendix A — Market Regime Detection, Appendix B — Effort & Complexity). The original Drift-centric V1 document is preserved verbatim at `docs/archive/VAULTS_ARCHITECTURE_V1.md` for historical reference. Drift-specific V1 content (DRIFT token rewards, Drift Strategy Vault discovery/indexing, Subaccount-0-as-vault) was intentionally **not** carried over — it lives only in the archive.
+
+## Overview
+
+The Vaults feature is a protocol-agnostic capital management layer that sits above the trading and yield adapter systems. Unlike the original design (which was tightly coupled to Drift Protocol's Subaccount 0), this architecture treats the vault as a **platform-level orchestration concept** — managing capital across multiple protocols for trading, lending, borrowing, and yield generation.
+
+The core insight: trading and yield are separate concerns handled by separate protocols. Pacifica handles order execution. Kamino, Marginfi, or Lulo handle lending and yield. The vault layer orchestrates capital flow between them based on user preferences and market conditions.
+
+**Status**: Planning phase. Depends on Pacifica adapter migration (Phases 1-6) completing first.
+
+---
+
+## Why V2?
+
+### What Changed
+
+| Aspect | V1 (Drift-Centric) | V2 (Protocol-Agnostic) |
+|--------|--------------------|-----------------------|
+| Trading protocol | Drift only | Any adapter (Pacifica first) |
+| Collateral/lending | Drift's built-in lending | External DeFi protocols |
+| Vault concept | Drift Subaccount 0 | Platform-level capital allocator |
+| Supported collateral | Whatever Drift whitelisted | Whatever lending protocols accept |
+| Borrowed capital location | Inside Drift (protocol risk) | Agent wallet (user-recoverable, zero protocol risk until bot allocation) |
+| Yield on idle capital | Drift lending APY (automatic) | Explicit yield adapter routing |
+| Single point of failure | Drift hack = everything lost | Trading down ≠ yield lost |
+| Revenue from idle | Built into Drift | Requires active yield routing |
+
+### What Stays the Same
+
+- Bot isolation model (each bot gets its own subaccount on the trading protocol)
+- Profit sweep / distribution logic
+- Health monitoring and auto-deleverage concepts
+- Risk management agent behaviors
+- Capital rebalancing intelligence
+- The original QuantumVault vision: "set and forget" DeFi optimization
+
+---
+
+## Architecture
+
+### V1 Architecture (Everything Through Drift)
+
+```
+User Deposits → Drift Subaccount 0 → Multi-Asset Collateral
+                       ↓
+               Drift Lending/Borrowing
+                       ↓
+               Borrowed USDC
+                       ↓
+               Bot Subaccounts (1, 2, 3...) → Isolated Trading (Drift)
+```
+
+Single protocol. Single point of failure. Convenient but fragile.
+
+### V2 Architecture (Separated Concerns)
+
+```
+User Deposits → Agent Wallet (SOL, USDC, BTC, LSTs, etc.)
+                       ↓
+                 Vault Orchestrator
+                  ↙        ↓          ↘
+    Yield Adapters    Agent Wallet     Trading Adapters
+    ┌──────────────┐  (holds borrowed  ┌───────────────┐
+    │ Jupiter Lend │   USDC until      │ Pacifica      │
+    │ Kamino       │   user allocates  │ (future) Drift│
+    │ Marginfi     │   to a bot)       │ (future) Zeta │
+    │ Lulo (agg)   │                   │ (future) Flash│
+    │ Save/Solend  │                   │               │
+    └──────┬───────┘                   └───────┬───────┘
+           │                                   │
+    Collateralize assets              User creates bot →
+    Borrow USDC → agent wallet        allocates from wallet →
+    Earn yield on idle capital        deposit to protocol
+```
+
+Three-layer model: yield protocols hold collateral and generate yield, the agent wallet holds borrowed/idle USDC (always user-recoverable), and trading protocols only receive capital when the user explicitly allocates it to a bot.
+
+Protocol failure in one layer doesn't affect the other. Unallocated capital in the agent wallet has zero protocol risk.
+
+### Adapter Layer Design
+
+The trading adapter uses the exact `ProtocolAdapter` + `UserTransactionBuilder` interfaces defined in `PACIFICA_MIGRATION.md` Section 4. The vault orchestrator calls these — it does NOT define its own simplified trading interface.
+
+```typescript
+// Trading: uses ProtocolAdapter + UserTransactionBuilder from PACIFICA_MIGRATION.md
+// See Section 4 for full interface — agent-signed vs user-signed flows,
+// order lifecycle states, client_order_id idempotency, adapter health states
+// (ready/degraded/unavailable), WS/REST reconciliation.
+// The vault orchestrator calls these interfaces; it does not redefine them.
+
+interface YieldProtocolAdapter {
+  name: string;
+  supportedAssets: string[];
+
+  getCurrentApy(asset: string): Promise<number>;
+  getHistoricalApy(asset: string, days: number): Promise<number[]>;
+  getAvailableLiquidity(asset: string): Promise<number>;
+
+  deposit(asset: string, amount: number): Promise<TxResult>;
+  withdraw(asset: string, amount: number): Promise<TxResult>;
+
+  getBorrowApy(asset: string): Promise<number>;
+  borrow(asset: string, amount: number): Promise<TxResult>;
+  repay(asset: string, amount: number): Promise<TxResult>;
+
+  getCollateralWeight(asset: string): Promise<number>;
+  getHealthFactor(walletAddress: string): Promise<number>;
+
+  withdrawalDelay: number;
+  maxDeposit: number | null;
+  minDeposit: number;
+}
+```
+
+---
+
+## The Collateral Problem (And Solution)
+
+### The Constraint
+
+Pacifica (and most perp DEXs) only accept USDC as margin. A user who holds SOL, BTC, or LSTs can't trade directly — they need USDC.
+
+### V1 Approach (Drift)
+
+Drift handled this internally: deposit SOL as collateral → Drift lets you borrow USDC against it → trade with borrowed USDC. All inside one protocol.
+
+### V2 Approach (External Lending)
+
+The platform handles the collateral-to-USDC conversion through external lending protocols:
+
+```
+User deposits 100 SOL
+       ↓
+Vault Orchestrator
+       ↓
+Deposits SOL to Kamino/Marginfi as collateral
+       ↓
+Borrows USDC against SOL (e.g., 65% LTV → ~$9,750 if SOL=$150)
+       ↓
+Borrowed USDC held in agent wallet (user-recoverable, zero protocol risk)
+       ↓
+User creates bot → allocates capital → deposit logic funds the bot
+       ↓
+Bot profits → sweep to agent wallet → repay borrow → reduce interest costs
+```
+
+### Supported Collateral (Protocol-Dependent)
+
+Collateral eligibility depends on the lending protocol, not on us. Each yield adapter reports what it accepts:
+
+> **Primary lending protocol: Jupiter Lend** — see strategic rationale below. Jupiter is listed first in this table because it has the broadest collateral acceptance (including JLP and INF natively) and the best LTV ratios for Jupiter-native assets.
+
+| Asset | Jupiter Lend | Kamino | Marginfi | Save/Solend | Notes |
+|-------|-------------|--------|----------|-------------|-------|
+| USDC | ✅ Lend | ✅ Lend | ✅ Lend | ✅ Lend | No borrow needed — deposit directly to trading |
+| SOL | ✅ Collateral | ✅ Collateral | ✅ Collateral | ✅ Collateral | ~65-80% LTV |
+| BTC (wBTC) | ✅ Collateral | ✅ Collateral | ✅ Collateral | ✅ Collateral | ~70-85% LTV |
+| ETH (wETH) | ✅ Collateral | ✅ Collateral | ✅ Collateral | ✅ Collateral | ~70-85% LTV |
+| JitoSOL | ✅ Collateral | ✅ Collateral | ✅ Collateral | ✅ Collateral | Yield-bearing + collateral |
+| mSOL | ✅ Collateral | ✅ Collateral | ✅ Collateral | ✅ Collateral | Yield-bearing + collateral |
+| INF | ✅ Collateral (native) | Varies | Varies | Varies | Jupiter's own LST — best LTV on Jupiter Lend |
+| JLP | ✅ Collateral (native) | ❌ | ❌ | ❌ | Jupiter Liquidity Pool token; earns Perps trading fees; only accepted on Jupiter Lend |
+
+**Key difference from V1**: Collateral weights and LTV ratios come from the lending protocol's API, not from a hardcoded table. The vault orchestrator queries the active yield adapter.
+
+### Why Jupiter Lend is the Primary Protocol
+
+Jupiter is the dominant DEX aggregator on Solana with the largest retail user base. Their lending product offers two meaningful advantages over Kamino/Marginfi for our use case:
+
+1. **Better collateral weights on Jupiter-native assets** — INF and JLP get higher LTV ratios on Jupiter Lend than anywhere else, because the protocol is designed around them. A user depositing JLP or INF as collateral to borrow USDC for trading gets more capital efficiency here than on any competing protocol.
+
+2. **JLP as collateral** — JLP is unique: it's a yield-bearing liquidity token (earns a share of Jupiter Perpetuals trading fees, typically 5-15% APY). It's not accepted as collateral anywhere except Jupiter Lend. This opens a deposit type no other vault platform supports — users can put their JLP to work as trading collateral without giving up the fee income.
+
+3. **Ecosystem reach** — Building on Jupiter as a primary integration creates a natural partnership story. Jupiter runs a regular community call ("Planetary Call") followed closely by the Solana DeFi community. Being featured there is a meaningful distribution channel that Kamino/Marginfi/Save integrations wouldn't generate.
+
+**Secondary protocols** (Kamino, Marginfi, Save/Solend, Lulo) serve as fallbacks and for diversification — not every user will hold Jupiter-native assets, and protocol risk caps mean we can't put everything in one place.
+
+```typescript
+interface AssetConfig {
+  symbol: string;
+  category: 'stablecoin' | 'major_crypto' | 'lst' | 'yield_only';
+
+  canDepositDirect: boolean;
+  canUseAsCollateral: boolean;
+  maxLtv: number;
+
+  hasNativeYield: boolean;
+  yieldSource: string | null;
+}
+
+async function getAssetConfig(
+  yieldAdapter: YieldProtocolAdapter,
+  asset: string
+): Promise<AssetConfig> {
+  const weight = await yieldAdapter.getCollateralWeight(asset);
+  return {
+    symbol: asset,
+    category: categorizeAsset(asset),
+    canDepositDirect: asset === 'USDC',
+    canUseAsCollateral: weight > 0,
+    maxLtv: weight,
+    hasNativeYield: ['JitoSOL', 'mSOL', 'INF'].includes(asset),
+    yieldSource: getYieldSource(asset),
+  };
+}
+```
+
+---
+
+## Idle Capital and the Yield Gap
+
+### The Problem
+
+On Drift, idle USDC in a subaccount automatically earned lending yield. Users didn't have to think about it — their unused margin was productive.
+
+On Pacifica (and most other perp DEXs), idle USDC in a subaccount earns nothing. It just sits there.
+
+For users who have made profits and aren't actively trading with all their capital, this is dead money.
+
+### The Solution: Yield Routing
+
+The vault orchestrator can route idle capital to yield-generating protocols:
+
+```
+Bot has $10,000 USDC on Pacifica
+Bot only using $3,000 in active positions
+$7,000 is idle
+       ↓
+Vault Orchestrator detects idle capital
+       ↓
+Withdraws $5,000 from Pacifica (keeps $2,000 buffer for new trades)
+       ↓
+Deposits $5,000 to highest-yield USDC opportunity
+(Kamino USDC lending at 8% APY, for example)
+       ↓
+When bot needs capital for a new trade:
+  → Withdraw from yield protocol
+  → Deposit to Pacifica
+  → Execute trade
+```
+
+### Idle Capital Detection
+
+```typescript
+interface IdleCapitalDetector {
+  botId: string;
+
+  async detectIdleCapital(): Promise<IdleCapitalResult> {
+    const account = await tradingAdapter.getAccountInfo(this.subaccountId);
+    const positions = await tradingAdapter.getPositions(this.subaccountId);
+
+    const totalEquity = account.equity;
+    const marginInUse = positions.reduce((sum, p) => sum + p.marginUsed, 0);
+    const freeCollateral = totalEquity - marginInUse;
+
+    const bufferRequired = this.calculateBuffer(positions);
+    const idleAmount = Math.max(0, freeCollateral - bufferRequired);
+
+    return {
+      totalEquity,
+      marginInUse,
+      freeCollateral,
+      bufferRequired,
+      idleAmount,
+      idlePercent: idleAmount / totalEquity,
+    };
+  }
+
+  calculateBuffer(positions: Position[]): number {
+    if (positions.length === 0) {
+      return this.bot.maxPositionSize * 1.2;
+    }
+    const maxPossibleNewPosition = this.bot.maxPositionSize;
+    const safetyMargin = 1.2;
+    return maxPossibleNewPosition * safetyMargin;
+  }
+}
+```
+
+### Yield Routing Constraints
+
+The vault must balance yield against availability:
+
+```typescript
+interface YieldRoutingConfig {
+  minIdleThreshold: number;
+  maxYieldAllocationPercent: number;
+  bufferMultiplier: number;
+
+  maxWithdrawalDelay: number;
+  minYieldApy: number;
+  maxProtocolExposurePercent: number;
+}
+
+const DEFAULT_YIELD_ROUTING: YieldRoutingConfig = {
+  minIdleThreshold: 500,
+  maxYieldAllocationPercent: 0.70,
+  bufferMultiplier: 1.2,
+  maxWithdrawalDelay: 0,
+  minYieldApy: 0.03,
+  maxProtocolExposurePercent: 0.30,
+};
+```
+
+---
+
+## Vault Orchestrator
+
+The central coordinator that manages capital flow between trading and yield protocols.
+
+### Core Responsibilities
+
+1. Track total user capital across all protocols
+2. Route idle capital to yield opportunities
+3. Recall capital from yield when trading needs it
+4. Manage collateral and borrowing for non-USDC deposits
+5. Monitor health across all protocol positions
+6. Execute profit distribution based on user preferences
+
+### State Model
+
+```typescript
+interface VaultState {
+  walletAddress: string;
+
+  agentWallet: {
+    solBalance: number;
+    usdcBalance: number;
+    otherTokens: TokenBalance[];
+  };
+
+  tradingAllocations: {
+    protocol: string;
+    subaccountId: string;
+    botId: string;
+    equity: number;
+    marginInUse: number;
+    freeCollateral: number;
+    unrealizedPnl: number;
+  }[];
+
+  yieldAllocations: {
+    protocol: string;
+    asset: string;
+    amount: number;
+    currentApy: number;
+    depositedAt: Date;
+    accrued: number;
+    withdrawalDelay: number;
+  }[];
+
+  borrowPositions: {
+    protocol: string;
+    collateralAsset: string;
+    collateralAmount: number;
+    borrowedAsset: string;
+    borrowedAmount: number;
+    borrowApy: number;
+    healthFactor: number;
+    liquidationPrice: number | null;
+  }[];
+
+  computed: {
+    totalEquity: number;
+    totalInTrading: number;
+    totalInYield: number;
+    totalBorrowed: number;
+    netYieldApy: number;
+    overallHealthFactor: number;
+    idleCapital: number;
+  };
+}
+```
+
+### Capital Flow Operations
+
+```typescript
+interface VaultOrchestrator {
+  async fundBotFromWallet(
+    botId: string,
+    amount: number
+  ): Promise<FundingResult> {
+    const wallet = await this.getAgentWalletBalance();
+
+    if (wallet.usdcBalance >= amount) {
+      await this.tradingAdapter.deposit(bot.subaccountId, amount);
+      return { source: 'wallet', amount };
+    }
+
+    const yieldRecall = await this.recallFromYield(amount - wallet.usdcBalance);
+    if (yieldRecall.success) {
+      await this.tradingAdapter.deposit(bot.subaccountId, amount);
+      return { source: 'wallet+yield', amount };
+    }
+
+    return { source: 'none', amount: 0, error: 'Insufficient available capital' };
+  }
+
+  // Step 1: Collateralize + borrow → funds land in agent wallet
+  async borrowAgainstCollateral(
+    collateralAsset: string,
+    collateralAmount: number,
+    borrowAmountUsdc: number
+  ): Promise<BorrowResult> {
+    const yieldAdapter = this.selectYieldAdapter(collateralAsset);
+
+    await yieldAdapter.deposit(collateralAsset, collateralAmount);
+
+    const healthAfterBorrow = await this.projectHealthAfterBorrow(
+      yieldAdapter, collateralAsset, collateralAmount, borrowAmountUsdc
+    );
+
+    if (healthAfterBorrow < SAFE_HEALTH_THRESHOLD) {
+      return { success: false, error: 'Would compromise vault health' };
+    }
+
+    // Borrowed USDC lands in agent wallet — NOT in any trading protocol
+    await yieldAdapter.borrow('USDC', borrowAmountUsdc);
+
+    return {
+      success: true,
+      collateral: { asset: collateralAsset, amount: collateralAmount },
+      borrowed: borrowAmountUsdc,
+      healthFactor: healthAfterBorrow,
+      // USDC now in agent wallet, available for bot allocation
+    };
+  }
+
+  // Step 2: User creates bot and allocates — only THEN does capital
+  // enter a trading protocol. This is the existing deposit flow.
+  // fundBotFromWallet() above handles this — it pulls from agent wallet.
+
+  async routeIdleCapitalToYield(botId: string): Promise<YieldRoutingResult> {
+    const idle = await this.idleCapitalDetector.detectIdleCapital(botId);
+
+    if (idle.idleAmount < this.config.minIdleThreshold) {
+      return { action: 'none', reason: 'Below idle threshold' };
+    }
+
+    const yieldableAmount = idle.idleAmount * this.config.maxYieldAllocationPercent;
+    const bestYield = await this.findBestYieldOpportunity('USDC', yieldableAmount);
+
+    if (bestYield.apy < this.config.minYieldApy) {
+      return { action: 'none', reason: 'No worthwhile yield opportunities' };
+    }
+
+    await this.tradingAdapter.withdraw(bot.subaccountId, yieldableAmount);
+    await bestYield.adapter.deposit('USDC', yieldableAmount);
+
+    return {
+      action: 'routed',
+      amount: yieldableAmount,
+      protocol: bestYield.adapter.name,
+      apy: bestYield.apy,
+    };
+  }
+
+  async recallFromYield(amountNeeded: number): Promise<RecallResult> {
+    const allocations = this.state.yieldAllocations
+      .filter(a => a.withdrawalDelay === 0)
+      .sort((a, b) => a.currentApy - b.currentApy);
+
+    let recalled = 0;
+    for (const alloc of allocations) {
+      if (recalled >= amountNeeded) break;
+
+      const toRecall = Math.min(alloc.amount, amountNeeded - recalled);
+      const adapter = this.getYieldAdapter(alloc.protocol);
+      await adapter.withdraw(alloc.asset, toRecall);
+      recalled += toRecall;
+    }
+
+    return {
+      success: recalled >= amountNeeded,
+      amountRecalled: recalled,
+      shortfall: Math.max(0, amountNeeded - recalled),
+    };
+  }
+}
+```
+
+---
+
+## Yield Aggregator
+
+The original QuantumVault vision: an intelligent yield aggregator that routes capital to the best opportunities across Solana DeFi.
+
+### Supported Protocols
+
+| Protocol | Type | Assets | Withdrawal | Complexity | Notes |
+|----------|------|--------|------------|------------|-------|
+| **Jupiter Lend** | **Lending** | **USDC, SOL, BTC, ETH, LSTs, INF, JLP** | **Instant** | **Medium** | **PRIMARY — best LTV on Jupiter-native assets (INF, JLP); only protocol accepting JLP as collateral; largest Solana ecosystem reach** |
+| Kamino | Lending | USDC, SOL, BTC, ETH, LSTs | Instant | Medium | Strong Solana ecosystem; fallback / diversification |
+| Marginfi | Lending | USDC, SOL, BTC, ETH, LSTs | Instant | Medium | Battle-tested; fallback / diversification |
+| Save (Solend) | Lending | USDC, SOL, ETH | Instant | Medium | Established; fallback |
+| Lulo | Aggregator | USDC, SOL | Varies | Low | Aggregates across protocols |
+| **OnRe** | **Yield Aggregator** | **USDC, stablecoins** | **Instant (TBC)** | **Low–Medium** | **~10% APY target; auto-routes stablecoins into LSTs/LRTs — yield baked into price or rebased. ⚠️ Candidate — verify API before implementation** |
+| Meteora | LP | USDC pairs | Instant | High | Concentrated liquidity |
+| Orca | LP | Various | Instant | High | Whirlpools |
+
+### Yield Comparison Engine
+
+```typescript
+interface YieldOpportunity {
+  protocol: string;
+  asset: string;
+  apy: number;
+  apySource: 'lending' | 'lp' | 'staking' | 'rewards';
+  liquidity: number;
+  withdrawalDelay: number;
+  riskScore: number;
+  protocolTvl: number;
+  audited: boolean;
+}
+
+async function findBestYieldOpportunity(
+  asset: string,
+  amount: number
+): Promise<YieldOpportunity[]> {
+  const adapters = yieldAdapterRegistry.getAdaptersForAsset(asset);
+
+  const opportunities: YieldOpportunity[] = [];
+  for (const adapter of adapters) {
+    const apy = await adapter.getCurrentApy(asset);
+    const liquidity = await adapter.getAvailableLiquidity(asset);
+
+    if (liquidity < amount) continue;
+    if (apy < MIN_YIELD_APY) continue;
+
+    opportunities.push({
+      protocol: adapter.name,
+      asset,
+      apy,
+      apySource: adapter.type,
+      liquidity,
+      withdrawalDelay: adapter.withdrawalDelay,
+      riskScore: getProtocolRiskScore(adapter.name),
+      protocolTvl: await adapter.getTvl(),
+      audited: adapter.audited,
+    });
+  }
+
+  return opportunities.sort((a, b) => {
+    const aScore = riskAdjustedScore(a);
+    const bScore = riskAdjustedScore(b);
+    return bScore - aScore;
+  });
+}
+
+function riskAdjustedScore(opp: YieldOpportunity): number {
+  let score = opp.apy * 100;
+
+  if (opp.withdrawalDelay > 0) score *= 0.8;
+  if (!opp.audited) score *= 0.7;
+  if (opp.riskScore > 7) score *= 0.5;
+  if (opp.liquidity < 100_000) score *= 0.9;
+
+  return score;
+}
+```
+
+### Migration Logic (Rebalancing Between Protocols)
+
+```typescript
+async function evaluateRebalance(
+  currentAllocations: YieldAllocation[],
+  opportunities: YieldOpportunity[]
+): Promise<RebalanceAction[]> {
+  const actions: RebalanceAction[] = [];
+
+  for (const allocation of currentAllocations) {
+    const currentApy = allocation.currentApy;
+    const bestOpportunity = opportunities
+      .filter(o => o.protocol !== allocation.protocol)
+      .filter(o => o.asset === allocation.asset)
+      [0];
+
+    if (!bestOpportunity) continue;
+
+    const apyDifference = bestOpportunity.apy - currentApy;
+    if (apyDifference < 0.02) continue;
+
+    const switchCost = estimateSwitchCost(
+      allocation.protocol,
+      bestOpportunity.protocol,
+      allocation.amount
+    );
+
+    const dailyGain = allocation.amount * (apyDifference / 365);
+    const breakEvenDays = switchCost / dailyGain;
+
+    if (breakEvenDays < 7) {
+      actions.push({
+        type: 'migrate',
+        from: allocation.protocol,
+        to: bestOpportunity.protocol,
+        asset: allocation.asset,
+        amount: allocation.amount,
+        currentApy,
+        newApy: bestOpportunity.apy,
+        breakEvenDays,
+        estimatedAnnualGain: allocation.amount * apyDifference,
+      });
+    }
+  }
+
+  return actions;
+}
+
+function estimateSwitchCost(
+  fromProtocol: string,
+  toProtocol: string,
+  amount: number
+): number {
+  const withdrawTxCost = 0.00025;
+  const depositTxCost = 0.00025;
+  const solPrice = getSolPriceSync();
+  const txCostUsd = (withdrawTxCost + depositTxCost) * solPrice;
+
+  const slippageCost = amount * 0.001;
+
+  return txCostUsd + slippageCost;
+}
+```
+
+### Protocol Risk Diversification
+
+Never put all capital in one protocol:
+
+```typescript
+interface DiversificationConfig {
+  maxPerProtocol: number;
+  riskScores: Record<string, number>;
+}
+
+const DEFAULT_DIVERSIFICATION: DiversificationConfig = {
+  maxPerProtocol: 0.30,
+  riskScores: {
+    'jupiter': 3,    // primary; large ecosystem, verify lending-specific audit status
+    'kamino': 3,
+    'marginfi': 3,
+    'save': 4,
+    'lulo': 4,
+    'onre': 4,    // newer; verify audit status before raising to tier 1
+    'meteora': 6,
+    'orca': 6,
+  },
+};
+
+function calculateOptimalAllocation(
+  totalCapital: number,
+  opportunities: YieldOpportunity[],
+  config: DiversificationConfig
+): AllocationPlan[] {
+  const plan: AllocationPlan[] = [];
+  let remaining = totalCapital;
+
+  const ranked = opportunities.sort((a, b) => {
+    const aRiskAdj = a.apy * (10 - (config.riskScores[a.protocol] || 5)) / 10;
+    const bRiskAdj = b.apy * (10 - (config.riskScores[b.protocol] || 5)) / 10;
+    return bRiskAdj - aRiskAdj;
+  });
+
+  for (const opp of ranked) {
+    if (remaining <= 0) break;
+
+    const maxForProtocol = totalCapital * config.maxPerProtocol;
+    const allocation = Math.min(remaining, maxForProtocol, opp.liquidity * 0.1);
+
+    if (allocation >= opp.protocol.minDeposit) {
+      plan.push({
+        protocol: opp.protocol,
+        asset: opp.asset,
+        amount: allocation,
+        expectedApy: opp.apy,
+        riskScore: config.riskScores[opp.protocol] || 5,
+      });
+      remaining -= allocation;
+    }
+  }
+
+  return plan;
+}
+```
+
+---
+
+## Collateral Borrowing Flow
+
+For users who want to hold non-USDC assets and still trade with bots.
+
+### The Loan Lifecycle
+
+Borrowed capital is held by the agent wallet — NOT deposited into any trading protocol. The agent wallet is always recoverable by the user. Capital only enters a trading protocol when the user explicitly creates a bot and allocates funds from their agent wallet balance.
+
+```
+1. DEPOSIT: User deposits 100 SOL into vault
+       ↓
+2. COLLATERALIZE: Vault deposits SOL to lending protocol as collateral
+       ↓
+3. BORROW: Vault borrows USDC against SOL (65% LTV → ~$9,750)
+       ↓
+4. HOLD: Borrowed USDC held in agent wallet (user-recoverable, no protocol risk)
+       ↓
+5. ALLOCATE: User creates bot, sets allocation → deposit logic moves
+   set amount from agent wallet to trading protocol subaccount
+       ↓
+6. TRADE: Bot trades with allocated capital
+       ↓
+7. REPAY: Bot profits auto-sweep back to agent wallet, then to repay borrow
+       ↓
+8. INTEREST: User pays borrow APY on outstanding USDC
+       ↓
+9. RELEASE: When borrow fully repaid, collateral is free to withdraw
+```
+
+**Protocol risk boundary:** The user only takes on trading protocol risk for the specific amount they allocate to a bot. Unallocated borrowed USDC stays safely in the agent wallet, which the user can always recover.
+
+### Intelligent Borrowing
+
+```typescript
+interface BorrowDecisionEngine {
+  async evaluateBorrowRequest(
+    collateralAsset: string,
+    collateralAmount: number,
+    borrowAmountUsdc: number
+  ): Promise<BorrowDecision> {
+    const adapter = this.selectBestLendingProtocol(collateralAsset);
+    const borrowApy = await adapter.getBorrowApy('USDC');
+    const collateralWeight = await adapter.getCollateralWeight(collateralAsset);
+    const maxBorrow = collateralAmount * this.getAssetPrice(collateralAsset) * collateralWeight;
+
+    if (borrowAmountUsdc > maxBorrow * 0.85) {
+      return {
+        action: 'deny',
+        reason: 'Borrow amount too close to max LTV — high liquidation risk',
+      };
+    }
+
+    if (borrowApy > MAX_ACCEPTABLE_BORROW_APY) {
+      return {
+        action: 'defer',
+        reason: `Borrow rate ${(borrowApy * 100).toFixed(1)}% is above threshold`,
+        retryAfter: '1h',
+      };
+    }
+
+    const projectedHealth = maxBorrow / borrowAmountUsdc;
+
+    return {
+      action: 'approve',
+      protocol: adapter.name,
+      borrowAmount: borrowAmountUsdc,
+      borrowApy,
+      projectedHealth,
+      liquidationPrice: this.calculateLiquidationPrice(
+        collateralAsset, collateralAmount, borrowAmountUsdc, collateralWeight
+      ),
+      estimatedHourlyCost: borrowAmountUsdc * borrowApy / 365 / 24,
+    };
+  }
+
+  selectBestLendingProtocol(collateralAsset: string): YieldProtocolAdapter {
+    const adapters = this.yieldAdapterRegistry
+      .getAdaptersForAsset(collateralAsset)
+      .filter(a => a.getCollateralWeight(collateralAsset) > 0);
+
+    return adapters.sort((a, b) => {
+      const aRate = a.getBorrowApySync('USDC');
+      const bRate = b.getBorrowApySync('USDC');
+      return aRate - bRate;
+    })[0];
+  }
+}
+```
+
+### Auto-Repayment From Bot Profits
+
+The key user value prop: bot profits automatically pay down the loan.
+
+```typescript
+interface AutoRepaymentConfig {
+  repayFromProfitsFirst: boolean;
+  minProfitBeforeRepay: number;
+  repayPercent: number;
+  keepMinBufferInBot: number;
+}
+
+const DEFAULT_AUTO_REPAY: AutoRepaymentConfig = {
+  repayFromProfitsFirst: true,
+  minProfitBeforeRepay: 10,
+  repayPercent: 0.50,
+  keepMinBufferInBot: 100,
+};
+
+async function handleProfitForRepayment(
+  botId: string,
+  realizedProfit: number,
+  config: AutoRepaymentConfig
+): Promise<RepaymentResult> {
+  if (!config.repayFromProfitsFirst) {
+    return { action: 'skip', reason: 'Auto-repay disabled' };
+  }
+
+  if (realizedProfit < config.minProfitBeforeRepay) {
+    return { action: 'accumulate', reason: 'Below minimum threshold' };
+  }
+
+  const outstandingBorrow = await getOutstandingBorrow(botId);
+  if (outstandingBorrow <= 0) {
+    return { action: 'skip', reason: 'No outstanding borrow' };
+  }
+
+  const repayAmount = Math.min(
+    realizedProfit * config.repayPercent,
+    outstandingBorrow
+  );
+
+  const botEquityAfterRepay = await projectBotEquity(botId, -repayAmount);
+  if (botEquityAfterRepay < config.keepMinBufferInBot) {
+    return { action: 'partial', reason: 'Maintaining bot buffer' };
+  }
+
+  await tradingAdapter.withdraw(bot.subaccountId, repayAmount);
+  await yieldAdapter.repay('USDC', repayAmount);
+
+  return {
+    action: 'repaid',
+    amount: repayAmount,
+    remainingBorrow: outstandingBorrow - repayAmount,
+  };
+}
+```
+
+---
+
+## Health Monitoring
+
+### Multi-Protocol Health
+
+Unlike V1 where health was a single Drift metric, V2 must monitor health across every protocol where capital is deployed:
+
+```typescript
+interface MultiProtocolHealth {
+  overall: {
+    healthFactor: number;
+    status: 'healthy' | 'warning' | 'critical' | 'emergency';
+  };
+
+  perProtocol: {
+    protocol: string;
+    type: 'trading' | 'yield' | 'lending';
+    healthFactor: number;
+    exposure: number;
+    risk: string;
+  }[];
+
+  borrowHealth: {
+    totalCollateralValue: number;
+    totalBorrowValue: number;
+    weightedHealthFactor: number;
+    lowestSingleHealth: number;
+    nearestLiquidationPrice: { asset: string; price: number } | null;
+  };
+}
+
+async function calculateOverallHealth(
+  state: VaultState
+): Promise<MultiProtocolHealth> {
+  const protocolHealths: ProtocolHealth[] = [];
+
+  for (const borrow of state.borrowPositions) {
+    const adapter = getYieldAdapter(borrow.protocol);
+    const health = await adapter.getHealthFactor(state.walletAddress);
+    protocolHealths.push({
+      protocol: borrow.protocol,
+      type: 'lending',
+      healthFactor: health,
+      exposure: borrow.borrowedAmount,
+      risk: health < 1.3 ? 'high' : health < 1.5 ? 'medium' : 'low',
+    });
+  }
+
+  for (const alloc of state.yieldAllocations) {
+    protocolHealths.push({
+      protocol: alloc.protocol,
+      type: 'yield',
+      healthFactor: 999,
+      exposure: alloc.amount,
+      risk: 'protocol_risk_only',
+    });
+  }
+
+  for (const alloc of state.tradingAllocations) {
+    const adapter = getTradingAdapter(alloc.protocol);
+    const info = await adapter.getAccountInfo(alloc.subaccountId);
+    protocolHealths.push({
+      protocol: alloc.protocol,
+      type: 'trading',
+      healthFactor: info.marginRatio || 999,
+      exposure: alloc.equity,
+      risk: info.marginRatio < 0.1 ? 'high' : 'low',
+    });
+  }
+
+  const lowestHealth = Math.min(...protocolHealths.map(p => p.healthFactor));
+
+  let status: 'healthy' | 'warning' | 'critical' | 'emergency';
+  if (lowestHealth < 1.1) status = 'emergency';
+  else if (lowestHealth < 1.2) status = 'critical';
+  else if (lowestHealth < 1.5) status = 'warning';
+  else status = 'healthy';
+
+  return {
+    overall: { healthFactor: lowestHealth, status },
+    perProtocol: protocolHealths,
+    borrowHealth: computeBorrowHealth(state.borrowPositions),
+  };
+}
+```
+
+### Health Thresholds and Actions
+
+| Health Factor | Status | Action |
+|---------------|--------|--------|
+| > 1.5 | Healthy | Normal operations |
+| 1.3 – 1.5 | Warning | Notify user, suggest adding collateral |
+| 1.2 – 1.3 | Critical | Pause new bot funding, pause new borrows, active warning |
+| 1.1 – 1.2 | Critical+ | Begin gradual deleverage (close losing positions first) |
+| < 1.1 | Emergency | Force close all bot positions, repay borrows immediately |
+
+### Real-Time Monitoring
+
+V1 relied on polling Drift every 60 seconds. V2 must be smarter since capital is spread across protocols:
+
+```typescript
+interface HealthMonitor {
+  checkInterval: number;
+
+  async monitor(): Promise<void> {
+    const state = await this.buildVaultState();
+    const health = await calculateOverallHealth(state);
+
+    if (health.overall.status === 'emergency') {
+      await this.emergencyDeleverage(state);
+      await this.notifyUser('emergency', health);
+    } else if (health.overall.status === 'critical') {
+      await this.pauseNewOperations();
+      await this.beginGradualDeleverage(state);
+      await this.notifyUser('critical', health);
+    } else if (health.overall.status === 'warning') {
+      await this.notifyUser('warning', health);
+    }
+  }
+
+  async emergencyDeleverage(state: VaultState): Promise<void> {
+    for (const alloc of state.tradingAllocations) {
+      const adapter = getTradingAdapter(alloc.protocol);
+      const positions = await adapter.getPositions(alloc.subaccountId);
+
+      const sorted = positions.sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
+      for (const pos of sorted) {
+        await adapter.closePosition(alloc.subaccountId, pos.market);
+      }
+
+      const equity = await adapter.getAccountInfo(alloc.subaccountId);
+      if (equity.freeCollateral > 0) {
+        await adapter.withdraw(alloc.subaccountId, equity.freeCollateral);
+      }
+    }
+
+    for (const borrow of state.borrowPositions) {
+      const adapter = getYieldAdapter(borrow.protocol);
+      await adapter.repay('USDC', borrow.borrowedAmount);
+    }
+  }
+}
+```
+
+---
+
+## Intelligent Agents
+
+Rule-based autonomous systems — no LLM required. Deterministic, reproducible, cheap.
+
+### 1. Yield Arbitrage Agent
+
+Continuously monitors yield opportunities and reallocates capital:
+
+```typescript
+interface YieldArbitrageAgent {
+  evaluationInterval: number;
+  minApyDifference: number;
+  maxBreakEvenDays: number;
+
+  async evaluate(): Promise<YieldDecision> {
+    const currentAllocations = await this.getCurrentYieldAllocations();
+    const opportunities = await this.fetchAllYieldOpportunities();
+
+    const rebalanceActions = await evaluateRebalance(
+      currentAllocations,
+      opportunities
+    );
+
+    if (rebalanceActions.length === 0) {
+      return { action: 'hold' };
+    }
+
+    return {
+      action: 'rebalance',
+      migrations: rebalanceActions,
+      estimatedAnnualGain: rebalanceActions.reduce(
+        (sum, a) => sum + a.estimatedAnnualGain, 0
+      ),
+    };
+  }
+}
+```
+
+**Triggers:**
+- Every 6 hours: Check yield rates across all protocols
+- On significant rate change (>2%): Immediate evaluation
+- After any deposit: Evaluate new capital placement
+
+### 2. Profit Distribution Agent
+
+Automatically allocates realized profits based on user preferences:
+
+```typescript
+interface ProfitDistributionAgent {
+  reinvestPercent: number;
+  yieldFarmPercent: number;
+  repayBorrowPercent: number;
+  withdrawPercent: number;
+  compoundThreshold: number;
+
+  async onProfitRealized(profit: number, botId: string): Promise<void> {
+    if (profit < this.compoundThreshold) return;
+
+    const hasBorrow = await this.hasOutstandingBorrow(botId);
+
+    if (hasBorrow && this.repayBorrowPercent > 0) {
+      const repayAmount = profit * this.repayBorrowPercent;
+      await this.repayBorrow(botId, repayAmount);
+      profit -= repayAmount;
+    }
+
+    if (this.reinvestPercent > 0) {
+      const reinvest = profit * this.reinvestPercent;
+    }
+
+    if (this.yieldFarmPercent > 0) {
+      const yieldAmount = profit * this.yieldFarmPercent;
+      await this.routeToYield(yieldAmount);
+    }
+
+    if (this.withdrawPercent > 0) {
+      const withdrawAmount = profit * this.withdrawPercent;
+      await this.withdrawToAgentWallet(botId, withdrawAmount);
+    }
+  }
+}
+```
+
+### 3. Vault Guardian
+
+The Vault Guardian is the unified risk management and liquidation-prevention agent. It monitors borrow position health every 60 seconds, delivers human-readable alerts through the existing Telegram and in-app notification channels, and takes protective actions in a defined waterfall order — trying the least-invasive option first.
+
+The framing matters for UX: the Guardian is not just an alert system. It is a safety net that actively tries to prevent catastrophic loss on the user's behalf, with the user in control of how far it goes.
+
+**Monitoring core** (runs every 60 seconds, fires Guardian waterfall on threshold breach):
+
+```typescript
+interface VaultGuardianCore {
+  async onHealthChange(health: MultiProtocolHealth, config: GuardianConfig): Promise<void> {
+    if (health.overall.healthFactor < config.emergencyAt) {
+      await guardianProtectWaterfall(health.walletAddress, health.overall.healthFactor, config);
+    } else if (health.overall.healthFactor < config.criticalAt) {
+      await this.pauseAllBots();
+      await guardianProtectWaterfall(health.walletAddress, health.overall.healthFactor, config);
+    } else if (health.overall.healthFactor < config.alertAt) {
+      await guardianProtectWaterfall(health.walletAddress, health.overall.healthFactor, config);
+    } else if (health.overall.healthFactor < config.warnAt) {
+      await notifyUser(health.walletAddress, buildGuardianMessage(health, config, 'warning'));
+    }
+  }
+}
+```
+
+**Escalation ladder (defaults — user-adjustable):**
+1. Warn (Health < 1.5): Notification only — alert via Telegram + in-app
+2. Alert (Health < 1.3): Notification + auto-topup fires if mode allows
+3. Critical (Health < 1.2): Bots paused + aggressive repay waterfall
+4. Emergency (Health < 1.1): Force-close everything — fires regardless of Guardian mode
+
+#### Guardian Modes (User-Configurable)
+
+```typescript
+type GuardianMode =
+  | 'notify_only'     // warn the user; all protective action is manual
+  | 'auto_topup'      // auto-move idle capital to repay borrow if available
+  | 'auto_full';      // do whatever it takes: topup, reduce bots, partial close
+
+interface GuardianConfig {
+  mode: GuardianMode;
+
+  // Health factor thresholds (user-adjustable within safe bounds)
+  warnAt: number;       // default: 1.5 — first Telegram/in-app ping
+  alertAt: number;      // default: 1.3 — urgent follow-up + auto-topup fires (if enabled)
+  criticalAt: number;   // default: 1.2 — bots paused + aggressive repay
+  emergencyAt: number;  // default: 1.1 — force-close everything (always fires, regardless of mode)
+
+  // How many notifications before the Guardian escalates without a user response
+  // (only relevant in auto_full mode)
+  escalationGraceMinutes: number;  // default: 30
+
+  notifyViaTelegram: boolean;      // default: true (if Telegram linked)
+  notifyViaInApp: boolean;         // default: true
+}
+```
+
+#### Notification Content
+
+Notifications use the existing Telegram bot (`TELEGRAM_BOT_TOKEN`) and the in-app notification store — no new delivery infrastructure needed. The Guardian generates human-readable messages with context and a clear action:
+
+```
+⚠️ VAULT HEALTH WARNING — QuantumVault
+
+Your borrow position health factor has dropped to 1.42
+(Warning threshold: 1.5)
+
+Collateral:  18.3 JitoSOL (~$2,745)
+Borrowed:    $1,850 USDC
+Liquidation price (SOL): $112.40  ← current: $150.20
+
+What to do:
+  → Add collateral or repay some USDC to improve your health factor
+  → Or reduce your bot positions to free up capital
+
+Tap to manage: https://myquantumvault.com/vault
+
+[Guardian mode: Notify Only — auto-protection is off]
+```
+
+At the critical and emergency levels, the message escalates in urgency and reports what the Guardian has already done automatically (if mode allows):
+
+```
+🚨 VAULT CRITICAL — QuantumVault
+
+Health factor: 1.18 (Critical threshold: 1.2)
+Liquidation in ~2.3 hours at current price trend.
+
+Guardian actions taken:
+  ✅ All bots paused
+  ✅ $240 idle USDC moved from Kamino yield → borrow repayment
+  ⏳ Health factor now: 1.31 — still in warning zone
+
+Remaining borrow: $1,610 USDC
+Recommended: Add $400+ collateral or repay $400+ USDC
+
+Tap to manage: https://myquantumvault.com/vault
+```
+
+#### Guardian Protection Waterfall
+
+When health drops below `alertAt`, the Guardian works through this sequence in order, stopping as soon as health is restored above `warnAt`. Each step is only taken if the user's `GuardianMode` permits it.
+
+```typescript
+async function guardianProtectWaterfall(
+  walletAddress: string,
+  currentHealth: number,
+  config: GuardianConfig,
+): Promise<GuardianActionResult> {
+  const actions: string[] = [];
+
+  // Step 1: Always notify (all modes)
+  await notifyUser(walletAddress, buildGuardianMessage(currentHealth, config));
+  actions.push('notified');
+
+  if (config.mode === 'notify_only') {
+    return { actions, healthAfter: currentHealth, stopped: 'notify_only_mode' };
+  }
+
+  // Step 2: Pull idle USDC from yield protocols (auto_topup + auto_full)
+  const idleInYield = await getLowestYieldAllocation(walletAddress);  // recall cheapest yield first
+  if (idleInYield > 0) {
+    const repayAmount = Math.min(idleInYield, calculateRepayNeeded(currentHealth, config.warnAt));
+    await recallFromYield(walletAddress, repayAmount);
+    await repayBorrow(walletAddress, repayAmount);
+    actions.push(`repaid_from_yield:${repayAmount}`);
+
+    const healthAfterRepay = await getHealthFactor(walletAddress);
+    if (healthAfterRepay >= config.warnAt) {
+      return { actions, healthAfter: healthAfterRepay, stopped: 'health_restored' };
+    }
+  }
+
+  // Step 3: Pull idle USDC from agent wallet (auto_topup + auto_full)
+  const idleInWallet = await getAgentWalletUsdcBalance(walletAddress);
+  if (idleInWallet > 0) {
+    const repayAmount = Math.min(idleInWallet, calculateRepayNeeded(currentHealth, config.warnAt));
+    await repayBorrow(walletAddress, repayAmount);
+    actions.push(`repaid_from_wallet:${repayAmount}`);
+
+    const healthAfterWallet = await getHealthFactor(walletAddress);
+    if (healthAfterWallet >= config.warnAt) {
+      return { actions, healthAfter: healthAfterWallet, stopped: 'health_restored' };
+    }
+  }
+
+  if (config.mode === 'auto_topup') {
+    // auto_topup exhausted its options — notify user that manual action is needed
+    await notifyUser(walletAddress, buildEscalationMessage(currentHealth, 'manual_action_required'));
+    return { actions, healthAfter: await getHealthFactor(walletAddress), stopped: 'topup_exhausted' };
+  }
+
+  // Step 4: Reduce bot positions (auto_full only)
+  // Withdraw partial capital from bots to repay borrow — smallest/worst-performing bot first
+  const bots = await getActiveBotsSortedByScore(walletAddress, 'asc');
+  for (const bot of bots) {
+    const freeCollateral = await getBotFreeCollateral(bot.id);
+    if (freeCollateral > 0) {
+      const withdrawAmount = Math.min(
+        freeCollateral * 0.5,   // never pull more than 50% of a bot's free collateral in one action
+        calculateRepayNeeded(currentHealth, config.warnAt),
+      );
+      await withdrawFromBot(bot.id, withdrawAmount);
+      await repayBorrow(walletAddress, withdrawAmount);
+      actions.push(`reduced_bot:${bot.id}:${withdrawAmount}`);
+
+      const healthAfterBotReduce = await getHealthFactor(walletAddress);
+      if (healthAfterBotReduce >= config.warnAt) {
+        return { actions, healthAfter: healthAfterBotReduce, stopped: 'health_restored' };
+      }
+    }
+  }
+
+  // Step 5: Emergency — force-close all positions (fires regardless of mode if health < emergencyAt)
+  const emergencyHealth = await getHealthFactor(walletAddress);
+  if (emergencyHealth < config.emergencyAt) {
+    await emergencyDeleverage(walletAddress);
+    actions.push('emergency_deleverage');
+    await notifyUser(walletAddress, buildEmergencyMessage(emergencyHealth));
+  }
+
+  return { actions, healthAfter: await getHealthFactor(walletAddress), stopped: 'exhausted' };
+}
+```
+
+#### Key UX Principles
+
+- **The emergency step (Step 5) always fires** regardless of `GuardianMode` — there is no mode that lets a user get liquidated when we can prevent it. Liquidation costs the user a penalty fee on top of the loss; we can almost always do better by closing positions ourselves.
+- **Step 3 (reduce bot positions) is never taken silently** — even in `auto_full` mode, the user is notified before and after any bot reduction, with a clear breakdown of what was done and why.
+- **Guardian actions are logged** to the `vaultAgentActions` table so the user can review the full history in the vault dashboard ("Your Guardian prevented a liquidation on May 30 by repaying $240 from your Kamino yield position").
+- **The `escalationGraceMinutes` setting** gives users in `auto_full` mode a grace window after the first notification before the Guardian starts touching their bots — e.g., 30 minutes to manually act before the system does it for them.
+
+#### Monitoring Frequency
+
+Health factor checks run every 60 seconds (same as the Risk Management Agent — they share the monitoring loop). The Guardian fires its protection waterfall when health crosses a threshold *and* has stayed below it for at least 2 consecutive checks, to avoid reacting to momentary price wicks.
+
+### 4. Capital Rebalancing Agent
+
+Optimizes capital allocation across bots based on performance:
+
+```typescript
+interface CapitalRebalancingAgent {
+  evaluationWindow: number;
+  rebalanceThreshold: number;
+
+  calculateBotScore(bot: Bot): number {
+    const sharpeRatio = this.calculateSharpe(bot);
+    const winRate = bot.winningTrades / bot.totalTrades;
+    const profitFactor = bot.grossProfit / bot.grossLoss;
+    const drawdown = bot.maxDrawdown;
+
+    return (sharpeRatio * 0.3) + (winRate * 0.2) +
+           (profitFactor * 0.3) + ((1 - drawdown) * 0.2);
+  }
+
+  async rebalance(): Promise<void> {
+    const scores = this.bots.map(b => ({
+      bot: b,
+      score: this.calculateBotScore(b),
+    }));
+    const totalScore = scores.reduce((sum, s) => sum + s.score, 0);
+
+    for (const { bot, score } of scores) {
+      const idealPercent = score / totalScore;
+      const currentPercent = bot.equity / this.totalEquity;
+
+      if (Math.abs(idealPercent - currentPercent) > this.rebalanceThreshold) {
+        await this.adjustAllocation(bot, idealPercent);
+      }
+    }
+  }
+}
+```
+
+**Schedule:** Weekly evaluation. Only rebalance if difference exceeds threshold. Never rebalance during open positions.
+
+### 5. Negative Carry Protection Agent
+
+Monitors borrow costs against trading returns:
+
+```typescript
+interface NegativeCarryProtector {
+  checkInterval: number;
+
+  async check(walletAddress: string): Promise<void> {
+    const borrows = await this.getActiveBorrows(walletAddress);
+    if (borrows.length === 0) return;
+
+    const weightedBorrowApy = this.calculateWeightedBorrowApy(borrows);
+    const botAvgReturn = await this.getAverageBotReturn(walletAddress, 7);
+
+    if (weightedBorrowApy > botAvgReturn) {
+      const hoursInNegative = await this.getHoursInNegativeCarry(walletAddress);
+
+      if (hoursInNegative > 6) {
+        await this.notify(walletAddress, 'negative_carry', {
+          borrowApy: weightedBorrowApy,
+          botReturn: botAvgReturn,
+          recommendation: 'Consider repaying borrows or pausing bots',
+        });
+
+        if (this.autoUnwindEnabled) {
+          await this.initiateGradualRepayment(walletAddress);
+        }
+      }
+    }
+  }
+}
+```
+
+### 6. Intelligent Borrow Agent
+
+The *timing/orchestration* layer for borrowing. The mechanics of whether a specific borrow is safe — protocol selection, collateral weight, max-LTV check, liquidation price — live in the canonical `BorrowDecisionEngine` (§ Collateral Borrowing Flow → Intelligent Borrowing). This agent decides *when* to invoke that engine in response to bot lifecycle events, and — uniquely — *when to repay vs. hold* as positions close. Ported from the original V1 design, which specified this event-driven repay logic that V2 lacked. To avoid two competing borrow policies, this agent does not re-implement the LTV/health gates; it delegates the borrow safety check to `BorrowDecisionEngine`.
+
+```typescript
+interface IntelligentBorrowAgent {
+  // When a bot needs funding: delegate the safety decision to the canonical engine,
+  // only borrowing incrementally (what's needed now, not max capacity upfront).
+  async onBotFundingRequest(botId: string, amountNeeded: number): Promise<BorrowDecision> {
+    const { collateralAsset, collateralAmount } = await this.getVaultCollateral();
+    return this.borrowDecisionEngine.evaluateBorrowRequest(
+      collateralAsset,
+      collateralAmount,
+      amountNeeded,
+    );
+  }
+
+  // When a bot closes a position (unique to this agent — repay-vs-hold orchestration)
+  async onPositionClosed(botId: string, freedCollateral: number): Promise<RepayDecision> {
+    const totalBorrowed = await this.getTotalBorrows();
+    const otherBotsNeedFunding = await this.getPendingFundingRequests();
+
+    // If no other bots need funds, repay to reduce interest
+    if (otherBotsNeedFunding.length === 0 && totalBorrowed > 0) {
+      const repayAmount = Math.min(freedCollateral, totalBorrowed);
+      return { action: 'repay', amount: repayAmount };
+    }
+
+    // If another bot needs funds, keep borrowed for quick reallocation
+    return { action: 'hold', reason: 'Funds may be needed by other bots' };
+  }
+}
+```
+
+**Operating principles** (the *when*; the *whether-it's-safe* is `BorrowDecisionEngine`'s job):
+1. **Borrow only what's needed** — borrow incrementally as bots need funding, not max capacity upfront.
+2. **Repay when idle** — when bots have no positions, repay borrowed USDC to minimize interest.
+
+**Automatic repayment triggers:**
+
+```typescript
+interface RepaymentTriggers {
+  idleRepaymentThreshold: number;  // e.g. repay after 4h of no bot activity
+  rateSpikeTrigger: number;        // e.g. repay if borrow APY > 2x normal
+  healthRepaymentTrigger: number;  // e.g. repay if health < 1.4
+  repayFromProfitsFirst: boolean;  // default: true
+}
+
+async function checkRepaymentOpportunities(): Promise<void> {
+  const borrowed = await getTotalBorrows();
+  if (borrowed === 0) return;
+
+  const idleUsdc = await getIdleUsdcInBots();
+  const currentApy = await getBorrowApy();
+  const avgApy = await getAverageBorrowApy(7);  // 7-day avg
+
+  if (currentApy > avgApy * 2) {            // rate spike
+    await initiateEmergencyRepayment(borrowed * 0.5);
+    return;
+  }
+
+  const idleHours = await getIdleDuration();  // idle funds
+  if (idleHours > 4 && idleUsdc > 0) {
+    await repayFromIdleFunds(idleUsdc);
+  }
+}
+```
+
+### 7. Borrow Rate Migration Agent
+
+Monitors borrow rates across lending protocols and migrates the user's debt position to a cheaper protocol when the savings justify the move.
+
+#### Why This Is Harder Than It Sounds
+
+The user's instinct here is exactly right — you can't simply "move" a live debt. The constraint is: your collateral is locked in Protocol A until the debt is repaid, and you don't have the USDC freely available because you borrowed it and deployed it into bots. So the sequence must be:
+
+```
+1. Get USDC from somewhere to repay Protocol A debt
+2. Repay debt → collateral is now unlocked
+3. Withdraw collateral from Protocol A
+4. Deposit collateral to Protocol B
+5. Borrow USDC on Protocol B (at the lower rate)
+6. Return the bridge USDC to wherever it came from
+```
+
+The key question is where step 1 gets the USDC. There are two paths.
+
+#### Path A: Idle Capital Bridge (Primary — No Flash Loan Required)
+
+If the vault has idle USDC sitting in yield protocols or the agent wallet, the orchestrator can use it as a temporary bridge:
+
+```typescript
+async function migrateBorrowPosition(
+  walletAddress: string,
+  fromProtocol: string,
+  toProtocol: string,
+): Promise<MigrationResult> {
+  const borrow = await getActiveBorrow(walletAddress, fromProtocol);
+  const idleCapital = await getAvailableIdleUsdc(walletAddress);  // yield + wallet
+
+  if (idleCapital < borrow.borrowedAmount) {
+    return {
+      success: false,
+      reason: 'Insufficient idle capital to bridge repayment',
+      shortfall: borrow.borrowedAmount - idleCapital,
+      recommendation: 'Wait until bots generate more idle profit, or repay partial borrow first',
+    };
+  }
+
+  // Step 1: Recall enough from yield to cover the repayment
+  await recallFromYield(walletAddress, borrow.borrowedAmount);
+
+  // Step 2: Repay old borrow — collateral is now free
+  await repayBorrow(walletAddress, fromProtocol, borrow.borrowedAmount);
+
+  // Step 3: Withdraw collateral
+  await yieldAdapter(fromProtocol).withdraw(borrow.collateralAsset, borrow.collateralAmount);
+
+  // Step 4: Deposit to cheaper protocol
+  await yieldAdapter(toProtocol).deposit(borrow.collateralAsset, borrow.collateralAmount);
+
+  // Step 5: Re-borrow the same amount on the new protocol
+  await yieldAdapter(toProtocol).borrow('USDC', borrow.borrowedAmount);
+
+  // Step 6: Re-deploy the bridge USDC back to yield (or leave in agent wallet)
+  await routeIdleUsdcToYield(walletAddress, borrow.borrowedAmount);
+
+  return { success: true, fromProtocol, toProtocol, savedApy: borrow.borrowApy - newBorrowApy };
+}
+```
+
+This requires no new infrastructure — the orchestrator already manages yield recall and collateral deposits. It does require that the vault has idle USDC >= the outstanding borrow, which is only guaranteed if the user has been running bots with profits accumulating, or has a meaningful yield allocation.
+
+#### Path B: Flash Loan Bridge (Stretch Goal)
+
+If idle capital is insufficient, a flash loan can bridge the repayment gap atomically. Kamino and MarginFi both support flash borrows on Solana, which allows:
+
+```
+1. Flash borrow USDC from Protocol B (no idle capital required)
+2. Repay Protocol A debt with flash-borrowed USDC
+3. Withdraw collateral from Protocol A
+4. Deposit collateral to Protocol B
+5. Borrow USDC on Protocol B (the actual, non-flash borrow)
+6. Repay the flash loan with the new borrow proceeds
+```
+
+This happens in a tightly sequenced set of instructions (ideally a single transaction bundle). The user ends up in the same position — collateral on Protocol B, debt on Protocol B — without needing any idle capital. Flash loan fees on Solana are small (typically 0.01–0.09% of the borrowed amount).
+
+**Implementation complexity:** High. Requires protocol-specific flash loan integration and careful transaction bundle construction. Mark as a future capability — Path A covers the majority of cases and should be built first.
+
+#### When to Trigger Migration
+
+The rate difference needs to be meaningful and sustained — borrow rates fluctuate constantly, and migrating for a 0.5% difference that closes within a day wastes gas and creates unnecessary risk during the migration window:
+
+```typescript
+interface MigrationTriggerConfig {
+  minRateDifferentialPercent: number;  // e.g. 2.0 — only migrate if savings >= 2% APY
+  sustainedHoursBeforeAction: number;  // e.g. 6 — rate must stay cheaper for 6h before migrating
+  minAnnualSavingsUsdc: number;        // e.g. $50 — not worth migrating for tiny borrow amounts
+}
+
+async function evaluateMigrationOpportunity(walletAddress: string): Promise<MigrationDecision> {
+  const borrow = await getActiveBorrow(walletAddress);
+  if (!borrow) return { action: 'none' };
+
+  const currentRate = await yieldAdapter(borrow.protocol).getBorrowApy('USDC');
+  const alternatives = await Promise.all(
+    getOtherProtocols(borrow.protocol).map(async p => ({
+      protocol: p,
+      rate: await yieldAdapter(p).getBorrowApy('USDC'),
+    }))
+  );
+
+  const bestAlternative = alternatives.sort((a, b) => a.rate - b.rate)[0];
+  const rateSaving = currentRate - bestAlternative.rate;
+  const annualSavingUsdc = borrow.borrowedAmount * rateSaving;
+
+  if (rateSaving < config.minRateDifferentialPercent / 100) {
+    return { action: 'none', reason: 'Rate differential too small' };
+  }
+  if (annualSavingUsdc < config.minAnnualSavingsUsdc) {
+    return { action: 'none', reason: 'Absolute savings too small for migration cost' };
+  }
+
+  const sustainedHours = await getRateSustainedHours(bestAlternative.protocol, bestAlternative.rate);
+  if (sustainedHours < config.sustainedHoursBeforeAction) {
+    return { action: 'monitor', reason: `Rate cheaper for ${sustainedHours}h — waiting for ${config.sustainedHoursBeforeAction}h confirmation` };
+  }
+
+  return {
+    action: 'migrate',
+    fromProtocol: borrow.protocol,
+    toProtocol: bestAlternative.protocol,
+    currentRate,
+    newRate: bestAlternative.rate,
+    annualSavingUsdc,
+  };
+}
+```
+
+#### Example Scenario
+
+```
+User has 100 SOL collateral on Jupiter Lend, borrowed $3,000 USDC at 10% APY
+Jupiter borrow demand spikes — rate jumps to 10% for 2 days
+Kamino borrow rate: 3.5% APY (sustained for >6 hours)
+
+Rate differential: 6.5%
+Annual saving on $3,000: ~$195/year
+
+Vault has $4,200 idle USDC in Kamino yield allocation (more than the $3,000 borrow)
+
+→ Guardian proposes migration via Telegram:
+  "💡 Borrow rate saving available — your $3,000 borrow on Jupiter Lend is at 10% APY.
+   Kamino is at 3.5% — saving $195/year.
+   The vault can migrate this automatically using your idle capital.
+   Tap to approve or ignore."
+
+User approves (or Guardian does it automatically if configured)
+→ Recall $3,000 from Kamino yield
+→ Repay Jupiter borrow
+→ Withdraw 100 SOL from Jupiter
+→ Deposit 100 SOL to Kamino
+→ Borrow $3,000 USDC on Kamino at 3.5%
+→ Re-deposit $3,000 to yield (now on a different protocol for diversification)
+```
+
+The whole operation takes ~30 seconds and saves $195/year on a $3,000 borrow. The user's bots see no interruption — their capital is untouched throughout.
+
+#### Risks and Mitigations
+
+| Risk | Mitigation |
+|------|-----------|
+| Price moves during migration (SOL drops → LTV worse on new protocol) | Check projected health factor on new protocol *before* depositing; abort if it would be < 1.4 |
+| New protocol rate changes between evaluation and execution | Re-check rates immediately before executing; abort if differential < 1% at execution time |
+| Migration fails midway (collateral withdrawn, deposit fails) | Use the vault operation state machine (compensating transactions → re-deposit to source) |
+| Rate was a spike, not a trend | `sustainedHoursBeforeAction` threshold filters this out |
+
+### Agent Execution Schedule
+
+| Agent | Frequency | Trigger |
+|-------|-----------|---------|
+| Yield Arbitrage | Every 6 hours | Rate change >2% |
+| Profit Distribution | On position close | Profit > threshold |
+| Vault Guardian | Every 60 seconds | Health factor change |
+| Capital Rebalancing | Weekly | Score divergence >10% |
+| Negative Carry | Every 1 hour | Borrow active |
+| Intelligent Borrow | On funding request / position close | Bot funding event |
+| Borrow Rate Migration | Every 6 hours | Rate differential > threshold, sustained >6h |
+| Guardian Notifications | Per threshold breach | Health < warnAt / alertAt / criticalAt / emergencyAt |
+
+---
+
+## Cross-Protocol Orchestration
+
+Capital movements between protocols involve multiple transactions that can fail partway through. The vault needs an explicit state machine to prevent capital from getting stranded.
+
+### Operation State Machine
+
+Every cross-protocol capital movement is tracked as an orchestrated operation:
+
+```typescript
+type OperationState =
+  | 'pending'
+  | 'withdrawing_source'
+  | 'source_withdrawn'
+  | 'depositing_target'
+  | 'completed'
+  | 'failed_withdraw'
+  | 'failed_deposit'
+  | 'compensating';
+
+interface VaultOperation {
+  id: string;
+  idempotencyKey: string;
+  type: 'yield_route' | 'yield_recall' | 'borrow' | 'repay' | 'rebalance';
+  walletAddress: string;
+
+  sourceProtocol: string;
+  targetProtocol: string;
+  asset: string;
+  amount: number;
+
+  state: OperationState;
+
+  withdrawTxSignature: string | null;
+  depositTxSignature: string | null;
+
+  retryCount: number;
+  maxRetries: number;
+
+  error: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+```
+
+### State Transitions
+
+```
+pending → withdrawing_source → source_withdrawn → depositing_target → completed
+    ↓              ↓                                      ↓
+    └→ failed   failed_withdraw                    failed_deposit
+                                                       ↓
+                                                  compensating
+                                                  (re-deposit to source)
+                                                       ↓
+                                                  completed (rollback)
+```
+
+### Failure Compensation
+
+```typescript
+async function executeVaultOperation(op: VaultOperation): Promise<void> {
+  try {
+    op.state = 'withdrawing_source';
+    await updateOperation(op);
+
+    const withdrawResult = await sourceAdapter.withdraw(op.asset, op.amount);
+    op.withdrawTxSignature = withdrawResult.signature;
+    op.state = 'source_withdrawn';
+    await updateOperation(op);
+
+    op.state = 'depositing_target';
+    await updateOperation(op);
+
+    const depositResult = await targetAdapter.deposit(op.asset, op.amount);
+    op.depositTxSignature = depositResult.signature;
+    op.state = 'completed';
+    await updateOperation(op);
+
+  } catch (error) {
+    if (op.state === 'depositing_target' || op.state === 'source_withdrawn') {
+      op.state = 'compensating';
+      await updateOperation(op);
+
+      try {
+        await sourceAdapter.deposit(op.asset, op.amount);
+        op.state = 'completed';
+        op.error = `Deposit to ${op.targetProtocol} failed; funds returned to ${op.sourceProtocol}`;
+      } catch (compensationError) {
+        op.state = 'failed_deposit';
+        op.error = `CRITICAL: Funds withdrawn from ${op.sourceProtocol} but failed to deposit to ${op.targetProtocol} AND failed to return. Manual intervention required.`;
+      }
+    } else {
+      op.state = 'failed_withdraw';
+      op.error = error.message;
+    }
+    await updateOperation(op);
+  }
+}
+```
+
+### Idempotency
+
+Every operation gets a deterministic idempotency key so restarts don't duplicate capital movements:
+
+```typescript
+function generateIdempotencyKey(
+  type: string,
+  walletAddress: string,
+  sourceProtocol: string,
+  targetProtocol: string,
+  asset: string,
+  amount: number,
+  timestamp: number
+): string {
+  const roundedTimestamp = Math.floor(timestamp / 60000);
+  return `${type}:${walletAddress}:${sourceProtocol}:${targetProtocol}:${asset}:${amount}:${roundedTimestamp}`;
+}
+```
+
+### Startup Reconciliation
+
+On server restart, scan for operations in intermediate states:
+
+```typescript
+async function reconcileStrandedOperations(): Promise<void> {
+  const stranded = await db.select()
+    .from(vaultOperations)
+    .where(
+      inArray(vaultOperations.state, [
+        'withdrawing_source',
+        'source_withdrawn',
+        'depositing_target',
+        'compensating',
+      ])
+    );
+
+  for (const op of stranded) {
+    const actualSourceBalance = await getProtocolBalance(op.sourceProtocol, op.asset);
+    const actualTargetBalance = await getProtocolBalance(op.targetProtocol, op.asset);
+
+    // Determine actual state from on-chain balances and retry or compensate
+  }
+}
+```
+
+---
+
+## Protocol Risk Management
+
+### The Reality
+
+Any capital outside the agent wallet is exposed to smart contract risk. Drift's hack demonstrated this — protocol exploits happen.
+
+### Mitigation Strategy
+
+```typescript
+interface ProtocolRiskFramework {
+  maxExposurePerProtocol: number;
+
+  protocolRiskTiers: {
+    tier1: string[];
+    tier2: string[];
+    tier3: string[];
+  };
+
+  emergencyWithdrawalEnabled: boolean;
+}
+
+const DEFAULT_RISK_FRAMEWORK: ProtocolRiskFramework = {
+  maxExposurePerProtocol: 0.30,
+
+  protocolRiskTiers: {
+    tier1: ['jupiter', 'kamino', 'marginfi'],  // jupiter: primary; verify lending audit status
+    tier2: ['save', 'lulo', 'onre'],           // onre: verify audit & TVL before promoting to tier1
+    tier3: ['meteora', 'orca'],
+  },
+
+  emergencyWithdrawalEnabled: true,
+};
+```
+
+**Risk tiers:**
+- **Tier 1**: Battle-tested, audited, high TVL, long track record → up to 30% allocation
+- **Tier 2**: Established, audited, moderate TVL → up to 20% allocation
+- **Tier 3**: Newer or more complex (LP strategies) → up to 10% allocation
+
+### Protocol Health Monitor
+
+The `onProtocolIncident` function above defines what happens *after* an incident is detected. The missing piece — and the most important one — is the detection layer itself. The Platform Health Monitor runs continuously, watches for compromise signals across both yield protocols and trading adapters, and calls `onProtocolIncident` when thresholds are breached.
+
+Speed matters enormously here. In the Drift treasury drain and most major DeFi exploits, the attacker empties a protocol in minutes. A monitor that polls every 60 seconds can still catch it early enough to recover most funds — but only if it acts automatically, not if it just pages a human and waits.
+
+#### Scope: Yield Protocols AND Trading Adapters
+
+This monitor is not limited to yield protocols. The same drain pattern applies to trading exchanges:
+- If Pacifica's treasury is being drained, bot capital sitting in subaccounts is at risk
+- If Drift's pools were exploited (as happened historically), bots would be left with positions they can't close
+- The monitor should watch every protocol that holds user capital: lending protocols, yield aggregators, and perp exchanges alike
+
+#### On-Chain Signal Detection
+
+These signals can be computed from on-chain data we can already read. No external API subscriptions required:
+
+```typescript
+interface ProtocolHealthSignals {
+  // TVL drain rate — the clearest exploit signal
+  tvlDropPercent1h: number;       // >20% in 1h = warning; >40% in 1h = critical; >60% = exploit
+  tvlDropPercent10m: number;      // >30% in 10 minutes = immediate exploit flag
+
+  // Utilization rate spike (lending protocols only)
+  // If everyone's borrowing at once, they're draining the pool
+  utilizationRate: number;        // normal: 40-80%; >95% sustained = warning; sudden spike to 95% = critical
+
+  // Reserve / treasury balance vs. expected
+  reserveBalanceVsExpected: number;  // % of expected reserves actually present
+
+  // Unusual large single-transaction withdrawals
+  largeWithdrawalCount10m: number;   // >3 withdrawals each >$1M in 10 minutes = red flag
+
+  // Protocol-specific pause / emergency flags
+  // Most audited protocols emit an event or flip a flag when paused by their own team
+  protocolPaused: boolean;
+
+  // Price oracle anomaly (collateral value reported vs. market price)
+  oracleDeviationPercent: number;    // >10% deviation = possible oracle manipulation
+}
+
+async function runHealthCheck(protocolId: string): Promise<HealthCheckResult> {
+  const [tvl, utilization, reserves, recentTxs, paused, oraclePrice] = await Promise.all([
+    getTvlHistory(protocolId, '10m'),
+    getUtilizationRate(protocolId),
+    getReserveBalance(protocolId),
+    getLargeWithdrawals(protocolId, '10m', MIN_LARGE_WITHDRAWAL_USD),
+    isProtocolPaused(protocolId),
+    getOracleDeviation(protocolId),
+  ]);
+
+  // Immediate exploit flag — act without waiting for confirmation
+  if (
+    tvl.dropPercent10m > 30 ||
+    paused ||
+    reserves.percentOfExpected < 50
+  ) {
+    return { severity: 'exploit', signals: { tvl, paused, reserves } };
+  }
+
+  // Critical — pause new deposits, alert users
+  if (
+    tvl.dropPercent1h > 20 ||
+    utilization > 0.95 ||
+    recentTxs.largeWithdrawalCount > 3
+  ) {
+    return { severity: 'critical', signals: { tvl, utilization, recentTxs } };
+  }
+
+  // Warning — log and monitor more closely
+  if (
+    tvl.dropPercent1h > 10 ||
+    oracleDeviation > 0.05
+  ) {
+    return { severity: 'warning', signals: { tvl, oracleDeviation } };
+  }
+
+  return { severity: 'healthy' };
+}
+```
+
+**Polling schedule:**
+- Normal state: every 2 minutes per protocol
+- Warning state: every 30 seconds
+- Critical state: every 10 seconds (rapid escalation monitoring)
+
+#### Off-Chain Signal Sources
+
+On-chain detection catches a drain *as it happens*. But social signals often appear *before* on-chain data catches up — the attacker's wallet moving funds, an insider warning on Discord, a rekt.news alert. These are harder to integrate but worth considering:
+
+| Source | Quality | Cost | Feasibility |
+|--------|---------|------|-------------|
+| X / Twitter API (real-time stream) | High — community posts immediately | ~$42k/month (Enterprise) — prohibitively expensive | ❌ Not viable |
+| Helius webhooks (on-chain tx alerts) | High — real-time, specific to protocol addresses | Included in existing Helius subscription | ✅ Build this first |
+| DefiLlama TVL API | Good — independent TVL cross-reference | Free | ✅ Good secondary check |
+| Protocol Discord / Telegram webhooks | Very high — official team announces pauses | Free but requires manual setup per protocol | ✅ Worth integrating |
+| Forta Network (exploit detection bots) | Very high — purpose-built security alerts | Free/low-cost community bots | ✅ Investigate |
+| Rekt.news RSS / API | High — post-exploit confirmation | Free | ✅ Good for blacklisting after the fact |
+
+**Recommended approach:** Build Helius webhook listeners for all protocol treasury addresses first — this gives real-time on-chain alerts at no extra cost. Cross-reference with DefiLlama TVL every 10 minutes as an independent data source. Protocol Discord monitoring is high-signal but requires manual config per protocol; implement as a future enhancement. X/Twitter is too expensive to justify.
+
+#### Emergency Response
+
+```typescript
+async function onProtocolIncident(
+  protocol: string,
+  severity: 'warning' | 'critical' | 'exploit'
+): Promise<void> {
+  if (severity === 'exploit') {
+    // Pull everything out immediately — don't wait for confirmation
+    await emergencyWithdrawAll(protocol);     // yield protocols: withdraw collateral + repay borrow
+    await closeAllBotsOnProtocol(protocol);  // trading adapters: close positions, withdraw to agent wallet
+    await blacklistProtocol(protocol);
+    await notifyAllAffectedUsers(protocol, {
+      level: 'exploit',
+      message: `⚠️ ${protocol} may be compromised. Your funds have been moved to your agent wallet automatically.`,
+    });
+  } else if (severity === 'critical') {
+    await pauseNewDeposits(protocol);
+    await notifyAllAffectedUsers(protocol, {
+      level: 'critical',
+      message: `🔴 Unusual activity detected on ${protocol}. New deposits paused. Monitoring closely.`,
+    });
+  } else {
+    await logWarning(protocol);
+    // No user action at warning level — just internal logging and increased polling
+  }
+}
+```
+
+**Key addition vs. the original stub:** trading adapters are now included in the exploit response — `closeAllBotsOnProtocol` closes any open perp positions on the affected exchange and withdraws capital back to the agent wallet, not just yield allocations.
+
+#### False Positive Risk
+
+An aggressive monitor can trigger on legitimate large withdrawals (protocol upgrade, whale exit). Mitigations:
+- Require two independent signals before calling `exploit` (e.g., TVL drop + reserve shortfall, not either alone)
+- Cross-reference with DefiLlama TVL to confirm the drop isn't just data lag
+- For `warning` and `critical` severities, never auto-withdraw — only notify and pause new inflows
+- Only auto-withdraw on `exploit` severity, which requires the most stringent signal combination
+
+#### Future: Platform-Wide Health Monitor Document
+
+As this grows to cover more protocols and signal sources, it should be extracted into a standalone `PLATFORM_HEALTH_MONITOR.md`. The vault is the first use case, but the same infrastructure protects all platform capital (bot trading capital, marketplace escrow, etc.). Keeping it here until that extraction is warranted.
+
+### Emergency Response Summary
+
+| Severity | Trigger | Automated Action | User Notified |
+|----------|---------|-----------------|---------------|
+| Warning | TVL -10% in 1h, oracle deviation | Log only | No |
+| Critical | TVL -20% in 1h, utilization >95% | Pause new deposits | Yes — monitor alert |
+| Exploit | TVL -30% in 10m, protocol paused, reserves <50% | Emergency withdraw all + close bots | Yes — urgent alert |
+
+### User Disclosure
+
+Every yield routing action must clearly communicate:
+1. Which protocol(s) capital is being sent to
+2. The smart contract risk involved
+3. That the platform cannot guarantee recovery if a protocol is exploited
+4. Historical audit status of each protocol
+
+---
+
+## Profit Sweep Settings (Bot Management Drawer)
+
+Extends the existing bot management UI for vault integration.
+
+### Enhanced Profit Destinations
+
+```typescript
+interface BotProfitSettings {
+  profitDestination: 'reinvest' | 'yield' | 'repay_borrow' | 'agent_wallet';
+
+  profitSweepThreshold: number;
+
+  splitMode: boolean;
+  splitConfig: {
+    reinvestPercent: number;
+    yieldPercent: number;
+    repayBorrowPercent: number;
+    agentWalletPercent: number;
+  } | null;
+}
+```
+
+### UI Layout
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Profit Sweep Destination                                    │
+│  ─────────────────────────────────────────────────────────── │
+│  Where should profits go when threshold is reached?          │
+│                                                              │
+│  ○ Reinvest in Bot                                           │
+│    Keep profits in this bot to compound returns              │
+│                                                              │
+│  ○ Route to Yield                                            │
+│    Move profits to highest-yield opportunity                 │
+│    Current best: Kamino USDC @ 8.2% APY                      │
+│                                                              │
+│  ○ Repay Borrow First                                        │
+│    Pay down outstanding USDC loan before distributing        │
+│    Outstanding: $2,450 @ 5.1% APY                            │
+│                                                              │
+│  ○ Sweep to Agent Wallet                                     │
+│    Withdraw profits to your agent wallet                     │
+│                                                              │
+│  ─────────────────────────────────────────────────────────── │
+│  Sweep Threshold                                             │
+│  ┌─────────────────┐                                         │
+│  │ $  50.00        │  Sweep when profits exceed this amount  │
+│  └─────────────────┘                                         │
+│                                                              │
+│  ─────────────────────────────────────────────────────────── │
+│  [ ] Advanced: Split profits between destinations            │
+│                                                              │
+│  (If enabled)                                                │
+│  ┌─────────────────────────────────────────────────────┐     │
+│  │ Reinvest:      [30%] ────●──────────────            │     │
+│  │ Yield:         [30%] ────●──────────────            │     │
+│  │ Repay Borrow:  [30%] ────●──────────────            │     │
+│  │ Agent Wallet:  [10%] ──●────────────────            │     │
+│  │                        Total: 100% ✓                │     │
+│  └─────────────────────────────────────────────────────┘     │
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐    │
+│  │              [Cancel]    [Save Settings]              │    │
+│  └──────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## The LST + Borrow User Flow
+
+The specific flow the user described: deposit a liquid staked version of SOL, borrow against it, trade with bots, pay down the loan with profits.
+
+### End-to-End Example
+
+```
+1. User has 50 JitoSOL (worth ~$7,500 at $150/SOL)
+       ↓
+2. User deposits JitoSOL through QuantumVault UI
+       ↓
+3. Vault deposits JitoSOL to Kamino as collateral
+   JitoSOL earns ~7% staking yield WHILE being used as collateral
+       ↓
+4. Vault borrows $4,000 USDC (53% LTV, conservative)
+   Borrow rate: ~5% APY
+   Borrowed USDC held in agent wallet — user can recover at any time
+       ↓
+5. User creates 2 bots and allocates capital from agent wallet:
+   Bot A: SOL-PERP momentum strategy ($2,000)
+   Bot B: BTC-PERP mean reversion ($2,000)
+   Remaining $0 unallocated (or user could keep a buffer)
+       ↓
+6. After 30 days:
+   - JitoSOL staking yield earned: ~$43
+   - Bot A profit: +$180
+   - Bot B profit: +$95
+   - Borrow interest owed: -$16
+   - Net profit: ~$302
+       ↓
+7. Auto-repay config (50% of profits to borrow repayment):
+   - $137 repaid against $4,000 borrow
+   - Remaining borrow: $3,863
+   - Other 50% reinvested in bots
+       ↓
+8. Over time:
+   - Borrow decreases as profits accumulate
+   - JitoSOL appreciates if SOL goes up
+   - Staking yield compounds
+   - Eventually loan is fully repaid → pure profit
+```
+
+### Key Advantages Over Manual DeFi
+
+| Step | Manual | QuantumVault |
+|------|--------|-------------|
+| Deposit JitoSOL | Find lending protocol, approve, deposit | One click |
+| Borrow USDC | Navigate lending UI, set amount, confirm | Automatic |
+| Fund bots | Withdraw, transfer, deposit to exchange | Automatic |
+| Monitor health | Check lending protocol regularly | Automated alerts |
+| Repay from profits | Withdraw from exchange, navigate to lending, repay | Auto-sweep |
+| Rebalance yield | Compare rates manually, migrate | Yield agent handles it |
+
+---
+
+## Database Schema
+
+All financial amounts use `numeric` (not `real`) for precision. All percentages stored as whole numbers (e.g., 30 = 30%, not 0.30). APY/rates stored as decimals (e.g., 0.082 = 8.2%).
+
+```typescript
+export const vaults = pgTable("vaults", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: varchar("wallet_address").notNull().unique(),
+
+  totalEquity: numeric("total_equity").default("0"),
+  totalInTrading: numeric("total_in_trading").default("0"),
+  totalInYield: numeric("total_in_yield").default("0"),
+  totalBorrowed: numeric("total_borrowed").default("0"),
+  overallHealthFactor: numeric("overall_health_factor").default("999"),
+
+  yieldRoutingEnabled: boolean("yield_routing_enabled").default(false),
+  autoRepayEnabled: boolean("auto_repay_enabled").default(true),
+
+  maxProtocolExposurePercent: integer("max_protocol_exposure_percent").default(30),
+
+  lastHealthCheck: timestamp("last_health_check"),
+  lastReconciliation: timestamp("last_reconciliation"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const vaultYieldAllocations = pgTable("vault_yield_allocations", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  vaultId: varchar("vault_id").notNull().references(() => vaults.id),
+
+  protocol: varchar("protocol").notNull(),
+  asset: varchar("asset").notNull(),
+  amount: numeric("amount").notNull(),
+  currentApy: numeric("current_apy"),
+  depositTxSignature: varchar("deposit_tx_signature"),
+
+  depositedAt: timestamp("deposited_at").defaultNow(),
+  lastApyUpdate: timestamp("last_apy_update"),
+}, (table) => ({
+  vaultProtocolAssetIdx: index("vault_yield_vault_protocol_asset")
+    .on(table.vaultId, table.protocol, table.asset),
+}));
+
+export const vaultBorrowPositions = pgTable("vault_borrow_positions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  vaultId: varchar("vault_id").notNull().references(() => vaults.id),
+
+  protocol: varchar("protocol").notNull(),
+  collateralAsset: varchar("collateral_asset").notNull(),
+  collateralAmount: numeric("collateral_amount").notNull(),
+  borrowedAsset: varchar("borrowed_asset").default("USDC"),
+  borrowedAmount: numeric("borrowed_amount").notNull(),
+  borrowApy: numeric("borrow_apy"),
+  healthFactor: numeric("health_factor"),
+  liquidationPrice: numeric("liquidation_price"),
+
+  status: varchar("status").default("active"),
+
+  borrowTxSignature: varchar("borrow_tx_signature"),
+  borrowedAt: timestamp("borrowed_at").defaultNow(),
+  lastHealthUpdate: timestamp("last_health_update"),
+}, (table) => ({
+  vaultStatusIdx: index("vault_borrow_vault_status")
+    .on(table.vaultId, table.status),
+}));
+
+export const vaultOperations = pgTable("vault_operations", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  idempotencyKey: varchar("idempotency_key").notNull().unique(),
+  walletAddress: varchar("wallet_address").notNull(),
+
+  type: varchar("type").notNull(),
+  sourceProtocol: varchar("source_protocol").notNull(),
+  targetProtocol: varchar("target_protocol").notNull(),
+  asset: varchar("asset").notNull(),
+  amount: numeric("amount").notNull(),
+
+  state: varchar("state").notNull().default("pending"),
+
+  withdrawTxSignature: varchar("withdraw_tx_signature"),
+  depositTxSignature: varchar("deposit_tx_signature"),
+  retryCount: integer("retry_count").default(0),
+  maxRetries: integer("max_retries").default(3),
+
+  error: text("error"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  stateIdx: index("vault_ops_state").on(table.state),
+  walletIdx: index("vault_ops_wallet").on(table.walletAddress),
+}));
+
+export const vaultCapitalEvents = pgTable("vault_capital_events", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  vaultId: varchar("vault_id").notNull().references(() => vaults.id),
+  operationId: varchar("operation_id").references(() => vaultOperations.id),
+
+  eventType: varchar("event_type").notNull(),
+  protocol: varchar("protocol").notNull(),
+  asset: varchar("asset").notNull(),
+  amount: numeric("amount").notNull(),
+  direction: varchar("direction").notNull(),
+
+  txSignature: varchar("tx_signature"),
+  metadata: jsonb("metadata"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  vaultTimeIdx: index("vault_events_vault_time")
+    .on(table.vaultId, table.createdAt),
+}));
+
+export const vaultRepaymentHistory = pgTable("vault_repayment_history", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  vaultId: varchar("vault_id").notNull().references(() => vaults.id),
+  borrowPositionId: varchar("borrow_position_id").references(() => vaultBorrowPositions.id),
+
+  source: varchar("source").notNull(),
+  amount: numeric("amount").notNull(),
+  botId: varchar("bot_id"),
+  txSignature: varchar("tx_signature"),
+
+  repaidAt: timestamp("repaid_at").defaultNow(),
+});
+
+export const vaultAgentConfigs = pgTable("vault_agent_configs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: varchar("wallet_address").notNull().unique(),
+
+  yieldOptimizationEnabled: boolean("yield_optimization_enabled").default(false),
+  minYieldDifferencePercent: integer("min_yield_difference_percent").default(2),
+
+  profitReinvestPercent: integer("profit_reinvest_percent").default(50),
+  profitYieldPercent: integer("profit_yield_percent").default(0),
+  profitRepayPercent: integer("profit_repay_percent").default(50),
+  profitWithdrawPercent: integer("profit_withdraw_percent").default(0),
+  profitCompoundThreshold: numeric("profit_compound_threshold").default("50"),
+
+  warningHealthFactor: numeric("warning_health_factor").default("1.5"),
+  criticalHealthFactor: numeric("critical_health_factor").default("1.2"),
+  autoDeleverageEnabled: boolean("auto_deleverage_enabled").default(true),
+
+  // Vault Guardian settings
+  guardianMode: varchar("guardian_mode").default("notify_only"),  // 'notify_only' | 'auto_topup' | 'auto_full'
+  guardianWarnAt: numeric("guardian_warn_at").default("1.5"),
+  guardianAlertAt: numeric("guardian_alert_at").default("1.3"),
+  guardianCriticalAt: numeric("guardian_critical_at").default("1.2"),
+  guardianEmergencyAt: numeric("guardian_emergency_at").default("1.1"),
+  guardianEscalationGraceMinutes: integer("guardian_escalation_grace_minutes").default(30),
+  guardianNotifyViaTelegram: boolean("guardian_notify_via_telegram").default(true),
+  guardianNotifyViaInApp: boolean("guardian_notify_via_in_app").default(true),
+
+  rebalancingEnabled: boolean("rebalancing_enabled").default(false),
+  rebalanceThresholdPercent: integer("rebalance_threshold_percent").default(10),
+
+  negativeCarryProtectionEnabled: boolean("negative_carry_protection_enabled").default(true),
+
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const vaultAgentActions = pgTable("vault_agent_actions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: varchar("wallet_address").notNull(),
+  agentType: varchar("agent_type").notNull(),
+  action: varchar("action").notNull(),
+  details: jsonb("details"),
+  result: varchar("result"),
+  executedAt: timestamp("executed_at").defaultNow(),
+}, (table) => ({
+  walletTimeIdx: index("vault_actions_wallet_time")
+    .on(table.walletAddress, table.executedAt),
+}));
+```
+
+### Derived Total Reconciliation
+
+The `vaults` table stores derived totals (`totalEquity`, `totalInTrading`, `totalInYield`, `totalBorrowed`) for fast reads. These are refreshed on a schedule and verified against source-of-truth records:
+
+```typescript
+async function reconcileVaultTotals(vaultId: string): Promise<void> {
+  const yieldTotal = await db.select({ sum: sql`SUM(amount)` })
+    .from(vaultYieldAllocations).where(eq(vaultYieldAllocations.vaultId, vaultId));
+
+  const borrowTotal = await db.select({ sum: sql`SUM(borrowed_amount)` })
+    .from(vaultBorrowPositions)
+    .where(and(eq(vaultBorrowPositions.vaultId, vaultId), eq(vaultBorrowPositions.status, 'active')));
+
+  const tradingTotal = await calculateTradingTotal(vaultId);
+
+  await db.update(vaults).set({
+    totalInYield: yieldTotal[0].sum || "0",
+    totalBorrowed: borrowTotal[0].sum || "0",
+    totalInTrading: tradingTotal.toString(),
+    totalEquity: (tradingTotal + parseFloat(yieldTotal[0].sum || "0") - parseFloat(borrowTotal[0].sum || "0")).toString(),
+    lastReconciliation: new Date(),
+    updatedAt: new Date(),
+  }).where(eq(vaults.id, vaultId));
+}
+```
+
+Reconciliation runs every 5 minutes and after every vault operation completes.
+
+---
+
+## Implementation Phases
+
+**Effort estimates** (AI-assisted, ported and re-mapped from the original V1 design — see Appendix B for the full complexity analysis these derive from). These are directional, not commitments. Critically, **everything here is gated on the Pacifica adapter migration (Phases 1-6) completing first** — see Dependencies.
+
+| Phase | Scope | Est. (AI-assisted) | Derived from (Appendix B) |
+|-------|-------|--------------------|---------------------------|
+| 1 — Vault Foundation | entity + capital tracking | **2-4 days** | Core vault |
+| 2 — Yield Routing (USDC only) | first yield adapter | **2-3 days** | Partial External yield aggregation (single protocol) |
+| **3 — Multi-Asset Collateral + Borrowing** | **SOL/BTC/ETH/LST → borrow USDC. This is the moat.** | **5-8 days** | Multi-asset (2-3) **+** Borrowing (3-5) — the differentiator vs USDC-only venues like Pacifica |
+| 4 — Auto-Repayment + Profit Distribution | profit sweep + UI | **2-3 days** | Subset of Intelligent automation |
+| 5 — Multi-Protocol Yield Aggregation | more yield adapters | **5-7 days** | External yield aggregation (or ~1-2 days via Lulo API shortcut) |
+| 6 — Advanced Agents | rebalancing, regime, digests | **4-6 days** | Intelligent automation + Market regime (Appendix A) |
+
+**Total: ~20-31 AI-assisted days** *after* Pacifica migration lands. A thin "moat MVP" (Phases 1-3 only: deposit collateral → borrow USDC → trade on Pacifica) is **~9-15 days** and delivers the multi-asset-collateral differentiator without the yield-aggregation or advanced-agent layers. Note Phase 3 combines what V1 scoped as two separate phases (multi-asset *and* borrowing), hence the wider band.
+
+### Phase 1: Vault Foundation (After Pacifica Migration)
+- [ ] Create vault entity tied to user wallet
+- [ ] Track capital across agent wallet + trading protocol
+- [ ] Display total equity breakdown (trading / idle / wallet)
+- [ ] Basic idle capital detection
+- [ ] Vault state API endpoints
+
+### Phase 2: Yield Routing (USDC Only)
+- [ ] Implement first YieldProtocolAdapter (**Jupiter Lend** — primary choice; Lulo as fallback if Jupiter API is not ready)
+- [ ] Route idle USDC to yield protocol
+- [ ] Recall capital from yield when bot needs funding
+- [ ] Display yield earned in vault dashboard
+- [ ] Yield arbitrage agent (basic: compare 2-3 protocols)
+
+### Phase 3: Multi-Asset Collateral + Borrowing
+- [ ] Support SOL, BTC, ETH, LST deposits through vault
+- [ ] Collateral deposit to lending protocol
+- [ ] USDC borrowing against collateral
+- [ ] Health factor monitoring for borrow positions
+- [ ] Auto-deleverage on health critical
+- [ ] Negative carry protection agent
+
+### Phase 4: Auto-Repayment + Profit Distribution
+- [ ] Bot profit sweep to borrow repayment
+- [ ] Configurable profit split (reinvest / yield / repay / withdraw)
+- [ ] Bot management drawer UI extensions
+- [ ] Repayment history tracking and display
+
+### Phase 5: Multi-Protocol Yield Aggregation
+- [ ] Second and third YieldProtocolAdapters
+- [ ] Risk diversification across protocols
+- [ ] Protocol risk scoring and tier limits
+- [ ] Yield comparison dashboard
+- [ ] Migration logic between yield protocols
+
+### Phase 6: Advanced Agents
+- [ ] Capital rebalancing agent (performance-weighted bot allocation)
+- [ ] Market regime detection (trend, volatility, funding direction)
+- [ ] Regime-aware yield and risk adjustments
+- [ ] Notification and reporting agent (daily digest)
+
+---
+
+## Compatibility with Adapter Architecture
+
+The vault system fits cleanly into the adapter architecture from the Pacifica migration:
+
+```
+AdapterRegistry
+├── TradingAdapterRegistry (from PACIFICA_MIGRATION.md)
+│   ├── PacificaAdapter (implements ProtocolAdapter + UserTransactionBuilder)
+│   ├── (future) DriftAdapter
+│   └── (future) ZetaAdapter
+│
+└── YieldAdapterRegistry (NEW — Vaults V2)
+    ├── JupiterLendAdapter (implements YieldProtocolAdapter) ← PRIMARY
+    ├── KaminoAdapter
+    ├── MarginfiAdapter
+    ├── LuloAdapter
+    └── (future) others
+```
+
+The `ProtocolAdapter` + `UserTransactionBuilder` interfaces from the Pacifica migration plan handle trading — including agent-signed vs user-signed flows, order lifecycle states, adapter health states, and WS/REST reconciliation. `YieldProtocolAdapter` is a new parallel interface for yield/lending. The vault orchestrator sits above both registries and routes capital based on user configuration and agent decisions.
+
+The Pacifica migration plan does NOT need changes for V2. Vaults adds a `YieldAdapterRegistry` alongside the existing `TradingAdapterRegistry`, plus the vault orchestrator, database tables, and agent services. These are additive — no existing interfaces or flows are modified.
+
+---
+
+## Cross-Exchange Delta Neutral Strategy (Exploratory)
+
+### The Opportunity
+
+Traditional delta neutral on Drift worked by holding a spot asset (or LST) and shorting the perp against it. Safe, simple, no liquidation risk — the spot position can't be liquidated and the short is fully collateralized by the spot value.
+
+The problem: this only works in bullish/neutral funding regimes where longs pay shorts. In bearish markets, shorts pay longs, and the strategy bleeds money.
+
+A cross-exchange delta neutral strategy solves this by opening opposing perp positions on different exchanges, capturing funding rate differentials regardless of market direction.
+
+### How It Works
+
+```
+Exchange A: SOL-PERP LONG  (funding rate: -0.01% per hour — longs receive)
+Exchange B: SOL-PERP SHORT (funding rate: +0.02% per hour — shorts receive)
+
+Net exposure: zero (long + short cancel out)
+Net funding income: 0.01% + 0.02% = 0.03% per hour
+Annualized: ~263% (in theory — rates fluctuate constantly)
+```
+
+The strategy profits whenever funding rates diverge between exchanges, regardless of whether the market is bullish or bearish. You're arbitraging the cost of leverage across venues.
+
+### Why This Is Hard
+
+#### 1. Dual Liquidation Risk
+
+Unlike spot + short (where spot can't be liquidated), both legs are perp positions with margin requirements:
+
+```
+Exchange A: LONG SOL-PERP at $150, 5x leverage, $2,000 margin
+Exchange B: SHORT SOL-PERP at $150, 5x leverage, $2,000 margin
+
+SOL drops to $120 (-20%):
+  Exchange A LONG: -$2,000 unrealized loss → approaching liquidation
+  Exchange B SHORT: +$2,000 unrealized profit → healthy
+
+Net P&L: $0 (delta neutral working as intended)
+But Exchange A doesn't know about Exchange B.
+Exchange A will liquidate your long before you can withdraw profit from B.
+```
+
+This is the fundamental problem. Each exchange sees only its own leg. A big price move in either direction threatens one leg while the other profits, but the profitable leg can't save the losing leg in time.
+
+**FTX solved this** with expiring futures that had no liquidation — you'd hold spot + short an expiring future, and the future settled at expiry regardless of margin. No perpetual funding, but zero liquidation risk. That product no longer exists anywhere.
+
+#### 2. Capital Inefficiency
+
+Both legs require full margin, so you need 2x the capital for the same notional exposure:
+
+```
+Spot + short delta neutral:  $10,000 SOL + $2,000 margin = $12,000 for $10,000 exposure
+Cross-exchange perp-perp:    $5,000 margin (A) + $5,000 margin (B) = $10,000 for $5,000 exposure
+```
+
+Half the capital efficiency compared to spot-short.
+
+#### 3. Rebalancing Complexity
+
+As price moves, one leg gains margin and the other loses it. You need to periodically withdraw from the winning side and deposit to the losing side to prevent liquidation:
+
+```
+Initial: $5,000 each side, SOL at $150
+SOL moves to $170 (+13%):
+  Exchange A LONG:  $5,000 + $1,333 profit = $6,333 margin
+  Exchange B SHORT: $5,000 - $1,333 loss   = $3,667 margin
+
+Exchange B is getting thin. Need to:
+  1. Withdraw ~$1,000 from Exchange A
+  2. Transfer to agent wallet
+  3. Deposit to Exchange B
+  4. Total time: 30-120 seconds depending on protocols
+  5. During transfer: Exchange B is at risk
+```
+
+#### 4. Funding Rate Convergence
+
+Funding rates can flip or converge between exchanges within hours. A strategy that looked profitable when opened can become unprofitable by the next funding period.
+
+### Architecture (If We Build It)
+
+Despite the challenges, the adapter architecture makes this possible. Here's how it would work:
+
+#### Cross-Exchange Delta Neutral Bot Type
+
+```typescript
+interface DeltaNeutralBotConfig {
+  longExchange: string;
+  shortExchange: string;
+  market: string;
+  notionalSize: number;
+  leverage: number;
+
+  marginPerLeg: number;
+
+  rebalanceThresholdPercent: number;
+  minFundingDifferential: number;
+  maxFundingCheckIntervalMs: number;
+
+  emergencyCloseThreshold: number;
+
+  maxSlippageBps: number;
+}
+```
+
+#### Funding Rate Monitor
+
+```typescript
+interface FundingRateMonitor {
+  async getFundingRates(market: string): Promise<CrossExchangeFunding> {
+    const adapters = tradingAdapterRegistry.getAllAdapters();
+
+    const rates: ExchangeFundingRate[] = [];
+    for (const adapter of adapters) {
+      const rate = await adapter.getFundingRate(market);
+      rates.push({
+        exchange: adapter.name,
+        hourlyRate: rate.hourlyRate,
+        nextFundingTime: rate.nextFundingTime,
+        predictedRate: rate.predictedRate,
+      });
+    }
+
+    const sorted = rates.sort((a, b) => a.hourlyRate - b.hourlyRate);
+
+    return {
+      rates,
+      bestLong: sorted[0],
+      bestShort: sorted[sorted.length - 1],
+      differential: sorted[sorted.length - 1].hourlyRate - sorted[0].hourlyRate,
+      annualizedDifferential: (sorted[sorted.length - 1].hourlyRate - sorted[0].hourlyRate) * 24 * 365,
+    };
+  }
+
+  async isEntryProfitable(
+    market: string,
+    config: DeltaNeutralBotConfig
+  ): Promise<EntryDecision> {
+    const funding = await this.getFundingRates(market);
+
+    if (funding.differential < config.minFundingDifferential) {
+      return { enter: false, reason: 'Funding differential below threshold' };
+    }
+
+    const historicalDiff = await this.getHistoricalDifferential(
+      market, funding.bestLong.exchange, funding.bestShort.exchange, 7
+    );
+    if (historicalDiff.percentPositive < 0.70) {
+      return { enter: false, reason: 'Differential not stable enough (positive <70% of the time over 7d)' };
+    }
+
+    const estimatedDailyYield = funding.differential * 24 * config.notionalSize;
+    const estimatedDailyRebalanceCost = this.estimateRebalanceCosts(config);
+    if (estimatedDailyYield < estimatedDailyRebalanceCost * 2) {
+      return { enter: false, reason: 'Yield doesn\'t justify rebalancing costs' };
+    }
+
+    return {
+      enter: true,
+      longExchange: funding.bestLong.exchange,
+      shortExchange: funding.bestShort.exchange,
+      differential: funding.differential,
+      estimatedApy: funding.annualizedDifferential,
+    };
+  }
+}
+```
+
+#### Margin Rebalancer
+
+The hardest piece. Must keep both legs alive during price movements:
+
+```typescript
+interface MarginRebalancer {
+  checkInterval: number;
+
+  async checkAndRebalance(bot: DeltaNeutralBot): Promise<RebalanceResult> {
+    const longAccount = await this.getLegAccount(bot, 'long');
+    const shortAccount = await this.getLegAccount(bot, 'short');
+
+    const longMarginRatio = longAccount.freeCollateral / longAccount.totalPosition;
+    const shortMarginRatio = shortAccount.freeCollateral / shortAccount.totalPosition;
+
+    const imbalance = Math.abs(longMarginRatio - shortMarginRatio);
+    if (imbalance < bot.config.rebalanceThresholdPercent) {
+      return { action: 'none', reason: 'Within threshold' };
+    }
+
+    const winner = longMarginRatio > shortMarginRatio ? 'long' : 'short';
+    const loser = winner === 'long' ? 'short' : 'long';
+
+    const winnerAccount = winner === 'long' ? longAccount : shortAccount;
+    const loserAccount = winner === 'long' ? shortAccount : longAccount;
+
+    const transferAmount = (winnerAccount.freeCollateral - loserAccount.freeCollateral) / 2;
+    const safeTransfer = Math.min(
+      transferAmount,
+      winnerAccount.freeCollateral * 0.3
+    );
+
+    const winnerAdapter = this.getAdapter(bot, winner);
+    const loserAdapter = this.getAdapter(bot, loser);
+
+    await winnerAdapter.withdraw(bot.subaccountId(winner), safeTransfer);
+    // Capital now in agent wallet
+    await loserAdapter.deposit(bot.subaccountId(loser), safeTransfer);
+
+    return {
+      action: 'rebalanced',
+      from: winner === 'long' ? bot.config.longExchange : bot.config.shortExchange,
+      to: winner === 'long' ? bot.config.shortExchange : bot.config.longExchange,
+      amount: safeTransfer,
+    };
+  }
+}
+```
+
+#### Emergency Close Logic
+
+If one leg approaches liquidation and rebalancing can't happen fast enough:
+
+```typescript
+async function emergencyCloseCheck(bot: DeltaNeutralBot): Promise<void> {
+  const longAccount = await getLegAccount(bot, 'long');
+  const shortAccount = await getLegAccount(bot, 'short');
+
+  const longHealthy = longAccount.marginRatio > bot.config.emergencyCloseThreshold;
+  const shortHealthy = shortAccount.marginRatio > bot.config.emergencyCloseThreshold;
+
+  if (!longHealthy || !shortHealthy) {
+    // Close BOTH legs simultaneously — closing only one leg
+    // leaves you with a naked directional position
+    const longAdapter = getAdapter(bot, 'long');
+    const shortAdapter = getAdapter(bot, 'short');
+
+    await Promise.all([
+      longAdapter.closePosition(bot.longSubaccountId, bot.market),
+      shortAdapter.closePosition(bot.shortSubaccountId, bot.market),
+    ]);
+
+    await withdrawAllToAgentWallet(bot);
+    await pauseBot(bot, 'Emergency close: margin threshold breached');
+  }
+}
+```
+
+### The Timing Problem
+
+The critical window is during rebalancing. When you withdraw from the winning exchange, there's a gap before the funds arrive at the losing exchange:
+
+```
+t=0:   Withdraw from Exchange A (winning side)
+t=5s:  Funds arrive in agent wallet
+t=10s: Deposit to Exchange B (losing side)
+t=15s: Exchange B confirms deposit
+
+During t=0 to t=15: Exchange B has reduced margin
+If price moves another 5% in the wrong direction during this window:
+  Exchange B liquidates the losing leg
+  You're left with a naked directional position on Exchange A
+```
+
+Mitigations:
+- **Over-margin both legs** — run at 3x instead of 5x leverage, leaving much more buffer
+- **Trigger rebalance early** — don't wait until one side is close to danger
+- **Keep a USDC reserve in agent wallet** — deposit to the losing side first from reserves, then withdraw from the winning side to replenish reserves
+- **Size positions small** — the strategy works on volume over time, not large individual positions
+
+### Reserve-First Rebalancing (Safer Approach)
+
+```typescript
+async function rebalanceWithReserve(bot: DeltaNeutralBot): Promise<void> {
+  const reserve = await getAgentWalletUsdcBalance(bot.walletAddress);
+  const needed = calculateRebalanceAmount(bot);
+
+  if (reserve >= needed) {
+    // Deposit to losing side FIRST (from reserve), then withdraw from winner
+    await loserAdapter.deposit(bot.loserSubaccountId, needed);
+    await winnerAdapter.withdraw(bot.winnerSubaccountId, needed);
+    // Reserve is replenished — no timing gap
+  } else {
+    // Not enough reserve — fall back to sequential (riskier)
+    // Only do this if margin ratio is still healthy enough
+    const loserMarginRatio = await getMarginRatio(bot, 'loser');
+    if (loserMarginRatio > SAFE_SEQUENTIAL_THRESHOLD) {
+      await winnerAdapter.withdraw(bot.winnerSubaccountId, needed);
+      await loserAdapter.deposit(bot.loserSubaccountId, needed);
+    } else {
+      // Too risky — reduce position size on both sides instead
+      await reducePositionBothLegs(bot, 0.5);
+    }
+  }
+}
+```
+
+### Profitability Analysis
+
+```
+Assumptions:
+  Market: SOL-PERP
+  Notional: $10,000 per leg ($20,000 total capital at 1x, $10,000 at 2x)
+  Average funding differential: 0.005% per hour (conservative)
+  Rebalancing frequency: every 4 hours
+  Rebalancing cost: ~$0.05 per rebalance (2 tx fees)
+
+Daily funding income:  $10,000 × 0.005% × 24 = $12/day
+Daily rebalance cost:  6 × $0.05 = $0.30/day
+Net daily:             $11.70/day
+Annualized:            ~$4,270/year on $20,000 = ~21% APY
+
+But:
+  - Funding differentials are NOT constant — can go to 0 or negative
+  - Liquidation events eat into capital
+  - Rebalancing during high volatility costs more (slippage)
+  - Realistic APY after accounting for downtime: 5-15%
+```
+
+### Feasibility Verdict
+
+| Factor | Assessment |
+|--------|-----------|
+| Profitability | Moderate — 5-15% realistic APY in favorable conditions |
+| Liquidation risk | High — the core unsolved problem |
+| Capital efficiency | Poor — 2x capital for same notional exposure |
+| Operational complexity | Very high — continuous monitoring, rebalancing, dual-exchange coordination |
+| Adapter architecture fit | Good — TradingAdapterRegistry already supports multiple exchanges |
+| Reserve-first rebalancing | Partially mitigates timing gap but requires idle capital |
+| User experience | Complex — hard to explain and monitor |
+
+**Bottom line:** Technically buildable with the adapter architecture, but the liquidation risk during rebalancing makes it unsuitable as a "set and forget" vault strategy. It's more of a power-user / institutional feature that requires active monitoring. Could be offered as an advanced bot type with very prominent risk warnings, or shelved until a DEX offers expiring futures (which would eliminate the liquidation problem entirely).
+
+### Prerequisites (If We Proceed)
+
+- At least 2 trading adapters active (Pacifica + one more)
+- Funding rate API on both exchanges (Pacifica has it)
+- Cross-exchange margin monitoring at 10-30 second intervals
+- Agent wallet USDC reserve management
+- Position size limits well below max leverage
+- Kill switch: auto-close both legs if either exchange's adapter goes to `unavailable` health state
+
+---
+
+## Compliance-Friendly Transaction Privacy (Exploratory)
+
+### The Problem
+
+On a public blockchain, every vault rebalancing operation — withdrawing from one yield protocol and depositing to another — is fully visible to anyone. For users, this creates two distinct problems:
+
+1. **Wallet stalking**: publicly visible capital flows let on-chain trackers see exactly where a user's money is, which protocols they use, and roughly how much they have.
+2. **Tax event proliferation**: in some jurisdictions (Australia being a prominent example), *every* DeFi transaction is treated as a capital gains event — even a swap from USDC to a yield-bearing stablecoin (like sUSDe or an LST-backed stable) and back again, even when the economic value barely changes. The practical consequence is that automated yield routing — which the vault orchestrator does dozens of times per year — could generate dozens of individual CGT events per rebalance cycle.
+
+### The Compliance-First Approach
+
+The goal here is NOT to hide transactions from tax authorities — it is to:
+- Reduce unnecessary **public** on-chain exposure (wallet stalking, strategy visibility)
+- Maintain the ability to **prove compliance** to a tax authority or accountant via selective disclosure
+
+This is meaningfully different from a privacy mixer. The user retains full provable access to their own transaction history; they just don't have to broadcast it to the world by default.
+
+### Candidate Protocols
+
+#### Light Protocol (Solana — primary candidate)
+
+Light Protocol provides a ZK-compression layer on Solana. Assets move through a "shielded pool" — the public chain sees a transaction interacting with the shielded program, but not the sender, receiver, or amount.
+
+**Selective disclosure mechanism:** Users can generate a **Viewing Key** for any time period. The key can be handed to tax software (Koinly, ZenLedger) or an accountant to decrypt only that user's history. The user's full audit trail is reconstructible; it just isn't public by default.
+
+**Relevance to vaults:** yield-routing rebalances that currently generate publicly visible stablecoin swaps could instead be routed through the shielded layer. From a public explorer's perspective: one transaction in, one transaction out. The individual swaps in between are not publicly visible.
+
+**Open question for legal review:** does routing through a shielded pool change the tax characterisation of the underlying swaps? This needs jurisdiction-specific legal input — the privacy layer does not eliminate the taxable event, it only affects visibility.
+
+#### Elusiv (Solana — reference point)
+
+Elusiv was the first compliance-focused ZK-privacy protocol on Solana, built around "shield" and "send" operations with integrated **Compliance Tooling** (a viewing-key system similar to Light Protocol). Its current development status should be verified before relying on it — the protocol has undergone rebranding/pivots. Light Protocol is the safer primary choice; Elusiv is worth monitoring.
+
+#### Railgun (EVM — cross-chain reference)
+
+Railgun is the closest equivalent on EVM chains. It supports privacy with viewing keys and an explicit "auditor role" — specific keys can be granted to a regulator or accountant. Not directly applicable to Solana vaults, but the compliance model is well-tested and serves as a design reference.
+
+### Architecture Sketch
+
+If we implement this, the shielded layer would sit between the vault orchestrator and the yield protocol adapters — an optional wrapper rather than a mandatory path:
+
+```
+VaultOrchestrator
+       ↓
+PrivacyLayerAdapter (optional; toggleable per user)
+  ├── shield(asset, amount)  → shielded pool
+  ├── unshield(asset, amount) → agent wallet
+  └── shieldedTransfer(asset, amount, targetProgram) → shielded deposit to yield protocol
+       ↓
+YieldProtocolAdapter (Kamino, OnRe, Lulo, etc.)
+```
+
+Users who opt in get reduced public footprint on rebalances. Users who opt out get the current transparent flow. Both paths produce the same economic outcome.
+
+### Compliance Export
+
+A key product feature alongside any privacy integration:
+
+```typescript
+interface ComplianceExport {
+  walletAddress: string;
+  viewingKey: string;         // user-held private key to decrypt their history
+  startDate: Date;
+  endDate: Date;
+
+  // Generates a full transaction log suitable for tax software import
+  async exportForTax(): Promise<TaxReport> {
+    const txs = await decryptHistory(this.viewingKey, this.startDate, this.endDate);
+    return {
+      transactions: txs.map(tx => ({
+        date: tx.timestamp,
+        type: tx.type,                  // 'swap' | 'deposit' | 'withdraw'
+        assetIn: tx.assetIn,
+        amountIn: tx.amountIn,
+        assetOut: tx.assetOut,
+        amountOut: tx.amountOut,
+        valueUsdAtTime: tx.valueUsd,    // requires price oracle at time of tx
+        protocol: tx.protocol,
+        txSignature: tx.signature,
+      })),
+      summary: {
+        totalEvents: txs.length,
+        periodStart: this.startDate,
+        periodEnd: this.endDate,
+      },
+    };
+  }
+}
+```
+
+### Important Caveats
+
+- **Not legal advice.** Whether routing through a shielded pool changes tax treatment depends on jurisdiction and evolving regulatory guidance. Users in jurisdictions with aggressive DeFi tax rules (Australia, US, UK) need to verify with a tax professional before using this.
+- **Protocol maturity.** Light Protocol is the most mature option on Solana but is still relatively new compared to Kamino/Marginfi. Smart contract risk applies.
+- **Regulatory trajectory.** Privacy protocol regulation is evolving rapidly (see: Tornado Cash, US OFAC). Any implementation must monitor this closely and include a kill switch to revert to transparent routing.
+- **Does not reduce CGT events — only reduces visibility.** If the underlying legal position is that every stablecoin swap is a CGT event, routing through a shielded pool does not change that position. It only means the events are not publicly enumerable from a block explorer.
+
+### Feasibility Verdict
+
+| Factor | Assessment |
+|--------|-----------|
+| Privacy benefit | Moderate — reduces wallet stalking; doesn't eliminate CGT |
+| Compliance compatibility | Good — viewing keys solve the disclosure requirement |
+| Protocol maturity (Solana) | Medium — Light Protocol is functional but newer than lending protocols |
+| Regulatory risk | Elevated — privacy protocol treatment is evolving globally |
+| Integration complexity | Medium — optional adapter wrapper; doesn't change yield logic |
+| User opt-in model | Clean — transparent mode is default; privacy is an opt-in per user |
+
+**Bottom line:** Worthwhile to keep as a Phase 6/7 candidate once the core vault is live and stable. Build it as an opt-in wrapper, never as a mandatory path. Requires legal review specific to the target user jurisdictions before launch.
+
+---
+
+## Open Questions
+
+1. **Jupiter Lend API access** — Verify the Jupiter Lend SDK/API for third-party integrators: deposit/withdraw/borrow programmatic access, collateral weight queries, health factor monitoring. Also confirm current LTV ratios for INF and JLP. Jupiter is the intended primary adapter — this research gates Phase 2.
+2. **Which lending protocol as fallback/diversification?** Kamino vs Marginfi vs Lulo — evaluate API maturity and rate competitiveness for the secondary adapters that sit behind Jupiter in the routing stack
+3. **Lulo API access** — Does Lulo offer a programmatic API for third-party integrators? If yes, it could shortcut multi-protocol yield aggregation
+4. **LST collateral acceptance** — Which lending protocols currently accept JitoSOL and mSOL as collateral? Weights vary
+5. **Withdrawal delay tolerance** — Should the platform only use instant-withdrawal protocols, or can we accept 24-48h delays for higher yield?
+6. **Legal review** — Does facilitating borrowing/lending on behalf of users create regulatory obligations?
+7. **Insurance/coverage** — Should we integrate with protocol insurance (like Nexus Mutual for Solana equivalents)?
+8. **OnRe API access** — Verify whether onre.finance offers a programmatic API for third-party integrators, confirm the ~10% APY mechanism (LST/LRT routing vs. rebasing), and assess audit status before assigning a final risk tier.
+9. **Privacy layer legal review** — Before building any shielded-routing feature, get jurisdiction-specific legal input on: (a) whether routing through a ZK shielded pool changes CGT treatment in Australia/US/UK, and (b) whether integrating Light Protocol creates any regulatory obligations for the platform itself.
+
+---
+
+## Dependencies
+
+- Pacifica adapter migration (Phases 1-6) complete
+- At least one YieldProtocolAdapter implemented and tested
+- Agent wallet infrastructure (already exists)
+- Auto-withdraw feature (already exists — extend for borrow repayment)
+- Lending protocol SDK/API access (Kamino, Marginfi, or Lulo)
+- Oracle price feeds for collateral valuation
+- Protocol health monitoring infrastructure
+
+---
+
+## V1 → V2 Consolidation Notes
+
+The original Drift-centric V1 design is archived verbatim at `docs/archive/VAULTS_ARCHITECTURE_V1.md`. This document supersedes it. Key V1 concepts carried forward into this consolidated plan:
+- Intelligent borrowing agent logic (now fully specified — see Intelligent Agents §6)
+- Automatic repayment triggers (see Intelligent Agents §6)
+- Market regime detection (see Appendix A)
+- Effort & complexity estimates (see Appendix B)
+- Profit distribution strategies, risk-management escalation ladder, capital-rebalancing algorithms, yield-arbitrage decision engine, negative-carry protection, force-recall protocol (deleverage spiral) — all reflected in the V2 sections above.
+
+Key V1 concepts deprecated or replaced (kept only in the archive):
+- Drift Subaccount 0 as vault → platform-level vault orchestrator
+- Drift-native lending/borrowing → external DeFi protocol adapters
+- Drift vault discovery/indexing → generic yield protocol aggregation
+- DRIFT token rewards collection → removed (no longer on Drift)
+- Single-protocol health factor → multi-protocol health aggregation
+- Hardcoded collateral weight tables → dynamic per-protocol queries
+
+Other V1-only material **not** carried over (intentionally — retrieve from the archive if needed): RPC optimization-for-vaults notes, maintainability guidelines, business-feasibility/revenue-alignment analysis, and the Drift-specific deep dives. These were either implementation-detail or Drift-coupled and would dilute this source-of-truth.
+
+---
+
+## Appendix A — Market Regime Detection
+
+*Ported from the original V1 design. The body of this document (Phase 6: Advanced Agents) references "market regime detection" as a checkbox; this appendix is the actual specification. The logic is venue-agnostic — `strategyType` applies to any vault/strategy classification, not just Drift strategy vaults.*
+
+### The core challenge
+
+Different strategies perform better in different market conditions. Adjusting yield routing, risk posture, and (where applicable) strategy selection based on the current regime adds complexity but can improve risk-adjusted returns. Regime changes slowly, so this runs daily — overhead is low (see end of appendix).
+
+### Regime classification
+
+```typescript
+type MarketRegime =
+  | 'bull_trending'        // Strong uptrend, high momentum
+  | 'bear_trending'        // Strong downtrend
+  | 'consolidation'        // Range-bound, low volatility
+  | 'high_volatility'      // Large swings, uncertain direction
+  | 'low_volatility'       // Quiet market, small moves
+  | 'funding_positive'     // Longs paying shorts
+  | 'funding_negative';    // Shorts paying longs
+
+interface RegimeDetector {
+  priceData: OHLCV[];               // 30-90 days minimum
+  fundingRates: FundingRate[];      // historical funding
+  volatilityData: number[];         // ATR, realized vol
+
+  detectTrend(): 'bull' | 'bear' | 'neutral' {
+    const sma50 = this.calculateSMA(50);
+    const sma200 = this.calculateSMA(200);
+    const adx = this.calculateADX(14);
+    if (adx < 20) return 'neutral';  // no trend
+    return sma50 > sma200 ? 'bull' : 'bear';
+  }
+
+  detectVolatility(): 'high' | 'normal' | 'low' {
+    const currentVol = this.calculate30dVolatility();
+    const historicalAvg = this.calculate1yAvgVolatility();
+    if (currentVol > historicalAvg * 1.5) return 'high';
+    if (currentVol < historicalAvg * 0.5) return 'low';
+    return 'normal';
+  }
+
+  detectFundingRegime(): 'positive' | 'negative' | 'neutral' {
+    const avgFunding7d = this.calculateAvgFunding(7);
+    if (avgFunding7d > 0.01) return 'positive';   // longs pay >1% weekly
+    if (avgFunding7d < -0.01) return 'negative';  // shorts pay
+    return 'neutral';
+  }
+}
+```
+
+### Regime-based strategy/vault scoring
+
+```typescript
+// Which strategy types work best in which regimes
+const REGIME_AFFINITY: Record<MarketRegime, Record<string, number>> = {
+  bull_trending:   { directional_long: 100, delta_neutral: 40, yield_farming: 70 },
+  bear_trending:   { directional_short: 100, delta_neutral: 60, yield_farming: 50 },
+  consolidation:   { delta_neutral: 100, market_making: 90, yield_farming: 80 },
+  high_volatility: { delta_neutral: 30, yield_farming: 40, cash: 100 },
+  low_volatility:  { yield_farming: 90, delta_neutral: 70, market_making: 80 },
+  funding_positive:{ delta_neutral: 100, basis_trade: 90 },
+  funding_negative:{ delta_neutral: 20, directional_long: 70 },
+};
+
+function scoreForRegime(strategyType: string, regime: MarketRegime, apy: number, maxDrawdown: number, withdrawalHours: number): number {
+  const base = REGIME_AFFINITY[regime][strategyType] ?? 50;
+  const apyBonus = Math.min(20, apy * 100);
+  const riskPenalty = maxDrawdown * 50;
+  const liquidityBonus = withdrawalHours < 24 ? 10 : 0;
+  return Math.max(0, Math.min(100, base + apyBonus - riskPenalty + liquidityBonus));
+}
+```
+
+### Overhead — is it worth it?
+
+- **Data:** ~1.5 MB price (3 majors × 90d × 1h candles) + ~0.5 MB funding (top 10 perps × 30d).
+- **Compute:** daily, ~2 s, negligible CPU.
+- **API:** ~30 calls/day (10 markets × 3).
+
+**Verdict:** overhead is LOW. The cost is in the logic, not the resources — which is why it sits in Phase 6 rather than blocking earlier phases.
+
+---
+
+## Appendix B — Effort & Complexity Analysis
+
+*Ported from the original V1 design. These complexity scores informed the per-phase estimates in the Implementation Phases table above. Note: the original phase numbering below was Drift-centric (it includes Drift strategy-vault discovery/integration as separate phases) and does NOT map 1:1 onto this document's six phases — use it as a relative-complexity reference, and use the Implementation Phases table as the authoritative plan.*
+
+### Complexity scoring (1-10; higher = harder)
+
+| Component | Implementation | Maintenance | Risk | Total |
+|-----------|----------------|-------------|------|-------|
+| Core vault | 4 | 3 | 3 | 10 |
+| Multi-asset deposits | 5 | 4 | 4 | 13 |
+| Borrowing integration | 6 | 5 | 6 | 17 |
+| Vault discovery/indexing *(Drift-specific — N/A in V2)* | 5 | 4 | 3 | 12 |
+| APY calculation | 6 | 5 | 4 | 15 |
+| Withdrawal-period handling | 5 | 4 | 5 | 14 |
+| External yield aggregation | 8 | 7 | 7 | 22 |
+| Multi-protocol integration | 8 | 8 | 6 | 22 |
+| Migration logic (between yield protocols) | 7 | 6 | 7 | 20 |
+| Market regime detection | 4 | 3 | 2 | 9 |
+| Intelligent automation (agents) | 6 | 5 | 5 | 16 |
+
+### Original V1 timeline (relative reference)
+
+```
+Phase 1: Foundation               2-4 days   (extends current system)
+Phase 2: Multi-Asset              2-3 days
+Phase 3: Borrowing                3-5 days
+Phase 4: Vault Discovery          2-3 days   (Drift-specific — dropped in V2)
+Phase 5: Vault Integration        3-4 days   (Drift-specific — dropped in V2)
+Phase 6: Market Regime            2-3 days
+Phase 7: External Aggregation     5-7 days   (OR Lulo API shortcut: 1-2 days)
+Phase 8: Intelligent Automation   4-6 days
+```
+
+### Resource requirements by phase (V1 reference)
+
+| Phase | AI dev time | Ongoing infra | API costs | RPC costs |
+|-------|-------------|---------------|-----------|-----------|
+| Foundation | 2-4 days | Low | $0 | Existing |
+| Multi-Asset | 2-3 days | Low | $0 | +10% |
+| Borrowing | 3-5 days | Medium | $0 | +20% |
+| External Aggregation | 5-7 days | High | ~$100/mo | +50% |
+| Market Regime | 2-3 days | Low | ~$20/mo | +5% |
+| Automation | 4-6 days | High | $0 | +10% |
+
+The headline takeaway that survives the V1→V2 transition: **the multi-asset-collateral + borrowing capability (the competitive moat) is medium complexity (~17/30) and ~3-5 days**, but it sits on top of foundation + collateral-deposit work and — in this architecture — on top of the Pacifica adapter migration. Budget the prerequisite stack, not just the moat phase in isolation.
+
+PROMPT_EOF
