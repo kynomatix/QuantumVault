@@ -98,6 +98,18 @@ export interface ProtocolAdapter {
   closeSubaccount?(agentPublicKey: string, subaccountId: string): Promise<void>;
   subaccountExists?(walletAddress: string, subaccountId: string): Promise<boolean>;
   getWalletCollateralBalance?(walletAddress: string): Promise<number>;
+  /**
+   * Poll the main account until its collateral balance reaches `targetBalance`,
+   * or the timeout elapses. Exists for exchanges (e.g. Pacifica) whose indexer
+   * lags after a deposit/internal transfer, so a follow-up withdraw must wait for
+   * the balance to be reflected. Returns `indexed:false` on timeout (never throws);
+   * adapters without an indexing lag may omit this.
+   */
+  waitForMainAccountBalance?(
+    agentPublicKey: string,
+    targetBalance: number,
+    opts?: { timeoutMs?: number; seedBalance?: number },
+  ): Promise<{ indexed: boolean; lastBalance: number; elapsedMs: number }>;
   getAdapterDiagnostics?(): Promise<Record<string, unknown>>;
 
   settlePnl(params: SettlePnlParams): Promise<SettleResult>;

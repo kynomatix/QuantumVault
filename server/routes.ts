@@ -115,7 +115,8 @@ async function sweepPacificaSubaccount(
   bot: TradingBot,
   agentPublicKey: string,
   logPrefix: string = '[Delete]',
-): Promise<{ handled: boolean; swept: boolean; amount: number; error?: string }> {
+  agentSecret: Uint8Array | null = null,
+): Promise<{ handled: boolean; swept: boolean; amount: number; withdrawnToWallet?: boolean; error?: string }> {
   const botCtx = getBotSubaccountContext(bot);
   if (!botCtx) return { handled: false, swept: false, amount: 0 };
 
@@ -126,9 +127,25 @@ async function sweepPacificaSubaccount(
     console.log(`${logPrefix} Pacifica subaccount ${botCtx.botPublicKey.slice(0, 8)}... balance: $${balance.toFixed(6)}`);
 
     if (balance >= adapter.minTransferAmount) {
+      // Read main balance BEFORE the transfer so we can (a) wait for the transfer
+      // to be indexed at main and (b) withdraw only THIS bot's contribution (the
+      // observed delta), never sweeping unrelated funds already sitting in main.
+      // A READ FAILURE is recorded as null (unknown) — NOT 0 — because assuming 0
+      // when main already holds funds would let the indexing wait pass instantly
+      // off that pre-existing balance and withdraw the wrong money, leaving this
+      // bot's swept funds stranded in main with no marker. Unknown ⇒ defer withdraw.
+      let mainBefore: number | null = 0;
+      try {
+        const mainInfo = await adapter.getAccountInfo(agentPublicKey);
+        mainBefore = mainInfo.exists ? mainInfo.balance : 0;
+      } catch (mainErr: any) {
+        mainBefore = null;
+        console.warn(`${logPrefix} Could not read main balance before transfer (will defer withdraw, leave funds in main): ${mainErr.message}`);
+      }
+
       const decrypted = await _resolveBotSubaccountSecretKey(botCtx);
       try {
-        console.log(`${logPrefix} Transferring $${balance.toFixed(4)} from bot subaccount ${botCtx.botPublicKey.slice(0, 8)}... to agent wallet`);
+        console.log(`${logPrefix} Step 1: transferring $${balance.toFixed(4)} from bot subaccount ${botCtx.botPublicKey.slice(0, 8)}... → main account`);
         const transferResult = await adapter.transferBetweenSubaccounts({
           agentSecretKey: decrypted.secretKey,
           mainWalletAddress: agentPublicKey,
@@ -138,15 +155,24 @@ async function sweepPacificaSubaccount(
         });
 
         if (!transferResult.success) {
-          console.error(`${logPrefix} Pacifica sweep failed: ${transferResult.error}`);
+          // Funds genuinely still in the subaccount — this is the blocking error.
+          console.error(`${logPrefix} Pacifica subaccount→main transfer failed: ${transferResult.error}`);
           return { handled: true, swept: false, amount: balance, error: transferResult.error };
         }
-
-        console.log(`${logPrefix} Pacifica sweep successful: $${balance.toFixed(4)} returned to agent wallet`);
-        return { handled: true, swept: true, amount: balance };
+        console.log(`${logPrefix} Step 1 ok: $${balance.toFixed(4)} moved to main account`);
       } finally {
         decrypted.cleanup();
       }
+
+      // Step 2: complete the round-trip — withdraw main → on-chain agent wallet.
+      // The transfer above only moved funds WITHIN Pacifica; without this leg the
+      // capital sits in the agent's Pacifica MAIN account and never returns to the
+      // user's wallet (the gap this fix closes). A failure here is NOT fatal: funds
+      // are safe in main and recoverable, so we never block deletion on it.
+      const withdrawnToWallet = await withdrawSweptFundsToWallet(
+        bot, agentPublicKey, agentSecret, mainBefore, balance, logPrefix,
+      );
+      return { handled: true, swept: true, amount: balance, withdrawnToWallet };
     }
 
     if (balance > 0) {
@@ -179,6 +205,126 @@ async function sweepPacificaSubaccount(
     console.error(`${logPrefix} Pacifica sweep error: ${err.message}`);
     return { handled: true, swept: false, amount: 0, error: err.message };
   }
+}
+
+/**
+ * Second leg of the Pacifica delete sweep: withdraw funds that were just moved
+ * subaccount→main back out to the on-chain agent wallet.
+ *
+ * Returns `true` only when the on-chain withdraw succeeded. Every failure mode is
+ * NON-FATAL — the funds are safely in the agent's Pacifica main account and can be
+ * withdrawn later — so this never throws and never blocks bot deletion. Whenever
+ * the funds do NOT reach the wallet, it records a `pacifica_main_pending_withdraw`
+ * equity event so reconciliation/recovery can find them.
+ *
+ * @param mainBefore main-account balance observed BEFORE the subaccount→main
+ *   transfer. We only withdraw the observed delta (capped at `sweptAmount`) so we
+ *   never sweep unrelated funds already sitting in main.
+ * @param sweptAmount amount moved from the subaccount into main.
+ */
+async function withdrawSweptFundsToWallet(
+  bot: TradingBot,
+  agentPublicKey: string,
+  agentSecret: Uint8Array | null,
+  mainBefore: number | null,
+  sweptAmount: number,
+  logPrefix: string,
+): Promise<boolean> {
+  const adapter = getDefaultAdapter();
+  let withdrawnToWallet = false;
+  let pendingReason: string | undefined;
+
+  if (!agentSecret) {
+    pendingReason = 'agent key unavailable';
+    console.warn(`${logPrefix} ${pendingReason} — $${sweptAmount.toFixed(4)} swept to main but cannot withdraw to wallet`);
+  } else if (mainBefore === null) {
+    // We never read a trustworthy pre-transfer main balance, so we cannot tell
+    // this bot's swept funds apart from any pre-existing main balance. Withdrawing
+    // could pull the wrong money and strand the swept amount. Defer to recovery.
+    pendingReason = 'pre-transfer main balance unknown — cannot safely delta-match';
+    console.warn(`${logPrefix} ${pendingReason}; leaving $${sweptAmount.toFixed(4)} in main (recoverable)`);
+  } else {
+    try {
+      // Wait for Pacifica to index the transfer at main before withdrawing, else
+      // the withdraw reads $0 and 422s ("account value: 0"). The target is the
+      // observed delta reaching the swept amount within a 1-cent rounding
+      // tolerance — NOT a percentage — so we don't treat a materially short
+      // (under-indexed) balance as "ready" and silently strand principal.
+      const target = mainBefore + sweptAmount - 0.01;
+      const waitRes = adapter.waitForMainAccountBalance
+        ? await adapter.waitForMainAccountBalance(agentPublicKey, target, { seedBalance: mainBefore })
+        : { indexed: true, lastBalance: mainBefore + sweptAmount, elapsedMs: 0 };
+
+      if (!waitRes.indexed) {
+        pendingReason = `Pacifica did not index the transfer within ${(waitRes.elapsedMs / 1000).toFixed(0)}s`;
+        console.warn(`${logPrefix} ${pendingReason} (funds safe in main, recoverable)`);
+      } else {
+        // Withdraw only this bot's contribution (observed delta, capped at the
+        // swept amount), floored to cents to avoid precision 422s. With the
+        // cent-accurate target above, delta is within ~1 cent of sweptAmount, so
+        // any residual left behind is sub-cent dust, not material principal.
+        const delta = Math.max(0, waitRes.lastBalance - mainBefore);
+        const withdrawAmount = Math.floor(Math.min(sweptAmount, delta) * 100) / 100;
+
+        if (withdrawAmount < adapter.minTransferAmount) {
+          pendingReason = `post-transfer main delta $${withdrawAmount.toFixed(2)} below $${adapter.minTransferAmount} minimum withdraw`;
+          console.log(`${logPrefix} ${pendingReason} — leaving in main`);
+        } else {
+          console.log(`${logPrefix} Step 2: withdrawing $${withdrawAmount.toFixed(2)} main → agent wallet`);
+          const wr = await executeAgentDriftWithdraw(agentPublicKey, agentSecret, withdrawAmount, 0, {
+            tradingBotId: bot.id,
+            context: logPrefix,
+          });
+          if (wr.success) {
+            withdrawnToWallet = true;
+            console.log(`${logPrefix} Step 2 ok: withdrew $${withdrawAmount.toFixed(2)} to agent wallet: ${wr.signature}`);
+            // Record the principal as its own equity event. The $1 Pacifica
+            // withdraw fee is recorded separately inside executeAgentDriftWithdraw
+            // using THIS SAME tx signature, so we must NOT gate the principal on
+            // getEquityEventByTxSignature (the fee row already occupies that
+            // signature and would suppress the principal). Mirror the canonical
+            // withdraw path: insert unconditionally, log CRITICAL on failure.
+            try {
+              await storage.createEquityEvent({
+                walletAddress: bot.walletAddress,
+                tradingBotId: bot.id,
+                eventType: 'drift_withdraw',
+                amount: String(-withdrawAmount),
+                txSignature: wr.signature || null,
+                notes: 'Capital returned to wallet on bot delete',
+              });
+            } catch (eventErr: any) {
+              console.error(`${logPrefix} CRITICAL: withdraw succeeded (tx ${wr.signature}) but principal equity event failed: ${eventErr.message}. Untracked withdraw: wallet=${bot.walletAddress}, botId=${bot.id}, amount=${withdrawAmount}`);
+            }
+          } else {
+            pendingReason = wr.error || 'withdraw failed';
+            console.warn(`${logPrefix} Withdraw main → wallet failed: ${pendingReason} (funds safe in main, recoverable)`);
+          }
+        }
+      }
+    } catch (err: any) {
+      pendingReason = err.message;
+      console.warn(`${logPrefix} Withdraw leg threw: ${err.message} (funds safe in main, recoverable)`);
+    }
+  }
+
+  // Non-blocking reconciliation marker: funds reached main but not the wallet.
+  if (!withdrawnToWallet) {
+    try {
+      await storage.createEquityEvent({
+        walletAddress: bot.walletAddress,
+        tradingBotId: bot.id,
+        eventType: 'pacifica_main_pending_withdraw',
+        amount: String(sweptAmount),
+        txSignature: null,
+        notes: `Bot deleted; $${sweptAmount.toFixed(4)} swept to Pacifica main but not withdrawn to wallet${pendingReason ? ` (${pendingReason})` : ''}. Recoverable via main → wallet withdraw.`,
+      });
+    } catch (eventErr: any) {
+      console.error(`${logPrefix} Failed to record pending-withdraw event: ${eventErr.message}`);
+    }
+  }
+
+  return withdrawnToWallet;
 }
 
 /**
@@ -7439,7 +7585,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       
       // Pacifica subaccount sweep — transfer funds back to agent wallet before deletion
       if (getBotSubaccountContext(bot) && agentAddress) {
-        const sweepResult = await sweepPacificaSubaccount(bot, agentAddress, '[Delete]');
+        const sweepResult = await sweepPacificaSubaccount(bot, agentAddress, '[Delete]', agentSecret);
         if (sweepResult.handled) {
           if (sweepResult.error && sweepResult.amount > 0.01) {
             return res.status(500).json({
@@ -7448,13 +7594,18 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             });
           }
           await storage.deleteTradingBot(req.params.id);
+          let message = 'Bot deleted';
+          if (sweepResult.swept) {
+            message = sweepResult.withdrawnToWallet
+              ? `Returned $${sweepResult.amount.toFixed(2)} USDC to your agent wallet before deletion`
+              : `Moved $${sweepResult.amount.toFixed(2)} USDC to your main account; it will return to your wallet shortly`;
+          }
           return res.json({
             success: true,
             swept: sweepResult.swept,
+            withdrawnToWallet: sweepResult.withdrawnToWallet ?? false,
             withdrawnAmount: sweepResult.amount,
-            message: sweepResult.swept
-              ? `Swept $${sweepResult.amount.toFixed(2)} USDC from Pacifica subaccount to agent wallet before deletion`
-              : 'Bot deleted'
+            message
           });
         }
       }
@@ -7774,7 +7925,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       
       // Pacifica subaccount sweep — transfer funds back to agent wallet before deletion
       if (getBotSubaccountContext(bot) && agentAddress) {
-        const sweepResult = await sweepPacificaSubaccount(bot, agentAddress, '[ForceDelete]');
+        const sweepResult = await sweepPacificaSubaccount(bot, agentAddress, '[ForceDelete]', agentSecret);
         if (sweepResult.handled) {
           if (sweepResult.error && sweepResult.amount > 0.01) {
             return res.status(500).json({
@@ -7783,13 +7934,18 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             });
           }
           await storage.deleteTradingBot(req.params.id);
+          let message = 'Bot deleted';
+          if (sweepResult.swept) {
+            message = sweepResult.withdrawnToWallet
+              ? `Returned $${sweepResult.amount.toFixed(2)} USDC to your agent wallet before deletion`
+              : `Moved $${sweepResult.amount.toFixed(2)} USDC to your main account; it will return to your wallet shortly`;
+          }
           return res.json({
             success: true,
             swept: sweepResult.swept,
+            withdrawnToWallet: sweepResult.withdrawnToWallet ?? false,
             amount: sweepResult.amount,
-            message: sweepResult.swept
-              ? `Swept $${sweepResult.amount.toFixed(2)} USDC from Pacifica subaccount to agent wallet before deletion`
-              : 'Bot deleted'
+            message
           });
         }
       }

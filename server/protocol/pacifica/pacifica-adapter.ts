@@ -1429,6 +1429,49 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   /**
+   * Poll the MAIN Pacifica account until its USDC balance reaches `targetBalance`,
+   * or until the timeout elapses. Pacifica's indexer can lag 30–60s after an
+   * on-chain deposit OR an internal subaccount→main transfer, so any code that
+   * then acts on the post-transfer main balance (create-path funding, delete-path
+   * withdraw) MUST wait for the balance to be reflected first — otherwise the
+   * follow-up withdraw/transfer reads $0 and 422s ("account value: 0").
+   *
+   * Pacifica's REST API is rate-limited (~300 credits / 60s). The stepped backoff
+   * keeps the fast path (indexed in 5–15s) at ~5 requests and the worst-case 90s
+   * wait at ~17 requests instead of 45.
+   *
+   * Never throws — returns `{ indexed:false }` on timeout so the caller decides
+   * whether that is fatal (create path: cannot fund an unconfirmed account) or
+   * merely deferred (delete path: funds are safe in main and the withdraw can be
+   * retried later).
+   */
+  async waitForMainAccountBalance(
+    agentPublicKey: string,
+    targetBalance: number,
+    opts?: { timeoutMs?: number; seedBalance?: number },
+  ): Promise<{ indexed: boolean; lastBalance: number; elapsedMs: number }> {
+    const pollStart = Date.now();
+    const pollTimeoutMs = opts?.timeoutMs ?? 90_000;
+    let indexed = false;
+    let lastBalance = opts?.seedBalance ?? 0;
+    while (Date.now() - pollStart < pollTimeoutMs) {
+      const elapsedMs = Date.now() - pollStart;
+      // 0–15s: every 2s (fast path — most deposits index here)
+      // 15–45s: every 5s · 45–90s: every 8s
+      const pollIntervalMs = elapsedMs < 15_000 ? 2_000 : elapsedMs < 45_000 ? 5_000 : 8_000;
+      await new Promise(r => setTimeout(r, pollIntervalMs));
+      const probe = await this.getAccountInfo(agentPublicKey).catch(() => null);
+      if (probe?.exists && probe.balance >= targetBalance) {
+        indexed = true;
+        lastBalance = probe.balance;
+        break;
+      }
+      if (probe) lastBalance = probe.balance;
+    }
+    return { indexed, lastBalance, elapsedMs: Date.now() - pollStart };
+  }
+
+  /**
    * Atomic first-bot provisioning for Pacifica.
    *
    * Pacifica only registers a `main_account` record once it observes a USDC deposit
@@ -1486,42 +1529,22 @@ export class PacificaAdapter implements ProtocolAdapter {
       }
       depositTxSignature = depositResult.txSignature;
 
-      // 3. Poll for Pacifica to index the deposit. Solana confirms quickly but
-      // Pacifica's indexer can lag 30–60s under load, so we give it 90s before
-      // surfacing a retry message. Funds are always safe — a timeout just means
-      // the retry path will see them already credited.
-      //
-      // Pacifica's REST API is rate-limited (~300 req/hour). We use a stepped
-      // backoff so the typical fast-path (indexed in 5–15s) only costs ~5
-      // requests, and the worst-case 90s wait costs ~17 requests instead of 45.
-      const pollStart = Date.now();
-      const pollTimeoutMs = 90_000;
-      let indexed = false;
-      let lastBalance = currentMainBalance;
-      while (Date.now() - pollStart < pollTimeoutMs) {
-        const elapsedMs = Date.now() - pollStart;
-        // 0–15s: poll every 2s (fast path — most deposits index here)
-        // 15–45s: poll every 5s
-        // 45–90s: poll every 8s
-        const pollIntervalMs = elapsedMs < 15_000 ? 2_000 : elapsedMs < 45_000 ? 5_000 : 8_000;
-        await new Promise(r => setTimeout(r, pollIntervalMs));
-        const probe = await this.getAccountInfo(input.agentPublicKey).catch(() => null);
-        if (probe?.exists && probe.balance >= input.fundingAmount) {
-          indexed = true;
-          lastBalance = probe.balance;
-          break;
-        }
-        if (probe) lastBalance = probe.balance;
-      }
-      if (!indexed) {
+      // 3. Wait for Pacifica to index the deposit before creating the subaccount.
+      // Funds are always safe — a timeout just means the retry path will see them
+      // already credited. The create path treats a timeout as fatal (it cannot
+      // proceed to fund a subaccount it hasn't confirmed), so we throw.
+      const waitResult = await this.waitForMainAccountBalance(input.agentPublicKey, input.fundingAmount, {
+        seedBalance: currentMainBalance,
+      });
+      if (!waitResult.indexed) {
         throw new Error(
           `provisionFundedSubaccount: Pacifica did not index deposit within 90s. ` +
-          `Deposit txSignature=${depositTxSignature || 'unknown'}, lastObservedBalance=$${lastBalance}. ` +
+          `Deposit txSignature=${depositTxSignature || 'unknown'}, lastObservedBalance=$${waitResult.lastBalance}. ` +
           `Your funds are safe and will appear in your main account shortly — ` +
           `simply retry bot creation in a moment and it will use the already-deposited funds.`,
         );
       }
-      console.log(`[PacificaAdapter] provisionFundedSubaccount: Pacifica indexed deposit in ${((Date.now() - pollStart) / 1000).toFixed(1)}s, mainBalance=$${lastBalance}`);
+      console.log(`[PacificaAdapter] provisionFundedSubaccount: Pacifica indexed deposit in ${(waitResult.elapsedMs / 1000).toFixed(1)}s, mainBalance=$${waitResult.lastBalance}`);
     } else {
       console.log(`[PacificaAdapter] provisionFundedSubaccount: skipping deposit (mainBalance=$${currentMainBalance} already covers fundingAmount=$${input.fundingAmount})`);
     }
