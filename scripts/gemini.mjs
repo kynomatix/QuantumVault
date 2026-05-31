@@ -10,7 +10,14 @@
  * Auth: requires GEMINI_API_KEY (direct Google AI Studio key).
  *   The old AI_INTEGRATIONS_GEMINI_* Replit-proxy fallback (Gemini 2.5
  *   family only) has been removed — we pay for the direct API and only
- *   use Gemini 3 Pro / 3 Flash Image.
+ *   use Gemini 3.5 Flash (default) / 3 Flash Image (image generation).
+ *
+ * Default model: gemini-3.5-flash
+ *   - 4x faster than 3.1 Pro, 25% cheaper ($1.50/$9 per 1M tokens)
+ *   - 65K output tokens (vs 16K on 3.1 Pro) — better for full audits
+ *   - Beats 3.1 Pro on coding, agentic, tool use, and Finance Agent benchmarks
+ *   - Use --model gemini-3.1-pro-preview only for tasks needing peak abstract
+ *     reasoning or long-context retrieval (128K+), where 3.1 Pro still leads.
  *
  * Usage:
  *   node scripts/gemini.mjs --prompt-file p.txt
@@ -23,7 +30,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { GoogleGenAI, Modality } from '@google/genai';
 
-const DEFAULT_TEXT_MODEL = 'gemini-3.1-pro-preview';
+const DEFAULT_TEXT_MODEL = 'gemini-3.5-flash';
 const DEFAULT_IMAGE_MODEL = 'gemini-3.1-flash-image-preview';
 
 function parseArgs(argv) {
