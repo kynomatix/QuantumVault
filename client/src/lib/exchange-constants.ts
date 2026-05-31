@@ -47,3 +47,19 @@ export function getMaxLeverage(ticker: string): number {
   }
   return LEVERAGE_TIERS[market] ?? CONSERVATIVE_FALLBACK;
 }
+
+export type ProtocolId = 'pacifica' | 'flash';
+
+export interface ProtocolMeta {
+  id: ProtocolId;
+  label: string;
+  icon: string;
+}
+
+// User-selectable exchanges for new bot creation. Drift is intentionally excluded
+// (retired — existing Drift bots keep running, but no new ones can be created). Icons
+// are the white monochrome marks in client/public/images/exchange/.
+export const SELECTABLE_PROTOCOLS: ProtocolMeta[] = [
+  { id: 'pacifica', label: 'Pacifica', icon: '/images/exchange/Pacifica.webp' },
+  { id: 'flash', label: 'Flash', icon: '/images/exchange/Flash.webp' },
+];

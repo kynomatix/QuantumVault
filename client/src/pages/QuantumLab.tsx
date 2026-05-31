@@ -38,7 +38,7 @@ import {
 import { motion } from "framer-motion";
 import { Link } from "wouter";
 import { cn } from "@/lib/utils";
-import { getMaxLeverage, tickerToMarket } from "@/lib/exchange-constants";
+import { getMaxLeverage, tickerToMarket, SELECTABLE_PROTOCOLS, type ProtocolId } from "@/lib/exchange-constants";
 import { useLeverageLimits } from "@/hooks/useLeverageLimits";
 import { generateInsightsReport, formatReportAsText, type StrategyInsightsReport, type ParamSensitivity, type ComboFit, type Suggestion } from "@/lib/strategy-insights";
 import { generateAndSaveInsightsReport, insightsReportsQueryKey, type GenerateReportError } from "@/lib/insights-report-workflow";
@@ -4405,6 +4405,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const [createdBot, setCreatedBot] = useState<any>(null);
   const [webhookUrl, setWebhookUrl] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [deployProtocol, setDeployProtocol] = useState<ProtocolId>('pacifica');
   const [agentBalance, setAgentBalance] = useState<string | null>(null);
   const [agentSolBalance, setAgentSolBalance] = useState<number | null>(null);
   const [agentPublicKey, setAgentPublicKey] = useState<string | null>(null);
@@ -4582,6 +4583,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
         leverage,
         totalInvestment: String(effectiveTradeSize),
         initialFundingAmount: String(totalDepositForRequest),
+        activeProtocol: deployProtocol,
       };
 
       const res = await fetch('/api/trading-bots', {
@@ -4897,6 +4899,25 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                       {bufferOverride === null && <span className="text-white/20"> (auto)</span>}
                     </span>
                   </div>
+                </div>
+
+                <div className="border-t border-white/5 pt-3 space-y-2">
+                  <span className="text-[10px] text-white/40">Exchange</span>
+                  <Select value={deployProtocol} onValueChange={(v) => setDeployProtocol(v as ProtocolId)}>
+                    <SelectTrigger className="h-8 bg-white/5 border-white/10 text-white text-xs" data-testid="select-protocol-lab">
+                      <SelectValue placeholder="Select exchange" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {SELECTABLE_PROTOCOLS.map((p) => (
+                        <SelectItem key={p.id} value={p.id} data-testid={`option-protocol-lab-${p.id}`}>
+                          <div className="flex items-center gap-2">
+                            <img src={p.icon} alt="" className="w-4 h-4 object-contain" />
+                            <span>{p.label}</span>
+                          </div>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
 
                 <div className="border-t border-white/5 pt-3 space-y-2">

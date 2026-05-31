@@ -8,6 +8,7 @@ import { useConnection } from '@solana/wallet-adapter-react';
 import { Transaction } from '@solana/web3.js';
 import { confirmTransactionWithFallback } from '@/lib/solana-utils';
 import { useLeverageLimits } from '@/hooks/useLeverageLimits';
+import { SELECTABLE_PROTOCOLS, type ProtocolId } from '@/lib/exchange-constants';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -129,27 +130,44 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
     market: 'SOL-PERP',
     leverage: defaultLeverage,
     investmentAmount: '',
+    activeProtocol: 'pacifica' as ProtocolId,
   });
   
-  // Fetch markets on mount
+  // Fetch markets for the selected exchange. Pacifica (default) uses the global
+  // registry path (rich risk-tier data); other exchanges use the ?exchange= path.
+  // The AbortController guards against out-of-order responses when the user rapidly
+  // toggles the exchange — a stale in-flight fetch must never overwrite the markets
+  // for the now-selected protocol.
   useEffect(() => {
+    const controller = new AbortController();
     const fetchMarkets = async () => {
-      if (markets.length > 0) return;
       setIsLoadingMarkets(true);
       try {
-        const res = await fetch('/api/exchange/markets');
-        if (res.ok) {
+        const url = newBot.activeProtocol === 'pacifica'
+          ? '/api/exchange/markets'
+          : `/api/exchange/markets?exchange=${newBot.activeProtocol}`;
+        const res = await fetch(url, { signal: controller.signal });
+        if (res.ok && !controller.signal.aborted) {
           const data = await safeResponseJson(res);
-          setMarkets(data.markets || []);
+          if (controller.signal.aborted) return;
+          const list: MarketInfo[] = data.markets || [];
+          setMarkets(list);
+          setNewBot((prev) => {
+            if (list.some((m) => m.symbol === prev.market)) return prev;
+            const fallback = list.find((m) => m.symbol === 'SOL-PERP')?.symbol || list[0]?.symbol || prev.market;
+            return { ...prev, market: fallback };
+          });
         }
-      } catch (error) {
+      } catch (error: any) {
+        if (error?.name === 'AbortError') return;
         console.error('Failed to fetch markets:', error);
       } finally {
-        setIsLoadingMarkets(false);
+        if (!controller.signal.aborted) setIsLoadingMarkets(false);
       }
     };
     fetchMarkets();
-  }, []);
+    return () => controller.abort();
+  }, [newBot.activeProtocol]);
   
   // Get selected market info
   const selectedMarket = markets.find(m => m.symbol === newBot.market);
@@ -232,6 +250,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
       market: 'SOL-PERP',
       leverage: defaultLeverage,
       investmentAmount: '',
+      activeProtocol: 'pacifica',
     });
   };
 
@@ -389,6 +408,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
         market: newBot.market,
         leverage: newBot.leverage,
         totalInvestment: fundingAmount > 0 ? String(fundingAmount) : '100',
+        activeProtocol: newBot.activeProtocol,
       };
       const res = await fetch('/api/trading-bots', {
         method: 'POST',
@@ -586,6 +606,25 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
           />
         </div>
         
+        <div className="space-y-2">
+          <Label>Exchange</Label>
+          <Select value={newBot.activeProtocol} onValueChange={(v) => setNewBot({ ...newBot, activeProtocol: v as ProtocolId })}>
+            <SelectTrigger data-testid="select-protocol">
+              <SelectValue placeholder="Select exchange" />
+            </SelectTrigger>
+            <SelectContent>
+              {SELECTABLE_PROTOCOLS.map((p) => (
+                <SelectItem key={p.id} value={p.id} data-testid={`option-protocol-${p.id}`}>
+                  <div className="flex items-center gap-2">
+                    <img src={p.icon} alt="" className="w-4 h-4 object-contain" />
+                    <span>{p.label}</span>
+                  </div>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <Label>Market</Label>

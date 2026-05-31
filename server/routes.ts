@@ -14,7 +14,7 @@ import type { Request as ExpressRequest, Response as ExpressResponse, NextFuncti
 import { db } from "./db";
 import { desc, eq, sql, asc, and } from "drizzle-orm";
 import { ZodError } from "zod";
-import { getDefaultAdapter, getAdapterForBot } from './protocol/adapter-registry';
+import { getDefaultAdapter, getAdapterForBot, getAdapter } from './protocol/adapter-registry';
 import type { ProtocolAdapter } from './protocol/adapter';
 import { parseAndValidateAdapterSubaccountId } from './protocol/persist-canonical-subaccount-id';
 import { resolveAgentKeypair } from './agent-wallet';
@@ -7186,10 +7186,18 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         legacyBotId: string | null;
       } | null = null;
 
-      const defaultAdapter = getDefaultAdapter();
-      const defaultCaps = defaultAdapter.getCapabilities();
+      // Phase 5: create the bot against the protocol the client selected (defaults to
+      // the platform default adapter). Only pacifica + flash are user-selectable; drift
+      // is retired (no new bots). getAdapter fails closed on an unknown/unregistered
+      // protocol, so an invalid value can never silently fall back to the default.
+      const requestedProtocol = String((req.body as any).activeProtocol ?? getDefaultAdapter().protocolName).toLowerCase();
+      if (requestedProtocol !== 'pacifica' && requestedProtocol !== 'flash') {
+        return res.status(400).json({ error: `Unsupported protocol: ${requestedProtocol}` });
+      }
+      const createAdapter = getAdapter(requestedProtocol);
+      const createCaps = createAdapter.getCapabilities();
       const subaccountAuthMode: 'external_key' | 'main_plus_id' =
-        defaultCaps.requiresExternalSubaccountKey ? 'external_key' : 'main_plus_id';
+        createCaps.requiresExternalSubaccountKey ? 'external_key' : 'main_plus_id';
 
       if (wallet.agentPublicKey && wallet.agentPrivateKeyEncryptedV3) {
         const { Keypair } = await import('@solana/web3.js');
@@ -7227,8 +7235,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
         }
         const agentKeypair = resolveAgentKeypair(_botCreateAgentKey.secretKey);
-        const adapter = defaultAdapter;
-        const caps = defaultCaps;
+        const adapter = createAdapter;
+        const caps = createCaps;
 
         const botKeypair = caps.requiresExternalSubaccountKey ? Keypair.generate() : null;
 
@@ -7547,7 +7555,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         // (Drift) it would have written NULL, which the new schema CHECK constraint
         // forbids. The tag is a property of the protocol the bot was created against,
         // not of how its subaccount is authed — both modes need the tag.
-        activeProtocol: defaultAdapter.protocolName,
+        activeProtocol: createAdapter.protocolName,
         subaccountStatus,
         subaccountAuthMode,
         isActive: true,
