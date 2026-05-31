@@ -10,6 +10,7 @@ import { decodeUser } from '@drift-labs/sdk/lib/node/decode/user';
 import { shouldUseSwift } from './swift-config';
 import { executeSwiftOrder, type SwiftOrderResult } from './swift-executor';
 import { AdapterHealthTracker } from './protocol/adapter-health';
+import { getAdapter } from './protocol/adapter-registry';
 // V3 Phase 4/4c: All public Drift-service entry points accept the freshly
 // V3-strict-decrypted raw secret key (Uint8Array) only. The legacy
 // encrypted-string overload has been retired — only `migrateAgentKeyToV3`
@@ -2977,6 +2978,8 @@ async function swiftLateOpenRecovery(
       pubkey,
       subAccountId,
       market,
+      undefined,
+      getAdapter('drift'),
     );
     const recoverySize = Math.abs(recoveryPos.size);
     const positionChanged = (baselineSide === 'FLAT' && recoveryPos.side !== 'FLAT' && recoverySize > 0.0001) ||
@@ -3096,6 +3099,8 @@ export async function executePerpOrder(
               verifyPubkey,
               subAccountId,
               market,
+              undefined,
+              getAdapter('drift'),
             );
             preSwiftPositionSize = Math.abs(postSwiftPos.size);
             preSwiftPositionSide = postSwiftPos.side;
@@ -3162,6 +3167,8 @@ export async function executePerpOrder(
           guardPubkey,
           subAccountId,
           market,
+          undefined,
+          getAdapter('drift'),
         );
         const guardSize = Math.abs(guardPos.size);
         const positionChanged = (preSwiftPositionSide === 'FLAT' && guardPos.side !== 'FLAT' && guardSize > 0.0001) ||
@@ -3449,6 +3456,8 @@ export async function closePerpPosition(
             verifyPubkey,
             subAccountId,
             market,
+            undefined,
+            getAdapter('drift'),
           );
           console.log(`[Drift] Swift close verification result: side=${postSwiftPos.side}, size=${postSwiftPos.size}`);
           if (postSwiftPos.side === 'FLAT' || Math.abs(postSwiftPos.size) < 0.0001) {
@@ -3498,6 +3507,8 @@ export async function closePerpPosition(
           closeGuardPubkey,
           subAccountId,
           market,
+          undefined,
+          getAdapter('drift'),
         );
         const closeGuardSize = Math.abs(closeGuardPos.size);
         const closeWasFilled = (closeGuardPos.side === 'FLAT' || closeGuardSize < 0.0001) ||

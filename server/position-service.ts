@@ -335,18 +335,27 @@ export class PositionService {
     // V3 Phase 4: no agent-key parameter accepted. Reads are done via the
     // protocol adapter (bot subaccount public key) or byte-parsing of the
     // on-chain User account — neither requires a private key.
-    botSubaccountPublicKey?: string
+    botSubaccountPublicKey?: string,
+    // Non-bot callers (e.g. Drift Swift late-fill verify/guard paths that use a
+    // synthetic botId) MUST pass the venue adapter explicitly. When omitted we
+    // resolve per-bot and fail closed on an unknown bot row.
+    adapterOverride?: ProtocolAdapter
   ): Promise<{ 
     size: number; 
     side: 'LONG' | 'SHORT' | 'FLAT'; 
     source: 'on-chain';
     entryPrice: number;
   }> {
-    const botRowForAdapter = await storage.getTradingBotById(botId);
-    if (!botRowForAdapter) {
-      throw new Error(`PositionService: bot ${botId} not found — cannot resolve protocol adapter (fail-closed: refusing to default-route a read for an unknown bot)`);
+    let adapter: ProtocolAdapter;
+    if (adapterOverride) {
+      adapter = adapterOverride;
+    } else {
+      const botRowForAdapter = await storage.getTradingBotById(botId);
+      if (!botRowForAdapter) {
+        throw new Error(`PositionService: bot ${botId} not found — cannot resolve protocol adapter (fail-closed: refusing to default-route a read for an unknown bot)`);
+      }
+      adapter = getAdapterForBot(botRowForAdapter);
     }
-    const adapter: ProtocolAdapter = getAdapterForBot(botRowForAdapter);
     let fetchResult;
     if (botSubaccountPublicKey) {
       console.log(`[PositionService] getPositionForExecution: Using adapter for ${market} (bot subaccount ${botSubaccountPublicKey.slice(0,8)}...)`);

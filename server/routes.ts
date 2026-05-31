@@ -15,6 +15,7 @@ import { db } from "./db";
 import { desc, eq, sql, asc, and } from "drizzle-orm";
 import { ZodError } from "zod";
 import { getDefaultAdapter, getAdapterForBot } from './protocol/adapter-registry';
+import type { ProtocolAdapter } from './protocol/adapter';
 import { parseAndValidateAdapterSubaccountId } from './protocol/persist-canonical-subaccount-id';
 import { resolveAgentKeypair } from './agent-wallet';
 import { reconcileWalletDeposits } from './deposit-reconciler';
@@ -644,8 +645,8 @@ function _mapAccountInfoToDrift(info: { balance: number; equity: number; availab
   };
 }
 
-async function getMarketPrice(symbol: string): Promise<number | null> {
-  return getDefaultAdapter().getPrice(symbol);
+async function getMarketPrice(symbol: string, adapter: ProtocolAdapter = getDefaultAdapter()): Promise<number | null> {
+  return adapter.getPrice(symbol);
 }
 
 async function getAllPrices(): Promise<Record<string, number>> {
@@ -684,9 +685,9 @@ async function buildTransferFromSubaccountTransaction(_a: string, _b: number, _c
   throw new Error('Pacifica subaccount transfers are API-based. Use executeAgentTransferBetweenSubaccounts instead.');
 }
 
-async function subaccountExists(walletAddress: string, subAccountId: number): Promise<boolean> {
+async function subaccountExists(walletAddress: string, subAccountId: number, adapter: ProtocolAdapter = getDefaultAdapter()): Promise<boolean> {
   try {
-    const subs = await getDefaultAdapter().listSubaccounts(walletAddress);
+    const subs = await adapter.listSubaccounts(walletAddress);
     return subs.some(s => s.subaccountId === String(subAccountId));
   } catch { return false; }
 }
@@ -6144,12 +6145,15 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const result = await closePerpPosition(
         agentSecret,
         market,
-        subAccountId,
+        closeMarketBotCtx ? 0 : subAccountId,
         marketPositionSize,
         marketCloseSlippageBps,
         undefined,
         wallet.agentPublicKey,
-        marketPositionSide
+        marketPositionSide,
+        closeMarketBotCtx,
+        bot.walletAddress,
+        getAdapterForBot(bot),
       );
 
       if (!result.success) {
@@ -6226,7 +6230,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const manualBotCtx = getBotSubaccountContext(bot);
       const baseCapital = parseFloat(bot.maxPositionSize || "0");
 
-      const oraclePrice = await getMarketPrice(bot.market);
+      const oraclePrice = await getMarketPrice(bot.market, getAdapterForBot(bot));
       if (!oraclePrice || oraclePrice <= 0) {
         // Early failure (no on-chain order placed yet) — still surface a
         // trade_failed alert so the user sees why the manual trade didn't
@@ -8229,7 +8233,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             decryptedBotKey?.cleanup();
           }
         } else {
-          exists = await subaccountExists(agentAddress, bot.driftSubaccountId);
+          exists = await subaccountExists(agentAddress, bot.driftSubaccountId, getAdapterForBot(bot));
 
           if (exists) {
             const balance = await getExchangeBalance(agentAddress, bot.driftSubaccountId, getAdapterForBot(bot));
@@ -8937,7 +8941,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
       let posCurrentPrice = posData.position.currentPrice;
       let posUnrealizedPnl = posData.position.unrealizedPnl;
-      const oraclePrice = await getMarketPrice(bot.market);
+      const oraclePrice = await getMarketPrice(bot.market, getAdapterForBot(bot));
       if (oraclePrice && oraclePrice > 0) {
         posCurrentPrice = oraclePrice;
         const baseSize = posData.position.size ?? 0;
@@ -10319,7 +10323,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // Wallet was already fetched earlier for position check
 
       // Get current market price from oracle (used for order execution)
-      const oraclePrice = await getMarketPrice(bot.market);
+      const oraclePrice = await getMarketPrice(bot.market, getAdapterForBot(bot));
       if (!oraclePrice || oraclePrice <= 0) {
         await storage.updateBotTrade(trade.id, {
           status: "failed",
@@ -11370,7 +11374,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       }
 
       // Get current market price from oracle (used for order execution)
-      const oraclePrice = await getMarketPrice(bot.market);
+      const oraclePrice = await getMarketPrice(bot.market, getAdapterForBot(bot));
       if (!oraclePrice || oraclePrice <= 0) {
         await storage.updateBotTrade(trade.id, {
           status: "failed",
@@ -13444,7 +13448,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         if (hasSubaccount) {
           let positions: any[];
           try {
-            const raw = await getDefaultAdapter().getPositions(wallet.agentPublicKey, _subIdStr(subId));
+            const raw = await getAdapterForBot(bot).getPositions(wallet.agentPublicKey, _subIdStr(subId));
             positions = raw.map(_mapPositionToDrift);
           } catch (posErr: any) {
             console.error(`[Unsubscribe] Position check failed for bot ${bot.id}:`, posErr.message);
@@ -13490,7 +13494,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             // Adapter direct (not getExchangeBalance, which swallows errors and
             // returns 0): a read failure must NOT look like an empty subaccount,
             // or we'd skip recovery and finalize, stranding the user's capital.
-            const info = await getDefaultAdapter().getAccountInfo(wallet.agentPublicKey, _subIdStr(subId));
+            const info = await getAdapterForBot(bot).getAccountInfo(wallet.agentPublicKey, _subIdStr(subId));
             balance = info.balance;
           } catch (balErr: any) {
             console.error(`[Unsubscribe] Balance read failed for bot ${bot.id} subaccount ${subId}:`, balErr.message);
@@ -13540,7 +13544,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           let exists = false;
           let existCheckFailed = false;
           try {
-            const subs = await getDefaultAdapter().listSubaccounts(wallet.agentPublicKey);
+            const subs = await getAdapterForBot(bot).listSubaccounts(wallet.agentPublicKey);
             exists = subs.some((s: any) => s.subaccountId === String(subId));
           } catch (existErr: any) {
             existCheckFailed = true;
@@ -15454,7 +15458,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           }
           
           const subAccountId = subBot.driftSubaccountId ?? 0;
-          const oraclePrice = await getMarketPrice(subBot.market);
+          const oraclePrice = await getMarketPrice(subBot.market, getAdapterForBot(subBot));
           subResult.oraclePrice = oraclePrice;
           
           if (!oraclePrice) {
