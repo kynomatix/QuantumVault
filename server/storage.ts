@@ -661,7 +661,7 @@ export class DatabaseStorage implements IStorage {
       // domain value won't be rejected — it just yields no matches. Callers that
       // want input validation should narrow the parameter upstream (e.g. with a
       // Zod enum) rather than relying on the cast for safety.
-      conditions.push(eq(tradingBots.activeProtocol, protocol as 'pacifica' | 'drift'));
+      conditions.push(eq(tradingBots.activeProtocol, protocol as 'pacifica' | 'drift' | 'flash'));
     }
     const result = await db.select()
       .from(tradingBots)

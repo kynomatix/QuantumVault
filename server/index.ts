@@ -100,6 +100,29 @@ async function initializeProtocolAdapter(): Promise<void> {
       }
     } catch { }
   }
+
+  // Flash Trade adapter — Phase 1 foundation (markets + prices only).
+  // Registered here so getAdapterForBot() resolves for active_protocol='flash' rows.
+  // No bot is currently created with active_protocol='flash'; registration is safe
+  // and zero-cost. Trading methods throw NotImplemented until Phase 2.
+  // Separate try-block: a Flash init failure must not affect Pacifica or Drift.
+  try {
+    const { FlashAdapter } = await import("./protocol/flash/flash-adapter");
+    const { registerAdapter, setAdapterHealth } = await import("./protocol/adapter-registry");
+    const flashAdapterInstance = new FlashAdapter();
+    registerAdapter(flashAdapterInstance);
+    await flashAdapterInstance.initialize();
+    setAdapterHealth('flash', 'ready');
+    console.log('[Startup] Flash adapter registered and initialized');
+  } catch (err: any) {
+    console.error('[Startup] Flash adapter initialization failed:', err.message || err);
+    try {
+      const { setAdapterHealth, listAdapters } = await import("./protocol/adapter-registry");
+      if (listAdapters().includes('flash')) {
+        setAdapterHealth('flash', 'degraded');
+      }
+    } catch { }
+  }
 }
 import { createLabSupervisor, getLabAuthSecret } from "./lab/supervisor";
 import { createProxyMiddleware } from "http-proxy-middleware";

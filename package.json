@@ -76,6 +76,7 @@
     "embla-carousel-react": "^8.6.0",
     "express": "^4.21.2",
     "express-session": "^1.18.1",
+    "flash-sdk": "^15.16.14",
     "framer-motion": "^12.23.24",
     "html2canvas": "^1.4.1",
     "http-proxy-middleware": "^3.0.5",

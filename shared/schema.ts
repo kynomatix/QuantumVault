@@ -169,7 +169,7 @@ export const tradingBots = pgTable("trading_bots", {
   // server/db.ts ensureSchema() (which also backfills any pre-existing NULL rows to
   // 'drift' before applying NOT NULL). Drizzle's $type<...> here documents the union;
   // the SQL CHECK is the actual enforcement.
-  activeProtocol: text("active_protocol").$type<'pacifica' | 'drift'>().notNull(),
+  activeProtocol: text("active_protocol").$type<'pacifica' | 'drift' | 'flash'>().notNull(),
   botSubaccountKeyEncrypted: text("bot_subaccount_key_encrypted"),
   // Phase 4b: V3-encrypted bot subaccount key (subkey derived from owner UMK
   // with per-bot AAD). Legacy column remains during the Phase 5b/6 drop window.
@@ -200,7 +200,7 @@ export const tradingBots = pgTable("trading_bots", {
   ),
   check(
     "trading_bots_active_protocol_check",
-    sql`${table.activeProtocol} IN ('pacifica', 'drift')`,
+    sql`${table.activeProtocol} IN ('pacifica', 'drift', 'flash')`,
   ),
 ]));
 

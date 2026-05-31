@@ -37,7 +37,7 @@ export function getDefaultAdapter(): ProtocolAdapter {
   return adapter;
 }
 
-export function getAdapterForBot(bot: { id?: number | string; activeProtocol: 'pacifica' | 'drift' }): ProtocolAdapter {
+export function getAdapterForBot(bot: { id?: number | string; activeProtocol: 'pacifica' | 'drift' | 'flash' }): ProtocolAdapter {
   // Group D item 18 (April 17, 2026) made trading_bots.active_protocol NOT NULL with
   // a CHECK constraint locking it to ('pacifica','drift'), and the four routes.ts
   // insert sites that previously emitted NULL were fixed in the same atomic diff.

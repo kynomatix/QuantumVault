@@ -230,6 +230,19 @@ export async function ensureSchema() {
              WHERE dest.user_id = 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez'
                AND dest.name = src.name
           )`,
+
+      // --- Flash Trade adapter Phase 1: expand active_protocol CHECK to include 'flash'. ---
+      // The original constraint (added in Group D item 18) only allowed ('pacifica', 'drift').
+      // Drop-and-recreate is required because PostgreSQL does not support ALTER CONSTRAINT for
+      // CHECK constraints. Idempotent: the DO block re-drops before adding, so re-running
+      // against an already-migrated DB is safe and produces the final desired constraint.
+      // No data backfill needed — no 'flash' rows exist yet; the constraint is broadened,
+      // not narrowed, so existing rows are unaffected.
+      `DO $$ BEGIN
+         ALTER TABLE trading_bots DROP CONSTRAINT IF EXISTS trading_bots_active_protocol_check;
+         ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_active_protocol_check
+           CHECK (active_protocol IN ('pacifica', 'drift', 'flash'));
+       END $$`,
     ];
     for (const sql of migrations) {
       await client.query(sql);
