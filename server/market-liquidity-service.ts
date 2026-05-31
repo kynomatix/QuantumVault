@@ -1,7 +1,8 @@
 import { getCachedMaxLeverage, isMarketNonTradable, getNonTradableMarkets } from "./leverage-cache-service";
 import { getMarketInfo as getAdapterMarketInfo, getAllMarkets as getAdapterAllMarkets } from "./market-registry";
 import type { MarketInfo as RegistryMarketInfo } from "./market-registry";
-import type { RiskTier } from "./protocol/protocol-types";
+import type { RiskTier, ProtocolMarket } from "./protocol/protocol-types";
+import { getAdapter } from "./protocol/adapter-registry";
 
 export type { RiskTier };
 
@@ -58,6 +59,69 @@ function buildMarketFromRegistry(m: RegistryMarketInfo, price: number | null): M
     lastPrice: price,
     openInterestUsd: m.openInterestUsd || null,
   };
+}
+
+function buildMarketFromProtocol(m: ProtocolMarket, price: number | null): MarketInfo {
+  const baseSymbol = m.internalSymbol.replace(/-PERP$/, '');
+  return {
+    symbol: m.internalSymbol,
+    fullName: m.fullName || baseSymbol,
+    marketIndex: 0,
+    category: m.category || [],
+    baseAssetSymbol: baseSymbol,
+    isActive: m.isActive,
+    warning: m.warning,
+    maxLeverage: m.maxLeverage,
+    riskTier: m.riskTier,
+    estimatedSlippagePct: m.estimatedSlippagePct,
+    lastPrice: price,
+    openInterestUsd: m.openInterestUsd ?? null,
+  };
+}
+
+const perExchangeCache = new Map<string, MarketCache>();
+
+/**
+ * Exchange-aware market listing. Unlike getAllPerpMarkets() — which reads the
+ * single global registry populated from the DEFAULT adapter at startup
+ * (currently Pacifica) — this resolves a SPECIFIC registered adapter and builds
+ * the list directly from its getMarkets(). Used so the Flash markets can flow
+ * into bot-creation / QuantumLab while Pacifica remains the live default.
+ * Throws if the exchange is not a registered adapter.
+ */
+export async function getAllPerpMarketsForExchange(
+  exchange: string,
+  forceRefresh = false,
+): Promise<MarketInfo[]> {
+  const now = new Date();
+  const cached = perExchangeCache.get(exchange);
+  if (cached && !forceRefresh && now < cached.expiresAt) {
+    return cached.markets;
+  }
+
+  const adapter = getAdapter(exchange); // throws if not registered
+  const protocolMarkets = await adapter.getMarkets();
+  if (protocolMarkets.length === 0) {
+    console.warn(`[MarketLiquidity] Exchange '${exchange}' returned no markets`);
+    return [];
+  }
+
+  const prices = await fetchMarketPrices();
+  const markets: MarketInfo[] = protocolMarkets
+    .filter(m => m.isActive)
+    .map(m => buildMarketFromProtocol(m, prices[m.internalSymbol] ?? null));
+
+  markets.sort((a, b) => (b.maxLeverage || 0) - (a.maxLeverage || 0) || a.symbol.localeCompare(b.symbol));
+
+  perExchangeCache.set(exchange, {
+    markets,
+    lastUpdated: now,
+    expiresAt: new Date(now.getTime() + CACHE_DURATION_MS),
+    source: 'adapter',
+  });
+
+  console.log(`[MarketLiquidity] Cached ${markets.length} markets for exchange '${exchange}'`);
+  return markets;
 }
 
 export async function getAllPerpMarkets(forceRefresh = false): Promise<MarketInfo[]> {

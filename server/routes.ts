@@ -1037,7 +1037,7 @@ async function settleAllPnl(
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet } from "./agent-wallet";
-import { getAllPerpMarkets, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMinOrderSizeUsd, getMarketMaxLeverage } from "./market-liquidity-service";
+import { getAllPerpMarkets, getAllPerpMarketsForExchange, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMinOrderSizeUsd, getMarketMaxLeverage } from "./market-liquidity-service";
 import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable } from "./leverage-cache-service";
 import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification, type TradeNotification, buildDefaultInlineKeyboard } from "./notification-service";
 import { classifySignal } from "./trading/signal-classifier";
@@ -11892,7 +11892,20 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
   app.get("/api/exchange/markets", async (req, res) => {
     try {
       const forceRefresh = req.query.refresh === 'true';
-      const markets = await getAllPerpMarkets(forceRefresh);
+      const exchange = typeof req.query.exchange === 'string' ? req.query.exchange.trim().toLowerCase() : '';
+      // Exchange-aware path: lists a SPECIFIC registered adapter's markets (e.g.
+      // ?exchange=flash) without touching the global Pacifica registry. No param =
+      // default behavior (global registry). Unknown exchange → 400.
+      let markets;
+      if (exchange) {
+        try {
+          markets = await getAllPerpMarketsForExchange(exchange, forceRefresh);
+        } catch (err: any) {
+          return res.status(400).json({ error: `Unknown or unavailable exchange: ${exchange}`, detail: err?.message });
+        }
+      } else {
+        markets = await getAllPerpMarkets(forceRefresh);
+      }
       
       // Add risk tier info to each market
       const marketsWithInfo = markets.map(market => ({

@@ -69,6 +69,22 @@ const NON_CRYPTO_PYTH_MAP: Record<string, string> = {
   PLTR: "PLTR",
   HOOD: "HOOD",
   CRCL: "CRCL",
+  // ── Flash Trade native base symbols (FX / commodity / equity) ─────────────
+  // Flash's PoolConfig uses different bases than the keys above (EUR not EURUSD,
+  // SPY not SP500, CRUDEOIL not CL), so they get their own entries. Values are
+  // Pyth Benchmarks TradingView shim symbols, verified live against
+  // benchmarks.pyth.network. NATGAS (Flash Commodities.NGDN6/USD) is
+  // deliberately ABSENT: Pyth Benchmarks exposes no natural-gas history feed
+  // (only oil: US/UK spot + WTI futures), so it is not backtestable and
+  // QuantumLab filters it out of the selectable Flash ticker list.
+  EUR: "EURUSD",
+  GBP: "GBPUSD",
+  USDCNH: "USDCNH",
+  CRUDEOIL: "USOILSPOT",
+  SPY: "SPY",
+  AAPL: "AAPL",
+  AMD: "AMD",
+  AMZN: "AMZN",
 };
 
 function isNonCryptoSymbol(symbol: string): boolean {

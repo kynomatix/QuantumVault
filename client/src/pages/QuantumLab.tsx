@@ -1518,6 +1518,20 @@ const TICKER_GROUPS: { label: string; tickers: string[] }[] = [
   { label: "Other", tickers: ["2Z"] },
 ];
 
+// Flash assets the QuantumLab datafeed cannot source candles for, so they must
+// not appear as selectable backtest tickers. NATGAS (Flash Commodities.NGDN6/USD)
+// has no Pyth Benchmarks history feed — see NON_CRYPTO_PYTH_MAP in
+// server/lab/datafeed.ts. Everything else on Flash resolves via the
+// crypto cascade (OKX/Gate/Pyth) or the non-crypto Pyth shim.
+const FLASH_NON_BACKTESTABLE_BASES = new Set<string>(["NATGAS"]);
+
+// Bases already covered by the curated static TICKER_GROUPS above (under their
+// Flash-native or legacy alias). Used to avoid listing a Flash market twice when
+// it is already grouped. EUR≈EURUSD, SPY≈SP500, CRUDEOIL≈CL are the same feed.
+const STATIC_GROUP_BASES = new Set<string>(
+  TICKER_GROUPS.flatMap((g) => g.tickers).concat(["EUR", "SPY", "CRUDEOIL"]),
+);
+
 function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobStarted, isRunning }: {
   code: string;
   parsedResult: LabPineParseResult | null;
@@ -1562,6 +1576,52 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
     }
     return set;
   }, [nonTradableData]);
+
+  // Dynamic ticker discovery: pull the active Flash adapter's markets so newly
+  // listed Flash assets become backtestable in the Lab WITHOUT editing
+  // shared/schema.ts. The static TICKER_GROUPS / LAB_AVAILABLE_TICKERS remain
+  // the curated base + fallback (used if this fetch fails or returns nothing).
+  const { data: flashMarketsData } = useQuery<{ markets: { symbol: string; baseAssetSymbol: string }[] }>({
+    queryKey: ["/api/exchange/markets", "flash"],
+    queryFn: async () => {
+      const res = await fetch("/api/exchange/markets?exchange=flash");
+      if (!res.ok) return { markets: [] };
+      return res.json();
+    },
+    staleTime: 60 * 60 * 1000,
+  });
+
+  // Flash markets not already in a curated group, filtered to backtestable ones.
+  // Lab backtests resolve candles by base symbol via OKX/Gate/Pyth, independent
+  // of the live venue, so we synthesize the Lab symbol as `${base}/USDT:USDT`.
+  const flashTickers = useMemo(() => {
+    const markets = flashMarketsData?.markets || [];
+    const seen = new Set<string>();
+    const out: { symbol: string; name: string }[] = [];
+    for (const m of markets) {
+      const base = (m.baseAssetSymbol || m.symbol.replace(/-PERP$/, '')).toUpperCase();
+      if (!base || seen.has(base)) continue;
+      if (FLASH_NON_BACKTESTABLE_BASES.has(base)) continue;
+      if (STATIC_GROUP_BASES.has(base)) continue;
+      seen.add(base);
+      out.push({ symbol: `${base}/USDT:USDT`, name: base });
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  }, [flashMarketsData]);
+
+  // Combined name→ticker lookup (static curated list + dynamic Flash additions).
+  const tickerLookup = useMemo(() => {
+    const map = new Map<string, { symbol: string; name: string }>();
+    for (const t of LAB_AVAILABLE_TICKERS) map.set(t.name, { symbol: t.symbol, name: t.name });
+    for (const t of flashTickers) if (!map.has(t.name)) map.set(t.name, t);
+    return map;
+  }, [flashTickers]);
+
+  // Render groups = curated static groups + an auto-discovered Flash group.
+  const tickerGroups = useMemo(() => {
+    if (flashTickers.length === 0) return TICKER_GROUPS;
+    return [...TICKER_GROUPS, { label: "Flash (new)", tickers: flashTickers.map((t) => t.name) }];
+  }, [flashTickers]);
 
   const { data: allInsightsReports } = useQuery<any[]>({
     queryKey: insightsReportsQueryKey(strategyId),
@@ -1713,12 +1773,12 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
               <span className="text-[10px] text-white/30">{selectedTickers.length} selected</span>
             </div>
             <div className="max-h-[200px] overflow-y-auto space-y-3 pr-1 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
-              {TICKER_GROUPS.map((group) => (
+              {tickerGroups.map((group) => (
                 <div key={group.label}>
                   <p className="text-[10px] uppercase tracking-wider text-white/30 mb-1.5">{group.label}</p>
                   <div className="flex flex-wrap gap-1.5">
                     {group.tickers.filter((name) => !nonTradableSet.has(name)).map((name) => {
-                      const ticker = LAB_AVAILABLE_TICKERS.find(t => t.name === name);
+                      const ticker = tickerLookup.get(name);
                       if (!ticker) return null;
                       const isSelected = selectedTickers.includes(ticker.symbol);
                       return (

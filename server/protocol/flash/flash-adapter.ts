@@ -67,10 +67,10 @@ import type {
 
 import {
   FLASH_PYTH_PRICE_IDS,
-  FLASH_MARKET_SPECS,
   FLASH_USDC_MINT,
   FLASH_MIN_TRANSFER_USDC,
 } from './flash-constants.js';
+import { getFlashMarketSpecs } from './flash-markets.js';
 import type { PythHermesResponse } from './flash-types.js';
 import {
   getCachedMarkets,
@@ -164,7 +164,7 @@ export class FlashAdapter implements ProtocolAdapter {
     const cached = getCachedMarkets();
     if (cached) return cached;
 
-    const markets: ProtocolMarket[] = FLASH_MARKET_SPECS.map((spec) => ({
+    const markets: ProtocolMarket[] = getFlashMarketSpecs().map((spec) => ({
       internalSymbol: spec.internalSymbol,
       protocolSymbol: spec.flashSymbol,
       maxLeverage: spec.maxLeverage,
@@ -185,18 +185,18 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   getMaintenanceMarginWeight(internalSymbol: string): number {
-    const spec = FLASH_MARKET_SPECS.find((s) => s.internalSymbol === internalSymbol);
+    const spec = getFlashMarketSpecs().find((s) => s.internalSymbol === internalSymbol);
     return spec?.maintenanceMarginWeight ?? 0.005;
   }
 
   quantizeOrderSize(internalSymbol: string, size: number): number {
-    const spec = FLASH_MARKET_SPECS.find((s) => s.internalSymbol === internalSymbol);
+    const spec = getFlashMarketSpecs().find((s) => s.internalSymbol === internalSymbol);
     const lotSize = spec?.lotSize ?? 0.0001;
     return Math.floor(size / lotSize) * lotSize;
   }
 
   quantizePrice(internalSymbol: string, price: number): number {
-    const spec = FLASH_MARKET_SPECS.find((s) => s.internalSymbol === internalSymbol);
+    const spec = getFlashMarketSpecs().find((s) => s.internalSymbol === internalSymbol);
     const tickSize = spec?.tickSize ?? 0.01;
     return Math.round(price / tickSize) * tickSize;
   }
@@ -424,7 +424,7 @@ export class FlashAdapter implements ProtocolAdapter {
       protocolName: this.protocolName,
       protocolVersion: this.protocolVersion,
       initialized: this.initialized,
-      knownMarkets: FLASH_MARKET_SPECS.map((s) => s.internalSymbol),
+      knownMarkets: getFlashMarketSpecs().map((s) => s.internalSymbol),
       cachedPrices: prices,
     };
   }
