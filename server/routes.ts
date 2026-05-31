@@ -121,7 +121,7 @@ async function sweepPacificaSubaccount(
   if (!botCtx) return { handled: false, swept: false, amount: 0 };
 
   try {
-    const adapter = getDefaultAdapter();
+    const adapter = getAdapterForBot(bot);
     const accountInfo = await adapter.getAccountInfo(botCtx.botPublicKey);
     const balance = accountInfo?.equity ?? accountInfo?.freeCollateral ?? 0;
     console.log(`${logPrefix} Pacifica subaccount ${botCtx.botPublicKey.slice(0, 8)}... balance: $${balance.toFixed(6)}`);
@@ -273,7 +273,7 @@ async function teardownPacificaSubaccountForDelete(
 ): Promise<{ ok: boolean; error?: string }> {
   const botCtx = getBotSubaccountContext(bot);
   if (!botCtx) return { ok: true };
-  const adapter = getDefaultAdapter();
+  const adapter = getAdapterForBot(bot);
   const acct = botCtx.botPublicKey;
   let decrypted: { secretKey: Uint8Array; cleanup: () => void } | null = null;
   try {
@@ -393,7 +393,7 @@ async function recycleDeletedSubaccount(
   const acct = botCtx.botPublicKey;
 
   // 1) SAFETY: confirm the subaccount is genuinely empty before any delete.
-  const adapter = getDefaultAdapter();
+  const adapter = getAdapterForBot(bot);
   if (!adapter.verifySubaccountEmpty) {
     // This path is Pacifica-only and the Pacifica adapter always implements
     // verifySubaccountEmpty; if some adapter ever lacks it we cannot confirm empty,
@@ -479,7 +479,7 @@ async function withdrawSweptFundsToWallet(
   sweptAmount: number,
   logPrefix: string,
 ): Promise<boolean> {
-  const adapter = getDefaultAdapter();
+  const adapter = getAdapterForBot(bot);
   let withdrawnToWallet = false;
   let pendingReason: string | undefined;
 
@@ -523,7 +523,7 @@ async function withdrawSweptFundsToWallet(
           const wr = await executeAgentDriftWithdraw(agentPublicKey, agentSecret, withdrawAmount, 0, {
             tradingBotId: bot.id,
             context: logPrefix,
-          });
+          }, getAdapterForBot(bot));
           if (wr.success) {
             withdrawnToWallet = true;
             console.log(`${logPrefix} Step 2 ok: withdrew $${withdrawAmount.toFixed(2)} to agent wallet: ${wr.signature}`);
@@ -704,9 +704,10 @@ async function executeAgentDeposit(
   agentSecretKey: Uint8Array,
   amountUsdc: number,
   subAccountId: number = 0,
+  adapter = getDefaultAdapter(),
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
-    const result = await getDefaultAdapter().executeDeposit({
+    const result = await adapter.executeDeposit({
       agentPublicKey,
       agentSecretKey,
       amount: amountUsdc,
@@ -724,11 +725,12 @@ async function executeAgentDriftWithdraw(
   amountUsdc: number,
   subAccountId: number = 0,
   feeContext?: { tradingBotId?: string | null; context?: string },
+  adapter = getDefaultAdapter(),
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
     const { secretKey } = _decryptToSecretKey(encryptedPrivateKey);
     const mainWalletAddress = await _lookupMainWallet(agentPublicKey);
-    const result = await getDefaultAdapter().executeWithdraw({
+    const result = await adapter.executeWithdraw({
       agentPublicKey,
       agentSecretKey: secretKey,
       mainWalletAddress,
@@ -743,6 +745,7 @@ async function executeAgentDriftWithdraw(
         tradingBotId: feeContext?.tradingBotId ?? null,
         txSignature: result.txSignature ?? null,
         context: feeContext?.context ?? 'Withdraw',
+        adapter,
       });
     }
     return { success: result.success, signature: result.txSignature, error: result.error };
@@ -762,9 +765,10 @@ async function recordPacificaWithdrawFeeIfApplicable(args: {
   tradingBotId: string | null;
   txSignature: string | null;
   context: string; // for logs only
+  adapter?: ReturnType<typeof getDefaultAdapter>;
 }): Promise<void> {
   try {
-    if (getDefaultAdapter().protocolName !== 'pacifica') return;
+    if ((args.adapter ?? getDefaultAdapter()).protocolName !== 'pacifica') return;
     const { PACIFICA_WITHDRAW_FEE_USDC } = await import('./protocol/pacifica/pacifica-constants');
     await storage.createEquityEvent({
       walletAddress: args.walletAddress,
@@ -785,11 +789,12 @@ async function executeAgentTransferBetweenSubaccounts(
   fromSubAccountId: number,
   toSubAccountId: number,
   amountUsdc: number,
+  adapter = getDefaultAdapter(),
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
     const { secretKey } = _decryptToSecretKey(encryptedPrivateKey);
     const mainWalletAddress = await _lookupMainWallet(agentPublicKey);
-    const result = await getDefaultAdapter().transferBetweenSubaccounts({
+    const result = await adapter.transferBetweenSubaccounts({
       agentSecretKey: secretKey,
       mainWalletAddress,
       fromSubaccountId: String(fromSubAccountId),
@@ -857,6 +862,7 @@ async function executePerpOrder(
   leverage?: number,
   botCtx?: BotSubaccountContext | null,
   mainWalletOverride?: string,
+  adapter = getDefaultAdapter(),
 ): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: string; swiftOrderId?: string | null }> {
   let signing: Awaited<ReturnType<typeof _resolveSigningContext>> | null = null;
   try {
@@ -866,7 +872,7 @@ async function executePerpOrder(
     // Avoid legacy decrypt of the agent key just to look it up by agent pubkey.
     const mainWalletAddress = mainWalletOverride
       || (botCtx ? botCtx.walletAddress : await _lookupMainWallet(agentPubKey));
-    const orderResult = await getDefaultAdapter().placeMarketOrder({
+    const orderResult = await adapter.placeMarketOrder({
       agentPublicKey: agentPubKey,
       agentSecretKey: signing.secretKey,
       mainWalletAddress,
@@ -930,6 +936,7 @@ async function closePerpPosition(
   positionSide?: 'long' | 'short',
   botCtx?: BotSubaccountContext | null,
   mainWalletOverride?: string,
+  adapter = getDefaultAdapter(),
 ): Promise<{ success: boolean; signature?: string; error?: string; executionMethod?: string; fillPrice?: number }> {
   let signing: Awaited<ReturnType<typeof _resolveSigningContext>> | null = null;
   try {
@@ -939,7 +946,6 @@ async function closePerpPosition(
     // Avoid legacy decrypt of the agent key just to look it up by agent pubkey.
     const mainWalletAddress = mainWalletOverride
       || (botCtx ? botCtx.walletAddress : await _lookupMainWallet(agentPubKey));
-    const adapter = getDefaultAdapter();
     let orderResult;
     if (positionSizeBase && positionSide) {
       const closeSide: 'long' | 'short' = positionSide === 'long' ? 'short' : 'long';
@@ -1238,6 +1244,7 @@ interface TradeSizingParams {
   oraclePrice: number;
   logPrefix: string;
   botCtx?: BotSubaccountContext | null;
+  adapter?: ReturnType<typeof getDefaultAdapter>;
 }
 
 interface TradeSizingResult {
@@ -1268,6 +1275,7 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
     oraclePrice,
     logPrefix,
     botCtx,
+    adapter = getDefaultAdapter(),
   } = params;
 
   // Calculate effective leverage (capped by market max)
@@ -1339,7 +1347,6 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
     if (topUpNeeded > 0) {
       try {
         if (botCtx) {
-          const adapter = getDefaultAdapter();
           const agentKeypair = resolveAgentKeypair(agentPrivateKeyEncrypted);
           const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
 
@@ -1384,6 +1391,7 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
               agentPrivateKeyEncrypted,
               depositAmount,
               subAccountId,
+              adapter,
             );
 
             if (depositResult.success) {
@@ -1510,7 +1518,6 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
 
         try {
           if (botCtx) {
-            const adapter = getDefaultAdapter();
             const agentKeypair = resolveAgentKeypair(agentPrivateKeyEncrypted);
             const depositAmount = Math.ceil(shortfall * 100) / 100;
 
@@ -1554,6 +1561,7 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
               agentPrivateKeyEncrypted,
               depositAmount,
               subAccountId,
+              adapter,
             );
 
             if (depositResult.success) {
@@ -1751,6 +1759,10 @@ async function distributeCreatorProfitShare(params: {
     console.warn(`[ProfitShare] IOU for trade ${tradeId} (bot ${subscriberBotId}) missing canonical protocolSubaccountId on bot row; falling back to String(driftSubaccountId)=${String(driftSubaccountId)}`);
   }
 
+  // Route the subscriber's withdraw through the subscriber bot's adapter (no-op
+  // for Pacifica today; fail-closed default if the bot row vanished mid-flight).
+  const profitShareAdapter = subscriberBotRow ? getAdapterForBot(subscriberBotRow) : getDefaultAdapter();
+
   // Helper function to create IOU on failure
   const createIouOnFailure = async (errorMsg: string) => {
     try {
@@ -1785,7 +1797,9 @@ async function distributeCreatorProfitShare(params: {
     subscriberAgentPublicKey,
     subscriberEncryptedPrivateKey,
     profitShareAmount,
-    driftSubaccountId
+    driftSubaccountId,
+    undefined,
+    profitShareAdapter
   );
 
   if (!withdrawResult.success) {
@@ -1802,7 +1816,9 @@ async function distributeCreatorProfitShare(params: {
           subscriberAgentPublicKey,
           subscriberEncryptedPrivateKey,
           dustAdjustedAmount,
-          driftSubaccountId
+          driftSubaccountId,
+          undefined,
+          profitShareAdapter
         );
         if (!retryResult.success) {
           await createIouOnFailure(`Drift withdrawal failed after dust adjustment: ${retryResult.error}`);
@@ -2363,6 +2379,7 @@ async function routeSignalToSubscribers(
             position.side === 'LONG' ? 'long' : 'short',
             subCloseCtx,
             subBot.walletAddress,
+            getAdapterForBot(subBot),
           );
 
           if (closeResult.success) {
@@ -2524,6 +2541,7 @@ async function routeSignalToSubscribers(
             subPartialPosition.side === 'LONG' ? 'long' : 'short',
             subPartialCtx,
             subBot.walletAddress,
+            getAdapterForBot(subBot),
           );
 
           if (subPartialResult.success) {
@@ -2634,6 +2652,7 @@ async function routeSignalToSubscribers(
             oraclePrice,
             logPrefix: `[Subscriber Routing] Bot ${subBot.id}`,
             botCtx: subBotCtx,
+            adapter: getAdapterForBot(subBot),
           });
 
           if (!sizingResult.success) {
@@ -2730,6 +2749,7 @@ async function routeSignalToSubscribers(
             subBot.leverage || 1,
             subBotCtx,
             subBot.walletAddress,
+            getAdapterForBot(subBot),
           );
 
           if (orderResult.success) {
@@ -4410,7 +4430,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             closeAllSlippageBps,
             undefined,
             wallet.agentPublicKey || undefined,
-            position.side === 'LONG' ? 'long' : 'short'
+            position.side === 'LONG' ? 'long' : 'short',
+            undefined,
+            undefined,
+            getAdapterForBot(bot),
           );
 
           if (result.success) {
@@ -4814,6 +4837,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         secretKeyCopy,
         amount,
         subAccountId,
+        botForTransfer ? getAdapterForBot(botForTransfer) : getDefaultAdapter(),
       );
       
       agentKeyResult.cleanup();
@@ -4825,7 +4849,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       let subaccountTransferSuccess = true;
       if (botForTransfer) {
         try {
-          const adapter = getDefaultAdapter();
+          const adapter = getAdapterForBot(botForTransfer);
           const agentKeypair = Keypair.fromSecretKey(secretKeyCopy);
 
           console.log(`[Deposit] Waiting for exchange deposit to settle before transferring to bot subaccount...`);
@@ -4955,12 +4979,14 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // If botId provided, verify ownership and get subaccount
       let tradingBotId: string | null = null;
       let subAccountId = 0; // Default to main account
+      let withdrawRoutedAdapter = getDefaultAdapter();
       if (botId) {
         const bot = await storage.getTradingBotById(botId);
         if (!bot || bot.walletAddress !== req.walletAddress) {
           return res.status(403).json({ error: "Bot not found or not owned" });
         }
         tradingBotId = botId;
+        withdrawRoutedAdapter = getAdapterForBot(bot);
         // Use bot's specific subaccount, not the main account
         if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
           subAccountId = bot.driftSubaccountId;
@@ -5017,7 +5043,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         const withdrawBotCtx = bot ? getBotSubaccountContext(bot) : null;
         if (withdrawBotCtx && bot) {
           try {
-            const adapter = getDefaultAdapter();
+            const adapter = getAdapterForBot(bot);
             const decrypted = await _resolveBotSubaccountSecretKey(withdrawBotCtx);
             try {
               console.log(`[Withdraw] Transferring ${amount} USDC from bot subaccount ${withdrawBotCtx.botPublicKey} to agent wallet`);
@@ -5058,7 +5084,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         agentSecret,
         amount,
         withdrawFromMain ? 0 : subAccountId,
-        { tradingBotId, context: 'Withdraw' }
+        { tradingBotId, context: 'Withdraw' },
+        withdrawRoutedAdapter
       );
 
       if (!result.success) {
@@ -5503,6 +5530,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         positionSide,
         closeBotCtx,
         bot.walletAddress,
+        getAdapterForBot(bot),
       );
 
       // Map closePerpPosition result format (signature) to expected format (txSignature)
@@ -5688,7 +5716,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             dustSlippageBps,
             undefined,
             wallet.agentPublicKey,
-            postClosePosition.side === 'LONG' ? 'long' : 'short'
+            postClosePosition.side === 'LONG' ? 'long' : 'short',
+            undefined,
+            undefined,
+            getAdapterForBot(bot),
           );
           
           if (retryResult.success && retryResult.signature) {
@@ -6221,6 +6252,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         oraclePrice,
         logPrefix: "[ManualTrade]",
         botCtx: manualBotCtx,
+        adapter: getAdapterForBot(bot),
       });
 
       if (!sizingResult.success) {
@@ -6270,6 +6302,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         bot.leverage || 1,
         manualBotCtx,
         bot.walletAddress,
+        getAdapterForBot(bot),
       );
 
       if (!orderResult.success) {
@@ -7775,6 +7808,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               undefined,
               pauseBotCtx,
               bot.walletAddress,
+              getAdapterForBot(bot),
             );
             
             if (result.success && result.txSignature) {
@@ -8133,7 +8167,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
           let decryptedBotKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
           try {
-            const adapter = getDefaultAdapter();
+            const adapter = getAdapterForBot(bot);
             decryptedBotKey = await _resolveBotSubaccountSecretKey(botCtx);
             const botSecretKey = decryptedBotKey.secretKey;
 
@@ -8165,7 +8199,9 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                       agentAddress,
                       agentSecret,
                       sweepAmount,
-                      0
+                      0,
+                      undefined,
+                      getAdapterForBot(bot)
                     );
 
                     if (withdrawResult.success) {
@@ -8212,10 +8248,11 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                   agentSecret,
                   bot.driftSubaccountId,
                   0,
-                  sweepAmount
+                  sweepAmount,
+                  getAdapterForBot(bot)
                 );
                 if (transferResult.success && balance > 0.01) {
-                  const withdrawResult = await executeAgentDriftWithdraw(agentAddress, agentSecret, balance, 0);
+                  const withdrawResult = await executeAgentDriftWithdraw(agentAddress, agentSecret, balance, 0, undefined, getAdapterForBot(bot));
                   if (withdrawResult.success) {
                     withdrawnAmount = balance;
                     withdrawTxSignature = withdrawResult.signature;
@@ -8494,7 +8531,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             agentSecret,
             bot.driftSubaccountId,
             0, // to main account
-            balance
+            balance,
+            getAdapterForBot(bot)
           );
           
           if (sweepResult.success) {
@@ -9400,6 +9438,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             webhookPositionSide,
             webhookBotCtx,
             bot.walletAddress,
+            getAdapterForBot(bot),
           );
           
           // closePerpPosition returns { success, signature, error } - map to expected format
@@ -9495,7 +9534,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                   webhookDustSlippageBps,
                   privateKeyBase58,
                   wallet.agentPublicKey!,
-                  postClosePosition.side === 'LONG' ? 'long' : 'short'
+                  postClosePosition.side === 'LONG' ? 'long' : 'short',
+                  undefined,
+                  undefined,
+                  getAdapterForBot(bot),
                 );
                 
                 if (retryResult.success && retryResult.signature) {
@@ -9706,7 +9748,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
                       const webhookAwBotCtx = botCtx && bot.protocolSubaccountId ? botCtx : null;
                       if (webhookAwBotCtx && bot.protocolSubaccountId) {
-                        const adapter = getDefaultAdapter();
+                        const adapter = getAdapterForBot(bot);
                         const decryptedWh = await _resolveBotSubaccountSecretKey(webhookAwBotCtx);
                         try {
                           console.log(`[Webhook] AUTO-WITHDRAW Step 1: Transfer $${withdrawAmount.toFixed(2)} from bot subaccount ${bot.protocolSubaccountId} → main account`);
@@ -9727,7 +9769,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                               agentKeyResult.secretKey,
                               withdrawAmount,
                               0,
-                              { tradingBotId: botId, context: 'Webhook AUTO-WITHDRAW' }
+                              { tradingBotId: botId, context: 'Webhook AUTO-WITHDRAW' },
+                              getAdapterForBot(bot)
                             );
 
                             if (withdrawResult.success) {
@@ -9753,7 +9796,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                           agentKeyResult.secretKey,
                           withdrawAmount,
                           subAccountId,
-                          { tradingBotId: botId, context: 'Webhook AUTO-WITHDRAW' }
+                          { tradingBotId: botId, context: 'Webhook AUTO-WITHDRAW' },
+                          getAdapterForBot(bot)
                         );
 
                         if (withdrawResult.success) {
@@ -9894,6 +9938,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             pcPositionSide,
             webhookBotCtx,
             bot.walletAddress,
+            getAdapterForBot(bot),
           );
 
           if (!pcResult.success) {
@@ -10088,6 +10133,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             isCurrentlyLong ? 'long' : 'short',
             webhookBotCtx,
             bot.walletAddress,
+            getAdapterForBot(bot),
           );
           
           if (!closeResult.success) {
@@ -10314,6 +10360,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         oraclePrice,
         logPrefix: "[Webhook]",
         botCtx: webhookBotCtx,
+        adapter: getAdapterForBot(bot),
       });
 
       if (!sizingResult.success) {
@@ -10348,6 +10395,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         undefined,
         webhookBotCtx,
         bot.walletAddress,
+        getAdapterForBot(bot),
       );
       const openExecEndTime = Date.now();
       console.log(`[Webhook] ⏱️ OPEN EXEC END at +${openExecEndTime - webhookStartTime}ms (took ${openExecEndTime - openExecStartTime}ms), success=${orderResult.success}`);
@@ -10942,6 +10990,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             onChainPosition.side === 'LONG' ? 'long' : 'short',
             userWebhookBotCtx,
             walletAddress,
+            getAdapterForBot(bot),
           );
           
           if (result.success && !result.signature) {
@@ -11126,7 +11175,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
 
                     const userWhAwBotCtx = botCtx && bot.protocolSubaccountId ? botCtx : null;
                     if (userWhAwBotCtx && bot.protocolSubaccountId) {
-                      const adapter = getDefaultAdapter();
+                      const adapter = getAdapterForBot(bot);
                       const decryptedUwh = await _resolveBotSubaccountSecretKey(userWhAwBotCtx);
                       try {
                         console.log(`[User Webhook] AUTO-WITHDRAW Step 1: Transfer $${withdrawAmount.toFixed(2)} from bot subaccount ${bot.protocolSubaccountId} → main account`);
@@ -11147,7 +11196,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                             agentKeyResult.secretKey,
                             withdrawAmount,
                             0,
-                            { tradingBotId: botId, context: 'User Webhook AUTO-WITHDRAW' }
+                            { tradingBotId: botId, context: 'User Webhook AUTO-WITHDRAW' },
+                            getAdapterForBot(bot)
                           );
 
                           if (withdrawResult.success) {
@@ -11174,7 +11224,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                         agentKeyResult.secretKey,
                         withdrawAmount,
                         subAccountId,
-                        { tradingBotId: botId, context: 'User Webhook AUTO-WITHDRAW' }
+                        { tradingBotId: botId, context: 'User Webhook AUTO-WITHDRAW' },
+                        getAdapterForBot(bot)
                       );
 
                       if (withdrawResult.success) {
@@ -11363,6 +11414,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         oraclePrice,
         logPrefix: "[User Webhook]",
         botCtx: userWebhookBotCtx,
+        adapter: getAdapterForBot(bot),
       });
 
       if (!sizingResult.success) {
@@ -11392,6 +11444,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         undefined,
         userWebhookBotCtx,
         walletAddress,
+        getAdapterForBot(bot),
       );
 
       if (!orderResult.success) {
@@ -12235,7 +12288,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "Bot has no active trading subaccount" });
       }
 
-      const _botTransferAdapter = getDefaultAdapter();
+      const _botTransferAdapter = getAdapterForBot(bot);
       if (amount < _botTransferAdapter.minTransferAmount) {
         return res.status(400).json({ error: `${_botTransferAdapter.protocolName} minimum transfer is $${_botTransferAdapter.minTransferAmount}` });
       }
@@ -12257,7 +12310,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const agentKeypair = Keypair.fromSecretKey(Buffer.from(agentKeyResult.secretKey));
       agentKeyResult.cleanup();
 
-      const adapter = getDefaultAdapter();
+      const adapter = getAdapterForBot(bot);
       const transferResult = await adapter.transferBetweenSubaccounts({
         agentSecretKey: agentKeypair.secretKey,
         mainWalletAddress: agentKeypair.publicKey.toString(),
@@ -12311,7 +12364,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(400).json({ error: "Bot has no active trading subaccount" });
       }
 
-      const _botTransferAdapter = getDefaultAdapter();
+      const _botTransferAdapter = getAdapterForBot(bot);
       if (amount < _botTransferAdapter.minTransferAmount) {
         return res.status(400).json({ error: `${_botTransferAdapter.protocolName} minimum transfer is $${_botTransferAdapter.minTransferAmount}` });
       }
@@ -12333,7 +12386,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       const agentKeypair = Keypair.fromSecretKey(Buffer.from(agentKeyResult.secretKey));
       agentKeyResult.cleanup();
 
-      const adapter = getDefaultAdapter();
+      const adapter = getAdapterForBot(bot);
       const decryptedBotKey = await _resolveBotSubaccountSecretKey(botCtx);
       try {
         const transferResult = await adapter.transferBetweenSubaccounts({
@@ -13241,7 +13294,8 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         wallet.agentPublicKey,
         marketplaceAgentSecret,
         capitalInvested,
-        persistedSubaccountId
+        persistedSubaccountId,
+        getAdapterForBot(subscriberBot),
       );
       
       if (!depositResult.success) {
@@ -13440,6 +13494,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               balance,
               subId,
               { tradingBotId: bot.id, context: 'Unsubscribe' },
+              getAdapterForBot(bot),
             );
             if (!result.success) {
               return res.status(400).json({ error: result.error || "Failed to recover funds. Nothing was changed — please try again." });
@@ -14185,7 +14240,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           
           if (topUpNeeded > 0) {
             if (retryBotCtxForTopUp) {
-              const adapter = getDefaultAdapter();
+              const adapter = getAdapterForBot(bot);
               const agentKeypairForTopUp = Keypair.fromSecretKey(retryAgentSecret);
               const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
               if (depositAmount < adapter.minTransferAmount) {
@@ -14228,6 +14283,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
                 retryAgentSecret,
                 depositAmount,
                 subAccountId,
+                getAdapterForBot(bot),
               );
               
               if (depositResult.success) {
@@ -14272,6 +14328,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         undefined,
         retryBotCtx,
         walletAddress,
+        getAdapterForBot(bot),
       );
       
       if (result.success) {
@@ -14743,7 +14800,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         return res.status(500).json({ error: "Agent key decryption failed" });
       }
       try {
-        const adapter = getDefaultAdapter();
+        const adapter = getAdapterForBot(bot);
         const agentKeypair = Keypair.fromSecretKey(rescueAgentKeyResult.secretKey);
         const transferResult = await adapter.transferBetweenSubaccounts({
           agentSecretKey: agentKeypair.secretKey,
@@ -15452,6 +15509,7 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
               oraclePrice,
               logPrefix: `[Debug Routing] Bot ${subBot.id}`,
               botCtx: debugSubBotCtx,
+              adapter: getAdapterForBot(subBot),
             });
             
             subResult.sizingSuccess = sizingResult.success;

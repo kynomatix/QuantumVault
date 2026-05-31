@@ -4,7 +4,7 @@ import { storage, DatabaseStorage } from "./storage";
 import { getMarketBySymbol } from "./market-liquidity-service";
 import { transferUsdcToWallet, resolveAgentKeypair } from "./agent-wallet";
 import { PublicKey } from "@solana/web3.js";
-import { getDefaultAdapter } from "./protocol/adapter-registry";
+import { getDefaultAdapter, getAdapterForBot } from "./protocol/adapter-registry";
 import { db } from "./db";
 import { wallets } from "@shared/schema";
 import { eq } from "drizzle-orm";
@@ -50,12 +50,12 @@ function _mapPositionToDrift(p: { internalSymbol: string; baseSize: number; entr
 async function driftExecutePerpOrder(
   encryptedKey: Uint8Array, market: string, side: 'long' | 'short', size: number,
   subAccountId: number, reduceOnly: boolean, _slippageBps: number,
-  _privateKeyBase58?: string, agentPublicKey?: string
+  _privateKeyBase58?: string, agentPublicKey?: string, adapter = getDefaultAdapter()
 ): Promise<any> {
   const keypair = resolveAgentKeypair(encryptedKey);
   const pubKey = agentPublicKey || keypair.publicKey.toBase58();
   const mainWalletAddress = await _lookupMainWallet(pubKey);
-  const orderResult = await getDefaultAdapter().placeMarketOrder({
+  const orderResult = await adapter.placeMarketOrder({
     agentPublicKey: pubKey,
     agentSecretKey: keypair.secretKey,
     mainWalletAddress,
@@ -80,12 +80,11 @@ async function driftExecutePerpOrder(
 async function driftClosePerpPosition(
   encryptedKey: Uint8Array, market: string, subAccountId: number,
   size?: number, _slippageBps?: number, _privateKeyBase58?: string,
-  agentPublicKey?: string, side?: 'long' | 'short'
+  agentPublicKey?: string, side?: 'long' | 'short', adapter = getDefaultAdapter()
 ): Promise<any> {
   const keypair = resolveAgentKeypair(encryptedKey);
   const pubKey = agentPublicKey || keypair.publicKey.toBase58();
   const mainWalletAddress = await _lookupMainWallet(pubKey);
-  const adapter = getDefaultAdapter();
   let orderResult;
   if (size && side) {
     const closeSide: 'long' | 'short' = side === 'long' ? 'short' : 'long';
@@ -156,11 +155,11 @@ async function driftSettleAllPnl(encryptedKey: Uint8Array, subAccountId: number)
 async function driftExecuteAgentWithdraw(
   agentPublicKey: string, encryptedKey: Uint8Array, amount: number, subAccountId: number,
   feeContext?: { tradingBotId?: string | null; context?: string },
+  adapter = getDefaultAdapter(),
 ): Promise<any> {
   try {
     const keypair = resolveAgentKeypair(encryptedKey);
     const mainWalletAddress = await _lookupMainWallet(agentPublicKey);
-    const adapter = getDefaultAdapter();
     const result = await adapter.executeWithdraw({
       agentPublicKey,
       agentSecretKey: keypair.secretKey,
@@ -631,6 +630,8 @@ async function processRetryJob(job: RetryJob): Promise<void> {
   try {
     let result: { success: boolean; signature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: string; swiftOrderId?: string };
     let actualCloseSide: 'long' | 'short' = 'short';
+    const jobBot = await storage.getTradingBotById(job.botId);
+    const jobAdapter = jobBot ? getAdapterForBot(jobBot) : getDefaultAdapter();
     const swiftAvailable = tryIsSwiftAvailable();
     const jobSwiftAttempts = job.swiftAttempts || 0;
     console.log(`[TradeRetry] Swift status: available=${swiftAvailable}, swiftAttempts=${jobSwiftAttempts}, originalMethod=${job.originalExecMethod || 'legacy'}`);
@@ -707,7 +708,8 @@ async function processRetryJob(job: RetryJob): Promise<void> {
         job.slippageBps,
         undefined,
         job.agentPublicKey || undefined,
-        actualCloseSide
+        actualCloseSide,
+        jobAdapter
       );
     } else {
       // For OPEN trades (long/short): Check on-chain if position already exists
@@ -771,7 +773,8 @@ async function processRetryJob(job: RetryJob): Promise<void> {
         job.reduceOnly,
         job.slippageBps,
         job.privateKeyBase58,
-        job.agentPublicKey
+        job.agentPublicKey,
+        jobAdapter
       );
     }
     
@@ -1031,7 +1034,9 @@ async function processRetryJob(job: RetryJob): Promise<void> {
                         job.agentPublicKey,
                         agentSecretKey,
                         profitShareAmount,
-                        job.subAccountId
+                        job.subAccountId,
+                        undefined,
+                        jobAdapter
                       );
                       
                       if (!withdrawResult.success) {
