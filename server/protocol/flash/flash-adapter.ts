@@ -19,8 +19,11 @@
  * custody = USDC). Long positions use the target asset as collateral — Phase 2
  * will handle the USDC→asset swap step or restrict bots to shorts-only initially.
  *
- * Builder rebate: every trade instruction must include FLASH_BUILDER_WALLET
- * as the `builderKey` param to claim the 10% rebate. This is wired in Phase 2.
+ * Builder rebate: Flash has no string "builder code" (that is a Pacifica concept).
+ * Attribution is on-chain via the partner wallet FLASH_BUILDER_WALLET. Phase 2
+ * trade instructions pass `privilege: Privilege.Referral` and thread the partner
+ * tokenStakeAccount + each trader's userReferralAccount (both PDAs) via the SDK's
+ * getReferralAccounts() helper. The 10% rebate accrues to the partner wallet.
  */
 
 import type {

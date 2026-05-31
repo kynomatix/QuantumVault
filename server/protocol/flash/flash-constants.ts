@@ -1,9 +1,12 @@
 /**
  * Flash Trade protocol constants.
  *
- * Builder wallet `FLASH_BUILDER_WALLET` and referral code `FLASH_REFERRAL_CODE`
- * were confirmed directly with Rehan (Flash Trade) via Telegram. The 10% fee
- * rebate (1000 bps) applies to all trades routed through this partner wallet.
+ * Partner attribution on Flash is done ENTIRELY via the on-chain partner wallet
+ * `FLASH_BUILDER_WALLET` — NOT via any text/string code. (The string "QuantumVault"
+ * is a Pacifica builder-code concept and does NOT apply to Flash.) Flash trade
+ * instructions take `privilege: Privilege.Referral` plus two PublicKeys
+ * (tokenStakeAccount, userReferralAccount) — there is no string field anywhere in
+ * the on-chain path. The 10% fee rebate (1000 bps) accrues to the partner wallet.
  *
  * Program IDs are read from the flash-sdk PoolConfig JSON (PoolConfig.fromIdsByName)
  * and reproduced here for documentation and Phase 2 direct-client construction.
@@ -33,13 +36,19 @@ export const FLASH_MIN_TRANSFER_USDC = 10;
 
 // ── Partner / referral ───────────────────────────────────────────────────────
 /**
- * Partner wallet address for Flash Trade referral program.
- * Confirmed with Rehan (Flash Trade) via Telegram — 10% fee rebate on all
- * trades that include this wallet as the "builder".
+ * Partner wallet address for the Flash Trade referral program. This is the ONLY
+ * attribution identifier Flash uses — there is no string code (unlike Pacifica,
+ * which uses the text builder code "QuantumVault"). On-chain, the partner wallet
+ * owns a `tokenStakeAccount`; rebates accrue to it when trades pass
+ * `privilege: Privilege.Referral`. 10% fee rebate (FLASH_BUILDER_REBATE_BPS) on
+ * routed trades.
+ *
+ * TODO(flash-phase2): derive the partner tokenStakeAccount PDA from this wallet
+ * and thread it (plus each trader's userReferralAccount PDA) into trade
+ * instructions via getReferralAccounts(). See flash-sdk PerpetualsClient.
  */
 export const FLASH_BUILDER_WALLET = 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez';
-export const FLASH_REFERRAL_CODE = 'QuantumVault';
-/** 10% fee rebate expressed in basis points. */
+/** 10% fee rebate expressed in basis points. Accrues to FLASH_BUILDER_WALLET. */
 export const FLASH_BUILDER_REBATE_BPS = 1000;
 
 // ── Pyth Hermes price IDs (hex, strip leading 0x for the API) ───────────────
