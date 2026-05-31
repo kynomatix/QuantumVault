@@ -1,5 +1,6 @@
 import { storage } from "./storage";
-import { getDefaultAdapter } from "./protocol/adapter-registry";
+import { getDefaultAdapter, getAdapterForBot } from "./protocol/adapter-registry";
+import type { ProtocolAdapter } from "./protocol/adapter";
 import type { TradingBot, Wallet } from "@shared/schema";
 
 function _subIdStr(subAccountId: number): string | undefined {
@@ -24,9 +25,9 @@ function resolveBotAdapterArgs(bot: TradingBot, wallet: Wallet): { account: stri
   return null;
 }
 
-async function getAccountEquity(account: string, subaccountId: string | undefined): Promise<{ usdcBalance: number; unrealizedPnl: number }> {
+async function getAccountEquity(account: string, subaccountId: string | undefined, adapter: ProtocolAdapter = getDefaultAdapter()): Promise<{ usdcBalance: number; unrealizedPnl: number }> {
   try {
-    const info = await getDefaultAdapter().getAccountInfo(account, subaccountId);
+    const info = await adapter.getAccountInfo(account, subaccountId);
     return { usdcBalance: info.balance || 0, unrealizedPnl: info.unrealizedPnl || 0 };
   } catch {
     return { usdcBalance: 0, unrealizedPnl: 0 };
@@ -58,7 +59,7 @@ export async function takePnlSnapshots(): Promise<void> {
           continue;
         }
         
-        const accountInfo = await getAccountEquity(adapterArgs.account, adapterArgs.subaccountId);
+        const accountInfo = await getAccountEquity(adapterArgs.account, adapterArgs.subaccountId, getAdapterForBot(sourceTradingBot));
         
         const stats = sourceTradingBot.stats as any || {};
         const realizedPnl = stats.totalPnl || 0;

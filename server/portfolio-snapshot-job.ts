@@ -1,6 +1,7 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 import { storage } from "./storage";
-import { getDefaultAdapter } from "./protocol/adapter-registry";
+import { getDefaultAdapter, getAdapterForBot } from "./protocol/adapter-registry";
+import type { ProtocolAdapter } from "./protocol/adapter";
 import { reconcileWalletDeposits } from "./deposit-reconciler";
 import type { TradingBot, Wallet } from "@shared/schema";
 
@@ -66,9 +67,9 @@ function resolveBotAdapterArgs(bot: TradingBot, wallet: Wallet): { account: stri
  * The caller skips the snapshot when any read returns null and the next
  * scheduled run retries.
  */
-async function getAccountBalance(account: string, subaccountId: string | undefined): Promise<number | null> {
+async function getAccountBalance(account: string, subaccountId: string | undefined, adapter: ProtocolAdapter = getDefaultAdapter()): Promise<number | null> {
   try {
-    const info = await getDefaultAdapter().getAccountInfo(account, subaccountId);
+    const info = await adapter.getAccountInfo(account, subaccountId);
     // Treat non-finite/NaN/undefined as failure — `|| 0` would hide a malformed
     // upstream response as a real zero balance and re-introduce phantom dips.
     if (typeof info.balance !== "number" || !Number.isFinite(info.balance)) return null;
@@ -159,7 +160,7 @@ export async function computeWalletTotalBalance(
     if (bot.isActive) activeBotCount++;
     const adapterArgs = resolveBotAdapterArgs(bot, wallet);
     if (!adapterArgs) continue;
-    const bal = await getAccountBalance(adapterArgs.account, adapterArgs.subaccountId);
+    const bal = await getAccountBalance(adapterArgs.account, adapterArgs.subaccountId, getAdapterForBot(bot));
     if (bal == null) {
       ok = false;
       console.warn(`[computeWalletTotalBalance] balance read failed for bot ${bot.id} (wallet ${walletAddress.slice(0, 8)}…) — partial total only`);

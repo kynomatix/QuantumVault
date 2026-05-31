@@ -1,16 +1,17 @@
 import { storage, DatabaseStorage } from "./storage";
 import { normalizeMarket } from "./protocol/symbol-registry";
-import { getDefaultAdapter } from "./protocol/adapter-registry";
+import { getDefaultAdapter, getAdapterForBot } from "./protocol/adapter-registry";
 import type { TradeRecord } from "./protocol/protocol-types";
+import type { ProtocolAdapter } from "./protocol/adapter";
 import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification } from "./notification-service";
 
 function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
 }
 
-async function fetchPerpPositions(agentPublicKey: string, subaccountId: number): Promise<{ positions: any[]; fetchFailed: boolean }> {
+async function fetchPerpPositions(agentPublicKey: string, subaccountId: number, adapter: ProtocolAdapter = getDefaultAdapter()): Promise<{ positions: any[]; fetchFailed: boolean }> {
   try {
-    const positions = await getDefaultAdapter().getPositions(agentPublicKey, _subIdStr(subaccountId));
+    const positions = await adapter.getPositions(agentPublicKey, _subIdStr(subaccountId));
     return { positions: positions.map(p => ({
       marketIndex: 0,
       market: p.internalSymbol,
@@ -29,9 +30,9 @@ async function fetchPerpPositions(agentPublicKey: string, subaccountId: number):
   }
 }
 
-async function fetchMarketPrice(market: string): Promise<number | null> {
+async function fetchMarketPrice(market: string, adapter: ProtocolAdapter = getDefaultAdapter()): Promise<number | null> {
   try {
-    return await getDefaultAdapter().getPrice(market);
+    return await adapter.getPrice(market);
   } catch {
     return null;
   }
@@ -70,11 +71,11 @@ async function detectOnChainClose(
   market: string,
   dbPosition: { baseSize: string; avgEntryPrice: string; realizedPnl?: string; totalFees?: string; lastTradeId?: string | null; lastTradeAt?: Date | null },
   botSubaccountPublicKey?: string,
+  adapter: ProtocolAdapter = getDefaultAdapter(),
 ): Promise<CloseDetectionResult> {
   const noDetection: CloseDetectionResult = { detected: false, reason: 'external_close' };
 
   try {
-    const adapter = getDefaultAdapter();
     const normalizedMarket = normalizeMarket(market);
     const dbBaseSize = parseFloat(dbPosition.baseSize);
     const entryPrice = parseFloat(dbPosition.avgEntryPrice);
@@ -300,7 +301,7 @@ async function detectOnChainClose(
         : (entryPrice - fillPrice) * absSize;
 
       if (hasTpSlConfig) {
-        const marketPrice = await fetchMarketPrice(market);
+        const marketPrice = await fetchMarketPrice(market, adapter);
 
         let estimatedFillPrice: number;
         let chosenLabel: string;
@@ -337,7 +338,7 @@ async function detectOnChainClose(
       }
 
       if (accountInfo.balance > 1 || accountInfo.equity > 1) {
-        const marketPrice = await fetchMarketPrice(market);
+        const marketPrice = await fetchMarketPrice(market, adapter);
         const fillPrice = marketPrice && marketPrice > 0 ? marketPrice : entryPrice;
         const pnl = marketPrice && marketPrice > 0 ? computePnl(marketPrice) : 0;
         console.log(`[Reconcile] Position closed for bot ${botId} (no trade history, age=${(positionAgeMs / 1000).toFixed(0)}s, balance=$${accountInfo.balance.toFixed(2)}): classified as external_close, estimated fill=$${fillPrice.toFixed(4)} (${marketPrice ? 'market' : 'entry-fallback'}), pnl=$${pnl.toFixed(4)}`);
@@ -384,10 +385,15 @@ export async function syncPositionFromOnChain(
   try {
     console.log(`[Sync] Force syncing bot ${botId} from on-chain (market=${market}, subaccount=${subAccountId}${botSubaccountPublicKey ? ', pacifica=' + botSubaccountPublicKey.slice(0,8) + '...' : ''})`);
     
+    const botRowForAdapter = await storage.getTradingBotById(botId);
+    if (!botRowForAdapter) {
+      throw new Error(`Reconciliation: bot ${botId} not found — cannot resolve protocol adapter (fail-closed)`);
+    }
+    const adapter = getAdapterForBot(botRowForAdapter);
     const fetchOnce = async () => {
       if (botSubaccountPublicKey) {
         try {
-          const positions = await getDefaultAdapter().getPositions(botSubaccountPublicKey);
+          const positions = await adapter.getPositions(botSubaccountPublicKey);
           return { positions: positions.map(p => ({
             marketIndex: 0,
             market: p.internalSymbol,
@@ -405,7 +411,7 @@ export async function syncPositionFromOnChain(
           return { positions: [], fetchFailed: true };
         }
       } else {
-        return await fetchPerpPositions(agentPublicKey, subAccountId);
+        return await fetchPerpPositions(agentPublicKey, subAccountId, adapter);
       }
     };
 
@@ -617,10 +623,11 @@ async function bookPartialReduction(opts: {
   dbPosition: { avgEntryPrice: string; realizedPnl: string; totalFees: string; lastTradeAt?: Date | null };
   closedSlice: number;
   onChainBaseSize: number;
+  adapter: ProtocolAdapter;
 }): Promise<void> {
   const {
     botId, walletAddress, market, agentPublicKey, botSubaccountPublicKey,
-    dbBaseSize, dbPosition, closedSlice,
+    dbBaseSize, dbPosition, closedSlice, adapter,
   } = opts;
 
   const positionSide = dbBaseSize > 0 ? 'long' : 'short';
@@ -634,7 +641,7 @@ async function bookPartialReduction(opts: {
   for (const windowMs of [5 * 60 * 1000, 60 * 60 * 1000]) {
     try {
       const startTime = Date.now() - windowMs;
-      const trades = await getDefaultAdapter().getTradeHistory(readAccount, {
+      const trades = await adapter.getTradeHistory(readAccount, {
         limit: 200,
         startTime,
       });
@@ -753,10 +760,15 @@ export async function reconcileBotPosition(
   botSubaccountPublicKey?: string
 ): Promise<{ synced: boolean; discrepancy: boolean; liquidation?: boolean }> {
   try {
+    const botRowForAdapter = await storage.getTradingBotById(botId);
+    if (!botRowForAdapter) {
+      throw new Error(`Reconciliation: bot ${botId} not found — cannot resolve protocol adapter (fail-closed)`);
+    }
+    const adapter = getAdapterForBot(botRowForAdapter);
     let fetchResult;
     if (botSubaccountPublicKey) {
       try {
-        const positions = await getDefaultAdapter().getPositions(botSubaccountPublicKey);
+        const positions = await adapter.getPositions(botSubaccountPublicKey);
         fetchResult = { positions: positions.map(p => ({
           marketIndex: 0,
           market: p.internalSymbol,
@@ -774,7 +786,7 @@ export async function reconcileBotPosition(
         fetchResult = { positions: [], fetchFailed: true };
       }
     } else {
-      fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId);
+      fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId, adapter);
     }
     if (fetchResult.fetchFailed) {
       console.log(`[Reconcile] Skipping reconciliation for bot ${botId} — position fetch failed`);
@@ -790,7 +802,7 @@ export async function reconcileBotPosition(
     
     if (Math.abs(dbBaseSize) > 0.0001 && !onChainHasRealPosition) {
       const closeDetection = await detectOnChainClose(
-        botId, agentPublicKey, market, dbPosition!, botSubaccountPublicKey
+        botId, agentPublicKey, market, dbPosition!, botSubaccountPublicKey, adapter
       );
 
       if (closeDetection.detected) {
@@ -955,6 +967,7 @@ export async function reconcileBotPosition(
               dbPosition: dbPosition!,
               closedSlice,
               onChainBaseSize,
+              adapter,
             });
           } else {
             console.log(`[Reconcile] Partial reduction detected for bot ${botId} ${market} but position is only ${(positionAgeMs / 1000).toFixed(0)}s old — likely propagation lag, skipping`);

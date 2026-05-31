@@ -125,18 +125,17 @@ async function driftClosePerpPosition(
   };
 }
 
-async function driftGetPerpPositions(agentPublicKey: string, subAccountId: number): Promise<any[]> {
+async function driftGetPerpPositions(agentPublicKey: string, subAccountId: number, adapter = getDefaultAdapter()): Promise<any[]> {
   try {
-    const positions = await getDefaultAdapter().getPositions(agentPublicKey, _subIdStr(subAccountId));
+    const positions = await adapter.getPositions(agentPublicKey, _subIdStr(subAccountId));
     return positions.map(_mapPositionToDrift);
   } catch {
     return [];
   }
 }
 
-async function driftSettleAllPnl(encryptedKey: Uint8Array, subAccountId: number): Promise<any> {
+async function driftSettleAllPnl(encryptedKey: Uint8Array, subAccountId: number, adapter = getDefaultAdapter()): Promise<any> {
   try {
-    const adapter = getDefaultAdapter();
     if (!adapter.getCapabilities().supportsSettlePnl) {
       return { success: true, settledMarkets: [] };
     }
@@ -639,7 +638,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
     if (job.side === 'close') {
       // CRITICAL: Check on-chain position before close retry to prevent duplicate closes
       try {
-        const positions = await driftGetPerpPositions(job.agentPublicKey, job.subAccountId);
+        const positions = await driftGetPerpPositions(job.agentPublicKey, job.subAccountId, jobAdapter);
         const normalizedMarket = job.market.toUpperCase().replace('-PERP', '').replace('PERP', '');
         const position = positions.find(p => {
           const posMarket = p.market.toUpperCase().replace('-PERP', '').replace('PERP', '');
@@ -717,7 +716,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
       // IMPORTANT: Must compare position size against intended trade size to avoid false positives
       // from residual positions left by incomplete closes
       try {
-        const positions = await driftGetPerpPositions(job.agentPublicKey, job.subAccountId);
+        const positions = await driftGetPerpPositions(job.agentPublicKey, job.subAccountId, jobAdapter);
         const normalizedMarket = job.market.toUpperCase().replace('-PERP', '').replace('PERP', '');
         const position = positions.find(p => {
           const posMarket = p.market.toUpperCase().replace('-PERP', '').replace('PERP', '');
@@ -1025,7 +1024,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
                     };
                     
                     // Step 1: Settle PnL
-                    const settleResult = await driftSettleAllPnl(agentSecretKey, job.subAccountId);
+                    const settleResult = await driftSettleAllPnl(agentSecretKey, job.subAccountId, jobAdapter);
                     if (!settleResult.success) {
                       console.error(`[TradeRetry] Settle PnL failed: ${settleResult.error}`);
                       await createIouOnFailure(`Settle PnL failed: ${settleResult.error}`);

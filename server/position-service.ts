@@ -1,15 +1,16 @@
 import { storage } from './storage';
 import { normalizeMarket } from './protocol/symbol-registry';
 import { getMarketInfo } from './market-registry';
-import { getDefaultAdapter } from './protocol/adapter-registry';
+import { getDefaultAdapter, getAdapterForBot } from './protocol/adapter-registry';
+import type { ProtocolAdapter } from './protocol/adapter';
 
 function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
 }
 
-async function fetchPerpPositions(agentPublicKey: string, subaccountId: number): Promise<{ positions: any[]; fetchFailed: boolean }> {
+async function fetchPerpPositions(agentPublicKey: string, subaccountId: number, adapter: ProtocolAdapter = getDefaultAdapter()): Promise<{ positions: any[]; fetchFailed: boolean }> {
   try {
-    const positions = await getDefaultAdapter().getPositions(agentPublicKey, _subIdStr(subaccountId));
+    const positions = await adapter.getPositions(agentPublicKey, _subIdStr(subaccountId));
     return { positions: positions.map(p => ({
       marketIndex: 0,
       market: p.internalSymbol,
@@ -28,9 +29,9 @@ async function fetchPerpPositions(agentPublicKey: string, subaccountId: number):
   }
 }
 
-async function fetchDriftAccountInfo(agentPublicKey: string, subaccountId: number): Promise<any> {
+async function fetchDriftAccountInfo(agentPublicKey: string, subaccountId: number, adapter: ProtocolAdapter = getDefaultAdapter()): Promise<any> {
   try {
-    const info = await getDefaultAdapter().getAccountInfo(agentPublicKey, _subIdStr(subaccountId));
+    const info = await adapter.getAccountInfo(agentPublicKey, _subIdStr(subaccountId));
     return {
       usdcBalance: info.balance,
       totalCollateral: info.equity,
@@ -104,6 +105,11 @@ export class PositionService {
     market: string,
     botSubaccountPublicKey?: string
   ): Promise<PositionData> {
+    const botRowForAdapter = await storage.getTradingBotById(botId);
+    if (!botRowForAdapter) {
+      throw new Error(`PositionService: bot ${botId} not found — cannot resolve protocol adapter (fail-closed: refusing to default-route a read for an unknown bot)`);
+    }
+    const adapter: ProtocolAdapter = getAdapterForBot(botRowForAdapter);
     const timestamp = new Date();
     let onChainPos: OnChainPosition | null = null;
     let driftDetected = false;
@@ -114,7 +120,7 @@ export class PositionService {
       if (botSubaccountPublicKey) {
         console.log(`[PositionService] Using adapter for ${market} (bot subaccount ${botSubaccountPublicKey.slice(0,8)}...)`);
         try {
-          const positions = await getDefaultAdapter().getPositions(botSubaccountPublicKey);
+          const positions = await adapter.getPositions(botSubaccountPublicKey);
           fetchResult = { positions: positions.map(p => ({
             marketIndex: 0,
             market: p.internalSymbol,
@@ -133,7 +139,7 @@ export class PositionService {
         }
       } else {
         console.log(`[PositionService] Using byte-parsing position fetching for ${market}`);
-        fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId);
+        fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId, adapter);
       }
       const normalizedMarket = normalizeMarket(market);
       onChainPos = fetchResult.positions.find(p => 
@@ -184,8 +190,8 @@ export class PositionService {
       if (hasPosition) {
         try {
           const accountInfo = botSubaccountPublicKey
-            ? await fetchDriftAccountInfo(botSubaccountPublicKey, 0)
-            : await fetchDriftAccountInfo(agentPublicKey, subAccountId);
+            ? await fetchDriftAccountInfo(botSubaccountPublicKey, 0, adapter)
+            : await fetchDriftAccountInfo(agentPublicKey, subAccountId, adapter);
           
           // Health Factor = (freeCollateral / totalCollateral) * 100
           // This matches Drift's approach: 100% when fully free, lower as margin is used
@@ -336,11 +342,16 @@ export class PositionService {
     source: 'on-chain';
     entryPrice: number;
   }> {
+    const botRowForAdapter = await storage.getTradingBotById(botId);
+    if (!botRowForAdapter) {
+      throw new Error(`PositionService: bot ${botId} not found — cannot resolve protocol adapter (fail-closed: refusing to default-route a read for an unknown bot)`);
+    }
+    const adapter: ProtocolAdapter = getAdapterForBot(botRowForAdapter);
     let fetchResult;
     if (botSubaccountPublicKey) {
       console.log(`[PositionService] getPositionForExecution: Using adapter for ${market} (bot subaccount ${botSubaccountPublicKey.slice(0,8)}...)`);
       try {
-        const positions = await getDefaultAdapter().getPositions(botSubaccountPublicKey);
+        const positions = await adapter.getPositions(botSubaccountPublicKey);
         fetchResult = { positions: positions.map(p => ({
           marketIndex: 0,
           market: p.internalSymbol,
@@ -356,7 +367,7 @@ export class PositionService {
       }
     } else {
       console.log(`[PositionService] getPositionForExecution: Using byte-parsing for ${market} (subaccount ${subAccountId})`);
-      fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId);
+      fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId, adapter);
     }
     
     const normalizedMarket = normalizeMarket(market);
