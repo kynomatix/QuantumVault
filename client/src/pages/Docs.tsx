@@ -309,6 +309,32 @@ function FundingSection() {
         Your USDC may earn interest while deposited in the exchange. The current APY (if available) is displayed 
         in your bot settings.
       </Alert>
+
+      <SubHeading>Supported Exchanges & Withdrawal Costs</SubHeading>
+      <Paragraph>
+        QuantumVault routes each bot to a perpetual exchange on Solana. You choose the exchange when you 
+        create a bot (Pacifica is the default). Minimum transfer amounts and withdrawal fees are set by each 
+        exchange, not by QuantumVault:
+      </Paragraph>
+      <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-4 space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-white font-medium">Pacifica <span className="text-white/40 text-sm">(default)</span></span>
+          <span className="text-white/60">$10 min transfer · $1 withdrawal fee</span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-white font-medium">Flash</span>
+          <span className="text-white/60">0.1 USDC min · no withdrawal fee</span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-white font-medium">Drift</span>
+          <span className="text-white/60">0.1 USDC min · no withdrawal fee</span>
+        </div>
+      </div>
+      <Paragraph>
+        Pacifica is the only exchange with a real protocol minimum ($10) and an on-chain withdrawal fee ($1), 
+        so QuantumVault batches small amounts into larger withdrawals. Flash and Drift transfers carry no fee 
+        and only a small 0.1 USDC floor.
+      </Paragraph>
     </div>
   );
 }

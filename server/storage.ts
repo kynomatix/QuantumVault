@@ -285,7 +285,7 @@ export interface IStorage {
   updateOrphanedSubaccountRetry(id: string): Promise<void>;
 
   // Marketplace: Published Bots
-  getPublishedBots(options?: { search?: string; market?: string; sortBy?: string; limit?: number }): Promise<(PublishedBot & { creator: { displayName: string | null; xUsername: string | null } })[]>;
+  getPublishedBots(options?: { search?: string; market?: string; sortBy?: string; limit?: number }): Promise<(PublishedBot & { creator: { displayName: string | null; xUsername: string | null }; activeProtocol: string | null })[]>;
   getPublishedBotsByCreator(walletAddress: string): Promise<(PublishedBot & { creator: { displayName: string | null; xUsername: string | null } })[]>;
   getPublishedBotById(id: string): Promise<(PublishedBot & { creator: { displayName: string | null; xUsername: string | null } }) | undefined>;
   getPublishedBotByTradingBotId(tradingBotId: string): Promise<PublishedBot | undefined>;
@@ -1824,7 +1824,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Marketplace: Published Bots
-  async getPublishedBots(options?: { search?: string; market?: string; sortBy?: string; limit?: number }): Promise<(PublishedBot & { creator: { displayName: string | null; xUsername: string | null } })[]> {
+  async getPublishedBots(options?: { search?: string; market?: string; sortBy?: string; limit?: number }): Promise<(PublishedBot & { creator: { displayName: string | null; xUsername: string | null }; activeProtocol: string | null })[]> {
     const conditions = [eq(publishedBots.isActive, true)];
     
     if (options?.market) {
@@ -1858,15 +1858,18 @@ export class DatabaseStorage implements IStorage {
       publishedBot: publishedBots,
       displayName: wallets.displayName,
       xUsername: wallets.xUsername,
+      activeProtocol: tradingBots.activeProtocol,
     })
     .from(publishedBots)
     .leftJoin(wallets, eq(publishedBots.creatorWalletAddress, wallets.address))
+    .leftJoin(tradingBots, eq(publishedBots.tradingBotId, tradingBots.id))
     .where(and(...conditions))
     .orderBy(orderByColumn)
     .limit(options?.limit || 50);
 
     return results.map(r => ({
       ...r.publishedBot,
+      activeProtocol: r.activeProtocol,
       creator: {
         displayName: r.displayName,
         xUsername: r.xUsername,

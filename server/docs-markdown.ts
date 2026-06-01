@@ -10,6 +10,7 @@ export const DOCS_MARKDOWN = `# QuantumVault Documentation
 1. [Getting Started](#getting-started)
 2. [Wallet Setup](#wallet-setup)
 3. [Funding Your Account](#funding-your-account)
+   - [Supported Exchanges & Withdrawal Costs](#supported-exchanges--withdrawal-costs)
 4. [Creating Trading Bots](#creating-trading-bots)
    - [Profit Reinvest](#profit-reinvest)
    - [Auto Withdraw](#auto-withdraw)
@@ -105,6 +106,18 @@ Your Solana Wallet → Agent Wallet → Trading Account
 When you deposit to a bot, funds move from your agent wallet to that bot's trading subaccount. Each bot has an isolated subaccount for safety.
 
 > **Tip:** Your USDC may earn interest while deposited in the exchange. The current APY (if available) is displayed in your bot settings.
+
+### Supported Exchanges & Withdrawal Costs
+
+QuantumVault routes each bot to a perpetual exchange on Solana. You choose the exchange when you create a bot (Pacifica is the default). Minimum transfer amounts and withdrawal fees are set by each exchange, not by QuantumVault:
+
+| Exchange            | Minimum transfer | Withdrawal fee |
+|---------------------|------------------|----------------|
+| Pacifica (default)  | $10 USDC         | $1 USDC        |
+| Flash               | 0.1 USDC         | None           |
+| Drift               | 0.1 USDC         | None           |
+
+> **Note:** Pacifica is the only exchange with a real protocol minimum ($10) and an on-chain withdrawal fee ($1), so QuantumVault batches small amounts into larger withdrawals. Flash and Drift transfers carry no fee and only a small 0.1 USDC floor.
 
 ---
 

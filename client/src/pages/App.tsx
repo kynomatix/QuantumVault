@@ -123,6 +123,7 @@ interface TradingBot {
   totalInvestment: string;
   maxPositionSize: string | null;
   driftSubaccountId?: number | null;
+  activeProtocol?: 'pacifica' | 'drift' | 'flash';
   stats: {
     totalTrades: number;
     winningTrades: number;
@@ -231,6 +232,26 @@ function ReferralOverviewPanel() {
   );
 }
 
+const EXCHANGE_BADGE_STYLES: Record<string, { label: string; className: string }> = {
+  flash: { label: 'Flash', className: 'bg-amber-500/20 text-amber-400' },
+  pacifica: { label: 'Pacifica', className: 'bg-sky-500/20 text-sky-400' },
+  drift: { label: 'Drift', className: 'bg-violet-500/20 text-violet-400' },
+};
+
+function ExchangeBadge({ protocol, className = '' }: { protocol?: string | null; className?: string }) {
+  if (!protocol) return null;
+  const style = EXCHANGE_BADGE_STYLES[protocol.toLowerCase()];
+  if (!style) return null;
+  return (
+    <span
+      className={`px-2 py-0.5 rounded text-[10px] font-medium ${style.className} ${className}`}
+      data-testid={`badge-exchange-${protocol.toLowerCase()}`}
+    >
+      {style.label}
+    </span>
+  );
+}
+
 export default function AppPage() {
   const [, navigate] = useLocation();
   const { connected, connecting, disconnect, shortenedAddress, balance, balanceLoading, publicKeyString, sessionConnected, referralCode: walletReferralCode, authenticateWallet } = useWallet();
@@ -329,6 +350,7 @@ export default function AppPage() {
   // Marketplace state
   const [marketplaceSearch, setMarketplaceSearch] = useState('');
   const [marketplaceSortBy, setMarketplaceSortBy] = useState<MarketplaceSortBy>('pnlAllTime');
+  const [marketplaceExchange, setMarketplaceExchange] = useState<'all' | 'pacifica' | 'flash' | 'drift'>('all');
   const [publishModalOpen, setPublishModalOpen] = useState(false);
   const [botToPublish, setBotToPublish] = useState<{ id: string; name: string; market: string } | null>(null);
   const [subscribeModalOpen, setSubscribeModalOpen] = useState(false);
@@ -396,6 +418,9 @@ export default function AppPage() {
     search: marketplaceSearch || undefined,
     sortBy: marketplaceSortBy,
   });
+  const filteredMarketplace = marketplaceData?.filter((b: PublishedBot) =>
+    marketplaceExchange === 'all' || (b.activeProtocol ?? '').toLowerCase() === marketplaceExchange
+  );
   const { data: mySubscriptions, refetch: refetchMySubscriptions } = useMyMarketplaceSubscriptions();
   const { data: myPublishedBots, refetch: refetchMyPublishedBots } = useMyPublishedBots();
   const unpublishBotMutation = useUnpublishBot();
@@ -2131,6 +2156,7 @@ export default function AppPage() {
                         positionsData.map((pos: any, i: number) => {
                           const isExpanded = expandedPositionBotId === pos.botId;
                           const health = isExpanded ? expandedBotHealth : null;
+                          const posProtocol = botsData?.find((b: TradingBot) => b.id === pos.botId)?.activeProtocol;
                           
                           return (
                             <div 
@@ -2156,7 +2182,10 @@ export default function AppPage() {
                                           {pos.side}
                                         </span>
                                       </div>
-                                      <p className="text-xs text-muted-foreground">{pos.market}</p>
+                                      <div className="flex items-center gap-1.5">
+                                        <p className="text-xs text-muted-foreground">{pos.market}</p>
+                                        <ExchangeBadge protocol={posProtocol} />
+                                      </div>
                                     </div>
                                   </div>
                                   <div className="flex items-center gap-6">
@@ -2380,7 +2409,10 @@ export default function AppPage() {
                                 </div>
                                 <div>
                                   <p className="text-sm font-medium">{bot.name}</p>
-                                  <p className="text-xs text-muted-foreground">{bot.market}</p>
+                                  <div className="flex items-center gap-1.5">
+                                    <p className="text-xs text-muted-foreground">{bot.market}</p>
+                                    <ExchangeBadge protocol={bot.activeProtocol} />
+                                  </div>
                                 </div>
                               </div>
                               <span className={`w-2 h-2 rounded-full ${bot.isActive ? 'bg-emerald-400' : 'bg-yellow-400'}`} />
@@ -3108,6 +3140,27 @@ export default function AppPage() {
                   ))}
                 </div>
 
+                <div className="flex flex-wrap gap-2">
+                  <span className="text-sm text-muted-foreground py-2 pr-2">Exchange:</span>
+                  {[
+                    { key: 'all', label: 'All' },
+                    { key: 'pacifica', label: 'Pacifica' },
+                    { key: 'flash', label: 'Flash' },
+                    { key: 'drift', label: 'Drift' },
+                  ].map((opt) => (
+                    <Button
+                      key={opt.key}
+                      variant={marketplaceExchange === opt.key ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => setMarketplaceExchange(opt.key as 'all' | 'pacifica' | 'flash' | 'drift')}
+                      className={marketplaceExchange === opt.key ? 'bg-primary' : ''}
+                      data-testid={`button-filter-exchange-${opt.key}`}
+                    >
+                      {opt.label}
+                    </Button>
+                  ))}
+                </div>
+
                 {myPublishedBots && myPublishedBots.length > 0 && (
                   <div className="gradient-border p-6 noise">
                     <div 
@@ -3243,14 +3296,14 @@ export default function AppPage() {
                   </div>
                 )}
 
-                {marketplaceData && marketplaceData.filter((b: PublishedBot) => b.isFeatured).length > 0 && (
+                {filteredMarketplace && filteredMarketplace.filter((b: PublishedBot) => b.isFeatured).length > 0 && (
                   <div className="gradient-border p-6 noise">
                     <div className="flex items-center gap-3 mb-4">
                       <Zap className="w-5 h-5 text-primary" />
                       <h2 className="font-display font-semibold">Featured Bots</h2>
                     </div>
                     <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
-                      {marketplaceData.filter((b: PublishedBot) => b.isFeatured).map((bot: PublishedBot) => {
+                      {filteredMarketplace.filter((b: PublishedBot) => b.isFeatured).map((bot: PublishedBot) => {
                         const pnl = marketplaceSortBy === 'pnl7d' ? bot.pnlPercent7d :
                                    marketplaceSortBy === 'pnl30d' ? bot.pnlPercent30d :
                                    marketplaceSortBy === 'pnl90d' ? bot.pnlPercent90d :
@@ -3294,9 +3347,9 @@ export default function AppPage() {
                     <Loader2 className="w-6 h-6 animate-spin text-primary" />
                     <span className="ml-2 text-muted-foreground">Loading marketplace...</span>
                   </div>
-                ) : marketplaceData && marketplaceData.length > 0 ? (
+                ) : filteredMarketplace && filteredMarketplace.length > 0 ? (
                   <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {marketplaceData.map((bot: PublishedBot) => {
+                    {filteredMarketplace.map((bot: PublishedBot) => {
                       const winRate = bot.totalTrades > 0 ? ((bot.winningTrades / bot.totalTrades) * 100).toFixed(1) : '0';
                       const pnl = marketplaceSortBy === 'pnl7d' ? bot.pnlPercent7d :
                                  marketplaceSortBy === 'pnl30d' ? bot.pnlPercent30d :
@@ -3339,7 +3392,10 @@ export default function AppPage() {
                               </div>
                               <div>
                                 <h3 className="font-display font-semibold">{bot.name}</h3>
-                                <p className="text-sm text-muted-foreground">{bot.market}</p>
+                                <div className="flex items-center gap-1.5">
+                                  <p className="text-sm text-muted-foreground">{bot.market}</p>
+                                  <ExchangeBadge protocol={bot.activeProtocol} />
+                                </div>
                               </div>
                             </div>
                             {bot.isFeatured && (

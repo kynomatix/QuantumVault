@@ -98,7 +98,7 @@ interface TradingBot {
   // pubkey for Pacifica, a derived sub address for Drift), not an "agent"
   // pubkey. The old name implied an off-chain wallet role.
   botSubaccountIdentifier?: string | null;
-  activeProtocol?: 'pacifica' | 'drift' | null;
+  activeProtocol?: 'pacifica' | 'drift' | 'flash' | null;
   sourcePublishedBotId?: string | null;
   profitReinvest?: boolean;
   autoWithdrawThreshold?: string | null;
