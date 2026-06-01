@@ -34,6 +34,20 @@ export const FLASH_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
  */
 export const FLASH_MIN_TRANSFER_USDC = 10;
 
+/**
+ * Native SOL seeded into each NEW Flash per-bot wallet at creation, moved from
+ * the user's agent wallet. In Flash's independent_trader model each bot owns its
+ * own Solana wallet which is the fee payer AND rent payer for ALL of its trades
+ * (openPosition / swapAndOpen / close create on-chain position + order accounts).
+ * Without a native-SOL balance the bot's very first trade fails. This seed is
+ * reclaimed (minus the final tx fee) when the bot is deleted. Override via the
+ * `FLASH_BOT_WALLET_SOL_SEED` env var.
+ */
+export const FLASH_BOT_WALLET_SOL_SEED = (() => {
+  const raw = Number(process.env.FLASH_BOT_WALLET_SOL_SEED);
+  return Number.isFinite(raw) && raw > 0 ? raw : 0.02;
+})();
+
 // ── Partner / referral ───────────────────────────────────────────────────────
 /**
  * Partner wallet address for the Flash Trade referral program. This is the ONLY

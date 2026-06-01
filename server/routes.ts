@@ -7261,7 +7261,18 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           Number.isFinite(fundingAmountNum) &&
           fundingAmountNum > 0;
 
-        console.log(`[Bot Creation] Creating ${adapter.protocolName} subaccount under agent ${agentKeypair.publicKey.toString()}${botKeypair ? ` with pre-generated sub key ${botKeypair.publicKey.toString()}` : ''}${usePacificaAtomicProvision ? ` (atomic provision, fundingAmount=$${fundingAmountNum})` : ''}`);
+        // Flash atomic provision path: each Flash bot owns its OWN minted Solana
+        // wallet (botKeypair). We fund it from the agent wallet in one atomic tx
+        // (SOL seed + USDC collateral). The bot.id is NOT needed for funding (the
+        // recipient is just an address), so this runs here in the pre-insert block
+        // while the agent key is still in scope.
+        const useFlashAtomicProvision =
+          adapter.protocolName === 'flash' &&
+          botKeypair !== null &&
+          Number.isFinite(fundingAmountNum) &&
+          fundingAmountNum > 0;
+
+        console.log(`[Bot Creation] Creating ${adapter.protocolName} subaccount under agent ${agentKeypair.publicKey.toString()}${botKeypair ? ` with pre-generated sub key ${botKeypair.publicKey.toString()}` : ''}${usePacificaAtomicProvision ? ` (atomic provision, fundingAmount=$${fundingAmountNum})` : ''}${useFlashAtomicProvision ? ` (flash per-bot wallet, fundingAmount=$${fundingAmountNum})` : ''}`);
 
         // Subaccount Recycling Plan §8 (Phase E) — reuse on create. Behind the
         // REUSE_ON_CREATE kill switch (default OFF) AND the adapter's `recyclable`
@@ -7408,7 +7419,35 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             } catch (enrollErr: any) {
               console.warn('[Bot Creation] Pacifica enrollment warm-up failed (non-fatal, retries on next trade):', enrollErr?.message || enrollErr);
             }
-          } else if (!usePacificaAtomicProvision) {
+          } else if (useFlashAtomicProvision && !reuseHandled) {
+            // Flash: mint-and-fund the bot's OWN wallet atomically from the agent
+            // wallet. If the funding tx fails, NO funds move (atomic) and we throw
+            // → caught below → 500 with nothing stranded and no bot row inserted.
+            const flashAdapter = adapter as import('./protocol/flash/flash-adapter').FlashAdapter;
+            const result = await flashAdapter.provisionBotWallet({
+              mainSecretKey: agentKeypair.secretKey,
+              subSecretKey: botKeypair!.secretKey,
+              fundingAmount: fundingAmountNum,
+            });
+
+            botSubaccountPublicKey = result.subaccountId;
+            pendingBotSecretKeyForV3 = botKeypair!.secretKey;
+            // Phase 4b: stay 'pending' until the V3 ciphertext is written post-insert.
+            subaccountStatus = 'pending';
+
+            if (!result.transferSucceeded) {
+              throw new Error(result.warning || 'Flash bot wallet funding failed');
+            }
+
+            (req as any)._flashProvisionResult = {
+              funded: true,
+              depositTxSignature: result.txSignature,
+              fundedAmount: result.fundedAmount,
+              solSeeded: result.solSeeded,
+            };
+
+            console.log(`[Bot Creation] Flash per-bot wallet provisioned: wallet=${botSubaccountPublicKey} funded=$${result.fundedAmount} solSeed=${result.solSeeded} tx=${result.txSignature}`);
+          } else if (!usePacificaAtomicProvision && !useFlashAtomicProvision) {
             const sub = await adapter.createSubaccount({
               mainSecretKey: agentKeypair.secretKey,
               subSecretKey: botKeypair?.secretKey,
@@ -7600,7 +7639,46 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           await storage.updateTradingBot(bot.id, { subaccountStatus: 'active' } as any);
         } catch (v3Err: any) {
           console.error(`[Bot Creation] Failed to write V3 bot-subaccount key for bot ${bot.id}:`, v3Err.message);
-          // Rollback: delete the bot since it can never be activated without the key.
+          // Flash: provisionBotWallet already moved funds into the bot's OWN wallet.
+          // The V3 key was NOT persisted, so the in-memory key (zeroized in the
+          // finally below) is the ONLY copy. Sweep funds back to the agent wallet
+          // NOW, and only delete the row once the wallet is CONFIRMED empty. If the
+          // sweep fails or any USDC remains, do NOT delete — that would discard the
+          // last key reference AND the audit trail. Instead preserve the row as
+          // 'error' and fail closed so the stranded wallet stays traceable.
+          if (createAdapter.protocolName === 'flash' && wallet?.agentPublicKey) {
+            const flashAdapter = createAdapter as import('./protocol/flash/flash-adapter').FlashAdapter;
+            let swept = false;
+            for (let attempt = 0; attempt < 2 && !swept; attempt++) {
+              try {
+                const rollback = await flashAdapter.sweepBotWallet({
+                  subSecretKey: pendingBotSecretKeyForV3,
+                  destWalletAddress: wallet.agentPublicKey,
+                });
+                if (rollback.error) {
+                  console.error(`[Bot Creation] Flash rollback sweep attempt ${attempt + 1} failed: ${rollback.error}`);
+                } else {
+                  console.warn(`[Bot Creation] Flash rollback swept $${rollback.usdcSwept.toFixed(6)} USDC + ${rollback.solReclaimed.toFixed(6)} SOL back to agent wallet`);
+                }
+              } catch (sweepErr: any) {
+                console.error(`[Bot Creation] Flash rollback sweep attempt ${attempt + 1} threw: ${sweepErr?.message || sweepErr}`);
+              }
+              // Trust the sweep only after the bot wallet is verified empty of USDC.
+              const residual = await flashAdapter.getWalletCollateralBalance(botSubaccountPublicKey!).catch(() => -1);
+              if (residual === 0) swept = true;
+            }
+            if (!swept) {
+              // Funds may remain in the bot wallet whose key we are about to lose.
+              // Preserve the row (status 'error') so the wallet address stays on
+              // record, and tell the user funds may be stranded. Fail closed.
+              try { await storage.updateTradingBot(bot.id, { subaccountStatus: 'error' } as any); } catch {}
+              console.error(`[Bot Creation] CRITICAL: Flash rollback could not confirm empty wallet ${botSubaccountPublicKey} — preserving bot row ${bot.id} for recovery`);
+              return res.status(500).json({
+                error: `Failed to secure bot subaccount key and could not fully return funds. Your bot wallet ${botSubaccountPublicKey} may still hold funds — please contact support before creating another bot.`,
+              });
+            }
+          }
+          // Wallet confirmed empty (or non-Flash) — safe to delete the row.
           try { await storage.deleteTradingBot(bot.id); } catch {}
           return res.status(500).json({ error: `Failed to secure bot subaccount key: ${v3Err.message}` });
         } finally {
@@ -7704,6 +7782,28 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         }
       }
 
+      // Flash per-bot wallet funding — record the same deposit baseline so the
+      // funded USDC is treated as a deposit (not phantom profit) by the P&L system.
+      const flashProvisionResult = (req as any)._flashProvisionResult as
+        | { funded: boolean; depositTxSignature?: string; fundedAmount: number; solSeeded?: number }
+        | undefined;
+      if (flashProvisionResult?.funded === true && flashProvisionResult.fundedAmount > 0) {
+        try {
+          await storage.createEquityEvent({
+            walletAddress: req.walletAddress!,
+            tradingBotId: bot.id,
+            eventType: 'drift_deposit',
+            amount: String(flashProvisionResult.fundedAmount),
+            txSignature: flashProvisionResult.depositTxSignature || null,
+            notes: `Initial funding for Flash bot wallet ${botSubaccountPublicKey}`,
+          });
+          console.log(`[Bot Creation] Equity event recorded: $${flashProvisionResult.fundedAmount} deposit for Flash bot ${bot.id}`);
+        } catch (eventErr: any) {
+          console.error(`[Bot Creation] Failed to record Flash equity event for bot ${bot.id}:`, eventErr.message);
+          // Non-fatal — bot is created and funded. P&L will be off but funds are safe.
+        }
+      }
+
       const provisionResultForResponse = (req as any)._pacificaProvisionResult as
         | { funded: boolean; wasNewAccount: boolean; depositTxSignature?: string; warning?: string; fundedAmount: number }
         | undefined;
@@ -7718,6 +7818,11 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           wasNewAccount: provisionResult.wasNewAccount,
           depositTxSignature: provisionResult.depositTxSignature,
           fundingWarning: provisionResult.warning,
+        } : {}),
+        ...(flashProvisionResult ? {
+          funded: flashProvisionResult.funded,
+          fundedAmount: flashProvisionResult.fundedAmount,
+          depositTxSignature: flashProvisionResult.depositTxSignature,
         } : {}),
       });
     } catch (error) {
@@ -8062,6 +8167,88 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         }
       }
       
+      // Flash per-bot wallet sweep — Flash bots are external_key bots so they ALSO
+      // satisfy getBotSubaccountContext, but their funds live in the bot's OWN
+      // Solana wallet and must be swept with sweepBotWallet (NOT Pacifica's
+      // transferBetweenSubaccounts, which Flash rejects). Handle them here and
+      // return so they never fall through to the Pacifica block below.
+      if (bot.activeProtocol === 'flash' && getBotSubaccountContext(bot) && agentAddress) {
+        // Legacy/broken Flash bots created before per-bot wallets have
+        // protocolSubaccountId === the agent wallet itself; their funds already
+        // live in the agent wallet, so there is nothing to sweep — just delete.
+        if (bot.protocolSubaccountId === agentAddress) {
+          console.log(`[Delete] Flash bot ${bot.id} maps to the agent wallet (legacy) — no separate wallet to sweep, deleting`);
+          await storage.deleteTradingBot(req.params.id);
+          return res.json({ success: true, swept: false, message: 'Bot deleted' });
+        }
+
+        const flashAdapter = getAdapterForBot(bot) as import('./protocol/flash/flash-adapter').FlashAdapter;
+
+        // Refuse to delete while a position is open — closing needs the bot key,
+        // which we discard on delete. Fail closed.
+        try {
+          const openPositions = await flashAdapter.getPositions(bot.protocolSubaccountId!);
+          if (openPositions && openPositions.length > 0) {
+            return res.status(409).json({
+              error: 'Cannot delete bot - it has an open Flash position.',
+              message: 'Close the position first, then delete the bot.',
+            });
+          }
+        } catch (posErr: any) {
+          console.error(`[Delete] Flash position check failed for bot ${bot.id}: ${posErr?.message || posErr}`);
+          return res.status(500).json({
+            error: 'Cannot delete bot - unable to verify open positions.',
+            message: 'Please try again in a moment.',
+          });
+        }
+
+        // Sweep the bot wallet (all USDC + reclaim SOL) back to the agent wallet
+        // with the bot's own key, verify empty, then delete. USDC leg fails closed.
+        const flashBotCtx = getBotSubaccountContext(bot)!;
+        let decrypted: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+        try {
+          decrypted = await _resolveBotSubaccountSecretKey(flashBotCtx);
+          const sweep = await flashAdapter.sweepBotWallet({
+            subSecretKey: decrypted.secretKey,
+            destWalletAddress: agentAddress,
+          });
+          if (sweep.error) {
+            return res.status(500).json({
+              error: `Cannot delete bot - failed to sweep funds from the Flash bot wallet: ${sweep.error}`,
+              message: 'Please try again, or withdraw funds manually before deleting.',
+            });
+          }
+          // Confirm the wallet is genuinely empty of USDC before discarding the key.
+          const residual = await flashAdapter.getWalletCollateralBalance(bot.protocolSubaccountId!).catch(() => 0);
+          if (residual > 0) {
+            return res.status(409).json({
+              error: `Cannot delete bot - $${residual.toFixed(6)} USDC still remains in the Flash bot wallet.`,
+              message: 'Please try again in a moment, or withdraw funds manually before deleting.',
+            });
+          }
+          await storage.deleteTradingBot(req.params.id);
+          const msg = sweep.usdcSwept > 0
+            ? `Returned $${sweep.usdcSwept.toFixed(2)} USDC to your agent wallet before deletion`
+            : 'Bot deleted';
+          return res.json({
+            success: true,
+            swept: sweep.usdcSwept > 0,
+            withdrawnToWallet: sweep.usdcSwept > 0,
+            withdrawnAmount: sweep.usdcSwept,
+            solReclaimed: sweep.solReclaimed,
+            message: msg,
+          });
+        } catch (sweepErr: any) {
+          console.error(`[Delete] Flash sweep error for bot ${bot.id}: ${sweepErr?.message || sweepErr}`);
+          return res.status(500).json({
+            error: `Cannot delete bot - error sweeping the Flash bot wallet: ${sweepErr?.message || sweepErr}`,
+            message: 'Please try again, or withdraw funds manually before deleting.',
+          });
+        } finally {
+          try { decrypted?.cleanup(); } catch {}
+        }
+      }
+
       // Pacifica subaccount sweep — transfer funds back to agent wallet before deletion
       if (getBotSubaccountContext(bot) && agentAddress) {
         const recycleOnDelete = isRecycleOnDeleteEnabled();
@@ -12224,7 +12411,11 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         let botBalance = 0;
         try {
           const eqBotCtx = getBotSubaccountContext(bot);
-          if (eqBotCtx) {
+          if (bot.activeProtocol === 'flash' && agentAddress && bot.protocolSubaccountId === agentAddress) {
+            // Legacy Flash bot whose "subaccount" IS the agent wallet — counting it
+            // here would double-count the agent balance (already in agentBalance).
+            botBalance = 0;
+          } else if (eqBotCtx) {
             const liveInfo = await getExchangeAccountInfoForBot('', 0, eqBotCtx, getAdapterForBot(bot));
             botBalance = liveInfo.totalCollateral;
           } else {

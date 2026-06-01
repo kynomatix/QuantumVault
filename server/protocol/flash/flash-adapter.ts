@@ -53,6 +53,8 @@ import {
   PublicKey,
   Keypair,
   Transaction,
+  SystemProgram,
+  LAMPORTS_PER_SOL,
   type TransactionInstruction,
   type Signer,
 } from '@solana/web3.js';
@@ -63,6 +65,7 @@ import {
   getAccount,
   createTransferInstruction,
   createAssociatedTokenAccountInstruction,
+  createCloseAccountInstruction,
 } from '@solana/spl-token';
 import { PerpetualsClient, PoolConfig, OraclePrice } from 'flash-sdk';
 import type { ContractOraclePrice, Side, Privilege } from 'flash-sdk';
@@ -114,6 +117,7 @@ import {
   FLASH_PYTH_PRICE_IDS,
   FLASH_USDC_MINT,
   FLASH_MIN_TRANSFER_USDC,
+  FLASH_BOT_WALLET_SOL_SEED,
   type FlashMarketSpec,
 } from './flash-constants.js';
 import { getFlashMarketSpecs } from './flash-markets.js';
@@ -963,13 +967,312 @@ export class FlashAdapter implements ProtocolAdapter {
   // ── Subaccount lifecycle (mapped to the bot wallet) ─────────────────────────
 
   async createSubaccount(input: CreateSubaccountInput): Promise<SubaccountInfo> {
-    // Flash independent_trader: the bot's own agent wallet IS the on-chain trader.
-    // There is no separate subaccount and no creation instruction — the position
-    // account is created implicitly by the first openPosition. We report the bot
-    // wallet as the (already-usable) subaccount id.
-    const subaccountId = input.agentPublicKey;
+    // Flash independent_trader: each bot owns its OWN minted Solana wallet — the
+    // `subSecretKey` minted by the caller — which is distinct from the user's
+    // shared agent wallet. THAT wallet is the on-chain trader; its USDC ATA holds
+    // the bot's isolated collateral and it is the fee/rent payer for its trades.
+    //
+    // We MUST return the bot wallet pubkey (derived from subSecretKey), NOT the
+    // agent wallet. Returning the agent wallet (the old behavior) made every
+    // Flash bot share one on-chain account (no isolation, equity double-counted)
+    // AND broke trade signing: the stored per-bot signing key's pubkey would not
+    // match protocolSubaccountId, so the decrypt pubkey-equality check rejected
+    // it. Funding the wallet happens separately in provisionBotWallet().
+    if (!input.subSecretKey || input.subSecretKey.length !== 64) {
+      throw new Error(
+        'Flash createSubaccount requires a 64-byte per-bot subSecretKey (each Flash bot needs its own minted wallet).',
+      );
+    }
+    const subaccountId = Keypair.fromSecretKey(input.subSecretKey).publicKey.toBase58();
     const equity = await this.getWalletCollateralBalance(subaccountId).catch(() => 0);
     return { subaccountId, label: input.label, equity, status: 'confirmed' };
+  }
+
+  /**
+   * Fund a freshly-minted Flash per-bot wallet from the user's agent wallet in
+   * ONE atomic, agent-signed transaction:
+   *   1. SystemProgram.transfer  agent → bot wallet  (native SOL seed for fees/rent)
+   *   2. create the bot wallet's USDC ATA            (rent paid by the agent)
+   *   3. SPL transfer            agent USDC → bot USDC ATA  (the bot's collateral)
+   *
+   * Atomicity is the safety guarantee: if the transaction fails for ANY reason,
+   * the chain reverts ALL three instructions, so NO funds move — the caller can
+   * abort creation cleanly with nothing stranded. Pre-checks (agent SOL, agent
+   * USDC) fail closed BEFORE any signing so we never half-fund.
+   *
+   * The bot.id is NOT needed here (the recipient is just an address), which is
+   * why funding can happen in the pre-insert provisioning block while the agent
+   * key is still in scope.
+   */
+  async provisionBotWallet(input: {
+    mainSecretKey: Uint8Array;
+    subSecretKey: Uint8Array;
+    fundingAmount: number;
+    solSeed?: number;
+  }): Promise<{
+    subaccountId: string;
+    transferSucceeded: boolean;
+    txSignature?: string;
+    fundedAmount: number;
+    solSeeded: number;
+    warning?: string;
+  }> {
+    if (!input.subSecretKey || input.subSecretKey.length !== 64) {
+      throw new Error('provisionBotWallet requires a 64-byte per-bot subSecretKey');
+    }
+    if (!input.mainSecretKey || input.mainSecretKey.length !== 64) {
+      throw new Error('provisionBotWallet requires a 64-byte agent mainSecretKey');
+    }
+
+    const connection = this._getConnection();
+    const agent = Keypair.fromSecretKey(input.mainSecretKey);
+    const bot = Keypair.fromSecretKey(input.subSecretKey);
+    const botWallet = bot.publicKey;
+    const subaccountId = botWallet.toBase58();
+    const usdcMint = new PublicKey(FLASH_USDC_MINT);
+    const agentUsdcAta = getAssociatedTokenAddressSync(usdcMint, agent.publicKey, true);
+    const botUsdcAta = getAssociatedTokenAddressSync(usdcMint, botWallet, true);
+    const solSeed = input.solSeed != null && input.solSeed > 0 ? input.solSeed : FLASH_BOT_WALLET_SOL_SEED;
+    const seedLamports = Math.round(solSeed * LAMPORTS_PER_SOL);
+
+    const fail = (warning: string) => ({
+      subaccountId, transferSucceeded: false, fundedAmount: 0, solSeeded: 0, warning,
+    });
+
+    if (!(input.fundingAmount >= this.minTransferAmount)) {
+      return fail(`Funding amount $${input.fundingAmount} is below the $${this.minTransferAmount} minimum`);
+    }
+
+    // Pre-check: agent SOL must cover the seed + ATA rent + tx fee headroom.
+    let agentLamports = 0;
+    try {
+      agentLamports = await connection.getBalance(agent.publicKey);
+    } catch (err) {
+      return fail(`Could not read agent SOL balance: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const SOL_OVERHEAD = Math.round(0.005 * LAMPORTS_PER_SOL); // ATA rent (~0.002) + fee headroom
+    if (agentLamports < seedLamports + SOL_OVERHEAD) {
+      return fail(
+        `Insufficient agent SOL for gas + bot-wallet seed: have ${(agentLamports / LAMPORTS_PER_SOL).toFixed(4)} SOL, ` +
+        `need ~${((seedLamports + SOL_OVERHEAD) / LAMPORTS_PER_SOL).toFixed(4)} SOL`,
+      );
+    }
+
+    // Pre-check: agent USDC must cover the funding amount.
+    let agentUsdc = 0;
+    try {
+      const acc = await getAccount(connection, agentUsdcAta);
+      agentUsdc = Number(acc.amount.toString()) / 1e6;
+    } catch {
+      agentUsdc = 0;
+    }
+    if (agentUsdc + 1e-9 < input.fundingAmount) {
+      return fail(`Insufficient agent USDC: have $${agentUsdc.toFixed(6)}, need $${input.fundingAmount}`);
+    }
+
+    // Build the single atomic funding transaction.
+    const instructions: TransactionInstruction[] = [];
+    instructions.push(SystemProgram.transfer({
+      fromPubkey: agent.publicKey,
+      toPubkey: botWallet,
+      lamports: seedLamports,
+    }));
+    const botAtaInfo = await connection.getAccountInfo(botUsdcAta);
+    if (!botAtaInfo) {
+      instructions.push(createAssociatedTokenAccountInstruction(
+        agent.publicKey, botUsdcAta, botWallet, usdcMint,
+      ));
+    }
+    const amountBase = BigInt(this._toBaseUnits(input.fundingAmount, 6).toString());
+    instructions.push(createTransferInstruction(agentUsdcAta, botUsdcAta, agent.publicKey, amountBase));
+
+    let blockhashCtx: Awaited<ReturnType<Connection['getLatestBlockhash']>>;
+    try {
+      blockhashCtx = await connection.getLatestBlockhash('confirmed');
+    } catch (err) {
+      return fail(`Could not fetch blockhash: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const tx = new Transaction({
+      feePayer: agent.publicKey,
+      blockhash: blockhashCtx.blockhash,
+      lastValidBlockHeight: blockhashCtx.lastValidBlockHeight,
+    });
+    tx.add(...instructions);
+    tx.sign(agent);
+
+    let txSignature: string;
+    try {
+      txSignature = await connection.sendRawTransaction(tx.serialize(), {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+      });
+    } catch (err) {
+      // Send rejected (e.g. preflight failure) → the tx never entered the network,
+      // so NO funds moved. Fail closed.
+      return fail(`Funding transaction send failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    try {
+      const conf = await connection.confirmTransaction({
+        signature: txSignature,
+        blockhash: blockhashCtx.blockhash,
+        lastValidBlockHeight: blockhashCtx.lastValidBlockHeight,
+      }, 'confirmed');
+      if (conf.value.err) {
+        // Atomic tx reverted on-chain — NO funds moved.
+        return { subaccountId, transferSucceeded: false, fundedAmount: 0, solSeeded: 0, txSignature, warning: `Funding tx failed on-chain: ${JSON.stringify(conf.value.err)}` };
+      }
+      return { subaccountId, transferSucceeded: true, txSignature, fundedAmount: input.fundingAmount, solSeeded: solSeed };
+    } catch (confErr) {
+      // Ambiguous confirm (timeout / blockheight exceeded). The tx MAY have landed,
+      // so we must NOT blindly declare failure (that would strand funds in the bot
+      // wallet whose key the caller is about to discard). A blockhash-based tx can
+      // no longer be included once lastValidBlockHeight passes, so an authoritative
+      // signature-status lookup fully disambiguates. Poll a few times to absorb
+      // status-propagation lag.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          const st = await connection.getSignatureStatuses([txSignature], { searchTransactionHistory: true });
+          const info = st?.value?.[0];
+          if (info) {
+            if (info.err) {
+              return { subaccountId, transferSucceeded: false, fundedAmount: 0, solSeeded: 0, txSignature, warning: `Funding tx failed on-chain: ${JSON.stringify(info.err)}` };
+            }
+            if (info.confirmationStatus === 'confirmed' || info.confirmationStatus === 'finalized') {
+              return { subaccountId, transferSucceeded: true, txSignature, fundedAmount: input.fundingAmount, solSeeded: solSeed };
+            }
+          } else if (attempt >= 2) {
+            // After the blockhash window, a missing status means the tx expired and
+            // can never be included → no funds moved. Safe to fail closed.
+            return fail(`Funding transaction expired without committing (no funds moved): ${confErr instanceof Error ? confErr.message : String(confErr)}`);
+          }
+        } catch { /* transient RPC error — retry */ }
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+      // Could not determine the outcome authoritatively (RPC degraded). Fail closed
+      // but FLAG the ambiguity with the signature so any landed funds are traceable
+      // and the caller never double-funds on a blind retry.
+      console.error(`[Flash provisionBotWallet] AMBIGUOUS funding outcome — could not confirm tx ${txSignature}. Verify on-chain before retrying.`);
+      return { subaccountId, transferSucceeded: false, fundedAmount: 0, solSeeded: 0, txSignature, warning: `AMBIGUOUS funding outcome for tx ${txSignature} — could not confirm on-chain commit. Verify this signature before retrying to avoid double-funding.` };
+    }
+  }
+
+  /**
+   * Sweep a Flash per-bot wallet back to the destination (the user's agent
+   * wallet) — used on bot deletion and on creation-rollback. Moves EVERYTHING:
+   *   1. all USDC (full ATA balance, NOT gated by the $10 min — it is a plain SPL
+   *      transfer), then closes the now-empty USDC ATA to reclaim its rent;
+   *   2. the remaining native SOL (minus the final tx fee).
+   *
+   * The USDC leg fails closed: if it errors with a non-zero balance the caller
+   * MUST refuse deletion (funds still in the bot wallet). The SOL-reclaim leg is
+   * best-effort dust recovery and never blocks deletion.
+   */
+  async sweepBotWallet(input: {
+    subSecretKey: Uint8Array;
+    destWalletAddress: string;
+  }): Promise<{
+    usdcSwept: number;
+    solReclaimed: number;
+    usdcTxSignature?: string;
+    solTxSignature?: string;
+    error?: string;
+  }> {
+    if (!input.subSecretKey || input.subSecretKey.length !== 64) {
+      throw new Error('sweepBotWallet requires a 64-byte per-bot subSecretKey');
+    }
+    const connection = this._getConnection();
+    const bot = Keypair.fromSecretKey(input.subSecretKey);
+    const botWallet = bot.publicKey;
+    const dest = new PublicKey(input.destWalletAddress);
+    const usdcMint = new PublicKey(FLASH_USDC_MINT);
+    const fromAta = getAssociatedTokenAddressSync(usdcMint, botWallet, true);
+    const toAta = getAssociatedTokenAddressSync(usdcMint, dest, true);
+
+    let usdcSwept = 0;
+    let usdcTxSignature: string | undefined;
+
+    // ── 1) USDC: sweep full balance + close the ATA (reclaims its rent) ──────
+    const fromAtaInfo = await connection.getAccountInfo(fromAta).catch(() => null);
+    if (fromAtaInfo) {
+      let botUsdc = BigInt(0);
+      try {
+        const acc = await getAccount(connection, fromAta);
+        botUsdc = acc.amount;
+      } catch {
+        botUsdc = BigInt(0);
+      }
+      const ix: TransactionInstruction[] = [];
+      if (botUsdc > BigInt(0)) {
+        const toInfo = await connection.getAccountInfo(toAta).catch(() => null);
+        if (!toInfo) {
+          ix.push(createAssociatedTokenAccountInstruction(botWallet, toAta, dest, usdcMint));
+        }
+        ix.push(createTransferInstruction(fromAta, toAta, botWallet, botUsdc));
+      }
+      // Close the (now-empty) bot USDC ATA, returning its rent lamports to dest.
+      ix.push(createCloseAccountInstruction(fromAta, dest, botWallet));
+
+      try {
+        const blockhashCtx = await connection.getLatestBlockhash('confirmed');
+        const tx = new Transaction({
+          feePayer: botWallet,
+          blockhash: blockhashCtx.blockhash,
+          lastValidBlockHeight: blockhashCtx.lastValidBlockHeight,
+        });
+        tx.add(...ix);
+        tx.sign(bot);
+        usdcTxSignature = await connection.sendRawTransaction(tx.serialize(), {
+          skipPreflight: false,
+          preflightCommitment: 'confirmed',
+        });
+        const conf = await connection.confirmTransaction({
+          signature: usdcTxSignature,
+          blockhash: blockhashCtx.blockhash,
+          lastValidBlockHeight: blockhashCtx.lastValidBlockHeight,
+        }, 'confirmed');
+        if (conf.value.err) {
+          return { usdcSwept: 0, solReclaimed: 0, usdcTxSignature, error: `USDC sweep failed on-chain: ${JSON.stringify(conf.value.err)}` };
+        }
+        usdcSwept = Number(botUsdc.toString()) / 1e6;
+      } catch (err) {
+        return { usdcSwept: 0, solReclaimed: 0, error: `USDC sweep failed: ${err instanceof Error ? err.message : String(err)}` };
+      }
+    }
+
+    // ── 2) Native SOL: reclaim the leftover seed (best-effort dust recovery) ──
+    let solReclaimed = 0;
+    let solTxSignature: string | undefined;
+    try {
+      const lamports = await connection.getBalance(botWallet);
+      const TX_FEE_LAMPORTS = 5000; // single-signature fee
+      const reclaim = lamports - TX_FEE_LAMPORTS;
+      if (reclaim > 0) {
+        const blockhashCtx = await connection.getLatestBlockhash('confirmed');
+        const tx = new Transaction({
+          feePayer: botWallet,
+          blockhash: blockhashCtx.blockhash,
+          lastValidBlockHeight: blockhashCtx.lastValidBlockHeight,
+        });
+        tx.add(SystemProgram.transfer({ fromPubkey: botWallet, toPubkey: dest, lamports: reclaim }));
+        tx.sign(bot);
+        solTxSignature = await connection.sendRawTransaction(tx.serialize(), {
+          skipPreflight: false,
+          preflightCommitment: 'confirmed',
+        });
+        await connection.confirmTransaction({
+          signature: solTxSignature,
+          blockhash: blockhashCtx.blockhash,
+          lastValidBlockHeight: blockhashCtx.lastValidBlockHeight,
+        }, 'confirmed');
+        solReclaimed = reclaim / LAMPORTS_PER_SOL;
+      }
+    } catch (err) {
+      // Never block deletion on dust recovery — the USDC (the real money) is safe.
+      console.warn(`[Flash sweepBotWallet] SOL reclaim failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    return { usdcSwept, solReclaimed, usdcTxSignature, solTxSignature };
   }
 
   async listSubaccounts(agentPublicKey: string): Promise<SubaccountInfo[]> {
