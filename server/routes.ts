@@ -5398,94 +5398,44 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const bots = await storage.getTradingBots(req.walletAddress!);
       const reconciled: any[] = [];
       const discrepancies: any[] = [];
-      let totalOnChainPositions = 0;
-
-      // BATCH OPTIMIZATION: Fetch all positions in single RPC call (deduplicated)
-      const subAccountIds = Array.from(new Set(bots.map(b => b.driftSubaccountId ?? 0)));
-      const batchPositions = await getBatchPerpPositions(wallet.agentPublicKey, subAccountIds);
-
-      // Process each bot using batch-fetched positions
+      // Per-bot reconciliation. CRITICAL: each bot MUST resolve its OWN protocol
+      // adapter AND account identity. A Flash (external_key) bot lives on its own
+      // dedicated wallet (protocolSubaccountId) and must be read via getAdapterForBot,
+      // NOT the default (Pacifica) adapter at the agent's Drift subaccount. The old
+      // single default-adapter batch call (getBatchPerpPositions => getDefaultAdapter)
+      // mis-routed Flash bots: it read the wrong venue/identity and could write a
+      // cross-venue position back into a Flash bot's row — re-opening a position the
+      // user just closed. Delegate to the SAME reconcileBotPosition routine the 60s
+      // periodic reconciler uses so per-protocol routing + idempotent close detection
+      // are identical everywhere.
       for (const bot of bots) {
         const subAccountId = bot.driftSubaccountId ?? 0;
-        const onChainPositions = batchPositions.get(subAccountId) || [];
-        totalOnChainPositions += onChainPositions.length;
-        console.log(`[Reconcile] Bot ${bot.name} (subaccount ${subAccountId}): Found ${onChainPositions.length} on-chain positions`);
-
-        // Find position matching this bot's market
-        const pos = onChainPositions.find((p: any) => p.market === bot.market);
-        const dbPosition = await storage.getBotPosition(bot.id, bot.market);
-        const dbBaseSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;
-
-        if (pos) {
-          const onChainBaseSize = pos.baseAssetAmount;
-          
-          // Check for discrepancy
-          if (Math.abs(dbBaseSize - onChainBaseSize) > 0.0001) {
-            discrepancies.push({
-              botId: bot.id,
-              botName: bot.name,
-              market: pos.market,
-              subAccountId,
-              database: { baseSize: dbBaseSize },
-              onChain: { 
-                baseSize: onChainBaseSize, 
-                side: pos.side,
-                entryPrice: pos.entryPrice 
-              }
-            });
-
-            // Update database with on-chain data
-            await storage.upsertBotPosition({
-              tradingBotId: bot.id,
-              walletAddress: bot.walletAddress,
-              market: pos.market,
-              baseSize: String(onChainBaseSize),
-              avgEntryPrice: String(pos.entryPrice),
-              costBasis: String(Math.abs(onChainBaseSize) * pos.entryPrice),
-              realizedPnl: dbPosition?.realizedPnl || "0",
-              totalFees: dbPosition?.totalFees || "0",
-              lastTradeId: dbPosition?.lastTradeId || null,
-              lastTradeAt: new Date(),
-            });
-
-            reconciled.push({
-              botId: bot.id,
-              botName: bot.name,
-              market: pos.market,
-              subAccountId,
-              newPosition: {
-                baseSize: onChainBaseSize,
-                side: pos.side,
-                entryPrice: pos.entryPrice
-              }
-            });
+        const botSubPubKey = (bot.subaccountAuthMode === 'external_key' && bot.subaccountStatus === 'active' && bot.protocolSubaccountId)
+          ? bot.protocolSubaccountId
+          : undefined;
+        try {
+          const result = await reconcileBotPosition(
+            bot.id,
+            req.walletAddress!,
+            wallet.agentPublicKey,
+            subAccountId,
+            bot.market,
+            botSubPubKey,
+          );
+          if (result.synced) {
+            reconciled.push({ botId: bot.id, botName: bot.name, market: bot.market, subAccountId });
           }
-        } else if (dbPosition && Math.abs(dbBaseSize) > 0.0001) {
-          discrepancies.push({
-            botId: bot.id,
-            botName: bot.name,
-            market: bot.market,
-            subAccountId,
-            database: { baseSize: dbBaseSize },
-            onChain: { baseSize: 0, side: 'FLAT' },
-            action: 'preserved_db'
-          });
-
-          console.log(`[Reconcile] On-chain empty but DB has ${dbBaseSize} ${bot.market} for bot ${bot.name} — preserving DB (source of truth)`);
-
-          reconciled.push({
-            botId: bot.id,
-            botName: bot.name,
-            market: bot.market,
-            subAccountId,
-            newPosition: { baseSize: 0, side: 'FLAT' }
-          });
+          if (result.discrepancy || result.liquidation) {
+            discrepancies.push({ botId: bot.id, botName: bot.name, market: bot.market, subAccountId, liquidation: result.liquidation ?? false });
+          }
+        } catch (botErr) {
+          console.error(`[Reconcile] Failed to reconcile bot ${bot.name} (${bot.id}):`, botErr);
+          discrepancies.push({ botId: bot.id, botName: bot.name, market: bot.market, subAccountId, error: botErr instanceof Error ? botErr.message : String(botErr) });
         }
       }
 
       res.json({ 
         success: true,
-        totalOnChainPositions,
         botsChecked: bots.length,
         discrepancies,
         reconciled,
