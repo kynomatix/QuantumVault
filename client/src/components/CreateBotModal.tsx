@@ -209,6 +209,13 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   // entered at least the $10 minimum, so floating-point dust never triggers a
   // "$0.00" warning.
   const needsUsdcDeposit = usdcDeficit >= 0.01 && investmentValue >= 10;
+
+  // Per-exchange minimum funding. Pacifica enforces a $10 floor server-side; below
+  // that the atomic provision throws a raw 500. Block the Create button (and show a
+  // calm yellow tip) so that aggressive toast never fires. Flash has no minimum.
+  const activeProtocolMeta = SELECTABLE_PROTOCOLS.find((p) => p.id === newBot.activeProtocol);
+  const minDeposit = activeProtocolMeta?.minDeposit ?? 0;
+  const belowMinimum = minDeposit > 0 && investmentValue > 0 && investmentValue < minDeposit;
   
   // Fetch agent balance when modal opens
   const fetchAgentBalanceOnOpen = async () => {
@@ -771,7 +778,12 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="investment-amount">Investment Amount (USDC)</Label>
+          <Label htmlFor="investment-amount">
+            Investment Amount (USDC)
+            {minDeposit > 0 && (
+              <span className="text-muted-foreground font-normal"> · min ${minDeposit}</span>
+            )}
+          </Label>
           <div className="flex gap-2">
             <Input
               id="investment-amount"
@@ -803,6 +815,17 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
               <span className="text-yellow-600">No USDC in agent wallet. Fund it from Wallet Management first.</span>
             )}
           </p>
+          {belowMinimum && (
+            <div
+              className="flex items-start gap-2 p-2 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-xs"
+              data-testid="warning-below-minimum"
+            >
+              <AlertTriangle className="w-3.5 h-3.5 text-yellow-400 mt-0.5 flex-shrink-0" />
+              <span className="text-yellow-400">
+                {activeProtocolMeta?.label} requires a minimum of ${minDeposit} to create a bot. Enter ${minDeposit} or more.
+              </span>
+            </div>
+          )}
         </div>
 
         {investmentValue > 0 && (
@@ -921,6 +944,9 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
             disabled={
               isCreating ||
               !newBot.name ||
+              // Block sub-minimum funding (Pacifica $10 floor) so the raw 500 toast
+              // never fires; Flash has no minimum so this never trips for Flash.
+              belowMinimum ||
               // Don't allow Create until we actually know the agent balance for
               // the entered investment amount — otherwise the user could click
               // Create before `needsUsdcDeposit` has had a chance to evaluate.

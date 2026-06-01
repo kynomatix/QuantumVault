@@ -54,12 +54,20 @@ export interface ProtocolMeta {
   id: ProtocolId;
   label: string;
   icon: string;
+  // Minimum funding (USDC) required to create a bot on this exchange. 0 = no minimum.
+  // Pacifica enforces a $10 floor in its atomic provision path; Flash has none.
+  minDeposit: number;
 }
 
 // User-selectable exchanges for new bot creation. Drift is intentionally excluded
 // (retired — existing Drift bots keep running, but no new ones can be created). Icons
 // are the white monochrome marks in client/public/images/exchange/.
 export const SELECTABLE_PROTOCOLS: ProtocolMeta[] = [
-  { id: 'pacifica', label: 'Pacifica', icon: '/images/exchange/Pacifica.webp' },
-  { id: 'flash', label: 'Flash', icon: '/images/exchange/Flash.webp' },
+  { id: 'pacifica', label: 'Pacifica', icon: '/images/exchange/Pacifica.webp', minDeposit: 10 },
+  { id: 'flash', label: 'Flash', icon: '/images/exchange/Flash.webp', minDeposit: 0 },
 ];
+
+// Minimum funding (USDC) required to create a bot on the given protocol.
+export function getProtocolMinDeposit(id: ProtocolId): number {
+  return SELECTABLE_PROTOCOLS.find((p) => p.id === id)?.minDeposit ?? 0;
+}
