@@ -1016,6 +1016,10 @@ export class FlashAdapter implements ProtocolAdapter {
     fundedAmount: number;
     solSeeded: number;
     warning?: string;
+    // True only when the funding tx was sent but its on-chain outcome could not be
+    // determined (RPC degraded). The caller MUST NOT discard the key/funds — it has
+    // to persist a recovery record because the tx MAY have committed.
+    ambiguous?: boolean;
   }> {
     if (!input.subSecretKey || input.subSecretKey.length !== 64) {
       throw new Error('provisionBotWallet requires a 64-byte per-bot subSecretKey');
@@ -1153,7 +1157,7 @@ export class FlashAdapter implements ProtocolAdapter {
       // but FLAG the ambiguity with the signature so any landed funds are traceable
       // and the caller never double-funds on a blind retry.
       console.error(`[Flash provisionBotWallet] AMBIGUOUS funding outcome — could not confirm tx ${txSignature}. Verify on-chain before retrying.`);
-      return { subaccountId, transferSucceeded: false, fundedAmount: 0, solSeeded: 0, txSignature, warning: `AMBIGUOUS funding outcome for tx ${txSignature} — could not confirm on-chain commit. Verify this signature before retrying to avoid double-funding.` };
+      return { subaccountId, transferSucceeded: false, ambiguous: true, fundedAmount: 0, solSeeded: 0, txSignature, warning: `AMBIGUOUS funding outcome for tx ${txSignature} — could not confirm on-chain commit. Verify this signature before retrying to avoid double-funding.` };
     }
   }
 
@@ -1301,6 +1305,36 @@ export class FlashAdapter implements ProtocolAdapter {
       // No ATA / not found = zero balance. Truthful "no account", not a money fallback.
       return 0;
     }
+  }
+
+  /**
+   * Strict USDC balance read for fund-safety GUARDS (e.g. verify-empty before key
+   * discard). Unlike getWalletCollateralBalance, this returns 0 ONLY for a genuine
+   * "no token account" and RE-THROWS on RPC/other errors so callers fail closed
+   * instead of mistaking an RPC outage for an empty wallet.
+   */
+  async getWalletCollateralBalanceStrict(walletAddress: string): Promise<number> {
+    const owner = new PublicKey(walletAddress);
+    const ata = getAssociatedTokenAddressSync(new PublicKey(FLASH_USDC_MINT), owner, true);
+    try {
+      const acc = await getAccount(this._getConnection(), ata);
+      return Number(acc.amount.toString()) / 1e6;
+    } catch (err: any) {
+      const name = err?.name || '';
+      if (name === 'TokenAccountNotFoundError' || name === 'TokenInvalidAccountOwnerError') {
+        return 0; // genuinely no account → zero balance
+      }
+      throw err; // RPC/other error → caller MUST fail closed
+    }
+  }
+
+  /**
+   * Native SOL balance of an address, in SOL. Throws on RPC error so fund-safety
+   * guards can fail closed (an unreadable balance must never be treated as empty).
+   */
+  async getWalletSolBalance(walletAddress: string): Promise<number> {
+    const lamports = await this._getConnection().getBalance(new PublicKey(walletAddress));
+    return lamports / LAMPORTS_PER_SOL;
   }
 
   // ── PnL settlement ──────────────────────────────────────────────────────────
