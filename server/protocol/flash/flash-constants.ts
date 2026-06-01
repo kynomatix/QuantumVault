@@ -25,14 +25,22 @@ export const FLASH_PRIMARY_POOL = 'Crypto.1';
 export const FLASH_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 
 /**
- * Conservative minimum transfer amount for deposits/withdrawals.
- * Flash does not document an explicit minimum; $10 matches the Pacifica/Drift
- * floor and prevents micro-dust transactions.  Revisit when exact protocol
- * minimum is confirmed.
+ * Minimum transfer amount for deposits/withdrawals — a small dust floor, NOT a
+ * protocol rule.
  *
- * TODO(flash-phase2): confirm Flash's actual minimum collateral amount.
+ * Flash has NO protocol-enforced transfer minimum. Unlike Pacifica (real $10
+ * minimum + $1 on-chain withdraw fee), a Flash deposit/withdraw is just a plain
+ * SPL USDC transfer between the bot's own wallet ATA and the user's main wallet
+ * (see executeWithdraw/executeDeposit) — on-chain the only floor is one base
+ * unit (0.000001 USDC). The earlier $10 here was a conservative placeholder
+ * copied from Pacifica's floor and incorrectly blocked legitimate small
+ * withdrawals.
+ *
+ * We keep a tiny floor (matching Drift's 0.1) only to avoid attempting
+ * zero/micro-dust transfers that waste gas. This same constant also drives the
+ * delete-sweep dust threshold, so a lower value means the sweep reclaims more.
  */
-export const FLASH_MIN_TRANSFER_USDC = 10;
+export const FLASH_MIN_TRANSFER_USDC = 0.1;
 
 /**
  * Native SOL seeded into each NEW Flash per-bot wallet at creation, moved from
