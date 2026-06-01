@@ -327,6 +327,12 @@ export interface AdapterCapabilities {
   supportsWebSocket: boolean;
   supportsSettlePnl: boolean;
   supportsCloseSubaccount: boolean;
+  // Whether per-trade creator profit-share can be paid out IMMEDIATELY on close
+  // (settle → withdraw → pay) economically. Venues with a per-withdraw fee and/or
+  // a high transfer minimum (so a typical per-trade share can't clear it) set this
+  // false and instead require an accumulate-then-claim model. Behavioural gate —
+  // do NOT branch on protocol name.
+  supportsImmediateProfitShare: boolean;
   maxSubaccounts: number | null;
   settlementType: 'on-chain' | 'off-chain' | 'hybrid';
   requiresExternalSubaccountKey: boolean;

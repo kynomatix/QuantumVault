@@ -709,9 +709,14 @@ export const pendingProfitShares = pgTable("pending_profit_shares", {
   profitSharePercent: decimal("profit_share_percent", { precision: 5, scale: 2 }).notNull(),
   tradeId: text("trade_id").notNull(),
   publishedBotId: varchar("published_bot_id").references(() => publishedBots.id, { onDelete: "set null" }),
-  driftSubaccountId: integer("drift_subaccount_id").notNull(),
+  // 5.5: nullable — venues without a numeric subaccount (e.g. Flash HD wallets)
+  // identify the subaccount via protocolSubaccountId instead.
+  driftSubaccountId: integer("drift_subaccount_id"),
   protocolSubaccountId: text("protocol_subaccount_id"),
-  status: text("status").notNull().default("pending"), // pending, processing, paid, voided
+  // 5.5: which protocol this owed share belongs to (e.g. 'pacifica', 'flash').
+  // Nullable for legacy rows written before this column existed.
+  protocol: text("protocol"),
+  status: text("status").notNull().default("pending"), // pending, processing, paid, voided, deferred
   retryCount: integer("retry_count").notNull().default(0),
   lastError: text("last_error"),
   lastAttemptAt: timestamp("last_attempt_at"),

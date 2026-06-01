@@ -224,6 +224,9 @@ export class FlashAdapter implements ProtocolAdapter {
       supportsWebSocket: false,
       supportsSettlePnl: false,
       supportsCloseSubaccount: false,
+      // No withdraw fee and a negligible $0.1 transfer minimum → per-trade
+      // creator profit-share can be paid out immediately and economically.
+      supportsImmediateProfitShare: true,
       maxSubaccounts: null,
       settlementType: 'on-chain',
       requiresExternalSubaccountKey: true,

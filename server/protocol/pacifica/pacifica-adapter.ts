@@ -240,6 +240,10 @@ export class PacificaAdapter implements ProtocolAdapter {
       supportsWebSocket: true,
       supportsSettlePnl: false,
       supportsCloseSubaccount: false,
+      // $1 per-withdraw fee + $10 transfer minimum make per-trade payouts
+      // uneconomical → copy-bot profit-share must accumulate then claim, not
+      // pay immediately on every close.
+      supportsImmediateProfitShare: false,
       maxSubaccounts: null,
       settlementType: 'hybrid',
       requiresExternalSubaccountKey: true,

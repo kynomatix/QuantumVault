@@ -191,6 +191,9 @@ export class DriftAdapter implements ProtocolAdapter {
       supportsIsolatedMargin: false,
       supportsWebSocket: false,
       supportsSettlePnl: true,
+      // Legacy venue (retired for new bots): on-chain withdraw with no fixed fee
+      // floor — existing Drift copy bots keep the immediate per-trade payout.
+      supportsImmediateProfitShare: true,
       // Currently false because closeSubaccount() throws NotSupportedError —
       // the ProtocolAdapter signature does not pass an agent secret key, but
       // drift-service.closeDriftSubaccount requires an encrypted private key

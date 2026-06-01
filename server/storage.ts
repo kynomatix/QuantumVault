@@ -412,6 +412,7 @@ export interface IStorage {
   createPendingProfitShare(data: InsertPendingProfitShare): Promise<PendingProfitShare>;
   getPendingProfitSharesBySubscriber(subscriberWalletAddress: string): Promise<PendingProfitShare[]>;
   getPendingProfitSharesByBot(subscriberBotId: string): Promise<PendingProfitShare[]>;
+  getUnsettledProfitSharesByBot(subscriberBotId: string): Promise<PendingProfitShare[]>;
   getAllPendingProfitShares(): Promise<PendingProfitShare[]>;
   updatePendingProfitShareStatus(id: string, updates: { status?: string; retryCount?: number; lastError?: string | null; lastAttemptAt?: Date }): Promise<PendingProfitShare | undefined>;
   deletePendingProfitShare(id: string): Promise<void>;
@@ -2651,6 +2652,24 @@ export class DatabaseStorage implements IStorage {
   // Alias for routes.ts compatibility
   async getPendingProfitSharesBySubscriberBot(subscriberBotId: string): Promise<PendingProfitShare[]> {
     return this.getPendingProfitSharesByBot(subscriberBotId);
+  }
+
+  // Every still-owed creator share for a bot: 'pending'/'processing' (immediate-payout
+  // retries in flight) PLUS 'deferred' (accumulate+claim venues like Pacifica whose
+  // per-trade payout is uneconomical). Used by teardown paths (unsubscribe/delete) so a
+  // departing subscriber settles the full liability — the immediate-payout retry job
+  // deliberately ignores 'deferred' and would otherwise never pay these.
+  async getUnsettledProfitSharesByBot(subscriberBotId: string): Promise<PendingProfitShare[]> {
+    return db.select().from(pendingProfitShares)
+      .where(and(
+        eq(pendingProfitShares.subscriberBotId, subscriberBotId),
+        or(
+          eq(pendingProfitShares.status, 'pending'),
+          eq(pendingProfitShares.status, 'processing'),
+          eq(pendingProfitShares.status, 'deferred')
+        )
+      ))
+      .orderBy(desc(pendingProfitShares.createdAt));
   }
   
   async getPendingProfitSharesProcessing(): Promise<PendingProfitShare[]> {

@@ -1898,6 +1898,303 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
   };
 }
 
+/**
+ * Phase 5.5: shared protocol-aware provisioning for an external-key bot subaccount
+ * (Pacifica funded subaccount / Flash per-bot HD wallet). Mirrors the pre-insert
+ * provisioning at the main bot-creation site (POST /api/trading-bots) so the
+ * marketplace subscribe flow provisions a copy bot on the SAME protocol+contract
+ * instead of the retired, Drift-hardcoded path.
+ *
+ * Returns the values the caller persists on the bot row, plus the still-in-memory
+ * bot secret key. The caller MUST insert the bot row and then call
+ * persistBotSubaccountKeyV3WithRollback() to encrypt+store that key (bound to the
+ * new bot.id) and flip the bot to 'active' — which also zeroizes the key.
+ *
+ * Only external_key adapters (requiresExternalSubaccountKey=true) are supported;
+ * Drift (main_plus_id) is retired for new bots/subscriptions and rejected here.
+ * For agent_hd adapters (Flash) the caller passes the decrypted agent mnemonic,
+ * which this helper CONSUMES and zeroizes the instant it has derived the wallet.
+ */
+async function provisionExternalKeyBotSubaccount(params: {
+  walletAddress: string;
+  agentKeypair: import('@solana/web3.js').Keypair;
+  agentMnemonic: Buffer | null;
+  adapter: ProtocolAdapter;
+  fundingAmount: number;
+}): Promise<{
+  botSubaccountPublicKey: string;
+  pendingBotSecretKeyForV3: Uint8Array;
+  subaccountAuthMode: 'external_key';
+  subaccountStatus: string;
+  derivationIndex: number | null;
+  derivationPathVersion: number | null;
+  ambiguous: boolean;
+  provisionMeta: { funded: boolean; depositTxSignature?: string; fundedAmount: number; wasNewAccount?: boolean; warning?: string; solSeeded?: number };
+}> {
+  const { walletAddress, agentKeypair, adapter, fundingAmount } = params;
+  let agentMnemonic = params.agentMnemonic;
+  const caps = adapter.getCapabilities();
+  if (!caps.requiresExternalSubaccountKey) {
+    throw new Error(`provisionExternalKeyBotSubaccount called for non-external-key protocol '${adapter.protocolName}' (Drift is retired)`);
+  }
+  if (!(Number.isFinite(fundingAmount) && fundingAmount > 0)) {
+    throw new Error(`Funding amount must be > 0 to provision a ${adapter.protocolName} subaccount`);
+  }
+
+  const { Keypair } = await import('@solana/web3.js');
+
+  // Derive (Flash agent_hd, recoverable) or generate (Pacifica) the bot's keypair.
+  let botKeypair: import('@solana/web3.js').Keypair;
+  let derivationIndex: number | null = null;
+  let derivationPathVersion: number | null = null;
+  if (caps.walletDerivation === 'agent_hd') {
+    if (!agentMnemonic) {
+      throw new Error(`${adapter.protocolName} requires a recovery phrase to derive a recoverable per-bot wallet`);
+    }
+    derivationIndex = await storage.allocateBotDerivationIndex(walletAddress);
+    derivationPathVersion = BOT_DERIVATION_PATH_VERSION;
+    try {
+      botKeypair = deriveBotKeypairFromAgentSeed(agentMnemonic, derivationIndex, derivationPathVersion);
+    } finally {
+      try { agentMnemonic.fill(0); } catch { /* noop */ }
+      agentMnemonic = null;
+    }
+  } else {
+    botKeypair = Keypair.generate();
+  }
+
+  let botSubaccountPublicKey: string;
+  let ambiguous = false;
+  let provisionMeta: { funded: boolean; depositTxSignature?: string; fundedAmount: number; wasNewAccount?: boolean; warning?: string; solSeeded?: number };
+
+  if (adapter.protocolName === 'pacifica') {
+    const pacificaAdapter = adapter as unknown as import('./protocol/pacifica/pacifica-adapter').PacificaAdapter;
+    const result = await pacificaAdapter.provisionFundedSubaccount({
+      mainSecretKey: agentKeypair.secretKey,
+      subSecretKey: botKeypair.secretKey,
+      agentPublicKey: agentKeypair.publicKey.toString(),
+      fundingAmount,
+    });
+    botSubaccountPublicKey = result.subaccountId;
+    provisionMeta = {
+      funded: result.transferSucceeded,
+      wasNewAccount: result.wasNewAccount,
+      depositTxSignature: result.depositTxSignature,
+      warning: result.warning,
+      fundedAmount: result.transferSucceeded ? fundingAmount : 0,
+    };
+    // Best-effort builder-code + referral warm-up so the first trade is tagged.
+    // Non-fatal — the adapter retries on the next trade if this fails.
+    try {
+      const agentPub = agentKeypair.publicKey.toString();
+      await Promise.allSettled([
+        pacificaAdapter.approveBuilderCodeForUser({ agentPublicKey: agentPub, agentSecretKey: agentKeypair.secretKey }),
+        pacificaAdapter.claimReferralCodeForUser({ agentPublicKey: agentPub, agentSecretKey: agentKeypair.secretKey }),
+      ]);
+    } catch (enrollErr: any) {
+      console.warn('[Provision] Pacifica enrollment warm-up failed (non-fatal, retries on next trade):', enrollErr?.message || enrollErr);
+    }
+    console.log(`[Provision] Pacifica atomic provision done: subaccount=${botSubaccountPublicKey} wasNew=${result.wasNewAccount} transferred=${result.transferSucceeded}`);
+  } else if (adapter.protocolName === 'flash') {
+    const flashAdapter = adapter as unknown as import('./protocol/flash/flash-adapter').FlashAdapter;
+    const result = await flashAdapter.provisionBotWallet({
+      mainSecretKey: agentKeypair.secretKey,
+      subSecretKey: botKeypair.secretKey,
+      fundingAmount,
+    });
+    botSubaccountPublicKey = result.subaccountId;
+    if (result.ambiguous) {
+      // Funding tx was sent but its on-chain outcome could NOT be confirmed (RPC
+      // degraded). Do NOT discard the key/funds: caller persists the key and flags
+      // the bot 'error' (action-required), and does NOT treat it as funded.
+      ambiguous = true;
+      provisionMeta = { funded: false, depositTxSignature: result.txSignature, fundedAmount: 0 };
+      console.error(`[Provision] Flash funding AMBIGUOUS — wallet=${botSubaccountPublicKey} tx=${result.txSignature}; key will be persisted in 'error' state for recovery`);
+    } else if (!result.transferSucceeded) {
+      // Atomic failure: no funds moved. Throw so the caller 500s with nothing
+      // stranded and no bot row inserted.
+      throw new Error(result.warning || 'Flash bot wallet funding failed');
+    } else {
+      provisionMeta = { funded: true, depositTxSignature: result.txSignature, fundedAmount: result.fundedAmount, solSeeded: result.solSeeded };
+      console.log(`[Provision] Flash per-bot wallet provisioned: wallet=${botSubaccountPublicKey} funded=$${result.fundedAmount} solSeed=${result.solSeeded} tx=${result.txSignature}`);
+    }
+  } else {
+    throw new Error(`Unsupported external-key protocol for provisioning: ${adapter.protocolName}`);
+  }
+
+  return {
+    botSubaccountPublicKey,
+    pendingBotSecretKeyForV3: botKeypair.secretKey,
+    subaccountAuthMode: 'external_key',
+    // Stay 'pending' until the V3 ciphertext is written post-insert (keeps the
+    // CHECK constraint external_key+active ⇒ key satisfied at insert time).
+    subaccountStatus: 'pending',
+    derivationIndex,
+    derivationPathVersion,
+    ambiguous,
+    provisionMeta,
+  };
+}
+
+/**
+ * Phase 5.5: protocol-aware fail-closed recovery of funds in a freshly provisioned
+ * external-key subaccount, working from the RAW in-memory key + pubkey (no bot row
+ * required). Returns swept=true ONLY when the subaccount is verified empty (or its
+ * residual is unrecoverable sub-minimum dust). Used by both the post-insert key-write
+ * rollback and the insert-failure rollback so neither path can silently lose funds.
+ *
+ * Flash: sweep the bot wallet back to the agent (2 attempts) and verify both USDC and
+ * reclaimable SOL are gone. Pacifica: transfer the subaccount balance back to the
+ * agent's main account (funds are safe + recoverable there) and verify the subaccount
+ * drained below the min-transfer floor. Reads fail CLOSED (any unknown ⇒ not swept).
+ */
+async function sweepProvisionedExternalKeyFunds(params: {
+  adapter: ProtocolAdapter;
+  subSecretKey: Uint8Array;
+  subaccountPublicKey: string;
+  agentPublicKey: string | null;
+  logPrefix?: string;
+}): Promise<{ swept: boolean; detail: string }> {
+  const { adapter, subSecretKey, subaccountPublicKey, agentPublicKey } = params;
+  const logPrefix = params.logPrefix ?? '[Provision]';
+  if (!agentPublicKey) return { swept: false, detail: 'no agent public key available for sweep' };
+
+  if (adapter.protocolName === 'flash') {
+    const flashAdapter = adapter as unknown as import('./protocol/flash/flash-adapter').FlashAdapter;
+    let swept = false;
+    for (let attempt = 0; attempt < 2 && !swept; attempt++) {
+      try {
+        const rollback = await flashAdapter.sweepBotWallet({ subSecretKey, destWalletAddress: agentPublicKey });
+        if (rollback.error) console.error(`${logPrefix} Flash rollback sweep attempt ${attempt + 1} failed: ${rollback.error}`);
+        else console.warn(`${logPrefix} Flash rollback swept $${rollback.usdcSwept.toFixed(6)} USDC + ${rollback.solReclaimed.toFixed(6)} SOL back to agent wallet`);
+      } catch (sweepErr: any) {
+        console.error(`${logPrefix} Flash rollback sweep attempt ${attempt + 1} threw: ${sweepErr?.message || sweepErr}`);
+      }
+      let residualUsdc = -1, residualSol = Number.POSITIVE_INFINITY;
+      try {
+        residualUsdc = await flashAdapter.getWalletCollateralBalanceStrict(subaccountPublicKey);
+        residualSol = await flashAdapter.getWalletSolBalance(subaccountPublicKey);
+      } catch { /* leave sentinels → not swept */ }
+      if (residualUsdc === 0 && residualSol <= 0.001) swept = true;
+    }
+    return { swept, detail: swept ? 'flash wallet confirmed empty' : 'flash wallet could not be confirmed empty' };
+  }
+
+  if (adapter.protocolName === 'pacifica') {
+    try {
+      const info = await adapter.getAccountInfo(subaccountPublicKey);
+      const balance = info?.equity ?? info?.balance ?? 0;
+      if (balance >= adapter.minTransferAmount) {
+        const tr = await adapter.transferBetweenSubaccounts({
+          agentSecretKey: subSecretKey,
+          mainWalletAddress: agentPublicKey,
+          fromSubaccountId: subaccountPublicKey,
+          toSubaccountId: agentPublicKey,
+          amount: balance,
+        });
+        if (!tr.success) return { swept: false, detail: `pacifica subaccount→main transfer failed: ${tr.error}` };
+        console.warn(`${logPrefix} Pacifica rollback moved $${balance.toFixed(6)} from subaccount ${subaccountPublicKey.slice(0, 8)}... back to agent main account`);
+      }
+      // Verify drained. A residual below the min-transfer floor is unrecoverable dust
+      // (cannot be moved on Pacifica anyway), so treat that as drained. A read failure
+      // is UNKNOWN → fail closed (not swept).
+      let residual = Number.POSITIVE_INFINITY;
+      try {
+        const after = await adapter.getAccountInfo(subaccountPublicKey);
+        residual = after?.equity ?? after?.balance ?? 0;
+      } catch (verifyErr: any) {
+        return { swept: false, detail: `could not verify pacifica subaccount empty: ${verifyErr?.message || verifyErr}` };
+      }
+      const swept = residual < adapter.minTransferAmount;
+      return { swept, detail: swept ? `pacifica subaccount drained (residual $${residual.toFixed(6)})` : `pacifica residual $${residual.toFixed(6)} still >= min transfer` };
+    } catch (pErr: any) {
+      return { swept: false, detail: `pacifica sweep error: ${pErr?.message || pErr}` };
+    }
+  }
+
+  return { swept: false, detail: `unsupported protocol for sweep: ${adapter.protocolName}` };
+}
+
+/**
+ * Phase 5.5: shared post-insert step that secures a freshly provisioned external-key
+ * bot's secret key. Encrypts the key under the owner's UMK bound to the new bot.id
+ * (AAD), persists the V3 ciphertext, and flips the bot to 'active' (or 'error' when
+ * Flash funding was ambiguous). ALWAYS zeroizes the in-memory key.
+ *
+ * Fails CLOSED: on a key-write failure it sweeps the subaccount back to the agent
+ * (protocol-aware: Flash wallet sweep / Pacifica sub→main transfer) and only deletes
+ * the bot row once the subaccount is CONFIRMED empty; otherwise it preserves the row
+ * in 'error' (retaining the key ciphertext when available) so funds stay recoverable.
+ * Returns the HTTP error the caller should surface, or { ok }.
+ *
+ * Mirrors the post-insert V3 key block at the main bot-creation site.
+ */
+async function persistBotSubaccountKeyV3WithRollback(params: {
+  walletAddress: string;
+  botId: string;
+  botSubaccountPublicKey: string;
+  pendingBotSecretKeyForV3: Uint8Array;
+  adapter: ProtocolAdapter;
+  ambiguous: boolean;
+  agentPublicKey: string | null;
+}): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+  const { walletAddress, botId, botSubaccountPublicKey, pendingBotSecretKeyForV3, adapter, ambiguous, agentPublicKey } = params;
+  let _botSubUmk: { umk: Buffer; cleanup: () => void } | null = null;
+  let v3Ciphertext: string | null = null;
+  try {
+    _botSubUmk = await getUmkForWebhook(walletAddress);
+    let umkBuf: Buffer | null = _botSubUmk ? _botSubUmk.umk : null;
+    if (!umkBuf) {
+      const sessionRes = getSessionByWalletAddress(walletAddress);
+      if (!sessionRes) {
+        throw new Error('No active session available to derive bot-subaccount subkey');
+      }
+      umkBuf = sessionRes.session.umk;
+    }
+    v3Ciphertext = encryptBotSubaccountKeyV3(umkBuf, Buffer.from(pendingBotSecretKeyForV3), walletAddress, botId);
+    await storage.updateBotSubaccountKeyV3(botId, v3Ciphertext);
+    await storage.updateTradingBot(botId, { subaccountStatus: ambiguous ? 'error' : 'active' } as any);
+    return { ok: true };
+  } catch (v3Err: any) {
+    console.error(`[Provision] Failed to write V3 bot-subaccount key for bot ${botId}:`, v3Err.message);
+    // The funding tx already moved funds into the bot's subaccount/wallet, but the
+    // V3 key was NOT persisted — the in-memory key (zeroized in the finally below) is
+    // the ONLY copy. Sweep funds back to the agent NOW (protocol-aware), and only
+    // delete the row once the subaccount is CONFIRMED empty. If the sweep can't be
+    // confirmed, preserve the row as 'error' and fail closed so the stranded funds
+    // stay traceable rather than discarding the last key reference + audit trail.
+    const recovery = await sweepProvisionedExternalKeyFunds({
+      adapter,
+      subSecretKey: pendingBotSecretKeyForV3,
+      subaccountPublicKey: botSubaccountPublicKey,
+      agentPublicKey,
+    });
+    if (!recovery.swept) {
+      // Last-resort durable key retention: if the encryption succeeded and only the
+      // DB write failed, we still hold the ciphertext. Retry persisting it onto the
+      // preserved 'error' row so the standard recovery tooling can later drain the
+      // subaccount — this is the ONLY key copy and the finally below zeroizes it.
+      if (v3Ciphertext) {
+        try {
+          await storage.updateBotSubaccountKeyV3(botId, v3Ciphertext);
+          console.warn(`[Provision] Retained V3 key on preserved 'error' row for bot ${botId} — subaccount ${botSubaccountPublicKey} remains recoverable`);
+        } catch (retainErr: any) {
+          console.error(`[Provision] Could not retain V3 key on 'error' row for bot ${botId}: ${retainErr?.message || retainErr}`);
+        }
+      }
+      try { await storage.updateTradingBot(botId, { subaccountStatus: 'error' } as any); } catch { /* noop */ }
+      console.error(`[Provision] CRITICAL: rollback could not confirm empty subaccount ${botSubaccountPublicKey} for bot ${botId} (${recovery.detail}) — preserving row for recovery`);
+      return { ok: false, status: 500, error: `Failed to secure bot subaccount key and could not fully return funds. Your bot subaccount ${botSubaccountPublicKey} may still hold funds — please contact support before subscribing again.` };
+    }
+    // Subaccount confirmed empty — safe to delete the row.
+    try { await storage.deleteTradingBot(botId); } catch { /* noop */ }
+    return { ok: false, status: 500, error: `Failed to secure bot subaccount key: ${v3Err.message}` };
+  } finally {
+    try { _botSubUmk?.cleanup(); } catch { /* noop */ }
+    try { pendingBotSecretKeyForV3.fill(0); } catch { /* noop */ }
+  }
+}
+
 // Distribute profit share from subscriber bot to signal creator
 // Called after a profitable close trade on subscriber bots
 async function distributeCreatorProfitShare(params: {
@@ -1985,10 +2282,12 @@ async function distributeCreatorProfitShare(params: {
   // for Pacifica today; fail-closed default if the bot row vanished mid-flight).
   const profitShareAdapter = subscriberBotRow ? getAdapterForBot(subscriberBotRow) : getDefaultAdapter();
 
-  // Helper function to create IOU on failure
+  // Helper function to create IOU on failure. Returns the persisted row (or the
+  // pre-existing row on conflict) so callers can post-process status; undefined
+  // if the write itself failed.
   const createIouOnFailure = async (errorMsg: string) => {
     try {
-      await storage.createPendingProfitShare({
+      const iou = await storage.createPendingProfitShare({
         subscriberBotId,
         subscriberWalletAddress,
         creatorWalletAddress,
@@ -1999,12 +2298,38 @@ async function distributeCreatorProfitShare(params: {
         publishedBotId: publishedBot.id,
         driftSubaccountId,
         protocolSubaccountId: canonicalProtocolSubaccountId,
+        protocol: profitShareAdapter.protocolName,
       });
       console.log(`[ProfitShare] IOU created for $${profitShareAmount.toFixed(4)} to ${creatorWalletAddress} (trade: ${tradeId})`);
+      return iou;
     } catch (iouErr: any) {
       console.error(`[ProfitShare] Failed to create IOU: ${iouErr.message}`);
+      return undefined;
     }
   };
+
+  // Deferral gate (5.5 / T4): venues without economical immediate payout
+  // (per-withdraw fee + high transfer minimum, e.g. Pacifica) must NOT run the
+  // settle→withdraw→pay path on every close — a $1 fee + $10 floor per trade is
+  // uneconomical. Their copy-bot profit-share is deferred to the accumulate+claim
+  // model (PROFIT_SHARE_IMPLEMENTATION_PLAN Part 3), enabled once
+  // pending_profit_shares carries `protocol` + a nullable numeric subaccount
+  // (5.5 schema migration). Behavioural gate — keyed off adapter capabilities,
+  // NOT the protocol name. Flash/Drift keep the immediate per-trade payout.
+  if (!profitShareAdapter.getCapabilities().supportsImmediateProfitShare) {
+    // Fail closed: record a DURABLE liability so the creator's owed share is
+    // never silently dropped. Persisted with status 'deferred' so the immediate
+    // payout retry job (which transfers from the agent wallet — funds that were
+    // never settled/withdrawn for these venues) never picks it up; the
+    // accumulate+claim flow settles these later. The deterministic tradeId +
+    // unique(subscriberBotId,tradeId) makes this idempotent on close replays.
+    const iou = await createIouOnFailure(`Deferred: ${profitShareAdapter.protocolName} accumulate+claim venue`);
+    if (iou && iou.status === 'pending') {
+      await storage.updatePendingProfitShareStatus(iou.id, { status: 'deferred' });
+    }
+    console.log(`[ProfitShare] Deferred (accumulate+claim venue ${profitShareAdapter.protocolName}) for trade ${tradeId}, bot ${subscriberBotId}, owed $${profitShareAmount.toFixed(4)} to ${creatorWalletAddress} — durable IOU recorded (status=deferred), immediate payout skipped`);
+    return { success: true };
+  }
 
   // Step 1: Settle PnL from on-chain position
   const settleResult = await settleAllPnl(subscriberEncryptedPrivateKey, driftSubaccountId, profitShareAdapter);
@@ -2634,7 +2959,7 @@ async function routeSignalToSubscribers(
               fillPrice,
               timestampMs: Date.now(),
             });
-            await storage.recordCloseEventAtomic({
+            const subRouteAtomic = await storage.recordCloseEventAtomic({
               botId: subBot.id,
               insert: {
                 tradingBotId: subBot.id,
@@ -2658,9 +2983,12 @@ async function routeSignalToSubscribers(
               },
             });
 
-            // PROFIT SHARE: Distribute to creator if subscriber closed with profit
-            if (closeTradePnl > 0) {
-              const tradeId = `${subBot.id}-${Date.now()}`;
+            // PROFIT SHARE: Distribute to creator if subscriber closed with profit.
+            // Gate on isNew (5.5/T4) so a reconciler/retry replay of the SAME close
+            // can't pay the creator twice; key tradeId off the canonical fill id so
+            // any IOU dedupes on the (subscriber_bot_id, trade_id) unique index.
+            if (closeTradePnl > 0 && subRouteAtomic.isNew) {
+              const tradeId = subRouteFillId;
               console.log(`[Subscriber Routing] Initiating profit share for ${subBot.id}: pnl=$${closeTradePnl.toFixed(4)}`);
               // V3 Phase 3b fund-safety: this is fire-and-forget, but the
               // outer try/finally zeros `subAgentSecretKey` as soon as the
@@ -3050,7 +3378,19 @@ async function routeSignalToSubscribers(
               
               // Trigger profit sharing if the flip realized a profit
               if (flipPnl > 0) {
-                const flipTradeId = `${subBot.id}-flip-${Date.now()}`;
+                // Flip close is recorded via updateBotTrade (no recordCloseEventAtomic
+                // isNew here) and fires once per signal — it is not reconciler-replayed.
+                // Use a deterministic canonical fill id as tradeId so any IOU still
+                // dedupes on the (subscriber_bot_id, trade_id) unique index (5.5/T4).
+                const flipTradeId = DatabaseStorage.canonicalCloseFillId({
+                  signature: orderResult.txSignature || orderResult.signature || undefined,
+                  botId: subBot.id,
+                  side: 'CLOSE',
+                  size: closedSize.toFixed(8),
+                  market: subBot.market,
+                  fillPrice,
+                  timestampMs: Date.now(),
+                });
                 console.log(`[Subscriber Routing] Initiating profit share for FLIP on ${subBot.id}: pnl=$${flipPnl.toFixed(4)}`);
                 // V3 Phase 3b fund-safety: see close-path note above — hand
                 // the profit-share an isolated key copy so the outer finally
@@ -6040,6 +6380,17 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // crashes or the process is killed.
       const manualClosePrice = parseFloat(String(fillPrice || result.fillPrice || 0));
       const manualCloseNotional = closeSize * (Number.isFinite(manualClosePrice) ? manualClosePrice : 0);
+      // Compute the canonical fill id ONCE so the stored protocolFillId and the
+      // profit-share tradeId are identical → IOU dedupe works (5.5/T4).
+      const manualCloseFillId = DatabaseStorage.canonicalCloseFillId({
+        signature: finalTxSignature,
+        botId: bot.id,
+        side: 'CLOSE',
+        size: closeSize,
+        market: bot.market,
+        fillPrice: fillPrice || result.fillPrice || 0,
+        timestampMs: Date.now(),
+      });
       const manualCloseAtomicResult = await storage.recordCloseEventAtomic({
         botId: bot.id,
         update: {
@@ -6050,15 +6401,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             pnl: String(tradePnl),
             status: "executed",
             txSignature: finalTxSignature,
-            protocolFillId: DatabaseStorage.canonicalCloseFillId({
-              signature: finalTxSignature,
-              botId: bot.id,
-              side: 'CLOSE',
-              size: closeSize,
-              market: bot.market,
-              fillPrice: fillPrice || result.fillPrice || 0,
-              timestampMs: Date.now(),
-            }),
+            protocolFillId: manualCloseFillId,
             webhookPayload: { action: "manual_close", reason: "User requested position close", entryPrice: closeEntryPrice, exitPrice: result.fillPrice || fillPrice },
             errorMessage: verificationWarning,
             executionMethod: result.executionMethod || 'legacy',
@@ -6106,8 +6449,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       
       // PROFIT SHARE: If this is a subscriber bot with profitable close, distribute to creator
       // This must happen BEFORE auto-withdraw to ensure creator gets their share
-      if (tradePnl > 0) {
-        const tradeId = `${bot.id}-${Date.now()}`;
+      if (tradePnl > 0 && manualCloseAtomicResult.isNew) {
+        const tradeId = manualCloseFillId;
         distributeCreatorProfitShare({
           subscriberBotId: bot.id,
           subscriberWalletAddress: wallet.address,
@@ -10299,7 +10642,18 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             // the deferred sync only handles position state, not stats.
             const webhookClosePrice = result.fillPrice ?? parseFloat(signalPrice || "0");
             const webhookCloseVolume = closeSize * (Number.isFinite(webhookClosePrice) ? webhookClosePrice : 0);
-            await storage.recordCloseEventAtomic({
+            // Canonical fill id computed once → stored protocolFillId and the
+            // profit-share tradeId match so any IOU dedupes (5.5/T4).
+            const webhookCloseFillId = DatabaseStorage.canonicalCloseFillId({
+              signature: finalTxSignature,
+              botId,
+              side: 'CLOSE',
+              size: closeSize,
+              market: bot.market,
+              fillPrice: result.fillPrice ?? parseFloat(signalPrice || '0'),
+              timestampMs: Date.now(),
+            });
+            const webhookCloseAtomic = await storage.recordCloseEventAtomic({
               botId,
               update: {
                 tradeId: closeTrade.id,
@@ -10310,15 +10664,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                   fee: String(closeFee),
                   pnl: String(closeTradePnl),
                   executionMethod: result.executionMethod || 'legacy',
-                  protocolFillId: DatabaseStorage.canonicalCloseFillId({
-                    signature: finalTxSignature,
-                    botId,
-                    side: 'CLOSE',
-                    size: closeSize,
-                    market: bot.market,
-                    fillPrice: result.fillPrice ?? parseFloat(signalPrice || '0'),
-                    timestampMs: Date.now(),
-                  }),
+                  protocolFillId: webhookCloseFillId,
                 },
               },
               deltas: {
@@ -10379,8 +10725,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 console.error(`[Webhook] Deferred post-trade sync failed (non-blocking): ${err}`);
               }
 
-              if (closeTradePnl > 0) {
-                const tradeId = `${botId}-${Date.now()}`;
+              if (closeTradePnl > 0 && webhookCloseAtomic.isNew) {
+                const tradeId = webhookCloseFillId;
                 distributeCreatorProfitShare({
                   subscriberBotId: botId,
                   subscriberWalletAddress: wallet.address,
@@ -11733,7 +12079,18 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             }
             
             // Atomic close-event update + stats recompute in a single tx.
-            await storage.recordCloseEventAtomic({
+            // Canonical fill id computed once → stored protocolFillId and the
+            // profit-share tradeId match so any IOU dedupes (5.5/T4).
+            const userWebhookCloseFillId = DatabaseStorage.canonicalCloseFillId({
+              signature: result.signature,
+              botId,
+              side: 'CLOSE',
+              size: closeSize,
+              market: bot.market,
+              fillPrice: closeFillPrice,
+              timestampMs: Date.now(),
+            });
+            const userWebhookCloseAtomic = await storage.recordCloseEventAtomic({
               botId,
               update: {
                 tradeId: closeTrade.id,
@@ -11743,15 +12100,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                   price: closeFillPrice.toString(),
                   fee: closeFee.toString(),
                   pnl: closeTradePnl.toString(),
-                  protocolFillId: DatabaseStorage.canonicalCloseFillId({
-                    signature: result.signature,
-                    botId,
-                    side: 'CLOSE',
-                    size: closeSize,
-                    market: bot.market,
-                    fillPrice: closeFillPrice,
-                    timestampMs: Date.now(),
-                  }),
+                  protocolFillId: userWebhookCloseFillId,
                 },
               },
               deltas: {
@@ -11804,8 +12153,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             
             // PROFIT SHARE: If this is a subscriber bot with profitable close, distribute to creator
             // This must happen BEFORE auto-withdraw to ensure creator gets their share
-            if (closeTradePnl > 0) {
-              const tradeId = `${botId}-${Date.now()}`;
+            if (closeTradePnl > 0 && userWebhookCloseAtomic.isNew) {
+              const tradeId = userWebhookCloseFillId;
               distributeCreatorProfitShare({
                 subscriberBotId: botId,
                 subscriberWalletAddress: walletAddress,
@@ -13653,14 +14002,22 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const totalTrades = canonicalCounts.totalTrades;
       const winningTrades = canonicalCounts.winningTrades;
       
-      // Get creator's current equity from Drift
+      // Get creator's current equity from the bot's subaccount (protocol-aware).
+      // Phase 5.5: external_key bots (Pacifica/Flash) have NO numeric
+      // driftSubaccountId, so the previous `tradingBot.driftSubaccountId` gate
+      // silently recorded $0 creator capital for every non-Drift bot. Resolve the
+      // account via the bot's subaccount context instead — botPublicKey for
+      // external_key bots, the numeric subaccount for legacy Drift — using the
+      // existing helper that already branches on both auth modes.
       let creatorEquity = 0;
       try {
         const wallet = await storage.getWallet(req.walletAddress!);
-        if (wallet?.agentPublicKey && tradingBot.driftSubaccountId) {
-          const accountInfo = await getExchangeAccountInfo(
+        const creatorBotCtx = getBotSubaccountContext(tradingBot);
+        if (wallet?.agentPublicKey && (creatorBotCtx || tradingBot.driftSubaccountId)) {
+          const accountInfo = await getExchangeAccountInfoForBot(
             wallet.agentPublicKey,
-            tradingBot.driftSubaccountId,
+            tradingBot.driftSubaccountId ?? 0,
+            creatorBotCtx,
             getAdapterForBot(tradingBot)
           );
           creatorEquity = accountInfo.usdcBalance || 0;
@@ -13794,7 +14151,34 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!originalBot) {
         return res.status(404).json({ error: "Original bot not found" });
       }
-      
+
+      // Phase 5.5 guardrails: a copy bot is provisioned on the SAME protocol as
+      // the creator's bot (same-protocol copy). Two consequences enforced here:
+      //   1. Drift is retired — block new subscriptions to any Drift creator so we
+      //      never provision a fresh Drift copy subaccount.
+      //   2. The minimum deposit is the creator VENUE's minimum (each protocol has
+      //      its own min transfer), floored at the product minimum ($10). We derive
+      //      it from the creator-protocol adapter and re-validate the amounts the
+      //      caller passed (the early $10 checks above are just a cheap pre-filter).
+      const creatorProtocol = (originalBot.activeProtocol ?? getDefaultAdapter().protocolName);
+      if (creatorProtocol === 'drift') {
+        return res.status(400).json({
+          error: "This bot runs on a retired protocol and is no longer available for new subscriptions.",
+        });
+      }
+      const creatorAdapter = getAdapter(creatorProtocol);
+      const effectiveMinUsdc = Math.max(MIN_SUBSCRIPTION_USDC, creatorAdapter.minTransferAmount);
+      if (capitalInvested < effectiveMinUsdc) {
+        return res.status(400).json({
+          error: `Minimum subscription is $${effectiveMinUsdc.toFixed(2)} USDC. You entered $${capitalInvested.toFixed(2)}.`,
+        });
+      }
+      if (sizingInvestment < effectiveMinUsdc) {
+        return res.status(400).json({
+          error: `Investment amount must be at least $${effectiveMinUsdc.toFixed(2)} USDC. Reduce equity buffer or increase capital.`,
+        });
+      }
+
       // Get wallet to check for agent wallet and available balance.
       // V3 Phase 3b: readiness is V3-only — agent public key + V3 envelope.
       // The legacy AGENT_ENCRYPTION_KEY blob is intentionally NOT required so
@@ -13849,198 +14233,191 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         });
       }
 
-      // Use on-chain discovery combined with database state to find the next valid sequential subaccount ID
-      // This ensures Drift's sequential requirement is met and avoids conflicts (same as bot creation)
       const webhookSecret = generateWebhookSecret();
-      let nextSubaccountId: number;
-      try {
-        // Get all subaccount IDs currently allocated in the database for this wallet
-        const dbAllocatedIds = await storage.getAllocatedSubaccountIds(req.walletAddress!);
-        
-        const existingOnChain = await discoverOnChainSubaccounts(wallet.agentPublicKey);
-        const dbIdSet = new Set(dbAllocatedIds);
-        for (const subId of existingOnChain) {
-          if (subId > 0 && !dbIdSet.has(subId)) {
-            try {
-              const orphanedWebhookSecret = generateWebhookSecret();
-              await storage.createTradingBot({
-                walletAddress: req.walletAddress!,
-                name: `Recovered Bot (SA${subId})`,
-                market: 'SOL-PERP',
-                webhookSecret: orphanedWebhookSecret,
-                driftSubaccountId: subId,
-                isActive: false,
-                side: 'both',
-                leverage: 1,
-                totalInvestment: '0',
-                maxPositionSize: null,
-                signalConfig: { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
-                riskConfig: {},
-                subaccountAuthMode: 'main_plus_id',
-                // Group D item 18: orphan recovery in marketplace flow — same Drift-only
-                // semantics as the main creation site's recovery branch.
-                activeProtocol: 'drift',
-              } as any);
-              console.log(`[Marketplace] Created recovered bot for orphaned subaccount ${subId}`);
-            } catch (syncErr: any) {
-              console.error(`[Marketplace] Failed to create placeholder for subaccount ${subId}:`, syncErr.message);
-            }
-          }
-        }
-        
-        // Re-fetch allocated IDs after sync (may have added orphaned bots)
-        const updatedDbAllocatedIds = await storage.getAllocatedSubaccountIds(req.walletAddress!);
-        
-        nextSubaccountId = await getNextOnChainSubaccountId(wallet.agentPublicKey, updatedDbAllocatedIds);
-        console.log(`[Marketplace] On-chain discovery returned subaccount ID: ${nextSubaccountId}`);
-      } catch (error) {
-        console.error(`[Marketplace] On-chain discovery failed, falling back to database:`, error);
-        nextSubaccountId = await storage.getNextSubaccountId(req.walletAddress!);
-      }
 
-      // Group D item 17d (April 17, 2026): route marketplace subaccount creation
-      // through the protocol adapter so the same parse/validate/persist contract
-      // as the main bot-creation site applies. The marketplace flow today is
-      // Drift-only by construction (it persists `driftSubaccountId`, calls
-      // `executeAgentDeposit` which is the Drift deposit path, and uses
-      // `discoverOnChainSubaccounts`/`getNextOnChainSubaccountId` which are Drift
-      // helpers). Use `getAdapter('drift')` EXPLICITLY rather than the default
-      // adapter — defaultAdapter is Pacifica, and PacificaAdapter.createSubaccount
-      // requires a generated `subSecretKey` (caps.requiresExternalSubaccountKey=true)
-      // which this flow does not produce, so calling the default would always
-      // throw and silently fall back, masking real adapter behavior.
-      // When marketplace gains cross-protocol bot sharing, the adapter must be
-      // selected from the published bot's protocol, not hardcoded here.
-      // NOTE: known dbAllocatedIds-awareness gap — DriftAdapter.createSubaccount
-      // does not pass updatedDbAllocatedIds through. Same gap exists at the main
-      // creation site today. Tracked for a separate cleanup; not introduced here.
-      let persistedSubaccountId: number = nextSubaccountId;
+      // Phase 5.5: provision the copy bot on the SAME protocol as the creator's bot.
+      // Drift creators are already blocked by the guardrails above, so `subAdapter`
+      // is always an external-key adapter (Pacifica funded subaccount / Flash per-bot
+      // HD wallet). We provision + secure the bot via the SAME shared helpers as the
+      // main bot-creation site, instead of the old Drift-hardcoded path. There is no
+      // Drift subaccount discovery / orphan-recovery here — copy bots are never Drift.
+      const subAdapter = creatorAdapter;
+      const subCaps = subAdapter.getCapabilities();
+
       const marketplaceUmkResult = await getUmkForWebhook(req.walletAddress!);
       if (!marketplaceUmkResult) {
         return res.status(403).json({ error: "Execution not enabled. Please enable execution authorization first." });
       }
-      const marketplaceAgentKeyResult = await decryptAgentKeyStrict(
-        req.walletAddress!,
-        marketplaceUmkResult.umk,
-        wallet,
-        wallet.agentPublicKey
-      );
-      marketplaceUmkResult.cleanup();
+      let marketplaceAgentKeyResult: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+      let copyBotMnemonic: Buffer | null = null;
+      try {
+        marketplaceAgentKeyResult = await decryptAgentKeyStrict(
+          req.walletAddress!,
+          marketplaceUmkResult.umk,
+          wallet,
+          wallet.agentPublicKey,
+        );
+        // Flash bots own an agent-derived (recoverable) wallet — decrypt the mnemonic
+        // WHILE the UMK is still live so the helper can derive the bot keypair.
+        if (marketplaceAgentKeyResult && subCaps.walletDerivation === 'agent_hd') {
+          copyBotMnemonic = await decryptMnemonic(req.walletAddress!, marketplaceUmkResult.umk);
+        }
+      } finally {
+        marketplaceUmkResult.cleanup();
+      }
       if (!marketplaceAgentKeyResult) {
         return res.status(500).json({ error: "Agent key decryption failed. Please sign in again." });
       }
-      try {
-        const marketplaceAgentSecret = marketplaceAgentKeyResult.secretKey;
-        try {
-          const { getAdapter } = await import("./protocol/adapter-registry");
-          const marketplaceAdapter = getAdapter('drift');
-          const marketplaceAgentKeypair = Keypair.fromSecretKey(marketplaceAgentSecret);
-          const sub = await marketplaceAdapter.createSubaccount({
-            mainSecretKey: marketplaceAgentKeypair.secretKey,
-            agentPublicKey: marketplaceAgentKeypair.publicKey.toString(),
-          });
-          const parsed = parseAndValidateAdapterSubaccountId(sub.subaccountId, marketplaceAdapter.protocolName);
-          if (parsed !== nextSubaccountId) {
-            console.warn(
-              `[Marketplace] Subaccount ID divergence: pre-allocated=${nextSubaccountId}, ` +
-              `adapter-returned=${parsed}. Persisting adapter value as canonical (driftSubaccountId=${parsed}).`
-            );
-          }
-          persistedSubaccountId = parsed;
-        } catch (subErr: any) {
-          console.error(
-            `[Marketplace] adapter.createSubaccount failed; falling back to pre-allocated ID ${nextSubaccountId}: ${subErr.message}`
-          );
-        }
-
-      // Create subscriber's bot with same settings but their own capital (with subaccount ID already set)
-      // maxPositionSize = investment × leverage (same as normal bot creation)
-      const effectiveLeverage = leverage || originalBot.leverage || 1;
-      const maxPositionSize = sizingInvestment * effectiveLeverage;
-      // Persist the deposit (capital) and sizing (investment) split so the bot's
-      // position-sizing reflects the equity-buffer model consumed by the UI.
-      void capitalInvested;
-      
-      const subscriberBot = await storage.createTradingBot({
-        name: `${publishedBot.name} (Copy)`,
-        market: originalBot.market,
-        walletAddress: req.walletAddress!,
-        botType: 'signal',
-        maxPositionSize: maxPositionSize.toString(),
-        leverage: effectiveLeverage,
-        webhookSecret,
-        isActive: true,
-        sourcePublishedBotId: publishedBot.id,
-        driftSubaccountId: persistedSubaccountId,
-        subaccountAuthMode: 'main_plus_id',
-        // Group D item 18: marketplace subscriber bot creation — Drift-only by
-        // construction today (see item 17d comment above for the rationale: this
-        // flow uses `getAdapter('drift')` for createSubaccount, persists
-        // driftSubaccountId, and calls executeAgentDeposit which is Drift's path).
-        activeProtocol: 'drift',
-      } as any);
-      
-      // Deposit USDC from agent wallet directly to the new bot's Drift subaccount
-      console.log(`[Marketplace] Depositing $${capitalInvested} from agent wallet to subaccount ${persistedSubaccountId} for subscriber bot`);
-      const depositResult = await executeAgentDeposit(
-        wallet.agentPublicKey,
-        marketplaceAgentSecret,
-        capitalInvested,
-        persistedSubaccountId,
-        getAdapterForBot(subscriberBot),
-      );
-      
-      if (!depositResult.success) {
-        // Rollback: delete the created bot
-        console.error(`[Marketplace] Deposit failed, rolling back bot creation: ${depositResult.error}`);
-        await storage.deleteTradingBot(subscriberBot.id);
-        return res.status(500).json({ 
-          error: `Failed to fund bot: ${depositResult.error}. Bot creation rolled back.` 
+      // Fail closed: never mint an unrecoverable random per-bot wallet when the venue
+      // needs a recoverable seed and none is on file.
+      if (subCaps.walletDerivation === 'agent_hd' && !copyBotMnemonic) {
+        marketplaceAgentKeyResult.cleanup();
+        return res.status(400).json({
+          error: "This wallet has no recovery phrase on file, which is required to create a recoverable copy bot. Please sign out and sign back in to re-key your wallet.",
         });
       }
-      
-      console.log(`[Marketplace] Deposit successful: ${depositResult.signature}`);
-      
-      // Record the deposit as an equity event
-      await storage.createEquityEvent({
-        walletAddress: req.walletAddress!,
-        tradingBotId: subscriberBot.id,
-        eventType: 'deposit',
-        amount: String(capitalInvested),
-        txSignature: depositResult.signature || null,
-        notes: `Initial deposit for subscription to ${publishedBot.name}`,
-      });
 
-      // Create or reactivate subscription record. A previous unsubscribe leaves
-      // a 'cancelled' row in place (the publishedBotId + wallet unique
-      // constraint blocks a second INSERT), so re-subscribing must reactivate
-      // that existing row rather than inserting a new one.
-      const subscription = existingSub
-        ? await storage.reactivateBotSubscription(existingSub.id, {
-            subscriberBotId: subscriberBot.id,
-            capitalInvested: capitalInvested.toString(),
-          })
-        : await storage.createBotSubscription({
-            publishedBotId: req.params.id,
-            subscriberWalletAddress: req.walletAddress!,
-            subscriberBotId: subscriberBot.id,
-            capitalInvested: capitalInvested.toString(),
-            status: 'active',
+      try {
+        const marketplaceAgentKeypair = Keypair.fromSecretKey(marketplaceAgentKeyResult.secretKey);
+
+        // 1) Atomic provision + fund on the creator's protocol (consumes/zeroizes the mnemonic).
+        let provision;
+        try {
+          provision = await provisionExternalKeyBotSubaccount({
+            walletAddress: req.walletAddress!,
+            agentKeypair: marketplaceAgentKeypair,
+            agentMnemonic: copyBotMnemonic,
+            adapter: subAdapter,
+            fundingAmount: capitalInvested,
           });
+          copyBotMnemonic = null; // ownership transferred into the helper, which zeroizes it
+        } catch (provErr: any) {
+          console.error(`[Marketplace] Copy-bot provisioning failed: ${provErr.message}`);
+          return res.status(500).json({ error: `Failed to provision copy bot: ${provErr.message}. Nothing was charged.` });
+        }
 
-      // Update published bot stats
-      await storage.incrementPublishedBotSubscribers(req.params.id, 1, capitalInvested);
+        // 2) Insert the copy bot row (cloned settings, own capital, protocol-aware
+        //    subaccount). Stays 'pending' until the V3 key write below flips it active.
+        const effectiveLeverage = leverage || originalBot.leverage || 1;
+        const maxPositionSize = sizingInvestment * effectiveLeverage;
+        let subscriberBot;
+        try {
+          subscriberBot = await storage.createTradingBot({
+            name: `${publishedBot.name} (Copy)`,
+            market: originalBot.market,
+            walletAddress: req.walletAddress!,
+            botType: 'signal',
+            maxPositionSize: maxPositionSize.toString(),
+            leverage: effectiveLeverage,
+            webhookSecret,
+            isActive: true,
+            sourcePublishedBotId: publishedBot.id,
+            driftSubaccountId: null,
+            protocolSubaccountId: provision.botSubaccountPublicKey,
+            subaccountAuthMode: provision.subaccountAuthMode,
+            subaccountStatus: provision.subaccountStatus,
+            activeProtocol: subAdapter.protocolName,
+            derivationIndex: provision.derivationIndex,
+            derivationPathVersion: provision.derivationPathVersion,
+          } as any);
+        } catch (insertErr: any) {
+          // Funds already moved by provisioning, but there is no bot row to hang the
+          // key off and no row to persist. Fail closed: sweep the funds back to the
+          // agent (protocol-aware, verified-empty) and zeroize the in-memory key —
+          // never silently strand a funded subaccount with no recovery trail.
+          console.error(`[Marketplace] Copy-bot DB insert failed after funding; rolling back funds: ${insertErr?.message || insertErr}`);
+          const rb = await sweepProvisionedExternalKeyFunds({
+            adapter: subAdapter,
+            subSecretKey: provision.pendingBotSecretKeyForV3,
+            subaccountPublicKey: provision.botSubaccountPublicKey,
+            agentPublicKey: wallet.agentPublicKey,
+            logPrefix: '[Marketplace]',
+          });
+          try { provision.pendingBotSecretKeyForV3.fill(0); } catch { /* noop */ }
+          if (!rb.swept) {
+            console.error(`[Marketplace] CRITICAL: could not confirm empty subaccount ${provision.botSubaccountPublicKey} after insert failure (${rb.detail})`);
+            return res.status(500).json({ error: `Failed to create your copy bot and could not fully return funds. Your subaccount ${provision.botSubaccountPublicKey} may still hold funds — please contact support before subscribing again.` });
+          }
+          return res.status(500).json({ error: `Failed to create your copy bot. Your funds were returned to your account. Please try again.` });
+        }
 
-      console.log(`[Marketplace] ${req.walletAddress} subscribed to ${publishedBot.name} with $${capitalInvested}`);
-      res.json({
-        subscription,
-        tradingBot: subscriberBot,
-        webhookUrl: generateWebhookUrl(subscriberBot.id, webhookSecret),
-        depositTxSignature: depositResult.signature,
-      });
+        // 3) Secure the bot's subaccount key (binds it to bot.id) and flip to active.
+        //    Fails closed: on a V3-write failure it sweeps the subaccount back to the
+        //    agent (protocol-aware) and only deletes the row once it is CONFIRMED empty.
+        const persistResult = await persistBotSubaccountKeyV3WithRollback({
+          walletAddress: req.walletAddress!,
+          botId: subscriberBot.id,
+          botSubaccountPublicKey: provision.botSubaccountPublicKey,
+          pendingBotSecretKeyForV3: provision.pendingBotSecretKeyForV3,
+          adapter: subAdapter,
+          ambiguous: provision.ambiguous,
+          agentPublicKey: wallet.agentPublicKey,
+        });
+        if (!persistResult.ok) {
+          return res.status(persistResult.status).json({ error: persistResult.error });
+        }
+
+        // Re-read so the response reflects the finalized status.
+        subscriberBot = (await storage.getTradingBotById(subscriberBot.id)) ?? subscriberBot;
+
+        // 4) Flash funding ambiguous: the key is saved and the bot is in 'error' state
+        //    for recovery, but we must NOT complete a normal subscription off an
+        //    unconfirmed funding tx. Surface action-required (the user can open the bot
+        //    to check its balance, then retry or delete it to recover any funds).
+        if (provision.ambiguous) {
+          return res.status(502).json({
+            error: "We couldn't confirm your funding transaction on-chain. Your copy bot was saved in an error state — open it to check its balance, then retry or delete it to recover any funds.",
+            tradingBot: subscriberBot,
+          });
+        }
+
+        // 5) Record the funded deposit as an equity event (best-effort — never strands
+        //    the now-funded, active bot if this bookkeeping write fails).
+        try {
+          await storage.createEquityEvent({
+            walletAddress: req.walletAddress!,
+            tradingBotId: subscriberBot.id,
+            eventType: 'deposit',
+            amount: String(capitalInvested),
+            txSignature: provision.provisionMeta.depositTxSignature || null,
+            notes: `Initial deposit for subscription to ${publishedBot.name}`,
+          });
+        } catch (eqErr: any) {
+          console.warn(`[Marketplace] Failed to record deposit equity event (non-fatal): ${eqErr?.message || eqErr}`);
+        }
+
+        // 6) Create or reactivate the subscription record. A previous unsubscribe
+        //    leaves a 'cancelled' row in place (the publishedBotId + wallet unique
+        //    constraint blocks a second INSERT), so re-subscribing reactivates it.
+        const subscription = existingSub
+          ? await storage.reactivateBotSubscription(existingSub.id, {
+              subscriberBotId: subscriberBot.id,
+              capitalInvested: capitalInvested.toString(),
+            })
+          : await storage.createBotSubscription({
+              publishedBotId: req.params.id,
+              subscriberWalletAddress: req.walletAddress!,
+              subscriberBotId: subscriberBot.id,
+              capitalInvested: capitalInvested.toString(),
+              status: 'active',
+            });
+
+        // Update published bot stats
+        await storage.incrementPublishedBotSubscribers(req.params.id, 1, capitalInvested);
+
+        console.log(`[Marketplace] ${req.walletAddress} subscribed to ${publishedBot.name} with $${capitalInvested} (${subAdapter.protocolName} copy bot ${subscriberBot.id})`);
+        res.json({
+          subscription,
+          tradingBot: subscriberBot,
+          webhookUrl: generateWebhookUrl(subscriberBot.id, webhookSecret),
+          depositTxSignature: provision.provisionMeta.depositTxSignature,
+          funded: provision.provisionMeta.funded,
+        });
       } finally {
-        marketplaceAgentKeyResult.cleanup();
+        try { marketplaceAgentKeyResult.cleanup(); } catch { /* noop */ }
+        try { copyBotMnemonic?.fill(0); } catch { /* noop */ }
       }
+
     } catch (error) {
       console.error("Subscribe error:", error);
       res.status(500).json({ error: "Failed to subscribe" });
@@ -14142,12 +14519,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           }
         }
 
-        // 2. Settle pending creator profit-share IOUs (block if unpayable).
-        const pendingIOUs = await storage.getPendingProfitSharesBySubscriberBot(bot.id);
-        if (pendingIOUs.length > 0) {
-          const totalOwed = pendingIOUs.reduce((sum, iou) => sum + parseFloat(iou.amount), 0);
-          console.log(`[Unsubscribe] Bot ${bot.id} has ${pendingIOUs.length} pending IOUs totaling $${totalOwed.toFixed(4)}`);
-          for (const iou of pendingIOUs) {
+        // 2. Settle EVERY still-owed creator profit-share IOU (block if unpayable).
+        // Includes 'deferred' shares (accumulate+claim venues like Pacifica): the
+        // departing subscriber must clear the full creator liability here, because the
+        // immediate-payout retry job ignores 'deferred' and would never pay them, and a
+        // deactivated copy bot otherwise leaves the creator permanently short.
+        const owedIOUs = await storage.getUnsettledProfitSharesByBot(bot.id);
+        if (owedIOUs.length > 0) {
+          const totalOwed = owedIOUs.reduce((sum, iou) => sum + parseFloat(iou.amount), 0);
+          console.log(`[Unsubscribe] Bot ${bot.id} has ${owedIOUs.length} owed IOUs totaling $${totalOwed.toFixed(4)}`);
+          for (const iou of owedIOUs) {
             const iouAmount = parseFloat(iou.amount);
             const transferResult = await transferUsdcToWallet(wallet.agentPublicKey, agentSecret, iou.creatorWalletAddress, iouAmount);
             if (transferResult.success) {
@@ -14156,18 +14537,73 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             } else {
               return res.status(400).json({
                 error: `Cannot unsubscribe yet — $${totalOwed.toFixed(2)} in creator profit share still needs to be paid. Ensure your agent wallet has enough USDC and SOL for fees, then try again.`,
-                pendingIOUs: pendingIOUs.length,
+                pendingIOUs: owedIOUs.length,
                 totalOwed,
               });
             }
           }
         }
 
-        // 3. Recover capital directly from the bot's subaccount to the agent wallet.
+        // 3. Recover the copy bot's capital back to the agent wallet (protocol-aware,
+        //    fail closed). Flash copy bots hold funds in their OWN HD wallet
+        //    (protocolSubaccountId, NOT a numeric subaccount); Pacifica copy bots in an
+        //    external-key funded subaccount; legacy Drift bots in a numeric subaccount.
+        //    `hasSubaccount` (numeric driftSubaccountId) is only ever true for Drift —
+        //    without the Flash/Pacifica branches those copy bots would skip recovery
+        //    entirely and strand the subscriber's capital.
         let recoveredAmount = 0;
         let recoverTxSignature: string | null = null;
-        const minTransfer = getAdapterForBot(bot).minTransferAmount;
-        if (hasSubaccount) {
+        // Only detach the protocolSubaccountId link once the account is VERIFIED empty.
+        // For Pacifica sub-minimum dust (swept:false, no error, amount>0) the funds can't
+        // be moved but still exist — keep the link so they stay recoverable/auditable.
+        let safeToDetach = false;
+        // External-key bots (Flash HD wallet OR Pacifica funded subaccount) hold funds
+        // under protocolSubaccountId, NOT a numeric driftSubaccountId. main_plus_id and
+        // legacy Drift bots fall through to the numeric-subaccount branch below.
+        const isExternalKeyBot = bot.subaccountAuthMode === 'external_key'
+          && !!bot.protocolSubaccountId
+          && bot.protocolSubaccountId !== wallet.agentPublicKey;
+        const isFlashWallet = isExternalKeyBot && bot.activeProtocol === 'flash';
+        const pacificaCtx = (isExternalKeyBot && !isFlashWallet) ? getBotSubaccountContext(bot) : null;
+        if (isFlashWallet) {
+          // Stop execution first so a live webhook/manual trade can't reopen a position
+          // mid-sweep (recoverFlashBotWallet refuses while execution is on), then
+          // close → sweep → verify-empty. Idempotent on retry (already-empty = no-op).
+          await storage.updateTradingBot(bot.id, { executionActive: false });
+          bot.executionActive = false;
+          const recovery = await recoverFlashBotWallet(bot, wallet.agentPublicKey, agentSecret, '[Unsubscribe]');
+          if (!recovery.recovered) {
+            return res.status(409).json({
+              error: `Couldn't return this bot's funds yet: ${recovery.error}. Nothing was finalized — please try again in a moment.`,
+            });
+          }
+          recoveredAmount = recovery.usdcSwept;
+          safeToDetach = true; // recoverFlashBotWallet verifies the wallet is empty
+        } else if (pacificaCtx) {
+          // Pacifica funded subaccount: stop execution, flatten (cancel orders + close
+          // positions), then sweep collateral back to the agent wallet. Fail closed if
+          // funds can't move (a set sweep.error means money may still be in the subaccount).
+          await storage.updateTradingBot(bot.id, { executionActive: false });
+          bot.executionActive = false;
+          const flat = await teardownPacificaSubaccountForDelete(bot, '[Unsubscribe]');
+          if (!flat.ok) {
+            return res.status(409).json({
+              code: 'OPEN_POSITION',
+              error: `This bot still has open positions or orders that couldn't be closed: ${flat.error}. Please try again in a moment.`,
+            });
+          }
+          const sweep = await sweepPacificaSubaccount(bot, wallet.agentPublicKey, '[Unsubscribe]', agentSecret);
+          if (sweep.handled && !sweep.swept && sweep.error) {
+            return res.status(400).json({
+              error: `Couldn't return $${sweep.amount.toFixed(2)} from this bot yet: ${sweep.error}. Nothing was finalized — please try again.`,
+            });
+          }
+          if (sweep.handled && sweep.swept) recoveredAmount = sweep.amount;
+          // Detach only when the subaccount is genuinely drained (swept) or already
+          // empty. Sub-minimum dust (swept:false, no error, amount>0) keeps the link.
+          safeToDetach = sweep.handled && (sweep.swept || sweep.amount === 0);
+        } else if (hasSubaccount) {
+          const minTransfer = getAdapterForBot(bot).minTransferAmount;
           let balance = 0;
           try {
             // Adapter direct (not getExchangeBalance, which swallows errors and
@@ -14214,6 +14650,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           } else if (balance > 0) {
             console.log(`[Unsubscribe] Bot ${bot.id} subaccount balance $${balance.toFixed(6)} below $${minTransfer} minimum — skipping recovery`);
           }
+        } else if (isExternalKeyBot) {
+          // Fail-closed net: this is an external-key bot (funds under protocolSubaccountId)
+          // that NONE of the recovery branches above could handle — e.g. a Pacifica
+          // subaccount not in 'active' state, so we couldn't build a signing context to
+          // sweep it. Refuse rather than finalize and silently strand the subscriber's
+          // capital. The user can retry once the account is reachable, or contact support.
+          console.error(`[Unsubscribe] External-key bot ${bot.id} (protocol=${bot.activeProtocol}, status=${bot.subaccountStatus}) not recoverable — refusing to finalize.`);
+          return res.status(409).json({
+            error: "Couldn't access this bot's trading account to return its funds. Please try again in a moment, or contact support if this keeps happening.",
+          });
         }
 
         // 4. Deactivate the bot, close its subaccount, and drop the subaccount link.
@@ -14280,6 +14726,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         // Null the subaccount link so the snapshot job stops reading a dead
         // subaccount (prevents skipping the whole wallet's snapshot).
         await storage.clearTradingBotSubaccount(bot.id);
+        if (isExternalKeyBot && safeToDetach) {
+          // clearTradingBotSubaccount only nulls the numeric Drift link. External-key
+          // bots track their account via protocolSubaccountId, so drop that too once
+          // it's VERIFIED empty — otherwise the snapshot/retry jobs keep reading it.
+          // (Sub-minimum Pacifica dust keeps the link so the funds stay recoverable.)
+          // activeProtocol is a permanent tag and is intentionally preserved.
+          await storage.clearProtocolSubaccount(bot.id);
+        }
         await storage.updateTradingBot(bot.id, {
           isActive: false,
           executionActive: false,
