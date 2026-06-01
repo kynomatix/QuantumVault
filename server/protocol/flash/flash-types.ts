@@ -6,7 +6,7 @@
  * flash-sdk types directly (only flash-adapter.ts does).
  */
 
-import type { BN } from '@coral-xyz/anchor';
+import type BN from 'bn.js';
 import type { PublicKey } from '@solana/web3.js';
 
 // ── Flash position shape (from PositionAccount) ──────────────────────────────

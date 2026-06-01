@@ -56,7 +56,8 @@ import {
   type TransactionInstruction,
   type Signer,
 } from '@solana/web3.js';
-import { AnchorProvider, BN } from '@coral-xyz/anchor';
+import { AnchorProvider } from '@coral-xyz/anchor';
+import BN from 'bn.js';
 import {
   getAssociatedTokenAddressSync,
   getAccount,
