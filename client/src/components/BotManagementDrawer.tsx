@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/sheet';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
+import { ExchangeBadge } from '@/components/ExchangeBadge';
 import { Button } from '@/components/ui/button';
 import {
   Table,
@@ -1181,7 +1182,10 @@ export function BotManagementDrawer({
               </div>
               <div>
                 <SheetTitle className="text-lg" data-testid="text-bot-name">{displayBot.name}</SheetTitle>
-                <SheetDescription className="text-sm" data-testid="text-bot-market">{displayBot.market}</SheetDescription>
+                <SheetDescription className="text-sm flex items-center gap-1.5" data-testid="text-bot-market">
+                  <span>{displayBot.market}</span>
+                  <ExchangeBadge protocol={displayBot.activeProtocol} />
+                </SheetDescription>
               </div>
             </div>
             <div className="flex items-center gap-2">
