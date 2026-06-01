@@ -851,6 +851,32 @@ export class FlashAdapter implements ProtocolAdapter {
       }
 
       const signature = await this._send(client, poolConfig, { instructions, additionalSigners: signers });
+
+      // Fail-closed verification. The Flash SDK's sendTransactionV3 submits with
+      // skipPreflight=true and returns a signature WITHOUT confirming the tx landed,
+      // so a reverted placement (e.g. MinCollateral on a sub-threshold position)
+      // would otherwise be reported as success and the caller would persist a phantom
+      // TP/SL. Until the advanced SL engine lands, TP/SL ARE exchange-resting trigger
+      // orders: if they do not rest on Flash, they are not functioning. Confirm the tx
+      // committed AND verify the orders actually rest before reporting success.
+      const verified = await this._verifyTriggerOrdersRest(
+        botWallet,
+        spec,
+        poolConfig,
+        signature,
+        { tp: appliedTakeProfitPrice != null, sl: appliedStopLossPrice != null },
+      );
+      if (!verified.ok) {
+        return {
+          success: false,
+          status: 'rejected',
+          error: verified.error,
+          appliedTakeProfitPrice: null,
+          appliedStopLossPrice: null,
+          droppedLegs,
+        };
+      }
+
       return {
         success: true,
         status: 'submitted',
@@ -863,6 +889,92 @@ export class FlashAdapter implements ProtocolAdapter {
     } catch (err: unknown) {
       return this._reject(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  /**
+   * Fail-closed check that TP/SL trigger orders actually rest on the Flash
+   * exchange after submission. Confirms the submitted signature committed and then
+   * reads the on-chain order accounts (the source of truth) to verify the expected
+   * legs are resting. Both legs travel in ONE tx, so placement is atomic — either
+   * both rest or neither does. Returns a human-readable cause on failure.
+   */
+  private async _verifyTriggerOrdersRest(
+    botWallet: PublicKey,
+    spec: FlashMarketSpec,
+    poolConfig: PoolConfig,
+    signature: string,
+    expect: { tp: boolean; sl: boolean },
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const connection = this._getConnection();
+
+    // 1) AUTHORITATIVELY confirm the placement tx committed WITHOUT error. This is the
+    // primary gate: a reverted tx (e.g. MinCollateral) yields a definitive `err`, so we
+    // fail here regardless of any stale orders left by a non-fatal pre-clear — the
+    // resting-count check alone could be fooled by those, so we never trust it before a
+    // clean commit. A tx that never reaches a definitive status is treated as failure
+    // (fail closed): we never claim protection we cannot verify. The opposite risk
+    // (orders actually rest but we report failure) is the safe direction — the caller
+    // persists nothing, and a retry pre-clears and re-places.
+    let committed = false;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      try {
+        const st = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+        const info = st?.value?.[0];
+        if (info?.err) {
+          return { ok: false, error: await this._classifyTriggerFailure(connection, signature) };
+        }
+        if (info && (info.confirmationStatus === 'confirmed' || info.confirmationStatus === 'finalized')) {
+          committed = true;
+          break;
+        }
+      } catch { /* transient RPC error — retry */ }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    if (!committed) {
+      return {
+        ok: false,
+        error: 'Could not confirm the TP/SL placement committed on Flash within the confirmation window — no TP/SL is assumed active. Please retry.',
+      };
+    }
+
+    // 2) Belt-and-suspenders: the placement committed cleanly, so the trigger orders
+    // placed atomically (both legs ride one tx). Confirm they actually rest, retrying
+    // briefly to absorb read-replica lag before declaring a mismatch.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const idx = this._getMarketIndex();
+        const orderAccts = await this._getReadClient().getUserOrderAccounts(botWallet, poolConfig);
+        let restingTp = 0;
+        let restingSl = 0;
+        for (const oa of orderAccts) {
+          const info = idx.get(oa.market.toBase58());
+          if (info?.internalSymbol !== spec.internalSymbol) continue;
+          restingTp += oa.openTp;
+          restingSl += oa.openSl;
+        }
+        if ((!expect.tp || restingTp > 0) && (!expect.sl || restingSl > 0)) return { ok: true };
+      } catch { /* transient RPC error — retry */ }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    return {
+      ok: false,
+      error: 'TP/SL placement committed but the orders are not resting on Flash after confirmation — verify on the exchange and retry.',
+    };
+  }
+
+  /** Best-effort cause for a TP/SL placement that did not rest, read from tx logs. */
+  private async _classifyTriggerFailure(connection: Connection, signature: string): Promise<string> {
+    try {
+      const tx = await connection.getTransaction(signature, {
+        maxSupportedTransactionVersion: 0,
+        commitment: 'confirmed',
+      });
+      const blob = (tx?.meta?.logMessages ?? []).join('\n');
+      if (/MinCollateral/i.test(blob) || /\b6034\b/.test(blob) || /0x1792/i.test(blob)) {
+        return 'Position too small to attach TP/SL on Flash (minimum collateral not met). Increase the position size, then set TP/SL again.';
+      }
+    } catch { /* tx not retrievable — fall through to the generic cause */ }
+    return 'TP/SL did not rest on the Flash exchange (on-chain placement did not confirm). No take-profit or stop-loss is active — please retry.';
   }
 
   async cancelStopOrder(_params: CancelStopOrderParams): Promise<CancelResult> {
