@@ -1076,18 +1076,142 @@ export class FlashAdapter implements ProtocolAdapter {
       const amountBase = BigInt(this._toBaseUnits(params.amount, 6).toString());
       instructions.push(createTransferInstruction(fromAta, toAta, botWallet, amountBase));
 
-      const { blockhash } = await connection.getLatestBlockhash('confirmed');
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
       const tx = new Transaction();
       tx.feePayer = botWallet;
       tx.recentBlockhash = blockhash;
       tx.add(...instructions);
       await signer.signTransaction(tx);
       const signature = await connection.sendRawTransaction(tx.serialize());
-      await connection.confirmTransaction(signature, 'confirmed');
+      const conf = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+      if (conf.value.err) {
+        // Confirmed-with-error ⇒ no USDC moved. Fail closed so the caller never
+        // records a phantom withdrawal equity event.
+        return { success: false, txSignature: signature, error: `Withdraw tx failed on-chain: ${JSON.stringify(conf.value.err)}` };
+      }
 
       return { success: true, txSignature: signature };
     } catch (err: unknown) {
       return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * Manual "Add to bot" (Equity tab) for the independent_trader model: move USDC
+   * straight from the user's agent wallet into the bot's OWN wallet USDC ATA. This
+   * is the deposit counterpart of executeWithdraw — there is no exchange deposit
+   * instruction and no main→subaccount transfer. The agent signs and fee-pays;
+   * the bot's USDC ATA is created on first deposit (agent pays rent). Fails closed:
+   * a rejected send never enters the network (no funds move); an unconfirmable send
+   * returns `ambiguous` with the signature so the caller never blind-retries.
+   */
+  async fundBotWalletCollateral(input: {
+    mainSecretKey: Uint8Array;
+    botWalletAddress: string;
+    amount: number;
+  }): Promise<{ success: boolean; txSignature?: string; ambiguous?: boolean; error?: string }> {
+    if (!input.mainSecretKey || input.mainSecretKey.length !== 64) {
+      return { success: false, error: 'fundBotWalletCollateral requires a 64-byte agent mainSecretKey' };
+    }
+    if (!(input.amount >= this.minTransferAmount)) {
+      return { success: false, error: `Deposit amount $${input.amount} is below the $${this.minTransferAmount} minimum` };
+    }
+    const connection = this._getConnection();
+    const agent = Keypair.fromSecretKey(input.mainSecretKey);
+    let botWallet: PublicKey;
+    try {
+      botWallet = new PublicKey(input.botWalletAddress);
+    } catch {
+      return { success: false, error: `Invalid bot wallet address: ${input.botWalletAddress}` };
+    }
+    const usdcMint = new PublicKey(FLASH_USDC_MINT);
+    const agentUsdcAta = getAssociatedTokenAddressSync(usdcMint, agent.publicKey, true);
+    const botUsdcAta = getAssociatedTokenAddressSync(usdcMint, botWallet, true);
+
+    // Pre-check: agent USDC must cover the deposit (fail closed before sending).
+    let agentUsdc = 0;
+    try {
+      const acc = await getAccount(connection, agentUsdcAta);
+      agentUsdc = Number(acc.amount.toString()) / 1e6;
+    } catch {
+      agentUsdc = 0;
+    }
+    if (agentUsdc + 1e-9 < input.amount) {
+      return { success: false, error: `Insufficient agent USDC: have $${agentUsdc.toFixed(6)}, need $${input.amount}` };
+    }
+
+    const instructions: TransactionInstruction[] = [];
+    let botAtaInfo: Awaited<ReturnType<Connection['getAccountInfo']>>;
+    try {
+      botAtaInfo = await connection.getAccountInfo(botUsdcAta);
+    } catch (err) {
+      return { success: false, error: `Could not read bot USDC account: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    if (!botAtaInfo) {
+      instructions.push(createAssociatedTokenAccountInstruction(agent.publicKey, botUsdcAta, botWallet, usdcMint));
+    }
+    const amountBase = BigInt(this._toBaseUnits(input.amount, 6).toString());
+    instructions.push(createTransferInstruction(agentUsdcAta, botUsdcAta, agent.publicKey, amountBase));
+
+    let blockhashCtx: Awaited<ReturnType<Connection['getLatestBlockhash']>>;
+    try {
+      blockhashCtx = await connection.getLatestBlockhash('confirmed');
+    } catch (err) {
+      return { success: false, error: `Could not fetch blockhash: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    const tx = new Transaction({
+      feePayer: agent.publicKey,
+      blockhash: blockhashCtx.blockhash,
+      lastValidBlockHeight: blockhashCtx.lastValidBlockHeight,
+    });
+    tx.add(...instructions);
+    tx.sign(agent);
+
+    let txSignature: string;
+    try {
+      txSignature = await connection.sendRawTransaction(tx.serialize(), {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+      });
+    } catch (err) {
+      // Send rejected (e.g. preflight failure) → tx never entered the network, NO funds moved.
+      return { success: false, error: `Deposit transaction send failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+
+    try {
+      const conf = await connection.confirmTransaction({
+        signature: txSignature,
+        blockhash: blockhashCtx.blockhash,
+        lastValidBlockHeight: blockhashCtx.lastValidBlockHeight,
+      }, 'confirmed');
+      if (conf.value.err) {
+        return { success: false, txSignature, error: `Deposit tx failed on-chain: ${JSON.stringify(conf.value.err)}` };
+      }
+      return { success: true, txSignature };
+    } catch (confErr) {
+      // Ambiguous confirm (timeout / blockheight exceeded). Resolve authoritatively
+      // via signature status before declaring an outcome — never blind-fail a tx
+      // that may have landed (that would under-report a real deposit).
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          const st = await connection.getSignatureStatuses([txSignature], { searchTransactionHistory: true });
+          const info = st?.value?.[0];
+          if (info) {
+            if (info.err) {
+              return { success: false, txSignature, error: `Deposit tx failed on-chain: ${JSON.stringify(info.err)}` };
+            }
+            if (info.confirmationStatus === 'confirmed' || info.confirmationStatus === 'finalized') {
+              return { success: true, txSignature };
+            }
+          } else if (attempt >= 2) {
+            // Past the blockhash window with no status ⇒ tx expired, can never commit ⇒ no funds moved.
+            return { success: false, error: `Deposit transaction expired without committing (no funds moved): ${confErr instanceof Error ? confErr.message : String(confErr)}` };
+          }
+        } catch { /* transient RPC error — retry */ }
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+      console.error(`[Flash fundBotWalletCollateral] AMBIGUOUS deposit outcome — could not confirm tx ${txSignature}. Verify on-chain before retrying.`);
+      return { success: false, ambiguous: true, txSignature, error: `AMBIGUOUS deposit outcome for tx ${txSignature} — could not confirm on-chain commit. Verify this signature before retrying to avoid double-funding.` };
     }
   }
 

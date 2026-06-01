@@ -143,6 +143,19 @@ export interface ProtocolAdapter {
   executeDeposit(params: AgentDepositParams): Promise<DepositResult>;
   executeWithdraw(params: AgentWithdrawParams): Promise<WithdrawResult>;
   transferBetweenSubaccounts(params: TransferParams): Promise<TransferResult>;
+  /**
+   * Fund an independent-trader bot's OWN on-chain wallet directly from the user's
+   * agent wallet (agent wallet → bot wallet USDC). For `accountModel ===
+   * 'independent_trader'` adapters (Flash) there is no exchange "deposit" + main→
+   * subaccount transfer — the bot wallet IS the trader and holds wallet-resident
+   * collateral. Fail closed: if the transfer cannot be confirmed, NO funds move
+   * (or `ambiguous` is set with the signature for manual verification).
+   */
+  fundBotWalletCollateral?(input: {
+    mainSecretKey: Uint8Array;
+    botWalletAddress: string;
+    amount: number;
+  }): Promise<{ success: boolean; txSignature?: string; ambiguous?: boolean; error?: string }>;
 
   createSubaccount(input: CreateSubaccountInput): Promise<SubaccountInfo>;
   listSubaccounts(agentPublicKey: string): Promise<SubaccountInfo[]>;

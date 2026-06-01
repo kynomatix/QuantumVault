@@ -5053,7 +5053,58 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       
       console.log(`[Drift Deposit] Key validation passed. Executing deposit: amount=${amount}, subAccountId=${subAccountId} (v3 security)`);
-      
+
+      // Independent-trader adapters (e.g. Flash): each bot owns its OWN on-chain
+      // wallet. There is no exchange "deposit" + main→subaccount transfer — fund
+      // the bot wallet directly (agent wallet → bot wallet USDC). Keyed off the
+      // adapter's account model so this stays generic for any non-subaccount venue.
+      if (botForTransfer && getAdapterForBot(botForTransfer).subaccountCaps?.accountModel === 'independent_trader') {
+        const indAdapter = getAdapterForBot(botForTransfer);
+        if (typeof indAdapter.fundBotWalletCollateral !== 'function' || !botForTransfer.protocolSubaccountId) {
+          agentKeyResult.cleanup();
+          return res.status(500).json({ error: `Deposit not supported for ${indAdapter.protocolName} bot (missing wallet funding path)` });
+        }
+        const fundResult = await indAdapter.fundBotWalletCollateral({
+          mainSecretKey: secretKeyCopy,
+          botWalletAddress: botForTransfer.protocolSubaccountId,
+          amount,
+        });
+        agentKeyResult.cleanup();
+        if (!fundResult.success) {
+          return res.status(400).json({ error: fundResult.error || 'Deposit to bot wallet failed', ambiguous: fundResult.ambiguous });
+        }
+        try {
+          await storage.createEquityEvent({
+            walletAddress: req.walletAddress!,
+            tradingBotId: tradingBotId || null,
+            eventType: 'drift_deposit',
+            amount: String(amount),
+            txSignature: fundResult.txSignature || null,
+            notes: `Deposit to bot wallet ${botForTransfer.protocolSubaccountId.slice(0, 8)}...`,
+          });
+        } catch (eventErr: any) {
+          console.error(`[Deposit] Equity event recording failed (independent_trader):`, eventErr.message);
+          if (fundResult.txSignature) {
+            const existing = await storage.getEquityEventByTxSignature(fundResult.txSignature);
+            if (!existing) {
+              try {
+                await storage.createEquityEvent({
+                  walletAddress: req.walletAddress!,
+                  tradingBotId: tradingBotId || null,
+                  eventType: 'drift_deposit',
+                  amount: String(amount),
+                  txSignature: fundResult.txSignature,
+                  notes: `Deposit to bot wallet (recovered)`,
+                });
+              } catch (retryErr: any) {
+                console.error(`[Deposit] Equity event retry also failed:`, retryErr.message);
+              }
+            }
+          }
+        }
+        return res.json({ success: true, signature: fundResult.txSignature });
+      }
+
       const result = await executeAgentDeposit(
         wallet.agentPublicKey,
         secretKeyCopy,
@@ -5272,6 +5323,57 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             const adapter = getAdapterForBot(bot);
             const decrypted = await _resolveBotSubaccountSecretKey(withdrawBotCtx);
             try {
+              // Independent-trader adapters (e.g. Flash): the bot's OWN wallet IS the
+              // trader and holds the collateral. Withdraw straight from the bot wallet
+              // to the agent wallet (the decrypted key signs) — no subaccount transfer
+              // and no second withdraw leg. No exchange fee on this model.
+              if (adapter.subaccountCaps?.accountModel === 'independent_trader') {
+                if (typeof adapter.executeWithdraw !== 'function') {
+                  return res.status(500).json({ error: `Withdraw not supported for ${adapter.protocolName} bot` });
+                }
+                console.log(`[Withdraw] Independent-trader withdraw: ${amount} USDC from bot wallet ${withdrawBotCtx.botPublicKey} → agent wallet`);
+                const wr = await adapter.executeWithdraw({
+                  agentPublicKey: withdrawBotCtx.botPublicKey,
+                  agentSecretKey: decrypted.secretKey,
+                  mainWalletAddress: wallet.agentPublicKey,
+                  amount,
+                  subaccountId: withdrawBotCtx.botPublicKey,
+                });
+                if (!wr.success) {
+                  return res.status(400).json({ error: wr.error || 'Withdraw from bot wallet failed' });
+                }
+                try {
+                  await storage.createEquityEvent({
+                    walletAddress: req.walletAddress!,
+                    tradingBotId,
+                    eventType: 'drift_withdraw',
+                    amount: String(-amount),
+                    txSignature: wr.txSignature || null,
+                    notes: `Withdraw from bot wallet`,
+                  });
+                } catch (eventErr: any) {
+                  console.error(`[Withdraw] CRITICAL: on-chain withdraw succeeded (tx: ${wr.txSignature}) but equity event recording failed:`, eventErr.message);
+                  if (wr.txSignature) {
+                    const existing = await storage.getEquityEventByTxSignature(wr.txSignature);
+                    if (!existing) {
+                      try {
+                        await storage.createEquityEvent({
+                          walletAddress: req.walletAddress!,
+                          tradingBotId,
+                          eventType: 'drift_withdraw',
+                          amount: String(-amount),
+                          txSignature: wr.txSignature,
+                          notes: `Withdraw from bot wallet (recovered)`,
+                        });
+                      } catch (retryErr: any) {
+                        console.error(`[Withdraw] Equity event retry also failed:`, retryErr.message);
+                      }
+                    }
+                  }
+                }
+                return res.json({ success: true, signature: wr.txSignature });
+              }
+
               console.log(`[Withdraw] Transferring ${amount} USDC from bot subaccount ${withdrawBotCtx.botPublicKey} to agent wallet`);
               const transferResult = await adapter.transferBetweenSubaccounts({
                 agentSecretKey: decrypted.secretKey,

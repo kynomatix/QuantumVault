@@ -2023,25 +2023,27 @@ export function BotManagementDrawer({
               <p className="text-xs text-muted-foreground">
                 Withdraw USDC from the bot back to your wallet
               </p>
-              <div
-                className="text-xs text-amber-500/90 flex items-start gap-1 leading-relaxed bg-amber-500/5 border border-amber-500/20 rounded-md px-2.5 py-1.5"
-                data-testid="text-remove-equity-fee-notice"
-              >
-                <Info className="w-3 h-3 mt-0.5 shrink-0" />
-                <span>
-                  Pacifica charges a flat <span className="font-medium">$1 USDC</span> fee per on-chain withdrawal.
-                  {removeEquityAmount && parseFloat(removeEquityAmount) > 1 && (
-                    <>
-                      {' '}You'll receive{' '}
-                      <span className="font-mono font-medium" data-testid="text-remove-equity-net-amount">
-                        ${(parseFloat(removeEquityAmount) - 1).toFixed(2)}
-                      </span>{' '}
-                      in your wallet.
-                    </>
-                  )}{' '}
-                  This fee is charged by the exchange — not QuantumVault.
-                </span>
-              </div>
+              {displayBot?.activeProtocol === 'pacifica' && (
+                <div
+                  className="text-xs text-amber-500/90 flex items-start gap-1 leading-relaxed bg-amber-500/5 border border-amber-500/20 rounded-md px-2.5 py-1.5"
+                  data-testid="text-remove-equity-fee-notice"
+                >
+                  <Info className="w-3 h-3 mt-0.5 shrink-0" />
+                  <span>
+                    Pacifica charges a flat <span className="font-medium">$1 USDC</span> fee per on-chain withdrawal.
+                    {removeEquityAmount && parseFloat(removeEquityAmount) > 1 && (
+                      <>
+                        {' '}You'll receive{' '}
+                        <span className="font-mono font-medium" data-testid="text-remove-equity-net-amount">
+                          ${(parseFloat(removeEquityAmount) - 1).toFixed(2)}
+                        </span>{' '}
+                        in your wallet.
+                      </>
+                    )}{' '}
+                    This fee is charged by the exchange — not QuantumVault.
+                  </span>
+                </div>
+              )}
               {hasOpenPositions && exchangeBalance > exchangeFreeCollateral && (
                 <p className="text-xs text-amber-500">
                   Note: ${(exchangeBalance - exchangeFreeCollateral).toFixed(2)} is locked as margin for open positions
@@ -2533,7 +2535,7 @@ export function BotManagementDrawer({
                       When equity exceeds ${parseFloat(editAutoWithdrawThreshold).toFixed(2)}, excess profits will be withdrawn automatically
                     </p>
                   )}
-                  {editAutoWithdrawThreshold && parseFloat(editAutoWithdrawThreshold) > 0 && (
+                  {displayBot?.activeProtocol === 'pacifica' && editAutoWithdrawThreshold && parseFloat(editAutoWithdrawThreshold) > 0 && (
                     <p
                       className="text-xs text-amber-500/90 flex items-start gap-1 leading-relaxed"
                       data-testid="text-auto-withdraw-fee-notice"
