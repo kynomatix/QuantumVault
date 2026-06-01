@@ -15,6 +15,7 @@ import { db } from "./db";
 import { desc, eq, sql, asc, and } from "drizzle-orm";
 import { ZodError } from "zod";
 import { getDefaultAdapter, getAdapterForBot, getAdapter } from './protocol/adapter-registry';
+import { normalizeMarket } from './protocol/symbol-registry';
 import type { ProtocolAdapter } from './protocol/adapter';
 import { parseAndValidateAdapterSubaccountId } from './protocol/persist-canonical-subaccount-id';
 import { resolveAgentKeypair } from './agent-wallet';
@@ -1061,6 +1062,76 @@ async function getPerpPositions(walletAddress: string, subAccountId: number = 0,
     const positions = await adapter.getPositions(walletAddress, _subIdStr(subAccountId));
     return positions.map(_mapPositionToDrift);
   } catch { return []; }
+}
+
+/**
+ * Guard: refuse to switch a bot's exchange/protocol while it still holds an open
+ * position OR unsettled funds on its CURRENT protocol.
+ *
+ * Switching `active_protocol` re-points getAdapterForBot() at the NEW venue, so
+ * the reconciler can no longer see — or repair — anything still live on the OLD
+ * venue: a position closed on the old venue leaves the DB cache stale-open with
+ * no self-healing path, and any leftover collateral is stranded.
+ * See docs/ADDING_EXCHANGE_ADAPTERS.md §5 / §12 (#18).
+ *
+ * FAIL CLOSED: on-chain reads go straight to the bot's adapter (NOT the
+ * fail-open getPerpPositions / getExchangeAccountInfoForBot helpers) so a read
+ * error BLOCKS the switch rather than letting it slip through.
+ */
+async function assertNoOpenPositionBeforeProtocolSwitch(
+  bot: TradingBot,
+): Promise<{ ok: true } | { ok: false; reason: string; positionSize?: number }> {
+  // 1) Cheap protocol-independent DB pre-check on the cached position.
+  let dbPos;
+  try {
+    dbPos = await storage.getBotPosition(bot.id, bot.market);
+  } catch {
+    return { ok: false, reason: 'Could not read the cached position to verify it is flat (fail-closed).' };
+  }
+  if (dbPos && Math.abs(parseFloat(dbPos.baseSize)) > 0.0001) {
+    return { ok: false, reason: 'The bot still has an open position (cached). Close it first.', positionSize: parseFloat(dbPos.baseSize) };
+  }
+
+  // 2) Authoritative on-chain reads on the CURRENT protocol. The adapter is
+  //    called directly so any failure throws and blocks the switch.
+  try {
+    const adapter = getAdapterForBot(bot);
+    let account: string | null;
+    let subIdStr: string | undefined;
+    // External-key bots (Flash/Pacifica) hold their position at the protocol
+    // subaccount pubkey — read THAT account directly, even when subaccountStatus
+    // is not 'active' (pending/error). Reading the agent main account instead
+    // would falsely report flat (a fail-open path). Only genuine non-external
+    // (legacy Drift) bots key by agent main + driftSubaccountId.
+    if (bot.protocolSubaccountId) {
+      account = bot.protocolSubaccountId;
+      subIdStr = undefined;
+    } else {
+      const wallet = await storage.getWallet(bot.walletAddress);
+      account = wallet?.agentPublicKey ?? null;
+      subIdStr = _subIdStr(bot.driftSubaccountId ?? 0);
+    }
+    if (!account) {
+      return { ok: false, reason: 'No account available to verify the on-chain position (fail-closed).' };
+    }
+
+    const positions = await adapter.getPositions(account, subIdStr);
+    const target = normalizeMarket(bot.market);
+    const onChain = positions.find(p => normalizeMarket(p.internalSymbol) === target);
+    const size = Math.abs(onChain?.baseSize || 0);
+    if (size > 0.0001) {
+      return { ok: false, reason: 'The bot still has an open position on-chain. Close it first.', positionSize: size };
+    }
+
+    const info = await adapter.getAccountInfo(account, subIdStr);
+    if ((info?.equity ?? 0) > 1) {
+      return { ok: false, reason: `The bot still holds ~$${info.equity.toFixed(2)} on ${bot.activeProtocol}. Withdraw funds before switching exchange.` };
+    }
+  } catch (err: any) {
+    return { ok: false, reason: `Could not verify the bot is flat on-chain (fail-closed): ${err?.message || String(err)}` };
+  }
+
+  return { ok: true };
 }
 
 async function getExchangeAccountInfoForBot(agentPublicKey: string, subAccountId: number, botCtx: BotSubaccountContext | null, adapter = getDefaultAdapter()) {
@@ -8008,6 +8079,34 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Forbidden" });
+      }
+
+      // Guard: in-place exchange/protocol switching is NOT supported. A real
+      // switch requires close + withdraw + provisioning a subaccount on the
+      // target venue (docs/ADDING_EXCHANGE_ADAPTERS.md §5). We reject any
+      // active_protocol change here; when the bot isn't flat we return a
+      // position-specific reason so an open position can never be silently
+      // switched away from its venue and orphan reconciliation (§12). Fail-closed.
+      const requestedProtocolRaw = (req.body as any).activeProtocol;
+      if (requestedProtocolRaw !== undefined && requestedProtocolRaw !== null) {
+        const requestedProtocol = String(requestedProtocolRaw).toLowerCase();
+        if (requestedProtocol !== (bot.activeProtocol ?? '').toLowerCase()) {
+          const switchGuard = await assertNoOpenPositionBeforeProtocolSwitch(bot);
+          if (!switchGuard.ok) {
+            return res.status(409).json({
+              error: "Cannot switch this bot's exchange while it has an open position or unsettled funds. Close the position and withdraw first.",
+              details: switchGuard.reason,
+              ...(switchGuard.positionSize !== undefined ? { positionSize: switchGuard.positionSize } : {}),
+              currentProtocol: bot.activeProtocol ?? null,
+              requestedProtocol,
+            });
+          }
+          return res.status(400).json({
+            error: "Switching a bot's exchange in place isn't supported. Create a new bot on the target exchange instead.",
+            currentProtocol: bot.activeProtocol ?? null,
+            requestedProtocol,
+          });
+        }
       }
 
       const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive, profitReinvest, autoWithdrawThreshold, autoTopUp } = req.body;

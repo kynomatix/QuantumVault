@@ -2630,6 +2630,18 @@ export function BotManagementDrawer({
                           <ExternalLink className="w-3 h-3 text-muted-foreground" />
                         </a>
                       )}
+                      {displayBot.activeProtocol === 'flash' && (
+                        <a
+                          href={`https://fstats.io/traders/${displayBot.botSubaccountIdentifier}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="p-1 rounded hover:bg-muted transition-colors"
+                          title="View trader on Flash Analytics (use until Flash V2 migration is complete)"
+                          data-testid="link-subaccount-flash"
+                        >
+                          <ExternalLink className="w-3 h-3 text-muted-foreground" />
+                        </a>
+                      )}
                       <button
                         onClick={() => {
                           navigator.clipboard.writeText(displayBot.botSubaccountIdentifier!);
