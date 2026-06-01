@@ -487,11 +487,33 @@ export class FlashAdapter implements ProtocolAdapter {
         // Reduce/close existing exposure → decreaseSize on the open position.
         const pos = await this._findPosition(botWallet, spec);
         if (!pos) return this._reject('reduceOnly requested but no open position');
+
+        // Full close: decreaseSize reconstructs the size delta from a float, which
+        // almost never lands exactly on the on-chain integer sizeAmount. A 1-unit
+        // overshoot trips the program's "cannot reduce below zero" guard and the
+        // instruction fails with InvalidArgument. Route full closes through the
+        // exact closePosition path (closeAndSwap for longs, closePosition for
+        // shorts), which closes 100% of the position regardless of dust.
+        const fullCloseEps = Math.max(1e-9, pos.sizeBase * 1e-4);
+        if (params.sizeBase >= pos.sizeBase - fullCloseEps) {
+          return this.closePosition({
+            agentPublicKey: params.agentPublicKey,
+            agentSecretKey: params.agentSecretKey,
+            mainWalletAddress: params.mainWalletAddress,
+            internalSymbol: params.internalSymbol,
+            subaccountId: params.subaccountId,
+            maxSlippagePct: params.maxSlippagePct,
+          });
+        }
+
         const collatSym = pos.side === 'short' ? 'USDC' : spec.flashSymbol;
         const sideEnum = pos.side === 'short' ? FLASH_SIDE_SHORT : FLASH_SIDE_LONG;
         // Reducing a short buys back (price up); reducing a long sells (price down).
         const limitPrice = pos.side === 'short' ? price * (1 + slipPct) : price * (1 - slipPct);
-        const sizeDelta = this._toBaseUnits(params.sizeBase, token.decimals);
+        // Clamp a genuine partial so float rounding can never push the delta past
+        // the on-chain size (which would also trip the InvalidArgument guard).
+        const reduceBase = Math.min(params.sizeBase, pos.sizeBase);
+        const sizeDelta = this._toBaseUnits(reduceBase, token.decimals);
         built = await client.decreaseSize(
           spec.flashSymbol,
           collatSym,
@@ -645,7 +667,7 @@ export class FlashAdapter implements ProtocolAdapter {
       const price = await this.getPrice(params.internalSymbol);
       if (price == null) return this._reject(`No oracle price for ${params.internalSymbol}`);
 
-      const slipPct = DEFAULT_SLIPPAGE_PCT / 100;
+      const slipPct = (params.maxSlippagePct ?? DEFAULT_SLIPPAGE_PCT) / 100;
       const client = this._buildWriteClient(signer);
       const referralArgs = [
         FLASH_PRIVILEGE_REFERRAL as unknown as Privilege,

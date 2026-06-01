@@ -120,6 +120,7 @@ export interface ClosePositionParams {
   subaccountId?: string;
   clientOrderId?: string;
   builderCode?: string;
+  maxSlippagePct?: number;
 }
 
 export interface SetLeverageParams {
