@@ -98,6 +98,10 @@ async function _resolveBotSubaccountSecretKey(
         protocolSubaccountId: bot.protocolSubaccountId,
         botSubaccountKeyEncrypted: bot.botSubaccountKeyEncrypted,
         botSubaccountKeyEncryptedV3: bot.botSubaccountKeyEncryptedV3,
+        // Phase 4b (Flash agent-HD wallets): enable seed re-derivation when the
+        // encrypted cache is missing/unusable.
+        derivationIndex: bot.derivationIndex,
+        derivationPathVersion: bot.derivationPathVersion,
       },
       umkResult.umk,
     );
@@ -109,6 +113,152 @@ async function _resolveBotSubaccountSecretKey(
     return decrypted;
   } finally {
     umkResult.cleanup();
+  }
+}
+
+/**
+ * Phase 4b emergency recovery for a Flash agent-derived per-bot wallet. Re-derives
+ * the bot key from the agent seed (via _resolveBotSubaccountSecretKey, which works
+ * even if the encrypted blob is gone), closes any open positions, cancels leftover
+ * trigger orders, tops up gas from the agent, sweeps ALL funds back to the agent
+ * wallet, and verifies the wallet is genuinely empty. Idempotent: re-running on an
+ * already-empty wallet is a safe no-op. Fails closed on any unreadable balance or
+ * unfinished close/sweep — never reports success while funds may remain.
+ *
+ * Does NOT delete the bot row — recovery only returns the capital to the agent.
+ */
+async function recoverFlashBotWallet(
+  bot: TradingBot,
+  agentAddress: string,
+  agentSecret: Uint8Array | null,
+  logPrefix: string = '[Recover]',
+): Promise<{
+  recovered: boolean;
+  closedPositions: number;
+  usdcSwept: number;
+  solReclaimed: number;
+  alreadyEmpty: boolean;
+  error?: string;
+}> {
+  const empty = (error?: string) => ({
+    recovered: false, closedPositions: 0, usdcSwept: 0, solReclaimed: 0, alreadyEmpty: false, error,
+  });
+
+  if (bot.activeProtocol !== 'flash' || !bot.protocolSubaccountId || bot.protocolSubaccountId === agentAddress) {
+    return empty('Bot has no separate Flash wallet to recover');
+  }
+  const isAgentHd = bot.derivationIndex != null && bot.derivationPathVersion != null;
+  const hasKey = !!(bot.botSubaccountKeyEncryptedV3 || bot.botSubaccountKeyEncrypted);
+  if (!isAgentHd && !hasKey) {
+    return empty('Bot wallet is not recoverable (random keypair with no stored key)');
+  }
+
+  const flashAdapter = getAdapterForBot(bot) as import('./protocol/flash/flash-adapter').FlashAdapter;
+  const subId = bot.protocolSubaccountId;
+  const botCtx: BotSubaccountContext = {
+    useBotKeypair: true, botPublicKey: subId, botId: bot.id, walletAddress: bot.walletAddress,
+  };
+
+  // Refuse to recover a bot that is still executing — a webhook/manual trade could
+  // reopen a position between our close and our sweep, locking collateral that the
+  // wallet-USDC check would not catch. Operator must stop the bot first. Fail closed.
+  if (bot.executionActive) {
+    return empty('Bot execution is still active — stop the bot before recovering its wallet (a live trade could reopen a position mid-sweep)');
+  }
+
+  let decrypted: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+  try {
+    // Re-derive (or decrypt) the bot key. Throws/fails closed if unrecoverable.
+    decrypted = await _resolveBotSubaccountSecretKey(botCtx);
+
+    // 1) Close any open positions — recovery CLOSES (delete refuses); fail closed.
+    let closedPositions = 0;
+    let positions = await flashAdapter.getPositions(subId);
+    for (const pos of positions) {
+      console.log(`${logPrefix} Closing ${pos.internalSymbol} position on bot wallet ${subId.slice(0, 8)}...`);
+      const close = await flashAdapter.closePosition({
+        agentPublicKey: subId,
+        agentSecretKey: decrypted.secretKey,
+        mainWalletAddress: agentAddress,
+        internalSymbol: pos.internalSymbol,
+        subaccountId: subId,
+      });
+      if (!close.success) {
+        return empty(`Failed to close ${pos.internalSymbol} position: ${close.error}`);
+      }
+      closedPositions++;
+    }
+
+    // Best-effort cancel of leftover trigger (TP/SL) orders — never blocks the sweep.
+    try {
+      await flashAdapter.cancelAllOrders({
+        agentPublicKey: subId,
+        agentSecretKey: decrypted.secretKey,
+        mainWalletAddress: agentAddress,
+        subaccountId: subId,
+      });
+    } catch (cancelErr: any) {
+      console.warn(`${logPrefix} cancelAllOrders failed (non-fatal): ${cancelErr?.message || cancelErr}`);
+    }
+
+    // Re-verify NO positions remain before sweeping — fail closed.
+    positions = await flashAdapter.getPositions(subId);
+    if (positions.length > 0) {
+      return empty(`${positions.length} position(s) still open after close attempt`);
+    }
+
+    // 2) Gas top-up so the bot wallet can pay its own sweep fee (USDC-rich/SOL-poor).
+    if (agentSecret) {
+      const gas = await flashAdapter.topUpBotWalletGas({ mainSecretKey: agentSecret, botWalletAddress: subId });
+      if (gas.error) {
+        return empty(`Could not top up bot gas for the sweep: ${gas.error}`);
+      }
+    }
+
+    // 3) Sweep everything (USDC + reclaim SOL) back to the agent wallet.
+    const sweep = await flashAdapter.sweepBotWallet({ subSecretKey: decrypted.secretKey, destWalletAddress: agentAddress });
+    if (sweep.error) {
+      return empty(`Sweep failed: ${sweep.error}`);
+    }
+
+    // 4) Verify the wallet is genuinely empty — reads + position check fail CLOSED.
+    //    A position reopened mid-recovery would lock collateral that the wallet-USDC
+    //    balance check cannot see, so re-check positions one final time after the sweep.
+    const residualPositions = await flashAdapter.getPositions(subId);
+    if (residualPositions.length > 0) {
+      return empty(`${residualPositions.length} position(s) reopened during recovery — collateral is locked; stop the bot and retry`);
+    }
+    let usdcResidual: number;
+    let solResidual: number;
+    try {
+      usdcResidual = await flashAdapter.getWalletCollateralBalanceStrict(subId);
+      solResidual = await flashAdapter.getWalletSolBalance(subId);
+    } catch (balErr: any) {
+      return empty(`Could not verify the bot wallet is empty after sweep: ${balErr?.message || balErr}`);
+    }
+    if (usdcResidual > 0) {
+      return empty(`$${usdcResidual.toFixed(6)} USDC still remains in the bot wallet after sweep`);
+    }
+    // A successful SOL reclaim leaves only sub-fee dust (< ~0.000005 SOL). A residual
+    // above the dust threshold means the reclaim leg FAILED and real SOL (including the
+    // gas we just topped up) is stranded — fail closed so the operator re-runs. The
+    // wallet is agent-HD recoverable, so a re-run is always safe.
+    const FLASH_SOL_DUST = 0.001;
+    if (solResidual > FLASH_SOL_DUST) {
+      return empty(`${solResidual.toFixed(6)} SOL still remains in the bot wallet after sweep (SOL reclaim failed) — retry recovery`);
+    }
+
+    const alreadyEmpty = closedPositions === 0 && sweep.usdcSwept === 0;
+    console.log(`${logPrefix} Recovered bot ${bot.id}: closed ${closedPositions} position(s), swept $${sweep.usdcSwept.toFixed(2)} USDC + ${sweep.solReclaimed.toFixed(6)} SOL to agent`);
+    return {
+      recovered: true,
+      closedPositions,
+      usdcSwept: sweep.usdcSwept,
+      solReclaimed: sweep.solReclaimed,
+      alreadyEmpty,
+    };
+  } finally {
+    try { decrypted?.cleanup(); } catch { /* noop */ }
   }
 }
 
@@ -1049,7 +1199,7 @@ import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable
 import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification, type TradeNotification, buildDefaultInlineKeyboard } from "./notification-service";
 import { classifySignal } from "./trading/signal-classifier";
 import { registerTelegramMiniAppRoutes } from "./telegram-mini-app";
-import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3, rebindRetainedKeyToBotUuidV3 } from "./session-v3";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3, rebindRetainedKeyToBotUuidV3, decryptMnemonic, deriveBotKeypairFromAgentSeed, BOT_DERIVATION_PATH_VERSION } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback, cancelRetryJobsForBot } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { DOCS_MARKDOWN } from "./docs-markdown";
@@ -7172,6 +7322,13 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       // value (not the pre-allocated `nextSubaccountId`) is persisted into the legacy
       // `driftSubaccountId` column to keep DB and on-chain state in sync.
       let adapterReturnedNumericSubaccountId: number | null = null;
+      // Phase 4b (Flash agent-HD wallets): the non-secret HD index + path version for
+      // an agent_hd bot, carried across the bot insert below. NULL for legacy random
+      // bots. `_botAgentMnemonic` holds the decrypted recovery phrase only long enough
+      // to derive the bot wallet, then is zeroized.
+      let botDerivationIndex: number | null = null;
+      let botDerivationPathVersion: number | null = null;
+      let _botAgentMnemonic: Buffer | null = null;
       // Subaccount Recycling Plan §8 (Phase E) — when a create reuses a pooled spare
       // instead of provisioning fresh, this carries the claim across the bot insert so
       // the post-insert block can rebind the retained key onto the new bot row and
@@ -7227,6 +7384,12 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
             if (refreshed) _botCreateWallet = refreshed;
           }
           _botCreateAgentKey = await decryptAgentKeyStrict(req.walletAddress!, _botCreateUmk.umk, _botCreateWallet, _botCreateWallet.agentPublicKey);
+          // Phase 4b (Flash agent-HD wallets): while the UMK is still live, decrypt the
+          // agent recovery phrase so we can derive a recoverable per-bot wallet below.
+          // Only for agent_hd adapters (Flash) — minimizes the mnemonic's blast radius.
+          if (_botCreateAgentKey && createCaps.walletDerivation === 'agent_hd') {
+            _botAgentMnemonic = await decryptMnemonic(req.walletAddress!, _botCreateUmk.umk);
+          }
         } finally {
           _botCreateUmk.cleanup();
         }
@@ -7234,11 +7397,37 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           console.error(`[BotCreate][RekeyGuard] FAIL_AT=decryptAgentKeyStrict wallet=${req.walletAddress!.slice(0,8)}... expectedAgentPub=${_botCreateWallet.agentPublicKey?.slice(0,8) ?? 'null'}... repair=${_botCreateRepair}`);
           return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
         }
+        // Phase 4b (Flash agent-HD wallets): agent_hd REQUIRES a recoverable seed. If
+        // the wallet has no recovery phrase on file, fail closed — never silently fall
+        // back to an unrecoverable random key (that would defeat the whole point).
+        if (createCaps.walletDerivation === 'agent_hd' && !_botAgentMnemonic) {
+          console.error(`[BotCreate][AgentHD] FAIL_AT=decryptMnemonic wallet=${req.walletAddress!.slice(0,8)}... — agent_hd requires a recovery phrase`);
+          _botCreateAgentKey.cleanup();
+          return res.status(400).json({ error: "This wallet has no recovery phrase on file, which is required to create a recoverable Flash bot. Please sign out and sign back in to re-key your wallet." });
+        }
         const agentKeypair = resolveAgentKeypair(_botCreateAgentKey.secretKey);
         const adapter = createAdapter;
         const caps = createCaps;
 
-        const botKeypair = caps.requiresExternalSubaccountKey ? Keypair.generate() : null;
+        let botKeypair: import('@solana/web3.js').Keypair | null = null;
+        if (caps.requiresExternalSubaccountKey) {
+          if (caps.walletDerivation === 'agent_hd') {
+            // Recoverable per-bot wallet: allocate a monotonic, never-reused HD index
+            // (burn-on-allocate) and derive from the agent seed. The encrypted key
+            // written post-insert is only a hot-path cache — seed + index is the real
+            // recovery source. Zeroize the mnemonic the instant we're done with it.
+            botDerivationIndex = await storage.allocateBotDerivationIndex(req.walletAddress!);
+            botDerivationPathVersion = BOT_DERIVATION_PATH_VERSION;
+            try {
+              botKeypair = deriveBotKeypairFromAgentSeed(_botAgentMnemonic!, botDerivationIndex, botDerivationPathVersion);
+            } finally {
+              _botAgentMnemonic?.fill(0);
+              _botAgentMnemonic = null;
+            }
+          } else {
+            botKeypair = Keypair.generate();
+          }
+        }
 
         // Pacifica atomic provision path: if the active adapter is Pacifica and a
         // funding amount was provided, use provisionFundedSubaccount which handles
@@ -7615,6 +7804,10 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
         maxPositionSize: maxPositionSize || null,
         signalConfig: signalConfig || { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
         riskConfig: riskConfig || {},
+        // Phase 4b (Flash agent-HD wallets): non-secret HD index + path version so the
+        // per-bot wallet stays re-derivable from the agent seed. NULL for random bots.
+        derivationIndex: botDerivationIndex,
+        derivationPathVersion: botDerivationPathVersion,
       } as any);
 
       const webhookUrl = generateWebhookUrl(bot.id, webhookSecret);
@@ -8212,12 +8405,17 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
           return res.json({ success: true, swept: false, message: 'Bot deleted' });
         }
 
-        // No persisted key ⇒ creation's key-write failed and the in-memory key was
-        // already discarded. We cannot sweep; any landed funds are unrecoverable and
-        // were already flagged at creation. Deleting only clears the audit row.
+        // Phase 4b (Flash agent-HD wallets): an agent_hd bot is ALWAYS recoverable
+        // from the agent seed + its non-secret derivation index, even with no persisted
+        // encrypted blob — so it must NOT take the "no key ⇒ delete audit row" shortcut.
+        // _resolveBotSubaccountSecretKey re-derives transparently; if that fails (e.g. no
+        // recovery phrase) the sweep below throws and deletion is blocked (fail closed).
+        // Only a legacy RANDOM bot (no blob AND no derivation index) is truly
+        // unrecoverable; for those, deleting clears the orphaned audit row.
         const hasKey = !!(bot.botSubaccountKeyEncryptedV3 || bot.botSubaccountKeyEncrypted);
-        if (!hasKey) {
-          console.warn(`[Delete] Flash bot ${bot.id} has no persisted subaccount key — cannot sweep wallet ${bot.protocolSubaccountId}; deleting audit row only`);
+        const isAgentHd = bot.derivationIndex != null && bot.derivationPathVersion != null;
+        if (!hasKey && !isAgentHd) {
+          console.warn(`[Delete] Flash bot ${bot.id} has no persisted subaccount key and is not agent-derived — cannot sweep wallet ${bot.protocolSubaccountId}; deleting audit row only`);
           await storage.deleteTradingBot(req.params.id);
           return res.json({ success: true, swept: false, message: 'Bot deleted (no recoverable wallet key)' });
         }
@@ -8638,6 +8836,69 @@ QuantumVault connects TradingView alerts and AI trading agents to Drift Protocol
       res.status(500).json({ error: "Internal server error" });
     } finally {
       _deleteAgentKeyCleanup?.();
+    }
+  });
+
+  // Phase 4b emergency recovery: re-derive a Flash agent-HD bot wallet, close any
+  // open positions, sweep ALL funds back to the agent wallet, and verify empty.
+  // Works even if the encrypted per-bot key blob is lost (re-derives from the agent
+  // seed). Idempotent — re-running on an already-empty wallet is a safe no-op. Does
+  // NOT delete the bot row; it only returns the capital to the agent wallet.
+  app.post("/api/trading-bots/:id/recover-wallet", requireWallet, async (req, res) => {
+    let _recoverCleanup: (() => void) | null = null;
+    try {
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.walletAddress !== req.walletAddress) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      const agentAddress = wallet?.agentPublicKey;
+      if (!agentAddress) {
+        return res.status(400).json({ error: "No agent wallet found — cannot recover bot funds." });
+      }
+
+      // V3 strict-decrypt the agent key so we can fund the bot wallet's sweep gas.
+      let agentSecret: Uint8Array | null = null;
+      if (wallet?.agentPrivateKeyEncryptedV3 && wallet?.agentPublicKey) {
+        const _recUmk = await getUmkForWebhook(req.walletAddress!);
+        if (!_recUmk) {
+          return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+        }
+        const _recKey = await decryptAgentKeyStrict(req.walletAddress!, _recUmk.umk, wallet, wallet.agentPublicKey);
+        if (!_recKey) {
+          _recUmk.cleanup();
+          return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+        }
+        agentSecret = _recKey.secretKey;
+        _recoverCleanup = () => { _recKey.cleanup(); _recUmk.cleanup(); };
+      }
+
+      const result = await recoverFlashBotWallet(bot, agentAddress, agentSecret, '[RecoverEndpoint]');
+      if (!result.recovered) {
+        return res.status(500).json({
+          error: result.error || "Recovery failed",
+          message: "The bot wallet could not be safely recovered. Funds remain in the bot wallet; please retry or contact support.",
+        });
+      }
+      return res.json({
+        success: true,
+        closedPositions: result.closedPositions,
+        usdcSwept: result.usdcSwept,
+        solReclaimed: result.solReclaimed,
+        alreadyEmpty: result.alreadyEmpty,
+        message: result.alreadyEmpty
+          ? "Bot wallet was already empty — nothing to recover."
+          : `Recovered $${result.usdcSwept.toFixed(2)} USDC to your agent wallet${result.closedPositions > 0 ? ` after closing ${result.closedPositions} position(s)` : ''}.`,
+      });
+    } catch (err) {
+      console.error('[RecoverEndpoint] Unexpected error:', err);
+      return res.status(500).json({ error: err instanceof Error ? err.message : "Recovery failed" });
+    } finally {
+      _recoverCleanup?.();
     }
   });
 

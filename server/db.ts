@@ -219,6 +219,30 @@ export async function ensureSchema() {
       `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS pacifica_builder_approved boolean NOT NULL DEFAULT false`,
       `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS pacifica_referral_claimed boolean NOT NULL DEFAULT false`,
 
+      // --- Phase 4b (Flash agent-HD wallets): recoverable per-bot wallet indices. ---
+      // Additive + idempotent. The allocator lives on `wallets` (burn-on-allocate,
+      // never reused). Each agent_hd bot stores its non-secret HD index + path version;
+      // legacy random bots leave both NULL. DB-level CHECK/UNIQUE are the real fund-safety
+      // enforcement so a manual or buggy write can never commingle two bots on one wallet.
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS next_bot_derivation_index integer NOT NULL DEFAULT 1`,
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS derivation_index integer`,
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS derivation_path_version integer`,
+      `DO $$ BEGIN
+         ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_derivation_index_positive
+           CHECK (derivation_index IS NULL OR derivation_index >= 1);
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+      `DO $$ BEGIN
+         ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_derivation_dual_model
+           CHECK (
+             (derivation_index IS NULL AND derivation_path_version IS NULL)
+             OR (derivation_index IS NOT NULL AND derivation_path_version IS NOT NULL)
+           );
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+      `DO $$ BEGIN
+         ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_wallet_derivation_index_unique
+           UNIQUE (wallet_address, derivation_index);
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+
       `INSERT INTO lab_strategies (user_id, name, description, pine_script, parsed_inputs, groups, strategy_settings)
        SELECT 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez',
               src.name, src.description, src.pine_script, src.parsed_inputs, src.groups, src.strategy_settings

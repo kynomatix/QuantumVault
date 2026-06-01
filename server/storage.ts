@@ -200,6 +200,10 @@ export interface IStorage {
   // §8. Record a successful verify-empty check (advisory freshness for the next reuse).
   markSubaccountVerifiedEmpty(protocol: string, protocolSubaccountId: string): Promise<void>;
   createTradingBot(bot: InsertTradingBot): Promise<TradingBot>;
+  // Phase 4b (Flash agent-HD wallets): atomically allocate the next monotonic HD
+  // index for a wallet's per-bot wallets. Burn-on-allocate (never decremented or
+  // reused, even if bot creation later fails) so an index always maps to one wallet.
+  allocateBotDerivationIndex(walletAddress: string): Promise<number>;
   updateTradingBot(id: string, updates: Partial<InsertTradingBot>): Promise<TradingBot | undefined>;
   // Phase 4b: write V3 ciphertext for per-bot subaccount key.
   updateBotSubaccountKeyV3(id: string, encryptedV3: string): Promise<void>;
@@ -890,6 +894,24 @@ export class DatabaseStorage implements IStorage {
   async createTradingBot(bot: InsertTradingBot): Promise<TradingBot> {
     const result = await db.insert(tradingBots).values(bot as any).returning();
     return result[0];
+  }
+
+  // Phase 4b (Flash agent-HD wallets): single-statement atomic allocator. The
+  // UPDATE takes a row lock, so concurrent creates for the same wallet serialize
+  // and each gets a unique, monotonic index. RETURNING (post-increment value - 1)
+  // yields the allocated index (first allocation = 1, since the column defaults to 1).
+  async allocateBotDerivationIndex(walletAddress: string): Promise<number> {
+    const result: any = await db.execute(sql`
+      UPDATE wallets
+         SET next_bot_derivation_index = next_bot_derivation_index + 1
+       WHERE address = ${walletAddress}
+       RETURNING (next_bot_derivation_index - 1) AS allocated
+    `);
+    const allocated = result?.rows?.[0]?.allocated;
+    if (allocated == null) {
+      throw new Error(`allocateBotDerivationIndex: wallet ${walletAddress} not found`);
+    }
+    return Number(allocated);
   }
 
   async updateTradingBot(id: string, updates: Partial<InsertTradingBot>): Promise<TradingBot | undefined> {

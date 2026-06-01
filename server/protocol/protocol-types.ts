@@ -329,6 +329,16 @@ export interface AdapterCapabilities {
   maxSubaccounts: number | null;
   settlementType: 'on-chain' | 'off-chain' | 'hybrid';
   requiresExternalSubaccountKey: boolean;
+  // Phase 4b (Flash agent-HD wallets): how the per-bot wallet key is created for
+  // adapters that require an external subaccount key (independent_trader model).
+  //   'agent_hd' — derived from the owner's agent seed at m/44'/501'/<botIndex>'/0',
+  //                so funds stay recoverable from the recovery phrase + a non-secret
+  //                index even if the database is lost. The framework default for every
+  //                new no-subaccount adapter.
+  //   'random'   — legacy: a fresh random keypair whose encrypted blob is the ONLY way
+  //                back to the funds (unrecoverable if lost).
+  // Omitted/undefined is treated as 'random' (legacy behaviour) for back-compat.
+  walletDerivation?: 'agent_hd' | 'random';
 }
 
 export type Unsubscribe = () => void;

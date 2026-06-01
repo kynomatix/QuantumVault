@@ -569,6 +569,50 @@ export function deriveKeypairFromMnemonic(mnemonicBuffer: Buffer): Keypair {
   return Keypair.fromSeed(derivedSeed);
 }
 
+// Phase 4b (Flash agent-HD wallets): the only HD path scheme that exists today.
+// Stored per agent_hd bot so recovery always re-derives on the bot's own version —
+// a future scheme bump can never silently strand a legacy bot.
+export const BOT_DERIVATION_PATH_VERSION = 1;
+
+// Derive a per-bot wallet from the agent seed at m/44'/501'/<botIndex>'/0' (fully
+// hardened — SLIP-0010 ed25519 supports hardened derivation only). Account 0' is
+// RESERVED for the agent wallet (see deriveKeypairFromMnemonic above), so botIndex
+// MUST be >= 1: a bot path can never resolve to the agent path. The agent recovery
+// phrase + this non-secret index re-creates the exact wallet, so funds stay
+// recoverable even if the entire database is lost.
+export function deriveBotKeypairFromAgentSeed(
+  mnemonicBuffer: Buffer,
+  botIndex: number,
+  pathVersion: number = BOT_DERIVATION_PATH_VERSION,
+): Keypair {
+  if (!Number.isInteger(botIndex) || botIndex < 1 || botIndex > 2147483647) {
+    throw new Error(`Invalid botIndex ${botIndex}: must be an integer in [1, 2^31-1]`);
+  }
+  if (pathVersion !== BOT_DERIVATION_PATH_VERSION) {
+    throw new Error(`Unsupported bot derivation path version ${pathVersion}`);
+  }
+
+  const mnemonicStr = mnemonicBuffer.toString('utf8');
+  if (!bip39.validateMnemonic(mnemonicStr)) {
+    throw new Error('Invalid mnemonic');
+  }
+
+  const path = `m/44'/501'/${botIndex}'/0'`;
+  // Fail-closed assertion: structurally impossible for botIndex >= 1, but never
+  // let a bot share/over-control the agent wallet.
+  if (path === SOLANA_DERIVATION_PATH) {
+    throw new Error('Bot derivation path resolved to the agent path — refusing');
+  }
+
+  const seed = bip39.mnemonicToSeedSync(mnemonicStr);
+  const derivedSeed = derivePath(path, seed.toString('hex')).key;
+  if (derivedSeed.length !== 32) {
+    throw new Error('Derived seed must be exactly 32 bytes');
+  }
+
+  return Keypair.fromSeed(derivedSeed);
+}
+
 export async function encryptAndStoreMnemonic(
   walletAddress: string,
   mnemonicBuffer: Buffer,
@@ -1316,9 +1360,61 @@ export async function decryptBotSubaccountKey(
     protocolSubaccountId: string | null;
     botSubaccountKeyEncrypted: string | null;
     botSubaccountKeyEncryptedV3: string | null;
+    // Phase 4b (Flash agent-HD wallets): present (non-null together) for agent_hd
+    // bots whose key is re-derivable from the agent seed. Optional so legacy callers
+    // that don't pass them still compile (re-derive simply won't be available).
+    derivationIndex?: number | null;
+    derivationPathVersion?: number | null;
   },
   umk: Buffer,
 ): Promise<{ secretKey: Uint8Array; cleanup: () => void } | null> {
+  // Phase 4b (Flash agent-HD wallets): re-derive the bot key from the agent seed
+  // when the V3 cache is missing, corrupt, mismatched, or wrong-length. The
+  // encrypted blob is ONLY a hot-path cache — the seed + non-secret HD index is the
+  // real source of the key, so losing/corrupting the blob can never brick an
+  // agent_hd bot. Best-effort rehydrates the cache afterward. Returns null for
+  // non-agent_hd bots (no seed-derived key exists for them).
+  const rederiveAgentHd = async (): Promise<{ secretKey: Uint8Array; cleanup: () => void } | null> => {
+    if (bot.derivationIndex == null || bot.derivationPathVersion == null) return null;
+    const mnemonic = await decryptMnemonic(bot.walletAddress, umk);
+    if (!mnemonic) {
+      console.error(`[Security][AgentHD] Bot ${bot.id} re-derive failed: no recovery phrase on file for owner`);
+      return null;
+    }
+    let kp: Keypair;
+    try {
+      kp = deriveBotKeypairFromAgentSeed(mnemonic, bot.derivationIndex, bot.derivationPathVersion);
+    } catch (err) {
+      console.error(`[Security][AgentHD] Bot ${bot.id} re-derive threw:`, err);
+      return null;
+    } finally {
+      zeroizeBuffer(mnemonic);
+    }
+    const derived = kp.publicKey.toBase58();
+    // Fail closed: never hand back a key that doesn't match the intended wallet.
+    if (bot.protocolSubaccountId && derived !== bot.protocolSubaccountId) {
+      try { (kp.secretKey as Uint8Array).fill(0); } catch { /* noop */ }
+      console.error(`[Security][AgentHD] Bot ${bot.id} re-derived pubkey mismatch: ${derived} != ${bot.protocolSubaccountId}`);
+      return null;
+    }
+    // Best-effort cache rehydrate so subsequent reads are hot (non-fatal on failure).
+    try {
+      const ct = encryptBotSubaccountKeyV3(umk, Buffer.from(kp.secretKey), bot.walletAddress, bot.id);
+      await storage.updateBotSubaccountKeyV3(bot.id, ct);
+      console.log(`[Security][AgentHD] Bot ${bot.id} re-derived from seed; rehydrated V3 cache`);
+    } catch (err) {
+      console.warn(`[Security][AgentHD] Bot ${bot.id} re-derive cache rehydrate failed (non-fatal):`, err);
+    }
+    const secretKey = new Uint8Array(kp.secretKey);
+    return {
+      secretKey,
+      cleanup: () => {
+        try { secretKey.fill(0); } catch { /* noop */ }
+        try { (kp.secretKey as Uint8Array).fill(0); } catch { /* noop */ }
+      },
+    };
+  };
+
   let v3Ciphertext = bot.botSubaccountKeyEncryptedV3;
 
   // JIT migration: if V3 is missing but legacy exists, migrate now while we
@@ -1330,24 +1426,25 @@ export async function decryptBotSubaccountKey(
       umk,
       bot.botSubaccountKeyEncrypted,
     );
-    if (!migrated) return null;
-    v3Ciphertext = migrated.encryptedV3;
+    // A failed migration falls through to re-derive (agent_hd) rather than failing
+    // hard — a legacy random bot with no derivation index still ends up null below.
+    if (migrated) v3Ciphertext = migrated.encryptedV3;
   }
 
-  if (!v3Ciphertext) return null;
+  if (!v3Ciphertext) return await rederiveAgentHd();
 
   let keyBuffer: Buffer;
   try {
     keyBuffer = decryptBotSubaccountKeyV3(umk, v3Ciphertext, bot.walletAddress, bot.id);
   } catch (err) {
-    console.error(`[Security] V3 decrypt failed for bot ${bot.id}:`, err);
-    return null;
+    console.error(`[Security] V3 decrypt failed for bot ${bot.id} (trying seed re-derive):`, err);
+    return await rederiveAgentHd();
   }
 
   if (keyBuffer.length !== 64) {
     zeroizeBuffer(keyBuffer);
-    console.error(`[Security] Bot ${bot.id} subaccount key has wrong length: ${keyBuffer.length}`);
-    return null;
+    console.error(`[Security] Bot ${bot.id} subaccount key has wrong length: ${keyBuffer.length} (trying seed re-derive)`);
+    return await rederiveAgentHd();
   }
 
   // Verify derived pubkey matches stored subaccount id.
@@ -1355,13 +1452,13 @@ export async function decryptBotSubaccountKey(
     const derived = Keypair.fromSecretKey(keyBuffer).publicKey.toBase58();
     if (bot.protocolSubaccountId && derived !== bot.protocolSubaccountId) {
       zeroizeBuffer(keyBuffer);
-      console.error(`[Security] Bot ${bot.id} keypair mismatch: derived ${derived} != stored ${bot.protocolSubaccountId}`);
-      return null;
+      console.error(`[Security] Bot ${bot.id} keypair mismatch: derived ${derived} != stored ${bot.protocolSubaccountId} (trying seed re-derive)`);
+      return await rederiveAgentHd();
     }
   } catch (err) {
     zeroizeBuffer(keyBuffer);
-    console.error(`[Security] Bot ${bot.id} keypair validation failed:`, err);
-    return null;
+    console.error(`[Security] Bot ${bot.id} keypair validation failed (trying seed re-derive):`, err);
+    return await rederiveAgentHd();
   }
 
   const secretKey = new Uint8Array(keyBuffer);

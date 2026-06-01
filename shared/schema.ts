@@ -79,7 +79,14 @@ export const wallets = pgTable("wallets", {
   emergencyStopTriggered: boolean("emergency_stop_triggered").default(false).notNull(),
   emergencyStopAt: timestamp("emergency_stop_at"),
   emergencyStopBy: text("emergency_stop_by"),                       // Admin ID who triggered
-  
+
+  // Phase 4b (Flash agent-HD wallets): monotonic allocator for per-bot HD wallet
+  // indices. Allocated burn-on-allocate (incremented atomically at bot creation,
+  // NEVER decremented or reused, even after a bot is deleted) so the agent seed +
+  // a non-secret index always maps to exactly one wallet. Its high-water mark also
+  // bounds the recovery scan after data loss.
+  nextBotDerivationIndex: integer("next_bot_derivation_index").default(1).notNull(),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
   lastSeen: timestamp("last_seen").defaultNow().notNull(),
 });
@@ -175,6 +182,16 @@ export const tradingBots = pgTable("trading_bots", {
   // with per-bot AAD). Legacy column remains during the Phase 5b/6 drop window.
   botSubaccountKeyEncryptedV3: text("bot_subaccount_key_encrypted_v3"),
 
+  // Phase 4b (Flash agent-HD wallets): for independent_trader bots whose per-bot
+  // wallet is derived from the owner's agent seed at m/44'/501'/<derivationIndex>'/0'.
+  // derivationIndex is the non-secret, monotonic, never-reused HD index; NULL marks a
+  // legacy random-keypair bot (recoverable only via its stored encrypted blob).
+  // derivationPathVersion pins the path scheme so a future change can't strand a bot —
+  // recovery always re-derives on the bot's own version. The two are set together
+  // (both NULL = random; both non-null = agent_hd), enforced by trading_bots_derivation_dual_model.
+  derivationIndex: integer("derivation_index"),
+  derivationPathVersion: integer("derivation_path_version"),
+
   // Task 149: Per-bot Pacifica enrollment flags. Each Phase 4b bot has its
   // own Pacifica account (the keypair behind bot_subaccount_key_encrypted_v3,
   // with the public key in protocol_subaccount_id). Enrollment must be
@@ -201,6 +218,18 @@ export const tradingBots = pgTable("trading_bots", {
   check(
     "trading_bots_active_protocol_check",
     sql`${table.activeProtocol} IN ('pacifica', 'drift', 'flash')`,
+  ),
+  // Phase 4b (Flash agent-HD wallets): fund-safety invariants. Postgres treats NULL
+  // as distinct in UNIQUE, so legacy random bots (NULL index) never collide; two
+  // agent_hd bots can never share a derived wallet on the same owner.
+  unique("trading_bots_wallet_derivation_index_unique").on(table.walletAddress, table.derivationIndex),
+  check(
+    "trading_bots_derivation_index_positive",
+    sql`${table.derivationIndex} IS NULL OR ${table.derivationIndex} >= 1`,
+  ),
+  check(
+    "trading_bots_derivation_dual_model",
+    sql`(${table.derivationIndex} IS NULL AND ${table.derivationPathVersion} IS NULL) OR (${table.derivationIndex} IS NOT NULL AND ${table.derivationPathVersion} IS NOT NULL)`,
   ),
 ]));
 

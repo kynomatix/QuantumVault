@@ -227,6 +227,9 @@ export class FlashAdapter implements ProtocolAdapter {
       maxSubaccounts: null,
       settlementType: 'on-chain',
       requiresExternalSubaccountKey: true,
+      // Phase 4b: each Flash bot owns its own minted Solana wallet, derived from the
+      // owner's agent seed so it's recoverable from the recovery phrase + HD index.
+      walletDerivation: 'agent_hd',
     };
   }
 
@@ -1277,6 +1280,81 @@ export class FlashAdapter implements ProtocolAdapter {
     }
 
     return { usdcSwept, solReclaimed, usdcTxSignature, solTxSignature };
+  }
+
+  /**
+   * Phase 4b recovery: fund a per-bot wallet's GAS from the agent so it can pay its
+   * own tx fees during recover/sweep. A derived wallet can hold USDC but ~0 SOL and
+   * be unable to sign anything — without this, recovery would deadlock. Idempotent:
+   * if the bot already has >= targetSol it returns a no-op (topped:false, no error).
+   * Fails closed (returns an error, sends nothing) if the agent can't cover it.
+   */
+  async topUpBotWalletGas(input: {
+    mainSecretKey: Uint8Array;
+    botWalletAddress: string;
+    targetSol?: number;
+  }): Promise<{ topped: boolean; lamportsSent: number; txSignature?: string; error?: string }> {
+    if (!input.mainSecretKey || input.mainSecretKey.length !== 64) {
+      throw new Error('topUpBotWalletGas requires a 64-byte agent mainSecretKey');
+    }
+    const connection = this._getConnection();
+    const agent = Keypair.fromSecretKey(input.mainSecretKey);
+    const botWallet = new PublicKey(input.botWalletAddress);
+    const target = input.targetSol != null && input.targetSol > 0 ? input.targetSol : FLASH_BOT_WALLET_SOL_SEED;
+    const targetLamports = Math.round(target * LAMPORTS_PER_SOL);
+
+    let botLamports: number;
+    try {
+      botLamports = await connection.getBalance(botWallet);
+    } catch (err) {
+      return { topped: false, lamportsSent: 0, error: `Could not read bot SOL balance: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    if (botLamports >= targetLamports) {
+      return { topped: false, lamportsSent: 0 }; // already funded → idempotent no-op
+    }
+    const need = targetLamports - botLamports;
+
+    let agentLamports: number;
+    try {
+      agentLamports = await connection.getBalance(agent.publicKey);
+    } catch (err) {
+      return { topped: false, lamportsSent: 0, error: `Could not read agent SOL balance: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    const TX_FEE_LAMPORTS = 5000;
+    if (agentLamports < need + TX_FEE_LAMPORTS) {
+      return {
+        topped: false,
+        lamportsSent: 0,
+        error: `Insufficient agent SOL to top up bot gas: have ${(agentLamports / LAMPORTS_PER_SOL).toFixed(4)} SOL, ` +
+          `need ~${((need + TX_FEE_LAMPORTS) / LAMPORTS_PER_SOL).toFixed(4)} SOL`,
+      };
+    }
+
+    try {
+      const blockhashCtx = await connection.getLatestBlockhash('confirmed');
+      const tx = new Transaction({
+        feePayer: agent.publicKey,
+        blockhash: blockhashCtx.blockhash,
+        lastValidBlockHeight: blockhashCtx.lastValidBlockHeight,
+      });
+      tx.add(SystemProgram.transfer({ fromPubkey: agent.publicKey, toPubkey: botWallet, lamports: need }));
+      tx.sign(agent);
+      const txSignature = await connection.sendRawTransaction(tx.serialize(), {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+      });
+      const conf = await connection.confirmTransaction({
+        signature: txSignature,
+        blockhash: blockhashCtx.blockhash,
+        lastValidBlockHeight: blockhashCtx.lastValidBlockHeight,
+      }, 'confirmed');
+      if (conf.value.err) {
+        return { topped: false, lamportsSent: 0, txSignature, error: `Gas top-up failed on-chain: ${JSON.stringify(conf.value.err)}` };
+      }
+      return { topped: true, lamportsSent: need, txSignature };
+    } catch (err) {
+      return { topped: false, lamportsSent: 0, error: `Gas top-up failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
   }
 
   async listSubaccounts(agentPublicKey: string): Promise<SubaccountInfo[]> {
