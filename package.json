@@ -15,7 +15,8 @@
     "db:push": "drizzle-kit push",
     "check:og": "node scripts/check-og-image.mjs",
     "gemini": "node scripts/gemini.mjs",
-    "install:hooks": "git config core.hooksPath .githooks && echo 'Git hooks installed (.githooks/pre-commit active)'"
+    "install:hooks": "git config core.hooksPath .githooks && echo 'Git hooks installed (.githooks/pre-commit active)'",
+    "openrouter": "node scripts/openrouter.mjs"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",
