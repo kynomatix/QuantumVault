@@ -30,9 +30,15 @@ export const getQueryFn: <T>(options: {
 }) => QueryFunction<T> =
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
-    const res = await fetch(queryKey.join("/") as string, {
+    let res = await fetch(queryKey.join("/") as string, {
       credentials: "include",
     });
+
+    if (res.status === 503) {
+      const retryAfterSec = parseInt(res.headers.get("Retry-After") || "5", 10);
+      await new Promise((r) => setTimeout(r, retryAfterSec * 1000));
+      res = await fetch(queryKey.join("/") as string, { credentials: "include" });
+    }
 
     if (unauthorizedBehavior === "returnNull" && res.status === 401) {
       return null;

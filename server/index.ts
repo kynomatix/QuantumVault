@@ -3,7 +3,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { storage } from "./storage";
-import { ensureSchema, checkUmkStorageSecretHealth, logSecurityConfigSummary } from "./db";
+import { ensureSchema, checkUmkStorageSecretHealth, logSecurityConfigSummary, closePool } from "./db";
 import { startPeriodicReconciliation } from "./reconciliation-service";
 import { startOrphanedSubaccountCleanup } from "./orphaned-subaccount-cleanup";
 import { startSubaccountLeaseRecoveryJob } from "./subaccount-lease-recovery";
@@ -452,7 +452,23 @@ app.use((req, res, next) => {
       console.log(`[body-parser error] ${req.method} ${req.path} - ${err.message}`);
       return res.status(400).json({ error: 'Invalid JSON body', details: err.message });
     }
-    
+
+    // DB pool exhaustion / connection timeout → 503 so clients can retry safely
+    const msg = err?.message || "";
+    const isPoolPressure =
+      msg.includes("Connection terminated") ||
+      msg.includes("connection timeout") ||
+      msg.includes("timeout exceeded") ||
+      msg.includes("too many clients") ||
+      msg.includes("Authentication timed out") ||
+      msg.includes("Connection acquisition timeout") ||
+      msg.includes("ECONNREFUSED");
+    if (isPoolPressure) {
+      console.warn(`[DB pressure] ${req.method} ${req.path} → 503: ${msg}`);
+      res.set("Retry-After", "5");
+      return res.status(503).json({ message: "Service temporarily unavailable — please retry in a moment" });
+    }
+
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";
     
@@ -491,8 +507,9 @@ app.use((req, res, next) => {
   }
 
   const shutdownHandler = async () => {
-    console.log("[Main] Shutting down (lab process will continue running)...");
+    console.log("[Main] Shutting down...");
     await labSupervisor.shutdown();
+    await closePool().catch((e) => console.warn("[Main] Pool close error (non-fatal):", e.message));
     httpServer.close();
   };
   process.on("SIGTERM", () => shutdownHandler().catch(() => process.exit(1)));
@@ -629,7 +646,10 @@ app.use((req, res, next) => {
         startSubaccountLeaseRecoveryJob();
       }, 30_000);
 
-      // ~45s: periodic snapshot/retry jobs (don't need to run immediately)
+      // ~45s+: snapshot / retry jobs spread across a 30s window so they don't
+      // all grab DB connections simultaneously. Each job already has its own
+      // internal stagger (initial setTimeout before the first setInterval tick),
+      // but starting them together would synchronise those internal delays.
       setTimeout(() => {
         log('[Staggered startup] Starting PnL snapshot job');
         startPnlSnapshotJob();
@@ -639,19 +659,34 @@ app.use((req, res, next) => {
         });
         log('[Staggered startup] Starting portfolio snapshot job');
         startPortfolioSnapshotJob();
+      }, 45_000);
+
+      setTimeout(() => {
         log('[Staggered startup] Starting profit share retry job');
         startProfitShareRetryJob();
+      }, 52_000);
+
+      setTimeout(() => {
         log('[Staggered startup] Starting referral rewards retry job');
         startReferralRewardsRetryJob();
+      }, 57_000);
+
+      setTimeout(() => {
         log('[Staggered startup] Starting Pacifica referral backfill job');
         startPacificaReferralBackfillJob();
+      }, 62_000);
+
+      setTimeout(() => {
         log('[Staggered startup] Starting Telegram daily summary job');
         startTelegramDailySummaryJob();
+      }, 67_000);
+
+      setTimeout(() => {
         log('[Staggered startup] Starting stats consistency monitor');
         import('./stats-consistency-monitor').then(({ startStatsConsistencyMonitor }) => {
           startStatsConsistencyMonitor();
         });
-      }, 45_000);
+      }, 72_000);
     },
   );
 })();

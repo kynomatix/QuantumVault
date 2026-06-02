@@ -31,8 +31,16 @@ const MAX_CONSECUTIVE_FAILURES = 8;
 const FAILURE_WINDOW_MS = 300_000;
 
 function deriveLabAuthSecret(): string {
-  const base = process.env.SESSION_SECRET || "quantum-vault-secret-change-in-production";
-  return createHash("sha256").update(`lab-auth:${base}`).digest("hex");
+  const base = process.env.SESSION_SECRET;
+  if (!base) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        "[LabSupervisor] FATAL: SESSION_SECRET is not set. Refusing to derive lab auth secret from a hardcoded default in production."
+      );
+    }
+    console.warn("[LabSupervisor] WARNING: SESSION_SECRET not set — using insecure default. Set SESSION_SECRET before deploying.");
+  }
+  return createHash("sha256").update(`lab-auth:${base ?? "quantum-vault-secret-change-in-production"}`).digest("hex");
 }
 
 const LAB_AUTH_SECRET = deriveLabAuthSecret();

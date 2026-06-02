@@ -14,14 +14,22 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: poolSize,
   connectionTimeoutMillis: connTimeoutMs,
-  idleTimeoutMillis: 30_000,
+  idleTimeoutMillis: 120_000,
 });
 
 pool.on("error", (err) => {
   console.error("[DB Pool] Idle client error (suppressed crash):", err.message);
 });
 
+setInterval(() => {
+  console.log(`[DB Pool] total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount} max=${poolSize}`);
+}, 30_000);
+
 export const db = drizzle(pool, { schema });
+
+export async function closePool(): Promise<void> {
+  await pool.end();
+}
 
 export async function ensureSchema() {
   const client = await pool.connect();
