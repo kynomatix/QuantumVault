@@ -1,25 +1,29 @@
 import { storage } from "./storage";
-import { getDefaultAdapter } from "./protocol/adapter-registry";
 import { getUmkForWebhook, decryptAgentKeyStrict } from "./session-v3";
-import { Keypair } from "@solana/web3.js";
 
 /**
- * V3 Phase 4: close an orphaned Drift subaccount using a strict-decrypted
- * agent key (Uint8Array). The legacy encrypted blob stored on the orphaned
- * row is intentionally ignored — we always go through UMK + the wallet's
- * v3 envelope so a single source of truth covers all background paths.
+ * V3 Phase 4: close an orphaned DRIFT subaccount to reclaim its ~0.023 SOL of
+ * on-chain rent, using a strict-decrypted agent key (plaintext Uint8Array). The
+ * legacy encrypted blob stored on the orphaned row is intentionally ignored — we
+ * always go through UMK + the wallet's v3 envelope so a single source of truth
+ * covers all background paths.
+ *
+ * `orphaned_subaccounts` is a Drift-only table by construction (numeric
+ * `drift_subaccount_id`, no protocol column — produced only by the Drift
+ * delete/unsubscribe paths). Pacifica subaccounts are recycled via the
+ * `protocol_subaccounts` pool and Flash bots have no subaccount, so neither ever
+ * lands here. We therefore route straight to the real working close in
+ * drift-service (agent-signed on-chain `deleteSubaccount` in the Drift
+ * subprocess) — NOT through the default adapter, which post-cutover is Pacifica
+ * and has no real close (this background job was silently no-op'ing before).
+ * Dynamic import keeps the Drift SDK out of this job's static boot graph.
  */
 async function tryCloseDriftSubaccount(agentSecretKey: Uint8Array, subaccountId: number): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
-    const agentPubKey = Keypair.fromSecretKey(agentSecretKey).publicKey.toBase58();
-    const adapter = getDefaultAdapter();
-    if (adapter.closeSubaccount) {
-      await adapter.closeSubaccount(agentPubKey, String(subaccountId));
-      return { success: true };
-    }
-    return { success: false, error: 'Adapter does not support closeSubaccount' };
+    const { closeDriftSubaccount } = await import('./drift-service');
+    return await closeDriftSubaccount(agentSecretKey, subaccountId);
   } catch (err: any) {
-    return { success: false, error: err.message || 'adapter unavailable' };
+    return { success: false, error: err.message || 'drift close unavailable' };
   }
 }
 

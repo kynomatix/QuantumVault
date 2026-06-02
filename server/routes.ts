@@ -1227,16 +1227,29 @@ async function discoverOnChainSubaccounts(walletAddress: string): Promise<number
 }
 
 async function closeDriftSubaccount(
-  encryptedPrivateKey: Uint8Array,
+  agentSecretKey: Uint8Array,
   subAccountId: number,
   adapter = getDefaultAdapter(),
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
+  // Reclaiming ~0.023 SOL of on-chain rent by CLOSING a subaccount is a
+  // DRIFT-ONLY operation. Pacifica subaccounts are permanent (recycled via the
+  // protocol_subaccounts pool, never closed); Flash bots are independent-trader
+  // wallets with no subaccount. For any non-Drift protocol there is no close to
+  // perform — fail CLOSED with an explicit failure. (Previously this returned a
+  // fake {success:true} for Pacifica, making callers believe rent was reclaimed.)
+  if (adapter.protocolName !== 'drift') {
+    return {
+      success: false,
+      error: `closeSubaccount not applicable for protocol "${adapter.protocolName}" — on-chain subaccount close (rent reclaim) is Drift-only`,
+    };
+  }
   try {
-    const { publicKey } = _decryptToSecretKey(encryptedPrivateKey);
-    if (adapter.closeSubaccount) {
-      await adapter.closeSubaccount(publicKey, String(subAccountId));
-    }
-    return { success: true };
+    // The real working close: agent-signed on-chain deleteSubaccount run in the
+    // Drift subprocess. drift-service.closeDriftSubaccount base58-encodes the
+    // plaintext secret key (callers already pass plaintext) and dispatches it.
+    // Dynamic import keeps the Drift SDK out of this module's static load graph.
+    const { closeDriftSubaccount: driftServiceCloseSubaccount } = await import('./drift-service');
+    return await driftServiceCloseSubaccount(agentSecretKey, subAccountId);
   } catch (error: any) {
     return { success: false, error: error.message || String(error) };
   }
@@ -4536,9 +4549,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             continue; // Skip deletion, move to next subaccount
           }
 
-          // 2e. Delete the subaccount (only if verified empty)
+          // 2e. Delete the subaccount (only if verified empty). These are numeric
+          // subaccounts (drift-shaped) so close with the Drift adapter explicitly —
+          // the default adapter is Pacifica post-cutover and would fail closed.
           log(`Deleting subaccount ${subId}...`);
-          const deleteResult = await closeDriftSubaccount(agentKey, subId);
+          const deleteResult = await closeDriftSubaccount(agentKey, subId, getAdapter('drift'));
           if (deleteResult.success) {
             deletedSubaccounts.push(subId);
             log(`Deleted subaccount ${subId}: ${deleteResult.signature}`);
@@ -9241,7 +9256,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           rentReclaimError = "Agent keys missing - manual recovery required";
         }
         
-        if (exists && agentSecret && bot.driftSubaccountId > 0) {
+        // Drift-only teardown. IMPORTANT: a numeric driftSubaccountId is NOT by itself
+        // a protocol-proof Drift signal — external-key Pacifica/Flash bots ALSO persist
+        // a numeric driftSubaccountId (allocation fallback at bot creation). On this
+        // path external-key bots are swept above via protocolSubaccountId and leave
+        // `exists=false`, but we ALSO gate explicitly on `subaccountAuthMode` (Drift =
+        // 'main_plus_id'; Pacifica/Flash = 'external_key') so the real Drift close and
+        // the orphaned_subaccounts producer below can NEVER fire for a non-Drift bot,
+        // independent of the numeric ID shape. Legacy Drift bots (authMode null) are
+        // preserved — only 'external_key' is excluded.
+        if (exists && agentSecret && bot.driftSubaccountId > 0 && bot.subaccountAuthMode !== 'external_key') {
           console.log(`[Delete] Attempting to close subaccount ${bot.driftSubaccountId} to reclaim rent...`);
           try {
             const closeResult = await closeDriftSubaccount(
@@ -14548,9 +14572,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         //    fail closed). Flash copy bots hold funds in their OWN HD wallet
         //    (protocolSubaccountId, NOT a numeric subaccount); Pacifica copy bots in an
         //    external-key funded subaccount; legacy Drift bots in a numeric subaccount.
-        //    `hasSubaccount` (numeric driftSubaccountId) is only ever true for Drift —
-        //    without the Flash/Pacifica branches those copy bots would skip recovery
-        //    entirely and strand the subscriber's capital.
+        //    NOTE: `hasSubaccount` (numeric driftSubaccountId) is NOT a protocol-proof
+        //    Drift signal — external-key bots also carry a numeric driftSubaccountId. The
+        //    isFlashWallet/pacificaCtx branches below MUST be evaluated before the numeric
+        //    `hasSubaccount` branch so external-key copy bots recover via protocolSubaccountId
+        //    instead of being mis-routed into Drift numeric recovery and stranding capital.
         let recoveredAmount = 0;
         let recoverTxSignature: string | null = null;
         // Only detach the protocolSubaccountId link once the account is VERIFIED empty.
@@ -14663,8 +14689,17 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
 
         // 4. Deactivate the bot, close its subaccount, and drop the subaccount link.
+        // Drift-only teardown. `hasSubaccount`/`subId` are derived purely from the
+        // numeric driftSubaccountId, which external-key Pacifica/Flash bots ALSO carry
+        // (allocation fallback at creation) — so the numeric guard alone is NOT
+        // protocol-proof. External-key bots are recovered via protocolSubaccountId in the
+        // branches above; we gate explicitly on `subaccountAuthMode` (Drift =
+        // 'main_plus_id'; Pacifica/Flash = 'external_key') so a non-Drift bot can never
+        // reach the Drift close wrapper or the orphaned_subaccounts producer — even in
+        // the edge case where a Pacifica bot with an unresolvable signing context falls
+        // through to the numeric branch above. Legacy Drift bots (authMode null) preserved.
         let rentReclaimed = false;
-        if (hasSubaccount && subId > 0) {
+        if (hasSubaccount && subId > 0 && bot.subaccountAuthMode !== 'external_key') {
           // Adapter direct so a listing failure is distinguishable from "gone".
           let exists = false;
           let existCheckFailed = false;

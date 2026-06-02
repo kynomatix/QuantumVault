@@ -24,7 +24,7 @@
  */
 
 import { storage } from './storage';
-import { getDefaultAdapter } from './protocol/adapter-registry';
+import { getDefaultAdapter, getAdapter } from './protocol/adapter-registry';
 import {
   getUmkForWebhook,
   decryptRetainedSubaccountKeyV3,
@@ -238,20 +238,30 @@ export async function runLeaseRecoveryOnce(): Promise<void> {
   const expired = await storage.findExpiredReservations(LEASE_TTL_MS);
   if (expired.length === 0) return;
 
-  const adapter = getDefaultAdapter();
-  // Recycling only applies to adapters that implement the full lifecycle. If the
-  // active adapter can't verify/sweep, there's nothing safe to do this cycle.
-  if (adapter.subaccountCaps?.recyclable !== true || typeof adapter.verifySubaccountEmpty !== 'function') {
-    console.warn(`${LOG} ${expired.length} expired reservation(s) but active adapter is not recyclable — skipping`);
-    return;
-  }
-
   console.log(`${LOG} processing ${expired.length} expired reservation(s)`);
   // Sequential on purpose: each row does on-chain reads/transfers and the funded
   // path sleeps for the indexing wait. Throughput is irrelevant (rare event); we
   // care about not hammering the RPC / Pacifica rate budget.
   for (const row of expired) {
     try {
+      // Resolve the adapter for THIS row's own protocol, not the global default.
+      // A reservation can only be verified/swept/pooled by its own protocol's
+      // adapter; routing it through whatever happens to be the default would read
+      // the wrong venue. Today only Pacifica is recyclable, but this keeps the job
+      // correct if the default changes or a second recyclable protocol is added.
+      let adapter;
+      try {
+        adapter = getAdapter(row.protocol);
+      } catch {
+        console.warn(`${LOG} no adapter registered for protocol "${row.protocol}" (reservation ${row.protocolSubaccountId}) — skipping`);
+        continue;
+      }
+      // Recycling only applies to adapters that implement the full lifecycle. If
+      // this row's adapter can't verify/sweep, there's nothing safe to do for it.
+      if (adapter.subaccountCaps?.recyclable !== true || typeof adapter.verifySubaccountEmpty !== 'function') {
+        console.warn(`${LOG} adapter "${row.protocol}" is not recyclable — skipping reservation ${row.protocolSubaccountId}`);
+        continue;
+      }
       await processExpiredReservation(adapter, row);
     } catch (err: any) {
       console.error(`${LOG} failed processing reservation id=${row.id} (${row.protocolSubaccountId}): ${err?.message || err}`);
