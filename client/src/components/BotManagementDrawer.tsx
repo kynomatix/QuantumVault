@@ -2638,11 +2638,11 @@ export function BotManagementDrawer({
                       )}
                       {displayBot.activeProtocol === 'flash' && (
                         <a
-                          href={`https://fstats.io/traders/${displayBot.botSubaccountIdentifier}`}
+                          href={`https://www.flash.trade/USDC-SOL?public_key=${displayBot.botSubaccountIdentifier}`}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="p-1 rounded hover:bg-muted transition-colors"
-                          title="View trader on Flash Analytics (use until Flash V2 migration is complete)"
+                          title="View live position on Flash"
                           data-testid="link-subaccount-flash"
                         >
                           <ExternalLink className="w-3 h-3 text-muted-foreground" />
