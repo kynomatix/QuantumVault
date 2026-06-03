@@ -917,8 +917,10 @@ function QuantumLabSlide() {
 function TechStackSlide() {
   const tech = [
     { name: "Solana", desc: "400ms blocks, sub-cent fees" },
-    { name: "Pacifica", desc: "High-performance perp DEX on Solana" },
-    { name: "Adapter Architecture", desc: "Protocol-agnostic layer enabling multi-exchange support" },
+    { name: "Pacifica", desc: "Primary perp DEX — default exchange for all bots" },
+    { name: "Drift Protocol", desc: "Legacy perp DEX — registered adapter, live on mainnet" },
+    { name: "Flash Trade", desc: "L1 perp DEX — adapter live, production rollout in Q2" },
+    { name: "Adapter Architecture", desc: "Protocol-agnostic layer — swap or add exchanges without touching bot logic" },
     { name: "TradingView", desc: "Strategy & webhook integration" },
     { name: "React + TypeScript", desc: "Modern web application" },
     { name: "PostgreSQL", desc: "Reliable data persistence" },
