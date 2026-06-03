@@ -87,6 +87,15 @@ export const wallets = pgTable("wallets", {
   // bounds the recovery scan after data loss.
   nextBotDerivationIndex: integer("next_bot_derivation_index").default(1).notNull(),
 
+  // Derivation slots that were once flagged as orphaned (a burned index with no
+  // trading_bots row) but have since been VERIFIED EMPTY — either swept clean by
+  // orphan-recovery or confirmed to belong to a live bot (index drift). Excluded
+  // from the "stranded funds" indicator so the recovery button disappears once
+  // there is nothing left to recover, instead of lingering on a permanently-burned
+  // (but now empty) slot. Append-only; an index is only added after a CONFIRMED
+  // zero-balance read (reads fail closed → never marked on an unreadable balance).
+  recoveredOrphanIndices: integer("recovered_orphan_indices").array().notNull().default([]),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
   lastSeen: timestamp("last_seen").defaultNow().notNull(),
 });

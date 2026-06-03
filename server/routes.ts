@@ -9564,9 +9564,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       for (const b of bots) {
         if (b.derivationIndex != null) used.add(b.derivationIndex);
       }
+      // Slots already verified empty (swept by recovery, or confirmed to be a live
+      // bot's wallet) no longer represent stranded funds — exclude them so the button
+      // disappears once there's nothing to recover, like Pacifica's fund-recovery UI.
+      const resolved = new Set<number>(wallet.recoveredOrphanIndices ?? []);
       let orphanSlots = 0;
       for (let i = 1; i < nextIndex; i++) {
-        if (!used.has(i)) orphanSlots++;
+        if (!used.has(i) && !resolved.has(i)) orphanSlots++;
       }
       return res.json({ orphanSlots });
     } catch (err) {
@@ -9586,6 +9590,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     let _agentKeyCleanup: (() => void) | null = null;
     let mnemonic: Buffer | null = null;
     const derived: { index: number; subId: string; secretKey: Uint8Array }[] = [];
+    // Slots verified empty during this run (swept clean, already empty, or a live
+    // bot's wallet) — persisted at the end so the stranded-funds indicator clears.
+    const resolvedIndices: number[] = [];
     try {
       const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet) return res.status(404).json({ error: "Wallet not found" });
@@ -9646,6 +9653,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         const kp = deriveBotKeypairFromAgentSeed(mnemonic, idx, BOT_DERIVATION_PATH_VERSION);
         const subId = kp.publicKey.toString();
         if (protectedSubIds.has(subId)) {
+          // Belongs to a live bot (derivationIndex drift). Skip the sweep, but do
+          // NOT mark it resolved: we never verified it empty, and persisting it
+          // permanently could hide genuinely stranded funds if that bot is later
+          // torn down improperly. A lingering indicator here is the safe direction.
           console.warn(`[OrphanRecovery] slot ${idx} (${subId}) belongs to a live bot — skipping (derivationIndex drift)`);
           try { kp.secretKey.fill(0); } catch {}
           continue;
@@ -9675,7 +9686,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           const positions = (await flashAdapter.getPositions(d.subId)).length;
           confirmedEmpty = usdc === 0 && sol <= 0.001 && positions === 0;
         } catch { confirmedEmpty = false; }
-        if (confirmedEmpty) continue;
+        if (confirmedEmpty) { resolvedIndices.push(d.index); continue; }
 
         const r = await _sweepFlashWalletToAgent(
           flashAdapter, d.subId, d.secretKey, agentAddress, agentSecret, '[OrphanRecovery]', `orphan slot ${d.index}`,
@@ -9684,9 +9695,23 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           failures.push({ index: d.index, wallet: d.subId, error: r.error || 'unknown' });
           continue;
         }
+        resolvedIndices.push(d.index); // swept clean (or already empty) → no longer stranded
         if (!r.alreadyEmpty) {
           totalUsdc += r.usdcSwept;
           recovered.push({ index: d.index, wallet: d.subId, usdc: r.usdcSwept, sol: r.solReclaimed, closedPositions: r.closedPositions });
+        }
+      }
+
+      // Persist every slot we just verified empty so the stranded-funds indicator
+      // clears for good. Runs before BOTH the partial-failure and success returns so
+      // the empties are marked even if some sweeps failed. Atomic array-union (computed
+      // from the live column, not a stale snapshot) so concurrent recovery runs can't
+      // lose each other's writes; best-effort (never block the response).
+      if (resolvedIndices.length > 0) {
+        try {
+          await storage.addRecoveredOrphanIndices(req.walletAddress!, resolvedIndices);
+        } catch (e) {
+          console.warn('[OrphanRecovery] failed to persist resolved orphan indices:', e);
         }
       }
 

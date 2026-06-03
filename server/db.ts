@@ -233,6 +233,9 @@ export async function ensureSchema() {
       // legacy random bots leave both NULL. DB-level CHECK/UNIQUE are the real fund-safety
       // enforcement so a manual or buggy write can never commingle two bots on one wallet.
       `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS next_bot_derivation_index integer NOT NULL DEFAULT 1`,
+      // Orphan slots verified empty (swept or live-bot drift) — excluded from the
+      // stranded-funds indicator so the recovery button clears once nothing remains.
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS recovered_orphan_indices integer[] NOT NULL DEFAULT '{}'`,
       `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS derivation_index integer`,
       `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS derivation_path_version integer`,
       `DO $$ BEGIN

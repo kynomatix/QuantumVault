@@ -153,6 +153,7 @@ export interface IStorage {
   updateWalletAgentKeyV3(address: string, agentPrivateKeyEncryptedV3: string): Promise<void>;
   updateWalletWebhookSecret(address: string, userWebhookSecret: string): Promise<void>;
   updateWallet(address: string, updates: Partial<InsertWallet>): Promise<Wallet | undefined>;
+  addRecoveredOrphanIndices(address: string, indices: number[]): Promise<void>;
   markPacificaBuilderApproved(agentPublicKey: string): Promise<void>;
   markPacificaReferralClaimed(agentPublicKey: string): Promise<void>;
   // Task 149: per-bot Pacifica enrollment (each Phase 4b bot is its own
@@ -571,6 +572,22 @@ export class DatabaseStorage implements IStorage {
   async updateWallet(address: string, updates: Partial<InsertWallet>): Promise<Wallet | undefined> {
     const result = await db.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
     return result[0];
+  }
+
+  // Atomically union `indices` into wallets.recovered_orphan_indices. Computed
+  // server-side from the live column value (not a stale snapshot) so concurrent
+  // orphan-recovery runs can never lose each other's writes. Deduped + sorted.
+  async addRecoveredOrphanIndices(address: string, indices: number[]): Promise<void> {
+    if (indices.length === 0) return;
+    await db
+      .update(wallets)
+      .set({
+        recoveredOrphanIndices: sql`(
+          SELECT COALESCE(array_agg(DISTINCT e ORDER BY e), '{}')
+          FROM unnest(${wallets.recoveredOrphanIndices} || ${sql.raw(`ARRAY[${indices.map((n) => Number(n)).join(",")}]::int[]`)}) AS e
+        )`,
+      })
+      .where(eq(wallets.address, address));
   }
 
   async markPacificaBuilderApproved(agentPublicKey: string): Promise<void> {
