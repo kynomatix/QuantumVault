@@ -347,6 +347,12 @@ export async function initializeWalletSecurity(
     return { sessionId, isNewWallet };
   }
 
+  // Heal any divergence between the canonical UMK and the execution-wrapped copy
+  // BEFORE handing back the session, so bot-create / webhook / background paths
+  // (getUmkForWebhook) read the same UMK that login & reveal use. Awaited so the
+  // DB is consistent before the user can act on this session; fail-safe inside.
+  await resyncExecutionUmkIfStale(walletAddress, umk);
+
   return finishLogin();
 }
 
@@ -904,6 +910,73 @@ export async function getUmkForWebhook(
   } catch (err) {
     console.error('[Security] Failed to unwrap UMK for webhook:', err);
     return null;
+  }
+}
+
+/**
+ * Self-heal a divergent execution-wrapped UMK copy.
+ *
+ * The canonical UMK lives in `encryptedUserMasterKey` (wrapped with the storage
+ * key) and is the single source of truth — it decrypts the agent key, mnemonic,
+ * and every other UMK-derived secret. `umkEncryptedForExecution` is a SECOND
+ * wrapped copy (wrapped with SERVER_EXECUTION_KEY) read by webhook / bot-create /
+ * background paths via getUmkForWebhook(). It is written once at
+ * enableExecution() time and is NOT updated when the canonical UMK is later
+ * regenerated (e.g. the v1->v3 migration above calls generateUMK()). When that
+ * happens the two copies diverge: login & reveal use the (correct) canonical UMK
+ * while bot-create and background jobs use the (stale) execution copy — so the
+ * mnemonic "reveals" fine yet bot-create reports "no recovery phrase on file",
+ * and the agent key flip-flops (its strict-decrypt repair re-encrypts under
+ * whichever UMK it was handed), spamming "V3 strict decrypt failed for agent
+ * key".
+ *
+ * On every login we re-wrap the execution copy from the canonical UMK whenever
+ * it is missing / stale / corrupt. Idempotent (no write when already in sync)
+ * and fail-safe (never throws into the login flow).
+ */
+async function resyncExecutionUmkIfStale(
+  walletAddress: string,
+  umk: Buffer,
+): Promise<void> {
+  try {
+    const wallet = await storage.getWallet(walletAddress);
+    // Only meaningful when execution is enabled; otherwise the copy is null and
+    // getUmkForWebhook() returns null by design.
+    if (!wallet?.executionEnabled || !wallet.umkEncryptedForExecution) return;
+
+    const serverKey = getServerExecutionKey();
+    const aad = buildAAD(walletAddress, 'EUMK_EXEC');
+
+    let inSync = false;
+    try {
+      const current = decryptFromBase64(wallet.umkEncryptedForExecution, serverKey, aad);
+      inSync = current.length === umk.length && nodeCrypto.timingSafeEqual(current, umk);
+      zeroizeBuffer(current);
+    } catch {
+      // Corrupt / undecryptable execution copy — treat as stale and rewrap.
+      inSync = false;
+    }
+
+    if (inSync) {
+      zeroizeBuffer(serverKey);
+      return;
+    }
+
+    const rewrapped = encryptToBase64(umk, serverKey, aad);
+    zeroizeBuffer(serverKey);
+
+    await storage.updateWalletExecution(walletAddress, {
+      executionEnabled: true,
+      umkEncryptedForExecution: rewrapped,
+      executionExpiresAt: wallet.executionExpiresAt ?? null,
+    });
+
+    console.warn(
+      `[Security v3] Resynced stale execution-wrapped UMK for ${walletAddress.slice(0, 8)}... ` +
+      `(canonical UMK had diverged from umkEncryptedForExecution).`,
+    );
+  } catch (err) {
+    console.error(`[Security v3] Execution UMK resync failed for ${walletAddress.slice(0, 8)}... (non-fatal):`, err);
   }
 }
 

@@ -2393,6 +2393,20 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
+  // Security v3: resync ONLY the execution-wrapped UMK copy, and ONLY while
+  // execution is still enabled. CAS on execution_enabled = true so a concurrent
+  // revoke (which sets execution_enabled = false and nulls the copy) cannot be
+  // clobbered back into an enabled state by a login-time resync — money paths
+  // must fail closed. Returns true iff the row was updated (still enabled).
+  async resyncWalletExecutionUmk(address: string, umkEncryptedForExecution: string): Promise<boolean> {
+    const result = await db
+      .update(wallets)
+      .set({ umkEncryptedForExecution })
+      .where(and(eq(wallets.address, address), eq(wallets.executionEnabled, true)))
+      .returning({ address: wallets.address });
+    return result.length > 0;
+  }
+
   // Phase 4b: atomically clear the wallet's execution authorization AND pause
   // every active trading bot the wallet owns. Wrapped in a single transaction
   // so we cannot end up in a state where execution is cleared but bots are
