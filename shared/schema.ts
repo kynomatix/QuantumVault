@@ -475,6 +475,55 @@ export const insertOrphanedSubaccountSchema = createInsertSchema(orphanedSubacco
 export type InsertOrphanedSubaccount = z.infer<typeof insertOrphanedSubaccountSchema>;
 export type OrphanedSubaccount = typeof orphanedSubaccounts.$inferSelect;
 
+// Admin "Errors" panel — system-critical errors at a glance (morning event-viewer style).
+// BOUNDED & DEDUPED: rows are keyed by `fingerprint` (a stable hash of category + source +
+// normalized message). Repeat occurrences upsert onto the same row, incrementing `count` and
+// refreshing `lastSeen` instead of inserting new rows — so a runaway error can never flood the
+// table. Auto-pruned by age (lastSeen) + a hard row cap (see storage.pruneErrors). Only
+// genuinely-critical events are written here (crashes/500s, failed-after-retry trades,
+// fund-safety, failed webhooks for active users, security/decryption) — NOT the console firehose.
+export const errorLog = pgTable("error_log", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  // Stable dedup key: hash(category + source + normalized message). Volatile bits (ids, amounts,
+  // addresses, tx sigs) are stripped before hashing so similar errors collapse onto one row.
+  fingerprint: text("fingerprint").notNull().unique(),
+  // Broad bucket: 'crash' | 'server_500' | 'trade_failed' | 'fund_safety' | 'webhook_failed' | 'security'.
+  category: text("category").notNull(),
+  // 'critical' (needs attention now) | 'error' (worth a look).
+  severity: text("severity").notNull().default("error"),
+  // Where it came from, e.g. '[Executor]', 'webhook', 'auth', 'unhandledRejection'.
+  source: text("source"),
+  // Human-readable one-liner (truncated). Latest occurrence wins.
+  message: text("message").notNull(),
+  // Optional stack / extra detail (truncated). Latest occurrence wins.
+  detail: text("detail"),
+  // Optional triage context (botId, market, txSig, walletAddress, status...) — NEVER secrets.
+  context: jsonb("context"),
+  // Dedup counter: how many times this fingerprint has fired.
+  count: integer("count").default(1).notNull(),
+  firstSeen: timestamp("first_seen").defaultNow().notNull(),
+  lastSeen: timestamp("last_seen").defaultNow().notNull(),
+  // Admin "I've handled this" flag; auto-reset to false when the error recurs.
+  resolved: boolean("resolved").default(false).notNull(),
+  resolvedAt: timestamp("resolved_at"),
+}, (table) => ({
+  bySeverity: index("error_log_severity_idx").on(table.severity),
+  byCategory: index("error_log_category_idx").on(table.category),
+  byLastSeen: index("error_log_last_seen_idx").on(table.lastSeen),
+  byResolved: index("error_log_resolved_idx").on(table.resolved),
+}));
+
+export const insertErrorLogSchema = createInsertSchema(errorLog).omit({
+  id: true,
+  count: true,
+  firstSeen: true,
+  lastSeen: true,
+  resolved: true,
+  resolvedAt: true,
+});
+export type InsertErrorLog = z.infer<typeof insertErrorLogSchema>;
+export type ErrorLog = typeof errorLog.$inferSelect;
+
 // Marketplace: Published bots that can be subscribed to
 export const publishedBots = pgTable("published_bots", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),

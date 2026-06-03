@@ -9,6 +9,7 @@ import crypto from "crypto";
 import bs58 from "bs58";
 import { Keypair } from "@solana/web3.js";
 import { storage, DatabaseStorage } from "./storage";
+import { recordCriticalError } from "./error-log";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents, marketplaceEquitySnapshots, userApiTokens, labOptimizationRuns } from "@shared/schema";
 import type { Request as ExpressRequest, Response as ExpressResponse, NextFunction } from "express";
 import { db } from "./db";
@@ -348,6 +349,13 @@ async function sweepPacificaSubaccount(
       } catch (eventErr: any) {
         console.error(`${logPrefix} Failed to record stranded dust event: ${eventErr.message}`);
       }
+      recordCriticalError({
+        category: "fund_safety",
+        severity: "error",
+        source: "pacifica-dust-stranded",
+        message: `Dust stranded on bot delete (below minimum transfer)`,
+        context: { botId: bot.id, amount: balance },
+      });
       return { handled: true, swept: false, amount: balance };
     }
 
@@ -10196,6 +10204,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!agentKeyResult) {
         // Agent key decryption failed - this is a critical error
         await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Agent key decryption failed" });
+        recordCriticalError({
+          category: "security",
+          severity: "error",
+          source: "webhook:agent-key-decrypt",
+          message: "Webhook execution blocked: agent key decryption failed",
+          context: { botId: bot.id },
+        });
         return res.status(403).json({ error: "Agent key decryption failed. Please reconfigure your agent wallet." });
       }
       
@@ -11658,6 +11673,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     } catch (error) {
       console.error("Webhook processing error:", error);
       await storage.updateWebhookLog(log.id, { errorMessage: String(error) });
+      // Reaching this catch means the bot passed the isActive + secret gates above, so this is a
+      // genuine "webhook failed for an active user" event worth surfacing in the admin Errors tab.
+      recordCriticalError({
+        category: "webhook_failed",
+        severity: "error",
+        source: "webhook:tradingview",
+        error,
+        context: { botId },
+      });
       res.status(500).json({ error: "Failed to process webhook" });
     }
   });
@@ -11790,6 +11814,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!agentKeyResult) {
         // Agent key decryption failed - this is a critical error
         await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Agent key decryption failed" });
+        recordCriticalError({
+          category: "security",
+          severity: "error",
+          source: "webhook:agent-key-decrypt",
+          message: "Webhook execution blocked: agent key decryption failed",
+          context: { bot: bot?.id },
+        });
         return res.status(403).json({ error: "Agent key decryption failed. Please reconfigure your agent wallet." });
       }
       
@@ -12678,6 +12709,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     } catch (error) {
       console.error("User webhook processing error:", error);
       await storage.updateWebhookLog(log.id, { errorMessage: String(error) });
+      // Reaching this catch means the bot passed the isActive + secret gates above, so this is a
+      // genuine "webhook failed for an active user" event worth surfacing in the admin Errors tab.
+      recordCriticalError({
+        category: "webhook_failed",
+        severity: "error",
+        source: "webhook:user",
+        error,
+        context: { botId },
+      });
       res.status(500).json({ error: "Failed to process webhook" });
     }
   });
@@ -16076,6 +16116,54 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     } catch (error) {
       console.error("[Admin] Webhook logs error:", error);
       res.status(500).json({ error: "Failed to fetch webhook logs" });
+    }
+  });
+
+  // ─── Admin "Errors" panel ──────────────────────────────────────────────────
+  // Resolve the "since" window from a ?days= query (default 7d, capped at 90d).
+  const errorsSinceFromQuery = (req: ExpressRequest): Date | undefined => {
+    const raw = req.query.days as string | undefined;
+    if (raw === "all") return undefined;
+    const days = Math.min(Math.max(parseInt(raw || "7", 10) || 7, 1), 90);
+    return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  };
+
+  app.get("/api/admin/errors", requireAdminAuth, async (req, res) => {
+    try {
+      const resolvedRaw = req.query.resolved as string | undefined;
+      const errors = await storage.listErrors({
+        category: (req.query.category as string) || undefined,
+        severity: (req.query.severity as string) || undefined,
+        resolved: resolvedRaw === undefined || resolvedRaw === "all" ? undefined : resolvedRaw === "true",
+        since: errorsSinceFromQuery(req),
+        limit: parseInt(req.query.limit as string) || 200,
+        offset: parseInt(req.query.offset as string) || 0,
+      });
+      res.json(errors);
+    } catch (error) {
+      console.error("[Admin] List errors failed:", error);
+      res.status(500).json({ error: "Failed to fetch errors" });
+    }
+  });
+
+  app.get("/api/admin/errors/stats", requireAdminAuth, async (req, res) => {
+    try {
+      const stats = await storage.getErrorStats(errorsSinceFromQuery(req));
+      res.json(stats);
+    } catch (error) {
+      console.error("[Admin] Error stats failed:", error);
+      res.status(500).json({ error: "Failed to fetch error stats" });
+    }
+  });
+
+  app.post("/api/admin/errors/:id/resolve", requireAdminAuth, async (req, res) => {
+    try {
+      const resolved = req.body?.resolved !== false; // default true
+      await storage.setErrorResolved(req.params.id, resolved);
+      res.json({ ok: true, resolved });
+    } catch (error) {
+      console.error("[Admin] Resolve error failed:", error);
+      res.status(500).json({ error: "Failed to update error" });
     }
   });
   

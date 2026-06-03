@@ -20,6 +20,7 @@ import {
   verifyPolicyHmac,
 } from './crypto-v3';
 import { storage } from './storage';
+import { recordCriticalError } from './error-log';
 import { decrypt as legacyDecrypt } from './crypto';
 import * as bip39 from 'bip39';
 import { derivePath } from 'ed25519-hd-key';
@@ -1721,6 +1722,13 @@ export async function decryptAgentKeyStrict(
     zeroizeBuffer(keyBuffer);
   } catch (err) {
     console.warn(`[Security] V3 strict decrypt failed for ${walletAddress.slice(0, 8)}...`);
+    recordCriticalError({
+      category: "security",
+      severity: "error",
+      source: "session-v3:strict-decrypt",
+      message: "V3 strict decrypt failed for agent key",
+      context: { wallet: walletAddress.slice(0, 8) },
+    });
     return null;
   }
 
@@ -1735,6 +1743,13 @@ export async function decryptAgentKeyStrict(
       const derivedPubkey = bs58.encode(keypair.publicKey);
       if (derivedPubkey !== storedPubkey) {
         console.error(`[Security] CRITICAL: V3 strict decryption produced wrong key! Derived=${derivedPubkey.slice(0,12)}... Expected=${storedPubkey.slice(0,12)}...`);
+        recordCriticalError({
+          category: "security",
+          severity: "critical",
+          source: "session-v3:wrong-key",
+          message: "V3 strict decryption produced WRONG key (pubkey mismatch)",
+          context: { wallet: walletAddress.slice(0, 8) },
+        });
         secretKey.fill(0);
         return null;
       }

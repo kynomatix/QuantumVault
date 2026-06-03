@@ -1,4 +1,4 @@
-import { eq, ne, desc, sql, and, or, ilike, gte, lte, inArray } from "drizzle-orm";
+import { eq, ne, desc, sql, and, or, ilike, gte, lte, lt, inArray } from "drizzle-orm";
 import { createHash, randomBytes } from "crypto";
 import { db } from "./db";
 import Decimal from "decimal.js";
@@ -19,6 +19,9 @@ import {
   trades,
   leaderboardStats,
   orphanedSubaccounts,
+  errorLog,
+  type ErrorLog,
+  type InsertErrorLog,
   publishedBots,
   botSubscriptions,
   pnlSnapshots,
@@ -102,6 +105,38 @@ export type ClaimedSpare = {
   status: string;
 };
 
+/** Input for storage.recordError — the central admin error-log upsert (see error_log table). */
+export type ErrorLogInput = {
+  fingerprint: string;
+  category: string;
+  severity?: string;
+  source?: string | null;
+  message: string;
+  detail?: string | null;
+  context?: unknown;
+  /** Increment amount for coalesced flushes (default 1). */
+  count?: number;
+  /** Occurrence time (default now); used for both firstSeen on insert and lastSeen. */
+  lastSeen?: Date;
+};
+
+export type ErrorLogFilter = {
+  category?: string;
+  severity?: string;
+  resolved?: boolean;
+  since?: Date;
+  limit?: number;
+  offset?: number;
+};
+
+export type ErrorStatRow = {
+  category: string;
+  severity: string;
+  rows: number;
+  occurrences: number;
+  unresolved: number;
+};
+
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
@@ -135,6 +170,13 @@ export interface IStorage {
   getTradingBots(walletAddress: string): Promise<TradingBot[]>;
   getTradingBotById(id: string): Promise<TradingBot | undefined>;
   getTradingBotBySecret(webhookSecret: string): Promise<TradingBot | undefined>;
+  // Admin "Errors" panel — bounded, deduped critical-error log.
+  recordError(input: ErrorLogInput): Promise<void>;
+  listErrors(filter?: ErrorLogFilter): Promise<ErrorLog[]>;
+  getErrorStats(since?: Date): Promise<ErrorStatRow[]>;
+  setErrorResolved(id: string, resolved: boolean): Promise<void>;
+  pruneErrors(opts?: { maxAgeDays?: number; maxRows?: number }): Promise<{ deletedByAge: number; deletedByCap: number }>;
+
   getNextSubaccountId(walletAddress: string): Promise<number>;
   getAllocatedSubaccountIds(walletAddress: string): Promise<number[]>;
   getAllocatedProtocolSubaccountIds(walletAddress: string, protocol?: string): Promise<string[]>;
@@ -723,6 +765,16 @@ export class DatabaseStorage implements IStorage {
     lastError: string;
     claimToken?: string;
   }): Promise<boolean> {
+    // Fund-safety: by the time this is called the caller has decided funds are genuinely
+    // stranded (sweep failed / stranding on delete). Surface it in the admin panel even if
+    // the CAS below later no-ops (another owner already quarantined the same slot).
+    void import("./error-log").then((m) => m.recordCriticalError({
+      category: "fund_safety",
+      severity: "critical",
+      source: "stuck-funds-quarantine",
+      message: `Subaccount quarantined as stuck_funds: ${params.lastError || "sweep failed / funds stranded"}`,
+      context: { protocol: params.protocol, subaccountId: params.protocolSubaccountId, botId: params.botId },
+    })).catch(() => {});
     // §5.1.4 CAS-guarded quarantine. When a claimToken is supplied the caller is a
     // lease holder (reuse-on-create / lease-recovery). A TTL-based recovery assumes
     // a slow holder is dead and can reclaim+re-finalize the slot to another owner;
@@ -3040,6 +3092,100 @@ export class DatabaseStorage implements IStorage {
       out.set(r.referee, parseFloat(r.sum) || 0);
     }
     return out;
+  }
+
+  // ─── Admin "Errors" panel ──────────────────────────────────────────────────
+  // Dedup by fingerprint: a repeat occurrence upserts onto the same row (count +=,
+  // lastSeen refreshed, latest message/detail/context wins, resolved auto-reset).
+  async recordError(input: ErrorLogInput): Promise<void> {
+    const inc = input.count && input.count > 0 ? input.count : 1;
+    const last = input.lastSeen ?? new Date();
+    const values = {
+      fingerprint: input.fingerprint,
+      category: input.category,
+      severity: input.severity ?? "error",
+      source: input.source ?? null,
+      message: input.message,
+      detail: input.detail ?? null,
+      context: (input.context ?? null) as any,
+      count: inc,
+      firstSeen: last,
+      lastSeen: last,
+      resolved: false,
+      resolvedAt: null,
+    };
+    await db.insert(errorLog).values(values).onConflictDoUpdate({
+      target: errorLog.fingerprint,
+      set: {
+        count: sql`${errorLog.count} + ${inc}`,
+        lastSeen: last,
+        message: input.message,
+        detail: input.detail ?? null,
+        context: (input.context ?? null) as any,
+        severity: input.severity ?? "error",
+        source: input.source ?? null,
+        // Recurrence means it's back — un-resolve so the admin sees it again.
+        resolved: false,
+        resolvedAt: null,
+      },
+    });
+  }
+
+  async listErrors(filter: ErrorLogFilter = {}): Promise<ErrorLog[]> {
+    const conds: any[] = [];
+    if (filter.category) conds.push(eq(errorLog.category, filter.category));
+    if (filter.severity) conds.push(eq(errorLog.severity, filter.severity));
+    if (filter.resolved !== undefined) conds.push(eq(errorLog.resolved, filter.resolved));
+    if (filter.since) conds.push(gte(errorLog.lastSeen, filter.since));
+    const where = conds.length ? and(...conds) : undefined;
+    return db.select().from(errorLog)
+      .where(where)
+      .orderBy(desc(errorLog.lastSeen))
+      .limit(Math.min(filter.limit ?? 200, 500))
+      .offset(filter.offset ?? 0);
+  }
+
+  // Summary counts per category/severity for the "what happened yesterday" glance.
+  async getErrorStats(since?: Date): Promise<ErrorStatRow[]> {
+    const where = since ? gte(errorLog.lastSeen, since) : undefined;
+    return db.select({
+      category: errorLog.category,
+      severity: errorLog.severity,
+      rows: sql<number>`count(*)::int`,
+      occurrences: sql<number>`coalesce(sum(${errorLog.count}), 0)::int`,
+      unresolved: sql<number>`sum(case when ${errorLog.resolved} = false then 1 else 0 end)::int`,
+    }).from(errorLog)
+      .where(where)
+      .groupBy(errorLog.category, errorLog.severity);
+  }
+
+  async setErrorResolved(id: string, resolved: boolean): Promise<void> {
+    await db.update(errorLog)
+      .set({ resolved, resolvedAt: resolved ? new Date() : null })
+      .where(eq(errorLog.id, id));
+  }
+
+  // Keep the table bounded: delete anything older than maxAgeDays (by lastSeen), then
+  // evict the oldest rows beyond a hard maxRows cap. Both guards run every prune.
+  async pruneErrors(opts: { maxAgeDays?: number; maxRows?: number } = {}): Promise<{ deletedByAge: number; deletedByCap: number }> {
+    const maxAgeDays = opts.maxAgeDays ?? 30;
+    const maxRows = opts.maxRows ?? 500;
+    const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000);
+    const byAge = await db.delete(errorLog)
+      .where(lt(errorLog.lastSeen, cutoff))
+      .returning({ id: errorLog.id });
+    let deletedByCap = 0;
+    const overflow = await db.select({ id: errorLog.id })
+      .from(errorLog)
+      .orderBy(desc(errorLog.lastSeen))
+      .offset(maxRows);
+    if (overflow.length) {
+      const byCap = await db.delete(errorLog)
+        .where(inArray(errorLog.id, overflow.map((r) => r.id)))
+        .returning({ id: errorLog.id });
+      deletedByCap = byCap.length;
+    }
+    return { deletedByAge: byAge.length, deletedByCap };
   }
 }
 

@@ -9,6 +9,7 @@ import { db } from "./db";
 import { wallets } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import { getUmkForWebhook, decryptAgentKeyStrict } from "./session-v3";
+import { recordCriticalError } from "./error-log";
 
 const DEFAULT_EXCHANGE_FEE_RATE = 0.0004;
 
@@ -1136,6 +1137,13 @@ async function processRetryJob(job: RetryJob): Promise<void> {
     }
     
     await notifyRetryResult(job, false, job.lastError);
+    recordCriticalError({
+      category: "trade_failed",
+      severity: "critical",
+      source: "trade-retry",
+      message: `Trade permanently failed after all retries: ${job.lastError || "Unknown error"}`,
+      context: { jobId: job.id, tradeId: job.originalTradeId, attempts: job.attempts },
+    });
     retryQueue.delete(job.id);
     // Mark as failed in database
     try {
@@ -1190,6 +1198,13 @@ async function processRetryJob(job: RetryJob): Promise<void> {
         });
       }
       await notifyRetryResult(job, false, errorMsg);
+      recordCriticalError({
+        category: "trade_failed",
+        severity: "critical",
+        source: "trade-retry",
+        message: `Trade permanently failed after all retries: ${errorMsg}`,
+        context: { jobId: job.id, tradeId: job.originalTradeId, attempts: job.attempts },
+      });
       retryQueue.delete(job.id);
     } else {
       const backoff = calculateBackoff(job.attempts, job.priority);

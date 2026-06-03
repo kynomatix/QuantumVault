@@ -15,6 +15,40 @@ import { startPacificaReferralBackfillJob } from "./pacifica-referral-backfill-j
 import { initLeverageCache, setOnCacheRefreshed } from "./leverage-cache-service";
 import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
 import { startTelegramDailySummaryJob } from "./telegram-daily-summary-job";
+import { recordCriticalError, flushErrorLog } from "./error-log";
+
+// Global crash capture for the admin "Errors" panel. Registered at module load so it catches
+// failures from any background job. Both handlers record the error then preserve Node's default
+// hard-crash semantics (flush + exit so the platform restarts us into a known-clean state). This
+// is the fail-closed choice for a money platform: a possibly-corrupt process must NOT keep
+// executing trades. Money paths already fail closed on their own; anything reaching here is, by
+// definition, an uncaught invariant we don't want to run on.
+process.on("unhandledRejection", (reason: any) => {
+  recordCriticalError({
+    category: "crash",
+    severity: "critical",
+    source: "unhandledRejection",
+    error: reason,
+    message: reason?.message ? String(reason.message) : `Unhandled rejection: ${String(reason)}`,
+  });
+  console.error("[unhandledRejection]", reason);
+  const hardExit = setTimeout(() => process.exit(1), 2000);
+  if (typeof hardExit.unref === "function") hardExit.unref();
+  flushErrorLog().finally(() => process.exit(1));
+});
+process.on("uncaughtException", (err: any) => {
+  recordCriticalError({
+    category: "crash",
+    severity: "critical",
+    source: "uncaughtException",
+    error: err,
+    message: err?.message ? String(err.message) : `Uncaught exception: ${String(err)}`,
+  });
+  console.error("[uncaughtException]", err);
+  const hardExit = setTimeout(() => process.exit(1), 2000);
+  if (typeof hardExit.unref === "function") hardExit.unref();
+  flushErrorLog().finally(() => process.exit(1));
+});
 
 async function trySyncMarketRegistry(): Promise<void> {
   try {
@@ -471,8 +505,22 @@ app.use((req, res, next) => {
 
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";
-    
+
     console.log(`[express error] ${req.method} ${req.path} - ${status} ${message}`);
+
+    // Surface genuine server errors (5xx) in the admin panel. 4xx (client/validation) and the
+    // 503 backpressure path above are deliberately excluded so the log stays signal, not noise.
+    if (status >= 500) {
+      recordCriticalError({
+        category: "server_500",
+        severity: "error",
+        source: "express",
+        message: `${req.method} ${req.path} → ${status}: ${message}`,
+        detail: err?.stack ? String(err.stack) : undefined,
+        context: { method: req.method, path: req.path, status },
+      });
+    }
+
     res.status(status).json({ message });
   });
 
@@ -508,6 +556,7 @@ app.use((req, res, next) => {
 
   const shutdownHandler = async () => {
     console.log("[Main] Shutting down...");
+    await flushErrorLog().catch(() => {});
     await labSupervisor.shutdown();
     await closePool().catch((e) => console.warn("[Main] Pool close error (non-fatal):", e.message));
     httpServer.close();
@@ -687,6 +736,23 @@ app.use((req, res, next) => {
           startStatsConsistencyMonitor();
         });
       }, 72_000);
+
+      // Admin error-log retention: prune on startup, then daily. Bounded table
+      // (30d age + hard row cap) so the "Errors" tab never balloons. Fail-safe.
+      setTimeout(() => {
+        log('[Staggered startup] Starting error-log prune job (daily)');
+        const runPrune = () => {
+          storage.pruneErrors()
+            .then(({ deletedByAge, deletedByCap }) => {
+              if (deletedByAge || deletedByCap) {
+                log(`[ErrorLogPrune] removed ${deletedByAge} by age + ${deletedByCap} by cap`);
+              }
+            })
+            .catch(err => console.error('[ErrorLogPrune] error:', err));
+        };
+        runPrune();
+        setInterval(runPrune, 24 * 60 * 60 * 1000);
+      }, 77_000);
     },
   );
 })();

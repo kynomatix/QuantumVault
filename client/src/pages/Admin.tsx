@@ -2,7 +2,7 @@ import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
-import { Lock, Activity, Bot, Users, Webhook, TrendingUp, ArrowLeft, RefreshCw, Clock, CheckCircle, XCircle, AlertTriangle, Rocket, ExternalLink, Send, Eye, Copy, FlaskConical, Power, UserCheck, DollarSign } from 'lucide-react';
+import { Lock, Activity, Bot, Users, Webhook, TrendingUp, ArrowLeft, RefreshCw, Clock, CheckCircle, XCircle, AlertTriangle, AlertOctagon, Rocket, ExternalLink, Send, Eye, Copy, FlaskConical, Power, UserCheck, DollarSign } from 'lucide-react';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -34,6 +34,17 @@ function truncateAddress(address: string | null | undefined) {
   if (!address) return '-';
   return `${address.slice(0, 4)}...${address.slice(-4)}`;
 }
+
+const ERROR_CATEGORY_META: Record<string, { label: string; cls: string }> = {
+  crash: { label: 'Crash', cls: 'bg-red-500/20 text-red-400 border-red-500/30' },
+  server_500: { label: 'Server 500', cls: 'bg-orange-500/20 text-orange-400 border-orange-500/30' },
+  trade_failed: { label: 'Trade Failed', cls: 'bg-amber-500/20 text-amber-400 border-amber-500/30' },
+  fund_safety: { label: 'Fund Safety', cls: 'bg-pink-500/20 text-pink-400 border-pink-500/30' },
+  webhook_failed: { label: 'Webhook', cls: 'bg-purple-500/20 text-purple-400 border-purple-500/30' },
+  security: { label: 'Security', cls: 'bg-rose-500/20 text-rose-400 border-rose-500/30' },
+};
+function errorCategoryLabel(c: string) { return ERROR_CATEGORY_META[c]?.label || c; }
+function errorCategoryClass(c: string) { return ERROR_CATEGORY_META[c]?.cls || 'bg-zinc-500/20 text-zinc-400 border-zinc-500/30'; }
 
 function StatusBadge({ status }: { status: string | boolean | null }) {
   if (status === true || status === 'active' || status === 'success' || status === 'completed') {
@@ -160,6 +171,51 @@ function AdminPage() {
         variant: 'destructive' as any,
       });
     },
+  });
+
+  // ─── Admin "Errors" panel ──────────────────────────────────────────────────
+  const [errorCategory, setErrorCategory] = useState<string>('all');
+  const [errorResolved, setErrorResolved] = useState<string>('false'); // default: show open items
+  const [errorDays, setErrorDays] = useState<string>('7');
+
+  const { data: errorList, isLoading: errorsLoading, refetch: refetchErrors } = useQuery({
+    queryKey: ['admin-errors', errorCategory, errorResolved, errorDays],
+    queryFn: async () => {
+      const qs = `?days=${errorDays}`
+        + (errorCategory !== 'all' ? `&category=${errorCategory}` : '')
+        + (errorResolved !== 'all' ? `&resolved=${errorResolved}` : '');
+      const res = await fetch(`/api/admin/errors${qs}`, { headers: authHeaders });
+      if (!res.ok) throw new Error('Failed to fetch');
+      return safeResponseJson(res);
+    },
+    enabled: authenticated && activeTab === 'errors',
+    refetchInterval: 30000,
+  });
+
+  const { data: errorStats, refetch: refetchErrorStats } = useQuery({
+    queryKey: ['admin-error-stats', errorDays],
+    queryFn: async () => {
+      const res = await fetch(`/api/admin/errors/stats?days=${errorDays}`, { headers: authHeaders });
+      if (!res.ok) throw new Error('Failed to fetch');
+      return safeResponseJson(res);
+    },
+    enabled: authenticated && activeTab === 'errors',
+    refetchInterval: 30000,
+  });
+
+  const resolveErrorMutation = useMutation({
+    mutationFn: async ({ id, resolved }: { id: string; resolved: boolean }) => {
+      const res = await fetch(`/api/admin/errors/${id}/resolve`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resolved }),
+      });
+      const data = await safeResponseJson(res);
+      if (!res.ok) throw new Error(data?.error || 'Update failed');
+      return data;
+    },
+    onSuccess: () => { refetchErrors(); refetchErrorStats(); },
+    onError: (err: any) => toast({ title: 'Update failed', description: err?.message || 'Unknown error', variant: 'destructive' as any }),
   });
 
   const { data: pendingShares, isLoading: sharesLoading, refetch: refetchShares } = useQuery({
@@ -386,6 +442,7 @@ function AdminPage() {
             <TabsTrigger value="users" className="data-[state=active]:bg-violet-600"><UserCheck className="w-4 h-4 mr-2" />Users</TabsTrigger>
             <TabsTrigger value="revenue" className="data-[state=active]:bg-violet-600"><DollarSign className="w-4 h-4 mr-2" />Revenue</TabsTrigger>
             <TabsTrigger value="superteam" className="data-[state=active]:bg-emerald-600"><Rocket className="w-4 h-4 mr-2" />Grants</TabsTrigger>
+            <TabsTrigger value="errors" className="data-[state=active]:bg-red-600"><AlertOctagon className="w-4 h-4 mr-2" />Errors</TabsTrigger>
           </TabsList>
 
           <TabsContent value="stats" className="space-y-4">
@@ -924,6 +981,110 @@ function AdminPage() {
 
           <TabsContent value="superteam">
             <SuperteamPanel authHeaders={authHeaders} />
+          </TabsContent>
+
+          <TabsContent value="errors" className="space-y-4">
+            <Card className="bg-zinc-900/80 border-zinc-800">
+              <CardHeader>
+                <CardTitle className="text-white flex items-center justify-between gap-2 flex-wrap">
+                  <span className="flex items-center gap-2">
+                    <AlertOctagon className="w-5 h-5 text-red-400" />
+                    System Errors ({errorList?.length || 0})
+                  </span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <select value={errorDays} onChange={(e) => setErrorDays(e.target.value)} className="bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs rounded px-2 py-1" data-testid="select-error-days">
+                      <option value="1">Last 24h</option>
+                      <option value="7">Last 7 days</option>
+                      <option value="30">Last 30 days</option>
+                      <option value="all">All time</option>
+                    </select>
+                    <select value={errorCategory} onChange={(e) => setErrorCategory(e.target.value)} className="bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs rounded px-2 py-1" data-testid="select-error-category">
+                      <option value="all">All categories</option>
+                      <option value="crash">Crashes</option>
+                      <option value="server_500">Server 500s</option>
+                      <option value="trade_failed">Trade failures</option>
+                      <option value="fund_safety">Fund safety</option>
+                      <option value="webhook_failed">Webhook failures</option>
+                      <option value="security">Security</option>
+                    </select>
+                    <select value={errorResolved} onChange={(e) => setErrorResolved(e.target.value)} className="bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs rounded px-2 py-1" data-testid="select-error-resolved">
+                      <option value="false">Open</option>
+                      <option value="true">Resolved</option>
+                      <option value="all">All</option>
+                    </select>
+                    <Button size="sm" variant="outline" className="h-7" onClick={() => { refetchErrors(); refetchErrorStats(); }} data-testid="button-refresh-errors">
+                      <RefreshCw className="w-3 h-3" />
+                    </Button>
+                  </div>
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {Array.isArray(errorStats) && errorStats.length > 0 && (
+                  <div className="flex flex-wrap gap-2 mb-4">
+                    {errorStats.map((s: any) => (
+                      <Badge key={`${s.category}-${s.severity}`} className={errorCategoryClass(s.category)} data-testid={`stat-error-${s.category}-${s.severity}`}>
+                        {errorCategoryLabel(s.category)} · {s.severity} · {s.occurrences} ({s.unresolved} open)
+                      </Badge>
+                    ))}
+                  </div>
+                )}
+                {errorsLoading ? (
+                  <div className="text-center py-8 text-zinc-400">Loading...</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="border-zinc-700">
+                          <TableHead className="text-zinc-400">Last Seen</TableHead>
+                          <TableHead className="text-zinc-400">Category</TableHead>
+                          <TableHead className="text-zinc-400">Severity</TableHead>
+                          <TableHead className="text-zinc-400">Source</TableHead>
+                          <TableHead className="text-zinc-400">Message</TableHead>
+                          <TableHead className="text-zinc-400">Count</TableHead>
+                          <TableHead className="text-zinc-400">Action</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {errorList?.map((e: any) => (
+                          <TableRow key={e.id} className={`border-zinc-800 ${e.resolved ? 'opacity-50' : ''}`} data-testid={`row-error-${e.id}`}>
+                            <TableCell className="text-zinc-300 text-xs whitespace-nowrap">{formatDate(e.lastSeen)}</TableCell>
+                            <TableCell><Badge className={errorCategoryClass(e.category)}>{errorCategoryLabel(e.category)}</Badge></TableCell>
+                            <TableCell>
+                              <Badge className={e.severity === 'critical' ? 'bg-red-500/20 text-red-400 border-red-500/30' : 'bg-orange-500/20 text-orange-400 border-orange-500/30'}>
+                                {e.severity}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="text-zinc-400 text-xs font-mono whitespace-nowrap">{e.source || '-'}</TableCell>
+                            <TableCell className="text-zinc-300 text-xs max-w-md">
+                              <div className="truncate" title={e.message} data-testid={`text-error-message-${e.id}`}>{e.message}</div>
+                              {e.detail && <div className="text-zinc-600 text-[10px] truncate" title={e.detail}>{e.detail}</div>}
+                            </TableCell>
+                            <TableCell className="text-zinc-300 text-xs">{e.count}</TableCell>
+                            <TableCell>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="text-xs h-7"
+                                disabled={resolveErrorMutation.isPending}
+                                onClick={() => resolveErrorMutation.mutate({ id: e.id, resolved: !e.resolved })}
+                                data-testid={`button-resolve-error-${e.id}`}
+                              >
+                                {e.resolved ? 'Reopen' : 'Resolve'}
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                        {(!errorList || errorList.length === 0) && (
+                          <TableRow>
+                            <TableCell colSpan={7} className="text-center text-zinc-500 py-8">No errors — all clear ✓</TableCell>
+                          </TableRow>
+                        )}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
           </TabsContent>
         </Tabs>
       </div>
