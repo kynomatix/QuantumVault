@@ -986,6 +986,68 @@ async function resyncExecutionUmkIfStale(
   }
 }
 
+/**
+ * Heal a divergent execution-wrapped UMK WITHOUT a live session.
+ *
+ * resyncExecutionUmkIfStale() needs the canonical UMK in hand, which only the
+ * login flow has (it unwraps encryptedUserMasterKey with the storage key). The
+ * session-less paths — bot-create, webhooks, background jobs — read the UMK via
+ * getUmkForWebhook() (the DB execution copy, so they survive in-memory session
+ * loss after a restart) and otherwise only re-key on a fresh unlock_umk login.
+ * A long-lived production session may never trigger that login, so a wallet
+ * whose execution copy diverged (e.g. after a v1->v3 UMK regen) stays broken:
+ * getUmkForWebhook returns a UMK that decrypts the (self-repairing) agent key
+ * but NOT the mnemonic, so agent_hd (Flash) bot-create fails with "no recovery
+ * phrase on file" even though reveal — which uses the canonical UMK — works.
+ *
+ * This re-derives the canonical UMK directly from storage (the exact crypto
+ * login uses) so any session-less path can self-heal the execution copy on
+ * demand, no re-authentication required. Supports v2/v3 wallets; v1 has no
+ * recoverable UMK. Idempotent (delegates the compare + CAS write, which never
+ * touches the executionEnabled flag, to resyncExecutionUmkIfStale) and
+ * fail-safe (never throws into the caller — money paths still fail closed
+ * downstream if the heal can't help).
+ */
+export async function healExecutionUmkFromStorage(walletAddress: string): Promise<void> {
+  try {
+    const wallet = await storage.getWallet(walletAddress);
+    // Nothing to heal unless execution is enabled AND both envelopes exist.
+    if (!wallet?.executionEnabled || !wallet.umkEncryptedForExecution) return;
+    if (!wallet.userSalt || !wallet.encryptedUserMasterKey) return;
+
+    const version = wallet.umkVersion || 1;
+    // v1 used a broken signature-derived key; its UMK is not recoverable from
+    // storage (login regenerates it). Only v2/v3 canonical UMKs round-trip here.
+    if (version !== 2 && version !== 3) return;
+
+    const userSalt = Buffer.from(wallet.userSalt, 'hex');
+    const aad = buildAAD(walletAddress, 'UMK');
+    const storageKey = version === 3
+      ? getStorageKeyV3(walletAddress, userSalt)
+      : getStorageKeyV2(walletAddress, userSalt);
+
+    let canonicalUmk: Buffer;
+    try {
+      canonicalUmk = decryptFromBase64(wallet.encryptedUserMasterKey, storageKey, aad);
+    } catch (err) {
+      zeroizeBuffer(storageKey);
+      // Canonical copy itself won't decrypt — a heal is impossible; let the
+      // caller fail closed. (Mirrors the v3 login "decrypt FAILED" branch.)
+      console.error(`[Security v3] healExecutionUmkFromStorage: canonical UMK decrypt failed for ${walletAddress.slice(0, 8)}... (cannot heal — check UMK_STORAGE_SECRET):`, err);
+      return;
+    }
+    zeroizeBuffer(storageKey);
+
+    try {
+      await resyncExecutionUmkIfStale(walletAddress, canonicalUmk);
+    } finally {
+      zeroizeBuffer(canonicalUmk);
+    }
+  } catch (err) {
+    console.error(`[Security v3] healExecutionUmkFromStorage failed for ${walletAddress.slice(0, 8)}... (non-fatal):`, err);
+  }
+}
+
 export async function emergencyStopWallet(
   walletAddress: string,
   adminId: string

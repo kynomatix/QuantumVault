@@ -1291,7 +1291,7 @@ import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable
 import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification, type TradeNotification, buildDefaultInlineKeyboard } from "./notification-service";
 import { classifySignal } from "./trading/signal-classifier";
 import { registerTelegramMiniAppRoutes } from "./telegram-mini-app";
-import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3, rebindRetainedKeyToBotUuidV3, decryptMnemonic, deriveBotKeypairFromAgentSeed, BOT_DERIVATION_PATH_VERSION } from "./session-v3";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, healExecutionUmkFromStorage, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3, rebindRetainedKeyToBotUuidV3, decryptMnemonic, deriveBotKeypairFromAgentSeed, BOT_DERIVATION_PATH_VERSION } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback, cancelRetryJobsForBot } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { DOCS_MARKDOWN } from "./docs-markdown";
@@ -7849,6 +7849,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         const { Keypair } = await import('@solana/web3.js');
 
         console.log(`[BotCreate][RekeyGuard] wallet=${req.walletAddress!.slice(0,8)}... agentPub=${wallet.agentPublicKey.slice(0,8)}... umkVersion=${(wallet as any).umkVersion} executionEnabled=${(wallet as any).executionEnabled} hasUmkExec=${!!(wallet as any).umkEncryptedForExecution} hasAgentV3=${!!wallet.agentPrivateKeyEncryptedV3} hasLegacy=${!!(wallet as any).agentPrivateKeyEncrypted} emergencyStop=${(wallet as any).emergencyStopTriggered}`);
+        // Self-heal a divergent execution-wrapped UMK BEFORE we read it.
+        // getUmkForWebhook() returns the DB execution copy (not the session UMK)
+        // so it survives in-memory session loss after a restart — but that copy
+        // goes stale if the canonical UMK was regenerated (e.g. v1->v3) and the
+        // user hasn't fully re-authenticated since. A stale copy decrypts the
+        // (self-repairing) agent key but NOT the mnemonic, so agent_hd (Flash)
+        // bot-create fails with "no recovery phrase on file" even though reveal
+        // (which uses the canonical UMK) works. This re-derives canonical from
+        // storage and rewraps the execution copy in place. Idempotent + fail-safe.
+        await healExecutionUmkFromStorage(req.walletAddress!);
         const _botCreateUmk = await getUmkForWebhook(req.walletAddress!);
         if (!_botCreateUmk) {
           console.error(`[BotCreate][RekeyGuard] FAIL_AT=getUmkForWebhook wallet=${req.walletAddress!.slice(0,8)}...`);
