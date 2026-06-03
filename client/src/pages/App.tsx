@@ -247,6 +247,8 @@ export default function AppPage() {
   const [withdrawingBotId, setWithdrawingBotId] = useState<string | null>(null);
   const [recoveringExchangeFunds, setRecoveringExchangeFunds] = useState(false);
   const [showRecoverDialog, setShowRecoverDialog] = useState(false);
+  const [orphanSlots, setOrphanSlots] = useState(0);
+  const [recoveringStranded, setRecoveringStranded] = useState(false);
   const [botBalances, setBotBalances] = useState<Record<string, { balance: number; exists: boolean }>>({});
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [botToDelete, setBotToDelete] = useState<{ id: string; name: string; balance: number; isLegacy?: boolean; agentPublicKey?: string } | null>(null);
@@ -425,6 +427,7 @@ export default function AppPage() {
       setAgentBalance(null);
       setExchangeBalance(null);
       setSolBalance(null);
+      setOrphanSlots(0);
       equityInitialLoadDone.current = false;
       return;
     }
@@ -450,8 +453,23 @@ export default function AppPage() {
         setEquityLoading(false);
       }
     };
-    
+
+    // Cheap DB-only check for funds stranded in orphaned Flash per-bot wallets
+    // (allocated slots with no bot row). Surfaces the "Recover stranded funds" button.
+    const fetchOrphanSlots = async () => {
+      try {
+        const res = await fetch('/api/flash/orphaned-wallets', { credentials: 'include' });
+        if (res.ok) {
+          const data = await safeResponseJson(res);
+          setOrphanSlots(data.orphanSlots ?? 0);
+        }
+      } catch (error) {
+        // Network error, keep previous value
+      }
+    };
+
     fetchEquityData();
+    fetchOrphanSlots();
     const interval = setInterval(fetchEquityData, 30000);
     return () => clearInterval(interval);
   }, [connected, publicKeyString]);
@@ -1472,6 +1490,50 @@ export default function AppPage() {
     }
   };
 
+  // Recover funds stranded in orphaned Flash per-bot wallets (slots that were funded
+  // but whose bot row was never created). Sweeps everything back to the agent wallet.
+  const handleRecoverStrandedFunds = async () => {
+    setRecoveringStranded(true);
+    try {
+      const response = await fetch('/api/flash/recover-orphaned-wallets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+      });
+      const data = await safeResponseJson(response);
+      if (!response.ok || data.success === false) {
+        throw new Error(data.message || data.error || 'Recovery failed');
+      }
+      toast({
+        title: data.totalUsdc > 0 ? 'Funds Recovered!' : 'Recovery Complete',
+        description: data.message,
+      });
+      // Re-check orphan slots and refresh balances.
+      try {
+        const orphanRes = await fetch('/api/flash/orphaned-wallets', { credentials: 'include' });
+        if (orphanRes.ok) {
+          const orphanData = await safeResponseJson(orphanRes);
+          setOrphanSlots(orphanData.orphanSlots ?? 0);
+        }
+        const eqRes = await fetch('/api/total-equity', { credentials: 'include' });
+        if (eqRes.ok) {
+          const eqData = await safeResponseJson(eqRes);
+          setTotalEquity(eqData.totalEquity ?? 0);
+          setAgentBalance(eqData.agentBalance ?? 0);
+        }
+      } catch {}
+    } catch (error: any) {
+      console.error('Stranded recovery error:', error);
+      toast({
+        title: 'Recovery Failed',
+        description: error.message || 'Please try again or contact support',
+        variant: 'destructive',
+      });
+    } finally {
+      setRecoveringStranded(false);
+    }
+  };
+
   const handleDeleteBot = async (botId: string, botName: string) => {
     const botBalance = botBalances[botId]?.balance ?? 0;
     
@@ -1774,6 +1836,19 @@ export default function AppPage() {
                         )}
                       </div>
                     </div>
+                    {orphanSlots > 0 && (
+                      <button
+                        onClick={handleRecoverStrandedFunds}
+                        disabled={recoveringStranded}
+                        className="w-full text-[10px] px-2 py-1 rounded bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors disabled:opacity-50 flex items-center justify-center gap-1"
+                        title="Recover funds from a bot wallet that wasn't fully set up"
+                        data-testid="button-recover-stranded"
+                      >
+                        {recoveringStranded ? (
+                          <><Loader2 className="w-3 h-3 animate-spin" /> Recovering...</>
+                        ) : 'Recover stranded funds'}
+                      </button>
+                    )}
                   </div>
                 </div>
                 <div className="p-3 rounded-xl bg-muted/30 mb-3 lg:hidden">
@@ -1826,6 +1901,19 @@ export default function AppPage() {
                         )}
                       </div>
                     </div>
+                    {orphanSlots > 0 && (
+                      <button
+                        onClick={handleRecoverStrandedFunds}
+                        disabled={recoveringStranded}
+                        className="w-full text-[10px] px-2 py-1 rounded bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors disabled:opacity-50 flex items-center justify-center gap-1"
+                        title="Recover funds from a bot wallet that wasn't fully set up"
+                        data-testid="button-recover-stranded-mobile"
+                      >
+                        {recoveringStranded ? (
+                          <><Loader2 className="w-3 h-3 animate-spin" /> Recovering...</>
+                        ) : 'Recover stranded funds'}
+                      </button>
+                    )}
                   </div>
                 </div>
                 <Button 

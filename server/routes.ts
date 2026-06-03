@@ -120,6 +120,171 @@ async function _resolveBotSubaccountSecretKey(
 }
 
 /**
+ * Core close+sweep+verify for a Flash per-bot wallet, given an ALREADY-resolved
+ * secret key. Closes any open positions, cancels leftover trigger (TP/SL) orders,
+ * tops up gas from the agent, sweeps ALL funds back to the agent wallet, and verifies
+ * the wallet is genuinely empty. Fails closed on any unreadable balance or unfinished
+ * close/sweep — never reports success while funds may remain. Idempotent.
+ *
+ * Shared by recoverFlashBotWallet (bot-row recovery) and the orphaned-wallet recovery
+ * endpoint (funded slots with NO bot row) so the fail-closed money-path checks live in
+ * ONE place. `label` is only for logging (e.g. `bot <id>` or `orphan slot N`).
+ */
+async function _sweepFlashWalletToAgent(
+  flashAdapter: import('./protocol/flash/flash-adapter').FlashAdapter,
+  subId: string,
+  secretKey: Uint8Array,
+  agentAddress: string,
+  agentSecret: Uint8Array | null,
+  logPrefix: string,
+  label: string,
+): Promise<{
+  recovered: boolean;
+  closedPositions: number;
+  usdcSwept: number;
+  solReclaimed: number;
+  alreadyEmpty: boolean;
+  error?: string;
+}> {
+  const empty = (error?: string) => ({
+    recovered: false, closedPositions: 0, usdcSwept: 0, solReclaimed: 0, alreadyEmpty: false, error,
+  });
+
+  // 1) Close any open positions — recovery CLOSES (delete refuses); fail closed.
+  let closedPositions = 0;
+  let positions = await flashAdapter.getPositions(subId);
+  for (const pos of positions) {
+    console.log(`${logPrefix} Closing ${pos.internalSymbol} position on bot wallet ${subId.slice(0, 8)}...`);
+    const close = await flashAdapter.closePosition({
+      agentPublicKey: subId,
+      agentSecretKey: secretKey,
+      mainWalletAddress: agentAddress,
+      internalSymbol: pos.internalSymbol,
+      subaccountId: subId,
+    });
+    if (!close.success) {
+      return empty(`Failed to close ${pos.internalSymbol} position: ${close.error}`);
+    }
+    closedPositions++;
+  }
+
+  // Best-effort cancel of leftover trigger (TP/SL) orders — never blocks the sweep.
+  try {
+    await flashAdapter.cancelAllOrders({
+      agentPublicKey: subId,
+      agentSecretKey: secretKey,
+      mainWalletAddress: agentAddress,
+      subaccountId: subId,
+    });
+  } catch (cancelErr: any) {
+    console.warn(`${logPrefix} cancelAllOrders failed (non-fatal): ${cancelErr?.message || cancelErr}`);
+  }
+
+  // Re-verify NO positions remain before sweeping — fail closed.
+  positions = await flashAdapter.getPositions(subId);
+  if (positions.length > 0) {
+    return empty(`${positions.length} position(s) still open after close attempt`);
+  }
+
+  // 2) Gas top-up so the bot wallet can pay its own sweep fee (USDC-rich/SOL-poor).
+  if (agentSecret) {
+    const gas = await flashAdapter.topUpBotWalletGas({ mainSecretKey: agentSecret, botWalletAddress: subId });
+    if (gas.error) {
+      return empty(`Could not top up bot gas for the sweep: ${gas.error}`);
+    }
+  }
+
+  // 3) Sweep everything (USDC + reclaim SOL) back to the agent wallet.
+  const sweep = await flashAdapter.sweepBotWallet({ subSecretKey: secretKey, destWalletAddress: agentAddress });
+  if (sweep.error) {
+    return empty(`Sweep failed: ${sweep.error}`);
+  }
+
+  // 4) Verify the wallet is genuinely empty — reads + position check fail CLOSED.
+  //    A position reopened mid-recovery would lock collateral that the wallet-USDC
+  //    balance check cannot see, so re-check positions one final time after the sweep.
+  const residualPositions = await flashAdapter.getPositions(subId);
+  if (residualPositions.length > 0) {
+    return empty(`${residualPositions.length} position(s) reopened during recovery — collateral is locked; stop the bot and retry`);
+  }
+  let usdcResidual: number;
+  let solResidual: number;
+  try {
+    usdcResidual = await flashAdapter.getWalletCollateralBalanceStrict(subId);
+    solResidual = await flashAdapter.getWalletSolBalance(subId);
+  } catch (balErr: any) {
+    return empty(`Could not verify the bot wallet is empty after sweep: ${balErr?.message || balErr}`);
+  }
+  if (usdcResidual > 0) {
+    return empty(`$${usdcResidual.toFixed(6)} USDC still remains in the bot wallet after sweep`);
+  }
+  // A successful SOL reclaim leaves only sub-fee dust (< ~0.000005 SOL). A residual
+  // above the dust threshold means the reclaim leg FAILED and real SOL (including the
+  // gas we just topped up) is stranded — fail closed so the operator re-runs. The
+  // wallet is agent-HD recoverable, so a re-run is always safe.
+  const FLASH_SOL_DUST = 0.001;
+  if (solResidual > FLASH_SOL_DUST) {
+    return empty(`${solResidual.toFixed(6)} SOL still remains in the bot wallet after sweep (SOL reclaim failed) — retry recovery`);
+  }
+
+  const alreadyEmpty = closedPositions === 0 && sweep.usdcSwept === 0;
+  console.log(`${logPrefix} Recovered ${label}: closed ${closedPositions} position(s), swept $${sweep.usdcSwept.toFixed(2)} USDC + ${sweep.solReclaimed.toFixed(6)} SOL to agent`);
+  return {
+    recovered: true,
+    closedPositions,
+    usdcSwept: sweep.usdcSwept,
+    solReclaimed: sweep.solReclaimed,
+    alreadyEmpty,
+  };
+}
+
+/**
+ * Sweep a freshly-funded Flash per-bot wallet back to the agent wallet after a
+ * post-funding bot-creation failure (INSERT failed, V3 key write failed, ...). Two
+ * attempts, then verifies the wallet is empty of BOTH USDC and reclaimable SOL. Reads
+ * fail CLOSED (any error ⇒ not swept). Returns whether the wallet was CONFIRMED empty
+ * so the caller can decide whether it's safe to drop the row / surface success.
+ */
+async function _rollbackFlashFundedWallet(
+  flashAdapter: import('./protocol/flash/flash-adapter').FlashAdapter,
+  botSecretKey: Uint8Array,
+  botWalletAddress: string,
+  agentAddress: string,
+  logPrefix: string,
+): Promise<{ swept: boolean; usdcSwept: number; solReclaimed: number }> {
+  let swept = false;
+  let usdcSwept = 0;
+  let solReclaimed = 0;
+  for (let attempt = 0; attempt < 2 && !swept; attempt++) {
+    try {
+      const rollback = await flashAdapter.sweepBotWallet({
+        subSecretKey: botSecretKey,
+        destWalletAddress: agentAddress,
+      });
+      if (rollback.error) {
+        console.error(`${logPrefix} Flash rollback sweep attempt ${attempt + 1} failed: ${rollback.error}`);
+      } else {
+        usdcSwept = rollback.usdcSwept;
+        solReclaimed = rollback.solReclaimed;
+        console.warn(`${logPrefix} Flash rollback swept $${rollback.usdcSwept.toFixed(6)} USDC + ${rollback.solReclaimed.toFixed(6)} SOL back to agent wallet`);
+      }
+    } catch (sweepErr: any) {
+      console.error(`${logPrefix} Flash rollback sweep attempt ${attempt + 1} threw: ${sweepErr?.message || sweepErr}`);
+    }
+    // Trust the sweep only after the bot wallet is verified empty of BOTH USDC and
+    // reclaimable SOL. Reads fail CLOSED (any error ⇒ not swept).
+    let residualUsdc = -1;
+    let residualSol = Number.POSITIVE_INFINITY;
+    try {
+      residualUsdc = await flashAdapter.getWalletCollateralBalanceStrict(botWalletAddress);
+      residualSol = await flashAdapter.getWalletSolBalance(botWalletAddress);
+    } catch { /* leave sentinels → not swept */ }
+    if (residualUsdc === 0 && residualSol <= 0.001) swept = true;
+  }
+  return { swept, usdcSwept, solReclaimed };
+}
+
+/**
  * Phase 4b emergency recovery for a Flash agent-derived per-bot wallet. Re-derives
  * the bot key from the agent seed (via _resolveBotSubaccountSecretKey, which works
  * even if the encrypted blob is gone), closes any open positions, cancels leftover
@@ -173,93 +338,10 @@ async function recoverFlashBotWallet(
   try {
     // Re-derive (or decrypt) the bot key. Throws/fails closed if unrecoverable.
     decrypted = await _resolveBotSubaccountSecretKey(botCtx);
-
-    // 1) Close any open positions — recovery CLOSES (delete refuses); fail closed.
-    let closedPositions = 0;
-    let positions = await flashAdapter.getPositions(subId);
-    for (const pos of positions) {
-      console.log(`${logPrefix} Closing ${pos.internalSymbol} position on bot wallet ${subId.slice(0, 8)}...`);
-      const close = await flashAdapter.closePosition({
-        agentPublicKey: subId,
-        agentSecretKey: decrypted.secretKey,
-        mainWalletAddress: agentAddress,
-        internalSymbol: pos.internalSymbol,
-        subaccountId: subId,
-      });
-      if (!close.success) {
-        return empty(`Failed to close ${pos.internalSymbol} position: ${close.error}`);
-      }
-      closedPositions++;
-    }
-
-    // Best-effort cancel of leftover trigger (TP/SL) orders — never blocks the sweep.
-    try {
-      await flashAdapter.cancelAllOrders({
-        agentPublicKey: subId,
-        agentSecretKey: decrypted.secretKey,
-        mainWalletAddress: agentAddress,
-        subaccountId: subId,
-      });
-    } catch (cancelErr: any) {
-      console.warn(`${logPrefix} cancelAllOrders failed (non-fatal): ${cancelErr?.message || cancelErr}`);
-    }
-
-    // Re-verify NO positions remain before sweeping — fail closed.
-    positions = await flashAdapter.getPositions(subId);
-    if (positions.length > 0) {
-      return empty(`${positions.length} position(s) still open after close attempt`);
-    }
-
-    // 2) Gas top-up so the bot wallet can pay its own sweep fee (USDC-rich/SOL-poor).
-    if (agentSecret) {
-      const gas = await flashAdapter.topUpBotWalletGas({ mainSecretKey: agentSecret, botWalletAddress: subId });
-      if (gas.error) {
-        return empty(`Could not top up bot gas for the sweep: ${gas.error}`);
-      }
-    }
-
-    // 3) Sweep everything (USDC + reclaim SOL) back to the agent wallet.
-    const sweep = await flashAdapter.sweepBotWallet({ subSecretKey: decrypted.secretKey, destWalletAddress: agentAddress });
-    if (sweep.error) {
-      return empty(`Sweep failed: ${sweep.error}`);
-    }
-
-    // 4) Verify the wallet is genuinely empty — reads + position check fail CLOSED.
-    //    A position reopened mid-recovery would lock collateral that the wallet-USDC
-    //    balance check cannot see, so re-check positions one final time after the sweep.
-    const residualPositions = await flashAdapter.getPositions(subId);
-    if (residualPositions.length > 0) {
-      return empty(`${residualPositions.length} position(s) reopened during recovery — collateral is locked; stop the bot and retry`);
-    }
-    let usdcResidual: number;
-    let solResidual: number;
-    try {
-      usdcResidual = await flashAdapter.getWalletCollateralBalanceStrict(subId);
-      solResidual = await flashAdapter.getWalletSolBalance(subId);
-    } catch (balErr: any) {
-      return empty(`Could not verify the bot wallet is empty after sweep: ${balErr?.message || balErr}`);
-    }
-    if (usdcResidual > 0) {
-      return empty(`$${usdcResidual.toFixed(6)} USDC still remains in the bot wallet after sweep`);
-    }
-    // A successful SOL reclaim leaves only sub-fee dust (< ~0.000005 SOL). A residual
-    // above the dust threshold means the reclaim leg FAILED and real SOL (including the
-    // gas we just topped up) is stranded — fail closed so the operator re-runs. The
-    // wallet is agent-HD recoverable, so a re-run is always safe.
-    const FLASH_SOL_DUST = 0.001;
-    if (solResidual > FLASH_SOL_DUST) {
-      return empty(`${solResidual.toFixed(6)} SOL still remains in the bot wallet after sweep (SOL reclaim failed) — retry recovery`);
-    }
-
-    const alreadyEmpty = closedPositions === 0 && sweep.usdcSwept === 0;
-    console.log(`${logPrefix} Recovered bot ${bot.id}: closed ${closedPositions} position(s), swept $${sweep.usdcSwept.toFixed(2)} USDC + ${sweep.solReclaimed.toFixed(6)} SOL to agent`);
-    return {
-      recovered: true,
-      closedPositions,
-      usdcSwept: sweep.usdcSwept,
-      solReclaimed: sweep.solReclaimed,
-      alreadyEmpty,
-    };
+    // Delegate the close+sweep+verify to the shared fail-closed core.
+    return await _sweepFlashWalletToAgent(
+      flashAdapter, subId, decrypted.secretKey, agentAddress, agentSecret, logPrefix, `bot ${bot.id}`,
+    );
   } finally {
     try { decrypted?.cleanup(); } catch { /* noop */ }
   }
@@ -8291,35 +8373,69 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         );
       }
 
-      const bot = await storage.createTradingBot({
-        walletAddress: req.walletAddress!,
-        name,
-        market,
-        webhookSecret,
-        driftSubaccountId: persistedDriftSubaccountId,
-        protocolSubaccountId: botSubaccountPublicKey,
-        // Group D item 18 (April 17, 2026): always tag the bot with the adapter that
-        // created it, regardless of subaccount auth mode. The previous conditional
-        // (botSubaccountPublicKey ? ... : null) only emitted a value for `external_key`
-        // mode (Pacifica's keypair-generation branch). For `main_plus_id` mode bots
-        // (Drift) it would have written NULL, which the new schema CHECK constraint
-        // forbids. The tag is a property of the protocol the bot was created against,
-        // not of how its subaccount is authed — both modes need the tag.
-        activeProtocol: createAdapter.protocolName,
-        subaccountStatus,
-        subaccountAuthMode,
-        isActive: true,
-        side: side || 'both',
-        leverage: leverage || 1,
-        totalInvestment: totalInvestment ? String(totalInvestment) : '100',
-        maxPositionSize: maxPositionSize || null,
-        signalConfig: signalConfig || { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
-        riskConfig: riskConfig || {},
-        // Phase 4b (Flash agent-HD wallets): non-secret HD index + path version so the
-        // per-bot wallet stays re-derivable from the agent seed. NULL for random bots.
-        derivationIndex: botDerivationIndex,
-        derivationPathVersion: botDerivationPathVersion,
-      } as any);
+      let bot;
+      try {
+        bot = await storage.createTradingBot({
+          walletAddress: req.walletAddress!,
+          name,
+          market,
+          webhookSecret,
+          driftSubaccountId: persistedDriftSubaccountId,
+          protocolSubaccountId: botSubaccountPublicKey,
+          // Group D item 18 (April 17, 2026): always tag the bot with the adapter that
+          // created it, regardless of subaccount auth mode. The previous conditional
+          // (botSubaccountPublicKey ? ... : null) only emitted a value for `external_key`
+          // mode (Pacifica's keypair-generation branch). For `main_plus_id` mode bots
+          // (Drift) it would have written NULL, which the new schema CHECK constraint
+          // forbids. The tag is a property of the protocol the bot was created against,
+          // not of how its subaccount is authed — both modes need the tag.
+          activeProtocol: createAdapter.protocolName,
+          subaccountStatus,
+          subaccountAuthMode,
+          isActive: true,
+          side: side || 'both',
+          leverage: leverage || 1,
+          totalInvestment: totalInvestment ? String(totalInvestment) : '100',
+          maxPositionSize: maxPositionSize || null,
+          signalConfig: signalConfig || { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
+          riskConfig: riskConfig || {},
+          // Phase 4b (Flash agent-HD wallets): non-secret HD index + path version so the
+          // per-bot wallet stays re-derivable from the agent seed. NULL for random bots.
+          derivationIndex: botDerivationIndex,
+          derivationPathVersion: botDerivationPathVersion,
+        } as any);
+      } catch (insertErr: any) {
+        // The bot row INSERT failed. For Flash, provisionBotWallet already moved funds
+        // into the per-bot wallet BEFORE this insert (see the atomic-provision branch
+        // above), so a naive 500 here would strand them with NO db row — the historical
+        // incident (a stale active_protocol CHECK constraint threw on insert AFTER
+        // funding). Sweep the funds back to the agent wallet NOW and fail closed if we
+        // cannot confirm the wallet is empty. The orphaned-wallet recovery endpoint is
+        // the backstop for anything this immediate sweep can't confirm.
+        if (createAdapter.protocolName === 'flash' && pendingBotSecretKeyForV3 && botSubaccountPublicKey && wallet?.agentPublicKey) {
+          const flashAdapter = createAdapter as import('./protocol/flash/flash-adapter').FlashAdapter;
+          let rb = { swept: false, usdcSwept: 0, solReclaimed: 0 };
+          try {
+            rb = await _rollbackFlashFundedWallet(
+              flashAdapter, pendingBotSecretKeyForV3, botSubaccountPublicKey, wallet.agentPublicKey, '[Bot Creation]',
+            );
+          } catch (rbErr: any) {
+            console.error(`[Bot Creation] Flash rollback after INSERT failure threw: ${rbErr?.message || rbErr}`);
+          }
+          try { pendingBotSecretKeyForV3.fill(0); } catch {}
+          if (!rb.swept) {
+            console.error(`[Bot Creation] CRITICAL: bot INSERT failed and Flash wallet ${botSubaccountPublicKey} could not be confirmed empty (insertErr: ${insertErr?.message}) — recoverable via orphaned-wallet recovery`);
+            return res.status(500).json({
+              error: `Could not create the bot, and we could not confirm your funds were returned. Your bot wallet ${botSubaccountPublicKey} may still hold funds — use "Recover stranded funds" or contact support before retrying.`,
+            });
+          }
+          console.warn(`[Bot Creation] bot INSERT failed; swept $${rb.usdcSwept.toFixed(2)} USDC back to agent wallet. insertErr: ${insertErr?.message}`);
+          return res.status(500).json({
+            error: `Could not create the bot. Your $${rb.usdcSwept.toFixed(2)} was returned to your wallet — please try again.`,
+          });
+        }
+        throw insertErr;
+      }
 
       const webhookUrl = generateWebhookUrl(bot.id, webhookSecret);
       await storage.updateTradingBot(bot.id, { webhookUrl } as any);
@@ -8368,30 +8484,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           // 'error' and fail closed so the stranded wallet stays traceable.
           if (createAdapter.protocolName === 'flash' && wallet?.agentPublicKey) {
             const flashAdapter = createAdapter as import('./protocol/flash/flash-adapter').FlashAdapter;
-            let swept = false;
-            for (let attempt = 0; attempt < 2 && !swept; attempt++) {
-              try {
-                const rollback = await flashAdapter.sweepBotWallet({
-                  subSecretKey: pendingBotSecretKeyForV3,
-                  destWalletAddress: wallet.agentPublicKey,
-                });
-                if (rollback.error) {
-                  console.error(`[Bot Creation] Flash rollback sweep attempt ${attempt + 1} failed: ${rollback.error}`);
-                } else {
-                  console.warn(`[Bot Creation] Flash rollback swept $${rollback.usdcSwept.toFixed(6)} USDC + ${rollback.solReclaimed.toFixed(6)} SOL back to agent wallet`);
-                }
-              } catch (sweepErr: any) {
-                console.error(`[Bot Creation] Flash rollback sweep attempt ${attempt + 1} threw: ${sweepErr?.message || sweepErr}`);
-              }
-              // Trust the sweep only after the bot wallet is verified empty of BOTH
-              // USDC and reclaimable SOL. Reads fail CLOSED (any error ⇒ not swept).
-              let residualUsdc = -1, residualSol = Number.POSITIVE_INFINITY;
-              try {
-                residualUsdc = await flashAdapter.getWalletCollateralBalanceStrict(botSubaccountPublicKey!);
-                residualSol = await flashAdapter.getWalletSolBalance(botSubaccountPublicKey!);
-              } catch { /* leave sentinels → not swept */ }
-              if (residualUsdc === 0 && residualSol <= 0.001) swept = true;
-            }
+            const { swept } = await _rollbackFlashFundedWallet(
+              flashAdapter, pendingBotSecretKeyForV3, botSubaccountPublicKey!, wallet.agentPublicKey, '[Bot Creation]',
+            );
             if (!swept) {
               // Funds may remain in the bot wallet whose key we are about to lose.
               // Preserve the row (status 'error') so the wallet address stays on
@@ -9447,6 +9542,176 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       return res.status(500).json({ error: err instanceof Error ? err.message : "Recovery failed" });
     } finally {
       _recoverCleanup?.();
+    }
+  });
+
+  // Count Flash per-bot wallet slots that were allocated (a derivation index was
+  // burned) but have NO trading_bots row — i.e. a bot-create that failed AFTER its
+  // per-bot wallet was funded. DB-only + cheap (no key derivation, no RPC) so the
+  // client can decide whether to surface a "Recover stranded funds" affordance.
+  // Unlike Drift/Pacifica (funds strand in the shared MAIN account, covered by the
+  // existing exchange-withdraw recover), Flash uses isolated per-bot wallets that the
+  // main-account recover cannot see — hence this dedicated path.
+  app.get("/api/flash/orphaned-wallets", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      const nextIndex = wallet?.nextBotDerivationIndex ?? 1;
+      if (!wallet || nextIndex <= 1) {
+        return res.json({ orphanSlots: 0 });
+      }
+      const bots = await storage.getTradingBots(req.walletAddress!);
+      const used = new Set<number>();
+      for (const b of bots) {
+        if (b.derivationIndex != null) used.add(b.derivationIndex);
+      }
+      let orphanSlots = 0;
+      for (let i = 1; i < nextIndex; i++) {
+        if (!used.has(i)) orphanSlots++;
+      }
+      return res.json({ orphanSlots });
+    } catch (err) {
+      console.error('[OrphanRecovery] count error:', err);
+      return res.status(500).json({ error: 'Failed to check for stranded funds' });
+    }
+  });
+
+  // Recover funds from orphaned Flash per-bot wallets (allocated derivation slots with
+  // NO trading_bots row). Re-derives each orphaned slot from the agent seed and, for
+  // any that still hold funds, closes positions + sweeps everything back to the agent
+  // wallet via the shared fail-closed core. Bounded to already-allocated slots,
+  // idempotent, and funds can only ever move to the caller's OWN agent wallet (read
+  // from the DB — never user input).
+  app.post("/api/flash/recover-orphaned-wallets", requireWallet, async (req, res) => {
+    let _umk: { umk: Buffer; cleanup: () => void } | null = null;
+    let _agentKeyCleanup: (() => void) | null = null;
+    let mnemonic: Buffer | null = null;
+    const derived: { index: number; subId: string; secretKey: Uint8Array }[] = [];
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+      const agentAddress = wallet.agentPublicKey;
+      if (!agentAddress) return res.status(400).json({ error: "No agent wallet found — cannot recover funds." });
+
+      const nextIndex = wallet.nextBotDerivationIndex ?? 1;
+      const bots = await storage.getTradingBots(req.walletAddress!);
+      const used = new Set<number>();
+      for (const b of bots) {
+        if (b.derivationIndex != null) used.add(b.derivationIndex);
+      }
+      const orphanIndices: number[] = [];
+      for (let i = 1; i < nextIndex; i++) {
+        if (!used.has(i)) orphanIndices.push(i);
+      }
+      if (orphanIndices.length === 0) {
+        return res.json({ success: true, recovered: [], totalUsdc: 0, message: "No orphaned wallet slots found — nothing to recover." });
+      }
+
+      // Fund-safety guard against DB metadata drift: a slot is only a true orphan if its
+      // derived subaccount pubkey does NOT belong to any existing bot. If derivationIndex
+      // is missing/wrong on a real bot row, the index-only check above could flag a live
+      // bot's wallet as orphaned; this set lets us skip (protect) any derived wallet that
+      // matches a real bot's protocolSubaccountId before we ever close/sweep it.
+      const protectedSubIds = new Set<string>();
+      for (const b of bots) {
+        if (b.protocolSubaccountId) protectedSubIds.add(b.protocolSubaccountId);
+      }
+
+      // The UMK lets us (a) decrypt the agent mnemonic to re-derive the orphan bot keys
+      // and (b) strict-decrypt the agent key to pay each sweep's gas. Works whenever
+      // trading is enabled (getUmkForWebhook has no expiry check).
+      _umk = await getUmkForWebhook(req.walletAddress!);
+      if (!_umk) {
+        return res.status(400).json({ error: "Trading authorization required — sign in and enable trading, then retry." });
+      }
+
+      let agentSecret: Uint8Array | null = null;
+      if (wallet.agentPrivateKeyEncryptedV3) {
+        const _ak = await decryptAgentKeyStrict(req.walletAddress!, _umk.umk, wallet, agentAddress);
+        if (!_ak) {
+          return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+        }
+        agentSecret = _ak.secretKey;
+        _agentKeyCleanup = () => _ak.cleanup();
+      }
+
+      mnemonic = await decryptMnemonic(req.walletAddress!, _umk.umk);
+      if (!mnemonic) {
+        return res.status(400).json({ error: "No recovery phrase on file — cannot re-derive bot wallets." });
+      }
+
+      // Derive all orphan keypairs up front, then zeroize the mnemonic ASAP.
+      // Skip (protect) any derived wallet that actually belongs to a live bot — guards
+      // against derivationIndex drift causing us to sweep a real bot's funds.
+      for (const idx of orphanIndices) {
+        const kp = deriveBotKeypairFromAgentSeed(mnemonic, idx, BOT_DERIVATION_PATH_VERSION);
+        const subId = kp.publicKey.toString();
+        if (protectedSubIds.has(subId)) {
+          console.warn(`[OrphanRecovery] slot ${idx} (${subId}) belongs to a live bot — skipping (derivationIndex drift)`);
+          try { kp.secretKey.fill(0); } catch {}
+          continue;
+        }
+        derived.push({ index: idx, subId, secretKey: kp.secretKey });
+      }
+      try { mnemonic.fill(0); } catch {}
+      mnemonic = null;
+
+      if (derived.length === 0) {
+        return res.json({ success: true, recovered: [], totalUsdc: 0, message: "No stranded funds found — nothing to recover." });
+      }
+
+      const flashAdapter = getAdapter('flash') as import('./protocol/flash/flash-adapter').FlashAdapter;
+      const recovered: { index: number; wallet: string; usdc: number; sol: number; closedPositions: number }[] = [];
+      const failures: { index: number; wallet: string; error: string }[] = [];
+      let totalUsdc = 0;
+
+      for (const d of derived) {
+        // Cheap pre-check: skip genuinely-empty slots so we don't waste agent SOL
+        // topping up gas on wallets we're about to find empty. Reads fail CLOSED — if
+        // we can't read the balance, attempt the full recovery anyway.
+        let confirmedEmpty = false;
+        try {
+          const usdc = await flashAdapter.getWalletCollateralBalanceStrict(d.subId);
+          const sol = await flashAdapter.getWalletSolBalance(d.subId);
+          const positions = (await flashAdapter.getPositions(d.subId)).length;
+          confirmedEmpty = usdc === 0 && sol <= 0.001 && positions === 0;
+        } catch { confirmedEmpty = false; }
+        if (confirmedEmpty) continue;
+
+        const r = await _sweepFlashWalletToAgent(
+          flashAdapter, d.subId, d.secretKey, agentAddress, agentSecret, '[OrphanRecovery]', `orphan slot ${d.index}`,
+        );
+        if (!r.recovered) {
+          failures.push({ index: d.index, wallet: d.subId, error: r.error || 'unknown' });
+          continue;
+        }
+        if (!r.alreadyEmpty) {
+          totalUsdc += r.usdcSwept;
+          recovered.push({ index: d.index, wallet: d.subId, usdc: r.usdcSwept, sol: r.solReclaimed, closedPositions: r.closedPositions });
+        }
+      }
+
+      if (failures.length > 0) {
+        return res.status(500).json({
+          success: false,
+          recovered, totalUsdc, failures,
+          message: `Recovered $${totalUsdc.toFixed(2)}, but ${failures.length} wallet(s) could not be fully recovered. Please retry or contact support.`,
+        });
+      }
+      return res.json({
+        success: true,
+        recovered, totalUsdc,
+        message: recovered.length === 0
+          ? "No stranded funds found — your allocated wallet slots are empty."
+          : `Recovered $${totalUsdc.toFixed(2)} to your agent wallet from ${recovered.length} stranded wallet(s).`,
+      });
+    } catch (err) {
+      console.error('[OrphanRecovery] Unexpected error:', err);
+      return res.status(500).json({ error: err instanceof Error ? err.message : "Recovery failed" });
+    } finally {
+      try { if (mnemonic) mnemonic.fill(0); } catch {}
+      for (const d of derived) { try { d.secretKey.fill(0); } catch {} }
+      try { _agentKeyCleanup?.(); } catch {}
+      try { _umk?.cleanup(); } catch {}
     }
   });
 
