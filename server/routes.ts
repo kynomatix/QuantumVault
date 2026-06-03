@@ -20,6 +20,7 @@ import { normalizeMarket } from './protocol/symbol-registry';
 import type { ProtocolAdapter } from './protocol/adapter';
 import { parseAndValidateAdapterSubaccountId } from './protocol/persist-canonical-subaccount-id';
 import { resolveAgentKeypair } from './agent-wallet';
+import { FLASH_BOT_WALLET_SOL_SEED } from './protocol/flash/flash-constants';
 import { reconcileWalletDeposits } from './deposit-reconciler';
 import { publicPortfolioHandler } from './public-portfolio';
 
@@ -5171,8 +5172,19 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // new-user welcome popup again.
       const isExistingUser = wallet.executionEnabled || bots.length > 0 || balance > 0;
       
+      // Per-protocol SOL requirement for bot creation. Pacifica/Drift only need
+      // a little gas for the trading tx (~0.005 SOL). Flash uses a per-bot wallet
+      // that must be SEEDED with native SOL at creation (FLASH_BOT_WALLET_SOL_SEED)
+      // plus ATA-rent + fee overhead — mirror the exact precheck in
+      // flash-adapter.ts (seed + 0.005 overhead) so the gate and the adapter agree.
+      // Without this, Flash bot-create passed the gate at 0.005 SOL and then hit a
+      // raw 500 ("Insufficient agent SOL ... need ~0.0250 SOL") deep in creation.
+      const protocol = typeof req.query.protocol === "string" ? req.query.protocol : "";
       const TRADING_GAS = 0.005;
-      const requiredSolForBot = TRADING_GAS;
+      const FLASH_SOL_OVERHEAD = 0.005; // ATA rent (~0.002) + fee headroom
+      const requiredSolForBot = protocol === "flash"
+        ? FLASH_BOT_WALLET_SOL_SEED + FLASH_SOL_OVERHEAD
+        : TRADING_GAS;
       
       const solDeficit = Math.max(0, requiredSolForBot - solBalance);
       const canCreateBot = solBalance >= requiredSolForBot;

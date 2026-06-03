@@ -1,5 +1,5 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { useExecutionAuthorization } from '@/hooks/useExecutionAuthorization';
 import { useWallet } from '@solana/wallet-adapter-react';
@@ -217,14 +217,27 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   const minDeposit = activeProtocolMeta?.minDeposit ?? 0;
   const belowMinimum = minDeposit > 0 && investmentValue > 0 && investmentValue < minDeposit;
   
-  // Fetch agent balance when modal opens
-  const fetchAgentBalanceOnOpen = async () => {
-    if (!walletAddress || agentBalance !== null) return;
+  // Fetch agent balance + per-protocol SOL requirement. Re-runs whenever the
+  // modal opens OR the selected exchange changes, because the SOL gate differs
+  // by protocol: Flash seeds a per-bot wallet (~0.025 SOL) while Pacifica only
+  // needs trading gas (~0.005 SOL). Passing ?protocol= lets the server return
+  // the right requirement so the inline "Deposit X SOL" button shows for Flash
+  // instead of the user hitting a raw error mid-creation.
+  // Monotonic request id: protocol switches fire overlapping balance fetches and
+  // the SOL requirement differs per protocol. Without this guard a slower earlier
+  // response (e.g. Pacifica @0.005) could resolve LAST and clobber the newer Flash
+  // requirement (~0.025), re-opening the gating gap. Only the latest request applies.
+  const balanceRequestId = useRef(0);
+  const refreshAgentBalance = useCallback(async () => {
+    if (!walletAddress) return;
+    const reqId = ++balanceRequestId.current;
     setIsLoadingBalance(true);
     try {
-      const res = await fetch(`/api/agent/balance?wallet=${walletAddress}`, { credentials: 'include' });
+      const res = await fetch(`/api/agent/balance?wallet=${walletAddress}&protocol=${newBot.activeProtocol}`, { credentials: 'include' });
+      if (reqId !== balanceRequestId.current) return; // superseded by a newer request
       if (res.ok) {
         const data = await safeResponseJson(res);
+        if (reqId !== balanceRequestId.current) return;
         setAgentBalance(data.balance?.toString() || '0');
         setAgentSolBalance(data.solBalance ?? null);
         if (data.botCreationSolRequirement) {
@@ -232,16 +245,16 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
         }
       }
     } catch (error) {
-      console.error('Failed to fetch balance:', error);
+      if (reqId === balanceRequestId.current) console.error('Failed to fetch balance:', error);
     } finally {
-      setIsLoadingBalance(false);
+      if (reqId === balanceRequestId.current) setIsLoadingBalance(false);
     }
-  };
-  
-  // Fetch balance when modal opens
-  if (isOpen && agentBalance === null && !isLoadingBalance) {
-    fetchAgentBalanceOnOpen();
-  }
+  }, [walletAddress, newBot.activeProtocol]);
+
+  // Fetch balance when modal opens and whenever the selected exchange changes.
+  useEffect(() => {
+    if (isOpen) refreshAgentBalance();
+  }, [isOpen, refreshAgentBalance]);
 
   const resetState = () => {
     setStep('create');
@@ -300,10 +313,9 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
 
       toast({ title: `Deposited ${amount.toFixed(3)} SOL successfully` });
       
-      // Refresh balance to check if we can now create bot
-      setAgentBalance(null);
-      setAgentSolBalance(null);
-      setSolRequirement(null);
+      // Refresh balance + SOL requirement so the gate re-evaluates (and the
+      // footer swaps back to Create Bot) without leaving the flow.
+      await refreshAgentBalance();
       
     } catch (error: any) {
       console.error('SOL deposit failed:', error);
@@ -359,17 +371,9 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
 
       toast({ title: `Deposited $${amount.toFixed(2)} USDC successfully` });
 
-      // Refresh agent balance + SOL gating in one call (the main wallet just
-      // paid SOL fees for this tx, so SOL state may need to update too).
-      const balanceRes = await fetch(`/api/agent/balance?wallet=${walletAddress}`, { credentials: 'include' });
-      if (balanceRes.ok) {
-        const data = await safeResponseJson(balanceRes);
-        setAgentBalance(data.balance?.toString() || '0');
-        setAgentSolBalance(data.solBalance ?? null);
-        if (data.botCreationSolRequirement) {
-          setSolRequirement(data.botCreationSolRequirement);
-        }
-      }
+      // Refresh agent balance + SOL gating (the main wallet just paid SOL fees
+      // for this tx, so SOL state may need to update too).
+      await refreshAgentBalance();
     } catch (error: any) {
       console.error('USDC deposit failed:', error);
       toast({

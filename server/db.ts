@@ -276,10 +276,31 @@ export async function ensureSchema() {
            CHECK (active_protocol IN ('pacifica', 'drift', 'flash'));
        END $$`,
     ];
+    // Fault-isolate EACH migration. These statements are written to be
+    // idempotent, but some still throw on re-run with an error their inner
+    // guard doesn't trap: e.g. `ADD CONSTRAINT ... UNIQUE` raises
+    // duplicate_table (42P07, "relation ... already exists") when its backing
+    // index already exists, while the DO/EXCEPTION block only catches
+    // duplicate_object (42710). Running the whole list under a single
+    // try/catch meant one such throw aborted the loop and SILENTLY SKIPPED
+    // every later migration — this is exactly how the Flash active_protocol
+    // constraint (the last item) never reached production. Per-statement
+    // isolation guarantees every migration is attempted on every boot.
+    let skipped = 0;
     for (const sql of migrations) {
-      await client.query(sql);
+      try {
+        await client.query(sql);
+      } catch (err: any) {
+        skipped++;
+        const firstLine = sql.trim().split("\n")[0].slice(0, 120);
+        console.warn(`[DB] Schema migration skipped (${err.code || "error"}): ${firstLine} — ${err.message}`);
+      }
     }
-    console.log("[DB] Schema check complete");
+    if (skipped === 0) {
+      console.log("[DB] Schema check complete");
+    } else {
+      console.warn(`[DB] Schema check complete with ${skipped} skipped statement(s) (see warnings above)`);
+    }
   } catch (err: any) {
     console.warn("[DB] Schema check warning:", err.message);
   } finally {
