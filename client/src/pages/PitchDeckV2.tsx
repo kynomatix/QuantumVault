@@ -36,8 +36,6 @@ import {
   Database,
   Globe,
   Server,
-  Clock,
-  Circle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 const superteamHero = '/images/superteam-melbourne-hero.png';
@@ -771,101 +769,7 @@ function TractionSlide({ metrics }: { metrics?: PlatformMetrics }) {
   );
 }
 
-// ─────────────── 11. Roadmap ───────────────
-function RoadmapSlide() {
-  const phases = [
-    {
-      quarter: 'Q1 2026',
-      title: 'Foundation',
-      status: 'complete',
-      items: [
-        'Core trading bots',
-        'TradingView webhooks',
-        'Signal marketplace & profit sharing',
-        'Pacifica mainnet launch',
-        'QuantumLab backtesting engine',
-        'Telegram notifications',
-        'Flash Trade adapter',
-        'Protocol adapter architecture',
-      ],
-    },
-    {
-      quarter: 'Q2 2026',
-      title: 'Growth',
-      status: 'current',
-      items: [
-        'Flash Trade production rollout',
-        'Per-bot wallet isolation',
-        'Grid trading',
-        'Advanced analytics',
-        'Mobile optimisation',
-      ],
-    },
-    {
-      quarter: 'Q3 2026',
-      title: 'AI & Routing',
-      status: 'upcoming',
-      items: [
-        'Multi-exchange smart routing (auto best-price)',
-        'AI portfolio management',
-        'Smart bot optimisation',
-        'Predictive analytics',
-        'Auto risk adjustment',
-      ],
-    },
-    {
-      quarter: 'Q4 2026',
-      title: 'Scale',
-      status: 'upcoming',
-      items: ['Multi-asset vaults', 'Institutional API', 'Cross-chain', 'DAO governance'],
-    },
-  ];
-
-  return (
-    <Slide>
-      <SectionBadge><Clock className="w-4 h-4" /> Timeline</SectionBadge>
-
-      <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-12 text-center">
-        Roadmap
-      </motion.h2>
-
-      <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-4 gap-4 max-w-5xl w-full">
-        {phases.map((phase, i) => (
-          <motion.div
-            key={i}
-            variants={fadeIn}
-            className={`p-5 rounded-2xl border ${
-              phase.status === 'complete'
-                ? 'bg-violet-500/5 border-violet-500/30'
-                : phase.status === 'current'
-                ? 'bg-fuchsia-500/10 border-fuchsia-400/40'
-                : 'bg-white/[0.02] border-white/[0.06]'
-            }`}
-            data-testid={`card-roadmap-${i}`}
-          >
-            <div className="flex items-center gap-2 mb-3">
-              {phase.status === 'complete' && <CheckCircle2 className="w-4 h-4 text-violet-400" />}
-              {phase.status === 'current' && <div className="w-2 h-2 rounded-full bg-fuchsia-400 animate-pulse" />}
-              {phase.status === 'upcoming' && <Circle className="w-4 h-4 text-white/20" />}
-              <span className="text-xs font-medium text-muted-foreground">{phase.quarter}</span>
-            </div>
-            <h3 className="font-bold text-lg mb-3">{phase.title}</h3>
-            <ul className="space-y-1.5">
-              {phase.items.map((item, j) => (
-                <li key={j} className="text-xs text-muted-foreground flex items-start gap-1.5">
-                  <span className={`mt-0.5 ${phase.status === 'complete' ? 'text-violet-400' : phase.status === 'current' ? 'text-fuchsia-400' : 'text-white/30'}`}>•</span>
-                  {item}
-                </li>
-              ))}
-            </ul>
-          </motion.div>
-        ))}
-      </motion.div>
-    </Slide>
-  );
-}
-
-// ─────────────── 12. The Ask ───────────────
+// ─────────────── 11. The Ask ───────────────
 function AskSlide() {
   const asks = [
     { icon: <Users className="w-6 h-6" />, title: 'Early Users & Creators', desc: 'Onboard the first 100 active traders, plus partnerships with content creators who specialise in trade automation. Our 0–10% creator profit-share lets them monetise strategies they share with their audience — multiplying reach where the audience already lives.' },
@@ -1002,7 +906,6 @@ export default function PitchDeckV2() {
     <HowItWorksSlide key="how" />,
     <TechStackSlide key="tech" />,
     <TractionSlide key="traction" metrics={metrics} />,
-    <RoadmapSlide key="roadmap" />,
     <AskSlide key="ask" />,
     <ClosingSlide key="closing" />,
   ];
