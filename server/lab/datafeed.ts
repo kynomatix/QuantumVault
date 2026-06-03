@@ -486,7 +486,7 @@ async function fetchOkxCandles(
 
 const TIMEFRAME_MS: Record<string, number> = {
   "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
-  "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000,
+  "45m": 2_700_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000,
   "6h": 21_600_000, "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000,
 };
 
@@ -534,6 +534,7 @@ function aggregateCandles(candles: OHLCV[], factor: number, targetTfMs?: number)
 }
 
 const SYNTHETIC_TIMEFRAMES: Record<string, { source: string; factor: number }> = {
+  "45m": { source: "15m", factor: 3 },
   "8h": { source: "4h", factor: 2 },
   "8H": { source: "4h", factor: 2 },
 };
@@ -713,7 +714,7 @@ function deduplicateCandles(candles: OHLCV[]): OHLCV[] {
 
 function getTimeframeSeconds(tf: string): number {
   const map: Record<string, number> = {
-    "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
+    "1m": 60, "5m": 300, "15m": 900, "30m": 1800, "45m": 2700,
     "1h": 3600, "2h": 7200, "4h": 14400, "8h": 28800,
     "12h": 43200, "1d": 86400, "1w": 604800,
   };

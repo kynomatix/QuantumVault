@@ -1343,7 +1343,7 @@ export const LAB_AVAILABLE_TICKERS = [
   { symbol: "CRCL/USDT:USDT", name: "CRCL" },
 ] as const;
 
-export const LAB_AVAILABLE_TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h"] as const;
+export const LAB_AVAILABLE_TIMEFRAMES = ["1m", "5m", "15m", "30m", "45m", "1h", "2h", "4h", "8h", "12h", "1d"] as const;
 
 export const insertLabStrategyBodySchema = z.object({
   name: z.string().min(1),
