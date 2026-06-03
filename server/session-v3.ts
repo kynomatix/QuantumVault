@@ -965,16 +965,22 @@ async function resyncExecutionUmkIfStale(
     const rewrapped = encryptToBase64(umk, serverKey, aad);
     zeroizeBuffer(serverKey);
 
-    await storage.updateWalletExecution(walletAddress, {
-      executionEnabled: true,
-      umkEncryptedForExecution: rewrapped,
-      executionExpiresAt: wallet.executionExpiresAt ?? null,
-    });
-
-    console.warn(
-      `[Security v3] Resynced stale execution-wrapped UMK for ${walletAddress.slice(0, 8)}... ` +
-      `(canonical UMK had diverged from umkEncryptedForExecution).`,
-    );
+    // CAS write: only rewrap while execution is still enabled, and never touch
+    // the executionEnabled flag. If a concurrent revoke flipped execution off
+    // between our read and this write, the update is a no-op — execution stays
+    // revoked (money paths fail closed).
+    const updated = await storage.resyncWalletExecutionUmk(walletAddress, rewrapped);
+    if (updated) {
+      console.warn(
+        `[Security v3] Resynced stale execution-wrapped UMK for ${walletAddress.slice(0, 8)}... ` +
+        `(canonical UMK had diverged from umkEncryptedForExecution).`,
+      );
+    } else {
+      console.warn(
+        `[Security v3] Skipped execution UMK resync for ${walletAddress.slice(0, 8)}... ` +
+        `(execution no longer enabled — likely concurrent revoke).`,
+      );
+    }
   } catch (err) {
     console.error(`[Security v3] Execution UMK resync failed for ${walletAddress.slice(0, 8)}... (non-fatal):`, err);
   }

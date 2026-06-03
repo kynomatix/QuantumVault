@@ -411,6 +411,7 @@ export interface IStorage {
     umkEncryptedForExecution: string | null;
     executionExpiresAt: Date | null;
   }): Promise<Wallet | undefined>;
+  resyncWalletExecutionUmk(address: string, umkEncryptedForExecution: string): Promise<boolean>;
 
   // Phase 4b: atomically revoke execution AND pause all owned active bots.
   // Returns the bots that were paused (id + name) so the caller can notify.
