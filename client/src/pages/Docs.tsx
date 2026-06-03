@@ -1167,7 +1167,44 @@ function SecuritySection() {
         Keep your recovery phrase safe! Write it down on paper and store it securely. 
         Never share it with anyone - QuantumVault will never ask for your recovery phrase.
       </Alert>
-      
+
+      <SubHeading>Your Funds Are Protected If Bot Creation Fails</SubHeading>
+      <Paragraph>
+        Creating a bot involves funding its trading account before the bot is fully registered.
+        If something goes wrong at that exact moment — a network hiccup, a temporary error — 
+        your funds are never lost. Each exchange has an automatic safety net built in.
+      </Paragraph>
+      <div className="space-y-4 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Shield className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Pacifica — Main Account Recovery</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Pacifica bots share one exchange account per user. If creation fails after funds are moved in, 
+            they simply sit in your main Pacifica account — untouched. The <strong className="text-white/80">"Recover funds"</strong> button 
+            in the wallet panel sweeps them straight back to your agent wallet.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Key className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Flash — Per-Bot Wallet Recovery</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Each Flash bot runs in its own isolated wallet, derived from your agent seed. If creation fails 
+            after that wallet was funded, QuantumVault detects it automatically. The <strong className="text-white/80">"Recover stranded funds"</strong> button 
+            appears only when stranded funds are actually present — it re-derives the wallet, sweeps the 
+            funds back to your agent wallet, and disappears once everything is clear. These wallets are 
+            also fully self-custodial: your 24-word phrase is all you ever need to access them independently.
+          </p>
+        </div>
+      </div>
+      <Alert type="success">
+        In both cases, the platform detects the problem automatically and shows you a one-click fix. 
+        You never need to contact support to recover funds from a failed bot creation.
+      </Alert>
+
       <SubHeading>Best Practices</SubHeading>
       <div className="space-y-4 mb-6">
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
