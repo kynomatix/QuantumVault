@@ -17,7 +17,13 @@
 import { createRequire } from 'module';
 import { FLASH_MARKET_SPECS, type FlashMarketSpec } from './flash-constants.js';
 
-const require = createRequire(import.meta.url);
+// In the esbuild CJS production bundle, `import.meta.url` is replaced with "" (see
+// script/build.ts `define`), so `createRequire(import.meta.url)` would throw
+// ("filename must be ... Received ''") at module load, which silently de-registers
+// the Flash adapter at startup. Branch on the bundle marker and resolve relative to
+// cwd in the bundle (same pattern as drift-service.ts), keeping import.meta.url in dev.
+const isBundledCJS = typeof __ESBUILD_CJS_BUNDLE__ !== 'undefined' && __ESBUILD_CJS_BUNDLE__;
+const require = createRequire(isBundledCJS ? `file://${process.cwd()}/` : import.meta.url);
 
 interface RawCustody {
   custodyAccount: string;
