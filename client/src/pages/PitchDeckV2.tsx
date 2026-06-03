@@ -282,51 +282,7 @@ function FounderJourneySlide() {
   );
 }
 
-// ─────────────── 3. The Market Shift ───────────────
-function MarketShiftSlide() {
-  return (
-    <Slide>
-      <SectionBadge color="sky"><GitBranch className="w-4 h-4" /> The Shift</SectionBadge>
-
-      <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-4 text-center">
-        Perp DEXs Have Changed
-      </motion.h2>
-      <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-12 text-center max-w-3xl">
-        Last cycle's onchain matching is giving way to offchain order matching — DeFi that feels like a CEX.
-      </motion.p>
-
-      <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-5xl w-full mb-8">
-        <div className="p-6 rounded-2xl bg-slate-800/30 border border-slate-700/40">
-          <div className="text-xs uppercase tracking-widest text-slate-400 mb-3">Last Cycle</div>
-          <h3 className="text-xl font-bold mb-3">Onchain Matching</h3>
-          <ul className="space-y-2 text-sm text-slate-300">
-            <li>• Drift, dYdX v3 and the early wave</li>
-            <li>• Slower fills, heavier infra</li>
-            <li>• Niche audience of DeFi-native traders</li>
-          </ul>
-        </div>
-        <div className="p-6 rounded-2xl bg-gradient-to-br from-violet-500/10 to-fuchsia-500/10 border border-violet-500/30">
-          <div className="text-xs uppercase tracking-widest text-violet-300 mb-3">This Cycle</div>
-          <h3 className="text-xl font-bold mb-3">Offchain Order Matching</h3>
-          <ul className="space-y-2 text-sm text-white/85">
-            <li>• Hyperliquid, Aster, Pacifica</li>
-            <li>• CEX-grade speed, DeFi-grade self-custody</li>
-            <li>• Mindshare and volume rotating fast</li>
-          </ul>
-        </div>
-      </motion.div>
-
-      <motion.div variants={fadeIn} className="max-w-4xl w-full p-5 rounded-2xl bg-white/[0.03] border border-white/[0.07] text-center">
-        <p className="text-base text-white/85">
-          <span className="text-fuchsia-300 font-semibold">Pacifica</span> is the new Solana-native frontier of
-          this wave — fast, hybrid, and exactly where automated trading needs to plug in.
-        </p>
-      </motion.div>
-    </Slide>
-  );
-}
-
-// ─────────────── 4. The Problem ───────────────
+// ─────────────── 3. The Problem ───────────────
 function ProblemSlide() {
   const problems = [
     {
@@ -898,7 +854,6 @@ export default function PitchDeckV2() {
     <EventHeroSlide key="event-hero" />,
     <TitleSlide key="title" />,
     <FounderJourneySlide key="founder" />,
-    <MarketShiftSlide key="shift" />,
     <ProblemSlide key="problem" />,
     <SolutionSlide key="solution" />,
     <QuantumLabSlide key="lab" />,
