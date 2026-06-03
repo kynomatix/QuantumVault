@@ -7,7 +7,7 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { ArrowUpRight, ArrowDownRight, XCircle, ChevronLeft, ChevronRight, Search } from 'lucide-react';
+import { ArrowUpRight, ArrowDownRight, XCircle, ChevronLeft, ChevronRight, Search, Copy, Download } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useToast } from '@/hooks/use-toast';
 
@@ -115,6 +115,116 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
     if (isRecovered) return 'bg-blue-500/20 text-blue-400';
     if (isExecuted) return 'bg-emerald-500/20 text-emerald-400';
     return 'bg-yellow-500/20 text-yellow-400';
+  };
+
+  const normalizeForExport = (trade: Trade) => {
+    const { isCloseSignal, feeValue, pnlValue } = getTradeInfo(trade);
+    const side = isCloseSignal ? 'CLOSE' : (trade.side?.toUpperCase() || '');
+    const time = trade.executedAt ? new Date(trade.executedAt).toLocaleString() : '';
+    const priceNum = trade.price ? Number(trade.price) : null;
+    return {
+      time,
+      bot: trade.botName || '',
+      market: trade.market || '',
+      side,
+      size: trade.size || '',
+      price: priceNum !== null ? String(priceNum) : '',
+      feeNum: feeValue > 0 ? feeValue : 0,
+      pnlNum: pnlValue,
+      status: trade.status || '',
+      error: trade.errorMessage || '',
+    };
+  };
+
+  const pnlLabel = (pnl: number | null) =>
+    pnl === null ? '--' : `${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`;
+
+  const buildPlainText = (list: Trade[]) => {
+    const rows = list.map(normalizeForExport);
+    const realized = rows.reduce((s, r) => s + (r.pnlNum ?? 0), 0);
+    const fees = rows.reduce((s, r) => s + r.feeNum, 0);
+    const closed = rows.filter((r) => r.pnlNum !== null);
+    const wins = closed.filter((r) => (r.pnlNum ?? 0) > 0).length;
+    const failed = rows.filter((r) => r.status === 'failed').length;
+    const summary =
+      `QuantumVault trade history — ${list.length} trades` +
+      ` | realized PnL: ${realized >= 0 ? '+' : '-'}$${Math.abs(realized).toFixed(2)}` +
+      ` | fees: -$${fees.toFixed(2)}` +
+      ` | wins: ${wins}/${closed.length}` +
+      (failed ? ` | failed: ${failed}` : '');
+    const lines = rows.map((r) =>
+      `${r.time} | ${r.bot} | ${r.market} | ${r.side} | size=${r.size} | price=$${r.price}` +
+      ` | fee=${r.feeNum > 0 ? `-$${r.feeNum.toFixed(4)}` : '--'} | pnl=${pnlLabel(r.pnlNum)} | ${r.status}` +
+      (r.error ? ` | error: ${r.error}` : '')
+    );
+    return `${summary}\n\n${lines.join('\n')}`;
+  };
+
+  const csvEscape = (v: string) => {
+    let s = v;
+    if (s && /^[=+\-@\t\r]/.test(s) && !/^-?\d+(\.\d+)?$/.test(s)) {
+      s = `'${s}`;
+    }
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+
+  const buildCsv = (list: Trade[]) => {
+    const header = ['Time', 'Bot', 'Market', 'Side', 'Size', 'Price', 'Fee', 'PnL', 'Status', 'Error'];
+    const rows = list.map(normalizeForExport).map((r) =>
+      [
+        r.time,
+        r.bot,
+        r.market,
+        r.side,
+        r.size,
+        r.price,
+        r.feeNum > 0 ? r.feeNum.toFixed(4) : '',
+        r.pnlNum !== null ? r.pnlNum.toFixed(2) : '',
+        r.status,
+        r.error,
+      ].map((v) => csvEscape(String(v))).join(',')
+    );
+    return [header.join(','), ...rows].join('\n');
+  };
+
+  const handleCopy = async () => {
+    if (!filteredTrades.length) {
+      toast({ title: 'Nothing to copy', description: 'No trades match the current filter.' });
+      return;
+    }
+    const text = buildPlainText(filteredTrades);
+    try {
+      await navigator.clipboard.writeText(text);
+      toast({
+        title: 'Copied to clipboard',
+        description: `${filteredTrades.length} trades copied — paste into ChatGPT/Claude for analysis.`,
+      });
+    } catch {
+      toast({
+        title: 'Copy failed',
+        description: 'Your browser blocked clipboard access. Try the CSV export instead.',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const handleExportCsv = () => {
+    if (!filteredTrades.length) {
+      toast({ title: 'Nothing to export', description: 'No trades match the current filter.' });
+      return;
+    }
+    const csv = buildCsv(filteredTrades);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const stamp = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `quantumvault-trades-${stamp}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast({ title: 'CSV exported', description: `${filteredTrades.length} trades downloaded.` });
   };
 
   const showErrorMessage = (errorMessage: string) => {
@@ -277,7 +387,31 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-6xl max-h-[85vh] w-[95vw] lg:w-[90vw] lg:min-w-[900px]">
         <DialogHeader>
-          <DialogTitle>Trade History</DialogTitle>
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pr-6">
+            <DialogTitle>Trade History</DialogTitle>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleCopy}
+                disabled={!filteredTrades.length}
+                data-testid="button-copy-trades"
+              >
+                <Copy className="w-4 h-4 sm:mr-1" />
+                <span className="hidden sm:inline">Copy for AI</span>
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleExportCsv}
+                disabled={!filteredTrades.length}
+                data-testid="button-export-csv"
+              >
+                <Download className="w-4 h-4 sm:mr-1" />
+                <span className="hidden sm:inline">Export CSV</span>
+              </Button>
+            </div>
+          </div>
         </DialogHeader>
         
         <div className="relative mb-3">
