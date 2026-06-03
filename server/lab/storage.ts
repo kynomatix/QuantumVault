@@ -85,7 +85,7 @@ export interface ILabStorage {
   claimNextQueuedRun(walletAddress?: string): Promise<LabOptimizationRun | null>;
   hasActiveRun(walletAddress?: string): Promise<boolean>;
   hasActiveOrPausedRun(): Promise<boolean>;
-  getHeatmapCells(walletAddress: string): Promise<{ cells: any[]; runsTotal: number }>;
+  getHeatmapCells(walletAddress: string, strategyId?: number): Promise<{ cells: any[]; runsTotal: number; strategyIds: number[] }>;
   getCompletedRunCount(walletAddress: string): Promise<number>;
   deduplicateStrategyResults(strategyId: number, protectRunId?: number): Promise<number>;
 }
@@ -897,13 +897,14 @@ export class LabDatabaseStorage implements ILabStorage {
     return activeJobs.length > 0;
   }
 
-  async getHeatmapCells(walletAddress: string): Promise<{ cells: any[]; runsTotal: number }> {
+  async getHeatmapCells(walletAddress: string, strategyId?: number): Promise<{ cells: any[]; runsTotal: number; strategyIds: number[] }> {
     const rows = await db.execute(sql`
       WITH eligible_runs AS (
         SELECT id, strategy_id
         FROM lab_optimization_runs
         WHERE user_id = ${walletAddress}
           AND status IN ('complete', 'paused')
+          ${strategyId != null ? sql`AND strategy_id = ${strategyId}` : sql``}
       ),
       runs_total AS (
         SELECT COUNT(*)::int AS cnt FROM eligible_runs
@@ -1053,7 +1054,19 @@ export class LabDatabaseStorage implements ILabStorage {
         };
       });
 
-    return { cells, runsTotal };
+    const stratRows = await db.execute(sql`
+      SELECT DISTINCT run.strategy_id AS strategy_id
+      FROM lab_optimization_runs run
+      INNER JOIN lab_optimization_results r ON r.run_id = run.id
+      WHERE run.user_id = ${walletAddress}
+        AND run.status IN ('complete', 'paused')
+        AND run.strategy_id IS NOT NULL
+    `);
+    const strategyIds = stratRows.rows
+      .map((r: any) => Number(r.strategy_id))
+      .filter((n: number) => Number.isFinite(n));
+
+    return { cells, runsTotal, strategyIds };
   }
 
   async getCompletedRunCount(walletAddress: string): Promise<number> {

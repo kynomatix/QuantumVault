@@ -2513,10 +2513,20 @@ export function registerLabRoutes(app: Express): void {
     try {
       const walletAddress = (req as any).walletAddress;
 
-      const { cells, runsTotal } = await labStorage.getHeatmapCells(walletAddress);
+      const rawStrategyId = req.query.strategyId;
+      const parsedStrategyId =
+        rawStrategyId != null && rawStrategyId !== "" && rawStrategyId !== "all"
+          ? Number(rawStrategyId)
+          : undefined;
+      const strategyId =
+        Number.isInteger(parsedStrategyId as number) && (parsedStrategyId as number) > 0
+          ? parsedStrategyId
+          : undefined;
+
+      const { cells, runsTotal, strategyIds } = await labStorage.getHeatmapCells(walletAddress, strategyId);
 
       if (runsTotal === 0) {
-        return res.json({ cells: [], tickers: [], timeframes: [], runs: 0 });
+        return res.json({ cells: [], tickers: [], timeframes: [], runs: 0, strategyIds });
       }
 
       const tickers = new Set<string>();
@@ -2530,7 +2540,7 @@ export function registerLabRoutes(app: Express): void {
       const sortedTimeframes = [...timeframes].sort((a, b) => tfOrder.indexOf(a) - tfOrder.indexOf(b));
       const sortedTickers = [...tickers].sort();
 
-      res.json({ cells, tickers: sortedTickers, timeframes: sortedTimeframes, runs: runsTotal });
+      res.json({ cells, tickers: sortedTickers, timeframes: sortedTimeframes, runs: runsTotal, strategyIds });
     } catch (err: any) {
       console.log(`[QuantumLab] Heatmap error: ${err.message}`);
       res.status(500).json({ error: err.message });

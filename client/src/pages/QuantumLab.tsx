@@ -3822,6 +3822,7 @@ function EquityCurvePopup({ resultId, ticker, timeframe }: { resultId: number; t
 
 function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, ticker: string, timeframe: string) => void; onRefine?: (jobId: string, runId: number, queued?: boolean) => void }) {
   const [metric, setMetric] = useState<HeatmapMetric>("bestProfit");
+  const [strategyFilter, setStrategyFilter] = useState<string>("all");
   const [selectedCell, setSelectedCell] = useState<any | null>(null);
   const [selectedTopIdx, setSelectedTopIdx] = useState<number>(0);
   const [refiningCombo, setRefiningCombo] = useState<string | null>(null);
@@ -3830,9 +3831,12 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
   const { toast } = useToast();
 
   const { data, isLoading, isError, error } = useQuery<any>({
-    queryKey: ["/api/lab/heatmap"],
+    queryKey: ["/api/lab/heatmap", strategyFilter],
     queryFn: async () => {
-      const res = await fetch("/api/lab/heatmap");
+      const url = strategyFilter && strategyFilter !== "all"
+        ? `/api/lab/heatmap?strategyId=${encodeURIComponent(strategyFilter)}`
+        : "/api/lab/heatmap";
+      const res = await fetch(url);
       if (!res.ok) throw new Error("Failed to load heatmap");
       return safeResponseJson(res);
     },
@@ -3855,6 +3859,14 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
     if (strategies) for (const s of strategies) map.set(s.id, s);
     return map;
   }, [strategies]);
+
+  const filterableStrategies = useMemo(() => {
+    const ids: number[] = data?.strategyIds ?? [];
+    return ids
+      .map((id) => strategyMap.get(id))
+      .filter((s): s is LabStrategy => !!s)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [data?.strategyIds, strategyMap]);
 
   const sortedTop5 = useMemo(() => {
     if (!selectedCell?.allResults) return [];
@@ -4073,7 +4085,20 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
       <div className="flex flex-col items-center justify-center py-20 text-white/50">
         <Grid3X3 className="w-16 h-16 mb-4 opacity-30" />
         <h3 className="text-lg font-semibold text-white/70 mb-2">No Heatmap Data Yet</h3>
-        <p className="text-sm">Run some optimizations across different tickers and timeframes to see the heatmap.</p>
+        {strategyFilter !== "all" ? (
+          <>
+            <p className="text-sm mb-4">No completed optimizations for this strategy yet.</p>
+            <button
+              className="px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-sm"
+              onClick={() => { setStrategyFilter("all"); setSelectedCell(null); setSortByTimeframe(null); }}
+              data-testid="button-heatmap-view-all-strategies"
+            >
+              View all strategies
+            </button>
+          </>
+        ) : (
+          <p className="text-sm">Run some optimizations across different tickers and timeframes to see the heatmap.</p>
+        )}
       </div>
     );
   }
@@ -4088,16 +4113,33 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
             <p className="text-xs text-white/40">{data.runs} completed runs · {cells.length} ticker/timeframe combos</p>
           </div>
         </div>
-        <Select value={metric} onValueChange={(v) => { setMetric(v as HeatmapMetric); setSelectedCell(null); }}>
-          <SelectTrigger className="w-[200px] bg-white/5 border-white/10 text-white" data-testid="select-heatmap-metric">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {HEATMAP_METRICS.map((m) => (
-              <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <div className="flex items-center gap-2">
+          {filterableStrategies.length > 0 && (
+            <Select value={strategyFilter} onValueChange={(v) => { setStrategyFilter(v); setSelectedCell(null); setSortByTimeframe(null); }}>
+              <SelectTrigger className="w-[200px] bg-white/5 border-white/10 text-white" data-testid="select-heatmap-strategy">
+                <SelectValue placeholder="All strategies" />
+              </SelectTrigger>
+              <SelectContent className="max-h-[320px]">
+                <SelectItem value="all">All strategies</SelectItem>
+                {filterableStrategies.map((s) => (
+                  <SelectItem key={s.id} value={String(s.id)} data-testid={`select-heatmap-strategy-${s.id}`}>
+                    {s.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          <Select value={metric} onValueChange={(v) => { setMetric(v as HeatmapMetric); setSelectedCell(null); }}>
+            <SelectTrigger className="w-[200px] bg-white/5 border-white/10 text-white" data-testid="select-heatmap-metric">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {HEATMAP_METRICS.map((m) => (
+                <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4 overflow-x-auto">
