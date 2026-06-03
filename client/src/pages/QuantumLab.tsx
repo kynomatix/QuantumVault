@@ -13,6 +13,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Slider } from "@/components/ui/slider";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogTrigger } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
@@ -4415,6 +4416,9 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const [copiedField, setCopiedField] = useState<string | null>(null);
   // null = use auto-recommended buffer; number = user override (in whole dollars).
   const [bufferOverride, setBufferOverride] = useState<number | null>(null);
+  // null = follow recommendation; boolean = explicit user toggle.
+  const [topUpOverride, setTopUpOverride] = useState<boolean | null>(null);
+  const [reinvestOverride, setReinvestOverride] = useState<boolean | null>(null);
 
   const levDD = drawdownPercent * leverage;
   const levStreakDD = (streakDrawdownPercent || drawdownPercent) * leverage;
@@ -4432,8 +4436,15 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const projectedProfit = capitalNum > 0 ? (profitPercent * leverage / 100) * effectiveTradeSize : 0;
   const projectedLoss = capitalNum > 0 ? (worstCaseLoss / 100) * effectiveTradeSize : 0;
   const survivable = worstCaseLoss < 80;
-  const enableTopUp = bufferPercent > 30;
-  const enableReinvest = leverage <= 5 && drawdownPercent < 15;
+  // Tightened auto-enable thresholds. We don't forward-test strategies, so a
+  // recommendation has to be REALLY safe to justify auto-enabling: profit
+  // reinvest only at very low leverage + low drawdown, auto-top-up only with a
+  // big equity buffer. These are defaults only — the user can flip either via
+  // the toggles below (topUpOverride / reinvestOverride win when set).
+  const recommendTopUp = bufferPercent >= 50;
+  const recommendReinvest = leverage <= 3 && drawdownPercent < 10;
+  const enableTopUp = topUpOverride ?? recommendTopUp;
+  const enableReinvest = reinvestOverride ?? recommendReinvest;
 
   const PACIFICA_MIN_DEPOSIT = 10;
   const canShowCreateButton = capitalNum > 0 && ticker && timeframe;
@@ -4937,15 +4948,29 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                   </div>
                 </div>
 
-                <div className="border-t border-white/5 pt-3 space-y-1.5">
-                  <p className="text-[10px] text-white/50 font-medium mb-1.5">Recommended Settings</p>
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] text-white/40">Auto Top-Up</span>
-                    <Badge className={cn("text-[9px] h-4", enableTopUp ? "bg-sky-500/10 text-sky-400 border-sky-500/30" : "bg-white/5 text-white/40 border-white/10")}>{enableTopUp ? "ON" : "OFF"}</Badge>
+                <div className="border-t border-white/5 pt-3 space-y-2.5">
+                  <p className="text-[10px] text-white/50 font-medium mb-1.5">Bot Settings <span className="text-white/30">— recommended for this setup, change anytime</span></p>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex flex-col">
+                      <span className="text-[10px] text-white/60">Auto Top-Up</span>
+                      <span className="text-[9px] text-white/30">{recommendTopUp ? "Recommended ON" : "Recommended OFF"} for this setup</span>
+                    </div>
+                    <Switch
+                      checked={enableTopUp}
+                      onCheckedChange={(v) => setTopUpOverride(v)}
+                      data-testid="switch-auto-topup"
+                    />
                   </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] text-white/40">Profit Reinvest</span>
-                    <Badge className={cn("text-[9px] h-4", enableReinvest ? "bg-sky-500/10 text-sky-400 border-sky-500/30" : "bg-white/5 text-white/40 border-white/10")}>{enableReinvest ? "ON" : "OFF"}</Badge>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex flex-col">
+                      <span className="text-[10px] text-white/60">Profit Reinvest</span>
+                      <span className="text-[9px] text-white/30">{recommendReinvest ? "Recommended ON" : "Recommended OFF"} for this setup</span>
+                    </div>
+                    <Switch
+                      checked={enableReinvest}
+                      onCheckedChange={(v) => setReinvestOverride(v)}
+                      data-testid="switch-profit-reinvest"
+                    />
                   </div>
                 </div>
 

@@ -806,6 +806,59 @@ export async function reconcileBotPosition(
       );
 
       if (closeDetection.detected) {
+        // Back-stop dedup: the webhook/manual/pause/subscriber close path may
+        // have ALREADY booked this close under a different canonical id
+        // (`tx-<close-tx-signature>` vs the reconciler's `tx-<exchange-fill-id>`),
+        // which the protocolFillId unique index can't collapse. If a recent
+        // canonical close from a non-reconciler path already exists for this
+        // bot+market+approx size (at/after this position's last activity), the
+        // close is already counted — skip the duplicate insert (which would
+        // double-count realized PnL) but STILL flatten the stale DB position.
+        const alreadyBooked = await storage.getRecentCanonicalCloseForBot({
+          botId,
+          market,
+          // Wide window so delayed reconciliation (server restart / backlog)
+          // still matches a close booked by another path; afterTimestamp keeps
+          // the effective floor at this position's last activity.
+          sinceMs: 60 * 60 * 1000,
+          afterTimestamp: dbPosition!.lastTradeAt ?? null,
+          sizeApprox: Math.abs(dbBaseSize),
+          sizeTolerancePct: 0.10,
+          excludeReconciled: true,
+          // Close side opposite the open position; matches 'CLOSE' rows too.
+          closeSide: dbBaseSize > 0 ? 'short' : 'long',
+        });
+        if (alreadyBooked) {
+          console.log(`[Reconcile] Close for bot ${botId} ${market} already booked by another path (tradeId=${alreadyBooked.id}, fillId=${alreadyBooked.protocolFillId ?? 'null'}, status=${alreadyBooked.status}) — skipping duplicate insert, flattening stale position only`);
+          // Flatten WITHOUT re-adding PnL/fees: the other path already booked
+          // them into bot_trades + stats. Re-adding here would double-count.
+          await storage.upsertBotPosition({
+            tradingBotId: botId,
+            walletAddress,
+            market,
+            baseSize: "0",
+            avgEntryPrice: dbPosition!.avgEntryPrice,
+            costBasis: "0",
+            realizedPnl: dbPosition!.realizedPnl || "0",
+            totalFees: dbPosition!.totalFees || "0",
+            lastTradeId: dbPosition!.lastTradeId,
+            lastTradeAt: new Date(),
+          });
+          {
+            const botForClear = await storage.getTradingBotById(botId);
+            if (botForClear?.riskConfig) {
+              const rc = botForClear.riskConfig as Record<string, unknown>;
+              delete rc.takeProfitPercent;
+              delete rc.stopLossPercent;
+              delete rc.takeProfitPrice;
+              delete rc.stopLossPrice;
+              await storage.updateTradingBot(botId, { riskConfig: rc } as any);
+            }
+          }
+          lastReconcileTime.set(botId, Date.now());
+          return { synced: true, discrepancy: true };
+        }
+
         // Canonical close-event ID. Reconciler-detected closes are keyed on
         // the protocol's fill ID when available so retries / racing reconciler
         // runs can never double-write. Falls back to a deterministic synthetic

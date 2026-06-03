@@ -1,4 +1,4 @@
-import { eq, ne, desc, sql, and, or, ilike, gte, lte, lt, inArray } from "drizzle-orm";
+import { eq, ne, desc, sql, and, or, ilike, gte, lte, lt, inArray, isNotNull } from "drizzle-orm";
 import { createHash, randomBytes } from "crypto";
 import { db } from "./db";
 import Decimal from "decimal.js";
@@ -265,6 +265,15 @@ export interface IStorage {
     update?: { tradeId: string; fields: Partial<InsertBotTrade> };
     deltas: { totalPnlDelta?: number; totalVolumeDelta?: number; lastTradeAt?: string };
   }): Promise<{ trade?: BotTrade; isNew: boolean }>;
+  getRecentCanonicalCloseForBot(opts: {
+    botId: string;
+    market: string;
+    sinceMs: number;
+    afterTimestamp?: Date | string | null;
+    sizeApprox?: number;
+    sizeTolerancePct?: number;
+    excludeReconciled?: boolean;
+  }): Promise<BotTrade | undefined>;
 
   getBotTrades(tradingBotId: string, limit?: number): Promise<BotTrade[]>;
   getBotTradeCount(tradingBotId: string): Promise<number>;
@@ -1218,6 +1227,34 @@ export class DatabaseStorage implements IStorage {
           return { trade: locked, isNew: false };
         }
 
+        // Reconciler-first race (DIFFERENT id spaces): the reconciler may have
+        // already booked the canonical close under `tx-<exchange-fill-id>` while
+        // THIS pending row promotes to `tx-<close-tx-signature>`. Those strings
+        // differ, so the unique index can't collapse them and the plain update
+        // below would create a SECOND canonical row → double-count. If a
+        // reconciler-booked close already exists for this bot+market+approx size
+        // at/after this pending row's creation, supersede our row and defer to
+        // it (it already merged the stats deltas). isNew:false keeps callers
+        // from re-sending notifications / re-booking IOUs.
+        if (locked.side === 'CLOSE' || locked.pnl != null) {
+          const reconcilerWinner = await this.getRecentCanonicalCloseForBot({
+            botId: opts.botId,
+            market: locked.market,
+            sinceMs: 30 * 60 * 1000,
+            afterTimestamp: locked.executedAt,
+            sizeApprox: Math.abs(parseFloat(locked.size || '0')),
+            sizeTolerancePct: 0.10,
+            onlyReconciled: true,
+          });
+          if (reconcilerWinner) {
+            await tx
+              .update(botTrades)
+              .set({ status: 'superseded', errorMessage: `Superseded by reconciler close ${reconcilerWinner.protocolFillId ?? reconcilerWinner.id}` })
+              .where(eq(botTrades.id, opts.update.tradeId));
+            return { trade: reconcilerWinner, isNew: false };
+          }
+        }
+
         // Cross-path race: another writer (reconciler / retry) may have
         // already inserted the canonical close row under this fillId. If
         // so, the unique-index update would fail with 23505 — handle it
@@ -1271,6 +1308,93 @@ export class DatabaseStorage implements IStorage {
 
   async getBotTrades(tradingBotId: string, limit: number = 50): Promise<BotTrade[]> {
     return db.select().from(botTrades).where(eq(botTrades.tradingBotId, tradingBotId)).orderBy(desc(botTrades.executedAt)).limit(limit);
+  }
+
+  /**
+   * Back-stop dedup helper for the reconciler. Returns the most recent
+   * canonical close trade (executed/liquidated/recovered) for a bot+market
+   * that was booked by a NON-reconciler path (webhook / manual / pause /
+   * subscriber), within a time window and (optionally) matching an approximate
+   * size and only counting closes at/after a given timestamp.
+   *
+   * Why: the webhook close keys `protocolFillId` on `tx-<close-tx-signature>`
+   * while the reconciler keys on `tx-<exchange-fill-id>` — DIFFERENT id spaces
+   * for the SAME close — so the `protocolFillId` unique index can't collapse
+   * them. The reconciler uses this to detect "already booked by another path"
+   * and skip a duplicate insert that would double-count realized PnL.
+   */
+  async getRecentCanonicalCloseForBot(opts: {
+    botId: string;
+    market: string;
+    sinceMs: number;
+    afterTimestamp?: Date | string | null;
+    sizeApprox?: number;
+    sizeTolerancePct?: number;
+    excludeReconciled?: boolean;
+    onlyReconciled?: boolean;
+    closeSide?: string;
+  }): Promise<BotTrade | undefined> {
+    const since = new Date(Date.now() - opts.sinceMs);
+    const afterTs = opts.afterTimestamp ? new Date(opts.afterTimestamp) : null;
+    // Lower bound = whichever is more recent: the time window or the caller's
+    // floor (position lastTradeAt / pending-row creation time). The floor
+    // prevents matching a PRIOR close of the same size (e.g. a quick
+    // reopen→close of the same market) and skipping a genuinely new close.
+    const lowerBound = afterTs && afterTs > since ? afterTs : since;
+    const conds: any[] = [
+      eq(botTrades.tradingBotId, opts.botId),
+      eq(botTrades.market, opts.market),
+      or(
+        eq(botTrades.status, 'executed'),
+        eq(botTrades.status, 'liquidated'),
+        eq(botTrades.status, 'recovered'),
+      ),
+      gte(botTrades.executedAt, lowerBound),
+    ];
+    if (opts.closeSide) {
+      // Close-only via SIDE semantics: non-reconciler closes store side='CLOSE',
+      // the reconciler stores the lowercase close side ('long'/'short'), while
+      // opens/entries ALWAYS store UPPERCASE 'LONG'/'SHORT'. Matching on side
+      // (rather than pnl-not-null) also catches RECOVERED closes whose pnl was
+      // left null — retry recovery only sets pnl when entry+fill prices are both
+      // > 0, but the row still carries side='CLOSE'. A pnl-not-null filter would
+      // miss those and let the reconciler book a duplicate canonical close.
+      conds.push(or(eq(botTrades.side, 'CLOSE'), eq(botTrades.side, opts.closeSide)));
+    } else {
+      // No side hint (onlyReconciled lookups): the reconciler always books
+      // realized PnL, so pnl-not-null is a safe close-only proxy here and
+      // excludes any pnl-less open/entry row.
+      conds.push(isNotNull(botTrades.pnl));
+    }
+    const rows = await db
+      .select()
+      .from(botTrades)
+      .where(and(...conds))
+      .orderBy(desc(botTrades.executedAt))
+      .limit(20);
+
+    const tol = opts.sizeTolerancePct ?? 0.10;
+    for (const row of rows) {
+      const reconciled = (row.webhookPayload as any)?.reconciled === true
+        || row.executionMethod === 'on-chain-detected';
+      // onlyReconciled: detect ONLY reconciler-booked closes (used by the close
+      // recorder to defer to a reconciler that already booked this close).
+      // excludeReconciled (default): detect ONLY non-reconciler closes (used by
+      // the reconciler to defer to a webhook/manual/etc. that already booked).
+      if (opts.onlyReconciled === true) {
+        if (!reconciled) continue;
+      } else if (opts.excludeReconciled !== false) {
+        if (reconciled) continue;
+      }
+      if (opts.sizeApprox != null && opts.sizeApprox > 0) {
+        const rowSize = Math.abs(parseFloat(row.size || '0'));
+        if (rowSize <= 0) continue;
+        const diff = Math.abs(rowSize - opts.sizeApprox) / opts.sizeApprox;
+        if (diff > tol) continue;
+      }
+      return row;
+    }
+    return undefined;
   }
 
   async getBotTradeCount(tradingBotId: string): Promise<number> {
