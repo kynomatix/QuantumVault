@@ -979,19 +979,35 @@ function RoadmapSlide() {
       quarter: "Q1 2026",
       title: "Foundation",
       status: "complete",
-      items: ["Core trading bots", "TradingView webhooks", "Signal marketplace", "Profit sharing", "Pacifica mainnet launch"]
+      items: [
+        "Core trading bots",
+        "TradingView webhooks",
+        "Signal marketplace",
+        "Profit sharing",
+        "Pacifica mainnet launch",
+        "QuantumLab backtesting engine",
+        "Telegram notifications",
+        "Flash Trade adapter",
+        "Protocol adapter architecture",
+      ]
     },
     {
       quarter: "Q2 2026",
       title: "Growth",
       status: "current",
-      items: ["Adapter architecture (Ports & Adapters)", "Multi-exchange infrastructure", "Grid trading", "Advanced analytics", "Mobile optimization"]
+      items: [
+        "Flash Trade production rollout",
+        "Per-bot wallet isolation",
+        "Grid trading",
+        "Advanced analytics",
+        "Mobile optimization",
+      ]
     },
     {
       quarter: "Q3 2026",
       title: "AI & Multi-Exchange",
       status: "upcoming",
-      items: ["Multi-exchange routing (auto best-price)", "AI portfolio management", "Smart bot optimization", "Predictive analytics", "Auto risk adjustment"]
+      items: ["Multi-exchange smart routing (auto best-price)", "AI portfolio management", "Smart bot optimization", "Predictive analytics", "Auto risk adjustment"]
     },
     {
       quarter: "Q4 2026",
