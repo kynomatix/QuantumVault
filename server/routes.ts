@@ -1462,12 +1462,14 @@ function generateWebhookUrl(botId: string, secret: string): string {
   return `${baseUrl}/api/webhook/tradingview/${botId}?secret=${secret}`;
 }
 
-// Parse Drift protocol errors into user-friendly messages
+// Parse trade-execution errors (Drift/Flash/Pacifica) into user-friendly messages
 function parseDriftError(error: string | undefined): string {
   if (!error) return "Trade execution failed";
   
-  // Always log the full error for debugging
-  console.log(`[Drift Error] Full error: ${error}`);
+  // Always log the full error for debugging. This parser is protocol-agnostic
+  // (used by Drift, Flash, and Pacifica execution paths), so the label is
+  // generic — the old "[Drift Error]" prefix was misleading for non-Drift bots.
+  console.log(`[Trade Error] Full error: ${error}`);
   
   // Check for common Drift errors and provide clear messages
   if (error.includes("InsufficientCollateral")) {
