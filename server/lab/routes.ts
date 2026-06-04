@@ -960,6 +960,16 @@ export function registerLabRoutes(app: Express): void {
 
           case "combo-complete":
             completedCombos.push(msg.combo);
+            if (msg.disposition) {
+              // Record the worker's per-combo terminal disposition in the
+              // checkpoint state so it persists across resume and the
+              // completion invariant can tell a legit-empty combo apart from a
+              // real coverage gap.
+              checkpointState.comboDispositions = {
+                ...(checkpointState.comboDispositions ?? {}),
+                [msg.combo]: msg.disposition,
+              };
+            }
             if (!runId) break;
             checkpointWriteChain = checkpointWriteChain.then(async () => {
               if (job.abortSignal.aborted) return;
@@ -989,6 +999,7 @@ export function registerLabRoutes(app: Express): void {
                   }
                 }
                 checkpointState = {
+                  comboDispositions: checkpointState.comboDispositions,
                   currentCombo: undefined,
                   currentStage: undefined,
                   currentIteration: undefined,
@@ -1065,10 +1076,17 @@ export function registerLabRoutes(app: Express): void {
                     setTimeout(() => pumpQueue(), 1000);
                     break;
                   }
-                  // Per-combo coverage: every expected combo must have ≥1 row
-                  // with a non-empty equityCurve. This catches the case where
-                  // a combo's saveComboResults silently produced zero usable
-                  // rows (e.g. only zero-trade results, or all writes failed).
+                  // Per-combo coverage. Every expected combo must reach a known
+                  // terminal state. A combo is fine when EITHER it persisted ≥1
+                  // row with a non-empty equityCurve, OR the worker reported a
+                  // legitimate empty disposition for it:
+                  //   - "data-unavailable": no candles could be fetched
+                  //   - "no-trades": no parameter set met the trade filters
+                  // Only flag combos the worker never accounted for (a genuine
+                  // gap), or that it reported as "ok" yet left no usable rows
+                  // (results produced but lost on persist). Both are real
+                  // failures and pause the run (fail closed). Legitimately empty
+                  // combos must NOT pause — that was the ORE pause→pump spam loop.
                   const expectedCombos = new Set<string>();
                   for (const ticker of config.tickers) {
                     for (const tf of config.timeframes) {
@@ -1082,11 +1100,25 @@ export function registerLabRoutes(app: Express): void {
                       goodCombos.add(`${r.ticker}|${r.timeframe}`);
                     }
                   }
-                  const missingCombos: string[] = [];
-                  expectedCombos.forEach(k => { if (!goodCombos.has(k)) missingCombos.push(k); });
-                  if (missingCombos.length > 0) {
-                    const sample = missingCombos.slice(0, 5).join(", ");
-                    const invMsg = `Completion invariant failed: ${missingCombos.length}/${expectedCombos.size} combos have no result with a non-empty equity curve (e.g. ${sample}). Pausing run for investigation.`;
+                  const dispositions = checkpointState.comboDispositions ?? {};
+                  const emptyCombos: string[] = [];   // legit no-data / no-trades
+                  const problemCombos: string[] = []; // never reported, or lost rows
+                  expectedCombos.forEach(k => {
+                    if (goodCombos.has(k)) return;
+                    const disp = dispositions[k];
+                    if (disp && (disp.status === "data-unavailable" || disp.status === "no-trades")) {
+                      emptyCombos.push(k);
+                    } else {
+                      problemCombos.push(k);
+                    }
+                  });
+                  if (emptyCombos.length > 0) {
+                    const sample = emptyCombos.slice(0, 8).map(k => `${k} (${dispositions[k]?.status ?? "empty"})`).join(", ");
+                    console.log(`[QuantumLab] Run ${runId}: ${emptyCombos.length}/${expectedCombos.size} combos produced no results — ${sample}`);
+                  }
+                  if (problemCombos.length > 0) {
+                    const sample = problemCombos.slice(0, 5).join(", ");
+                    const invMsg = `Completion invariant failed: ${problemCombos.length}/${expectedCombos.size} combos have no result and no terminal disposition (e.g. ${sample}). Pausing run for investigation.`;
                     console.log(`[QuantumLab] ${invMsg} (run ${runId})`);
                     try { await labStorage.pauseRun(runId); } catch {}
                     labStorage.updateProgress(job.id, {
@@ -1098,7 +1130,21 @@ export function registerLabRoutes(app: Express): void {
                     break;
                   }
                 } catch (invErr: any) {
-                  console.log(`[QuantumLab] Completion invariant check failed: ${invErr.message}`);
+                  // Fail closed: if the completion invariant itself errors (e.g.
+                  // a transient DB read failure), we cannot verify coverage, so
+                  // we must NOT mark the run successful. Pause for investigation
+                  // (bounded by MAX_AUTO_RESUME_ATTEMPTS) instead of falling
+                  // through to finalizeSuccessfulRun.
+                  const invMsg = `Completion invariant check errored: ${invErr.message}. Pausing run for investigation.`;
+                  console.log(`[QuantumLab] ${invMsg} (run ${runId})`);
+                  try { await labStorage.pauseRun(runId); } catch {}
+                  labStorage.updateProgress(job.id, {
+                    jobId: job.id, status: "error", stage: invMsg,
+                    current: 0, total: 0, percent: 0, elapsed: 0, error: invMsg,
+                  });
+                  clearActiveWorker();
+                  setTimeout(() => pumpQueue(), 1000);
+                  break;
                 }
                 try {
                   let totalConfigsTested: number;

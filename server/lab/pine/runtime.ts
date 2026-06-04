@@ -1929,6 +1929,29 @@ export function executePine(
   }
 
   function evalMathCall(fn: string, args: Expr[]): any {
+    if (fn === "sum") {
+      // math.sum(source, length): sliding sum of last `length` values of
+      // `source` (NOT source+length). Static source → exact windowed sum with
+      // full history; dynamic source → per-call-site accumulation. Warmup/NaN
+      // handling matches ind.sma (math.sum === sma * length).
+      const len = Math.round(toNum(evalExpr(args[1])));
+      if (len <= 0 || currentBar < len - 1) return NA;
+      const srcSeries = args[0] ? resolveExprSeries(args[0]) : null;
+      const series = srcSeries ?? (() => {
+        const key = `__mathSum_${JSON.stringify(args[0])}`;
+        let arr = dynNumArrays.get(key);
+        if (!arr) { arr = new Array(n).fill(NaN); dynNumArrays.set(key, arr); }
+        arr[currentBar] = toNum(evalExpr(args[0]));
+        return arr;
+      })();
+      let s = 0;
+      for (let i = currentBar - len + 1; i <= currentBar; i++) {
+        const v = series[i];
+        if (isNaN(v)) return NA;
+        s += v;
+      }
+      return s;
+    }
     const vals = args.map(a => evalExpr(a));
     switch (fn) {
       case "abs": return Math.abs(toNum(vals[0]));
@@ -1952,7 +1975,6 @@ export function executePine(
         return nums.length > 0 ? nums.reduce((a, b) => a + b, 0) / nums.length : NaN;
       }
       case "sign": return Math.sign(toNum(vals[0]));
-      case "sum": return vals.map(toNum).reduce((a, b) => a + b, 0);
       case "round_to_mintick": {
         const v = toNum(vals[0]);
         return isNaN(v) ? NA : Math.round(v * 100) / 100;
@@ -3779,8 +3801,24 @@ export function executePine(
         return nums.length > 0 ? nums.reduce((a: number, b: number) => a + b, 0) / nums.length : NaN;
       },
 
-      mathSum(vals: any[]): number {
-        return vals.map(toNum).reduce((a: number, b: number) => a + b, 0);
+      // Pine's math.sum(source, length): sliding sum of the last `length`
+      // values of `source`. Slotted + stateful (mirrors taDynSma) so each call
+      // site keeps its own rolling buffer. Warmup/NaN handling matches ind.sma
+      // (so math.sum === sma * length): NA until `length` bars, NA if any value
+      // in the window is NaN.
+      mathSumWindow(slot: number, srcVal: number, len: number): any {
+        const bar = rctx.bar;
+        let src = rctx._taDynSrc[slot];
+        if (!src) { src = new Array(n).fill(NaN); rctx._taDynSrc[slot] = src; }
+        src[bar] = srcVal;
+        const L = Math.round(len);
+        if (L <= 0 || bar < L - 1) return NA;
+        let sum = 0;
+        for (let i = bar - L + 1; i <= bar; i++) {
+          if (isNaN(src[i])) return NA;
+          sum += src[i];
+        }
+        return sum;
       },
 
       strFormat(...fmtArgs: any[]): string {

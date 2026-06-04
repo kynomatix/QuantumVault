@@ -564,7 +564,16 @@ function compileMathCall(fn: string, args: Expr[], ctx: CompilerContext): string
     case "pow": return `Math.pow(_toNum(${a[0]}),_toNum(${a[1]}))`;
     case "sign": return `Math.sign(_toNum(${a[0]}))`;
     case "avg": return `ctx.mathAvg([${a.join(",")}])`;
-    case "sum": return `ctx.mathSum([${a.join(",")}])`;
+    case "sum": {
+      // math.sum(source, length) is the sliding sum of the last `length`
+      // values of `source` — NOT source+length. Route through a slotted,
+      // stateful windowed sum (mirrors taDynSma) so each call site keeps its
+      // own rolling source buffer.
+      const slot = _taSlotCounter++;
+      const srcExpr = args.length > 0 ? compileExpr(args[0], ctx) : "0";
+      const lenExpr = args.length > 1 ? compileExpr(args[1], ctx) : "1";
+      return `ctx.mathSumWindow(${slot}, _toNum(${srcExpr}), ${lenExpr})`;
+    }
     case "round_to_mintick": return `((_rt=_toNum(${a[0]})),isNaN(_rt)?null:Math.round(_rt*100)/100)`;
     default: return "NaN";
   }

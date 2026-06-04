@@ -1219,6 +1219,11 @@ export interface LabBacktestResult {
 export interface LabCheckpoint {
   completedCombos: string[];
   configSnapshot: LabOptimizationConfig;
+  // Per-combo terminal disposition reported by the worker. Lets run
+  // finalization distinguish a legitimately empty combo (no candle data, or
+  // no parameter set met the trade filters) from a genuine missing/lost
+  // combo. Persisted in the checkpoint so it survives resume.
+  comboDispositions?: Record<string, { status: "ok" | "no-trades" | "data-unavailable"; reason?: string }>;
   currentCombo?: string;
   currentStage?: "random" | "refine" | "deep" | "coordinate";
   currentIteration?: number;

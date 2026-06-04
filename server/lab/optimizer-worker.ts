@@ -61,7 +61,7 @@ type PartialResult = LiteBacktestResult | LabBacktestResult;
 type WorkerMessage =
   | { type: "progress"; data: LabJobProgress }
   | { type: "partial-checkpoint"; combo: string; stage: "random" | "refine" | "deep" | "coordinate"; iteration: number; deepRound?: number; results: PartialResult[]; refineSeeds?: Record<string, any>[]; coordinateCompleted?: string[] }
-  | { type: "combo-complete"; combo: string; results: LabBacktestResult[] }
+  | { type: "combo-complete"; combo: string; results: LabBacktestResult[]; disposition?: { status: "ok" | "no-trades" | "data-unavailable"; reason?: string } }
   | { type: "best-discovery"; combo: string; stage: "deep"; deepRound: number; score: number; params: Record<string, any> }
   | { type: "done"; results: LabBacktestResult[]; totalConfigsTested?: number }
   | { type: "error"; message: string; isResourceError?: boolean }
@@ -1028,9 +1028,13 @@ async function run() {
 
     const candles = candlesByCombo[key];
     if (!candles || candles.length < 100) {
+      // Data-unavailable combo (e.g. a symbol/timeframe with no fetchable
+      // candles). Report a clear terminal disposition so finalization treats
+      // this as a legitimate empty combo rather than a missing-coverage gap
+      // (which used to wedge the run into a pause→pump spam loop).
       tickerProgress[key] = { status: "complete", best: 0 };
       completedCombos.add(key);
-      send({ type: "combo-complete", combo: key, results: [] });
+      send({ type: "combo-complete", combo: key, results: [], disposition: { status: "data-unavailable", reason: `No candle data available (${candles?.length ?? 0} candles fetched)` } });
       continue;
     }
 
@@ -1152,13 +1156,18 @@ async function run() {
 
       coordinateTotalTests += tuneResult.totalTests;
       const topLites = tuneResult.results.sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, 10);
-      const topForCombo = topLites.map(lite =>
-        trimResult(runBacktest(candles, lite.params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache))
-      );
+      // Only surface results that actually traded — a zero-trade result has no
+      // trades/equityCurve and must not be written as a misleading "clean zero".
+      const topForCombo = topLites
+        .map(lite => trimResult(runBacktest(candles, lite.params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache)))
+        .filter(r => (r.totalTrades ?? 0) > 0);
       allResults.push(...topForCombo);
+      const coordDisposition = topForCombo.length > 0
+        ? { status: "ok" as const }
+        : { status: "no-trades" as const, reason: "No parameter set met the minimum-trades filter" };
       tickerProgress[key] = { status: "complete", best: topForCombo[0]?.netProfitPercent ?? 0 };
       completedCombos.add(key);
-      send({ type: "combo-complete", combo: key, results: topForCombo });
+      send({ type: "combo-complete", combo: key, results: topForCombo, disposition: coordDisposition });
 
       delete candlesByCombo[key];
       continue;
@@ -1565,7 +1574,13 @@ async function run() {
     }
 
     comboResults.sort((a, b) => scoreLite(b) - scoreLite(a));
-    const topLitesForCombo = comboResults.slice(0, 10);
+    // Only surface results that actually traded. A zero-trade result (e.g. the
+    // default-param baseline seed when no sampled config met min_trades) carries
+    // no trades/equityCurve and must NOT be written as a misleading "clean zero"
+    // success row. If nothing traded, this combo reports "no-trades" (empty),
+    // not a fake zero result.
+    const tradedLites = comboResults.filter(r => (r.totalTrades ?? 0) > 0);
+    const topLitesForCombo = tradedLites.slice(0, 10);
     const topForCombo: LabBacktestResult[] = [];
     for (let fi = 0; fi < topLitesForCombo.length; fi++) {
       const lite = topLitesForCombo[fi];
@@ -1574,9 +1589,12 @@ async function run() {
     }
     allResults.push(...topForCombo);
 
+    const disposition = topForCombo.length > 0
+      ? { status: "ok" as const }
+      : { status: "no-trades" as const, reason: "No parameter set met the minimum-trades filter" };
     tickerProgress[key] = { status: "complete", best: topForCombo[0]?.netProfitPercent ?? 0 };
     completedCombos.add(key);
-    send({ type: "combo-complete", combo: key, results: topForCombo });
+    send({ type: "combo-complete", combo: key, results: topForCombo, disposition });
 
     delete candlesByCombo[key];
   }
