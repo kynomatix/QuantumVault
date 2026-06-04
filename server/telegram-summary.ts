@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, inArray, and } from "drizzle-orm";
 import { db } from "./db";
 import { botTrades } from "@shared/schema";
 import { storage } from "./storage";
@@ -402,11 +402,65 @@ export async function buildPositionsJsonForChat(walletAddresses: string[]): Prom
   return { wallets: out };
 }
 
+// Batch-compute realized PnL and trade counters directly from bot_trades,
+// excluding superseded/duplicate rows. This is the authoritative source vs the
+// denormalized stats JSONB in trading_bots, which can be inflated when the
+// webhook+reconciler double-close race fires before the economic dedup catches
+// it — both writers see the other's row as uncommitted and each succeeds,
+// so stats.totalPnl ends up counting the same close twice.
+//
+// Status filter mirrors `recomputeAndMergeBotStats`: 'executed' | 'liquidated'
+// | 'recovered'. 'superseded' (the losing side of a deduped double-close),
+// 'pending', and 'failed' are all excluded.
+async function liveBotTradeStats(botIds: string[]): Promise<Map<string, {
+  totalPnl: number;
+  totalTrades: number;
+  winningTrades: number;
+  losingTrades: number;
+  lastTradeAt: string | null;
+}>> {
+  if (botIds.length === 0) return new Map();
+  const rows = await db
+    .select({
+      botId: botTrades.tradingBotId,
+      totalPnl: sql<number>`COALESCE(SUM(${botTrades.pnl}::numeric), 0)`,
+      totalTrades: sql<number>`COUNT(*)::int`,
+      winningTrades: sql<number>`COUNT(*) FILTER (WHERE ${botTrades.pnl}::numeric > 0)::int`,
+      losingTrades: sql<number>`COUNT(*) FILTER (WHERE ${botTrades.pnl}::numeric < 0)::int`,
+      lastTradeAt: sql<string | null>`MAX(${botTrades.executedAt})::text`,
+    })
+    .from(botTrades)
+    .where(and(
+      inArray(botTrades.tradingBotId, botIds),
+      sql`${botTrades.pnl} IS NOT NULL`,
+      sql`${botTrades.status} IN ('executed', 'liquidated', 'recovered')`,
+    ))
+    .groupBy(botTrades.tradingBotId);
+
+  const map = new Map<string, {
+    totalPnl: number; totalTrades: number; winningTrades: number;
+    losingTrades: number; lastTradeAt: string | null;
+  }>();
+  for (const row of rows) {
+    map.set(row.botId, {
+      totalPnl: Number(row.totalPnl ?? 0),
+      totalTrades: Number(row.totalTrades ?? 0),
+      winningTrades: Number(row.winningTrades ?? 0),
+      losingTrades: Number(row.losingTrades ?? 0),
+      lastTradeAt: row.lastTradeAt ?? null,
+    });
+  }
+  return map;
+}
+
 export async function buildBotsJsonForChat(walletAddresses: string[]): Promise<{
   bots: BotCardJson[];
 }> {
   const prices = await getMarkPricesSafely();
-  const cards: BotCardJson[] = [];
+
+  // First pass: collect all bots and positions per wallet. Separating
+  // collection from card-building lets us batch the live-stats query.
+  const collected: Array<{ b: any; pos: any | null }> = [];
   for (const addr of walletAddresses) {
     try {
       const bots = await storage.getTradingBots(addr);
@@ -418,47 +472,60 @@ export async function buildBotsJsonForChat(walletAddresses: string[]): Promise<{
         posByBot.set(p.tradingBotId, p);
       }
       for (const b of bots) {
-        const stats = b.stats ?? { totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 };
-        const pos = posByBot.get(b.id);
-        let openPosition: PositionJson | null = null;
-        if (pos) {
-          const baseSize = parseFloat(pos.baseSize);
-          const side: 'LONG' | 'SHORT' = baseSize > 0 ? 'LONG' : 'SHORT';
-          const entry = parseFloat(pos.avgEntryPrice);
-          const mark = prices[pos.market] && prices[pos.market] > 0 ? prices[pos.market] : entry;
-          const uPnl = side === 'LONG'
-            ? (mark - entry) * Math.abs(baseSize)
-            : (entry - mark) * Math.abs(baseSize);
-          openPosition = {
-            botName: b.name,
-            market: pos.market,
-            side,
-            size: Math.abs(baseSize),
-            entryPrice: entry,
-            markPrice: mark,
-            unrealizedPnl: uPnl,
-          };
-        }
-        cards.push({
-          id: b.id,
-          name: b.name,
-          market: b.market,
-          side: b.side,
-          leverage: b.leverage,
-          status: b.isActive ? 'running' : 'paused',
-          pauseReason: b.pauseReason ?? null,
-          totalPnl: Number(stats.totalPnl ?? 0),
-          totalInvestment: parseFloat(b.totalInvestment ?? '0') || 0,
-          totalTrades: Number(stats.totalTrades ?? 0),
-          winningTrades: Number(stats.winningTrades ?? 0),
-          losingTrades: Number(stats.losingTrades ?? 0),
-          lastTradeAt: stats.lastTradeAt ?? null,
-          openPosition,
-        });
+        collected.push({ b, pos: posByBot.get(b.id) ?? null });
       }
     } catch (err: any) {
       console.error(`[TelegramSummary] bots build failed for ${addr.slice(0, 8)}:`, err?.message || err);
     }
+  }
+
+  // Single batch query: live PnL / trade counters from bot_trades.
+  // Superseded duplicate rows are excluded by the status filter, so a
+  // double-counted stats JSONB doesn't bleed into the mini-app display.
+  const allBotIds = collected.map(({ b }) => b.id as string);
+  const liveStats = await liveBotTradeStats(allBotIds);
+
+  // Second pass: build cards using live stats, falling back to cached
+  // stats JSONB only when no trade rows exist yet (brand-new bot).
+  const cards: BotCardJson[] = [];
+  for (const { b, pos } of collected) {
+    const live = liveStats.get(b.id);
+    const cached: any = b.stats ?? {};
+    let openPosition: PositionJson | null = null;
+    if (pos) {
+      const baseSize = parseFloat(pos.baseSize);
+      const side: 'LONG' | 'SHORT' = baseSize > 0 ? 'LONG' : 'SHORT';
+      const entry = parseFloat(pos.avgEntryPrice);
+      const mark = prices[pos.market] && prices[pos.market] > 0 ? prices[pos.market] : entry;
+      const uPnl = side === 'LONG'
+        ? (mark - entry) * Math.abs(baseSize)
+        : (entry - mark) * Math.abs(baseSize);
+      openPosition = {
+        botName: b.name,
+        market: pos.market,
+        side,
+        size: Math.abs(baseSize),
+        entryPrice: entry,
+        markPrice: mark,
+        unrealizedPnl: uPnl,
+      };
+    }
+    cards.push({
+      id: b.id,
+      name: b.name,
+      market: b.market,
+      side: b.side,
+      leverage: b.leverage,
+      status: b.isActive ? 'running' : 'paused',
+      pauseReason: b.pauseReason ?? null,
+      totalPnl: live ? live.totalPnl : Number(cached.totalPnl ?? 0),
+      totalInvestment: parseFloat(b.totalInvestment ?? '0') || 0,
+      totalTrades: live ? live.totalTrades : Number(cached.totalTrades ?? 0),
+      winningTrades: live ? live.winningTrades : Number(cached.winningTrades ?? 0),
+      losingTrades: live ? live.losingTrades : Number(cached.losingTrades ?? 0),
+      lastTradeAt: live ? live.lastTradeAt : (cached.lastTradeAt ?? null),
+      openPosition,
+    });
   }
   return { bots: cards };
 }
