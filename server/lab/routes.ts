@@ -651,12 +651,73 @@ export function registerLabRoutes(app: Express): void {
     }
   }
 
+  // --- Startup-stall watchdog -------------------------------------------------
+  // The candle-prefetch phase (fetchAllCandles) runs on the lab MAIN thread with
+  // workerStarting=true and activeWorker=null. If that fetch HANGS (network
+  // stall, OKX paging wedge, event-loop starvation) instead of throwing, the
+  // doStart() promise never settles, so doStart().catch() never fires and
+  // workerStarting stays latched true forever. While latched, EVERY other
+  // recovery path is gated off: pumpQueue, unifiedScheduler, and the worker
+  // watchdog all bail when workerStarting is true. The lab then wedges until a
+  // manual process restart. This watchdog is the ONLY recovery timer that is NOT
+  // gated by workerStarting: it detects a startup that has made no progress for
+  // too long and forces the SAME recovery a thrown fetch error would have
+  // (clear the latch, evict the job, pause + auto-resume the run).
+  let startupWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+  const STARTUP_WATCHDOG_INTERVAL = 30_000;
+  const STARTUP_STALL_THRESHOLD = 150_000; // no job progress for 2.5 min pre-worker
+
+  function startStartupWatchdog(jobId: string, runId: number | undefined) {
+    stopStartupWatchdog();
+    startupWatchdogTimer = setInterval(() => {
+      // Only relevant while wedged in the pre-worker startup phase.
+      if (activeWorker || !workerStarting) { stopStartupWatchdog(); return; }
+      const job = labStorage.getJob(jobId);
+      if (!job) {
+        // Job vanished (force-evicted / cleaned up) while we're STILL latched in
+        // pre-worker startup. Without this branch the latch would stay stuck and
+        // re-wedge the lab. Clear it and let the queue re-pump (a paused run is
+        // picked back up via interruptedRunIds; nothing eligible is a no-op).
+        console.log(`[QuantumLab] Startup watchdog: job ${jobId} gone while still latched in startup — clearing latch and repumping.`);
+        stopStartupWatchdog();
+        clearActiveWorker();
+        setTimeout(() => pumpQueue(), 1000);
+        return;
+      }
+      const stalledMs = Date.now() - job.lastUpdated;
+      if (stalledMs <= STARTUP_STALL_THRESHOLD) return; // still fetching/progressing
+      const reason = `Startup stalled: no progress for ${Math.round(stalledMs / 1000)}s before worker spawned`;
+      console.log(`[QuantumLab] Startup watchdog: job ${jobId} (run ${runId ?? "n/a"}) wedged in startup — worker never spawned, ${reason}. Forcing recovery.`);
+      stopStartupWatchdog();
+      labStorage.updateProgress(jobId, {
+        jobId, status: "error", stage: `Error: ${reason}`,
+        current: 0, total: 0, percent: 0, elapsed: 0, error: reason,
+      });
+      clearActiveWorker(); // resets workerStarting=false → ungates pumpQueue/scheduler/watchdog
+      if (runId) {
+        labStorage.pauseRun(runId)
+          .then(() => autoRetryAfterCrash(runId, jobId, reason))
+          .catch(() => { labStorage.failRun(runId).catch(() => {}); });
+      } else {
+        setTimeout(() => pumpQueue(), 1000);
+      }
+    }, STARTUP_WATCHDOG_INTERVAL);
+  }
+
+  function stopStartupWatchdog() {
+    if (startupWatchdogTimer) {
+      clearInterval(startupWatchdogTimer);
+      startupWatchdogTimer = null;
+    }
+  }
+
   function clearActiveWorker() {
     activeWorker = null;
     workerStarting = false;
     lastWorkerMessageTime = 0;
     stopKeepAlive();
     stopWorkerWatchdog();
+    stopStartupWatchdog();
   }
 
   let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -740,6 +801,7 @@ export function registerLabRoutes(app: Express): void {
   ) {
     workerStarting = true;
     lastRunStartedAt = Date.now();
+    startStartupWatchdog(job.id, runId);
     const completedCombos: string[] = resumeCheckpoint?.completedCombos ? [...resumeCheckpoint.completedCombos] : [];
     let checkpointState: Partial<LabCheckpoint> = resumeCheckpoint ? { ...resumeCheckpoint } : {};
     let checkpointWriteChain: Promise<void> = Promise.resolve();
@@ -803,6 +865,7 @@ export function registerLabRoutes(app: Express): void {
 
       activeWorker = worker;
       workerStarting = false;
+      stopStartupWatchdog();
       lastWorkerOOM = false;
       lastWorkerMessageTime = Date.now();
       startKeepAlive();
