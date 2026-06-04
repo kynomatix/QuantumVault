@@ -30,7 +30,7 @@ import {
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
   History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown, FilePlus2,
-  Shield, AlertTriangle, DollarSign, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet, Trophy, Filter, Crosshair, ListOrdered, GripVertical, RefreshCw,
+  Shield, AlertTriangle, DollarSign, Fuel, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet, Trophy, Filter, Crosshair, ListOrdered, GripVertical, RefreshCw,
 } from "lucide-react";
 import {
   ResponsiveContainer, Area, AreaChart, CartesianGrid, XAxis, YAxis,
@@ -4445,6 +4445,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const [isOpen, setIsOpen] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [isDepositingUsdc, setIsDepositingUsdc] = useState(false);
+  const [isDepositingSol, setIsDepositingSol] = useState(false);
   const [createdBot, setCreatedBot] = useState<any>(null);
   const [webhookUrl, setWebhookUrl] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -4489,19 +4490,32 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const enableReinvest = reinvestOverride ?? recommendReinvest;
 
   const PACIFICA_MIN_DEPOSIT = 10;
+  // Extra SOL on top of the measured shortfall so the bot-wallet seed + ATA rent
+  // + tx fees land comfortably above the adapter's floor (Flash needs ~0.025 SOL)
+  // rather than exactly on it, where propagation lag can still trip a raw error.
+  const SOL_GAS_BUFFER = 0.003;
   const canShowCreateButton = capitalNum > 0 && ticker && timeframe;
 
   // `force` bypasses the balanceChecked guard — used after a deposit so the
   // freshly-funded wallet balance gets re-fetched without waiting for the
-  // popover to be reopened.
-  const fetchBalanceAndAgent = useCallback(async (force = false) => {
-    if (!walletAddress) return;
-    if (!force && balanceChecked) return;
+  // popover to be reopened. Returns the freshly-read SOL balance (or null) so
+  // post-deposit retry logic doesn't have to rely on stale closure state.
+  // Monotonic request id: protocol switches fire overlapping balance fetches and
+  // the SOL requirement differs per protocol (Flash ~0.025 vs Pacifica ~0.005).
+  // Without this guard a slower earlier response could resolve last and clobber
+  // the newer requirement, re-opening the gating gap (same fix as CreateBotModal).
+  const balanceReqId = useRef(0);
+  const fetchBalanceAndAgent = useCallback(async (force = false): Promise<number | null> => {
+    if (!walletAddress) return null;
+    if (!force && balanceChecked) return null;
+    const reqId = ++balanceReqId.current;
     setBalanceLoading(true);
     try {
-      const balRes = await fetch(`/api/agent/balance?wallet=${walletAddress}`, { credentials: 'include' });
+      const balRes = await fetch(`/api/agent/balance?wallet=${walletAddress}&protocol=${deployProtocol}`, { credentials: 'include' });
+      if (reqId !== balanceReqId.current) return null; // superseded by a newer request
       if (balRes.ok) {
         const data = await safeResponseJson(balRes);
+        if (reqId !== balanceReqId.current) return null;
         setAgentBalance(data.balance?.toString() || '0');
         setAgentSolBalance(data.solBalance ?? null);
         setAgentPublicKey(data.agentPublicKey || null);
@@ -4509,14 +4523,27 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
           setSolRequired(data.botCreationSolRequirement.required);
         }
         setBalanceChecked(true);
+        return data.solBalance ?? null;
       } else if (balRes.status === 400) {
         setBalanceChecked(true);
       }
+      return null;
     } catch {
+      return null;
     } finally {
-      setBalanceLoading(false);
+      if (reqId === balanceReqId.current) setBalanceLoading(false);
     }
-  }, [walletAddress, balanceChecked]);
+  }, [walletAddress, balanceChecked, deployProtocol]);
+
+  // Re-fetch the SOL requirement whenever the deploy protocol changes. Flash
+  // seeds a per-bot wallet (~0.025 SOL) while Pacifica only needs trading gas
+  // (~0.005). Without a protocol-scoped refetch the gate keeps the previous
+  // protocol's requirement, so a Flash create slips through to a raw
+  // "insufficient SOL" error instead of surfacing the inline deposit button.
+  useEffect(() => {
+    if (walletAddress && sessionConnected) fetchBalanceAndAgent(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deployProtocol]);
 
   const generateBotName = () => {
     const base = (ticker || "").split("/")[0].toUpperCase();
@@ -4577,6 +4604,52 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
       });
     } finally {
       setIsDepositingUsdc(false);
+    }
+  };
+
+  // One-click SOL gas top-up to the agent wallet. Deposits the shortfall plus a
+  // little headroom (SOL_GAS_BUFFER) so the bot-wallet seed + ATA rent + tx fees
+  // are comfortably covered, instead of blocking the user with a raw error.
+  const handleSolDeposit = async (amount: number) => {
+    if (amount <= 0) return;
+    if (!publicKey || !signTransaction) {
+      toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+    const rounded = Math.ceil(amount * 1000) / 1000;
+    setIsDepositingSol(true);
+    try {
+      const response = await fetch('/api/agent/deposit-sol', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount: rounded }),
+        credentials: 'include',
+      });
+      if (!response.ok) {
+        const error = await safeResponseJson(response);
+        throw new Error(error.error || 'SOL deposit failed');
+      }
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight } = await safeResponseJson(response);
+      const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
+      const signedTx = await signTransaction(transaction);
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
+      await confirmTransactionWithFallback(connection, { signature, blockhash, lastValidBlockHeight });
+      toast({ title: `Deposited ${rounded.toFixed(3)} SOL successfully` });
+      // Re-fetch so the gate re-evaluates and the button flips back to Create Bot.
+      // The balance API can lag the on-chain confirmation by a beat, so settle
+      // briefly and retry once if it still reads short.
+      const expectedMin = (agentSolBalance ?? 0) + rounded - 0.001;
+      await new Promise(r => setTimeout(r, 1500));
+      const latestSol = await fetchBalanceAndAgent(true);
+      if ((latestSol ?? 0) < expectedMin) {
+        await new Promise(r => setTimeout(r, 2500));
+        await fetchBalanceAndAgent(true);
+      }
+    } catch (error: any) {
+      console.error('SOL deposit failed:', error);
+      toast({ title: 'SOL Deposit Failed', description: error.message || 'Please try again', variant: 'destructive' });
+    } finally {
+      setIsDepositingSol(false);
     }
   };
 
@@ -4647,7 +4720,14 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
 
       if (!res.ok) {
         const error = await safeResponseJson(res);
-        setCreateError(error.error || 'Failed to create bot');
+        const msg = error.error || 'Failed to create bot';
+        // If creation was rejected for lack of SOL to seed the bot wallet,
+        // refresh the balance so the inline "Deposit SOL" button appears instead
+        // of dead-ending on a raw error.
+        if (/insufficient (agent )?sol|bot-wallet seed/i.test(msg)) {
+          await fetchBalanceAndAgent(true);
+        }
+        setCreateError(msg);
         return;
       }
 
@@ -5048,6 +5128,31 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                       </div>
                     )}
                     {(() => {
+                      // SOL gas shortfall takes priority — the bot wallet can't be
+                      // seeded without it. Offer a one-click top-up of the shortfall
+                      // plus a little headroom (tx fees / on-chain rent) instead of
+                      // blocking. Flash needs ~0.025 SOL (seeded per-bot wallet) vs
+                      // Pacifica's ~0.005 gas, so solRequired is protocol-scoped.
+                      const hasSol = agentSolBalance !== null && isAuthenticated && hasAgentWallet;
+                      const solDeficit = hasSol ? Math.max(0, solRequired - (agentSolBalance ?? 0)) : 0;
+                      if (solDeficit > 0) {
+                        const solDepositAmount = Math.ceil((solDeficit + SOL_GAS_BUFFER) * 1000) / 1000;
+                        return (
+                          <Button
+                            size="sm"
+                            onClick={() => handleSolDeposit(solDepositAmount)}
+                            disabled={isDepositingSol}
+                            className="w-full h-7 text-[10px] bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600 text-white"
+                            data-testid={`button-deposit-sol-${leverage}x`}
+                          >
+                            {isDepositingSol ? (
+                              <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Depositing…</>
+                            ) : (
+                              <><Fuel className="w-3 h-3 mr-1" /> Deposit {solDepositAmount.toFixed(3)} SOL for gas</>
+                            )}
+                          </Button>
+                        );
+                      }
                       // USDC shortfall — replace Create Bot with a Deposit button (same
                       // pattern as SubscribeBotModal). Only kicks in once we have a real
                       // balance reading and the entered capital is at least the protocol
