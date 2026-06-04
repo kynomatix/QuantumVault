@@ -136,12 +136,25 @@ export function classifySignal(
     }
 
     // Reduce: target is 0 ≤ |targetSigned| < current size.
-    // (tvSize===0 was already handled above.)
+    // (tvSize===0 was already handled above; FLIP handled above.)
     const targetSize = Math.abs(targetSigned);
-    const sliceToClose = size - targetSize;
+
+    // Honor the strategy's explicit order size (`contracts`) as the amount to
+    // close — that is exactly what the strategy asked to exit on this bar.
+    //
+    // We deliberately do NOT use (size - targetSize) to "reconcile to target".
+    // Our tracked `size` is a cache and can drift ABOVE TV's own model; that
+    // subtraction then closes the drift too and over-closes real collateral
+    // (observed live: cache 96560 vs TV model 66054 → closed 49390 instead of
+    // the intended 18884). reduceOnly already caps us at the live position, and
+    // the eventual tvSize=0 full-close flattens any residual, so honoring
+    // `contracts` is the safe, intent-faithful choice. Fall back to the
+    // target-derived slice only when the alert omits a usable `contracts`.
+    const sliceToClose =
+      contracts > 0.0001 ? Math.min(contracts, size) : size - targetSize;
 
     if (sliceToClose <= 0.0001) {
-      // Target ≥ current: treat as pyramid (TV may have rounded up slightly).
+      // Nothing meaningful to close: treat as pyramid (TV may have rounded up).
       return { type: 'PYRAMID', closeSize: 0, addSize: contracts, closedFraction: 0 };
     }
 
