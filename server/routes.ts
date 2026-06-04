@@ -11356,7 +11356,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             timestampMs: Date.now(),
           });
 
-          await storage.recordCloseEventAtomic({
+          const pcAtomic = await storage.recordCloseEventAtomic({
             botId,
             insert: {
               tradingBotId: botId,
@@ -11380,8 +11380,24 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             },
           });
 
-          // Sync position state from on-chain (reflects the new reduced size).
-          syncPositionFromOnChain(botId, bot.walletAddress, bot.market).catch(err =>
+          // Sync the bot_positions cache from on-chain so it reflects the new
+          // reduced size. Full args (fee/fillPrice/side/size) let sync compute
+          // the position-level realizedPnl + reduced baseSize and engage its
+          // stale-read guard; this is a separate ledger from the bot-level
+          // totalPnl booked by recordCloseEventAtomic above, so no double-count.
+          syncPositionFromOnChain(
+            botId,
+            bot.walletAddress,
+            pcWallet.agentPublicKey!,
+            pcSubAccountId,
+            bot.market,
+            pcAtomic.trade?.id ?? '',
+            pcFee,
+            pcFillPrice,
+            pcPositionSide === 'long' ? 'short' : 'long',
+            partialCloseSize,
+            webhookBotCtx?.botPublicKey,
+          ).catch(err =>
             console.error(`[Webhook] Post-partial-close sync error:`, err));
 
           // Schedule debounced Telegram notification.
