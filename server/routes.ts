@@ -2851,10 +2851,15 @@ const botWebhookLocks = new Map<string, Promise<void>>();
 
 function acquireBotWebhookLock(key: string): Promise<() => void> {
   let release!: () => void;
+  // `gate` stays pending until the caller invokes the returned releaser.
+  const gate = new Promise<void>(resolve => { release = resolve; });
   const current = botWebhookLocks.get(key) ?? Promise.resolve();
-  const next = current.then(() => new Promise<void>(resolve => { release = resolve; }));
-  botWebhookLocks.set(key, next.catch(() => {}));
-  return next.then(() => release);
+  // New tail: the next waiter must wait for the previous holder AND our gate.
+  botWebhookLocks.set(key, current.then(() => gate).catch(() => {}));
+  // Hand back the releaser once the PREVIOUS holder releases — chaining off
+  // our own `gate` here (the original bug) deadlocks, since the caller can
+  // never release a lock it is still awaiting.
+  return current.then(() => release);
 }
 
 async function routeSignalToSubscribers(
@@ -10690,7 +10695,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           entryPrice: dbPositionForClassification ? parseFloat(dbPositionForClassification.avgEntryPrice) : 0,
         },
         {
-          action: side as 'buy' | 'sell',
+          action: action as 'buy' | 'sell',
           contracts: parseFloat(contracts),
           strategyPositionSize: strategyPositionSize !== null ? parseFloat(strategyPositionSize) : null,
         },
@@ -12729,6 +12734,179 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             error: "Close signal processing failed", 
             details: closeHandlerError.message 
           });
+        }
+      }
+
+      // ── PARTIAL CLOSE HANDLER (user-webhook path) ──────────────────────────
+      // TradingView partial take-profits arrive as a sell/buy with a NON-zero
+      // remaining strategy.position_size, so isCloseSignal (which only fires when
+      // position_size===0) is false and the signal would otherwise fall through
+      // to the open path below and place a margin-requiring order
+      // (reduceOnly=false) — failing with "Insufficient Funds" whenever the bot
+      // has no spare collateral. Mirror the per-bot webhook: classify against the
+      // DB position (anchors on intent, dodging on-chain propagation lag) and, if
+      // it's a partial reduce, execute a reduce-only close of the slice via the
+      // bot's adapter (Flash/Drift/Pacifica) instead of opening new exposure.
+      const uwDbPosition = await storage.getBotPosition(botId, bot.market);
+      const uwClassified = classifySignal(
+        {
+          side: uwDbPosition
+            ? (parseFloat(uwDbPosition.baseSize) > 0 ? 'LONG' : parseFloat(uwDbPosition.baseSize) < 0 ? 'SHORT' : 'FLAT')
+            : 'FLAT',
+          size: uwDbPosition ? Math.abs(parseFloat(uwDbPosition.baseSize)) : 0,
+          entryPrice: uwDbPosition ? parseFloat(uwDbPosition.avgEntryPrice) : 0,
+        },
+        {
+          action: action as 'buy' | 'sell',
+          contracts: parseFloat(contracts),
+          strategyPositionSize: strategyPositionSize !== null ? parseFloat(strategyPositionSize) : null,
+        },
+      );
+      const uwIsPartialClose = !isCloseSignal && uwClassified.type === 'PARTIAL_CLOSE';
+      const uwPartialCloseSize = uwIsPartialClose ? uwClassified.closeSize : 0;
+      const uwPartialCloseFraction = uwIsPartialClose ? uwClassified.closedFraction : 0;
+
+      if (uwIsPartialClose) {
+        console.log(`[User Webhook] *** PARTIAL CLOSE DETECTED *** (slice=${uwPartialCloseSize.toFixed(4)}, fraction=${(uwPartialCloseFraction * 100).toFixed(1)}%, classified=${uwClassified.type})`);
+        const releaseUwLock = await acquireBotWebhookLock(`${botId}:${bot.market}`);
+        const uwLockTimer = setTimeout(() => releaseUwLock(), 30_000);
+        try {
+          const pcWallet = await storage.getWallet(walletAddress);
+          if (!pcWallet?.agentPublicKey) {
+            await storage.updateWebhookLog(log.id, { errorMessage: "No agent wallet for partial close", processed: true });
+            return res.status(400).json({ error: "Agent wallet not configured" });
+          }
+
+          const pcSubAccountId = userWebhookBotCtx ? 0 : (bot.driftSubaccountId ?? 0);
+          const pcPositionSide: 'long' | 'short' = uwDbPosition
+            ? (parseFloat(uwDbPosition.baseSize) > 0 ? 'long' : 'short')
+            : 'long';
+
+          console.log(`[User Webhook] Partial close: executing closePerpPosition(${uwPartialCloseSize.toFixed(4)} ${pcPositionSide} ${bot.market}, reduceOnly)`);
+          const pcResult = await closePerpPosition(
+            agentKeyResult.secretKey,
+            bot.market,
+            pcSubAccountId,
+            uwPartialCloseSize,
+            pcWallet.slippageBps ?? 50,
+            privateKeyBase58,
+            pcWallet.agentPublicKey!,
+            pcPositionSide,
+            userWebhookBotCtx,
+            walletAddress,
+            getAdapterForBot(bot),
+          );
+
+          if (!pcResult.success) {
+            console.error(`[User Webhook] Partial close failed: ${pcResult.error}`);
+            await storage.updateWebhookLog(log.id, { errorMessage: `Partial close failed: ${pcResult.error}`, processed: true });
+            return res.status(500).json({ error: "Partial close failed", details: pcResult.error });
+          }
+
+          // Book realized PnL for the closed slice.
+          const pcFillPrice = pcResult.fillPrice ?? (signalPrice ? parseFloat(signalPrice) : 0);
+          const pcEntryPrice = uwDbPosition ? parseFloat(uwDbPosition.avgEntryPrice) : 0;
+          const pcFee = uwPartialCloseSize * (pcFillPrice || pcEntryPrice) * getExchangeFeeRate();
+          const pcPnl = pcPositionSide === 'long'
+            ? (pcFillPrice - pcEntryPrice) * uwPartialCloseSize - pcFee
+            : (pcEntryPrice - pcFillPrice) * uwPartialCloseSize - pcFee;
+
+          const pcDedupKey = DatabaseStorage.canonicalCloseFillId({
+            signature: pcResult.signature ? `tx-${pcResult.signature}` : undefined,
+            botId,
+            side: pcPositionSide === 'long' ? 'short' : 'long',
+            size: uwPartialCloseSize,
+            market: bot.market,
+            fillPrice: pcFillPrice,
+            timestampMs: Date.now(),
+          });
+
+          const pcAtomic = await storage.recordCloseEventAtomic({
+            botId,
+            insert: {
+              tradingBotId: botId,
+              walletAddress: bot.walletAddress,
+              market: bot.market,
+              side: pcPositionSide === 'long' ? 'short' : 'long',
+              size: String(uwPartialCloseSize),
+              price: String(pcFillPrice),
+              fee: String(pcFee),
+              pnl: String(pcPnl),
+              status: 'executed',
+              txSignature: pcResult.signature || null,
+              protocolFillId: pcDedupKey,
+              webhookPayload: { ...payload, partialClose: true, fraction: uwPartialCloseFraction },
+              executionMethod: pcResult.executionMethod || 'legacy',
+            },
+            deltas: {
+              totalPnlDelta: pcPnl,
+              totalVolumeDelta: uwPartialCloseSize * pcFillPrice,
+              lastTradeAt: new Date().toISOString(),
+            },
+          });
+
+          // Sync the bot_positions cache from on-chain so it reflects the new
+          // reduced size. Full args (fee/fillPrice/side/size) let sync compute
+          // the position-level realizedPnl + reduced baseSize and engage its
+          // stale-read guard; this is a separate ledger from the bot-level
+          // totalPnl booked by recordCloseEventAtomic above, so no double-count.
+          syncPositionFromOnChain(
+            botId,
+            bot.walletAddress,
+            pcWallet.agentPublicKey!,
+            pcSubAccountId,
+            bot.market,
+            pcAtomic.trade?.id ?? '',
+            pcFee,
+            pcFillPrice,
+            pcPositionSide === 'long' ? 'short' : 'long',
+            uwPartialCloseSize,
+            userWebhookBotCtx?.botPublicKey,
+          ).catch(err =>
+            console.error(`[User Webhook] Post-partial-close sync error:`, err));
+
+          // Schedule debounced Telegram notification.
+          schedulePartialCloseNotification({
+            walletAddress: bot.walletAddress,
+            botId,
+            botName: bot.name,
+            market: bot.market,
+            side: pcPositionSide === 'long' ? 'LONG' : 'SHORT',
+            closedFraction: uwPartialCloseFraction,
+            realizedPnl: pcPnl,
+            price: pcFillPrice,
+          });
+
+          // Fan out to copy-trade subscribers proportionally.
+          const pcPublished = await storage.getPublishedBotByTradingBotId(botId);
+          if (pcPublished?.isActive) {
+            routeSignalToSubscribers(botId, {
+              action: action as 'buy' | 'sell',
+              contracts,
+              positionSize,
+              price: signalPrice || String(pcFillPrice),
+              isCloseSignal: false,
+              strategyPositionSize,
+              partialCloseFraction: uwPartialCloseFraction,
+            }).catch(err => console.error(`[User Webhook] Partial close routing error:`, err));
+          }
+
+          await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
+          return res.json({
+            status: "success",
+            type: "partial_close",
+            fraction: uwPartialCloseFraction,
+            closedSize: uwPartialCloseSize,
+            pnl: pcPnl,
+            signature: pcResult.signature,
+          });
+        } catch (pcErr: any) {
+          console.error(`[User Webhook] Partial close handler error:`, pcErr);
+          await storage.updateWebhookLog(log.id, { errorMessage: `Partial close error: ${pcErr.message}`, processed: true });
+          return res.status(500).json({ error: "Partial close failed", details: pcErr.message });
+        } finally {
+          clearTimeout(uwLockTimer);
+          releaseUwLock();
         }
       }
 
