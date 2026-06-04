@@ -335,7 +335,10 @@ function PositionsTab({ initData, pnlUnit }: { initData: string; pnlUnit: PnlUni
           <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
             <div>
               <div className="text-[color:var(--tg-hint)]">Size</div>
-              <div>{fmtNum(p.size)}</div>
+              <div data-testid={`text-position-size-${i}`}>{fmtNum(p.size)}</div>
+              <div className="text-[color:var(--tg-hint)]" data-testid={`text-position-notional-${i}`}>
+                {fmtUsd(p.size * p.markPrice)}
+              </div>
             </div>
             <div>
               <div className="text-[color:var(--tg-hint)]">Entry</div>
