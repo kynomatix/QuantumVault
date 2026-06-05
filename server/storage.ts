@@ -498,6 +498,39 @@ export interface IStorage {
   getReferralEarningsByReferee(earnerWallet: string, refereeWallets: string[]): Promise<Map<string, number>>;
 }
 
+// Raw SQL predicate that is TRUE for a "phantom duplicate" close row: a
+// redundant close booked by a SECOND writer (reconciler or a re-fired webhook)
+// under a different protocol_fill_id id-space (nosig-/reconcile-close-/NULL vs
+// tx-<sig>), which dodges the protocol_fill_id unique index. The phantom row is
+// weak — no tx_signature AND zero fee, i.e. nothing actually filled on-chain —
+// AND it mirrors a STRONGER real close (one carrying a tx_signature or a real
+// fee) of the same size within 120s. Such rows must NOT inflate the canonical
+// trade count / performance series. The asymmetric "stronger sibling" test
+// guarantees we never drop BOTH rows of a pair, and lone reconciler-detected
+// closes (no sibling) are kept. See memory: double-close-webhook-reconciler-race.
+// References the unaliased `bot_trades` table, so it only embeds in queries
+// whose primary FROM is bot_trades with no alias.
+const PHANTOM_DUP_CLOSE_PREDICATE = `
+  bot_trades.tx_signature IS NULL
+  AND COALESCE(bot_trades.fee, 0) = 0
+  AND EXISTS (
+    SELECT 1 FROM bot_trades s
+    WHERE s.trading_bot_id = bot_trades.trading_bot_id
+      AND s.market = bot_trades.market
+      AND s.id <> bot_trades.id
+      AND s.pnl IS NOT NULL
+      AND s.status IN ('executed','liquidated','recovered')
+      AND ABS(EXTRACT(EPOCH FROM (s.executed_at - bot_trades.executed_at))) <= 120
+      AND ABS(ABS(s.size) - ABS(bot_trades.size)) <= 0.01 * ABS(bot_trades.size)
+      AND (s.tx_signature IS NOT NULL OR COALESCE(s.fee, 0) > 0)
+  )`;
+
+// Drizzle SQL chunk: TRUE when a bot_trades row is NOT a phantom duplicate.
+// Returns a fresh chunk per call so it can be embedded in multiple queries.
+function notPhantomDupClose() {
+  return sql.raw(`NOT (${PHANTOM_DUP_CLOSE_PREDICATE})`);
+}
+
 export class DatabaseStorage implements IStorage {
   async getUser(id: string): Promise<User | undefined> {
     const result = await db.select().from(users).where(eq(users.id, id)).limit(1);
@@ -1042,6 +1075,7 @@ export class DatabaseStorage implements IStorage {
       WHERE ${botTrades.tradingBotId} = ${tradingBotId}
         AND ${botTrades.pnl} IS NOT NULL
         AND ${botTrades.status} IN ('executed','liquidated','recovered')
+        AND ${notPhantomDupClose()}
     `);
     const row: any = (result as any).rows?.[0] ?? (result as any)[0] ?? {};
     return {
@@ -1079,6 +1113,7 @@ export class DatabaseStorage implements IStorage {
           eq(botTrades.tradingBotId, tradingBotId),
           sql`${botTrades.pnl} IS NOT NULL`,
           sql`${botTrades.status} IN ('executed','liquidated','recovered')`,
+          notPhantomDupClose(),
         ));
       const counts = {
         totalTrades: Number(countsRows[0]?.totalTrades ?? 0),
@@ -1449,6 +1484,10 @@ export class DatabaseStorage implements IStorage {
         eq(botTrades.status, 'recovered'),
       ),
       sql`${botTrades.pnl} IS NOT NULL`,
+      // Drop phantom duplicate closes so the series length (tradeCount on the
+      // performance card) matches getCanonicalBotTradeStats. MUST stay in
+      // lockstep with that function's filter.
+      notPhantomDupClose(),
     ];
     if (since) {
       conditions.push(gte(botTrades.executedAt, since));
