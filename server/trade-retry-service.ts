@@ -51,7 +51,7 @@ function _mapPositionToDrift(p: { internalSymbol: string; baseSize: number; entr
 async function driftExecutePerpOrder(
   encryptedKey: Uint8Array, market: string, side: 'long' | 'short', size: number,
   subAccountId: number, reduceOnly: boolean, _slippageBps: number,
-  _privateKeyBase58?: string, agentPublicKey?: string, adapter = getDefaultAdapter()
+  _privateKeyBase58?: string, agentPublicKey?: string, leverage?: number, adapter = getDefaultAdapter()
 ): Promise<any> {
   const keypair = resolveAgentKeypair(encryptedKey);
   const pubKey = agentPublicKey || keypair.publicKey.toBase58();
@@ -65,6 +65,7 @@ async function driftExecutePerpOrder(
     sizeBase: size,
     reduceOnly,
     subaccountId: _subIdStr(subAccountId),
+    leverage,
   });
   return {
     success: orderResult.success,
@@ -211,6 +212,7 @@ export interface RetryJob {
   protocolSubaccountId?: string;
   reduceOnly: boolean;
   slippageBps: number;
+  leverage: number;
   privateKeyBase58?: string;
   priority: 'critical' | 'normal';
   attempts: number;
@@ -416,7 +418,7 @@ function calculateBackoff(attempts: number, priority: 'critical' | 'normal'): nu
   return backoff + jitter;
 }
 
-export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'maxAttempts' | 'nextRetryAt' | 'createdAt'>): Promise<string> {
+export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'maxAttempts' | 'nextRetryAt' | 'createdAt' | 'leverage'>): Promise<string> {
   const maxAttempts = job.priority === 'critical' ? MAX_ATTEMPTS_CRITICAL : MAX_ATTEMPTS_NORMAL;
   const backoff = calculateBackoff(0, job.priority);
   const nextRetryAt = Date.now() + backoff;
@@ -427,15 +429,19 @@ export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'm
   // would store a numeric Drift index masquerading as a Pacifica pubkey, which the
   // restart-reconstruction path would then prefer over the real bot.protocolSubaccountId.
   let resolvedProtocolSubaccountId: string | null = job.protocolSubaccountId ?? null;
-  if (!resolvedProtocolSubaccountId) {
-    try {
-      const botRow = await storage.getTradingBotById(job.botId);
-      if (botRow?.protocolSubaccountId) {
-        resolvedProtocolSubaccountId = botRow.protocolSubaccountId;
-      }
-    } catch (lookupErr) {
-      console.warn(`[TradeRetry] Failed to look up bot ${job.botId} for protocolSubaccountId:`, lookupErr);
+  // Resolve the bot's configured leverage so Flash OPEN retries post collateral =
+  // notional/leverage (not full notional). Reuse this lookup for protocolSubaccountId too.
+  let resolvedLeverage = 1;
+  try {
+    const botRow = await storage.getTradingBotById(job.botId);
+    if (botRow?.leverage) {
+      resolvedLeverage = botRow.leverage || 1;
     }
+    if (!resolvedProtocolSubaccountId && botRow?.protocolSubaccountId) {
+      resolvedProtocolSubaccountId = botRow.protocolSubaccountId;
+    }
+  } catch (lookupErr) {
+    console.warn(`[TradeRetry] Failed to look up bot ${job.botId} for leverage/protocolSubaccountId:`, lookupErr);
   }
   // Hydrate the in-memory job copy too so retry execution has the same value.
   if (resolvedProtocolSubaccountId && !job.protocolSubaccountId) {
@@ -453,7 +459,7 @@ export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'm
       market: job.market,
       side: job.side,
       size: job.size.toString(),
-      leverage: 1,
+      leverage: resolvedLeverage,
       priority: job.priority,
       attempts: 0,
       maxAttempts,
@@ -476,6 +482,7 @@ export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'm
   
   const fullJob: RetryJob = {
     ...job,
+    leverage: resolvedLeverage,
     id: dbJobId,
     attempts: 0,
     maxAttempts,
@@ -774,6 +781,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
         job.slippageBps,
         job.privateKeyBase58,
         job.agentPublicKey,
+        job.leverage,
         jobAdapter
       );
     }
@@ -1346,6 +1354,7 @@ export async function startRetryWorker(): Promise<void> {
           protocolSubaccountId: bot.protocolSubaccountId ?? dbJob.protocolSubaccountId ?? undefined,
           reduceOnly: dbJob.side === 'close',
           slippageBps: wallet.slippageBps || 50,
+          leverage: bot.leverage || 1,
           priority: dbJob.priority as 'critical' | 'normal',
           attempts: dbJob.attempts,
           maxAttempts: dbJob.maxAttempts,
