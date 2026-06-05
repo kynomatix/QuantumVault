@@ -278,6 +278,15 @@ export async function ensureSchema() {
          ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_active_protocol_check
            CHECK (active_protocol IN ('pacifica', 'drift', 'flash'));
        END $$`,
+
+      // --- bot_trades protocol label honesty. ---
+      // The column originally defaulted to 'pacifica', so any insert that
+      // omitted `protocol` was silently mislabeled as Pacifica regardless of
+      // the actual venue (Flash/Drift). createBotTrade() now stamps the real
+      // protocol from the owning bot, so drop the misleading default — a
+      // genuinely unknown protocol should read NULL, never a wrong venue.
+      // Idempotent: DROP DEFAULT is a no-op once the default is already gone.
+      `ALTER TABLE bot_trades ALTER COLUMN protocol DROP DEFAULT`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner

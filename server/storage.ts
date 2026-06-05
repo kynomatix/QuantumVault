@@ -1197,6 +1197,16 @@ export class DatabaseStorage implements IStorage {
         deltas: {},
       };
     }
+    // Stamp the executing protocol on a fresh close row when the caller omits
+    // it — this atomic path inserts directly and bypasses createBotTrade()'s
+    // central stamp. opts.botId identifies the venue (bot.activeProtocol is what
+    // getAdapterForBot routes to). Cheap PK read; kept OUT of the tx below.
+    if (opts.insert && !opts.insert.protocol && opts.botId) {
+      const ownerBot = await this.getTradingBotById(opts.botId);
+      if (ownerBot?.activeProtocol) {
+        opts = { ...opts, insert: { ...opts.insert, protocol: ownerBot.activeProtocol } };
+      }
+    }
     return await db.transaction(async (tx) => {
       let trade: BotTrade | undefined;
       let isNew = true;
@@ -1501,6 +1511,20 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createBotTrade(trade: InsertBotTrade): Promise<BotTrade> {
+    // Stamp the executing protocol so every trade row reflects the real
+    // exchange/adapter that handled it (e.g. 'flash', 'drift', 'pacifica'),
+    // not the schema fallback. Callers that don't pass `protocol` get it
+    // derived from the owning bot here — `tradingBotId` is NOT NULL with an
+    // FK, so the bot exists at insert time, and `activeProtocol` is exactly
+    // what getAdapterForBot() routes the execution to. This central stamp
+    // keeps labels correct for current AND future call sites/exchanges.
+    if (!trade.protocol && trade.tradingBotId) {
+      const ownerBot = await this.getTradingBotById(trade.tradingBotId);
+      if (ownerBot?.activeProtocol) {
+        trade = { ...trade, protocol: ownerBot.activeProtocol };
+      }
+    }
+
     if (trade.status === 'executed' && trade.size && trade.price) {
       const volume = Math.abs(parseFloat(String(trade.size)) * parseFloat(String(trade.price)));
       if (volume > 0) {
