@@ -165,6 +165,40 @@ interface BotPosition {
   freeCollateral?: number;
 }
 
+function formatUsdSigned(n: number): string {
+  const sign = n >= 0 ? '+' : '-';
+  return `${sign}$${Math.abs(n).toFixed(2)}`;
+}
+
+// Given a TP/SL input (percent or absolute price), compute the resulting target
+// price, the price-move % from entry, and the expected $ P&L at that target for
+// the open position. P&L respects side (LONG/SHORT). Returns null when inputs are
+// not usable yet. pnl is null when position size is unknown.
+function computeTpSlOutcome(
+  raw: string,
+  mode: 'percent' | 'price',
+  kind: 'tp' | 'sl',
+  side: 'LONG' | 'SHORT' | undefined,
+  entry: number | undefined,
+  size: number | undefined,
+): { targetPrice: number; movePct: number; pnl: number | null } | null {
+  const val = parseFloat(raw || '');
+  if (!Number.isFinite(val) || val <= 0 || !entry || entry <= 0 || !side) return null;
+  const isLong = side === 'LONG';
+  let targetPrice: number;
+  if (mode === 'percent') {
+    // TP for a long moves up, for a short moves down. SL is the inverse.
+    const favorableUp = kind === 'tp' ? isLong : !isLong;
+    targetPrice = entry * (favorableUp ? 1 + val / 100 : 1 - val / 100);
+  } else {
+    targetPrice = val;
+  }
+  const dir = isLong ? 1 : -1;
+  const movePct = Math.abs((targetPrice - entry) / entry) * 100;
+  const pnl = size && size > 0 ? (targetPrice - entry) * dir * size : null;
+  return { targetPrice, movePct, pnl };
+}
+
 interface BotManagementDrawerProps {
   bot: TradingBot | null;
   isOpen: boolean;
@@ -1689,11 +1723,18 @@ export function BotManagementDrawer({
                             className="h-8 text-sm font-mono"
                             data-testid="input-tp"
                           />
-                          {tpInput && tpslMode === 'percent' && botPosition?.avgEntryPrice && (
-                            <p className="text-[10px] text-muted-foreground mt-0.5 font-mono" data-testid="text-tp-preview">
-                              = ${formatPrice(botPosition.avgEntryPrice * (botPosition.side === 'LONG' ? 1 + parseFloat(tpInput || '0') / 100 : 1 - parseFloat(tpInput || '0') / 100))}
-                            </p>
-                          )}
+                          {tpInput && botPosition?.avgEntryPrice && (() => {
+                            const o = computeTpSlOutcome(tpInput, tpslMode, 'tp', botPosition.side, botPosition.avgEntryPrice, botPosition.size);
+                            if (!o) return null;
+                            return (
+                              <p className="text-[10px] text-muted-foreground mt-0.5 font-mono space-x-1" data-testid="text-tp-preview">
+                                <span>{tpslMode === 'percent' ? `= $${formatPrice(o.targetPrice)}` : `${o.movePct.toFixed(2)}% move`}</span>
+                                {o.pnl !== null && (
+                                  <span className={o.pnl >= 0 ? 'text-emerald-500' : 'text-red-500'} data-testid="text-tp-pnl">· {formatUsdSigned(o.pnl)}</span>
+                                )}
+                              </p>
+                            );
+                          })()}
                         </div>
                         <div>
                           <label className="text-xs text-red-500 font-medium mb-1 block">
@@ -1709,11 +1750,18 @@ export function BotManagementDrawer({
                             className="h-8 text-sm font-mono"
                             data-testid="input-sl"
                           />
-                          {slInput && tpslMode === 'percent' && botPosition?.avgEntryPrice && (
-                            <p className="text-[10px] text-muted-foreground mt-0.5 font-mono" data-testid="text-sl-preview">
-                              = ${formatPrice(botPosition.avgEntryPrice * (botPosition.side === 'LONG' ? 1 - parseFloat(slInput || '0') / 100 : 1 + parseFloat(slInput || '0') / 100))}
-                            </p>
-                          )}
+                          {slInput && botPosition?.avgEntryPrice && (() => {
+                            const o = computeTpSlOutcome(slInput, tpslMode, 'sl', botPosition.side, botPosition.avgEntryPrice, botPosition.size);
+                            if (!o) return null;
+                            return (
+                              <p className="text-[10px] text-muted-foreground mt-0.5 font-mono space-x-1" data-testid="text-sl-preview">
+                                <span>{tpslMode === 'percent' ? `= $${formatPrice(o.targetPrice)}` : `${o.movePct.toFixed(2)}% move`}</span>
+                                {o.pnl !== null && (
+                                  <span className={o.pnl >= 0 ? 'text-emerald-500' : 'text-red-500'} data-testid="text-sl-pnl">· {formatUsdSigned(o.pnl)}</span>
+                                )}
+                              </p>
+                            );
+                          })()}
                         </div>
                       </div>
 
