@@ -10,6 +10,7 @@ export const DOCS_MARKDOWN = `# QuantumVault Documentation
 1. [Getting Started](#getting-started)
 2. [Wallet Setup](#wallet-setup)
 3. [Funding Your Account](#funding-your-account)
+   - [Deposit Any Token (Auto-Swap to USDC)](#deposit-any-token-auto-swap-to-usdc)
    - [Supported Exchanges & Withdrawal Costs](#supported-exchanges--withdrawal-costs)
 4. [Creating Trading Bots](#creating-trading-bots)
    - [Profit Reinvest](#profit-reinvest)
@@ -86,7 +87,7 @@ To start trading, you need to fund your agent wallet with both SOL (for transact
 
 ### SOL for Account Setup & Fees
 
-SOL covers a one-time account setup (~0.05 SOL for your trading account initialization) plus ongoing transaction fees. We recommend depositing at least 0.1 SOL to cover setup and many trades.
+SOL covers a one-time account setup (~0.05 SOL for your trading account initialization) plus ongoing transaction fees. We recommend depositing at least 0.1 SOL to cover setup and many trades. Flash bots each run from their own wallet, so they need a little extra SOL (about 0.025 SOL per bot) the first time you create them — see Supported Exchanges below.
 
 | Item                     | Amount          |
 |--------------------------|-----------------|
@@ -96,6 +97,21 @@ SOL covers a one-time account setup (~0.05 SOL for your trading account initiali
 ### USDC for Trading
 
 USDC is the trading currency. Your USDC is held in your agent wallet and can be allocated to individual bots or your trading account.
+
+### Deposit Any Token (Auto-Swap to USDC)
+
+You don't need to already hold USDC. QuantumVault accepts almost any Solana asset — SOL or any SPL token in your wallet — and automatically converts it to USDC for trading.
+
+1. Open the deposit dialog and switch to the **"Any asset"** tab — your wallet's tokens are listed with their balances and dollar values.
+2. Pick a token and amount. A live quote shows how much USDC you'll receive, including price impact.
+3. Sign one transfer in your wallet to move the token into your bot wallet.
+4. QuantumVault converts it to USDC for you automatically, routed through Jupiter for the best available price.
+
+> **Note:** Swaps use a 1% slippage limit by default, and you'll be warned before confirming if a token's price impact is high (over 3%). When you deposit SOL, a small amount (~0.02 SOL) is kept back to cover network fees.
+
+If the transfer goes through but the conversion doesn't, your token stays safely in your bot wallet — just tap **Retry conversion** in the deposit dialog to finish the swap. No funds are lost.
+
+**For AI agents:** Call \`GET /api/wallet/tokens\` to list swappable tokens, \`GET /api/swap/quote?inputMint=<mint>&amountRaw=<raw>\` for a quote, then \`POST /api/agent/deposit-token\` ({ mint, amountRaw }) to build the user transfer, and \`POST /api/agent/swap-to-usdc\` ({ mint }) to run the server-side swap. If the swap step fails, retry \`POST /api/agent/swap-to-usdc\` — the token is already in the bot wallet and the swap is idempotent.
 
 ### Capital Flow
 
@@ -111,13 +127,17 @@ When you deposit to a bot, funds move from your agent wallet to that bot's tradi
 
 QuantumVault routes each bot to a perpetual exchange on Solana. You choose the exchange when you create a bot (Pacifica is the default). Minimum transfer amounts and withdrawal fees are set by each exchange, not by QuantumVault:
 
-| Exchange            | Minimum transfer | Withdrawal fee |
-|---------------------|------------------|----------------|
-| Pacifica (default)  | $10 USDC         | $1 USDC        |
-| Flash               | 0.1 USDC         | None           |
-| Drift               | 0.1 USDC         | None           |
+| Exchange            | Minimum transfer | Withdrawal fee | SOL to create a bot | Wallet model |
+|---------------------|------------------|----------------|---------------------|--------------|
+| Pacifica (default)  | $10 USDC         | $1 USDC        | ~0.005 SOL          | Isolated subaccount under your agent wallet |
+| Flash               | 0.1 USDC         | None           | ~0.025 SOL (reclaimed on delete) | Isolated per-bot wallet (recoverable from your 24-word phrase) |
+| Drift (legacy)      | 0.1 USDC         | None           | n/a (no new bots)   | Isolated subaccount |
 
 > **Note:** Pacifica is the only exchange with a real protocol minimum ($10) and an on-chain withdrawal fee ($1), so QuantumVault batches small amounts into larger withdrawals. Flash and Drift transfers carry no fee and only a small 0.1 USDC floor.
+
+> **Drift is legacy:** Existing Drift bots keep running, but you can no longer create new ones. New bots are created on Pacifica or Flash.
+
+**Which should you pick?** Pacifica is the simple default. Flash is better for smaller amounts (no $10 floor) and frequent profit-taking (no withdrawal fee), and each Flash bot runs from its own wallet that you can always recover from your 24-word recovery phrase — it just needs a bit more SOL up front to create. Creators who publish Flash bots are also paid their profit share immediately as trades close, rather than in a later batch.
 
 ---
 
@@ -127,10 +147,13 @@ Bots are automated trading agents that execute trades based on TradingView webho
 
 ### Bot Settings
 
+- **Exchange** — Choose where the bot trades: **Pacifica** (default) or **Flash**. Your choice sets the fees, minimums, and how much SOL is needed to create the bot (see Funding → Supported Exchanges). If your agent wallet is low on SOL, QuantumVault prompts you to top up before the bot can be created.
 - **Market** — Choose which perpetual market to trade (e.g., SOL-PERP, BTC-PERP, ETH-PERP). Each bot trades one market only.
 - **Leverage** — Set your leverage multiplier (1x to 20x depending on market). Higher leverage amplifies both gains and losses.
 - **Investment Amount** — The USDC amount allocated to this bot. This is your maximum position size before leverage.
 - **Direction** — Choose "Both" for long and short signals, or restrict to "Long Only" or "Short Only".
+
+> **Flash TP/SL note:** On Flash, very small positions can be too small to attach automatic take-profit / stop-loss orders. If you rely on TP/SL, give the bot enough capital (and leverage) so each position clears Flash's minimum size.
 
 ### Automated Capital Management
 

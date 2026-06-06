@@ -3753,12 +3753,12 @@ export async function registerRoutes(
 
   app.get("/llms.txt", (_req, res) => {
     const llmsTxt = `# QuantumVault
-> Automated perpetual futures trading on Solana via Pacifica, Flash, and Drift.
+> Automated perpetual futures trading on Solana via Pacifica and Flash (Drift legacy).
 
 URL: https://myquantumvault.com
 Full Documentation: https://myquantumvault.com/api/docs
 
-QuantumVault connects TradingView alerts and AI trading agents to perpetual exchanges on Solana (Pacifica, Flash, and Drift) for automated perpetual futures trading. Features include webhook-based trade execution, automated capital management (profit reinvest, auto withdraw, auto top-up), copy trading marketplace, gasless execution, and bank-grade wallet security.
+QuantumVault connects TradingView alerts and AI trading agents to perpetual exchanges on Solana (Pacifica and Flash; Drift is legacy) for automated perpetual futures trading. Features include webhook-based trade execution, automated capital management (profit reinvest, auto withdraw, auto top-up), deposit any Solana token (auto-swapped to USDC), copy trading marketplace, gasless execution, and bank-grade wallet security.
 
 ## Docs
 - [Full Documentation (Markdown)](https://myquantumvault.com/api/docs)

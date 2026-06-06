@@ -269,7 +269,8 @@ function FundingSection() {
       <Paragraph>
         SOL covers a one-time account setup (~0.05 SOL for your trading account initialization) 
         plus ongoing transaction fees. We recommend depositing at least 0.1 SOL to cover 
-        setup and many trades.
+        setup and many trades. Flash bots each run from their own wallet, so they need a little 
+        extra SOL (about 0.025 SOL per bot) the first time you create them — see Supported Exchanges below.
       </Paragraph>
       <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-4">
         <div className="flex items-center justify-between">
@@ -286,6 +287,28 @@ function FundingSection() {
       <Paragraph>
         USDC is the trading currency. Your USDC is held in your agent wallet 
         and can be allocated to individual bots or your trading account.
+      </Paragraph>
+
+      <SubHeading>Deposit Any Token (Auto-Swap to USDC)</SubHeading>
+      <Paragraph>
+        You don't need to already hold USDC. QuantumVault accepts almost any Solana asset — 
+        SOL or any SPL token in your wallet — and automatically converts it to USDC for trading.
+      </Paragraph>
+      <StepList steps={[
+        'Open the deposit dialog and switch to the "Any asset" tab — your wallet\'s tokens are listed with their balances and dollar values.',
+        'Pick a token and amount. A live quote shows how much USDC you\'ll receive, including price impact.',
+        'Sign one transfer in your wallet to move the token into your bot wallet.',
+        'QuantumVault converts it to USDC for you automatically, routed through Jupiter for the best available price.',
+      ]} />
+      <Alert type="info">
+        Swaps use a 1% slippage limit by default, and you'll be warned before confirming if a token's 
+        price impact is high (over 3%). When you deposit SOL, a small amount (~0.02 SOL) is kept back to 
+        cover network fees.
+      </Alert>
+      <Paragraph>
+        If the transfer goes through but the conversion doesn't, your token stays safely in your bot 
+        wallet — just tap <strong className="text-white/90">Retry conversion</strong> in the deposit dialog 
+        to finish the swap. No funds are lost.
       </Paragraph>
       
       <SubHeading>Capital Flow</SubHeading>
@@ -316,24 +339,40 @@ function FundingSection() {
         create a bot (Pacifica is the default). Minimum transfer amounts and withdrawal fees are set by each 
         exchange, not by QuantumVault:
       </Paragraph>
-      <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-4 space-y-2">
-        <div className="flex items-center justify-between">
-          <span className="text-white font-medium">Pacifica <span className="text-white/40 text-sm">(default)</span></span>
-          <span className="text-white/60">$10 min transfer · $1 withdrawal fee</span>
+      <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-4 space-y-3">
+        <div>
+          <div className="flex items-center justify-between">
+            <span className="text-white font-medium">Pacifica <span className="text-white/40 text-sm">(default)</span></span>
+            <span className="text-white/60">$10 min transfer · $1 withdrawal fee</span>
+          </div>
+          <p className="text-white/50 text-sm mt-1">Isolated subaccount under your agent wallet · needs ~0.005 SOL to create a bot</p>
         </div>
-        <div className="flex items-center justify-between">
-          <span className="text-white font-medium">Flash</span>
-          <span className="text-white/60">0.1 USDC min · no withdrawal fee</span>
+        <div>
+          <div className="flex items-center justify-between">
+            <span className="text-white font-medium">Flash</span>
+            <span className="text-white/60">0.1 USDC min · no withdrawal fee</span>
+          </div>
+          <p className="text-white/50 text-sm mt-1">Isolated per-bot wallet · needs ~0.025 SOL to create a bot (reclaimed when you delete it)</p>
         </div>
-        <div className="flex items-center justify-between">
-          <span className="text-white font-medium">Drift</span>
-          <span className="text-white/60">0.1 USDC min · no withdrawal fee</span>
+        <div>
+          <div className="flex items-center justify-between">
+            <span className="text-white font-medium">Drift <span className="text-white/40 text-sm">(legacy)</span></span>
+            <span className="text-white/60">0.1 USDC min · no withdrawal fee</span>
+          </div>
+          <p className="text-white/50 text-sm mt-1">Existing Drift bots keep running, but you can no longer create new ones</p>
         </div>
       </div>
       <Paragraph>
         Pacifica is the only exchange with a real protocol minimum ($10) and an on-chain withdrawal fee ($1), 
         so QuantumVault batches small amounts into larger withdrawals. Flash and Drift transfers carry no fee 
         and only a small 0.1 USDC floor.
+      </Paragraph>
+      <Paragraph>
+        <strong className="text-white/90">Which should you pick?</strong> Pacifica is the simple default. 
+        Flash is better for smaller amounts (no $10 floor) and frequent profit-taking (no withdrawal fee), and 
+        each Flash bot runs from its own wallet that you can always recover from your 24-word recovery phrase — 
+        it just needs a bit more SOL up front to create. Creators who publish Flash bots are also paid their 
+        profit share immediately as trades close, rather than in a later batch.
       </Paragraph>
     </div>
   );
@@ -354,6 +393,15 @@ function CreatingBotsSection() {
       
       <SubHeading>Bot Settings</SubHeading>
       <div className="space-y-4 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2">Exchange</h4>
+          <p className="text-white/60 text-sm">
+            Choose where the bot trades — <strong className="text-white/80">Pacifica</strong> (default) or 
+            <strong className="text-white/80"> Flash</strong>. Your choice sets the fees, minimums, and how much 
+            SOL is needed to create the bot (see Funding → Supported Exchanges). If your agent wallet is low on 
+            SOL, QuantumVault prompts you to top up before the bot can be created.
+          </p>
+        </div>
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
           <h4 className="font-medium text-white mb-2">Market</h4>
           <p className="text-white/60 text-sm">
@@ -381,6 +429,12 @@ function CreatingBotsSection() {
           </p>
         </div>
       </div>
+
+      <Alert type="warning">
+        On Flash, very small positions can be too small to attach automatic take-profit / stop-loss orders. 
+        If you rely on TP/SL, give the bot enough capital (and leverage) so each position clears Flash's 
+        minimum size.
+      </Alert>
       
       {/* Automated Capital Management Intro */}
       <SubHeading>Automated Capital Management</SubHeading>
