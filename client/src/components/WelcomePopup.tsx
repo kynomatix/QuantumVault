@@ -17,6 +17,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent } from '@/components/ui/card';
+import { DepositPanel } from '@/components/DepositPanel';
 import { useToast } from '@/hooks/use-toast';
 import { useTokenBalance } from '@/hooks/useTokenBalance';
 import { useExecutionAuthorization } from '@/hooks/useExecutionAuthorization';
@@ -46,9 +47,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
   
   // Step 2: USDC deposit, Step 3: Execution authorization
   const [currentStep, setCurrentStep] = useState<'sol' | 'usdc' | 'execution' | 'complete'>('sol');
-  const [usdcDepositAmount, setUsdcDepositAmount] = useState('');
   const [isDepositingUsdc, setIsDepositingUsdc] = useState(false);
-  const [usdcProcessingStep, setUsdcProcessingStep] = useState<'idle' | 'preparing' | 'signing' | 'confirming' | 'finalizing'>('idle');
   const [usdcFunded, setUsdcFunded] = useState(false);
 
   const fetchUserSolBalance = async () => {
@@ -208,92 +207,14 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
     }
   };
 
-  const setMaxUsdcDeposit = () => {
-    if (usdcBalance !== null) {
-      setUsdcDepositAmount(usdcBalance.toString());
-    }
-  };
-
-  const handleUsdcDeposit = async () => {
-    const amount = parseFloat(usdcDepositAmount);
-    if (!amount || amount <= 0) {
-      toast({ title: 'Enter a valid amount', variant: 'destructive' });
-      return;
-    }
-
-    if (!wallet.publicKey || !wallet.signTransaction) {
-      toast({ title: 'Wallet not connected', variant: 'destructive' });
-      return;
-    }
-
-    if (usdcBalance !== null && amount > usdcBalance) {
-      toast({ title: 'Insufficient USDC balance', variant: 'destructive' });
-      return;
-    }
-
-    setIsDepositingUsdc(true);
-    setUsdcProcessingStep('preparing');
-    try {
-      const response = await fetch('/api/agent/deposit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount }),
-        credentials: 'include',
-      });
-
-      if (!response.ok) {
-        const error = await safeResponseJson(response);
-        throw new Error(error.error || 'USDC deposit failed');
-      }
-
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await safeResponseJson(response);
-      
-      setUsdcProcessingStep('signing');
-      const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
-      const signedTx = await wallet.signTransaction(transaction);
-      
-      setUsdcProcessingStep('confirming');
-      const signature = await connection.sendRawTransaction(signedTx.serialize());
-      
-      await confirmTransactionWithFallback(connection, {
-        signature,
-        blockhash,
-        lastValidBlockHeight,
-      });
-
-      setUsdcProcessingStep('finalizing');
-      
-      // Confirm deposit on backend
-      await fetch('/api/agent/confirm-deposit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount, txSignature: signature }),
-        credentials: 'include',
-      });
-      
-      toast({ 
-        title: 'USDC Deposit Complete!', 
-        description: message || `Deposited ${amount} USDC to your trading account`
-      });
-      
-      setUsdcFunded(true);
-      const status = await refetchStatus();
-      if (!status?.executionEnabled) {
-        setCurrentStep('execution');
-      } else {
-        setCurrentStep('complete');
-        setDepositSuccess(true);
-      }
-    } catch (error: any) {
-      console.error('USDC deposit error:', error);
-      toast({ 
-        title: 'USDC Deposit Failed', 
-        description: error.message || 'Please try again',
-        variant: 'destructive' 
-      });
-    } finally {
-      setIsDepositingUsdc(false);
-      setUsdcProcessingStep('idle');
+  const handleDepositComplete = async () => {
+    setUsdcFunded(true);
+    const status = await refetchStatus();
+    if (!status?.executionEnabled) {
+      setCurrentStep('execution');
+    } else {
+      setCurrentStep('complete');
+      setDepositSuccess(true);
     }
   };
 
@@ -321,15 +242,6 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
     setCurrentStep('complete');
     setDepositSuccess(true);
     onDepositComplete();
-  };
-
-  const getUsdcStepStatus = (stepId: string) => {
-    const stepOrder = ['preparing', 'signing', 'confirming', 'finalizing'];
-    const currentIndex = stepOrder.indexOf(usdcProcessingStep);
-    const stepIndex = stepOrder.indexOf(stepId);
-    if (stepIndex < currentIndex) return 'complete';
-    if (stepIndex === currentIndex) return 'active';
-    return 'pending';
   };
 
   const processingSteps = [
@@ -430,97 +342,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
     );
   }
 
-  // USDC Deposit Processing Screen
-  if (isDepositingUsdc) {
-    const usdcProcessingSteps = [
-      { id: 'preparing', label: 'Preparing USDC transfer', icon: Shield },
-      { id: 'signing', label: 'Sign with your wallet', icon: Wallet },
-      { id: 'confirming', label: 'Confirming on Solana', icon: Zap },
-      { id: 'finalizing', label: 'Finalizing deposit', icon: CheckCircle2 },
-    ];
-    
-    return (
-      <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-        <DialogContent className="sm:max-w-md" data-testid="dialog-usdc-processing">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <DollarSign className="w-5 h-5 text-primary" />
-              Depositing USDC
-            </DialogTitle>
-            <DialogDescription>
-              Please wait while we transfer USDC to your trading account...
-            </DialogDescription>
-          </DialogHeader>
-          
-          <div className="py-6 space-y-4">
-            {usdcProcessingSteps.map((step, index) => {
-              const status = getUsdcStepStatus(step.id);
-              const Icon = step.icon;
-              return (
-                <motion.div
-                  key={step.id}
-                  initial={{ opacity: 0, x: -20 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: index * 0.1 }}
-                  className={`flex items-center gap-4 p-3 rounded-lg transition-colors ${
-                    status === 'active' 
-                      ? 'bg-primary/10 border border-primary/30' 
-                      : status === 'complete'
-                        ? 'bg-green-500/10 border border-green-500/30'
-                        : 'bg-muted/30'
-                  }`}
-                >
-                  <div className={`w-10 h-10 rounded-full flex items-center justify-center ${
-                    status === 'active'
-                      ? 'bg-primary/20'
-                      : status === 'complete'
-                        ? 'bg-green-500/20'
-                        : 'bg-muted/50'
-                  }`}>
-                    {status === 'active' ? (
-                      <Loader2 className="w-5 h-5 text-primary animate-spin" />
-                    ) : status === 'complete' ? (
-                      <Check className="w-5 h-5 text-green-500" />
-                    ) : (
-                      <Icon className={`w-5 h-5 ${status === 'pending' ? 'text-muted-foreground' : 'text-primary'}`} />
-                    )}
-                  </div>
-                  <div className="flex-1">
-                    <p className={`text-sm font-medium ${
-                      status === 'active' 
-                        ? 'text-primary' 
-                        : status === 'complete'
-                          ? 'text-green-500'
-                          : 'text-muted-foreground'
-                    }`}>
-                      {step.label}
-                    </p>
-                  </div>
-                  {status === 'active' && (
-                    <motion.div
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      className="flex items-center gap-1"
-                    >
-                      <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse" />
-                      <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse" style={{ animationDelay: '0.2s' }} />
-                      <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse" style={{ animationDelay: '0.4s' }} />
-                    </motion.div>
-                  )}
-                </motion.div>
-              );
-            })}
-          </div>
-
-          <div className="text-center text-xs text-muted-foreground">
-            <p>This may take up to 30 seconds. Please don't close this window.</p>
-          </div>
-        </DialogContent>
-      </Dialog>
-    );
-  }
-
-  // USDC Deposit Form Screen (Step 2)
+  // Fund Account Screen (Step 2) — deposit USDC or any wallet token (auto-swapped to USDC)
   if (currentStep === 'usdc') {
     return (
       <Dialog open={isOpen} onOpenChange={handleOpenChange}>
@@ -531,7 +353,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
               Fund Your Trading Account
             </DialogTitle>
             <DialogDescription>
-              Deposit USDC to start trading. Your SOL deposit for transaction fees is complete.
+              Deposit USDC — or any token in your wallet and we'll convert it to USDC automatically. Your SOL deposit for transaction fees is complete.
             </DialogDescription>
           </DialogHeader>
 
@@ -550,63 +372,15 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
               </CardContent>
             </Card>
 
-            <Card className="border-primary/30 bg-primary/5">
-              <CardContent className="pt-4">
-                <div className="flex items-start gap-3">
-                  <DollarSign className="w-5 h-5 text-primary mt-0.5" />
-                  <div className="text-sm">
-                    <p className="font-medium text-primary mb-1">Deposit USDC for Trading</p>
-                    <p className="text-muted-foreground">
-                      USDC is used as collateral for your perpetual futures trading. Deposit funds to start trading.
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="text-sm font-medium">Deposit USDC</label>
-                <span className="text-xs text-muted-foreground">
-                  Available: {usdcLoading ? '...' : `${(usdcBalance ?? 0).toFixed(2)} USDC`}
-                </span>
-              </div>
-              <div className="flex gap-2">
-                <Input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  placeholder="100"
-                  value={usdcDepositAmount}
-                  onChange={(e) => setUsdcDepositAmount(e.target.value)}
-                  className="flex-1"
-                  data-testid="input-usdc-amount"
-                />
-                <Button 
-                  variant="outline" 
-                  onClick={setMaxUsdcDeposit}
-                  disabled={!usdcBalance || usdcBalance <= 0}
-                  data-testid="button-max-usdc"
-                >
-                  Max
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Minimum recommended: 10 USDC for testing strategies
-              </p>
-            </div>
+            <DepositPanel
+              active
+              usdcBalance={usdcBalance}
+              onComplete={handleDepositComplete}
+              onProcessingChange={setIsDepositingUsdc}
+            />
           </div>
 
           <DialogFooter className="flex-col gap-2 sm:flex-col">
-            <Button
-              onClick={handleUsdcDeposit}
-              disabled={isDepositingUsdc || !usdcDepositAmount || parseFloat(usdcDepositAmount) <= 0}
-              className="w-full bg-gradient-to-r from-primary to-accent"
-              data-testid="button-deposit-usdc"
-            >
-              <DollarSign className="w-4 h-4 mr-2" />
-              Deposit USDC
-            </Button>
             <Button
               variant="ghost"
               onClick={handleSkipUsdc}
