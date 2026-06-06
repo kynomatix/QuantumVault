@@ -81,42 +81,72 @@ function getBotSubaccountContext(bot: TradingBot): BotSubaccountContext | null {
 async function _resolveBotSubaccountSecretKey(
   botCtx: BotSubaccountContext,
 ): Promise<{ secretKey: Uint8Array; cleanup: () => void }> {
-  const { getUmkForWebhook, decryptBotSubaccountKey } = await import('./session-v3');
-  const umkResult = await getUmkForWebhook(botCtx.walletAddress);
-  if (!umkResult) {
-    throw new Error(
-      `Cannot decrypt bot subaccount key for ${botCtx.botId.slice(0, 8)}...: ` +
-      `no active execution authorization for owner ${botCtx.walletAddress.slice(0, 8)}...`,
-    );
+  const { getUmkForWebhook, decryptBotSubaccountKey, healExecutionUmkFromStorage } = await import('./session-v3');
+
+  const bot = await storage.getTradingBotById(botCtx.botId);
+  if (!bot) {
+    throw new Error(`Bot ${botCtx.botId} not found during signing-key resolution`);
   }
-  try {
-    const bot = await storage.getTradingBotById(botCtx.botId);
-    if (!bot) {
-      throw new Error(`Bot ${botCtx.botId} not found during signing-key resolution`);
-    }
-    const decrypted = await decryptBotSubaccountKey(
-      {
-        id: bot.id,
-        walletAddress: bot.walletAddress,
-        protocolSubaccountId: bot.protocolSubaccountId,
-        botSubaccountKeyEncrypted: bot.botSubaccountKeyEncrypted,
-        botSubaccountKeyEncryptedV3: bot.botSubaccountKeyEncryptedV3,
-        // Phase 4b (Flash agent-HD wallets): enable seed re-derivation when the
-        // encrypted cache is missing/unusable.
-        derivationIndex: bot.derivationIndex,
-        derivationPathVersion: bot.derivationPathVersion,
-      },
-      umkResult.umk,
-    );
-    if (!decrypted) {
+  const botKeyArgs = {
+    id: bot.id,
+    walletAddress: bot.walletAddress,
+    protocolSubaccountId: bot.protocolSubaccountId,
+    botSubaccountKeyEncrypted: bot.botSubaccountKeyEncrypted,
+    botSubaccountKeyEncryptedV3: bot.botSubaccountKeyEncryptedV3,
+    // Phase 4b (Flash agent-HD wallets): enable seed re-derivation when the
+    // encrypted cache is missing/unusable.
+    derivationIndex: bot.derivationIndex,
+    derivationPathVersion: bot.derivationPathVersion,
+  };
+
+  // One decrypt attempt against a freshly-fetched execution-wrapped UMK. Returns
+  // the decrypted key, or null when the execution copy can't unlock the bot key.
+  const attempt = async (): Promise<{ secretKey: Uint8Array; cleanup: () => void } | null> => {
+    const umkResult = await getUmkForWebhook(botCtx.walletAddress);
+    if (!umkResult) {
       throw new Error(
-        `Failed to decrypt bot subaccount key for ${botCtx.botId.slice(0, 8)}... (no usable ciphertext or AAD mismatch)`,
+        `Cannot decrypt bot subaccount key for ${botCtx.botId.slice(0, 8)}...: ` +
+        `no active execution authorization for owner ${botCtx.walletAddress.slice(0, 8)}...`,
       );
     }
-    return decrypted;
-  } finally {
-    umkResult.cleanup();
+    try {
+      return await decryptBotSubaccountKey(botKeyArgs, umkResult.umk);
+    } finally {
+      umkResult.cleanup();
+    }
+  };
+
+  let decrypted = await attempt();
+  if (!decrypted) {
+    // The execution-wrapped UMK copy (read by getUmkForWebhook) can drift out of
+    // sync with the canonical UMK — e.g. a historical key migration regenerated
+    // the canonical UMK but left umkEncryptedForExecution stale. Bots WITHOUT a
+    // seed fallback (Pacifica external-key subaccounts) then can't be unlocked by
+    // the webhook/background path until the owner next logs in — breaking the
+    // "set and forget" contract. Heal the execution copy server-side from the
+    // storage-wrapped canonical UMK (no user login required) and retry ONCE.
+    // Fail-safe + CAS-gated inside; a no-op when execution is disabled, the
+    // wallet is umk_version 1, or the canonical copy itself won't decrypt.
+    console.warn(
+      `[Security v3] Bot subaccount key decrypt failed for ${botCtx.botId.slice(0, 8)}...; ` +
+      `attempting server-side execution-UMK heal for owner ${botCtx.walletAddress.slice(0, 8)}... and retrying.`,
+    );
+    await healExecutionUmkFromStorage(botCtx.walletAddress);
+    decrypted = await attempt();
+    if (decrypted) {
+      console.warn(
+        `[Security v3] Execution-UMK heal recovered bot ${botCtx.botId.slice(0, 8)}... ` +
+        `for owner ${botCtx.walletAddress.slice(0, 8)}... (stale execution copy re-synced; no login needed).`,
+      );
+    }
   }
+
+  if (!decrypted) {
+    throw new Error(
+      `Failed to decrypt bot subaccount key for ${botCtx.botId.slice(0, 8)}... (no usable ciphertext or AAD mismatch)`,
+    );
+  }
+  return decrypted;
 }
 
 /**
