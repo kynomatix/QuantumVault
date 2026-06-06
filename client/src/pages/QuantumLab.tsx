@@ -664,7 +664,7 @@ export default function QuantumLab() {
                   const res = await apiRequest("POST", `/api/lab/runs/${completedRunId}/refine`, {});
                   const refineData = await safeResponseJson(res);
                   if (refineData.queued) {
-                    toast({ title: "Auto-refine queued", description: `Queued at position #${refineData.queueOrder}` });
+                    toast({ title: refineData.yourRunNumber ? `Auto-refine queued (run #${refineData.yourRunNumber})` : "Auto-refine queued", description: queueWaitText(refineData.jobsAhead) });
                     queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
                     if (refineData.runId) {
                       pollForQueuedRun(refineData.runId);
@@ -695,7 +695,7 @@ export default function QuantumLab() {
                         if (jobData.jobId) {
                           setActiveRunId(nextRun.id);
                           setActiveJobId(jobData.jobId);
-                          toast({ title: "Next run started", description: `Run #${nextRun.id} is now active.` });
+                          toast({ title: "Next run started", description: nextRun.yourRunNumber ? `Your run #${nextRun.yourRunNumber} is now active.` : "Your next run is now active." });
                           return;
                         }
                       }
@@ -1737,7 +1737,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
       });
       const data = await safeResponseJson(res);
       if (data.queued) {
-        toast({ title: "Run queued", description: `Position #${data.queueOrder} in queue` });
+        toast({ title: data.yourRunNumber ? `Run #${data.yourRunNumber} queued` : "Run queued", description: queueWaitText(data.jobsAhead) });
         queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
         return;
       }
@@ -2307,6 +2307,9 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
           {queueItems.length > 0 && (
             <div className="space-y-2">
               <p className="text-xs font-medium text-white/40 uppercase tracking-wider">Queued</p>
+              <p className="text-[11px] text-white/30 leading-snug" data-testid="text-queue-note">
+                The lab runs one optimization at a time for everyone, so your runs start as soon as the ones ahead finish.
+              </p>
               <div className="space-y-2">
                 {queueItems.map((item: any, index: number) => (
                   <div
@@ -2367,6 +2370,17 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
       </SheetContent>
     </Sheet>
   );
+}
+
+// Friendly, call-center-style wait message for queued lab runs. The lab runs
+// one optimization at a time across all users, so a user's job may sit behind
+// others. We tell them how many are ahead instead of showing a global pool id.
+function queueWaitText(jobsAhead?: number): string {
+  if (typeof jobsAhead !== "number" || jobsAhead <= 0) {
+    return "You're next — it'll start as soon as the lab is free.";
+  }
+  const word = jobsAhead === 1 ? "job" : "jobs";
+  return `${jobsAhead} ${word} ahead of you. The lab runs one optimization at a time, so there may be a short wait.`;
 }
 
 const TIMEFRAME_ORDER: Record<string, number> = LAB_AVAILABLE_TIMEFRAMES.reduce((acc, tf, i) => {
@@ -2663,7 +2677,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress }: { onSelec
     onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/lab/runs"] });
       queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
-      toast({ title: "Run queued for retry", description: `New run #${data.runId} created` });
+      toast({ title: data.yourRunNumber ? `Run #${data.yourRunNumber} queued for retry` : "Run queued for retry", description: queueWaitText(data.jobsAhead) });
     },
     onError: (err: any) => {
       toast({ title: "Retry failed", description: err.message, variant: "destructive" });
@@ -2984,7 +2998,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
       });
       const data = await safeResponseJson(res);
       if (data.queued) {
-        toast({ title: "Refine queued", description: `${ticker} ${timeframe} queued at position #${data.queueOrder}` });
+        toast({ title: data.yourRunNumber ? `Refine queued (run #${data.yourRunNumber})` : "Refine queued", description: `${ticker} ${timeframe} — ${queueWaitText(data.jobsAhead)}` });
         queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
         if (data.runId) onRefine?.("", data.runId, true);
         return;
@@ -3181,7 +3195,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
           </Button>
           <div>
             <h2 className="text-lg font-semibold text-white" data-testid="text-history-title">
-              Run #{runId} Results
+              {(run as any)?.yourRunNumber ? `Run #${(run as any).yourRunNumber} Results` : "Run Results"}
               {strategy && <span className="ml-2 text-sm font-normal text-white/50">— {strategy.name}</span>}
               {run && (run.status === "paused" || run.status === "failed") && (
                 <Badge className="ml-2 text-[10px] bg-indigo-500/20 text-indigo-400 align-middle">Partial</Badge>
@@ -3200,7 +3214,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
         <div className="flex items-center gap-2 flex-wrap">
           <Button variant="secondary" size="sm" onClick={async () => {
             const ok = await confirm({
-              title: `Delete Run #${runId}?`,
+              title: (run as any)?.yourRunNumber ? `Delete Run #${(run as any).yourRunNumber}?` : "Delete this run?",
               description: "This will permanently remove the run and all of its results. This cannot be undone.",
               confirmText: "Delete Run",
               variant: "destructive",
@@ -3964,7 +3978,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
       });
       const data = await safeResponseJson(res);
       if (data.queued) {
-        toast({ title: "Refine queued", description: `${ticker} ${timeframe} queued at position #${data.queueOrder}` });
+        toast({ title: data.yourRunNumber ? `Refine queued (run #${data.yourRunNumber})` : "Refine queued", description: `${ticker} ${timeframe} — ${queueWaitText(data.jobsAhead)}` });
         queryClient.invalidateQueries({ queryKey: ["/api/lab/queue"] });
         if (data.runId) onRefine?.("", data.runId, true);
         return;

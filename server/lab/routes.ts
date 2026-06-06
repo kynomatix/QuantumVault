@@ -463,7 +463,10 @@ export function registerLabRoutes(app: Express): void {
     try {
       const run = await verifyRunOwnership(req, res);
       if (!run) return;
-      res.json(run);
+      const yourRunNumber = run.userId
+        ? await labStorage.getUserRunNumber(run.userId, run.id)
+        : null;
+      res.json({ ...run, yourRunNumber });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1673,7 +1676,9 @@ export function registerLabRoutes(app: Express): void {
         }).where(eq(labOptimizationRuns.id, run.id));
         console.log(`[QuantumLab] Queued new run ${run.id} (order: ${queueOrder})`);
         setTimeout(() => pumpQueue(), 500);
-        return res.json({ queued: true, runId: run.id, queueOrder });
+        const jobsAhead = await labStorage.getJobsAheadCount(queueOrder);
+        const yourRunNumber = walletAddress ? await labStorage.getUserRunNumber(walletAddress, run.id) : null;
+        return res.json({ queued: true, runId: run.id, queueOrder, jobsAhead, yourRunNumber });
       }
 
       const job = labStorage.createJob(config, { hasActiveWorker: !!activeWorker });
@@ -1794,7 +1799,9 @@ export function registerLabRoutes(app: Express): void {
           }).where(eq(labOptimizationRuns.id, run.id));
           console.log(`[QuantumLab] Auto-queued run ${run.id} (order: ${queueOrder})`);
           setTimeout(() => pumpQueue(), 500);
-          return res.json({ queued: true, runId: run.id, queueOrder });
+          const jobsAhead = await labStorage.getJobsAheadCount(queueOrder);
+          const yourRunNumber = walletAddress ? await labStorage.getUserRunNumber(walletAddress, run.id) : null;
+          return res.json({ queued: true, runId: run.id, queueOrder, jobsAhead, yourRunNumber });
         } catch (queueErr: any) {
           console.log(`[QuantumLab] Auto-queue fallback failed: ${queueErr.message}`);
         }
@@ -1997,7 +2004,9 @@ export function registerLabRoutes(app: Express): void {
       }).where(eq(labOptimizationRuns.id, newRun.id));
       console.log(`[QuantumLab] Retry: created run ${newRun.id} from failed run ${runId} (order: ${queueOrder})`);
       setTimeout(() => pumpQueue(), 500);
-      res.json({ queued: true, runId: newRun.id, queueOrder, sourceRunId: runId });
+      const retryJobsAhead = await labStorage.getJobsAheadCount(queueOrder);
+      const retryYourRunNumber = await labStorage.getUserRunNumber(walletAddress, newRun.id);
+      res.json({ queued: true, runId: newRun.id, queueOrder, sourceRunId: runId, jobsAhead: retryJobsAhead, yourRunNumber: retryYourRunNumber });
     } catch (err: any) {
       console.error(`[QuantumLab] Retry failed:`, err);
       res.status(500).json({ error: err.message });
@@ -2152,7 +2161,9 @@ export function registerLabRoutes(app: Express): void {
         }).where(eq(labOptimizationRuns.id, newRun.id));
         console.log(`[QuantumLab] Queued refine run ${newRun.id} for ${ticker} ${timeframe} (order: ${queueOrder})`);
         setTimeout(() => pumpQueue(), 500);
-        return res.json({ queued: true, runId: newRun.id, queueOrder });
+        const refineJobsAhead = await labStorage.getJobsAheadCount(queueOrder);
+        const refineYourRunNumber = await labStorage.getUserRunNumber(walletAddress, newRun.id);
+        return res.json({ queued: true, runId: newRun.id, queueOrder, jobsAhead: refineJobsAhead, yourRunNumber: refineYourRunNumber });
       }
 
       retryGeneration++;
@@ -2303,7 +2314,10 @@ export function registerLabRoutes(app: Express): void {
           }).where(eq(labOptimizationRuns.id, queuedRun.id));
           console.log(`[QuantumLab] Auto-queued refine run ${queuedRun.id} for ${refineTicker} ${refineTimeframe} (order: ${queueOrder})`);
           setTimeout(() => pumpQueue(), 500);
-          return res.json({ queued: true, runId: queuedRun.id, queueOrder });
+          const refineFallbackWallet = (req as any).walletAddress;
+          const refineFallbackJobsAhead = await labStorage.getJobsAheadCount(queueOrder);
+          const refineFallbackYourRunNumber = refineFallbackWallet ? await labStorage.getUserRunNumber(refineFallbackWallet, queuedRun.id) : null;
+          return res.json({ queued: true, runId: queuedRun.id, queueOrder, jobsAhead: refineFallbackJobsAhead, yourRunNumber: refineFallbackYourRunNumber });
         } catch (queueErr: any) {
           console.log(`[QuantumLab] Auto-queue refine fallback failed: ${queueErr.message}`);
         }
@@ -2365,6 +2379,7 @@ export function registerLabRoutes(app: Express): void {
         strategyName: strategyNames[ar.strategyId] || null,
         lastHeartbeat,
         createdAtMs,
+        yourRunNumber: await labStorage.getUserRunNumber(walletAddress, ar.id),
       };
     }
     return { items, activeRun };

@@ -87,6 +87,8 @@ export interface ILabStorage {
   hasActiveOrPausedRun(): Promise<boolean>;
   getHeatmapCells(walletAddress: string, strategyId?: number): Promise<{ cells: any[]; runsTotal: number; strategyIds: number[] }>;
   getCompletedRunCount(walletAddress: string): Promise<number>;
+  getJobsAheadCount(queueOrder: number): Promise<number>;
+  getUserRunNumber(walletAddress: string, runId: number): Promise<number>;
   deduplicateStrategyResults(strategyId: number, protectRunId?: number): Promise<number>;
 }
 
@@ -895,6 +897,30 @@ export class LabDatabaseStorage implements ILabStorage {
       (j) => j.progress.status !== "complete" && j.progress.status !== "error"
     );
     return activeJobs.length > 0;
+  }
+
+  // How many jobs (across ALL users) will be processed before a queued run with
+  // this queueOrder. The lab runs one optimization at a time platform-wide, so
+  // this = the currently active/paused run (if any) + queued runs ahead of it.
+  // Used to show users a friendly "N jobs ahead of you" wait estimate.
+  async getJobsAheadCount(queueOrder: number): Promise<number> {
+    const result = await db.select({ cnt: sql<number>`COUNT(*)::int` })
+      .from(labOptimizationRuns)
+      .where(or(
+        inArray(labOptimizationRuns.status, ["running", "paused"]),
+        and(eq(labOptimizationRuns.status, "queued"), sql`${labOptimizationRuns.queueOrder} < ${queueOrder}`),
+      )!);
+    return result[0]?.cnt ?? 0;
+  }
+
+  // The user's OWN sequential number for a run (their 1st run = 1, 2nd = 2, ...).
+  // Counts the user's runs created up to and including this one, so the number a
+  // user sees reflects their own activity, not the global pool of run ids.
+  async getUserRunNumber(walletAddress: string, runId: number): Promise<number> {
+    const result = await db.select({ cnt: sql<number>`COUNT(*)::int` })
+      .from(labOptimizationRuns)
+      .where(and(eq(labOptimizationRuns.userId, walletAddress), sql`${labOptimizationRuns.id} <= ${runId}`)!);
+    return result[0]?.cnt ?? 0;
   }
 
   async getHeatmapCells(walletAddress: string, strategyId?: number): Promise<{ cells: any[]; runsTotal: number; strategyIds: number[] }> {
