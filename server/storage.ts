@@ -2430,13 +2430,27 @@ export class DatabaseStorage implements IStorage {
   }
 
   async initWalletUmkIfAbsent(address: string, userSalt: string, encryptedUserMasterKey: string): Promise<boolean> {
+    // Atomic first-writer-wins UMK init. This is an UPSERT (not a plain UPDATE)
+    // because a brand-new wallet has NO row yet at /api/auth/verify time — the
+    // nonce + signature-verify steps never create one. A plain UPDATE would
+    // affect 0 rows for a first-time signup, the caller would read back no UMK,
+    // and initializeWalletSecurity would throw "concurrent UMK init lost but DB
+    // has no UMK" — bricking every new account.
+    //
+    // ON CONFLICT semantics preserve the original race guard:
+    //   - row absent           -> INSERT          -> rowCount 1 -> won
+    //   - row present, salt NULL-> DO UPDATE match -> rowCount 1 -> won
+    //   - row present, salt set -> WHERE fails     -> rowCount 0 -> lost
+    // Postgres serializes the conflict, so two concurrent first-time inserts
+    // resolve to exactly one winner; the loser sees salt set and re-derives.
     const result = await db.execute(sql`
-      UPDATE wallets
-         SET user_salt = ${userSalt},
-             encrypted_user_master_key = ${encryptedUserMasterKey},
+      INSERT INTO wallets (address, user_salt, encrypted_user_master_key, umk_version)
+      VALUES (${address}, ${userSalt}, ${encryptedUserMasterKey}, 3)
+      ON CONFLICT (address) DO UPDATE
+         SET user_salt = EXCLUDED.user_salt,
+             encrypted_user_master_key = EXCLUDED.encrypted_user_master_key,
              umk_version = 3
-       WHERE address = ${address}
-         AND user_salt IS NULL
+       WHERE wallets.user_salt IS NULL
     `);
     return (result.rowCount ?? 0) > 0;
   }
