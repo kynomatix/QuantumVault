@@ -790,7 +790,7 @@ export function WelcomePopup({ isOpen, onClose, agentPublicKey, onDepositComplet
                 <div className="text-sm">
                   <p className="font-medium text-orange-500 mb-1">Why SOL is Required</p>
                   <p className="text-muted-foreground">
-                    A small amount of SOL covers the Solana network fees for USDC token transfers — depositing funds and moving collateral between bot accounts. Trade execution itself does not consume SOL.
+                    A small amount of SOL covers Solana network fees — depositing funds, moving collateral between bot accounts, and, depending on the exchange, creating bots and executing trades. The exact amount needed varies by the exchange your bot runs on.
                   </p>
                 </div>
               </div>
