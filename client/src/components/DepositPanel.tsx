@@ -211,7 +211,7 @@ export function DepositPanel({
     try {
       const response = await fetch('/api/agent/deposit', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...walletAuthHeaders() },
         body: JSON.stringify({ amount }),
         credentials: 'include',
       });
@@ -229,7 +229,7 @@ export function DepositPanel({
 
       await fetch('/api/agent/confirm-deposit', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...walletAuthHeaders() },
         body: JSON.stringify({ amount, txSignature: signature }),
         credentials: 'include',
       });
@@ -277,7 +277,7 @@ export function DepositPanel({
       setStatusText('Building deposit transaction...');
       const depRes = await fetch('/api/agent/deposit-token', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...walletAuthHeaders() },
         body: JSON.stringify({ mint: selected.mint, amountRaw }),
         credentials: 'include',
       });
@@ -316,7 +316,7 @@ export function DepositPanel({
     try {
       const swapRes = await fetch('/api/agent/swap-to-usdc', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...walletAuthHeaders() },
         body: JSON.stringify({ mint }),
         credentials: 'include',
       });
