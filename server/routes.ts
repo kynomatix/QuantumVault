@@ -1398,7 +1398,13 @@ async function settleAllPnl(
 }
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
-import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet } from "./agent-wallet";
+import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRaw, NATIVE_SOL_MINT } from "./agent-wallet";
+import { getBestQuote } from "./swap/index.js";
+import { getUserFungibleTokens } from "./swap/helius-tokens.js";
+
+const SWAP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const MAX_SWAP_SLIPPAGE_BPS = 500;
+const DEFAULT_SWAP_SLIPPAGE_BPS = 100;
 import { getAllPerpMarkets, getAllPerpMarketsForExchange, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMinOrderSizeUsd, getMarketMaxLeverage } from "./market-liquidity-service";
 import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable } from "./leverage-cache-service";
 import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification, type TradeNotification, buildDefaultInlineKeyboard } from "./notification-service";
@@ -7310,6 +7316,191 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     } catch (error) {
       console.error("Confirm deposit error:", error);
       res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Task #181: list the tokens held by the user's MAIN wallet so they can pick
+  // one to deposit-and-swap into USDC. Returns balances + metadata (Helius DAS).
+  app.get("/api/wallet/tokens", requireWallet, async (req, res) => {
+    try {
+      const tokens = await getUserFungibleTokens(req.walletAddress!);
+      res.json({ tokens });
+    } catch (error) {
+      console.error("List wallet tokens error:", error);
+      res.status(500).json({ error: "Failed to list wallet tokens" });
+    }
+  });
+
+  // Task #181: preview the USDC a deposited token would convert to. Pure quote,
+  // no side effects. amountRaw is the input token in raw base units.
+  app.get("/api/swap/quote", requireWallet, async (req, res) => {
+    try {
+      const inputMint = typeof req.query.inputMint === "string" ? req.query.inputMint : "";
+      const amountRaw = typeof req.query.amountRaw === "string" ? req.query.amountRaw : "";
+      if (!inputMint) {
+        return res.status(400).json({ error: "inputMint required" });
+      }
+      if (inputMint === SWAP_USDC_MINT) {
+        return res.status(400).json({ error: "USDC needs no swap — use the standard deposit" });
+      }
+      if (!/^\d+$/.test(amountRaw) || BigInt(amountRaw) <= BigInt(0)) {
+        return res.status(400).json({ error: "Valid amountRaw required" });
+      }
+
+      let slippageBps = DEFAULT_SWAP_SLIPPAGE_BPS;
+      if (typeof req.query.slippageBps === "string") {
+        const parsed = parseInt(req.query.slippageBps, 10);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          slippageBps = Math.min(parsed, MAX_SWAP_SLIPPAGE_BPS);
+        }
+      }
+
+      const quote = await getBestQuote({
+        inputMint,
+        outputMint: SWAP_USDC_MINT,
+        amountRaw,
+        slippageBps,
+      });
+      if (!quote) {
+        return res.status(404).json({ error: "No swap route available for this token" });
+      }
+
+      res.json({
+        provider: quote.provider,
+        inAmountRaw: quote.inAmountRaw,
+        outAmountRaw: quote.outAmountRaw,
+        usdcOut: Number(quote.outAmountRaw) / 1_000_000,
+        priceImpactPct: quote.priceImpactPct,
+        slippageBps: quote.slippageBps,
+      });
+    } catch (error) {
+      console.error("Swap quote error:", error);
+      res.status(500).json({ error: "Failed to fetch swap quote" });
+    }
+  });
+
+  // Task #181 step 1 of 2: build the USER-SIGNED transfer that moves the chosen
+  // token into the bot wallet. (Native SOL goes via the system-transfer builder.)
+  app.post("/api/agent/deposit-token", requireWallet, async (req, res) => {
+    try {
+      const { mint, amountRaw } = req.body;
+      if (!mint || typeof mint !== "string") {
+        return res.status(400).json({ error: "mint required" });
+      }
+      if (mint === SWAP_USDC_MINT) {
+        return res.status(400).json({ error: "Use the standard USDC deposit for USDC" });
+      }
+      if (typeof amountRaw !== "string" || !/^\d+$/.test(amountRaw) || BigInt(amountRaw) <= BigInt(0)) {
+        return res.status(400).json({ error: "Valid amountRaw required" });
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      if (!wallet.agentPublicKey) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      if (mint === NATIVE_SOL_MINT) {
+        const amountSol = Number(amountRaw) / 1_000_000_000;
+        const txData = await buildSolTransferToAgentTransaction(
+          req.walletAddress!,
+          wallet.agentPublicKey,
+          amountSol,
+        );
+        return res.json(txData);
+      }
+
+      const txData = await buildTokenTransferToAgentTransaction(
+        req.walletAddress!,
+        wallet.agentPublicKey,
+        mint,
+        amountRaw,
+      );
+      res.json(txData);
+    } catch (error: any) {
+      console.error("Build deposit-token tx error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // Task #181 step 2 of 2: SERVER-SIGNED swap of the just-deposited token →
+  // USDC inside the bot wallet. Fail-closed (verifies realized USDC delta) and
+  // records an equity event for the actual USDC received. Idempotent: a repeat
+  // call finds a zero token balance and reports nothing-to-swap.
+  app.post("/api/agent/swap-to-usdc", requireWallet, async (req, res) => {
+    try {
+      const { mint } = req.body;
+      if (!mint || typeof mint !== "string") {
+        return res.status(400).json({ error: "mint required" });
+      }
+      if (mint === SWAP_USDC_MINT) {
+        return res.status(400).json({ error: "Token is already USDC — no swap needed" });
+      }
+
+      let slippageBps = DEFAULT_SWAP_SLIPPAGE_BPS;
+      if (typeof req.body.slippageBps === "number" && req.body.slippageBps > 0) {
+        slippageBps = Math.min(Math.round(req.body.slippageBps), MAX_SWAP_SLIPPAGE_BPS);
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      const umkResult = await getUmkForWebhook(req.walletAddress!);
+      if (!umkResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      const agentKeyResult = await decryptAgentKeyStrict(req.walletAddress!, umkResult.umk, wallet, wallet.agentPublicKey);
+      if (!agentKeyResult) {
+        umkResult.cleanup();
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+
+      let result;
+      try {
+        result = await executeAgentSwapToUsdc(
+          wallet.agentPublicKey,
+          agentKeyResult.secretKey,
+          mint,
+          slippageBps,
+        );
+      } finally {
+        agentKeyResult.cleanup();
+        umkResult.cleanup();
+      }
+
+      if (!result.success || !result.signature || result.usdcReceived == null) {
+        return res.status(400).json({ error: result.error || "Swap failed" });
+      }
+
+      // Record the realized USDC as a deposit equity event, deduped by the swap
+      // signature so retries / reconcilers never double-count.
+      const existing = await storage.getEquityEventByTxSignature(result.signature);
+      if (!existing) {
+        await storage.createEquityEvent({
+          walletAddress: req.walletAddress!,
+          eventType: 'agent_deposit',
+          amount: String(result.usdcReceived),
+          txSignature: result.signature,
+          notes: 'Deposit via swap to USDC',
+        });
+      }
+
+      res.json({
+        success: true,
+        usdcReceived: result.usdcReceived,
+        signature: result.signature,
+        duplicate: !!existing,
+      });
+    } catch (error: any) {
+      console.error("Swap-to-USDC error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
     }
   });
 

@@ -28,6 +28,8 @@ import { Buffer } from 'buffer';
 import { Fuel } from 'lucide-react';
 import { confirmTransactionWithFallback } from '@/lib/solana-utils';
 import { EquityHistory } from '@/components/EquityHistory';
+import { DepositDialog } from '@/components/DepositDialog';
+import { Coins } from 'lucide-react';
 
 interface CapitalPool {
   mainAccountBalance: number;
@@ -59,9 +61,9 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
   const { connection } = useConnection();
   const { toast } = useToast();
 
-  const [depositAmount, setDepositAmount] = useState('');
   const [withdrawAmount, setWithdrawAmount] = useState('');
-  const [isDepositing, setIsDepositing] = useState(false);
+  const [depositDialogOpen, setDepositDialogOpen] = useState(false);
+  const [depositDialogTab, setDepositDialogTab] = useState<'usdc' | 'token'>('usdc');
   const [isWithdrawing, setIsWithdrawing] = useState(false);
   const [copiedAddress, setCopiedAddress] = useState(false);
   
@@ -172,84 +174,6 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
     }
   };
 
-  const handleDepositToAgent = async () => {
-    const amount = parseFloat(depositAmount);
-    if (!amount || amount <= 0) {
-      toast({ title: 'Enter a valid amount', variant: 'destructive' });
-      return;
-    }
-
-    if (!solanaWallet.publicKey || !solanaWallet.signTransaction) {
-      toast({ title: 'Wallet not connected', variant: 'destructive' });
-      return;
-    }
-
-    if (usdcBalance !== null && amount > usdcBalance) {
-      toast({ title: 'Insufficient USDC balance', variant: 'destructive' });
-      return;
-    }
-
-    setIsDepositing(true);
-    try {
-      const response = await fetch('/api/agent/deposit', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ amount }),
-        credentials: 'include',
-      });
-
-      if (!response.ok) {
-        const error = await safeResponseJson(response);
-        throw new Error(error.error || 'Deposit failed');
-      }
-
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await safeResponseJson(response);
-      
-      const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
-      const signedTx = await solanaWallet.signTransaction(transaction);
-      const signature = await connection.sendRawTransaction(signedTx.serialize());
-      
-      toast({ 
-        title: 'Transaction Submitted', 
-        description: 'Confirming deposit...'
-      });
-      
-      await confirmTransactionWithFallback(connection, {
-        signature,
-        blockhash,
-        lastValidBlockHeight,
-      });
-
-      await fetch('/api/agent/confirm-deposit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount, txSignature: signature }),
-        credentials: 'include',
-      });
-
-      toast({ 
-        title: 'Deposit Confirmed!', 
-        description: message || `Deposited ${amount} USDC to Agent Wallet`
-      });
-      
-      setDepositAmount('');
-      
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      await Promise.all([fetchUsdcBalance(), fetchAgentBalance()]);
-    } catch (error: any) {
-      console.error('Deposit error:', error);
-      toast({ 
-        title: 'Deposit Failed', 
-        description: error.message || 'Please try again',
-        variant: 'destructive' 
-      });
-    } finally {
-      setIsDepositing(false);
-    }
-  };
-
   const handleWithdraw = async () => {
     const amount = parseFloat(withdrawAmount);
     if (!amount || amount <= 0) {
@@ -323,12 +247,6 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       });
     } finally {
       setIsWithdrawing(false);
-    }
-  };
-
-  const setMaxDeposit = () => {
-    if (usdcBalance !== null) {
-      setDepositAmount(usdcBalance.toString());
     }
   };
 
@@ -868,70 +786,46 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
             </TabsList>
             
             <TabsContent value="deposit" className="space-y-4">
-              <div className="p-5 bg-muted/30 rounded-xl space-y-5">
-                <div className="flex items-center justify-center gap-4 py-2">
-                  <div className="flex items-center gap-2 px-3 py-2 bg-muted/50 rounded-lg">
-                    <Wallet className="w-4 h-4 text-muted-foreground" />
-                    <span className="text-sm font-medium">Your Wallet</span>
-                  </div>
-                  <div className="flex items-center gap-1 text-muted-foreground">
-                    <ArrowRight className="w-5 h-5" />
-                  </div>
-                  <div className="flex items-center gap-2 px-3 py-2 bg-primary/10 border border-primary/20 rounded-lg">
-                    <Bot className="w-4 h-4 text-primary" />
-                    <span className="text-sm font-medium text-primary">Trading Agent</span>
-                  </div>
+              <div className="flex items-center justify-center gap-4 py-1">
+                <div className="flex items-center gap-2 px-3 py-2 bg-muted/50 rounded-lg">
+                  <Wallet className="w-4 h-4 text-muted-foreground" />
+                  <span className="text-sm font-medium">Your Wallet</span>
                 </div>
+                <ArrowRight className="w-5 h-5 text-muted-foreground" />
+                <div className="flex items-center gap-2 px-3 py-2 bg-primary/10 border border-primary/20 rounded-lg">
+                  <Bot className="w-4 h-4 text-primary" />
+                  <span className="text-sm font-medium text-primary">Trading Agent</span>
+                </div>
+              </div>
 
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <label className="text-sm font-medium">Amount (USDC)</label>
-                    <span className="text-xs text-muted-foreground">
-                      Available: ${(usdcBalance ?? 0).toFixed(2)}
-                    </span>
-                  </div>
-                  <div className="flex gap-2">
-                    <Input
-                      type="number"
-                      placeholder="0.00"
-                      value={depositAmount}
-                      onChange={(e) => setDepositAmount(e.target.value)}
-                      className="flex-1 text-lg"
-                      data-testid="input-deposit-amount"
-                    />
-                    <Button 
-                      variant="outline" 
-                      onClick={setMaxDeposit}
-                      data-testid="button-deposit-max"
-                    >
-                      Max
-                    </Button>
-                  </div>
-                </div>
-
-                <div className="text-xs text-amber-500/80 bg-amber-500/10 rounded-lg p-3 flex items-start gap-2">
-                  <Fuel className="w-4 h-4 shrink-0 mt-0.5" />
-                  <span>You'll need SOL in your wallet for the transaction fee (~0.005 SOL)</span>
-                </div>
-                
-                <Button
-                  className="w-full bg-gradient-to-r from-primary to-accent h-12 text-base"
-                  onClick={handleDepositToAgent}
-                  disabled={isDepositing || !depositAmount || parseFloat(depositAmount) <= 0}
-                  data-testid="button-deposit"
+              <div className="grid sm:grid-cols-2 gap-3">
+                <button
+                  onClick={() => { setDepositDialogTab('usdc'); setDepositDialogOpen(true); }}
+                  className="group text-left p-4 rounded-xl border border-border/50 bg-muted/30 hover:border-primary/40 hover:bg-primary/5 transition-colors"
+                  data-testid="button-open-deposit-usdc"
                 >
-                  {isDepositing ? (
-                    <>
-                      <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                      Processing...
-                    </>
-                  ) : (
-                    <>
-                      <ArrowDownToLine className="w-5 h-5 mr-2" />
-                      Deposit USDC
-                    </>
-                  )}
-                </Button>
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <div className="p-1.5 rounded-lg bg-primary/10">
+                      <Wallet className="w-4 h-4 text-primary" />
+                    </div>
+                    <span className="font-medium">Deposit USDC</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">Move USDC straight from your wallet into the trading agent.</p>
+                </button>
+
+                <button
+                  onClick={() => { setDepositDialogTab('token'); setDepositDialogOpen(true); }}
+                  className="group text-left p-4 rounded-xl border border-border/50 bg-muted/30 hover:border-primary/40 hover:bg-primary/5 transition-colors"
+                  data-testid="button-open-deposit-token"
+                >
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <div className="p-1.5 rounded-lg bg-primary/10">
+                      <Coins className="w-4 h-4 text-primary" />
+                    </div>
+                    <span className="font-medium">Deposit any asset</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">Deposit SOL, BONK, or any token — we auto-swap it to USDC.</p>
+                </button>
               </div>
             </TabsContent>
             
@@ -1163,6 +1057,16 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       </Card>
 
       <EquityHistory walletAddress={publicKeyString ?? undefined} />
+
+      <DepositDialog
+        open={depositDialogOpen}
+        onOpenChange={setDepositDialogOpen}
+        usdcBalance={usdcBalance ?? null}
+        initialTab={depositDialogTab}
+        onComplete={() => {
+          Promise.all([fetchUsdcBalance(), fetchAgentBalance(), fetchCapitalPool(), fetchUserSolBalance()]);
+        }}
+      />
     </motion.div>
   );
 }

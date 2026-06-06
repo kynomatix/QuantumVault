@@ -1,6 +1,16 @@
-import { Connection, PublicKey, Keypair, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import { Connection, PublicKey, Keypair, Transaction, VersionedTransaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import bs58 from 'bs58';
 import BN from 'bn.js';
+import { getBestQuote, getProviderByName } from './swap/index.js';
+
+/** Wrapped-SOL mint — also how Jupiter represents native SOL as a swap input. */
+export const NATIVE_SOL_MINT = 'So11111111111111111111111111111111111111112';
+/**
+ * SOL the agent must retain when swapping native SOL → USDC: enough for the
+ * swap tx fee + temporary wSOL account rent (reclaimed on unwrap) plus headroom
+ * for subsequent trading gas. Never sweep an agent dry of gas.
+ */
+const SWAP_SOL_GAS_RESERVE = 0.02;
 
 const SOLANA_ENV = (process.env.DRIFT_ENV || process.env.SOLANA_ENV || 'mainnet-beta') as 'devnet' | 'mainnet-beta';
 const IS_MAINNET = SOLANA_ENV === 'mainnet-beta';
@@ -522,5 +532,204 @@ export async function transferUsdcToWallet(
   } catch (error: any) {
     console.error('[TransferToWallet] Error:', error.message);
     return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Reads an agent wallet's balance of an arbitrary SPL mint (raw base units +
+ * decimals). For the native SOL pseudo-mint, returns the lamport balance with
+ * 9 decimals. Returns zero when the ATA does not exist (truthful "no balance",
+ * not a money fallback).
+ */
+export async function getAgentTokenBalanceRaw(
+  agentPublicKey: string,
+  mint: string,
+): Promise<{ amountRaw: string; decimals: number; uiAmount: number }> {
+  const connection = getConnection();
+  const agentPubkey = new PublicKey(agentPublicKey);
+
+  if (mint === NATIVE_SOL_MINT) {
+    const lamports = await connection.getBalance(agentPubkey);
+    return { amountRaw: String(lamports), decimals: 9, uiAmount: lamports / LAMPORTS_PER_SOL };
+  }
+
+  const ata = getAssociatedTokenAddressSync(new PublicKey(mint), agentPubkey);
+  try {
+    const bal = await connection.getTokenAccountBalance(ata);
+    return {
+      amountRaw: bal.value.amount,
+      decimals: bal.value.decimals,
+      uiAmount: bal.value.uiAmount || 0,
+    };
+  } catch {
+    return { amountRaw: '0', decimals: 0, uiAmount: 0 };
+  }
+}
+
+/**
+ * Builds a USER-SIGNED transaction moving `amountRaw` base units of an arbitrary
+ * SPL `mint` from the user's main wallet into the agent wallet ATA (created if
+ * missing). This is the "deposit any asset" on-ramp; the server later swaps the
+ * deposited token → USDC. Native SOL is handled separately via
+ * buildSolTransferToAgentTransaction.
+ */
+export async function buildTokenTransferToAgentTransaction(
+  userWalletAddress: string,
+  agentPublicKey: string,
+  mint: string,
+  amountRaw: string,
+): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
+  if (mint === NATIVE_SOL_MINT) {
+    throw new Error('Use buildSolTransferToAgentTransaction for native SOL');
+  }
+  const amount = BigInt(amountRaw);
+  if (amount <= BigInt(0)) {
+    throw new Error('Invalid transfer amount');
+  }
+
+  const connection = getConnection();
+  const userPubkey = new PublicKey(userWalletAddress);
+  const agentPubkey = new PublicKey(agentPublicKey);
+  const mintPubkey = new PublicKey(mint);
+
+  const userAta = getAssociatedTokenAddressSync(mintPubkey, userPubkey);
+  const agentAta = getAssociatedTokenAddressSync(mintPubkey, agentPubkey);
+
+  const instructions: TransactionInstruction[] = [];
+
+  const agentAtaInfo = await connection.getAccountInfo(agentAta);
+  if (!agentAtaInfo) {
+    instructions.push(
+      createAssociatedTokenAccountInstruction(userPubkey, agentAta, agentPubkey, mintPubkey),
+    );
+  }
+
+  instructions.push(createTransferInstruction(userAta, agentAta, userPubkey, amount));
+
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+  const transaction = new Transaction({ feePayer: userPubkey, blockhash, lastValidBlockHeight });
+  for (const ix of instructions) transaction.add(ix);
+
+  const serializedTx = transaction
+    .serialize({ requireAllSignatures: false, verifySignatures: false })
+    .toString('base64');
+
+  return {
+    transaction: serializedTx,
+    blockhash,
+    lastValidBlockHeight,
+    message: 'Deposit token to bot wallet for conversion to USDC',
+  };
+}
+
+/**
+ * SERVER-SIGNED swap of the agent wallet's full balance of `inputMint` → USDC,
+ * via the swap aggregator (Jupiter today). Fail-closed: the realized USDC
+ * balance delta is the source of truth, so an ambiguous confirmation can never
+ * fabricate credited funds. Native SOL input retains a gas reserve.
+ *
+ * Returns the actual USDC received (delta) and the swap signature on success.
+ */
+export async function executeAgentSwapToUsdc(
+  agentPublicKey: string,
+  agentSecretKey: Uint8Array,
+  inputMint: string,
+  slippageBps: number = 100,
+): Promise<{ success: boolean; signature?: string; usdcReceived?: number; inAmountRaw?: string; error?: string }> {
+  try {
+    if (inputMint === USDC_MINT) {
+      return { success: false, error: 'Input token is already USDC — no swap needed' };
+    }
+
+    const connection = getConnection();
+    const agentKeypair = resolveAgentKeypair(agentSecretKey);
+    const agentPubkey = new PublicKey(agentPublicKey);
+
+    // 1) Determine how much of the input token we can swap.
+    const tokenBal = await getAgentTokenBalanceRaw(agentPublicKey, inputMint);
+    let amountToSwap = BigInt(tokenBal.amountRaw);
+
+    if (inputMint === NATIVE_SOL_MINT) {
+      const reserveLamports = BigInt(Math.round(SWAP_SOL_GAS_RESERVE * LAMPORTS_PER_SOL));
+      amountToSwap = amountToSwap > reserveLamports ? amountToSwap - reserveLamports : BigInt(0);
+    }
+    if (amountToSwap <= BigInt(0)) {
+      return { success: false, error: 'No balance available to swap' };
+    }
+
+    // 2) Agent needs SOL to pay swap fees (+ wSOL rent for native input).
+    const solLamports = await connection.getBalance(agentPubkey);
+    if (solLamports / LAMPORTS_PER_SOL < 0.005) {
+      return { success: false, error: 'Insufficient SOL in bot wallet for swap gas (need ~0.005 SOL)' };
+    }
+
+    // 3) Quote inputMint → USDC.
+    const quote = await getBestQuote({
+      inputMint,
+      outputMint: USDC_MINT,
+      amountRaw: amountToSwap.toString(),
+      slippageBps,
+    });
+    if (!quote) {
+      return { success: false, error: 'No swap route available for this token' };
+    }
+
+    const provider = getProviderByName(quote.provider);
+    if (!provider) {
+      return { success: false, error: `Swap provider ${quote.provider} unavailable` };
+    }
+
+    // 4) USDC balance BEFORE — the realized delta is our source of truth.
+    const usdcBefore = await getAgentUsdcBalance(agentPublicKey);
+
+    // 5) Build, sign, and send the swap transaction.
+    const swapTxB64 = await provider.buildSwapTransaction(quote, agentPublicKey);
+    const swapTx = VersionedTransaction.deserialize(Buffer.from(swapTxB64, 'base64'));
+    swapTx.sign([agentKeypair]);
+
+    const signature = await connection.sendRawTransaction(swapTx.serialize(), {
+      skipPreflight: false,
+      preflightCommitment: 'confirmed',
+      maxRetries: 3,
+    });
+
+    // 6) Confirm by polling signature status (avoids the blockhash /
+    //    lastValidBlockHeight mismatch of confirmTransaction, which can falsely
+    //    time out). We VERIFY via the USDC balance delta below regardless of
+    //    outcome, so this stays fail-closed.
+    let confirmedErr: unknown = null;
+    for (let i = 0; i < 20; i++) {
+      const statuses = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+      const st = statuses.value[0];
+      if (st) {
+        if (st.err) { confirmedErr = st.err; break; }
+        if (st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized') break;
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    if (confirmedErr) {
+      return { success: false, signature, error: `Swap transaction failed on-chain: ${JSON.stringify(confirmedErr)}` };
+    }
+
+    // 7) Verify the realized USDC delta (retry for RPC lag / late finalization).
+    let usdcReceived = 0;
+    for (let i = 0; i < 6; i++) {
+      const usdcAfter = await getAgentUsdcBalance(agentPublicKey);
+      usdcReceived = usdcAfter - usdcBefore;
+      if (usdcReceived > 0) break;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+
+    if (usdcReceived <= 0) {
+      return {
+        success: false,
+        signature,
+        error: 'Swap landed but no USDC increase was detected — please refresh and retry',
+      };
+    }
+
+    return { success: true, signature, usdcReceived, inAmountRaw: amountToSwap.toString() };
+  } catch (error: any) {
+    return { success: false, error: error?.message || 'Swap failed' };
   }
 }
