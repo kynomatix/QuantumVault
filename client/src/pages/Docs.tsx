@@ -2954,9 +2954,10 @@ export default function DocsPage() {
           <aside className={cn(
             "fixed inset-0 z-40 md:relative md:inset-auto w-64 flex-shrink-0",
             "bg-slate-950 md:bg-transparent",
+            "overflow-y-auto md:overflow-visible overscroll-contain",
             mobileMenuOpen ? "block" : "hidden md:block"
           )}>
-            <div className="sticky top-24 p-4 md:p-0">
+            <div className="md:sticky md:top-24 p-4 md:p-0">
               <div className="flex items-center justify-between md:hidden mb-4">
                 <span className="font-medium text-white">Navigation</span>
                 <Button variant="ghost" size="icon" onClick={() => setMobileMenuOpen(false)}>
