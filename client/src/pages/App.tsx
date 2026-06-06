@@ -98,7 +98,7 @@ import {
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet";
-import { apiRequest, queryClient } from '@/lib/queryClient';
+import { apiRequest, queryClient, walletAuthHeaders } from '@/lib/queryClient';
 import { BotManagementDrawer } from '@/components/BotManagementDrawer';
 import { ExchangeBadge } from '@/components/ExchangeBadge';
 import { CreateBotModal } from '@/components/CreateBotModal';
@@ -154,7 +154,7 @@ function ReferralOverviewPanel() {
   const { data, isLoading } = useQuery<ReferralOverviewResponse>({
     queryKey: ["/api/referrals/overview"],
     queryFn: async () => {
-      const res = await fetch("/api/referrals/overview", { credentials: "include" });
+      const res = await fetch("/api/referrals/overview", { credentials: "include", headers: walletAuthHeaders() });
       if (!res.ok) throw new Error("Failed to load referrals overview");
       return res.json();
     },
@@ -437,7 +437,7 @@ export default function AppPage() {
         setEquityLoading(true);
       }
       try {
-        const res = await fetch('/api/total-equity', { credentials: 'include' });
+        const res = await fetch('/api/total-equity', { credentials: 'include', headers: walletAuthHeaders() });
         if (res.ok) {
           const data = await safeResponseJson(res);
           setTotalEquity(data.totalEquity ?? 0);
@@ -458,7 +458,7 @@ export default function AppPage() {
     // (allocated slots with no bot row). Surfaces the "Recover stranded funds" button.
     const fetchOrphanSlots = async () => {
       try {
-        const res = await fetch('/api/flash/orphaned-wallets', { credentials: 'include' });
+        const res = await fetch('/api/flash/orphaned-wallets', { credentials: 'include', headers: walletAuthHeaders() });
         if (res.ok) {
           const data = await safeResponseJson(res);
           setOrphanSlots(data.orphanSlots ?? 0);
@@ -488,7 +488,7 @@ export default function AppPage() {
     const loadSettings = async () => {
       setSettingsLoading(true);
       try {
-        const res = await fetch('/api/wallet/settings', { credentials: 'include' });
+        const res = await fetch('/api/wallet/settings', { credentials: 'include', headers: walletAuthHeaders() });
         if (res.ok) {
           const data = await safeResponseJson(res);
           setDisplayName(data.displayName || '');
@@ -766,7 +766,7 @@ export default function AppPage() {
       // Helper to safely fetch JSON
       const safeFetchJson = async (url: string) => {
         try {
-          const res = await fetch(url, { credentials: 'include' });
+          const res = await fetch(url, { credentials: 'include', headers: walletAuthHeaders() });
           if (!res.ok) return null;
           const text = await res.text();
           if (!text || text.startsWith('<!')) return null;
@@ -1108,7 +1108,7 @@ export default function AppPage() {
       if (!sessionConnected) return;
       
       try {
-        const res = await fetch('/api/agent/balance', { credentials: 'include' });
+        const res = await fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders() });
         if (res.ok) {
           const data = await safeResponseJson(res);
           setAgentPublicKey(data.agentPublicKey);
@@ -1142,7 +1142,7 @@ export default function AppPage() {
               const authSuccess = await authenticateWallet(publicKeyString);
               if (authSuccess) {
                 // Retry balance check now that auth/verify should have created the agent wallet
-                const retryRes = await fetch('/api/agent/balance', { credentials: 'include' });
+                const retryRes = await fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders() });
                 if (retryRes.ok) {
                   const retryData = await safeResponseJson(retryRes);
                   setAgentPublicKey(retryData.agentPublicKey);
@@ -1218,6 +1218,20 @@ export default function AppPage() {
   }, [sessionConnected, welcomeChecked, welcomePopupOpen]);
 
   const handleDisconnect = async () => {
+    // Clear the server session FIRST so it can't linger as the previous wallet.
+    // A stale session would otherwise leak the old wallet's balances (and skip
+    // onboarding) for whatever wallet connects next on this browser.
+    try {
+      // Intentionally NO wallet header here: logout should clear whatever
+      // session currently exists (requireWallet falls back to the session
+      // wallet), even if it has drifted from the connected wallet.
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+      });
+    } catch {
+      // Best effort — disconnect locally regardless of network result.
+    }
     await disconnect();
   };
 
@@ -1230,7 +1244,7 @@ export default function AppPage() {
       for (const bot of botsData) {
         if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
           try {
-            const res = await fetch(`/api/bot/${bot.id}/balance`, { credentials: 'include' });
+            const res = await fetch(`/api/bot/${bot.id}/balance`, { credentials: 'include', headers: walletAuthHeaders() });
             if (res.ok) {
               const data = await safeResponseJson(res);
               balances[bot.id] = { balance: data.usdcBalance ?? 0, exists: data.subaccountExists ?? false };
@@ -1469,7 +1483,7 @@ export default function AppPage() {
 
       await new Promise(r => setTimeout(r, 5000));
       try {
-        const eqRes = await fetch('/api/total-equity', { credentials: 'include' });
+        const eqRes = await fetch('/api/total-equity', { credentials: 'include', headers: walletAuthHeaders() });
         if (eqRes.ok) {
           const eqData = await safeResponseJson(eqRes);
           setTotalEquity(eqData.totalEquity ?? 0);
@@ -1510,12 +1524,12 @@ export default function AppPage() {
       });
       // Re-check orphan slots and refresh balances.
       try {
-        const orphanRes = await fetch('/api/flash/orphaned-wallets', { credentials: 'include' });
+        const orphanRes = await fetch('/api/flash/orphaned-wallets', { credentials: 'include', headers: walletAuthHeaders() });
         if (orphanRes.ok) {
           const orphanData = await safeResponseJson(orphanRes);
           setOrphanSlots(orphanData.orphanSlots ?? 0);
         }
-        const eqRes = await fetch('/api/total-equity', { credentials: 'include' });
+        const eqRes = await fetch('/api/total-equity', { credentials: 'include', headers: walletAuthHeaders() });
         if (eqRes.ok) {
           const eqData = await safeResponseJson(eqRes);
           setTotalEquity(eqData.totalEquity ?? 0);

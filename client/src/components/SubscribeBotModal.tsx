@@ -1,4 +1,5 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
+import { walletAuthHeaders } from "@/lib/queryClient";
 import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { useSubscribeToPublishedBot, SubscribeAuthorizationRequiredError, type PublishedBot } from '@/hooks/useApi';
@@ -107,8 +108,8 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
     if (isOpen) {
       setBalanceLoading(true);
       Promise.all([
-        fetch('/api/total-equity', { credentials: 'include' }).then(res => res.ok ? safeResponseJson(res) : Promise.reject()),
-        fetch('/api/agent/balance', { credentials: 'include' }).then(res => res.ok ? safeResponseJson(res) : Promise.reject())
+        fetch('/api/total-equity', { credentials: 'include', headers: walletAuthHeaders() }).then(res => res.ok ? safeResponseJson(res) : Promise.reject()),
+        fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders() }).then(res => res.ok ? safeResponseJson(res) : Promise.reject())
       ])
         .then(([equityData, balanceData]) => {
           setAvailableBalance(equityData.agentBalance ?? 0);
@@ -249,7 +250,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
 
       toast({ title: 'SOL deposited successfully!' });
       
-      const balanceRes = await fetch('/api/agent/balance', { credentials: 'include' });
+      const balanceRes = await fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders() });
       if (balanceRes.ok) {
         const data = await safeResponseJson(balanceRes);
         if (data.botCreationSolRequirement) {
@@ -314,8 +315,8 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
       // Refresh both balance sources in parallel so SOL gating and USDC gating
       // stay coherent (the user's main wallet just paid SOL fees for this tx).
       const [equityRes, balanceRes] = await Promise.all([
-        fetch('/api/total-equity', { credentials: 'include' }),
-        fetch('/api/agent/balance', { credentials: 'include' }),
+        fetch('/api/total-equity', { credentials: 'include', headers: walletAuthHeaders() }),
+        fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders() }),
       ]);
       if (equityRes.ok) {
         const data = await safeResponseJson(equityRes);

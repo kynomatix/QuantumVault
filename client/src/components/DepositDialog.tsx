@@ -1,4 +1,5 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
+import { walletAuthHeaders } from "@/lib/queryClient";
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
 import { Transaction, LAMPORTS_PER_SOL } from '@solana/web3.js';
@@ -111,7 +112,7 @@ export function DepositDialog({ open, onOpenChange, usdcBalance, onComplete, ini
   const fetchTokens = useCallback(async () => {
     setTokensLoading(true);
     try {
-      const res = await fetch('/api/wallet/tokens', { credentials: 'include' });
+      const res = await fetch('/api/wallet/tokens', { credentials: 'include', headers: walletAuthHeaders() });
       if (!res.ok) throw new Error('Failed to load tokens');
       const data = await safeResponseJson(res);
       // Hide USDC from the swap list — it has its own (no-swap) deposit path.
@@ -157,7 +158,7 @@ export function DepositDialog({ open, onOpenChange, usdcBalance, onComplete, ini
       try {
         const res = await fetch(
           `/api/swap/quote?inputMint=${encodeURIComponent(selected.mint)}&amountRaw=${amountRaw}`,
-          { credentials: 'include' },
+          { credentials: 'include', headers: walletAuthHeaders() },
         );
         const data = await safeResponseJson(res);
         if (seq !== quoteSeq.current) return; // stale

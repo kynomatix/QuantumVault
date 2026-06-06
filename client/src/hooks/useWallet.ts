@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState, useRef } from 'react';
 import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
 import { LAMPORTS_PER_SOL } from '@solana/web3.js';
 import bs58 from 'bs58';
-import { queryClient } from '@/lib/queryClient';
+import { queryClient, setActiveWalletAddress } from '@/lib/queryClient';
 
 export { useConnection };
 
@@ -130,12 +130,21 @@ export function useWallet() {
   // Register wallet with backend session when connected
   useEffect(() => {
     const registerWallet = async () => {
+      // Keep the API layer's wallet header in sync with the connected wallet so
+      // every authenticated request fails closed (server 403) if the express
+      // session is still pinned to a previously connected wallet.
+      setActiveWalletAddress(publicKeyString);
+
       if (publicKeyString && publicKeyString !== lastConnectedWallet.current) {
         // CRITICAL: Clear all cached queries when switching wallets
         // This prevents stale data from the previous wallet from being displayed
         if (lastConnectedWallet.current !== null) {
           console.log('[Wallet] Wallet changed, clearing query cache');
           queryClient.clear();
+          // Drop the "session ready" flag until the NEW wallet re-authenticates.
+          // Otherwise effects gated on sessionConnected could run against the
+          // previous wallet's server session during the switch window.
+          setSessionConnected(false);
         }
         
         // Already authenticated successfully in this session - just restore state

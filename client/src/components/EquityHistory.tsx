@@ -1,4 +1,5 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
+import { walletAuthHeaders } from "@/lib/queryClient";
 import { useState, useEffect } from 'react';
 import { format } from 'date-fns';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -33,6 +34,7 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
     try {
       const response = await fetch('/api/equity-events?limit=20', {
         credentials: 'include',
+        headers: walletAuthHeaders(),
       });
       if (response.ok) {
         const data = await safeResponseJson(response);
