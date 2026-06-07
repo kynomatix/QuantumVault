@@ -2957,7 +2957,7 @@ export default function DocsPage() {
             "overflow-y-auto md:overflow-visible overscroll-contain",
             mobileMenuOpen ? "block" : "hidden md:block"
           )}>
-            <div className="md:sticky md:top-24 p-4 md:p-0">
+            <div className="md:sticky md:top-24 pt-28 px-4 pb-4 md:p-0">
               <div className="flex items-center justify-between md:hidden mb-4">
                 <span className="font-medium text-white">Navigation</span>
                 <Button variant="ghost" size="icon" onClick={() => setMobileMenuOpen(false)}>
