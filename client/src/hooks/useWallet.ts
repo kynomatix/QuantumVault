@@ -37,6 +37,7 @@ export function useWallet() {
   const [sessionConnected, setSessionConnected] = useState(false);
   const [referralCode, setReferralCode] = useState<string | null>(null);
   const [signingInProgress, setSigningInProgress] = useState(false);
+  const [authError, setAuthError] = useState(false);
   const lastConnectedWallet = useRef<string | null>(null);
   const authAttempted = useRef<Set<string>>(new Set());
   const authSucceeded = useRef<Set<string>>(new Set());
@@ -127,6 +128,34 @@ export function useWallet() {
     }
   }, []); // Empty deps - uses ref for signMessage
 
+  // Gesture-driven retry for when the automatic post-connect sign-in failed
+  // (e.g. a transient Phantom Mobile Wallet Adapter hiccup). Clears the
+  // per-wallet guards and re-runs authentication from a user tap so the wallet's
+  // signMessage fires inside an active user gesture.
+  const retryAuth = useCallback(async (): Promise<boolean> => {
+    if (!publicKeyString) return false;
+    const walletToAuth = publicKeyString;
+    authAttempted.current.delete(walletToAuth);
+    authInProgress.current.delete(walletToAuth);
+    authPromiseMap.delete(walletToAuth);
+    setAuthError(false);
+    authInProgress.current.add(walletToAuth);
+    authAttempted.current.add(walletToAuth);
+    try {
+      const ok = await authenticateWallet(walletToAuth);
+      if (ok) {
+        authSucceeded.current.add(walletToAuth);
+        lastConnectedWallet.current = walletToAuth;
+        setSessionConnected(true);
+      } else {
+        setAuthError(true);
+      }
+      return ok;
+    } finally {
+      authInProgress.current.delete(walletToAuth);
+    }
+  }, [publicKeyString, authenticateWallet]);
+
   // Register wallet with backend session when connected
   useEffect(() => {
     const registerWallet = async () => {
@@ -157,6 +186,17 @@ export function useWallet() {
         // Prevent duplicate authentication attempts using multiple guards
         // 1. Check refs (per-wallet tracking)
         if (authAttempted.current.has(publicKeyString) || authInProgress.current.has(publicKeyString)) {
+          // If a PRIOR attempt for this wallet already failed (attempted, not in
+          // flight, not succeeded) — e.g. the user switched away after a failed
+          // sign-in and switched back — restore the error state so the gate shows
+          // the retry screen instead of a permanently stuck "Signing in…" spinner.
+          if (
+            authAttempted.current.has(publicKeyString) &&
+            !authInProgress.current.has(publicKeyString) &&
+            !authSucceeded.current.has(publicKeyString)
+          ) {
+            setAuthError(true);
+          }
           return;
         }
         
@@ -169,10 +209,15 @@ export function useWallet() {
             authSucceeded.current.add(publicKeyString);
             lastConnectedWallet.current = publicKeyString;
             setSessionConnected(true);
+          } else {
+            setAuthError(true);
           }
           return;
         }
         
+        // Clear any prior failure now that a fresh attempt is starting.
+        setAuthError(false);
+
         // Set locks SYNCHRONOUSLY before any async work
         authInProgress.current.add(publicKeyString);
         authAttempted.current.add(publicKeyString);
@@ -233,6 +278,8 @@ export function useWallet() {
           authSucceeded.current.add(walletToAuth);
           lastConnectedWallet.current = walletToAuth;
           setSessionConnected(true);
+        } else {
+          setAuthError(true);
         }
       } else if (!publicKeyString) {
         // Clear query cache when wallet disconnects
@@ -242,6 +289,7 @@ export function useWallet() {
         lastConnectedWallet.current = null;
         setSessionConnected(false);
         setReferralCode(null);
+        setAuthError(false);
         // Only clear on explicit disconnect
         authAttempted.current.clear();
         authSucceeded.current.clear();
@@ -293,6 +341,8 @@ export function useWallet() {
     fetchBalance,
     sessionConnected,
     signingInProgress,
+    authError,
+    retryAuth,
     referralCode,
     authenticateWallet,
   };

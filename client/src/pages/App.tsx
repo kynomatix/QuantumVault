@@ -135,6 +135,7 @@ interface TradingBot {
   createdAt: string;
 }
 import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
+import { SolanaMobileWalletAdapterWalletName } from '@solana-mobile/wallet-adapter-mobile';
 import { Transaction } from '@solana/web3.js';
 import { Buffer } from 'buffer';
 import { confirmTransactionWithFallback } from '@/lib/solana-utils';
@@ -235,7 +236,7 @@ function ReferralOverviewPanel() {
 
 export default function AppPage() {
   const [, navigate] = useLocation();
-  const { connected, connecting, disconnect, shortenedAddress, balance, balanceLoading, publicKeyString, sessionConnected, referralCode: walletReferralCode, authenticateWallet } = useWallet();
+  const { connected, connecting, disconnect, shortenedAddress, balance, balanceLoading, publicKeyString, sessionConnected, referralCode: walletReferralCode, authenticateWallet, authError, retryAuth } = useWallet();
   const solanaWallet = useSolanaWallet();
   const { connection } = useConnection();
   const { toast } = useToast();
@@ -1221,6 +1222,10 @@ export default function AppPage() {
     // Clear the server session FIRST so it can't linger as the previous wallet.
     // A stale session would otherwise leak the old wallet's balances (and skip
     // onboarding) for whatever wallet connects next on this browser.
+    // Capture whether the active wallet is Mobile Wallet Adapter BEFORE we tear
+    // anything down — solanaWallet.wallet reflects the current render's selection.
+    const isMwa =
+      solanaWallet.wallet?.adapter?.name === SolanaMobileWalletAdapterWalletName;
     try {
       // Intentionally NO wallet header here: logout should clear whatever
       // session currently exists (requireWallet falls back to the session
@@ -1232,7 +1237,21 @@ export default function AppPage() {
     } catch {
       // Best effort — disconnect locally regardless of network result.
     }
-    await disconnect();
+    try {
+      await disconnect();
+    } catch (e) {
+      // adapter.disconnect() can reject on mobile MWA — never let it strand us.
+      console.warn('[Disconnect] adapter.disconnect() failed:', e);
+    }
+    // On mobile, Mobile Wallet Adapter's disconnect frequently does NOT flip
+    // `connected` in a third-party browser (no app round-trip happens), so the
+    // not-connected redirect never fires and the button appears to do nothing.
+    // A full navigation home guarantees a clean disconnected state:
+    // clearPersistedMwaSelection() runs on the next load and blocks auto-reconnect
+    // (this is exactly the manual pull-to-refresh users resort to today).
+    if (isMwa) {
+      window.location.assign('/');
+    }
   };
 
   // Fetch bot balances when connected
@@ -1737,6 +1756,72 @@ export default function AppPage() {
             <p className="text-muted-foreground">
               Please wait while we load your dashboard
             </p>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // Wallet is connected on-chain, but the backend sign-in (signature) hasn't
+  // completed yet. Normally this window is well under a second; a transient
+  // Phantom Mobile Wallet Adapter hiccup can leave the automatic sign-in failed.
+  // Surface an explicit, gesture-driven retry instead of a silently empty
+  // dashboard (the previous behavior stranded users until a manual refresh).
+  if (connected && !sessionConnected) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-6">
+        <div className="absolute inset-0 -z-10 overflow-hidden">
+          <div className="absolute top-1/3 left-1/4 w-[500px] h-[500px] bg-primary/20 rounded-full blur-[150px]" />
+          <div className="absolute bottom-1/3 right-1/4 w-[400px] h-[400px] bg-accent/15 rounded-full blur-[120px]" />
+        </div>
+
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="max-w-md w-full"
+        >
+          <div className="gradient-border p-8 noise text-center">
+            <div className="w-16 h-16 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-primary to-accent flex items-center justify-center">
+              {authError ? (
+                <Shield className="w-8 h-8 text-white" />
+              ) : (
+                <Loader2 className="w-8 h-8 text-white animate-spin" />
+              )}
+            </div>
+            {authError ? (
+              <>
+                <h1 className="text-3xl font-display font-bold mb-2">Finish signing in</h1>
+                <p className="text-muted-foreground mb-6">
+                  Your wallet is connected, but the sign-in signature didn't go
+                  through. This can happen if the wallet popup was dismissed or
+                  timed out. Tap below to try again.
+                </p>
+                <div className="flex flex-col gap-3">
+                  <Button
+                    onClick={() => retryAuth()}
+                    className="w-full"
+                    data-testid="button-retry-signin"
+                  >
+                    Sign in
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={handleDisconnect}
+                    className="w-full"
+                    data-testid="button-cancel-signin"
+                  >
+                    Disconnect
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h1 className="text-3xl font-display font-bold mb-2">Signing in...</h1>
+                <p className="text-muted-foreground">
+                  Approve the signature request in your wallet to continue
+                </p>
+              </>
+            )}
           </div>
         </motion.div>
       </div>
