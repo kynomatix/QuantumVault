@@ -28,7 +28,14 @@ export default defineConfig({
       "@": path.resolve(import.meta.dirname, "client", "src"),
       "@shared": path.resolve(import.meta.dirname, "shared"),
       "@assets": path.resolve(import.meta.dirname, "attached_assets"),
+      // Force every bare `buffer` import (ours + transitive web3.js/MWA) to the real
+      // npm impl instead of Vite's externalized Node-builtin stub, which breaks
+      // window.Buffer and the MWA connect/sign handshake on mobile.
+      buffer: "buffer/",
     },
+  },
+  optimizeDeps: {
+    include: ["buffer"],
   },
   css: {
     postcss: {
