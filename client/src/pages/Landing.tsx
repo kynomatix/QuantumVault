@@ -215,7 +215,7 @@ export default function Landing() {
             style={{ y: heroY, scale: heroScale }}
           >
             <motion.img 
-              src="/images/QV_Hero3.webp" 
+              src="/images/QV_Hero4.webp" 
               alt="QuantumVault Hero"
               className="w-full h-full object-cover"
               animate={{ 
