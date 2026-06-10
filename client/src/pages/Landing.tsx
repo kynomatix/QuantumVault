@@ -430,7 +430,7 @@ export default function Landing() {
               >
                 <Zap className="w-4 h-4 text-primary" />
               </motion.div>
-              Powered by Pacifica on Solana
+              Powered by Solana
             </motion.span>
           </div>
         </section>
