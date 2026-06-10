@@ -1,0 +1,10 @@
+# App store media goes here.
+#
+# Provided:
+#   app_icon.png        512x512 (used for publisher, app, and release icon)
+#
+# You must ADD before publishing:
+#   screenshot_1.png .. screenshot_4.png   at least 4 phone screenshots (portrait)
+#   banner.png (optional)                  ~1200x600 feature graphic
+#
+# Capture screenshots on a phone at native resolution. PNG or JPG.

@@ -1,0 +1,6 @@
+# Never commit the signed binary or any wallet keypair to git.
+files/*.apk
+files/*.aab
+*keypair*.json
+*-keypair.json
+keypair.json

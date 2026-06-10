@@ -1,0 +1,7 @@
+# Place the signed release APK here before publishing:
+#   dapp-store/files/app-release-signed.apk
+#
+# Download it from this Replit at:
+#   .local/android/twa/app-release-signed.apk
+#
+# It is gitignored on purpose (binaries don't belong in git).

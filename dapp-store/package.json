@@ -1,0 +1,9 @@
+{
+  "name": "quantumvault-dapp-store",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Solana dApp Store publishing config for QuantumVault. Run the commands in PUBLISHING.md from your own machine.",
+  "devDependencies": {
+    "@solana-mobile/dapp-store-cli": "latest"
+  }
+}
