@@ -99,6 +99,24 @@ export function WalletProvider({ children }: WalletProviderProps) {
 
   const onWalletError = useCallback((error: Error) => {
     console.error('[WalletAdapter]', error.name, error.message, error);
+    // Dev-only beacon: mirror wallet-adapter connect errors to the server so a
+    // Seeker's failure (whose browser console we can't see) shows up in logs.
+    if (import.meta.env.DEV && typeof window !== 'undefined') {
+      try {
+        void fetch('/api/mwa-diag', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          keepalive: true,
+          body: JSON.stringify({
+            event: `WALLET-ERROR ${error?.name || ''}: ${error?.message || String(error)}`,
+            isSecureContext: window.isSecureContext,
+            ua: navigator.userAgent,
+          }),
+        }).catch(() => {});
+      } catch {
+        /* never let logging break the app */
+      }
+    }
   }, []);
 
   // Auto-reconnect every wallet EXCEPT MWA. Jupiter/Phantom/Solflare/Backpack
