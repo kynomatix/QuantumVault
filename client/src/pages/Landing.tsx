@@ -559,7 +559,7 @@ export default function Landing() {
                   <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-accent/30 transition-colors">
                     <Zap className="w-5 h-5 text-accent mb-3" />
                     <h4 className="font-semibold text-sm mb-1">Lightning Fast</h4>
-                    <p className="text-xs text-muted-foreground">Sub-second execution on Solana and Pacifica.</p>
+                    <p className="text-xs text-muted-foreground">Sub-second on-chain execution on Solana.</p>
                   </div>
                   <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-accent/30 transition-colors">
                     <Lock className="w-5 h-5 text-accent mb-3" />
