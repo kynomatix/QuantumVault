@@ -98,20 +98,23 @@ const SheetContent = React.forwardRef<
       className={cn(sheetVariants({ side }), "overflow-visible border-l border-l-primary/30", className)}
       {...props}
     >
-      {/* Sci-fi trapezoid close button - always tappable; tucks + slides out on hover (desktop) */}
+      {/* Sci-fi trapezoid close button - slides out + glows on hover (owner-tuned) */}
       <SheetClose asChild>
         <button 
           tabIndex={-1}
           aria-label="Close panel"
-          className={cn(
-            "absolute left-0 top-1/2 -translate-y-1/2 z-[60] cursor-pointer transition-all duration-300 ease-out focus:outline-none",
-            // Touch / no-hover devices: rest fully visible in brand color so it's easy to tap
-            "translate-x-0 text-primary/80",
-            // Hover-capable (desktop): tuck off the edge, slide out + glow on hover
-            "[@media(hover:hover)]:-translate-x-2.5 [@media(hover:hover)]:text-muted-foreground",
-            "[@media(hover:hover)]:hover:translate-x-0 [@media(hover:hover)]:hover:text-primary",
-            "[@media(hover:hover)]:hover:[filter:drop-shadow(0_0_10px_currentColor)]"
-          )}
+          className="absolute left-0 top-1/2 z-[60] text-muted-foreground transition-all duration-300 ease-out focus:outline-none cursor-pointer"
+          style={{ transform: 'translateY(-50%) translateX(-10px)', filter: 'none' }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.transform = 'translateY(-50%) translateX(0px)';
+            e.currentTarget.style.filter = 'drop-shadow(0 0 12px hsl(var(--primary)))';
+            e.currentTarget.style.color = 'hsl(var(--primary))';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.transform = 'translateY(-50%) translateX(-10px)';
+            e.currentTarget.style.filter = 'none';
+            e.currentTarget.style.color = '';
+          }}
         >
           <SciFiCloseButton />
           <span className="sr-only">Close</span>
