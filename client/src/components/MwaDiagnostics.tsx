@@ -49,6 +49,22 @@ export function MwaDiagnostics() {
   const append = (line: string) => {
     const t = new Date().toISOString().slice(11, 23);
     setLog((prev) => [...prev, `${t}  ${line}`]);
+    // Fire-and-forget beacon so the phone's connect steps appear in the server
+    // logs (its own console never reaches us). Dev-only endpoint; ignore failures.
+    try {
+      void fetch('/api/mwa-diag', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        keepalive: true,
+        body: JSON.stringify({
+          event: line,
+          isSecureContext: typeof window !== 'undefined' ? window.isSecureContext : false,
+          ua: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+        }),
+      }).catch(() => {});
+    } catch {
+      // never let logging break the panel
+    }
   };
 
   // Capture global errors / unhandled rejections so a thrown connect shows here.
@@ -68,6 +84,18 @@ export function MwaDiagnostics() {
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [log]);
+
+  // One-time mount beacon: confirms the page loaded on the device + environment.
+  useEffect(() => {
+    if (!enabled) return;
+    const env = detectEnv();
+    append(
+      `PANEL MOUNTED secure=${typeof window !== 'undefined' ? window.isSecureContext : '?'} ` +
+        `mobile=${env.isMobile} android=${env.isAndroid} webView=${env.isWebView} ` +
+        `wallets=${wallets.length}`,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled]);
 
   if (!enabled) return null;
 
