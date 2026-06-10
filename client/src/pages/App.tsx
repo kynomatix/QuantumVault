@@ -2212,8 +2212,8 @@ export default function AppPage() {
                   </div>
                 </div>
 
-                <div className="grid lg:grid-cols-3 gap-6">
-                  <div className="lg:col-span-2 gradient-border p-4 noise">
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  <div className="lg:col-span-2 min-w-0 gradient-border p-4 noise">
                     <div className="flex items-center justify-between mb-4">
                       <h2 className="font-display font-semibold">Open Positions</h2>
                       <div className="flex gap-2">
@@ -2252,13 +2252,13 @@ export default function AppPage() {
                                 onClick={() => setExpandedPositionBotId(isExpanded ? null : pos.botId)}
                               >
                                 <div className="flex items-center justify-between">
-                                  <div className="flex items-center gap-3">
-                                    <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center">
+                                  <div className="flex items-center gap-3 min-w-0">
+                                    <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center flex-shrink-0">
                                       <TrendingUp className="w-5 h-5 text-primary" />
                                     </div>
-                                    <div>
+                                    <div className="min-w-0">
                                       <div className="flex items-center gap-2">
-                                        <p className="font-medium">{pos.botName || 'Unknown'}</p>
+                                        <p className="font-medium truncate">{pos.botName || 'Unknown'}</p>
                                         <span className={`px-2 py-0.5 rounded text-xs font-medium ${
                                           pos.side === 'LONG' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
                                         }`}>
@@ -2271,7 +2271,7 @@ export default function AppPage() {
                                       </div>
                                     </div>
                                   </div>
-                                  <div className="flex items-center gap-6">
+                                  <div className="flex items-center gap-2 sm:gap-6 flex-shrink-0">
                                     <div className="text-right">
                                       <p className="text-[10px] uppercase tracking-wide text-muted-foreground mb-0.5">Size</p>
                                       <p className="font-mono font-semibold text-foreground">
@@ -2281,7 +2281,7 @@ export default function AppPage() {
                                         {Math.abs(pos.baseAssetAmount).toFixed(4)} @ ${Number(pos.entryPrice).toFixed(2)}
                                       </p>
                                     </div>
-                                    <div className="text-right border-l border-border/30 pl-4">
+                                    <div className="text-right border-l border-border/30 pl-2 sm:pl-4">
                                       <p className="text-[10px] uppercase tracking-wide text-muted-foreground mb-0.5">PnL</p>
                                       <p className={`font-mono font-semibold ${Number(pos.unrealizedPnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                                         {Number(pos.unrealizedPnl) >= 0 ? '+' : ''}${Number(pos.unrealizedPnl).toFixed(2)}
@@ -2372,7 +2372,7 @@ export default function AppPage() {
                     </div>
                   </div>
 
-                  <div className="gradient-border p-4 noise">
+                  <div className="min-w-0 gradient-border p-4 noise">
                     <div className="flex items-center justify-between mb-4">
                       <h2 className="font-display font-semibold">Active Bots</h2>
                       <div className="flex items-center gap-1">
@@ -2721,13 +2721,13 @@ export default function AppPage() {
                 exit={{ opacity: 0, y: -10 }}
                 className="space-y-6"
               >
-                <div className="flex items-center justify-between">
-                  <div>
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div className="min-w-0">
                     <h1 className="text-2xl font-display font-bold">My Bots</h1>
                     <p className="text-muted-foreground">Manage your TradingView trading bots</p>
                   </div>
                   <Button 
-                    className="bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                    className="bg-gradient-to-r from-primary to-accent hover:opacity-90 flex-shrink-0"
                     onClick={() => setCreateBotOpen(true)}
                     data-testid="button-create-bot"
                   >
