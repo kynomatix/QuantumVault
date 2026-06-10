@@ -5,7 +5,6 @@ import {
   registerMwa,
   createDefaultAuthorizationCache,
   createDefaultChainSelector,
-  createDefaultWalletNotFoundHandler,
 } from '@solana-mobile/wallet-standard-mobile';
 import { SolanaMobileWalletAdapterWalletName } from '@solana-mobile/wallet-adapter-mobile';
 
@@ -69,7 +68,18 @@ function registerMwaOnce() {
       authorizationCache: createDefaultAuthorizationCache(),
       chains: ['solana:mainnet'],
       chainSelector: createDefaultChainSelector(),
-      onWalletNotFound: createDefaultWalletNotFoundHandler(),
+      // Quiet no-op instead of createDefaultWalletNotFoundHandler(). The default
+      // pops up "To use mobile wallet adapter, you must have a compatible mobile
+      // wallet application installed on your device" (and can redirect to a
+      // download page). On the Solana Seeker the wallet (Seed Vault) is built in,
+      // so this fires misleadingly when an association just times out / isn't
+      // completed in time — confusing users into thinking they have no wallet.
+      // Suppress the UI; log only.
+      onWalletNotFound: async () => {
+        console.warn(
+          '[MWA] wallet-not-found handler fired (UI suppressed). Usually means the association timed out or was cancelled, not that no wallet is installed.',
+        );
+      },
       // remoteHostAuthority would enable desktop QR connection via reflector.
       // Leaving unset for now — only mobile (local association) is needed.
     });
