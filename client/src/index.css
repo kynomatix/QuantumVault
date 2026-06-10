@@ -54,50 +54,50 @@
   --elevate-1: rgba(255,255,255, .04);
   --elevate-2: rgba(255,255,255, .08);
 
-  --background: 260 25% 4%;
-  --foreground: 270 20% 98%;
-  --border: 265 30% 15%;
-  --card: 262 30% 8%;
-  --card-foreground: 270 20% 98%;
-  --card-border: 265 35% 18%;
-  --sidebar: 262 28% 6%;
-  --sidebar-foreground: 270 15% 90%;
-  --sidebar-border: 265 30% 12%;
-  --sidebar-primary: 270 80% 60%;
+  --background: 234 28% 5%;
+  --foreground: 235 20% 98%;
+  --border: 235 28% 16%;
+  --card: 235 26% 9%;
+  --card-foreground: 235 20% 98%;
+  --card-border: 235 30% 18%;
+  --sidebar: 235 26% 7%;
+  --sidebar-foreground: 235 15% 90%;
+  --sidebar-border: 235 28% 13%;
+  --sidebar-primary: 248 88% 65%;
   --sidebar-primary-foreground: 0 0% 100%;
-  --sidebar-accent: 265 40% 15%;
-  --sidebar-accent-foreground: 270 15% 95%;
-  --sidebar-ring: 270 80% 60%;
-  --popover: 262 32% 10%;
-  --popover-foreground: 270 20% 98%;
-  --popover-border: 265 35% 18%;
-  --primary: 270 85% 60%;
+  --sidebar-accent: 235 38% 16%;
+  --sidebar-accent-foreground: 235 15% 95%;
+  --sidebar-ring: 248 88% 65%;
+  --popover: 235 30% 10%;
+  --popover-foreground: 235 20% 98%;
+  --popover-border: 235 32% 18%;
+  --primary: 248 90% 66%;
   --primary-foreground: 0 0% 100%;
-  --secondary: 280 60% 50%;
+  --secondary: 244 65% 58%;
   --secondary-foreground: 0 0% 100%;
-  --muted: 265 25% 15%;
-  --muted-foreground: 265 15% 60%;
-  --accent: 285 70% 55%;
+  --muted: 235 22% 16%;
+  --muted-foreground: 235 14% 62%;
+  --accent: 217 90% 58%;
   --accent-foreground: 0 0% 100%;
   --destructive: 0 70% 50%;
   --destructive-foreground: 0 0% 100%;
-  --input: 265 30% 18%;
-  --ring: 270 85% 60%;
-  --chart-1: 270 85% 60%;
-  --chart-2: 285 70% 55%;
+  --input: 235 26% 18%;
+  --ring: 248 90% 66%;
+  --chart-1: 248 90% 66%;
+  --chart-2: 217 90% 58%;
   --chart-3: 200 80% 55%;
   --chart-4: 160 70% 45%;
-  --chart-5: 320 70% 55%;
+  --chart-5: 280 70% 60%;
 
   --radius: 0.75rem;
-  --shadow-glow: 0 0 60px rgba(139, 92, 246, 0.3);
-  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(139, 92, 246, 0.1);
-  --shadow-elevated: 0 8px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(139, 92, 246, 0.15);
+  --shadow-glow: 0 0 60px rgba(99, 102, 241, 0.32);
+  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(99, 102, 241, 0.1);
+  --shadow-elevated: 0 8px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(99, 102, 241, 0.15);
 
-  --gradient-purple: linear-gradient(135deg, hsl(270 85% 60%) 0%, hsl(285 70% 55%) 50%, hsl(300 65% 50%) 100%);
-  --gradient-dark: linear-gradient(180deg, hsl(260 25% 6%) 0%, hsl(260 25% 3%) 100%);
-  --gradient-card: linear-gradient(135deg, rgba(139, 92, 246, 0.08) 0%, rgba(168, 85, 247, 0.04) 100%);
-  --gradient-glow: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(139, 92, 246, 0.3) 0%, transparent 70%);
+  --gradient-purple: linear-gradient(135deg, hsl(248 90% 66%) 0%, hsl(225 90% 62%) 50%, hsl(210 90% 56%) 100%);
+  --gradient-dark: linear-gradient(180deg, hsl(234 28% 6%) 0%, hsl(234 28% 3%) 100%);
+  --gradient-card: linear-gradient(135deg, rgba(99, 102, 241, 0.08) 0%, rgba(59, 130, 246, 0.04) 100%);
+  --gradient-glow: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(99, 102, 241, 0.3) 0%, transparent 70%);
 }
 
 .dark {
@@ -107,40 +107,40 @@
   --elevate-1: rgba(255,255,255, .04);
   --elevate-2: rgba(255,255,255, .08);
 
-  --background: 260 25% 4%;
-  --foreground: 270 20% 98%;
-  --border: 265 30% 15%;
-  --card: 262 30% 8%;
-  --card-foreground: 270 20% 98%;
-  --card-border: 265 35% 18%;
-  --sidebar: 262 28% 6%;
-  --sidebar-foreground: 270 15% 90%;
-  --sidebar-border: 265 30% 12%;
-  --sidebar-primary: 270 80% 60%;
+  --background: 234 28% 5%;
+  --foreground: 235 20% 98%;
+  --border: 235 28% 16%;
+  --card: 235 26% 9%;
+  --card-foreground: 235 20% 98%;
+  --card-border: 235 30% 18%;
+  --sidebar: 235 26% 7%;
+  --sidebar-foreground: 235 15% 90%;
+  --sidebar-border: 235 28% 13%;
+  --sidebar-primary: 248 88% 65%;
   --sidebar-primary-foreground: 0 0% 100%;
-  --sidebar-accent: 265 40% 15%;
-  --sidebar-accent-foreground: 270 15% 95%;
-  --sidebar-ring: 270 80% 60%;
-  --popover: 262 32% 10%;
-  --popover-foreground: 270 20% 98%;
-  --popover-border: 265 35% 18%;
-  --primary: 270 85% 60%;
+  --sidebar-accent: 235 38% 16%;
+  --sidebar-accent-foreground: 235 15% 95%;
+  --sidebar-ring: 248 88% 65%;
+  --popover: 235 30% 10%;
+  --popover-foreground: 235 20% 98%;
+  --popover-border: 235 32% 18%;
+  --primary: 248 90% 66%;
   --primary-foreground: 0 0% 100%;
-  --secondary: 280 60% 50%;
+  --secondary: 244 65% 58%;
   --secondary-foreground: 0 0% 100%;
-  --muted: 265 25% 15%;
-  --muted-foreground: 265 15% 60%;
-  --accent: 285 70% 55%;
+  --muted: 235 22% 16%;
+  --muted-foreground: 235 14% 62%;
+  --accent: 217 90% 58%;
   --accent-foreground: 0 0% 100%;
   --destructive: 0 70% 50%;
   --destructive-foreground: 0 0% 100%;
-  --input: 265 30% 18%;
-  --ring: 270 85% 60%;
-  --chart-1: 270 85% 60%;
-  --chart-2: 285 70% 55%;
+  --input: 235 26% 18%;
+  --ring: 248 90% 66%;
+  --chart-1: 248 90% 66%;
+  --chart-2: 217 90% 58%;
   --chart-3: 200 80% 55%;
   --chart-4: 160 70% 45%;
-  --chart-5: 320 70% 55%;
+  --chart-5: 280 70% 60%;
 }
 
 @layer base {
@@ -180,7 +180,7 @@
     inset: 0;
     padding: 1px;
     border-radius: inherit;
-    background: linear-gradient(135deg, rgba(139, 92, 246, 0.5) 0%, rgba(168, 85, 247, 0.2) 50%, rgba(139, 92, 246, 0.1) 100%);
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.5) 0%, rgba(96, 130, 246, 0.2) 50%, rgba(99, 102, 241, 0.1) 100%);
     -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
     mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
     -webkit-mask-composite: xor;
@@ -189,7 +189,7 @@
   }
 
   .glass {
-    background: rgba(20, 15, 35, 0.7);
+    background: rgba(15, 17, 32, 0.7);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
   }
@@ -199,7 +199,7 @@
   }
 
   .glow-text {
-    text-shadow: 0 0 40px rgba(139, 92, 246, 0.5);
+    text-shadow: 0 0 40px rgba(99, 102, 241, 0.5);
   }
 
   .animate-float {

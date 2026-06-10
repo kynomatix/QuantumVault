@@ -22,6 +22,7 @@ import {
   Percent
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import LaunchVideo from '@/components/LaunchVideo';
 import { useWallet } from '@/hooks/useWallet';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
 
@@ -431,6 +432,43 @@ export default function Landing() {
               </motion.div>
               Powered by Pacifica on Solana
             </motion.span>
+          </div>
+        </section>
+
+        <section className="relative py-24 px-6 bg-background overflow-hidden">
+          <div className="absolute inset-0 bg-gradient-to-b from-background via-black to-background" />
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[700px] h-[700px] bg-primary/10 rounded-full blur-[160px]" />
+          <div className="max-w-6xl mx-auto relative z-10">
+            <motion.div
+              initial={{ opacity: 0, y: 24 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, margin: "-100px" }}
+              transition={{ duration: 0.6 }}
+              className="text-center mb-12"
+            >
+              <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-primary/30 bg-primary/10 text-sm text-primary mb-5">
+                <Sparkles className="w-4 h-4" />
+                See it in action
+              </span>
+              <h2 className="text-4xl sm:text-5xl lg:text-6xl font-display font-bold text-white mb-4">
+                From signal to <span className="gradient-text">live trade</span>
+              </h2>
+              <p className="text-lg text-white/60 max-w-2xl mx-auto">
+                Watch the full QuantumVault workflow — live dashboards, automated bots,
+                backtesting, and the marketplace — in twenty seconds.
+              </p>
+            </motion.div>
+            <motion.div
+              initial={{ opacity: 0, y: 30 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, margin: "-80px" }}
+              transition={{ duration: 0.7, delay: 0.1 }}
+              className="relative rounded-2xl overflow-hidden border border-primary/20 shadow-2xl shadow-primary/20"
+            >
+              <div className="relative w-full aspect-[16/9]" data-testid="launch-video">
+                <LaunchVideo />
+              </div>
+            </motion.div>
           </div>
         </section>
 
