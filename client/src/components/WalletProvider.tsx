@@ -19,6 +19,37 @@ interface WalletProviderProps {
 // even across React strict-mode double mounts and HMR.
 let mwaRegistered = false;
 
+// Runs once at module load — BEFORE wallet-adapter's <SolanaWalletProvider>
+// reads its persisted "walletName" (it reads via a useState initializer on first
+// render). If the last selected wallet was MWA, we drop it so the page never
+// silently auto-reconnects MWA on load. That silent reconnect (adapter.autoConnect())
+// is what caused the Seeker "three dots forever" hang. We only clear when the
+// stored wallet is MWA — every other wallet keeps its normal auto-reconnect.
+// With this in place we can safely allow autoConnect=true for MWA, which is what
+// makes the wallet modal's user-tap fire adapter.connect() (the connect branch
+// in @solana/wallet-adapter-react that hasUserSelectedAWallet gates).
+function clearPersistedMwaSelection() {
+  if (typeof window === 'undefined') return;
+  try {
+    // 'walletName' is wallet-adapter-react's default localStorageKey.
+    const raw = window.localStorage.getItem('walletName');
+    if (!raw) return;
+    let parsed: string | null = null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = raw;
+    }
+    if (parsed === SolanaMobileWalletAdapterWalletName) {
+      window.localStorage.removeItem('walletName');
+      console.log('[WalletProvider] Cleared persisted MWA selection (prevents load-time auto-reconnect)');
+    }
+  } catch {
+    /* ignore */
+  }
+}
+clearPersistedMwaSelection();
+
 function registerMwaOnce() {
   if (mwaRegistered) return;
   if (typeof window === 'undefined') return;
@@ -119,15 +150,16 @@ export function WalletProvider({ children }: WalletProviderProps) {
     }
   }, []);
 
-  // Auto-reconnect every wallet EXCEPT MWA. Jupiter/Phantom/Solflare/Backpack
-  // mobile injectors expect autoConnect to remember the previous session, and
-  // turning it off globally made the app appear "broken" on reload (user has
-  // to manually reconnect every time). MWA on Seeker is the only one where
-  // autoConnect=true caused the half-connected race ("three dots") hang, so
-  // we exclude only that one.
+  // Allow auto-connect for ALL wallets, including MWA. wallet-adapter-react uses
+  // this gate for two distinct branches (see WalletProvider internals):
+  //   - user tapped the wallet in the modal  -> adapter.connect()      (we WANT this for MWA)
+  //   - silent page-load restore             -> adapter.autoConnect()  (caused MWA "three dots")
+  // Returning false for MWA (the previous fix) blocked BOTH, so tapping MWA in
+  // the modal did nothing. We now return true for MWA — the unwanted load-time
+  // restore is instead prevented surgically by clearPersistedMwaSelection() at
+  // module load, so MWA is never the restored wallet on a fresh page.
   const autoConnect = useCallback(async (adapter: any): Promise<boolean> => {
     if (!adapter) return false;
-    if (adapter.name === SolanaMobileWalletAdapterWalletName) return false;
     return true;
   }, []);
 
