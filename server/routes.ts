@@ -3849,27 +3849,6 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     }
   });
 
-  // Dev-only MWA diagnostic beacon. The on-device diagnostics panel POSTs each
-  // connect step here so a Seeker's connect flow is visible in the server logs
-  // (the phone's own browser console never reaches us). Logging only — no storage,
-  // no auth, no side effects. Disabled in production.
-  app.post("/api/mwa-diag", (req, res) => {
-    if (process.env.NODE_ENV === "production") {
-      return res.status(404).end();
-    }
-    try {
-      const { event, detail, isSecureContext, ua } = req.body || {};
-      const ev = String(event ?? "").slice(0, 80);
-      const dt = String(detail ?? "").slice(0, 300);
-      const sc = isSecureContext === true ? "secure" : "INSECURE";
-      const agent = String(ua ?? req.headers["user-agent"] ?? "").slice(0, 200);
-      console.log(`[MWA-DIAG] ${sc} | ${ev} | ${dt} | UA=${agent}`);
-    } catch {
-      // never throw from a logging beacon
-    }
-    res.json({ ok: true });
-  });
-
   app.post("/api/auth/nonce", async (req, res) => {
     try {
       const { walletAddress, purpose } = req.body;
