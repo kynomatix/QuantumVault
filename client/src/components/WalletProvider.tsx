@@ -108,9 +108,12 @@ function registerMwaOnce() {
       appIdentity: {
         name: 'QuantumVault',
         uri: window.location.origin,
-        // MUST be a relative path. Seed Vault rejects absolute URLs with
-        // "identity.icon must be a relative URI".
-        icon: 'favicon.png',
+        // MUST be a relative path (resolved against `uri`). Seed Vault rejects
+        // absolute URLs with "identity.icon must be a relative URI". This points
+        // at the QuantumVault brand mark served at the site root (same icon the
+        // PWA manifest uses), NOT the old favicon.png — that file was a leftover
+        // Replit logo, which is what showed up in the wallet connect/sign sheet.
+        icon: 'icon-192.png',
       },
       authorizationCache: createWalletUriBaseStrippingAuthorizationCache(),
       chains: ['solana:mainnet'],
