@@ -49,6 +49,53 @@ function clearPersistedMwaSelection() {
 }
 clearPersistedMwaSelection();
 
+// Strip `wallet_uri_base` from every MWA authorization.
+//
+// When a wallet (e.g. Jupiter) authorizes, it may return a `wallet_uri_base`
+// like `https://jup.ag`. The MWA library stores it on its in-memory
+// authorization and uses it as the association base for EVERY association after
+// the first. With an https base, launchAssociation() does a top-level
+// `window.location.assign("https://jup.ag/v1/associate/local?...")`. On the
+// Seeker / wallet in-app browser an Android App Link intercepts that and reopens
+// the wallet, but in a THIRD-PARTY mobile browser (e.g. Brave) it just navigates
+// to the wallet's website -> 404, stranding the user. (The connect itself works:
+// the first association uses the `solana-wallet:` custom scheme because the
+// in-memory authorization is still empty; it's the SECOND association — our
+// post-connect signMessage login — that inherits the https base and redirects.)
+//
+// Removing wallet_uri_base forces ALL associations through the `solana-wallet:`
+// custom scheme, which the OS intercepts via intent WITHOUT replacing the page,
+// so the dApp survives the round trip and the wallet returns cleanly. This is
+// already how the Seeker path behaves, so it's a no-op there and a fix for
+// generic Android browsers.
+//
+// Implementation note: wallet-standard-mobile passes the SAME authorization
+// object reference to `authorizationCache.set()` and to its internal
+// `#authorization` assignment within one `Promise.all([... set(auth),
+// handleAuthorizationResult(auth)])`, evaluating `set()` first. Deleting the
+// field synchronously at the top of `set()` therefore also clears the LIVE
+// in-memory value before the next association reads it — not just the persisted
+// copy. `get()` strips defensively for the reconnect-from-cache path.
+function createWalletUriBaseStrippingAuthorizationCache() {
+  const inner = createDefaultAuthorizationCache();
+  let loggedStrip = false;
+  const strip = <T,>(auth: T): T => {
+    if (auth && typeof auth === 'object' && 'wallet_uri_base' in (auth as any)) {
+      delete (auth as any).wallet_uri_base;
+      if (!loggedStrip) {
+        loggedStrip = true;
+        console.log('[MWA] Stripped wallet_uri_base; forcing solana-wallet: association scheme');
+      }
+    }
+    return auth;
+  };
+  return {
+    clear: () => inner.clear(),
+    get: async () => strip(await inner.get()),
+    set: (auth: Parameters<typeof inner.set>[0]) => inner.set(strip(auth)),
+  };
+}
+
 function registerMwaOnce() {
   if (mwaRegistered) return;
   if (typeof window === 'undefined') return;
@@ -65,7 +112,7 @@ function registerMwaOnce() {
         // "identity.icon must be a relative URI".
         icon: 'favicon.png',
       },
-      authorizationCache: createDefaultAuthorizationCache(),
+      authorizationCache: createWalletUriBaseStrippingAuthorizationCache(),
       chains: ['solana:mainnet'],
       chainSelector: createDefaultChainSelector(),
       // Quiet no-op instead of createDefaultWalletNotFoundHandler(). The default
