@@ -3694,6 +3694,29 @@ export async function registerRoutes(
   const { sessionMiddleware } = await import("./session");
   app.use(sessionMiddleware);
 
+  // Digital Asset Links for the Solana dApp Store TWA (Trusted Web Activity)
+  // wrapper. Android fetches this from
+  // https://myquantumvault.com/.well-known/assetlinks.json to verify the Android
+  // app is allowed to handle our domain (so the app opens without browser UI).
+  // express.static ignores dot-directories, so we must serve it explicitly here.
+  // The SHA-256 fingerprint is the APK signing keystore's certificate fingerprint
+  // and MUST match it exactly, or domain verification fails.
+  const TWA_PACKAGE_NAME = "com.myquantumvault.app";
+  const TWA_SHA256_FINGERPRINT = "REPLACE_WITH_KEYSTORE_SHA256_FINGERPRINT";
+  app.get("/.well-known/assetlinks.json", (_req, res) => {
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.json([
+      {
+        relation: ["delegate_permission/common.handle_all_urls"],
+        target: {
+          namespace: "android_app",
+          package_name: TWA_PACKAGE_NAME,
+          sha256_cert_fingerprints: [TWA_SHA256_FINGERPRINT],
+        },
+      },
+    ]);
+  });
+
   const requireAuth = (req: any, res: any, next: any) => {
     if (!req.session.userId) {
       return res.status(401).json({ error: "Unauthorized" });
