@@ -1719,7 +1719,7 @@ export default function AppPage() {
   if (connecting || !connected) {
     return (
       <div className="min-h-screen flex items-center justify-center p-6">
-        <div className="absolute inset-0 -z-10">
+        <div className="absolute inset-0 -z-10 overflow-hidden">
           <div className="absolute top-1/3 left-1/4 w-[500px] h-[500px] bg-primary/20 rounded-full blur-[150px]" />
           <div className="absolute bottom-1/3 right-1/4 w-[400px] h-[400px] bg-accent/15 rounded-full blur-[120px]" />
         </div>
@@ -1744,7 +1744,7 @@ export default function AppPage() {
   }
 
   return (
-    <div className="min-h-screen flex">
+    <div className="min-h-screen flex overflow-x-clip">
       <aside className={`fixed inset-y-0 left-0 z-50 bg-card/95 backdrop-blur-xl border-r border-border/50 transform transition-all duration-300 lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} ${sidebarCollapsed ? 'lg:w-20' : 'lg:w-64'} w-64`}>
         <div className="flex flex-col h-full">
           <div className="p-4 border-b border-border/50">
@@ -3029,8 +3029,8 @@ export default function AppPage() {
                       </div>
                     </div>
 
-                    <div className="gradient-border p-6 noise">
-                      <div className="flex items-center justify-between mb-4">
+                    <div className="gradient-border p-4 sm:p-6 noise">
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
                         <div className="flex items-center gap-3">
                           <h2 className="font-display font-semibold">P&L History</h2>
                           <div className="flex gap-1" data-testid="toggle-portfolio-chart-view">
@@ -3668,7 +3668,8 @@ export default function AppPage() {
                       <p>No traders on the leaderboard yet</p>
                     </div>
                   ) : (
-                    <table className="w-full text-sm">
+                    <div className="overflow-x-auto">
+                    <table className="w-full min-w-[600px] text-sm">
                       <thead>
                         <tr className="bg-muted/20 text-muted-foreground text-xs">
                           <th className="text-left py-4 px-4 font-medium">Rank</th>
@@ -3752,6 +3753,7 @@ export default function AppPage() {
                         })}
                       </tbody>
                     </table>
+                    </div>
                   )}
                 </div>
               </motion.div>
