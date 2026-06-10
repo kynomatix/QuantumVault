@@ -1067,7 +1067,7 @@ export default function QuantumLab() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
+    <div className="min-h-screen overflow-x-clip bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
       <header className="sticky top-0 z-50 border-b border-white/10 bg-slate-950/80 backdrop-blur-xl">
         <div className="max-w-7xl mx-auto px-2 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-12 sm:h-16">
@@ -4119,7 +4119,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
 
   return (
     <div className="space-y-6" data-testid="heatmap-panel">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
           <Grid3X3 className="w-5 h-5 text-violet-400" />
           <div>
@@ -4127,10 +4127,10 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
             <p className="text-xs text-white/40">{data.runs} completed runs · {cells.length} ticker/timeframe combos</p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 w-full sm:w-auto">
           {filterableStrategies.length > 0 && (
             <Select value={strategyFilter} onValueChange={(v) => { setStrategyFilter(v); setSelectedCell(null); setSortByTimeframe(null); }}>
-              <SelectTrigger className="w-[200px] bg-white/5 border-white/10 text-white" data-testid="select-heatmap-strategy">
+              <SelectTrigger className="flex-1 sm:flex-none sm:w-[200px] min-w-0 bg-white/5 border-white/10 text-white" data-testid="select-heatmap-strategy">
                 <SelectValue placeholder="All strategies" />
               </SelectTrigger>
               <SelectContent className="max-h-[320px]">
@@ -4144,7 +4144,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
             </Select>
           )}
           <Select value={metric} onValueChange={(v) => { setMetric(v as HeatmapMetric); setSelectedCell(null); }}>
-            <SelectTrigger className="w-[200px] bg-white/5 border-white/10 text-white" data-testid="select-heatmap-metric">
+            <SelectTrigger className="flex-1 sm:flex-none sm:w-[200px] min-w-0 bg-white/5 border-white/10 text-white" data-testid="select-heatmap-metric">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

@@ -95,32 +95,28 @@ const SheetContent = React.forwardRef<
     <SheetOverlay />
     <SheetPrimitive.Content
       ref={ref}
-      className={cn(sheetVariants({ side }), "overflow-visible border-l border-l-purple-500/30", className)}
+      className={cn(sheetVariants({ side }), "overflow-visible border-l border-l-primary/30", className)}
       {...props}
     >
-      {/* Sci-fi trapezoid close button - slides out on hover */}
-      <button 
-        onClick={() => {
-          const closeEvent = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true });
-          document.dispatchEvent(closeEvent);
-        }}
-        tabIndex={-1}
-        className="absolute left-0 top-1/2 z-[60] text-muted-foreground transition-all duration-300 ease-out focus:outline-none cursor-pointer"
-        style={{ transform: 'translateY(-50%) translateX(-10px)', filter: 'none' }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.transform = 'translateY(-50%) translateX(0px)';
-          e.currentTarget.style.filter = 'drop-shadow(0 0 12px rgba(168, 85, 247, 0.8))';
-          e.currentTarget.style.color = 'rgb(192, 132, 252)';
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.transform = 'translateY(-50%) translateX(-10px)';
-          e.currentTarget.style.filter = 'none';
-          e.currentTarget.style.color = '';
-        }}
-      >
-        <SciFiCloseButton />
-        <span className="sr-only">Close</span>
-      </button>
+      {/* Sci-fi trapezoid close button - always tappable; tucks + slides out on hover (desktop) */}
+      <SheetClose asChild>
+        <button 
+          tabIndex={-1}
+          aria-label="Close panel"
+          className={cn(
+            "absolute left-0 top-1/2 -translate-y-1/2 z-[60] cursor-pointer transition-all duration-300 ease-out focus:outline-none",
+            // Touch / no-hover devices: rest fully visible in brand color so it's easy to tap
+            "translate-x-0 text-primary/80",
+            // Hover-capable (desktop): tuck off the edge, slide out + glow on hover
+            "[@media(hover:hover)]:-translate-x-2.5 [@media(hover:hover)]:text-muted-foreground",
+            "[@media(hover:hover)]:hover:translate-x-0 [@media(hover:hover)]:hover:text-primary",
+            "[@media(hover:hover)]:hover:[filter:drop-shadow(0_0_10px_currentColor)]"
+          )}
+        >
+          <SciFiCloseButton />
+          <span className="sr-only">Close</span>
+        </button>
+      </SheetClose>
       {children}
     </SheetPrimitive.Content>
   </SheetPortal>
