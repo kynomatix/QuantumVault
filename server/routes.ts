@@ -3702,7 +3702,7 @@ export async function registerRoutes(
   // The SHA-256 fingerprint is the APK signing keystore's certificate fingerprint
   // and MUST match it exactly, or domain verification fails.
   const TWA_PACKAGE_NAME = "com.myquantumvault.app";
-  const TWA_SHA256_FINGERPRINT = "REPLACE_WITH_KEYSTORE_SHA256_FINGERPRINT";
+  const TWA_SHA256_FINGERPRINT = "83:B1:3B:C2:53:A6:79:63:9E:AC:63:CC:63:1A:B1:1C:27:E8:DB:6B:3E:2D:25:F0:7E:62:EF:94:4D:E6:FC:D9";
   app.get("/.well-known/assetlinks.json", (_req, res) => {
     res.setHeader("Cache-Control", "public, max-age=3600");
     res.json([
