@@ -4,6 +4,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { WalletProvider } from "@/components/WalletProvider";
+import { MwaDiagnostics } from "@/components/MwaDiagnostics";
 import { ConfirmDialogProvider } from "@/hooks/useConfirm";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import NotFound from "@/pages/not-found";
@@ -45,6 +46,7 @@ function App() {
             <ConfirmDialogProvider>
               <Toaster />
               <Router />
+              <MwaDiagnostics />
             </ConfirmDialogProvider>
           </TooltipProvider>
         </WalletProvider>
