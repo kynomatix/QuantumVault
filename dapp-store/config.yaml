@@ -1,8 +1,11 @@
 # =============================================================================
-# QuantumVault — Solana dApp Store publishing config
+# QuantumVault — Solana dApp Store listing content (REFERENCE ONLY)
 # =============================================================================
-# This file is consumed by the Solana Mobile dApp Store CLI
-# (@solana-mobile/dapp-store-cli). See PUBLISHING.md for the full step-by-step.
+# NOTE (April 2026): The Solana dApp Store is now published through the web
+# Publisher Portal (https://publish.solanamobile.com) — NOT this config file.
+# The old `dapp-store-cli create publisher/app/release` flow is deprecated.
+# Keep this file only as a copy-paste source for the portal's web form
+# (descriptions, package name, etc.). See PUBLISHING.md for the current steps.
 #
 # FILL IN every <ANGLE_BRACKET> placeholder before publishing.
 # Do NOT change `android_package` — it must stay identical to the value baked
