@@ -27,14 +27,15 @@ wrapper that loads the live site at https://myquantumvault.com. So:
 
 1. **Node.js 18+** installed (`node -v`).
 2. **Android build-tools** (the CLI uses `aapt2` to read the APK). Install Android Studio,
-   or just the command-line tools, then install build-tools 34:
+   or just the command-line tools, then install the latest build-tools — any recent
+   version works (e.g. 37.0.0):
    ```
-   sdkmanager "build-tools;34.0.0"
+   sdkmanager "build-tools;37.0.0"
    ```
-   Note the path, e.g.:
-   - macOS: `~/Library/Android/sdk/build-tools/34.0.0`
-   - Linux: `~/Android/Sdk/build-tools/34.0.0`
-   - Windows: `%LOCALAPPDATA%\Android\Sdk\build-tools\34.0.0`
+   Note the path, and **match the version number to whatever you actually installed**:
+   - macOS: `~/Library/Android/sdk/build-tools/37.0.0`
+   - Linux: `~/Android/Sdk/build-tools/37.0.0`
+   - Windows: `%LOCALAPPDATA%\Android\Sdk\build-tools\37.0.0`
    We'll call this `<BUILD_TOOLS_DIR>` below.
 3. **A funded Solana mainnet keypair file** (`keypair.json`, the standard array-of-bytes
    format from `solana-keygen`). This wallet becomes the permanent owner/authority of your
