@@ -96,6 +96,8 @@ export default function Landing() {
   const heroRef = useRef<HTMLDivElement>(null);
   const vaultSectionRef = useRef<HTMLDivElement>(null);
   const [isMounted, setIsMounted] = useState(false);
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
+  const [heroInView, setHeroInView] = useState(true);
   
   const { data: metrics } = useQuery<PlatformMetrics>({
     queryKey: ['platform-metrics'],
@@ -112,6 +114,28 @@ export default function Landing() {
   useEffect(() => {
     setIsMounted(true);
   }, []);
+
+  // Respect the user's reduced-motion preference (render vault doors open, no scrub)
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    setPrefersReducedMotion(mq.matches);
+    const onChange = (e: MediaQueryListEvent) => setPrefersReducedMotion(e.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+
+  // Pause the hero's infinite breathing zoom while it is scrolled off-screen so it
+  // stops competing for frame budget during the vault door scrub.
+  useEffect(() => {
+    const el = heroRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => setHeroInView(entry.isIntersecting),
+      { threshold: 0 }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
   
   const { scrollY } = useScroll();
   
@@ -124,8 +148,8 @@ export default function Landing() {
   );
   
   // Vault doors open based on scroll position through the section
-  const vaultLeftX = useTransform(vaultScrollProgress, [0.2, 0.5], ["0%", "-100%"]);
-  const vaultRightX = useTransform(vaultScrollProgress, [0.2, 0.5], ["0%", "100%"]);
+  const vaultLeftX = useTransform(vaultScrollProgress, [0.2, 0.5], ["0vw", "-50vw"]);
+  const vaultRightX = useTransform(vaultScrollProgress, [0.2, 0.5], ["0vw", "50vw"]);
   const vaultLogoScale = useTransform(vaultScrollProgress, [0.2, 0.5], [0.5, 1]);
   const vaultLogoOpacity = useTransform(vaultScrollProgress, [0.2, 0.45], [0, 1]);
   const vaultTitleOpacity = useTransform(vaultScrollProgress, [0.35, 0.5], [0, 1]);
@@ -152,8 +176,10 @@ export default function Landing() {
   const heroFrostBlur = useTransform(scrollY, [0, 80, 800], [0, 4, 16]);
   const heroFrostBlurStyle = useMotionTemplate`blur(${heroFrostBlur}px)`;
   
-  // Progressive darkening as page scrolls down
-  const heroDarkenOpacity = useTransform(scrollY, [0, 400, 800], [0, 0.3, 0.6]);
+  // Progressive darkening as page scrolls down. Stays fully clear for the first
+  // stretch of scroll so the top/initial frame isn't dimmed prematurely (the hero
+  // logo crossfade now handles the early fade), then ramps in.
+  const heroDarkenOpacity = useTransform(scrollY, [200, 500, 800], [0, 0.3, 0.6]);
   
   // Scroll indicator fades out quickly
   const scrollIndicatorOpacity = useTransform(scrollY, [0, 80], [1, 0]);
@@ -212,17 +238,11 @@ export default function Landing() {
             className="absolute inset-0 z-0"
             style={{ y: heroY, scale: heroScale }}
           >
-            {/* Breathing zoom loop applied to BOTH images so they move as one */}
-            <motion.div
-              className="absolute inset-0"
-              animate={{ 
-                scale: [1, 1.03, 1],
-              }}
-              transition={{
-                duration: 8,
-                repeat: Infinity,
-                ease: "easeInOut"
-              }}
+            {/* Breathing zoom loop applied to BOTH images so they move as one.
+                CSS-driven so it can be paused (not restarted) while off-screen. */}
+            <div
+              className={prefersReducedMotion ? "absolute inset-0" : "absolute inset-0 animate-hero-breathe"}
+              style={{ animationPlayState: heroInView ? 'running' : 'paused' }}
             >
               {/* Logo-free base, always visible */}
               <img 
@@ -238,9 +258,14 @@ export default function Landing() {
                 className="absolute inset-0 w-full h-full object-cover"
                 style={{ opacity: heroLogoOpacity }}
               />
-            </motion.div>
-            <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-black/40 to-black" />
-            <div className="absolute inset-0 bg-gradient-to-r from-primary/20 via-transparent to-accent/20" />
+            </div>
+            {/* Keep the bottom fade-to-black for the section transition, but don't
+                darken the top/center — that was muting the logo glow and flattening
+                the artwork's deep blacks. */}
+            <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-black" />
+            {/* Subtle brand tint only; the source art already carries its own
+                purple/blue neon, so a heavy wash here just faded it out. */}
+            <div className="absolute inset-0 bg-gradient-to-r from-primary/5 via-transparent to-accent/5" />
             
             {/* Progressive darkening overlay as page scrolls */}
             <motion.div 
@@ -369,34 +394,42 @@ export default function Landing() {
 
         {/* Brand transition section - Vault reveal (scroll-based reversible animation) */}
         <section ref={vaultSectionRef} className="relative py-24 px-6 bg-black overflow-hidden">
-          <div className="absolute inset-0 backdrop-blur-xl bg-black/80" />
+          {/* Plain semi-opaque fill (was backdrop-blur-xl, which forced a continuous
+              GPU repaint under the opaque doors for zero visual benefit). */}
+          <div className="absolute inset-0 bg-black/90" />
           <div className="absolute inset-0 bg-gradient-to-b from-transparent via-black/50 to-background" />
           
           {/* Vault door left - scroll-based */}
           <motion.div
-            style={{ x: vaultLeftX }}
-            className="absolute left-0 top-0 w-1/2 h-full bg-gradient-to-r from-black via-gray-900 to-gray-800 z-20 border-r border-white/5"
+            style={{ x: prefersReducedMotion ? "-50vw" : vaultLeftX, willChange: "transform" }}
+            className="absolute left-0 top-0 w-1/2 h-full bg-gradient-to-r from-black via-gray-900 to-gray-800 z-20 border-r border-white/5 flex items-center justify-end shadow-[8px_0_24px_rgba(0,0,0,0.6)]"
           >
-            <div className="absolute right-4 top-1/2 -translate-y-1/2 w-1 h-24 bg-gradient-to-b from-primary/50 via-accent/50 to-primary/50 rounded-full" />
+            <div className="mr-4 w-1 h-24 bg-gradient-to-b from-primary/50 via-accent/50 to-primary/50 rounded-full shadow-[0_0_8px_rgba(99,102,241,0.6)]" />
           </motion.div>
           
           {/* Vault door right - scroll-based */}
           <motion.div
-            style={{ x: vaultRightX }}
-            className="absolute right-0 top-0 w-1/2 h-full bg-gradient-to-l from-black via-gray-900 to-gray-800 z-20 border-l border-white/5"
+            style={{ x: prefersReducedMotion ? "50vw" : vaultRightX, willChange: "transform" }}
+            className="absolute right-0 top-0 w-1/2 h-full bg-gradient-to-l from-black via-gray-900 to-gray-800 z-20 border-l border-white/5 flex items-center justify-start shadow-[-8px_0_24px_rgba(0,0,0,0.6)]"
           >
-            <div className="absolute left-4 top-1/2 -translate-y-1/2 w-1 h-24 bg-gradient-to-b from-primary/50 via-accent/50 to-primary/50 rounded-full" />
+            <div className="ml-4 w-1 h-24 bg-gradient-to-b from-primary/50 via-accent/50 to-primary/50 rounded-full shadow-[0_0_8px_rgba(99,102,241,0.6)]" />
           </motion.div>
           
           <div className="relative z-10 max-w-4xl mx-auto text-center">
             {/* Glow ring effect - scroll-based */}
             <motion.div
-              style={{ opacity: vaultGlowOpacity, scale: vaultGlowScale }}
+              style={{
+                opacity: prefersReducedMotion ? 1 : vaultGlowOpacity,
+                scale: prefersReducedMotion ? 1 : vaultGlowScale,
+              }}
               className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-48 h-48 sm:w-64 sm:h-64"
             >
-              <div className="absolute inset-0 rounded-full bg-gradient-to-r from-primary/30 to-accent/30 blur-3xl animate-pulse" />
+              {/* Opacity-only pulse + layer hint so the blur doesn't recomposite
+                  every frame during the door scrub. No paint containment here — it
+                  would clip the soft glow bleed into a hard rectangle. */}
+              <div className="absolute inset-0 rounded-full bg-gradient-to-r from-primary/30 to-accent/30 blur-3xl animate-pulse [will-change:opacity]" />
               <motion.div 
-                animate={{ rotate: 360 }}
+                animate={prefersReducedMotion ? undefined : { rotate: 360 }}
                 transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
                 className="absolute inset-4 rounded-full border border-white/10"
                 style={{ borderStyle: 'dashed' }}
@@ -406,14 +439,14 @@ export default function Landing() {
             {/* Logo with scroll-based reveal */}
             <motion.div 
               style={{ 
-                opacity: vaultLogoOpacity, 
-                scale: vaultLogoScale
+                opacity: prefersReducedMotion ? 1 : vaultLogoOpacity, 
+                scale: prefersReducedMotion ? 1 : vaultLogoScale
               }}
               className="relative inline-block mb-6"
             >
               {/* Glow effect behind logo with matching rounded corners */}
               <motion.div 
-                animate={{ opacity: [0.4, 0.7, 0.4] }}
+                animate={prefersReducedMotion ? undefined : { opacity: [0.4, 0.7, 0.4] }}
                 transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
                 className="absolute -inset-3 bg-gradient-to-r from-primary to-accent rounded-[2rem] blur-xl"
               />
@@ -426,7 +459,7 @@ export default function Landing() {
             
             {/* Title with scroll-based reveal */}
             <motion.h2 
-              style={{ opacity: vaultTitleOpacity, y: vaultTitleY }}
+              style={{ opacity: prefersReducedMotion ? 1 : vaultTitleOpacity, y: prefersReducedMotion ? 0 : vaultTitleY }}
               className="font-display font-bold text-2xl sm:text-3xl text-white mb-4"
             >
               QuantumVault
@@ -434,11 +467,11 @@ export default function Landing() {
             
             {/* Pill with scroll-based reveal */}
             <motion.span 
-              style={{ opacity: vaultPillOpacity, y: vaultPillY }}
+              style={{ opacity: prefersReducedMotion ? 1 : vaultPillOpacity, y: prefersReducedMotion ? 0 : vaultPillY }}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 backdrop-blur-md border border-white/20 text-sm text-white"
             >
               <motion.div
-                animate={{ rotate: [0, 360] }}
+                animate={prefersReducedMotion ? undefined : { rotate: [0, 360] }}
                 transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
               >
                 <Zap className="w-4 h-4 text-primary" />
