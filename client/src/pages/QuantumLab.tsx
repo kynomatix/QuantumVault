@@ -4202,7 +4202,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
                       key={tf}
                       onClick={() => setSelectedCell(isSelected ? null : cell)}
                       className={cn(
-                        "aspect-[2/1] rounded-lg flex flex-col items-center justify-center transition-all cursor-pointer hover:scale-105 border",
+                        "aspect-[2/1] rounded-lg flex flex-col items-center justify-center transition-all cursor-pointer [@media(hover:hover)]:hover:scale-105 border",
                         isSelected ? "ring-2 ring-violet-400 border-violet-400/50" : "border-white/5 hover:border-white/20"
                       )}
                       style={{ backgroundColor: isProfitMetric && lev ? getHeatColor(lev.levProfit, levMin, levMax, "bestProfit") : getHeatColor(val, minVal, maxVal, metric) }}
@@ -4323,8 +4323,8 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
           {sortedTop5.length > 0 && (
             <div>
               <h4 className="text-sm font-medium text-white/60 mb-2">Top 5 Configurations</h4>
-              <div className="space-y-1">
-                <div className="grid gap-2 text-[10px] text-white/40 px-3 py-1" style={{ gridTemplateColumns: "2rem minmax(80px, 1.2fr) 1fr 1.3fr 1fr 1fr 1fr 1fr 0.8fr 5rem" }}>
+              <div className="space-y-1 overflow-x-auto">
+                <div className="grid gap-2 text-[10px] text-white/40 px-3 py-1 min-w-[700px]" style={{ gridTemplateColumns: "2rem minmax(80px, 1.2fr) 1fr 1.3fr 1fr 1fr 1fr 1fr 0.8fr 5rem" }}>
                   <span>#</span>
                   <span>Strategy</span>
                   <span>Profit (1x)</span>
@@ -4348,7 +4348,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
                     <div
                       key={idx}
                       onClick={() => setSelectedTopIdx(idx)}
-                      className={`grid gap-2 text-xs px-3 py-2 rounded-lg cursor-pointer transition-colors items-center ${isActive ? "bg-violet-500/10 ring-1 ring-violet-500/30" : "bg-white/[0.03] hover:bg-white/[0.06]"}`}
+                      className={`grid gap-2 text-xs px-3 py-2 rounded-lg cursor-pointer transition-colors items-center min-w-[700px] ${isActive ? "bg-violet-500/10 ring-1 ring-violet-500/30" : "bg-white/[0.03] hover:bg-white/[0.06]"}`}
                       style={{ gridTemplateColumns: "2rem minmax(80px, 1.2fr) 1fr 1.3fr 1fr 1fr 1fr 1fr 0.8fr 5rem" }}
                       data-testid={`heatmap-top-${idx}`}
                     >
@@ -4555,7 +4555,12 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   // protocol's requirement, so a Flash create slips through to a raw
   // "insufficient SOL" error instead of surfacing the inline deposit button.
   useEffect(() => {
-    if (walletAddress && sessionConnected) fetchBalanceAndAgent(true);
+    // Only refetch on protocol change while the dialog is actually open. Without
+    // the isOpen guard this fired once per BotSetupAdvisor on mount — and the
+    // heatmap renders 4 of them per selected cell, so every cell tap kicked off
+    // 4 redundant /api/agent/balance calls (the "struggling to load" jank on
+    // mobile). The dialog's own onOpenChange handles the open-time fetch.
+    if (isOpen && walletAddress && sessionConnected) fetchBalanceAndAgent(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deployProtocol]);
 
