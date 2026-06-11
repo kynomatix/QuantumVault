@@ -16648,7 +16648,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
   // ===== ADMIN LOGS ENDPOINTS =====
   const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD?.trim();
-  console.log(`[Admin] ADMIN_PASSWORD configured: ${ADMIN_PASSWORD ? 'yes' : 'no'}, length: ${ADMIN_PASSWORD?.length || 0}`);
+  console.log(`[Admin] ADMIN_PASSWORD configured: ${ADMIN_PASSWORD ? 'yes' : 'no'}`);
   
   // Middleware to check admin password
   const requireAdminAuth = (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
@@ -16659,7 +16659,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     const providedToken = authHeader?.replace('Bearer ', '').trim();
     
     if (!providedToken || providedToken !== ADMIN_PASSWORD) {
-      console.log(`[Admin] Auth failed - provided length: ${providedToken?.length || 0}, expected length: ${ADMIN_PASSWORD.length}`);
+      console.log(`[Admin] Auth failed - invalid token`);
       return res.status(401).json({ error: "Unauthorized" });
     }
     next();

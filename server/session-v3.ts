@@ -1,4 +1,5 @@
 import nodeCrypto from 'crypto';
+import { escapeTelegramHtml } from './telegram-html';
 import {
   generateUserSalt,
   generateUMK,
@@ -856,7 +857,7 @@ export async function revokeExecution(
           if (!wallet?.telegramChatId || !wallet.notificationsEnabled) return;
           const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
           if (!TELEGRAM_BOT_TOKEN) return;
-          const names = pausedBots.map((b) => b.name).join(', ');
+          const names = pausedBots.map((b) => escapeTelegramHtml(b.name)).join(', ');
           const text =
             `<b>🛑 Execution Revoked</b>\n` +
             `Your trading authorization was revoked. ${pausedBots.length} active bot(s) ` +

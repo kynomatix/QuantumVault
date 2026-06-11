@@ -3,6 +3,7 @@ import { db } from "./db";
 import { botTrades } from "@shared/schema";
 import { storage } from "./storage";
 import { getDefaultAdapter } from "./protocol/adapter-registry";
+import { escapeTelegramHtml } from "./telegram-html";
 
 export interface SummaryOpenPosition {
   botName: string;
@@ -226,7 +227,7 @@ export function formatSummaryMessage(stats: WalletSummaryStats[]): string {
     lines.push(`24h trades: <b>${s.tradesLast24h}</b> · wins ${s.winning24h} · losses ${s.losing24h}`);
     lines.push(`Open positions: <b>${s.openPositions.length}</b>`);
     for (const p of s.openPositions) {
-      lines.push(`  • ${p.botName} — ${p.side} ${p.market} ${p.size.toFixed(4)} · uPnL ${fmtPnl(p.unrealizedPnl)}`);
+      lines.push(`  • ${escapeTelegramHtml(p.botName)} — ${p.side} ${escapeTelegramHtml(p.market)} ${p.size.toFixed(4)} · uPnL ${fmtPnl(p.unrealizedPnl)}`);
     }
     parts.push(lines.join('\n'));
   }
@@ -246,7 +247,7 @@ export function formatPositionsMessage(stats: WalletSummaryStats[]): string {
     }
     for (const p of s.openPositions) {
       parts.push(
-        `  • ${p.botName} — ${p.side} ${p.market}\n` +
+        `  • ${escapeTelegramHtml(p.botName)} — ${p.side} ${escapeTelegramHtml(p.market)}\n` +
         `    size ${p.size.toFixed(4)} · entry ${fmtUsd(p.entryPrice)} · uPnL ${fmtPnl(p.unrealizedPnl)}`,
       );
     }

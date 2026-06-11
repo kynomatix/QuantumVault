@@ -3,6 +3,26 @@ import type { LabTradeRecord, LabBacktestResult } from "@shared/schema";
 import * as ind from "../indicators";
 import { compilePineHotLoop, TA_WHITELIST, type CompilerContext } from "./compiler";
 
+// Whitelist of Math methods the Pine const-folder / series-mapper may dispatch
+// dynamically via `math.<fn>(...)`. The property name comes from a user
+// strategy's AST, so resolving an arbitrary member off Math (e.g. `constructor`
+// or an inherited Object.prototype method) is rejected — only these numeric
+// functions are reachable through bracket access. Defense-in-depth; the runtime
+// is backtest-only. Keep this in sync with JS Math: if Pine ever maps a new
+// math.* name onto a Math method, add it here or that call silently falls
+// through (no const-fold / series-map) instead of dispatching.
+const SAFE_MATH_FNS: ReadonlySet<string> = new Set([
+  "abs", "acos", "acosh", "asin", "asinh", "atan", "atan2", "atanh", "cbrt",
+  "ceil", "clz32", "cos", "cosh", "exp", "expm1", "floor", "fround", "hypot",
+  "imul", "log", "log10", "log1p", "log2", "max", "min", "pow", "random",
+  "round", "sign", "sin", "sinh", "sqrt", "tan", "tanh", "trunc",
+]);
+function safeMathFn(name: unknown): ((...args: number[]) => number) | undefined {
+  if (typeof name !== "string" || !SAFE_MATH_FNS.has(name)) return undefined;
+  const fn = (Math as any)[name];
+  return typeof fn === "function" ? fn : undefined;
+}
+
 export const TA_IMPL_REGISTRY: ReadonlySet<string> = new Set([
   "crossover", "crossunder", "cross", "change", "rising", "falling",
   "sma", "ema", "wma", "linreg", "rma", "vwma", "swma", "hma", "dema", "tema", "alma",
@@ -386,7 +406,7 @@ export function executePine(
   sharedIndicatorCache?: Map<string, any>,
   forceInterpreter?: boolean,
 ): LabBacktestResult {
-  const params: Record<string, any> = {};
+  const params: Record<string, any> = Object.create(null);
   for (const [k, v] of Object.entries(rawParams)) {
     if (typeof v === "string") {
       const tsMatch = v.match(/^timestamp\(\s*"(.+?)"\s*\)?$/);
@@ -425,24 +445,29 @@ export function executePine(
     }
   }
 
-  const builtinSeries: Record<string, number[] | Float64Array> = {
+  // Null-prototype scratch maps: keys come from user-supplied Pine identifiers
+  // (a strategy variable literally named `__proto__`/`constructor` is a valid
+  // Pine identifier), so a plain object literal here would be prototype-
+  // pollutable. Object.create(null) makes such keys harmless own properties.
+  // Backtest-only / sandboxed; pure defense-in-depth.
+  const builtinSeries: Record<string, number[] | Float64Array> = Object.assign(Object.create(null), {
     close: closeArr, open: openArr, high: highArr, low: lowArr,
     volume: volArr, hl2: hl2Arr, hlc3: hlc3Arr, ohlc4: ohlc4Arr,
-  };
+  });
 
   const numHighArr: Float64Array | number[] = shared?.numHighArr ?? highArr;
   const numLowArr: Float64Array | number[] = shared?.numLowArr ?? lowArr;
   const numCloseArr: Float64Array | number[] = shared?.numCloseArr ?? closeArr;
 
   const broker = new Broker(config);
-  const vars: Record<string, any[]> = {};
+  const vars: Record<string, any[]> = Object.create(null);
   const varIsVar: Set<string> = new Set();
-  const precomputed: PrecomputedSeries = {};
+  const precomputed: PrecomputedSeries = Object.create(null);
   const indicatorCache: Map<string, any> = sharedIndicatorCache ?? new Map();
   const dynNumArrays: Map<string, number[]> = new Map();
   let _lastFullSeries: number[] | null = null;
-  const inputDefaults: Record<string, any> = {};
-  const userFunctions: Record<string, { params: string[]; body: Stmt[] }> = {};
+  const inputDefaults: Record<string, any> = Object.create(null);
+  const userFunctions: Record<string, { params: string[]; body: Stmt[] }> = Object.create(null);
   let currentBar = 0;
   let opsThrottle = 0;
   let totalOps = 0;
@@ -515,8 +540,8 @@ export function executePine(
       const mathFn = e.fn.prop;
       const constArgs = e.args.map(a => resolveConst(a));
       if (constArgs.every((a: any) => typeof a === "number")) {
-        const fn = (Math as any)[mathFn];
-        if (typeof fn === "function") return fn(...constArgs);
+        const fn = safeMathFn(mathFn);
+        if (fn) return fn(...constArgs);
       }
     }
     if (e.k === "call" && e.fn.k === "id" && e.fn.name === "timestamp") {
@@ -826,8 +851,8 @@ export function executePine(
         const inner = tryGetSeries(e.args[0]);
         if (inner) {
           const result = new Array(n).fill(NaN);
-          const fn = (Math as any)[mathFn];
-          if (typeof fn === "function") {
+          const fn = safeMathFn(mathFn);
+          if (fn) {
             for (let i = 0; i < n; i++) result[i] = isNaN(inner[i]) ? NaN : fn(inner[i]);
             precomputed[name] = result;
             return true;
@@ -978,8 +1003,8 @@ export function executePine(
       if (e.args.length >= 1) {
         const inner = tryGetSeries(e.args[0]);
         if (inner) {
-          const fn = (Math as any)[mathFn];
-          if (typeof fn === "function") {
+          const fn = safeMathFn(mathFn);
+          if (fn) {
             const result = new Array(n).fill(NaN);
             for (let i = 0; i < n; i++) result[i] = isNaN(inner[i]) ? NaN : fn(inner[i]);
             return result;
@@ -1860,7 +1885,7 @@ export function executePine(
       if (name === "__array_literal") return e.args.map(a => evalExpr(a));
       if (userFunctions[name]) {
         const fn = userFunctions[name];
-        const savedVars: Record<string, any> = {};
+        const savedVars: Record<string, any> = Object.create(null);
         const savedAliases: { name: string; origB?: Series; origP?: Series }[] = [];
         for (let i = 0; i < fn.params.length; i++) {
           const paramName = fn.params[i];

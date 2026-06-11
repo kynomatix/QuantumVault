@@ -1,6 +1,7 @@
 import { db } from "./db";
 import { wallets } from "@shared/schema";
 import { eq } from "drizzle-orm";
+import { escapeTelegramHtml } from "./telegram-html";
 
 export interface TradeNotification {
   type: 'trade_executed' | 'trade_failed' | 'position_closed' | 'partial_close';
@@ -174,8 +175,15 @@ export async function sendTradeNotification(
 }
 
 function formatNotificationMessage(notification: TradeNotification): { title: string; body: string } {
-  const { type, botName, market, side, size, price, pnl, error } = notification;
-  
+  const { type, size, price, pnl } = notification;
+  // Escape user/creator-derived values (bot names, symbols, error text) before
+  // they are interpolated into the HTML message body. Bot names in particular
+  // are creator-controlled and surfaced to marketplace subscribers.
+  const botName = escapeTelegramHtml(notification.botName);
+  const market = escapeTelegramHtml(notification.market);
+  const side = notification.side ? escapeTelegramHtml(notification.side) : notification.side;
+  const error = notification.error ? escapeTelegramHtml(notification.error) : notification.error;
+
   switch (type) {
     case 'trade_executed': {
       const sizeStr = size ? `$${size.toFixed(2)}` : '';
@@ -197,7 +205,7 @@ function formatNotificationMessage(notification: TradeNotification): { title: st
         ? (pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`)
         : '';
       const emoji = pnl !== undefined ? (pnl >= 0 ? '🟢' : '🔴') : '';
-      const reasonSuffix = notification.closeReason ? ` (${notification.closeReason})` : '';
+      const reasonSuffix = notification.closeReason ? ` (${escapeTelegramHtml(notification.closeReason)})` : '';
       return {
         title: `📊 Position Closed`,
         body: `${emoji} ${botName}: ${market} ${pnlStr}${reasonSuffix}`.trim()
