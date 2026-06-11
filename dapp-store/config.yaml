@@ -14,9 +14,9 @@
 # =============================================================================
 
 publisher:
-  name: <YOUR PUBLISHER NAME>            # e.g. "QuantumVault" or your company name
+  name: QuantumVault            # e.g. "QuantumVault" or your company name
   website: https://myquantumvault.com
-  email: <YOUR CONTACT EMAIL>            # support/contact email (shown to reviewers)
+  email: jayse@myquantumvault.com            # support/contact email (shown to reviewers)
   # address: <auto-filled by `dapp-store create publisher`>
   media:
     - purpose: icon
@@ -41,13 +41,13 @@ release:
     # Capture on a phone (Seeker/Android) at native resolution. Portrait PNG/JPG.
     # Drop them in dapp-store/media/ and keep these paths in sync.
     - purpose: screenshot
-      uri: ./media/screenshot_1.png
+      uri: ./media/Screenshot_1.jpg
     - purpose: screenshot
-      uri: ./media/screenshot_2.png
+      uri: ./media/Screenshot_2.jpg
     - purpose: screenshot
-      uri: ./media/screenshot_3.png
+      uri: ./media/Screenshot_3.jpg
     - purpose: screenshot
-      uri: ./media/screenshot_4.png
+      uri: ./media/Screenshot_4.jpg
 
     # --- Banner / feature graphic: OPTIONAL but recommended ---------------
     # Roughly 2:1 (e.g. 1200x600) PNG. Uncomment once you add the file.

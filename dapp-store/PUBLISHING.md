@@ -62,8 +62,11 @@ safe forever: lose it and you can never ship an update to this listing.
 
 ## 3) Finish the listing
 
-1. Add **at least 4 phone screenshots** to `dapp-store/media/` named
-   `screenshot_1.png` … `screenshot_4.png` (portrait, native resolution).
+1. Add **at least 4 phone screenshots** to `dapp-store/media/` (portrait, native
+   resolution; PNG or JPG both fine).
+   - The filename in `config.yaml` must match the file on disk **exactly, including
+     capitalisation** (e.g. `Screenshot_1.jpg` ≠ `screenshot_1.jpg` on Mac/Linux).
+   - Aim for at least ~1080px on the shorter side so they don't look soft or get flagged.
    - Your Seeker is airgapped — capture there and transfer, or capture on any Android
      device / emulator running the app.
 2. (Optional) add `dapp-store/media/banner.png` (~1200×600) and uncomment the `banner`
