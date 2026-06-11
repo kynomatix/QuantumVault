@@ -847,9 +847,20 @@ export default function AppPage() {
       return;
     }
     
-    // If this is the first connection, just store and return
+    // First connection (fresh login). The mount-time loaders for equity/
+    // settings fire as soon as `connected` flips true, but they don't first
+    // POST /api/wallet/connect to bind the server session — only
+    // handleRefreshAll does. On mobile/MWA the connect handshake completes
+    // late, so those early loads come back empty and the user sees a zero
+    // balance / no bots until they hit the manual refresh button. Trigger the
+    // same full refresh automatically so the data just populates on login.
     if (!prevWalletRef.current) {
       prevWalletRef.current = publicKeyString;
+      if (refreshing) {
+        pendingRefreshRef.current = true;
+      } else {
+        handleRefreshAll();
+      }
       return;
     }
     
