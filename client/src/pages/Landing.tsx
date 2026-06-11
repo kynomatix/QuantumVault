@@ -138,13 +138,14 @@ export default function Landing() {
   // Background parallax - continuous zoom and movement
   const heroY = useTransform(scrollY, [0, 800], [0, 300]);
   const heroScale = useTransform(scrollY, [0, 800], [1, 1.15]);
+
+  // Crossfade the logo background out as the user scrolls into the hero,
+  // so the headline reads cleanly. Mostly gone by the time the text reaches
+  // full opacity (~120). Scroll-scrubbed, so it reverses on scroll-up.
+  const heroLogoOpacity = useTransform(scrollY, [0, 100], [1, 0]);
   
   // Staged reveal: content starts hidden, fades in gradually (0-120), then fades out (300-600)
   const contentY = useTransform(scrollY, [0, 120, 600], [40, 0, 100]);
-  
-  // Glass backdrop - smooth blur that's always present but fades intensity
-  const glassOpacity = useTransform(scrollY, [0, 120, 300, 550], [0, 0.85, 0.85, 0]);
-  const glassBlur = useTransform(scrollY, [0, 120], [8, 20]);
   
   // Hero frost effect - blur gets stronger as user scrolls down
   const heroFrostOpacity = useTransform(scrollY, [0, 80, 800], [0, 0.4, 0.7]);
@@ -163,9 +164,6 @@ export default function Landing() {
     [0, 120, 300, 600],
     [0, 1, 1, 0]
   );
-  
-  // Glass blur as template string for backdrop-filter - always has some blur
-  const glassBlurStyle = useMotionTemplate`blur(${glassBlur}px)`;
 
   useEffect(() => {
     if (connected) {
@@ -214,10 +212,9 @@ export default function Landing() {
             className="absolute inset-0 z-0"
             style={{ y: heroY, scale: heroScale }}
           >
-            <motion.img 
-              src="/images/QV_Hero5.webp" 
-              alt="QuantumVault Hero"
-              className="w-full h-full object-cover"
+            {/* Breathing zoom loop applied to BOTH images so they move as one */}
+            <motion.div
+              className="absolute inset-0"
               animate={{ 
                 scale: [1, 1.03, 1],
               }}
@@ -226,7 +223,22 @@ export default function Landing() {
                 repeat: Infinity,
                 ease: "easeInOut"
               }}
-            />
+            >
+              {/* Logo-free base, always visible */}
+              <img 
+                src="/images/QV_Hero5-1.webp" 
+                alt="QuantumVault Hero"
+                className="absolute inset-0 w-full h-full object-cover"
+              />
+              {/* Logo layer on top, crossfaded out on scroll */}
+              <motion.img 
+                src="/images/QV_Hero5.webp" 
+                alt=""
+                aria-hidden="true"
+                className="absolute inset-0 w-full h-full object-cover"
+                style={{ opacity: heroLogoOpacity }}
+              />
+            </motion.div>
             <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-black/40 to-black" />
             <div className="absolute inset-0 bg-gradient-to-r from-primary/20 via-transparent to-accent/20" />
             
@@ -251,18 +263,19 @@ export default function Landing() {
             className="absolute inset-0 flex items-center justify-center z-10"
             style={{ y: contentY, opacity: contentOpacity }}
           >
-            {/* Glass backdrop for text readability */}
-            <motion.div 
-              className="absolute inset-x-4 sm:inset-x-8 md:inset-x-16 top-1/2 -translate-y-1/2 max-w-5xl mx-auto rounded-3xl shadow-2xl"
+            {/* Soft, edgeless readability vignette behind the headline.
+                Inherits the content wrapper's contentOpacity, so it fades in
+                and out in step with the text and is never visible on its own. */}
+            <div 
+              className="absolute inset-0 pointer-events-none"
               style={{ 
-                opacity: glassOpacity,
-                backdropFilter: glassBlurStyle,
-                WebkitBackdropFilter: glassBlurStyle,
-                background: 'linear-gradient(135deg, rgba(0,0,0,0.4) 0%, rgba(0,0,0,0.2) 50%, rgba(0,0,0,0.4) 100%)'
+                background: 'radial-gradient(ellipse 55% 38% at 50% 42%, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0.3) 48%, transparent 78%)',
+                backdropFilter: 'blur(3px)',
+                WebkitBackdropFilter: 'blur(3px)',
+                maskImage: 'radial-gradient(ellipse 55% 38% at 50% 42%, black 0%, black 45%, transparent 78%)',
+                WebkitMaskImage: 'radial-gradient(ellipse 55% 38% at 50% 42%, black 0%, black 45%, transparent 78%)',
               }}
-            >
-              <div className="h-full w-full rounded-3xl bg-gradient-to-br from-primary/5 via-transparent to-accent/5" />
-            </motion.div>
+            />
             
             <motion.div 
               initial="hidden"
