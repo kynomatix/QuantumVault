@@ -103,5 +103,4 @@ solana_mobile_dapp_publisher_portal:
     QuantumVault is a Trusted Web Activity that loads https://myquantumvault.com.
     To exercise the app: open it, tap Connect Wallet (Mobile Wallet Adapter),
     approve the connection in your wallet, and the dashboard, bots, and positions
-    views will load. No test account is required to browse the connect screen.
-    <ADD ANY DEMO WALLET / CREDENTIALS THE REVIEWER MAY NEED, OR STATE NONE.>
+    views will load.
