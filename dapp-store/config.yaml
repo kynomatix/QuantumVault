@@ -49,10 +49,10 @@ release:
     - purpose: screenshot
       uri: ./media/Screenshot_4.jpg
 
-    # --- Banner / feature graphic: OPTIONAL but recommended ---------------
-    # Roughly 2:1 (e.g. 1200x600) PNG. Uncomment once you add the file.
-    # - purpose: banner
-    #   uri: ./media/banner.png
+    # --- Banner / feature graphic ----------------------------------------
+    # Roughly 2:1 (1200x600). Filename must match the file on disk exactly.
+    - purpose: banner
+      uri: ./media/Banner.jpg
 
   files:
     - purpose: install

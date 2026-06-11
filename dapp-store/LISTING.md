@@ -47,9 +47,9 @@ manage your trading bots on the go.
 ---
 
 ## Media checklist
-- [x] App icon 512×512 — `media/app_icon.png` (provided)
-- [ ] Screenshot 1 — `media/screenshot_1.png` (portrait, phone)
-- [ ] Screenshot 2 — `media/screenshot_2.png`
-- [ ] Screenshot 3 — `media/screenshot_3.png`
-- [ ] Screenshot 4 — `media/screenshot_4.png`
-- [ ] (optional) Banner ~1200×600 — `media/banner.png`
+- [x] App icon 512×512 — `media/app_icon.png`
+- [x] Screenshot 1 — `media/Screenshot_1.jpg` (1200×2670, portrait)
+- [x] Screenshot 2 — `media/Screenshot_2.jpg`
+- [x] Screenshot 3 — `media/Screenshot_3.jpg`
+- [x] Screenshot 4 — `media/Screenshot_4.jpg`
+- [x] Banner 1200×600 — `media/Banner.jpg`
