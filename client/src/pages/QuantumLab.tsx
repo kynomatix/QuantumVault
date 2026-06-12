@@ -6503,15 +6503,15 @@ function CreatorPanel({ strategies, onUseStrategy }: {
                   <span className="text-[10px]">Every strategy auto-protects: stop → partial TP → breakeven → trail</span>
                 </div>
                 <p className="text-[10px] uppercase tracking-wider text-white/30 mb-2 text-left">Try a starting point</p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 auto-rows-fr">
                   {CREATOR_QUICK_STARTS.map((q, i) => (
-                    <button key={i} type="button" onClick={() => { setMode("new"); setIdea(q.prompt); }} data-testid={`button-quickstart-${i}`} className="text-left p-3 rounded-lg bg-white/5 hover:bg-indigo-500/10 border border-white/10 hover:border-indigo-400/30 transition-colors group">
+                    <button key={i} type="button" onClick={() => { setMode("new"); setIdea(q.prompt); }} data-testid={`button-quickstart-${i}`} className="h-full flex flex-col text-left p-3 rounded-lg bg-white/5 hover:bg-indigo-500/10 border border-white/10 hover:border-indigo-400/30 transition-colors group">
                       <div className="flex items-center justify-between gap-1 mb-1">
                         <span className="text-[9px] uppercase tracking-wider text-indigo-300/55 truncate">{q.family}</span>
                         <Shield className="w-3 h-3 text-indigo-300/25 group-hover:text-indigo-300/70 transition-colors shrink-0" aria-hidden="true" />
                       </div>
-                      <p className="text-[12px] font-medium text-white/80 leading-tight" data-testid={`text-quickstart-title-${i}`}>{q.title}</p>
-                      <p className="text-[11px] text-white/45 mt-0.5 leading-snug">{q.blurb}</p>
+                      <p className="text-[12px] font-medium text-white/80 leading-tight min-h-[2lh]" data-testid={`text-quickstart-title-${i}`}>{q.title}</p>
+                      <p className="text-[11px] text-white/45 mt-0.5 leading-snug line-clamp-2">{q.blurb}</p>
                     </button>
                   ))}
                 </div>
