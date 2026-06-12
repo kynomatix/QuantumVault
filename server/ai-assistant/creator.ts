@@ -82,6 +82,151 @@ function tryCompile(pine: string): { ok: boolean; error: string | null } {
   }
 }
 
+// --- Structural enforcement of the standard backtest defaults --------------------
+//
+// The prompt asks the model to put the standard settings in strategy(), but a prompt
+// is a request, not a guarantee — a draft can omit or deviate from them. parsePineScript
+// reads initial_capital / commission_value out of the strategy() declaration into the
+// saved strategySettings, so a deviating declaration silently changes how the backtest
+// is configured. We therefore rewrite the strategy() call DETERMINISTICALLY after the
+// model returns, so the standard defaults are enforced by code, not by hope.
+//
+// NOTE on date range: there is intentionally NO date-range default to inject. In
+// QuantumLab the backtest window is a RUN-TIME selection (the UI's start/end dates drive
+// the candle fetch in datafeed.ts and the run-loop filter); it is not part of the Pine
+// source. Hard-coding a date range into the script would override the user's chosen
+// candle range, so it is deliberately excluded from the enforced defaults.
+
+const STANDARD_DEFAULT_KEYS = new Set([
+  'initial_capital',
+  'commission_type',
+  'commission_value',
+  'default_qty_type',
+  'default_qty_value',
+  'slippage',
+]);
+
+// Locate the top-level `strategy(...)` declaration call (NOT strategy.entry / .close /
+// .exit), skipping string literals and `//` line comments, and return the paren span.
+function locateStrategyCall(src: string): { open: number; close: number } | null {
+  let inStr = false;
+  let strCh = '';
+  let inComment = false;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (inComment) {
+      if (c === '\n') inComment = false;
+      continue;
+    }
+    if (inStr) {
+      if (c === strCh && src[i - 1] !== '\\') inStr = false;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      inStr = true;
+      strCh = c;
+      continue;
+    }
+    if (c === '/' && src[i + 1] === '/') {
+      inComment = true;
+      i++;
+      continue;
+    }
+    if (c === 's' && src.startsWith('strategy', i)) {
+      const prev = i > 0 ? src[i - 1] : '';
+      if (/[.\w]/.test(prev)) continue; // member access (strategy.entry) or part of an identifier
+      let j = i + 'strategy'.length;
+      while (j < src.length && /\s/.test(src[j])) j++;
+      if (src[j] !== '(') continue;
+      const open = j;
+      let depth = 0;
+      let s2 = false;
+      let sc = '';
+      for (let k = open; k < src.length; k++) {
+        const cc = src[k];
+        if (s2) {
+          if (cc === sc && src[k - 1] !== '\\') s2 = false;
+          continue;
+        }
+        if (cc === '"' || cc === "'") {
+          s2 = true;
+          sc = cc;
+          continue;
+        }
+        if (cc === '(') depth++;
+        else if (cc === ')') {
+          depth--;
+          if (depth === 0) return { open, close: k };
+        }
+      }
+      return null; // unbalanced
+    }
+  }
+  return null;
+}
+
+// Split a call's argument list on top-level commas, respecting strings and nested
+// (), [], {}. Trims and drops empties.
+function splitTopLevelArgs(inner: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = 0;
+  let inStr = false;
+  let strCh = '';
+  for (let i = 0; i < inner.length; i++) {
+    const c = inner[i];
+    if (inStr) {
+      if (c === strCh && inner[i - 1] !== '\\') inStr = false;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      inStr = true;
+      strCh = c;
+      continue;
+    }
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') depth--;
+    else if (c === ',' && depth === 0) {
+      out.push(inner.slice(start, i));
+      start = i + 1;
+    }
+  }
+  out.push(inner.slice(start));
+  return out.map((a) => a.trim()).filter((a) => a.length > 0);
+}
+
+// Rewrite the strategy() declaration so it carries EXACTLY the standard defaults,
+// preserving the title and every other (non-default) argument. Returns the input
+// unchanged (fail-safe, never throws) if no strategy() call can be located.
+export function enforceStandardDefaults(pine: string): string {
+  const loc = locateStrategyCall(pine);
+  if (!loc) return pine;
+
+  const inner = pine.slice(loc.open + 1, loc.close);
+  const args = splitTopLevelArgs(inner);
+
+  // Keep positional args (title etc.) and any named arg that isn't a standard default.
+  const kept = args.filter((a) => {
+    const eq = a.indexOf('=');
+    if (eq === -1) return true; // positional
+    const key = a.slice(0, eq).trim();
+    return !STANDARD_DEFAULT_KEYS.has(key);
+  });
+
+  const d = STANDARD_BACKTEST_DEFAULTS;
+  const standardArgs = [
+    `initial_capital=${d.initialCapital}`,
+    'commission_type=strategy.commission.percent',
+    `commission_value=${d.commissionPercent}`,
+    'default_qty_type=strategy.cash',
+    `default_qty_value=${d.defaultQtyValue}`,
+    `slippage=${d.slippageTicks}`,
+  ];
+
+  const newInner = [...kept, ...standardArgs].join(', ');
+  return pine.slice(0, loc.open + 1) + newInner + pine.slice(loc.close);
+}
+
 // Draft on the DRAFT model, then up to MAX_REPAIRS repairs (feeding the compile error
 // back), then exactly one escalation to the stronger model as a last resort.
 async function generateWithRepair(
@@ -115,6 +260,18 @@ async function generateWithRepair(
         `That script failed to compile in QuantumLab's Pine engine with:\n${compile.error}\n` +
         'Fix it and output the corrected, complete strategy as a single ```pine code block. No prose.',
     });
+  }
+
+  // Structurally enforce the standard backtest defaults on the final draft. Adopt the
+  // enforced version only if it still compiles, so the rewrite can never turn a working
+  // script into a broken one (fail-safe fallback to the model's own output).
+  const enforced = enforceStandardDefaults(pine);
+  if (enforced !== pine) {
+    const enforcedCompile = tryCompile(enforced);
+    if (enforcedCompile.ok) {
+      pine = enforced;
+      compile = enforcedCompile;
+    }
   }
 
   return { pine, compile, modelUsed, attempts };
