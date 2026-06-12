@@ -6216,10 +6216,10 @@ function CreatorPanel({ strategies, onUseStrategy }: {
       </div>
 
       {/* Workspace: control deck (left) + canvas (right) */}
-      <div className="grid lg:grid-cols-2 gap-5 items-start">
+      <div className="grid gap-5 lg:flex lg:h-[680px]">
         {/* LEFT — Control deck */}
-        <Card className="bg-white/5 border border-white/10 overflow-hidden" data-testid="creator-control-deck">
-          <Tabs value={mode} onValueChange={(v) => setMode(v as "new" | "improve")}>
+        <Card className="bg-white/5 border border-white/10 overflow-hidden flex flex-col lg:w-1/2 lg:h-full" data-testid="creator-control-deck">
+          <Tabs value={mode} onValueChange={(v) => setMode(v as "new" | "improve")} className="lg:flex-1 lg:flex lg:flex-col lg:min-h-0">
             <div className="px-4 pt-4">
               <TabsList className="bg-black/30 border border-white/10">
                 <TabsTrigger value="new" data-testid="tab-creator-new" className="text-white/60 data-[state=active]:bg-indigo-500/20 data-[state=active]:text-white">
@@ -6231,12 +6231,12 @@ function CreatorPanel({ strategies, onUseStrategy }: {
               </TabsList>
             </div>
 
-            <TabsContent value="new" className="mt-0 p-4 space-y-2">
+            <TabsContent value="new" className="mt-0 p-4 space-y-2 lg:flex-1 lg:flex lg:flex-col lg:min-h-0">
               <Textarea
                 value={idea}
                 onChange={(e) => setIdea(e.target.value)}
                 placeholder={"e.g. Go long when the 50 EMA crosses above the 200 EMA and RSI is below 70. Exit when price closes below the 50 EMA or hits a 5% stop loss."}
-                className="min-h-[150px] bg-black/40 border-white/10 text-white/90 text-sm resize-y"
+                className="min-h-[150px] bg-black/40 border-white/10 text-white/90 text-sm resize-y lg:resize-none lg:flex-1 lg:min-h-0"
                 data-testid="input-idea"
               />
               <div className="flex items-center justify-end">
@@ -6244,7 +6244,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
               </div>
             </TabsContent>
 
-            <TabsContent value="improve" className="mt-0 p-4 space-y-2">
+            <TabsContent value="improve" className="mt-0 p-4 space-y-2 lg:flex-1 lg:flex lg:flex-col lg:min-h-0">
               <p className="text-[12px] text-white/50">Refine a saved strategy (or the current draft) using its backtest insights.</p>
               <div className="flex flex-wrap items-center gap-2">
                 <Select
@@ -6271,7 +6271,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
                 value={insightsText}
                 onChange={(e) => setInsightsText(e.target.value)}
                 placeholder={"What should the AI change? Paste backtest insights, or describe what to fix (e.g. 'too many trades in chop — add a trend filter')."}
-                className="min-h-[120px] bg-black/40 border-white/10 text-white/90 text-sm resize-y font-mono"
+                className="min-h-[120px] bg-black/40 border-white/10 text-white/90 text-sm resize-y font-mono lg:resize-none lg:flex-1 lg:min-h-0"
                 data-testid="input-insights"
               />
               <div className="flex items-center justify-end">
@@ -6425,7 +6425,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
         </Card>
 
         {/* RIGHT — Canvas */}
-        <Card className="bg-white/5 border border-white/10 overflow-hidden lg:sticky lg:top-4 min-h-[440px] flex flex-col" data-testid="creator-canvas">
+        <Card className="bg-white/5 border border-white/10 overflow-hidden min-h-[440px] flex flex-col lg:w-1/2 lg:h-full lg:min-h-0" data-testid="creator-canvas">
           {busy ? (
             <div className="flex-1 flex flex-col items-center justify-center p-8 gap-6" data-testid="creator-pipeline">
               <div className="flex items-center gap-1.5">
@@ -6489,7 +6489,8 @@ function CreatorPanel({ strategies, onUseStrategy }: {
               )}
             </>
           ) : (
-            <div className="flex-1 flex flex-col items-center justify-center text-center p-8 gap-4" data-testid="creator-empty">
+            <div className="flex-1 lg:min-h-0 lg:overflow-y-auto" data-testid="creator-empty">
+              <div className="flex flex-col items-center justify-center text-center p-8 gap-4 lg:min-h-full">
               <div className="w-14 h-14 rounded-2xl bg-indigo-500/10 border border-indigo-400/15 flex items-center justify-center">
                 <FileCode className="w-7 h-7 text-indigo-300/70" />
               </div>
@@ -6515,6 +6516,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
                     </button>
                   ))}
                 </div>
+              </div>
               </div>
             </div>
           )}
