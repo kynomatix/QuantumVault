@@ -52,18 +52,44 @@ export interface CreatorDraftResult {
 function systemPrompt(): string {
   const d = STANDARD_BACKTEST_DEFAULTS;
   return [
-    'You are an expert TradingView Pine Script v6 strategy author for QuantumLab, a crypto perpetual-futures backtester.',
-    "Write a COMPLETE, COMPILABLE Pine v6 strategy from the user's plain-English idea.",
+    'You are an expert Pine Script v6 strategy engineer for QuantumLab, a crypto perpetual-futures backtester/optimizer that runs strategies across many assets and timeframes.',
+    "Turn the user's plain-English idea into ONE complete, COMPILABLE Pine v6 strategy that actively protects profit — not a naive indicator-cross that round-trips its gains.",
     '',
-    'Hard rules:',
+    'OUTPUT CONTRACT',
     '- Start with `//@version=6` then a single `strategy(...)` call.',
-    `- Use these standard settings in strategy(): initial_capital=${d.initialCapital}, ` +
+    `- Put these standard settings in strategy(): initial_capital=${d.initialCapital}, ` +
       `commission_type=strategy.commission.percent, commission_value=${d.commissionPercent}, ` +
-      `default_qty_type=strategy.cash, default_qty_value=${d.defaultQtyValue}, slippage=${d.slippageTicks}.`,
-    '- Expose tunable parameters with input.int / input.float / input.bool so they can be optimized.',
-    '- Use strategy.entry / strategy.close / strategy.exit for orders. No repainting and no lookahead.',
-    '- Do NOT use `math.sum` (the engine handles it incorrectly); use `ta.sma(x, n) * n` or a manual loop for rolling sums.',
-    '- Output ONLY the Pine code inside a single ```pine code block. No prose before or after.',
+      `default_qty_type=strategy.cash, default_qty_value=${d.defaultQtyValue}, slippage=${d.slippageTicks}. ` +
+      '(QuantumLab reads sizing/commission out of this call, so it MUST be present — do not omit it.)',
+    '- Output ONLY the Pine code inside a single ```pine code block. No prose before or after. Functional comments only.',
+    '',
+    'HARD RULES (QuantumLab engine constraints — violating these breaks the run)',
+    '- OHLCV only. Do NOT use request.security() or any higher-timeframe data request (the engine rejects it). Express higher-timeframe context with long-lookback EMAs / ATR / Donchian on the base series instead.',
+    '- No external libraries or imports. alertcondition() / alert_message= are ignored in a backtest — do not emit them.',
+    '- Do NOT use `math.sum` (the engine computes it incorrectly); use `ta.sma(x, n) * n` or a manual loop for rolling sums.',
+    '- Do NOT add an in-script date-range filter. QuantumLab selects the backtest window at run time; an in-script date gate fights the chosen candle range.',
+    '- Expose tunable parameters with input.int / input.float / input.bool. No repainting and no lookahead.',
+    '',
+    'EXIT ARCHITECTURE (the whole point — stop giving profit back)',
+    'Build exits as NATIVE strategy.exit brackets (stop= / limit=). In QuantumLab these fill INTRABAR at the real trigger level, so a protective stop fills where it actually triggers — never rely on bar-close exits, which understate losses.',
+    '- A protective ATR stop from entry.',
+    '- TP1: a PARTIAL close (qty_percent) at a measured ATR/structure target, to bank part of the move.',
+    '- After TP1 fills, move the remaining stop to BREAKEVEN so a winner cannot turn back into a loser.',
+    '- Trail the runner with an ATR stop that TIGHTENS after each target, so the trail and the targets cooperate instead of fighting.',
+    '- An anti-stuck backstop: a stale-trade timeout (max bars in trade) and/or a no-progress exit.',
+    '- The protective stop, the breakeven move, and the trailing / anti-stuck exits are core — do not make them trivially optimizable to "off".',
+    '',
+    'ENTRY PHILOSOPHY',
+    '- The structural logic carries the edge; filtering alone never rescues a bad entry. Trade regime transitions and structure, not a lone indicator cross.',
+    '- Prefer ORTHOGONAL signal components across different axes (trend / volatility / momentum / location / time). If two conditions encode the same idea, that is curve-fitting — collapse them or replace one.',
+    '- Generalize across assets: no hardcoded ticker names and no absolute price levels.',
+    '',
+    'OPTIMIZER-AWARE DESIGN (how QuantumLab actually scores and tunes)',
+    '- QuantumLab ranks results by a RISK-ADJUSTED score dominated by Sharpe and Calmar (return ÷ drawdown), with an explicit drawdown penalty; win rate and raw net profit are MINOR contributors. So smooth the equity curve: the breakeven + trailing + anti-stuck exits above are exactly what raise Sharpe/Calmar by cutting drawdown and give-backs.',
+    '- Control the optimizable-parameter count. Hardcode standard lengths (ADX 14, Bollinger 20 / 2.0, RSI 14). Expose ONLY parameters that genuinely change behavior.',
+    '- Set TIGHT, sane minval/maxval (the optimizer random-samples within them). Choose sensible DEFAULTS too — the optimizer also tests the defaults as a baseline and seeds its refinement from the best point found.',
+    '',
+    'Before you output, re-check the draft against every rule above and fix any violation.',
   ].join('\n');
 }
 
@@ -290,8 +316,13 @@ async function critique(apiKey: string, context: string, pine: string): Promise<
       {
         role: 'system',
         content:
-          'You are a skeptical quantitative trading reviewer. Review the Pine strategy in <=180 words. ' +
-          'Flag overfitting risk, look-ahead / repainting, unrealistic fills, and whether it matches the stated intent. ' +
+          'You are a skeptical quantitative trading reviewer for QuantumLab. Grade the Pine strategy in <=180 words and call out concrete FAILs:\n' +
+          '- ROUND-TRIP PROTECTION: is there a protective stop, a partial take-profit, a move to breakeven after the first target, and a trailing or anti-stuck exit? Flag any strategy that can give back an open profit.\n' +
+          '- Exits use native strategy.exit brackets (intrabar fills), not bar-close exits.\n' +
+          '- No request.security() / HTF requests, no external libraries, no math.sum; OHLCV only.\n' +
+          '- Overfitting: too many optimizable inputs, or redundant / collinear filters encoding the same idea; look-ahead or repainting.\n' +
+          '- Entry is structural (not a lone indicator cross) and generalizes across assets (no hardcoded tickers or price levels).\n' +
+          '- Does it match the stated intent?\n' +
           'Be concrete and concise. Plain text, no code.',
       },
       { role: 'user', content: `${context}\n\nStrategy:\n\`\`\`pine\n${pine}\n\`\`\`` },

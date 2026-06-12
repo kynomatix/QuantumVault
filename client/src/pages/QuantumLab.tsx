@@ -6016,9 +6016,12 @@ const CREATOR_MAX_TEXT = 4000;
 
 // Plain-English starting points shown in the empty Creator canvas.
 const CREATOR_QUICK_STARTS = [
-  "Go long when the 50 EMA crosses above the 200 EMA and RSI is below 70. Exit on a close below the 50 EMA or a 5% stop.",
-  "RSI(2) mean reversion: buy oversold dips while price is above the 200 SMA, exit when RSI rebounds above 60.",
-  "Bollinger Band breakout: enter when price closes above the upper band, trail the stop with 2x ATR.",
+  "Volatility squeeze breakout: when Bollinger Bands contract inside the Keltner Channel, enter in the direction price expands as the squeeze releases. Trade the compression-to-expansion regime change, not a fixed level.",
+  "Efficiency-gated Donchian breakout: break of an N-bar Donchian channel, but only when the Kaufman Efficiency Ratio confirms the move is directional rather than chop. Ride the trend leg with the runner.",
+  "Statistical mean fade: fade price when its Z-score versus a rolling mean exceeds a threshold, exit on reversion to the mean. Statistical extremity adapts to each asset instead of a fixed RSI line.",
+  "Break-and-retest continuation: after a structural swing-high/low break, wait for a retest of the broken level holding as new support/resistance, then enter on confirmation for a tighter, structure-based stop.",
+  "ATR-expansion trend pullback: in a confirmed trend (slope + efficiency), buy pullbacks to a dynamic anchor when ATR re-expands in the trend direction. Continuation entries, not reversal guesses.",
+  "Range-regime boundary fade: only when a range regime is detected (low ADX + compressed Bollinger bandwidth), fade the band edges back toward the basis. Mean reversion only when it is actually the right model.",
 ];
 
 // Format a USD-per-1M-tokens price for the engine picker (null → em dash).
