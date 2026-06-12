@@ -109,7 +109,13 @@ export async function callOpenRouter(opts: {
         'HTTP-Referer': SITE_URL,
         'X-Title': SITE_NAME,
       },
-      body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature }),
+      // Disable provider "reasoning"/thinking. Modern models (Kimi K2.6, Claude,
+      // Qwen, …) default reasoning ON, which spends the whole max_tokens budget on
+      // hidden thinking and returns an EMPTY `content` — or never finishes the body
+      // inside our timeout. We only want the final answer. Verified live: with
+      // reasoning on, Kimi K2.6 returns no content within 90s; with it off it
+      // returns a complete strategy in ~40s. Non-reasoning models ignore this no-op.
+      body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature, reasoning: { enabled: false } }),
       signal: controller.signal,
     });
   } catch (err: any) {
@@ -139,8 +145,13 @@ export async function callOpenRouter(opts: {
     throw new LlmGatewayError('The model returned an unreadable response. Try again.');
   }
 
-  const content: unknown = data?.choices?.[0]?.message?.content;
+  const choice: any = data?.choices?.[0];
+  const content: unknown = choice?.message?.content;
   if (typeof content !== 'string' || content.trim().length === 0) {
+    // finish_reason "length" => the model ran out of output budget before answering.
+    if (choice?.finish_reason === 'length') {
+      throw new LlmGatewayError('The model hit its output limit before returning a strategy. Try a simpler idea or pick a different model.', 502);
+    }
     throw new LlmGatewayError('The model returned an empty response. Try again.');
   }
   return content.length > LLM_LIMITS.MAX_OUTPUT_CHARS

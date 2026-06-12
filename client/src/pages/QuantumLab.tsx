@@ -15,7 +15,7 @@ import { Slider } from "@/components/ui/slider";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
-import { Dialog, DialogContent, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogTrigger, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -6007,6 +6007,15 @@ function cleanCreatorError(err: any): string {
   return body || "Something went wrong. Please try again.";
 }
 
+// A Creator API 401 means the interactive session (or its in-memory UMK) lapsed.
+// Both the "please sign in" and "session is locked" cases are recoverable by
+// re-signing IN PLACE (retryAuth) — no wallet disconnect/reconnect needed.
+function isReauthableError(err: any): boolean {
+  const raw = (err?.message ?? String(err ?? "")).trim();
+  if (/^401:/.test(raw)) return true;
+  return /session is locked|please sign in/i.test(raw);
+}
+
 // /draft and /improve now return a job id immediately and run the LLM chain in the
 // background — the chain is too slow (1–2 min) to hold an HTTP request open without
 // the proxy reaping it. Poll the job until it settles. Stop immediately on a 404
@@ -6165,6 +6174,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
   onUseStrategy: (pine: string, parse: LabPineParseResult | null) => void;
 }) {
   const { toast } = useToast();
+  const { retryAuth } = useWallet();
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [editingKey, setEditingKey] = useState(false);
   const [idea, setIdea] = useState("");
@@ -6177,6 +6187,52 @@ function CreatorPanel({ strategies, onUseStrategy }: {
   const [selectedModel, setSelectedModel] = useState<string>(""); // "" = Auto blend
   const [engineOpen, setEngineOpen] = useState(false);
   const [keyOpen, setKeyOpen] = useState(false);
+  // Re-auth modal: when a Creator call 401s because the in-memory session UMK was
+  // evicted, re-sign IN PLACE (retryAuth) instead of forcing a full wallet
+  // disconnect/reconnect, then transparently retry the action the user was doing.
+  const [reauthOpen, setReauthOpen] = useState(false);
+  const [reauthBusy, setReauthBusy] = useState(false);
+  const pendingRetryRef = useRef<(() => void) | null>(null);
+  // retryAuth waits on a wallet signature that can hang indefinitely if the user
+  // neither approves nor rejects it. This ref lets an explicit Cancel escape that
+  // wait so the modal can never trap the user, and prevents a late-resolving
+  // signature from retrying an action the user already abandoned.
+  const reauthCancelledRef = useRef(false);
+
+  const handleCreatorError = (err: any, title: string, retry: () => void) => {
+    if (isReauthableError(err)) {
+      pendingRetryRef.current = retry;
+      setReauthOpen(true);
+      return;
+    }
+    toast({ title, description: cleanCreatorError(err), variant: "destructive" });
+  };
+
+  const cancelReauth = () => {
+    reauthCancelledRef.current = true;
+    pendingRetryRef.current = null;
+    setReauthBusy(false);
+    setReauthOpen(false);
+  };
+
+  const doReauth = async () => {
+    reauthCancelledRef.current = false;
+    setReauthBusy(true);
+    try {
+      const ok = await retryAuth();
+      if (reauthCancelledRef.current) return; // user dismissed while the wallet prompt was open
+      if (!ok) {
+        toast({ title: "Sign-in didn't complete", description: "Approve the signature in your wallet to refresh your session, then try again.", variant: "destructive" });
+        return;
+      }
+      const retry = pendingRetryRef.current;
+      pendingRetryRef.current = null;
+      setReauthOpen(false);
+      retry?.();
+    } finally {
+      if (!reauthCancelledRef.current) setReauthBusy(false);
+    }
+  };
 
   const { data: keyMeta, isLoading: keyLoading } = useQuery<CreatorKeyMeta>({
     queryKey: ["/api/lab/creator/key"],
@@ -6210,7 +6266,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
       queryClient.invalidateQueries({ queryKey: ["/api/lab/creator/key"] });
       toast({ title: "API key saved", description: "Your OpenRouter key is encrypted and stored only for you." });
     },
-    onError: (err: any) => toast({ title: "Couldn't save key", description: cleanCreatorError(err), variant: "destructive" }),
+    onError: (err: any) => handleCreatorError(err, "Couldn't save key", () => saveKeyMutation.mutate()),
   });
 
   const clearKeyMutation = useMutation({
@@ -6221,7 +6277,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
       queryClient.invalidateQueries({ queryKey: ["/api/lab/creator/key"] });
       toast({ title: "API key removed" });
     },
-    onError: (err: any) => toast({ title: "Couldn't remove key", description: cleanCreatorError(err), variant: "destructive" }),
+    onError: (err: any) => handleCreatorError(err, "Couldn't remove key", () => clearKeyMutation.mutate()),
   });
 
   const draftMutation = useMutation({
@@ -6235,7 +6291,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
       if (d.compileOk) toast({ title: "Strategy drafted", description: `Compiles cleanly · ${d.modelUsed.split("/").pop()}` });
       else toast({ title: "Drafted — but it didn't compile", description: "Review it below, or use Improve to ask the AI to fix it.", variant: "destructive" });
     },
-    onError: (err: any) => toast({ title: "Generation failed", description: cleanCreatorError(err), variant: "destructive" }),
+    onError: (err: any) => handleCreatorError(err, "Generation failed", () => draftMutation.mutate()),
   });
 
   const improveMutation = useMutation({
@@ -6253,7 +6309,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
       setDraft(d);
       toast({ title: "Improved draft ready", description: d.compileOk ? "Compiles cleanly." : "Didn't compile — check the error below." });
     },
-    onError: (err: any) => toast({ title: "Improve failed", description: cleanCreatorError(err), variant: "destructive" }),
+    onError: (err: any) => handleCreatorError(err, "Improve failed", () => improveMutation.mutate()),
   });
 
   const pullInsights = async () => {
@@ -6298,6 +6354,27 @@ function CreatorPanel({ strategies, onUseStrategy }: {
 
   return (
     <div className="max-w-6xl mx-auto p-2 sm:p-6 space-y-5" data-testid="creator-panel">
+      {/* Re-auth (session-timeout) modal — re-sign in place, keep the wallet connected */}
+      <Dialog open={reauthOpen} onOpenChange={(o) => { if (!reauthBusy) setReauthOpen(o); }}>
+        <DialogContent className="w-[380px] max-w-[92vw] bg-slate-900 border-white/10" data-testid="dialog-creator-reauth">
+          <div className="space-y-3">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-lg bg-indigo-500/15 border border-indigo-400/20 flex items-center justify-center flex-shrink-0">
+                <KeyRound className="w-4 h-4 text-indigo-300" />
+              </div>
+              <DialogTitle className="text-base font-semibold text-white" data-testid="text-reauth-title">Session timed out</DialogTitle>
+            </div>
+            <DialogDescription className="text-sm text-white/60">For your security, your signed-in session expired. Sign in again to keep using the AI Creator — your wallet stays connected.</DialogDescription>
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="ghost" size="sm" onClick={cancelReauth} data-testid="button-reauth-cancel" className="text-white/60 hover:text-white">Cancel</Button>
+              <Button size="sm" disabled={reauthBusy} onClick={doReauth} data-testid="button-reauth-signin" className="bg-indigo-500 hover:bg-indigo-400 text-white">
+                {reauthBusy ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> Signing in…</> : "Sign in again"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* Header */}
       <div className="flex items-center gap-3">
         <div className="w-10 h-10 rounded-xl bg-indigo-500/15 border border-indigo-400/20 flex items-center justify-center flex-shrink-0">
