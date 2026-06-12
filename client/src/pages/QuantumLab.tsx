@@ -6178,7 +6178,19 @@ function CreatorPanel({ strategies, onUseStrategy }: {
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [editingKey, setEditingKey] = useState(false);
   const [idea, setIdea] = useState("");
-  const [draft, setDraft] = useState<CreatorDraft | null>(null);
+  // Persist the draft across reloads / HMR / server restarts so a regenerated Pine
+  // script isn't lost. Session-scoped (cleared when the tab closes).
+  const [draft, setDraftState] = useState<CreatorDraft | null>(() => {
+    try { const s = sessionStorage.getItem("ql_creator_draft"); return s ? (JSON.parse(s) as CreatorDraft) : null; } catch { return null; }
+  });
+  const setDraft = (d: CreatorDraft | null) => {
+    setDraftState(d);
+    try {
+      if (d) sessionStorage.setItem("ql_creator_draft", JSON.stringify(d));
+      else sessionStorage.removeItem("ql_creator_draft");
+    } catch { /* storage unavailable; in-memory state still works */ }
+  };
+  const [reviewOpen, setReviewOpen] = useState(false);
   const [insightsText, setInsightsText] = useState("");
   const [improveStrategyId, setImproveStrategyId] = useState<number | null>(null);
   const [pullingInsights, setPullingInsights] = useState(false);
@@ -6294,11 +6306,15 @@ function CreatorPanel({ strategies, onUseStrategy }: {
     onError: (err: any) => handleCreatorError(err, "Generation failed", () => draftMutation.mutate()),
   });
 
-  const improveMutation = useMutation({
-    mutationFn: async () => {
-      const body: any = { insights: insightsText.trim() };
+  const improveMutation = useMutation<CreatorDraft, unknown, { insights?: string; useDraftPine?: boolean } | void>({
+    mutationFn: async (override) => {
+      const ov = override || {};
+      const body: any = { insights: (ov.insights ?? insightsText).trim() };
       if (selectedModel) body.model = selectedModel;
-      if (improveStrategyId) body.strategyId = improveStrategyId;
+      // "Apply fixes" from the reviewer notes improves the on-screen draft directly,
+      // not a saved strategy, so force currentPine in that case.
+      if (ov.useDraftPine && draft) body.currentPine = draft.pineScript;
+      else if (improveStrategyId) body.strategyId = improveStrategyId;
       else if (draft) body.currentPine = draft.pineScript;
       else throw new Error("Generate or pick a strategy to improve first.");
       const res = await apiRequest("POST", "/api/lab/creator/improve", body);
@@ -6309,8 +6325,18 @@ function CreatorPanel({ strategies, onUseStrategy }: {
       setDraft(d);
       toast({ title: "Improved draft ready", description: d.compileOk ? "Compiles cleanly." : "Didn't compile — check the error below." });
     },
-    onError: (err: any) => handleCreatorError(err, "Improve failed", () => improveMutation.mutate()),
+    // Preserve the original variables (incl. useDraftPine) so a re-auth retry of
+    // "Apply fixes" still improves the on-screen draft, not a saved strategy.
+    onError: (err: any, variables) => handleCreatorError(err, "Improve failed", () => improveMutation.mutate(variables)),
   });
+
+  // Pipe the reviewer's flags straight back into the AI: revise the current draft to
+  // address the critique. This is the actionable answer to "what do I do with the notes".
+  const applyReviewFixes = () => {
+    if (!draft?.criticNotes) return;
+    setInsightsText(draft.criticNotes.slice(0, CREATOR_MAX_TEXT));
+    improveMutation.mutate({ insights: draft.criticNotes, useDraftPine: true });
+  };
 
   const pullInsights = async () => {
     if (!improveStrategyId) { toast({ title: "Pick a saved strategy first", variant: "destructive" }); return; }
@@ -6665,12 +6691,25 @@ function CreatorPanel({ strategies, onUseStrategy }: {
               </div>
 
               {draft.criticNotes && (
-                <div className="px-4 py-3 border-t border-white/10 bg-indigo-500/5">
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <Lightbulb className="w-4 h-4 text-indigo-400" />
+                <div className="border-t border-white/10 bg-indigo-500/5 flex-shrink-0">
+                  <button type="button" onClick={() => setReviewOpen((o) => !o)} data-testid="button-toggle-review" className="w-full flex items-center gap-2 px-4 py-2.5 text-left hover:bg-white/5 transition-colors">
+                    <Lightbulb className="w-4 h-4 text-indigo-400 shrink-0" />
                     <span className="text-sm font-semibold text-white">Reviewer notes</span>
-                  </div>
-                  <p className="text-[12px] text-white/70 leading-relaxed whitespace-pre-wrap" data-testid="text-critic-notes">{draft.criticNotes}</p>
+                    <span className="hidden sm:inline text-[10px] text-white/40">independent check — optional</span>
+                    <ChevronDown className={`w-4 h-4 text-white/40 ml-auto transition-transform ${reviewOpen ? "rotate-180" : ""}`} />
+                  </button>
+                  {reviewOpen && (
+                    <div className="px-4 pb-3 max-h-60 overflow-y-auto">
+                      <p className="text-[11px] text-white/45 leading-relaxed mb-2">
+                        A second AI reviewer grades the draft and flags risks — give-backs, overfitting, weak exits. It doesn't change the code. Click <span className="text-indigo-300">Apply fixes</span> to have the AI revise the strategy to address these, or just open it in Setup &amp; Run and backtest as-is.
+                      </p>
+                      <p className="text-[12px] text-white/70 leading-relaxed whitespace-pre-wrap" data-testid="text-critic-notes">{draft.criticNotes}</p>
+                      <Button size="sm" onClick={applyReviewFixes} disabled={busy} data-testid="button-apply-review" className="mt-2.5 bg-indigo-600 hover:bg-indigo-500 text-white">
+                        {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" /> : <Wand2 className="w-3.5 h-3.5 mr-1.5" />}
+                        Apply fixes
+                      </Button>
+                    </div>
+                  )}
                 </div>
               )}
             </>

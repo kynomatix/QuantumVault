@@ -56,7 +56,7 @@ function systemPrompt(): string {
     "Turn the user's plain-English idea into ONE complete, COMPILABLE Pine v6 strategy that actively protects profit — not a naive indicator-cross that round-trips its gains.",
     '',
     'OUTPUT CONTRACT',
-    '- Start with `//@version=6` then a single `strategy(...)` call.',
+    '- The VERY FIRST line must be `//@version=6` — no title / description / license comment banner above it — then a single `strategy(...)` call.',
     `- Put these standard settings in strategy(): initial_capital=${d.initialCapital}, ` +
       `commission_type=strategy.commission.percent, commission_value=${d.commissionPercent}, ` +
       `default_qty_type=strategy.cash, default_qty_value=${d.defaultQtyValue}, slippage=${d.slippageTicks}. ` +
@@ -67,7 +67,12 @@ function systemPrompt(): string {
     '- OHLCV only. Do NOT use request.security() or any higher-timeframe data request (the engine rejects it). Express higher-timeframe context with long-lookback EMAs / ATR / Donchian on the base series instead.',
     '- No external libraries or imports. alertcondition() / alert_message= are ignored in a backtest — do not emit them.',
     '- Do NOT use `math.sum` (the engine computes it incorrectly); use `ta.sma(x, n) * n` or a manual loop for rolling sums.',
-    '- Do NOT add an in-script date-range filter. QuantumLab selects the backtest window at run time; an in-script date gate fights the chosen candle range.',
+    '- BACKTEST DATE WINDOW (REQUIRED on every strategy — QuantumLab reads these inputs BY NAME). Include this block verbatim and gate EVERY entry condition with `and inDateRange`:',
+    '    useDateFilter = input.bool(true, "Enable Date Filter", group="Date Range")',
+    '    backtestStart = input.time(timestamp("1 Jan 2020"), "Start Date", group="Date Range")',
+    '    backtestEnd = input.time(timestamp("31 Dec 2035"), "End Date", group="Date Range")',
+    '    inDateRange = not useDateFilter or (time >= backtestStart and time <= backtestEnd)',
+    '  Do NOT rename useDateFilter / backtestStart / backtestEnd / inDateRange — the engine reads them by name.',
     '- Expose tunable parameters with input.int / input.float / input.bool. No repainting and no lookahead.',
     '',
     'EXIT ARCHITECTURE (the whole point — stop giving profit back)',
@@ -96,7 +101,16 @@ function systemPrompt(): string {
 function extractPine(text: string): string {
   const fenced = text.match(/```(?:pine|pinescript)?\s*([\s\S]*?)```/i);
   const body = fenced ? fenced[1] : text;
-  return body.trim();
+  return stripLeadingPreamble(body.trim());
+}
+
+// Models sometimes prepend a title / description / license comment banner above the
+// //@version line. The generated script must start at //@version with no preamble,
+// so drop everything before the first //@version line.
+function stripLeadingPreamble(pine: string): string {
+  const lines = pine.split('\n');
+  const idx = lines.findIndex((l) => /^\s*\/\/@version/i.test(l));
+  return idx > 0 ? lines.slice(idx).join('\n').trim() : pine;
 }
 
 function tryCompile(pine: string): { ok: boolean; error: string | null } {
@@ -117,11 +131,13 @@ function tryCompile(pine: string): { ok: boolean; error: string | null } {
 // is configured. We therefore rewrite the strategy() call DETERMINISTICALLY after the
 // model returns, so the standard defaults are enforced by code, not by hope.
 //
-// NOTE on date range: there is intentionally NO date-range default to inject. In
-// QuantumLab the backtest window is a RUN-TIME selection (the UI's start/end dates drive
-// the candle fetch in datafeed.ts and the run-loop filter); it is not part of the Pine
-// source. Hard-coding a date range into the script would override the user's chosen
-// candle range, so it is deliberately excluded from the enforced defaults.
+// NOTE on date range: every generated strategy carries a standard date-window input
+// block (useDateFilter / backtestStart / backtestEnd / inDateRange) — the SAME variable
+// names the backtest engine reads (see server/lab/engine.ts). The prompt requires the
+// block (with entry-gating); ensureDateFilter() below is a fail-safe that injects the
+// inputs if the model omits them, so the engine's date filter always has its parameters.
+// Defaults are wide (filter on, 2020->2035) so the in-script gate never fights the
+// UI-selected candle range; it only narrows the window when the user tightens the dates.
 
 const STANDARD_DEFAULT_KEYS = new Set([
   'initial_capital',
@@ -253,6 +269,31 @@ export function enforceStandardDefaults(pine: string): string {
   return pine.slice(0, loc.open + 1) + newInner + pine.slice(loc.close);
 }
 
+// The standard QuantumLab date-window inputs. The variable names MUST match what the
+// backtest engine reads (server/lab/engine.ts): useDateFilter / backtestStart / backtestEnd.
+const DATE_FILTER_BLOCK = [
+  '',
+  '// --- Backtest date window (QuantumLab reads these inputs by name) ---',
+  'useDateFilter = input.bool(true, "Enable Date Filter", group="Date Range")',
+  'backtestStart = input.time(timestamp("1 Jan 2020"), "Start Date", group="Date Range")',
+  'backtestEnd = input.time(timestamp("31 Dec 2035"), "End Date", group="Date Range")',
+  'inDateRange = not useDateFilter or (time >= backtestStart and time <= backtestEnd)',
+].join('\n');
+
+// Guarantee the standard date-window inputs exist (the names the engine reads). Only
+// injects when the model omitted them — never duplicates. Inserted right after the
+// strategy() declaration. Entry-gating is the model's job (per the prompt); this is a
+// fail-safe so the engine's date filter always has its parameters. Returns the input
+// unchanged (never throws) if there is nothing to do.
+function ensureDateFilter(pine: string): string {
+  if (/\buseDateFilter\b/.test(pine) || /\binDateRange\b/.test(pine)) return pine;
+  const loc = locateStrategyCall(pine);
+  if (!loc) return pine;
+  let nl = pine.indexOf('\n', loc.close);
+  if (nl === -1) nl = pine.length;
+  return pine.slice(0, nl) + '\n' + DATE_FILTER_BLOCK + pine.slice(nl);
+}
+
 // Draft on the DRAFT model, then up to MAX_REPAIRS repairs (feeding the compile error
 // back), then exactly one escalation to the stronger model as a last resort.
 async function generateWithRepair(
@@ -307,6 +348,17 @@ async function generateWithRepair(
     }
   }
 
+  // Fail-safe: if the model dropped the standard date-window inputs, inject them so the
+  // engine's date filter always has its parameters. Adopt only if it still compiles.
+  const dated = ensureDateFilter(pine);
+  if (dated !== pine) {
+    const datedCompile = tryCompile(dated);
+    if (datedCompile.ok) {
+      pine = dated;
+      compile = datedCompile;
+    }
+  }
+
   return { pine, compile, modelUsed, attempts };
 }
 
@@ -322,6 +374,7 @@ async function critique(apiKey: string, context: string, pine: string): Promise<
           '- No request.security() / HTF requests, no external libraries, no math.sum; OHLCV only.\n' +
           '- Overfitting: too many optimizable inputs, or redundant / collinear filters encoding the same idea; look-ahead or repainting.\n' +
           '- Entry is structural (not a lone indicator cross) and generalizes across assets (no hardcoded tickers or price levels).\n' +
+          '- DATE WINDOW: includes the useDateFilter / backtestStart / backtestEnd inputs and gates entries with inDateRange.\n' +
           '- Does it match the stated intent?\n' +
           'Be concrete and concise. Plain text, no code.',
       },
