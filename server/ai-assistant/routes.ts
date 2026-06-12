@@ -26,6 +26,7 @@ import {
 } from "../session-v3";
 import { parsePineScript } from "../lab/pine-parser";
 import { draftStrategy, improveStrategy } from "./creator";
+import { getCreatorModelCatalog, isSelectableModel } from "./models-catalog";
 import { LlmGatewayError } from "./router";
 
 // Creator payloads are tiny (idea/insights are capped at 4KB in the gateway). Keep a
@@ -127,6 +128,15 @@ export function registerCreatorRoutes(app: Express, sessionMiddleware: RequestHa
     }
   });
 
+  // --- Selectable model catalog (Auto blend + overrides, with live pricing) -----
+  app.get("/api/lab/creator/models", ...guards, async (_req: Request, res: Response) => {
+    try {
+      res.json(await getCreatorModelCatalog());
+    } catch (err: any) {
+      sendError(res, err, "Could not load the model list.");
+    }
+  });
+
   // --- Draft a strategy from a plain-English idea -------------------------------
   app.post("/api/lab/creator/draft", ...guards, async (req: Request, res: Response) => {
     const r = req as any;
@@ -135,6 +145,12 @@ export function registerCreatorRoutes(app: Express, sessionMiddleware: RequestHa
       const idea = typeof req.body?.idea === "string" ? req.body.idea : "";
       if (!idea.trim()) return res.status(400).json({ error: "Describe the strategy you want first." });
 
+      const rawModel = typeof req.body?.model === "string" ? req.body.model.trim() : "";
+      const model = rawModel && rawModel !== "auto" ? rawModel : undefined;
+      if (model && !isSelectableModel(model)) {
+        return res.status(400).json({ error: "That model isn't available to choose." });
+      }
+
       const ciphertext = await storage.getWalletLlmApiKeyCiphertext(r.walletAddress);
       if (!ciphertext) return res.status(400).json({ error: "Add your OpenRouter API key first." });
 
@@ -142,7 +158,7 @@ export function registerCreatorRoutes(app: Express, sessionMiddleware: RequestHa
       if (!umk) return;
       keyBuf = decryptLlmApiKeyV3(umk, ciphertext, r.walletAddress);
 
-      const result = await draftStrategy({ idea, apiKey: keyBuf.toString("utf8"), walletAddress: r.walletAddress });
+      const result = await draftStrategy({ idea, apiKey: keyBuf.toString("utf8"), walletAddress: r.walletAddress, model });
       const parse = result.compileOk ? safeParse(result.pineScript) : null;
       res.json({ ...result, parse });
     } catch (err: any) {
@@ -177,6 +193,12 @@ export function registerCreatorRoutes(app: Express, sessionMiddleware: RequestHa
       const insights = typeof body.insights === "string" ? body.insights : "";
       const idea = typeof body.idea === "string" ? body.idea : undefined;
 
+      const rawModel = typeof body.model === "string" ? body.model.trim() : "";
+      const model = rawModel && rawModel !== "auto" ? rawModel : undefined;
+      if (model && !isSelectableModel(model)) {
+        return res.status(400).json({ error: "That model isn't available to choose." });
+      }
+
       const ciphertext = await storage.getWalletLlmApiKeyCiphertext(r.walletAddress);
       if (!ciphertext) return res.status(400).json({ error: "Add your OpenRouter API key first." });
 
@@ -190,6 +212,7 @@ export function registerCreatorRoutes(app: Express, sessionMiddleware: RequestHa
         apiKey: keyBuf.toString("utf8"),
         walletAddress: r.walletAddress,
         idea,
+        model,
       });
       const parse = result.compileOk ? safeParse(result.pineScript) : null;
       res.json({ ...result, parse });

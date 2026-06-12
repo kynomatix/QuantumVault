@@ -5976,6 +5976,20 @@ interface CreatorKeyMeta {
   updatedAt: string | null;
 }
 
+interface CreatorSelectableModel {
+  id: string;
+  label: string;
+  note: string;
+  rank: number;
+  promptPerM: number | null;
+  completionPerM: number | null;
+}
+
+interface CreatorModelCatalog {
+  auto: { label: string; note: string; stages: { label: string; model: string }[] };
+  models: CreatorSelectableModel[];
+}
+
 function cleanCreatorError(err: any): string {
   const raw = (err?.message ?? String(err ?? "")).trim();
   // apiRequest throws as `${status}: ${bodyText}` — strip the status and pull out {error}.
@@ -6000,6 +6014,19 @@ const CREATOR_CAVEAT =
 // Keep client text inputs safely under the server's MAX_IDEA_CHARS (4096) cap.
 const CREATOR_MAX_TEXT = 4000;
 
+// Plain-English starting points shown in the empty Creator canvas.
+const CREATOR_QUICK_STARTS = [
+  "Go long when the 50 EMA crosses above the 200 EMA and RSI is below 70. Exit on a close below the 50 EMA or a 5% stop.",
+  "RSI(2) mean reversion: buy oversold dips while price is above the 200 SMA, exit when RSI rebounds above 60.",
+  "Bollinger Band breakout: enter when price closes above the upper band, trail the stop with 2x ATR.",
+];
+
+// Format a USD-per-1M-tokens price for the engine picker (null → em dash).
+function fmtPricePerM(v: number | null): string {
+  if (v === null || !Number.isFinite(v)) return "—";
+  return v >= 1 ? `$${v.toFixed(2)}` : `$${v.toFixed(3)}`;
+}
+
 function CreatorPanel({ strategies, onUseStrategy }: {
   strategies: LabStrategy[];
   onUseStrategy: (pine: string, parse: LabPineParseResult | null) => void;
@@ -6012,6 +6039,10 @@ function CreatorPanel({ strategies, onUseStrategy }: {
   const [insightsText, setInsightsText] = useState("");
   const [improveStrategyId, setImproveStrategyId] = useState<number | null>(null);
   const [pullingInsights, setPullingInsights] = useState(false);
+  const [mode, setMode] = useState<"new" | "improve">("new");
+  const [selectedModel, setSelectedModel] = useState<string>(""); // "" = Auto blend
+  const [engineOpen, setEngineOpen] = useState(false);
+  const [keyOpen, setKeyOpen] = useState(false);
 
   const { data: keyMeta, isLoading: keyLoading } = useQuery<CreatorKeyMeta>({
     queryKey: ["/api/lab/creator/key"],
@@ -6021,6 +6052,18 @@ function CreatorPanel({ strategies, onUseStrategy }: {
       return safeResponseJson(res);
     },
   });
+
+  const { data: modelCatalog } = useQuery<CreatorModelCatalog>({
+    queryKey: ["/api/lab/creator/models"],
+    queryFn: async () => {
+      const res = await fetch("/api/lab/creator/models");
+      if (!res.ok) return { auto: { label: "Auto", note: "Our tailored multi-model blend.", stages: [] }, models: [] };
+      return safeResponseJson(res);
+    },
+    staleTime: 60 * 60 * 1000,
+  });
+  const selectableModels = modelCatalog?.models ?? [];
+  const selectedModelInfo = selectedModel ? selectableModels.find((m) => m.id === selectedModel) ?? null : null;
 
   const saveKeyMutation = useMutation({
     mutationFn: async () => {
@@ -6049,7 +6092,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
 
   const draftMutation = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/lab/creator/draft", { idea: idea.trim() });
+      const res = await apiRequest("POST", "/api/lab/creator/draft", { idea: idea.trim(), model: selectedModel || undefined });
       return safeResponseJson(res) as Promise<CreatorDraft>;
     },
     onSuccess: (d) => {
@@ -6063,6 +6106,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
   const improveMutation = useMutation({
     mutationFn: async () => {
       const body: any = { insights: insightsText.trim() };
+      if (selectedModel) body.model = selectedModel;
       if (improveStrategyId) body.strategyId = improveStrategyId;
       else if (draft) body.currentPine = draft.pineScript;
       else throw new Error("Generate or pick a strategy to improve first.");
@@ -6107,205 +6151,322 @@ function CreatorPanel({ strategies, onUseStrategy }: {
   const ideaTooLong = idea.length > CREATOR_MAX_TEXT;
   const insightsTooLong = insightsText.length > CREATOR_MAX_TEXT;
   const busy = draftMutation.isPending || improveMutation.isPending;
+  const engineLabel = selectedModelInfo ? selectedModelInfo.label : "Auto";
+  const canGenerate = hasKey && !!idea.trim() && !ideaTooLong && !busy;
+  const canImprove = hasKey && !busy && (!!draft || !!improveStrategyId) && !!insightsText.trim() && !insightsTooLong;
+  const pipelineStages = [
+    { icon: Wand2, label: "Draft" },
+    { icon: RefreshCw, label: "Compile-check" },
+    { icon: Lightbulb, label: "Review" },
+  ];
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6 p-2 sm:p-6" data-testid="creator-panel">
-      <div className="flex items-center gap-3 mb-1">
-        <Sparkles className="w-6 h-6 text-indigo-400" />
+    <div className="max-w-6xl mx-auto p-2 sm:p-6 space-y-5" data-testid="creator-panel">
+      {/* Header */}
+      <div className="flex items-center gap-3">
+        <div className="w-10 h-10 rounded-xl bg-indigo-500/15 border border-indigo-400/20 flex items-center justify-center flex-shrink-0">
+          <Sparkles className="w-5 h-5 text-indigo-300" />
+        </div>
         <div>
           <h2 className="text-xl font-bold text-white">AI Strategy Creator</h2>
           <p className="text-white/50 text-sm">Describe a trading idea in plain English — the AI drafts a backtestable Pine v6 strategy.</p>
         </div>
       </div>
 
-      {/* Persistent honest caveat */}
-      <Card className="bg-amber-500/10 border border-amber-500/30 p-3 flex items-start gap-2" data-testid="creator-caveat">
-        <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 flex-shrink-0" />
-        <p className="text-[12px] text-amber-200/90 leading-relaxed">{CREATOR_CAVEAT}</p>
-      </Card>
+      {/* Workspace: control deck (left) + canvas (right) */}
+      <div className="grid lg:grid-cols-2 gap-5 items-start">
+        {/* LEFT — Control deck */}
+        <Card className="bg-white/5 border border-white/10 overflow-hidden" data-testid="creator-control-deck">
+          <Tabs value={mode} onValueChange={(v) => setMode(v as "new" | "improve")}>
+            <div className="px-4 pt-4">
+              <TabsList className="bg-black/30 border border-white/10">
+                <TabsTrigger value="new" data-testid="tab-creator-new" className="text-white/60 data-[state=active]:bg-indigo-500/20 data-[state=active]:text-white">
+                  <Wand2 className="w-3.5 h-3.5 mr-1.5" /> New idea
+                </TabsTrigger>
+                <TabsTrigger value="improve" data-testid="tab-creator-improve" className="text-white/60 data-[state=active]:bg-indigo-500/20 data-[state=active]:text-white">
+                  <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Improve
+                </TabsTrigger>
+              </TabsList>
+            </div>
 
-      {/* API key management */}
-      <Card className="bg-white/5 border border-white/10 p-4 space-y-3" data-testid="creator-key-card">
-        <div className="flex items-center gap-2">
-          <KeyRound className="w-4 h-4 text-indigo-400" />
-          <span className="font-semibold text-white text-sm">Your OpenRouter API key</span>
-        </div>
-        {keyLoading ? (
-          <div className="flex items-center gap-2 text-white/50 text-sm"><Loader2 className="w-4 h-4 animate-spin" /> Checking…</div>
-        ) : hasKey && !editingKey ? (
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2 text-sm text-white/70" data-testid="text-key-status">
-              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-              <span>Key set</span>
-              <code className="px-1.5 py-0.5 rounded bg-black/40 text-white/60 text-[12px]">sk-or-…{keyMeta?.last4}</code>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button size="sm" variant="secondary" onClick={() => setEditingKey(true)} data-testid="button-replace-key" className="bg-white/5 hover:bg-white/10 text-white/70">Replace</Button>
-              <Button size="sm" variant="secondary" onClick={() => clearKeyMutation.mutate()} disabled={clearKeyMutation.isPending} data-testid="button-clear-key" className="bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/20">
-                {clearKeyMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Trash2 className="w-3 h-3 mr-1" />}
-                Remove
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            <p className="text-[12px] text-white/50">
-              The Creator runs on your own OpenRouter account, so you control the spend. Get a key at{" "}
-              <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline" data-testid="link-openrouter-keys">openrouter.ai/keys</a>.
-              It's encrypted on our server and never shown again.
-            </p>
-            <div className="flex flex-wrap items-center gap-2">
-              <Input
-                type="password"
-                value={apiKeyInput}
-                onChange={(e) => setApiKeyInput(e.target.value)}
-                placeholder="sk-or-v1-…"
-                className="flex-1 min-w-[220px] bg-black/40 border-white/10 text-white font-mono text-sm"
-                data-testid="input-api-key"
+            <TabsContent value="new" className="mt-0 p-4 space-y-2">
+              <Textarea
+                value={idea}
+                onChange={(e) => setIdea(e.target.value)}
+                placeholder={"e.g. Go long when the 50 EMA crosses above the 200 EMA and RSI is below 70. Exit when price closes below the 50 EMA or hits a 5% stop loss."}
+                className="min-h-[150px] bg-black/40 border-white/10 text-white/90 text-sm resize-y"
+                data-testid="input-idea"
               />
-              <Button size="sm" onClick={() => saveKeyMutation.mutate()} disabled={saveKeyMutation.isPending || !apiKeyInput.trim()} data-testid="button-save-key" className="bg-indigo-600 hover:bg-indigo-500 text-white">
-                {saveKeyMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Save className="w-3 h-3 mr-1" />}
-                Save key
-              </Button>
-              {hasKey && editingKey && (
-                <Button size="sm" variant="ghost" onClick={() => { setEditingKey(false); setApiKeyInput(""); }} data-testid="button-cancel-key" className="text-white/50 hover:text-white/80">Cancel</Button>
-              )}
-            </div>
-          </div>
-        )}
-      </Card>
-
-      {/* Idea → Generate */}
-      <Card className="bg-white/5 border border-white/10 p-4 space-y-3" data-testid="creator-idea-card">
-        <div className="flex items-center gap-2">
-          <Wand2 className="w-4 h-4 text-indigo-400" />
-          <span className="font-semibold text-white text-sm">Describe your strategy</span>
-        </div>
-        <Textarea
-          value={idea}
-          onChange={(e) => setIdea(e.target.value)}
-          placeholder={"e.g. Go long when the 50 EMA crosses above the 200 EMA and RSI is below 70. Exit when price closes below the 50 EMA or hits a 5% stop loss."}
-          className="min-h-[120px] bg-black/40 border-white/10 text-white/90 text-sm resize-y"
-          data-testid="input-idea"
-        />
-        <div className="flex items-center justify-between gap-2">
-          <span className={`text-[11px] ${ideaTooLong ? "text-red-400" : "text-white/40"}`} data-testid="text-idea-count">{idea.length} / {CREATOR_MAX_TEXT}</span>
-          <Button
-            onClick={() => draftMutation.mutate()}
-            disabled={!hasKey || !idea.trim() || ideaTooLong || busy}
-            data-testid="button-generate"
-            className="bg-indigo-600 hover:bg-indigo-500 text-white"
-          >
-            {draftMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Sparkles className="w-4 h-4 mr-1.5" />}
-            {draftMutation.isPending ? "Generating…" : "Generate strategy"}
-          </Button>
-        </div>
-        {!hasKey && !keyLoading && (
-          <p className="text-[12px] text-amber-300/80 flex items-center gap-1.5"><Info className="w-3.5 h-3.5" /> Add your OpenRouter key above to start generating.</p>
-        )}
-      </Card>
-
-      {/* Draft result */}
-      {draft && (
-        <Card className="bg-white/5 border border-white/10 overflow-hidden" data-testid="creator-draft-card">
-          <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-white/10">
-            <div className="flex items-center gap-2 flex-wrap">
-              {draft.compileOk ? (
-                <Badge className="bg-emerald-500/15 text-emerald-300 border border-emerald-500/30" data-testid="badge-compile-ok"><CheckCircle2 className="w-3 h-3 mr-1" /> Compiles</Badge>
-              ) : (
-                <Badge className="bg-red-500/15 text-red-300 border border-red-500/30" data-testid="badge-compile-fail"><XCircle className="w-3 h-3 mr-1" /> Compile error</Badge>
-              )}
-              <Badge variant="secondary" className="bg-white/10 text-white/60 text-[10px]" data-testid="badge-model">{draft.modelUsed.split("/").pop()}</Badge>
-              <Badge variant="secondary" className="bg-white/10 text-white/60 text-[10px]" data-testid="badge-attempts">{draft.attempts} {draft.attempts === 1 ? "pass" : "passes"}</Badge>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button size="sm" variant="ghost" onClick={copyPine} data-testid="button-copy-pine" className="text-white/60 hover:text-white"><Copy className="w-3.5 h-3.5 mr-1" /> Copy</Button>
-              <Button
-                size="sm"
-                onClick={() => onUseStrategy(draft.pineScript, draft.compileOk ? draft.parse : null)}
-                data-testid="button-use-strategy"
-                className="bg-sky-500 hover:bg-sky-400 text-white"
-              >
-                <Play className="w-3.5 h-3.5 mr-1" /> Open in Setup &amp; Run
-              </Button>
-            </div>
-          </div>
-
-          {!draft.compileOk && draft.compileError && (
-            <div className="px-4 py-2.5 bg-red-500/10 border-b border-red-500/20 text-[12px] text-red-300 font-mono" data-testid="text-compile-error">{draft.compileError}</div>
-          )}
-
-          <div className="max-h-[360px] overflow-auto">
-            <pre className="text-[12px] leading-relaxed text-white/80 font-mono p-4 whitespace-pre-wrap" data-testid="text-draft-pine">{draft.pineScript}</pre>
-          </div>
-
-          {draft.criticNotes && (
-            <div className="px-4 py-3 border-t border-white/10 bg-indigo-500/5">
-              <div className="flex items-center gap-2 mb-1.5">
-                <Lightbulb className="w-4 h-4 text-indigo-400" />
-                <span className="text-sm font-semibold text-white">Reviewer notes</span>
+              <div className="flex items-center justify-end">
+                <span className={`text-[11px] ${ideaTooLong ? "text-red-400" : "text-white/40"}`} data-testid="text-idea-count">{idea.length} / {CREATOR_MAX_TEXT}</span>
               </div>
-              <p className="text-[12px] text-white/70 leading-relaxed whitespace-pre-wrap" data-testid="text-critic-notes">{draft.criticNotes}</p>
-            </div>
-          )}
+            </TabsContent>
 
-          <div className="px-4 py-2 border-t border-white/10 flex items-start gap-2 bg-amber-500/5">
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-400 mt-0.5 flex-shrink-0" />
-            <p className="text-[11px] text-amber-200/80">{draft.caveat || CREATOR_CAVEAT}</p>
+            <TabsContent value="improve" className="mt-0 p-4 space-y-2">
+              <p className="text-[12px] text-white/50">Refine a saved strategy (or the current draft) using its backtest insights.</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Select
+                  value={improveStrategyId ? String(improveStrategyId) : ""}
+                  onValueChange={(v) => setImproveStrategyId(v ? Number(v) : null)}
+                >
+                  <SelectTrigger className="flex-1 min-w-[180px] bg-black/40 border-white/10 text-white text-sm" data-testid="select-improve-strategy">
+                    <SelectValue placeholder="Pick a saved strategy…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {strategies.length === 0 ? (
+                      <SelectItem value="none" disabled>No saved strategies yet</SelectItem>
+                    ) : strategies.map(s => (
+                      <SelectItem key={s.id} value={String(s.id)} data-testid={`option-strategy-${s.id}`}>{s.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button size="sm" variant="secondary" onClick={pullInsights} disabled={!improveStrategyId || pullingInsights} data-testid="button-pull-insights" className="bg-white/5 hover:bg-white/10 text-white/70">
+                  {pullingInsights ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Lightbulb className="w-3 h-3 mr-1" />}
+                  Pull insights
+                </Button>
+              </div>
+              <Textarea
+                value={insightsText}
+                onChange={(e) => setInsightsText(e.target.value)}
+                placeholder={"What should the AI change? Paste backtest insights, or describe what to fix (e.g. 'too many trades in chop — add a trend filter')."}
+                className="min-h-[120px] bg-black/40 border-white/10 text-white/90 text-sm resize-y font-mono"
+                data-testid="input-insights"
+              />
+              <div className="flex items-center justify-end">
+                <span className={`text-[11px] ${insightsTooLong ? "text-red-400" : "text-white/40"}`} data-testid="text-insights-count">{insightsText.length} / {CREATOR_MAX_TEXT}</span>
+              </div>
+            </TabsContent>
+          </Tabs>
+
+          {/* Engine + key config bar */}
+          <div className="px-4 py-3 border-t border-white/10 flex flex-wrap items-center gap-2">
+            <Popover open={engineOpen} onOpenChange={setEngineOpen}>
+              <PopoverTrigger asChild>
+                <button type="button" data-testid="button-engine-select" className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-black/40 border border-white/10 hover:border-indigo-400/40 text-xs text-white/80 transition-colors">
+                  <Zap className="w-3.5 h-3.5 text-indigo-300" />
+                  <span className="text-white/40">Engine:</span>
+                  <span className="font-medium text-white" data-testid="text-engine-label">{engineLabel}</span>
+                  <ChevronDown className="w-3 h-3 text-white/40" />
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-[340px] p-0 bg-zinc-950/95 border-white/10">
+                <div className="px-3 py-2.5 border-b border-white/10">
+                  <p className="text-sm font-semibold text-white">Generation engine</p>
+                  <p className="text-[11px] text-white/45">Auto is recommended. Pick one model to override it — ranked by coding strength, with live price. You're billed on your own key.</p>
+                </div>
+                <div className="max-h-[320px] overflow-auto p-1.5 space-y-1">
+                  <button type="button" onClick={() => { setSelectedModel(""); setEngineOpen(false); }} data-testid="engine-option-auto" className={`w-full text-left rounded-lg px-2.5 py-2 border transition-colors ${!selectedModel ? "bg-indigo-500/15 border-indigo-400/40" : "bg-white/5 border-transparent hover:bg-white/10"}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="inline-flex items-center gap-1.5 text-sm font-medium text-white">
+                        <Sparkles className="w-3.5 h-3.5 text-indigo-300" /> Auto
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-200">Recommended</span>
+                      </span>
+                      {!selectedModel && <Check className="w-4 h-4 text-indigo-300" />}
+                    </div>
+                    <p className="text-[11px] text-white/50 mt-1">{modelCatalog?.auto?.note ?? "Our tailored multi-model blend."}</p>
+                  </button>
+
+                  {selectableModels.map((m) => (
+                    <button key={m.id} type="button" onClick={() => { setSelectedModel(m.id); setEngineOpen(false); }} data-testid={`engine-option-${m.id}`} className={`w-full text-left rounded-lg px-2.5 py-2 border transition-colors ${selectedModel === m.id ? "bg-indigo-500/15 border-indigo-400/40" : "bg-white/5 border-transparent hover:bg-white/10"}`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-medium text-white">{m.label}</span>
+                        <span className="inline-flex items-center gap-1 text-[10px] text-white/55 font-mono whitespace-nowrap">
+                          <DollarSign className="w-3 h-3 text-emerald-400/70" />
+                          {fmtPricePerM(m.promptPerM)} / {fmtPricePerM(m.completionPerM)}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-white/50 mt-1">{m.note}</p>
+                    </button>
+                  ))}
+
+                  {selectableModels.length === 0 && (
+                    <p className="px-2 py-3 text-[11px] text-white/40">Model list unavailable right now — Auto still works.</p>
+                  )}
+                </div>
+                <div className="px-3 py-2 border-t border-white/10">
+                  <p className="text-[10px] text-white/35">Prices are $/1M tokens (input / output), pulled live from OpenRouter. A chosen model drafts and self-repairs; our independent reviewer still checks it.</p>
+                </div>
+              </PopoverContent>
+            </Popover>
+
+            <Popover open={keyOpen} onOpenChange={setKeyOpen}>
+              <PopoverTrigger asChild>
+                <button type="button" data-testid="button-key-popover" className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-black/40 border text-xs transition-colors ${hasKey ? "border-white/10 hover:border-emerald-400/40 text-white/80" : "border-amber-400/30 hover:border-amber-400/50 text-amber-200"}`}>
+                  <KeyRound className={`w-3.5 h-3.5 ${hasKey ? "text-emerald-400" : "text-amber-300"}`} />
+                  {hasKey ? (
+                    <>
+                      <span className="text-white/40">Key:</span>
+                      <span className="font-mono text-white/80" data-testid="text-key-status">…{keyMeta?.last4}</span>
+                    </>
+                  ) : (
+                    <span className="font-medium">Add API key</span>
+                  )}
+                  <ChevronDown className="w-3 h-3 text-white/40" />
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-[330px] p-3 bg-zinc-950/95 border-white/10 space-y-2">
+                <div className="flex items-center gap-2">
+                  <KeyRound className="w-4 h-4 text-indigo-300" />
+                  <span className="text-sm font-semibold text-white">Your OpenRouter key</span>
+                </div>
+                {keyLoading ? (
+                  <div className="flex items-center gap-2 text-white/50 text-sm"><Loader2 className="w-4 h-4 animate-spin" /> Checking…</div>
+                ) : hasKey && !editingKey ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2 text-sm text-white/70">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                      <span>Key set</span>
+                      <code className="px-1.5 py-0.5 rounded bg-black/40 text-white/60 text-[12px]">sk-or-…{keyMeta?.last4}</code>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button size="sm" variant="secondary" onClick={() => setEditingKey(true)} data-testid="button-replace-key" className="bg-white/5 hover:bg-white/10 text-white/70">Replace</Button>
+                      <Button size="sm" variant="secondary" onClick={() => clearKeyMutation.mutate()} disabled={clearKeyMutation.isPending} data-testid="button-clear-key" className="bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/20">
+                        {clearKeyMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Trash2 className="w-3 h-3 mr-1" />}
+                        Remove
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-[12px] text-white/50">
+                      The Creator runs on your own OpenRouter account, so you control the spend. Get a key at{" "}
+                      <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline" data-testid="link-openrouter-keys">openrouter.ai/keys</a>. Encrypted on our server, never shown again.
+                    </p>
+                    <Input
+                      type="password"
+                      value={apiKeyInput}
+                      onChange={(e) => setApiKeyInput(e.target.value)}
+                      placeholder="sk-or-v1-…"
+                      className="bg-black/40 border-white/10 text-white font-mono text-sm"
+                      data-testid="input-api-key"
+                    />
+                    <div className="flex items-center gap-2">
+                      <Button size="sm" onClick={() => saveKeyMutation.mutate()} disabled={saveKeyMutation.isPending || !apiKeyInput.trim()} data-testid="button-save-key" className="bg-indigo-600 hover:bg-indigo-500 text-white">
+                        {saveKeyMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Save className="w-3 h-3 mr-1" />}
+                        Save key
+                      </Button>
+                      {hasKey && editingKey && (
+                        <Button size="sm" variant="ghost" onClick={() => { setEditingKey(false); setApiKeyInput(""); }} data-testid="button-cancel-key" className="text-white/50 hover:text-white/80">Cancel</Button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </PopoverContent>
+            </Popover>
+
+            <span className="ml-auto text-[10px] text-white/30 hidden sm:block">Billed to your key</span>
+          </div>
+
+          {/* Primary action */}
+          <div className="px-4 pb-3">
+            {mode === "new" ? (
+              <Button onClick={() => draftMutation.mutate()} disabled={!canGenerate} data-testid="button-generate" className="w-full bg-indigo-600 hover:bg-indigo-500 text-white">
+                {draftMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Sparkles className="w-4 h-4 mr-1.5" />}
+                {draftMutation.isPending ? "Generating…" : "Generate strategy"}
+              </Button>
+            ) : (
+              <Button onClick={() => improveMutation.mutate()} disabled={!canImprove} data-testid="button-improve" className="w-full bg-indigo-600 hover:bg-indigo-500 text-white">
+                {improveMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Wand2 className="w-4 h-4 mr-1.5" />}
+                {improveMutation.isPending ? "Improving…" : "Improve strategy"}
+              </Button>
+            )}
+            {!hasKey && !keyLoading && (
+              <p className="text-[12px] text-amber-300/80 flex items-center gap-1.5 mt-2"><Info className="w-3.5 h-3.5" /> Add your OpenRouter key to start generating.</p>
+            )}
+          </div>
+
+          {/* Integrated honesty caveat */}
+          <div className="px-4 py-2.5 border-t border-white/10 bg-black/20 flex items-start gap-2" data-testid="creator-caveat">
+            <span className="mt-1 w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0" />
+            <p className="text-[11px] text-white/45 leading-relaxed">{CREATOR_CAVEAT}</p>
           </div>
         </Card>
-      )}
 
-      {/* Improve loop */}
-      <Card className="bg-white/5 border border-white/10 p-4 space-y-3" data-testid="creator-improve-card">
-        <div className="flex items-center gap-2">
-          <RefreshCw className="w-4 h-4 text-indigo-400" />
-          <span className="font-semibold text-white text-sm">Improve with backtest insights</span>
-        </div>
-        <p className="text-[12px] text-white/50">
-          Pull the insights report from a saved strategy's backtests (or write your own notes), then let the AI revise the script.
-        </p>
-        <div className="flex flex-wrap items-center gap-2">
-          <Select
-            value={improveStrategyId ? String(improveStrategyId) : ""}
-            onValueChange={(v) => setImproveStrategyId(v ? Number(v) : null)}
-          >
-            <SelectTrigger className="w-[240px] bg-black/40 border-white/10 text-white text-sm" data-testid="select-improve-strategy">
-              <SelectValue placeholder="Pick a saved strategy…" />
-            </SelectTrigger>
-            <SelectContent>
-              {strategies.length === 0 ? (
-                <SelectItem value="none" disabled>No saved strategies yet</SelectItem>
-              ) : strategies.map(s => (
-                <SelectItem key={s.id} value={String(s.id)} data-testid={`option-strategy-${s.id}`}>{s.name}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Button size="sm" variant="secondary" onClick={pullInsights} disabled={!improveStrategyId || pullingInsights} data-testid="button-pull-insights" className="bg-white/5 hover:bg-white/10 text-white/70">
-            {pullingInsights ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Lightbulb className="w-3 h-3 mr-1" />}
-            Pull backtest insights
-          </Button>
-        </div>
-        <Textarea
-          value={insightsText}
-          onChange={(e) => setInsightsText(e.target.value)}
-          placeholder={"What should the AI change? Paste backtest insights, or describe what to fix (e.g. 'too many trades in chop — add a trend filter')."}
-          className="min-h-[100px] bg-black/40 border-white/10 text-white/90 text-sm resize-y font-mono"
-          data-testid="input-insights"
-        />
-        <div className="flex items-center justify-between gap-2">
-          <span className={`text-[11px] ${insightsTooLong ? "text-red-400" : "text-white/40"}`} data-testid="text-insights-count">{insightsText.length} / {CREATOR_MAX_TEXT}</span>
-          <Button
-            onClick={() => improveMutation.mutate()}
-            disabled={!hasKey || busy || (!draft && !improveStrategyId) || !insightsText.trim() || insightsTooLong}
-            data-testid="button-improve"
-            className="bg-indigo-600 hover:bg-indigo-500 text-white"
-          >
-            {improveMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Wand2 className="w-4 h-4 mr-1.5" />}
-            {improveMutation.isPending ? "Improving…" : "Improve strategy"}
-          </Button>
-        </div>
-      </Card>
+        {/* RIGHT — Canvas */}
+        <Card className="bg-white/5 border border-white/10 overflow-hidden lg:sticky lg:top-4 min-h-[440px] flex flex-col" data-testid="creator-canvas">
+          {busy ? (
+            <div className="flex-1 flex flex-col items-center justify-center p-8 gap-6" data-testid="creator-pipeline">
+              <div className="flex items-center gap-1.5">
+                {pipelineStages.map((s, i) => {
+                  const Icon = s.icon;
+                  return (
+                    <Fragment key={s.label}>
+                      {i > 0 && <div className="w-7 h-px bg-gradient-to-r from-indigo-400/50 to-indigo-400/10" />}
+                      <div className="flex flex-col items-center gap-1.5">
+                        <div className="w-10 h-10 rounded-full bg-indigo-500/15 border border-indigo-400/30 flex items-center justify-center animate-pulse">
+                          <Icon className="w-4 h-4 text-indigo-300" />
+                        </div>
+                        <span className="text-[10px] text-white/50">{s.label}</span>
+                      </div>
+                    </Fragment>
+                  );
+                })}
+              </div>
+              <div className="flex items-center gap-2 text-white/70 text-sm">
+                <Loader2 className="w-4 h-4 animate-spin text-indigo-300" />
+                {selectedModelInfo ? `Generating with ${selectedModelInfo.label}…` : "Auto pipeline working…"}
+              </div>
+              <p className="text-[11px] text-white/35">This usually takes 20–60 seconds.</p>
+            </div>
+          ) : draft ? (
+            <>
+              <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-white/10">
+                <div className="flex items-center gap-2 flex-wrap">
+                  {draft.compileOk ? (
+                    <Badge className="bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 animate-in fade-in zoom-in duration-300" data-testid="badge-compile-ok"><CheckCircle2 className="w-3 h-3 mr-1" /> Compiles</Badge>
+                  ) : (
+                    <Badge className="bg-red-500/15 text-red-300 border border-red-500/30" data-testid="badge-compile-fail"><XCircle className="w-3 h-3 mr-1" /> Compile error</Badge>
+                  )}
+                  <Badge variant="secondary" className="bg-white/10 text-white/60 text-[10px]" data-testid="badge-model">{draft.modelUsed.split("/").pop()}</Badge>
+                  <Badge variant="secondary" className="bg-white/10 text-white/60 text-[10px]" data-testid="badge-attempts">{draft.attempts} {draft.attempts === 1 ? "pass" : "passes"}</Badge>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button size="sm" variant="ghost" onClick={copyPine} data-testid="button-copy-pine" className="text-white/60 hover:text-white"><Copy className="w-3.5 h-3.5 mr-1" /> Copy</Button>
+                  <Button size="sm" onClick={() => onUseStrategy(draft.pineScript, draft.compileOk ? draft.parse : null)} data-testid="button-use-strategy" className="bg-sky-500 hover:bg-sky-400 text-white">
+                    <Play className="w-3.5 h-3.5 mr-1" /> Open in Setup &amp; Run
+                  </Button>
+                </div>
+              </div>
+
+              {!draft.compileOk && draft.compileError && (
+                <div className="px-4 py-2.5 bg-red-500/10 border-b border-red-500/20 text-[12px] text-red-300 font-mono" data-testid="text-compile-error">{draft.compileError}</div>
+              )}
+
+              <div className="flex-1 min-h-0 overflow-auto bg-black/30">
+                <pre className="text-[12px] leading-relaxed text-white/80 font-mono p-4 whitespace-pre-wrap" data-testid="text-draft-pine">{draft.pineScript}</pre>
+              </div>
+
+              {draft.criticNotes && (
+                <div className="px-4 py-3 border-t border-white/10 bg-indigo-500/5">
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <Lightbulb className="w-4 h-4 text-indigo-400" />
+                    <span className="text-sm font-semibold text-white">Reviewer notes</span>
+                  </div>
+                  <p className="text-[12px] text-white/70 leading-relaxed whitespace-pre-wrap" data-testid="text-critic-notes">{draft.criticNotes}</p>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center text-center p-8 gap-4" data-testid="creator-empty">
+              <div className="w-14 h-14 rounded-2xl bg-indigo-500/10 border border-indigo-400/15 flex items-center justify-center">
+                <FileCode className="w-7 h-7 text-indigo-300/70" />
+              </div>
+              <div>
+                <p className="text-white/80 font-medium">Your strategy will appear here</p>
+                <p className="text-white/45 text-sm mt-1 max-w-xs mx-auto">Describe an idea and hit Generate. The AI drafts it, checks it compiles, and an independent reviewer flags the risks.</p>
+              </div>
+              <div className="w-full max-w-sm space-y-1.5 pt-1">
+                <p className="text-[10px] uppercase tracking-wider text-white/30">Try a starting point</p>
+                {CREATOR_QUICK_STARTS.map((q, i) => (
+                  <button key={i} type="button" onClick={() => { setMode("new"); setIdea(q); }} data-testid={`button-quickstart-${i}`} className="w-full text-left px-3 py-2 rounded-lg bg-white/5 hover:bg-indigo-500/10 border border-white/10 hover:border-indigo-400/30 text-[12px] text-white/65 hover:text-white/85 transition-colors">
+                    {q}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </Card>
+      </div>
     </div>
   );
 }

@@ -232,14 +232,21 @@ export function enforceStandardDefaults(pine: string): string {
 async function generateWithRepair(
   apiKey: string,
   messages: LlmMessage[],
+  overrideModel?: string,
 ): Promise<{ pine: string; compile: { ok: boolean; error: string | null }; modelUsed: string; attempts: number }> {
   let pine = '';
   let compile: { ok: boolean; error: string | null } = { ok: false, error: null };
-  let modelUsed: string = CREATOR_MODELS.DRAFT;
+  let modelUsed: string = overrideModel || CREATOR_MODELS.DRAFT;
   let attempts = 0;
 
   for (let i = 0; i <= MAX_REPAIRS + 1; i++) {
-    const model = i <= MAX_REPAIRS ? CREATOR_MODELS.DRAFT : CREATOR_MODELS.ESCALATE;
+    // When the user pins a specific model, use it for the draft AND every repair (no
+    // cross-model escalation). Otherwise: draft model first, escalate as a last resort.
+    const model = overrideModel
+      ? overrideModel
+      : i <= MAX_REPAIRS
+        ? CREATOR_MODELS.DRAFT
+        : CREATOR_MODELS.ESCALATE;
     attempts++;
     const raw = await callOpenRouter({
       apiKey,
@@ -307,6 +314,7 @@ export async function draftStrategy(args: {
   idea: string;
   apiKey: string;
   walletAddress: string;
+  model?: string;
 }): Promise<CreatorDraftResult> {
   const idea = (args.idea ?? '').trim();
   if (!idea) throw new LlmGatewayError('Describe the strategy you want first.', 400);
@@ -320,7 +328,7 @@ export async function draftStrategy(args: {
     { role: 'user', content: idea },
   ];
 
-  const { pine, compile, modelUsed, attempts } = await generateWithRepair(args.apiKey, messages);
+  const { pine, compile, modelUsed, attempts } = await generateWithRepair(args.apiKey, messages, args.model);
   const criticNotes = await critique(args.apiKey, `Idea:\n${idea}`, pine);
 
   return {
@@ -341,6 +349,7 @@ export async function improveStrategy(args: {
   apiKey: string;
   walletAddress: string;
   idea?: string;
+  model?: string;
 }): Promise<CreatorDraftResult> {
   const currentPine = (args.currentPine ?? '').trim();
   const insights = (args.insights ?? '').trim();
@@ -361,7 +370,7 @@ export async function improveStrategy(args: {
     },
   ];
 
-  const { pine, compile, modelUsed, attempts } = await generateWithRepair(args.apiKey, messages);
+  const { pine, compile, modelUsed, attempts } = await generateWithRepair(args.apiKey, messages, args.model);
   const criticNotes = await critique(
     args.apiKey,
     args.idea ? `Idea:\n${args.idea}` : 'Context: improving an existing strategy based on a backtest report.',
