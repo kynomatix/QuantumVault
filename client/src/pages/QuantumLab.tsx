@@ -6014,14 +6014,53 @@ const CREATOR_CAVEAT =
 // Keep client text inputs safely under the server's MAX_IDEA_CHARS (4096) cap.
 const CREATOR_MAX_TEXT = 4000;
 
-// Plain-English starting points shown in the empty Creator canvas.
+// Starting-point seed concepts shown in the empty Creator canvas. The card shows a short
+// family/title/blurb; `prompt` (the full concept) is what gets sent to the model on click.
+// Exit logic is intentionally omitted from the text — the generator auto-applies the
+// profit-protection cascade (stop → partial TP → breakeven → trail) to every strategy.
 const CREATOR_QUICK_STARTS = [
-  "Volatility squeeze breakout: when Bollinger Bands contract inside the Keltner Channel, enter in the direction price expands as the squeeze releases. Trade the compression-to-expansion regime change, not a fixed level.",
-  "Efficiency-gated Donchian breakout: break of an N-bar Donchian channel, but only when the Kaufman Efficiency Ratio confirms the move is directional rather than chop. Ride the trend leg with the runner.",
-  "Statistical mean fade: fade price when its Z-score versus a rolling mean exceeds a threshold, exit on reversion to the mean. Statistical extremity adapts to each asset instead of a fixed RSI line.",
-  "Break-and-retest continuation: after a structural swing-high/low break, wait for a retest of the broken level holding as new support/resistance, then enter on confirmation for a tighter, structure-based stop.",
-  "ATR-expansion trend pullback: in a confirmed trend (slope + efficiency), buy pullbacks to a dynamic anchor when ATR re-expands in the trend direction. Continuation entries, not reversal guesses.",
-  "Range-regime boundary fade: only when a range regime is detected (low ADX + compressed Bollinger bandwidth), fade the band edges back toward the basis. Mean reversion only when it is actually the right model.",
+  {
+    family: "Volatility",
+    title: "Squeeze Breakout",
+    blurb: "Enter as a Bollinger/Keltner squeeze releases.",
+    prompt:
+      "Volatility squeeze breakout: when Bollinger Bands contract inside the Keltner Channel, enter in the direction price expands as the squeeze releases. Trade the compression-to-expansion regime change, not a fixed level.",
+  },
+  {
+    family: "Trend",
+    title: "Efficiency Donchian",
+    blurb: "Channel break gated by Kaufman efficiency.",
+    prompt:
+      "Efficiency-gated Donchian breakout: break of an N-bar Donchian channel, but only when the Kaufman Efficiency Ratio confirms the move is directional rather than chop. Ride the trend leg with the runner.",
+  },
+  {
+    family: "Mean Reversion",
+    title: "Z-Score Mean Fade",
+    blurb: "Fade statistical extremes back to the mean.",
+    prompt:
+      "Statistical mean fade: fade price when its Z-score versus a rolling mean exceeds a threshold, exit on reversion to the mean. Statistical extremity adapts to each asset instead of a fixed RSI line.",
+  },
+  {
+    family: "Structure",
+    title: "Break & Retest",
+    blurb: "Enter the retest of a broken swing level.",
+    prompt:
+      "Break-and-retest continuation: after a structural swing-high/low break, wait for a retest of the broken level holding as new support/resistance, then enter on confirmation for a tighter, structure-based stop.",
+  },
+  {
+    family: "Trend",
+    title: "ATR Expansion Pullback",
+    blurb: "Buy trend pullbacks as ATR re-expands.",
+    prompt:
+      "ATR-expansion trend pullback: in a confirmed trend (slope + efficiency), buy pullbacks to a dynamic anchor when ATR re-expands in the trend direction. Continuation entries, not reversal guesses.",
+  },
+  {
+    family: "Mean Reversion",
+    title: "Range-Regime Fade",
+    blurb: "Fade band edges only in a range regime.",
+    prompt:
+      "Range-regime boundary fade: only when a range regime is detected (low ADX + compressed Bollinger bandwidth), fade the band edges back toward the basis. Mean reversion only when it is actually the right model.",
+  },
 ];
 
 // Format a USD-per-1M-tokens price for the engine picker (null → em dash).
@@ -6458,13 +6497,24 @@ function CreatorPanel({ strategies, onUseStrategy }: {
                 <p className="text-white/80 font-medium">Your strategy will appear here</p>
                 <p className="text-white/45 text-sm mt-1 max-w-xs mx-auto">Describe an idea and hit Generate. The AI drafts it, checks it compiles, and an independent reviewer flags the risks.</p>
               </div>
-              <div className="w-full max-w-sm space-y-1.5 pt-1">
-                <p className="text-[10px] uppercase tracking-wider text-white/30">Try a starting point</p>
-                {CREATOR_QUICK_STARTS.map((q, i) => (
-                  <button key={i} type="button" onClick={() => { setMode("new"); setIdea(q); }} data-testid={`button-quickstart-${i}`} className="w-full text-left px-3 py-2 rounded-lg bg-white/5 hover:bg-indigo-500/10 border border-white/10 hover:border-indigo-400/30 text-[12px] text-white/65 hover:text-white/85 transition-colors">
-                    {q}
-                  </button>
-                ))}
+              <div className="w-full max-w-md pt-1">
+                <div className="flex items-center justify-center gap-1.5 mb-3 text-white/45" data-testid="text-creator-protection">
+                  <Shield className="w-3 h-3 text-indigo-300/60 shrink-0" aria-hidden="true" />
+                  <span className="text-[10px]">Every strategy auto-protects: stop → partial TP → breakeven → trail</span>
+                </div>
+                <p className="text-[10px] uppercase tracking-wider text-white/30 mb-2 text-left">Try a starting point</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {CREATOR_QUICK_STARTS.map((q, i) => (
+                    <button key={i} type="button" onClick={() => { setMode("new"); setIdea(q.prompt); }} data-testid={`button-quickstart-${i}`} className="text-left p-3 rounded-lg bg-white/5 hover:bg-indigo-500/10 border border-white/10 hover:border-indigo-400/30 transition-colors group">
+                      <div className="flex items-center justify-between gap-1 mb-1">
+                        <span className="text-[9px] uppercase tracking-wider text-indigo-300/55 truncate">{q.family}</span>
+                        <Shield className="w-3 h-3 text-indigo-300/25 group-hover:text-indigo-300/70 transition-colors shrink-0" aria-hidden="true" />
+                      </div>
+                      <p className="text-[12px] font-medium text-white/80 leading-tight" data-testid={`text-quickstart-title-${i}`}>{q.title}</p>
+                      <p className="text-[11px] text-white/45 mt-0.5 leading-snug">{q.blurb}</p>
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
           )}
