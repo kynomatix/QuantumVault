@@ -6063,6 +6063,46 @@ const CREATOR_QUICK_STARTS = [
   },
 ];
 
+// "Auto" spark: a richer, randomized creative brief for users who don't know where to
+// start. Each click composes a creative archetype (base) + an edge directive + the
+// standard risk frame, avoiding an immediate repeat. The generator auto-applies the
+// exit cascade, but we restate it so the brief reads like a complete trader's ask.
+const CREATOR_SPARK_BASES: string[] = [
+  "Build a breakout strategy that only fires when the market is genuinely trending, not chopping. Define what makes a breakout 'real' — for example a compression in range and volatility that resolves with a sharp expansion — and add a regime detector (trend vs. range) so it stands down when price is stuck going sideways.",
+  "Make a regime-adaptive strategy: detect whether the market is trending or ranging, then change behaviour with the regime — go with momentum on breaks when it's trending, and fade the extremes back toward the mean when it's ranging. The edge is in classifying the regime correctly, not in either entry on its own.",
+  "Create a counter-trend strategy that only takes mean-reversion trades once it detects the market is trapped in a range. Fade overextensions back toward the middle, but require confluence — a momentum stall, a volatility contraction — so it isn't blindly catching a falling knife.",
+  "Design a stop-run reversal: look for price sweeping just beyond a prior swing high or low (taking out the obvious stops) and then snapping back. Enter on the reclaim and use the sweep extreme as a tight invalidation. The edge is in the failed move, not the breakout itself.",
+  "Build a trend-continuation strategy that buys pullbacks (or sells rallies) only inside a high-quality trend. Measure trend quality — directional efficiency, slope persistence — as the gate, and time entries off a pullback to a dynamic anchor. Continuation, not reversal guessing.",
+  "Make a volatility-coil strategy: detect a tightening, low-volatility consolidation and position for the expansion that follows. The edge is anticipating the energy release, with a regime check so a quiet coil isn't confused with a dead, directionless market.",
+  "Create a strategy where the primary trigger is structural — a break or a pullback — and momentum is used only as confluence: require it to confirm, or stand aside when momentum diverges from price. Don't let a lone oscillator drive entries; use it to filter them.",
+  "Build a strategy around volatility expansion: enter when range and ATR expand sharply in one direction after a quiet stretch, with an anti-chop guard so a single noisy bar in a sideways market can't trigger it. The edge is telling a genuine expansion apart from noise.",
+  "Design a mean-reversion strategy that fades statistical extremes — how stretched price is from its own rolling mean, adapted per asset — but with a trend guard that disables fades when a strong trend is in control, so it never fights a runaway move.",
+  "Build a two-layer strategy: a slow bias layer (a long-lookback trend or volatility filter that sets the allowed direction) and a faster trigger layer that only takes entries aligned with that bias. The edge is multi-horizon alignment expressed on a single series.",
+  "Create a market-structure strategy: identify a real shift in structure — a break of recent swing highs/lows that flips the higher-high/higher-low sequence — and trade the new direction, but require a confirmation or retest so a one-bar spike can't fool it.",
+  "Make a strategy that trades a change in character: when the way price moves shifts — impulsive vs. corrective, expanding vs. contracting volatility — treat it as a new regime to trade into. Use generic indicators only to quantify the shift, never as the edge itself.",
+];
+
+const CREATOR_SPARK_NUDGES: string[] = [
+  "Lean toward a less-obvious edge: don't rely on any single generic indicator — use them only for confluence across different axes (trend, volatility, momentum, location).",
+  "Keep the secondary confirmations as optional, toggleable inputs so the optimizer can discover which ones actually add an edge and which are just noise.",
+  "Favour orthogonal signals that each measure something different; if two conditions are really saying the same thing, that's curve-fitting — drop one.",
+  "Add a regime filter so it steps aside in conditions that don't suit it instead of forcing trades in chop.",
+];
+
+const CREATOR_SPARK_RISK =
+  "For risk, scale out across multiple take-profits, move the stop to breakeven after the first target hits, and trail the runner with an ATR-based stop.";
+
+// Compose a fresh creative brief, avoiding an immediate repeat of the same base archetype.
+function buildCreatorSpark(excludeBase: number | null): { base: number; text: string } {
+  const n = CREATOR_SPARK_BASES.length;
+  let i = Math.floor(Math.random() * n);
+  if (excludeBase !== null && n > 1 && i === excludeBase) {
+    i = (i + 1 + Math.floor(Math.random() * (n - 1))) % n;
+  }
+  const nudge = CREATOR_SPARK_NUDGES[Math.floor(Math.random() * CREATOR_SPARK_NUDGES.length)];
+  return { base: i, text: `${CREATOR_SPARK_BASES[i]} ${nudge} ${CREATOR_SPARK_RISK}` };
+}
+
 // Format a USD-per-1M-tokens price for the engine picker (null → em dash).
 function fmtPricePerM(v: number | null): string {
   if (v === null || !Number.isFinite(v)) return "—";
@@ -6082,6 +6122,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
   const [improveStrategyId, setImproveStrategyId] = useState<number | null>(null);
   const [pullingInsights, setPullingInsights] = useState(false);
   const [mode, setMode] = useState<"new" | "improve">("new");
+  const [lastSparkBase, setLastSparkBase] = useState<number | null>(null);
   const [selectedModel, setSelectedModel] = useState<string>(""); // "" = Auto blend
   const [engineOpen, setEngineOpen] = useState(false);
   const [keyOpen, setKeyOpen] = useState(false);
@@ -6239,7 +6280,22 @@ function CreatorPanel({ strategies, onUseStrategy }: {
                 className="min-h-[150px] bg-black/40 border-white/10 text-white/90 text-sm resize-y lg:resize-none lg:flex-1 lg:min-h-0"
                 data-testid="input-idea"
               />
-              <div className="flex items-center justify-end">
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const s = buildCreatorSpark(lastSparkBase);
+                    setMode("new");
+                    setIdea(s.text);
+                    setLastSparkBase(s.base);
+                  }}
+                  data-testid="button-auto-spark"
+                  title="Auto-write a creative strategy brief to start from"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-400/20 hover:border-indigo-400/40 text-[11px] font-medium text-indigo-200 transition-colors"
+                >
+                  <Wand2 className="w-3.5 h-3.5" />
+                  Auto-write
+                </button>
                 <span className={`text-[11px] ${ideaTooLong ? "text-red-400" : "text-white/40"}`} data-testid="text-idea-count">{idea.length} / {CREATOR_MAX_TEXT}</span>
               </div>
             </TabsContent>
