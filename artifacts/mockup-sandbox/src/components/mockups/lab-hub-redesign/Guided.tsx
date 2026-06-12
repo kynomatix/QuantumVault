@@ -88,14 +88,14 @@ export function Guided() {
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="space-y-8"
+          className="space-y-8 text-center"
         >
-          <div className="flex items-center gap-3 text-indigo-400">
-            <FlaskConical className="w-7 h-7" />
-            <span className="font-display font-bold tracking-wide text-xl">QuantumLab</span>
+          <div className="flex items-center justify-center gap-3 text-indigo-400">
+            <FlaskConical className="w-8 h-8" />
+            <span className="font-display font-bold tracking-wide text-2xl">QuantumLab</span>
           </div>
 
-          <div className="space-y-6 max-w-2xl">
+          <div className="space-y-6 max-w-2xl mx-auto">
             <h1 className="text-4xl sm:text-5xl font-display font-extrabold tracking-tight text-white leading-[1.15]">
               Test your trading ideas before you risk real money.
             </h1>
@@ -104,18 +104,18 @@ export function Guided() {
             </p>
           </div>
 
-          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 pt-4">
-            <Button size="lg" className="bg-indigo-600 hover:bg-indigo-500 text-white rounded-full px-8 shadow-[0_0_30px_-5px_rgba(99,102,241,0.4)] transition-all">
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-2">
+            <Button className="bg-indigo-600 hover:bg-indigo-500 text-white rounded-full px-6 shadow-[0_0_30px_-5px_rgba(99,102,241,0.4)] transition-all">
               <Play className="w-4 h-4 mr-2" />
               Run a backtest
             </Button>
-            <Button size="lg" variant="ghost" className="text-indigo-300 hover:text-white hover:bg-white/5 rounded-full px-8">
+            <Button variant="ghost" className="text-indigo-300 hover:text-white hover:bg-white/5 rounded-full px-6">
               <Sparkles className="w-4 h-4 mr-2" />
               Create with AI
             </Button>
           </div>
 
-          <div className="flex flex-wrap items-center gap-6 text-sm text-slate-400 pt-4">
+          <div className="flex flex-wrap items-center justify-center gap-6 text-sm text-slate-400 pt-2">
             <div className="flex items-center gap-2">
               <FileCode className="w-4 h-4 text-slate-500" />
               <span className="font-medium text-slate-300">{strategiesCount} saved strategies</span>
@@ -134,7 +134,7 @@ export function Guided() {
           transition={{ delay: 0.1 }}
           className="space-y-10"
         >
-          <h2 className="text-2xl font-display font-semibold text-white tracking-tight">How it works</h2>
+          <h2 className="text-2xl font-display font-semibold text-white tracking-tight text-center">How it works</h2>
           <div className="relative pl-8 sm:pl-0">
             {/* Desktop line */}
             <div className="hidden sm:block absolute top-[20px] left-[16.6%] right-[16.6%] h-px bg-slate-800" />
@@ -169,19 +169,19 @@ export function Guided() {
           transition={{ delay: 0.2 }}
           className="space-y-8"
         >
-          <h2 className="text-2xl font-display font-semibold text-white tracking-tight">Explore the Lab</h2>
+          <h2 className="text-2xl font-display font-semibold text-white tracking-tight text-center">Explore the Lab</h2>
           
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-12 gap-y-10">
             {explore.map((item) => {
               const Icon = item.icon;
               return (
                 <a key={item.id} href="#" className="group block">
-                  <div className="flex items-start gap-5">
+                  <div className="flex flex-col items-center text-center gap-4">
                     <div className="w-12 h-12 rounded-xl bg-slate-800/50 flex items-center justify-center group-hover:bg-indigo-500/10 group-hover:text-indigo-300 transition-colors shrink-0">
                       <Icon className="w-6 h-6 text-slate-400 group-hover:text-indigo-400 transition-colors" />
                     </div>
                     <div>
-                      <div className="flex items-center gap-3 mb-1.5">
+                      <div className="flex items-center justify-center gap-3 mb-1.5">
                         <h3 className="text-lg font-semibold text-slate-200 group-hover:text-white transition-colors">{item.label}</h3>
                         {item.badge && (
                           <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 text-xs font-mono font-medium">
@@ -190,7 +190,7 @@ export function Guided() {
                         )}
                         <ArrowUpRight className="w-4 h-4 text-slate-600 group-hover:text-indigo-400 opacity-0 -translate-y-1 translate-x-1 group-hover:opacity-100 group-hover:translate-y-0 group-hover:translate-x-0 transition-all" />
                       </div>
-                      <p className="text-slate-400 leading-relaxed text-sm mb-3">{item.desc}</p>
+                      <p className="text-slate-400 leading-relaxed text-sm mb-3 max-w-xs mx-auto">{item.desc}</p>
                       <div className={`text-xs font-mono font-medium ${item.hintColor} opacity-80`}>
                         {item.hint}
                       </div>
