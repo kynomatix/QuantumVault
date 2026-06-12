@@ -32,7 +32,7 @@ import {
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
   History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown, FilePlus2,
   Shield, AlertTriangle, DollarSign, Fuel, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet, Trophy, Filter, Crosshair, ListOrdered, GripVertical, RefreshCw,
-  Sparkles, Wand2, KeyRound,
+  Sparkles, Wand2, KeyRound, LayoutDashboard, FlaskConical,
 } from "lucide-react";
 import {
   ResponsiveContainer, Area, AreaChart, CartesianGrid, XAxis, YAxis,
@@ -53,7 +53,7 @@ import type {
 } from "@shared/schema";
 import { LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES } from "@shared/schema";
 
-type MainTab = "main" | "results" | "heatmap" | "insights" | "creator";
+type MainTab = "hub" | "main" | "results" | "heatmap" | "insights" | "creator";
 const CONSERVATIVE_FALLBACK = 5;
 
 // ── Task 188: backtest robustness (in-sample vs out-of-sample) ──────────────
@@ -224,7 +224,8 @@ interface LabNavItem {
 }
 
 const labNavItems: LabNavItem[] = [
-  { id: "main", label: "Main", icon: Settings2 },
+  { id: "hub", label: "Overview", icon: LayoutDashboard },
+  { id: "main", label: "Backtest", icon: Settings2 },
   { id: "creator", label: "Creator", icon: Sparkles },
   { id: "results", label: "Results", icon: History },
   { id: "heatmap", label: "Heatmap", icon: Grid3X3 },
@@ -510,8 +511,159 @@ async function copyPineWithParams(pineScript: string, params: Record<string, any
   }
 }
 
+function LabHub({
+  onNavigate,
+  onOpenQueue,
+  strategiesCount,
+  queueCount,
+}: {
+  onNavigate: (tab: MainTab) => void;
+  onOpenQueue: () => void;
+  strategiesCount: number;
+  queueCount: number;
+}) {
+  const steps = [
+    { n: 1, icon: FileCode, title: "Build a strategy", desc: "Paste a Pine Script strategy, or have the Creator generate one for you." },
+    { n: 2, icon: Play, title: "Backtest & optimize", desc: "Run it across real market history and sweep settings to find what holds up." },
+    { n: 3, icon: Trophy, title: "Review & go live", desc: "Check robustness and insights, then take the winners to a live bot." },
+  ];
+
+  const sections: {
+    id: MainTab | "queue";
+    label: string;
+    desc: string;
+    icon: React.ComponentType<{ className?: string }>;
+    onClick: () => void;
+    badge?: string;
+  }[] = [
+    { id: "main", label: "Backtest", icon: Settings2, desc: "Set up strategies, run backtests, and sweep parameters to optimize.", onClick: () => onNavigate("main") },
+    { id: "creator", label: "Creator", icon: Sparkles, desc: "Generate or refine a trading strategy with AI assistance.", onClick: () => onNavigate("creator") },
+    { id: "results", label: "Results", icon: History, desc: "Revisit past runs with equity curves and full trade logs.", onClick: () => onNavigate("results") },
+    { id: "heatmap", label: "Heatmap", icon: Grid3X3, desc: "Compare every parameter combination at a glance.", onClick: () => onNavigate("heatmap") },
+    { id: "insights", label: "Insights", icon: Lightbulb, desc: "Plain-language analysis of what's robust — and what's overfit.", onClick: () => onNavigate("insights") },
+    { id: "queue", label: "Queue", icon: ListOrdered, desc: "Track your running and queued optimization jobs.", onClick: onOpenQueue, badge: queueCount > 0 ? String(queueCount) : undefined },
+  ];
+
+  return (
+    <div className="space-y-8" data-testid="lab-hub">
+      {/* Hero */}
+      <div className="relative overflow-hidden rounded-2xl border border-indigo-500/20 bg-gradient-to-br from-indigo-500/10 via-slate-900/50 to-slate-950 p-6 sm:p-10">
+        <div className="pointer-events-none absolute -top-24 -right-20 w-72 h-72 rounded-full bg-indigo-500/20 blur-[120px]" />
+        <div className="pointer-events-none absolute -bottom-28 -left-16 w-72 h-72 rounded-full bg-blue-500/10 blur-[120px]" />
+        <div className="relative max-w-2xl">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-indigo-500/30 bg-indigo-500/10 text-indigo-300 text-xs font-medium mb-4">
+            <FlaskConical className="w-3.5 h-3.5" />
+            QuantumLab
+          </div>
+          <h1 className="text-2xl sm:text-4xl font-display font-extrabold tracking-tight text-white leading-tight" data-testid="text-hub-title">
+            Test your trading ideas before you risk real money.
+          </h1>
+          <p className="mt-3 text-sm sm:text-base text-white/60 leading-relaxed">
+            Backtest strategies against real market history, find the settings that hold up out-of-sample, and spot the ones that only look good on paper.
+          </p>
+          <div className="mt-5 flex flex-col sm:flex-row gap-3">
+            <Button
+              onClick={() => onNavigate("main")}
+              className="bg-gradient-to-r from-indigo-500 to-blue-500 hover:opacity-90 text-white shadow-[0_0_24px_-6px_rgba(99,102,241,0.85)]"
+              data-testid="button-hub-backtest"
+            >
+              <Play className="w-4 h-4 mr-1.5" />
+              Run a backtest
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => onNavigate("creator")}
+              className="border-indigo-500/40 text-indigo-200 hover:bg-indigo-500/10 hover:text-white"
+              data-testid="button-hub-creator"
+            >
+              <Sparkles className="w-4 h-4 mr-1.5" />
+              Create with AI
+            </Button>
+          </div>
+          <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+            <span className="inline-flex items-center gap-1.5 text-white/50" data-testid="text-hub-strategy-count">
+              <FileCode className="w-3.5 h-3.5 text-indigo-400" />
+              {strategiesCount} saved {strategiesCount === 1 ? "strategy" : "strategies"}
+            </span>
+            <span className="inline-flex items-center gap-1.5 text-white/50" data-testid="text-hub-queue-count">
+              <ListOrdered className="w-3.5 h-3.5 text-indigo-400" />
+              {queueCount} {queueCount === 1 ? "job" : "jobs"} in queue
+            </span>
+          </div>
+          <p className="mt-4 inline-flex items-start gap-1.5 text-[11px] text-white/40 max-w-md leading-relaxed">
+            <Info className="w-3.5 h-3.5 flex-shrink-0 mt-px text-amber-400/70" />
+            Backtests are a guide, not a guarantee. Past results never promise future profit — start small and size up only once a strategy proves itself live.
+          </p>
+        </div>
+      </div>
+
+      {/* How it works */}
+      <div>
+        <h2 className="text-sm font-semibold text-white/70 mb-3">How it works</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          {steps.map((s) => {
+            const Icon = s.icon;
+            return (
+              <div key={s.n} className="rounded-xl border border-white/10 bg-white/[0.03] p-5" data-testid={`hub-step-${s.n}`}>
+                <div className="flex items-center gap-3 mb-2">
+                  <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-indigo-500/20 to-blue-500/20 flex items-center justify-center">
+                    <Icon className="w-4 h-4 text-indigo-300" />
+                  </div>
+                  <span className="text-xs font-mono text-white/30">Step {s.n}</span>
+                </div>
+                <h3 className="text-sm font-semibold text-white">{s.title}</h3>
+                <p className="mt-1 text-xs text-white/50 leading-relaxed">{s.desc}</p>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Explore the Lab */}
+      <div>
+        <h2 className="text-sm font-semibold text-white/70 mb-3">Explore the Lab</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {sections.map((sec) => {
+            const Icon = sec.icon;
+            return (
+              <button
+                key={sec.id}
+                onClick={sec.onClick}
+                className="group text-left rounded-xl border border-white/10 bg-white/[0.03] p-5 transition-colors hover:border-indigo-500/40 hover:bg-indigo-500/[0.06]"
+                data-testid={`hub-card-${sec.id}`}
+              >
+                <div className="flex items-center justify-between mb-3">
+                  <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-indigo-500/20 to-blue-500/20 flex items-center justify-center transition-colors group-hover:from-indigo-500/30 group-hover:to-blue-500/30">
+                    <Icon className="w-5 h-5 text-indigo-300" />
+                  </div>
+                  {sec.badge ? (
+                    <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center rounded-full bg-indigo-500 text-white text-[10px] font-bold" data-testid={`hub-card-badge-${sec.id}`}>{sec.badge}</span>
+                  ) : null}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <h3 className="text-base font-semibold text-white">{sec.label}</h3>
+                  <ChevronRight className="w-4 h-4 text-white/30 transition-colors group-hover:text-indigo-300" />
+                </div>
+                <p className="mt-1 text-sm text-white/50 leading-relaxed">{sec.desc}</p>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Footer help */}
+      <div className="flex items-center justify-center pt-2">
+        <Link href="/docs" className="inline-flex items-center gap-1.5 text-xs text-white/40 transition-colors hover:text-indigo-300" data-testid="link-hub-docs">
+          <BookOpen className="w-3.5 h-3.5" />
+          New here? Read the docs
+        </Link>
+      </div>
+    </div>
+  );
+}
+
 export default function QuantumLab() {
-  const [mainTab, setMainTab] = useState<MainTab>("main");
+  const [mainTab, setMainTab] = useState<MainTab>("hub");
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeRunId, setActiveRunId] = useState<number | null>(null);
   const [activeHistoryRunId, setActiveHistoryRunId] = useState<number | null>(null);
@@ -1009,6 +1161,15 @@ export default function QuantumLab() {
 
   const renderContent = () => {
     switch (mainTab) {
+      case "hub":
+        return (
+          <LabHub
+            onNavigate={setMainTab}
+            onOpenQueue={() => setQueueOpen(true)}
+            strategiesCount={strategies?.length ?? 0}
+            queueCount={queueCount}
+          />
+        );
       case "main":
         return (
           <div className="space-y-6">
@@ -1032,9 +1193,9 @@ export default function QuantumLab() {
                   />
                 </div>
               ) : (
-                <Card className="bg-violet-500/5 border border-violet-500/20 p-5" data-testid="reconnecting-monitor">
+                <Card className="bg-indigo-500/5 border border-indigo-500/20 p-5" data-testid="reconnecting-monitor">
                   <div className="flex items-center gap-3">
-                    <Loader2 className="w-5 h-5 animate-spin text-violet-400" />
+                    <Loader2 className="w-5 h-5 animate-spin text-indigo-400" />
                     <div>
                       <p className="text-sm font-medium text-white">Reattaching to your run...</p>
                       <p className="text-xs text-white/50">Your run is still active on the server. Reconnecting the live progress feed.</p>
@@ -1166,7 +1327,7 @@ export default function QuantumLab() {
                 <img
                   src="/images/QV_Logo_02.png"
                   alt="QuantumVault"
-                  className="w-6 h-6 sm:w-8 sm:h-8 rounded-lg shadow-[0_0_18px_-4px_rgba(139,92,246,0.55)] group-hover:shadow-[0_0_22px_-3px_rgba(139,92,246,0.85)] transition-shadow"
+                  className="w-6 h-6 sm:w-8 sm:h-8 rounded-lg shadow-[0_0_18px_-4px_rgba(99,102,241,0.55)] group-hover:shadow-[0_0_22px_-3px_rgba(99,102,241,0.85)] transition-shadow"
                 />
                 <span className="font-display font-extrabold tracking-tight text-white text-base sm:text-lg leading-none">QV</span>
                 <span className="text-white/50 text-xs sm:text-sm font-medium leading-none">Lab</span>
@@ -1183,7 +1344,7 @@ export default function QuantumLab() {
                     className={cn(
                       "flex items-center gap-1.5 px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors",
                       mainTab === item.id
-                        ? "bg-violet-500/20 text-violet-300"
+                        ? "bg-indigo-500/20 text-indigo-300"
                         : "text-white/50 hover:text-white hover:bg-white/5"
                     )}
                     data-testid={`nav-${item.id}`}
@@ -1201,7 +1362,7 @@ export default function QuantumLab() {
                 <ListOrdered className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                 <span className="hidden sm:inline">Queue</span>
                 {queueCount > 0 && (
-                  <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-violet-500 text-white text-[10px] font-bold leading-none px-1" data-testid="queue-badge">
+                  <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-indigo-500 text-white text-[10px] font-bold leading-none px-1" data-testid="queue-badge">
                     {queueCount}
                   </span>
                 )}
@@ -1241,7 +1402,7 @@ function StrategyLibrary({ strategies, selectedId, onSelect, onDelete, onClearRe
   return (
     <div data-testid="strategy-library">
       <div className="flex items-center gap-2 mb-1.5">
-        <BookOpen className="w-3.5 h-3.5 text-violet-400" />
+        <BookOpen className="w-3.5 h-3.5 text-indigo-400" />
         <span className="text-xs font-medium text-white/60">Strategy Library</span>
       </div>
       <Popover open={open} onOpenChange={setOpen}>
@@ -1249,13 +1410,13 @@ function StrategyLibrary({ strategies, selectedId, onSelect, onDelete, onClearRe
           <button
             className={cn(
               "w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-lg border transition-all text-left",
-              "bg-white/[0.03] hover:bg-white/[0.06] border-white/10 hover:border-violet-500/30",
-              open && "border-violet-500/40 bg-white/[0.06] ring-1 ring-violet-500/20"
+              "bg-white/[0.03] hover:bg-white/[0.06] border-white/10 hover:border-indigo-500/30",
+              open && "border-indigo-500/40 bg-white/[0.06] ring-1 ring-indigo-500/20"
             )}
             data-testid="button-strategy-dropdown"
           >
             <div className="flex items-center gap-2 min-w-0">
-              <FileCode className="w-4 h-4 text-violet-400 flex-shrink-0" />
+              <FileCode className="w-4 h-4 text-indigo-400 flex-shrink-0" />
               {selected ? (
                 <div className="min-w-0">
                   <p className="text-sm font-medium text-white truncate" data-testid="text-selected-strategy">{selected.name}</p>
@@ -1290,14 +1451,14 @@ function StrategyLibrary({ strategies, selectedId, onSelect, onDelete, onClearRe
                     onClick={() => { onSelect(s); setOpen(false); }}
                     className={cn(
                       "flex items-center justify-between gap-2 px-2.5 py-2 rounded-md cursor-pointer transition-colors",
-                      isSelected ? "bg-violet-500/15" : "hover:bg-white/[0.05]"
+                      isSelected ? "bg-indigo-500/15" : "hover:bg-white/[0.05]"
                     )}
                     data-testid={`strategy-row-${s.id}`}
                     data-strategy-name={s.name}
                     data-strategy-id={s.id}
                   >
                     <div className="min-w-0">
-                      <p className={cn("text-xs font-medium truncate", isSelected ? "text-violet-300" : "text-white/80")} data-testid={`text-strategy-name-${s.id}`}>{s.name}</p>
+                      <p className={cn("text-xs font-medium truncate", isSelected ? "text-indigo-300" : "text-white/80")} data-testid={`text-strategy-name-${s.id}`}>{s.name}</p>
                       <p className="text-[10px] text-white/40">{new Date(s.createdAt).toLocaleDateString()} · {paramCount} opt params</p>
                     </div>
                     <div className="flex items-center gap-0.5 flex-shrink-0">
@@ -1435,7 +1596,7 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
       <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)]">
         <div className="flex items-center justify-between gap-1 px-4 py-3 border-b border-white/10">
           <div className="flex items-center gap-2 flex-1 min-w-0">
-            <FileCode className="w-4 h-4 text-violet-400 flex-shrink-0" />
+            <FileCode className="w-4 h-4 text-indigo-400 flex-shrink-0" />
             <Input
               value={strategyName}
               onChange={(e) => setStrategyName(e.target.value)}
@@ -1454,7 +1615,7 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
               <Upload className="w-3 h-3 mr-1" />
               Upload Pine
             </Button>
-            <Button size="sm" onClick={() => handleParse()} disabled={isParsing} data-testid="button-parse" className="bg-violet-600 hover:bg-violet-500 text-white">
+            <Button size="sm" onClick={() => handleParse()} disabled={isParsing} data-testid="button-parse" className="bg-indigo-600 hover:bg-indigo-500 text-white">
               {isParsing ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <CheckCircle2 className="w-3 h-3 mr-1" />}
               {isParsing ? "Parsing..." : "Parse Script"}
             </Button>
@@ -1479,7 +1640,7 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
         {isEditorOpen ? (
           <div className="h-[400px]">
             <textarea
-              className="w-full h-full bg-black/40 text-white/80 font-mono text-[13px] p-3 resize-none focus:outline-none focus:ring-1 focus:ring-violet-500 leading-relaxed border-none"
+              className="w-full h-full bg-black/40 text-white/80 font-mono text-[13px] p-3 resize-none focus:outline-none focus:ring-1 focus:ring-indigo-500 leading-relaxed border-none"
               value={code}
               onChange={(e) => setCode(e.target.value)}
               spellCheck={false}
@@ -1520,11 +1681,11 @@ function SetupPanel({ code, setCode, strategyName, setStrategyName, strategyId, 
             data-testid="button-toggle-params"
           >
             <div className="flex items-center gap-2 min-w-0">
-              <Settings2 className="w-4 h-4 text-violet-400 flex-shrink-0" />
+              <Settings2 className="w-4 h-4 text-indigo-400 flex-shrink-0" />
               <span className="text-sm font-medium text-white truncate">Parsed Parameters</span>
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
-              <Badge className="bg-violet-500/20 text-violet-300 border-violet-500/30" data-testid="badge-optimizable-count">
+              <Badge className="bg-indigo-500/20 text-indigo-300 border-indigo-500/30" data-testid="badge-optimizable-count">
                 {optimizableCount} optimizable
               </Badge>
               {fixedCount > 0 && (
@@ -1851,7 +2012,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
       <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)]">
         <div className="px-4 py-3 border-b border-white/10">
           <div className="flex items-center gap-2">
-            <Settings2 className="w-4 h-4 text-violet-400" />
+            <Settings2 className="w-4 h-4 text-indigo-400" />
             <span className="text-sm font-medium text-white">Run Configuration</span>
           </div>
           <p className="text-[11px] text-white/40 mt-0.5">Select markets, timeframes, and backtest period</p>
@@ -1881,7 +2042,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
                           className={cn(
                             "px-2.5 py-1 rounded text-xs font-medium transition-all",
                             isSelected
-                              ? "bg-violet-600 text-white shadow-sm shadow-violet-500/20"
+                              ? "bg-indigo-600 text-white shadow-sm shadow-indigo-500/20"
                               : "bg-white/5 text-white/50 hover:bg-white/10 border border-white/10"
                           )}
                           data-testid={`button-ticker-${name}`}
@@ -1913,7 +2074,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
                     className={cn(
                       "px-2.5 py-1 rounded text-xs font-medium transition-all",
                       isSelected
-                        ? "bg-violet-600 text-white shadow-sm shadow-violet-500/20"
+                        ? "bg-indigo-600 text-white shadow-sm shadow-indigo-500/20"
                         : "bg-white/5 text-white/50 hover:bg-white/10 border border-white/10"
                     )}
                     data-testid={`button-tf-${tf}`}
@@ -2020,10 +2181,10 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
                     data-testid="toggle-use-insights"
                   >
                     <div className="flex items-center gap-2">
-                      <Lightbulb className={`w-3.5 h-3.5 ${useInsights ? "text-violet-400" : "text-white/30"}`} />
+                      <Lightbulb className={`w-3.5 h-3.5 ${useInsights ? "text-indigo-400" : "text-white/30"}`} />
                       <span className={`text-xs font-medium ${useInsights ? "text-white" : "text-white/50"}`}>Use Insights</span>
                     </div>
-                    <div className={`w-8 h-4.5 rounded-full transition-colors relative ${useInsights ? "bg-violet-600" : "bg-white/10"}`}>
+                    <div className={`w-8 h-4.5 rounded-full transition-colors relative ${useInsights ? "bg-indigo-600" : "bg-white/10"}`}>
                       <div className={`absolute top-0.5 w-3.5 h-3.5 rounded-full bg-white transition-transform ${useInsights ? "translate-x-4" : "translate-x-0.5"}`} />
                     </div>
                   </button>
@@ -2069,7 +2230,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
                         <div>
                           {singleComboStaleness && !singleComboStaleness.exists ? (
                             <>
-                              <p className="text-[10px] text-violet-400 flex items-center gap-1">
+                              <p className="text-[10px] text-indigo-400 flex items-center gap-1">
                                 <AlertTriangle className="w-3 h-3" />
                                 No focused report for {singleComboStaleness.ticker.replace("-PERP", "").replace("/USDT", "")} {singleComboStaleness.timeframe}
                               </p>
@@ -2079,7 +2240,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
                                   inlineGenerateMutation.mutate(requestCombo);
                                 }}
                                 disabled={inlineGenerateMutation.isPending}
-                                className="mt-1.5 flex items-center gap-1.5 px-2.5 py-1 rounded bg-violet-500/15 hover:bg-violet-500/25 border border-violet-500/20 text-violet-400 text-[10px] font-medium transition-colors disabled:opacity-50"
+                                className="mt-1.5 flex items-center gap-1.5 px-2.5 py-1 rounded bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/20 text-indigo-400 text-[10px] font-medium transition-colors disabled:opacity-50"
                                 data-testid="btn-generate-insights-report"
                               >
                                 {inlineGenerateMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
@@ -2088,7 +2249,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
                             </>
                           ) : (
                             <>
-                              <p className="text-[10px] text-violet-400 flex items-center gap-1">
+                              <p className="text-[10px] text-indigo-400 flex items-center gap-1">
                                 <AlertTriangle className="w-3 h-3" />
                                 No focused reports — will use general report
                               </p>
@@ -2110,7 +2271,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
                               <span key={c.label} className="text-[9px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400/70 border border-sky-500/10">{c.label}</span>
                             ))}
                             {insightsCoverage.missing.map(m => (
-                              <span key={m.label} className="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-400/50 border border-violet-500/10">{m.label}</span>
+                              <span key={m.label} className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400/50 border border-indigo-500/10">{m.label}</span>
                             ))}
                           </div>
                           <p className="text-[10px] text-white/30 mt-1">
@@ -2150,7 +2311,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
               <>
                 {isGuided && guidedCombos != null ? (
                   <p className="text-[11px] text-white/40" data-testid="text-total-search-space">
-                    Guided space: <span className="text-violet-300 font-medium">{formatCombinations(guidedCombos)}</span>
+                    Guided space: <span className="text-indigo-300 font-medium">{formatCombinations(guidedCombos)}</span>
                     <span className="text-white/25 mx-1">←</span>
                     <span className="text-white/25 line-through">{formatCombinations(totalSearch)}</span>
                     <span className="text-white/25 ml-1">({Math.max(1, Math.round((guidedCombos / totalSearch) * 100))}% of full)</span>
@@ -2161,7 +2322,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
                   </p>
                 )}
                 <p className="text-[11px] text-white/40">
-                  Optimizer will test: <span className="text-violet-300 font-medium">{formatCombinations(totalTests)}</span> samples
+                  Optimizer will test: <span className="text-indigo-300 font-medium">{formatCombinations(totalTests)}</span> samples
                 </p>
               </>
             );
@@ -2171,7 +2332,7 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
           {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Play className="w-4 h-4 mr-2" />}
           {isRunning ? "Queue Smoke Test" : "Smoke Test"}
         </Button>
-        <Button className="w-full bg-violet-600 hover:bg-violet-500 text-white shadow-[0_0_24px_-6px_rgba(139,92,246,0.85)] hover:shadow-[0_0_30px_-4px_rgba(139,92,246,1)] transition-shadow" onClick={() => handleRun("sweep")} disabled={isSubmitting || !parsedResult} data-testid="button-full-sweep">
+        <Button className="w-full bg-indigo-600 hover:bg-indigo-500 text-white shadow-[0_0_24px_-6px_rgba(99,102,241,0.85)] hover:shadow-[0_0_30px_-4px_rgba(99,102,241,1)] transition-shadow" onClick={() => handleRun("sweep")} disabled={isSubmitting || !parsedResult} data-testid="button-full-sweep">
           {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Rocket className="w-4 h-4 mr-2" />}
           {isRunning ? "Queue Full Sweep" : "Full Sweep"}
         </Button>
@@ -2304,8 +2465,8 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
       <SheetContent className="w-full sm:max-w-[440px] overflow-y-auto bg-slate-950 border-white/10" data-testid="queue-panel">
         <SheetHeader className="space-y-3 pb-4 border-b border-white/10">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-violet-500/10">
-              <ListOrdered className="w-5 h-5 text-violet-400" />
+            <div className="p-2 rounded-lg bg-indigo-500/10">
+              <ListOrdered className="w-5 h-5 text-indigo-400" />
             </div>
             <div className="flex-1">
               <SheetTitle className="text-lg text-white">Run Queue</SheetTitle>
@@ -2332,7 +2493,7 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
                   <Button
                     variant="outline"
                     size="sm"
-                    className="h-7 px-3 text-xs border-violet-500/30 text-violet-300 hover:bg-violet-500/10"
+                    className="h-7 px-3 text-xs border-indigo-500/30 text-indigo-300 hover:bg-indigo-500/10"
                     onClick={() => kickQueueMutation.mutate(false)}
                     disabled={kickQueueMutation.isPending}
                     data-testid="queue-kick-btn"
@@ -2371,17 +2532,17 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
           {activeRun && (
             <div className="space-y-2">
               <p className="text-xs font-medium text-white/40 uppercase tracking-wider">Active</p>
-              <div className="flex items-center gap-3 px-4 py-3 rounded-lg bg-violet-500/10 border border-violet-500/20" data-testid={`queue-active-run-${activeRun.id}`}>
+              <div className="flex items-center gap-3 px-4 py-3 rounded-lg bg-indigo-500/10 border border-indigo-500/20" data-testid={`queue-active-run-${activeRun.id}`}>
                 {activeRun.status === "running" ? (
-                  <Loader2 className="w-4 h-4 text-violet-400 animate-spin flex-shrink-0" />
+                  <Loader2 className="w-4 h-4 text-indigo-400 animate-spin flex-shrink-0" />
                 ) : (
-                  <PauseCircle className="w-4 h-4 text-indigo-400 flex-shrink-0" />
+                  <PauseCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
                 )}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <Badge variant="outline" className={cn(
                       "text-[10px] px-1.5",
-                      activeRun.status === "running" ? "border-violet-500/40 text-violet-300" : "border-indigo-500/40 text-indigo-300"
+                      activeRun.status === "running" ? "border-indigo-500/40 text-indigo-300" : "border-amber-500/40 text-amber-300"
                     )}>
                       {activeRun.status === "running" ? "Running" : "Paused"}
                     </Badge>
@@ -2395,7 +2556,7 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
                   <Button
                     variant="outline"
                     size="sm"
-                    className="h-7 px-3 text-xs border-violet-500/30 text-violet-300 hover:bg-violet-500/10"
+                    className="h-7 px-3 text-xs border-indigo-500/30 text-indigo-300 hover:bg-indigo-500/10"
                     onClick={() => resumeMutation.mutate(activeRun.id)}
                     disabled={resumeMutation.isPending}
                     data-testid={`queue-resume-${activeRun.id}`}
@@ -2425,7 +2586,7 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
                     onDrop={(e) => handleDrop(e, index)}
                     className={cn(
                       "flex items-center gap-3 px-4 py-3 rounded-lg bg-white/[0.03] border group cursor-grab active:cursor-grabbing transition-all",
-                      dragOverIndex === index && dragIndex !== index ? "border-violet-400/50 bg-violet-500/10" : "border-white/5",
+                      dragOverIndex === index && dragIndex !== index ? "border-indigo-400/50 bg-indigo-500/10" : "border-white/5",
                       dragIndex === index ? "opacity-40" : "opacity-100"
                     )}
                     data-testid={`queue-item-${item.id}`}
@@ -2436,7 +2597,7 @@ function QueueDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
                       <div className="flex items-center gap-2 mb-0.5">
                         <Badge variant="outline" className={cn(
                           "text-[10px] px-1.5",
-                          item.type === "refine" ? "border-sky-500/30 text-sky-400" : "border-violet-500/30 text-violet-400"
+                          item.type === "refine" ? "border-sky-500/30 text-sky-400" : "border-indigo-500/30 text-indigo-400"
                         )}>
                           {item.type === "refine" ? "Refine" : "New Run"}
                         </Badge>
@@ -2538,8 +2699,8 @@ function SweepProgressPanel({ tickerProgress }: { tickerProgress: NonNullable<La
         </p>
         <div className="flex items-center gap-3 text-[10px] font-mono tabular-nums" data-testid="sweep-summary">
           <span className="text-white/70" data-testid="sweep-summary-counts">{complete} / {total}</span>
-          <span className="flex items-center gap-1 text-violet-400" data-testid="sweep-summary-running">
-            <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse" />
+          <span className="flex items-center gap-1 text-indigo-400" data-testid="sweep-summary-running">
+            <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
             {running} running
           </span>
           <span className="text-white/40" data-testid="sweep-summary-pending">{pending} pending</span>
@@ -2548,7 +2709,7 @@ function SweepProgressPanel({ tickerProgress }: { tickerProgress: NonNullable<La
 
       <div className="relative w-full h-1 rounded-full bg-white/5 overflow-hidden">
         <div
-          className="absolute inset-y-0 left-0 bg-gradient-to-r from-violet-500 to-sky-400 transition-[width] duration-500 ease-out"
+          className="absolute inset-y-0 left-0 bg-gradient-to-r from-indigo-500 to-sky-400 transition-[width] duration-500 ease-out"
           style={{ width: `${pct}%` }}
           data-testid="sweep-progress-bar"
         />
@@ -2574,7 +2735,7 @@ function SweepProgressPanel({ tickerProgress }: { tickerProgress: NonNullable<La
                   status === "complete"
                     ? "bg-sky-500/10 border-sky-500/30 text-sky-300"
                     : status === "running"
-                    ? "bg-violet-500/15 border-violet-500/40 text-violet-200"
+                    ? "bg-indigo-500/15 border-indigo-500/40 text-indigo-200"
                     : "bg-white/5 border-white/10 text-white/50";
                 return (
                   <div
@@ -2623,13 +2784,13 @@ export function JobMonitor({ progress, onCancel, autoRefine, onAutoRefineChange,
 
   const isRetrying = progress.status === "retrying";
   const isRunning = progress.status !== "complete" && progress.status !== "error" && !isRetrying;
-  const statusColor = progress.status === "error" && !isRetrying ? "text-purple-400" : progress.status === "complete" ? "text-sky-400" : isRetrying ? "text-amber-400" : "text-violet-400";
+  const statusColor = progress.status === "error" && !isRetrying ? "text-purple-400" : progress.status === "complete" ? "text-sky-400" : isRetrying ? "text-amber-400" : "text-indigo-400";
   const statusIcon = progress.status === "error" && !isRetrying ? <AlertCircle className="w-5 h-5" /> : progress.status === "complete" ? <CheckCircle2 className="w-5 h-5" /> : <Loader2 className="w-5 h-5 animate-spin" />;
 
   return (
-    <Card className="bg-violet-500/5 border border-violet-500/20 p-0 overflow-hidden" data-testid="job-monitor">
+    <Card className="bg-indigo-500/5 border border-indigo-500/20 p-0 overflow-hidden" data-testid="job-monitor">
       <div className="relative w-full h-1.5 bg-white/5">
-        <div className="absolute inset-y-0 left-0 bg-gradient-to-r from-violet-600 to-violet-400 transition-all duration-500 ease-out" style={{ width: `${Math.min(100, Math.round(progress.percent ?? 0))}%` }} />
+        <div className="absolute inset-y-0 left-0 bg-gradient-to-r from-indigo-600 to-indigo-400 transition-all duration-500 ease-out" style={{ width: `${Math.min(100, Math.round(progress.percent ?? 0))}%` }} />
       </div>
 
       <div className="p-5 space-y-4">
@@ -2824,7 +2985,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress }: { onSelec
   const strategyMap = new Map<number, LabStrategy>();
   strategies?.forEach(s => strategyMap.set(s.id, s));
 
-  if (isLoading) return <div className="flex items-center justify-center h-96"><Loader2 className="w-6 h-6 animate-spin text-violet-400" /></div>;
+  if (isLoading) return <div className="flex items-center justify-center h-96"><Loader2 className="w-6 h-6 animate-spin text-indigo-400" /></div>;
 
   const allRuns = runs ?? [];
 
@@ -2832,24 +2993,24 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress }: { onSelec
     <div className="max-w-5xl mx-auto space-y-6">
       <div>
         <h2 className="text-lg font-semibold flex items-center gap-2 text-white" data-testid="text-history-page-title">
-          <History className="w-5 h-5 text-violet-400" /> Run History
+          <History className="w-5 h-5 text-indigo-400" /> Run History
         </h2>
         <p className="text-xs text-white/60 mt-1">{allRuns.length} run{allRuns.length !== 1 ? "s" : ""}</p>
       </div>
 
       {liveProgress && liveProgress.status !== "complete" && liveProgress.status !== "error" && (
-        <Card className="bg-violet-500/10 border border-violet-500/30 p-4" data-testid="card-live-progress">
+        <Card className="bg-indigo-500/10 border border-indigo-500/30 p-4" data-testid="card-live-progress">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
-              <Loader2 className="w-4 h-4 text-violet-400 animate-spin" />
-              <span className="text-sm font-medium text-violet-300">Optimization Running</span>
+              <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />
+              <span className="text-sm font-medium text-indigo-300">Optimization Running</span>
               {(() => { const activeRun = allRuns.find(r => r.status === "running"); const strat = activeRun ? strategyMap.get(activeRun.strategyId) : null; return strat ? <span className="text-xs text-white/50">— {strat.name}</span> : null; })()}
               <span className="text-xs text-white/40">{liveProgress.stage}</span>
             </div>
-            <span className="text-[10px] text-violet-400/60 font-mono">LIVE</span>
+            <span className="text-[10px] text-indigo-400/60 font-mono">LIVE</span>
           </div>
           <div className="w-full bg-white/10 rounded-full h-2 mb-3">
-            <div className="bg-violet-500 h-2 rounded-full transition-all duration-500" style={{ width: `${Math.min(100, liveProgress.percent ?? 0)}%` }} />
+            <div className="bg-indigo-500 h-2 rounded-full transition-all duration-500" style={{ width: `${Math.min(100, liveProgress.percent ?? 0)}%` }} />
           </div>
           <div className="flex items-center gap-4 text-xs text-white/60">
             <span>{Math.min(100, liveProgress.percent ?? 0)}% complete</span>
@@ -2906,11 +3067,11 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress }: { onSelec
 
             const statusIcon = isComplete ? <CheckCircle2 className="w-4 h-4 text-sky-400" /> :
               isFailed ? <XCircle className="w-4 h-4 text-purple-400" /> :
-              isPaused ? <PauseCircle className="w-4 h-4 text-indigo-400" /> :
-              isRunning ? <Loader2 className="w-4 h-4 text-violet-400 animate-spin" /> :
+              isPaused ? <PauseCircle className="w-4 h-4 text-amber-400" /> :
+              isRunning ? <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" /> :
               <AlertCircle className="w-4 h-4 text-indigo-400" />;
 
-            const statusBg = isComplete ? "bg-sky-500/10" : isFailed ? "bg-purple-500/10" : isPaused ? "bg-indigo-500/10" : isRunning ? "bg-violet-500/10" : "bg-indigo-500/10";
+            const statusBg = isComplete ? "bg-sky-500/10" : isFailed ? "bg-purple-500/10" : isPaused ? "bg-amber-500/10" : isRunning ? "bg-indigo-500/10" : "bg-indigo-500/10";
 
             return (
               <div key={run.id} className="flex items-center gap-2">
@@ -2921,7 +3082,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress }: { onSelec
                     if (card) card.scrollIntoView({ behavior: "smooth", block: "start" });
                   }
                 }}>
-                  <Card className={`bg-white/5 border border-white/10 p-4 ${isRunning ? "border-violet-500/20 opacity-60" : "cursor-pointer hover:bg-white/10"}`} data-testid={`history-run-card-${run.id}`}>
+                  <Card className={`bg-white/5 border border-white/10 p-4 ${isRunning ? "border-indigo-500/20 opacity-60" : "cursor-pointer hover:bg-white/10"}`} data-testid={`history-run-card-${run.id}`}>
                     <div className="flex items-center justify-between gap-4 flex-wrap">
                       <div className="flex items-center gap-3 min-w-0 flex-1">
                         <div className={`flex items-center justify-center w-9 h-9 rounded-md ${statusBg} flex-shrink-0`}>{statusIcon}</div>
@@ -2947,7 +3108,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress }: { onSelec
                               <Badge className={`text-[10px] ${
                                 (run as any).configSnapshot?.type === "refine" && (isComplete || (!isRunning && !isFailed))
                                   ? "bg-sky-500/20 text-sky-400"
-                                  : isComplete ? "bg-white/5 text-white/70" : isFailed ? "bg-purple-500/20 text-purple-400" : "bg-violet-500/20 text-violet-400"
+                                  : isComplete ? "bg-white/5 text-white/70" : isFailed ? "bg-purple-500/20 text-purple-400" : "bg-indigo-500/20 text-indigo-400"
                               }`}>
                                 {isRunning ? "Running" : isFailed ? "Failed" : run.mode === "smoke" ? "Smoke Test" : (run as any).configSnapshot?.type === "refine" ? "Refine" : "Full Sweep"}
                               </Badge>
@@ -2995,7 +3156,7 @@ function RunHistoryPanel({ onSelectRun, onViewRunning, liveProgress }: { onSelec
           })}
           {visibleCount < allRuns.length && (
             <div ref={sentinelRef} className="flex items-center justify-center py-4 gap-2">
-              <Loader2 className="w-4 h-4 text-violet-400 animate-spin" />
+              <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />
               <span className="text-xs text-white/40">Loading more runs...</span>
             </div>
           )}
@@ -3259,7 +3420,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
     return calculateRiskAnalysis(trades, selectedResult.netProfitPercent, selectedResult.maxDrawdownPercent, selectedResult.winRatePercent, equityCurve, selectedResult.ticker, maxLev);
   }, [selectedResult, getMaxLeverage]);
 
-  if (isLoading) return <div className="flex items-center justify-center h-96"><Loader2 className="w-6 h-6 animate-spin text-violet-400" /></div>;
+  if (isLoading) return <div className="flex items-center justify-center h-96"><Loader2 className="w-6 h-6 animate-spin text-indigo-400" /></div>;
 
   if (!results || results.length === 0) {
     const runStatus = run?.status;
@@ -3345,7 +3506,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
             {strategy?.pineScript && (
               <Button variant="secondary" size="sm" onClick={() => {
                 exportPineWithParams(strategy.pineScript, selectedResult.params as Record<string, any>, selectedResult.ticker, selectedResult.timeframe, strategy.name);
-              }} className="bg-violet-500/20 hover:bg-violet-500/30 text-violet-300" data-testid="button-export-pine">
+              }} className="bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300" data-testid="button-export-pine">
                 <Download className="w-3 h-3 mr-1" /> Export .pine
               </Button>
             )}
@@ -3378,13 +3539,13 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
         <HistStatCard label="Net Profit" value={`${bestProfit > 0 ? "+" : ""}${bestProfit.toFixed(2)}%`} color={bestProfit >= 0 ? "text-sky-400" : "text-purple-400"} icon={<TrendingUp className="w-4 h-4" />} sublabel={displayResult ? `${displayResult.ticker.split("/")[0]} ${displayResult.timeframe}` : undefined} />
         <HistStatCard label="Win Rate" value={`${bestWinRate.toFixed(1)}%`} color="text-sky-400" icon={<Percent className="w-4 h-4" />} />
         <HistStatCard label="Max Drawdown" value={`${lowestDD.toFixed(1)}%`} color="text-indigo-400" icon={<TrendingDown className="w-4 h-4" />} />
-        <HistStatCard label="Profit Factor" value={bestPF.toFixed(2)} color="text-violet-400" icon={<BarChart3 className="w-4 h-4" />} sublabel={RANKING_LABELS[rankingMode]} />
+        <HistStatCard label="Profit Factor" value={bestPF.toFixed(2)} color="text-indigo-400" icon={<BarChart3 className="w-4 h-4" />} sublabel={RANKING_LABELS[rankingMode]} />
       </div>
 
       <Card className="bg-white/5 border border-white/10 p-0 overflow-hidden">
         <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between gap-1">
           <h3 className="text-sm font-semibold flex items-center gap-2 text-white">
-            <BarChart3 className="w-4 h-4 text-violet-400" /> Best per Ticker/Timeframe
+            <BarChart3 className="w-4 h-4 text-indigo-400" /> Best per Ticker/Timeframe
           </h3>
           <Select value={rankingMode} onValueChange={(v) => setRankingMode(v as RankingMode)}>
             <SelectTrigger className="w-[160px] h-8 bg-white/5 border-white/10 text-white text-xs" data-testid="select-history-ranking-mode">
@@ -3392,7 +3553,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
             </SelectTrigger>
             <SelectContent className="bg-slate-900 border-white/10">
               {(Object.entries(RANKING_LABELS) as [RankingMode, string][]).map(([k, label]) => (
-                <SelectItem key={k} value={k} className="text-white/80 text-xs focus:bg-violet-600/20 focus:text-white">{label}</SelectItem>
+                <SelectItem key={k} value={k} className="text-white/80 text-xs focus:bg-indigo-600/20 focus:text-white">{label}</SelectItem>
               ))}
             </SelectContent>
           </Select>
@@ -3427,7 +3588,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                 const isExpanded = expandedCombos.has(comboKey);
                 return (
                   <Fragment key={r.id}>
-                    <tr className={`border-b border-white/5 cursor-pointer transition-colors ${isSelected ? "bg-violet-500/5" : "hover:bg-white/5"}`}
+                    <tr className={`border-b border-white/5 cursor-pointer transition-colors ${isSelected ? "bg-indigo-500/5" : "hover:bg-white/5"}`}
                       onClick={() => selectResult(r)} data-testid={`history-row-${r.id}`}>
                       <td className="py-2.5 px-4 font-medium text-white">{name}</td>
                       <td className="py-2.5 px-2"><Badge variant="outline" className="text-[10px] border-white/20 text-white/60">{r.timeframe}</Badge></td>
@@ -3463,7 +3624,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                         <td className="py-2.5 px-2 text-center">
                           <button
                             onClick={(e) => { e.stopPropagation(); exportPineWithParams(strategy.pineScript, r.params as Record<string, any>, r.ticker, r.timeframe, strategy.name); }}
-                            className="text-violet-400 hover:text-violet-300 transition-colors p-0.5 rounded hover:bg-violet-500/10"
+                            className="text-indigo-400 hover:text-indigo-300 transition-colors p-0.5 rounded hover:bg-indigo-500/10"
                             title="Export .pine with these params"
                             data-testid={`history-export-${r.id}`}
                           >
@@ -3503,7 +3664,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                     {isExpanded && subResults.map((sr, idx) => {
                       const subSelected = selectedResult?.id === sr.id;
                       return (
-                        <tr key={sr.id} className={`border-b border-white/5 cursor-pointer transition-colors ${subSelected ? "bg-violet-500/5" : "hover:bg-white/5"}`}
+                        <tr key={sr.id} className={`border-b border-white/5 cursor-pointer transition-colors ${subSelected ? "bg-indigo-500/5" : "hover:bg-white/5"}`}
                           onClick={() => selectResult(sr)} data-testid={`history-sub-${sr.id}`}>
                           <td className="py-2 px-4 pl-8 text-xs text-white/40">#{idx + 2}</td>
                           <td className="py-2 px-2"><Badge variant="outline" className="text-[10px] border-white/20 text-white/40">{sr.timeframe}</Badge></td>
@@ -3539,7 +3700,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                             <td className="py-2 px-2 text-center">
                               <button
                                 onClick={(e) => { e.stopPropagation(); exportPineWithParams(strategy.pineScript, sr.params as Record<string, any>, sr.ticker, sr.timeframe, strategy.name); }}
-                                className="text-violet-400 hover:text-violet-300 transition-colors p-0.5 rounded hover:bg-violet-500/10"
+                                className="text-indigo-400 hover:text-indigo-300 transition-colors p-0.5 rounded hover:bg-indigo-500/10"
                                 title="Export .pine with these params"
                                 data-testid={`history-export-sub-${sr.id}`}
                               >
@@ -3582,20 +3743,20 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
       {selectedResult && (
         <Tabs defaultValue="equity" className="space-y-4">
           <TabsList className="bg-white/5 border border-white/10" data-testid="tabs-history-detail">
-            <TabsTrigger value="equity" className="data-[state=active]:bg-violet-600" data-testid="tab-history-equity">Equity Curve</TabsTrigger>
-            <TabsTrigger value="risk" className="data-[state=active]:bg-violet-600" data-testid="tab-history-risk">Risk Management</TabsTrigger>
-            <TabsTrigger value="robustness" className="data-[state=active]:bg-violet-600" data-testid="tab-history-robustness">Robustness</TabsTrigger>
-            <TabsTrigger value="params" className="data-[state=active]:bg-violet-600" data-testid="tab-history-params">Parameters</TabsTrigger>
-            <TabsTrigger value="trades" className="data-[state=active]:bg-violet-600" data-testid="tab-history-trades">Trades</TabsTrigger>
+            <TabsTrigger value="equity" className="data-[state=active]:bg-indigo-600" data-testid="tab-history-equity">Equity Curve</TabsTrigger>
+            <TabsTrigger value="risk" className="data-[state=active]:bg-indigo-600" data-testid="tab-history-risk">Risk Management</TabsTrigger>
+            <TabsTrigger value="robustness" className="data-[state=active]:bg-indigo-600" data-testid="tab-history-robustness">Robustness</TabsTrigger>
+            <TabsTrigger value="params" className="data-[state=active]:bg-indigo-600" data-testid="tab-history-params">Parameters</TabsTrigger>
+            <TabsTrigger value="trades" className="data-[state=active]:bg-indigo-600" data-testid="tab-history-trades">Trades</TabsTrigger>
           </TabsList>
 
           <TabsContent value="equity">
             <Card className="bg-white/5 border border-white/10 p-4">
               <h3 className="text-sm font-semibold mb-4 flex items-center gap-2 text-white">
-                <Activity className="w-4 h-4 text-violet-400" /> {selectedResult.ticker.split("/")[0]} {selectedResult.timeframe}
+                <Activity className="w-4 h-4 text-indigo-400" /> {selectedResult.ticker.split("/")[0]} {selectedResult.timeframe}
               </h3>
               {loadingDetail ? (
-                <div className="h-[350px] flex items-center justify-center"><Loader2 className="w-5 h-5 animate-spin text-violet-400" /></div>
+                <div className="h-[350px] flex items-center justify-center"><Loader2 className="w-5 h-5 animate-spin text-indigo-400" /></div>
               ) : selectedResult.equityCurve && (selectedResult.equityCurve as any[]).length > 0 ? (
                 <div className="h-[350px]" data-testid="chart-history-equity">
                   <ResponsiveContainer width="100%" height="100%">
@@ -3739,7 +3900,7 @@ function RobustnessTab({ result, run }: { result: LabOptResult; run?: LabOptimiz
     <Card className="bg-white/5 border border-white/10 p-4 space-y-4" data-testid="panel-robustness">
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <h3 className="text-sm font-semibold flex items-center gap-2 text-white">
-          <Activity className="w-4 h-4 text-violet-400" /> In-Sample vs Out-of-Sample
+          <Activity className="w-4 h-4 text-indigo-400" /> In-Sample vs Out-of-Sample
         </h3>
         <span className={`text-[11px] px-2 py-0.5 rounded border ${ROBUSTNESS_TONE_CLASS[verdict.tone]}`} data-testid="badge-robustness-verdict">
           {verdict.label}
@@ -3816,7 +3977,7 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <h3 className="text-sm font-semibold flex items-center gap-2 text-white">
-          <Shield className="w-4 h-4 text-violet-400" /> Risk Management
+          <Shield className="w-4 h-4 text-indigo-400" /> Risk Management
           {ticker && <span className="text-white/60 font-normal">- {ticker.split("/")[0]} {timeframe}</span>}
         </h3>
         <div className="flex items-center gap-2">
@@ -3824,7 +3985,7 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
             size="sm"
             variant={showLeverageView ? "default" : "secondary"}
             onClick={() => setShowLeverageView(!showLeverageView)}
-            className={showLeverageView ? "bg-violet-600 hover:bg-violet-500 text-white text-xs h-7" : "bg-white/5 hover:bg-white/10 text-white/60 text-xs h-7 border border-white/10"}
+            className={showLeverageView ? "bg-indigo-600 hover:bg-indigo-500 text-white text-xs h-7" : "bg-white/5 hover:bg-white/10 text-white/60 text-xs h-7 border border-white/10"}
             data-testid="button-leverage-projection"
           >
             <ArrowUpDown className="w-3 h-3 mr-1" />
@@ -3835,10 +3996,10 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
       </div>
 
       {showLeverageView && (
-        <Card className="bg-violet-500/5 border border-violet-500/20 p-4" data-testid="leverage-projection-panel">
+        <Card className="bg-indigo-500/5 border border-indigo-500/20 p-4" data-testid="leverage-projection-panel">
           <div className="flex items-center gap-2 mb-3">
-            <ArrowUpDown className="w-3.5 h-3.5 text-violet-400" />
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-violet-300">Leverage Projection</h4>
+            <ArrowUpDown className="w-3.5 h-3.5 text-indigo-400" />
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-indigo-300">Leverage Projection</h4>
           </div>
           <p className="text-[11px] text-white/40 mb-3">Backtest uses $1,000 capital with $1,000 position size (1x). Here's how results scale with leverage:</p>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -3850,15 +4011,15 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
                   <button
                     type="button"
                     className={cn(
-                      "group rounded-lg border p-3 text-center transition-all duration-200 ease-out relative w-full cursor-pointer hover:-translate-y-0.5 hover:scale-[1.03] focus-visible:-translate-y-0.5 focus-visible:scale-[1.03] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/70",
-                      l.isCurrent && "bg-white/5 border-white/10 hover:bg-white/10 hover:border-violet-400/50 hover:ring-1 hover:ring-violet-500/50 hover:shadow-[0_0_18px_-2px_rgba(139,92,246,0.55)] active:bg-violet-500/20 active:border-violet-300 active:shadow-[0_0_20px_-2px_rgba(139,92,246,0.75)]",
-                      l.isRecommended && "bg-violet-500/10 border-violet-500/30 hover:bg-violet-500/25 hover:border-violet-300 hover:ring-2 hover:ring-violet-400/70 hover:shadow-[0_0_26px_-2px_rgba(139,92,246,0.8)] active:bg-violet-500/30 active:border-violet-200 active:shadow-[0_0_28px_-2px_rgba(139,92,246,0.95)]",
-                      !l.isCurrent && !l.isRecommended && "bg-white/[0.03] border-white/10 hover:bg-white/[0.1] hover:border-violet-400/50 hover:ring-1 hover:ring-violet-500/50 hover:shadow-[0_0_18px_-2px_rgba(139,92,246,0.55)] active:bg-violet-500/20 active:border-violet-300 active:shadow-[0_0_20px_-2px_rgba(139,92,246,0.75)]"
+                      "group rounded-lg border p-3 text-center transition-all duration-200 ease-out relative w-full cursor-pointer hover:-translate-y-0.5 hover:scale-[1.03] focus-visible:-translate-y-0.5 focus-visible:scale-[1.03] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/70",
+                      l.isCurrent && "bg-white/5 border-white/10 hover:bg-white/10 hover:border-indigo-400/50 hover:ring-1 hover:ring-indigo-500/50 hover:shadow-[0_0_18px_-2px_rgba(99,102,241,0.55)] active:bg-indigo-500/20 active:border-indigo-300 active:shadow-[0_0_20px_-2px_rgba(99,102,241,0.75)]",
+                      l.isRecommended && "bg-indigo-500/10 border-indigo-500/30 hover:bg-indigo-500/25 hover:border-indigo-300 hover:ring-2 hover:ring-indigo-400/70 hover:shadow-[0_0_26px_-2px_rgba(99,102,241,0.8)] active:bg-indigo-500/30 active:border-indigo-200 active:shadow-[0_0_28px_-2px_rgba(99,102,241,0.95)]",
+                      !l.isCurrent && !l.isRecommended && "bg-white/[0.03] border-white/10 hover:bg-white/[0.1] hover:border-indigo-400/50 hover:ring-1 hover:ring-indigo-500/50 hover:shadow-[0_0_18px_-2px_rgba(99,102,241,0.55)] active:bg-indigo-500/20 active:border-indigo-300 active:shadow-[0_0_20px_-2px_rgba(99,102,241,0.75)]"
                     )}
                     data-testid={`leverage-card-${l.lev}x`}
                   >
-                    <Rocket className="w-3.5 h-3.5 text-violet-300 absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 group-active:opacity-100 transition-opacity duration-200" />
-                    <p className={cn("text-[10px] font-medium mb-1.5", l.isRecommended ? "text-violet-300" : "text-white/50")}>{l.label}</p>
+                    <Rocket className="w-3.5 h-3.5 text-indigo-300 absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 group-active:opacity-100 transition-opacity duration-200" />
+                    <p className={cn("text-[10px] font-medium mb-1.5", l.isRecommended ? "text-indigo-300" : "text-white/50")}>{l.label}</p>
                     <p className={cn("text-lg font-bold tabular-nums", adjProfit >= 0 ? "text-sky-400" : "text-purple-400")}>
                       {adjProfit >= 0 ? "+" : ""}{adjProfit.toFixed(1)}%
                     </p>
@@ -3877,7 +4038,7 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <RiskMetricCard label="Recommended Leverage" value={`${analysis.recommendedLeverage}x`} sublabel={`Max safe: ${analysis.maxSafeLeverage}x`} icon={<Gauge className="w-4 h-4" />} color={analysis.recommendedLeverage <= 3 ? "text-sky-400" : analysis.recommendedLeverage <= 7 ? "text-indigo-400" : "text-purple-400"} testId="metric-leverage" />
-        <RiskMetricCard label="Wallet Allocation" value={`$${analysis.recommendedWalletAllocation.toLocaleString()}`} sublabel="per $1,000 trade" icon={<DollarSign className="w-4 h-4" />} color="text-violet-400" testId="metric-wallet" />
+        <RiskMetricCard label="Wallet Allocation" value={`$${analysis.recommendedWalletAllocation.toLocaleString()}`} sublabel="per $1,000 trade" icon={<DollarSign className="w-4 h-4" />} color="text-indigo-400" testId="metric-wallet" />
         <RiskMetricCard label="Longest Losing Streak" value={`${analysis.longestLosingStreak} trades`} sublabel={`${analysis.streakDrawdownPercent.toFixed(1)}% cumulative loss`} icon={<TrendingDown className="w-4 h-4" />} color={analysis.longestLosingStreak <= 3 ? "text-sky-400" : analysis.longestLosingStreak <= 6 ? "text-indigo-400" : "text-purple-400"} testId="metric-streak" />
         <RiskMetricCard label="Recovery Factor" value={analysis.recoveryFactor.toFixed(2)} sublabel="profit / max drawdown" icon={<Target className="w-4 h-4" />} color={analysis.recoveryFactor >= 2 ? "text-sky-400" : analysis.recoveryFactor >= 1 ? "text-indigo-400" : "text-purple-400"} testId="metric-recovery" />
       </div>
@@ -3923,7 +4084,7 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
           {analysis.recommendations.map((rec, idx) => (
             <div key={idx} className="flex gap-2.5 text-xs" data-testid={`recommendation-${idx}`}>
               <div className="mt-0.5 shrink-0">
-                {idx === 0 ? <Gauge className="w-3.5 h-3.5 text-violet-400" /> :
+                {idx === 0 ? <Gauge className="w-3.5 h-3.5 text-indigo-400" /> :
                   rec.includes("consecutive") || rec.includes("ruin") ? <AlertTriangle className="w-3.5 h-3.5 text-indigo-400" /> :
                   rec.includes("Strong") || rec.includes("Kelly") ? <Target className="w-3.5 h-3.5 text-sky-400" /> :
                   <Info className="w-3.5 h-3.5 text-white/40" />}
@@ -3963,12 +4124,12 @@ const HEATMAP_METRICS: { value: HeatmapMetric; label: string }[] = [
 ];
 
 function getHeatColor(value: number, min: number, max: number, metric: HeatmapMetric): string {
-  if (max === min) return "rgba(139, 92, 246, 0.3)";
+  if (max === min) return "rgba(99,102,241, 0.3)";
   const isInverse = metric === "lowestDrawdown" || metric === "avgDrawdown";
   let t = (value - min) / (max - min);
   if (isInverse) t = 1 - t;
   if (t < 0.25) return `rgba(168, 85, 247, ${0.2 + t * 2})`;
-  if (t < 0.5) return `rgba(99, 102, 241, ${0.3 + (t - 0.25) * 1.5})`;
+  if (t < 0.5) return `rgba(99,102,241, ${0.3 + (t - 0.25) * 1.5})`;
   if (t < 0.75) return `rgba(56, 189, 248, ${0.3 + (t - 0.5) * 1.5})`;
   return `rgba(56, 189, 248, ${0.6 + (t - 0.75) * 1.6})`;
 }
@@ -4021,11 +4182,11 @@ function EquityCurvePopup({ resultId, ticker, timeframe }: { resultId: number; t
         sideOffset={8}
       >
         <div className="flex items-center gap-2 mb-2">
-          <Activity className="w-3.5 h-3.5 text-violet-400" />
+          <Activity className="w-3.5 h-3.5 text-indigo-400" />
           <span className="text-xs font-medium text-white">{ticker.replace("/USDT:USDT", "").replace("-PERP", "")} {timeframe} Equity Curve</span>
         </div>
         {loading ? (
-          <div className="h-[180px] flex items-center justify-center"><Loader2 className="w-5 h-5 animate-spin text-violet-400" /></div>
+          <div className="h-[180px] flex items-center justify-center"><Loader2 className="w-5 h-5 animate-spin text-indigo-400" /></div>
         ) : curveData && curveData.length > 0 ? (
           <div className="h-[180px]">
             <ResponsiveContainer width="100%" height="100%">
@@ -4291,7 +4452,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-20">
-        <Loader2 className="w-6 h-6 animate-spin text-violet-400" />
+        <Loader2 className="w-6 h-6 animate-spin text-indigo-400" />
         <span className="ml-3 text-white/50">Loading heatmap data...</span>
       </div>
     );
@@ -4304,7 +4465,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
         <h3 className="text-lg font-semibold text-white/70 mb-2">Failed to Load Heatmap</h3>
         <p className="text-sm mb-4">{(error as Error)?.message || "An unexpected error occurred."}</p>
         <button
-          className="px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-sm"
+          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm"
           onClick={() => queryClient.invalidateQueries({ queryKey: ["/api/lab/heatmap"] })}
           data-testid="button-retry-heatmap"
         >
@@ -4323,7 +4484,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
           <>
             <p className="text-sm mb-4">No completed optimizations for this strategy yet.</p>
             <button
-              className="px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-sm"
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm"
               onClick={() => { setStrategyFilter("all"); setSelectedCell(null); setSortByTimeframe(null); }}
               data-testid="button-heatmap-view-all-strategies"
             >
@@ -4341,7 +4502,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
     <div className="space-y-6" data-testid="heatmap-panel">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
-          <Grid3X3 className="w-5 h-5 text-violet-400" />
+          <Grid3X3 className="w-5 h-5 text-indigo-400" />
           <div>
             <h2 className="text-lg font-display font-semibold text-white">Optimization Heatmap</h2>
             <p className="text-xs text-white/40">{data.runs} completed runs · {cells.length} ticker/timeframe combos</p>
@@ -4387,7 +4548,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
                 className={cn(
                   "text-center text-xs font-medium py-2 rounded-md transition-colors cursor-pointer select-none flex items-center justify-center gap-1",
                   sortByTimeframe === tf
-                    ? "text-violet-300 bg-violet-500/10"
+                    ? "text-indigo-300 bg-indigo-500/10"
                     : "text-white/50 hover:text-white/70 hover:bg-white/5"
                 )}
                 title="Click to sort by this timeframe"
@@ -4423,7 +4584,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
                       onClick={() => setSelectedCell(isSelected ? null : cell)}
                       className={cn(
                         "aspect-[2/1] rounded-lg flex flex-col items-center justify-center transition-all cursor-pointer [@media(hover:hover)]:hover:scale-105 border",
-                        isSelected ? "ring-2 ring-violet-400 border-violet-400/50" : "border-white/5 hover:border-white/20"
+                        isSelected ? "ring-2 ring-indigo-400 border-indigo-400/50" : "border-white/5 hover:border-white/20"
                       )}
                       style={{ backgroundColor: isProfitMetric && lev ? getHeatColor(lev.levProfit, levMin, levMax, "bestProfit") : getHeatColor(val, minVal, maxVal, metric) }}
                       data-testid={`heatmap-cell-${ticker.split("/")[0]}-${tf}`}
@@ -4463,7 +4624,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
             <span>Worst</span>
           </div>
           <div className="flex items-center gap-1">
-            <div className="w-4 h-2.5 rounded-sm" style={{ background: "rgba(99, 102, 241, 0.5)" }} />
+            <div className="w-4 h-2.5 rounded-sm" style={{ background: "rgba(99,102,241, 0.5)" }} />
             <span>Below Avg</span>
           </div>
           <div className="flex items-center gap-1">
@@ -4486,7 +4647,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
         >
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <Activity className="w-5 h-5 text-violet-400" />
+              <Activity className="w-5 h-5 text-indigo-400" />
               <div>
                 <h3 className="font-semibold text-white">{selectedCell.ticker.split("/")[0]} · {selectedCell.timeframe}</h3>
                 <p className="text-xs text-white/40">{selectedCell.totalConfigs} configs across {selectedCell.runsCount} run{selectedCell.runsCount !== 1 ? "s" : ""}</p>
@@ -4535,7 +4696,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
             </Card>
             <Card className="bg-white/5 border border-white/10 p-3">
               <p className="text-[10px] text-white/40 mb-1">Best Profit Factor</p>
-              <p className="text-lg font-bold font-mono text-violet-400">{selectedCell.bestPF.toFixed(2)}</p>
+              <p className="text-lg font-bold font-mono text-indigo-400">{selectedCell.bestPF.toFixed(2)}</p>
               <p className="text-[9px] text-white/30 mt-1">avg {selectedCell.avgPF.toFixed(2)}</p>
             </Card>
           </div>
@@ -4568,11 +4729,11 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
                     <div
                       key={idx}
                       onClick={() => setSelectedTopIdx(idx)}
-                      className={`grid gap-2 text-xs px-3 py-2 rounded-lg cursor-pointer transition-colors items-center min-w-[700px] ${isActive ? "bg-violet-500/10 ring-1 ring-violet-500/30" : "bg-white/[0.03] hover:bg-white/[0.06]"}`}
+                      className={`grid gap-2 text-xs px-3 py-2 rounded-lg cursor-pointer transition-colors items-center min-w-[700px] ${isActive ? "bg-indigo-500/10 ring-1 ring-indigo-500/30" : "bg-white/[0.03] hover:bg-white/[0.06]"}`}
                       style={{ gridTemplateColumns: "2rem minmax(80px, 1.2fr) 1fr 1.3fr 1fr 1fr 1fr 1fr 0.8fr 5rem" }}
                       data-testid={`heatmap-top-${idx}`}
                     >
-                      <span className={`font-mono ${isActive ? "text-violet-400" : "text-white/50"}`}>{idx + 1}</span>
+                      <span className={`font-mono ${isActive ? "text-indigo-400" : "text-white/50"}`}>{idx + 1}</span>
                       <span className="text-white/70 truncate" title={strat?.name || "Unknown"}>{strat?.name || "Unknown"}</span>
                       <span className={`font-mono font-medium ${cfg.netProfitPercent >= 0 ? "text-sky-400" : "text-purple-400"}`}>
                         {cfg.netProfitPercent.toFixed(1)}%
@@ -4582,7 +4743,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
                       </span>
                       <span className="font-mono text-sky-400">{cfg.winRatePercent.toFixed(1)}%</span>
                       <span className="font-mono text-indigo-400">{cfg.maxDrawdownPercent.toFixed(1)}%</span>
-                      <span className="font-mono text-violet-400">{cfg.profitFactor.toFixed(2)}</span>
+                      <span className="font-mono text-indigo-400">{cfg.profitFactor.toFixed(2)}</span>
                       <span className={`font-mono ${typeof cfg.sharpeRatio === "number" ? (cfg.sharpeRatio >= 1 ? "text-sky-400" : cfg.sharpeRatio >= 0 ? "text-white/70" : "text-purple-400") : "text-white/30"}`}>
                         {typeof cfg.sharpeRatio === "number" ? cfg.sharpeRatio.toFixed(2) : "—"}
                       </span>
@@ -4607,7 +4768,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
                           <>
                             <button
                               onClick={(e) => { e.stopPropagation(); handleCopyPine(cfg); }}
-                              className="p-1 rounded hover:bg-violet-500/20 text-violet-400 hover:text-violet-300 transition-colors"
+                              className="p-1 rounded hover:bg-indigo-500/20 text-indigo-400 hover:text-indigo-300 transition-colors"
                               title="Copy Pine script with optimized params to clipboard"
                               data-testid={`heatmap-copy-pine-${idx}`}
                             >
@@ -4615,7 +4776,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
                             </button>
                             <button
                               onClick={(e) => { e.stopPropagation(); handleExportPine(cfg, selectedCell.ticker, selectedCell.timeframe); }}
-                              className="p-1 rounded hover:bg-violet-500/20 text-violet-400 hover:text-violet-300 transition-colors"
+                              className="p-1 rounded hover:bg-indigo-500/20 text-indigo-400 hover:text-indigo-300 transition-colors"
                               title="Export .pine with optimized params"
                               data-testid={`heatmap-export-pine-${idx}`}
                             >
@@ -5106,7 +5267,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
             {pineScript && params && (
               <div className="border border-white/10 rounded p-3 space-y-2.5">
                 <div className="flex items-center gap-2">
-                  <FileCode className="w-3.5 h-3.5 text-violet-400" />
+                  <FileCode className="w-3.5 h-3.5 text-indigo-400" />
                   <p className="text-[10px] font-semibold text-white uppercase tracking-wider">Step 1 (if not done yet) — Export Pine Script</p>
                 </div>
                 <div className="flex gap-2">
@@ -5139,7 +5300,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
               </div>
               <Button
                 size="sm"
-                className="w-full h-7 text-[10px] bg-violet-600 hover:bg-violet-500"
+                className="w-full h-7 text-[10px] bg-indigo-600 hover:bg-indigo-500"
                 onClick={() => copyToClipboard(getMessageTemplate(createdBot.id), 'Message')}
                 data-testid={`copy-alert-msg-${leverage}x`}
               >
@@ -5155,7 +5316,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
               </div>
               <Button
                 size="sm"
-                className="w-full h-7 text-[10px] bg-violet-600 hover:bg-violet-500"
+                className="w-full h-7 text-[10px] bg-indigo-600 hover:bg-indigo-500"
                 onClick={() => webhookUrl && copyToClipboard(webhookUrl, 'Webhook URL')}
                 disabled={!webhookUrl}
                 data-testid={`copy-webhook-${leverage}x`}
@@ -5172,7 +5333,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
             {pineScript && params && (
               <div className="p-4 border-b border-white/10 space-y-2.5">
                 <div className="flex items-center gap-2">
-                  <FileCode className="w-3.5 h-3.5 text-violet-400" />
+                  <FileCode className="w-3.5 h-3.5 text-indigo-400" />
                   <p className="text-[10px] font-semibold text-white uppercase tracking-wider">Step 1 — Export Pine Script</p>
                 </div>
                 <p className="text-[9px] text-white/40 leading-relaxed">Load this strategy into TradingView before setting up the alert.</p>
@@ -5200,7 +5361,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
             )}
             <div className="p-4 border-b border-white/10">
               <div className="flex items-center gap-2 mb-3">
-                <Wallet className="w-3.5 h-3.5 text-violet-400" />
+                <Wallet className="w-3.5 h-3.5 text-indigo-400" />
                 <h4 className="text-[10px] font-semibold text-white uppercase tracking-wider">{pineScript && params ? `Step 2 — Create Bot & Get Webhook` : `Bot Setup at ${leverage}x`}</h4>
               </div>
               <div className="flex items-center gap-2">
@@ -5246,7 +5407,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                         <button
                           type="button"
                           onClick={() => setBufferOverride(null)}
-                          className="text-[9px] text-violet-400 hover:text-violet-300 underline underline-offset-2"
+                          className="text-[9px] text-indigo-400 hover:text-indigo-300 underline underline-offset-2"
                           data-testid="button-reset-buffer"
                         >
                           reset
@@ -5295,7 +5456,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                 <div className="border-t border-white/5 pt-3 space-y-2">
                   <div className="flex justify-between items-center">
                     <span className="text-[10px] text-white/40">Set Leverage</span>
-                    <span className="text-xs font-semibold text-violet-400">{leverage}x</span>
+                    <span className="text-xs font-semibold text-indigo-400">{leverage}x</span>
                   </div>
                   <div className="flex justify-between items-center">
                     <span className="text-[10px] text-white/40">Projected Profit</span>
@@ -5427,7 +5588,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                               <div>
                                 <Button
                                   size="sm"
-                                  className="w-full h-7 text-[10px] bg-violet-600/50 text-white/50 cursor-not-allowed"
+                                  className="w-full h-7 text-[10px] bg-indigo-600/50 text-white/50 cursor-not-allowed"
                                   disabled
                                   data-testid={`create-bot-btn-${leverage}x`}
                                 >
@@ -5449,7 +5610,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                           )}
                           <Button
                             size="sm"
-                            className="w-full h-7 text-[10px] bg-violet-600 hover:bg-violet-500 text-white"
+                            className="w-full h-7 text-[10px] bg-indigo-600 hover:bg-indigo-500 text-white"
                             onClick={handleCreateBot}
                             disabled={isCreating}
                             data-testid={`create-bot-btn-${leverage}x`}
@@ -5522,7 +5683,7 @@ function HeatmapRiskSummary({ config, idx, ticker, timeframe, strategyName, pine
     <div className="space-y-3" data-testid={`heatmap-risk-${idx}`}>
       <div className="flex items-center justify-between">
         <h4 className="text-sm font-medium text-white/60 flex items-center gap-2">
-          <Shield className="w-3.5 h-3.5 text-violet-400" />
+          <Shield className="w-3.5 h-3.5 text-indigo-400" />
           Config #{idx + 1} Risk
         </h4>
         <div className="flex items-center gap-2">
@@ -5530,7 +5691,7 @@ function HeatmapRiskSummary({ config, idx, ticker, timeframe, strategyName, pine
             size="sm"
             variant={showProjection ? "default" : "secondary"}
             onClick={() => setShowProjection(!showProjection)}
-            className={showProjection ? "bg-violet-600 hover:bg-violet-500 text-white text-xs h-6" : "bg-white/5 hover:bg-white/10 text-white/60 text-xs h-6 border border-white/10"}
+            className={showProjection ? "bg-indigo-600 hover:bg-indigo-500 text-white text-xs h-6" : "bg-white/5 hover:bg-white/10 text-white/60 text-xs h-6 border border-white/10"}
             data-testid={`heatmap-leverage-btn-${idx}`}
           >
             <ArrowUpDown className="w-3 h-3 mr-1" />
@@ -5543,12 +5704,12 @@ function HeatmapRiskSummary({ config, idx, ticker, timeframe, strategyName, pine
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
         <div className="bg-white/[0.03] rounded-lg p-2.5 text-center">
           <p className="text-[10px] text-white/40 mb-0.5">Recommended</p>
-          <p className="text-base font-bold text-violet-400">{recommended}x</p>
+          <p className="text-base font-bold text-indigo-400">{recommended}x</p>
           <p className="text-[9px] text-white/30">max safe: {maxSafe}x</p>
         </div>
         <div className="bg-white/[0.03] rounded-lg p-2.5 text-center">
           <p className="text-[10px] text-white/40 mb-0.5">Wallet Allocation</p>
-          <p className="text-base font-bold text-violet-400">${walletAlloc.toLocaleString()}</p>
+          <p className="text-base font-bold text-indigo-400">${walletAlloc.toLocaleString()}</p>
           <p className="text-[9px] text-white/30">per $1k trade</p>
         </div>
         <div className="bg-white/[0.03] rounded-lg p-2.5 text-center">
@@ -5570,15 +5731,15 @@ function HeatmapRiskSummary({ config, idx, ticker, timeframe, strategyName, pine
               <button
                 type="button"
                 className={cn(
-                  "group rounded-lg border p-2.5 text-center relative w-full cursor-pointer transition-all duration-200 ease-out hover:-translate-y-0.5 hover:scale-[1.03] focus-visible:-translate-y-0.5 focus-visible:scale-[1.03] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/70",
-                  l.isCurrent && "bg-white/5 border-white/10 hover:bg-white/10 hover:border-violet-400/50 hover:ring-1 hover:ring-violet-500/50 hover:shadow-[0_0_16px_-2px_rgba(139,92,246,0.5)] active:bg-violet-500/20 active:border-violet-300 active:shadow-[0_0_18px_-2px_rgba(139,92,246,0.7)]",
-                  l.isRecommended && "bg-violet-500/10 border-violet-500/30 hover:bg-violet-500/25 hover:border-violet-300 hover:ring-2 hover:ring-violet-400/70 hover:shadow-[0_0_24px_-2px_rgba(139,92,246,0.75)] active:bg-violet-500/30 active:border-violet-200 active:shadow-[0_0_26px_-2px_rgba(139,92,246,0.9)]",
-                  !l.isCurrent && !l.isRecommended && "bg-white/[0.03] border-white/10 hover:bg-white/[0.1] hover:border-violet-400/50 hover:ring-1 hover:ring-violet-500/50 hover:shadow-[0_0_16px_-2px_rgba(139,92,246,0.5)] active:bg-violet-500/20 active:border-violet-300 active:shadow-[0_0_18px_-2px_rgba(139,92,246,0.7)]"
+                  "group rounded-lg border p-2.5 text-center relative w-full cursor-pointer transition-all duration-200 ease-out hover:-translate-y-0.5 hover:scale-[1.03] focus-visible:-translate-y-0.5 focus-visible:scale-[1.03] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/70",
+                  l.isCurrent && "bg-white/5 border-white/10 hover:bg-white/10 hover:border-indigo-400/50 hover:ring-1 hover:ring-indigo-500/50 hover:shadow-[0_0_16px_-2px_rgba(99,102,241,0.5)] active:bg-indigo-500/20 active:border-indigo-300 active:shadow-[0_0_18px_-2px_rgba(99,102,241,0.7)]",
+                  l.isRecommended && "bg-indigo-500/10 border-indigo-500/30 hover:bg-indigo-500/25 hover:border-indigo-300 hover:ring-2 hover:ring-indigo-400/70 hover:shadow-[0_0_24px_-2px_rgba(99,102,241,0.75)] active:bg-indigo-500/30 active:border-indigo-200 active:shadow-[0_0_26px_-2px_rgba(99,102,241,0.9)]",
+                  !l.isCurrent && !l.isRecommended && "bg-white/[0.03] border-white/10 hover:bg-white/[0.1] hover:border-indigo-400/50 hover:ring-1 hover:ring-indigo-500/50 hover:shadow-[0_0_16px_-2px_rgba(99,102,241,0.5)] active:bg-indigo-500/20 active:border-indigo-300 active:shadow-[0_0_18px_-2px_rgba(99,102,241,0.7)]"
                 )}
                 data-testid={`heatmap-lev-${l.lev}x-${idx}`}
               >
-                <Rocket className="w-3 h-3 text-violet-300 absolute top-1 right-1 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 group-active:opacity-100 transition-opacity duration-200" />
-                <p className={cn("text-[10px] font-medium mb-1", l.isRecommended ? "text-violet-300" : "text-white/50")}>{l.label}</p>
+                <Rocket className="w-3 h-3 text-indigo-300 absolute top-1 right-1 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 group-active:opacity-100 transition-opacity duration-200" />
+                <p className={cn("text-[10px] font-medium mb-1", l.isRecommended ? "text-indigo-300" : "text-white/50")}>{l.label}</p>
                 <p className={cn("text-sm font-bold tabular-nums", profit * l.lev >= 0 ? "text-sky-400" : "text-purple-400")}>
                   {profit * l.lev >= 0 ? "+" : ""}{(profit * l.lev).toFixed(1)}%
                 </p>
@@ -5609,7 +5770,7 @@ function Top10Leaderboard({ strategyId, pineScript, strategyName }: { strategyId
 
   if (isLoading) return (
     <Card className="border-white/10 bg-white/[0.03] p-6 flex items-center justify-center gap-2">
-      <Loader2 className="w-4 h-4 text-violet-400 animate-spin" />
+      <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />
       <span className="text-white/50 text-sm">Loading leaderboard...</span>
     </Card>
   );
@@ -5647,7 +5808,7 @@ function Top10Leaderboard({ strategyId, pineScript, strategyName }: { strategyId
                 <tr key={r.id || i} className="border-b border-white/5 hover:bg-white/[0.03] transition-colors" data-testid={`top10-row-${i}`}>
                   <td className={cn("text-center py-2 px-2 font-bold", i < 3 ? medalColors[i] : "text-white/30")}>{i + 1}</td>
                   <td className="py-2 px-2 text-white/80 font-medium">{(r.ticker || "").replace("-PERP", "").replace("USDT", "")}</td>
-                  <td className="py-2 px-2 text-violet-400">{r.timeframe}</td>
+                  <td className="py-2 px-2 text-indigo-400">{r.timeframe}</td>
                   <td className={cn("text-right py-2 px-2 font-bold tabular-nums", r.levProfit >= 0 ? "text-sky-400" : "text-purple-400")}>
                     {r.levProfit >= 0 ? "+" : ""}{r.levProfit.toFixed(1)}%
                   </td>
@@ -5659,7 +5820,7 @@ function Top10Leaderboard({ strategyId, pineScript, strategyName }: { strategyId
                   <td className="text-right py-2 px-2 text-white/60 tabular-nums">{r.profitFactor.toFixed(2)}</td>
                   <td className={`text-right py-2 px-2 tabular-nums ${r.sharpeRatio == null ? "text-white/30" : r.sharpeRatio >= 1 ? "text-sky-400" : r.sharpeRatio >= 0 ? "text-white/60" : "text-purple-400"}`}>{r.sharpeRatio != null ? r.sharpeRatio.toFixed(2) : "—"}</td>
                   <td className="text-right py-2 px-2 text-white/60 tabular-nums">{r.totalTrades}</td>
-                  <td className="text-right py-2 px-2 text-violet-400 font-semibold">{r.leverage}x</td>
+                  <td className="text-right py-2 px-2 text-indigo-400 font-semibold">{r.leverage}x</td>
                   {pineScript && (
                     <td className="text-center py-2 px-2">
                       <button
@@ -5670,7 +5831,7 @@ function Top10Leaderboard({ strategyId, pineScript, strategyName }: { strategyId
                           const sName = (strategyName || "STRATEGY").replace(/[^a-zA-Z0-9_-]/g, "_").toUpperCase();
                           downloadFile(injected, `${t}_${tf}_${sName}.pine`);
                         }}
-                        className="text-violet-400 hover:text-violet-300 transition-colors p-0.5 rounded hover:bg-violet-500/10"
+                        className="text-indigo-400 hover:text-indigo-300 transition-colors p-0.5 rounded hover:bg-indigo-500/10"
                         title="Export .pine with these params"
                         data-testid={`top10-export-${i}`}
                       >
@@ -5693,7 +5854,7 @@ function OptimizerGuide() {
     <Popover>
       <PopoverTrigger asChild>
         <button
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-500/10 border border-violet-500/20 text-violet-300 hover:bg-violet-500/20 hover:text-violet-200 transition-colors text-xs font-medium"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 hover:bg-indigo-500/20 hover:text-indigo-200 transition-colors text-xs font-medium"
           data-testid="btn-optimizer-guide"
         >
           <BookOpen className="w-3.5 h-3.5" />
@@ -5708,7 +5869,7 @@ function OptimizerGuide() {
         style={{ maxHeight: "min(70vh, 600px)" }}
       >
         <div className="px-4 py-3 border-b border-white/10 flex items-center gap-2 flex-shrink-0">
-          <BookOpen className="w-4 h-4 text-violet-400" />
+          <BookOpen className="w-4 h-4 text-indigo-400" />
           <span className="text-sm font-semibold text-white">Getting the Most Out of QuantumLab</span>
         </div>
         <div className="overflow-y-auto" style={{ maxHeight: "min(calc(70vh - 52px), 548px)" }}>
@@ -5716,7 +5877,7 @@ function OptimizerGuide() {
 
             <div>
               <div className="flex items-center gap-1.5 mb-1.5">
-                <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">1</span>
+                <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">1</span>
                 <span className="text-white font-medium text-[13px]">Use the Focus filter for clean reports</span>
               </div>
               <p className="pl-7">Use the "Focus" dropdown to generate reports for a specific ticker + timeframe combo. This gives the sharpest, most actionable parameter insights since each market has different optimal settings. The "All Results" option gives you a cross-market overview.</p>
@@ -5724,7 +5885,7 @@ function OptimizerGuide() {
 
             <div>
               <div className="flex items-center gap-1.5 mb-1.5">
-                <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">2</span>
+                <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">2</span>
                 <span className="text-white font-medium text-[13px]">Build data before using Guided Mode</span>
               </div>
               <p className="pl-7">Run 2-3 standard optimizations (2,000+ random samples each) before turning on "Use Insights." The sensitivity analysis needs enough data points to distinguish real patterns from noise. Minimum ~4,000 total configurations tested.</p>
@@ -5732,20 +5893,20 @@ function OptimizerGuide() {
 
             <div>
               <div className="flex items-center gap-1.5 mb-1.5">
-                <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">3</span>
+                <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">3</span>
                 <span className="text-white font-medium text-[13px]">The optimization cycle</span>
               </div>
               <div className="pl-7 space-y-1">
-                <p><span className="text-violet-300 font-medium">Random runs</span> — Start with standard random search to explore the full parameter space broadly.</p>
-                <p><span className="text-violet-300 font-medium">Generate Insights</span> — Review the report. Check which parameters have high impact scores and which ranges perform best.</p>
-                <p><span className="text-violet-300 font-medium">Guided runs</span> — Enable "Use Insights" in Advanced Settings. The optimizer will prefer a filtered report matching your run's ticker/timeframe, falling back to the latest report. 80% of samples focus on the best ranges while 20% stay fully random.</p>
-                <p><span className="text-violet-300 font-medium">Regenerate Insights</span> — The new report will analyze ALL runs combined, refining the recommendations further. Each cycle sharpens the focus.</p>
+                <p><span className="text-indigo-300 font-medium">Random runs</span> — Start with standard random search to explore the full parameter space broadly.</p>
+                <p><span className="text-indigo-300 font-medium">Generate Insights</span> — Review the report. Check which parameters have high impact scores and which ranges perform best.</p>
+                <p><span className="text-indigo-300 font-medium">Guided runs</span> — Enable "Use Insights" in Advanced Settings. The optimizer will prefer a filtered report matching your run's ticker/timeframe, falling back to the latest report. 80% of samples focus on the best ranges while 20% stay fully random.</p>
+                <p><span className="text-indigo-300 font-medium">Regenerate Insights</span> — The new report will analyze ALL runs combined, refining the recommendations further. Each cycle sharpens the focus.</p>
               </div>
             </div>
 
             <div>
               <div className="flex items-center gap-1.5 mb-1.5">
-                <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">4</span>
+                <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">4</span>
                 <span className="text-white font-medium text-[13px]">Reports build on each other</span>
               </div>
               <p className="pl-7">Every optimization run adds to your strategy's dataset. When you generate a new report, it analyzes all results from every past run. More data means more reliable recommendations. Old reports are saved so you can track how the analysis evolves over time.</p>
@@ -5753,7 +5914,7 @@ function OptimizerGuide() {
 
             <div>
               <div className="flex items-center gap-1.5 mb-1.5">
-                <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">5</span>
+                <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">5</span>
                 <span className="text-white font-medium text-[13px]">Use the Combo Fit section</span>
               </div>
               <p className="pl-7">If you do run multiple tickers, check the "Ticker/Timeframe Fit" section in the report. It rates each combo as strong, moderate, weak, or poor. Focus your effort on combos rated "strong" — those are where your strategy naturally works best.</p>
@@ -5761,7 +5922,7 @@ function OptimizerGuide() {
 
             <div>
               <div className="flex items-center gap-1.5 mb-1.5">
-                <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">6</span>
+                <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">6</span>
                 <span className="text-white font-medium text-[13px]">When to clear results</span>
               </div>
               <p className="pl-7">Use the clear button (<span className="inline-flex items-center"><RotateCcw className="w-2.5 h-2.5 inline" /></span>) on a strategy if the backtesting engine has been updated. Old results from a different engine version will mislead the Insights analysis and Guided Mode. After clearing, start fresh with new runs.</p>
@@ -5769,7 +5930,7 @@ function OptimizerGuide() {
 
             <div>
               <div className="flex items-center gap-1.5 mb-1.5">
-                <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">7</span>
+                <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-300 flex items-center justify-center text-[10px] font-bold flex-shrink-0">7</span>
                 <span className="text-white font-medium text-[13px]">Export and verify on TradingView</span>
               </div>
               <p className="pl-7">Always export your best result's Pine Script and run it on TradingView to verify. The optimizer finds the parameters — TradingView confirms they work in the real Pine Script environment. If trade counts or PnL don't match, something needs investigating.</p>
@@ -5940,7 +6101,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
   return (
     <div className="max-w-5xl mx-auto space-y-6 p-2 sm:p-6" data-testid="creator-panel">
       <div className="flex items-center gap-3 mb-1">
-        <Sparkles className="w-6 h-6 text-violet-400" />
+        <Sparkles className="w-6 h-6 text-indigo-400" />
         <div>
           <h2 className="text-xl font-bold text-white">AI Strategy Creator</h2>
           <p className="text-white/50 text-sm">Describe a trading idea in plain English — the AI drafts a backtestable Pine v6 strategy.</p>
@@ -5956,7 +6117,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
       {/* API key management */}
       <Card className="bg-white/5 border border-white/10 p-4 space-y-3" data-testid="creator-key-card">
         <div className="flex items-center gap-2">
-          <KeyRound className="w-4 h-4 text-violet-400" />
+          <KeyRound className="w-4 h-4 text-indigo-400" />
           <span className="font-semibold text-white text-sm">Your OpenRouter API key</span>
         </div>
         {keyLoading ? (
@@ -5980,7 +6141,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
           <div className="space-y-2">
             <p className="text-[12px] text-white/50">
               The Creator runs on your own OpenRouter account, so you control the spend. Get a key at{" "}
-              <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-violet-400 hover:underline" data-testid="link-openrouter-keys">openrouter.ai/keys</a>.
+              <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline" data-testid="link-openrouter-keys">openrouter.ai/keys</a>.
               It's encrypted on our server and never shown again.
             </p>
             <div className="flex flex-wrap items-center gap-2">
@@ -5992,7 +6153,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
                 className="flex-1 min-w-[220px] bg-black/40 border-white/10 text-white font-mono text-sm"
                 data-testid="input-api-key"
               />
-              <Button size="sm" onClick={() => saveKeyMutation.mutate()} disabled={saveKeyMutation.isPending || !apiKeyInput.trim()} data-testid="button-save-key" className="bg-violet-600 hover:bg-violet-500 text-white">
+              <Button size="sm" onClick={() => saveKeyMutation.mutate()} disabled={saveKeyMutation.isPending || !apiKeyInput.trim()} data-testid="button-save-key" className="bg-indigo-600 hover:bg-indigo-500 text-white">
                 {saveKeyMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Save className="w-3 h-3 mr-1" />}
                 Save key
               </Button>
@@ -6007,7 +6168,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
       {/* Idea → Generate */}
       <Card className="bg-white/5 border border-white/10 p-4 space-y-3" data-testid="creator-idea-card">
         <div className="flex items-center gap-2">
-          <Wand2 className="w-4 h-4 text-violet-400" />
+          <Wand2 className="w-4 h-4 text-indigo-400" />
           <span className="font-semibold text-white text-sm">Describe your strategy</span>
         </div>
         <Textarea
@@ -6023,7 +6184,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
             onClick={() => draftMutation.mutate()}
             disabled={!hasKey || !idea.trim() || ideaTooLong || busy}
             data-testid="button-generate"
-            className="bg-violet-600 hover:bg-violet-500 text-white"
+            className="bg-indigo-600 hover:bg-indigo-500 text-white"
           >
             {draftMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Sparkles className="w-4 h-4 mr-1.5" />}
             {draftMutation.isPending ? "Generating…" : "Generate strategy"}
@@ -6069,9 +6230,9 @@ function CreatorPanel({ strategies, onUseStrategy }: {
           </div>
 
           {draft.criticNotes && (
-            <div className="px-4 py-3 border-t border-white/10 bg-violet-500/5">
+            <div className="px-4 py-3 border-t border-white/10 bg-indigo-500/5">
               <div className="flex items-center gap-2 mb-1.5">
-                <Lightbulb className="w-4 h-4 text-violet-400" />
+                <Lightbulb className="w-4 h-4 text-indigo-400" />
                 <span className="text-sm font-semibold text-white">Reviewer notes</span>
               </div>
               <p className="text-[12px] text-white/70 leading-relaxed whitespace-pre-wrap" data-testid="text-critic-notes">{draft.criticNotes}</p>
@@ -6088,7 +6249,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
       {/* Improve loop */}
       <Card className="bg-white/5 border border-white/10 p-4 space-y-3" data-testid="creator-improve-card">
         <div className="flex items-center gap-2">
-          <RefreshCw className="w-4 h-4 text-violet-400" />
+          <RefreshCw className="w-4 h-4 text-indigo-400" />
           <span className="font-semibold text-white text-sm">Improve with backtest insights</span>
         </div>
         <p className="text-[12px] text-white/50">
@@ -6128,7 +6289,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
             onClick={() => improveMutation.mutate()}
             disabled={!hasKey || busy || (!draft && !improveStrategyId) || !insightsText.trim() || insightsTooLong}
             data-testid="button-improve"
-            className="bg-violet-600 hover:bg-violet-500 text-white"
+            className="bg-indigo-600 hover:bg-indigo-500 text-white"
           >
             {improveMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Wand2 className="w-4 h-4 mr-1.5" />}
             {improveMutation.isPending ? "Improving…" : "Improve strategy"}
@@ -6252,13 +6413,13 @@ function InsightsPanel() {
 
   const severityColor = (s: string) => s === "critical" ? "text-purple-400 bg-purple-500/10 border-purple-500/20" : s === "warning" ? "text-indigo-400 bg-indigo-500/10 border-indigo-500/20" : "text-sky-400 bg-sky-500/10 border-sky-500/20";
   const severityIcon = (s: string) => s === "critical" ? <AlertCircle className="w-3.5 h-3.5" /> : s === "warning" ? <AlertTriangle className="w-3.5 h-3.5" /> : <Info className="w-3.5 h-3.5" />;
-  const ratingColor = (r: string) => r === "strong" ? "text-sky-400" : r === "moderate" ? "text-indigo-400" : r === "weak" ? "text-violet-400" : "text-purple-400";
-  const ratingBg = (r: string) => r === "strong" ? "bg-sky-500/10 border-sky-500/20" : r === "moderate" ? "bg-indigo-500/10 border-indigo-500/20" : r === "weak" ? "bg-violet-500/10 border-violet-500/20" : "bg-purple-500/10 border-purple-500/20";
+  const ratingColor = (r: string) => r === "strong" ? "text-sky-400" : r === "moderate" ? "text-indigo-400" : r === "weak" ? "text-indigo-400" : "text-purple-400";
+  const ratingBg = (r: string) => r === "strong" ? "bg-sky-500/10 border-sky-500/20" : r === "moderate" ? "bg-indigo-500/10 border-indigo-500/20" : r === "weak" ? "bg-indigo-500/10 border-indigo-500/20" : "bg-purple-500/10 border-purple-500/20";
 
   const SectionHeader = ({ sectionKey, title, icon: Icon, count }: { sectionKey: string; title: string; icon: React.ComponentType<{ className?: string }>; count?: number }) => (
     <button onClick={() => toggleSection(sectionKey)} className="w-full flex items-center justify-between px-4 py-3 hover:bg-white/5 transition-colors" data-testid={`btn-toggle-${sectionKey}`}>
       <div className="flex items-center gap-2">
-        <Icon className="w-4 h-4 text-violet-400" />
+        <Icon className="w-4 h-4 text-indigo-400" />
         <span className="font-semibold text-white text-sm">{title}</span>
         {count !== undefined && <Badge variant="secondary" className="bg-white/10 text-white/60 text-[10px] h-5">{count}</Badge>}
       </div>
@@ -6270,7 +6431,7 @@ function InsightsPanel() {
     <div className="max-w-5xl mx-auto space-y-6 p-6" data-testid="insights-panel">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-3">
-          <Lightbulb className="w-6 h-6 text-violet-400" />
+          <Lightbulb className="w-6 h-6 text-indigo-400" />
           <div>
             <h2 className="text-xl font-bold text-white">Strategy Insights</h2>
             <p className="text-white/50 text-sm">Statistical analysis across optimization runs — filter by ticker/timeframe for focused insights</p>
@@ -6314,7 +6475,7 @@ function InsightsPanel() {
               </Select>
             </div>
           )}
-          <Button onClick={generateReport} disabled={!selectedStrategyId || loading} className="bg-violet-600 hover:bg-violet-500 text-white gap-2" data-testid="btn-generate-insights">
+          <Button onClick={generateReport} disabled={!selectedStrategyId || loading} className="bg-indigo-600 hover:bg-indigo-500 text-white gap-2" data-testid="btn-generate-insights">
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
             {loading ? "Analyzing..." : "Generate Report"}
           </Button>
@@ -6345,7 +6506,7 @@ function InsightsPanel() {
                       <span className="text-xs text-white/70">{new Date(sr.createdAt).toLocaleDateString()} {new Date(sr.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                       <span className="text-[10px] text-white/30 ml-2">{sr.totalResults ?? 0} results · {sr.totalRuns ?? 0} runs</span>
                       {sr.reportData?.filter && (sr.reportData.filter.ticker || sr.reportData.filter.timeframe) && (
-                        <span className="text-[10px] text-violet-400/60 ml-2">
+                        <span className="text-[10px] text-indigo-400/60 ml-2">
                           {[sr.reportData.filter.ticker?.replace("-PERP", "").replace("/USDT", ""), sr.reportData.filter.timeframe].filter(Boolean).join(" ")}
                         </span>
                       )}
@@ -6367,7 +6528,7 @@ function InsightsPanel() {
       {strategySummary && selectedStrategyId && !report && !loading && (
         <Card className="border-white/10 bg-white/[0.03] p-4" data-testid="strategy-preview">
           <div className="flex items-center gap-2 mb-3">
-            <BarChart3 className="w-4 h-4 text-violet-400" />
+            <BarChart3 className="w-4 h-4 text-indigo-400" />
             <span className="text-sm font-semibold text-white">Dataset Overview</span>
           </div>
           {strategySummary.totalRuns === 0 ? (
@@ -6398,7 +6559,7 @@ function InsightsPanel() {
                 <div className="flex flex-wrap items-center gap-1.5">
                   <span className="text-xs text-white/40 mr-1">Timeframes</span>
                   {strategySummary.timeframes.map(tf => (
-                    <Badge key={tf} variant="outline" className="text-[10px] border-violet-500/20 text-violet-400">{tf}</Badge>
+                    <Badge key={tf} variant="outline" className="text-[10px] border-indigo-500/20 text-indigo-400">{tf}</Badge>
                   ))}
                 </div>
               </div>
@@ -6409,7 +6570,7 @@ function InsightsPanel() {
 
       {loading && (
         <Card className="border-white/10 bg-white/[0.03] p-12 flex flex-col items-center justify-center gap-4">
-          <Loader2 className="w-8 h-8 text-violet-400 animate-spin" />
+          <Loader2 className="w-8 h-8 text-indigo-400 animate-spin" />
           <p className="text-white/60 text-sm">Fetching and analyzing optimization data...</p>
         </Card>
       )}
@@ -6418,9 +6579,9 @@ function InsightsPanel() {
         <>
           {report.filter && (report.filter.ticker || report.filter.timeframe) && (
             <div className="flex items-center gap-2 text-sm">
-              <Filter className="w-3.5 h-3.5 text-violet-400" />
+              <Filter className="w-3.5 h-3.5 text-indigo-400" />
               <span className="text-white/50">Filtered to:</span>
-              <Badge className="bg-violet-500/15 text-violet-300 border-violet-500/20 text-xs">
+              <Badge className="bg-indigo-500/15 text-indigo-300 border-indigo-500/20 text-xs">
                 {[report.filter.ticker?.replace("-PERP", "").replace("/USDT", ""), report.filter.timeframe].filter(Boolean).join(" ")}
               </Badge>
             </div>
@@ -6434,7 +6595,7 @@ function InsightsPanel() {
             ].map(stat => (
               <Card key={stat.label} className="border-white/10 bg-white/[0.03] p-3">
                 <div className="flex items-center gap-2 mb-1">
-                  <stat.icon className="w-3.5 h-3.5 text-violet-400" />
+                  <stat.icon className="w-3.5 h-3.5 text-indigo-400" />
                   <span className="text-[10px] text-white/50 uppercase tracking-wide">{stat.label}</span>
                 </div>
                 <p className="text-lg font-bold text-white tabular-nums">{stat.value}</p>
@@ -6519,7 +6680,7 @@ function InsightsPanel() {
                     <span className={`text-right font-mono ${combo.avgProfit >= 0 ? "text-sky-400" : "text-purple-400"}`}>{combo.avgProfit >= 0 ? "+" : ""}{combo.avgProfit.toFixed(1)}%</span>
                     <span className={`text-right font-mono ${combo.avgWinRate >= 50 ? "text-sky-400" : "text-indigo-400"}`}>{combo.avgWinRate.toFixed(1)}%</span>
                     <span className="text-right font-mono text-purple-400">{combo.avgDrawdown.toFixed(1)}%</span>
-                    <span className="text-right font-mono text-violet-400">{combo.bestLevProfit.toFixed(0)}% @{combo.bestLeverage}x</span>
+                    <span className="text-right font-mono text-indigo-400">{combo.bestLevProfit.toFixed(0)}% @{combo.bestLeverage}x</span>
                     <span className={`text-right font-medium uppercase text-[10px] ${ratingColor(combo.rating)}`}>{combo.rating}</span>
                   </div>
                 ))}
@@ -6569,7 +6730,7 @@ function InsightsPanel() {
                     { label: "Avg Win", value: `+${report.tradePatterns.avgWinSize.toFixed(2)}%`, color: "text-sky-400" },
                     { label: "Avg Loss", value: `-${report.tradePatterns.avgLossSize.toFixed(2)}%`, color: "text-purple-400" },
                     { label: "Reward/Risk", value: `${report.tradePatterns.winLossRatio.toFixed(1)}:1`, color: report.tradePatterns.winLossRatio >= 1 ? "text-sky-400" : "text-purple-400" },
-                    { label: "Bars Ratio", value: `${report.tradePatterns.barsRatio.toFixed(1)}x`, color: "text-violet-400" },
+                    { label: "Bars Ratio", value: `${report.tradePatterns.barsRatio.toFixed(1)}x`, color: "text-indigo-400" },
                   ].map(s => (
                     <div key={s.label} className="rounded-lg border border-white/5 bg-white/[0.02] p-3">
                       <span className="text-[10px] text-white/40 uppercase tracking-wide">{s.label}</span>
