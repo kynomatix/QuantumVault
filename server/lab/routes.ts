@@ -2122,6 +2122,11 @@ export function registerLabRoutes(app: Express): void {
         minTrades: sourceConfig?.minTrades ?? run.minTrades ?? 10,
         maxDrawdownCap: sourceConfig?.maxDrawdownCap ?? run.maxDrawdownCap ?? 85,
         minAvgBarsHeld: sourceConfig?.minAvgBarsHeld ?? (run as any).minAvgBarsHeld ?? 1,
+        // Validity (Task 188): inherit the source run's out-of-sample holdout so a
+        // refined run keeps the same IS/OOS split instead of silently rebuilding
+        // config without it (which dropped every refine to full-window → blank
+        // OOS / Robustness column). Falls back to the persisted run column.
+        outOfSampleFraction: sourceConfig?.outOfSampleFraction ?? run.oosFraction ?? undefined,
         mode: "sweep",
         strategyId,
         engineType: isNative ? nativeEngineType : undefined,

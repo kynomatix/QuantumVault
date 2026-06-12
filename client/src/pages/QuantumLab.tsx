@@ -3529,7 +3529,13 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
         <AlertCircle className="w-4 h-4 text-amber-400/80 mt-0.5 flex-shrink-0" />
         <p className="text-[11px] text-white/50 leading-relaxed">
           Backtests measure the past — they don't guarantee live results. These headline numbers cover the full backtest period{run?.slippage != null ? `, with ${fmtSlippagePct(run.slippage)} slippage per side plus commission charged round-trip` : ""}.
-          Check the <span className="text-white/70">OOS / Robustness</span> column for how each config held up on out-of-sample data the optimizer never saw (top results are lightly selected, so it's not a perfectly pristine holdout).
+          {bestPerCombo.some((r) => r.oosMetrics != null) ? (
+            <> Check the <span className="text-white/70">OOS / Robustness</span> column for how each config held up on out-of-sample data the optimizer never saw (top results are lightly selected, so it's not a perfectly pristine holdout).</>
+          ) : (run?.oosFraction != null && run.oosFraction > 0) ? (
+            <> This run had an out-of-sample holdout, but produced no out-of-sample results to judge, so the <span className="text-white/70">OOS / Robustness</span> column is blank.</>
+          ) : (
+            <> This run used no out-of-sample holdout, so the <span className="text-white/70">OOS / Robustness</span> column is blank — turn one on under Advanced Settings → Out-of-Sample Holdout to get an overfit check on your next run.</>
+          )}
         </p>
       </div>
 
