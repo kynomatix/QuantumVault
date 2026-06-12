@@ -225,8 +225,8 @@ interface LabNavItem {
 
 const labNavItems: LabNavItem[] = [
   { id: "hub", label: "Overview", icon: LayoutDashboard },
-  { id: "main", label: "Backtest", icon: Settings2 },
   { id: "creator", label: "Creator", icon: Sparkles },
+  { id: "main", label: "Backtest", icon: Settings2 },
   { id: "results", label: "Results", icon: History },
   { id: "heatmap", label: "Heatmap", icon: Grid3X3 },
   { id: "insights", label: "Insights", icon: Lightbulb },
@@ -536,8 +536,8 @@ function LabHub({
     onClick: () => void;
     badge?: string;
   }[] = [
-    { id: "main", label: "Backtest", icon: Settings2, desc: "Set up strategies, run backtests, and sweep parameters to optimize.", onClick: () => onNavigate("main") },
     { id: "creator", label: "Creator", icon: Sparkles, desc: "Generate or refine a trading strategy with AI assistance.", onClick: () => onNavigate("creator") },
+    { id: "main", label: "Backtest", icon: Settings2, desc: "Set up strategies, run backtests, and sweep parameters to optimize.", onClick: () => onNavigate("main") },
     { id: "results", label: "Results", icon: History, desc: "Revisit past runs with equity curves and full trade logs.", onClick: () => onNavigate("results") },
     { id: "heatmap", label: "Heatmap", icon: Grid3X3, desc: "Compare every parameter combination at a glance.", onClick: () => onNavigate("heatmap") },
     { id: "insights", label: "Insights", icon: Lightbulb, desc: "Plain-language analysis of what's robust — and what's overfit.", onClick: () => onNavigate("insights") },
@@ -581,17 +581,27 @@ function LabHub({
             </Button>
           </div>
           <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
-            <span className="inline-flex items-center gap-1.5 text-white/50" data-testid="text-hub-strategy-count">
+            <button
+              type="button"
+              onClick={() => onNavigate("main")}
+              className="inline-flex items-center gap-1.5 text-white/70 hover:text-white transition-colors"
+              data-testid="text-hub-strategy-count"
+            >
               <FileCode className="w-3.5 h-3.5 text-indigo-400" />
               {strategiesCount} saved {strategiesCount === 1 ? "strategy" : "strategies"}
-            </span>
-            <span className="inline-flex items-center gap-1.5 text-white/50" data-testid="text-hub-queue-count">
+            </button>
+            <button
+              type="button"
+              onClick={onOpenQueue}
+              className="inline-flex items-center gap-1.5 text-white/70 hover:text-white transition-colors"
+              data-testid="text-hub-queue-count"
+            >
               <ListOrdered className="w-3.5 h-3.5 text-indigo-400" />
               {queueCount} {queueCount === 1 ? "job" : "jobs"} in queue
-            </span>
+            </button>
           </div>
-          <p className="mt-4 inline-flex items-start gap-1.5 text-[11px] text-white/40 max-w-md leading-relaxed">
-            <Info className="w-3.5 h-3.5 flex-shrink-0 mt-px text-amber-400/70" />
+          <p className="mt-4 inline-flex items-start gap-1.5 text-[11px] text-white/60 max-w-md leading-relaxed">
+            <Info className="w-3.5 h-3.5 flex-shrink-0 mt-px text-amber-400/80" />
             Backtests are a guide, not a guarantee. Past results never promise future profit — start small and size up only once a strategy proves itself live.
           </p>
         </div>
@@ -612,7 +622,7 @@ function LabHub({
                   <span className="text-xs font-mono text-white/30">Step {s.n}</span>
                 </div>
                 <h3 className="text-sm font-semibold text-white">{s.title}</h3>
-                <p className="mt-1 text-xs text-white/50 leading-relaxed">{s.desc}</p>
+                <p className="mt-1 text-xs text-white/60 leading-relaxed">{s.desc}</p>
               </div>
             );
           })}
@@ -1350,7 +1360,7 @@ export default function QuantumLab() {
                     data-testid={`nav-${item.id}`}
                   >
                     <Icon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-                    <span className="hidden sm:inline">{item.label}</span>
+                    <span className="hidden lg:inline">{item.label}</span>
                   </button>
                 );
               })}
@@ -1360,7 +1370,7 @@ export default function QuantumLab() {
                 data-testid="nav-queue"
               >
                 <ListOrdered className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-                <span className="hidden sm:inline">Queue</span>
+                <span className="hidden lg:inline">Queue</span>
                 {queueCount > 0 && (
                   <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-indigo-500 text-white text-[10px] font-bold leading-none px-1" data-testid="queue-badge">
                     {queueCount}
