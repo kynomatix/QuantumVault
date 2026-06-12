@@ -49,12 +49,76 @@ import { generateAndSaveInsightsReport, insightsReportsQueryKey, type GenerateRe
 import type {
   LabPineInput, LabPineParseResult, LabStrategy, LabBacktestResult,
   LabJobProgress, LabJobResult, LabOptimizationRun, LabOptResult,
-  LabTradeRecord, LabRiskAnalysis,
+  LabTradeRecord, LabRiskAnalysis, LabWindowMetrics, LabOosMetrics,
 } from "@shared/schema";
 import { LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES } from "@shared/schema";
 
 type MainTab = "main" | "results" | "heatmap" | "insights" | "creator";
 const CONSERVATIVE_FALLBACK = 5;
+
+// ── Task 188: backtest robustness (in-sample vs out-of-sample) ──────────────
+// Pure, null-safe verdict derived from a result's IS/OOS partition metrics.
+// Legacy rows (no holdout) return null so the UI renders a neutral dash.
+type RobustnessTone = "good" | "warn" | "bad" | "muted";
+const ROBUSTNESS_TONE_CLASS: Record<RobustnessTone, string> = {
+  good: "bg-sky-500/15 text-sky-300 border-sky-500/30",
+  warn: "bg-amber-500/15 text-amber-300 border-amber-500/30",
+  bad: "bg-purple-500/15 text-purple-300 border-purple-500/30",
+  muted: "bg-white/5 text-white/40 border-white/10",
+};
+function robustnessVerdict(
+  is?: LabWindowMetrics | null,
+  oos?: LabOosMetrics | null,
+): { label: string; tone: RobustnessTone; tip: string } | null {
+  if (!is && !oos) return null; // legacy / holdout-disabled run — nothing to judge
+  if (!oos) {
+    return {
+      label: "No holdout",
+      tone: "muted",
+      tip: "This run used no out-of-sample holdout. Treat these numbers as in-sample only.",
+    };
+  }
+  if (oos.sufficient === false) {
+    return {
+      label: "Holdout too small",
+      tone: "muted",
+      tip: "The out-of-sample window had too few trades to validate. Treat these numbers as in-sample only.",
+    };
+  }
+  const gap = (is?.sharpeRatio ?? 0) - (oos.sharpeRatio ?? 0);
+  const oosProfitable = (oos.netProfitPercent ?? 0) > 0;
+  if (oosProfitable && gap <= 0.5) {
+    return { label: "Robust", tone: "good", tip: "Held up on out-of-sample data the optimizer never saw." };
+  }
+  if (oosProfitable && gap <= 1.2) {
+    return { label: "Some decay", tone: "warn", tip: "Weaker out-of-sample than in-sample — size down and watch live closely." };
+  }
+  return { label: "Likely overfit", tone: "bad", tip: "Strong in-sample but weak or negative out-of-sample — the classic overfit signature." };
+}
+// Per-side slippage is stored as a fraction of notional; show it as a friendly %.
+function fmtSlippagePct(frac?: number | null): string {
+  if (frac == null) return "default";
+  return `${(frac * 100).toFixed(3).replace(/\.?0+$/, "")}%`;
+}
+// Compact OOS + robustness cell shared by the main and expanded result rows.
+function renderOosCell(is?: LabWindowMetrics | null, oos?: LabOosMetrics | null) {
+  const verdict = robustnessVerdict(is, oos);
+  if (!verdict) return <span className="text-white/30 text-xs font-mono">—</span>;
+  return (
+    <div className="flex flex-col items-end gap-0.5">
+      {oos && oos.sufficient ? (
+        <span className={`text-xs font-mono ${oos.netProfitPercent >= 0 ? "text-sky-400" : "text-purple-400"}`}>
+          {oos.netProfitPercent > 0 ? "+" : ""}{oos.netProfitPercent.toFixed(1)}%
+        </span>
+      ) : (
+        <span className="text-[10px] font-mono text-white/30">n/a</span>
+      )}
+      <span className={`text-[9px] px-1.5 py-0.5 rounded border whitespace-nowrap ${ROBUSTNESS_TONE_CLASS[verdict.tone]}`} title={verdict.tip}>
+        {verdict.label}
+      </span>
+    </div>
+  );
+}
 
 type SortKey = "netProfitPercent" | "levProfit" | "winRatePercent" | "maxDrawdownPercent" | "profitFactor" | "totalTrades" | "sharpeRatio";
 type SortDir = "asc" | "desc";
@@ -1577,6 +1641,11 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [useInsights, setUseInsights] = useState(false);
   const [deepSearch, setDeepSearch] = useState(false);
+  // Task 188 — validity/fidelity controls. oosPct: % of recent history withheld
+  // from the optimizer for out-of-sample validation. slippagePct: per-side
+  // slippage as a % of notional, charged round-trip alongside commission.
+  const [oosPct, setOosPct] = useState(30);
+  const [slippagePct, setSlippagePct] = useState(0.05);
 
   const { data: nonTradableData } = useQuery<{ nonTradableMarkets: string[] }>({
     queryKey: ["/api/exchange/non-tradable-markets"],
@@ -1755,6 +1824,8 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
         minTrades, maxDrawdownCap: maxDrawdown, minAvgBarsHeld: minBarsHeld, mode, strategyId: strategyId ?? undefined,
         useInsights: useInsights && hasInsights ? true : undefined,
         deepSearch: deepSearch && mode !== "smoke" ? true : undefined,
+        outOfSampleFraction: Math.max(0, Math.min(0.9, oosPct / 100)),
+        slippage: Math.max(0, slippagePct / 100),
       });
       const data = await safeResponseJson(res);
       if (data.queued) {
@@ -1907,6 +1978,18 @@ function RunConfigPanel({ code, parsedResult, strategyId, strategyName, onJobSta
                   <Label className="text-[10px] text-white/30 mb-1 block">Min Avg Bars Held</Label>
                   <Input type="number" min={0} step={0.5} value={minBarsHeld} onChange={(e) => setMinBarsHeld(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white h-8" data-testid="input-min-bars-held" />
                   <p className="text-[9px] text-white/20 mt-0.5">Set to 0 for 8h/12h timeframes</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2 pt-2 border-t border-white/5">
+                <div>
+                  <Label className="text-[10px] text-white/30 mb-1 block">Out-of-Sample Holdout (%)</Label>
+                  <Input type="number" min={0} max={90} step={5} value={oosPct} onChange={(e) => setOosPct(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white h-8" data-testid="input-oos-fraction" />
+                  <p className="text-[9px] text-white/20 mt-0.5">Recent slice withheld from the optimizer to test for overfit. 0 disables.</p>
+                </div>
+                <div>
+                  <Label className="text-[10px] text-white/30 mb-1 block">Slippage / side (%)</Label>
+                  <Input type="number" min={0} step={0.01} value={slippagePct} onChange={(e) => setSlippagePct(Number(e.target.value))} className="text-xs font-mono bg-white/5 border-white/10 text-white h-8" data-testid="input-slippage" />
+                  <p className="text-[9px] text-white/20 mt-0.5">Cost per fill (charged both sides; ~2x on stop exits).</p>
                 </div>
               </div>
               <div className="pt-2 border-t border-white/5">
@@ -3271,6 +3354,26 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
         </div>
       </div>
 
+      <div className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-2.5 flex items-start gap-2" data-testid="banner-backtest-caveat">
+        <AlertCircle className="w-4 h-4 text-amber-400/80 mt-0.5 flex-shrink-0" />
+        <p className="text-[11px] text-white/50 leading-relaxed">
+          Backtests measure the past — they don't guarantee live results. These headline numbers cover the full backtest period{run?.slippage != null ? `, with ${fmtSlippagePct(run.slippage)} slippage per side plus commission charged round-trip` : ""}.
+          Check the <span className="text-white/70">OOS / Robustness</span> column for how each config held up on out-of-sample data the optimizer never saw (top results are lightly selected, so it's not a perfectly pristine holdout).
+        </p>
+      </div>
+
+      {run?.parityMatch === false && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 flex items-start gap-2" data-testid="banner-fidelity-warning">
+          <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 flex-shrink-0" />
+          <div className="text-[11px] text-amber-200/90 leading-relaxed">
+            <span className="font-medium">Engine self-consistency check failed</span> for this run — the compiled and interpreted Pine engines disagreed on some bars, so these results may not faithfully reflect your script. Treat them with extra caution.
+            {Array.isArray(run.parityDiffs) && run.parityDiffs.length > 0 && (
+              <span className="block mt-1 text-amber-300/70 font-mono">e.g. {run.parityDiffs.slice(0, 2).join("; ")}</span>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <HistStatCard label="Net Profit" value={`${bestProfit > 0 ? "+" : ""}${bestProfit.toFixed(2)}%`} color={bestProfit >= 0 ? "text-sky-400" : "text-purple-400"} icon={<TrendingUp className="w-4 h-4" />} sublabel={displayResult ? `${displayResult.ticker.split("/")[0]} ${displayResult.timeframe}` : undefined} />
         <HistStatCard label="Win Rate" value={`${bestWinRate.toFixed(1)}%`} color="text-sky-400" icon={<Percent className="w-4 h-4" />} />
@@ -3306,6 +3409,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                 <SortHeader label="Max DD %" sortKey="maxDrawdownPercent" current={sortKey} dir={sortDir} onClick={handleSort} />
                 <SortHeader label="PF" sortKey="profitFactor" current={sortKey} dir={sortDir} onClick={handleSort} />
                 <SortHeader label="Sharpe" sortKey="sharpeRatio" current={sortKey} dir={sortDir} onClick={handleSort} />
+                <th className="text-right py-2.5 px-2" title="Out-of-sample net profit on data the optimizer never saw, plus an overfit verdict">OOS / Robustness</th>
                 <SortHeader label="Trades" sortKey="totalTrades" current={sortKey} dir={sortDir} onClick={handleSort} />
                 {onRefine && <th className="w-8"></th>}
                 {strategy?.pineScript && <th className="w-8"></th>}
@@ -3340,6 +3444,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                       <td className={`py-2.5 px-2 text-right font-mono ${r.maxDrawdownPercent <= 30 ? "text-sky-400" : "text-purple-400"}`}>{r.maxDrawdownPercent.toFixed(1)}%</td>
                       <td className={`py-2.5 px-2 text-right font-mono ${r.profitFactor >= 1.5 ? "text-sky-400" : "text-white"}`}>{r.profitFactor.toFixed(2)}</td>
                       <td className={`py-2.5 px-2 text-right font-mono ${r.sharpeRatio == null ? "text-white/30" : r.sharpeRatio >= 1 ? "text-sky-400" : r.sharpeRatio >= 0 ? "text-white/70" : "text-purple-400"}`}>{r.sharpeRatio != null ? r.sharpeRatio.toFixed(2) : "—"}</td>
+                      <td className="py-2.5 px-2" data-testid={`oos-cell-${r.id}`}>{renderOosCell(r.isMetrics, r.oosMetrics)}</td>
                       <td className="py-2.5 px-2 text-right font-mono text-white/60">{r.totalTrades}</td>
                       {onRefine && (
                         <td className="py-2.5 px-2 text-center">
@@ -3415,6 +3520,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.maxDrawdownPercent <= 30 ? "text-sky-400/70" : "text-purple-400/70"}`}>{sr.maxDrawdownPercent.toFixed(1)}%</td>
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.profitFactor >= 1.5 ? "text-sky-400/70" : "text-white/50"}`}>{sr.profitFactor.toFixed(2)}</td>
                           <td className={`py-2 px-2 text-right font-mono text-xs ${sr.sharpeRatio == null ? "text-white/20" : sr.sharpeRatio >= 1 ? "text-sky-400/70" : sr.sharpeRatio >= 0 ? "text-white/40" : "text-purple-400/70"}`}>{sr.sharpeRatio != null ? sr.sharpeRatio.toFixed(2) : "—"}</td>
+                          <td className="py-2 px-2">{renderOosCell(sr.isMetrics, sr.oosMetrics)}</td>
                           <td className="py-2 px-2 text-right font-mono text-xs text-white/40">{sr.totalTrades}</td>
                           {onRefine && (
                             <td className="py-2 px-2 text-center">
@@ -3478,6 +3584,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
           <TabsList className="bg-white/5 border border-white/10" data-testid="tabs-history-detail">
             <TabsTrigger value="equity" className="data-[state=active]:bg-violet-600" data-testid="tab-history-equity">Equity Curve</TabsTrigger>
             <TabsTrigger value="risk" className="data-[state=active]:bg-violet-600" data-testid="tab-history-risk">Risk Management</TabsTrigger>
+            <TabsTrigger value="robustness" className="data-[state=active]:bg-violet-600" data-testid="tab-history-robustness">Robustness</TabsTrigger>
             <TabsTrigger value="params" className="data-[state=active]:bg-violet-600" data-testid="tab-history-params">Parameters</TabsTrigger>
             <TabsTrigger value="trades" className="data-[state=active]:bg-violet-600" data-testid="tab-history-trades">Trades</TabsTrigger>
           </TabsList>
@@ -3519,6 +3626,10 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
 
           <TabsContent value="risk">
             {riskAnalysis && <RiskManagementPanel analysis={riskAnalysis} ticker={selectedResult.ticker} timeframe={selectedResult.timeframe} backtestProfit={selectedResult.netProfitPercent} backtestDrawdown={selectedResult.maxDrawdownPercent} strategyName={strategy?.name} pineScript={strategy?.pineScript} params={selectedResult.params as Record<string, any>} />}
+          </TabsContent>
+
+          <TabsContent value="robustness">
+            <RobustnessTab result={selectedResult} run={run} />
           </TabsContent>
 
           <TabsContent value="params">
@@ -3581,6 +3692,94 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
     </div>
   );
 });
+
+// ── Task 188: robustness detail (in-sample vs out-of-sample breakdown) ──────
+function MetricStat({ label, value, tone }: { label: string; value: string; tone?: string }) {
+  return (
+    <div className="flex flex-col gap-0.5 p-2.5 rounded-md bg-white/5 border border-white/10">
+      <span className="text-[10px] text-white/30">{label}</span>
+      <span className={`text-sm font-mono font-medium ${tone ?? "text-white"}`}>{value}</span>
+    </div>
+  );
+}
+
+function WindowMetricsGrid({ m }: { m: LabWindowMetrics }) {
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+      <MetricStat label="Net Profit" value={`${m.netProfitPercent > 0 ? "+" : ""}${m.netProfitPercent.toFixed(2)}%`} tone={m.netProfitPercent >= 0 ? "text-sky-400" : "text-purple-400"} />
+      <MetricStat label="Win Rate" value={`${m.winRatePercent.toFixed(1)}%`} />
+      <MetricStat label="Max DD (approx)" value={`${m.maxDrawdownPercent.toFixed(1)}%`} />
+      <MetricStat label="Profit Factor" value={m.profitFactor.toFixed(2)} />
+      <MetricStat label="Sharpe" value={m.sharpeRatio.toFixed(2)} />
+      <MetricStat label="Trades" value={String(m.totalTrades)} />
+    </div>
+  );
+}
+
+function RobustnessTab({ result, run }: { result: LabOptResult; run?: LabOptimizationRun }) {
+  const is = result.isMetrics as LabWindowMetrics | null;
+  const oos = result.oosMetrics as LabOosMetrics | null;
+  const verdict = robustnessVerdict(is, oos);
+  const slippage = run?.slippage ?? null;
+  const oosFraction = run?.oosFraction ?? null;
+
+  if (!verdict) {
+    return (
+      <Card className="bg-white/5 border border-white/10 p-4" data-testid="panel-robustness">
+        <p className="text-sm text-white/50 leading-relaxed">
+          This run was produced without an out-of-sample holdout, so there's no robustness
+          breakdown. Start a new run with a holdout (Advanced Settings → Out-of-Sample Holdout)
+          to see how the strategy performs on data the optimizer never saw.
+        </p>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="bg-white/5 border border-white/10 p-4 space-y-4" data-testid="panel-robustness">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <h3 className="text-sm font-semibold flex items-center gap-2 text-white">
+          <Activity className="w-4 h-4 text-violet-400" /> In-Sample vs Out-of-Sample
+        </h3>
+        <span className={`text-[11px] px-2 py-0.5 rounded border ${ROBUSTNESS_TONE_CLASS[verdict.tone]}`} data-testid="badge-robustness-verdict">
+          {verdict.label}
+        </span>
+      </div>
+      <p className="text-xs text-white/50">{verdict.tip}</p>
+
+      <div className="space-y-2">
+        <p className="text-[11px] uppercase tracking-wider text-white/40">In-Sample (optimizer fit here)</p>
+        {is ? <WindowMetricsGrid m={is} /> : <p className="text-xs text-white/30">Not recorded.</p>}
+      </div>
+
+      <div className="space-y-2">
+        <p className="text-[11px] uppercase tracking-wider text-white/40">
+          Out-of-Sample (held out{oosFraction != null ? ` · ${Math.round(oosFraction * 100)}%` : ""})
+        </p>
+        {oos && oos.sufficient ? (
+          <WindowMetricsGrid m={oos} />
+        ) : (
+          <p className="text-xs text-amber-300/80 leading-relaxed">
+            The out-of-sample window had too few bars or trades to validate. Treat the headline
+            numbers as in-sample only.
+          </p>
+        )}
+      </div>
+
+      <div className="text-[11px] text-white/40 space-y-1 pt-2 border-t border-white/5">
+        <p>
+          Friction applied: {slippage != null ? fmtSlippagePct(slippage) : "default"} slippage per
+          side (charged round-trip, ~2x on stop exits) plus commission.
+        </p>
+        <p>
+          The top configs are lightly selected on the out-of-sample window, so it isn't a perfectly
+          pristine holdout. Out-of-sample max drawdown is approximate (trade-level).
+        </p>
+        <p className="text-white/50 font-medium">Backtests measure the past — they don't guarantee live results.</p>
+      </div>
+    </Card>
+  );
+}
 
 function HistStatCard({ label, value, color, icon, sublabel }: { label: string; value: string; color: string; icon: any; sublabel?: string }) {
   return (

@@ -8,6 +8,7 @@ import { fetchOHLCV } from "./datafeed";
 import { Worker } from "worker_threads";
 import { resolve, dirname } from "path";
 import type { OHLCV } from "./engine";
+import { DEFAULT_LAB_SLIPPAGE } from "./friction";
 import { WorkerPool, recommendedPoolSize } from "./worker-pool";
 import { hashStringToSeed } from "./rng";
 import { db } from "../db";
@@ -255,7 +256,7 @@ export function registerLabRoutes(app: Express): void {
         const p = 100 + Math.sin(i * 0.1) * 20 + Math.random() * 5;
         candles.push({time: Date.now() - (500-i) * 86400000, open: p, high: p*1.03, low: p*0.97, close: p*(0.98+Math.random()*0.04), volume: 1000+Math.random()*5000});
       }
-      const config: PineEngineConfig = { initialCapital: 100, commissionPercent: 0.05, slippageTicks: 1, defaultQtyType: "cash", defaultQtyValue: 100 };
+      const config: PineEngineConfig = { initialCapital: 100, commission: 0.0005, positionSize: 100 };
       const parity = runPineParityTest(plan, candles, {}, "TEST/USDT", "1d", config);
       res.json({ strategyId: id, name: strat.name, scriptLength: strat.pineScript.length, astStmts: plan.ast.length, ...parity });
     } catch (err: any) {
@@ -860,6 +861,13 @@ export function registerLabRoutes(app: Express): void {
           pineScript: config.pineScript,
           strategyId: config.strategyId,
           engineType: config.engineType,
+          slippage: config.slippage,
+          // Validity (Task 188): fixed date range + holdout fraction so the
+          // worker derives a resume-stable IS/OOS boundary timestamp. All three
+          // live in the persisted config snapshot → identical across resume.
+          startDate: config.startDate,
+          endDate: config.endDate,
+          outOfSampleFraction: config.outOfSampleFraction,
         },
         candlesByCombo,
         resumeCheckpoint,
@@ -1160,6 +1168,21 @@ export function registerLabRoutes(app: Express): void {
                   }
                   const finalCheckpoint: LabCheckpoint = { completedCombos: [], configSnapshot: config };
                   await labStorage.finalizeSuccessfulRun(runId, totalConfigsTested, finalCheckpoint);
+                  // T005: persist holdout fraction, slippage, and engine
+                  // self-consistency (parity) onto the run for UI labeling. The
+                  // config snapshot stays the canonical source; these columns are
+                  // a denormalized post-run record. parityMatch stays NULL when no
+                  // Pine combo was checked (native engines) — never a false "pass".
+                  try {
+                    await db.update(labOptimizationRuns).set({
+                      oosFraction: config.outOfSampleFraction ?? null,
+                      slippage: config.slippage ?? null,
+                      parityMatch: (msg as any).parityChecked ? ((msg as any).parityMatch ?? false) : null,
+                      parityDiffs: ((msg as any).parityDiffs && (msg as any).parityDiffs.length > 0) ? (msg as any).parityDiffs : null,
+                    }).where(eq(labOptimizationRuns.id, runId));
+                  } catch (e: any) {
+                    console.log(`[QuantumLab] Failed to persist run fidelity/holdout columns: ${e.message}`);
+                  }
                   console.log(`[QuantumLab] Run ${runId} completed`);
                   if (config.strategyId) {
                     labStorage.deduplicateStrategyResults(config.strategyId, runId).then(removed => {
@@ -1622,6 +1645,11 @@ export function registerLabRoutes(app: Express): void {
       }
 
       config = parsed.data;
+      // Apply the platform friction default to NEW runs so backtests model
+      // realistic slippage. Stored in configSnapshot.config below → flows to the
+      // worker + survives resume. Engines treat undefined as 0, so legacy runs
+      // resumed without this field stay unchanged.
+      if (config.slippage === undefined) config.slippage = DEFAULT_LAB_SLIPPAGE;
       walletAddress = (req as any).walletAddress;
 
       const isBusy = await labStorage.hasActiveOrPausedRun();

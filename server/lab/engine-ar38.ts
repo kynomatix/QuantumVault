@@ -1,6 +1,7 @@
 import type { LabTradeRecord, LabBacktestResult } from "@shared/schema";
 import * as ind from "./indicators";
 import type { OHLCV, EngineConfig } from "./engine";
+import { slippageCost } from "./friction";
 
 function p(params: Record<string, any>, name: string, defaultVal: any): any {
   return params[name] !== undefined ? params[name] : defaultVal;
@@ -484,7 +485,8 @@ export function runAdaptiveRegimeBacktest(
           ? ((exitPrice - position.avgEntryPrice) / position.avgEntryPrice) * 100
           : ((position.avgEntryPrice - exitPrice) / position.avgEntryPrice) * 100;
         const pnlDollar = position.pyramidCount * config.positionSize * (pnlPct / 100)
-          - 2 * position.pyramidCount * config.positionSize * config.commission;
+          - 2 * position.pyramidCount * config.positionSize * config.commission
+          - slippageCost(position.pyramidCount, config.positionSize, config.slippage, exitReason);
         equity += pnlDollar;
         trades.push({
           entryTime: new Date(candles[position.entryTimeIdx].time).toISOString(),
@@ -684,7 +686,8 @@ export function runAdaptiveRegimeBacktest(
       ? ((lastClose - position.avgEntryPrice) / position.avgEntryPrice) * 100
       : ((position.avgEntryPrice - lastClose) / position.avgEntryPrice) * 100;
     const pnlDollar = position.pyramidCount * config.positionSize * (pnlPct / 100)
-      - 2 * position.pyramidCount * config.positionSize * config.commission;
+      - 2 * position.pyramidCount * config.positionSize * config.commission
+      - slippageCost(position.pyramidCount, config.positionSize, config.slippage, "Open Position");
     equity += pnlDollar;
     trades.push({
       entryTime: new Date(candles[position.entryTimeIdx].time).toISOString(),

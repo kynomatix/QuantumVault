@@ -296,6 +296,19 @@ export async function ensureSchema() {
       // genuinely unknown protocol should read NULL, never a wrong venue.
       // Idempotent: DROP DEFAULT is a no-op once the default is already gone.
       `ALTER TABLE bot_trades ALTER COLUMN protocol DROP DEFAULT`,
+
+      // --- Task 188: QuantumLab backtest accuracy foundation. ---
+      // Validity (out-of-sample holdout) + fidelity (slippage friction + engine
+      // self-consistency check). All columns nullable / backward-compatible:
+      // legacy runs read NULL (holdout disabled, no friction record, no parity),
+      // and legacy result rows read NULL is/oos metrics. Each statement is
+      // additive ADD COLUMN IF NOT EXISTS — idempotent, never drops anything.
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS oos_fraction real`,
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS slippage real`,
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS parity_match boolean`,
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS parity_diffs jsonb`,
+      `ALTER TABLE lab_optimization_results ADD COLUMN IF NOT EXISTS is_metrics jsonb`,
+      `ALTER TABLE lab_optimization_results ADD COLUMN IF NOT EXISTS oos_metrics jsonb`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner

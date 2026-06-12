@@ -2,6 +2,7 @@ import type { Expr, Stmt } from "./parser";
 import type { LabTradeRecord, LabBacktestResult } from "@shared/schema";
 import * as ind from "../indicators";
 import { compilePineHotLoop, TA_WHITELIST, type CompilerContext } from "./compiler";
+import { slippageCost } from "../friction";
 
 // Whitelist of Math methods the Pine const-folder / series-mapper may dispatch
 // dynamically via `math.<fn>(...)`. The property name comes from a user
@@ -70,6 +71,7 @@ export interface PineEngineConfig {
   commission: number;
   positionSize: number;
   processOrdersOnClose?: boolean;
+  slippage?: number;
 }
 
 // NA represents PineScript's "na" value — intentionally typed as any since it
@@ -317,11 +319,17 @@ class Broker {
     const grossPnlPct = isLong
       ? ((price - pos.avgPrice) / pos.avgPrice) * 100
       : ((pos.avgPrice - price) / pos.avgPrice) * 100;
-    const pnlDollar = qty * this.config.positionSize * (grossPnlPct / 100)
-      - 2 * qty * this.config.positionSize * this.config.commission;
-    // Report pnlPercent NET of commission so it matches TV's "Net P&L %" column.
-    // 2× commission accounts for the entry + exit fee charged on this slice.
-    const netPnlPct = grossPnlPct - 2 * this.config.commission * 100;
+    const notional = qty * this.config.positionSize;
+    const slipCost = slippageCost(qty, this.config.positionSize, this.config.slippage, reason);
+    const pnlDollar = notional * (grossPnlPct / 100)
+      - 2 * notional * this.config.commission
+      - slipCost;
+    // Report pnlPercent NET of commission + slippage so it matches the dollar
+    // P&L. 2× commission = entry + exit fee on this slice; slipCost as a % of
+    // this slice's notional is the friction drag.
+    const netPnlPct = grossPnlPct
+      - 2 * this.config.commission * 100
+      - (notional > 0 ? (slipCost / notional) * 100 : 0);
     this.equity += pnlDollar;
     this.trades.push({
       entryTime: new Date(pos.entryTime).toISOString(),

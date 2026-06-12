@@ -3,6 +3,8 @@ import * as ind from "./indicators";
 import { runPineBacktest, type PinePlan, type PineSharedArrays } from "./pine/index";
 import { runAdaptiveRegimeBacktest } from "./engine-ar38";
 import { runSbrBacktest } from "./engine-sbr";
+import { slippageCost } from "./friction";
+import { sharpeFromTrades } from "./metrics";
 
 export type { PinePlan } from "./pine/index";
 export type { PineSharedArrays } from "./pine/index";
@@ -25,6 +27,7 @@ export interface EngineConfig {
   pinePlan?: PinePlan;
   strategyId?: number;
   engineType?: string;
+  slippage?: number;
 }
 
 function p(params: Record<string, any>, name: string, fallback: string | null, defaultVal: any): any {
@@ -48,6 +51,7 @@ export function runBacktest(
       commission: config.commission,
       positionSize: config.positionSize,
       processOrdersOnClose: config.processOrdersOnClose,
+      slippage: config.slippage,
     }, shared, sharedIndicatorCache);
   }
 
@@ -306,7 +310,8 @@ export function runBacktest(
       ? ((fillPrice - pos.entryPrice) / pos.entryPrice) * 100
       : ((pos.entryPrice - fillPrice) / pos.entryPrice) * 100;
     const pnlDollar = pos.remainingQty * config.positionSize * (pnlPct / 100)
-      - 2 * pos.remainingQty * config.positionSize * config.commission;
+      - 2 * pos.remainingQty * config.positionSize * config.commission
+      - slippageCost(pos.remainingQty, config.positionSize, config.slippage, exitReason);
     equity += pnlDollar;
     trades.push({
       entryTime: new Date(candles[pos.entryTimeIdx].time).toISOString(),
@@ -326,7 +331,9 @@ export function runBacktest(
     const pnl = dir === "long"
       ? (fillPrice - pos.entryPrice) / pos.entryPrice
       : (pos.entryPrice - fillPrice) / pos.entryPrice;
-    equity += qty * config.positionSize * pnl - 2 * qty * config.positionSize * config.commission;
+    equity += qty * config.positionSize * pnl
+      - 2 * qty * config.positionSize * config.commission
+      - slippageCost(qty, config.positionSize, config.slippage);
     pos.remainingQty -= qty;
   }
 
@@ -684,14 +691,7 @@ export function runBacktest(
   }
   const netProfitPercent = ((equity - config.initialCapital) / config.initialCapital) * 100;
 
-  const tradeReturns = trades.map(t => t.pnlPercent);
-  let sharpeRatio = 0;
-  if (tradeReturns.length >= 2) {
-    const mean = tradeReturns.reduce((s, r) => s + r, 0) / tradeReturns.length;
-    const variance = tradeReturns.reduce((s, r) => s + (r - mean) ** 2, 0) / (tradeReturns.length - 1);
-    const stdDev = Math.sqrt(variance);
-    sharpeRatio = stdDev > 0 ? Math.round((mean / stdDev) * 100) / 100 : 0;
-  }
+  const sharpeRatio = sharpeFromTrades(trades);
 
   // Drawdown is computed against running peak equity, comparing to the bar's
   // intrabar worst (using bar low for longs / high for shorts). This matches

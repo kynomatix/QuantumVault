@@ -2,6 +2,8 @@ import { workerData, parentPort } from "worker_threads";
 import { runBacktest, compilePine, createSharedArrays, type OHLCV, type PinePlan, type PineSharedArrays } from "./engine";
 import type { LabPineInput, LabBacktestResult, LabJobProgress, LabCheckpoint, GuidedInsights } from "@shared/schema";
 import { makeRng, hashStringToSeed, deriveComboSeed, deriveConfigSeed, deriveStageSeed, type SeededRng } from "./rng";
+import { sharpeFromTrades, robustScore, oosBoundaryMs, computeWindowMetrics, robustnessRank } from "./metrics";
+import { runPineParityTest } from "./pine/index";
 
 // Module-level seeded RNG. Reseeded per (job, combo) inside run() so that
 // optimizer behavior is fully reproducible from (jobSeed, combo) regardless
@@ -29,6 +31,12 @@ interface WorkerInput {
     pineScript?: string;
     strategyId?: number;
     engineType?: string;
+    slippage?: number;
+    // Validity (Task 188): fixed config date range + holdout fraction. Used to
+    // derive an absolute, resume-stable IS/OOS boundary timestamp in the worker.
+    startDate?: string;
+    endDate?: string;
+    outOfSampleFraction?: number;
   };
   candlesByCombo: Record<string, OHLCV[]>;
   resumeCheckpoint?: LabCheckpoint;
@@ -63,7 +71,7 @@ type WorkerMessage =
   | { type: "partial-checkpoint"; combo: string; stage: "random" | "refine" | "deep" | "coordinate"; iteration: number; deepRound?: number; results: PartialResult[]; refineSeeds?: Record<string, any>[]; coordinateCompleted?: string[] }
   | { type: "combo-complete"; combo: string; results: LabBacktestResult[]; disposition?: { status: "ok" | "no-trades" | "data-unavailable"; reason?: string } }
   | { type: "best-discovery"; combo: string; stage: "deep"; deepRound: number; score: number; params: Record<string, any> }
-  | { type: "done"; results: LabBacktestResult[]; totalConfigsTested?: number }
+  | { type: "done"; results: LabBacktestResult[]; totalConfigsTested?: number; parityChecked?: boolean; parityMatch?: boolean; parityDiffs?: string[] }
   | { type: "error"; message: string; isResourceError?: boolean }
   // T005: per-slot peer<->lead random-search streaming.
   | { type: "slot-result"; combo: string; slot: number; result: LiteBacktestResult | null }
@@ -119,16 +127,16 @@ function toLiteResult(r: LabBacktestResult | LiteBacktestResult | any): LiteBack
     totalTrades: r.totalTrades,
     params: r.params,
     avgBarsHeld,
-    sharpeRatio: r.sharpeRatio,
+    // Pine runtime does not compute Sharpe → fall back to the trade-level
+    // formula so the risk-adjusted objective has a real value for Pine results
+    // (native results already carry sharpeRatio; a real 0 is preserved by ??).
+    sharpeRatio: r.sharpeRatio ?? sharpeFromTrades(r.trades),
     compiledPath: r.compiledPath,
   };
 }
 
 function scoreLite(r: LiteBacktestResult): number {
-  const dd = r.maxDrawdownPercent;
-  const safeMaxLev = dd > 0 ? Math.min(20, 80 / dd) : 20;
-  const leveragedProfit = r.netProfitPercent * safeMaxLev;
-  return leveragedProfit * 100 + r.winRatePercent * 10 + r.profitFactor * 50 - dd * 50;
+  return robustScore(r);
 }
 
 function meetsFiltersLite(r: LiteBacktestResult, config: WorkerInput["config"]): boolean {
@@ -544,13 +552,6 @@ function jitterParams(baseParams: Record<string, any>, inputs: LabPineInput[], j
   return params;
 }
 
-function scoreResult(r: LabBacktestResult): number {
-  const dd = r.maxDrawdownPercent;
-  const safeMaxLev = dd > 0 ? Math.min(20, 80 / dd) : 20;
-  const leveragedProfit = r.netProfitPercent * safeMaxLev;
-  return leveragedProfit * 100 + r.winRatePercent * 10 + r.profitFactor * 50 - dd * 50;
-}
-
 function meetsFilters(result: LabBacktestResult, config: WorkerInput["config"]): boolean {
   if (result.totalTrades < config.minTrades) return false;
   if (result.maxDrawdownPercent > config.maxDrawdownCap) return false;
@@ -575,7 +576,7 @@ interface CoordinateTuneContext {
   timeframe: string;
   inputs: LabPineInput[];
   config: WorkerInput["config"];
-  engineConfig: { initialCapital: number; commission: number; positionSize: number; processOrdersOnClose?: boolean; strategyId?: number };
+  engineConfig: { initialCapital: number; commission: number; positionSize: number; processOrdersOnClose?: boolean; strategyId?: number; slippage?: number };
   seedResult: LiteBacktestResult;
   seedScore: number;
   testedSignatures: Set<string>;
@@ -896,6 +897,24 @@ function trimResult(r: LabBacktestResult): LabBacktestResult {
   return { ...r, trades, equityCurve };
 }
 
+// Validity (Task 188): attach IS/OOS window metrics to a FINALIZED full-window
+// result by partitioning its own trades (no engine re-run). No-op when the
+// holdout is inactive for this combo (full-window only) or the result has no
+// trades → legacy/short-window combos keep clean primary-only rows. Mutates +
+// returns the same object (called right after trimResult).
+function attachWindowMetrics(
+  result: LabBacktestResult,
+  oosBoundary: number | null,
+  useSplit: boolean,
+  initialCapital: number,
+): LabBacktestResult {
+  if (!useSplit || oosBoundary == null || !result.trades || result.trades.length === 0) return result;
+  const { is, oos } = computeWindowMetrics(result.trades, oosBoundary, initialCapital);
+  result.is = is;
+  result.oos = oos;
+  return result;
+}
+
 let aborted = false;
 
 // T005: lead-worker state for receiving peer per-slot results during the
@@ -952,6 +971,12 @@ async function run() {
   let coordinateTotalTests = 0;
   const inputs = config.parsedInputs;
 
+  // Validity (Task 188): absolute IS/OOS boundary timestamp (ms), derived ONCE
+  // from the fixed config date range. Identical for every combo; null disables
+  // the holdout (legacy runs / holdout off → full-window everywhere). Derived
+  // from fixed config (not candle count) so a resumed run picks the same split.
+  const oosBoundary = oosBoundaryMs(config.startDate, config.endDate, config.outOfSampleFraction);
+
   let pinePlan: PinePlan | undefined;
   if (config.pineScript) {
     try {
@@ -961,6 +986,15 @@ async function run() {
       return;
     }
   }
+
+  // Fidelity (Task 188): engine self-consistency (compiled vs interpreter),
+  // checked once per traded Pine combo during finalize and aggregated to the
+  // run. Native engines (sbr/ar38) have no compiled/interpreter split → never
+  // checked, so parityChecked stays false and the run records NULL parity
+  // (an honest "not applicable", never a false "passed").
+  let parityChecked = false;
+  let parityMatch = true;
+  const parityDiffs: string[] = [];
 
   const combos: { ticker: string; timeframe: string }[] = [];
   for (const ticker of config.tickers) {
@@ -1026,17 +1060,40 @@ async function run() {
 
     tickerProgress[key] = { status: "running" };
 
-    const candles = candlesByCombo[key];
-    if (!candles || candles.length < 100) {
+    const fullCandles = candlesByCombo[key];
+    if (!fullCandles || fullCandles.length < 100) {
       // Data-unavailable combo (e.g. a symbol/timeframe with no fetchable
       // candles). Report a clear terminal disposition so finalization treats
       // this as a legitimate empty combo rather than a missing-coverage gap
       // (which used to wedge the run into a pause→pump spam loop).
       tickerProgress[key] = { status: "complete", best: 0 };
       completedCombos.add(key);
-      send({ type: "combo-complete", combo: key, results: [], disposition: { status: "data-unavailable", reason: `No candle data available (${candles?.length ?? 0} candles fetched)` } });
+      send({ type: "combo-complete", combo: key, results: [], disposition: { status: "data-unavailable", reason: `No candle data available (${fullCandles?.length ?? 0} candles fetched)` } });
       continue;
     }
+
+    // Validity (Task 188): OOS holdout. SEARCH/SELECT runs on the in-sample HEAD
+    // slice (candles up to oosBoundary) so the optimizer NEVER sees the OOS tail
+    // — the real overfit fix. FINALIZE re-runs survivors on the full window and
+    // partitions trades into IS/OOS metrics. The split is by absolute TIMESTAMP
+    // (resume-stable), and falls back to full-window for THIS combo when the IS
+    // head is too short to search on (rare; tiny datasets). MIN_IS_BARS mirrors
+    // the data-unavailable floor so search always has signal.
+    const MIN_IS_BARS = 100;
+    const splitIdx = oosBoundary != null
+      ? fullCandles.findIndex(c => Number(c.time) >= oosBoundary)
+      : -1;
+    const useSplit = splitIdx >= MIN_IS_BARS && (fullCandles.length - splitIdx) >= 1;
+    // Diagnostic: holdout was requested but this combo can't split (IS head too
+    // short — e.g. a late-listing asset whose data starts after startDate). It
+    // silently runs full-window; log so it isn't an invisible robustness gap.
+    if (oosBoundary != null && !useSplit) {
+      console.log(`[QuantumLab] OOS holdout: combo ${key} falls back to full-window (IS head too short: splitIdx=${splitIdx}, candles=${fullCandles.length})`);
+    }
+    // `candles` is the SEARCH working set: all existing search stages reference
+    // it transparently, so rebinding it to the IS slice routes every stage
+    // (random/peer/refine/deep/coordinate) onto in-sample data with no churn.
+    const candles = useSplit ? fullCandles.slice(0, splitIdx) : fullCandles;
 
     const engineConfig = {
       initialCapital: 1000,
@@ -1046,9 +1103,17 @@ async function run() {
       pinePlan,
       strategyId: config.strategyId,
       engineType: config.engineType,
+      slippage: config.slippage,
     };
 
+    // Search uses the IS-window shared arrays (built from `candles` = IS slice).
+    // Finalize needs its OWN full-window shared arrays — passing IS shared arrays
+    // against the full candle array (or vice-versa) silently corrupts indicator
+    // values (THE main trap). When there's no split they're the same object.
     const sharedArrays = pinePlan ? createSharedArrays(candles) : undefined;
+    const fullSharedArrays = !useSplit
+      ? sharedArrays
+      : (pinePlan ? createSharedArrays(fullCandles) : undefined);
 
     // T005: assigned slot indices for this worker. When the pool runs in
     // per-slot mode, slotsPerComboMap[key] is the round-robin subset of
@@ -1158,10 +1223,35 @@ async function run() {
       const topLites = tuneResult.results.sort((a, b) => scoreLite(b) - scoreLite(a)).slice(0, 10);
       // Only surface results that actually traded — a zero-trade result has no
       // trades/equityCurve and must not be written as a misleading "clean zero".
+      // Finalize on the FULL window (fullCandles + fullSharedArrays), then split
+      // trades into IS/OOS metrics and re-rank by the OOS-dominant robustness
+      // score (amendment #4) — the IS-search top-10 are re-judged on OOS here.
+      // attachWindowMetrics MUST run BEFORE trimResult: trim drops the EARLIEST
+      // trades (slice(-maxTrades)) — exactly the IS partition — so partitioning
+      // a trimmed list would corrupt is/oos on high-trade-count configs. trim's
+      // {...r} spread preserves the attached is/oos fields.
       const topForCombo = topLites
-        .map(lite => trimResult(runBacktest(candles, lite.params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache)))
-        .filter(r => (r.totalTrades ?? 0) > 0);
+        .map(lite => trimResult(attachWindowMetrics(
+          runBacktest(fullCandles, lite.params, combo.ticker, combo.timeframe, engineConfig, fullSharedArrays, sharedIndicatorCache),
+          oosBoundary, useSplit, engineConfig.initialCapital,
+        )))
+        .filter(r => (r.totalTrades ?? 0) > 0)
+        .sort((a, b) => robustnessRank(b) - robustnessRank(a));
       allResults.push(...topForCombo);
+      // Fidelity (Task 188): engine self-consistency for this Pine combo's best
+      // config on the FULL window. Aggregated to the run. Native engines skip.
+      if (pinePlan && topForCombo.length > 0) {
+        try {
+          const pr = runPineParityTest(pinePlan, fullCandles, topForCombo[0].params, combo.ticker, combo.timeframe, engineConfig);
+          parityChecked = true;
+          if (!pr.match) {
+            parityMatch = false;
+            for (const d of pr.diffs.slice(0, 3)) parityDiffs.push(`${combo.ticker} ${combo.timeframe}: ${d}`);
+          }
+        } catch (e: any) {
+          console.log(`[QuantumLab] parity check error ${combo.ticker} ${combo.timeframe}: ${e.message}`);
+        }
+      }
       const coordDisposition = topForCombo.length > 0
         ? { status: "ok" as const }
         : { status: "no-trades" as const, reason: "No parameter set met the minimum-trades filter" };
@@ -1585,9 +1675,34 @@ async function run() {
     for (let fi = 0; fi < topLitesForCombo.length; fi++) {
       const lite = topLitesForCombo[fi];
       sendHeartbeat(jobId, `Finalizing ${combo.ticker.split("/")[0]} ${combo.timeframe} — ${fi + 1}/${topLitesForCombo.length}`, globalCurrent, grandTotal, startTime, tickerProgress);
-      topForCombo.push(trimResult(runBacktest(candles, lite.params, combo.ticker, combo.timeframe, engineConfig, sharedArrays, sharedIndicatorCache)));
+      // Finalize on the FULL window (fullCandles + fullSharedArrays), then split
+      // trades into IS/OOS metrics. Primary cols stay full-period (headline).
+      // attachWindowMetrics BEFORE trimResult — trim drops the earliest (IS)
+      // trades, so partitioning must happen on the full trade list first.
+      topForCombo.push(trimResult(attachWindowMetrics(
+        runBacktest(fullCandles, lite.params, combo.ticker, combo.timeframe, engineConfig, fullSharedArrays, sharedIndicatorCache),
+        oosBoundary, useSplit, engineConfig.initialCapital,
+      )));
     }
+    // Re-rank by the OOS-dominant robustness score (amendment #4): IS-search
+    // top-10 re-judged on out-of-sample before they become the combo's winners.
+    topForCombo.sort((a, b) => robustnessRank(b) - robustnessRank(a));
     allResults.push(...topForCombo);
+
+    // Fidelity (Task 188): engine self-consistency for this Pine combo's best
+    // config on the FULL window. Aggregated to the run. Native engines skip.
+    if (pinePlan && topForCombo.length > 0) {
+      try {
+        const pr = runPineParityTest(pinePlan, fullCandles, topForCombo[0].params, combo.ticker, combo.timeframe, engineConfig);
+        parityChecked = true;
+        if (!pr.match) {
+          parityMatch = false;
+          for (const d of pr.diffs.slice(0, 3)) parityDiffs.push(`${combo.ticker} ${combo.timeframe}: ${d}`);
+        }
+      } catch (e: any) {
+        console.log(`[QuantumLab] parity check error ${combo.ticker} ${combo.timeframe}: ${e.message}`);
+      }
+    }
 
     const disposition = topForCombo.length > 0
       ? { status: "ok" as const }
@@ -1599,7 +1714,11 @@ async function run() {
     delete candlesByCombo[key];
   }
 
-  allResults.sort((a, b) => scoreResult(b) - scoreResult(a));
+  // Global cross-combo ranking uses the same OOS-dominant robustness score so
+  // the run's overall "best" reflects out-of-sample robustness, not IS-fit.
+  // Combos without a holdout (legacy/short) get a flat robustScore*0.75 demotion
+  // (see robustnessRank) → consistent ordering whether or not OOS is present.
+  allResults.sort((a, b) => robustnessRank(b) - robustnessRank(a));
 
   const finalTotal = config.coordinateTune ? coordinateTotalTests : grandTotal;
   send({ type: "progress", data: {
@@ -1613,7 +1732,14 @@ async function run() {
     tickerProgress,
   }});
 
-  send({ type: "done", results: allResults, totalConfigsTested: config.coordinateTune ? coordinateTotalTests : undefined });
+  send({
+    type: "done",
+    results: allResults,
+    totalConfigsTested: config.coordinateTune ? coordinateTotalTests : undefined,
+    parityChecked,
+    parityMatch: parityChecked ? parityMatch : undefined,
+    parityDiffs: parityDiffs.slice(0, 10),
+  });
 }
 
 process.on("uncaughtException", (err: Error) => {

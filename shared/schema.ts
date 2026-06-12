@@ -1059,6 +1059,18 @@ export const labOptimizationRuns = pgTable("lab_optimization_runs", {
   checkpoint: jsonb("checkpoint"),
   queueOrder: integer("queue_order"),
   configSnapshot: jsonb("config_snapshot"),
+  // Validity (Task 188): out-of-sample holdout fraction actually used for this
+  // run (0..0.9). NULL = legacy run (no holdout). Stored explicitly for display;
+  // the worker reads it from configSnapshot so resume stays window-consistent.
+  oosFraction: real("oos_fraction"),
+  // Fidelity (Task 188): per-side slippage (fraction of notional) charged this
+  // run. NULL = legacy run (no friction record).
+  slippage: real("slippage"),
+  // Fidelity (Task 188): run-level engine self-consistency (compiled vs
+  // interpreter), aggregated across Pine combos. NULL = not evaluated (native
+  // engines, or legacy run). parityDiffs holds a small sample of divergences.
+  parityMatch: boolean("parity_match"),
+  parityDiffs: jsonb("parity_diffs").$type<string[]>(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   completedAt: timestamp("completed_at"),
 });
@@ -1093,6 +1105,13 @@ export const labOptimizationResults = pgTable("lab_optimization_results", {
   trades: jsonb("trades"),
   equityCurve: jsonb("equity_curve"),
   sharpeRatio: real("sharpe_ratio"),
+  // Validity (Task 188): in-sample / out-of-sample partition metrics. NULL on
+  // legacy rows and on holdout-disabled runs. Primary columns above remain the
+  // FULL-period numbers (unchanged headline + equity curve); these add the
+  // robustness story (the optimizer fit on isMetrics' window and is validated
+  // on oosMetrics' window). See LabWindowMetrics / LabOosMetrics.
+  isMetrics: jsonb("is_metrics").$type<LabWindowMetrics>(),
+  oosMetrics: jsonb("oos_metrics").$type<LabOosMetrics>(),
 });
 
 export const labInsightsReports = pgTable("lab_insights_reports", {
@@ -1197,6 +1216,14 @@ export interface LabOptimizationConfig {
   useInsights?: boolean;
   deepSearch?: boolean;
   coordinateTune?: boolean;
+  // Validity (Task 188): out-of-sample holdout fraction (0..0.9). The optimizer
+  // searches/selects on the in-sample head slice and validates on the OOS tail.
+  // 0/undefined disables the split (legacy full-window behavior). Drives resume
+  // window selection via the run's config snapshot.
+  outOfSampleFraction?: number;
+  // Fidelity (Task 188): per-side slippage as a fraction of notional (same units
+  // as commission). Charged round-trip at close. Undefined → engine default (0).
+  slippage?: number;
 }
 
 export interface LabTradeRecord {
@@ -1209,6 +1236,29 @@ export interface LabTradeRecord {
   pnlDollar: number;
   exitReason: string;
   barsHeld: number;
+}
+
+// Validity (Task 188): trade-level metrics for an in-sample or out-of-sample
+// partition. maxDrawdownPercent here is APPROXIMATE — computed from the per-trade
+// equity path (close-to-close on trade boundaries), NOT intrabar, because the
+// partition is derived by splitting the full run's trade list by entry time and
+// has no intrabar equity to walk. Net profit IS exact: sizing is fixed-notional
+// (engine charges qty*positionSize; equity does not compound), so summing
+// pnlDollar / initialCapital matches the engine's netProfitPercent semantics.
+export interface LabWindowMetrics {
+  netProfitPercent: number;
+  winRatePercent: number;
+  maxDrawdownPercent: number;
+  profitFactor: number;
+  totalTrades: number;
+  sharpeRatio: number;
+}
+
+// Out-of-sample partition. `sufficient` is false when the OOS window had too few
+// bars or trades to conclude anything — surfaced as "insufficient" rather than a
+// misleading number (the optimizer never optimized on this window).
+export interface LabOosMetrics extends LabWindowMetrics {
+  sufficient: boolean;
 }
 
 export interface LabBacktestResult {
@@ -1224,6 +1274,14 @@ export interface LabBacktestResult {
   trades: LabTradeRecord[];
   equityCurve: { time: string; equity: number }[];
   compiledPath?: "compiled" | "interpreter";
+  // Validity (Task 188): in-sample vs out-of-sample partition. Populated only
+  // when the run used a holdout (oosFraction > 0) and the combo produced trades;
+  // legacy / holdout-disabled runs leave them undefined.
+  is?: LabWindowMetrics;
+  oos?: LabOosMetrics;
+  // Fidelity (Task 188): per-combo engine self-consistency (compiled vs
+  // interpreter), aggregated to run level for display. Pine strategies only.
+  parity?: { match: boolean; diffs: string[] };
 }
 
 export interface LabCheckpoint {
@@ -1399,4 +1457,6 @@ export const labOptimizationConfigSchema = z.object({
   useInsights: z.boolean().optional(),
   deepSearch: z.boolean().optional(),
   coordinateTune: z.boolean().optional(),
+  outOfSampleFraction: z.number().min(0).max(0.9).optional(),
+  slippage: z.number().min(0).optional(),
 });

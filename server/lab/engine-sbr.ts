@@ -1,6 +1,7 @@
 import type { LabTradeRecord, LabBacktestResult } from "@shared/schema";
 import * as ind from "./indicators";
 import type { OHLCV, EngineConfig } from "./engine";
+import { slippageCost } from "./friction";
 
 function p(params: Record<string, any>, name: string, defaultVal: any): any {
   return params[name] !== undefined ? params[name] : defaultVal;
@@ -197,6 +198,7 @@ export function runSbrBacktest(
   // Config
   const posSize    = config.positionSize   || 1000;
   const commission = config.commission     || 0.0005;
+  const slippage   = config.slippage       || 0;
   const initCap    = config.initialCapital || 1000;
 
   // Accounting
@@ -326,7 +328,8 @@ export function runSbrBacktest(
         const pnlPct    = dir === "long"
           ? (exitPrice - entryPrice) / entryPrice * 100
           : (entryPrice - exitPrice) / entryPrice * 100;
-        const pnlDollar = posSize * (pnlPct / 100) - 2 * posSize * commission;
+        const pnlDollar = posSize * (pnlPct / 100) - 2 * posSize * commission
+          - slippageCost(1, posSize, slippage, exitReason);
         equity  += pnlDollar;
         peakEq   = Math.max(peakEq, equity);
         maxDD    = Math.max(maxDD, (peakEq - equity) / peakEq * 100);
@@ -415,7 +418,8 @@ export function runSbrBacktest(
     const pnlPct    = position.dir === "long"
       ? (lastClose - position.entryPrice) / position.entryPrice * 100
       : (position.entryPrice - lastClose) / position.entryPrice * 100;
-    const pnlDollar = posSize * (pnlPct / 100) - 2 * posSize * commission;
+    const pnlDollar = posSize * (pnlPct / 100) - 2 * posSize * commission
+      - slippageCost(1, posSize, slippage, "Open Position");
     equity += pnlDollar;
     trades.push({
       entryTime:  new Date(position.entryTime).toISOString(),

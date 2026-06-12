@@ -2,6 +2,7 @@ import { Worker } from "worker_threads";
 import { EventEmitter } from "events";
 import { availableParallelism } from "os";
 import type { LabBacktestResult } from "@shared/schema";
+import { robustnessRank } from "./metrics";
 
 // .local/session_plan.md T001b / T005 — WorkerPool.
 //
@@ -50,13 +51,6 @@ export interface PoolSpawnArgs {
   randomSeed: number;
 }
 
-function scoreFinal(r: LabBacktestResult): number {
-  const dd = r.maxDrawdownPercent;
-  const safeMaxLev = dd > 0 ? Math.min(20, 80 / dd) : 20;
-  const leveragedProfit = r.netProfitPercent * safeMaxLev;
-  return leveragedProfit * 100 + r.winRatePercent * 10 + r.profitFactor * 50 - dd * 50;
-}
-
 export class WorkerPool extends EventEmitter {
   public readonly poolSize: number;
   public readonly perSlot: boolean;
@@ -64,6 +58,13 @@ export class WorkerPool extends EventEmitter {
   private states: WorkerState[];
   private aggregatedResults: LabBacktestResult[] = [];
   private totalConfigsTested: number | undefined = undefined;
+  // T005: run-level Pine engine self-consistency (parity) aggregated across
+  // workers. parityCheckedAny = OR (any worker ran a parity check);
+  // parityMatchAll = AND across the workers that checked (one divergence fails
+  // the whole run); diffs concatenated and capped at 10 downstream.
+  private parityCheckedAny = false;
+  private parityMatchAll = true;
+  private parityDiffsAgg: string[] = [];
   private perWorkerProgress = new Map<number, { current: number; total: number; data: any }>();
   private terminated = false;
   private exitEmitted = false;
@@ -217,13 +218,25 @@ export class WorkerPool extends EventEmitter {
           if (typeof msg.totalConfigsTested === "number") {
             this.totalConfigsTested = (this.totalConfigsTested ?? 0) + msg.totalConfigsTested;
           }
+          // T005: fold this worker's parity verdict into the run-level rollup.
+          if (msg.parityChecked) {
+            this.parityCheckedAny = true;
+            if (msg.parityMatch === false) this.parityMatchAll = false;
+            if (Array.isArray(msg.parityDiffs)) this.parityDiffsAgg.push(...msg.parityDiffs);
+          }
           if (this.allFinished() && !this.doneEmitted) {
             this.doneEmitted = true;
-            this.aggregatedResults.sort((a, b) => scoreFinal(b) - scoreFinal(a));
+            // OOS-dominant cross-combo ordering (T003/T004) — must match the
+            // worker's per-combo robustnessRank, NOT the retired leveraged-profit
+            // score, or the final allResults sort would reintroduce overfit bias.
+            this.aggregatedResults.sort((a, b) => robustnessRank(b) - robustnessRank(a));
             this.emit("message", {
               type: "done",
               results: this.aggregatedResults,
               totalConfigsTested: this.totalConfigsTested,
+              parityChecked: this.parityCheckedAny,
+              parityMatch: this.parityCheckedAny ? this.parityMatchAll : undefined,
+              parityDiffs: this.parityDiffsAgg.slice(0, 10),
             });
           }
           break;

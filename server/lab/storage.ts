@@ -9,17 +9,14 @@ import {
 import { db } from "../db";
 import { eq, desc, inArray, isNull, and, or, asc, sql } from "drizzle-orm";
 import { randomUUID } from "crypto";
+import { sharpeFromTrades } from "./metrics";
 
 const MAX_CONCURRENT_JOBS = 1;
 
+// Delegates to the shared single-source-of-truth helper so the persistence
+// fallback Sharpe is identical to the engine + optimizer ones.
 function calcSharpeFromTrades(trades: unknown): number {
-  if (!Array.isArray(trades) || trades.length < 2) return 0;
-  const returns = trades.map((t: any) => Number(t?.pnlPercent ?? 0));
-  const n = returns.length;
-  const mean = returns.reduce((s, r) => s + r, 0) / n;
-  const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / (n - 1);
-  const stdDev = Math.sqrt(variance);
-  return stdDev > 0 ? Math.round((mean / stdDev) * 100) / 100 : 0;
+  return sharpeFromTrades(trades);
 }
 
 export interface LabJob {
@@ -415,6 +412,8 @@ export class LabDatabaseStorage implements ILabStorage {
       params: r.params,
       trades: r.trades,
       equityCurve: r.equityCurve,
+      isMetrics: r.is,
+      oosMetrics: r.oos,
     }));
 
     const batchSize = 50;
@@ -471,6 +470,8 @@ export class LabDatabaseStorage implements ILabStorage {
         params: r.params,
         trades: r.trades,
         equityCurve: r.equityCurve,
+        isMetrics: r.is,
+        oosMetrics: r.oos,
       }));
 
       const batchSize = 50;
@@ -743,6 +744,8 @@ export class LabDatabaseStorage implements ILabStorage {
       totalTrades: labOptimizationResults.totalTrades,
       sharpeRatio: labOptimizationResults.sharpeRatio,
       params: labOptimizationResults.params,
+      isMetrics: labOptimizationResults.isMetrics,
+      oosMetrics: labOptimizationResults.oosMetrics,
     }).from(labOptimizationResults)
       .where(inArray(labOptimizationResults.runId, completedRuns))
       .orderBy(desc(labOptimizationResults.netProfitPercent));
@@ -772,6 +775,8 @@ export class LabDatabaseStorage implements ILabStorage {
       totalTrades: r.totalTrades,
       sharpeRatio: r.sharpeRatio,
       params: r.params,
+      isMetrics: r.isMetrics,
+      oosMetrics: r.oosMetrics,
       levProfit: r._levProfit,
       leverage: r._lev,
     }));
