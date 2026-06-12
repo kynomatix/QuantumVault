@@ -28,6 +28,7 @@ import { parsePineScript } from "../lab/pine-parser";
 import { draftStrategy, improveStrategy } from "./creator";
 import { getCreatorModelCatalog, isSelectableModel } from "./models-catalog";
 import { LlmGatewayError } from "./router";
+import { startCreatorJob, getCreatorJob, CreatorJobConflictError } from "./creator-jobs";
 
 // Creator payloads are tiny (idea/insights are capped at 4KB in the gateway). Keep a
 // small per-route body limit — these routes are registered before the global parser.
@@ -80,6 +81,8 @@ function safeParse(pine: string): ReturnType<typeof parsePineScript> | null {
 
 export function registerCreatorRoutes(app: Express, sessionMiddleware: RequestHandler): void {
   const guards: RequestHandler[] = [sessionMiddleware, jsonParser, requireCreatorSession];
+  // The job-status poll carries no body, so it skips the JSON parser.
+  const getGuards: RequestHandler[] = [sessionMiddleware, requireCreatorSession];
 
   // --- BYO key management -------------------------------------------------------
   app.post("/api/lab/creator/key", ...guards, async (req: Request, res: Response) => {
@@ -157,11 +160,29 @@ export function registerCreatorRoutes(app: Express, sessionMiddleware: RequestHa
       const umk = getInteractiveUmk(r, res);
       if (!umk) return;
       keyBuf = decryptLlmApiKeyV3(umk, ciphertext, r.walletAddress);
+      // Capture the key as an (immutable) string the background job can hold, then
+      // zero the buffer in this request's finally. The LLM chain outlives the HTTP
+      // request, so it runs as a job and the client polls for the result. Zeroing the
+      // buffer here is safe — the string copy can't be zeroed anyway and is the only
+      // thing the job keeps; the request never holds the connection open.
+      const apiKey = keyBuf.toString("utf8");
+      const walletAddress = r.walletAddress as string;
 
-      const result = await draftStrategy({ idea, apiKey: keyBuf.toString("utf8"), walletAddress: r.walletAddress, model });
-      const parse = result.compileOk ? safeParse(result.pineScript) : null;
-      res.json({ ...result, parse });
+      const jobId = startCreatorJob(
+        walletAddress,
+        "draft",
+        "Could not draft a strategy. Please try again.",
+        async () => {
+          const result = await draftStrategy({ idea, apiKey, walletAddress, model });
+          const parse = result.compileOk ? safeParse(result.pineScript) : null;
+          return { ...result, parse };
+        },
+      );
+      res.status(202).json({ jobId });
     } catch (err: any) {
+      if (err instanceof CreatorJobConflictError) {
+        return res.status(409).json({ error: err.message, jobId: err.jobId });
+      }
       sendError(res, err, "Could not draft a strategy. Please try again.");
     } finally {
       if (keyBuf) keyBuf.fill(0);
@@ -205,21 +226,54 @@ export function registerCreatorRoutes(app: Express, sessionMiddleware: RequestHa
       const umk = getInteractiveUmk(r, res);
       if (!umk) return;
       keyBuf = decryptLlmApiKeyV3(umk, ciphertext, r.walletAddress);
+      // See /draft above for why the key is captured as a string and the buffer is
+      // zeroed here while the chain runs as a background job.
+      const apiKey = keyBuf.toString("utf8");
+      const walletAddress = r.walletAddress as string;
+      const currentPine = pine;
 
-      const result = await improveStrategy({
-        currentPine: pine,
-        insights,
-        apiKey: keyBuf.toString("utf8"),
-        walletAddress: r.walletAddress,
-        idea,
-        model,
-      });
-      const parse = result.compileOk ? safeParse(result.pineScript) : null;
-      res.json({ ...result, parse });
+      const jobId = startCreatorJob(
+        walletAddress,
+        "improve",
+        "Could not improve the strategy. Please try again.",
+        async () => {
+          const result = await improveStrategy({
+            currentPine,
+            insights,
+            apiKey,
+            walletAddress,
+            idea,
+            model,
+          });
+          const parse = result.compileOk ? safeParse(result.pineScript) : null;
+          return { ...result, parse };
+        },
+      );
+      res.status(202).json({ jobId });
     } catch (err: any) {
+      if (err instanceof CreatorJobConflictError) {
+        return res.status(409).json({ error: err.message, jobId: err.jobId });
+      }
       sendError(res, err, "Could not improve the strategy. Please try again.");
     } finally {
       if (keyBuf) keyBuf.fill(0);
     }
+  });
+
+  // --- Poll a draft/improve job ------------------------------------------------
+  // The generation chain runs in the background (see creator-jobs.ts); the client
+  // polls here until status flips to "done" or "error". Ownership is enforced so one
+  // wallet can't read another's job — 404 (not 403) so job existence isn't leaked.
+  app.get("/api/lab/creator/job/:jobId", ...getGuards, (req: Request, res: Response) => {
+    const r = req as any;
+    const job = getCreatorJob(req.params.jobId);
+    if (!job || job.walletAddress !== r.walletAddress) {
+      return res.status(404).json({ error: "That generation wasn't found — it may have expired. Try again." });
+    }
+    res.json({
+      status: job.status,
+      result: job.result ?? null,
+      error: job.error ?? null,
+    });
   });
 }

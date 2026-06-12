@@ -6007,6 +6007,57 @@ function cleanCreatorError(err: any): string {
   return body || "Something went wrong. Please try again.";
 }
 
+// /draft and /improve now return a job id immediately and run the LLM chain in the
+// background — the chain is too slow (1–2 min) to hold an HTTP request open without
+// the proxy reaping it. Poll the job until it settles. Stop immediately on a 404
+// (job expired / server restarted) rather than waiting out the cap.
+async function pollCreatorJob(jobId: string): Promise<CreatorDraft> {
+  const POLL_INTERVAL_MS = 2500;
+  const MAX_WAIT_MS = 10 * 60 * 1000; // safely above the worst-case chain (~7.5 min)
+  const MAX_CONSECUTIVE_FAILURES = 3; // ride out transient proxy/network blips
+  const startedAt = Date.now();
+  let consecutiveFailures = 0;
+  while (Date.now() - startedAt < MAX_WAIT_MS) {
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+
+    let res: Response;
+    try {
+      res = await fetch(`/api/lab/creator/job/${jobId}`, { credentials: "include" });
+    } catch {
+      // Network blip — the job keeps running server-side, so don't give up on the
+      // first failure (a retry would 409). Tolerate a few in a row, then bail.
+      if (++consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        throw new Error("Lost contact with the generation. Please try again.");
+      }
+      continue;
+    }
+
+    // 404 = job expired / server restarted: unrecoverable, stop immediately.
+    if (res.status === 404) {
+      throw new Error("That generation was lost (the server may have restarted). Please try again.");
+    }
+    // A transient 5xx / proxy hiccup is recoverable — the job is still running.
+    if (!res.ok) {
+      if (++consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        throw new Error("Lost contact with the generation. Please try again.");
+      }
+      continue;
+    }
+
+    consecutiveFailures = 0;
+    const job = (await safeResponseJson(res)) as {
+      status: "running" | "done" | "error";
+      result: CreatorDraft | null;
+      error: { message: string } | null;
+    };
+    if (job.status === "done" && job.result) return job.result;
+    if (job.status === "error") {
+      throw new Error(job.error?.message || "Strategy generation failed. Please try again.");
+    }
+  }
+  throw new Error("Strategy generation took too long. Please try again.");
+}
+
 const CREATOR_CAVEAT =
   "Backtests measure the past. They do not guarantee live results — markets change, " +
   "slippage and fees bite, and an overfit strategy can look great here and still lose real money.";
@@ -6176,7 +6227,8 @@ function CreatorPanel({ strategies, onUseStrategy }: {
   const draftMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", "/api/lab/creator/draft", { idea: idea.trim(), model: selectedModel || undefined });
-      return safeResponseJson(res) as Promise<CreatorDraft>;
+      const { jobId } = (await safeResponseJson(res)) as { jobId: string };
+      return pollCreatorJob(jobId);
     },
     onSuccess: (d) => {
       setDraft(d);
@@ -6194,7 +6246,8 @@ function CreatorPanel({ strategies, onUseStrategy }: {
       else if (draft) body.currentPine = draft.pineScript;
       else throw new Error("Generate or pick a strategy to improve first.");
       const res = await apiRequest("POST", "/api/lab/creator/improve", body);
-      return safeResponseJson(res) as Promise<CreatorDraft>;
+      const { jobId } = (await safeResponseJson(res)) as { jobId: string };
+      return pollCreatorJob(jobId);
     },
     onSuccess: (d) => {
       setDraft(d);
