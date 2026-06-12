@@ -151,6 +151,10 @@ export interface IStorage {
   getOrCreateWallet(address: string): Promise<Wallet>;
   updateWalletAgentKeys(address: string, agentPublicKey: string, agentPrivateKeyEncrypted: string): Promise<void>;
   updateWalletAgentKeyV3(address: string, agentPrivateKeyEncryptedV3: string): Promise<void>;
+  setWalletLlmApiKey(address: string, encryptedV3: string, last4: string, provider: string): Promise<void>;
+  clearWalletLlmApiKey(address: string): Promise<void>;
+  getWalletLlmApiKeyMeta(address: string): Promise<{ hasKey: boolean; last4: string | null; provider: string | null; updatedAt: Date | null }>;
+  getWalletLlmApiKeyCiphertext(address: string): Promise<string | null>;
   updateWalletWebhookSecret(address: string, userWebhookSecret: string): Promise<void>;
   updateWallet(address: string, updates: Partial<InsertWallet>): Promise<Wallet | undefined>;
   addRecoveredOrphanIndices(address: string, indices: number[]): Promise<void>;
@@ -596,6 +600,49 @@ export class DatabaseStorage implements IStorage {
     await db.update(wallets).set({ 
       agentPrivateKeyEncryptedV3 
     }).where(eq(wallets.address, address));
+  }
+
+  // --- QuantumLab AI Strategy Creator (Task 187): BYO LLM key (V3-encrypted) ---
+  // The ciphertext column is never selected into any client-facing payload; only
+  // the meta reader (last4/provider/updatedAt) is. getWalletLlmApiKeyCiphertext is
+  // server-internal — its result is decrypted transiently and discarded.
+  async setWalletLlmApiKey(address: string, encryptedV3: string, last4: string, provider: string): Promise<void> {
+    await db.update(wallets).set({
+      llmApiKeyEncrypted: encryptedV3,
+      llmApiKeyLast4: last4,
+      llmApiKeyProvider: provider,
+      llmApiKeyUpdatedAt: new Date(),
+    }).where(eq(wallets.address, address));
+  }
+
+  async clearWalletLlmApiKey(address: string): Promise<void> {
+    await db.update(wallets).set({
+      llmApiKeyEncrypted: null,
+      llmApiKeyLast4: null,
+      llmApiKeyProvider: null,
+      llmApiKeyUpdatedAt: null,
+    }).where(eq(wallets.address, address));
+  }
+
+  async getWalletLlmApiKeyMeta(address: string): Promise<{ hasKey: boolean; last4: string | null; provider: string | null; updatedAt: Date | null }> {
+    const [row] = await db.select({
+      enc: wallets.llmApiKeyEncrypted,
+      last4: wallets.llmApiKeyLast4,
+      provider: wallets.llmApiKeyProvider,
+      updatedAt: wallets.llmApiKeyUpdatedAt,
+    }).from(wallets).where(eq(wallets.address, address)).limit(1);
+    return {
+      hasKey: !!row?.enc,
+      last4: row?.last4 ?? null,
+      provider: row?.provider ?? null,
+      updatedAt: row?.updatedAt ?? null,
+    };
+  }
+
+  async getWalletLlmApiKeyCiphertext(address: string): Promise<string | null> {
+    const [row] = await db.select({ enc: wallets.llmApiKeyEncrypted })
+      .from(wallets).where(eq(wallets.address, address)).limit(1);
+    return row?.enc ?? null;
   }
 
   async updateWalletWebhookSecret(address: string, userWebhookSecret: string): Promise<void> {

@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Slider } from "@/components/ui/slider";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -31,6 +32,7 @@ import {
   X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
   History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown, FilePlus2,
   Shield, AlertTriangle, DollarSign, Fuel, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet, Trophy, Filter, Crosshair, ListOrdered, GripVertical, RefreshCw,
+  Sparkles, Wand2, KeyRound,
 } from "lucide-react";
 import {
   ResponsiveContainer, Area, AreaChart, CartesianGrid, XAxis, YAxis,
@@ -51,7 +53,7 @@ import type {
 } from "@shared/schema";
 import { LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES } from "@shared/schema";
 
-type MainTab = "main" | "results" | "heatmap" | "insights";
+type MainTab = "main" | "results" | "heatmap" | "insights" | "creator";
 const CONSERVATIVE_FALLBACK = 5;
 
 type SortKey = "netProfitPercent" | "levProfit" | "winRatePercent" | "maxDrawdownPercent" | "profitFactor" | "totalTrades" | "sharpeRatio";
@@ -159,6 +161,7 @@ interface LabNavItem {
 
 const labNavItems: LabNavItem[] = [
   { id: "main", label: "Main", icon: Settings2 },
+  { id: "creator", label: "Creator", icon: Sparkles },
   { id: "results", label: "Results", icon: History },
   { id: "heatmap", label: "Heatmap", icon: Grid3X3 },
   { id: "insights", label: "Insights", icon: Lightbulb },
@@ -1061,6 +1064,24 @@ export default function QuantumLab() {
         return <HeatmapPanel onViewRun={(runId, ticker, timeframe) => { setActiveHistoryRunId(runId); setTargetCombo({ ticker, timeframe }); setMainTab("results"); }} onRefine={(jobId, newRunId, queued) => { if (queued && newRunId) { pollForQueuedRun(newRunId); } else { handleJobStarted(jobId, newRunId); } setMainTab("main"); }} />;
       case "insights":
         return <InsightsPanel />;
+      case "creator":
+        return (
+          <CreatorPanel
+            strategies={strategies ?? []}
+            onUseStrategy={(pine, parse) => {
+              setStrategyId(null);
+              setSelectedStrategy(null);
+              setCode(pine);
+              if (parse) {
+                setParsedResult(parse);
+                setStrategyName(parse.strategyName || "");
+              } else {
+                setParsedResult(null);
+              }
+              setMainTab("main");
+            }}
+          />
+        );
       default:
         return null;
     }
@@ -5563,6 +5584,359 @@ function OptimizerGuide() {
         </div>
       </PopoverContent>
     </Popover>
+  );
+}
+
+interface CreatorDraft {
+  pineScript: string;
+  compileOk: boolean;
+  compileError: string | null;
+  criticNotes: string;
+  modelUsed: string;
+  attempts: number;
+  caveat: string;
+  defaults: Record<string, any>;
+  parse: LabPineParseResult | null;
+}
+
+interface CreatorKeyMeta {
+  hasKey: boolean;
+  last4: string | null;
+  provider: string | null;
+  updatedAt: string | null;
+}
+
+function cleanCreatorError(err: any): string {
+  const raw = (err?.message ?? String(err ?? "")).trim();
+  // apiRequest throws as `${status}: ${bodyText}` — strip the status and pull out {error}.
+  const m = raw.match(/^\d{3}:\s*([\s\S]*)$/);
+  const body = m ? m[1].trim() : raw;
+  if (body.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(body);
+      if (typeof parsed?.error === "string") return parsed.error;
+      if (typeof parsed?.message === "string") return parsed.message;
+    } catch {
+      /* fall through */
+    }
+  }
+  return body || "Something went wrong. Please try again.";
+}
+
+const CREATOR_CAVEAT =
+  "Backtests measure the past. They do not guarantee live results — markets change, " +
+  "slippage and fees bite, and an overfit strategy can look great here and still lose real money.";
+
+// Keep client text inputs safely under the server's MAX_IDEA_CHARS (4096) cap.
+const CREATOR_MAX_TEXT = 4000;
+
+function CreatorPanel({ strategies, onUseStrategy }: {
+  strategies: LabStrategy[];
+  onUseStrategy: (pine: string, parse: LabPineParseResult | null) => void;
+}) {
+  const { toast } = useToast();
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [editingKey, setEditingKey] = useState(false);
+  const [idea, setIdea] = useState("");
+  const [draft, setDraft] = useState<CreatorDraft | null>(null);
+  const [insightsText, setInsightsText] = useState("");
+  const [improveStrategyId, setImproveStrategyId] = useState<number | null>(null);
+  const [pullingInsights, setPullingInsights] = useState(false);
+
+  const { data: keyMeta, isLoading: keyLoading } = useQuery<CreatorKeyMeta>({
+    queryKey: ["/api/lab/creator/key"],
+    queryFn: async () => {
+      const res = await fetch("/api/lab/creator/key");
+      if (!res.ok) return { hasKey: false, last4: null, provider: null, updatedAt: null };
+      return safeResponseJson(res);
+    },
+  });
+
+  const saveKeyMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/lab/creator/key", { apiKey: apiKeyInput.trim() });
+      return safeResponseJson(res);
+    },
+    onSuccess: () => {
+      setApiKeyInput("");
+      setEditingKey(false);
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/creator/key"] });
+      toast({ title: "API key saved", description: "Your OpenRouter key is encrypted and stored only for you." });
+    },
+    onError: (err: any) => toast({ title: "Couldn't save key", description: cleanCreatorError(err), variant: "destructive" }),
+  });
+
+  const clearKeyMutation = useMutation({
+    mutationFn: async () => { await apiRequest("DELETE", "/api/lab/creator/key"); },
+    onSuccess: () => {
+      setEditingKey(false);
+      setApiKeyInput("");
+      queryClient.invalidateQueries({ queryKey: ["/api/lab/creator/key"] });
+      toast({ title: "API key removed" });
+    },
+    onError: (err: any) => toast({ title: "Couldn't remove key", description: cleanCreatorError(err), variant: "destructive" }),
+  });
+
+  const draftMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/lab/creator/draft", { idea: idea.trim() });
+      return safeResponseJson(res) as Promise<CreatorDraft>;
+    },
+    onSuccess: (d) => {
+      setDraft(d);
+      if (d.compileOk) toast({ title: "Strategy drafted", description: `Compiles cleanly · ${d.modelUsed.split("/").pop()}` });
+      else toast({ title: "Drafted — but it didn't compile", description: "Review it below, or use Improve to ask the AI to fix it.", variant: "destructive" });
+    },
+    onError: (err: any) => toast({ title: "Generation failed", description: cleanCreatorError(err), variant: "destructive" }),
+  });
+
+  const improveMutation = useMutation({
+    mutationFn: async () => {
+      const body: any = { insights: insightsText.trim() };
+      if (improveStrategyId) body.strategyId = improveStrategyId;
+      else if (draft) body.currentPine = draft.pineScript;
+      else throw new Error("Generate or pick a strategy to improve first.");
+      const res = await apiRequest("POST", "/api/lab/creator/improve", body);
+      return safeResponseJson(res) as Promise<CreatorDraft>;
+    },
+    onSuccess: (d) => {
+      setDraft(d);
+      toast({ title: "Improved draft ready", description: d.compileOk ? "Compiles cleanly." : "Didn't compile — check the error below." });
+    },
+    onError: (err: any) => toast({ title: "Improve failed", description: cleanCreatorError(err), variant: "destructive" }),
+  });
+
+  const pullInsights = async () => {
+    if (!improveStrategyId) { toast({ title: "Pick a saved strategy first", variant: "destructive" }); return; }
+    const strat = strategies.find(s => s.id === improveStrategyId);
+    if (!strat) return;
+    setPullingInsights(true);
+    try {
+      const inputs = (strat.parsedInputs || []) as LabPineInput[];
+      const result = await generateAndSaveInsightsReport(improveStrategyId, strat.name, inputs, null);
+      // The server already passes the current Pine separately, so omit it here and keep
+      // the report under the server's MAX_IDEA_CHARS (4096) cap.
+      const text = formatReportAsText(result.report);
+      setInsightsText(text.slice(0, CREATOR_MAX_TEXT));
+      toast({ title: "Backtest insights loaded", description: "Review/edit the notes, then click Improve." });
+    } catch (err: any) {
+      toast({ title: "No insights yet", description: err?.message || "Run a backtest on this strategy first.", variant: "destructive" });
+    } finally {
+      setPullingInsights(false);
+    }
+  };
+
+  const copyPine = () => {
+    if (!draft) return;
+    navigator.clipboard.writeText(draft.pineScript)
+      .then(() => toast({ title: "Pine Script copied" }))
+      .catch(() => toast({ title: "Couldn't copy", variant: "destructive" }));
+  };
+
+  const hasKey = !!keyMeta?.hasKey;
+  const ideaTooLong = idea.length > CREATOR_MAX_TEXT;
+  const insightsTooLong = insightsText.length > CREATOR_MAX_TEXT;
+  const busy = draftMutation.isPending || improveMutation.isPending;
+
+  return (
+    <div className="max-w-5xl mx-auto space-y-6 p-2 sm:p-6" data-testid="creator-panel">
+      <div className="flex items-center gap-3 mb-1">
+        <Sparkles className="w-6 h-6 text-violet-400" />
+        <div>
+          <h2 className="text-xl font-bold text-white">AI Strategy Creator</h2>
+          <p className="text-white/50 text-sm">Describe a trading idea in plain English — the AI drafts a backtestable Pine v6 strategy.</p>
+        </div>
+      </div>
+
+      {/* Persistent honest caveat */}
+      <Card className="bg-amber-500/10 border border-amber-500/30 p-3 flex items-start gap-2" data-testid="creator-caveat">
+        <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 flex-shrink-0" />
+        <p className="text-[12px] text-amber-200/90 leading-relaxed">{CREATOR_CAVEAT}</p>
+      </Card>
+
+      {/* API key management */}
+      <Card className="bg-white/5 border border-white/10 p-4 space-y-3" data-testid="creator-key-card">
+        <div className="flex items-center gap-2">
+          <KeyRound className="w-4 h-4 text-violet-400" />
+          <span className="font-semibold text-white text-sm">Your OpenRouter API key</span>
+        </div>
+        {keyLoading ? (
+          <div className="flex items-center gap-2 text-white/50 text-sm"><Loader2 className="w-4 h-4 animate-spin" /> Checking…</div>
+        ) : hasKey && !editingKey ? (
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm text-white/70" data-testid="text-key-status">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              <span>Key set</span>
+              <code className="px-1.5 py-0.5 rounded bg-black/40 text-white/60 text-[12px]">sk-or-…{keyMeta?.last4}</code>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant="secondary" onClick={() => setEditingKey(true)} data-testid="button-replace-key" className="bg-white/5 hover:bg-white/10 text-white/70">Replace</Button>
+              <Button size="sm" variant="secondary" onClick={() => clearKeyMutation.mutate()} disabled={clearKeyMutation.isPending} data-testid="button-clear-key" className="bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/20">
+                {clearKeyMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Trash2 className="w-3 h-3 mr-1" />}
+                Remove
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-[12px] text-white/50">
+              The Creator runs on your own OpenRouter account, so you control the spend. Get a key at{" "}
+              <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-violet-400 hover:underline" data-testid="link-openrouter-keys">openrouter.ai/keys</a>.
+              It's encrypted on our server and never shown again.
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                type="password"
+                value={apiKeyInput}
+                onChange={(e) => setApiKeyInput(e.target.value)}
+                placeholder="sk-or-v1-…"
+                className="flex-1 min-w-[220px] bg-black/40 border-white/10 text-white font-mono text-sm"
+                data-testid="input-api-key"
+              />
+              <Button size="sm" onClick={() => saveKeyMutation.mutate()} disabled={saveKeyMutation.isPending || !apiKeyInput.trim()} data-testid="button-save-key" className="bg-violet-600 hover:bg-violet-500 text-white">
+                {saveKeyMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Save className="w-3 h-3 mr-1" />}
+                Save key
+              </Button>
+              {hasKey && editingKey && (
+                <Button size="sm" variant="ghost" onClick={() => { setEditingKey(false); setApiKeyInput(""); }} data-testid="button-cancel-key" className="text-white/50 hover:text-white/80">Cancel</Button>
+              )}
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {/* Idea → Generate */}
+      <Card className="bg-white/5 border border-white/10 p-4 space-y-3" data-testid="creator-idea-card">
+        <div className="flex items-center gap-2">
+          <Wand2 className="w-4 h-4 text-violet-400" />
+          <span className="font-semibold text-white text-sm">Describe your strategy</span>
+        </div>
+        <Textarea
+          value={idea}
+          onChange={(e) => setIdea(e.target.value)}
+          placeholder={"e.g. Go long when the 50 EMA crosses above the 200 EMA and RSI is below 70. Exit when price closes below the 50 EMA or hits a 5% stop loss."}
+          className="min-h-[120px] bg-black/40 border-white/10 text-white/90 text-sm resize-y"
+          data-testid="input-idea"
+        />
+        <div className="flex items-center justify-between gap-2">
+          <span className={`text-[11px] ${ideaTooLong ? "text-red-400" : "text-white/40"}`} data-testid="text-idea-count">{idea.length} / {CREATOR_MAX_TEXT}</span>
+          <Button
+            onClick={() => draftMutation.mutate()}
+            disabled={!hasKey || !idea.trim() || ideaTooLong || busy}
+            data-testid="button-generate"
+            className="bg-violet-600 hover:bg-violet-500 text-white"
+          >
+            {draftMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Sparkles className="w-4 h-4 mr-1.5" />}
+            {draftMutation.isPending ? "Generating…" : "Generate strategy"}
+          </Button>
+        </div>
+        {!hasKey && !keyLoading && (
+          <p className="text-[12px] text-amber-300/80 flex items-center gap-1.5"><Info className="w-3.5 h-3.5" /> Add your OpenRouter key above to start generating.</p>
+        )}
+      </Card>
+
+      {/* Draft result */}
+      {draft && (
+        <Card className="bg-white/5 border border-white/10 overflow-hidden" data-testid="creator-draft-card">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-white/10">
+            <div className="flex items-center gap-2 flex-wrap">
+              {draft.compileOk ? (
+                <Badge className="bg-emerald-500/15 text-emerald-300 border border-emerald-500/30" data-testid="badge-compile-ok"><CheckCircle2 className="w-3 h-3 mr-1" /> Compiles</Badge>
+              ) : (
+                <Badge className="bg-red-500/15 text-red-300 border border-red-500/30" data-testid="badge-compile-fail"><XCircle className="w-3 h-3 mr-1" /> Compile error</Badge>
+              )}
+              <Badge variant="secondary" className="bg-white/10 text-white/60 text-[10px]" data-testid="badge-model">{draft.modelUsed.split("/").pop()}</Badge>
+              <Badge variant="secondary" className="bg-white/10 text-white/60 text-[10px]" data-testid="badge-attempts">{draft.attempts} {draft.attempts === 1 ? "pass" : "passes"}</Badge>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant="ghost" onClick={copyPine} data-testid="button-copy-pine" className="text-white/60 hover:text-white"><Copy className="w-3.5 h-3.5 mr-1" /> Copy</Button>
+              <Button
+                size="sm"
+                onClick={() => onUseStrategy(draft.pineScript, draft.compileOk ? draft.parse : null)}
+                data-testid="button-use-strategy"
+                className="bg-sky-500 hover:bg-sky-400 text-white"
+              >
+                <Play className="w-3.5 h-3.5 mr-1" /> Open in Setup &amp; Run
+              </Button>
+            </div>
+          </div>
+
+          {!draft.compileOk && draft.compileError && (
+            <div className="px-4 py-2.5 bg-red-500/10 border-b border-red-500/20 text-[12px] text-red-300 font-mono" data-testid="text-compile-error">{draft.compileError}</div>
+          )}
+
+          <div className="max-h-[360px] overflow-auto">
+            <pre className="text-[12px] leading-relaxed text-white/80 font-mono p-4 whitespace-pre-wrap" data-testid="text-draft-pine">{draft.pineScript}</pre>
+          </div>
+
+          {draft.criticNotes && (
+            <div className="px-4 py-3 border-t border-white/10 bg-violet-500/5">
+              <div className="flex items-center gap-2 mb-1.5">
+                <Lightbulb className="w-4 h-4 text-violet-400" />
+                <span className="text-sm font-semibold text-white">Reviewer notes</span>
+              </div>
+              <p className="text-[12px] text-white/70 leading-relaxed whitespace-pre-wrap" data-testid="text-critic-notes">{draft.criticNotes}</p>
+            </div>
+          )}
+
+          <div className="px-4 py-2 border-t border-white/10 flex items-start gap-2 bg-amber-500/5">
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-400 mt-0.5 flex-shrink-0" />
+            <p className="text-[11px] text-amber-200/80">{draft.caveat || CREATOR_CAVEAT}</p>
+          </div>
+        </Card>
+      )}
+
+      {/* Improve loop */}
+      <Card className="bg-white/5 border border-white/10 p-4 space-y-3" data-testid="creator-improve-card">
+        <div className="flex items-center gap-2">
+          <RefreshCw className="w-4 h-4 text-violet-400" />
+          <span className="font-semibold text-white text-sm">Improve with backtest insights</span>
+        </div>
+        <p className="text-[12px] text-white/50">
+          Pull the insights report from a saved strategy's backtests (or write your own notes), then let the AI revise the script.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            value={improveStrategyId ? String(improveStrategyId) : ""}
+            onValueChange={(v) => setImproveStrategyId(v ? Number(v) : null)}
+          >
+            <SelectTrigger className="w-[240px] bg-black/40 border-white/10 text-white text-sm" data-testid="select-improve-strategy">
+              <SelectValue placeholder="Pick a saved strategy…" />
+            </SelectTrigger>
+            <SelectContent>
+              {strategies.length === 0 ? (
+                <SelectItem value="none" disabled>No saved strategies yet</SelectItem>
+              ) : strategies.map(s => (
+                <SelectItem key={s.id} value={String(s.id)} data-testid={`option-strategy-${s.id}`}>{s.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button size="sm" variant="secondary" onClick={pullInsights} disabled={!improveStrategyId || pullingInsights} data-testid="button-pull-insights" className="bg-white/5 hover:bg-white/10 text-white/70">
+            {pullingInsights ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Lightbulb className="w-3 h-3 mr-1" />}
+            Pull backtest insights
+          </Button>
+        </div>
+        <Textarea
+          value={insightsText}
+          onChange={(e) => setInsightsText(e.target.value)}
+          placeholder={"What should the AI change? Paste backtest insights, or describe what to fix (e.g. 'too many trades in chop — add a trend filter')."}
+          className="min-h-[100px] bg-black/40 border-white/10 text-white/90 text-sm resize-y font-mono"
+          data-testid="input-insights"
+        />
+        <div className="flex items-center justify-between gap-2">
+          <span className={`text-[11px] ${insightsTooLong ? "text-red-400" : "text-white/40"}`} data-testid="text-insights-count">{insightsText.length} / {CREATOR_MAX_TEXT}</span>
+          <Button
+            onClick={() => improveMutation.mutate()}
+            disabled={!hasKey || busy || (!draft && !improveStrategyId) || !insightsText.trim() || insightsTooLong}
+            data-testid="button-improve"
+            className="bg-violet-600 hover:bg-violet-500 text-white"
+          >
+            {improveMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Wand2 className="w-4 h-4 mr-1.5" />}
+            {improveMutation.isPending ? "Improving…" : "Improve strategy"}
+          </Button>
+        </div>
+      </Card>
+    </div>
   );
 }
 

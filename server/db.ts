@@ -236,6 +236,15 @@ export async function ensureSchema() {
       // Orphan slots verified empty (swept or live-bot drift) — excluded from the
       // stranded-funds indicator so the recovery button clears once nothing remains.
       `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS recovered_orphan_indices integer[] NOT NULL DEFAULT '{}'`,
+
+      // QuantumLab AI Strategy Creator (Task 187): BYO OpenRouter key, V3-encrypted
+      // (UMK-wrapped only, interactive-only). Additive + idempotent. Plaintext is
+      // never stored; only the ciphertext, a display-only last4, provider, and mtime.
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS llm_api_key_encrypted text`,
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS llm_api_key_last4 text`,
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS llm_api_key_provider text`,
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS llm_api_key_updated_at timestamp`,
+
       `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS derivation_index integer`,
       `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS derivation_path_version integer`,
       `DO $$ BEGIN

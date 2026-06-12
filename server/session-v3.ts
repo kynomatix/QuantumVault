@@ -1171,6 +1171,48 @@ export function decryptAgentKeyV3(
   }
 }
 
+// ============================================================================
+// LLM API key (BYO) v3 encryption — QuantumLab AI Strategy Creator (Task 187)
+// ============================================================================
+//
+// Users may supply their OWN OpenRouter API key for the AI Strategy Creator. It
+// is encrypted with a subkey derived from the owner's UMK (the LLM_API_KEY
+// purpose) and AAD-bound to the owner wallet. It is UMK-wrapped ONLY — it is
+// NEVER wrapped with SERVER_EXECUTION_KEY — so it can only be decrypted while the
+// user holds a live interactive session (no headless/execution path can read it).
+// The plaintext is decrypted transiently per request, used, and discarded; it is
+// never returned to the client and never logged.
+
+export function encryptLlmApiKeyV3(
+  umk: Buffer,
+  apiKey: Buffer,
+  walletAddress: string,
+): string {
+  const subkey = deriveSubkey(umk, SUBKEY_PURPOSES.LLM_API_KEY);
+  try {
+    const aad = buildAAD(walletAddress, 'LLM_API_KEY');
+    const ciphertext = encryptBuffer(apiKey, subkey, aad);
+    return ciphertext.toString('base64');
+  } finally {
+    zeroizeBuffer(subkey);
+  }
+}
+
+export function decryptLlmApiKeyV3(
+  umk: Buffer,
+  encryptedV3: string,
+  walletAddress: string,
+): Buffer {
+  const subkey = deriveSubkey(umk, SUBKEY_PURPOSES.LLM_API_KEY);
+  try {
+    const aad = buildAAD(walletAddress, 'LLM_API_KEY');
+    const ciphertext = Buffer.from(encryptedV3, 'base64');
+    return decryptBuffer(ciphertext, subkey, aad);
+  } finally {
+    zeroizeBuffer(subkey);
+  }
+}
+
 export async function migrateAgentKeyToV3(
   walletAddress: string,
   umk: Buffer,

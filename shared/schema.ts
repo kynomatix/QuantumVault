@@ -96,6 +96,16 @@ export const wallets = pgTable("wallets", {
   // zero-balance read (reads fail closed → never marked on an unreadable balance).
   recoveredOrphanIndices: integer("recovered_orphan_indices").array().notNull().default([]),
 
+  // QuantumLab AI Strategy Creator (Task 187): the user's OWN OpenRouter API key
+  // (BYO), encrypted with the V3 envelope under the LLM_API_KEY subkey + AAD. It is
+  // UMK-wrapped ONLY — NEVER SERVER_EXECUTION_KEY-wrapped — so it is decryptable only
+  // during a live interactive session. Plaintext is never returned to the client; the
+  // UI sees `last4` only. `provider` is informational (e.g. "openrouter").
+  llmApiKeyEncrypted: text("llm_api_key_encrypted"),
+  llmApiKeyLast4: text("llm_api_key_last4"),
+  llmApiKeyProvider: text("llm_api_key_provider"),
+  llmApiKeyUpdatedAt: timestamp("llm_api_key_updated_at"),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
   lastSeen: timestamp("last_seen").defaultNow().notNull(),
 });

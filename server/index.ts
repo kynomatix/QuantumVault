@@ -197,6 +197,7 @@ app.use((req, res, next) => {
 // forwarded as-is (no double-parse). Session middleware is applied inline
 // to extract the wallet address for the trusted header.
 import { sessionMiddleware } from "./session";
+import { registerCreatorRoutes } from "./ai-assistant/routes";
 
 const labProxy = createProxyMiddleware({
   target: `http://127.0.0.1:5050`,
@@ -385,6 +386,11 @@ app.post("/api/lab/job/:id/cancel", (req: Request, res: Response, next: NextFunc
     }
   });
 });
+
+// AI Strategy Creator (Task 187) — registered in the MAIN process BEFORE the lab
+// proxy because these routes need the Express session + V3 UMK, which the lab CHILD
+// process does not have. They read the wallet only from the session (never a token).
+registerCreatorRoutes(app, sessionMiddleware as any);
 
 app.use("/api/lab", (req: Request, res: Response, next: NextFunction) => {
   sessionMiddleware(req, res, (err) => {

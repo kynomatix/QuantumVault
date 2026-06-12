@@ -7,13 +7,18 @@ const AUTH_TAG_LENGTH = 16;
 const SALT_LENGTH = 32;
 const KEY_LENGTH = 32;
 
-export type RecordType = 'UMK' | 'MNEMONIC' | 'AGENT_PRIVKEY' | 'EUMK_EXEC';
+export type RecordType = 'UMK' | 'MNEMONIC' | 'AGENT_PRIVKEY' | 'EUMK_EXEC' | 'LLM_API_KEY';
 
+// NOTE: bytes 0x05 (BOT_SUBACCOUNT) and 0x06 (POOLED_SUBACCOUNT) are RESERVED — they
+// are written literally inside buildBotSubaccountAAD/buildPooledSubaccountAAD (which use
+// their own variable-length AAD layout), NOT through this fixed-width map. Any new record
+// type that goes through buildAAD() must skip them — hence LLM_API_KEY = 0x07.
 const RECORD_TYPE_BYTES: Record<RecordType, number> = {
   UMK: 0x01,
   MNEMONIC: 0x02,
   AGENT_PRIVKEY: 0x03,
   EUMK_EXEC: 0x04,
+  LLM_API_KEY: 0x07,
 } as const;
 
 export function generateUserSalt(): Buffer {
@@ -74,6 +79,7 @@ export const SUBKEY_PURPOSES = {
   AGENT_PRIVKEY: 'agent_privkey',
   POLICY_HMAC: 'policy_hmac',
   BOT_SUBACCOUNT_PRIVKEY: 'bot_subaccount_privkey',
+  LLM_API_KEY: 'llm_api_key',
 } as const;
 
 /**
