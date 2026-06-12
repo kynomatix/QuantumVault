@@ -127,28 +127,60 @@ export function Guided() {
           </div>
         </motion.div>
 
-        {/* How it works - Stepper */}
+        {/* How it works - Glowing signal ribbon */}
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.1 }}
-          className="space-y-10"
+          className="space-y-12"
         >
-          <h2 className="text-2xl font-display font-semibold text-white tracking-tight text-center">How it works</h2>
-          <div className="relative pl-8 sm:pl-0">
-            {/* Desktop line */}
-            <div className="hidden sm:block absolute top-[20px] left-[16.6%] right-[16.6%] h-px bg-slate-800" />
-            {/* Mobile line */}
-            <div className="sm:hidden absolute top-[20px] bottom-0 left-[15px] w-px bg-slate-800" />
+          <div className="text-center space-y-2">
+            <span className="text-xs font-mono uppercase tracking-[0.2em] text-indigo-400/80">The workflow</span>
+            <h2 className="text-2xl font-display font-semibold text-white tracking-tight">How it works</h2>
+          </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-12 sm:gap-8 relative z-10">
+          <div className="relative">
+            {/* Desktop signal line (runs through the node centers) */}
+            <div className="hidden sm:block absolute top-7 left-[16.6%] right-[16.6%] z-0">
+              <div className="relative h-px">
+                {/* base rail */}
+                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-slate-700 to-transparent" />
+                {/* glow rail */}
+                <div className="absolute -inset-y-[1px] inset-x-0 bg-gradient-to-r from-transparent via-indigo-500/50 to-transparent blur-[2px]" />
+                {/* travelling pulse */}
+                <motion.div
+                  className="absolute top-1/2 h-1.5 w-1.5 -translate-y-1/2 rounded-full bg-indigo-200 shadow-[0_0_14px_4px_rgba(99,102,241,0.75)]"
+                  animate={{ left: ["0%", "100%"], opacity: [0, 1, 1, 0] }}
+                  transition={{ duration: 3.4, repeat: Infinity, ease: "easeInOut", times: [0, 0.12, 0.88, 1] }}
+                />
+              </div>
+            </div>
+            {/* Mobile signal line */}
+            <div className="sm:hidden absolute top-7 bottom-6 left-7 w-px bg-gradient-to-b from-indigo-500/50 via-slate-700 to-transparent z-0" />
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-10 sm:gap-6 relative z-10">
               {steps.map((step) => (
-                <div key={step.n} className="relative sm:text-center">
-                  <div className="absolute sm:static -left-12 top-0 sm:mx-auto mb-6 w-10 h-10 rounded-full bg-slate-900 border border-slate-700 flex items-center justify-center shadow-lg">
-                    <span className="font-mono text-sm font-medium text-indigo-400">{step.n}</span>
+                <div
+                  key={step.n}
+                  className="group relative flex items-start gap-5 sm:flex-col sm:items-center sm:gap-0 sm:text-center"
+                >
+                  {/* Node */}
+                  <div className="relative shrink-0 sm:mb-7">
+                    {/* hover halo */}
+                    <div className="absolute inset-0 rounded-full bg-indigo-500/25 blur-md opacity-0 scale-110 transition-opacity duration-500 group-hover:opacity-100" />
+                    {/* gradient ring */}
+                    <div className="relative w-14 h-14 rounded-full p-px bg-gradient-to-br from-indigo-400/80 via-indigo-500/30 to-blue-500/50 shadow-[0_0_20px_-6px_rgba(99,102,241,0.6)] transition-all duration-500 group-hover:-translate-y-0.5 group-hover:shadow-[0_0_30px_-3px_rgba(99,102,241,0.85)]">
+                      <div className="w-full h-full rounded-full bg-slate-950 flex items-center justify-center">
+                        <span className="font-mono text-base font-semibold text-transparent bg-clip-text bg-gradient-to-br from-indigo-200 to-blue-300">
+                          0{step.n}
+                        </span>
+                      </div>
+                    </div>
                   </div>
-                  <h3 className="text-lg font-semibold text-slate-200 mb-3">{step.title}</h3>
-                  <p className="text-slate-400 leading-relaxed text-sm sm:text-base">{step.desc}</p>
+                  <div className="sm:px-2">
+                    <h3 className="text-lg font-semibold text-slate-200 mb-2 transition-colors group-hover:text-white">{step.title}</h3>
+                    <p className="text-slate-400 leading-relaxed text-sm sm:max-w-[230px] sm:mx-auto">{step.desc}</p>
+                  </div>
                 </div>
               ))}
             </div>

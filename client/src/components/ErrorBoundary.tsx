@@ -8,17 +8,40 @@ interface Props {
 interface State {
   hasError: boolean;
   error: Error | null;
+  componentStack: string | null;
 }
 
 export class ErrorBoundary extends Component<Props, State> {
-  state: State = { hasError: false, error: null };
+  state: State = { hasError: false, error: null, componentStack: null };
 
   static getDerivedStateFromError(error: Error): State {
-    return { hasError: true, error };
+    return { hasError: true, error, componentStack: null };
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    const componentStack = errorInfo?.componentStack ?? null;
+    this.setState({ componentStack });
     console.error("[ErrorBoundary] Caught render error:", error, errorInfo);
+
+    // Best-effort: report client render crashes to the server so the component
+    // stack is captured in the logs (client-only crashes are otherwise invisible).
+    try {
+      void fetch("/api/client-error", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        keepalive: true,
+        body: JSON.stringify({
+          message: error?.message ?? String(error),
+          stack: error?.stack ?? "",
+          componentStack: componentStack ?? "",
+          url: typeof window !== "undefined" ? window.location.href : "",
+          userAgent:
+            typeof navigator !== "undefined" ? navigator.userAgent : "",
+        }),
+      }).catch(() => {});
+    } catch {
+      // ignore — reporting must never break the fallback UI
+    }
   }
 
   handleReload = () => {
@@ -62,11 +85,24 @@ export class ErrorBoundary extends Component<Props, State> {
                 {this.state.error.message}
               </p>
             )}
+            {this.state.componentStack && (
+              <details className="mt-3 text-left">
+                <summary className="text-[11px] text-white/30 cursor-pointer hover:text-white/50">
+                  Technical details
+                </summary>
+                <pre
+                  className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-white/5 p-3 text-[10px] leading-relaxed text-white/40"
+                  data-testid="text-error-component-stack"
+                >
+                  {this.state.componentStack}
+                </pre>
+              </details>
+            )}
           </div>
           <div className="flex gap-3">
             <Button
               onClick={this.handleReload}
-              className="bg-violet-500 hover:bg-violet-600 text-white"
+              className="bg-indigo-500 hover:bg-indigo-600 text-white"
               data-testid="button-error-reload"
             >
               Reload page

@@ -3694,6 +3694,31 @@ export async function registerRoutes(
   const { sessionMiddleware } = await import("./session");
   app.use(sessionMiddleware);
 
+  // Client-side render-error reporting. The browser ErrorBoundary POSTs here when
+  // a React render throws, so the error message + component stack land in our
+  // server logs (client-only crashes are otherwise invisible to operators).
+  // Public, best-effort, and never throws back to the client.
+  app.post("/api/client-error", (req, res) => {
+    try {
+      const b = (req.body ?? {}) as Record<string, unknown>;
+      const clip = (v: unknown, n: number) =>
+        typeof v === "string" ? v.slice(0, n) : "";
+      console.error(
+        "[CLIENT-ERROR]",
+        JSON.stringify({
+          message: clip(b.message, 500),
+          url: clip(b.url, 300),
+          componentStack: clip(b.componentStack, 4000),
+          stack: clip(b.stack, 4000),
+          userAgent: clip(b.userAgent ?? req.headers["user-agent"], 300),
+        }),
+      );
+    } catch {
+      // best-effort logging; never let it break the response
+    }
+    res.status(204).end();
+  });
+
   // Digital Asset Links for the Solana dApp Store TWA (Trusted Web Activity)
   // wrapper. Android fetches this from
   // https://myquantumvault.com/.well-known/assetlinks.json to verify the Android
