@@ -1151,7 +1151,9 @@ export const labAgentTasks = pgTable("lab_agent_tasks", {
   memory: jsonb("memory").$type<Record<string, unknown>>(),
   // The currently-running owned run, if any (one-active-run gate, §7).
   activeRunId: integer("active_run_id"),
-  // Every run id this task has queued — reconciliation reads runs by these ids.
+  // Denormalized CACHE of this task's owned run ids, self-healed by the reconciler.
+  // NOT the source of truth — the reconciler derives owned runs from the run rows
+  // themselves (agent_task_id + agent_owned, wallet-scoped). Display/convenience only.
   ownedRunIds: jsonb("owned_run_ids").$type<number[]>().notNull().default(sql`'[]'::jsonb`),
   // Auto-loop leash counter (§7).
   loopCount: integer("loop_count").notNull().default(0),

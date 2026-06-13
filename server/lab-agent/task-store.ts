@@ -5,7 +5,9 @@
 //  - the one-active-task-per-wallet leash (§7), enforced atomically by storage,
 //  - wallet-scoped reads (cross-wallet leak guard, §8 —
 //    .agents/memory/cross-wallet-session-leak.md),
-//  - owned-run bookkeeping (the run ids the reconciler reads as source of truth).
+//  (Owned-run tracking is NOT here: the reconciler derives owned runs from the
+//   authoritative run rows — agent_task_id + agent_owned, wallet-scoped — and
+//   self-heals the task's ownedRunIds cache. It is never the source of truth.)
 //
 // reconciler.ts is the READER half: it drives most transitions FROM the DB. There
 // is no LLM and no chat here — this is the plumbing a later phase's brain drives.
@@ -142,6 +144,9 @@ export class TaskStore {
     if (task.walletAddress !== walletAddress) return { ok: false, reason: "forbidden" };
 
     const from = task.status as TaskStatus;
+    // Re-asserting the same status is a true no-op: no write, no side effects.
+    // (A plain patch would reset awaitingSince and silently extend the idle TTL.)
+    if (from === to) return { ok: true, task };
     if (!canTransition(from, to)) return { ok: false, reason: "invalid_transition", from, to };
 
     const now = this.clock();
@@ -171,29 +176,6 @@ export class TaskStore {
       cancelRequestedAt: task.cancelRequestedAt ?? this.clock(),
     };
     if (reason !== undefined) patch.stopReason = reason;
-    const updated = await this.storage.updateAgentTask(id, patch);
-    return { ok: true, task: updated ?? task };
-  }
-
-  /**
-   * Record a run this task owns (dedup-appended to `ownedRunIds` — the set the
-   * reconciler reads as source of truth). `active:true` also points
-   * `activeRunId` at it (the one-active-run gate, §7).
-   */
-  async addOwnedRun(
-    id: number,
-    walletAddress: string,
-    runId: number,
-    opts?: { active?: boolean },
-  ): Promise<MutateResult> {
-    const task = await this.storage.getAgentTask(id);
-    if (!task) return { ok: false, reason: "not_found" };
-    if (task.walletAddress !== walletAddress) return { ok: false, reason: "forbidden" };
-
-    const owned = Array.isArray(task.ownedRunIds) ? task.ownedRunIds : [];
-    const ownedRunIds = owned.includes(runId) ? owned : [...owned, runId];
-    const patch: Partial<InsertLabAgentTask> = { ownedRunIds };
-    if (opts?.active) patch.activeRunId = runId;
     const updated = await this.storage.updateAgentTask(id, patch);
     return { ok: true, task: updated ?? task };
   }

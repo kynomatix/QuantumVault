@@ -105,8 +105,13 @@ export interface ILabStorage {
   deduplicateStrategyResults(strategyId: number, protectRunId?: number): Promise<number>;
 
   // --- QuantumLab Sandbox Agent task persistence (T6 reliability spine) ---
-  /** Bulk run read by id — the reconciler's source-of-truth fetch for a task's owned runs. */
-  getRunsByIds(ids: number[]): Promise<LabOptimizationRun[]>;
+  /**
+   * The reconciler's source-of-truth fetch: every agent-owned run for a task,
+   * scoped by wallet (§8 cross-wallet leak guard). The run row's `agent_task_id`
+   * is authoritative — the task's `ownedRunIds` is only a self-healed cache, never
+   * trusted as the run set (the enqueue path stamps the run, not the JSON list).
+   */
+  getAgentRunsForTask(walletAddress: string, agentTaskId: number): Promise<LabOptimizationRun[]>;
   /**
    * Atomically create an agent task under the one-active-task-per-wallet leash
    * (§7). Takes a per-wallet advisory lock so a concurrent create can't slip a
@@ -320,6 +325,11 @@ export class LabDatabaseStorage implements ILabStorage {
   }
 
   async markAgentRunCancelled(id: number): Promise<boolean> {
+    // CALLER-MUST-SCOPE: this matches by run id only (no wallet/task filter). Only
+    // call it with an id already proven to belong to the caller's wallet+task
+    // (e.g. from getAgentRunsForTask or a wallet-scoped getAgentRun). Reusing it
+    // with an unvetted id is a cross-wallet cancel footgun — scope first.
+    //
     // CAS on status='queued': only cancel a run that hasn't been claimed by the
     // worker yet. A queued run has no worker, so terminal-marking it here is safe
     // and fail-closed. If it already started, the UPDATE matches 0 rows → false,
@@ -336,9 +346,12 @@ export class LabDatabaseStorage implements ILabStorage {
     return rows.length > 0;
   }
 
-  async getRunsByIds(ids: number[]): Promise<LabOptimizationRun[]> {
-    if (!ids.length) return [];
-    return db.select().from(labOptimizationRuns).where(inArray(labOptimizationRuns.id, ids));
+  async getAgentRunsForTask(walletAddress: string, agentTaskId: number): Promise<LabOptimizationRun[]> {
+    return db.select().from(labOptimizationRuns).where(and(
+      eq(labOptimizationRuns.userId, walletAddress),
+      eq(labOptimizationRuns.agentTaskId, agentTaskId),
+      eq(labOptimizationRuns.agentOwned, true),
+    )!);
   }
 
   async createAgentTaskExclusive(

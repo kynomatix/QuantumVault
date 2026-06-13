@@ -41,7 +41,8 @@ type LabCheckpointLoose = LabCheckpoint & { userCancelled?: boolean };
 
 export interface ReconcilerStorage {
   getAgentTask(id: number): Promise<LabAgentTask | undefined>;
-  getRunsByIds(ids: number[]): Promise<LabOptimizationRun[]>;
+  /** Authoritative owned-run fetch — scoped by wallet + agent_task_id (§8). */
+  getAgentRunsForTask(walletAddress: string, agentTaskId: number): Promise<LabOptimizationRun[]>;
   markAgentRunCancelled(id: number): Promise<boolean>;
   updateAgentTask(id: number, patch: Partial<InsertLabAgentTask>): Promise<LabAgentTask | undefined>;
 }
@@ -115,17 +116,20 @@ export async function reconcileTask(
   const pauseTtlMs = opts?.pauseTtlMs ?? DEFAULT_PAUSE_TTL_MS;
   const status = task.status as TaskStatus;
 
-  const ownedIds = Array.isArray(task.ownedRunIds) ? task.ownedRunIds : [];
-  const runs = ownedIds.length ? await storage.getRunsByIds(ownedIds) : [];
+  // Source of truth = the run rows themselves (agent_task_id + agent_owned),
+  // wallet-scoped (§8). The task's ownedRunIds JSON is a cache the enqueue path
+  // doesn't populate, so it is self-healed below, never read as the run set.
+  const runs = await storage.getAgentRunsForTask(task.walletAddress, taskId);
+  const ownedRunIds = runs.map((r) => r.id);
 
   const buckets: ReconcileBuckets = {
     queued: [], running: [], paused: [], completed: [], failed: [], cancelled: [],
   };
   for (const run of runs) bucketRun(buckets, run);
 
-  // Terminal task: nothing to drive; just stamp the reconcile and report.
+  // Terminal task: nothing to drive; stamp the reconcile, self-heal the cache.
   if (TERMINAL_TASK_STATUSES.has(status)) {
-    await storage.updateAgentTask(taskId, { lastReconciledAt: now });
+    await storage.updateAgentTask(taskId, { lastReconciledAt: now, ownedRunIds });
     return {
       taskId, activeRunId: null, buckets, interruptedRunIds: [...buckets.paused],
       cancelledQueuedRunIds: [], pendingStop: false, statusChanged: false, status,
@@ -136,28 +140,28 @@ export async function reconcileTask(
   const cancelledQueued: number[] = [];
   const stopRequested = task.cancelRequestedAt != null;
   if (stopRequested && buckets.queued.length) {
-    const stillQueued: number[] = [];
-    const racedToRunning: number[] = [];
+    const casLost: number[] = [];
     for (const runId of buckets.queued) {
       const cancelled = await storage.markAgentRunCancelled(runId);
-      if (cancelled) {
-        cancelledQueued.push(runId);
-        continue;
-      }
-      // CAS lost: the run left `queued` between bucketing and cancel. Reload to
-      // see if it actually started — a now-running run must be treated as live,
-      // never silently dropped while work continues.
-      const [fresh] = await storage.getRunsByIds([runId]);
-      if (fresh) {
-        const s = mapRunStatusFromDb(fresh.status, (fresh.checkpoint as LabCheckpointLoose | null) ?? null);
-        if (s === "running") racedToRunning.push(runId);
-        else if (s === "queued") stillQueued.push(runId);
-        // any terminal/cancelled state: nothing more to do for this run
+      if (cancelled) cancelledQueued.push(runId);
+      else casLost.push(runId); // left 'queued' mid-cancel — recheck below
+    }
+    buckets.queued = [];
+    if (cancelledQueued.length) buckets.cancelled.push(...cancelledQueued);
+
+    // One authoritative re-read settles every CAS-loser into its TRUE bucket so
+    // the census stays complete (bucket-every-owned-run invariant): a run that
+    // actually started is treated as live (never silently dropped while work
+    // runs); one transiently still 'queued' is retried next pass; a terminal
+    // one (completed/failed/cancelled) is recorded, not lost.
+    if (casLost.length) {
+      const fresh = await storage.getAgentRunsForTask(task.walletAddress, taskId);
+      const byId = new Map(fresh.map((r) => [r.id, r]));
+      for (const runId of casLost) {
+        const r = byId.get(runId);
+        if (r) bucketRun(buckets, r);
       }
     }
-    buckets.queued = stillQueued;
-    if (cancelledQueued.length) buckets.cancelled.push(...cancelledQueued);
-    if (racedToRunning.length) buckets.running.push(...racedToRunning);
   }
 
   // Running is preferred over queued for the one-active-run pointer.
@@ -184,6 +188,7 @@ export async function reconcileTask(
   const patch: Partial<InsertLabAgentTask> = {
     activeRunId: movingToStopped ? null : liveRunId,
     lastReconciledAt: now,
+    ownedRunIds, // self-heal the denormalized cache to the authoritative set
   };
   const statusChanged = newStatus !== status;
   if (statusChanged) patch.status = newStatus;

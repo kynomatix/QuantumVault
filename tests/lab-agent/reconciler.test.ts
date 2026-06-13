@@ -26,11 +26,14 @@ function makeFake() {
   // Run ids that should simulate a queued→running race: markAgentRunCancelled
   // flips them to running and returns false (CAS lost).
   const raceOnCancel = new Set<number>();
+  // Run ids that race queued→complete during the cancel CAS (also returns false).
+  const raceToComplete = new Set<number>();
 
   const fake = {
     tasks,
     runs,
     raceOnCancel,
+    raceToComplete,
 
     addTask(partial: Record<string, unknown> = {}) {
       const id = ++taskSeq;
@@ -45,7 +48,9 @@ function makeFake() {
       return row;
     },
     addRun(r: Record<string, unknown> & { id: number; status: string }) {
-      const row = { checkpoint: null, userId: WALLET, ...r };
+      // The run row is the reconciler's source of truth: agentTaskId + userId +
+      // agentOwned are what getAgentRunsForTask scopes on (NOT task.ownedRunIds).
+      const row = { checkpoint: null, userId: WALLET, agentOwned: true, agentTaskId: null, ...r };
       runs.set(r.id, row);
       return row;
     },
@@ -77,14 +82,20 @@ function makeFake() {
       tasks.set(id, next);
       return next;
     },
-    async getRunsByIds(ids: number[]) {
-      return ids.map((i) => runs.get(i)).filter(Boolean);
+    async getAgentRunsForTask(walletAddress: string, agentTaskId: number) {
+      return [...runs.values()].filter(
+        (r) => r.userId === walletAddress && r.agentTaskId === agentTaskId && r.agentOwned === true,
+      );
     },
     async markAgentRunCancelled(id: number) {
       const r = runs.get(id);
       if (!r) return false;
       if (raceOnCancel.has(id)) {
         runs.set(id, { ...r, status: "running" }); // started mid-cancel
+        return false;
+      }
+      if (raceToComplete.has(id)) {
+        runs.set(id, { ...r, status: "complete" }); // finished mid-cancel
         return false;
       }
       if (r.status !== "queued") return false;
@@ -240,20 +251,29 @@ describe("TaskStore.requestStop", () => {
   });
 });
 
-describe("TaskStore.addOwnedRun", () => {
-  it("dedup-appends owned runs and sets the active pointer", async () => {
+describe("TaskStore.transition — same-status no-op", () => {
+  it("re-asserting awaiting_input does NOT reset awaitingSince (idle TTL is preserved)", async () => {
+    const fake = makeFake();
+    const t0 = new Date("2026-06-13T10:00:00.000Z");
+    let clock = t0;
+    const store = new TaskStore(fake as any, () => clock);
+    const t = fake.addTask({ walletAddress: WALLET });
+    const a = await store.transition(t.id, WALLET, "awaiting_input");
+    if (a.ok) expect(a.task.awaitingSince).toEqual(t0);
+    // A later re-assert of the SAME status must be a true no-op (no write).
+    clock = new Date("2026-06-13T11:00:00.000Z");
+    const b = await store.transition(t.id, WALLET, "awaiting_input");
+    expect(b.ok).toBe(true);
+    if (b.ok) expect(b.task.awaitingSince).toEqual(t0); // unchanged, not bumped
+  });
+
+  it("re-asserting a terminal status is idempotent", async () => {
     const fake = makeFake();
     const store = new TaskStore(fake as any, () => NOW);
-    const t = fake.addTask({ walletAddress: WALLET });
-    await store.addOwnedRun(t.id, WALLET, 30, { active: true });
-    const again = await store.addOwnedRun(t.id, WALLET, 30);
-    expect(again.ok).toBe(true);
-    if (again.ok) {
-      expect(again.task.ownedRunIds).toEqual([30]);
-      expect(again.task.activeRunId).toBe(30);
-    }
-    const added = await store.addOwnedRun(t.id, WALLET, 31);
-    if (added.ok) expect(added.task.ownedRunIds).toEqual([30, 31]);
+    const t = fake.addTask({ walletAddress: WALLET, status: "stopped" });
+    const res = await store.transition(t.id, WALLET, "stopped");
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.task.status).toBe("stopped");
   });
 });
 
@@ -269,37 +289,51 @@ describe("reconcileTask — activeRun resync", () => {
 
   it("clears activeRunId when the owned run finished while away", async () => {
     const fake = makeFake();
-    fake.addRun({ id: 30, status: "complete" });
-    const t = fake.addTask({ status: "active", activeRunId: 30, ownedRunIds: [30] });
+    const t = fake.addTask({ status: "active", activeRunId: 30 });
+    fake.addRun({ id: 30, status: "complete", agentTaskId: t.id });
     const res = await reconcileTask(fake as any, t.id, { now: NOW });
     expect(res!.activeRunId).toBeNull();
     expect(res!.buckets.completed).toEqual([30]);
     expect(res!.statusChanged).toBe(false);
     expect(fake.tasks.get(t.id).lastReconciledAt).toEqual(NOW);
+    // Self-heal: the denormalized cache is rewritten to the authoritative set.
+    expect(fake.tasks.get(t.id).ownedRunIds).toEqual([30]);
   });
 
   it("keeps activeRunId for a still-running owned run", async () => {
     const fake = makeFake();
-    fake.addRun({ id: 31, status: "running" });
-    const t = fake.addTask({ status: "active", activeRunId: 31, ownedRunIds: [31] });
+    const t = fake.addTask({ status: "active", activeRunId: 31 });
+    fake.addRun({ id: 31, status: "running", agentTaskId: t.id });
     const res = await reconcileTask(fake as any, t.id, { now: NOW });
     expect(res!.activeRunId).toBe(31);
     expect(res!.buckets.running).toEqual([31]);
   });
 
+  it("ignores a run that belongs to another task even if its id is stale-cached", async () => {
+    const fake = makeFake();
+    const t = fake.addTask({ status: "active", activeRunId: 42, ownedRunIds: [42] });
+    // Run 42 is owned by a DIFFERENT task — the cache lies, the run rows don't.
+    fake.addRun({ id: 42, status: "running", agentTaskId: 999 });
+    const res = await reconcileTask(fake as any, t.id, { now: NOW });
+    expect(res!.activeRunId).toBeNull();
+    expect(res!.buckets.running).toEqual([]);
+    expect(fake.tasks.get(t.id).ownedRunIds).toEqual([]); // cache corrected
+  });
+
   it("prefers a running run over a queued one for the active pointer", async () => {
     const fake = makeFake();
-    fake.addRun({ id: 40, status: "queued" });
-    fake.addRun({ id: 41, status: "running" });
-    const t = fake.addTask({ status: "active", ownedRunIds: [40, 41] });
+    const t = fake.addTask({ status: "active" });
+    fake.addRun({ id: 40, status: "queued", agentTaskId: t.id });
+    fake.addRun({ id: 41, status: "running", agentTaskId: t.id });
     const res = await reconcileTask(fake as any, t.id, { now: NOW });
     expect(res!.activeRunId).toBe(41);
+    expect(fake.tasks.get(t.id).ownedRunIds).toEqual([40, 41]);
   });
 
   it("maps a user-cancelled failed run to the cancelled bucket", async () => {
     const fake = makeFake();
-    fake.addRun({ id: 36, status: "failed", checkpoint: { userCancelled: true } });
-    const t = fake.addTask({ status: "active", ownedRunIds: [36] });
+    const t = fake.addTask({ status: "active" });
+    fake.addRun({ id: 36, status: "failed", checkpoint: { userCancelled: true }, agentTaskId: t.id });
     const res = await reconcileTask(fake as any, t.id, { now: NOW });
     expect(res!.buckets.cancelled).toEqual([36]);
     expect(res!.buckets.failed).toEqual([]);
@@ -309,8 +343,8 @@ describe("reconcileTask — activeRun resync", () => {
 describe("reconcileTask — cancel semantics", () => {
   it("cancels a queued owned run and cleanly stops the task", async () => {
     const fake = makeFake();
-    fake.addRun({ id: 32, status: "queued" });
-    const t = fake.addTask({ status: "active", cancelRequestedAt: NOW, ownedRunIds: [32] });
+    const t = fake.addTask({ status: "active", cancelRequestedAt: NOW });
+    fake.addRun({ id: 32, status: "queued", agentTaskId: t.id });
     const res = await reconcileTask(fake as any, t.id, { now: NOW });
     expect(res!.cancelledQueuedRunIds).toEqual([32]);
     expect(res!.status).toBe("stopped");
@@ -321,8 +355,8 @@ describe("reconcileTask — cancel semantics", () => {
 
   it("never kills a running owned run — leaves the task pending-stop", async () => {
     const fake = makeFake();
-    fake.addRun({ id: 33, status: "running" });
-    const t = fake.addTask({ status: "active", cancelRequestedAt: NOW, ownedRunIds: [33] });
+    const t = fake.addTask({ status: "active", cancelRequestedAt: NOW });
+    fake.addRun({ id: 33, status: "running", agentTaskId: t.id });
     const res = await reconcileTask(fake as any, t.id, { now: NOW });
     expect(res!.pendingStop).toBe(true);
     expect(res!.status).toBe("active");
@@ -332,14 +366,27 @@ describe("reconcileTask — cancel semantics", () => {
 
   it("treats a queued run that raced to running during the CAS as live (pending-stop)", async () => {
     const fake = makeFake();
-    fake.addRun({ id: 34, status: "queued" });
+    const t = fake.addTask({ status: "active", cancelRequestedAt: NOW });
+    fake.addRun({ id: 34, status: "queued", agentTaskId: t.id });
     fake.raceOnCancel.add(34); // markAgentRunCancelled will flip it to running, return false
-    const t = fake.addTask({ status: "active", cancelRequestedAt: NOW, ownedRunIds: [34] });
     const res = await reconcileTask(fake as any, t.id, { now: NOW });
     expect(res!.cancelledQueuedRunIds).toEqual([]);
     expect(res!.pendingStop).toBe(true);
     expect(res!.status).toBe("active");
     expect(res!.activeRunId).toBe(34);
+  });
+
+  it("records a CAS-loser that finished mid-cancel in the completed bucket (census stays complete)", async () => {
+    const fake = makeFake();
+    const t = fake.addTask({ status: "active", cancelRequestedAt: NOW });
+    fake.addRun({ id: 37, status: "queued", agentTaskId: t.id });
+    fake.raceToComplete.add(37); // CAS fails, run is already complete on re-read
+    const res = await reconcileTask(fake as any, t.id, { now: NOW });
+    expect(res!.cancelledQueuedRunIds).toEqual([]);
+    expect(res!.buckets.completed).toEqual([37]); // NOT silently dropped
+    expect(res!.buckets.queued).toEqual([]);
+    expect(res!.status).toBe("stopped"); // no live run left → clean stop
+    expect(res!.pendingStop).toBe(false);
   });
 });
 
@@ -349,7 +396,6 @@ describe("reconcileTask — idle-only pause TTL", () => {
     const t = fake.addTask({
       status: "awaiting_input",
       awaitingSince: new Date(NOW.getTime() - 25 * HOUR),
-      ownedRunIds: [],
     });
     const res = await reconcileTask(fake as any, t.id, { now: NOW });
     expect(res!.status).toBe("stopped");
@@ -358,12 +404,11 @@ describe("reconcileTask — idle-only pause TTL", () => {
 
   it("never evicts an awaiting_input task while a run is still live", async () => {
     const fake = makeFake();
-    fake.addRun({ id: 50, status: "running" });
     const t = fake.addTask({
       status: "awaiting_input",
       awaitingSince: new Date(NOW.getTime() - 25 * HOUR),
-      ownedRunIds: [50],
     });
+    fake.addRun({ id: 50, status: "running", agentTaskId: t.id });
     const res = await reconcileTask(fake as any, t.id, { now: NOW });
     expect(res!.status).toBe("awaiting_input");
     expect(res!.activeRunId).toBe(50);
@@ -374,7 +419,6 @@ describe("reconcileTask — idle-only pause TTL", () => {
     const t = fake.addTask({
       status: "awaiting_input",
       awaitingSince: new Date(NOW.getTime() - 1 * HOUR),
-      ownedRunIds: [],
     });
     const res = await reconcileTask(fake as any, t.id, { now: NOW });
     expect(res!.status).toBe("awaiting_input");
@@ -384,8 +428,8 @@ describe("reconcileTask — idle-only pause TTL", () => {
 describe("reconcileTask — interrupted runs", () => {
   it("surfaces paused owned runs without auto-resuming or counting them live", async () => {
     const fake = makeFake();
-    fake.addRun({ id: 35, status: "paused" });
-    const t = fake.addTask({ status: "active", activeRunId: 35, ownedRunIds: [35] });
+    const t = fake.addTask({ status: "active", activeRunId: 35 });
+    fake.addRun({ id: 35, status: "paused", agentTaskId: t.id });
     const res = await reconcileTask(fake as any, t.id, { now: NOW });
     expect(res!.interruptedRunIds).toEqual([35]);
     expect(res!.buckets.paused).toEqual([35]);
@@ -398,13 +442,14 @@ describe("reconcileTask — interrupted runs", () => {
 describe("reconcileTask — terminal task", () => {
   it("only stamps lastReconciledAt and still surfaces paused runs", async () => {
     const fake = makeFake();
-    fake.addRun({ id: 60, status: "paused" });
-    const t = fake.addTask({ status: "stopped", ownedRunIds: [60] });
+    const t = fake.addTask({ status: "stopped" });
+    fake.addRun({ id: 60, status: "paused", agentTaskId: t.id });
     const res = await reconcileTask(fake as any, t.id, { now: NOW });
     expect(res!.statusChanged).toBe(false);
     expect(res!.status).toBe("stopped");
     expect(res!.activeRunId).toBeNull();
     expect(res!.interruptedRunIds).toEqual([60]);
     expect(fake.tasks.get(t.id).lastReconciledAt).toEqual(NOW);
+    expect(fake.tasks.get(t.id).ownedRunIds).toEqual([60]); // self-healed even when terminal
   });
 });
