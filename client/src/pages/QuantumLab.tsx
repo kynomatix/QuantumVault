@@ -1462,7 +1462,9 @@ export default function QuantumLab() {
         </motion.div>
       </div>
 
-      <LabAssistantDock walletAddress={walletAddress ?? null} onNavigate={(tab) => setMainTab(tab as MainTab)} />
+      {mainTab === "hub" && (
+        <LabAssistantDock walletAddress={walletAddress ?? null} onNavigate={(tab) => setMainTab(tab as MainTab)} />
+      )}
       <QueueDrawer open={queueOpen} onOpenChange={setQueueOpen} />
     </div>
   );
