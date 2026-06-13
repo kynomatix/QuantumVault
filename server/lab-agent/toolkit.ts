@@ -38,6 +38,16 @@ export interface ToolkitContext {
   walletAddress: string;
   /** Capability gate. Both default to allowed when omitted. */
   allow?: { read?: boolean; write?: boolean };
+  /**
+   * The owning agent task (§7b). REQUIRED for control writes (runOptimization /
+   * refineFrom): the (wallet, taskId, idempotencyKey) tuple is the idempotency
+   * scope, and the run table's partial UNIQUE backstop only fires when
+   * agent_task_id is non-null. Populated by the T6 task store; absent for plain
+   * reads. Cancel does not need it (it targets an existing run by id).
+   */
+  taskId?: number;
+  /** Stable correlation id reused across a task's retries/resume; generated when absent. */
+  correlationId?: string;
 }
 
 /**

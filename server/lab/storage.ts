@@ -41,6 +41,20 @@ export interface ILabStorage {
   createRun(data: InsertLabRun): Promise<LabOptimizationRun>;
   getRuns(strategyId?: number, userId?: string): Promise<LabOptimizationRun[]>;
   getRun(id: number): Promise<LabOptimizationRun | undefined>;
+  /**
+   * Agent idempotency lookup: the ONE run a (wallet, agent task, idempotency key)
+   * maps to, so a retried agent call returns the existing run instead of
+   * double-queueing on the shared worker (§7b). Backed by uq_lab_opt_runs_agent_idem.
+   */
+  getAgentRun(walletAddress: string, agentTaskId: number, agentIdempotencyKey: string): Promise<LabOptimizationRun | undefined>;
+  /**
+   * Cooperatively cancel an agent-owned run that is STILL queued (CAS on
+   * status='queued'). Marks it failed + checkpoint.userCancelled (the boundary
+   * mapper reports this as `cancelled`) and clears its queue slot. Returns false
+   * if it already started — the caller must then treat it as running (the main
+   * process can't reach the child worker; see §7b reconciliation).
+   */
+  markAgentRunCancelled(id: number): Promise<boolean>;
   completeRun(id: number, totalConfigsTested: number): Promise<void>;
   finalizeSuccessfulRun(id: number, totalConfigsTested: number, checkpoint: LabCheckpoint): Promise<void>;
   failRun(id: number, force?: boolean): Promise<void>;
@@ -278,6 +292,32 @@ export class LabDatabaseStorage implements ILabStorage {
   async getRun(id: number): Promise<LabOptimizationRun | undefined> {
     const [run] = await db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.id, id));
     return run;
+  }
+
+  async getAgentRun(walletAddress: string, agentTaskId: number, agentIdempotencyKey: string): Promise<LabOptimizationRun | undefined> {
+    const [run] = await db.select().from(labOptimizationRuns).where(and(
+      eq(labOptimizationRuns.userId, walletAddress),
+      eq(labOptimizationRuns.agentTaskId, agentTaskId),
+      eq(labOptimizationRuns.agentIdempotencyKey, agentIdempotencyKey),
+    )!).limit(1);
+    return run;
+  }
+
+  async markAgentRunCancelled(id: number): Promise<boolean> {
+    // CAS on status='queued': only cancel a run that hasn't been claimed by the
+    // worker yet. A queued run has no worker, so terminal-marking it here is safe
+    // and fail-closed. If it already started, the UPDATE matches 0 rows → false,
+    // and the caller treats it as running (we can't reach the child worker).
+    const rows = await db.update(labOptimizationRuns).set({
+      status: "failed",
+      queueOrder: null,
+      completedAt: new Date(),
+      checkpoint: { userCancelled: true } as any,
+    }).where(and(
+      eq(labOptimizationRuns.id, id),
+      eq(labOptimizationRuns.status, "queued"),
+    )!).returning({ id: labOptimizationRuns.id });
+    return rows.length > 0;
   }
 
   async completeRun(id: number, totalConfigsTested: number): Promise<void> {

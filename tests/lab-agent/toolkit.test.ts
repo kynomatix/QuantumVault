@@ -8,6 +8,7 @@
 import { describe, it, expect } from "vitest";
 import { LabAgentToolkit, type LabAgentAdapter } from "../../server/lab-agent/toolkit";
 import { createCurrentLabAdapter, type AdapterStorage } from "../../server/lab-agent/current-lab-adapter";
+import { DEFAULT_LAB_SLIPPAGE } from "../../server/lab/friction";
 
 const WALLET = "wallet-AAA";
 const OTHER = "wallet-BBB";
@@ -22,6 +23,12 @@ function makeFakeStorage() {
     lastGetStrategiesArg: undefined as string | undefined,
     activeRun: false,
     jobsAhead: 0,
+
+    // T5 control surface state.
+    nextRunId: 1000,
+    queueSeq: 0,
+    lastCreated: undefined as any,
+    nextCreateError: null as { code: string } | null,
 
     strategies: [
       { id: 1, userId: WALLET, name: "FLUX MOMENTUM", description: "trend rider", createdAt: now },
@@ -81,6 +88,40 @@ function makeFakeStorage() {
     async hasActiveRun(_wallet?: string) {
       return this.activeRun;
     },
+
+    // --- T5 control surface ---
+    async getNextQueueOrder(_wallet?: string) {
+      return ++this.queueSeq;
+    },
+    async getAgentRun(wallet: string, taskId: number, key: string) {
+      return this.runs.find(
+        (r) => r.userId === wallet && r.agentTaskId === taskId && r.agentIdempotencyKey === key,
+      );
+    },
+    async createRun(data: any) {
+      // Simulate a concurrent winner committing the SAME idempotency key, then the
+      // UNIQUE index rejecting our insert. The adapter must reselect + return it.
+      if (this.nextCreateError) {
+        const code = this.nextCreateError.code;
+        this.nextCreateError = null;
+        const winner = { id: ++this.nextRunId, createdAt: now, completedAt: null, ...data };
+        this.runs.push(winner);
+        throw Object.assign(new Error("duplicate key value"), { code });
+      }
+      const row = { id: ++this.nextRunId, createdAt: now, completedAt: null, ...data };
+      this.runs.push(row);
+      this.lastCreated = row;
+      return row;
+    },
+    async markAgentRunCancelled(id: number) {
+      const run = this.runs.find((r) => r.id === id);
+      if (!run || run.status !== "queued") return false;
+      run.status = "failed";
+      run.queueOrder = null;
+      run.completedAt = now;
+      run.checkpoint = { userCancelled: true };
+      return true;
+    },
   };
   return fake;
 }
@@ -92,6 +133,44 @@ function makeToolkit() {
 }
 
 const ctx = { walletAddress: WALLET };
+// Control writes carry an owning agent task; this is the (wallet, taskId) scope.
+const wctx = { walletAddress: WALLET, taskId: 1 };
+
+/**
+ * A toolkit over an ISOLATED fake seeded with control-tool fixtures (a strategy
+ * WITH params, one WITHOUT, a refine source whose config snapshot must win, and
+ * agent-owned runs in each cancel-relevant state). Kept separate from the read
+ * fixtures so the read-test assertions (counts, latestRunId) stay untouched.
+ */
+function makeControlToolkit() {
+  const now = new Date("2026-01-01T00:00:00.000Z");
+  const fake = makeFakeStorage();
+  fake.strategies.push({
+    id: 4, userId: WALLET, name: "AGENT STRAT", description: null,
+    parsedInputs: [{ name: "length", type: "int", defaultValue: 14 }],
+    pineScript: "//@version=5\nstrategy('x')", strategySettings: {}, createdAt: now,
+  });
+  fake.strategies.push({
+    id: 5, userId: WALLET, name: "NO PARAMS", description: null,
+    parsedInputs: [], pineScript: "//", strategySettings: {}, createdAt: now,
+  });
+  // Refine source: config-snapshot OOS/slippage (0.33/0.0007) must WIN over the
+  // run columns (0.15/0.0006) — the GOOD refine path re-threads the holdout.
+  fake.runs.push({
+    id: 30, userId: WALLET, strategyId: 4, status: "complete", queueOrder: null,
+    oosFraction: 0.15, slippage: 0.0006, tickers: ["SOL"], timeframes: ["2h"],
+    startDate: "2025-01-01", endDate: "2025-12-31",
+    randomSamples: 800, topK: 15, refinementsPerSeed: 40, minTrades: 8, maxDrawdownCap: 80,
+    configSnapshot: { type: "new", config: { outOfSampleFraction: 0.33, slippage: 0.0007, startDate: "2025-02-01", endDate: "2025-11-30" } },
+    checkpoint: null, agentOwned: true, totalConfigsTested: 300, createdAt: now, completedAt: now,
+  });
+  // Agent-owned runs in each cancel-relevant state.
+  fake.runs.push({ id: 40, userId: WALLET, strategyId: 4, status: "queued", queueOrder: 9, oosFraction: 0.2, agentOwned: true, checkpoint: null, totalConfigsTested: null, createdAt: now, completedAt: null });
+  fake.runs.push({ id: 41, userId: WALLET, strategyId: 4, status: "complete", queueOrder: null, oosFraction: 0.2, agentOwned: true, checkpoint: null, totalConfigsTested: 100, createdAt: now, completedAt: now });
+  fake.runs.push({ id: 42, userId: WALLET, strategyId: 4, status: "running", queueOrder: null, oosFraction: 0.2, agentOwned: true, checkpoint: null, totalConfigsTested: 5, createdAt: now, completedAt: null });
+  const toolkit = new LabAgentToolkit(createCurrentLabAdapter(fake as unknown as AdapterStorage));
+  return { fake, toolkit };
+}
 
 // ---------------------------------------------------------------------------
 // Capability-bounding + wallet binding
@@ -308,13 +387,10 @@ describe("deferred methods return not_implemented", () => {
   const cases: Array<[string, unknown]> = [
     ["listTemplates", {}],
     ["getHeatmap", { runId: 10 }],
-    ["runOptimization", { strategyId: 1, symbols: ["SOL"], timeframes: ["2h"], idempotencyKey: "k" }],
-    ["refineFrom", { runId: 10, idempotencyKey: "k" }],
     ["generateInsights", { strategyId: 1, idempotencyKey: "k" }],
     ["createStrategyFromText", { prompt: "make a thing", idempotencyKey: "k" }],
     ["createStrategyFromTemplate", { templateId: "t1", idempotencyKey: "k" }],
     ["improve", { strategyId: 1, insightsOrWeaknesses: "too few trades", idempotencyKey: "k" }],
-    ["cancelRun", { runId: 10 }],
   ];
 
   for (const [method, input] of cases) {
@@ -325,4 +401,182 @@ describe("deferred methods return not_implemented", () => {
       if (!res.ok) expect(res.error.code).toBe("not_implemented");
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// T5: idempotent control tools — runOptimization / refineFrom / cancelRun
+// ---------------------------------------------------------------------------
+
+describe("control: runOptimization", () => {
+  it("queues a new agent run with a correlationId (idempotent:false)", async () => {
+    const { fake, toolkit } = makeControlToolkit();
+    const res = await toolkit.call(wctx, "runOptimization", {
+      strategyId: 4, symbols: ["SOL", "ETH"], timeframes: ["2h"], idempotencyKey: "opt-1",
+    });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.data.status).toBe("queued");
+    expect(res.data.idempotent).toBe(false);
+    expect(res.data.correlationId.length).toBeGreaterThan(0);
+    expect(res.data.runId).toBeGreaterThan(0);
+    // Persisted as an agent-owned queued run carrying the (task, key) tuple + OOS default.
+    expect(fake.lastCreated.agentOwned).toBe(true);
+    expect(fake.lastCreated.status).toBe("queued");
+    expect(fake.lastCreated.queueOrder).not.toBeNull();
+    expect(fake.lastCreated.agentTaskId).toBe(1);
+    expect(fake.lastCreated.agentIdempotencyKey).toBe("opt-1");
+    expect(fake.lastCreated.oosFraction).toBe(0.2);
+    expect(fake.lastCreated.configSnapshot.config.outOfSampleFraction).toBe(0.2);
+    expect(fake.lastCreated.configSnapshot.config.slippage).toBe(DEFAULT_LAB_SLIPPAGE);
+  });
+
+  it("is idempotent on a reused key (same run, idempotent:true)", async () => {
+    const { toolkit } = makeControlToolkit();
+    const input = { strategyId: 4, symbols: ["SOL"], timeframes: ["2h"], idempotencyKey: "opt-2" };
+    const first = await toolkit.call(wctx, "runOptimization", input);
+    const second = await toolkit.call(wctx, "runOptimization", input);
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(first.data.idempotent).toBe(false);
+    expect(second.data.idempotent).toBe(true);
+    expect(second.data.runId).toBe(first.data.runId);
+  });
+
+  it("requires an owning task (forbidden without taskId)", async () => {
+    const { toolkit } = makeControlToolkit();
+    const res = await toolkit.call(ctx, "runOptimization", {
+      strategyId: 4, symbols: ["SOL"], timeframes: ["2h"], idempotencyKey: "opt-3",
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("forbidden");
+  });
+
+  it("rejects a stage list that omits 'random'", async () => {
+    const { toolkit } = makeControlToolkit();
+    const res = await toolkit.call(wctx, "runOptimization", {
+      strategyId: 4, symbols: ["SOL"], timeframes: ["2h"], stages: ["refine"], idempotencyKey: "opt-4",
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("invalid_input");
+  });
+
+  it("rejects a sub-hour timeframe", async () => {
+    const { toolkit } = makeControlToolkit();
+    const res = await toolkit.call(wctx, "runOptimization", {
+      strategyId: 4, symbols: ["SOL"], timeframes: ["15m"], idempotencyKey: "opt-5",
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("invalid_input");
+  });
+
+  it("hides another wallet's strategy as not_found", async () => {
+    const { toolkit } = makeControlToolkit();
+    const res = await toolkit.call(wctx, "runOptimization", {
+      strategyId: 3, symbols: ["SOL"], timeframes: ["2h"], idempotencyKey: "opt-6",
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("not_found");
+  });
+
+  it("rejects a strategy that has no parameters to optimize", async () => {
+    const { toolkit } = makeControlToolkit();
+    const res = await toolkit.call(wctx, "runOptimization", {
+      strategyId: 5, symbols: ["SOL"], timeframes: ["2h"], idempotencyKey: "opt-7",
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("invalid_input");
+  });
+
+  it("survives a UNIQUE-violation race (returns the committed winner, idempotent:true)", async () => {
+    const { fake, toolkit } = makeControlToolkit();
+    fake.nextCreateError = { code: "23505" };
+    const res = await toolkit.call(wctx, "runOptimization", {
+      strategyId: 4, symbols: ["SOL"], timeframes: ["2h"], idempotencyKey: "race-1",
+    });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.data.idempotent).toBe(true);
+    const winner = fake.runs.find((r) => r.agentIdempotencyKey === "race-1");
+    expect(winner).toBeDefined();
+    expect(res.data.runId).toBe(winner!.id);
+  });
+});
+
+describe("control: refineFrom", () => {
+  it("inherits OOS + slippage from the source run's config snapshot", async () => {
+    const { fake, toolkit } = makeControlToolkit();
+    const res = await toolkit.call(wctx, "refineFrom", { runId: 30, idempotencyKey: "ref-1" });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.data.status).toBe("queued");
+    // Config snapshot WINS over the run columns (0.33/0.0007, not 0.15/0.0006).
+    expect(fake.lastCreated.oosFraction).toBe(0.33);
+    expect(fake.lastCreated.slippage).toBe(0.0007);
+    expect(fake.lastCreated.configSnapshot.sourceRunId).toBe(30);
+    expect(fake.lastCreated.configSnapshot.config.deepSearch).toBe(true);
+    expect(fake.lastCreated.configSnapshot.config.coordinateTune).toBe(true);
+    expect(fake.lastCreated.configSnapshot.config.useInsights).toBe(true);
+  });
+
+  it("requires an owning task (forbidden without taskId)", async () => {
+    const { toolkit } = makeControlToolkit();
+    const res = await toolkit.call(ctx, "refineFrom", { runId: 30, idempotencyKey: "ref-2" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("forbidden");
+  });
+
+  it("hides another wallet's run as not_found", async () => {
+    const { toolkit } = makeControlToolkit();
+    const res = await toolkit.call(wctx, "refineFrom", { runId: 12, idempotencyKey: "ref-3" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("not_found");
+  });
+
+  it("is idempotent on a reused key (same run, idempotent:true)", async () => {
+    const { toolkit } = makeControlToolkit();
+    const input = { runId: 30, idempotencyKey: "ref-4" };
+    const first = await toolkit.call(wctx, "refineFrom", input);
+    const second = await toolkit.call(wctx, "refineFrom", input);
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(second.data.idempotent).toBe(true);
+    expect(second.data.runId).toBe(first.data.runId);
+  });
+});
+
+describe("control: cancelRun", () => {
+  it("cancels a queued agent run", async () => {
+    const { toolkit } = makeControlToolkit();
+    const res = await toolkit.call(ctx, "cancelRun", { runId: 40 });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.data.status).toBe("cancelled");
+  });
+
+  it("is an idempotent no-op on an already-terminal run", async () => {
+    const { toolkit } = makeControlToolkit();
+    const res = await toolkit.call(ctx, "cancelRun", { runId: 41 });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.data.status).toBe("completed");
+  });
+
+  it("returns conflict for a still-running run", async () => {
+    const { toolkit } = makeControlToolkit();
+    const res = await toolkit.call(ctx, "cancelRun", { runId: 42 });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("conflict");
+  });
+
+  it("refuses a non-agent-owned run with forbidden", async () => {
+    const { toolkit } = makeControlToolkit();
+    const res = await toolkit.call(ctx, "cancelRun", { runId: 10 });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("forbidden");
+  });
+
+  it("hides another wallet's run as not_found", async () => {
+    const { toolkit } = makeControlToolkit();
+    const res = await toolkit.call(ctx, "cancelRun", { runId: 12 });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("not_found");
+  });
 });
