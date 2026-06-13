@@ -1,6 +1,6 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { useEffect, useRef, useState } from 'react';
-import { motion, useScroll, useTransform, useMotionTemplate } from 'framer-motion';
+import { motion, useScroll, useTransform, useMotionTemplate, type MotionProps, type Variants } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { useQuery } from '@tanstack/react-query';
 import { 
@@ -68,6 +68,45 @@ const staggerContainer = {
   }
 };
 
+// Bento reveal choreography for the features section. The container staggers the
+// category tiles; each tile then staggers its own inner feature cells, so elements
+// arrive individually (not as one uniform block fade). Custom per-card offsets let
+// tiles enter from varied directions for a layered, premium feel.
+const featuresStagger: Variants = {
+  hidden: {},
+  visible: { transition: { staggerChildren: 0.12, delayChildren: 0.05 } },
+};
+
+const bentoCardVariants: Variants = {
+  hidden: (c?: { x?: number; y?: number; scale?: number }) => ({
+    opacity: 0,
+    x: c?.x ?? 0,
+    y: c?.y ?? 40,
+    scale: c?.scale ?? 0.97,
+  }),
+  visible: {
+    opacity: 1,
+    x: 0,
+    y: 0,
+    scale: 1,
+    transition: {
+      duration: 0.6,
+      ease: [0.22, 1, 0.36, 1],
+      staggerChildren: 0.07,
+      delayChildren: 0.12,
+    },
+  },
+};
+
+const bentoItemVariants: Variants = {
+  hidden: { opacity: 0, y: 16 },
+  visible: {
+    opacity: 1,
+    y: 0,
+    transition: { duration: 0.45, ease: [0.22, 1, 0.36, 1] },
+  },
+};
+
 interface FeatureCardProps {
   icon: React.ReactNode;
   title: string;
@@ -95,6 +134,7 @@ export default function Landing() {
   const { setVisible } = useWalletModal();
   const heroRef = useRef<HTMLDivElement>(null);
   const vaultSectionRef = useRef<HTMLDivElement>(null);
+  const featuresSectionRef = useRef<HTMLDivElement>(null);
   const [isMounted, setIsMounted] = useState(false);
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
   const [heroInView, setHeroInView] = useState(true);
@@ -158,6 +198,18 @@ export default function Landing() {
   const vaultPillY = useTransform(vaultScrollProgress, [0.4, 0.55], [20, 0]);
   const vaultGlowOpacity = useTransform(vaultScrollProgress, [0.2, 0.5], [0, 1]);
   const vaultGlowScale = useTransform(vaultScrollProgress, [0.2, 0.5], [0.5, 1]);
+
+  // Features section scroll-linked parallax. Drives only decorative background
+  // accents and the heading (never the content grid) so depth never pushes copy
+  // sideways or causes overflow at phone widths. Disabled under reduced motion.
+  const { scrollYProgress: featuresScrollProgress } = useScroll(
+    isMounted && featuresSectionRef.current
+      ? { target: featuresSectionRef, offset: ["start end", "end start"] }
+      : undefined
+  );
+  const featuresBlobY1 = useTransform(featuresScrollProgress, [0, 1], [-90, 90]);
+  const featuresBlobY2 = useTransform(featuresScrollProgress, [0, 1], [70, -110]);
+  const featuresHeadingY = useTransform(featuresScrollProgress, [0, 1], [40, -28]);
   
   // Background parallax - continuous zoom and movement
   const heroY = useTransform(scrollY, [0, 800], [0, 300]);
@@ -200,6 +252,21 @@ export default function Landing() {
   const handleConnectWallet = () => {
     setVisible(true);
   };
+
+  // Reveal helpers for the features bento. Under reduced motion we return no motion
+  // props at all, so tiles render fully visible in their natural position (graceful
+  // static experience) rather than being held in the hidden variant.
+  const featuresContainerProps: MotionProps = prefersReducedMotion
+    ? {}
+    : {
+        initial: 'hidden',
+        whileInView: 'visible',
+        viewport: { once: false, amount: 0.12 },
+        variants: featuresStagger,
+      };
+  const cardReveal = (custom?: { x?: number; y?: number; scale?: number }): MotionProps =>
+    prefersReducedMotion ? {} : { variants: bentoCardVariants, custom };
+  const itemReveal: MotionProps = prefersReducedMotion ? {} : { variants: bentoItemVariants };
 
   return (
     <div className="min-h-screen bg-black overflow-x-hidden">
@@ -518,19 +585,43 @@ export default function Landing() {
           </div>
         </section>
 
-        <section id="features" className="relative py-24 px-6 bg-background">
+        <section
+          id="features"
+          ref={featuresSectionRef}
+          className="relative py-24 px-6 bg-background overflow-hidden"
+          data-testid="section-features"
+        >
+          {/* Layered, scroll-parallaxed background accents (decorative, clipped by
+              the section's overflow-hidden so depth never bleeds into overflow). */}
           <div className="absolute inset-0 bg-gradient-to-b from-black via-background to-background" />
-          <div className="absolute top-0 left-1/4 w-[500px] h-[500px] bg-primary/10 rounded-full blur-[150px]" />
-          <div className="absolute bottom-0 right-1/4 w-[400px] h-[400px] bg-accent/10 rounded-full blur-[120px]" />
-          
+          <motion.div
+            aria-hidden="true"
+            style={{ y: prefersReducedMotion ? 0 : featuresBlobY1, willChange: 'transform' }}
+            className="pointer-events-none absolute -top-24 left-1/4 w-[480px] max-w-[80vw] h-[480px] bg-primary/10 rounded-full blur-[150px]"
+          />
+          <motion.div
+            aria-hidden="true"
+            style={{ y: prefersReducedMotion ? 0 : featuresBlobY2, willChange: 'transform' }}
+            className="pointer-events-none absolute bottom-0 right-1/4 w-[420px] max-w-[80vw] h-[420px] bg-accent/10 rounded-full blur-[120px]"
+          />
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 opacity-[0.05] [background-image:linear-gradient(to_right,rgba(255,255,255,0.6)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.6)_1px,transparent_1px)] [background-size:64px_64px] [mask-image:radial-gradient(ellipse_60%_55%_at_50%_40%,black,transparent)]"
+          />
+
           <div className="max-w-7xl mx-auto relative z-10">
-            {/* Section Header */}
-            <motion.div 
-              initial={{ opacity: 0, y: 30 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: false, amount: 0.3 }}
-              transition={{ duration: 0.6 }}
-              className="text-center mb-16"
+            {/* Section Header (subtle parallax drift) */}
+            <motion.div
+              style={{ y: prefersReducedMotion ? 0 : featuresHeadingY }}
+              {...(prefersReducedMotion
+                ? {}
+                : {
+                    initial: { opacity: 0, y: 30 },
+                    whileInView: { opacity: 1, y: 0 },
+                    viewport: { once: false, amount: 0.3 },
+                    transition: { duration: 0.6 },
+                  })}
+              className="text-center mb-14 sm:mb-16"
             >
               <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 border border-primary/20 text-sm text-primary mb-6">
                 <Sparkles className="w-4 h-4" />
@@ -542,172 +633,164 @@ export default function Landing() {
               </p>
             </motion.div>
 
-            {/* Bento Grid Layout - Grouped by Category */}
-            <div className="space-y-8">
-              {/* Security & Control */}
+            {/* Asymmetric bento — varied tile sizes and per-tile staggered reveals */}
+            <motion.div
+              {...featuresContainerProps}
+              className="grid grid-cols-1 lg:grid-cols-6 gap-4 sm:gap-5"
+            >
+              {/* Security & Control — hero/feature tile (enters from the left) */}
               <motion.div
-                initial={{ opacity: 0, y: 40 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: false, amount: 0.2 }}
-                transition={{ duration: 0.5 }}
-                className="rounded-3xl bg-gradient-to-br from-card/80 to-card/40 border border-border/50 p-6 sm:p-8"
+                {...cardReveal({ x: -48, y: 24 })}
+                className="group relative lg:col-span-4 rounded-3xl overflow-hidden border border-primary/15 bg-gradient-to-br from-primary/[0.10] via-card/60 to-card/30 p-6 sm:p-8 transition-[transform,box-shadow,border-color] duration-300 will-change-transform [@media(hover:hover)]:hover:-translate-y-1.5 [@media(hover:hover)]:hover:border-primary/40 [@media(hover:hover)]:hover:shadow-[0_20px_60px_-20px_rgba(99,102,241,0.45)]"
+                data-testid="card-feature-security"
               >
-                <div className="flex items-center gap-3 mb-6">
-                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/20 to-accent/20 flex items-center justify-center">
-                    <ShieldCheck className="w-5 h-5 text-primary" />
+                <div className="pointer-events-none absolute -top-16 -right-16 w-56 h-56 bg-primary/20 rounded-full blur-[90px] opacity-60 transition-opacity duration-500 [@media(hover:hover)]:group-hover:opacity-100" />
+                <div className="relative">
+                  <div className="flex items-center gap-3 mb-2">
+                    <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-primary/30 to-accent/20 flex items-center justify-center ring-1 ring-primary/20 transition-transform duration-300 [@media(hover:hover)]:group-hover:scale-110">
+                      <ShieldCheck className="w-6 h-6 text-primary" />
+                    </div>
+                    <div>
+                      <span className="text-[11px] uppercase tracking-[0.18em] text-primary/70 font-semibold">Core</span>
+                      <h3 className="font-display font-semibold text-2xl leading-tight">Security &amp; Control</h3>
+                    </div>
                   </div>
-                  <h3 className="font-display font-semibold text-xl">Security & Control</h3>
-                </div>
-                <div className="grid sm:grid-cols-3 gap-4">
-                  <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-primary/30 transition-colors">
-                    <Shield className="w-5 h-5 text-primary mb-3" />
-                    <h4 className="font-semibold text-sm mb-1">Dedicated Trading Wallet</h4>
-                    <p className="text-xs text-muted-foreground">A secure agent wallet handles automated trades. Your main wallet stays safe - you only sign deposits and withdrawals.</p>
-                  </div>
-                  <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-primary/30 transition-colors">
-                    <Lock className="w-5 h-5 text-primary mb-3" />
-                    <h4 className="font-semibold text-sm mb-1">Institutional-Grade Security</h4>
-                    <p className="text-xs text-muted-foreground">AES-256-GCM encryption, session-based key derivation, and cryptographic buffer zeroization. Your keys are never exposed.</p>
-                  </div>
-                  <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-primary/30 transition-colors">
-                    <KeyRound className="w-5 h-5 text-primary mb-3" />
-                    <h4 className="font-semibold text-sm mb-1">Seed Phrase Backup</h4>
-                    <p className="text-xs text-muted-foreground">Full user ownership and control. Export your agent wallet's recovery phrase anytime - your keys, your backup.</p>
+                  <p className="text-sm text-muted-foreground max-w-md mb-6">
+                    Non-custodial by design — institutional-grade encryption with keys only you can recover.
+                  </p>
+                  <div className="grid sm:grid-cols-3 gap-3 sm:gap-4">
+                    <motion.div {...itemReveal} className="group/cell p-4 rounded-2xl bg-background/40 border border-border/30 transition-[transform,border-color] duration-300 [@media(hover:hover)]:hover:-translate-y-1 [@media(hover:hover)]:hover:border-primary/40" data-testid="tile-feature-dedicated-wallet">
+                      <Shield className="w-5 h-5 text-primary mb-3 transition-transform duration-300 [@media(hover:hover)]:group-hover/cell:scale-110" />
+                      <h4 className="font-semibold text-sm mb-1">Dedicated Trading Wallet</h4>
+                      <p className="text-xs text-muted-foreground">A secure agent wallet handles automated trades. Your main wallet stays safe - you only sign deposits and withdrawals.</p>
+                    </motion.div>
+                    <motion.div {...itemReveal} className="group/cell p-4 rounded-2xl bg-background/40 border border-border/30 transition-[transform,border-color] duration-300 [@media(hover:hover)]:hover:-translate-y-1 [@media(hover:hover)]:hover:border-primary/40" data-testid="tile-feature-encryption">
+                      <Lock className="w-5 h-5 text-primary mb-3 transition-transform duration-300 [@media(hover:hover)]:group-hover/cell:scale-110" />
+                      <h4 className="font-semibold text-sm mb-1">Institutional-Grade Security</h4>
+                      <p className="text-xs text-muted-foreground">AES-256-GCM encryption, session-based key derivation, and cryptographic buffer zeroization. Your keys are never exposed.</p>
+                    </motion.div>
+                    <motion.div {...itemReveal} className="group/cell p-4 rounded-2xl bg-background/40 border border-border/30 transition-[transform,border-color] duration-300 [@media(hover:hover)]:hover:-translate-y-1 [@media(hover:hover)]:hover:border-primary/40" data-testid="tile-feature-seed-backup">
+                      <KeyRound className="w-5 h-5 text-primary mb-3 transition-transform duration-300 [@media(hover:hover)]:group-hover/cell:scale-110" />
+                      <h4 className="font-semibold text-sm mb-1">Seed Phrase Backup</h4>
+                      <p className="text-xs text-muted-foreground">Full user ownership and control. Export your agent wallet's recovery phrase anytime - your keys, your backup.</p>
+                    </motion.div>
                   </div>
                 </div>
               </motion.div>
 
-              {/* Automation & Execution */}
+              {/* Scale & Ecosystem — tall supporting tile (enters from the right) */}
               <motion.div
-                initial={{ opacity: 0, y: 40 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: false, amount: 0.2 }}
-                transition={{ duration: 0.5 }}
-                className="rounded-3xl bg-gradient-to-br from-card/80 to-card/40 border border-border/50 p-6 sm:p-8"
+                {...cardReveal({ x: 48, y: 24 })}
+                className="group relative lg:col-span-2 rounded-3xl overflow-hidden border border-border/50 bg-gradient-to-br from-card/80 to-card/40 p-6 sm:p-8 flex flex-col transition-[transform,box-shadow,border-color] duration-300 will-change-transform [@media(hover:hover)]:hover:-translate-y-1.5 [@media(hover:hover)]:hover:border-blue-500/40 [@media(hover:hover)]:hover:shadow-[0_20px_60px_-20px_rgba(59,130,246,0.4)]"
+                data-testid="card-feature-scale"
               >
-                <div className="flex items-center gap-3 mb-6">
-                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-accent/20 to-primary/20 flex items-center justify-center">
-                    <Zap className="w-5 h-5 text-accent" />
+                <div className="pointer-events-none absolute -bottom-16 -left-10 w-48 h-48 bg-blue-500/15 rounded-full blur-[80px] opacity-50 transition-opacity duration-500 [@media(hover:hover)]:group-hover:opacity-100" />
+                <div className="relative flex items-center gap-3 mb-6">
+                  <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-blue-500/25 to-cyan-500/20 flex items-center justify-center ring-1 ring-blue-500/20 transition-transform duration-300 [@media(hover:hover)]:group-hover:scale-110">
+                    <Globe className="w-6 h-6 text-blue-400" />
                   </div>
-                  <h3 className="font-display font-semibold text-xl">Automation & Execution</h3>
+                  <h3 className="font-display font-semibold text-xl">Scale &amp; Ecosystem</h3>
                 </div>
-                <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-accent/30 transition-colors">
-                    <Activity className="w-5 h-5 text-accent mb-3" />
+                <div className="relative flex flex-col gap-3 sm:gap-4 flex-1">
+                  <motion.div {...itemReveal} className="group/cell flex items-start gap-3 p-4 rounded-2xl bg-background/40 border border-border/30 transition-[transform,border-color] duration-300 [@media(hover:hover)]:hover:-translate-y-1 [@media(hover:hover)]:hover:border-blue-500/40" data-testid="tile-feature-all-markets">
+                    <Globe className="w-5 h-5 text-blue-400 mt-0.5 shrink-0 transition-transform duration-300 [@media(hover:hover)]:group-hover/cell:scale-110" />
+                    <div>
+                      <h4 className="font-semibold text-sm mb-1">All Markets</h4>
+                      <p className="text-xs text-muted-foreground">Auto-discovery of all Pacifica markets. New listings available instantly.</p>
+                    </div>
+                  </motion.div>
+                  <motion.div {...itemReveal} className="group/cell flex items-start gap-3 p-4 rounded-2xl bg-background/40 border border-border/30 transition-[transform,border-color] duration-300 [@media(hover:hover)]:hover:-translate-y-1 [@media(hover:hover)]:hover:border-blue-500/40" data-testid="tile-feature-isolation">
+                    <Layers className="w-5 h-5 text-blue-400 mt-0.5 shrink-0 transition-transform duration-300 [@media(hover:hover)]:group-hover/cell:scale-110" />
+                    <div>
+                      <h4 className="font-semibold text-sm mb-1">Multi-Bot Isolation</h4>
+                      <p className="text-xs text-muted-foreground">Each bot runs on its own subaccount. Losses contained.</p>
+                    </div>
+                  </motion.div>
+                  <motion.div {...itemReveal} className="group/cell flex items-start gap-3 p-4 rounded-2xl bg-background/40 border border-border/30 transition-[transform,border-color] duration-300 [@media(hover:hover)]:hover:-translate-y-1 [@media(hover:hover)]:hover:border-blue-500/40" data-testid="tile-feature-marketplace">
+                    <Store className="w-5 h-5 text-blue-400 mt-0.5 shrink-0 transition-transform duration-300 [@media(hover:hover)]:group-hover/cell:scale-110" />
+                    <div>
+                      <h4 className="font-semibold text-sm mb-1">Bot Marketplace</h4>
+                      <p className="text-xs text-muted-foreground">Publish bots and subscribe to community signals.</p>
+                    </div>
+                  </motion.div>
+                </div>
+              </motion.div>
+
+              {/* Automation & Execution — wide tile, 2x2 inner grid (rises up) */}
+              <motion.div
+                {...cardReveal({ y: 56 })}
+                className="group relative lg:col-span-3 rounded-3xl overflow-hidden border border-border/50 bg-gradient-to-br from-card/80 to-card/40 p-6 sm:p-8 transition-[transform,box-shadow,border-color] duration-300 will-change-transform [@media(hover:hover)]:hover:-translate-y-1.5 [@media(hover:hover)]:hover:border-accent/40 [@media(hover:hover)]:hover:shadow-[0_20px_60px_-20px_rgba(59,130,246,0.4)]"
+                data-testid="card-feature-automation"
+              >
+                <div className="pointer-events-none absolute -top-16 -left-10 w-48 h-48 bg-accent/15 rounded-full blur-[80px] opacity-50 transition-opacity duration-500 [@media(hover:hover)]:group-hover:opacity-100" />
+                <div className="relative flex items-center gap-3 mb-6">
+                  <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-accent/25 to-primary/20 flex items-center justify-center ring-1 ring-accent/20 transition-transform duration-300 [@media(hover:hover)]:group-hover:scale-110">
+                    <Zap className="w-6 h-6 text-accent" />
+                  </div>
+                  <h3 className="font-display font-semibold text-xl">Automation &amp; Execution</h3>
+                </div>
+                <div className="relative grid sm:grid-cols-2 gap-3 sm:gap-4">
+                  <motion.div {...itemReveal} className="group/cell p-4 rounded-2xl bg-background/40 border border-border/30 transition-[transform,border-color] duration-300 [@media(hover:hover)]:hover:-translate-y-1 [@media(hover:hover)]:hover:border-accent/40" data-testid="tile-feature-signals">
+                    <Activity className="w-5 h-5 text-accent mb-3 transition-transform duration-300 [@media(hover:hover)]:group-hover/cell:scale-110" />
                     <h4 className="font-semibold text-sm mb-1">TradingView Signals</h4>
                     <p className="text-xs text-muted-foreground">Direct webhook integration with idempotent execution.</p>
-                  </div>
-                  <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-accent/30 transition-colors">
-                    <TrendingUp className="w-5 h-5 text-accent mb-3" />
+                  </motion.div>
+                  <motion.div {...itemReveal} className="group/cell p-4 rounded-2xl bg-background/40 border border-border/30 transition-[transform,border-color] duration-300 [@media(hover:hover)]:hover:-translate-y-1 [@media(hover:hover)]:hover:border-accent/40" data-testid="tile-feature-strategies">
+                    <TrendingUp className="w-5 h-5 text-accent mb-3 transition-transform duration-300 [@media(hover:hover)]:group-hover/cell:scale-110" />
                     <h4 className="font-semibold text-sm mb-1">Advanced Strategies</h4>
                     <p className="text-xs text-muted-foreground">Auto top-up, profit reinvestment, and dynamic position scaling.</p>
-                  </div>
-                  <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-accent/30 transition-colors">
-                    <Zap className="w-5 h-5 text-accent mb-3" />
+                  </motion.div>
+                  <motion.div {...itemReveal} className="group/cell p-4 rounded-2xl bg-background/40 border border-border/30 transition-[transform,border-color] duration-300 [@media(hover:hover)]:hover:-translate-y-1 [@media(hover:hover)]:hover:border-accent/40" data-testid="tile-feature-fast">
+                    <Zap className="w-5 h-5 text-accent mb-3 transition-transform duration-300 [@media(hover:hover)]:group-hover/cell:scale-110" />
                     <h4 className="font-semibold text-sm mb-1">Lightning Fast</h4>
                     <p className="text-xs text-muted-foreground">Sub-second on-chain execution on Solana.</p>
-                  </div>
-                  <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-accent/30 transition-colors">
-                    <Lock className="w-5 h-5 text-accent mb-3" />
+                  </motion.div>
+                  <motion.div {...itemReveal} className="group/cell p-4 rounded-2xl bg-background/40 border border-border/30 transition-[transform,border-color] duration-300 [@media(hover:hover)]:hover:-translate-y-1 [@media(hover:hover)]:hover:border-accent/40" data-testid="tile-feature-risk">
+                    <Lock className="w-5 h-5 text-accent mb-3 transition-transform duration-300 [@media(hover:hover)]:group-hover/cell:scale-110" />
                     <h4 className="font-semibold text-sm mb-1">Risk Controls</h4>
                     <p className="text-xs text-muted-foreground">Per-bot limits and emergency stop functionality.</p>
-                  </div>
+                  </motion.div>
                 </div>
               </motion.div>
 
-              {/* Two-column layout for smaller groups */}
-              <div className="grid lg:grid-cols-2 gap-8">
-                {/* Portfolio Management */}
-                <motion.div
-                  initial={{ opacity: 0, y: 40 }}
-                  whileInView={{ opacity: 1, y: 0 }}
-                  viewport={{ once: false, amount: 0.2 }}
-                  transition={{ duration: 0.5 }}
-                  className="rounded-3xl bg-gradient-to-br from-card/80 to-card/40 border border-border/50 p-6 sm:p-8"
-                >
-                  <div className="flex items-center gap-3 mb-6">
-                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-green-500/20 to-emerald-500/20 flex items-center justify-center">
-                      <PiggyBank className="w-5 h-5 text-green-400" />
-                    </div>
-                    <h3 className="font-display font-semibold text-xl">Portfolio Management</h3>
+              {/* Portfolio Management — wide tile (rises up + scales in) */}
+              <motion.div
+                {...cardReveal({ y: 56, scale: 0.95 })}
+                className="group relative lg:col-span-3 rounded-3xl overflow-hidden border border-border/50 bg-gradient-to-br from-card/80 to-card/40 p-6 sm:p-8 transition-[transform,box-shadow,border-color] duration-300 will-change-transform [@media(hover:hover)]:hover:-translate-y-1.5 [@media(hover:hover)]:hover:border-green-500/40 [@media(hover:hover)]:hover:shadow-[0_20px_60px_-20px_rgba(34,197,94,0.35)]"
+                data-testid="card-feature-portfolio"
+              >
+                <div className="pointer-events-none absolute -bottom-16 -right-10 w-48 h-48 bg-green-500/15 rounded-full blur-[80px] opacity-50 transition-opacity duration-500 [@media(hover:hover)]:group-hover:opacity-100" />
+                <div className="relative flex items-center gap-3 mb-6">
+                  <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-green-500/25 to-emerald-500/20 flex items-center justify-center ring-1 ring-green-500/20 transition-transform duration-300 [@media(hover:hover)]:group-hover:scale-110">
+                    <PiggyBank className="w-6 h-6 text-green-400" />
                   </div>
-                  <div className="space-y-4">
-                    <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-green-500/30 transition-colors">
-                      <div className="flex items-start gap-3">
-                        <PiggyBank className="w-5 h-5 text-green-400 mt-0.5" />
-                        <div>
-                          <h4 className="font-semibold text-sm mb-1">Profit Auto-Withdraw</h4>
-                          <p className="text-xs text-muted-foreground">Automatically sweep profits when equity exceeds your threshold.</p>
-                        </div>
-                      </div>
+                  <h3 className="font-display font-semibold text-xl">Portfolio Management</h3>
+                </div>
+                <div className="relative flex flex-col gap-3 sm:gap-4">
+                  <motion.div {...itemReveal} className="group/cell flex items-start gap-3 p-4 rounded-2xl bg-background/40 border border-border/30 transition-[transform,border-color] duration-300 [@media(hover:hover)]:hover:-translate-y-1 [@media(hover:hover)]:hover:border-green-500/40" data-testid="tile-feature-auto-withdraw">
+                    <PiggyBank className="w-5 h-5 text-green-400 mt-0.5 shrink-0 transition-transform duration-300 [@media(hover:hover)]:group-hover/cell:scale-110" />
+                    <div>
+                      <h4 className="font-semibold text-sm mb-1">Profit Auto-Withdraw</h4>
+                      <p className="text-xs text-muted-foreground">Automatically sweep profits when equity exceeds your threshold.</p>
                     </div>
-                    <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-green-500/30 transition-colors">
-                      <div className="flex items-start gap-3">
-                        <Percent className="w-5 h-5 text-green-400 mt-0.5" />
-                        <div>
-                          <h4 className="font-semibold text-sm mb-1">Equity Tracking</h4>
-                          <p className="text-xs text-muted-foreground">Real-time portfolio snapshots with daily equity curves and deposit history.</p>
-                        </div>
-                      </div>
+                  </motion.div>
+                  <motion.div {...itemReveal} className="group/cell flex items-start gap-3 p-4 rounded-2xl bg-background/40 border border-border/30 transition-[transform,border-color] duration-300 [@media(hover:hover)]:hover:-translate-y-1 [@media(hover:hover)]:hover:border-green-500/40" data-testid="tile-feature-equity">
+                    <Percent className="w-5 h-5 text-green-400 mt-0.5 shrink-0 transition-transform duration-300 [@media(hover:hover)]:group-hover/cell:scale-110" />
+                    <div>
+                      <h4 className="font-semibold text-sm mb-1">Equity Tracking</h4>
+                      <p className="text-xs text-muted-foreground">Real-time portfolio snapshots with daily equity curves and deposit history.</p>
                     </div>
-                    <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-green-500/30 transition-colors">
-                      <div className="flex items-start gap-3">
-                        <TrendingUp className="w-5 h-5 text-green-400 mt-0.5" />
-                        <div>
-                          <h4 className="font-semibold text-sm mb-1">PnL & Trade Analytics</h4>
-                          <p className="text-xs text-muted-foreground">Per-bot performance charts, net PnL, win rate, and complete trade history.</p>
-                        </div>
-                      </div>
+                  </motion.div>
+                  <motion.div {...itemReveal} className="group/cell flex items-start gap-3 p-4 rounded-2xl bg-background/40 border border-border/30 transition-[transform,border-color] duration-300 [@media(hover:hover)]:hover:-translate-y-1 [@media(hover:hover)]:hover:border-green-500/40" data-testid="tile-feature-analytics">
+                    <TrendingUp className="w-5 h-5 text-green-400 mt-0.5 shrink-0 transition-transform duration-300 [@media(hover:hover)]:group-hover/cell:scale-110" />
+                    <div>
+                      <h4 className="font-semibold text-sm mb-1">PnL &amp; Trade Analytics</h4>
+                      <p className="text-xs text-muted-foreground">Per-bot performance charts, net PnL, win rate, and complete trade history.</p>
                     </div>
-                  </div>
-                </motion.div>
-
-                {/* Scale & Ecosystem */}
-                <motion.div
-                  initial={{ opacity: 0, y: 40 }}
-                  whileInView={{ opacity: 1, y: 0 }}
-                  viewport={{ once: false, amount: 0.2 }}
-                  transition={{ duration: 0.5 }}
-                  className="rounded-3xl bg-gradient-to-br from-card/80 to-card/40 border border-border/50 p-6 sm:p-8"
-                >
-                  <div className="flex items-center gap-3 mb-6">
-                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500/20 to-cyan-500/20 flex items-center justify-center">
-                      <Globe className="w-5 h-5 text-blue-400" />
-                    </div>
-                    <h3 className="font-display font-semibold text-xl">Scale & Ecosystem</h3>
-                  </div>
-                  <div className="space-y-4">
-                    <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-blue-500/30 transition-colors">
-                      <div className="flex items-start gap-3">
-                        <Globe className="w-5 h-5 text-blue-400 mt-0.5" />
-                        <div>
-                          <h4 className="font-semibold text-sm mb-1">All Markets</h4>
-                          <p className="text-xs text-muted-foreground">Auto-discovery of all Pacifica markets. New listings available instantly.</p>
-                        </div>
-                      </div>
-                    </div>
-                    <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-blue-500/30 transition-colors">
-                      <div className="flex items-start gap-3">
-                        <Layers className="w-5 h-5 text-blue-400 mt-0.5" />
-                        <div>
-                          <h4 className="font-semibold text-sm mb-1">Multi-Bot Isolation</h4>
-                          <p className="text-xs text-muted-foreground">Each bot runs on its own subaccount. Losses contained.</p>
-                        </div>
-                      </div>
-                    </div>
-                    <div className="p-4 rounded-xl bg-background/50 border border-border/30 hover:border-blue-500/30 transition-colors">
-                      <div className="flex items-start gap-3">
-                        <Store className="w-5 h-5 text-blue-400 mt-0.5" />
-                        <div>
-                          <h4 className="font-semibold text-sm mb-1">Bot Marketplace</h4>
-                          <p className="text-xs text-muted-foreground">Publish bots and subscribe to community signals.</p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </motion.div>
-              </div>
-            </div>
+                  </motion.div>
+                </div>
+              </motion.div>
+            </motion.div>
           </div>
         </section>
 
