@@ -570,8 +570,8 @@ function LabHub({
       {/* Hero */}
       <motion.div {...fade(0)} className="space-y-8 text-center">
         <div className="flex items-center justify-center gap-3 text-indigo-400">
-          <FlaskConical className="w-8 h-8" />
-          <span className="font-display font-bold tracking-wide text-2xl">QuantumLab</span>
+          <FlaskConical className="w-7 h-7 shrink-0" />
+          <span className="font-display font-bold tracking-wide text-2xl leading-none">QuantumLab</span>
         </div>
 
         <div className="space-y-5 max-w-2xl mx-auto">
@@ -689,7 +689,7 @@ function LabHub({
       <motion.div {...fade(0.2)} className="space-y-8">
         <h2 className="text-2xl font-display font-semibold text-white tracking-tight text-center">Explore the Lab</h2>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-12 gap-y-10">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {sections.map((sec) => {
             const Icon = sec.icon;
             return (
@@ -697,31 +697,29 @@ function LabHub({
                 key={sec.id}
                 type="button"
                 onClick={sec.onClick}
-                className="group block text-left"
+                className="group relative text-left rounded-xl border border-white/10 bg-white/[0.03] p-5 transition-all duration-200 hover:border-indigo-300/70 hover:bg-indigo-500/[0.08] hover:ring-2 hover:ring-indigo-400/60 hover:shadow-[0_0_26px_-2px_rgba(99,102,241,0.8)] focus-visible:outline-none focus-visible:border-indigo-300/70 focus-visible:ring-2 focus-visible:ring-indigo-400/60 focus-visible:shadow-[0_0_26px_-2px_rgba(99,102,241,0.8)]"
                 data-testid={`hub-card-${sec.id}`}
               >
-                <div className="flex flex-col items-center text-center gap-4">
-                  <div className="w-12 h-12 rounded-xl bg-slate-800/50 flex items-center justify-center transition-colors [@media(hover:hover)]:group-hover:bg-indigo-500/10 shrink-0">
-                    <Icon className="w-6 h-6 text-slate-400 transition-colors [@media(hover:hover)]:group-hover:text-indigo-400" />
+                <div className="flex items-center justify-between mb-3">
+                  <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-indigo-500/20 to-blue-500/20 flex items-center justify-center transition-colors group-hover:from-indigo-500/40 group-hover:to-blue-500/40">
+                    <Icon className="w-5 h-5 text-indigo-300 transition-colors group-hover:text-indigo-200" />
                   </div>
-                  <div>
-                    <div className="flex items-center justify-center gap-3 mb-1.5">
-                      <h3 className="text-lg font-semibold text-slate-200 transition-colors group-hover:text-white">{sec.label}</h3>
-                      {sec.badge && (
-                        <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 text-xs font-mono font-medium" data-testid={`hub-card-badge-${sec.id}`}>
-                          {sec.badge}
-                        </span>
-                      )}
-                      <ArrowUpRight className="w-4 h-4 text-slate-600 opacity-0 -translate-y-1 translate-x-1 transition-all [@media(hover:hover)]:group-hover:text-indigo-400 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:group-hover:translate-y-0 [@media(hover:hover)]:group-hover:translate-x-0" />
-                    </div>
-                    <p className="text-white/60 leading-relaxed text-sm max-w-xs mx-auto">{sec.desc}</p>
-                    {sec.hint && (
-                      <div className={`mt-3 text-xs font-mono font-medium ${sec.hintColor ?? "text-slate-500"} opacity-80`}>
-                        {sec.hint}
-                      </div>
-                    )}
-                  </div>
+                  {sec.badge && (
+                    <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 text-xs font-mono font-medium" data-testid={`hub-card-badge-${sec.id}`}>
+                      {sec.badge}
+                    </span>
+                  )}
                 </div>
+                <div className="flex items-center gap-1.5">
+                  <h3 className="text-base font-semibold text-white">{sec.label}</h3>
+                  <ArrowUpRight className="w-4 h-4 text-white/30 transition-colors group-hover:text-indigo-300" />
+                </div>
+                <p className="mt-1.5 text-sm text-white/55 leading-relaxed">{sec.desc}</p>
+                {sec.hint && (
+                  <div className={`mt-3 text-xs font-mono font-medium ${sec.hintColor ?? "text-slate-500"} opacity-80`}>
+                    {sec.hint}
+                  </div>
+                )}
               </button>
             );
           })}
