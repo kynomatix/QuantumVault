@@ -448,9 +448,17 @@ export async function improveStrategy(args: {
     {
       role: 'user',
       content:
-        'Here is an existing Pine v6 strategy and a backtest insights report. Improve the strategy to address the ' +
-        'weaknesses in the report WITHOUT overfitting to the sample (keep it general and robust). Preserve tunable inputs.\n\n' +
-        `Current strategy:\n\`\`\`pine\n${currentPine}\n\`\`\`\n\nInsights report:\n${insights || '(no report provided)'}`,
+        'Here is an existing Pine v6 strategy and a report describing its weaknesses.\n' +
+        'IMPROVE THE STRATEGY ITSELF — its trading LOGIC, its entry/exit STRUCTURE, and its risk management — by editing the CODE. ' +
+        'Treat the report as a diagnosis of where the logic falls short, and change the code to fix it (for example: add or ' +
+        'restructure the protective / partial / breakeven / trailing exits, replace a weak or redundant signal, cut a give-back, ' +
+        'or fix a structural flaw). Do NOT just nudge input values.\n' +
+        'Do NOT spend this pass hand-picking parameter DEFAULTS: in QuantumLab a default is only the optimizer\'s starting seed ' +
+        'and is re-tuned per asset and timeframe, so hand-tuned defaults add no real edge here. Keep each input\'s minval/maxval ' +
+        'bounds tight and sane, but leave the actual best values for the optimizer to find.\n' +
+        'Keep the result general and robust — do NOT overfit to the sample — and preserve the existing tunable inputs ' +
+        '(add new ones only if the improved logic genuinely needs them).\n\n' +
+        `Current strategy:\n\`\`\`pine\n${currentPine}\n\`\`\`\n\nReport:\n${insights || '(no report provided)'}`,
     },
   ];
 
