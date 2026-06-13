@@ -436,11 +436,12 @@ export default function Landing() {
 
   // "How It Works" ribbon — scroll-LINKED reveal (not a fire-once timer). The
   // node opacities are scrubbed off scroll position, so scrolling down threads
-  // the nodes 1-2-3 and scrolling back up unwinds them 3-2-1. Window runs from
-  // the ribbon entering near the bottom to it settling into the upper-middle.
+  // the nodes 1-2-3 and scrolling back up unwinds them 3-2-1. Window opens once
+  // the ribbon reaches the lower-middle and completes as it settles upper-middle,
+  // so the reveal plays out while the ribbon is centered rather than at the edge.
   const { scrollYProgress: ribbonProgress } = useScroll(
     isMounted && ribbonRef.current
-      ? { target: ribbonRef, offset: ["start 0.85", "start 0.4"] }
+      ? { target: ribbonRef, offset: ["start 0.65", "start 0.25"] }
       : undefined
   );
   const ribbonOpacity0 = useTransform(ribbonProgress, [0.05, 0.32], [0, 1]);
