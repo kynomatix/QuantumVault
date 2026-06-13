@@ -1071,6 +1071,16 @@ export const labOptimizationRuns = pgTable("lab_optimization_runs", {
   // engines, or legacy run). parityDiffs holds a small sample of divergences.
   parityMatch: boolean("parity_match"),
   parityDiffs: jsonb("parity_diffs").$type<string[]>(),
+  // --- QuantumLab Sandbox Agent (Phase A): agent ownership + idempotency. ---
+  // NULL on every non-agent run (manual / UI runs). When an agent task queues a
+  // run these link it back to the owning task and make a resumed task safe to
+  // retry: the same (user_id, agent_task_id, agent_idempotency_key) maps to ONE
+  // run (enforced by a partial UNIQUE index in server/db.ts), so a reconnect can
+  // never double-queue on the single shared worker. Runs stay the source of truth.
+  agentTaskId: integer("agent_task_id"),
+  agentIdempotencyKey: text("agent_idempotency_key"),
+  agentCorrelationId: text("agent_correlation_id"),
+  agentOwned: boolean("agent_owned").notNull().default(false),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   completedAt: timestamp("completed_at"),
 });
@@ -1123,6 +1133,43 @@ export const labInsightsReports = pgTable("lab_insights_reports", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+// --- QuantumLab Sandbox Agent (Phase A): durable task state. ---
+// One row per agent chat/auto task: the agent's small, structured working memory
+// — its goal, its plan checklist, which runs it owns, and the leash counters
+// (loop_count, spend_estimate_usd). Reconciliation (§7b) treats lab_optimization_runs
+// as the source of truth; this table holds ONLY the agent's own intent and
+// bookkeeping, never trade or position data. Wallet-scoped on every access (§8).
+export const labAgentTasks = pgTable("lab_agent_tasks", {
+  id: serial("id").primaryKey(),
+  walletAddress: text("wallet_address").notNull(),
+  // active | awaiting_input | paused | completed | stopped | failed
+  status: text("status").notNull().default("active"),
+  // chat | auto (hands-off mode is gated by an admin whitelist — later phase)
+  mode: text("mode").notNull().default("chat"),
+  goal: text("goal"),
+  plan: jsonb("plan").$type<Record<string, unknown>>(),
+  memory: jsonb("memory").$type<Record<string, unknown>>(),
+  // The currently-running owned run, if any (one-active-run gate, §7).
+  activeRunId: integer("active_run_id"),
+  // Every run id this task has queued — reconciliation reads runs by these ids.
+  ownedRunIds: jsonb("owned_run_ids").$type<number[]>().notNull().default(sql`'[]'::jsonb`),
+  // Auto-loop leash counter (§7).
+  loopCount: integer("loop_count").notNull().default(0),
+  // Cumulative LLM spend estimate in USD (leash, §7).
+  spendEstimateUsd: real("spend_estimate_usd").notNull().default(0),
+  stopReason: text("stop_reason"),
+  lastReconciledAt: timestamp("last_reconciled_at"),
+  // When the task entered awaiting_input — basis for the idle-ONLY pause TTL (§7b).
+  awaitingSince: timestamp("awaiting_since"),
+  cancelRequestedAt: timestamp("cancel_requested_at"),
+  // = LAB_AGENT_TOOLKIT_VERSION at creation; lets a future contract bump migrate forward.
+  toolkitVersion: integer("toolkit_version").notNull().default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  index("idx_lab_agent_tasks_wallet_status").on(table.walletAddress, table.status),
+]);
+
 // Personal access tokens used by AI agents (Claude/MCP/etc.) and external
 // automation to call lab/backtest endpoints on behalf of the wallet owner.
 // Only the SHA-256 hash of the token is stored; the plaintext is shown to the
@@ -1157,6 +1204,10 @@ export type LabOptResult = typeof labOptimizationResults.$inferSelect;
 export type InsertLabResult = z.infer<typeof insertLabResultSchema>;
 export type LabInsightsReport = typeof labInsightsReports.$inferSelect;
 export type InsertLabInsightsReport = z.infer<typeof insertLabInsightsReportSchema>;
+
+export const insertLabAgentTaskSchema = createInsertSchema(labAgentTasks).omit({ id: true, createdAt: true, updatedAt: true });
+export type LabAgentTask = typeof labAgentTasks.$inferSelect;
+export type InsertLabAgentTask = z.infer<typeof insertLabAgentTaskSchema>;
 
 export interface LabPineInput {
   name: string;

@@ -309,6 +309,46 @@ export async function ensureSchema() {
       `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS parity_diffs jsonb`,
       `ALTER TABLE lab_optimization_results ADD COLUMN IF NOT EXISTS is_metrics jsonb`,
       `ALTER TABLE lab_optimization_results ADD COLUMN IF NOT EXISTS oos_metrics jsonb`,
+
+      // --- QuantumLab Sandbox Agent (Phase A): agent task state + run idempotency. ---
+      // Additive + idempotent. lab_agent_tasks is the agent's durable working
+      // memory (goal / plan / owned runs / leash counters). The agent_* columns on
+      // lab_optimization_runs link a run to its owning task and make a resumed task
+      // safe to retry: the partial UNIQUE index maps each
+      // (user_id, agent_task_id, agent_idempotency_key) to ONE run, so a reconnect
+      // can never double-queue on the single shared worker. Runs are the source of
+      // truth; every non-agent (manual/UI) run leaves all agent_* columns NULL/false.
+      `CREATE TABLE IF NOT EXISTS lab_agent_tasks (
+        id serial PRIMARY KEY,
+        wallet_address text NOT NULL,
+        status text NOT NULL DEFAULT 'active',
+        mode text NOT NULL DEFAULT 'chat',
+        goal text,
+        plan jsonb,
+        memory jsonb,
+        active_run_id integer,
+        owned_run_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+        loop_count integer NOT NULL DEFAULT 0,
+        spend_estimate_usd real NOT NULL DEFAULT 0,
+        stop_reason text,
+        last_reconciled_at timestamp,
+        awaiting_since timestamp,
+        cancel_requested_at timestamp,
+        toolkit_version integer NOT NULL DEFAULT 1,
+        created_at timestamp NOT NULL DEFAULT now(),
+        updated_at timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_lab_agent_tasks_wallet_status ON lab_agent_tasks (wallet_address, status)`,
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS agent_task_id integer`,
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS agent_idempotency_key text`,
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS agent_correlation_id text`,
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS agent_owned boolean NOT NULL DEFAULT false`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_lab_opt_runs_agent_idem
+         ON lab_optimization_runs (user_id, agent_task_id, agent_idempotency_key)
+         WHERE agent_idempotency_key IS NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS idx_lab_opt_runs_agent_task
+         ON lab_optimization_runs (agent_task_id)
+         WHERE agent_task_id IS NOT NULL`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner
