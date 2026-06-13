@@ -39,7 +39,7 @@ export interface ILabStorage {
   deleteStrategy(id: number): Promise<void>;
 
   createRun(data: InsertLabRun): Promise<LabOptimizationRun>;
-  getRuns(strategyId?: number): Promise<LabOptimizationRun[]>;
+  getRuns(strategyId?: number, userId?: string): Promise<LabOptimizationRun[]>;
   getRun(id: number): Promise<LabOptimizationRun | undefined>;
   completeRun(id: number, totalConfigsTested: number): Promise<void>;
   finalizeSuccessfulRun(id: number, totalConfigsTested: number, checkpoint: LabCheckpoint): Promise<void>;
