@@ -1172,6 +1172,36 @@ export const labAgentTasks = pgTable("lab_agent_tasks", {
   index("idx_lab_agent_tasks_wallet_status").on(table.walletAddress, table.status),
 ]);
 
+// A chip the assistant can attach to a message (§11 option bubbles). `navigate`
+// switches a QuantumLab tab client-side; `send` posts a predefined follow-up.
+export const agentSuggestedActionSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  kind: z.enum(["send", "navigate"]),
+  message: z.string().optional(),
+  tab: z.string().optional(),
+});
+export type AgentSuggestedAction = z.infer<typeof agentSuggestedActionSchema>;
+
+// Chat transcript for a Lab Assistant task (Phase B). Wallet-scoped through the
+// owning lab_agent_tasks row on every access (§8) — never by task id alone.
+export const labAgentMessages = pgTable("lab_agent_messages", {
+  id: serial("id").primaryKey(),
+  taskId: integer("task_id").notNull(),
+  // user | agent | tool
+  role: text("role").notNull(),
+  content: text("content").notNull(),
+  // Server-authored option bubbles ([] for plain replies / user messages).
+  suggestedActions: jsonb("suggested_actions").$type<AgentSuggestedAction[]>().notNull().default(sql`'[]'::jsonb`),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("idx_lab_agent_messages_task_created").on(table.taskId, table.createdAt, table.id),
+]);
+
+export const insertLabAgentMessageSchema = createInsertSchema(labAgentMessages).omit({ id: true, createdAt: true });
+export type LabAgentMessage = typeof labAgentMessages.$inferSelect;
+export type InsertLabAgentMessage = z.infer<typeof insertLabAgentMessageSchema>;
+
 // Personal access tokens used by AI agents (Claude/MCP/etc.) and external
 // automation to call lab/backtest endpoints on behalf of the wallet owner.
 // Only the SHA-256 hash of the token is stored; the plaintext is shown to the

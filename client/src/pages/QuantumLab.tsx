@@ -16,6 +16,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogTrigger, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { LabAssistantDock } from "@/components/LabAssistantDock";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -1461,6 +1462,7 @@ export default function QuantumLab() {
         </motion.div>
       </div>
 
+      <LabAssistantDock walletAddress={walletAddress ?? null} onNavigate={(tab) => setMainTab(tab as MainTab)} />
       <QueueDrawer open={queueOpen} onOpenChange={setQueueOpen} />
     </div>
   );

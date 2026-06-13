@@ -1,12 +1,13 @@
 import {
   labStrategies, labOptimizationRuns, labOptimizationResults, labInsightsReports,
-  labAgentTasks,
+  labAgentTasks, labAgentMessages,
   type LabStrategy, type InsertLabStrategy,
   type LabOptimizationRun, type InsertLabRun,
   type LabOptResult, type InsertLabResult,
   type LabBacktestResult, type LabJobProgress, type LabOptimizationConfig, type LabJobResult,
   type LabCheckpoint, type LabInsightsReport,
   type LabAgentTask, type InsertLabAgentTask,
+  type LabAgentMessage, type AgentSuggestedAction,
 } from "@shared/schema";
 import { db } from "../db";
 import { eq, desc, inArray, isNull, and, or, asc, sql } from "drizzle-orm";
@@ -122,6 +123,22 @@ export interface ILabStorage {
   createAgentTaskExclusive(data: InsertLabAgentTask): Promise<{ created: LabAgentTask } | { conflict: LabAgentTask }>;
   getAgentTask(id: number): Promise<LabAgentTask | undefined>;
   updateAgentTask(id: number, patch: Partial<InsertLabAgentTask>): Promise<LabAgentTask | undefined>;
+
+  // --- Lab Assistant chat (Phase B). All wallet-scoped through the owning task. ---
+  // Atomically find-or-create this wallet's active chat task and seed the greeting
+  // on first open — all under one per-wallet advisory lock, so concurrent /ensure
+  // calls can't double-create the task OR double-seed the greeting.
+  ensureActiveChatTask(
+    walletAddress: string,
+    greeting: { content: string; suggestedActions: AgentSuggestedAction[] },
+  ): Promise<{ task: LabAgentTask; messages: LabAgentMessage[] }>;
+  getAgentTaskForWallet(walletAddress: string, taskId: number): Promise<LabAgentTask | undefined>;
+  createAgentMessageForWallet(
+    walletAddress: string,
+    taskId: number,
+    data: { role: "user" | "agent" | "tool"; content: string; suggestedActions?: AgentSuggestedAction[] },
+  ): Promise<LabAgentMessage | undefined>;
+  listAgentMessagesForWallet(walletAddress: string, taskId: number, limit?: number): Promise<LabAgentMessage[]>;
 }
 
 export class LabDatabaseStorage implements ILabStorage {
@@ -383,6 +400,86 @@ export class LabDatabaseStorage implements ILabStorage {
       .where(eq(labAgentTasks.id, id))
       .returning();
     return task;
+  }
+
+  async ensureActiveChatTask(
+    walletAddress: string,
+    greeting: { content: string; suggestedActions: AgentSuggestedAction[] },
+  ): Promise<{ task: LabAgentTask; messages: LabAgentMessage[] }> {
+    return db.transaction(async (tx) => {
+      // Per-wallet advisory lock: serialize find-or-create AND the first-greeting
+      // seed so two concurrent opens (e.g. a double-mounted client, or React
+      // StrictMode) can't race either into a duplicate. Mirrors createAgentTaskExclusive.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${walletAddress}))`);
+      const [existing] = await tx.select().from(labAgentTasks).where(and(
+        eq(labAgentTasks.walletAddress, walletAddress),
+        inArray(labAgentTasks.status, ["active", "awaiting_input", "paused"]),
+      )!).orderBy(desc(labAgentTasks.createdAt)).limit(1);
+      let task: LabAgentTask;
+      if (existing) {
+        task = existing;
+      } else {
+        const [created] = await tx.insert(labAgentTasks)
+          .values({ walletAddress, status: "active", mode: "chat" })
+          .returning();
+        task = created;
+      }
+      let messages = await tx.select().from(labAgentMessages)
+        .where(eq(labAgentMessages.taskId, task.id))
+        .orderBy(asc(labAgentMessages.createdAt), asc(labAgentMessages.id));
+      if (messages.length === 0) {
+        await tx.insert(labAgentMessages).values({
+          taskId: task.id,
+          role: "agent",
+          content: greeting.content,
+          suggestedActions: greeting.suggestedActions,
+        });
+        messages = await tx.select().from(labAgentMessages)
+          .where(eq(labAgentMessages.taskId, task.id))
+          .orderBy(asc(labAgentMessages.createdAt), asc(labAgentMessages.id));
+      }
+      return { task, messages };
+    });
+  }
+
+  async getAgentTaskForWallet(walletAddress: string, taskId: number): Promise<LabAgentTask | undefined> {
+    const [task] = await db.select().from(labAgentTasks).where(and(
+      eq(labAgentTasks.id, taskId),
+      eq(labAgentTasks.walletAddress, walletAddress),
+    )!).limit(1);
+    return task;
+  }
+
+  async createAgentMessageForWallet(
+    walletAddress: string,
+    taskId: number,
+    data: { role: "user" | "agent" | "tool"; content: string; suggestedActions?: AgentSuggestedAction[] },
+  ): Promise<LabAgentMessage | undefined> {
+    // Ownership gate: the message attaches only to a task this wallet owns.
+    const [task] = await db.select({ id: labAgentTasks.id }).from(labAgentTasks).where(and(
+      eq(labAgentTasks.id, taskId),
+      eq(labAgentTasks.walletAddress, walletAddress),
+    )!).limit(1);
+    if (!task) return undefined;
+    const [msg] = await db.insert(labAgentMessages).values({
+      taskId,
+      role: data.role,
+      content: data.content,
+      suggestedActions: data.suggestedActions ?? [],
+    }).returning();
+    return msg;
+  }
+
+  async listAgentMessagesForWallet(walletAddress: string, taskId: number, limit = 500): Promise<LabAgentMessage[]> {
+    const [task] = await db.select({ id: labAgentTasks.id }).from(labAgentTasks).where(and(
+      eq(labAgentTasks.id, taskId),
+      eq(labAgentTasks.walletAddress, walletAddress),
+    )!).limit(1);
+    if (!task) return [];
+    return db.select().from(labAgentMessages)
+      .where(eq(labAgentMessages.taskId, taskId))
+      .orderBy(asc(labAgentMessages.createdAt), asc(labAgentMessages.id))
+      .limit(limit);
   }
 
   async completeRun(id: number, totalConfigsTested: number): Promise<void> {

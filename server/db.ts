@@ -349,6 +349,22 @@ export async function ensureSchema() {
       `CREATE INDEX IF NOT EXISTS idx_lab_opt_runs_agent_task
          ON lab_optimization_runs (agent_task_id)
          WHERE agent_task_id IS NOT NULL`,
+
+      // --- QuantumLab Sandbox Agent (Phase B): chat transcript. ---
+      // Additive + idempotent. Wallet-scoping is enforced in the storage layer
+      // through the owning lab_agent_tasks row, never by task_id alone. The CHECK
+      // lives INSIDE the CREATE so it ships atomically with a brand-new table and
+      // never runs as a standalone ADD CONSTRAINT (which throws 42P07 on re-run
+      // and would silently skip later migrations — see the per-statement note below).
+      `CREATE TABLE IF NOT EXISTS lab_agent_messages (
+        id serial PRIMARY KEY,
+        task_id integer NOT NULL,
+        role text NOT NULL CHECK (role IN ('user','agent','tool')),
+        content text NOT NULL,
+        suggested_actions jsonb NOT NULL DEFAULT '[]'::jsonb,
+        created_at timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_lab_agent_messages_task_created ON lab_agent_messages (task_id, created_at, id)`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner

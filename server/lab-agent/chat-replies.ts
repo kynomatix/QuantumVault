@@ -1,0 +1,170 @@
+// QuantumLab Sandbox Agent — Phase B deterministic chat replies.
+//
+// Phase B is the conversational SHELL (docs/LAB_AGENT_SANDBOX_PLAN.md §14): the
+// chat persists, renders, and offers option bubbles, but it does NOT call an LLM
+// or the toolkit yet (that is Phase C/D). So every assistant reply here is a
+// pure, deterministic function of the user's text — no network, no key, no
+// hallucination surface. It acknowledges intent honestly and routes the user to
+// the QuantumLab tab where they can do the thing by hand today, while naming the
+// capability the agent will perform directly in a later phase.
+//
+// Kept in its own module (no Express, no DB, no LLM) so it is unit-testable in
+// isolation and cannot accidentally reach a key or the toolkit.
+
+import type { AgentSuggestedAction } from "@shared/schema";
+
+export interface ComposedReply {
+  content: string;
+  suggestedActions: AgentSuggestedAction[];
+}
+
+// Tabs the chips can deep-link to — mirror client/src/pages/QuantumLab.tsx
+// `MainTab` ("hub" | "main" | "results" | "heatmap" | "insights" | "creator").
+// "main" is the Backtest Setup tab.
+const NAV = {
+  draft: { id: "nav-creator", label: "Open the Creator", kind: "navigate", tab: "creator" },
+  backtest: { id: "nav-backtest", label: "Open Backtest Setup", kind: "navigate", tab: "main" },
+  results: { id: "nav-results", label: "See my results", kind: "navigate", tab: "results" },
+  heatmap: { id: "nav-heatmap", label: "Open the heatmap", kind: "navigate", tab: "heatmap" },
+  insights: { id: "nav-insights", label: "Open insights", kind: "navigate", tab: "insights" },
+} as const satisfies Record<string, AgentSuggestedAction>;
+
+const ASK = {
+  whyLosing: { id: "ask-why-losing", label: "Why is my strategy losing?", kind: "send", message: "Why is my strategy losing money?" },
+  bestResult: { id: "ask-best", label: "What's my best result?", kind: "send", message: "What's my best result?" },
+  ideas: { id: "ask-ideas", label: "Suggest a strategy idea", kind: "send", message: "Suggest a strategy idea" },
+  help: { id: "ask-help", label: "What can you do?", kind: "send", message: "What can you do?" },
+} as const satisfies Record<string, AgentSuggestedAction>;
+
+/** The default chip set shown on the greeting and when no intent is matched. */
+export const STARTER_ACTIONS: AgentSuggestedAction[] = [
+  NAV.draft,
+  NAV.backtest,
+  NAV.results,
+  ASK.whyLosing,
+];
+
+/** First message seeded into a brand-new chat task. */
+export const SEED_GREETING: ComposedReply = {
+  content:
+    "Hi — I'm your Lab Assistant. I can help you find your way around QuantumLab: " +
+    "drafting strategies, running backtests, reading your results, and understanding " +
+    "why a strategy wins or loses. Soon I'll be able to do these for you directly. " +
+    "What would you like to do?",
+  suggestedActions: STARTER_ACTIONS,
+};
+
+interface Intent {
+  test: RegExp;
+  reply: () => ComposedReply;
+}
+
+// Ordered, first-match-wins. Phrased honestly: Phase B routes you to the tab that
+// does the thing today and names the capability the agent will own in a later phase.
+const INTENTS: Intent[] = [
+  {
+    // create / draft / new strategy / idea
+    test: /\b(draft|create|build|make|new|generate|write)\b[^.?!]*\b(strateg|bot|script|pine)\b|\b(strateg|bot|script|pine)\b[^.?!]*\b(draft|create|build|make|new|generate|write)\b|suggest (a |an )?(strateg|idea)/i,
+    reply: () => ({
+      content:
+        "Strategy drafting lives in the Creator — describe what you want in plain English and it writes the Pine for you. " +
+        "I'll be able to draft and test ideas for you end-to-end in a later phase. For now, I've pointed you there.",
+      suggestedActions: [NAV.draft, NAV.backtest, ASK.help],
+    }),
+  },
+  {
+    // templates
+    test: /\btemplate/i,
+    reply: () => ({
+      content:
+        "Ready-made strategy templates are in the Creator — start from one and tweak it. " +
+        "Soon I'll be able to pick and tune a template for you.",
+      suggestedActions: [NAV.draft, NAV.backtest],
+    }),
+  },
+  {
+    // why losing / insights / report (checked before "results" so "losing" wins)
+    test: /\b(why|lose|losing|loss|drawdown|insight|report|explain|overfit|underperform)\b/i,
+    reply: () => ({
+      content:
+        "The Insights tab breaks down parameter sensitivity and directional bias, and helps explain why a strategy under-performs. " +
+        "Soon I'll read it and explain it in plain language, then offer to improve the strategy.",
+      suggestedActions: [NAV.insights, NAV.results],
+    }),
+  },
+  {
+    // heatmap
+    test: /\bheat ?map/i,
+    reply: () => ({
+      content: "The parameter heatmap shows how your results shift across two parameters — I've pointed you to it.",
+      suggestedActions: [NAV.heatmap, NAV.results],
+    }),
+  },
+  {
+    // results / best / top / winners
+    test: /\b(result|best|top|winner|leaderboard|ranked|ranking|profit)\b/i,
+    reply: () => ({
+      content:
+        "Your ranked results are on the Results tab. Heads up: the lab ranks by profit/win-rate today, which isn't the same as robust — " +
+        "a later phase will let me re-rank by out-of-sample robustness for you.",
+      suggestedActions: [NAV.results, NAV.heatmap, ASK.whyLosing],
+    }),
+  },
+  {
+    // refine
+    test: /\brefin/i,
+    reply: () => ({
+      content:
+        "Refining hones in around a run's best parameters. You can launch a refine from a finished run; " +
+        "in a later phase I'll chain random → refine → deep search for you automatically.",
+      suggestedActions: [NAV.results, NAV.backtest],
+    }),
+  },
+  {
+    // improve
+    test: /\bimprove\b/i,
+    reply: () => ({
+      content:
+        "Improving rewrites a strategy from its weaknesses using your OpenRouter key — an AI step I'll run for you once the " +
+        "deterministic search is exhausted, coming in a later phase. The Creator handles it manually today.",
+      suggestedActions: [NAV.draft, NAV.insights],
+    }),
+  },
+  {
+    // backtest / optimize / run / test
+    test: /\b(backtest|back-test|optimi[sz]e|optimi[sz]ation|run|test)\b/i,
+    reply: () => ({
+      content:
+        "Backtests and optimizations are set up on the Backtest Setup tab — pick a strategy, symbols and timeframes, then run. " +
+        "In a later phase I'll queue and watch these runs for you.",
+      suggestedActions: [NAV.backtest, NAV.results, ASK.help],
+    }),
+  },
+  {
+    // greetings / help / capabilities
+    test: /\b(hi|hey|hello|help|what can you|who are you|capab|how do you)\b/i,
+    reply: () => ({
+      content:
+        "I'm the Lab Assistant. Right now I can guide you to the right place for each task — drafting, backtesting, reading results, " +
+        "and insights — and remember our conversation. Driving the lab for you directly is coming next. Where to?",
+      suggestedActions: STARTER_ACTIONS,
+    }),
+  },
+];
+
+/**
+ * Map a user message to a deterministic assistant reply + option bubbles.
+ * First matching intent wins; falls back to a friendly capabilities prompt.
+ */
+export function composeAgentReply(userContent: string): ComposedReply {
+  const raw = (userContent ?? "").trim();
+  for (const intent of INTENTS) {
+    if (intent.test.test(raw)) return intent.reply();
+  }
+  return {
+    content:
+      "I can help you draft strategies, run backtests, read your results, and understand why a strategy wins or loses. " +
+      "Pick one below — or tell me what you're trying to do.",
+    suggestedActions: STARTER_ACTIONS,
+  };
+}

@@ -29,6 +29,8 @@ import { draftStrategy, improveStrategy } from "./creator";
 import { getCreatorModelCatalog, isSelectableModel } from "./models-catalog";
 import { LlmGatewayError } from "./router";
 import { startCreatorJob, getCreatorJob, CreatorJobConflictError } from "./creator-jobs";
+import { labStorage } from "../lab/storage";
+import { SEED_GREETING, composeAgentReply } from "../lab-agent/chat-replies";
 
 // Creator payloads are tiny (idea/insights are capped at 4KB in the gateway). Keep a
 // small per-route body limit — these routes are registered before the global parser.
@@ -83,6 +85,79 @@ export function registerCreatorRoutes(app: Express, sessionMiddleware: RequestHa
   const guards: RequestHandler[] = [sessionMiddleware, jsonParser, requireCreatorSession];
   // The job-status poll carries no body, so it skips the JSON parser.
   const getGuards: RequestHandler[] = [sessionMiddleware, requireCreatorSession];
+
+  // --- Lab Assistant chat (Phase B): a persisted conversational SHELL ----------
+  // No LLM and no toolkit calls here — replies are deterministic and synchronous
+  // (composeAgentReply), so there is no job/poll. The wallet comes ONLY from the
+  // session; every task/message access is wallet-scoped in the storage layer, and
+  // a task owned by another wallet returns 404 (no existence leak).
+  const MAX_CHAT_CONTENT = 4000;
+  const toChatTaskDto = (t: { id: number; status: string; mode: string; createdAt: Date }) => ({
+    id: t.id, status: t.status, mode: t.mode, createdAt: t.createdAt,
+  });
+  const parseTaskId = (raw: string): number | null => {
+    const n = Number(raw);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  };
+
+  // Find-or-create this wallet's active chat task (seeded with a greeting on first
+  // open) and return it with its messages. Atomic + race-free in the storage layer.
+  app.post("/api/lab/agent/chat/ensure", ...guards, async (req: Request, res: Response) => {
+    const r = req as any;
+    try {
+      const { task, messages } = await labStorage.ensureActiveChatTask(
+        r.walletAddress as string,
+        SEED_GREETING,
+      );
+      res.json({ task: toChatTaskDto(task), messages });
+    } catch (err: any) {
+      sendError(res, err, "Could not open the assistant. Please try again.");
+    }
+  });
+
+  app.get("/api/lab/agent/chat/:taskId/messages", ...getGuards, async (req: Request, res: Response) => {
+    const r = req as any;
+    try {
+      const taskId = parseTaskId(req.params.taskId);
+      if (taskId === null) return res.status(400).json({ error: "Invalid conversation id." });
+      // Wallet-scoped lookup (§8): never resolve a task by id alone.
+      const task = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+      if (!task) {
+        return res.status(404).json({ error: "Conversation not found." });
+      }
+      const messages = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
+      res.json({ messages });
+    } catch (err: any) {
+      sendError(res, err, "Could not load messages.");
+    }
+  });
+
+  app.post("/api/lab/agent/chat/:taskId/messages", ...guards, async (req: Request, res: Response) => {
+    const r = req as any;
+    try {
+      const taskId = parseTaskId(req.params.taskId);
+      if (taskId === null) return res.status(400).json({ error: "Invalid conversation id." });
+      const content = typeof req.body?.content === "string" ? req.body.content.trim() : "";
+      if (!content) return res.status(400).json({ error: "Type a message first." });
+      if (content.length > MAX_CHAT_CONTENT) {
+        return res.status(400).json({ error: "That message is too long." });
+      }
+      // The user message both records the turn AND enforces ownership: undefined
+      // means the task isn't this wallet's, so don't compose or leak a reply.
+      const userMsg = await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
+        role: "user", content,
+      });
+      if (!userMsg) return res.status(404).json({ error: "Conversation not found." });
+
+      const reply = composeAgentReply(content);
+      const agentMsg = await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
+        role: "agent", content: reply.content, suggestedActions: reply.suggestedActions,
+      });
+      res.json({ messages: agentMsg ? [userMsg, agentMsg] : [userMsg] });
+    } catch (err: any) {
+      sendError(res, err, "Could not send your message.");
+    }
+  });
 
   // --- BYO key management -------------------------------------------------------
   app.post("/api/lab/creator/key", ...guards, async (req: Request, res: Response) => {
