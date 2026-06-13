@@ -29,7 +29,7 @@ import { confirmTransactionWithFallback } from "@/lib/solana-utils";
 import {
   Play, Rocket, ChevronDown, ChevronUp, Calendar, Settings2, Lock,
   TrendingUp, TrendingDown, Gauge, BarChart3, Loader2, CheckCircle2, AlertCircle, Save,
-  X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, Zap, XCircle,
+  X, Clock, Activity, Percent, Download, Copy, ArrowUpDown, ArrowUpRight, Zap, XCircle,
   History, ChevronRight, Trash2, ArrowLeft, FileCode, BookOpen, Check, ChevronsUpDown, FilePlus2,
   Shield, AlertTriangle, DollarSign, Fuel, Target, Flame, Info, PauseCircle, RotateCcw, Grid3X3, Upload, Lightbulb, Wallet, Trophy, Filter, Crosshair, ListOrdered, GripVertical, RefreshCw,
   Sparkles, Wand2, KeyRound, LayoutDashboard, FlaskConical,
@@ -38,7 +38,7 @@ import {
   ResponsiveContainer, Area, AreaChart, CartesianGrid, XAxis, YAxis,
   Tooltip as RechartsTooltip,
 } from "recharts";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import { Link } from "wouter";
 import { cn } from "@/lib/utils";
 import { getMaxLeverage, tickerToMarket, SELECTABLE_PROTOCOLS, type ProtocolId } from "@/lib/exchange-constants";
@@ -522,10 +522,20 @@ function LabHub({
   strategiesCount: number;
   queueCount: number;
 }) {
+  const reduceMotion = useReducedMotion();
+  const fade = (delay: number) =>
+    reduceMotion
+      ? {}
+      : {
+          initial: { opacity: 0, y: 20 },
+          animate: { opacity: 1, y: 0 },
+          transition: { delay },
+        };
+
   const steps = [
-    { n: 1, icon: FileCode, title: "Build a strategy", desc: "Paste a Pine Script strategy, or have the Creator generate one for you." },
-    { n: 2, icon: Play, title: "Backtest & optimize", desc: "Run it across real market history and sweep settings to find what holds up." },
-    { n: 3, icon: Trophy, title: "Review & go live", desc: "Check robustness and insights, then take the winners to a live bot." },
+    { n: 1, title: "Build a strategy", desc: "Paste a Pine Script strategy, or have the Creator generate one for you." },
+    { n: 2, title: "Backtest & optimize", desc: "Run it across real market history and sweep settings to find what holds up." },
+    { n: 3, title: "Review & go live", desc: "Check robustness and insights, then take the winners to a live bot." },
   ];
 
   const sections: {
@@ -535,139 +545,199 @@ function LabHub({
     icon: React.ComponentType<{ className?: string }>;
     onClick: () => void;
     badge?: string;
+    hint?: string;
+    hintColor?: string;
   }[] = [
     { id: "creator", label: "Creator", icon: Sparkles, desc: "Generate or refine a trading strategy with AI assistance.", onClick: () => onNavigate("creator") },
     { id: "main", label: "Backtest", icon: Settings2, desc: "Set up strategies, run backtests, and sweep parameters to optimize.", onClick: () => onNavigate("main") },
     { id: "results", label: "Results", icon: History, desc: "Revisit past runs with equity curves and full trade logs.", onClick: () => onNavigate("results") },
     { id: "heatmap", label: "Heatmap", icon: Grid3X3, desc: "Compare every parameter combination at a glance.", onClick: () => onNavigate("heatmap") },
     { id: "insights", label: "Insights", icon: Lightbulb, desc: "Plain-language analysis of what's robust — and what's overfit.", onClick: () => onNavigate("insights") },
-    { id: "queue", label: "Queue", icon: ListOrdered, desc: "Track your running and queued optimization jobs.", onClick: onOpenQueue, badge: queueCount > 0 ? String(queueCount) : undefined },
+    {
+      id: "queue",
+      label: "Queue",
+      icon: ListOrdered,
+      desc: "Track your running and queued optimization jobs.",
+      onClick: onOpenQueue,
+      badge: queueCount > 0 ? String(queueCount) : undefined,
+      hint: queueCount > 0 ? `${queueCount} ${queueCount === 1 ? "job" : "jobs"} running` : undefined,
+      hintColor: "text-indigo-400",
+    },
   ];
 
   return (
-    <div className="space-y-8" data-testid="lab-hub">
+    <div className="max-w-4xl mx-auto space-y-20 sm:space-y-24 py-4 sm:py-8" data-testid="lab-hub">
       {/* Hero */}
-      <div className="relative overflow-hidden rounded-2xl border border-indigo-500/20 bg-gradient-to-br from-indigo-500/10 via-slate-900/50 to-slate-950 p-6 sm:p-10">
-        <div className="pointer-events-none absolute -top-24 -right-20 w-72 h-72 rounded-full bg-indigo-500/20 blur-[120px]" />
-        <div className="pointer-events-none absolute -bottom-28 -left-16 w-72 h-72 rounded-full bg-blue-500/10 blur-[120px]" />
-        <div className="relative max-w-2xl">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-indigo-500/30 bg-indigo-500/10 text-indigo-300 text-xs font-medium mb-4">
-            <FlaskConical className="w-3.5 h-3.5" />
-            QuantumLab
-          </div>
-          <h1 className="text-2xl sm:text-4xl font-display font-extrabold tracking-tight text-white leading-tight" data-testid="text-hub-title">
+      <motion.div {...fade(0)} className="space-y-8 text-center">
+        <div className="flex items-center justify-center gap-3 text-indigo-400">
+          <FlaskConical className="w-8 h-8" />
+          <span className="font-display font-bold tracking-wide text-2xl">QuantumLab</span>
+        </div>
+
+        <div className="space-y-5 max-w-2xl mx-auto">
+          <h1 className="text-3xl sm:text-5xl font-display font-extrabold tracking-tight text-white leading-[1.15]" data-testid="text-hub-title">
             Test your trading ideas before you risk real money.
           </h1>
-          <p className="mt-3 text-sm sm:text-base text-white/60 leading-relaxed">
+          <p className="text-base sm:text-lg text-white/60 leading-relaxed">
             Backtest strategies against real market history, find the settings that hold up out-of-sample, and spot the ones that only look good on paper.
           </p>
-          <div className="mt-5 flex flex-col sm:flex-row gap-3">
-            <Button
-              onClick={() => onNavigate("main")}
-              className="bg-gradient-to-r from-indigo-500 to-blue-500 hover:opacity-90 text-white shadow-[0_0_24px_-6px_rgba(99,102,241,0.85)]"
-              data-testid="button-hub-backtest"
-            >
-              <Play className="w-4 h-4 mr-1.5" />
-              Run a backtest
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => onNavigate("creator")}
-              className="border-indigo-500/40 text-indigo-200 hover:bg-indigo-500/10 hover:text-white"
-              data-testid="button-hub-creator"
-            >
-              <Sparkles className="w-4 h-4 mr-1.5" />
-              Create with AI
-            </Button>
+        </div>
+
+        <div className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-1">
+          <Button
+            onClick={() => onNavigate("main")}
+            className="bg-gradient-to-r from-indigo-500 to-blue-500 hover:opacity-90 text-white rounded-full px-6 shadow-[0_0_30px_-5px_rgba(99,102,241,0.45)] transition-all"
+            data-testid="button-hub-backtest"
+          >
+            <Play className="w-4 h-4 mr-2" />
+            Run a backtest
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => onNavigate("creator")}
+            className="text-indigo-300 hover:text-white hover:bg-white/5 rounded-full px-6"
+            data-testid="button-hub-creator"
+          >
+            <Sparkles className="w-4 h-4 mr-2" />
+            Create with AI
+          </Button>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-sm pt-1">
+          <button
+            type="button"
+            onClick={() => onNavigate("main")}
+            className="inline-flex items-center gap-2 text-white/70 hover:text-white transition-colors"
+            data-testid="text-hub-strategy-count"
+          >
+            <FileCode className="w-4 h-4 text-slate-500" />
+            <span className="font-medium">{strategiesCount} saved {strategiesCount === 1 ? "strategy" : "strategies"}</span>
+          </button>
+          <button
+            type="button"
+            onClick={onOpenQueue}
+            className="inline-flex items-center gap-2 text-indigo-300 hover:text-white transition-colors"
+            data-testid="text-hub-queue-count"
+          >
+            <Activity className="w-4 h-4 text-indigo-400" />
+            <span className="font-medium">{queueCount} {queueCount === 1 ? "job" : "jobs"} in queue</span>
+          </button>
+        </div>
+      </motion.div>
+
+      {/* How it works — glowing signal ribbon */}
+      <motion.div {...fade(0.1)} className="space-y-12">
+        <div className="text-center space-y-2">
+          <span className="text-xs font-mono uppercase tracking-[0.2em] text-indigo-400/80">The workflow</span>
+          <h2 className="text-2xl font-display font-semibold text-white tracking-tight">How it works</h2>
+        </div>
+
+        <div className="relative">
+          {/* Desktop signal line (runs through the node centers) */}
+          <div className="hidden sm:block absolute top-7 left-[16.6%] right-[16.6%] z-0">
+            <div className="relative h-px">
+              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-slate-700 to-transparent" />
+              <div className="absolute -inset-y-[1px] inset-x-0 bg-gradient-to-r from-transparent via-indigo-500/50 to-transparent blur-[2px]" />
+              {!reduceMotion && (
+                <motion.div
+                  className="absolute top-1/2 h-1.5 w-1.5 -translate-y-1/2 rounded-full bg-indigo-200 shadow-[0_0_14px_4px_rgba(99,102,241,0.75)]"
+                  animate={{ left: ["0%", "100%"], opacity: [0, 1, 1, 0] }}
+                  transition={{ duration: 3.4, repeat: Infinity, ease: "easeInOut", times: [0, 0.12, 0.88, 1] }}
+                />
+              )}
+            </div>
           </div>
-          <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
-            <button
-              type="button"
-              onClick={() => onNavigate("main")}
-              className="inline-flex items-center gap-1.5 text-white/70 hover:text-white transition-colors"
-              data-testid="text-hub-strategy-count"
-            >
-              <FileCode className="w-3.5 h-3.5 text-indigo-400" />
-              {strategiesCount} saved {strategiesCount === 1 ? "strategy" : "strategies"}
-            </button>
-            <button
-              type="button"
-              onClick={onOpenQueue}
-              className="inline-flex items-center gap-1.5 text-white/70 hover:text-white transition-colors"
-              data-testid="text-hub-queue-count"
-            >
-              <ListOrdered className="w-3.5 h-3.5 text-indigo-400" />
-              {queueCount} {queueCount === 1 ? "job" : "jobs"} in queue
-            </button>
+          {/* Mobile signal line */}
+          <div className="sm:hidden absolute top-7 bottom-6 left-7 w-px bg-gradient-to-b from-indigo-500/50 via-slate-700 to-transparent z-0" />
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-10 sm:gap-6 relative z-10">
+            {steps.map((step) => (
+              <div
+                key={step.n}
+                className="group relative flex items-start gap-5 sm:flex-col sm:items-center sm:gap-0 sm:text-center"
+                data-testid={`hub-step-${step.n}`}
+              >
+                {/* Node */}
+                <div className="relative shrink-0 sm:mb-7">
+                  <div className="absolute inset-0 rounded-full bg-indigo-500/25 blur-md opacity-0 scale-110 transition-opacity duration-500 [@media(hover:hover)]:group-hover:opacity-100" />
+                  <div className="relative w-14 h-14 rounded-full p-px bg-gradient-to-br from-indigo-400/80 via-indigo-500/30 to-blue-500/50 shadow-[0_0_20px_-6px_rgba(99,102,241,0.6)] transition-all duration-500 [@media(hover:hover)]:group-hover:-translate-y-0.5 [@media(hover:hover)]:group-hover:shadow-[0_0_30px_-3px_rgba(99,102,241,0.85)]">
+                    <div className="w-full h-full rounded-full bg-slate-950 flex items-center justify-center">
+                      <span className="font-mono text-base font-semibold text-transparent bg-clip-text bg-gradient-to-br from-indigo-200 to-blue-300">
+                        0{step.n}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <div className="sm:px-2">
+                  <h3 className="text-lg font-semibold text-slate-200 mb-2 transition-colors group-hover:text-white">{step.title}</h3>
+                  <p className="text-white/60 leading-relaxed text-sm sm:max-w-[230px] sm:mx-auto">{step.desc}</p>
+                </div>
+              </div>
+            ))}
           </div>
-          <p className="mt-4 inline-flex items-start gap-1.5 text-[11px] text-white/60 max-w-md leading-relaxed">
-            <Info className="w-3.5 h-3.5 flex-shrink-0 mt-px text-amber-400/80" />
+        </div>
+
+        <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-5 flex items-start gap-4">
+          <Info className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+          <p className="text-sm text-amber-200/80 leading-relaxed">
             Backtests are a guide, not a guarantee. Past results never promise future profit — start small and size up only once a strategy proves itself live.
           </p>
         </div>
-      </div>
-
-      {/* How it works */}
-      <div>
-        <h2 className="text-sm font-semibold text-white/70 mb-3">How it works</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          {steps.map((s) => {
-            const Icon = s.icon;
-            return (
-              <div key={s.n} className="rounded-xl border border-white/10 bg-white/[0.03] p-5" data-testid={`hub-step-${s.n}`}>
-                <div className="flex items-center gap-3 mb-2">
-                  <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-indigo-500/20 to-blue-500/20 flex items-center justify-center">
-                    <Icon className="w-4 h-4 text-indigo-300" />
-                  </div>
-                  <span className="text-xs font-mono text-white/30">Step {s.n}</span>
-                </div>
-                <h3 className="text-sm font-semibold text-white">{s.title}</h3>
-                <p className="mt-1 text-xs text-white/60 leading-relaxed">{s.desc}</p>
-              </div>
-            );
-          })}
-        </div>
-      </div>
+      </motion.div>
 
       {/* Explore the Lab */}
-      <div>
-        <h2 className="text-sm font-semibold text-white/70 mb-3">Explore the Lab</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      <motion.div {...fade(0.2)} className="space-y-8">
+        <h2 className="text-2xl font-display font-semibold text-white tracking-tight text-center">Explore the Lab</h2>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-12 gap-y-10">
           {sections.map((sec) => {
             const Icon = sec.icon;
             return (
               <button
                 key={sec.id}
+                type="button"
                 onClick={sec.onClick}
-                className="group text-left rounded-xl border border-white/10 bg-white/[0.03] p-5 transition-colors hover:border-indigo-500/40 hover:bg-indigo-500/[0.06]"
+                className="group block text-left"
                 data-testid={`hub-card-${sec.id}`}
               >
-                <div className="flex items-center justify-between mb-3">
-                  <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-indigo-500/20 to-blue-500/20 flex items-center justify-center transition-colors group-hover:from-indigo-500/30 group-hover:to-blue-500/30">
-                    <Icon className="w-5 h-5 text-indigo-300" />
+                <div className="flex flex-col items-center text-center gap-4">
+                  <div className="w-12 h-12 rounded-xl bg-slate-800/50 flex items-center justify-center transition-colors [@media(hover:hover)]:group-hover:bg-indigo-500/10 shrink-0">
+                    <Icon className="w-6 h-6 text-slate-400 transition-colors [@media(hover:hover)]:group-hover:text-indigo-400" />
                   </div>
-                  {sec.badge ? (
-                    <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center rounded-full bg-indigo-500 text-white text-[10px] font-bold" data-testid={`hub-card-badge-${sec.id}`}>{sec.badge}</span>
-                  ) : null}
+                  <div>
+                    <div className="flex items-center justify-center gap-3 mb-1.5">
+                      <h3 className="text-lg font-semibold text-slate-200 transition-colors group-hover:text-white">{sec.label}</h3>
+                      {sec.badge && (
+                        <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 text-xs font-mono font-medium" data-testid={`hub-card-badge-${sec.id}`}>
+                          {sec.badge}
+                        </span>
+                      )}
+                      <ArrowUpRight className="w-4 h-4 text-slate-600 opacity-0 -translate-y-1 translate-x-1 transition-all [@media(hover:hover)]:group-hover:text-indigo-400 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:group-hover:translate-y-0 [@media(hover:hover)]:group-hover:translate-x-0" />
+                    </div>
+                    <p className="text-white/60 leading-relaxed text-sm max-w-xs mx-auto">{sec.desc}</p>
+                    {sec.hint && (
+                      <div className={`mt-3 text-xs font-mono font-medium ${sec.hintColor ?? "text-slate-500"} opacity-80`}>
+                        {sec.hint}
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <h3 className="text-base font-semibold text-white">{sec.label}</h3>
-                  <ChevronRight className="w-4 h-4 text-white/30 transition-colors group-hover:text-indigo-300" />
-                </div>
-                <p className="mt-1 text-sm text-white/50 leading-relaxed">{sec.desc}</p>
               </button>
             );
           })}
         </div>
-      </div>
+      </motion.div>
 
-      {/* Footer help */}
-      <div className="flex items-center justify-center pt-2">
-        <Link href="/docs" className="inline-flex items-center gap-1.5 text-xs text-white/40 transition-colors hover:text-indigo-300" data-testid="link-hub-docs">
-          <BookOpen className="w-3.5 h-3.5" />
+      {/* Footer */}
+      <motion.div
+        {...(reduceMotion ? {} : { initial: { opacity: 0 }, animate: { opacity: 1 }, transition: { delay: 0.3 } })}
+        className="pt-12 border-t border-slate-800/50 flex justify-center"
+      >
+        <Link href="/docs" className="inline-flex items-center gap-2 text-sm font-medium text-white/40 hover:text-indigo-400 transition-colors" data-testid="link-hub-docs">
+          <BookOpen className="w-4 h-4" />
           New here? Read the docs
         </Link>
-      </div>
+      </motion.div>
     </div>
   );
 }
