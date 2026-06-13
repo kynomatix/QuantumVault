@@ -416,7 +416,12 @@ export class PacificaAdapter implements ProtocolAdapter {
     }
     const lotSize = market.lotSize;
     const decimals = countDecimals(lotSize);
-    const raw = Math.floor(size / lotSize) * lotSize;
+    // +epsilon before floor: float division of a clean lot multiple can yield e.g.
+    // 0.3 / 0.1 === 2.9999999999999996, which would wrongly floor DOWN a whole lot
+    // (0.3 -> 0.2) and push the order below the venue minimum notional (422 "Order amount
+    // too low"). The nudge only affects values within 1e-9 of a lot boundary (float
+    // artifacts), never genuine intent.
+    const raw = Math.floor(size / lotSize + 1e-9) * lotSize;
     return parseFloat(raw.toFixed(decimals));
   }
 

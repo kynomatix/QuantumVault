@@ -1406,6 +1406,7 @@ const SWAP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const MAX_SWAP_SLIPPAGE_BPS = 500;
 const DEFAULT_SWAP_SLIPPAGE_BPS = 100;
 import { getAllPerpMarkets, getAllPerpMarketsForExchange, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMinOrderSizeUsd, getMarketMaxLeverage } from "./market-liquidity-service";
+import { evaluateNotionalFloor } from "./trade-sizing-math";
 import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable } from "./leverage-cache-service";
 import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification, type TradeNotification, buildDefaultInlineKeyboard } from "./notification-service";
 import { classifySignal } from "./trading/signal-classifier";
@@ -2004,17 +2005,28 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
     }
   }
 
-  // STEP 7: Final notional floor check — Pacifica enforces a minimum notional (typically $10)
-  const finalNotional = finalContractSize * oraclePrice;
-  if (finalNotional < minOrderUsd) {
-    const minContractsForNotional = minOrderUsd / oraclePrice;
-    const requiredCollateralForMin = (minOrderUsd / effectiveLeverage) * 1.05;
+  // STEP 7: Final notional floor — Pacifica enforces a minimum notional (typically $10).
+  // CRITICAL: the adapter floor-quantizes order size to the venue lot step (minOrderSize ===
+  // lotSize) before submitting (quantizeOrderSize = Math.floor(size / lot) * lot). So a bump
+  // to the exact `minOrderUsd / price` contracts gets its sub-lot remainder truncated away and
+  // the order lands BELOW the floor (Pacifica 422 "Order amount too low: 8.14 < 10"). The shared
+  // evaluateNotionalFloor() mirrors that floor and, when bumping, rounds UP to a whole lot
+  // multiple (+ a 1% cushion for oracle↔mark drift) so the adapter's floor can't drop us back
+  // under the minimum. See server/trade-sizing-math.ts.
+  const notionalFloor = evaluateNotionalFloor(
+    finalContractSize,
+    oraclePrice,
+    minOrderUsd,
+    minOrderSize > 0 ? minOrderSize : 0,
+  );
+  if (notionalFloor.needsBump) {
+    const requiredCollateralForMin = (notionalFloor.bumpedNotional / effectiveLeverage) * 1.05;
     if (freeCollateral >= requiredCollateralForMin) {
-      console.log(`${logPrefix} NOTIONAL FLOOR: $${finalNotional.toFixed(2)} < $${minOrderUsd} minimum. Bumping ${finalContractSize.toFixed(6)} → ${minContractsForNotional.toFixed(6)} contracts (need $${requiredCollateralForMin.toFixed(2)} collateral, have $${freeCollateral.toFixed(2)})`);
-      finalContractSize = minContractsForNotional;
-      tradeAmountUsd = minOrderUsd;
+      console.log(`${logPrefix} NOTIONAL FLOOR: quantized $${notionalFloor.quantizedNotional.toFixed(2)} < $${minOrderUsd} minimum. Bumping ${finalContractSize.toFixed(6)} → ${notionalFloor.bumpedContracts.toFixed(6)} contracts (lot-aligned, $${notionalFloor.bumpedNotional.toFixed(2)} notional; need $${requiredCollateralForMin.toFixed(2)} collateral, have $${freeCollateral.toFixed(2)})`);
+      finalContractSize = notionalFloor.bumpedContracts;
+      tradeAmountUsd = notionalFloor.bumpedNotional;
     } else {
-      const pauseReason = `Order notional $${finalNotional.toFixed(2)} below Pacifica minimum of $${minOrderUsd}. Need $${requiredCollateralForMin.toFixed(2)} equity at ${effectiveLeverage}x leverage, but only $${freeCollateral.toFixed(2)} available. Deposit more funds to trade.`;
+      const pauseReason = `Order notional $${notionalFloor.quantizedNotional.toFixed(2)} below Pacifica minimum of $${minOrderUsd}. Need $${requiredCollateralForMin.toFixed(2)} equity at ${effectiveLeverage}x leverage, but only $${freeCollateral.toFixed(2)} available. Deposit more funds to trade.`;
       console.log(`${logPrefix} ${pauseReason}`);
       return {
         success: false,
