@@ -159,8 +159,14 @@ export type BacktestResultDto = z.infer<typeof backtestResultDtoSchema>;
 export const topResultsDtoSchema = z.object({
   strategyId: z.number().int(),
   runId: z.number().int().nullable(),
-  /** Ranked by the §6 robustness view, not raw %. */
-  rankedBy: z.literal("robustness"),
+  /**
+   * How `results` are ordered. "lab_objective" = the lab's CURRENT internal rank
+   * (profit / win-rate-weighted, NOT robustness — see
+   * docs/QUANTUMLAB_ACCURACY_DIAGNOSIS.md). "robustness" is reserved for when the
+   * adapter re-ranks by the §6 view (OOS sufficiency + drawdown + Sharpe). The DTO
+   * states which ordering was actually applied so the agent never assumes robustness.
+   */
+  rankedBy: z.enum(["lab_objective", "robustness"]),
   results: z.array(backtestResultDtoSchema),
 });
 export type TopResultsDto = z.infer<typeof topResultsDtoSchema>;
