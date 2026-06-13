@@ -68,42 +68,38 @@ const staggerContainer = {
   }
 };
 
-// Bento reveal choreography for the features section. The container staggers the
-// category tiles; each tile then staggers its own inner feature cells, so elements
-// arrive individually (not as one uniform block fade). Custom per-card offsets let
-// tiles enter from varied directions for a layered, premium feel.
+// Bento reveal choreography for the features section. One coordinated motion:
+// every tile rises on the SAME axis (Y only) with a tiny settle, in reading
+// order (top-left -> bottom-right), and reveals ONCE. No per-tile direction
+// variety (that read as "arbitrary"); no X translation (avoids horizontal
+// overflow on narrow phones). Inner cells get a whisper of stagger so tiles
+// don't feel dead, without the old "stagger fatigue".
 const featuresStagger: Variants = {
   hidden: {},
-  visible: { transition: { staggerChildren: 0.12, delayChildren: 0.05 } },
+  visible: { transition: { staggerChildren: 0.08, delayChildren: 0.05 } },
 };
 
 const bentoCardVariants: Variants = {
-  hidden: (c?: { x?: number; y?: number; scale?: number }) => ({
-    opacity: 0,
-    x: c?.x ?? 0,
-    y: c?.y ?? 40,
-    scale: c?.scale ?? 0.97,
-  }),
+  hidden: { opacity: 0, y: 24, scale: 0.98 },
   visible: {
     opacity: 1,
-    x: 0,
     y: 0,
     scale: 1,
     transition: {
       duration: 0.6,
-      ease: [0.22, 1, 0.36, 1],
-      staggerChildren: 0.07,
-      delayChildren: 0.12,
+      ease: [0.16, 1, 0.3, 1],
+      staggerChildren: 0.04,
+      delayChildren: 0.08,
     },
   },
 };
 
 const bentoItemVariants: Variants = {
-  hidden: { opacity: 0, y: 16 },
+  hidden: { opacity: 0, y: 12 },
   visible: {
     opacity: 1,
     y: 0,
-    transition: { duration: 0.45, ease: [0.22, 1, 0.36, 1] },
+    transition: { duration: 0.4, ease: [0.16, 1, 0.3, 1] },
   },
 };
 
@@ -199,17 +195,17 @@ export default function Landing() {
   const vaultGlowOpacity = useTransform(vaultScrollProgress, [0.2, 0.5], [0, 1]);
   const vaultGlowScale = useTransform(vaultScrollProgress, [0.2, 0.5], [0.5, 1]);
 
-  // Features section scroll-linked parallax. Drives only decorative background
-  // accents and the heading (never the content grid) so depth never pushes copy
-  // sideways or causes overflow at phone widths. Disabled under reduced motion.
+  // Features section scroll-linked parallax. Drives ONLY the decorative
+  // background blobs (never the heading or the content grid, which stay
+  // anchored for readability). Tight, transform-only ranges; off under
+  // reduced motion.
   const { scrollYProgress: featuresScrollProgress } = useScroll(
     isMounted && featuresSectionRef.current
       ? { target: featuresSectionRef, offset: ["start end", "end start"] }
       : undefined
   );
-  const featuresBlobY1 = useTransform(featuresScrollProgress, [0, 1], [-90, 90]);
-  const featuresBlobY2 = useTransform(featuresScrollProgress, [0, 1], [70, -110]);
-  const featuresHeadingY = useTransform(featuresScrollProgress, [0, 1], [40, -28]);
+  const featuresBlobY1 = useTransform(featuresScrollProgress, [0, 1], [-50, 50]);
+  const featuresBlobY2 = useTransform(featuresScrollProgress, [0, 1], [45, -45]);
   
   // Background parallax - continuous zoom and movement
   const heroY = useTransform(scrollY, [0, 800], [0, 300]);
@@ -261,11 +257,10 @@ export default function Landing() {
     : {
         initial: 'hidden',
         whileInView: 'visible',
-        viewport: { once: false, amount: 0.12 },
+        viewport: { once: true, amount: 0.2 },
         variants: featuresStagger,
       };
-  const cardReveal = (custom?: { x?: number; y?: number; scale?: number }): MotionProps =>
-    prefersReducedMotion ? {} : { variants: bentoCardVariants, custom };
+  const cardReveal: MotionProps = prefersReducedMotion ? {} : { variants: bentoCardVariants };
   const itemReveal: MotionProps = prefersReducedMotion ? {} : { variants: bentoItemVariants };
 
   return (
@@ -610,16 +605,15 @@ export default function Landing() {
           />
 
           <div className="max-w-7xl mx-auto relative z-10">
-            {/* Section Header (subtle parallax drift) */}
+            {/* Section Header (anchored — stays put for readability) */}
             <motion.div
-              style={{ y: prefersReducedMotion ? 0 : featuresHeadingY }}
               {...(prefersReducedMotion
                 ? {}
                 : {
                     initial: { opacity: 0, y: 30 },
                     whileInView: { opacity: 1, y: 0 },
-                    viewport: { once: false, amount: 0.3 },
-                    transition: { duration: 0.6 },
+                    viewport: { once: true, amount: 0.3 },
+                    transition: { duration: 0.7, ease: [0.16, 1, 0.3, 1] },
                   })}
               className="text-center mb-14 sm:mb-16"
             >
@@ -638,9 +632,9 @@ export default function Landing() {
               {...featuresContainerProps}
               className="grid grid-cols-1 lg:grid-cols-6 gap-4 sm:gap-5"
             >
-              {/* Security & Control — hero/feature tile (enters from the left) */}
+              {/* Security & Control — hero/feature tile (1st in the coordinated rise) */}
               <motion.div
-                {...cardReveal({ x: -48, y: 24 })}
+                {...cardReveal}
                 className="group relative lg:col-span-4 rounded-3xl overflow-hidden border border-primary/15 bg-gradient-to-br from-primary/[0.10] via-card/60 to-card/30 p-6 sm:p-8 transition-[transform,box-shadow,border-color] duration-300 will-change-transform [@media(hover:hover)]:hover:-translate-y-1.5 [@media(hover:hover)]:hover:border-primary/40 [@media(hover:hover)]:hover:shadow-[0_20px_60px_-20px_rgba(99,102,241,0.45)]"
                 data-testid="card-feature-security"
               >
@@ -678,9 +672,9 @@ export default function Landing() {
                 </div>
               </motion.div>
 
-              {/* Scale & Ecosystem — tall supporting tile (enters from the right) */}
+              {/* Scale & Ecosystem — tall supporting tile (2nd in the coordinated rise) */}
               <motion.div
-                {...cardReveal({ x: 48, y: 24 })}
+                {...cardReveal}
                 className="group relative lg:col-span-2 rounded-3xl overflow-hidden border border-border/50 bg-gradient-to-br from-card/80 to-card/40 p-6 sm:p-8 flex flex-col transition-[transform,box-shadow,border-color] duration-300 will-change-transform [@media(hover:hover)]:hover:-translate-y-1.5 [@media(hover:hover)]:hover:border-blue-500/40 [@media(hover:hover)]:hover:shadow-[0_20px_60px_-20px_rgba(59,130,246,0.4)]"
                 data-testid="card-feature-scale"
               >
@@ -716,9 +710,9 @@ export default function Landing() {
                 </div>
               </motion.div>
 
-              {/* Automation & Execution — wide tile, 2x2 inner grid (rises up) */}
+              {/* Automation & Execution — wide tile, 2x2 inner grid (3rd in the coordinated rise) */}
               <motion.div
-                {...cardReveal({ y: 56 })}
+                {...cardReveal}
                 className="group relative lg:col-span-3 rounded-3xl overflow-hidden border border-border/50 bg-gradient-to-br from-card/80 to-card/40 p-6 sm:p-8 transition-[transform,box-shadow,border-color] duration-300 will-change-transform [@media(hover:hover)]:hover:-translate-y-1.5 [@media(hover:hover)]:hover:border-accent/40 [@media(hover:hover)]:hover:shadow-[0_20px_60px_-20px_rgba(59,130,246,0.4)]"
                 data-testid="card-feature-automation"
               >
@@ -753,9 +747,9 @@ export default function Landing() {
                 </div>
               </motion.div>
 
-              {/* Portfolio Management — wide tile (rises up + scales in) */}
+              {/* Portfolio Management — wide tile (4th in the coordinated rise) */}
               <motion.div
-                {...cardReveal({ y: 56, scale: 0.95 })}
+                {...cardReveal}
                 className="group relative lg:col-span-3 rounded-3xl overflow-hidden border border-border/50 bg-gradient-to-br from-card/80 to-card/40 p-6 sm:p-8 transition-[transform,box-shadow,border-color] duration-300 will-change-transform [@media(hover:hover)]:hover:-translate-y-1.5 [@media(hover:hover)]:hover:border-green-500/40 [@media(hover:hover)]:hover:shadow-[0_20px_60px_-20px_rgba(34,197,94,0.35)]"
                 data-testid="card-feature-portfolio"
               >
