@@ -1,6 +1,6 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { useEffect, useRef, useState } from 'react';
-import { motion, useScroll, useTransform, useMotionTemplate, type MotionProps, type Variants } from 'framer-motion';
+import { motion, useScroll, useTransform, useMotionTemplate, type MotionProps, type MotionValue, type Variants } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { useQuery } from '@tanstack/react-query';
 import { 
@@ -131,8 +131,13 @@ export default function Landing() {
   const heroRef = useRef<HTMLDivElement>(null);
   const vaultSectionRef = useRef<HTMLDivElement>(null);
   const featuresSectionRef = useRef<HTMLDivElement>(null);
+  const bentoTrackRef = useRef<HTMLDivElement>(null);
   const [isMounted, setIsMounted] = useState(false);
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
+  // Only pin the (tall) bento on desktop viewports that are tall enough to hold
+  // the whole grid without clipping. Short laptops + phones fall back to a
+  // per-card scroll reveal instead of the pin.
+  const [isTallDesktop, setIsTallDesktop] = useState(false);
   const [heroInView, setHeroInView] = useState(true);
   
   const { data: metrics } = useQuery<PlatformMetrics>({
@@ -160,6 +165,15 @@ export default function Landing() {
     return () => mq.removeEventListener('change', onChange);
   }, []);
 
+  // Gate the bento pin to desktop viewports tall enough to show the full grid.
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 1024px) and (min-height: 760px)');
+    setIsTallDesktop(mq.matches);
+    const onChange = (e: MediaQueryListEvent) => setIsTallDesktop(e.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+
   // Pause the hero's infinite breathing zoom while it is scrolled off-screen so it
   // stops competing for frame budget during the vault door scrub.
   useEffect(() => {
@@ -177,23 +191,27 @@ export default function Landing() {
   
   // Scroll-based vault door animation (opens when scrolling down, closes when scrolling up)
   // Only enable target-based scroll after mount to avoid hydration errors
+  // The vault is a PINNED scroll-trap: a tall track holds a sticky panel locked
+  // to the viewport while these transforms scrub. offset start/start -> end/end
+  // means progress 0 = pin begins (panel top hits viewport top), progress 1 =
+  // pin releases. Doors part early, content reveals, then it holds before release.
   const { scrollYProgress: vaultScrollProgress } = useScroll(
     isMounted && vaultSectionRef.current 
-      ? { target: vaultSectionRef, offset: ["start end", "end start"] }
+      ? { target: vaultSectionRef, offset: ["start start", "end end"] }
       : undefined
   );
   
-  // Vault doors open based on scroll position through the section
-  const vaultLeftX = useTransform(vaultScrollProgress, [0.2, 0.5], ["0vw", "-50vw"]);
-  const vaultRightX = useTransform(vaultScrollProgress, [0.2, 0.5], ["0vw", "50vw"]);
-  const vaultLogoScale = useTransform(vaultScrollProgress, [0.2, 0.5], [0.5, 1]);
-  const vaultLogoOpacity = useTransform(vaultScrollProgress, [0.2, 0.45], [0, 1]);
-  const vaultTitleOpacity = useTransform(vaultScrollProgress, [0.35, 0.5], [0, 1]);
-  const vaultTitleY = useTransform(vaultScrollProgress, [0.35, 0.5], [20, 0]);
-  const vaultPillOpacity = useTransform(vaultScrollProgress, [0.4, 0.55], [0, 1]);
-  const vaultPillY = useTransform(vaultScrollProgress, [0.4, 0.55], [20, 0]);
-  const vaultGlowOpacity = useTransform(vaultScrollProgress, [0.2, 0.5], [0, 1]);
-  const vaultGlowScale = useTransform(vaultScrollProgress, [0.2, 0.5], [0.5, 1]);
+  // Doors slide fully off-screen (-/+100% of their own half-viewport width).
+  const vaultLeftX = useTransform(vaultScrollProgress, [0.05, 0.5], ["0%", "-100%"]);
+  const vaultRightX = useTransform(vaultScrollProgress, [0.05, 0.5], ["0%", "100%"]);
+  const vaultLogoScale = useTransform(vaultScrollProgress, [0.18, 0.5], [0.5, 1]);
+  const vaultLogoOpacity = useTransform(vaultScrollProgress, [0.18, 0.5], [0, 1]);
+  const vaultTitleOpacity = useTransform(vaultScrollProgress, [0.4, 0.6], [0, 1]);
+  const vaultTitleY = useTransform(vaultScrollProgress, [0.4, 0.6], [20, 0]);
+  const vaultPillOpacity = useTransform(vaultScrollProgress, [0.5, 0.7], [0, 1]);
+  const vaultPillY = useTransform(vaultScrollProgress, [0.5, 0.7], [20, 0]);
+  const vaultGlowOpacity = useTransform(vaultScrollProgress, [0.1, 0.45], [0, 1]);
+  const vaultGlowScale = useTransform(vaultScrollProgress, [0.1, 0.5], [0.5, 1]);
 
   // Features section scroll-linked parallax. Drives ONLY the decorative
   // background blobs (never the heading or the content grid, which stay
@@ -206,7 +224,61 @@ export default function Landing() {
   );
   const featuresBlobY1 = useTransform(featuresScrollProgress, [0, 1], [-50, 50]);
   const featuresBlobY2 = useTransform(featuresScrollProgress, [0, 1], [45, -45]);
-  
+
+  // Bento pin: a separate tall track holds the grid pinned (on tall desktops)
+  // while the four cards reveal ONE BY ONE, scrubbed to this progress so the
+  // reveal reverses cleanly on scroll-up. offset start/start -> end/end.
+  const bentoPinned = isTallDesktop && !prefersReducedMotion;
+  const { scrollYProgress: bentoScrollProgress } = useScroll(
+    isMounted && bentoTrackRef.current
+      ? { target: bentoTrackRef, offset: ["start start", "end end"] }
+      : undefined
+  );
+  const card1Opacity = useTransform(bentoScrollProgress, [0.04, 0.26], [0, 1]);
+  const card1Y = useTransform(bentoScrollProgress, [0.04, 0.26], [44, 0]);
+  const card1Scale = useTransform(bentoScrollProgress, [0.04, 0.26], [0.96, 1]);
+  const card2Opacity = useTransform(bentoScrollProgress, [0.18, 0.40], [0, 1]);
+  const card2Y = useTransform(bentoScrollProgress, [0.18, 0.40], [44, 0]);
+  const card2Scale = useTransform(bentoScrollProgress, [0.18, 0.40], [0.96, 1]);
+  const card3Opacity = useTransform(bentoScrollProgress, [0.34, 0.56], [0, 1]);
+  const card3Y = useTransform(bentoScrollProgress, [0.34, 0.56], [44, 0]);
+  const card3Scale = useTransform(bentoScrollProgress, [0.34, 0.56], [0.96, 1]);
+  const card4Opacity = useTransform(bentoScrollProgress, [0.50, 0.72], [0, 1]);
+  const card4Y = useTransform(bentoScrollProgress, [0.50, 0.72], [44, 0]);
+  const card4Scale = useTransform(bentoScrollProgress, [0.50, 0.72], [0.96, 1]);
+  // Reduced-motion visible state. We must NOT return {} here: the first render
+  // happens before the matchMedia effects settle (reduced/tall default false),
+  // so framer writes the hidden `initial` (opacity:0, translate, scale) inline.
+  // When reduced-motion then flips true, an empty props object gives framer no
+  // animate target, so it never clears that leftover inline style and the
+  // element stays invisible. Explicitly animating to the visible state (instant)
+  // forces framer to overwrite it.
+  const reducedVisible: MotionProps = {
+    initial: false,
+    animate: { opacity: 1, y: 0, scale: 1 },
+    transition: { duration: 0 },
+  };
+
+  // Per-card motion props: scrubbed style when pinned; a self-contained scroll
+  // reveal (reverses, once:false) on mobile/short screens; snap-to-visible under
+  // reduced motion (cards render in place).
+  const bentoCardProps = (
+    i: number,
+    opacity: MotionValue<number>,
+    y: MotionValue<number>,
+    scale: MotionValue<number>,
+  ): MotionProps =>
+    bentoPinned
+      ? { style: { opacity, y, scale } }
+      : prefersReducedMotion
+        ? reducedVisible
+        : {
+            initial: { opacity: 0, y: 44, scale: 0.96 },
+            whileInView: { opacity: 1, y: 0, scale: 1 },
+            viewport: { once: false, amount: 0.25 },
+            transition: { duration: 0.55, ease: [0.16, 1, 0.3, 1], delay: i * 0.06 },
+          };
+
   // Background parallax - continuous zoom and movement
   const heroY = useTransform(scrollY, [0, 800], [0, 300]);
   const heroScale = useTransform(scrollY, [0, 800], [1, 1.15]);
@@ -260,11 +332,11 @@ export default function Landing() {
         viewport: { once: true, amount: 0.2 },
         variants: featuresStagger,
       };
-  const cardReveal: MotionProps = prefersReducedMotion ? {} : { variants: bentoCardVariants };
-  const itemReveal: MotionProps = prefersReducedMotion ? {} : { variants: bentoItemVariants };
+  const cardReveal: MotionProps = prefersReducedMotion ? reducedVisible : { variants: bentoCardVariants };
+  const itemReveal: MotionProps = prefersReducedMotion ? reducedVisible : { variants: bentoItemVariants };
 
   return (
-    <div className="min-h-screen bg-black overflow-x-hidden">
+    <div className="min-h-screen bg-black overflow-x-clip">
       <nav className="fixed top-0 left-0 right-0 z-50 bg-black/50 backdrop-blur-xl border-b border-white/10">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -454,8 +526,15 @@ export default function Landing() {
           </motion.div>
         </section>
 
-        {/* Brand transition section - Vault reveal (scroll-based reversible animation) */}
-        <section ref={vaultSectionRef} className="relative py-24 px-6 bg-black overflow-hidden">
+        {/* Brand transition — Vault reveal (PINNED scroll-trap). A tall track holds
+            a sticky panel locked to the viewport; the doors slide apart while pinned,
+            then the section releases. Under reduced motion we drop the track + pin and
+            render the vault open in normal flow. */}
+        <section
+          ref={vaultSectionRef}
+          className={`relative bg-black ${prefersReducedMotion ? '' : 'h-[250vh]'}`}
+        >
+          <div className={`${prefersReducedMotion ? 'relative min-h-screen py-24' : 'sticky top-0 h-[100dvh]'} overflow-hidden flex items-center justify-center px-6`}>
           {/* Plain semi-opaque fill (was backdrop-blur-xl, which forced a continuous
               GPU repaint under the opaque doors for zero visual benefit). */}
           <div className="absolute inset-0 bg-black/90" />
@@ -541,6 +620,7 @@ export default function Landing() {
               Powered by Solana
             </motion.span>
           </div>
+          </div>
         </section>
 
         <section className="relative py-24 px-6 bg-background overflow-hidden">
@@ -583,39 +663,25 @@ export default function Landing() {
         <section
           id="features"
           ref={featuresSectionRef}
-          className="relative py-24 px-6 bg-background overflow-hidden"
+          className="relative bg-background"
           data-testid="section-features"
         >
-          {/* Layered, scroll-parallaxed background accents (decorative, clipped by
-              the section's overflow-hidden so depth never bleeds into overflow). */}
-          <div className="absolute inset-0 bg-gradient-to-b from-black via-background to-background" />
-          <motion.div
-            aria-hidden="true"
-            style={{ y: prefersReducedMotion ? 0 : featuresBlobY1, willChange: 'transform' }}
-            className="pointer-events-none absolute -top-24 left-1/4 w-[480px] max-w-[80vw] h-[480px] bg-primary/10 rounded-full blur-[150px]"
-          />
-          <motion.div
-            aria-hidden="true"
-            style={{ y: prefersReducedMotion ? 0 : featuresBlobY2, willChange: 'transform' }}
-            className="pointer-events-none absolute bottom-0 right-1/4 w-[420px] max-w-[80vw] h-[420px] bg-accent/10 rounded-full blur-[120px]"
-          />
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-0 opacity-[0.05] [background-image:linear-gradient(to_right,rgba(255,255,255,0.6)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.6)_1px,transparent_1px)] [background-size:64px_64px] [mask-image:radial-gradient(ellipse_60%_55%_at_50%_40%,black,transparent)]"
-          />
+          {/* Full-section backdrop gradient (blends down from the black vault). It's a
+              sibling of the pinned panel, never an ancestor, so it can't break sticky. */}
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black via-background to-background" />
 
-          <div className="max-w-7xl mx-auto relative z-10">
-            {/* Section Header (anchored — stays put for readability) */}
+          {/* Section Header — anchored in normal flow (stays put for readability) */}
+          <div className="relative z-10 px-6 pt-24 pb-4">
             <motion.div
               {...(prefersReducedMotion
-                ? {}
+                ? reducedVisible
                 : {
                     initial: { opacity: 0, y: 30 },
                     whileInView: { opacity: 1, y: 0 },
                     viewport: { once: true, amount: 0.3 },
                     transition: { duration: 0.7, ease: [0.16, 1, 0.3, 1] },
                   })}
-              className="text-center mb-14 sm:mb-16"
+              className="max-w-7xl mx-auto text-center"
             >
               <span className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 border border-primary/20 text-sm text-primary mb-6">
                 <Sparkles className="w-4 h-4" />
@@ -626,15 +692,37 @@ export default function Landing() {
                 Built for traders who demand performance, security, and transparency.
               </p>
             </motion.div>
+          </div>
 
-            {/* Asymmetric bento — varied tile sizes and per-tile staggered reveals */}
-            <motion.div
-              {...featuresContainerProps}
-              className="grid grid-cols-1 lg:grid-cols-6 gap-4 sm:gap-5"
-            >
+          {/* Bento PIN track. On tall desktops the grid pins (a sticky panel) while
+              the four tiles reveal ONE BY ONE, scrubbed to scroll so the reveal
+              cleanly reverses on scroll-up. On mobile/short screens (bentoPinned=false)
+              this is a normal block and each tile reveals via its own whileInView. */}
+          <div ref={bentoTrackRef} className={bentoPinned ? 'relative h-[300vh]' : 'relative'}>
+            <div className={`${bentoPinned ? 'sticky top-0 h-screen flex items-center' : ''} px-6 pb-24`}>
+              {/* Parallaxed background accents — clipped in their OWN overflow-hidden
+                  layer so the blur never bleeds, and nothing here clips the grid or
+                  acts as an overflow ancestor of the sticky panel. */}
+              <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden">
+                <motion.div
+                  style={{ y: prefersReducedMotion ? 0 : featuresBlobY1, willChange: 'transform' }}
+                  className="absolute -top-24 left-1/4 w-[480px] max-w-[80vw] h-[480px] bg-primary/10 rounded-full blur-[150px]"
+                />
+                <motion.div
+                  style={{ y: prefersReducedMotion ? 0 : featuresBlobY2, willChange: 'transform' }}
+                  className="absolute bottom-0 right-1/4 w-[420px] max-w-[80vw] h-[420px] bg-accent/10 rounded-full blur-[120px]"
+                />
+                <div className="absolute inset-0 opacity-[0.05] [background-image:linear-gradient(to_right,rgba(255,255,255,0.6)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.6)_1px,transparent_1px)] [background-size:64px_64px] [mask-image:radial-gradient(ellipse_60%_55%_at_50%_40%,black,transparent)]" />
+              </div>
+
+              {/* Asymmetric bento — one-by-one tile reveal (scrubbed when pinned) */}
+              <motion.div
+                {...featuresContainerProps}
+                className="max-w-7xl mx-auto w-full relative z-10 grid grid-cols-1 lg:grid-cols-6 gap-4 sm:gap-5"
+              >
               {/* Security & Control — hero/feature tile (1st in the coordinated rise) */}
               <motion.div
-                {...cardReveal}
+                {...bentoCardProps(0, card1Opacity, card1Y, card1Scale)}
                 className="group relative lg:col-span-4 rounded-3xl overflow-hidden border border-primary/15 bg-gradient-to-br from-primary/[0.10] via-card/60 to-card/30 p-6 sm:p-8 transition-[transform,box-shadow,border-color] duration-300 will-change-transform [@media(hover:hover)]:hover:-translate-y-1.5 [@media(hover:hover)]:hover:border-primary/40 [@media(hover:hover)]:hover:shadow-[0_20px_60px_-20px_rgba(99,102,241,0.45)]"
                 data-testid="card-feature-security"
               >
@@ -674,7 +762,7 @@ export default function Landing() {
 
               {/* Scale & Ecosystem — tall supporting tile (2nd in the coordinated rise) */}
               <motion.div
-                {...cardReveal}
+                {...bentoCardProps(1, card2Opacity, card2Y, card2Scale)}
                 className="group relative lg:col-span-2 rounded-3xl overflow-hidden border border-border/50 bg-gradient-to-br from-card/80 to-card/40 p-6 sm:p-8 flex flex-col transition-[transform,box-shadow,border-color] duration-300 will-change-transform [@media(hover:hover)]:hover:-translate-y-1.5 [@media(hover:hover)]:hover:border-blue-500/40 [@media(hover:hover)]:hover:shadow-[0_20px_60px_-20px_rgba(59,130,246,0.4)]"
                 data-testid="card-feature-scale"
               >
@@ -690,7 +778,7 @@ export default function Landing() {
                     <Globe className="w-5 h-5 text-blue-400 mt-0.5 shrink-0 transition-transform duration-300 [@media(hover:hover)]:group-hover/cell:scale-110" />
                     <div>
                       <h4 className="font-semibold text-sm mb-1">All Markets</h4>
-                      <p className="text-xs text-muted-foreground">Auto-discovery of all Pacifica markets. New listings available instantly.</p>
+                      <p className="text-xs text-muted-foreground">Auto-discovery of all markets across every venue. New listings available instantly.</p>
                     </div>
                   </motion.div>
                   <motion.div {...itemReveal} className="group/cell flex items-start gap-3 p-4 rounded-2xl bg-background/40 border border-border/30 transition-[transform,border-color] duration-300 [@media(hover:hover)]:hover:-translate-y-1 [@media(hover:hover)]:hover:border-blue-500/40" data-testid="tile-feature-isolation">
@@ -712,7 +800,7 @@ export default function Landing() {
 
               {/* Automation & Execution — wide tile, 2x2 inner grid (3rd in the coordinated rise) */}
               <motion.div
-                {...cardReveal}
+                {...bentoCardProps(2, card3Opacity, card3Y, card3Scale)}
                 className="group relative lg:col-span-3 rounded-3xl overflow-hidden border border-border/50 bg-gradient-to-br from-card/80 to-card/40 p-6 sm:p-8 transition-[transform,box-shadow,border-color] duration-300 will-change-transform [@media(hover:hover)]:hover:-translate-y-1.5 [@media(hover:hover)]:hover:border-accent/40 [@media(hover:hover)]:hover:shadow-[0_20px_60px_-20px_rgba(59,130,246,0.4)]"
                 data-testid="card-feature-automation"
               >
@@ -749,7 +837,7 @@ export default function Landing() {
 
               {/* Portfolio Management — wide tile (4th in the coordinated rise) */}
               <motion.div
-                {...cardReveal}
+                {...bentoCardProps(3, card4Opacity, card4Y, card4Scale)}
                 className="group relative lg:col-span-3 rounded-3xl overflow-hidden border border-border/50 bg-gradient-to-br from-card/80 to-card/40 p-6 sm:p-8 transition-[transform,box-shadow,border-color] duration-300 will-change-transform [@media(hover:hover)]:hover:-translate-y-1.5 [@media(hover:hover)]:hover:border-green-500/40 [@media(hover:hover)]:hover:shadow-[0_20px_60px_-20px_rgba(34,197,94,0.35)]"
                 data-testid="card-feature-portfolio"
               >
@@ -785,6 +873,7 @@ export default function Landing() {
                 </div>
               </motion.div>
             </motion.div>
+            </div>
           </div>
         </section>
 
@@ -809,27 +898,64 @@ export default function Landing() {
               </p>
             </motion.div>
 
-            <div className="grid md:grid-cols-3 gap-8">
-              {[
-                { step: '01', title: 'Connect Wallet', description: 'Connect your Solana wallet securely. No signup, no email, just pure crypto.' },
-                { step: '02', title: 'Fund Your Agent', description: 'Transfer USDC to your agent wallet for trading, plus SOL for gas fees.' },
-                { step: '03', title: 'Deploy Bots', description: 'Create signal bots connected to TradingView alerts. Start automating 24/7.' },
-              ].map((item, i) => (
-                <motion.div 
-                  key={i} 
-                  initial={{ opacity: 0, y: 30 }}
-                  whileInView={{ opacity: 1, y: 0 }}
-                  viewport={{ once: false, amount: 0.3 }}
-                  transition={{ duration: 0.5, delay: i * 0.1 }}
-                  className="text-center group"
-                >
-                  <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-primary to-accent flex items-center justify-center shadow-lg shadow-primary/25 group-hover:scale-110 transition-transform duration-300">
-                    <span className="text-2xl font-display font-bold text-white">{item.step}</span>
-                  </div>
-                  <h3 className="font-display font-semibold text-xl mb-3">{item.title}</h3>
-                  <p className="text-muted-foreground leading-relaxed">{item.description}</p>
-                </motion.div>
-              ))}
+            {/* Glowing signal ribbon — numbered nodes wired onto a pulsing signal
+                line (a single pulse travels left→right on desktop). Mirrors the
+                QuantumLab hub workflow. Reduced motion drops the traveling pulse. */}
+            <div className="relative">
+              {/* Desktop signal line — runs through the node centers (cols at 16.6/50/83.3%) */}
+              <div className="hidden md:block absolute top-7 left-[16.6%] right-[16.6%] z-0">
+                <div className="relative h-px">
+                  <div className="absolute inset-0 bg-gradient-to-r from-transparent via-slate-700 to-transparent" />
+                  <div className="absolute -inset-y-[1px] inset-x-0 bg-gradient-to-r from-transparent via-indigo-500/50 to-transparent blur-[2px]" />
+                  {!prefersReducedMotion && (
+                    <motion.div
+                      className="absolute top-1/2 h-1.5 w-1.5 -translate-y-1/2 rounded-full bg-indigo-200 shadow-[0_0_14px_4px_rgba(99,102,241,0.75)]"
+                      animate={{ left: ["0%", "100%"], opacity: [0, 1, 1, 0] }}
+                      transition={{ duration: 3.4, repeat: Infinity, ease: "easeInOut", times: [0, 0.12, 0.88, 1] }}
+                    />
+                  )}
+                </div>
+              </div>
+              {/* Mobile signal line (vertical, threads the node centers) */}
+              <div className="md:hidden absolute top-7 bottom-6 left-7 w-px bg-gradient-to-b from-indigo-500/50 via-slate-700 to-transparent z-0" />
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-10 md:gap-6 relative z-10">
+                {[
+                  { step: '01', title: 'Connect Wallet', description: 'Connect your Solana wallet securely. No signup, no email, just pure crypto.' },
+                  { step: '02', title: 'Fund Your Agent', description: 'Transfer USDC to your agent wallet for trading, plus SOL for gas fees.' },
+                  { step: '03', title: 'Deploy Bots', description: 'Create signal bots connected to TradingView alerts. Start automating 24/7.' },
+                ].map((item, i) => (
+                  <motion.div
+                    key={i}
+                    {...(prefersReducedMotion
+                      ? reducedVisible
+                      : {
+                          initial: { opacity: 0, y: 30 },
+                          whileInView: { opacity: 1, y: 0 },
+                          viewport: { once: false, amount: 0.3 },
+                          transition: { duration: 0.5, delay: i * 0.1 },
+                        })}
+                    className="group relative flex items-start gap-5 md:flex-col md:items-center md:gap-0 md:text-center"
+                    data-testid={`step-how-${item.step}`}
+                  >
+                    {/* Node */}
+                    <div className="relative shrink-0 md:mb-7">
+                      <div className="absolute inset-0 rounded-full bg-indigo-500/25 blur-md opacity-0 scale-110 transition-opacity duration-500 [@media(hover:hover)]:group-hover:opacity-100" />
+                      <div className="relative w-14 h-14 rounded-full p-px bg-gradient-to-br from-indigo-400/80 via-indigo-500/30 to-blue-500/50 shadow-[0_0_20px_-6px_rgba(99,102,241,0.6)] transition-all duration-500 [@media(hover:hover)]:group-hover:-translate-y-0.5 [@media(hover:hover)]:group-hover:shadow-[0_0_30px_-3px_rgba(99,102,241,0.85)]">
+                        <div className="w-full h-full rounded-full bg-slate-950 flex items-center justify-center">
+                          <span className="font-mono text-base font-semibold text-transparent bg-clip-text bg-gradient-to-br from-indigo-200 to-blue-300">
+                            {item.step}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="md:px-2">
+                      <h3 className="text-lg font-semibold text-slate-200 mb-2 transition-colors group-hover:text-white">{item.title}</h3>
+                      <p className="text-white/60 leading-relaxed text-sm md:max-w-[230px] md:mx-auto">{item.description}</p>
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
             </div>
           </div>
         </section>
