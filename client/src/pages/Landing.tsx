@@ -340,6 +340,7 @@ export default function Landing() {
   const heroRef = useRef<HTMLDivElement>(null);
   const vaultSectionRef = useRef<HTMLDivElement>(null);
   const featuresSectionRef = useRef<HTMLDivElement>(null);
+  const ribbonRef = useRef<HTMLDivElement>(null);
   const [isMounted, setIsMounted] = useState(false);
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
   // Only pin the (tall) bento on desktop viewports that are tall enough to hold
@@ -432,6 +433,20 @@ export default function Landing() {
   );
   const featuresBlobY1 = useTransform(featuresScrollProgress, [0, 1], [-50, 50]);
   const featuresBlobY2 = useTransform(featuresScrollProgress, [0, 1], [45, -45]);
+
+  // "How It Works" ribbon — scroll-LINKED reveal (not a fire-once timer). The
+  // node opacities are scrubbed off scroll position, so scrolling down threads
+  // the nodes 1-2-3 and scrolling back up unwinds them 3-2-1. Window runs from
+  // the ribbon entering near the bottom to it settling into the upper-middle.
+  const { scrollYProgress: ribbonProgress } = useScroll(
+    isMounted && ribbonRef.current
+      ? { target: ribbonRef, offset: ["start 0.85", "start 0.4"] }
+      : undefined
+  );
+  const ribbonOpacity0 = useTransform(ribbonProgress, [0.05, 0.32], [0, 1]);
+  const ribbonOpacity1 = useTransform(ribbonProgress, [0.3, 0.57], [0, 1]);
+  const ribbonOpacity2 = useTransform(ribbonProgress, [0.55, 0.82], [0, 1]);
+  const ribbonNodeOpacity = [ribbonOpacity0, ribbonOpacity1, ribbonOpacity2];
 
   // Tall desktops get the sticky stacking "feature stack" (FeatureStack);
   // everything else (mobile, short laptops, reduced motion) keeps the classic
@@ -724,19 +739,29 @@ export default function Landing() {
           <div className="absolute inset-0 bg-black/90" />
           <div className="absolute inset-0 bg-gradient-to-b from-transparent via-black/50 to-background" />
           
-          {/* Vault door left - scroll-based */}
+          {/* Vault door left - scroll-based. Bevel is self-contained (inset highlight
+              on the seam edge) so it can't bleed a one-sided shadow onto the other
+              door — that paint-order bleed is what made one door look "above" the
+              other. Inner children: engraved panel frame, brushed sheen, soft
+              blurple inner-edge glow, then the handle (unchanged). */}
           <motion.div
             style={{ x: prefersReducedMotion ? "-50vw" : vaultLeftX, willChange: "transform" }}
-            className="absolute left-0 top-0 w-1/2 h-full bg-gradient-to-r from-black via-gray-900 to-gray-800 z-20 border-r border-white/5 flex items-center justify-end shadow-[8px_0_24px_rgba(0,0,0,0.6)]"
+            className="absolute left-0 top-0 w-1/2 h-full bg-gradient-to-r from-black via-gray-900 to-gray-800 z-20 flex items-center justify-end shadow-[inset_-1px_0_0_rgba(255,255,255,0.10)]"
           >
+            <div className="pointer-events-none absolute inset-6 sm:inset-10 rounded-2xl border border-white/[0.04] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]" />
+            <div className="pointer-events-none absolute inset-0 opacity-50 bg-[linear-gradient(105deg,transparent_42%,rgba(255,255,255,0.035)_50%,transparent_58%)]" />
+            <div className="pointer-events-none absolute top-0 right-0 h-full w-px bg-gradient-to-b from-transparent via-indigo-300/40 to-transparent shadow-[0_0_7px_rgba(99,102,241,0.35)]" />
             <div className="mr-4 w-1 h-24 bg-gradient-to-b from-primary/50 via-accent/50 to-primary/50 rounded-full shadow-[0_0_8px_rgba(99,102,241,0.6)]" />
           </motion.div>
           
-          {/* Vault door right - scroll-based */}
+          {/* Vault door right - scroll-based. Mirror of the left door. */}
           <motion.div
             style={{ x: prefersReducedMotion ? "50vw" : vaultRightX, willChange: "transform" }}
-            className="absolute right-0 top-0 w-1/2 h-full bg-gradient-to-l from-black via-gray-900 to-gray-800 z-20 border-l border-white/5 flex items-center justify-start shadow-[-8px_0_24px_rgba(0,0,0,0.6)]"
+            className="absolute right-0 top-0 w-1/2 h-full bg-gradient-to-l from-black via-gray-900 to-gray-800 z-20 flex items-center justify-start shadow-[inset_1px_0_0_rgba(255,255,255,0.10)]"
           >
+            <div className="pointer-events-none absolute inset-6 sm:inset-10 rounded-2xl border border-white/[0.04] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]" />
+            <div className="pointer-events-none absolute inset-0 opacity-50 bg-[linear-gradient(255deg,transparent_42%,rgba(255,255,255,0.035)_50%,transparent_58%)]" />
+            <div className="pointer-events-none absolute top-0 left-0 h-full w-px bg-gradient-to-b from-transparent via-indigo-300/40 to-transparent shadow-[0_0_7px_rgba(99,102,241,0.35)]" />
             <div className="ml-4 w-1 h-24 bg-gradient-to-b from-primary/50 via-accent/50 to-primary/50 rounded-full shadow-[0_0_8px_rgba(99,102,241,0.6)]" />
           </motion.div>
           
@@ -1087,7 +1112,7 @@ export default function Landing() {
             {/* Glowing signal ribbon — numbered nodes wired onto a pulsing signal
                 line (a single pulse travels left→right on desktop). Mirrors the
                 QuantumLab hub workflow. Reduced motion drops the traveling pulse. */}
-            <div className="relative">
+            <div ref={ribbonRef} className="relative">
               {/* Desktop signal line — runs through the node centers (cols at 16.6/50/83.3%) */}
               <div className="hidden md:block absolute top-7 left-[16.6%] right-[16.6%] z-0">
                 <div className="relative h-px">
@@ -1113,14 +1138,7 @@ export default function Landing() {
                 ].map((item, i) => (
                   <motion.div
                     key={i}
-                    {...(prefersReducedMotion
-                      ? reducedVisible
-                      : {
-                          initial: { opacity: 0 },
-                          whileInView: { opacity: 1 },
-                          viewport: { once: false, amount: 0.3 },
-                          transition: { duration: 0.6, delay: i * 0.8, ease: 'easeOut' },
-                        })}
+                    style={{ opacity: prefersReducedMotion ? 1 : ribbonNodeOpacity[i] }}
                     className="group relative flex items-start gap-5 md:flex-col md:items-center md:gap-0 md:text-center"
                     data-testid={`step-how-${item.step}`}
                   >
