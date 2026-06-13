@@ -1,10 +1,12 @@
 import {
   labStrategies, labOptimizationRuns, labOptimizationResults, labInsightsReports,
+  labAgentTasks,
   type LabStrategy, type InsertLabStrategy,
   type LabOptimizationRun, type InsertLabRun,
   type LabOptResult, type InsertLabResult,
   type LabBacktestResult, type LabJobProgress, type LabOptimizationConfig, type LabJobResult,
   type LabCheckpoint, type LabInsightsReport,
+  type LabAgentTask, type InsertLabAgentTask,
 } from "@shared/schema";
 import { db } from "../db";
 import { eq, desc, inArray, isNull, and, or, asc, sql } from "drizzle-orm";
@@ -101,6 +103,20 @@ export interface ILabStorage {
   getJobsAheadCount(queueOrder: number): Promise<number>;
   getUserRunNumber(walletAddress: string, runId: number): Promise<number>;
   deduplicateStrategyResults(strategyId: number, protectRunId?: number): Promise<number>;
+
+  // --- QuantumLab Sandbox Agent task persistence (T6 reliability spine) ---
+  /** Bulk run read by id — the reconciler's source-of-truth fetch for a task's owned runs. */
+  getRunsByIds(ids: number[]): Promise<LabOptimizationRun[]>;
+  /**
+   * Atomically create an agent task under the one-active-task-per-wallet leash
+   * (§7). Takes a per-wallet advisory lock so a concurrent create can't slip a
+   * second non-terminal task in (there is no partial unique index for this).
+   * Returns the existing non-terminal task as `conflict` instead of inserting a
+   * duplicate.
+   */
+  createAgentTaskExclusive(data: InsertLabAgentTask): Promise<{ created: LabAgentTask } | { conflict: LabAgentTask }>;
+  getAgentTask(id: number): Promise<LabAgentTask | undefined>;
+  updateAgentTask(id: number, patch: Partial<InsertLabAgentTask>): Promise<LabAgentTask | undefined>;
 }
 
 export class LabDatabaseStorage implements ILabStorage {
@@ -318,6 +334,42 @@ export class LabDatabaseStorage implements ILabStorage {
       eq(labOptimizationRuns.status, "queued"),
     )!).returning({ id: labOptimizationRuns.id });
     return rows.length > 0;
+  }
+
+  async getRunsByIds(ids: number[]): Promise<LabOptimizationRun[]> {
+    if (!ids.length) return [];
+    return db.select().from(labOptimizationRuns).where(inArray(labOptimizationRuns.id, ids));
+  }
+
+  async createAgentTaskExclusive(
+    data: InsertLabAgentTask,
+  ): Promise<{ created: LabAgentTask } | { conflict: LabAgentTask }> {
+    return db.transaction(async (tx) => {
+      // Serialize task-creation for this wallet so the check-then-insert below is
+      // atomic — there is no partial unique index on "non-terminal task", so a
+      // bare read-then-insert would race a second create through the leash.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${data.walletAddress}))`);
+      const [existing] = await tx.select().from(labAgentTasks).where(and(
+        eq(labAgentTasks.walletAddress, data.walletAddress),
+        inArray(labAgentTasks.status, ["active", "awaiting_input", "paused"]),
+      )!).limit(1);
+      if (existing) return { conflict: existing };
+      const [created] = await tx.insert(labAgentTasks).values(data).returning();
+      return { created };
+    });
+  }
+
+  async getAgentTask(id: number): Promise<LabAgentTask | undefined> {
+    const [task] = await db.select().from(labAgentTasks).where(eq(labAgentTasks.id, id));
+    return task;
+  }
+
+  async updateAgentTask(id: number, patch: Partial<InsertLabAgentTask>): Promise<LabAgentTask | undefined> {
+    const [task] = await db.update(labAgentTasks)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(eq(labAgentTasks.id, id))
+      .returning();
+    return task;
   }
 
   async completeRun(id: number, totalConfigsTested: number): Promise<void> {
