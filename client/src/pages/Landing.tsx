@@ -19,7 +19,8 @@ import {
   Layers,
   KeyRound,
   PiggyBank,
-  Percent
+  Percent,
+  type LucideIcon
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import LaunchVideo from '@/components/LaunchVideo';
@@ -103,6 +104,214 @@ const bentoItemVariants: Variants = {
   },
 };
 
+// ───────────────────────────────────────────────────────────────────────────
+// Desktop feature "story": sticky stacking cards. On tall desktops each feature
+// group pins to the viewport, the next slides up over it, and covered cards
+// recede (scale down) for depth. Replaces the old pinned bento, which clipped
+// its own top at 100% zoom because the grid was taller than the viewport.
+// Mobile / short laptops / reduced-motion keep the classic bento grid below.
+//
+// Accent class strings are written out IN FULL (never `border-${x}`) so
+// Tailwind's JIT can't purge them.
+type StackAccent = {
+  iconWrap: string;
+  iconText: string;
+  border: string;
+  glow: string;
+  itemHover: string;
+  shadow: string;
+  kicker: string;
+};
+
+const STACK_ACCENTS: Record<string, StackAccent> = {
+  indigo: {
+    iconWrap: 'from-primary/30 to-accent/20 ring-primary/20',
+    iconText: 'text-primary',
+    border: 'border-primary/20',
+    glow: 'bg-primary/20',
+    itemHover: '[@media(hover:hover)]:hover:border-primary/40',
+    shadow: 'shadow-[0_40px_90px_-40px_rgba(99,102,241,0.55)]',
+    kicker: 'text-primary/70',
+  },
+  blue: {
+    iconWrap: 'from-blue-500/25 to-cyan-500/20 ring-blue-500/20',
+    iconText: 'text-blue-400',
+    border: 'border-blue-500/20',
+    glow: 'bg-blue-500/15',
+    itemHover: '[@media(hover:hover)]:hover:border-blue-500/40',
+    shadow: 'shadow-[0_40px_90px_-40px_rgba(59,130,246,0.5)]',
+    kicker: 'text-blue-400/70',
+  },
+  azure: {
+    iconWrap: 'from-accent/25 to-primary/20 ring-accent/20',
+    iconText: 'text-accent',
+    border: 'border-accent/20',
+    glow: 'bg-accent/15',
+    itemHover: '[@media(hover:hover)]:hover:border-accent/40',
+    shadow: 'shadow-[0_40px_90px_-40px_rgba(59,130,246,0.5)]',
+    kicker: 'text-accent/70',
+  },
+  green: {
+    iconWrap: 'from-green-500/25 to-emerald-500/20 ring-green-500/20',
+    iconText: 'text-green-400',
+    border: 'border-green-500/20',
+    glow: 'bg-green-500/15',
+    itemHover: '[@media(hover:hover)]:hover:border-green-500/40',
+    shadow: 'shadow-[0_40px_90px_-40px_rgba(34,197,94,0.4)]',
+    kicker: 'text-green-400/70',
+  },
+};
+
+type StackItem = { icon: LucideIcon; title: string; desc: string; testid: string };
+type StackFeature = {
+  accent: keyof typeof STACK_ACCENTS;
+  icon: LucideIcon;
+  kicker: string;
+  title: string;
+  description: string;
+  items: StackItem[];
+  cardTestid: string;
+};
+
+// Copy mirrors the bento grid below; keep the two in sync if feature copy changes.
+const FEATURE_STACK: StackFeature[] = [
+  {
+    accent: 'indigo',
+    icon: ShieldCheck,
+    kicker: 'Security',
+    title: 'Security & Control',
+    description: 'Non-custodial by design — institutional-grade encryption with keys only you can recover.',
+    cardTestid: 'card-stack-security',
+    items: [
+      { icon: Shield, title: 'Dedicated Trading Wallet', desc: 'A secure agent wallet handles automated trades. Your main wallet stays safe — you only sign deposits and withdrawals.', testid: 'tile-stack-dedicated-wallet' },
+      { icon: Lock, title: 'Institutional-Grade Security', desc: 'AES-256-GCM encryption, session-based key derivation, and cryptographic buffer zeroization. Your keys are never exposed.', testid: 'tile-stack-encryption' },
+      { icon: KeyRound, title: 'Seed Phrase Backup', desc: "Full ownership and control. Export your agent wallet's recovery phrase anytime — your keys, your backup.", testid: 'tile-stack-seed-backup' },
+    ],
+  },
+  {
+    accent: 'blue',
+    icon: Globe,
+    kicker: 'Scale',
+    title: 'Scale & Ecosystem',
+    description: 'Trade everything, everywhere — every market on every venue, isolated per bot.',
+    cardTestid: 'card-stack-scale',
+    items: [
+      { icon: Globe, title: 'All Markets', desc: 'Auto-discovery of all markets across every venue. New listings available instantly.', testid: 'tile-stack-all-markets' },
+      { icon: Layers, title: 'Multi-Bot Isolation', desc: 'Each bot runs on its own subaccount. Losses stay contained.', testid: 'tile-stack-isolation' },
+      { icon: Store, title: 'Bot Marketplace', desc: 'Publish your bots and subscribe to community signals.', testid: 'tile-stack-marketplace' },
+    ],
+  },
+  {
+    accent: 'azure',
+    icon: Zap,
+    kicker: 'Automation',
+    title: 'Automation & Execution',
+    description: 'Signal in, trade out — automated, idempotent, and lightning fast on Solana.',
+    cardTestid: 'card-stack-automation',
+    items: [
+      { icon: Activity, title: 'TradingView Signals', desc: 'Direct webhook integration with idempotent execution.', testid: 'tile-stack-signals' },
+      { icon: TrendingUp, title: 'Advanced Strategies', desc: 'Auto top-up, profit reinvestment, and dynamic position scaling.', testid: 'tile-stack-strategies' },
+      { icon: Zap, title: 'Lightning Fast', desc: 'Sub-second on-chain execution on Solana.', testid: 'tile-stack-fast' },
+      { icon: Lock, title: 'Risk Controls', desc: 'Per-bot limits and emergency stop functionality.', testid: 'tile-stack-risk' },
+    ],
+  },
+  {
+    accent: 'green',
+    icon: PiggyBank,
+    kicker: 'Portfolio',
+    title: 'Portfolio Management',
+    description: 'Keep your edge — automatic profit-taking and real-time performance you can actually see.',
+    cardTestid: 'card-stack-portfolio',
+    items: [
+      { icon: PiggyBank, title: 'Profit Auto-Withdraw', desc: 'Automatically sweep profits when equity exceeds your threshold.', testid: 'tile-stack-auto-withdraw' },
+      { icon: Percent, title: 'Equity Tracking', desc: 'Real-time portfolio snapshots with daily equity curves and deposit history.', testid: 'tile-stack-equity' },
+      { icon: TrendingUp, title: 'PnL & Trade Analytics', desc: 'Per-bot performance charts, net PnL, win rate, and complete trade history.', testid: 'tile-stack-analytics' },
+    ],
+  },
+];
+
+function FeatureStackCard({
+  feature,
+  index,
+  total,
+  progress,
+}: {
+  feature: StackFeature;
+  index: number;
+  total: number;
+  progress: MotionValue<number>;
+}) {
+  const a = STACK_ACCENTS[feature.accent];
+  // Earlier cards recede as later cards stack over them; the top card stays 1.
+  const targetScale = 1 - (total - 1 - index) * 0.05;
+  const scale = useTransform(progress, [index / total, 1], [1, targetScale]);
+  const Icon = feature.icon;
+  const cols = feature.items.length === 4 ? 'lg:grid-cols-4' : 'lg:grid-cols-3';
+  return (
+    <div className="sticky top-0 flex h-[100svh] items-center justify-center px-6">
+      <motion.div
+        style={{ scale, top: `${index * 1.6}rem`, willChange: 'transform' }}
+        className={`relative w-full max-w-5xl origin-top overflow-hidden rounded-[2rem] border ${a.border} bg-gradient-to-br from-card/90 to-card/50 p-8 backdrop-blur-xl sm:p-10 lg:p-12 ${a.shadow}`}
+        data-testid={feature.cardTestid}
+      >
+        <div className={`pointer-events-none absolute -top-24 -right-16 h-80 w-80 ${a.glow} rounded-full blur-[110px] opacity-60`} />
+        <div className="relative mb-6 flex items-start justify-between gap-6">
+          <div className="flex items-center gap-4">
+            <div className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br ${a.iconWrap} ring-1`}>
+              <Icon className={`h-7 w-7 ${a.iconText}`} />
+            </div>
+            <div>
+              <span className={`block text-[11px] font-semibold uppercase tracking-[0.2em] ${a.kicker}`}>{feature.kicker}</span>
+              <h3 className="font-display text-3xl font-bold leading-tight sm:text-4xl">{feature.title}</h3>
+            </div>
+          </div>
+          <span className="hidden font-mono text-6xl font-bold leading-none text-white/[0.06] sm:block" aria-hidden="true">
+            {String(index + 1).padStart(2, '0')}
+          </span>
+        </div>
+        <p className="relative mb-8 max-w-2xl text-base text-muted-foreground sm:text-lg">{feature.description}</p>
+        <div className={`relative grid grid-cols-1 gap-4 sm:grid-cols-2 ${cols}`}>
+          {feature.items.map((it) => {
+            const ItemIcon = it.icon;
+            return (
+              <div
+                key={it.testid}
+                className={`group/cell rounded-2xl border border-border/30 bg-background/40 p-5 transition-[transform,border-color] duration-300 [@media(hover:hover)]:hover:-translate-y-1 ${a.itemHover}`}
+                data-testid={it.testid}
+              >
+                <ItemIcon className={`mb-3 h-5 w-5 ${a.iconText} transition-transform duration-300 [@media(hover:hover)]:group-hover/cell:scale-110`} />
+                <h4 className="mb-1 text-sm font-semibold">{it.title}</h4>
+                <p className="text-xs leading-relaxed text-muted-foreground">{it.desc}</p>
+              </div>
+            );
+          })}
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
+function FeatureStack() {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const { scrollYProgress } = useScroll({
+    target: trackRef,
+    offset: ['start start', 'end end'],
+  });
+  return (
+    <div ref={trackRef} className="relative" data-testid="feature-stack">
+      {FEATURE_STACK.map((feature, i) => (
+        <FeatureStackCard
+          key={feature.cardTestid}
+          feature={feature}
+          index={i}
+          total={FEATURE_STACK.length}
+          progress={scrollYProgress}
+        />
+      ))}
+    </div>
+  );
+}
+
 interface FeatureCardProps {
   icon: React.ReactNode;
   title: string;
@@ -131,7 +340,6 @@ export default function Landing() {
   const heroRef = useRef<HTMLDivElement>(null);
   const vaultSectionRef = useRef<HTMLDivElement>(null);
   const featuresSectionRef = useRef<HTMLDivElement>(null);
-  const bentoTrackRef = useRef<HTMLDivElement>(null);
   const [isMounted, setIsMounted] = useState(false);
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
   // Only pin the (tall) bento on desktop viewports that are tall enough to hold
@@ -225,27 +433,10 @@ export default function Landing() {
   const featuresBlobY1 = useTransform(featuresScrollProgress, [0, 1], [-50, 50]);
   const featuresBlobY2 = useTransform(featuresScrollProgress, [0, 1], [45, -45]);
 
-  // Bento pin: a separate tall track holds the grid pinned (on tall desktops)
-  // while the four cards reveal ONE BY ONE, scrubbed to this progress so the
-  // reveal reverses cleanly on scroll-up. offset start/start -> end/end.
+  // Tall desktops get the sticky stacking "feature stack" (FeatureStack);
+  // everything else (mobile, short laptops, reduced motion) keeps the classic
+  // bento grid below in normal flow.
   const bentoPinned = isTallDesktop && !prefersReducedMotion;
-  const { scrollYProgress: bentoScrollProgress } = useScroll(
-    isMounted && bentoTrackRef.current
-      ? { target: bentoTrackRef, offset: ["start start", "end end"] }
-      : undefined
-  );
-  const card1Opacity = useTransform(bentoScrollProgress, [0.04, 0.26], [0, 1]);
-  const card1Y = useTransform(bentoScrollProgress, [0.04, 0.26], [44, 0]);
-  const card1Scale = useTransform(bentoScrollProgress, [0.04, 0.26], [0.96, 1]);
-  const card2Opacity = useTransform(bentoScrollProgress, [0.18, 0.40], [0, 1]);
-  const card2Y = useTransform(bentoScrollProgress, [0.18, 0.40], [44, 0]);
-  const card2Scale = useTransform(bentoScrollProgress, [0.18, 0.40], [0.96, 1]);
-  const card3Opacity = useTransform(bentoScrollProgress, [0.34, 0.56], [0, 1]);
-  const card3Y = useTransform(bentoScrollProgress, [0.34, 0.56], [44, 0]);
-  const card3Scale = useTransform(bentoScrollProgress, [0.34, 0.56], [0.96, 1]);
-  const card4Opacity = useTransform(bentoScrollProgress, [0.50, 0.72], [0, 1]);
-  const card4Y = useTransform(bentoScrollProgress, [0.50, 0.72], [44, 0]);
-  const card4Scale = useTransform(bentoScrollProgress, [0.50, 0.72], [0.96, 1]);
   // Reduced-motion visible state. We must NOT return {} here: the first render
   // happens before the matchMedia effects settle (reduced/tall default false),
   // so framer writes the hidden `initial` (opacity:0, translate, scale) inline.
@@ -259,25 +450,19 @@ export default function Landing() {
     transition: { duration: 0 },
   };
 
-  // Per-card motion props: scrubbed style when pinned; a self-contained scroll
-  // reveal (reverses, once:false) on mobile/short screens; snap-to-visible under
-  // reduced motion (cards render in place).
-  const bentoCardProps = (
-    i: number,
-    opacity: MotionValue<number>,
-    y: MotionValue<number>,
-    scale: MotionValue<number>,
-  ): MotionProps =>
-    bentoPinned
-      ? { style: { opacity, y, scale } }
-      : prefersReducedMotion
-        ? reducedVisible
-        : {
-            initial: { opacity: 0, y: 44, scale: 0.96 },
-            whileInView: { opacity: 1, y: 0, scale: 1 },
-            viewport: { once: false, amount: 0.25 },
-            transition: { duration: 0.55, ease: [0.16, 1, 0.3, 1], delay: i * 0.06 },
-          };
+  // Per-card motion props for the bento grid (mobile / short-desktop / reduced
+  // path; tall desktop uses the FeatureStack instead): a self-contained scroll
+  // reveal (reverses, once:false); snap-to-visible under reduced motion (cards
+  // render in place).
+  const bentoCardProps = (i: number): MotionProps =>
+    prefersReducedMotion
+      ? reducedVisible
+      : {
+          initial: { opacity: 0, y: 44, scale: 0.96 },
+          whileInView: { opacity: 1, y: 0, scale: 1 },
+          viewport: { once: false, amount: 0.25 },
+          transition: { duration: 0.55, ease: [0.16, 1, 0.3, 1], delay: i * 0.06 },
+        };
 
   // Background parallax - continuous zoom and movement
   const heroY = useTransform(scrollY, [0, 800], [0, 300]);
@@ -332,7 +517,6 @@ export default function Landing() {
         viewport: { once: true, amount: 0.2 },
         variants: featuresStagger,
       };
-  const cardReveal: MotionProps = prefersReducedMotion ? reducedVisible : { variants: bentoCardVariants };
   const itemReveal: MotionProps = prefersReducedMotion ? reducedVisible : { variants: bentoItemVariants };
 
   return (
@@ -694,12 +878,13 @@ export default function Landing() {
             </motion.div>
           </div>
 
-          {/* Bento PIN track. On tall desktops the grid pins (a sticky panel) while
-              the four tiles reveal ONE BY ONE, scrubbed to scroll so the reveal
-              cleanly reverses on scroll-up. On mobile/short screens (bentoPinned=false)
-              this is a normal block and each tile reveals via its own whileInView. */}
-          <div ref={bentoTrackRef} className={bentoPinned ? 'relative h-[300vh]' : 'relative'}>
-            <div className={`${bentoPinned ? 'sticky top-0 h-screen flex items-center' : ''} px-6 pb-24`}>
+          {/* Tall desktops get the sticky stacking "feature stack"; mobile / short /
+              reduced-motion fall back to the classic bento grid in normal flow. */}
+          {bentoPinned ? (
+            <FeatureStack />
+          ) : (
+          <div className="relative">
+            <div className="px-6 pb-24">
               {/* Parallaxed background accents — clipped in their OWN overflow-hidden
                   layer so the blur never bleeds, and nothing here clips the grid or
                   acts as an overflow ancestor of the sticky panel. */}
@@ -715,14 +900,14 @@ export default function Landing() {
                 <div className="absolute inset-0 opacity-[0.05] [background-image:linear-gradient(to_right,rgba(255,255,255,0.6)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.6)_1px,transparent_1px)] [background-size:64px_64px] [mask-image:radial-gradient(ellipse_60%_55%_at_50%_40%,black,transparent)]" />
               </div>
 
-              {/* Asymmetric bento — one-by-one tile reveal (scrubbed when pinned) */}
+              {/* Asymmetric bento — one-by-one tile reveal (mobile / short-desktop / reduced) */}
               <motion.div
                 {...featuresContainerProps}
                 className="max-w-7xl mx-auto w-full relative z-10 grid grid-cols-1 lg:grid-cols-6 gap-4 sm:gap-5"
               >
               {/* Security & Control — hero/feature tile (1st in the coordinated rise) */}
               <motion.div
-                {...bentoCardProps(0, card1Opacity, card1Y, card1Scale)}
+                {...bentoCardProps(0)}
                 className="group relative lg:col-span-4 rounded-3xl overflow-hidden border border-primary/15 bg-gradient-to-br from-primary/[0.10] via-card/60 to-card/30 p-6 sm:p-8 transition-[transform,box-shadow,border-color] duration-300 will-change-transform [@media(hover:hover)]:hover:-translate-y-1.5 [@media(hover:hover)]:hover:border-primary/40 [@media(hover:hover)]:hover:shadow-[0_20px_60px_-20px_rgba(99,102,241,0.45)]"
                 data-testid="card-feature-security"
               >
@@ -762,7 +947,7 @@ export default function Landing() {
 
               {/* Scale & Ecosystem — tall supporting tile (2nd in the coordinated rise) */}
               <motion.div
-                {...bentoCardProps(1, card2Opacity, card2Y, card2Scale)}
+                {...bentoCardProps(1)}
                 className="group relative lg:col-span-2 rounded-3xl overflow-hidden border border-border/50 bg-gradient-to-br from-card/80 to-card/40 p-6 sm:p-8 flex flex-col transition-[transform,box-shadow,border-color] duration-300 will-change-transform [@media(hover:hover)]:hover:-translate-y-1.5 [@media(hover:hover)]:hover:border-blue-500/40 [@media(hover:hover)]:hover:shadow-[0_20px_60px_-20px_rgba(59,130,246,0.4)]"
                 data-testid="card-feature-scale"
               >
@@ -800,7 +985,7 @@ export default function Landing() {
 
               {/* Automation & Execution — wide tile, 2x2 inner grid (3rd in the coordinated rise) */}
               <motion.div
-                {...bentoCardProps(2, card3Opacity, card3Y, card3Scale)}
+                {...bentoCardProps(2)}
                 className="group relative lg:col-span-3 rounded-3xl overflow-hidden border border-border/50 bg-gradient-to-br from-card/80 to-card/40 p-6 sm:p-8 transition-[transform,box-shadow,border-color] duration-300 will-change-transform [@media(hover:hover)]:hover:-translate-y-1.5 [@media(hover:hover)]:hover:border-accent/40 [@media(hover:hover)]:hover:shadow-[0_20px_60px_-20px_rgba(59,130,246,0.4)]"
                 data-testid="card-feature-automation"
               >
@@ -837,7 +1022,7 @@ export default function Landing() {
 
               {/* Portfolio Management — wide tile (4th in the coordinated rise) */}
               <motion.div
-                {...bentoCardProps(3, card4Opacity, card4Y, card4Scale)}
+                {...bentoCardProps(3)}
                 className="group relative lg:col-span-3 rounded-3xl overflow-hidden border border-border/50 bg-gradient-to-br from-card/80 to-card/40 p-6 sm:p-8 transition-[transform,box-shadow,border-color] duration-300 will-change-transform [@media(hover:hover)]:hover:-translate-y-1.5 [@media(hover:hover)]:hover:border-green-500/40 [@media(hover:hover)]:hover:shadow-[0_20px_60px_-20px_rgba(34,197,94,0.35)]"
                 data-testid="card-feature-portfolio"
               >
@@ -875,6 +1060,7 @@ export default function Landing() {
             </motion.div>
             </div>
           </div>
+          )}
         </section>
 
         <section id="how-it-works" className="relative py-24 px-6 bg-background overflow-hidden">
@@ -930,10 +1116,10 @@ export default function Landing() {
                     {...(prefersReducedMotion
                       ? reducedVisible
                       : {
-                          initial: { opacity: 0, y: 30 },
-                          whileInView: { opacity: 1, y: 0 },
+                          initial: { opacity: 0 },
+                          whileInView: { opacity: 1 },
                           viewport: { once: false, amount: 0.3 },
-                          transition: { duration: 0.5, delay: i * 0.1 },
+                          transition: { duration: 0.6, delay: i * 0.8, ease: 'easeOut' },
                         })}
                     className="group relative flex items-start gap-5 md:flex-col md:items-center md:gap-0 md:text-center"
                     data-testid={`step-how-${item.step}`}
