@@ -319,7 +319,8 @@ async function generateWithRepair(
       apiKey,
       model,
       messages,
-      maxTokens: LLM_LIMITS.MAX_TOKENS,
+      // No maxTokens here: the gateway applies the per-model cap so thinking models
+      // (e.g. the K2.7 drafter) get the larger output budget and aren't truncated.
       temperature: i === 0 ? 0.2 : 0.1,
     });
     pine = extractPine(raw);

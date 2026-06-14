@@ -30,12 +30,13 @@ export interface CreatorModelCatalog {
 // that later disappears can never surface a 404 inside the picker.
 const CURATED: Omit<SelectableModel, "promptPerM" | "completionPerM">[] = [
   { id: "anthropic/claude-opus-4.8", label: "Claude Opus 4.8", rank: 1, note: "Peak reasoning — best for intricate, multi-condition logic." },
-  { id: "moonshotai/kimi-k2.6", label: "Kimi K2.6", rank: 2, note: "Fast, strong coder. The default drafter inside Auto." },
-  { id: "qwen/qwen3.7-max", label: "Qwen3.7 Max", rank: 3, note: "Strong coding with independent provenance." },
-  { id: "deepseek/deepseek-v4-pro", label: "DeepSeek V4 Pro", rank: 4, note: "Excellent value — capable on most strategies." },
-  { id: "z-ai/glm-5.1", label: "GLM-5.1", rank: 5, note: "Reliable, well-structured output." },
-  { id: "deepseek/deepseek-v4-flash", label: "DeepSeek V4 Flash", rank: 6, note: "Cheapest and fastest — good for simple ideas." },
-  { id: "minimax/minimax-m3", label: "MiniMax M3", rank: 7, note: "Very large context window." },
+  { id: "moonshotai/kimi-k2.7-code", label: "Kimi K2.7 Code", rank: 2, note: "Strongest Kimi coder (thinking model). The default drafter inside Auto — pricier and slower per draft." },
+  { id: "moonshotai/kimi-k2.6", label: "Kimi K2.6", rank: 3, note: "Fast, strong coder with no thinking overhead — a cheaper, quicker alternative." },
+  { id: "qwen/qwen3.7-max", label: "Qwen3.7 Max", rank: 4, note: "Strong coding with independent provenance." },
+  { id: "deepseek/deepseek-v4-pro", label: "DeepSeek V4 Pro", rank: 5, note: "Excellent value — capable on most strategies." },
+  { id: "z-ai/glm-5.1", label: "GLM-5.1", rank: 6, note: "Reliable, well-structured output." },
+  { id: "deepseek/deepseek-v4-flash", label: "DeepSeek V4 Flash", rank: 7, note: "Cheapest and fastest — good for simple ideas." },
+  { id: "minimax/minimax-m3", label: "MiniMax M3", rank: 8, note: "Very large context window." },
 ];
 
 const SELECTABLE_IDS = new Set(CURATED.map((m) => m.id));
@@ -113,7 +114,7 @@ export async function getCreatorModelCatalog(): Promise<CreatorModelCatalog> {
   return {
     auto: {
       label: "Auto",
-      note: "Our tailored blend: Kimi drafts, Claude escalates on hard cases, and Qwen reviews it independently.",
+      note: "Our tailored blend: Kimi K2.7 drafts, Claude escalates on hard cases, and Qwen reviews it independently.",
       stages: [
         { label: "Draft", model: CREATOR_MODELS.DRAFT },
         { label: "Escalate", model: CREATOR_MODELS.ESCALATE },

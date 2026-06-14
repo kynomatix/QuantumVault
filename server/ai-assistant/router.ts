@@ -13,16 +13,30 @@ const SITE_NAME = 'QuantumVault';
 
 export const CREATOR_MODELS = {
   // Verified live on OpenRouter (June 2026). If a call 404s, check openrouter.ai/models.
-  DRAFT: 'moonshotai/kimi-k2.6', // strong, fast coding model — initial Pine draft + repairs
+  DRAFT: 'moonshotai/kimi-k2.7-code', // strongest Kimi coder (thinking model) — initial Pine draft + repairs
   ESCALATE: 'anthropic/claude-opus-4.8', // peak reasoning — last-resort repair when DRAFT can't compile
   CRITIC: 'qwen/qwen3.7-max', // different provenance — independent review pass
 } as const;
 
+// Some models REQUIRE provider reasoning ("thinking") and reject reasoning:{enabled:false}
+// with HTTP 400 ("Reasoning is mandatory for this endpoint and cannot be disabled."). For
+// these we must NOT send the disable flag, and we give them a larger output budget + a
+// longer timeout so the hidden thinking can't crowd out (truncate) the actual answer.
+// Verified live 2026-06-14: kimi-k2.7-code 400s on reasoning-off; with reasoning on it
+// returns valid Pine but spends most of its completion tokens thinking.
+export const REASONING_REQUIRED_MODELS = new Set<string>(['moonshotai/kimi-k2.7-code']);
+
+export function modelRequiresReasoning(model: string): boolean {
+  return REASONING_REQUIRED_MODELS.has(model);
+}
+
 export const LLM_LIMITS = {
   MAX_IDEA_CHARS: 4096, // hard cap on user-supplied idea / insights text
   MAX_OUTPUT_CHARS: 65536, // hard cap on model output we will accept/parse
-  MAX_TOKENS: 8192, // hard per-call output budget (bounds the user's spend)
+  MAX_TOKENS: 8192, // hard per-call output budget for non-reasoning models (bounds spend)
+  MAX_TOKENS_REASONING: 16384, // bigger budget for thinking models (thinking consumes output tokens)
   TIMEOUT_MS: 90_000,
+  TIMEOUT_MS_REASONING: 120_000, // thinking models are slower; stays well under the job stuck-cap
 } as const;
 
 // Per-wallet operation rate limit (an "operation" = one draft/improve, which itself
@@ -114,9 +128,13 @@ export async function callOpenRouterWithUsage(opts: {
   timeoutMs?: number;
 }): Promise<{ content: string; usage?: LlmUsage }> {
   const { apiKey, model, messages } = opts;
-  const maxTokens = Math.min(opts.maxTokens ?? LLM_LIMITS.MAX_TOKENS, LLM_LIMITS.MAX_TOKENS);
+  // Thinking models need a bigger output budget (thinking eats tokens) and longer to
+  // respond; pick the per-model cap so an explicit caller value can't exceed it.
+  const reasoningRequired = modelRequiresReasoning(model);
+  const tokenCap = reasoningRequired ? LLM_LIMITS.MAX_TOKENS_REASONING : LLM_LIMITS.MAX_TOKENS;
+  const maxTokens = Math.min(opts.maxTokens ?? tokenCap, tokenCap);
   const temperature = opts.temperature ?? 0.2;
-  const timeoutMs = opts.timeoutMs ?? LLM_LIMITS.TIMEOUT_MS;
+  const timeoutMs = opts.timeoutMs ?? (reasoningRequired ? LLM_LIMITS.TIMEOUT_MS_REASONING : LLM_LIMITS.TIMEOUT_MS);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -131,13 +149,21 @@ export async function callOpenRouterWithUsage(opts: {
         'HTTP-Referer': SITE_URL,
         'X-Title': SITE_NAME,
       },
-      // Disable provider "reasoning"/thinking. Modern models (Kimi K2.6, Claude,
-      // Qwen, …) default reasoning ON, which spends the whole max_tokens budget on
-      // hidden thinking and returns an EMPTY `content` — or never finishes the body
-      // inside our timeout. We only want the final answer. Verified live: with
-      // reasoning on, Kimi K2.6 returns no content within 90s; with it off it
-      // returns a complete strategy in ~40s. Non-reasoning models ignore this no-op.
-      body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature, reasoning: { enabled: false } }),
+      // Disable provider "reasoning"/thinking for models that ALLOW it. Most modern
+      // models (Kimi K2.6, Claude, Qwen, …) default reasoning ON, which spends the whole
+      // max_tokens budget on hidden thinking and returns an EMPTY `content` — or never
+      // finishes inside our timeout. We only want the final answer. Verified live: with
+      // reasoning on, Kimi K2.6 returns no content within 90s; with it off it returns a
+      // complete strategy in ~40s. EXCEPTION: models in REASONING_REQUIRED_MODELS (e.g.
+      // kimi-k2.7-code) reject reasoning:{enabled:false} with HTTP 400, so we omit the
+      // flag and let them think — the larger budget + timeout above keep the answer intact.
+      body: JSON.stringify({
+        model,
+        messages,
+        max_tokens: maxTokens,
+        temperature,
+        ...(reasoningRequired ? {} : { reasoning: { enabled: false } }),
+      }),
       signal: controller.signal,
     });
   } catch (err: any) {
