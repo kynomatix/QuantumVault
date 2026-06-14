@@ -750,7 +750,7 @@ export default function QuantumLab() {
   const [selectedStrategy, setSelectedStrategy] = useState<LabStrategy | null>(null);
   const { toast } = useToast();
   const { getMaxLeverage } = useLeverageLimits();
-  const { publicKeyString: walletAddress, sessionConnected } = useWallet();
+  const { publicKeyString: walletAddress, sessionConnected, retryAuth, signingInProgress } = useWallet();
   const lastWalletRef = useRef<string | null>(walletAddress);
   useEffect(() => {
     if (lastWalletRef.current === walletAddress) return;
@@ -1466,6 +1466,8 @@ export default function QuantumLab() {
         <LabAssistantDock
           walletAddress={walletAddress ?? null}
           sessionConnected={sessionConnected}
+          onReconnect={retryAuth}
+          reconnecting={signingInProgress}
           onNavigate={(tab) => setMainTab(tab as MainTab)}
         />
       )}

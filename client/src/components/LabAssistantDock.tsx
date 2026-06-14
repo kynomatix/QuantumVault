@@ -43,10 +43,18 @@ const messagesKey = (taskId: number | null, wallet: string | null) =>
 export function LabAssistantDock({
   walletAddress,
   sessionConnected = false,
+  onReconnect,
+  reconnecting = false,
   onNavigate,
 }: {
   walletAddress: string | null;
   sessionConnected?: boolean;
+  // Re-establish a stale server session in place (re-sign), mirroring the
+  // Creator's re-auth flow. Resolves true once the session is live again.
+  onReconnect?: () => Promise<boolean>;
+  // True while the parent's auto sign-in is mid-flight, so we don't offer a
+  // premature "Reconnect" tap over an in-progress signature.
+  reconnecting?: boolean;
   onNavigate: (tab: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -54,6 +62,9 @@ export function LabAssistantDock({
   const [draft, setDraft] = useState("");
   // Inline notice (e.g. the pasted-API-key guard) shown just above the composer.
   const [notice, setNotice] = useState<string | null>(null);
+  // Stale-session reconnect (re-sign): busy flag + last error for the button.
+  const [reconnectBusy, setReconnectBusy] = useState(false);
+  const [reconnectError, setReconnectError] = useState<string | null>(null);
   const qc = useQueryClient();
   const listRef = useRef<HTMLDivElement | null>(null);
 
@@ -80,7 +91,14 @@ export function LabAssistantDock({
   // wallet anyway, so nothing leaks across wallets — this is a UX correctness.)
   useEffect(() => {
     setTaskId(null);
+    setReconnectError(null);
+    setReconnectBusy(false);
   }, [walletAddress]);
+
+  // Don't let a stale reconnect error linger once the session is healthy again.
+  useEffect(() => {
+    if (sessionConnected) setReconnectError(null);
+  }, [sessionConnected]);
 
   // Only start a chat once the wallet is connected AND the server session is
   // authenticated — firing ensure before the session is ready would 401 and
@@ -120,6 +138,33 @@ export function LabAssistantDock({
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, open, send.isPending]);
+
+  // Re-establish a stale server session in place (re-sign in the wallet),
+  // mirroring the Creator's re-auth flow, so a user whose session went idle can
+  // get back to chatting without leaving the assistant. Must be gesture-driven:
+  // the wallet's signMessage has to fire inside a real user tap.
+  async function handleReconnect() {
+    if (!onReconnect || reconnectBusy) return;
+    setReconnectBusy(true);
+    setReconnectError(null);
+    try {
+      const ok = await onReconnect();
+      if (!ok) {
+        setReconnectError(
+          "Sign-in didn’t finish. Approve the request in your wallet, then try again.",
+        );
+        return;
+      }
+      // Session is live again. If there's still no chat task, start one now —
+      // when the session was already "connected" (an expired ensure), the
+      // sessionConnected prop won't change, so the auto-effect can't re-fire.
+      if (walletAddress && taskId === null && !ensure.isPending) {
+        ensure.mutate(walletAddress);
+      }
+    } finally {
+      setReconnectBusy(false);
+    }
+  }
 
   function submitDraft() {
     const content = draft.trim();
@@ -214,13 +259,32 @@ export function LabAssistantDock({
                 <Sparkles className="h-5 w-5" />
               </span>
               <p className="text-sm font-medium text-white">
-                {walletAddress ? "Finish signing in to chat" : "Connect your wallet to chat"}
+                {walletAddress ? "Reconnect to chat" : "Connect your wallet to chat"}
               </p>
               <p className="max-w-[240px] text-xs text-white/40">
                 {walletAddress
-                  ? "Approve the sign-in request on QuantumLab, then the assistant can help."
+                  ? "Your session went idle. Re-sign in your wallet to pick up where you left off — no need to leave this chat."
                   : "Connect your wallet on QuantumLab, then the assistant can guide you around."}
               </p>
+              {walletAddress && onReconnect && (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleReconnect}
+                    disabled={reconnectBusy || reconnecting}
+                    data-testid="button-lab-assistant-reconnect"
+                    className="mt-1 inline-flex items-center gap-1.5 rounded-full border border-indigo-400/30 bg-indigo-500/10 px-3.5 py-1.5 text-xs font-medium text-indigo-200 transition-colors hover:bg-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {(reconnectBusy || reconnecting) && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    {reconnectBusy || reconnecting ? "Reconnecting…" : "Reconnect"}
+                  </button>
+                  {reconnectError && (
+                    <p className="max-w-[240px] text-xs text-amber-300/90" data-testid="text-lab-assistant-reconnect-error">
+                      {reconnectError}
+                    </p>
+                  )}
+                </>
+              )}
             </div>
           )}
 
@@ -228,17 +292,36 @@ export function LabAssistantDock({
             <div className="flex h-full flex-col items-center justify-center gap-2 text-center" data-testid="lab-assistant-session-error">
               <p className="text-sm font-medium text-white">Couldn’t start a chat</p>
               <p className="max-w-[240px] text-xs text-white/40">
-                Make sure you’re signed in on QuantumLab, then try again.
+                Your session may have gone idle. Reconnect to refresh it, or try again.
               </p>
-              <button
-                type="button"
-                onClick={() => walletAddress && ensure.mutate(walletAddress)}
-                disabled={ensure.isPending}
-                data-testid="button-lab-assistant-retry"
-                className="mt-1 rounded-full border border-indigo-400/30 bg-indigo-500/10 px-3 py-1 text-xs font-medium text-indigo-200 transition-colors hover:bg-indigo-500/20 disabled:opacity-50"
-              >
-                Try again
-              </button>
+              <div className="mt-1 flex items-center gap-2">
+                {onReconnect && (
+                  <button
+                    type="button"
+                    onClick={handleReconnect}
+                    disabled={reconnectBusy || reconnecting || ensure.isPending}
+                    data-testid="button-lab-assistant-reconnect-session"
+                    className="inline-flex items-center gap-1.5 rounded-full border border-indigo-400/30 bg-indigo-500/10 px-3 py-1 text-xs font-medium text-indigo-200 transition-colors hover:bg-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {(reconnectBusy || reconnecting) && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    {reconnectBusy || reconnecting ? "Reconnecting…" : "Reconnect"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => walletAddress && ensure.mutate(walletAddress)}
+                  disabled={ensure.isPending || reconnectBusy}
+                  data-testid="button-lab-assistant-retry"
+                  className="rounded-full border border-white/15 bg-white/5 px-3 py-1 text-xs font-medium text-white/70 transition-colors hover:bg-white/10 disabled:opacity-50"
+                >
+                  Try again
+                </button>
+              </div>
+              {reconnectError && (
+                <p className="max-w-[240px] text-xs text-amber-300/90" data-testid="text-lab-assistant-reconnect-error">
+                  {reconnectError}
+                </p>
+              )}
             </div>
           )}
 
