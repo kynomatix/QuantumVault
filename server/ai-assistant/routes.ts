@@ -31,6 +31,7 @@ import { LlmGatewayError } from "./router";
 import { startCreatorJob, getCreatorJob, CreatorJobConflictError } from "./creator-jobs";
 import { labStorage } from "../lab/storage";
 import { SEED_GREETING, composeAgentReply } from "../lab-agent/chat-replies";
+import { looksLikeApiKey } from "@shared/api-key-detect";
 
 // Creator payloads are tiny (idea/insights are capped at 4KB in the gateway). Keep a
 // small per-route body limit — these routes are registered before the global parser.
@@ -142,6 +143,16 @@ export function registerCreatorRoutes(app: Express, sessionMiddleware: RequestHa
       if (content.length > MAX_CHAT_CONTENT) {
         return res.status(400).json({ error: "That message is too long." });
       }
+      // Pasted-secret guard (security): a pasted API key must NEVER be persisted
+      // as a chat message. Reject BEFORE createAgentMessageForWallet so the secret
+      // never lands in lab_agent_messages. The error echoes no key material and
+      // points the user to the encrypted key entry in the Creator.
+      if (looksLikeApiKey(content)) {
+        return res.status(400).json({
+          error:
+            "Don't paste your API key here. Add it securely in the Creator — it goes straight to encrypted storage and is never saved in this chat.",
+        });
+      }
       // The user message both records the turn AND enforces ownership: undefined
       // means the task isn't this wallet's, so don't compose or leak a reply.
       const userMsg = await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
@@ -149,7 +160,11 @@ export function registerCreatorRoutes(app: Express, sessionMiddleware: RequestHa
       });
       if (!userMsg) return res.status(404).json({ error: "Conversation not found." });
 
-      const reply = composeAgentReply(content);
+      // Key-awareness (BYO key): when the wallet has no OpenRouter key saved,
+      // AI-step replies nudge the user to the SECURE key entry. hasKey only
+      // toggles copy/chips — the key itself never flows through this chat path.
+      const keyMeta = await storage.getWalletLlmApiKeyMeta(r.walletAddress);
+      const reply = composeAgentReply(content, keyMeta.hasKey);
       const agentMsg = await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
         role: "agent", content: reply.content, suggestedActions: reply.suggestedActions,
       });

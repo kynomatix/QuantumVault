@@ -15,6 +15,7 @@ import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { Sparkles, Send, X, Bot, Loader2 } from "lucide-react";
 import type { AgentSuggestedAction } from "@shared/schema";
+import { looksLikeApiKey } from "@shared/api-key-detect";
 
 type ChatRole = "user" | "agent" | "tool";
 
@@ -51,6 +52,8 @@ export function LabAssistantDock({
   const [open, setOpen] = useState(false);
   const [taskId, setTaskId] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
+  // Inline notice (e.g. the pasted-API-key guard) shown just above the composer.
+  const [notice, setNotice] = useState<string | null>(null);
   const qc = useQueryClient();
   const listRef = useRef<HTMLDivElement | null>(null);
 
@@ -121,6 +124,17 @@ export function LabAssistantDock({
   function submitDraft() {
     const content = draft.trim();
     if (!content || !canChat || send.isPending) return;
+    // Never let a pasted API key leave the browser or hit the transcript. The
+    // server rejects it too (defense in depth), but stop it here for instant,
+    // key-free feedback — the key belongs in the Creator's encrypted store.
+    if (looksLikeApiKey(content)) {
+      setDraft("");
+      setNotice(
+        "That looked like an API key, so I didn't send it. Add your key in the Creator — it's stored encrypted and never shown in this chat.",
+      );
+      return;
+    }
+    setNotice(null);
     setDraft("");
     send.mutate(content);
   }
@@ -288,11 +302,20 @@ export function LabAssistantDock({
           </div>
         )}
 
+        {notice && (
+          <div
+            data-testid="text-lab-assistant-notice"
+            className="border-t border-amber-400/20 bg-amber-400/5 px-3 py-2 text-xs text-amber-200/90"
+          >
+            {notice}
+          </div>
+        )}
+
         {/* Composer */}
         <div className="flex items-center gap-2 border-t border-white/10 px-3 py-3">
           <input
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => { setDraft(e.target.value); if (notice) setNotice(null); }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();

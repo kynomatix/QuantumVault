@@ -27,6 +27,9 @@ const NAV = {
   results: { id: "nav-results", label: "See my results", kind: "navigate", tab: "results" },
   heatmap: { id: "nav-heatmap", label: "Open the heatmap", kind: "navigate", tab: "heatmap" },
   insights: { id: "nav-insights", label: "Open insights", kind: "navigate", tab: "insights" },
+  // Lands on the Creator, where the secure "Add API key" popover lives. The key
+  // is entered there (encrypted store) — deliberately NOT a chat text field.
+  addKey: { id: "nav-add-key", label: "Add your API key", kind: "navigate", tab: "creator" },
 } as const satisfies Record<string, AgentSuggestedAction>;
 
 const ASK = {
@@ -57,6 +60,10 @@ export const SEED_GREETING: ComposedReply = {
 interface Intent {
   test: RegExp;
   reply: () => ComposedReply;
+  // True when the capability requires the user's OpenRouter key (an AI step).
+  // When the wallet has no key saved, composeAgentReply wraps the reply with a
+  // secure "add your key" nudge. Loading/reading/navigation intents leave unset.
+  needsKey?: boolean;
 }
 
 // Ordered, first-match-wins. Phrased honestly: Phase B routes you to the tab that
@@ -64,13 +71,14 @@ interface Intent {
 const INTENTS: Intent[] = [
   {
     // create / draft / new strategy / idea
-    test: /\b(draft|create|build|make|new|generate|write)\b[^.?!]*\b(strateg|bot|script|pine)\b|\b(strateg|bot|script|pine)\b[^.?!]*\b(draft|create|build|make|new|generate|write)\b|suggest (a |an )?(strateg|idea)/i,
+    test: /\b(draft|create|build|make|new|generate|write)\b[^.?!]*\b(strateg\w*|bots?|scripts?|pine)\b|\b(strateg\w*|bots?|scripts?|pine)\b[^.?!]*\b(draft|create|build|make|new|generate|write)\b|suggest (a |an )?(strateg\w*|idea)/i,
     reply: () => ({
       content:
         "Strategy drafting lives in the Creator — describe what you want in plain English and it writes the Pine for you. " +
         "I'll be able to draft and test ideas for you end-to-end in a later phase. For now, I've pointed you there.",
       suggestedActions: [NAV.draft, NAV.backtest, ASK.help],
     }),
+    needsKey: true,
   },
   {
     // templates
@@ -81,6 +89,18 @@ const INTENTS: Intent[] = [
         "Soon I'll be able to pick and tune a template for you.",
       suggestedActions: [NAV.draft, NAV.backtest],
     }),
+  },
+  {
+    // improve (AI step — checked before "why losing" so "improve my losing
+    // strategy" routes here and triggers the key nudge, not the insights reply)
+    test: /\bimprove\b/i,
+    reply: () => ({
+      content:
+        "Improving rewrites a strategy from its weaknesses using your OpenRouter key — an AI step I'll run for you once the " +
+        "deterministic search is exhausted, coming in a later phase. The Creator handles it manually today.",
+      suggestedActions: [NAV.draft, NAV.insights],
+    }),
+    needsKey: true,
   },
   {
     // why losing / insights / report (checked before "results" so "losing" wins)
@@ -121,16 +141,6 @@ const INTENTS: Intent[] = [
     }),
   },
   {
-    // improve
-    test: /\bimprove\b/i,
-    reply: () => ({
-      content:
-        "Improving rewrites a strategy from its weaknesses using your OpenRouter key — an AI step I'll run for you once the " +
-        "deterministic search is exhausted, coming in a later phase. The Creator handles it manually today.",
-      suggestedActions: [NAV.draft, NAV.insights],
-    }),
-  },
-  {
     // backtest / optimize / run / test
     test: /\b(backtest|back-test|optimi[sz]e|optimi[sz]ation|run|test)\b/i,
     reply: () => ({
@@ -153,13 +163,53 @@ const INTENTS: Intent[] = [
 ];
 
 /**
+ * Prepend an honest heads-up and surface the secure key-entry chip FIRST when a
+ * capability needs the user's OpenRouter key but none is saved. The key is added
+ * in the Creator's encrypted store — never typed into this chat or sent to the
+ * model (see server/ai-assistant/routes.ts POST /api/lab/creator/key).
+ */
+function withKeyGuidance(reply: ComposedReply): ComposedReply {
+  return {
+    content:
+      "Heads up: this uses AI, so you'll need your own OpenRouter API key first. " +
+      "Add it in the Creator — it goes straight to encrypted storage and is never typed into this chat or sent to the model. " +
+      reply.content,
+    suggestedActions: [NAV.addKey, ...reply.suggestedActions.filter((a) => a.id !== NAV.addKey.id)],
+  };
+}
+
+/**
  * Map a user message to a deterministic assistant reply + option bubbles.
  * First matching intent wins; falls back to a friendly capabilities prompt.
+ * `hasKey` lets AI-step replies nudge the user to add their OpenRouter key; it
+ * defaults to true so chatting never nags someone who already has one.
  */
-export function composeAgentReply(userContent: string): ComposedReply {
+export function composeAgentReply(userContent: string, hasKey = true): ComposedReply {
   const raw = (userContent ?? "").trim();
+
+  // Explicit key questions: answer with the secure flow + current status. Note
+  // chatting with me needs NO key — it only powers the AI Creator (draft/improve).
+  if (/\b(api[ -]?key|open ?router|sk-or|byok?|my key)\b/i.test(raw)) {
+    return hasKey
+      ? {
+          content:
+            "You're set — your OpenRouter key is saved (encrypted). You don't need a key just to chat with me; " +
+            "it powers the AI Creator when it drafts or improves a strategy. You can update or remove it in the Creator.",
+          suggestedActions: [NAV.draft],
+        }
+      : {
+          content:
+            "You don't need a key to chat with me. To have the AI draft or improve a strategy, add your own OpenRouter key " +
+            "in the Creator — it goes straight to encrypted storage and is never typed into this chat or sent to the model.",
+          suggestedActions: [NAV.addKey, NAV.draft],
+        };
+  }
+
   for (const intent of INTENTS) {
-    if (intent.test.test(raw)) return intent.reply();
+    if (intent.test.test(raw)) {
+      const reply = intent.reply();
+      return intent.needsKey && !hasKey ? withKeyGuidance(reply) : reply;
+    }
   }
   return {
     content:
