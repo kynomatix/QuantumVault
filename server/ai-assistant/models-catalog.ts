@@ -123,3 +123,26 @@ export async function getCreatorModelCatalog(): Promise<CreatorModelCatalog> {
     models,
   };
 }
+
+// --- Spend accounting helpers (used by the Lab Assistant chat brain) ----------
+
+// Look up live per-million prices for one model from the same cached loader the
+// catalog uses. Returns nulls when pricing is unavailable (fail-soft).
+export async function getModelPrice(modelId: string): Promise<PriceEntry> {
+  const { prices } = await loadPrices();
+  return prices.get(modelId) ?? { promptPerM: null, completionPerM: null };
+}
+
+// Estimate the USD cost of one call from its token usage. Returns null when we
+// don't have live pricing for the model — callers then record "unknown" (nothing)
+// rather than guess at the user's spend.
+export async function estimateCallCostUsd(
+  modelId: string,
+  promptTokens: number,
+  completionTokens: number,
+): Promise<number | null> {
+  const { promptPerM, completionPerM } = await getModelPrice(modelId);
+  if (promptPerM == null || completionPerM == null) return null;
+  const cost = (promptTokens / 1e6) * promptPerM + (completionTokens / 1e6) * completionPerM;
+  return Number.isFinite(cost) && cost >= 0 ? cost : null;
+}

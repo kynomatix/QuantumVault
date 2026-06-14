@@ -123,6 +123,7 @@ export interface ILabStorage {
   createAgentTaskExclusive(data: InsertLabAgentTask): Promise<{ created: LabAgentTask } | { conflict: LabAgentTask }>;
   getAgentTask(id: number): Promise<LabAgentTask | undefined>;
   updateAgentTask(id: number, patch: Partial<InsertLabAgentTask>): Promise<LabAgentTask | undefined>;
+  incrementAgentTaskSpend(walletAddress: string, taskId: number, deltaUsd: number): Promise<void>;
 
   // --- Lab Assistant chat (Phase B). All wallet-scoped through the owning task. ---
   // Atomically find-or-create this wallet's active chat task and seed the greeting
@@ -139,6 +140,10 @@ export interface ILabStorage {
     data: { role: "user" | "agent" | "tool"; content: string; suggestedActions?: AgentSuggestedAction[] },
   ): Promise<LabAgentMessage | undefined>;
   listAgentMessagesForWallet(walletAddress: string, taskId: number, limit?: number): Promise<LabAgentMessage[]>;
+  // Most-recent `limit` messages in CHRONOLOGICAL order (oldest -> newest), so the
+  // tail is the latest turn. Used to build bounded LLM context without loading the
+  // whole transcript every chat turn.
+  listRecentAgentMessagesForWallet(walletAddress: string, taskId: number, limit?: number): Promise<LabAgentMessage[]>;
 }
 
 export class LabDatabaseStorage implements ILabStorage {
@@ -402,6 +407,16 @@ export class LabDatabaseStorage implements ILabStorage {
     return task;
   }
 
+  // Atomic, wallet-scoped spend accrual (§7). A read-modify-write would race when
+  // two turns overlap and under-count the user's spend; do it as a single SQL
+  // increment. Non-positive / non-finite deltas are no-ops.
+  async incrementAgentTaskSpend(walletAddress: string, taskId: number, deltaUsd: number): Promise<void> {
+    if (!Number.isFinite(deltaUsd) || deltaUsd <= 0) return;
+    await db.update(labAgentTasks)
+      .set({ spendEstimateUsd: sql`${labAgentTasks.spendEstimateUsd} + ${deltaUsd}`, updatedAt: new Date() })
+      .where(and(eq(labAgentTasks.id, taskId), eq(labAgentTasks.walletAddress, walletAddress)));
+  }
+
   async ensureActiveChatTask(
     walletAddress: string,
     greeting: { content: string; suggestedActions: AgentSuggestedAction[] },
@@ -480,6 +495,22 @@ export class LabDatabaseStorage implements ILabStorage {
       .where(eq(labAgentMessages.taskId, taskId))
       .orderBy(asc(labAgentMessages.createdAt), asc(labAgentMessages.id))
       .limit(limit);
+  }
+
+  async listRecentAgentMessagesForWallet(walletAddress: string, taskId: number, limit = 20): Promise<LabAgentMessage[]> {
+    const [task] = await db.select({ id: labAgentTasks.id }).from(labAgentTasks).where(and(
+      eq(labAgentTasks.id, taskId),
+      eq(labAgentTasks.walletAddress, walletAddress),
+    )!).limit(1);
+    if (!task) return [];
+    // Fetch newest-first (cheap, indexed LIMIT) then restore chronological order so
+    // the returned tail is the latest turn — the contract buildChatMessages relies on.
+    // Plain ascending + LIMIT would return the OLDEST N and drop the newest message.
+    const rows = await db.select().from(labAgentMessages)
+      .where(eq(labAgentMessages.taskId, taskId))
+      .orderBy(desc(labAgentMessages.createdAt), desc(labAgentMessages.id))
+      .limit(limit);
+    return rows.reverse();
   }
 
   async completeRun(id: number, totalConfigsTested: number): Promise<void> {

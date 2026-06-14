@@ -26,11 +26,12 @@ import {
 } from "../session-v3";
 import { parsePineScript } from "../lab/pine-parser";
 import { draftStrategy, improveStrategy } from "./creator";
-import { getCreatorModelCatalog, isSelectableModel } from "./models-catalog";
-import { LlmGatewayError } from "./router";
+import { getCreatorModelCatalog, isSelectableModel, estimateCallCostUsd } from "./models-catalog";
+import { LlmGatewayError, checkRateLimit } from "./router";
 import { startCreatorJob, getCreatorJob, CreatorJobConflictError } from "./creator-jobs";
 import { labStorage } from "../lab/storage";
 import { SEED_GREETING, composeAgentReply } from "../lab-agent/chat-replies";
+import { generateLabChatReply } from "../lab-agent/chat-brain";
 import { looksLikeApiKey } from "@shared/api-key-detect";
 
 // Creator payloads are tiny (idea/insights are capped at 4KB in the gateway). Keep a
@@ -93,6 +94,10 @@ export function registerCreatorRoutes(app: Express, sessionMiddleware: RequestHa
   // session; every task/message access is wallet-scoped in the storage layer, and
   // a task owned by another wallet returns 404 (no existence leak).
   const MAX_CHAT_CONTENT = 4000;
+  // Per-task BYO-key safety cap for C0 chat (§7; tunable per §13). One chat turn
+  // costs a fraction of a cent, so this is a runaway/abuse net — NOT a budget the
+  // user is meant to hit. Over it, the assistant degrades to the free shell reply.
+  const LAB_CHAT_TASK_SPEND_CAP_USD = 2.0;
   const toChatTaskDto = (t: { id: number; status: string; mode: string; createdAt: Date }) => ({
     id: t.id, status: t.status, mode: t.mode, createdAt: t.createdAt,
   });
@@ -160,11 +165,82 @@ export function registerCreatorRoutes(app: Express, sessionMiddleware: RequestHa
       });
       if (!userMsg) return res.status(404).json({ error: "Conversation not found." });
 
-      // Key-awareness (BYO key): when the wallet has no OpenRouter key saved,
-      // AI-step replies nudge the user to the SECURE key entry. hasKey only
-      // toggles copy/chips — the key itself never flows through this chat path.
+      // Reply composition (Phase C0): the conversational brain.
+      //
+      // The DETERMINISTIC shell (composeAgentReply) is BOTH the no-key path AND the
+      // graceful-degrade fallback (§7c). When the wallet has a saved OpenRouter key
+      // we replace ONLY the prose with an LLM answer on the user's own key; the
+      // navigation chips stay deterministic so the model can never author a client
+      // action. ANY brain failure (timeout, 401/402/429, empty content, locked
+      // session, over the per-task spend cap) silently keeps the shell reply.
       const keyMeta = await storage.getWalletLlmApiKeyMeta(r.walletAddress);
-      const reply = composeAgentReply(content, keyMeta.hasKey);
+      let reply = composeAgentReply(content, keyMeta.hasKey);
+
+      if (keyMeta.hasKey) {
+        let keyBuf: Buffer | null = null;
+        try {
+          // Validate an optional model override before doing any work.
+          const rawModel = typeof req.body?.model === "string" ? req.body.model.trim() : "";
+          const model = rawModel && rawModel !== "auto" ? rawModel : undefined;
+          if (model && !isSelectableModel(model)) {
+            return res.status(400).json({ error: "That model isn't available to choose." });
+          }
+          // Bound double-spend / runaway: a reconnect, a polling retry, or two open
+          // tabs can fire overlapping turns on the user's key. Shares the Creator's
+          // per-wallet limiter. Over the limit, we degrade rather than error.
+          checkRateLimit(r.walletAddress);
+
+          const task = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+          const spentSoFar = task?.spendEstimateUsd ?? 0;
+          const ciphertext = await storage.getWalletLlmApiKeyCiphertext(r.walletAddress);
+          // Per-task safety cap (§7): once at/over the cap, fall back to the free
+          // deterministic shell rather than spend more of the user's key. This is a
+          // read-before-call check (not an atomic reservation); checkRateLimit bounds
+          // concurrent turns, so at worst a tiny overshoot past the cap — acceptable
+          // for a $2 abuse net (the real per-task budget UI lands in C1).
+          if (ciphertext && spentSoFar < LAB_CHAT_TASK_SPEND_CAP_USD) {
+            // Decrypt transiently. We resolve the UMK WITHOUT res-writing (unlike
+            // getInteractiveUmk) so a locked session degrades gracefully instead of
+            // 401-ing the whole chat.
+            const sessionRes = getSessionByWalletAddress(r.walletAddress);
+            const umk = sessionRes?.session?.umk;
+            if (umk) {
+              keyBuf = decryptLlmApiKeyV3(umk, ciphertext, r.walletAddress);
+              const apiKey = keyBuf.toString("utf8");
+              const recent = await labStorage.listRecentAgentMessagesForWallet(r.walletAddress, taskId, 20);
+              const brain = await generateLabChatReply({
+                goal: task?.goal ?? null,
+                recentMessages: recent.map((m) => ({
+                  role: m.role as "user" | "agent" | "tool",
+                  content: m.content,
+                })),
+                apiKey,
+                model,
+              });
+              // LLM prose + DETERMINISTIC chips (model never authors client actions).
+              reply = { content: brain.content, suggestedActions: reply.suggestedActions };
+              // Best-effort spend accrual; unknown pricing records nothing. Wrapped
+              // so a pricing/DB hiccup can never discard a good LLM reply.
+              if (brain.usage) {
+                try {
+                  const cost = await estimateCallCostUsd(
+                    brain.model, brain.usage.promptTokens, brain.usage.completionTokens,
+                  );
+                  if (cost) await labStorage.incrementAgentTaskSpend(r.walletAddress, taskId, cost);
+                } catch {
+                  /* spend accounting is best-effort — never fail the turn over it */
+                }
+              }
+            }
+          }
+        } catch {
+          // §7c graceful degrade: never surface the LLM error (it can echo the key);
+          // `reply` already holds the deterministic shell answer, so just keep it.
+        } finally {
+          if (keyBuf) keyBuf.fill(0);
+        }
+      }
+
       const agentMsg = await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
         role: "agent", content: reply.content, suggestedActions: reply.suggestedActions,
       });

@@ -83,14 +83,36 @@ function mapStatusToMessage(status: number): string {
   }
 }
 
-export async function callOpenRouter(opts: {
+export interface LlmUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+// OpenRouter echoes token counts in `data.usage`. Parse defensively; absent or
+// malformed usage returns undefined so callers can record "unknown spend"
+// (nothing) rather than guess at the user's bill.
+function parseUsage(u: any): LlmUsage | undefined {
+  if (!u || typeof u !== 'object') return undefined;
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0);
+  const promptTokens = num(u.prompt_tokens);
+  const completionTokens = num(u.completion_tokens);
+  const totalTokens = num(u.total_tokens) || promptTokens + completionTokens;
+  if (promptTokens === 0 && completionTokens === 0 && totalTokens === 0) return undefined;
+  return { promptTokens, completionTokens, totalTokens };
+}
+
+// Core gateway call: returns the final answer AND token usage (for spend tracking).
+// `callOpenRouter` below is the back-compat wrapper that returns just the string,
+// so existing draft/improve callers are untouched.
+export async function callOpenRouterWithUsage(opts: {
   apiKey: string;
   model: string;
   messages: LlmMessage[];
   maxTokens?: number;
   temperature?: number;
   timeoutMs?: number;
-}): Promise<string> {
+}): Promise<{ content: string; usage?: LlmUsage }> {
   const { apiKey, model, messages } = opts;
   const maxTokens = Math.min(opts.maxTokens ?? LLM_LIMITS.MAX_TOKENS, LLM_LIMITS.MAX_TOKENS);
   const temperature = opts.temperature ?? 0.2;
@@ -154,7 +176,21 @@ export async function callOpenRouter(opts: {
     }
     throw new LlmGatewayError('The model returned an empty response. Try again.');
   }
-  return content.length > LLM_LIMITS.MAX_OUTPUT_CHARS
+  const trimmed = content.length > LLM_LIMITS.MAX_OUTPUT_CHARS
     ? content.slice(0, LLM_LIMITS.MAX_OUTPUT_CHARS)
     : content;
+  return { content: trimmed, usage: parseUsage(data?.usage) };
+}
+
+// Back-compat wrapper: returns just the answer text (draft/improve callers).
+export async function callOpenRouter(opts: {
+  apiKey: string;
+  model: string;
+  messages: LlmMessage[];
+  maxTokens?: number;
+  temperature?: number;
+  timeoutMs?: number;
+}): Promise<string> {
+  const { content } = await callOpenRouterWithUsage(opts);
+  return content;
 }
