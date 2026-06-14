@@ -12,7 +12,9 @@
 // SECURITY: the plaintext key is passed in by the route (decrypted transiently),
 // used for the single call, and never logged or persisted here.
 
+import { z } from "zod";
 import { callOpenRouterWithUsage, type LlmMessage, type LlmUsage } from "../ai-assistant/router";
+import type { LabAgentToolkitMethod } from "@shared/lab-agent-contract";
 
 // Default chat model: "cheapest capable" per docs/LAB_AGENT_SANDBOX_PLAN.md §5.
 // DeepSeek V4 Pro is the catalog's value/capability pick; an override may pass a
@@ -110,4 +112,241 @@ export async function generateLabChatReply(input: ChatBrainInput): Promise<ChatB
     timeoutMs: CHAT_TIMEOUT_MS,
   });
   return { content: content.trim(), usage, model };
+}
+
+// ===========================================================================
+// Phase C — turn-loop brain (decideTurnAction)
+// ===========================================================================
+//
+// C0 (above) only TALKS. C1's brain decides, each turn, ONE of three things:
+//   - call a working toolkit tool (read a result, queue/refine/cancel a run), or
+//   - record a short plan checklist (update_plan), or
+//   - finish the turn with a natural-language reply (final).
+//
+// The orchestrator (server/lab-agent/orchestrator.ts) drives the loop; this
+// module only turns context -> a single, validated decision. It is the ONLY place
+// the user's key is used for a decision. The decision is STRICT, single-JSON: the
+// model authors prose and tool calls, NEVER client chips (those stay deterministic
+// in chat-replies.ts, attached by the orchestrator).
+
+// The tools the agent may actually invoke today. This is a strict subset of the
+// full contract registry — the not_implemented methods (templates, heatmap,
+// LLM-backed create/improve/insights) are deliberately EXCLUDED so the brain can
+// never pick a tool that returns `not_implemented`. The allowlist is enforced by
+// the zod enum below, not by the prompt alone.
+export const WORKING_TOOLS = [
+  "listStrategies",
+  "findStrategy",
+  "getTopResults",
+  "getInsightsReport",
+  "getRunStatus",
+  "getQueuePosition",
+  "runOptimization",
+  "refineFrom",
+  "cancelRun",
+] as const satisfies readonly LabAgentToolkitMethod[];
+
+export type WorkingTool = (typeof WORKING_TOOLS)[number];
+
+/** Async tools that QUEUE a run; the orchestrator pauses the turn until they finish. */
+export const ASYNC_TOOLS: ReadonlySet<WorkingTool> = new Set<WorkingTool>([
+  "runOptimization",
+  "refineFrom",
+]);
+
+// One decision = one of three discriminated actions. `args` for a tool is whatever
+// the contract input schema for that tool requires MINUS idempotencyKey (which the
+// orchestrator injects deterministically — the model must never author it, so a
+// resumed turn re-derives the same key and can't double-enqueue).
+export type BrainDecision =
+  | { action: "tool"; tool: WorkingTool; args: Record<string, unknown> }
+  | { action: "final"; message: string }
+  | { action: "update_plan"; plan: string[]; note?: string };
+
+const toolDecisionSchema = z.object({
+  action: z.literal("tool"),
+  tool: z.enum(WORKING_TOOLS),
+  args: z.record(z.string(), z.unknown()).default({}),
+});
+const finalDecisionSchema = z.object({
+  action: z.literal("final"),
+  message: z.string().min(1),
+});
+const updatePlanDecisionSchema = z.object({
+  action: z.literal("update_plan"),
+  plan: z.array(z.string().min(1)).min(1).max(12),
+  note: z.string().optional(),
+});
+const brainDecisionSchema = z.discriminatedUnion("action", [
+  toolDecisionSchema,
+  finalDecisionSchema,
+  updatePlanDecisionSchema,
+]);
+
+/** Raised when the model's output cannot be parsed into a valid single decision. */
+export class MalformedDecisionError extends Error {
+  constructor(message: string, readonly raw?: string) {
+    super(message);
+    this.name = "MalformedDecisionError";
+  }
+}
+
+// Context the orchestrator hands the brain each iteration. Carries NO key (the job
+// wires the key into the BrainFn closure) so the orchestrator stays key-agnostic.
+export interface BrainTurnContext {
+  goal: string | null;
+  recentMessages: { role: "user" | "agent" | "tool"; content: string }[];
+  // Compact, orchestrator-rendered working memory (current strategy, recent tool
+  // results, plan) — already bounded so the brain prompt stays small/cheap.
+  memoryDigest?: string;
+}
+
+export interface BrainTurnResult {
+  decision: BrainDecision;
+  usage?: LlmUsage;
+  model: string;
+}
+
+/** The brain seam the orchestrator depends on. The job binds the key + model. */
+export type BrainFn = (ctx: BrainTurnContext) => Promise<BrainTurnResult>;
+
+const DECIDE_MAX_TOKENS = 900; // a single JSON decision is small; bounds spend/latency
+const DECIDE_TIMEOUT_MS = 30_000; // a decision turn may reason briefly; stays under proxy reap
+const DECIDE_TEMPERATURE = 0.1; // near-deterministic: we want a clean, parseable action
+
+// The decision contract + §6 operating rules, baked into the system prompt. The
+// rules mirror docs/LAB_AGENT_SANDBOX_PLAN.md §6 and the contract DTO comments.
+const DECIDE_SYSTEM_PROMPT = [
+  "You are the QuantumLab Lab Assistant operating as an autonomous turn agent inside a",
+  "Solana perpetual-futures bot-trading platform's backtesting lab. Each turn you output",
+  "EXACTLY ONE JSON object and NOTHING else — no prose, no markdown, no code fences.",
+  "",
+  "The JSON must be one of these three shapes:",
+  '1. {"action":"tool","tool":"<toolName>","args":{...}} — call one toolkit tool.',
+  '2. {"action":"update_plan","plan":["step 1","step 2"],"note":"optional"} — record a short checklist.',
+  '3. {"action":"final","message":"<your reply to the user>"} — finish the turn and reply.',
+  "",
+  "Available tools and their args (call NOTHING else):",
+  '- listStrategies {} — the user\'s strategies.',
+  '- findStrategy {"query":"name"} — fuzzy-find a strategy by name.',
+  '- getTopResults {"strategyId":N,"limit":N?} — ranked backtest results for a strategy.',
+  '- getInsightsReport {"strategyId":N} — the latest insights report, if any.',
+  '- getRunStatus {"runId":N} — status/progress of a run.',
+  '- getQueuePosition {} — jobs ahead + whether you already hold an active run.',
+  '- runOptimization {"strategyId":N,"symbols":["SOL","ETH"],"timeframes":["1h","4h"],"stages":["random","refine","deep"]?,"outOfSampleFraction":0.2?} — QUEUE a backtest/optimization (async).',
+  '- refineFrom {"runId":N} — QUEUE a refine around a finished run\'s best params (async).',
+  '- cancelRun {"runId":N} — cancel a queued/running run.',
+  "",
+  "Do NOT include an idempotencyKey — the system adds it. Do NOT invent strategy ids,",
+  "run ids, or numbers: discover them with listStrategies / findStrategy / getTopResults first.",
+  "",
+  "Operating rules (§6):",
+  "- Backtest ACROSS assets (e.g. SOL, ETH, ARB), never a single symbol — robustness, not a spike.",
+  "- Use 1H timeframes or higher; sub-hour bars overfit and waste data budget.",
+  "- Exhaust the cheap deterministic pipeline (random -> refine -> deep) before suggesting any paid improve.",
+  "- A result with NO out-of-sample (oos:null) is UNVALIDATED, not good — say so; never present it as proven.",
+  "- Never fabricate PnL, win rate, or parameter values you were not given by a tool.",
+  "- After you queue a run you will be resumed when it finishes; read its results then.",
+  "- When you have answered the user or have nothing left to do, use action:final.",
+].join("\n");
+
+// Extract the first balanced top-level JSON object from a model response. Models
+// sometimes wrap JSON in prose or ``` fences even when told not to; this scans for
+// the first '{' and brace-matches (string-aware) to its close. Returns null when
+// no balanced object is found.
+function extractFirstJsonObject(text: string): string | null {
+  const start = text.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let inStr = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+/** Parse a raw model response into a validated BrainDecision (exported for tests). */
+export function parseBrainDecision(raw: string): BrainDecision {
+  const json = extractFirstJsonObject(raw ?? "");
+  if (!json) {
+    throw new MalformedDecisionError("No JSON object found in the model response.", raw);
+  }
+  let obj: unknown;
+  try {
+    obj = JSON.parse(json);
+  } catch {
+    throw new MalformedDecisionError("The model response was not valid JSON.", raw);
+  }
+  const parsed = brainDecisionSchema.safeParse(obj);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const where = issue?.path.join(".");
+    throw new MalformedDecisionError(
+      `Decision failed validation${where ? ` at ${where}` : ""}: ${issue?.message ?? "unknown shape"}.`,
+      raw,
+    );
+  }
+  return parsed.data;
+}
+
+/**
+ * Make ONE turn decision on the user's key. Throws MalformedDecisionError when the
+ * model's output can't be parsed/validated (the orchestrator retries within a
+ * bounded repair budget, then degrades). Throws LlmGatewayError on transport
+ * failures. Never throws a raw provider error.
+ */
+export async function decideTurnAction(
+  input: BrainTurnContext & { apiKey: string; model?: string },
+): Promise<BrainTurnResult> {
+  const model = input.model || DEFAULT_CHAT_MODEL;
+  const messages = buildDecisionMessages(input);
+  const { content, usage } = await callOpenRouterWithUsage({
+    apiKey: input.apiKey,
+    model,
+    messages,
+    maxTokens: DECIDE_MAX_TOKENS,
+    temperature: DECIDE_TEMPERATURE,
+    timeoutMs: DECIDE_TIMEOUT_MS,
+  });
+  const decision = parseBrainDecision(content);
+  return { decision, usage, model };
+}
+
+// Assemble the decision prompt: system contract+rules, optional goal + memory
+// digest, then the bounded recent transcript (same bounding as the chat path).
+// Exported for unit testing.
+export function buildDecisionMessages(input: BrainTurnContext): LlmMessage[] {
+  const goal = (input.goal ?? "").trim();
+  const digest = (input.memoryDigest ?? "").trim();
+  let system = DECIDE_SYSTEM_PROMPT;
+  if (goal) system += `\n\nThe user's stated goal: ${goal.slice(0, MAX_GOAL_CHARS)}`;
+  if (digest) system += `\n\nWorking memory so far:\n${digest.slice(0, MAX_CONTEXT_CHARS)}`;
+
+  const history = input.recentMessages
+    .filter((m) => typeof m.content === "string" && m.content.trim().length > 0)
+    .slice(-MAX_CONTEXT_MESSAGES);
+
+  const picked: LlmMessage[] = [];
+  let used = 0;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const text = history[i].content.trim();
+    if (used + text.length > MAX_CONTEXT_CHARS && picked.length > 0) break;
+    used += text.length;
+    picked.push({ role: toLlmRole(history[i].role), content: text });
+  }
+  picked.reverse();
+  return [{ role: "system", content: system }, ...picked];
 }

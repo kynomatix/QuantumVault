@@ -1,11 +1,13 @@
-// QuantumLab Lab Assistant — Phase B chat dock.
+// QuantumLab Lab Assistant — Phase C chat dock.
 //
 // A collapsed Sparkles button (bottom-right) expands into a persisted chat panel.
-// Phase B is a conversational SHELL: messages persist server-side and the
-// assistant offers clickable option bubbles, but there is NO LLM and NO toolkit
-// call yet (that's Phase C/D). Replies come back synchronously from the server,
-// so there is no polling. All authenticated reads go through apiRequest, which
-// stamps the x-wallet-address header so a stale session fails closed.
+// With no saved OpenRouter key the dock is still a deterministic SHELL: messages
+// persist server-side and the assistant offers clickable option bubbles, replying
+// synchronously. With a saved key, POST .../messages starts a BACKGROUND turn
+// (202) that drives the lab toolkit on the user's key; the dock then polls GET
+// .../messages on turn_state and POSTs .../step to resume a turn parked on a
+// long async run. All authenticated reads go through apiRequest, which stamps the
+// x-wallet-address header so a stale session fails closed.
 
 import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -34,8 +36,20 @@ interface EnsureResponse {
   messages: ChatMessage[];
 }
 
+// The turn-loop view the server attaches to every messages read. turn_state drives
+// the client poll loop: running_turn (a background LLM/tool step is advancing) and
+// waiting_for_tool (parked on an async lab run) both mean "keep polling"; ready
+// means the turn is done.
+interface TurnTask {
+  id: number;
+  status: string;
+  turnState: string;
+  activeRunId: number | null;
+}
+
 interface MessagesResponse {
   messages: ChatMessage[];
+  task?: TurnTask | null;
 }
 
 const messagesKey = (taskId: number | null, wallet: string | null) =>
@@ -122,6 +136,13 @@ export function LabAssistantDock({
       const res = await apiRequest("GET", `/api/lab/agent/chat/${taskId}/messages`);
       return (await res.json()) as MessagesResponse;
     },
+    // While a turn is live the background job mutates the transcript out-of-band, so
+    // poll to surface new tool/agent messages + the latest turn_state. Polling stops
+    // the moment the turn returns to "ready" (or errors out to ready).
+    refetchInterval: (query) => {
+      const ts = query.state.data?.task?.turnState;
+      return ts === "running_turn" || ts === "waiting_for_tool" ? 2500 : false;
+    },
   });
 
   const send = useMutation({
@@ -129,20 +150,68 @@ export function LabAssistantDock({
       const res = await apiRequest("POST", `/api/lab/agent/chat/${taskId}/messages`, { content });
       return (await res.json()) as MessagesResponse;
     },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: messagesKey(taskId, walletAddress) });
+    onSuccess: (data) => {
+      // Merge the returned message(s) + task so the user's line and the running_turn
+      // state show instantly; the poll loop (driven by turn_state) then takes over
+      // and surfaces the assistant's tool/agent messages as the turn advances.
+      qc.setQueryData<MessagesResponse>(messagesKey(taskId, walletAddress), (prev) => {
+        const byId = new Map<number, ChatMessage>((prev?.messages ?? []).map((m) => [m.id, m]));
+        for (const m of data.messages) byId.set(m.id, m);
+        return {
+          messages: Array.from(byId.values()).sort((a, b) => a.id - b.id),
+          task: data.task ?? prev?.task ?? null,
+        };
+      });
+    },
+  });
+
+  // Resume a parked turn after an async lab run. One in-flight at a time (the
+  // !isPending guard in the effect below); the server is also a safe no-op if the
+  // run hasn't finished or a step is already advancing, so an extra /step never
+  // double-spends or re-enqueues.
+  const step = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/lab/agent/chat/${taskId}/step`);
+      return (await res.json()) as { task?: TurnTask | null; resumed: boolean };
+    },
+    onSuccess: (data) => {
+      if (!data.task) return;
+      qc.setQueryData<MessagesResponse>(messagesKey(taskId, walletAddress), (prev) =>
+        prev ? { ...prev, task: data.task } : prev,
+      );
     },
   });
 
   const messages = messagesQuery.data?.messages ?? [];
   const signedIn = !!walletAddress && sessionConnected;
   const canChat = signedIn && taskId !== null;
+  const turnState = messagesQuery.data?.task?.turnState ?? "ready";
+  const turnActive = turnState === "running_turn" || turnState === "waiting_for_tool";
+  const workingLabel = turnState === "waiting_for_tool" ? "Running your backtest…" : "Thinking…";
+
+  // Client-driven resume (§7): while a turn is live, POST /step once per poll tick
+  // (gated to one in-flight). This drives BOTH live states:
+  //   • waiting_for_tool — advances the turn once the async run finishes.
+  //   • running_turn      — re-drives a DB-persisted turn whose background job is
+  //                         gone after a crash/restart (without this, the client
+  //                         would GET-poll a stuck turn forever and never resume).
+  // During a NORMAL running_turn the live background job owns the advance, so the
+  // server no-ops cheaply via isLabTurnRunning — this never double-spends or
+  // re-enqueues. Keyed off the poll's dataUpdatedAt so it re-fires each refetch
+  // until turn_state returns to ready. Interactive by design — closing the tab
+  // simply pauses the turn until it's reopened.
+  useEffect(() => {
+    if (turnActive && canChat && !step.isPending) {
+      step.mutate();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [turnState, messagesQuery.dataUpdatedAt, canChat]);
 
   // Keep the transcript pinned to the latest message.
   useEffect(() => {
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages.length, open, send.isPending]);
+  }, [messages.length, open, send.isPending, turnActive]);
 
   // Re-establish a stale server session in place (re-sign in the wallet),
   // mirroring the Creator's re-auth flow, so a user whose session went idle can
@@ -173,7 +242,7 @@ export function LabAssistantDock({
 
   function submitDraft() {
     const content = draft.trim();
-    if (!content || !canChat || send.isPending) return;
+    if (!content || !canChat || send.isPending || turnActive) return;
     // Never let a pasted API key leave the browser or hit the transcript. The
     // server rejects it too (defense in depth), but stop it here for instant,
     // key-free feedback — the key belongs in the Creator's encrypted store.
@@ -193,7 +262,7 @@ export function LabAssistantDock({
     // Navigation never needs a session; "send" chips do.
     if (action.kind === "navigate" && action.tab) {
       onNavigate(action.tab);
-    } else if (action.kind === "send" && action.message && canChat && !send.isPending) {
+    } else if (action.kind === "send" && action.message && canChat && !send.isPending && !turnActive) {
       send.mutate(action.message);
     }
   }
@@ -374,10 +443,10 @@ export function LabAssistantDock({
             );
           })}
 
-          {send.isPending && (
+          {(send.isPending || turnActive) && (
             <div className="flex justify-start" data-testid="lab-assistant-sending">
               <div className="flex items-center gap-2 rounded-2xl rounded-bl-sm bg-white/[0.06] px-3 py-2 text-xs text-white/40">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Thinking…
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> {workingLabel}
               </div>
             </div>
           )}
@@ -391,7 +460,7 @@ export function LabAssistantDock({
                 key={a.id}
                 type="button"
                 onClick={() => handleAction(a)}
-                disabled={send.isPending || (a.kind === "send" && !canChat)}
+                disabled={send.isPending || turnActive || (a.kind === "send" && !canChat)}
                 data-testid={`chip-lab-assistant-${a.id}`}
                 className="rounded-full border border-indigo-400/30 bg-indigo-500/10 px-3 py-1 text-xs font-medium text-indigo-200 transition-colors hover:bg-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -422,16 +491,18 @@ export function LabAssistantDock({
               }
             }}
             placeholder={
-              canChat
-                ? "Ask the assistant…"
-                : signedIn
-                  ? "Starting chat…"
-                  : walletAddress
-                    ? "Finish signing in to chat"
-                    : "Connect your wallet to chat"
+              turnActive
+                ? "Assistant is working…"
+                : canChat
+                  ? "Ask the assistant…"
+                  : signedIn
+                    ? "Starting chat…"
+                    : walletAddress
+                      ? "Finish signing in to chat"
+                      : "Connect your wallet to chat"
             }
             maxLength={4000}
-            disabled={!canChat}
+            disabled={!canChat || turnActive}
             data-testid="input-lab-assistant"
             className="flex-1 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-indigo-400/50 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
           />
@@ -439,7 +510,7 @@ export function LabAssistantDock({
             type="button"
             size="icon"
             onClick={submitDraft}
-            disabled={!draft.trim() || send.isPending || !canChat}
+            disabled={!draft.trim() || send.isPending || !canChat || turnActive}
             data-testid="button-lab-assistant-send"
             className="bg-indigo-600 hover:bg-indigo-500"
           >

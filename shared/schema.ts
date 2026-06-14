@@ -1166,6 +1166,24 @@ export const labAgentTasks = pgTable("lab_agent_tasks", {
   cancelRequestedAt: timestamp("cancel_requested_at"),
   // = LAB_AGENT_TOOLKIT_VERSION at creation; lets a future contract bump migrate forward.
   toolkitVersion: integer("toolkit_version").notNull().default(1),
+  // --- Phase C turn-loop orchestration (server/lab-agent/orchestrator.ts). ---
+  // The DB is the source of truth so a turn can be safely resumed after a crash
+  // or reconnect. turn_state: ready | running_turn | waiting_for_tool.
+  turnState: text("turn_state").notNull().default("ready"),
+  // Single-flight CAS lease: the turn runner that wins the CAS owns the task; a
+  // second concurrent runner loses and no-ops. Expiry lets a crashed turn reclaim.
+  turnLease: text("turn_lease"),
+  turnLeaseExpiresAt: timestamp("turn_lease_expires_at"),
+  // When the current turn_state was entered — basis for a stuck-turn watchdog.
+  turnStateChangedAt: timestamp("turn_state_changed_at"),
+  // Monotonic step counter; feeds the per-step idempotency key derivation so a
+  // resumed turn can never re-enqueue a tool it already ran.
+  stepIndex: integer("step_index").notNull().default(0),
+  // Two-phase record of the in-flight async tool step: persisted as
+  // {phase:'executing',…} BEFORE the write tool is called, so crash recovery
+  // replays the STORED tool (not the brain), then flipped to {phase:'waiting',…}
+  // with the queued runId. Null when no async step is pending.
+  currentStep: jsonb("current_step").$type<Record<string, unknown>>(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [

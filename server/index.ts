@@ -390,7 +390,7 @@ app.post("/api/lab/job/:id/cancel", (req: Request, res: Response, next: NextFunc
 // AI Strategy Creator (Task 187) — registered in the MAIN process BEFORE the lab
 // proxy because these routes need the Express session + V3 UMK, which the lab CHILD
 // process does not have. They read the wallet only from the session (never a token).
-registerCreatorRoutes(app, sessionMiddleware as any);
+registerCreatorRoutes(app, sessionMiddleware as any, () => labSupervisor.labPort);
 
 app.use("/api/lab", (req: Request, res: Response, next: NextFunction) => {
   sessionMiddleware(req, res, (err) => {

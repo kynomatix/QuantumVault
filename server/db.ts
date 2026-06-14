@@ -365,6 +365,16 @@ export async function ensureSchema() {
         created_at timestamp NOT NULL DEFAULT now()
       )`,
       `CREATE INDEX IF NOT EXISTS idx_lab_agent_messages_task_created ON lab_agent_messages (task_id, created_at, id)`,
+
+      // --- QuantumLab Sandbox Agent (Phase C): turn-loop orchestration state. ---
+      // Additive + idempotent. The DB is the source of truth for the turn loop so a
+      // turn can be resumed crash-safely; see server/lab-agent/orchestrator.ts.
+      `ALTER TABLE lab_agent_tasks ADD COLUMN IF NOT EXISTS turn_state text NOT NULL DEFAULT 'ready'`,
+      `ALTER TABLE lab_agent_tasks ADD COLUMN IF NOT EXISTS turn_lease text`,
+      `ALTER TABLE lab_agent_tasks ADD COLUMN IF NOT EXISTS turn_lease_expires_at timestamp`,
+      `ALTER TABLE lab_agent_tasks ADD COLUMN IF NOT EXISTS turn_state_changed_at timestamp`,
+      `ALTER TABLE lab_agent_tasks ADD COLUMN IF NOT EXISTS step_index integer NOT NULL DEFAULT 0`,
+      `ALTER TABLE lab_agent_tasks ADD COLUMN IF NOT EXISTS current_step jsonb`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner

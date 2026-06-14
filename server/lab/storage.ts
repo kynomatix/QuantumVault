@@ -124,6 +124,16 @@ export interface ILabStorage {
   getAgentTask(id: number): Promise<LabAgentTask | undefined>;
   updateAgentTask(id: number, patch: Partial<InsertLabAgentTask>): Promise<LabAgentTask | undefined>;
   incrementAgentTaskSpend(walletAddress: string, taskId: number, deltaUsd: number): Promise<void>;
+  /**
+   * Single-flight CAS lease for the Phase C turn loop (server/lab-agent/orchestrator.ts).
+   * Atomically claims the task's turn lease iff it is currently free (NULL) or
+   * expired: the winner gets the updated row back; a concurrent loser gets
+   * undefined and must no-op. The lease auto-expires after `leaseMs` so a crashed
+   * turn can be reclaimed. `token` is an opaque per-attempt id used to release.
+   */
+  claimTurnLease(taskId: number, token: string, leaseMs: number, now?: Date): Promise<LabAgentTask | undefined>;
+  /** Release a held lease, CAS-guarded on the token so a stale/lost holder is a no-op. */
+  releaseTurnLease(taskId: number, token: string): Promise<void>;
 
   // --- Lab Assistant chat (Phase B). All wallet-scoped through the owning task. ---
   // Atomically find-or-create this wallet's active chat task and seed the greeting
@@ -415,6 +425,37 @@ export class LabDatabaseStorage implements ILabStorage {
     await db.update(labAgentTasks)
       .set({ spendEstimateUsd: sql`${labAgentTasks.spendEstimateUsd} + ${deltaUsd}`, updatedAt: new Date() })
       .where(and(eq(labAgentTasks.id, taskId), eq(labAgentTasks.walletAddress, walletAddress)));
+  }
+
+  // Single-flight CAS lease (§7c). One UPDATE both tests and takes the lease: the
+  // WHERE only matches when the lease is free or expired, and RETURNING gives the
+  // winner the row. A concurrent loser's WHERE matches nothing -> undefined. This
+  // is the same compare-and-set pattern the recovery leases use elsewhere.
+  async claimTurnLease(
+    taskId: number,
+    token: string,
+    leaseMs: number,
+    now: Date = new Date(),
+  ): Promise<LabAgentTask | undefined> {
+    const expiresAt = new Date(now.getTime() + Math.max(1000, leaseMs));
+    const [task] = await db.update(labAgentTasks)
+      .set({ turnLease: token, turnLeaseExpiresAt: expiresAt, updatedAt: now })
+      .where(and(
+        eq(labAgentTasks.id, taskId),
+        or(
+          isNull(labAgentTasks.turnLease),
+          sql`${labAgentTasks.turnLeaseExpiresAt} IS NULL`,
+          sql`${labAgentTasks.turnLeaseExpiresAt} < ${now}`,
+        ),
+      ))
+      .returning();
+    return task;
+  }
+
+  async releaseTurnLease(taskId: number, token: string): Promise<void> {
+    await db.update(labAgentTasks)
+      .set({ turnLease: null, turnLeaseExpiresAt: null, updatedAt: new Date() })
+      .where(and(eq(labAgentTasks.id, taskId), eq(labAgentTasks.turnLease, token)));
   }
 
   async ensureActiveChatTask(
