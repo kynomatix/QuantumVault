@@ -13,7 +13,7 @@ const SITE_NAME = 'QuantumVault';
 
 export const CREATOR_MODELS = {
   // Verified live on OpenRouter (June 2026). If a call 404s, check openrouter.ai/models.
-  DRAFT: 'moonshotai/kimi-k2.7-code', // strongest Kimi coder (thinking model) — initial Pine draft + repairs
+  DRAFT: 'moonshotai/kimi-k2.6', // fast + reliable on our custom Pine engine — initial Pine draft + repairs
   ESCALATE: 'anthropic/claude-opus-4.8', // peak reasoning — last-resort repair when DRAFT can't compile
   CRITIC: 'qwen/qwen3.7-max', // different provenance — independent review pass
 } as const;
@@ -155,14 +155,15 @@ export async function callOpenRouterWithUsage(opts: {
       // finishes inside our timeout. We only want the final answer. Verified live: with
       // reasoning on, Kimi K2.6 returns no content within 90s; with it off it returns a
       // complete strategy in ~40s. EXCEPTION: models in REASONING_REQUIRED_MODELS (e.g.
-      // kimi-k2.7-code) reject reasoning:{enabled:false} with HTTP 400, so we omit the
-      // flag and let them think — the larger budget + timeout above keep the answer intact.
+      // kimi-k2.7-code) reject reasoning:{enabled:false} with HTTP 400, so we send
+      // enabled:true and let them think — the larger budget + timeout above keep the
+      // answer intact (these models are slow: ~minutes per call on real prompts).
       body: JSON.stringify({
         model,
         messages,
         max_tokens: maxTokens,
         temperature,
-        ...(reasoningRequired ? {} : { reasoning: { enabled: false } }),
+        reasoning: { enabled: reasoningRequired },
       }),
       signal: controller.signal,
     });
