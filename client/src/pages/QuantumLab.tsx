@@ -750,7 +750,7 @@ export default function QuantumLab() {
   const [selectedStrategy, setSelectedStrategy] = useState<LabStrategy | null>(null);
   const { toast } = useToast();
   const { getMaxLeverage } = useLeverageLimits();
-  const { publicKeyString: walletAddress } = useWallet();
+  const { publicKeyString: walletAddress, sessionConnected } = useWallet();
   const lastWalletRef = useRef<string | null>(walletAddress);
   useEffect(() => {
     if (lastWalletRef.current === walletAddress) return;
@@ -1463,7 +1463,11 @@ export default function QuantumLab() {
       </div>
 
       {mainTab === "hub" && (
-        <LabAssistantDock walletAddress={walletAddress ?? null} onNavigate={(tab) => setMainTab(tab as MainTab)} />
+        <LabAssistantDock
+          walletAddress={walletAddress ?? null}
+          sessionConnected={sessionConnected}
+          onNavigate={(tab) => setMainTab(tab as MainTab)}
+        />
       )}
       <QueueDrawer open={queueOpen} onOpenChange={setQueueOpen} />
     </div>

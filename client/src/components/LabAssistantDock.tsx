@@ -41,9 +41,11 @@ const messagesKey = (taskId: number | null, wallet: string | null) =>
 
 export function LabAssistantDock({
   walletAddress,
+  sessionConnected = false,
   onNavigate,
 }: {
   walletAddress: string | null;
+  sessionConnected?: boolean;
   onNavigate: (tab: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -77,12 +79,15 @@ export function LabAssistantDock({
     setTaskId(null);
   }, [walletAddress]);
 
+  // Only start a chat once the wallet is connected AND the server session is
+  // authenticated — firing ensure before the session is ready would 401 and
+  // flash a spurious error during the sign-in handshake.
   useEffect(() => {
-    if (open && walletAddress && taskId === null && !ensure.isPending) {
+    if (open && walletAddress && sessionConnected && taskId === null && !ensure.isPending) {
       ensure.mutate(walletAddress);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, walletAddress, taskId]);
+  }, [open, walletAddress, sessionConnected, taskId]);
 
   const messagesQuery = useQuery({
     queryKey: messagesKey(taskId, walletAddress),
@@ -104,6 +109,8 @@ export function LabAssistantDock({
   });
 
   const messages = messagesQuery.data?.messages ?? [];
+  const signedIn = !!walletAddress && sessionConnected;
+  const canChat = signedIn && taskId !== null;
 
   // Keep the transcript pinned to the latest message.
   useEffect(() => {
@@ -113,22 +120,25 @@ export function LabAssistantDock({
 
   function submitDraft() {
     const content = draft.trim();
-    if (!content || !taskId || send.isPending) return;
+    if (!content || !canChat || send.isPending) return;
     setDraft("");
     send.mutate(content);
   }
 
   function handleAction(action: AgentSuggestedAction) {
+    // Navigation never needs a session; "send" chips do.
     if (action.kind === "navigate" && action.tab) {
       onNavigate(action.tab);
-    } else if (action.kind === "send" && action.message && taskId && !send.isPending) {
+    } else if (action.kind === "send" && action.message && canChat && !send.isPending) {
       send.mutate(action.message);
     }
   }
 
-  // The assistant requires an interactive sign-in (server gate). Hide until then.
-  if (!walletAddress) return null;
-
+  // The FAB stays discoverable even when signed out so it never silently
+  // vanishes (on mobile the wallet adapter's publicKey is often transiently
+  // null even when the user feels signed in). Chatting still needs a connected
+  // wallet + server session; when that's missing we show a prompt and disable
+  // the composer instead of hiding the button.
   if (!open) {
     return (
       <button
@@ -147,6 +157,8 @@ export function LabAssistantDock({
   const lastAgent = [...messages].reverse().find((m) => m.role === "agent");
   const chips = lastAgent?.suggestedActions ?? [];
   const isLoading = ensure.isPending || (messagesQuery.isLoading && messages.length === 0);
+  // Signed in, but the chat session couldn't be created (e.g. session expired).
+  const sessionProblem = signedIn && ensure.isError;
 
   return (
     <div
@@ -182,6 +194,40 @@ export function LabAssistantDock({
           data-testid="lab-assistant-messages"
           className="flex-1 space-y-3 overflow-y-auto px-4 py-3"
         >
+          {!signedIn && (
+            <div className="flex h-full flex-col items-center justify-center gap-2 text-center" data-testid="lab-assistant-connect-prompt">
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-500/20 text-indigo-300">
+                <Sparkles className="h-5 w-5" />
+              </span>
+              <p className="text-sm font-medium text-white">
+                {walletAddress ? "Finish signing in to chat" : "Connect your wallet to chat"}
+              </p>
+              <p className="max-w-[240px] text-xs text-white/40">
+                {walletAddress
+                  ? "Approve the sign-in request on QuantumLab, then the assistant can help."
+                  : "Connect your wallet on QuantumLab, then the assistant can guide you around."}
+              </p>
+            </div>
+          )}
+
+          {sessionProblem && (
+            <div className="flex h-full flex-col items-center justify-center gap-2 text-center" data-testid="lab-assistant-session-error">
+              <p className="text-sm font-medium text-white">Couldn’t start a chat</p>
+              <p className="max-w-[240px] text-xs text-white/40">
+                Make sure you’re signed in on QuantumLab, then try again.
+              </p>
+              <button
+                type="button"
+                onClick={() => walletAddress && ensure.mutate(walletAddress)}
+                disabled={ensure.isPending}
+                data-testid="button-lab-assistant-retry"
+                className="mt-1 rounded-full border border-indigo-400/30 bg-indigo-500/10 px-3 py-1 text-xs font-medium text-indigo-200 transition-colors hover:bg-indigo-500/20 disabled:opacity-50"
+              >
+                Try again
+              </button>
+            </div>
+          )}
+
           {isLoading && (
             <div className="flex items-center gap-2 text-xs text-white/40" data-testid="lab-assistant-loading">
               <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…
@@ -232,7 +278,7 @@ export function LabAssistantDock({
                 key={a.id}
                 type="button"
                 onClick={() => handleAction(a)}
-                disabled={send.isPending}
+                disabled={send.isPending || (a.kind === "send" && !canChat)}
                 data-testid={`chip-lab-assistant-${a.id}`}
                 className="rounded-full border border-indigo-400/30 bg-indigo-500/10 px-3 py-1 text-xs font-medium text-indigo-200 transition-colors hover:bg-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -253,16 +299,25 @@ export function LabAssistantDock({
                 submitDraft();
               }
             }}
-            placeholder="Ask the assistant…"
+            placeholder={
+              canChat
+                ? "Ask the assistant…"
+                : signedIn
+                  ? "Starting chat…"
+                  : walletAddress
+                    ? "Finish signing in to chat"
+                    : "Connect your wallet to chat"
+            }
             maxLength={4000}
+            disabled={!canChat}
             data-testid="input-lab-assistant"
-            className="flex-1 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-indigo-400/50 focus:outline-none"
+            className="flex-1 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-indigo-400/50 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
           />
           <Button
             type="button"
             size="icon"
             onClick={submitDraft}
-            disabled={!draft.trim() || send.isPending || !taskId}
+            disabled={!draft.trim() || send.isPending || !canChat}
             data-testid="button-lab-assistant-send"
             className="bg-indigo-600 hover:bg-indigo-500"
           >
