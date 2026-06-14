@@ -43,6 +43,7 @@ import {
   type BrainTurnContext,
   type WorkingTool,
 } from "./chat-brain";
+import type { NextStepContext } from "./chat-replies";
 
 // --- tunables (§7; per docs §13 these are the safety nets, not budgets) ----------
 const LEASE_MS = 4 * 60_000; // covers one advance() segment's worst-case brain calls
@@ -76,6 +77,9 @@ const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set(["completed", "stopp
 /** The agent's small structured working memory (task.memory jsonb). */
 export interface OrchestratorMemory {
   currentStrategyId?: number | null;
+  /** The most recent COMPLETED run this task produced — drives result-aware
+   *  next-step chips (refine / improve / try-another-asset) on the final reply. */
+  lastFinishedRunId?: number | null;
   ledger: LedgerEntry[];
 }
 interface LedgerEntry {
@@ -150,6 +154,7 @@ export interface OrchestratorDeps {
   composeReply: (
     userContent: string,
     hasKey: boolean,
+    resultCtx?: NextStepContext,
   ) => { content: string; suggestedActions: AgentSuggestedAction[] };
   /** Live per-call USD estimate; null = unknown (record nothing). */
   estimateCost?: (model: string, promptTokens: number, completionTokens: number) => Promise<number | null>;
@@ -217,6 +222,7 @@ function readMemory(task: LabAgentTask): OrchestratorMemory {
   const ledger = Array.isArray(raw?.ledger) ? (raw!.ledger as LedgerEntry[]) : [];
   return {
     currentStrategyId: typeof raw?.currentStrategyId === "number" ? raw!.currentStrategyId : null,
+    lastFinishedRunId: typeof raw?.lastFinishedRunId === "number" ? raw!.lastFinishedRunId : null,
     ledger,
   };
 }
@@ -510,11 +516,15 @@ export class LabTurnOrchestrator {
     const summary = `Run #${step.runId} (${step.tool}) finished: status=${dto.status}${reason}${configs}, ${oos}`;
     await this.appendToolMessage(task, summary);
     this.pushLedger(task, { step: step.stepIndex, tool: step.tool, ok, summary });
+    const memory = this.memoryPatch(task);
+    // Only a COMPLETED run unlocks result-aware next-step chips; a failed/cancelled
+    // run leaves the prior value untouched so chips still reflect the last GOOD run.
+    if (ok) (memory as { lastFinishedRunId?: number | null }).lastFinishedRunId = step.runId;
     await this.storage.updateAgentTask(task.id, {
       currentStep: null,
       stepIndex: step.stepIndex + 1,
       activeRunId: null,
-      memory: this.memoryPatch(task),
+      memory,
     });
   }
 
@@ -539,7 +549,13 @@ export class LabTurnOrchestrator {
     userText: string,
   ): Promise<void> {
     // LLM prose, DETERMINISTIC chips (the model never authors client actions).
-    const chips = this.composeReply(userText, hasKey).suggestedActions;
+    // Result-aware: pass the task's current strategy + last finished run so the
+    // reply can append refine / improve / try-another-asset next-step chips.
+    const memory = readMemory(task);
+    const chips = this.composeReply(userText, hasKey, {
+      strategyId: memory.currentStrategyId ?? null,
+      lastRunId: memory.lastFinishedRunId ?? null,
+    }).suggestedActions;
     await this.storage.createAgentMessageForWallet(task.walletAddress, task.id, {
       role: "agent",
       content: message.trim(),

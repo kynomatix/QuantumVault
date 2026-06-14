@@ -178,7 +178,7 @@ export const heatmapCellDtoSchema = z.object({
   metric: z.number(),
 });
 export const heatmapDtoSchema = z.object({
-  runId: z.number().int(),
+  strategyId: z.number().int(),
   xParam: z.string(),
   yParam: z.string(),
   metricName: z.string(),
@@ -262,7 +262,7 @@ export const getTopResultsInput = z.object({
   strategyId: z.number().int().positive(),
   limit: z.number().int().min(1).max(50).optional(),
 }).strict();
-export const getHeatmapInput = z.object({ runId: z.number().int().positive() }).strict();
+export const getHeatmapInput = z.object({ strategyId: z.number().int().positive() }).strict();
 export const getInsightsReportInput = z.object({
   strategyId: z.number().int().positive(),
 }).strict();
@@ -302,9 +302,11 @@ export const refineFromInput = z.object({
   idempotencyKey,
 }).strict();
 
+// generateInsights is a SYNCHRONOUS, side-effect-free compute (no LLM, no persist):
+// it derives insights from the strategy's EXISTING backtest results, so it is a
+// read with no run to queue and therefore needs no idempotencyKey.
 export const generateInsightsInput = z.object({
   strategyId: z.number().int().positive(),
-  idempotencyKey,
 }).strict();
 
 export const improveInput = z.object({
@@ -335,6 +337,9 @@ export const LAB_AGENT_TOOLKIT_METHODS = {
     "getTopResults",
     "getHeatmap",
     "getInsightsReport",
+    // generateInsights is a pure read: it computes a report from existing results
+    // synchronously (no LLM, no persist), so it needs the read capability, not write.
+    "generateInsights",
     "getRunStatus",
     "getQueuePosition",
   ],
@@ -343,7 +348,6 @@ export const LAB_AGENT_TOOLKIT_METHODS = {
     "createStrategyFromTemplate",
     "runOptimization",
     "refineFrom",
-    "generateInsights",
     "improve",
     "cancelRun",
   ],
@@ -385,7 +389,7 @@ export const LAB_AGENT_TOOLKIT_IO = {
   createStrategyFromTemplate: { input: createStrategyFromTemplateInput, output: createStrategyResultDtoSchema },
   runOptimization: { input: runOptimizationInput, output: runQueuedDtoSchema },
   refineFrom: { input: refineFromInput, output: runQueuedDtoSchema },
-  generateInsights: { input: generateInsightsInput, output: runQueuedDtoSchema },
+  generateInsights: { input: generateInsightsInput, output: insightsReportDtoSchema },
   improve: { input: improveInput, output: runQueuedDtoSchema },
   cancelRun: { input: cancelRunInput, output: runStatusDtoSchema },
 } as const satisfies Record<LabAgentToolkitMethod, { input: z.ZodTypeAny; output: z.ZodTypeAny }>;

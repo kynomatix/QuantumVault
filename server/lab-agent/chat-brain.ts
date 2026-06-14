@@ -130,19 +130,25 @@ export async function generateLabChatReply(input: ChatBrainInput): Promise<ChatB
 // in chat-replies.ts, attached by the orchestrator).
 
 // The tools the agent may actually invoke today. This is a strict subset of the
-// full contract registry — the not_implemented methods (templates, heatmap,
-// LLM-backed create/improve/insights) are deliberately EXCLUDED so the brain can
-// never pick a tool that returns `not_implemented`. The allowlist is enforced by
-// the zod enum below, not by the prompt alone.
+// full contract registry — the still-unimplemented methods (templates) are
+// deliberately EXCLUDED so the brain can never pick a tool that returns
+// `not_implemented`. The allowlist is enforced by the zod enum below, not by the
+// prompt alone. The LLM-backed tools (createStrategyFromText / improve) ARE wired:
+// they spend the user's BYO OpenRouter key, so the operating rules below tell the
+// brain to exhaust the free deterministic pipeline before reaching for `improve`.
 export const WORKING_TOOLS = [
   "listStrategies",
   "findStrategy",
   "getTopResults",
+  "getHeatmap",
   "getInsightsReport",
+  "generateInsights",
   "getRunStatus",
   "getQueuePosition",
+  "createStrategyFromText",
   "runOptimization",
   "refineFrom",
+  "improve",
   "cancelRun",
 ] as const satisfies readonly LabAgentToolkitMethod[];
 
@@ -152,6 +158,7 @@ export type WorkingTool = (typeof WORKING_TOOLS)[number];
 export const ASYNC_TOOLS: ReadonlySet<WorkingTool> = new Set<WorkingTool>([
   "runOptimization",
   "refineFrom",
+  "improve",
 ]);
 
 // One decision = one of three discriminated actions. `args` for a tool is whatever
@@ -229,12 +236,16 @@ const DECIDE_SYSTEM_PROMPT = [
   "Available tools and their args (call NOTHING else):",
   '- listStrategies {} — the user\'s strategies.',
   '- findStrategy {"query":"name"} — fuzzy-find a strategy by name.',
-  '- getTopResults {"strategyId":N,"limit":N?} — ranked backtest results for a strategy.',
-  '- getInsightsReport {"strategyId":N} — the latest insights report, if any.',
+  '- getTopResults {"strategyId":N,"limit":N?} — ROBUSTNESS-ranked backtest results (rank 1 = most robust).',
+  '- getHeatmap {"strategyId":N} — ticker×timeframe grid of avg Sharpe across the strategy\'s runs.',
+  '- getInsightsReport {"strategyId":N} — the latest saved insights report, if any.',
+  '- generateInsights {"strategyId":N} — compute FRESH insights (which params drive profit + a robustness read) from existing results. Free, no key.',
   '- getRunStatus {"runId":N} — status/progress of a run.',
   '- getQueuePosition {} — jobs ahead + whether you already hold an active run.',
+  '- createStrategyFromText {"prompt":"plain-English strategy idea","name":"optional"} — the AI DRAFTS a new Pine strategy from a description. Spends the user\'s key. Returns the new strategyId; backtest it next.',
   '- runOptimization {"strategyId":N,"symbols":["SOL","ETH"],"timeframes":["1h","4h"],"stages":["random","refine","deep"]?,"outOfSampleFraction":0.2?} — QUEUE a backtest/optimization (async).',
   '- refineFrom {"runId":N} — QUEUE a refine around a finished run\'s best params (async).',
+  '- improve {"strategyId":N,"insightsOrWeaknesses":"what to fix"} — the AI rewrites the strategy\'s LOGIC from its weaknesses into a NEW strategy and QUEUES a fresh backtest for it (async). Spends the user\'s key; requires existing results.',
   '- cancelRun {"runId":N} — cancel a queued/running run.',
   "",
   "Do NOT include an idempotencyKey — the system adds it. Do NOT invent strategy ids,",
@@ -244,6 +255,8 @@ const DECIDE_SYSTEM_PROMPT = [
   "- Backtest ACROSS assets (e.g. SOL, ETH, ARB), never a single symbol — robustness, not a spike.",
   "- Use 1H timeframes or higher; sub-hour bars overfit and waste data budget.",
   "- Exhaust the cheap deterministic pipeline (random -> refine -> deep) before suggesting any paid improve.",
+  "- RANK and recommend by ROBUSTNESS, not headline profit: a result validated out-of-sample with steady Sharpe/drawdown beats a bigger in-sample return. getTopResults is already robustness-ranked.",
+  "- KEEP a result only if it holds up out-of-sample (oos sufficient AND its Sharpe doesn't collapse vs in-sample); otherwise treat it as a curve-fit to KILL or re-test, never as a win.",
   "- A result with NO out-of-sample (oos:null) is UNVALIDATED, not good — say so; never present it as proven.",
   "- Never fabricate PnL, win rate, or parameter values you were not given by a tool.",
   "- After you queue a run you will be resumed when it finishes; read its results then.",

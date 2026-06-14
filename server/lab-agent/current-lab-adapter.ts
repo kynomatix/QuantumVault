@@ -48,6 +48,7 @@ import {
   toStrategyMatchDto,
   toBacktestResultDto,
   toInsightsReportDto,
+  toHeatmapDto,
   toRunStatusDto,
   toQueuePositionDto,
   type LiveProgress,
@@ -55,6 +56,7 @@ import {
 import { LabAgentToolkit, ToolkitError } from "./toolkit";
 import type { LabAgentAdapter, ToolkitContext } from "./toolkit";
 import { DEFAULT_LAB_SLIPPAGE } from "../lab/friction";
+import { robustnessRank } from "../lab/metrics";
 import { randomUUID } from "crypto";
 
 /** The subset of lab storage this adapter reads. Keeps the coupling explicit. */
@@ -65,10 +67,12 @@ export type AdapterStorage = Pick<
   | "getRuns"
   | "getRun"
   | "getTopResultsForStrategy"
+  | "getHeatmapCells"
   | "getJobByRunId"
   | "getLatestInsightsReport"
   | "getJobsAheadCount"
   | "hasActiveRun"
+  | "createStrategy"
   | "createRun"
   | "getNextQueueOrder"
   | "getAgentRun"
@@ -177,6 +181,124 @@ function scoreStrategyMatch(name: string, query: string): number {
   return matched > 0 ? Math.min(0.7, 0.35 + 0.2 * matched) : 0;
 }
 
+/** Robustness score for a raw lab result row (superset of RankableResult). */
+function rankRow(row: any): number {
+  return robustnessRank({
+    netProfitPercent: row.netProfitPercent,
+    winRatePercent: row.winRatePercent,
+    maxDrawdownPercent: row.maxDrawdownPercent,
+    profitFactor: row.profitFactor,
+    totalTrades: row.totalTrades,
+    sharpeRatio: row.sharpeRatio ?? undefined,
+    is: row.isMetrics ?? undefined,
+    oos: row.oosMetrics ?? undefined,
+  });
+}
+
+/**
+ * Deterministic parameter sensitivity (no LLM): for each numeric/scalar param in
+ * the result set, group results by that param's value, average net profit per
+ * value, and report the SPREAD (max avg − min avg) as the param's impact. A large
+ * spread means net profit depends heavily on getting that param right. Params with
+ * fewer than 2 distinct values carry no sensitivity signal and are skipped. Returns
+ * the top 8 by impact.
+ */
+function computeParamSensitivity(rows: any[]): { param: string; impact: number }[] {
+  // Plain Record (not Map) so iteration via Object.entries/values stays array-based
+  // and does not require the --downlevelIteration tsc flag.
+  const byParam: Record<string, Record<string, { sum: number; n: number }>> = {};
+  for (const row of rows) {
+    const params = (row?.params ?? {}) as Record<string, unknown>;
+    const net = Number(row?.netProfitPercent ?? 0);
+    if (!Number.isFinite(net)) continue;
+    for (const [key, val] of Object.entries(params)) {
+      if (val == null || typeof val === "object") continue;
+      const valueKey = String(val);
+      let valueMap = byParam[key];
+      if (!valueMap) {
+        valueMap = {};
+        byParam[key] = valueMap;
+      }
+      let agg = valueMap[valueKey];
+      if (!agg) {
+        agg = { sum: 0, n: 0 };
+        valueMap[valueKey] = agg;
+      }
+      agg.sum += net;
+      agg.n += 1;
+    }
+  }
+  const out: { param: string; impact: number }[] = [];
+  for (const [param, valueMap] of Object.entries(byParam)) {
+    const aggs = Object.values(valueMap);
+    if (aggs.length < 2) continue;
+    let min = Infinity;
+    let max = -Infinity;
+    for (const { sum, n } of aggs) {
+      const avg = sum / n;
+      if (avg < min) min = avg;
+      if (avg > max) max = avg;
+    }
+    out.push({ param, impact: Math.round((max - min) * 100) / 100 });
+  }
+  out.sort((a, b) => b.impact - a.impact);
+  return out.slice(0, 8);
+}
+
+function fmtPct(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return "n/a";
+  return `${Math.round(n * 100) / 100}%`;
+}
+
+function fmtNum(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return "n/a";
+  return String(Math.round(n * 100) / 100);
+}
+
+/**
+ * Map a thrown LLM-gateway error to a typed ToolkitError. LlmGatewayError messages
+ * are already sanitized at the gateway, so they are safe to relay; any other error
+ * collapses to a generic `internal` so no raw text/stack leaks to the agent. The
+ * import is lazy to keep this module side-effect-free at import time (Phase A
+ * dormancy), matching the lazy `labStorage` import below.
+ */
+async function mapLlmError(e: unknown): Promise<ToolkitError> {
+  const { LlmGatewayError } = await import("../ai-assistant/router");
+  if (e instanceof LlmGatewayError) {
+    switch (e.status) {
+      case 429:
+        return new ToolkitError("rate_limited", e.message, true);
+      case 400:
+        return new ToolkitError("invalid_input", e.message, false);
+      case 401:
+      case 403:
+        return new ToolkitError("conflict", e.message, false);
+      default:
+        return new ToolkitError("internal", "An AI service error occurred.", false);
+    }
+  }
+  return new ToolkitError("internal", "An unexpected error occurred.", false);
+}
+
+/**
+ * Recover a run's own optimization config from its checkpoint (preferred) or its
+ * queued snapshot. Mirrors refineFrom's recovery so a DERIVED run re-threads the
+ * parent's window / holdout / slippage instead of silently defaulting them. Note
+ * the deliberate asymmetry: a checkpoint stores the config under `configSnapshot`,
+ * whereas the run's `configSnapshot` column wraps it as `{type, config}`.
+ */
+function recoverRunConfig(run: LabOptimizationRun): Partial<LabOptimizationConfig> | null {
+  return (
+    (run.checkpoint && typeof run.checkpoint === "object"
+      ? ((run.checkpoint as any).configSnapshot as Partial<LabOptimizationConfig> | undefined)
+      : undefined)
+    ?? (run.configSnapshot && typeof run.configSnapshot === "object"
+      ? ((run.configSnapshot as any).config as Partial<LabOptimizationConfig> | undefined)
+      : undefined)
+    ?? null
+  );
+}
+
 export class CurrentLabAdapter implements LabAgentAdapter {
   /**
    * @param storage      the lab storage subset this adapter touches.
@@ -190,7 +312,55 @@ export class CurrentLabAdapter implements LabAgentAdapter {
   constructor(
     private readonly storage: AdapterStorage,
     private readonly onRunQueued?: (runId: number) => void,
+    /**
+     * OPTIONAL BYO-key resolver. Given a wallet, returns its decrypted OpenRouter
+     * key as a Buffer (the adapter ALWAYS zeroizes it), or null when the key was
+     * deleted or the session is locked between the check and now. Left undefined,
+     * the LLM-backed tools (createStrategyFromText / improve) stay not_implemented.
+     */
+    private readonly resolveLlmKey?: (wallet: string) => Promise<Buffer | null>,
   ) {}
+
+  /**
+   * Run an LLM-backed operation with the wallet's BYO OpenRouter key. Resolves the
+   * key transiently, hands the callback an immutable string copy, and ALWAYS
+   * zeroizes the decrypted buffer in `finally`. Errors are mapped to typed
+   * ToolkitErrors so no raw gateway text or stack ever reaches the agent:
+   *   - no resolver wired                       → not_implemented (LLM tools dormant)
+   *   - resolver returns null (key gone/locked) → conflict (the user must add a key)
+   *   - LlmGatewayError 429 → rate_limited; 400 → invalid_input; 401/403 → conflict
+   *   - anything else                           → internal (generic, no leak)
+   */
+  private async withLlmKey<T>(
+    wallet: string,
+    fn: (apiKey: string) => Promise<T>,
+  ): Promise<T> {
+    if (!this.resolveLlmKey) {
+      throw new ToolkitError(
+        "not_implemented",
+        "AI features are not available in this phase.",
+        false,
+      );
+    }
+    let keyBuf: Buffer | null = null;
+    try {
+      keyBuf = await this.resolveLlmKey(wallet);
+      if (!keyBuf) {
+        throw new ToolkitError(
+          "conflict",
+          "No OpenRouter API key is set, or your session is locked. Add your key and try again.",
+          false,
+        );
+      }
+      const apiKey = keyBuf.toString("utf8");
+      return await fn(apiKey);
+    } catch (e) {
+      if (e instanceof ToolkitError) throw e;
+      throw await mapLlmError(e);
+    } finally {
+      if (keyBuf) keyBuf.fill(0);
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Reads (fully wired)
@@ -246,23 +416,36 @@ export class CurrentLabAdapter implements LabAgentAdapter {
     if (!strategy || strategy.userId !== ctx.walletAddress) {
       throw new ToolkitError("not_found", `Strategy ${input.strategyId} not found.`, false);
     }
-    const rows = await this.storage.getTopResultsForStrategy(input.strategyId, input.limit ?? 10);
+    const limit = input.limit ?? 10;
+    // Re-rank by ROBUSTNESS, not the lab's headline (leveraged-profit) objective.
+    // Fetch a wider candidate pool than `limit` so the robustness sort has real
+    // choice beyond the lab's own top-by-profit slice, then keep the most robust
+    // `limit`. This is what makes the agent recommend durable configs over
+    // curve-fits (docs/QUANTUMLAB_ACCURACY_DIAGNOSIS.md).
+    const candidatePool = Math.min(50, limit * 5);
+    const rows = await this.storage.getTopResultsForStrategy(input.strategyId, candidatePool);
     // The OOS holdout fraction is a per-RUN property and these top results span
     // multiple runs, so resolve each row's fraction from its own run. A null
     // fraction means that run carried no holdout → the result is UNVALIDATED.
     const runs = await this.storage.getRuns(input.strategyId);
     const oosByRun = new Map<number, number | null>();
     for (const r of runs) oosByRun.set(r.id, r.oosFraction ?? null);
-    const results = rows.map((row: LabOptResult) =>
-      toBacktestResultDto(row, { oosFraction: oosByRun.get(row.runId) ?? null }),
-    );
+    const ranked = rows
+      .map((row: any) => ({ row, score: rankRow(row) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+    const results = ranked.map(({ row }, idx) => ({
+      ...toBacktestResultDto(row, { oosFraction: oosByRun.get(row.runId) ?? null }),
+      // Renumber to the robustness order (1 = most robust), overriding the DB
+      // rank which reflects the lab's profit objective.
+      rank: idx + 1,
+    }));
     // Strategy-level set spanning runs → top-level runId is null; each result
-    // carries its own runId. Ranked by the lab's current objective (honest; not
-    // robustness — see docs/QUANTUMLAB_ACCURACY_DIAGNOSIS.md).
+    // carries its own runId.
     return {
       strategyId: input.strategyId,
       runId: null,
-      rankedBy: "lab_objective",
+      rankedBy: "robustness",
       results,
     };
   }
@@ -329,21 +512,68 @@ export class CurrentLabAdapter implements LabAgentAdapter {
   }
 
   async getHeatmap(
-    _ctx: ToolkitContext,
-    _input: LabAgentToolkitInput<"getHeatmap">,
+    ctx: ToolkitContext,
+    input: LabAgentToolkitInput<"getHeatmap">,
   ): Promise<LabAgentToolkitOutput<"getHeatmap">> {
-    throw new ToolkitError(
-      "not_implemented",
-      "Per-run parameter heatmaps are not available via the agent yet.",
-      false,
-    );
+    const strategy = await this.storage.getStrategy(input.strategyId);
+    if (!strategy || strategy.userId !== ctx.walletAddress) {
+      throw new ToolkitError("not_found", `Strategy ${input.strategyId} not found.`, false);
+    }
+    // The lab's heatmap is a strategy-level ticker×timeframe grid (each cell
+    // aggregates that combo's results), so the axes ARE ticker and timeframe and
+    // the per-cell metric is its average Sharpe — the most robustness-aligned
+    // single number the grid exposes. (This is why the input keys on strategyId,
+    // not runId: the grid spans every completed run of the strategy.)
+    const { cells } = await this.storage.getHeatmapCells(ctx.walletAddress, input.strategyId);
+    const mapped = cells.map((c: any) => ({
+      x: String(c.ticker),
+      y: String(c.timeframe),
+      metric: Number(c.avgSharpe ?? 0),
+    }));
+    return toHeatmapDto({
+      strategyId: input.strategyId,
+      xParam: "ticker",
+      yParam: "timeframe",
+      metricName: "avgSharpe",
+      cells: mapped,
+    });
   }
 
   async createStrategyFromText(
-    _ctx: ToolkitContext,
-    _input: LabAgentToolkitInput<"createStrategyFromText">,
+    ctx: ToolkitContext,
+    input: LabAgentToolkitInput<"createStrategyFromText">,
   ): Promise<LabAgentToolkitOutput<"createStrategyFromText">> {
-    throw new ToolkitError("not_implemented", "AI strategy generation is not available in this phase.", false);
+    const wallet = ctx.walletAddress;
+    // BYO-key LLM draft. withLlmKey resolves + zeroizes the key and maps any
+    // gateway error to a typed ToolkitError; with no resolver wired it stays
+    // not_implemented (Phase A dormancy).
+    const draft = await this.withLlmKey(wallet, async (apiKey) => {
+      const { draftStrategy } = await import("../ai-assistant/creator");
+      return draftStrategy({ idea: input.prompt, apiKey, walletAddress: wallet });
+    });
+    // The agent's next move is to backtest this strategy, so a draft that doesn't
+    // compile is a dead end that would only fail later in the worker. Fail loud
+    // (retryable) rather than persisting a broken, un-runnable strategy.
+    if (!draft.compileOk) {
+      throw new ToolkitError(
+        "internal",
+        "The AI drafted a strategy but it failed to compile. Try rephrasing your idea.",
+        true,
+      );
+    }
+    const { parsePineScript } = await import("../lab/pine-parser");
+    const parsed = parsePineScript(draft.pineScript);
+    const name = input.name?.trim() || parsed.strategyName || "AI strategy";
+    const strategy = await this.storage.createStrategy({
+      name,
+      pineScript: draft.pineScript,
+      description: null,
+      parsedInputs: parsed.inputs,
+      groups: parsed.groups ?? null,
+      strategySettings: parsed.strategySettings ?? null,
+      userId: wallet,
+    });
+    return { strategyId: strategy.id, name: strategy.name };
   }
 
   async createStrategyFromTemplate(
@@ -473,7 +703,19 @@ export class CurrentLabAdapter implements LabAgentAdapter {
       ?? null;
     const settings = (strategy.strategySettings ?? {}) as Record<string, any>;
     const isNative = settings.nativeEngine === true;
-    const oosFraction = srcConfig?.outOfSampleFraction ?? source.oosFraction ?? DEFAULT_AGENT_OOS_FRACTION;
+    // Holdout-FORWARD: a refine inherits the parent's OOS holdout. If the parent
+    // ran with NO holdout, its "best" params were chosen without any out-of-sample
+    // validation (overfit-prone), so refining from them would silently propagate an
+    // unvalidated result. Reject rather than fabricate a holdout the parent lacked.
+    const parentOos = srcConfig?.outOfSampleFraction ?? source.oosFraction ?? null;
+    if (parentOos == null || parentOos <= 0) {
+      throw new ToolkitError(
+        "conflict",
+        "Can't refine this run: it ran without an out-of-sample holdout, so its results aren't validated. Start a fresh optimization (which adds a holdout), then refine from that.",
+        false,
+      );
+    }
+    const oosFraction = parentOos;
     const slippage = srcConfig?.slippage ?? source.slippage ?? DEFAULT_LAB_SLIPPAGE;
     const startDate = srcConfig?.startDate ?? source.startDate ?? isoDaysAgo(365);
     const endDate = srcConfig?.endDate ?? source.endDate ?? isoDaysAgo(0);
@@ -541,17 +783,201 @@ export class CurrentLabAdapter implements LabAgentAdapter {
   }
 
   async generateInsights(
-    _ctx: ToolkitContext,
-    _input: LabAgentToolkitInput<"generateInsights">,
+    ctx: ToolkitContext,
+    input: LabAgentToolkitInput<"generateInsights">,
   ): Promise<LabAgentToolkitOutput<"generateInsights">> {
-    throw new ToolkitError("not_implemented", "Insights generation is not available in this phase.", false);
+    const strategy = await this.storage.getStrategy(input.strategyId);
+    if (!strategy || strategy.userId !== ctx.walletAddress) {
+      throw new ToolkitError("not_found", `Strategy ${input.strategyId} not found.`, false);
+    }
+    // Deterministic insights computed from the strategy's existing backtest
+    // results — which params actually move net profit, plus a robustness read on
+    // the best config. No LLM call, so it costs nothing and never touches the
+    // user's key. The LLM-backed `improve` tool consumes this summary downstream.
+    const rows = await this.storage.getTopResultsForStrategy(input.strategyId, 50);
+    if (rows.length === 0) {
+      throw new ToolkitError(
+        "conflict",
+        "No backtest results yet — run an optimization first, then I can generate insights.",
+        false,
+      );
+    }
+    // Describe the most ROBUST config, not the headline curve-fit.
+    const best = [...rows].sort((a, b) => rankRow(b) - rankRow(a))[0];
+    const paramSensitivity = computeParamSensitivity(rows);
+    const oosNote =
+      best.oosMetrics && (best.oosMetrics as any).sufficient
+        ? "validated out-of-sample"
+        : "NOT validated out-of-sample (treat with caution)";
+    const parts = [
+      `Across ${rows.length} result${rows.length === 1 ? "" : "s"} for "${strategy.name}", the most robust is ` +
+        `${best.ticker} ${best.timeframe}: net ${fmtPct(best.netProfitPercent)}, win rate ${fmtPct(best.winRatePercent)}, ` +
+        `max drawdown ${fmtPct(best.maxDrawdownPercent)}, profit factor ${fmtNum(best.profitFactor)}, ` +
+        `Sharpe ${fmtNum(best.sharpeRatio)} — ${oosNote}.`,
+    ];
+    if (paramSensitivity.length > 0) {
+      parts.push(
+        `Net profit is most sensitive to: ${paramSensitivity.slice(0, 3).map((p) => p.param).join(", ")}.`,
+      );
+    } else {
+      parts.push("No single parameter clearly drives net profit across these results.");
+    }
+    return {
+      strategyId: input.strategyId,
+      generatedAt: new Date().toISOString(),
+      summary: parts.join(" "),
+      paramSensitivity: paramSensitivity.length ? paramSensitivity : null,
+      directionalBias: null,
+    };
   }
 
   async improve(
-    _ctx: ToolkitContext,
-    _input: LabAgentToolkitInput<"improve">,
+    ctx: ToolkitContext,
+    input: LabAgentToolkitInput<"improve">,
   ): Promise<LabAgentToolkitOutput<"improve">> {
-    throw new ToolkitError("not_implemented", "AI improvement is not available in this phase.", false);
+    const wallet = ctx.walletAddress;
+    const taskId = this.requireTaskId(ctx);
+    // EARLY idempotent replay: improve pays for an EXPENSIVE LLM pass before it
+    // enqueues, so on a /step replay we must short-circuit to the already-queued
+    // run BEFORE calling the model again. (A crash STRICTLY between the LLM draft
+    // and the enqueue is the one un-deduped gap — rare, and the only alternative is
+    // a DB transaction spanning an external LLM call. The common replay path —
+    // client re-POSTs /step — is fully covered here.)
+    const replay = await this.storage.getAgentRun(wallet, taskId, input.idempotencyKey);
+    if (replay) {
+      return this.toRunQueued(replay, true, replay.agentCorrelationId ?? "");
+    }
+    const strategy = await this.storage.getStrategy(input.strategyId);
+    if (!strategy || strategy.userId !== wallet) {
+      throw new ToolkitError("not_found", `Strategy ${input.strategyId} not found.`, false);
+    }
+    // Improve must be grounded in real backtest evidence: without results there is
+    // nothing to diagnose AND no base run to mirror the new strategy's test against.
+    const topRows = await this.storage.getTopResultsForStrategy(input.strategyId, 1);
+    if (topRows.length === 0) {
+      throw new ToolkitError(
+        "conflict",
+        "No backtest results yet — run an optimization first so I have something to improve from.",
+        false,
+      );
+    }
+    const baseRun = await this.storage.getRun(Number(topRows[0].runId));
+    if (!baseRun) {
+      throw new ToolkitError("conflict", "The strategy's results have no source run to mirror.", false);
+    }
+    // BYO-key improvement pass: rewrite the strategy's LOGIC from its weaknesses.
+    const improved = await this.withLlmKey(wallet, async (apiKey) => {
+      const { improveStrategy } = await import("../ai-assistant/creator");
+      return improveStrategy({
+        currentPine: strategy.pineScript ?? "",
+        insights: input.insightsOrWeaknesses,
+        apiKey,
+        walletAddress: wallet,
+      });
+    });
+    if (!improved.compileOk) {
+      throw new ToolkitError(
+        "internal",
+        "The AI produced an improved strategy that failed to compile. Try again.",
+        true,
+      );
+    }
+    const { parsePineScript } = await import("../lab/pine-parser");
+    const parsed = parsePineScript(improved.pineScript);
+    if (parsed.inputs.length === 0) {
+      throw new ToolkitError("invalid_input", "The improved strategy has no parameters to optimize.", false);
+    }
+    const newStrategy = await this.storage.createStrategy({
+      name: `${strategy.name} (improved)`,
+      pineScript: improved.pineScript,
+      description: null,
+      parsedInputs: parsed.inputs,
+      groups: parsed.groups ?? null,
+      strategySettings: parsed.strategySettings ?? null,
+      userId: wallet,
+    });
+    // Enqueue a FRESH full optimization for the improved strategy, mirroring the
+    // base run's market scope (tickers / timeframes / window) so its results are
+    // directly comparable to the original. A fresh random->refine->deep search gets
+    // its OWN holdout (default if the base lacked one) — we are NOT propagating the
+    // parent's best params, so refine's holdout-forward REJECTION does not apply.
+    const srcConfig = recoverRunConfig(baseRun);
+    const srcTickers = Array.isArray(baseRun.tickers) ? (baseRun.tickers as string[]) : [];
+    const srcTimeframes = Array.isArray(baseRun.timeframes) ? (baseRun.timeframes as string[]) : [];
+    const tickers = srcConfig?.tickers?.length ? srcConfig.tickers : srcTickers;
+    const timeframes = srcConfig?.timeframes?.length ? srcConfig.timeframes : srcTimeframes;
+    if (tickers.length === 0 || timeframes.length === 0) {
+      throw new ToolkitError("conflict", "The base run has no market scope to mirror.", false);
+    }
+    const oosFraction = srcConfig?.outOfSampleFraction ?? baseRun.oosFraction ?? DEFAULT_AGENT_OOS_FRACTION;
+    const slippage = srcConfig?.slippage ?? baseRun.slippage ?? DEFAULT_LAB_SLIPPAGE;
+    const startDate = srcConfig?.startDate ?? baseRun.startDate ?? isoDaysAgo(365);
+    const endDate = srcConfig?.endDate ?? baseRun.endDate ?? isoDaysAgo(0);
+    const randomSamples = srcConfig?.randomSamples ?? baseRun.randomSamples ?? LAB_RANDOM_SAMPLES;
+    const topK = srcConfig?.topK ?? baseRun.topK ?? LAB_TOPK;
+    const refinementsPerSeed = srcConfig?.refinementsPerSeed ?? baseRun.refinementsPerSeed ?? LAB_REFINEMENTS_PER_SEED;
+    const minTrades = srcConfig?.minTrades ?? baseRun.minTrades ?? LAB_MIN_TRADES;
+    const maxDrawdownCap = srcConfig?.maxDrawdownCap ?? baseRun.maxDrawdownCap ?? LAB_MAX_DRAWDOWN_CAP;
+
+    const config: LabOptimizationConfig = {
+      pineScript: improved.pineScript,
+      parsedInputs: parsed.inputs,
+      tickers,
+      timeframes,
+      startDate,
+      endDate,
+      randomSamples,
+      topK,
+      refinementsPerSeed,
+      minTrades,
+      maxDrawdownCap,
+      minAvgBarsHeld: srcConfig?.minAvgBarsHeld ?? LAB_MIN_AVG_BARS_HELD,
+      mode: "sweep",
+      strategyId: newStrategy.id,
+      // Improved strategies are interpreter (Pine) engines — never native — so the
+      // stored pine script IS the source of truth; no engineType.
+      engineType: undefined,
+      useInsights: false,
+      deepSearch: true,
+      coordinateTune: true,
+      outOfSampleFraction: oosFraction,
+      slippage,
+    };
+
+    const { run, idempotent, correlationId } = await this.idempotentEnqueue(
+      ctx,
+      taskId,
+      input.idempotencyKey,
+      ({ correlationId, queueOrder }) => ({
+        strategyId: newStrategy.id,
+        userId: wallet,
+        tickers,
+        timeframes,
+        startDate,
+        endDate,
+        randomSamples,
+        topK,
+        refinementsPerSeed,
+        minTrades,
+        maxDrawdownCap,
+        mode: "sweep",
+        status: "queued",
+        queueOrder,
+        oosFraction,
+        slippage,
+        configSnapshot: {
+          type: "new",
+          config,
+          improvedFromStrategyId: input.strategyId,
+          baseRunId: baseRun.id,
+        } as any,
+        agentTaskId: taskId,
+        agentIdempotencyKey: input.idempotencyKey,
+        agentCorrelationId: correlationId,
+        agentOwned: true,
+      }),
+    );
+    return this.toRunQueued(run, idempotent, correlationId);
   }
 
   async cancelRun(
@@ -666,8 +1092,9 @@ export class CurrentLabAdapter implements LabAgentAdapter {
 export function createCurrentLabAdapter(
   storage: AdapterStorage,
   onRunQueued?: (runId: number) => void,
+  resolveLlmKey?: (wallet: string) => Promise<Buffer | null>,
 ): LabAgentAdapter {
-  return new CurrentLabAdapter(storage, onRunQueued);
+  return new CurrentLabAdapter(storage, onRunQueued, resolveLlmKey);
 }
 
 /**

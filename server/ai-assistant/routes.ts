@@ -147,9 +147,22 @@ export function registerCreatorRoutes(
       /* never let a kick failure break the enqueue */
     }
   };
+  // BYO-key resolver for the adapter's LLM-backed tools (createStrategyFromText /
+  // improve). Decrypts the wallet's stored OpenRouter key transiently; the adapter
+  // zeroizes the returned buffer after use. null = key deleted or session locked
+  // (mirrors startTurnWithKey's "no-key" degrade) → the tool returns a typed
+  // conflict, never a crash.
+  const resolveLlmKey = async (walletAddress: string): Promise<Buffer | null> => {
+    const ciphertext = await storage.getWalletLlmApiKeyCiphertext(walletAddress);
+    if (!ciphertext) return null;
+    const sessionRes = getSessionByWalletAddress(walletAddress);
+    const umk = sessionRes?.session?.umk;
+    if (!umk) return null;
+    return decryptLlmApiKeyV3(umk, ciphertext, walletAddress);
+  };
   const labOrchestrator = createLabTurnOrchestrator({
     storage: labStorage,
-    toolkit: new LabAgentToolkit(createCurrentLabAdapter(labStorage, kickLabQueue)),
+    toolkit: new LabAgentToolkit(createCurrentLabAdapter(labStorage, kickLabQueue, resolveLlmKey)),
     reconcile: (taskId: number) => reconcileTask(labStorage, taskId),
     composeReply: composeAgentReply,
     estimateCost: estimateCallCostUsd,

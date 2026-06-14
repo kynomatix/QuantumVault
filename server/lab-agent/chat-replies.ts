@@ -18,6 +18,14 @@ export interface ComposedReply {
   suggestedActions: AgentSuggestedAction[];
 }
 
+/** Optional result context the orchestrator passes after a turn so the reply can
+ *  offer result-aware NEXT-STEP chips. All fields nullable — chips appear only for
+ *  whatever is present (a current strategy, a finished run, or both). */
+export interface NextStepContext {
+  strategyId?: number | null;
+  lastRunId?: number | null;
+}
+
 // Tabs the chips can deep-link to — mirror client/src/pages/QuantumLab.tsx
 // `MainTab` ("hub" | "main" | "results" | "heatmap" | "insights" | "creator").
 // "main" is the Backtest Setup tab.
@@ -184,7 +192,7 @@ function withKeyGuidance(reply: ComposedReply): ComposedReply {
  * `hasKey` lets AI-step replies nudge the user to add their OpenRouter key; it
  * defaults to true so chatting never nags someone who already has one.
  */
-export function composeAgentReply(userContent: string, hasKey = true): ComposedReply {
+function baseAgentReply(userContent: string, hasKey: boolean): ComposedReply {
   const raw = (userContent ?? "").trim();
 
   // Explicit key questions: answer with the secure flow + current status. Note
@@ -216,5 +224,59 @@ export function composeAgentReply(userContent: string, hasKey = true): ComposedR
       "I can help you draft strategies, run backtests, read your results, and understand why a strategy wins or loses. " +
       "Pick one below — or tell me what you're trying to do.",
     suggestedActions: STARTER_ACTIONS,
+  };
+}
+
+/** Result-aware NEXT-STEP chips. `kind:"send"` so a click sends a follow-up message
+ *  back to the agent (which then calls the matching tool). Gated by what's available:
+ *  a finished run unlocks Refine; a current strategy unlocks Improve + try-another-
+ *  asset. The agent re-checks the REAL preconditions (e.g. refine needs a holdout,
+ *  improve needs existing results) and will explain if a chip can't proceed. */
+function nextStepActions(ctx: NextStepContext): AgentSuggestedAction[] {
+  const out: AgentSuggestedAction[] = [];
+  if (ctx.lastRunId != null) {
+    out.push({
+      id: "next-refine",
+      label: "Refine the best result",
+      kind: "send",
+      message: `Refine run #${ctx.lastRunId} to hone its best parameters.`,
+    });
+  }
+  if (ctx.strategyId != null) {
+    out.push({
+      id: "next-improve",
+      label: "Improve this strategy",
+      kind: "send",
+      message: `Improve strategy #${ctx.strategyId} based on its backtest weaknesses.`,
+    });
+    out.push({
+      id: "next-another-asset",
+      label: "Try another asset",
+      kind: "send",
+      message: `Backtest strategy #${ctx.strategyId} on another asset to check robustness.`,
+    });
+  }
+  return out;
+}
+
+/**
+ * Public entry: the deterministic reply (see {@link baseAgentReply}) plus — when the
+ * orchestrator supplies result context — result-aware next-step chips appended after
+ * the base chips. Dedupes by id and never drops a base chip. `resultCtx` omitted =
+ * pure shell reply (back-compat for the degrade path and unit tests).
+ */
+export function composeAgentReply(
+  userContent: string,
+  hasKey = true,
+  resultCtx?: NextStepContext,
+): ComposedReply {
+  const base = baseAgentReply(userContent, hasKey);
+  if (!resultCtx) return base;
+  const extra = nextStepActions(resultCtx);
+  if (extra.length === 0) return base;
+  const seen = new Set(base.suggestedActions.map((a) => a.id));
+  return {
+    content: base.content,
+    suggestedActions: [...base.suggestedActions, ...extra.filter((a) => !seen.has(a.id))],
   };
 }

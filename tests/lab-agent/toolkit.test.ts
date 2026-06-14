@@ -284,12 +284,12 @@ describe("reads: findStrategy", () => {
 });
 
 describe("reads: getTopResults", () => {
-  it("returns honest lab_objective ranking with per-run OOS resolved", async () => {
+  it("returns robustness ranking with per-run OOS resolved", async () => {
     const { toolkit } = makeToolkit();
     const res = await toolkit.call(ctx, "getTopResults", { strategyId: 1 });
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(res.data.rankedBy).toBe("lab_objective");
+    expect(res.data.rankedBy).toBe("robustness");
     expect(res.data.runId).toBeNull(); // spans runs
     expect(res.data.results).toHaveLength(1);
     const r = res.data.results[0];
@@ -386,8 +386,6 @@ describe("reads: getQueuePosition", () => {
 describe("deferred methods return not_implemented", () => {
   const cases: Array<[string, unknown]> = [
     ["listTemplates", {}],
-    ["getHeatmap", { runId: 10 }],
-    ["generateInsights", { strategyId: 1, idempotencyKey: "k" }],
     ["createStrategyFromText", { prompt: "make a thing", idempotencyKey: "k" }],
     ["createStrategyFromTemplate", { templateId: "t1", idempotencyKey: "k" }],
     ["improve", { strategyId: 1, insightsOrWeaknesses: "too few trades", idempotencyKey: "k" }],

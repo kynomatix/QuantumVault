@@ -304,7 +304,7 @@ export function toInsightsReportDto(report: LabInsightsReport): InsightsReportDt
 }
 
 export function toHeatmapDto(input: {
-  runId: number;
+  strategyId: number;
   xParam: string;
   yParam: string;
   metricName: string;
@@ -312,7 +312,7 @@ export function toHeatmapDto(input: {
 }): HeatmapDto {
   const capped = input.cells.slice(0, MAX_HEATMAP_CELLS);
   return {
-    runId: input.runId,
+    strategyId: input.strategyId,
     xParam: input.xParam,
     yParam: input.yParam,
     metricName: input.metricName,

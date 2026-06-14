@@ -359,14 +359,14 @@ describe("toInsightsReportDto", () => {
 describe("toHeatmapDto", () => {
   it("caps cells and flags truncation", () => {
     const cells = Array.from({ length: MAX_HEATMAP_CELLS + 50 }, (_, i) => ({ x: i, y: 0, metric: i }));
-    const dto = toHeatmapDto({ runId: 7, xParam: "len", yParam: "mult", metricName: "netProfit", cells });
+    const dto = toHeatmapDto({ strategyId: 7, xParam: "len", yParam: "mult", metricName: "netProfit", cells });
     expect(() => heatmapDtoSchema.parse(dto)).not.toThrow();
     expect(dto.cells).toHaveLength(MAX_HEATMAP_CELLS);
     expect(dto.truncated).toBe(true);
   });
   it("does not flag truncation when within bounds", () => {
     const dto = toHeatmapDto({
-      runId: 7,
+      strategyId: 7,
       xParam: "len",
       yParam: "mult",
       metricName: "netProfit",

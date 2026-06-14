@@ -5,7 +5,6 @@
 // (Pine runtime does not compute Sharpe), and the storage persistence fallback.
 
 import type {
-  LabBacktestResult,
   LabTradeRecord,
   LabWindowMetrics,
   LabOosMetrics,
@@ -197,7 +196,23 @@ export function computeWindowMetrics(
 //     - 50*max(0, sharpe_IS - sharpe_OOS). The Sharpe GAP (not ratio) is the
 //       scale-stable divergence metric; a config that looks great in-sample but
 //       falls apart out-of-sample is pushed down hard.
-export function robustnessRank(r: LabBacktestResult): number {
+/**
+ * Minimal structural input for {@link robustnessRank}. `LabBacktestResult` and
+ * the adapter's result rows are both supersets of this, so every existing caller
+ * passes unchanged — this only narrows what the function is allowed to read.
+ */
+export type RankableResult = {
+  netProfitPercent: number;
+  winRatePercent: number;
+  maxDrawdownPercent: number;
+  profitFactor: number;
+  totalTrades: number;
+  sharpeRatio?: number;
+  is?: LabWindowMetrics | null;
+  oos?: LabOosMetrics | null;
+};
+
+export function robustnessRank(r: RankableResult): number {
   const full = robustScore({
     netProfitPercent: r.netProfitPercent,
     winRatePercent: r.winRatePercent,
