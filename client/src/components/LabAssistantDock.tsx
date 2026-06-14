@@ -13,7 +13,8 @@ import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { Sparkles, Send, X, Bot, Loader2 } from "lucide-react";
+import { Sparkles, Send, X, Bot, Loader2, Wallet } from "lucide-react";
+import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import type { AgentSuggestedAction } from "@shared/schema";
 import { looksLikeApiKey } from "@shared/api-key-detect";
 
@@ -67,6 +68,10 @@ export function LabAssistantDock({
   const [reconnectError, setReconnectError] = useState<string | null>(null);
   const qc = useQueryClient();
   const listRef = useRef<HTMLDivElement | null>(null);
+  // Opens the Solana wallet-adapter picker so a fully signed-out user can connect
+  // right from the chat. Once a wallet connects, useWallet auto-runs sign-in and
+  // the open effect starts the chat task — no extra wiring is needed here.
+  const { setVisible: setWalletModalVisible } = useWalletModal();
 
   // Open → make sure there's an active chat task (created or reused), seeded with
   // the greeting. The response already carries the messages, so prime the cache.
@@ -264,7 +269,7 @@ export function LabAssistantDock({
               <p className="max-w-[240px] text-xs text-white/40">
                 {walletAddress
                   ? "Your session went idle. Re-sign in your wallet to pick up where you left off — no need to leave this chat."
-                  : "Connect your wallet on QuantumLab, then the assistant can guide you around."}
+                  : "Connect your wallet to start — then the assistant can guide you around QuantumLab."}
               </p>
               {walletAddress && onReconnect && (
                 <>
@@ -284,6 +289,17 @@ export function LabAssistantDock({
                     </p>
                   )}
                 </>
+              )}
+              {!walletAddress && (
+                <button
+                  type="button"
+                  onClick={() => setWalletModalVisible(true)}
+                  data-testid="button-lab-assistant-connect"
+                  className="mt-1 inline-flex items-center gap-1.5 rounded-full border border-indigo-400/30 bg-indigo-500/10 px-3.5 py-1.5 text-xs font-medium text-indigo-200 transition-colors hover:bg-indigo-500/20"
+                >
+                  <Wallet className="h-3.5 w-3.5" />
+                  Connect wallet
+                </button>
               )}
             </div>
           )}
