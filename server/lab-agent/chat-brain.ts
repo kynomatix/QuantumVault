@@ -262,6 +262,10 @@ export interface AutoMemory {
   graduated?: boolean;
 }
 
+// The auto-pipeline's target basket. SOL is the PROVING symbol (proved first); the rest
+// are the GRADUATION set it widens to once SOL holds up out-of-sample (see auto-planner.ts
+// + docs/LAB_AGENT_SANDBOX_PLAN.md §6b). ⚠️ ETH/ARB are PLACEHOLDER graduation tickers —
+// swap them here for better candidates whenever we pick them; keep SOL first as the prover.
 export const DEFAULT_AUTO_SYMBOLS = ["SOL", "ETH", "ARB"];
 
 /** The zero-value AutoMemory for a fresh auto task. */
