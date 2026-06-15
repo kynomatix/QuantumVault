@@ -9,7 +9,7 @@
 // long async run. All authenticated reads go through apiRequest, which stamps the
 // x-wallet-address header so a stale session fails closed.
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
@@ -89,6 +89,24 @@ function apiErrorMessage(err: unknown, fallback: string): string {
     /* body wasn't JSON — fall through */
   }
   return body || fallback;
+}
+
+// Render the small slice of markdown the assistant emits — currently just **bold** —
+// without pulling in a markdown dependency. We split on the bold delimiter and wrap
+// the captured (odd-index) segments in <strong>; everything else stays a plain text
+// node. There's no dangerouslySetInnerHTML, so the content remains inert React text
+// with no injection surface. Newlines are preserved by whitespace-pre-wrap on the
+// parent, and a lone/unmatched ** simply renders literally.
+function renderRichText(text: string): ReactNode {
+  return text.split(/\*\*(.+?)\*\*/g).map((seg, i) =>
+    i % 2 === 1 ? (
+      <strong key={i} className="font-semibold">
+        {seg}
+      </strong>
+    ) : (
+      seg
+    ),
+  );
 }
 
 export function LabAssistantDock({
@@ -627,7 +645,7 @@ export function LabAssistantDock({
                       <Bot className="h-3 w-3" /> Assistant
                     </span>
                   )}
-                  <p className="whitespace-pre-wrap break-words leading-relaxed">{m.content}</p>
+                  <p className="whitespace-pre-wrap break-words leading-relaxed">{renderRichText(m.content)}</p>
                 </div>
               </div>
             );
