@@ -216,3 +216,40 @@ describe("looksLikeApiKey (pasted-secret guard)", () => {
     expect(looksLikeApiKey(undefined)).toBe(false);
   });
 });
+
+describe("capability-positive copy (no stale 'coming later' persona)", () => {
+  // The whole point of the fix: the fallback shell must never tell the user a
+  // capability is "coming later" or that it "can only guide" — it describes what
+  // the assistant actually does now.
+  const BANNED =
+    /coming soon|coming next|later phase|i can only guide|driving the lab for you directly is coming|soon i'll be able/i;
+  const samples = [
+    "create a strategy for me",
+    "run a backtest",
+    "what's my best result?",
+    "why is my strategy losing?",
+    "refine my run",
+    "show me the heatmap",
+    "improve my strategy",
+    "what can you do?",
+    "random gibberish",
+  ];
+
+  it("never deflects with a 'coming later' / 'guide only' persona", () => {
+    expect(SEED_GREETING.content).not.toMatch(BANNED);
+    for (const s of samples) {
+      for (const hasKey of [true, false]) {
+        expect(composeAgentReply(s, hasKey).content).not.toMatch(BANNED);
+      }
+    }
+  });
+
+  it("stays honest for a keyless wallet (a key is needed to RUN) without nagging reading intents with an add-key chip", () => {
+    // Non-AI action intent, no key: the copy names the key need, but adds NO add-key chip.
+    const noKey = composeAgentReply("run a backtest", false);
+    expect(noKey.content).toMatch(/openrouter/i);
+    expect(noKey.suggestedActions.some((a) => a.id === "nav-add-key")).toBe(false);
+    // With a key, that note is gone — the assistant just speaks in present tense.
+    expect(composeAgentReply("run a backtest", true).content).not.toMatch(/openrouter/i);
+  });
+});
