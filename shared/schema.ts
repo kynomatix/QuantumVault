@@ -1199,11 +1199,14 @@ export const labAgentTasks = pgTable("lab_agent_tasks", {
 ]);
 
 // A chip the assistant can attach to a message (§11 option bubbles). `navigate`
-// switches a QuantumLab tab client-side; `send` posts a predefined follow-up.
+// switches a QuantumLab tab client-side; `send` posts a predefined follow-up;
+// `reconnect` re-signs the wallet in place to reload the session UMK (needs neither
+// message nor tab) — used when a saved key is present but the idle session can't
+// unlock it.
 export const agentSuggestedActionSchema = z.object({
   id: z.string(),
   label: z.string(),
-  kind: z.enum(["send", "navigate"]),
+  kind: z.enum(["send", "navigate", "reconnect"]),
   message: z.string().optional(),
   tab: z.string().optional(),
 });

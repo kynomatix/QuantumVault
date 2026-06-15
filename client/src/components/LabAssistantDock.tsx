@@ -76,6 +76,21 @@ const mergeMessages = (
   };
 };
 
+// apiRequest throws Error("<status>: <body>"); the body is usually JSON {error:"…"}.
+// Pull out the human-readable message for an inline notice so a failed mutation
+// (e.g. a locked session on /auto/start) surfaces the real reason instead of nothing.
+function apiErrorMessage(err: unknown, fallback: string): string {
+  const raw = err instanceof Error ? err.message : String(err ?? "");
+  const body = raw.replace(/^\d+:\s*/, "");
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed && typeof parsed.error === "string" && parsed.error) return parsed.error;
+  } catch {
+    /* body wasn't JSON — fall through */
+  }
+  return body || fallback;
+}
+
 export function LabAssistantDock({
   walletAddress,
   sessionConnected = false,
@@ -196,6 +211,11 @@ export function LabAssistantDock({
         mergeMessages(prev, data),
       );
     },
+    onError: (err) => {
+      // Don't swallow a hard send failure — show why (the normal degrade path returns
+      // 200 with a shell reply, so this only fires on a true error).
+      setNotice(apiErrorMessage(err, "Couldn't send your message. Try again."));
+    },
   });
 
   // Resume a parked turn after an async lab run. One in-flight at a time (the
@@ -205,12 +225,14 @@ export function LabAssistantDock({
   const step = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", `/api/lab/agent/chat/${taskId}/step`);
-      return (await res.json()) as { task?: TurnTask | null; resumed: boolean };
+      return (await res.json()) as { task?: TurnTask | null; resumed: boolean; messages?: ChatMessage[] };
     },
     onSuccess: (data) => {
       if (!data.task) return;
+      // /step can return a message too (the locked-session note when the turn loses the
+      // key mid-flight) — merge it so it renders before polling stops at turn_state ready.
       qc.setQueryData<MessagesResponse>(messagesKey(taskId, walletAddress), (prev) =>
-        prev ? { ...prev, task: data.task } : prev,
+        mergeMessages(prev, { messages: data.messages ?? [], task: data.task }),
       );
     },
   });
@@ -228,6 +250,11 @@ export function LabAssistantDock({
       qc.setQueryData<MessagesResponse>(messagesKey(taskId, walletAddress), (prev) =>
         mergeMessages(prev, data),
       );
+    },
+    onError: (err) => {
+      // Surface the real reason (e.g. a locked session) instead of the button silently
+      // doing nothing — the #1 reason "the Auto button doesn't do anything."
+      setNotice(apiErrorMessage(err, "Couldn't start the auto run. Try again."));
     },
   });
 
@@ -342,7 +369,16 @@ export function LabAssistantDock({
   // never land here (the server rejects it too).
   function startAuto() {
     const goal = draft.trim();
-    if (!goal || !canChat || autoStart.isPending || turnActive || isAuto) return;
+    if (!canChat || autoStart.isPending || turnActive || isAuto) return;
+    // Empty composer: explain what Auto is instead of silently no-opping (the button is
+    // intentionally clickable while empty so a tap teaches the feature — "what is the
+    // Auto button? it doesn't seem to do anything").
+    if (!goal) {
+      setNotice(
+        "Auto-run builds it for you: type what you want (e.g. “a mean-reversion bot for SOL”), then tap Auto — I'll draft, backtest and refine it, pausing to confirm before any paid AI step.",
+      );
+      return;
+    }
     if (looksLikeApiKey(goal)) {
       setDraft("");
       setNotice(
@@ -357,9 +393,13 @@ export function LabAssistantDock({
   }
 
   function handleAction(action: AgentSuggestedAction) {
-    // Navigation never needs a session; "send" chips do.
+    // Navigation never needs a session; "send" chips do; "reconnect" re-signs in place
+    // to reload the session UMK (the fix for a saved-but-locked key — a plain wallet
+    // reconnect won't restore it, only a re-sign does).
     if (action.kind === "navigate" && action.tab) {
       onNavigate(action.tab);
+    } else if (action.kind === "reconnect") {
+      void handleReconnect();
     } else if (action.kind === "send" && action.message && canChat && !send.isPending && !turnActive) {
       send.mutate(action.message);
     }
@@ -603,7 +643,12 @@ export function LabAssistantDock({
                 key={a.id}
                 type="button"
                 onClick={() => handleAction(a)}
-                disabled={send.isPending || turnActive || (a.kind === "send" && !canChat)}
+                disabled={
+                  send.isPending ||
+                  turnActive ||
+                  (a.kind === "send" && !canChat) ||
+                  (a.kind === "reconnect" && (reconnectBusy || reconnecting))
+                }
                 data-testid={`chip-lab-assistant-${a.id}`}
                 className="rounded-full border border-indigo-400/30 bg-indigo-500/10 px-3 py-1 text-xs font-medium text-indigo-200 transition-colors hover:bg-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -677,7 +722,7 @@ export function LabAssistantDock({
             size="sm"
             variant="ghost"
             onClick={startAuto}
-            disabled={!draft.trim() || autoStart.isPending || !canChat || turnActive || isAuto}
+            disabled={autoStart.isPending || !canChat || turnActive || isAuto}
             title="Auto-run this as a goal — I'll build, backtest and refine, pausing to confirm before any paid AI step."
             data-testid="button-lab-assistant-auto"
             className="shrink-0 gap-1 border border-indigo-400/40 bg-indigo-500/10 px-2.5 text-xs text-indigo-200 hover:bg-indigo-500/20"

@@ -30,7 +30,7 @@ import { getCreatorModelCatalog, isSelectableModel, estimateCallCostUsd, getMode
 import { LlmGatewayError, checkRateLimit } from "./router";
 import { startCreatorJob, getCreatorJob, CreatorJobConflictError } from "./creator-jobs";
 import { labStorage } from "../lab/storage";
-import { SEED_GREETING, composeAgentReply } from "../lab-agent/chat-replies";
+import { SEED_GREETING, composeAgentReply, SESSION_LOCKED_REPLY } from "../lab-agent/chat-replies";
 import { decideTurnAction, defaultAutoMemory, type BrainFn, type AutoMemory, type PaidTool } from "../lab-agent/chat-brain";
 import { createAutoPlanner } from "../lab-agent/auto-planner";
 import { looksLikeApiKey } from "@shared/api-key-detect";
@@ -370,10 +370,17 @@ export function registerCreatorRoutes(
           });
           const outcome = await startTaskTurn(r.walletAddress, taskId, undefined, "auto");
           if (outcome === "no-key") {
-            // Key/session gone between park and confirm: end cleanly so the run doesn't
-            // hang awaiting a key the paid tool can't resolve.
+            // Key/session gone between park and confirm (UMK dropped after an idle
+            // reconnect): end the run AND tell the user why with a one-tap re-sign, rather
+            // than silently dropping the paid step they just approved. Back to chat so the
+            // dock isn't stranded awaiting a confirm it can never fulfil.
             await labStorage.updateAgentTask(taskId, {
-              turnState: "ready", turnStateChangedAt: new Date(),
+              mode: "chat", status: "active", turnState: "ready", turnStateChangedAt: new Date(),
+            });
+            await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
+              role: "agent",
+              content: SESSION_LOCKED_REPLY.content,
+              suggestedActions: SESSION_LOCKED_REPLY.suggestedActions,
             });
           }
           const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
@@ -452,8 +459,14 @@ export function registerCreatorRoutes(
 
       // Compose-and-return the deterministic shell synchronously. Shared by the
       // no-key path and every has-key degrade (rate-limited, locked session, etc.).
-      const degradeToShell = async () => {
-        const reply = composeAgentReply(content, keyMeta.hasKey);
+      // `sessionLocked` distinguishes "key saved but the idle session can't unlock it"
+      // (offer a one-tap re-sign) from a true keyless wallet / transient degrade (the
+      // generic capability shell). Without this the locked user gets the SAME canned
+      // reply as a keyless one — silent, with no way back to the full assistant.
+      const degradeToShell = async (opts?: { sessionLocked?: boolean }) => {
+        const reply = opts?.sessionLocked
+          ? SESSION_LOCKED_REPLY
+          : composeAgentReply(content, keyMeta.hasKey);
         const agentMsg = await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
           role: "agent", content: reply.content, suggestedActions: reply.suggestedActions,
         });
@@ -487,11 +500,14 @@ export function registerCreatorRoutes(
 
         const outcome = await startTaskTurn(r.walletAddress, taskId, model, existing.mode);
         if (outcome === "no-key") {
-          // Key deleted or session locked between the meta read and the decrypt.
+          // We only reach here when keyMeta.hasKey was true (the keyless path returned
+          // above), so "no-key" now means the SESSION can't unlock a saved key — the UMK
+          // is gone after an idle reconnect. Surface the locked state + a re-sign chip
+          // instead of pretending there's no key (which read as "the assistant degraded").
           await labStorage.updateAgentTask(taskId, {
             turnState: "ready", turnStateChangedAt: new Date(),
           });
-          return await degradeToShell();
+          return await degradeToShell({ sessionLocked: true });
         }
         const task = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
         return res.status(202).json({ messages: [userMsg], task: task ? toTurnTaskDto(task) : null });
@@ -564,18 +580,34 @@ export function registerCreatorRoutes(
 
       const outcome = await startTaskTurn(r.walletAddress, taskId, model, task.mode);
       if (outcome === "no-key") {
-        // Key/session gone mid-turn: the orchestrator needs the key to interpret a
-        // finished run, so end the parked turn cleanly (ready) rather than hang. A pending
-        // run, if any, is folded later if the user re-adds their key. A pending Stop can't
-        // strand here: it's consumed key-free at the top of /step, and a Stop racing this
-        // no-key step finalizes directly in /auto/stop (its isLabTurnRunning route sees no
-        // live loop, since a no-key step never starts one).
+        // Key/session gone mid-turn (the UMK dropped after an idle reconnect): the
+        // orchestrator needs the key to interpret a finished run, so end the parked turn
+        // rather than hang. Crucially, POST the locked-session note + re-sign chip — this
+        // is the exact "no reply" symptom when an auto goal's turn loses the key, and a
+        // silent reset to ready leaves the user staring at nothing. Drop back to chat so
+        // the dock isn't stranded in an awaiting-confirm state with a disabled composer.
+        // Posted once: the next /step early-returns at the ready guard above (no dupes).
+        // A pending run, if any, is folded later if the user re-adds their key. A pending
+        // Stop can't strand here: it's consumed key-free at the top of /step, and a Stop
+        // racing this no-key step finalizes directly in /auto/stop (its isLabTurnRunning
+        // route sees no live loop, since a no-key step never starts one).
         await labStorage.updateAgentTask(taskId, {
+          mode: "chat",
+          status: "active",
           turnState: "ready",
           turnStateChangedAt: new Date(),
         });
+        const lockedMsg = await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
+          role: "agent",
+          content: SESSION_LOCKED_REPLY.content,
+          suggestedActions: SESSION_LOCKED_REPLY.suggestedActions,
+        });
         const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
-        return res.status(202).json({ task: updated ? toTurnTaskDto(updated) : null, resumed: false });
+        return res.status(202).json({
+          task: updated ? toTurnTaskDto(updated) : null,
+          resumed: false,
+          messages: lockedMsg ? [lockedMsg] : [],
+        });
       }
       const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
       return res.status(202).json({ task: updated ? toTurnTaskDto(updated) : null, resumed: true });
@@ -658,11 +690,25 @@ export function registerCreatorRoutes(
 
       const outcome = await startTaskTurn(r.walletAddress, taskId, undefined, "auto");
       if (outcome === "no-key") {
-        // Key/session vanished between the meta read and the decrypt: revert cleanly.
+        // Key/session locked between the meta read and the decrypt (UMK dropped after an
+        // idle reconnect): revert to chat AND post the locked-session note with a re-sign
+        // chip, rather than a bare 400. In this exact state the composer is visible
+        // (signedIn=true), so the signed-out Reconnect panel is NOT rendered — a plain
+        // error toast would tell the user to reconnect with no in-dock button to do it.
+        // Posting the chip (mirrors the /messages, /step and auto-confirm no-key sites)
+        // gives a one-tap re-sign. The goal we just recorded stays in the transcript; a
+        // later re-signed /auto/start starts a fresh run.
         await labStorage.updateAgentTask(taskId, {
-          mode: "chat", turnState: "ready", turnStateChangedAt: new Date(),
+          mode: "chat", status: "active", turnState: "ready", turnStateChangedAt: new Date(),
         });
-        return res.status(400).json({ error: "Your session is locked — reconnect your wallet and try again." });
+        await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
+          role: "agent",
+          content: SESSION_LOCKED_REPLY.content,
+          suggestedActions: SESSION_LOCKED_REPLY.suggestedActions,
+        });
+        const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+        const msgs = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
+        return res.status(202).json({ messages: msgs, task: updated ? toTurnTaskDto(updated) : null });
       }
       const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
       const msgs = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);

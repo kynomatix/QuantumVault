@@ -5,6 +5,7 @@ import {
   composeAgentReply,
   SEED_GREETING,
   STARTER_ACTIONS,
+  SESSION_LOCKED_REPLY,
 } from "../../server/lab-agent/chat-replies";
 
 // Mirror client/src/pages/QuantumLab.tsx `MainTab`.
@@ -38,6 +39,18 @@ describe("STARTER_ACTIONS", () => {
     expectValidActions(STARTER_ACTIONS);
     const ids = STARTER_ACTIONS.map((a) => a.id);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+describe("SESSION_LOCKED_REPLY", () => {
+  it("explains the locked state and offers a single reconnect chip (no tab/message needed)", () => {
+    expect(SESSION_LOCKED_REPLY.content.length).toBeGreaterThan(0);
+    expectValidActions(SESSION_LOCKED_REPLY.suggestedActions);
+    const reconnect = SESSION_LOCKED_REPLY.suggestedActions.filter((a) => a.kind === "reconnect");
+    expect(reconnect.length).toBe(1);
+    // A reconnect chip drives the wallet re-sign client-side, so it carries no tab/message.
+    expect(reconnect[0].tab).toBeUndefined();
+    expect(reconnect[0].message).toBeUndefined();
   });
 });
 

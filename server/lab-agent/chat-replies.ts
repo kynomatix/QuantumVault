@@ -55,6 +55,21 @@ export const STARTER_ACTIONS: AgentSuggestedAction[] = [
   ASK.whyLosing,
 ];
 
+/** Degrade reply for the "key saved but this session can't unlock it" case: the wallet
+ *  HAS an OpenRouter key, but the in-memory session UMK is gone (the session went idle and
+ *  was reconnected — a wallet reconnect re-binds the session but does NOT reload the UMK;
+ *  only a fresh re-sign does). Without the UMK the chat can't decrypt the key, so the LLM
+ *  turn can't run. Rather than fall back to the canned shell with NO signal (which reads as
+ *  "the assistant got dumber" and gives no way out), name the real cause and offer a
+ *  one-tap re-sign (kind:"reconnect"). */
+export const SESSION_LOCKED_REPLY: ComposedReply = {
+  content:
+    "Your OpenRouter key is saved — but this session is locked, so I can only give canned answers right now. " +
+    "(Your session went idle; reconnecting the wallet re-links it but doesn't reload the key.) " +
+    "Tap “Reconnect to unlock” to re-sign in your wallet, and I'll be back to full strength.",
+  suggestedActions: [{ id: "reconnect-session", label: "Reconnect to unlock", kind: "reconnect" }],
+};
+
 /** First message seeded into a brand-new chat task. */
 export const SEED_GREETING: ComposedReply = {
   content:
