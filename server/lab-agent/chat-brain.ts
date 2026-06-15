@@ -247,6 +247,13 @@ export interface AutoMemory {
   symbols: string[];
   pendingConfirm?: AutoPendingConfirm | null;
   confirmedToken?: string | null;
+  /**
+   * Task 201: the user's hands-off INTENT for this run, captured at /auto/start and
+   * only ever set true for an admin-whitelisted wallet. When true, the orchestrator
+   * AUTO-APPROVES paid steps (no confirm chip) — but ONLY after it re-checks the live
+   * whitelist (fail-closed). A non-whitelisted run leaves this false → watched mode.
+   */
+  handsOff?: boolean;
 }
 
 export const DEFAULT_AUTO_SYMBOLS = ["SOL", "ETH", "ARB"];
@@ -261,6 +268,7 @@ export function defaultAutoMemory(): AutoMemory {
     symbols: [...DEFAULT_AUTO_SYMBOLS],
     pendingConfirm: null,
     confirmedToken: null,
+    handsOff: false,
   };
 }
 

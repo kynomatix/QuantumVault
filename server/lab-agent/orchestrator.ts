@@ -184,6 +184,13 @@ export interface OrchestratorDeps {
   limits?: Partial<OrchestratorLimits>;
   now?: () => Date;
   genToken?: () => string;
+  /**
+   * Task 201: LIVE hands-off authorization for a wallet (admin whitelist). The
+   * orchestrator calls this fail-closed before EVERY auto-approval — if it's absent,
+   * returns false, or throws, the run stays in watched mode (parks on a confirm chip).
+   * Persisted `auto.handsOff` only records the user's intent; this is the real gate.
+   */
+  isHandsOffApproved?: (walletAddress: string) => Promise<boolean>;
 }
 
 // --- helpers (pure) --------------------------------------------------------------
@@ -292,6 +299,7 @@ export class LabTurnOrchestrator {
   private readonly limits: OrchestratorLimits;
   private readonly now: () => Date;
   private readonly genToken: () => string;
+  private readonly isHandsOffApproved: (walletAddress: string) => Promise<boolean>;
 
   constructor(deps: OrchestratorDeps) {
     this.storage = deps.storage;
@@ -302,6 +310,8 @@ export class LabTurnOrchestrator {
     this.limits = { ...DEFAULT_LIMITS, ...(deps.limits ?? {}) };
     this.now = deps.now ?? (() => new Date());
     this.genToken = deps.genToken ?? (() => createHash("sha256").update(`${Date.now()}:${Math.random()}`).digest("hex"));
+    // Fail-closed default: no injected gate ⇒ hands-off is never authorized.
+    this.isHandsOffApproved = deps.isHandsOffApproved ?? (async () => false);
   }
 
   /**
@@ -471,9 +481,23 @@ export class LabTurnOrchestrator {
         // A Stop can land AFTER this iteration's top gate but before we park. This is the
         // ONLY park that stays in auto + ready (final/degrade flip to chat), and the client
         // stops polling once ready — so nothing else would consume the flag. Check BEFORE
-        // asking (so we don't post a confirm prompt we're about to moot)...
+        // asking/approving (so we don't post a prompt — or spend — we're about to moot)...
         if (await this.stopAutoIfRequested(taskId)) return { outcome: "stopped" };
-        // Auto mode paid-step gate: park the turn until the user confirms the spend.
+
+        // Task 201 — hands-off mode: skip the human confirm and approve the paid step
+        // ourselves. Gated by BOTH the user's persisted intent AND a LIVE whitelist
+        // re-check (fail-closed: a throw or a removed wallet falls through to the watched
+        // park below). Every other cap is untouched — the planner's 90% guard already ran
+        // INSIDE requestPaid before this await_confirm, and the loop's top gates (Stop,
+        // spend cap, maxAutoSteps) re-fire next iteration before the approved tool runs.
+        if (readMemory(task).auto?.handsOff === true && (await this.handsOffAllowed(task))) {
+          await this.autoApproveConfirmation(task, decision, nextAuto);
+          // A Stop could have raced the approval write; honor it before looping back.
+          if (await this.stopAutoIfRequested(taskId)) return { outcome: "stopped" };
+          continue; // next planner tick sees the confirmed token and runs the paid tool
+        }
+
+        // Auto mode paid-step gate (watched): park the turn until the user confirms.
         await this.requestConfirmation(task, decision, nextAuto);
         // ...and once more AFTER the park write, to catch a Stop that raced it.
         if (await this.stopAutoIfRequested(taskId)) return { outcome: "stopped" };
@@ -923,6 +947,58 @@ export class LabTurnOrchestrator {
       loopCount: 0,
       turnStateChangedAt: this.now(),
     });
+  }
+
+  // Task 201 — LIVE, fail-closed hands-off gate. Wraps the injected whitelist check so a
+  // throw (DB blip, missing dep) can NEVER auto-approve a spend: any error → watched mode.
+  private async handsOffAllowed(task: LabAgentTask): Promise<boolean> {
+    try {
+      return await this.isHandsOffApproved(task.walletAddress);
+    } catch {
+      return false;
+    }
+  }
+
+  // Task 201 — hands-off counterpart to requestConfirmation. Instead of parking on a
+  // confirm chip, we approve the paid step ourselves: persist pendingConfirm AND a matching
+  // confirmedToken in ONE write (collapsing the watched ask + user-confirm into one), so the
+  // very next planner tick's confirmed-token path runs the paid tool. The turn keeps running
+  // (caller `continue`s); status/turnState are intentionally left as the live running turn.
+  private async autoApproveConfirmation(
+    task: LabAgentTask,
+    decision: Extract<BrainDecision, { action: "await_confirm" }>,
+    nextAuto?: AutoMemory,
+  ): Promise<void> {
+    const memory = readMemory(task);
+    const persisted = memory.auto;
+    // Idempotency: a crash-replay that already approved THIS exact pending step must not
+    // re-mint a token or post a second note. (Normally unreachable — the planner clears
+    // pendingConfirm the moment the tool runs — but defensive against a re-drive.)
+    if (
+      persisted?.pendingConfirm?.tool === decision.tool &&
+      !!persisted?.confirmedToken &&
+      persisted.confirmedToken === persisted.pendingConfirm.token
+    ) {
+      return;
+    }
+    // Base off the planner's nextAuto so the advanced autoStepCount sticks (mirrors the
+    // watched requestConfirmation base), then set BOTH the pending gate and its approval.
+    const base = nextAuto ?? persisted ?? defaultAutoMemory();
+    const token = this.genToken();
+    memory.auto = {
+      ...base,
+      pendingConfirm: { tool: decision.tool, token, estCostUsd: decision.estCostUsd, args: decision.args },
+      confirmedToken: token,
+    };
+    (task as { memory?: unknown }).memory = memory;
+    // Persist the approval FIRST: a crash before the note resumes as confirmed (planner
+    // runs the tool) — at worst the cosmetic log line is missing, never doubled.
+    await this.storage.updateAgentTask(task.id, { memory: memory as unknown as Record<string, unknown> });
+    const est = `$${decision.estCostUsd.toFixed(2)}`;
+    await this.appendToolMessage(
+      task,
+      `Hands-off: auto-approved ${decision.tool} (est. ${est}). No check-in needed — running it now.`,
+    );
   }
 
   private async safeReconcile(taskId: number): Promise<void> {

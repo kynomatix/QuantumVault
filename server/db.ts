@@ -219,6 +219,10 @@ export async function ensureSchema() {
       `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS pacifica_builder_approved boolean NOT NULL DEFAULT false`,
       `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS pacifica_referral_claimed boolean NOT NULL DEFAULT false`,
 
+      // --- Task 201: hands-off auto-mode admin whitelist (additive, idempotent). ---
+      // Default false → every wallet starts in watched mode; an admin flips it on.
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS hands_off_approved boolean NOT NULL DEFAULT false`,
+
       // --- Task 149: per-bot Pacifica enrollment flags ---
       // Phase 4b bots are their own Pacifica main accounts (keypair behind
       // bot_subaccount_key_encrypted_v3, pubkey in protocol_subaccount_id),

@@ -176,6 +176,7 @@ function makeOrch(store: any, toolkit: any, over: Partial<OrchestratorDeps> = {}
     limits: over.limits,
     now: over.now,
     genToken: over.genToken,
+    isHandsOffApproved: over.isHandsOffApproved,
   };
   return new LabTurnOrchestrator(deps);
 }
@@ -695,5 +696,174 @@ describe("LabTurnOrchestrator — auto mode confirm gate", () => {
     // The confirm prompt was never posted — we re-checked BEFORE requestConfirmation.
     const chips = store.agentMessages().flatMap((m) => (m.suggestedActions as any[]) ?? []);
     expect(chips.some((c) => String(c.id).startsWith("auto-confirm-"))).toBe(false);
+  });
+});
+
+// Task 201 — hands-off (autonomous) mode. A whitelisted wallet's runs auto-approve the PAID
+// steps instead of parking on a confirm chip, but EVERY Task #200 cap stays in force. These
+// lock the orchestrator integration: the live whitelist re-check is fail-closed (intent alone
+// is never enough), an instant Stop still wins, the auto-approval is idempotent across a
+// re-drive, and the planner's 90% spend guard halts BEFORE any approval.
+describe("LabTurnOrchestrator — hands-off (autonomous) mode", () => {
+  const estimatePaidCostUsd = (t: PaidTool) => (t === "createStrategyFromText" ? 0.06 : 0.12);
+
+  function handsOffMemory(over: Partial<AutoMemory> = {}): Record<string, unknown> {
+    return { auto: { ...defaultAutoMemory(), handsOff: true, ...over } } as unknown as Record<string, unknown>;
+  }
+
+  it("auto-runs the PAID create with NO confirm park — bills it once and posts a single note", async () => {
+    const store = makeStore({ mode: "auto", goal: "a momentum strategy on SOL", memory: handsOffMemory() });
+    const toolkit = makeToolkit({
+      createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }),
+      runOptimization: () => ({ ok: true, data: { runId: 101, correlationId: "c-101" } }),
+    });
+    const orch = makeOrch(store, toolkit, { isHandsOffApproved: async () => true });
+    const brain = createAutoPlanner({ estimatePaidCostUsd });
+
+    const r = await orch.advance(1, { brain, hasKey: true });
+
+    expect(r.outcome).toBe("waiting"); // approved create → ran → parked on the async backtest
+    expect(toolkit.countOf("createStrategyFromText")).toBe(1); // ran without a human confirm
+    const task = store.tasks.get(1)!;
+    expect((task.memory as any).currentStrategyId).toBe(7);
+    expect((task.memory as any).auto.pendingConfirm ?? null).toBeNull(); // gate cleared
+    expect(task.spendEstimateUsd).toBeCloseTo(0.06, 5); // approved estimate billed once
+    // exactly one auto-approval note, and NO watched confirm chips were ever posted
+    const notes = store.messages.filter(
+      (m) => m.role === "tool" && String(m.content).includes("auto-approved createStrategyFromText"),
+    );
+    expect(notes.length).toBe(1);
+    const chips = store.messages.flatMap((m) => (m.suggestedActions as any[]) ?? []);
+    expect(chips.some((c) => String(c.id).startsWith("auto-confirm-"))).toBe(false);
+  });
+
+  it("falls back to the WATCHED confirm park when the wallet is flagged but NOT whitelisted", async () => {
+    const store = makeStore({ mode: "auto", goal: "momentum on SOL", memory: handsOffMemory() });
+    const toolkit = makeToolkit({ createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }) });
+    const orch = makeOrch(store, toolkit, { isHandsOffApproved: async () => false });
+    const brain = createAutoPlanner({ estimatePaidCostUsd });
+
+    const r = await orch.advance(1, { brain, hasKey: true });
+
+    expect(r.outcome).toBe("awaiting_confirm");
+    expect(toolkit.countOf("createStrategyFromText")).toBe(0); // never auto-ran
+    expect(store.tasks.get(1)!.spendEstimateUsd ?? 0).toBe(0);
+    const chips = store.messages.flatMap((m) => (m.suggestedActions as any[]) ?? []);
+    expect(chips.some((c) => String(c.id).startsWith("auto-confirm-"))).toBe(true); // watched chips posted
+    expect(store.messages.some((m) => m.role === "tool" && String(m.content).includes("auto-approved"))).toBe(false);
+  });
+
+  it("fail-closed by default: an ABSENT whitelist dep parks watched even with hands-off intent", async () => {
+    const store = makeStore({ mode: "auto", goal: "momentum on SOL", memory: handsOffMemory() });
+    const toolkit = makeToolkit({ createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }) });
+    const orch = makeOrch(store, toolkit); // no isHandsOffApproved override ⇒ deps default to false
+    const brain = createAutoPlanner({ estimatePaidCostUsd });
+
+    const r = await orch.advance(1, { brain, hasKey: true });
+
+    expect(r.outcome).toBe("awaiting_confirm");
+    expect(toolkit.countOf("createStrategyFromText")).toBe(0);
+    expect(store.messages.some((m) => m.role === "tool" && String(m.content).includes("auto-approved"))).toBe(false);
+  });
+
+  it("a throwing whitelist check is treated as NOT approved (fail-closed) — parks watched", async () => {
+    const store = makeStore({ mode: "auto", goal: "momentum on SOL", memory: handsOffMemory() });
+    const toolkit = makeToolkit({ createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }) });
+    const orch = makeOrch(store, toolkit, {
+      isHandsOffApproved: async () => {
+        throw new Error("whitelist backend down");
+      },
+    });
+    const brain = createAutoPlanner({ estimatePaidCostUsd });
+
+    const r = await orch.advance(1, { brain, hasKey: true });
+
+    expect(r.outcome).toBe("awaiting_confirm");
+    expect(toolkit.countOf("createStrategyFromText")).toBe(0);
+  });
+
+  it("an instant Stop that lands during the iteration wins BEFORE auto-approval — no spend, no note", async () => {
+    const store = makeStore({ mode: "auto", goal: "momentum on SOL", memory: handsOffMemory() });
+    const toolkit = makeToolkit({ createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }) });
+    const orch = makeOrch(store, toolkit, { isHandsOffApproved: async () => true });
+    // Simulate a Stop click DURING this iteration, then return the paid-step gate the planner
+    // would emit. The pre-approve Stop re-check must convert it to a clean stop.
+    let calls = 0;
+    const brain: BrainFn = async () => {
+      calls++;
+      store.tasks.get(1)!.cancelRequestedAt = new Date();
+      return {
+        decision: {
+          action: "await_confirm",
+          tool: "createStrategyFromText",
+          args: { prompt: "momentum on SOL" },
+          estCostUsd: 0.06,
+          reason: "Create the first draft.",
+        },
+        usage: undefined,
+      };
+    };
+
+    const r = await orch.advance(1, { brain, hasKey: true });
+
+    expect(r.outcome).toBe("stopped");
+    expect(calls).toBe(1);
+    const task = store.tasks.get(1)!;
+    expect(task.mode).toBe("chat"); // dropped back so a later /step can't re-drive the planner
+    expect(task.cancelRequestedAt ?? null).toBeNull(); // signal consumed
+    expect(toolkit.countOf("createStrategyFromText")).toBe(0);
+    expect((task.memory as any).auto?.confirmedToken ?? null).toBeNull(); // never approved
+    expect(store.messages.some((m) => m.role === "tool" && String(m.content).includes("auto-approved"))).toBe(false);
+  });
+
+  it("is idempotent across a re-drive: re-entering await_confirm for an approved step never doubles a token or note", async () => {
+    const store = makeStore({ mode: "auto", goal: "momentum on SOL", memory: handsOffMemory() });
+    const toolkit = makeToolkit({}); // the scripted brain never emits the tool action, so it can't run
+    const orch = makeOrch(store, toolkit, { isHandsOffApproved: async () => true });
+    // Pathological brain: ALWAYS asks to confirm the SAME paid step. The first tick auto-approves
+    // (mints a token + posts a note); every later tick must be an idempotent no-op until the
+    // segment-iteration cap yields the lease. (usage undefined ⇒ no loopCount/spend bump.)
+    const brain: BrainFn = async () => ({
+      decision: {
+        action: "await_confirm",
+        tool: "createStrategyFromText",
+        args: { prompt: "momentum on SOL" },
+        estCostUsd: 0.06,
+        reason: "Draft it.",
+      },
+      usage: undefined,
+    });
+
+    const r = await orch.advance(1, { brain, hasKey: true });
+
+    expect(r.outcome).toBe("yield"); // long non-pausing segment trips the iteration cap
+    const notes = store.messages.filter(
+      (m) => m.role === "tool" && String(m.content).includes("auto-approved"),
+    );
+    expect(notes.length).toBe(1); // posted exactly once despite many re-entries
+    expect(toolkit.countOf("createStrategyFromText")).toBe(0);
+    const auto = (store.tasks.get(1)!.memory as any).auto;
+    expect(auto.confirmedToken).toBe(auto.pendingConfirm.token); // a single, stable approved token
+  });
+
+  it("does NOT bypass the spend cap — the planner's 90% guard halts before any hands-off approval", async () => {
+    // 1.79 + 0.06 (= 1.85) exceeds 0.9 × $2.00 (= $1.80) but stays under the $2.00 hard gate, so
+    // the planner's pre-spend guard fires and returns a graceful final — never an auto-approval.
+    const store = makeStore({
+      mode: "auto",
+      goal: "momentum on SOL",
+      spendEstimateUsd: 1.79,
+      memory: handsOffMemory(),
+    });
+    const toolkit = makeToolkit({ createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }) });
+    const orch = makeOrch(store, toolkit, { isHandsOffApproved: async () => true });
+    const brain = createAutoPlanner({ estimatePaidCostUsd });
+
+    const r = await orch.advance(1, { brain, hasKey: true });
+
+    expect(r.outcome).toBe("final"); // graceful spend-cap stop, not an auto-approval
+    expect(toolkit.countOf("createStrategyFromText")).toBe(0);
+    expect(store.messages.some((m) => m.role === "tool" && String(m.content).includes("auto-approved"))).toBe(false);
+    expect(String(store.agentMessages().at(-1)!.content)).toMatch(/spend cap/i);
   });
 });

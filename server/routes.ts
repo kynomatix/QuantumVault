@@ -16701,7 +16701,58 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     }
     next();
   };
-  
+
+  // ===== Task 201: QuantumLab Assistant hands-off whitelist (admin-only) =====
+  // A wallet on this list may run the Assistant's auto-grind loop in "hands-off"
+  // mode (auto-approves the paid AI steps). All other Task #200 caps still apply,
+  // and the orchestrator re-checks membership LIVE before each auto-approval, so a
+  // removal here drops any in-flight run back to watched mode at its next paid step.
+  const isValidSolanaAddress = (addr: string): boolean => {
+    try {
+      return new PublicKey(addr).toBase58() === addr;
+    } catch {
+      return false;
+    }
+  };
+
+  app.get("/api/admin/handsoff-whitelist", requireAdminAuth, async (_req, res) => {
+    try {
+      const wallets = await storage.listHandsOffApproved();
+      res.json({ wallets });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to list whitelist" });
+    }
+  });
+
+  app.post("/api/admin/handsoff-whitelist", requireAdminAuth, async (req, res) => {
+    try {
+      const address = typeof req.body?.address === "string" ? req.body.address.trim() : "";
+      if (!address) return res.status(400).json({ error: "A wallet address is required." });
+      if (!isValidSolanaAddress(address)) {
+        return res.status(400).json({ error: "That isn't a valid Solana wallet address." });
+      }
+      await storage.setHandsOffApproved(address, true);
+      console.log(`[Admin] Hands-off whitelist: added ${address}`);
+      const wallets = await storage.listHandsOffApproved();
+      res.json({ wallets });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to add to whitelist" });
+    }
+  });
+
+  app.delete("/api/admin/handsoff-whitelist/:address", requireAdminAuth, async (req, res) => {
+    try {
+      const address = typeof req.params?.address === "string" ? req.params.address.trim() : "";
+      if (!address) return res.status(400).json({ error: "A wallet address is required." });
+      await storage.setHandsOffApproved(address, false);
+      console.log(`[Admin] Hands-off whitelist: removed ${address}`);
+      const wallets = await storage.listHandsOffApproved();
+      res.json({ wallets });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to remove from whitelist" });
+    }
+  });
+
   let lastLabRestartAt = 0;
   let labRestartInFlight = false;
   const LAB_RESTART_MIN_INTERVAL_MS = 30_000;

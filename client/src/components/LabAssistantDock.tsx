@@ -98,6 +98,9 @@ export function LabAssistantDock({
   const [draft, setDraft] = useState("");
   // Inline notice (e.g. the pasted-API-key guard) shown just above the composer.
   const [notice, setNotice] = useState<string | null>(null);
+  // Task 201: hands-off toggle. Only ever offered to admin-whitelisted wallets; the
+  // server re-checks eligibility on /auto/start so a stale UI can't force it on.
+  const [handsOff, setHandsOff] = useState(false);
   // Stale-session reconnect (re-sign): busy flag + last error for the button.
   const [reconnectBusy, setReconnectBusy] = useState(false);
   const [reconnectError, setReconnectError] = useState<string | null>(null);
@@ -166,6 +169,20 @@ export function LabAssistantDock({
     },
   });
 
+  // Task 201: is THIS wallet allowed to run hands-off? Drives whether the toggle shows
+  // at all. Cached for the session (whitelist rarely changes); the server re-checks on
+  // /auto/start regardless, so a stale "eligible" can never actually force hands-off on.
+  const handsOffEligibilityQuery = useQuery({
+    queryKey: ["lab-handsoff-eligibility", walletAddress],
+    enabled: open && !!walletAddress,
+    staleTime: Infinity,
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/lab/agent/handsoff-eligibility");
+      return (await res.json()) as { eligible: boolean };
+    },
+  });
+  const handsOffEligible = handsOffEligibilityQuery.data?.eligible === true;
+
   const send = useMutation({
     mutationFn: async (content: string) => {
       const res = await apiRequest("POST", `/api/lab/agent/chat/${taskId}/messages`, { content });
@@ -203,8 +220,8 @@ export function LabAssistantDock({
   // deterministic tick. The poll loop + /step effect then drive it forward, parking with
   // confirm chips (cost in the label) before each PAID step.
   const autoStart = useMutation({
-    mutationFn: async (goal: string) => {
-      const res = await apiRequest("POST", `/api/lab/agent/chat/${taskId}/auto/start`, { goal });
+    mutationFn: async ({ goal, handsOff }: { goal: string; handsOff: boolean }) => {
+      const res = await apiRequest("POST", `/api/lab/agent/chat/${taskId}/auto/start`, { goal, handsOff });
       return (await res.json()) as MessagesResponse;
     },
     onSuccess: (data) => {
@@ -335,7 +352,8 @@ export function LabAssistantDock({
     }
     setNotice(null);
     setDraft("");
-    autoStart.mutate(goal);
+    // Only request hands-off when the wallet is actually eligible; the server re-checks.
+    autoStart.mutate({ goal, handsOff: handsOff && handsOffEligible });
   }
 
   function handleAction(action: AgentSuggestedAction) {
@@ -602,6 +620,27 @@ export function LabAssistantDock({
           >
             {notice}
           </div>
+        )}
+
+        {/* Task 201: hands-off toggle — only rendered for admin-whitelisted wallets. */}
+        {handsOffEligible && (
+          <label
+            className="flex cursor-pointer items-center gap-2 border-t border-white/10 px-3 py-2 text-xs text-white/70"
+            data-testid="toggle-lab-assistant-handsoff"
+          >
+            <input
+              type="checkbox"
+              checked={handsOff}
+              onChange={(e) => setHandsOff(e.target.checked)}
+              disabled={isAuto || turnActive}
+              className="h-3.5 w-3.5 accent-amber-500"
+              data-testid="checkbox-lab-assistant-handsoff"
+            />
+            <span>
+              Hands-off mode
+              <span className="ml-1 text-white/40">— auto-approve paid steps (caps still apply)</span>
+            </span>
+          </label>
         )}
 
         {/* Composer */}

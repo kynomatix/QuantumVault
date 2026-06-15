@@ -160,6 +160,10 @@ export interface IStorage {
   addRecoveredOrphanIndices(address: string, indices: number[]): Promise<void>;
   markPacificaBuilderApproved(agentPublicKey: string): Promise<void>;
   markPacificaReferralClaimed(agentPublicKey: string): Promise<void>;
+  // Task 201: QuantumLab Assistant hands-off auto-mode admin whitelist.
+  isHandsOffApproved(address: string): Promise<boolean>;
+  setHandsOffApproved(address: string, approved: boolean): Promise<void>;
+  listHandsOffApproved(): Promise<{ address: string; displayName: string | null }[]>;
   // Task 149: per-bot Pacifica enrollment (each Phase 4b bot is its own
   // Pacifica main account, keyed by trading_bots.protocol_subaccount_id).
   getBotByAgentPublicKey(agentPublicKey: string): Promise<TradingBot | undefined>;
@@ -676,6 +680,39 @@ export class DatabaseStorage implements IStorage {
 
   async markPacificaReferralClaimed(agentPublicKey: string): Promise<void> {
     await db.update(wallets).set({ pacificaReferralClaimed: true }).where(eq(wallets.agentPublicKey, agentPublicKey));
+  }
+
+  // --- Task 201: hands-off auto-mode admin whitelist ---------------------------
+  // Read is the live authorization the orchestrator re-checks (fail-closed) before
+  // every auto-approval, so admin removal immediately drops a run back to watched.
+  async isHandsOffApproved(address: string): Promise<boolean> {
+    const result = await db
+      .select({ handsOffApproved: wallets.handsOffApproved })
+      .from(wallets)
+      .where(eq(wallets.address, address))
+      .limit(1);
+    return result[0]?.handsOffApproved === true;
+  }
+
+  // ADD upserts a row (a whitelist is an admin intent list — the wallet may not
+  // have connected yet); REMOVE only flips an existing row (a no-op if absent).
+  async setHandsOffApproved(address: string, approved: boolean): Promise<void> {
+    if (approved) {
+      await db
+        .insert(wallets)
+        .values({ address, handsOffApproved: true })
+        .onConflictDoUpdate({ target: wallets.address, set: { handsOffApproved: true } });
+    } else {
+      await db.update(wallets).set({ handsOffApproved: false }).where(eq(wallets.address, address));
+    }
+  }
+
+  async listHandsOffApproved(): Promise<{ address: string; displayName: string | null }[]> {
+    return db
+      .select({ address: wallets.address, displayName: wallets.displayName })
+      .from(wallets)
+      .where(eq(wallets.handsOffApproved, true))
+      .orderBy(desc(wallets.lastSeen));
   }
 
   // Task 149: per-bot Pacifica enrollment helpers. The bot's Pacifica main

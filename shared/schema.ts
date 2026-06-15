@@ -60,7 +60,15 @@ export const wallets = pgTable("wallets", {
   // referral claim is best-effort and never blocks trading (fail-open).
   pacificaBuilderApproved: boolean("pacifica_builder_approved").default(false).notNull(),
   pacificaReferralClaimed: boolean("pacifica_referral_claimed").default(false).notNull(),
-  
+
+  // Task 201: admin-managed whitelist for QuantumLab Assistant "hands-off" auto mode.
+  // When true, the deterministic auto-grind loop AUTO-APPROVES its paid LLM steps
+  // (create/improve) instead of parking on a confirm chip — all other Task #200 caps
+  // (spend cap, 90% guard, ≤3 improve, maxAutoSteps, instant Stop, key-pause) still
+  // apply. Flipped ONLY by an admin; the orchestrator re-checks it live (fail-closed)
+  // before every auto-approval, so de-whitelisting drops a run back to watched mode.
+  handsOffApproved: boolean("hands_off_approved").default(false).notNull(),
+
   protocolSubaccountId: text("protocol_subaccount_id"),
   
   // Security v3: Per-user cryptographic salt and UMK envelope

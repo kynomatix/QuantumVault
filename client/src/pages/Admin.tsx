@@ -67,6 +67,7 @@ function AdminPage() {
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState('stats');
   const [showRestartDialog, setShowRestartDialog] = useState(false);
+  const [handsoffInput, setHandsoffInput] = useState('');
   const { toast } = useToast();
 
   const authHeaders = {
@@ -216,6 +217,55 @@ function AdminPage() {
     },
     onSuccess: () => { refetchErrors(); refetchErrorStats(); },
     onError: (err: any) => toast({ title: 'Update failed', description: err?.message || 'Unknown error', variant: 'destructive' as any }),
+  });
+
+  // ─── Hands-off whitelist (Task 201) ────────────────────────────────────────
+  // Wallets allowed to run the Lab Assistant in hands-off mode (auto-approve paid
+  // steps without per-step check-ins). All other safety caps still apply.
+  const { data: handsoffData, isLoading: handsoffLoading, refetch: refetchHandsoff } = useQuery({
+    queryKey: ['admin-handsoff'],
+    queryFn: async () => {
+      const res = await fetch('/api/admin/handsoff-whitelist', { headers: authHeaders });
+      if (!res.ok) throw new Error('Failed to fetch');
+      return safeResponseJson(res);
+    },
+    enabled: authenticated && activeTab === 'handsoff',
+  });
+
+  const addHandsoffMutation = useMutation({
+    mutationFn: async (address: string) => {
+      const res = await fetch('/api/admin/handsoff-whitelist', {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address }),
+      });
+      const data = await safeResponseJson(res);
+      if (!res.ok) throw new Error(data?.error || 'Add failed');
+      return data;
+    },
+    onSuccess: () => {
+      setHandsoffInput('');
+      toast({ title: 'Wallet added', description: 'This wallet can now run hands-off mode.' });
+      refetchHandsoff();
+    },
+    onError: (err: any) => toast({ title: 'Could not add wallet', description: err?.message || 'Unknown error', variant: 'destructive' as any }),
+  });
+
+  const removeHandsoffMutation = useMutation({
+    mutationFn: async (address: string) => {
+      const res = await fetch(`/api/admin/handsoff-whitelist/${encodeURIComponent(address)}`, {
+        method: 'DELETE',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      });
+      const data = await safeResponseJson(res);
+      if (!res.ok) throw new Error(data?.error || 'Remove failed');
+      return data;
+    },
+    onSuccess: () => {
+      toast({ title: 'Wallet removed', description: 'This wallet is back to watched mode.' });
+      refetchHandsoff();
+    },
+    onError: (err: any) => toast({ title: 'Could not remove wallet', description: err?.message || 'Unknown error', variant: 'destructive' as any }),
   });
 
   const { data: pendingShares, isLoading: sharesLoading, refetch: refetchShares } = useQuery({
@@ -443,6 +493,7 @@ function AdminPage() {
             <TabsTrigger value="revenue" className="data-[state=active]:bg-violet-600"><DollarSign className="w-4 h-4 mr-2" />Revenue</TabsTrigger>
             <TabsTrigger value="superteam" className="data-[state=active]:bg-emerald-600"><Rocket className="w-4 h-4 mr-2" />Grants</TabsTrigger>
             <TabsTrigger value="errors" className="data-[state=active]:bg-red-600"><AlertOctagon className="w-4 h-4 mr-2" />Errors</TabsTrigger>
+            <TabsTrigger value="handsoff" className="data-[state=active]:bg-amber-600" data-testid="tab-handsoff"><Lock className="w-4 h-4 mr-2" />Hands-off</TabsTrigger>
           </TabsList>
 
           <TabsContent value="stats" className="space-y-4">
@@ -1081,6 +1132,84 @@ function AdminPage() {
                         )}
                       </TableBody>
                     </Table>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="handsoff" className="space-y-4">
+            <Card className="bg-zinc-900/50 border-zinc-800">
+              <CardHeader>
+                <CardTitle className="text-white flex items-center gap-2">
+                  <Lock className="w-5 h-5 text-amber-400" /> Hands-off Whitelist
+                </CardTitle>
+                <p className="text-sm text-zinc-400 mt-1">
+                  Wallets here can run the Lab Assistant in hands-off mode — it auto-approves the
+                  paid AI build/improve steps without asking each time. Every other safety limit still
+                  applies (per-run spend cap, max 3 improve loops, step ceiling, instant Stop), it never
+                  moves funds or deploys a bot, and removing a wallet makes its next paid step pause for
+                  confirmation again (back to watched mode).
+                </p>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex gap-2">
+                  <Input
+                    value={handsoffInput}
+                    onChange={(e) => setHandsoffInput(e.target.value)}
+                    placeholder="Solana wallet address"
+                    className="bg-zinc-800 border-zinc-700 text-white"
+                    data-testid="input-handsoff-address"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && handsoffInput.trim() && !addHandsoffMutation.isPending) {
+                        addHandsoffMutation.mutate(handsoffInput.trim());
+                      }
+                    }}
+                  />
+                  <Button
+                    onClick={() => addHandsoffMutation.mutate(handsoffInput.trim())}
+                    disabled={!handsoffInput.trim() || addHandsoffMutation.isPending}
+                    className="bg-amber-600 hover:bg-amber-500 text-white shrink-0"
+                    data-testid="button-handsoff-add"
+                  >
+                    {addHandsoffMutation.isPending ? 'Adding…' : 'Add wallet'}
+                  </Button>
+                </div>
+
+                {handsoffLoading ? (
+                  <div className="text-center py-8 text-zinc-400">Loading…</div>
+                ) : (handsoffData?.wallets?.length ?? 0) === 0 ? (
+                  <div className="text-center py-8 text-zinc-500" data-testid="text-handsoff-empty">
+                    No wallets whitelisted. Everyone runs in watched mode.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {handsoffData.wallets.map((w: { address: string; displayName: string | null }) => (
+                      <div
+                        key={w.address}
+                        className="flex items-center justify-between gap-3 rounded-md border border-zinc-800 bg-zinc-800/40 px-3 py-2"
+                        data-testid={`row-handsoff-${w.address}`}
+                      >
+                        <div className="min-w-0">
+                          <div className="font-mono text-sm text-white truncate" data-testid={`text-handsoff-address-${w.address}`}>
+                            {w.address}
+                          </div>
+                          {w.displayName && (
+                            <div className="text-xs text-zinc-500 truncate">{w.displayName}</div>
+                          )}
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => removeHandsoffMutation.mutate(w.address)}
+                          disabled={removeHandsoffMutation.isPending}
+                          className="text-red-400 hover:text-red-300 hover:bg-red-950/40 shrink-0"
+                          data-testid={`button-handsoff-remove-${w.address}`}
+                        >
+                          <XCircle className="w-4 h-4 mr-1" /> Remove
+                        </Button>
+                      </div>
+                    ))}
                   </div>
                 )}
               </CardContent>

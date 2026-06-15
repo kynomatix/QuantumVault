@@ -173,6 +173,9 @@ export function registerCreatorRoutes(
     composeReply: composeAgentReply,
     estimateCost: estimateCallCostUsd,
     limits: { hardSpendCapUsd: LAB_CHAT_TASK_SPEND_CAP_USD },
+    // Task 201: LIVE hands-off gate — re-checked fail-closed before EVERY auto-approval,
+    // so revoking a wallet's whitelist instantly drops its running auto run to watched mode.
+    isHandsOffApproved: (wallet: string) => storage.isHandsOffApproved(wallet),
   });
 
   // --- auto-mode (Task #200) paid-cost estimator -------------------------------
@@ -622,6 +625,19 @@ export function registerCreatorRoutes(
         return res.status(409).json({ error: "Finish the current turn before starting an auto run." });
       }
 
+      // Task 201 — hands-off intent: the client may ASK for hands-off, but it only takes
+      // effect for an admin-whitelisted wallet (checked live, fail-closed). A non-eligible
+      // request silently falls back to watched mode — same run, just with confirm chips.
+      const wantsHandsOff = req.body?.handsOff === true;
+      let effectiveHandsOff = false;
+      if (wantsHandsOff) {
+        try {
+          effectiveHandsOff = await storage.isHandsOffApproved(r.walletAddress);
+        } catch {
+          effectiveHandsOff = false; // fail-closed: whitelist read failed → watched mode
+        }
+      }
+
       // Record the goal in the transcript so the watcher sees what was asked, then reset
       // the pipeline state to a clean budget (each watched run gets its own spend cap +
       // improve/step leashes) and switch the task into auto mode.
@@ -630,7 +646,10 @@ export function registerCreatorRoutes(
         goal,
         mode: "auto",
         status: "active",
-        memory: { ...((task.memory as Record<string, unknown>) ?? {}), auto: defaultAutoMemory() },
+        memory: {
+          ...((task.memory as Record<string, unknown>) ?? {}),
+          auto: { ...defaultAutoMemory(), handsOff: effectiveHandsOff },
+        },
         spendEstimateUsd: 0,
         cancelRequestedAt: null,
         turnState: "running_turn",
@@ -709,6 +728,19 @@ export function registerCreatorRoutes(
       return res.status(200).json({ messages: msgs, task: updated ? toTurnTaskDto(updated) : null });
     } catch (err: any) {
       sendError(res, err, "Could not stop the auto run.");
+    }
+  });
+
+  // Task 201 — is THIS wallet allowed to run hands-off (auto-approve paid steps without
+  // check-ins)? Drives the dock's hands-off toggle. Wallet-scoped + fail-closed: any read
+  // error reports ineligible, so the UI never offers hands-off it can't actually grant.
+  app.get("/api/lab/agent/handsoff-eligibility", ...guards, async (req: Request, res: Response) => {
+    const r = req as any;
+    try {
+      const eligible = await storage.isHandsOffApproved(r.walletAddress);
+      return res.status(200).json({ eligible: !!eligible });
+    } catch {
+      return res.status(200).json({ eligible: false });
     }
   });
 
