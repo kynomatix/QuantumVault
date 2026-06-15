@@ -106,6 +106,9 @@ function makeFakeStorage() {
     async hasActiveRun(_wallet?: string) {
       return this.activeRun;
     },
+    async walletHasManualRunAhead(_wallet?: string) {
+      return false;
+    },
 
     // --- T5 control surface ---
     async getNextQueueOrder(_wallet?: string) {
@@ -115,6 +118,9 @@ function makeFakeStorage() {
       return this.runs.find(
         (r) => r.userId === wallet && r.agentTaskId === taskId && r.agentIdempotencyKey === key,
       );
+    },
+    async getAgentRunsForTask(wallet: string, taskId: number) {
+      return this.runs.filter((r) => r.userId === wallet && r.agentTaskId === taskId);
     },
     async createRun(data: any) {
       // Simulate a concurrent winner committing the SAME idempotency key, then the

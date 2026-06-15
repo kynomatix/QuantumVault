@@ -213,6 +213,13 @@ export const queuePositionDtoSchema = z.object({
   jobsAhead: z.number().int(),
   /** Whether this wallet already holds an active run (one-active-run gate, §7). */
   hasActiveRun: z.boolean(),
+  /**
+   * True when this wallet has its OWN manual (user-driven) run running or queued
+   * ahead of the agent on the single shared worker. Manual runs always claim
+   * first (Task #200 fairness), so this drives the "waiting on your manual run"
+   * copy. Optional so older callers/DTOs stay valid.
+   */
+  waitingOnManualRun: z.boolean().optional(),
 });
 export type QueuePositionDto = z.infer<typeof queuePositionDtoSchema>;
 

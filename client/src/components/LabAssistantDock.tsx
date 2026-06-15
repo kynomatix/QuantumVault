@@ -15,7 +15,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { Sparkles, Send, X, Bot, Loader2, Wallet } from "lucide-react";
+import { Sparkles, Send, X, Bot, Loader2, Wallet, Square, Activity, Wand2 } from "lucide-react";
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import type { AgentSuggestedAction } from "@shared/schema";
 import { looksLikeApiKey } from "@shared/api-key-detect";
@@ -45,6 +45,12 @@ interface TurnTask {
   status: string;
   turnState: string;
   activeRunId: number | null;
+  // Auto-mode (Task #200): mode==="auto" surfaces the watch banner + Stop control;
+  // spendEstimateUsd is the running approved-spend total; cancelRequested reflects a
+  // stop that's winding a live segment down.
+  mode?: string;
+  spendEstimateUsd?: number;
+  cancelRequested?: boolean;
 }
 
 interface MessagesResponse {
@@ -54,6 +60,21 @@ interface MessagesResponse {
 
 const messagesKey = (taskId: number | null, wallet: string | null) =>
   ["lab-assistant-messages", taskId, wallet] as const;
+
+// Merge a server reply (its messages + latest turn task) into the cached transcript,
+// de-duping by id and keeping ascending order. Used by every mutation that returns a
+// MessagesResponse so the new line + turn_state show instantly before the poll catches up.
+const mergeMessages = (
+  prev: MessagesResponse | undefined,
+  data: MessagesResponse,
+): MessagesResponse => {
+  const byId = new Map<number, ChatMessage>((prev?.messages ?? []).map((m) => [m.id, m]));
+  for (const m of data.messages) byId.set(m.id, m);
+  return {
+    messages: Array.from(byId.values()).sort((a, b) => a.id - b.id),
+    task: data.task ?? prev?.task ?? null,
+  };
+};
 
 export function LabAssistantDock({
   walletAddress,
@@ -154,14 +175,9 @@ export function LabAssistantDock({
       // Merge the returned message(s) + task so the user's line and the running_turn
       // state show instantly; the poll loop (driven by turn_state) then takes over
       // and surfaces the assistant's tool/agent messages as the turn advances.
-      qc.setQueryData<MessagesResponse>(messagesKey(taskId, walletAddress), (prev) => {
-        const byId = new Map<number, ChatMessage>((prev?.messages ?? []).map((m) => [m.id, m]));
-        for (const m of data.messages) byId.set(m.id, m);
-        return {
-          messages: Array.from(byId.values()).sort((a, b) => a.id - b.id),
-          task: data.task ?? prev?.task ?? null,
-        };
-      });
+      qc.setQueryData<MessagesResponse>(messagesKey(taskId, walletAddress), (prev) =>
+        mergeMessages(prev, data),
+      );
     },
   });
 
@@ -182,12 +198,58 @@ export function LabAssistantDock({
     },
   });
 
+  // Start the watched auto-grind pipeline (Task #200). The composer draft becomes the
+  // goal; the server resets the spend/leash budget, flips mode→auto and kicks the first
+  // deterministic tick. The poll loop + /step effect then drive it forward, parking with
+  // confirm chips (cost in the label) before each PAID step.
+  const autoStart = useMutation({
+    mutationFn: async (goal: string) => {
+      const res = await apiRequest("POST", `/api/lab/agent/chat/${taskId}/auto/start`, { goal });
+      return (await res.json()) as MessagesResponse;
+    },
+    onSuccess: (data) => {
+      qc.setQueryData<MessagesResponse>(messagesKey(taskId, walletAddress), (prev) =>
+        mergeMessages(prev, data),
+      );
+    },
+  });
+
+  // Instant Stop (Task #200): cancels agent-owned queued backtests, signals a live
+  // segment to wind down, clears any confirm gate, and drops back to chat. The server is
+  // idempotent, so a stray tap after the run already ended is a harmless no-op.
+  const stop = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/lab/agent/chat/${taskId}/auto/stop`);
+      return (await res.json()) as MessagesResponse;
+    },
+    onSuccess: (data) => {
+      qc.setQueryData<MessagesResponse>(messagesKey(taskId, walletAddress), (prev) =>
+        mergeMessages(prev, data),
+      );
+    },
+  });
+
   const messages = messagesQuery.data?.messages ?? [];
+  const task = messagesQuery.data?.task ?? null;
   const signedIn = !!walletAddress && sessionConnected;
   const canChat = signedIn && taskId !== null;
-  const turnState = messagesQuery.data?.task?.turnState ?? "ready";
+  const turnState = task?.turnState ?? "ready";
   const turnActive = turnState === "running_turn" || turnState === "waiting_for_tool";
-  const workingLabel = turnState === "waiting_for_tool" ? "Running your backtest…" : "Thinking…";
+  // Auto-mode watch state: the banner + Stop control show while mode==="auto".
+  const isAuto = task?.mode === "auto";
+  const spend = task?.spendEstimateUsd ?? 0;
+  const stopPending = stop.isPending || task?.cancelRequested === true;
+  // Auto mode that's parked (not actively working) means the planner is waiting on a
+  // paid-step confirm chip — finalReply/degrade flip mode→chat on every other ending, so
+  // ready+auto only ever means "awaiting your OK". Steer the user to the chips by
+  // disabling freeform input here (typing would re-drive the planner and strand text).
+  const awaitingConfirm = isAuto && !turnActive;
+  const workingLabel =
+    turnState === "waiting_for_tool"
+      ? isAuto
+        ? "Running backtests — your manual runs go first…"
+        : "Running your backtest…"
+      : "Thinking…";
 
   // Client-driven resume (§7): while a turn is live, POST /step once per poll tick
   // (gated to one in-flight). This drives BOTH live states:
@@ -242,7 +304,7 @@ export function LabAssistantDock({
 
   function submitDraft() {
     const content = draft.trim();
-    if (!content || !canChat || send.isPending || turnActive) return;
+    if (!content || !canChat || send.isPending || turnActive || awaitingConfirm) return;
     // Never let a pasted API key leave the browser or hit the transcript. The
     // server rejects it too (defense in depth), but stop it here for instant,
     // key-free feedback — the key belongs in the Creator's encrypted store.
@@ -256,6 +318,24 @@ export function LabAssistantDock({
     setNotice(null);
     setDraft("");
     send.mutate(content);
+  }
+
+  // Kick off a watched auto-grind run using the composer text as the goal. Same
+  // pasted-key guard as a chat send — the goal is persisted + echoed, so a key must
+  // never land here (the server rejects it too).
+  function startAuto() {
+    const goal = draft.trim();
+    if (!goal || !canChat || autoStart.isPending || turnActive || isAuto) return;
+    if (looksLikeApiKey(goal)) {
+      setDraft("");
+      setNotice(
+        "That looked like an API key, so I didn't send it. Add your key in the Creator — it's stored encrypted and never shown in this chat.",
+      );
+      return;
+    }
+    setNotice(null);
+    setDraft("");
+    autoStart.mutate(goal);
   }
 
   function handleAction(action: AgentSuggestedAction) {
@@ -320,6 +400,36 @@ export function LabAssistantDock({
             <X className="h-4 w-4" />
           </button>
         </div>
+
+        {/* Auto-run watch banner (Task #200): always visible while mode==="auto" —
+            shows live status + approved spend so far, and the always-available Stop. */}
+        {isAuto && (
+          <div
+            data-testid="lab-assistant-auto-banner"
+            className="flex items-center justify-between gap-2 border-b border-indigo-400/20 bg-indigo-500/10 px-4 py-2"
+          >
+            <div className="flex min-w-0 items-center gap-2 text-xs text-indigo-100">
+              <Loader2
+                className={cn("h-3.5 w-3.5 shrink-0", (turnActive || stop.isPending) && "animate-spin")}
+              />
+              <span className="font-medium" data-testid="text-lab-assistant-auto-status">
+                {stopPending ? "Stopping…" : turnActive ? "Auto-run active" : "Waiting for your OK"}
+              </span>
+              <span className="truncate text-indigo-200/70" data-testid="text-lab-assistant-spend">
+                · ~${spend.toFixed(2)} spent
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => stop.mutate()}
+              disabled={stopPending || !canChat}
+              data-testid="button-lab-assistant-stop"
+              className="inline-flex shrink-0 items-center gap-1 rounded-full border border-rose-400/40 bg-rose-500/15 px-2.5 py-1 text-xs font-medium text-rose-200 transition-colors hover:bg-rose-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Square className="h-3 w-3" /> Stop
+            </button>
+          </div>
+        )}
 
         {/* Transcript */}
         <div
@@ -417,6 +527,21 @@ export function LabAssistantDock({
           )}
 
           {messages.map((m) => {
+            // Tool messages are the live step feed (queued/finished backtests, insights
+            // progress). Render them as compact muted log lines, not chat bubbles, so the
+            // auto-run reads like a progress log rather than the assistant talking to itself.
+            if (m.role === "tool") {
+              return (
+                <div
+                  key={m.id}
+                  data-testid={`message-lab-assistant-${m.id}`}
+                  className="flex items-start gap-2 px-1 text-[11px] leading-relaxed text-white/45"
+                >
+                  <Activity className="mt-0.5 h-3 w-3 shrink-0 text-indigo-300/70" />
+                  <span className="whitespace-pre-wrap break-words">{m.content}</span>
+                </div>
+              );
+            }
             const isUser = m.role === "user";
             return (
               <div
@@ -493,24 +618,39 @@ export function LabAssistantDock({
             placeholder={
               turnActive
                 ? "Assistant is working…"
-                : canChat
-                  ? "Ask the assistant…"
-                  : signedIn
-                    ? "Starting chat…"
-                    : walletAddress
-                      ? "Finish signing in to chat"
-                      : "Connect your wallet to chat"
+                : awaitingConfirm
+                  ? "Use the buttons above to continue…"
+                  : canChat
+                    ? "Ask the assistant…"
+                    : signedIn
+                      ? "Starting chat…"
+                      : walletAddress
+                        ? "Finish signing in to chat"
+                        : "Connect your wallet to chat"
             }
             maxLength={4000}
-            disabled={!canChat || turnActive}
+            disabled={!canChat || turnActive || awaitingConfirm}
             data-testid="input-lab-assistant"
             className="flex-1 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-indigo-400/50 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
           />
           <Button
             type="button"
+            size="sm"
+            variant="ghost"
+            onClick={startAuto}
+            disabled={!draft.trim() || autoStart.isPending || !canChat || turnActive || isAuto}
+            title="Auto-run this as a goal — I'll build, backtest and refine, pausing to confirm before any paid AI step."
+            data-testid="button-lab-assistant-auto"
+            className="shrink-0 gap-1 border border-indigo-400/40 bg-indigo-500/10 px-2.5 text-xs text-indigo-200 hover:bg-indigo-500/20"
+          >
+            {autoStart.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
+            Auto
+          </Button>
+          <Button
+            type="button"
             size="icon"
             onClick={submitDraft}
-            disabled={!draft.trim() || send.isPending || !canChat || turnActive}
+            disabled={!draft.trim() || send.isPending || !canChat || turnActive || awaitingConfirm}
             data-testid="button-lab-assistant-send"
             className="bg-indigo-600 hover:bg-indigo-500"
           >

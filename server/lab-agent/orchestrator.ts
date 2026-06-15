@@ -38,7 +38,11 @@ import type { ILabStorage } from "../lab/storage";
 import type { LabAgentToolkit, ToolkitContext } from "./toolkit";
 import {
   ASYNC_TOOLS,
+  PAID_TOOLS,
   MalformedDecisionError,
+  defaultAutoMemory,
+  type AutoMemory,
+  type BrainDecision,
   type BrainFn,
   type BrainTurnContext,
   type WorkingTool,
@@ -55,6 +59,7 @@ export interface OrchestratorLimits {
   hardSpendCapUsd: number; // per-task runaway net (matches the C0 chat cap)
   maxMalformedRetries: number; // consecutive malformed decisions before degrade
   maxToolErrorRetries: number; // consecutive tool failures before degrade
+  maxAutoSteps: number; // auto mode: pipeline-tick safety net (deterministic ticks aren't brain calls)
 }
 const DEFAULT_LIMITS: OrchestratorLimits = {
   maxBrainCalls: 16,
@@ -62,11 +67,20 @@ const DEFAULT_LIMITS: OrchestratorLimits = {
   hardSpendCapUsd: 2.0,
   maxMalformedRetries: 2,
   maxToolErrorRetries: 3,
+  maxAutoSteps: 14, // sits a touch above the planner's own cap so its graceful final fires first
 };
 
 const LEDGER_CAP = 40; // bound the working-memory step ledger
 const TOOL_RESULT_CHARS = 1800; // cap a folded tool result in the transcript
 const RECENT_MESSAGES = 24; // transcript window handed to the brain
+const AUTO_TOOL_DATA_CAP = 16000; // cap the auto stashed tool result (still holds 10 top results)
+
+// Sentinel prefixes for the auto-mode confirm/decline chips. The client routes a chip
+// to the dedicated confirm endpoint by its id prefix; the message is a plain-chat
+// fallback the Phase 3 route also understands. The token after the prefix is the
+// pendingConfirm token that must match for a paid step to run.
+export const AUTO_CONFIRM_PREFIX = "__auto_confirm__:";
+export const AUTO_DECLINE_PREFIX = "__auto_decline__:";
 
 // A task is terminal when it can no longer think. Mirrors task-store's set but kept
 // local so the orchestrator does not depend on the auto-loop task store.
@@ -81,6 +95,12 @@ export interface OrchestratorMemory {
    *  next-step chips (refine / improve / try-another-asset) on the final reply. */
   lastFinishedRunId?: number | null;
   ledger: LedgerEntry[];
+  /** Auto mode (Task #200): the deterministic pipeline's typed state. Planner-owned —
+   *  the orchestrator persists whatever the planner returns (plus the confirm token). */
+  auto?: AutoMemory | null;
+  /** Auto mode: the most recent SYNC tool's structured result, so the next planner tick
+   *  can branch on robustness without re-reading the transcript. */
+  autoLastTool?: { tool: string; data: unknown } | null;
 }
 interface LedgerEntry {
   step: number;
@@ -112,9 +132,11 @@ export type AdvanceOutcome =
   | "gone" // the task no longer exists
   | "final" // the brain finished the turn with a reply
   | "waiting" // parked on an async run; the client should POST /step
+  | "awaiting_confirm" // auto mode parked on a PAID step; the user must confirm/decline
   | "stopped" // task terminal or stop requested; brain not called
   | "halted_iterations" // hit the global brain-call cap; degraded
   | "halted_spend" // hit the hard spend cap; degraded
+  | "halted_auto_steps" // auto mode: hit the pipeline-tick safety net; degraded
   | "halted_malformed" // ran out of malformed-decision repair budget; degraded
   | "halted_tool_errors" // ran out of tool-error repair budget; degraded
   | "error" // brain transport error; degraded
@@ -220,10 +242,17 @@ function lastUserContent(messages: LabAgentMessage[]): string {
 function readMemory(task: LabAgentTask): OrchestratorMemory {
   const raw = task.memory as Partial<OrchestratorMemory> | null | undefined;
   const ledger = Array.isArray(raw?.ledger) ? (raw!.ledger as LedgerEntry[]) : [];
+  const auto = raw?.auto && typeof raw.auto === "object" ? (raw.auto as AutoMemory) : null;
+  const autoLastTool =
+    raw?.autoLastTool && typeof raw.autoLastTool === "object"
+      ? (raw.autoLastTool as { tool: string; data: unknown })
+      : null;
   return {
     currentStrategyId: typeof raw?.currentStrategyId === "number" ? raw!.currentStrategyId : null,
     lastFinishedRunId: typeof raw?.lastFinishedRunId === "number" ? raw!.lastFinishedRunId : null,
     ledger,
+    auto,
+    autoLastTool,
   };
 }
 
@@ -306,10 +335,24 @@ export class LabTurnOrchestrator {
       const task = await this.storage.getAgentTask(taskId);
       if (!task) return { outcome: "gone" };
 
-      // Honor stop/terminal WITHOUT calling the brain.
-      if (TERMINAL_TASK_STATUSES.has(task.status) || task.cancelRequestedAt) {
+      // Honor a terminal status WITHOUT calling the brain.
+      if (TERMINAL_TASK_STATUSES.has(task.status)) {
         await this.finishTurn(taskId);
         return { outcome: "stopped" };
+      }
+      // A stop signal winds an AUTO run down: CONSUME it (clear the flag), drop back to
+      // chat, and end the turn so a later /step or message can't re-drive the planner.
+      if (task.cancelRequestedAt) {
+        if (task.mode === "auto") {
+          await this.storage.updateAgentTask(taskId, { cancelRequestedAt: null, mode: "chat" });
+          await this.finishTurn(taskId);
+          return { outcome: "stopped" };
+        }
+        // Stale flag: a stop landed in the tiny window AFTER the auto turn already
+        // finished and flipped to chat (mode==="chat" here). Clear it and fall through
+        // to answer this turn normally — winding down would swallow the user's message.
+        await this.storage.updateAgentTask(taskId, { cancelRequestedAt: null });
+        (task as { cancelRequestedAt?: Date | null }).cancelRequestedAt = null;
       }
 
       // Mark the turn running on first useful iteration.
@@ -365,6 +408,16 @@ export class LabTurnOrchestrator {
         await this.degrade(task, opts.hasKey, userText);
         return { outcome: "halted_spend" };
       }
+      if (task.mode === "auto") {
+        // Deterministic ticks don't bump loopCount, so the pipeline gets its own safety
+        // net. Set a touch above the planner's own cap so its graceful final fires first;
+        // this only trips if the planner somehow fails to terminate.
+        const steps = readMemory(task).auto?.autoStepCount ?? 0;
+        if (steps >= this.limits.maxAutoSteps) {
+          await this.degrade(task, opts.hasKey, userText);
+          return { outcome: "halted_auto_steps" };
+        }
+      }
       if (segmentIters >= this.limits.maxSegmentIterations) {
         // Long, non-pausing segment: yield the lease so the client can re-poll.
         return { outcome: "yield" };
@@ -391,18 +444,47 @@ export class LabTurnOrchestrator {
       await this.recordBrainCost(task, result.model, result.usage);
 
       const decision = result.decision;
+      // Auto mode: the planner returns its NEXT pipeline state. We do NOT persist it
+      // eagerly — a crash AFTER the persist but BEFORE the tool ran would resume from
+      // an advanced phase and SKIP the tool. Instead each branch folds nextAuto into
+      // the SAME write that records the step's effect, so the phase advances iff the
+      // step actually happened (and async PHASE-1 rolls it back on a failed enqueue).
+      const nextAuto = result.auto;
+      // If this is the just-approved PAID step, capture its confirmed estimate to bill
+      // once it runs. The planner clears pendingConfirm in nextAuto, so read it from the
+      // STILL-persisted memory before we act. Only the confirmed paid tool reaches here
+      // as action:"tool" (paid steps otherwise stop at await_confirm).
+      const paidEstUsd =
+        decision.action === "tool" && (PAID_TOOLS as readonly string[]).includes(decision.tool)
+          ? readMemory(task).auto?.pendingConfirm?.estCostUsd
+          : undefined;
+
       if (decision.action === "final") {
-        await this.finalReply(task, decision.message, opts.hasKey, userText);
+        await this.finalReply(task, decision.message, opts.hasKey, userText, nextAuto);
         return { outcome: "final" };
       }
       if (decision.action === "update_plan") {
         await this.applyPlan(task, decision.plan, decision.note);
         continue;
       }
+      if (decision.action === "await_confirm") {
+        // A Stop can land AFTER this iteration's top gate but before we park. This is the
+        // ONLY park that stays in auto + ready (final/degrade flip to chat), and the client
+        // stops polling once ready — so nothing else would consume the flag. Check BEFORE
+        // asking (so we don't post a confirm prompt we're about to moot)...
+        if (await this.stopAutoIfRequested(taskId)) return { outcome: "stopped" };
+        // Auto mode paid-step gate: park the turn until the user confirms the spend.
+        await this.requestConfirmation(task, decision, nextAuto);
+        // ...and once more AFTER the park write, to catch a Stop that raced it.
+        if (await this.stopAutoIfRequested(taskId)) return { outcome: "stopped" };
+        return { outcome: "awaiting_confirm" };
+      }
 
       // decision.action === "tool"
       if (ASYNC_TOOLS.has(decision.tool)) {
-        const exec = await this.executeAsyncTool(task, decision.tool, decision.args, task.stepIndex);
+        const exec = await this.executeAsyncTool(
+          task, decision.tool, decision.args, task.stepIndex, nextAuto, paidEstUsd,
+        );
         if (exec.outcome === "waiting") return { outcome: "waiting", runId: exec.runId };
         // queue failed: fold the error and let the brain retry within budget
         toolErrorStreak++;
@@ -414,7 +496,7 @@ export class LabTurnOrchestrator {
       }
 
       // sync tool (reads + cancelRun)
-      const ok = await this.executeSyncTool(task, decision.tool, decision.args);
+      const ok = await this.executeSyncTool(task, decision.tool, decision.args, nextAuto, paidEstUsd);
       if (!ok) {
         toolErrorStreak++;
         if (toolErrorStreak > this.limits.maxToolErrorRetries) {
@@ -436,6 +518,8 @@ export class LabTurnOrchestrator {
     tool: WorkingTool,
     args: Record<string, unknown>,
     stepIndex: number,
+    nextAuto?: AutoMemory,
+    paidEstUsd?: number,
   ): Promise<{ outcome: "waiting"; runId: number } | { outcome: "tool_error" }> {
     // Reuse a stored key on replay; derive a fresh deterministic one otherwise. The
     // key is part of the args so the adapter dedupes (no double-enqueue on resume).
@@ -444,14 +528,34 @@ export class LabTurnOrchestrator {
     const finalArgs: Record<string, unknown> = { ...args, idempotencyKey: key };
 
     // PHASE 1: persist the intent BEFORE the call so a crash replays the stored tool.
-    await this.storage.updateAgentTask(task.id, {
+    // Auto mode: advance the pipeline phase ATOMICALLY with the 'executing' commit, so
+    // a crash-replay re-runs THIS stored tool (idempotent) instead of re-deciding from
+    // a fresh planner tick on the old phase (which would double-enqueue). The replay
+    // path passes nextAuto undefined (the phase is already advanced from the first try).
+    const priorMemory = readMemory(task);
+    const priorAuto = priorMemory.auto ?? null;
+    const p1: Partial<LabAgentTask> = {
       currentStep: { phase: "executing", stepIndex, tool, args: finalArgs } as unknown as Record<string, unknown>,
-    });
+    };
+    if (nextAuto !== undefined) {
+      priorMemory.auto = nextAuto;
+      (task as { memory?: unknown }).memory = priorMemory;
+      p1.memory = priorMemory as unknown as Record<string, unknown>;
+    }
+    await this.storage.updateAgentTask(task.id, p1);
 
     const res = await this.toolkit.call(this.ctx(task), tool, finalArgs);
     if (!res.ok) {
-      // Clear the marker; the call did not queue, so the brain may safely re-decide.
-      await this.storage.updateAgentTask(task.id, { currentStep: null });
+      // The call did not queue, so the brain may safely re-decide. Roll the phase back
+      // to its pre-advance value (clearing the marker alone would strand the advance).
+      const clear: Partial<LabAgentTask> = { currentStep: null };
+      if (nextAuto !== undefined) {
+        const m = readMemory(task);
+        m.auto = priorAuto;
+        (task as { memory?: unknown }).memory = m;
+        clear.memory = m as unknown as Record<string, unknown>;
+      }
+      await this.storage.updateAgentTask(task.id, clear);
       await this.foldToolError(task, tool, res.error.message, stepIndex);
       return { outcome: "tool_error" };
     }
@@ -477,15 +581,23 @@ export class LabTurnOrchestrator {
     await this.appendToolMessage(task, note);
     this.pushLedger(task, { step: stepIndex, tool, ok: true, summary: note });
     await this.storage.updateAgentTask(task.id, { memory: this.memoryPatch(task, args) });
+    // Bill the approved estimate ONLY on a fresh enqueue — a replay re-attaches to the
+    // same run (dto.idempotent) and must not double-charge. The adapter does not meter
+    // improve's own LLM spend, so this estimate is the spend signal for the cap.
+    if (paidEstUsd != null && !dto.idempotent) await this.recordPaidEstimate(task, paidEstUsd);
     return { outcome: "waiting", runId: dto.runId };
   }
 
   // Sync tool (reads + cancelRun). Folds the result into the transcript + ledger and
-  // advances step_index. Returns false on a clean toolkit failure.
+  // advances step_index. Returns false on a clean toolkit failure. Auto mode folds the
+  // planner's next phase + bills any approved paid estimate atomically with the success
+  // write, so the phase advances iff the tool actually ran.
   private async executeSyncTool(
     task: LabAgentTask,
     tool: WorkingTool,
     args: Record<string, unknown>,
+    nextAuto?: AutoMemory,
+    paidEstUsd?: number,
   ): Promise<boolean> {
     const stepIndex = task.stepIndex;
     const res = await this.toolkit.call(this.ctx(task), tool, args);
@@ -496,10 +608,25 @@ export class LabTurnOrchestrator {
     const summary = `${tool} result: ${capJson(res.data, TOOL_RESULT_CHARS)}`;
     await this.appendToolMessage(task, summary);
     this.pushLedger(task, { step: stepIndex, tool, ok: true, summary: `${tool} ok` });
+    // Auto mode: stash the structured result so the next planner tick can branch on
+    // robustness (and pick up a new strategyId from a create/improve) without parsing
+    // the transcript. Mutates the in-memory task so the memoryPatch below persists it.
+    if (task.mode === "auto") this.stashAutoToolResult(task, tool, res.data);
+    // Build the memory patch (picks up the stashed result + any strategyId from args),
+    // then overlay the planner's next phase so it advances atomically with this success.
+    const memory = readMemory(task);
+    if (args && typeof args.strategyId === "number") memory.currentStrategyId = args.strategyId;
+    if (nextAuto !== undefined) memory.auto = nextAuto;
+    (task as { memory?: unknown }).memory = memory;
     await this.storage.updateAgentTask(task.id, {
       stepIndex: stepIndex + 1,
-      memory: this.memoryPatch(task, args),
+      memory: memory as unknown as Record<string, unknown>,
     });
+    // Bill the approved estimate for a sync paid step (createStrategyFromText). The
+    // tiny window between the tool's side-effect and this write is the pre-existing
+    // sync-tool replay risk (shared with the chat path) — a crash there can re-draft;
+    // the planner's post-success currentStrategyId guard covers the common case.
+    if (paidEstUsd != null) await this.recordPaidEstimate(task, paidEstUsd);
     return true;
   }
 
@@ -547,11 +674,13 @@ export class LabTurnOrchestrator {
     message: string,
     hasKey: boolean,
     userText: string,
+    nextAuto?: AutoMemory,
   ): Promise<void> {
     // LLM prose, DETERMINISTIC chips (the model never authors client actions).
     // Result-aware: pass the task's current strategy + last finished run so the
     // reply can append refine / improve / try-another-asset next-step chips.
     const memory = readMemory(task);
+    if (nextAuto !== undefined) memory.auto = nextAuto;
     const chips = this.composeReply(userText, hasKey, {
       strategyId: memory.currentStrategyId ?? null,
       lastRunId: memory.lastFinishedRunId ?? null,
@@ -561,6 +690,15 @@ export class LabTurnOrchestrator {
       content: message.trim(),
       suggestedActions: chips,
     });
+    // The auto pipeline reached a terminal end (done / caps / no goal). Persist the
+    // final phase AND drop back to chat mode so a stray /step can't re-drive the
+    // planner and the user can converse normally again.
+    const patch: Record<string, unknown> = { memory: memory as unknown as Record<string, unknown> };
+    if (task.mode === "auto") {
+      patch.mode = "chat";
+      (task as { mode?: string }).mode = "chat";
+    }
+    await this.storage.updateAgentTask(task.id, patch);
     await this.finishTurn(task.id);
   }
 
@@ -577,6 +715,13 @@ export class LabTurnOrchestrator {
       content: reply.content,
       suggestedActions: reply.suggestedActions,
     });
+    // A halt on an orchestrator safety net (iterations / spend / auto-steps / malformed
+    // / tool errors / transport) ends the auto run — drop back to chat so a later /step
+    // can't re-drive the planner.
+    if (task.mode === "auto") {
+      (task as { mode?: string }).mode = "chat";
+      await this.storage.updateAgentTask(task.id, { mode: "chat" });
+    }
     await this.finishTurn(task.id);
   }
 
@@ -590,12 +735,31 @@ export class LabTurnOrchestrator {
     });
   }
 
+  // Wind an auto run down if a Stop landed mid-iteration. Re-reads the LIVE row (the
+  // caller's snapshot predates the race) and, on a pending cancel, clears the flag, drops
+  // to chat, and resets the turn. Guards the await_confirm park — the one park that stays
+  // in auto + ready, where the task would otherwise sit with the flag set while the client
+  // has stopped polling. Returns true if it stopped (caller returns outcome:"stopped").
+  private async stopAutoIfRequested(taskId: number): Promise<boolean> {
+    const fresh = await this.storage.getAgentTask(taskId);
+    if (fresh?.mode === "auto" && fresh.cancelRequestedAt) {
+      await this.storage.updateAgentTask(taskId, {
+        cancelRequestedAt: null,
+        mode: "chat",
+        status: "active",
+      });
+      await this.finishTurn(taskId);
+      return true;
+    }
+    return false;
+  }
+
   // --- brain context + cost -------------------------------------------------------
 
   private buildBrainContext(task: LabAgentTask, messages: LabAgentMessage[]): BrainTurnContext {
     const memory = readMemory(task);
     const plan = readPlan(task);
-    return {
+    const ctx: BrainTurnContext = {
       goal: task.goal ?? null,
       recentMessages: messages.map((m) => ({
         role: m.role as "user" | "agent" | "tool",
@@ -603,6 +767,20 @@ export class LabTurnOrchestrator {
       })),
       memoryDigest: renderMemoryDigest(memory, plan),
     };
+    // Auto mode: assemble the deterministic planner's view from persisted memory + live
+    // task fields. The planner is pure — everything it branches on lives here.
+    if (task.mode === "auto") {
+      ctx.auto = {
+        memory: memory.auto ?? defaultAutoMemory(),
+        goal: task.goal ?? null,
+        currentStrategyId: memory.currentStrategyId ?? null,
+        lastFinishedRunId: memory.lastFinishedRunId ?? null,
+        lastToolResult: memory.autoLastTool ?? null,
+        spendSoFarUsd: task.spendEstimateUsd ?? 0,
+        hardSpendCapUsd: this.limits.hardSpendCapUsd,
+      };
+    }
+    return ctx;
   }
 
   private async recordBrainCost(
@@ -610,8 +788,12 @@ export class LabTurnOrchestrator {
     model: string,
     usage?: { promptTokens: number; completionTokens: number },
   ): Promise<void> {
+    // Deterministic ticks (the auto-planner) carry NO usage — they are not LLM brain
+    // calls, so they must not bump the brain-call leash or charge spend. Only a real
+    // LLM turn (usage present) counts.
+    if (!usage) return;
     await this.bumpLoopCount(task);
-    if (usage && this.estimateCost) {
+    if (this.estimateCost) {
       try {
         const cost = await this.estimateCost(model, usage.promptTokens, usage.completionTokens);
         if (cost) await this.storage.incrementAgentTaskSpend(task.walletAddress, task.id, cost);
@@ -662,6 +844,85 @@ export class LabTurnOrchestrator {
     const memory = readMemory(task);
     if (args && typeof args.strategyId === "number") memory.currentStrategyId = args.strategyId;
     return memory as unknown as Record<string, unknown>;
+  }
+
+  // --- auto mode (Task #200) ------------------------------------------------------
+
+  // Stash a sync tool's structured result for the next planner tick. Bounds the blob
+  // and lifts a returned strategyId (create/improve) into currentStrategyId.
+  private stashAutoToolResult(task: LabAgentTask, tool: WorkingTool, data: unknown): void {
+    const memory = readMemory(task);
+    memory.autoLastTool = { tool, data: this.boundAutoData(data) };
+    if (data && typeof (data as { strategyId?: unknown }).strategyId === "number") {
+      memory.currentStrategyId = (data as { strategyId: number }).strategyId;
+    }
+    (task as { memory?: unknown }).memory = memory;
+  }
+
+  private boundAutoData(data: unknown): unknown {
+    try {
+      if (JSON.stringify(data).length <= AUTO_TOOL_DATA_CAP) return data;
+    } catch {
+      /* unserializable — drop it; the planner re-reads via a tool next tick */
+    }
+    return null;
+  }
+
+  // Bill the user-approved estimate for a PAID auto step. The deterministic planner
+  // has no LLM usage, so paid spend is recorded HERE (not in recordBrainCost) from the
+  // pre-call estimate. Best-effort: never fail a turn over spend accounting. Also syncs
+  // the in-memory task so a later spend-cap check in the SAME segment sees the new total.
+  private async recordPaidEstimate(task: LabAgentTask, estUsd: number): Promise<void> {
+    if (!(estUsd > 0)) return;
+    try {
+      await this.storage.incrementAgentTaskSpend(task.walletAddress, task.id, estUsd);
+      (task as { spendEstimateUsd?: number }).spendEstimateUsd = (task.spendEstimateUsd ?? 0) + estUsd;
+    } catch {
+      /* spend accounting is best-effort — never fail a turn over it */
+    }
+  }
+
+  // Park an auto turn on a PAID step: mint a confirm token, post the confirm/decline
+  // prompt once (idempotent on re-drive), and move the task to awaiting_input. The
+  // paid tool only runs once the confirm route writes a matching confirmedToken.
+  private async requestConfirmation(
+    task: LabAgentTask,
+    decision: Extract<BrainDecision, { action: "await_confirm" }>,
+    nextAuto?: AutoMemory,
+  ): Promise<void> {
+    const memory = readMemory(task);
+    // Idempotency reads the PERSISTED pendingConfirm (a re-drive must not re-ask); the
+    // base for a fresh ask is the planner's nextAuto so the advanced step count sticks.
+    const persisted = memory.auto;
+    const base = nextAuto ?? persisted ?? defaultAutoMemory();
+    const alreadyAsked = persisted?.pendingConfirm?.tool === decision.tool && !persisted?.confirmedToken;
+    if (!alreadyAsked) {
+      const token = this.genToken();
+      memory.auto = {
+        ...base,
+        pendingConfirm: { tool: decision.tool, token, estCostUsd: decision.estCostUsd, args: decision.args },
+        confirmedToken: null,
+      };
+      (task as { memory?: unknown }).memory = memory;
+      const est = `$${decision.estCostUsd.toFixed(2)}`;
+      const chips: AgentSuggestedAction[] = [
+        { id: `auto-confirm-${token}`, label: `Yes, spend ~${est}`, kind: "send", message: `${AUTO_CONFIRM_PREFIX}${token}` },
+        { id: `auto-decline-${token}`, label: "No, stop here", kind: "send", message: `${AUTO_DECLINE_PREFIX}${token}` },
+      ];
+      await this.storage.createAgentMessageForWallet(task.walletAddress, task.id, {
+        role: "agent",
+        content: `${decision.reason} This step uses your OpenRouter key (est. ${est}). Want me to go ahead?`,
+        suggestedActions: chips,
+      });
+      await this.storage.updateAgentTask(task.id, { memory: memory as unknown as Record<string, unknown> });
+    }
+    await this.storage.updateAgentTask(task.id, {
+      status: "awaiting_input",
+      turnState: "ready",
+      currentStep: null,
+      loopCount: 0,
+      turnStateChangedAt: this.now(),
+    });
   }
 
   private async safeReconcile(taskId: number): Promise<void> {

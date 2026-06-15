@@ -69,6 +69,9 @@ function makeFake() {
     async getAgentRun() {
       return undefined; // no prior run → never a replay in these tests
     },
+    async getAgentRunsForTask() {
+      return []; // no in-flight runs → the max-queued guard never trips here
+    },
     async getNextQueueOrder() {
       return 1;
     },

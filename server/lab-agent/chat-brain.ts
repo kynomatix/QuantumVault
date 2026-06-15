@@ -161,6 +161,15 @@ export const ASYNC_TOOLS: ReadonlySet<WorkingTool> = new Set<WorkingTool>([
   "improve",
 ]);
 
+/**
+ * PAID tools — they spend the user's BYO OpenRouter key (the AI drafts/rewrites a
+ * strategy). In auto mode (Task #200) these are GATED behind an explicit user
+ * confirmation (action:"await_confirm"); free tools (backtests, reads, insights)
+ * flow automatically.
+ */
+export const PAID_TOOLS = ["createStrategyFromText", "improve"] as const satisfies readonly WorkingTool[];
+export type PaidTool = (typeof PAID_TOOLS)[number];
+
 // One decision = one of three discriminated actions. `args` for a tool is whatever
 // the contract input schema for that tool requires MINUS idempotencyKey (which the
 // orchestrator injects deterministically — the model must never author it, so a
@@ -168,7 +177,12 @@ export const ASYNC_TOOLS: ReadonlySet<WorkingTool> = new Set<WorkingTool>([
 export type BrainDecision =
   | { action: "tool"; tool: WorkingTool; args: Record<string, unknown> }
   | { action: "final"; message: string }
-  | { action: "update_plan"; plan: string[]; note?: string };
+  | { action: "update_plan"; plan: string[]; note?: string }
+  // Backend-only (Task #200 auto mode): the DETERMINISTIC auto-planner emits this to
+  // STOP before a PAID tool and ask the user to approve the spend. The LLM chat brain
+  // NEVER emits it — it is deliberately absent from `brainDecisionSchema`, so a model
+  // can never trigger a paid step unprompted.
+  | { action: "await_confirm"; tool: PaidTool; args: Record<string, unknown>; estCostUsd: number; reason: string };
 
 const toolDecisionSchema = z.object({
   action: z.literal("tool"),
@@ -198,6 +212,76 @@ export class MalformedDecisionError extends Error {
   }
 }
 
+// ===========================================================================
+// Task #200 — deterministic auto-pipeline state (persisted in task.memory.auto)
+// ===========================================================================
+
+/** Where the deterministic pipeline currently is. */
+export type AutoPhase = "create" | "backtest" | "evaluate" | "insights" | "improve" | "done";
+
+/** A paid step parked awaiting the user's spend approval. */
+export interface AutoPendingConfirm {
+  tool: PaidTool;
+  /** Opaque token the confirm/decline route must echo back (set by the orchestrator). */
+  token: string;
+  estCostUsd: number;
+  args: Record<string, unknown>;
+}
+
+/**
+ * The auto-loop's small typed working state — persisted as `task.memory.auto` (no
+ * migration; it rides the existing jsonb column). Owned by the planner: each tick the
+ * planner returns the NEXT AutoMemory and the orchestrator persists it verbatim. The
+ * orchestrator only sets `pendingConfirm` (it mints the token); the confirm route
+ * sets `confirmedToken`.
+ */
+export interface AutoMemory {
+  phase: AutoPhase;
+  /** Total planner ticks this task — bounds the pipeline (maxAutoSteps). */
+  autoStepCount: number;
+  /** Paid `improve` rewrites used so far (cap ~3). */
+  improveCount: number;
+  /** Backtests this task has queued (max-queued guard, Phase 3). */
+  enqueuedBatchCount: number;
+  /** The asset basket the pipeline evaluates in one multi-symbol run. */
+  symbols: string[];
+  pendingConfirm?: AutoPendingConfirm | null;
+  confirmedToken?: string | null;
+}
+
+export const DEFAULT_AUTO_SYMBOLS = ["SOL", "ETH", "ARB"];
+
+/** The zero-value AutoMemory for a fresh auto task. */
+export function defaultAutoMemory(): AutoMemory {
+  return {
+    phase: "create",
+    autoStepCount: 0,
+    improveCount: 0,
+    enqueuedBatchCount: 0,
+    symbols: [...DEFAULT_AUTO_SYMBOLS],
+    pendingConfirm: null,
+    confirmedToken: null,
+  };
+}
+
+/**
+ * Everything the PURE auto-planner needs each tick. The orchestrator assembles it
+ * from the persisted memory + live task fields. Present on BrainTurnContext only for
+ * auto-mode tasks.
+ */
+export interface AutoTurnContext {
+  memory: AutoMemory;
+  goal: string | null;
+  currentStrategyId: number | null;
+  lastFinishedRunId: number | null;
+  /** Structured result of the most recent SYNC tool, so the planner can branch on
+   *  robustness without parsing transcript text. */
+  lastToolResult?: { tool: string; data: unknown } | null;
+  /** Spend accounting for the pre-paid 90% guard. */
+  spendSoFarUsd: number;
+  hardSpendCapUsd: number;
+}
+
 // Context the orchestrator hands the brain each iteration. Carries NO key (the job
 // wires the key into the BrainFn closure) so the orchestrator stays key-agnostic.
 export interface BrainTurnContext {
@@ -206,12 +290,17 @@ export interface BrainTurnContext {
   // Compact, orchestrator-rendered working memory (current strategy, recent tool
   // results, plan) — already bounded so the brain prompt stays small/cheap.
   memoryDigest?: string;
+  // Present only for auto-mode tasks — drives the deterministic auto-planner.
+  auto?: AutoTurnContext;
 }
 
 export interface BrainTurnResult {
   decision: BrainDecision;
   usage?: LlmUsage;
   model: string;
+  // The planner's NEXT persisted auto state (auto mode only). The orchestrator writes
+  // it into task.memory.auto. Undefined for the LLM chat brain.
+  auto?: AutoMemory;
 }
 
 /** The brain seam the orchestrator depends on. The job binds the key + model. */

@@ -13,6 +13,7 @@ import { db } from "../db";
 import { eq, desc, inArray, isNull, and, or, asc, sql } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { sharpeFromTrades } from "./metrics";
+import { countJobsAhead, type QueueCensusRun, type QueueClaimRun } from "./queue-order";
 
 const MAX_CONCURRENT_JOBS = 1;
 
@@ -101,7 +102,9 @@ export interface ILabStorage {
   hasActiveOrPausedRun(): Promise<boolean>;
   getHeatmapCells(walletAddress: string, strategyId?: number): Promise<{ cells: any[]; runsTotal: number; strategyIds: number[] }>;
   getCompletedRunCount(walletAddress: string): Promise<number>;
-  getJobsAheadCount(queueOrder: number): Promise<number>;
+  getJobsAheadCount(queueOrder: number, opts?: { agentOwned?: boolean; runId?: number }): Promise<number>;
+  /** True if this wallet has its own manual run running/queued (Task #200 fairness). */
+  walletHasManualRunAhead(walletAddress: string): Promise<boolean>;
   getUserRunNumber(walletAddress: string, runId: number): Promise<number>;
   deduplicateStrategyResults(strategyId: number, protectRunId?: number): Promise<number>;
 
@@ -1118,7 +1121,10 @@ export class LabDatabaseStorage implements ILabStorage {
             SELECT 1 FROM ${labOptimizationRuns} blocker
             WHERE blocker.status = 'running'
           )
-        ORDER BY q.queue_order ASC NULLS LAST, q.id ASC
+        -- Fairness (Task #200): manual (user-driven) runs claim before agent-owned
+        -- runs on the single shared worker, then by queue_order (NULLS LAST), then
+        -- id. MUST mirror compareQueueClaim() in ./queue-order.ts.
+        ORDER BY (q.agent_owned IS TRUE) ASC, q.queue_order ASC NULLS LAST, q.id ASC
         LIMIT 1
         FOR UPDATE SKIP LOCKED
       )
@@ -1178,18 +1184,51 @@ export class LabDatabaseStorage implements ILabStorage {
     return activeJobs.length > 0;
   }
 
-  // How many jobs (across ALL users) will be processed before a queued run with
-  // this queueOrder. The lab runs one optimization at a time platform-wide, so
-  // this = the currently active/paused run (if any) + queued runs ahead of it.
-  // Used to show users a friendly "N jobs ahead of you" wait estimate.
-  async getJobsAheadCount(queueOrder: number): Promise<number> {
-    const result = await db.select({ cnt: sql<number>`COUNT(*)::int` })
+  // How many jobs (across ALL users) will be processed before a queued run on the
+  // single platform-wide worker. The lab runs one optimization at a time, so this
+  // = the currently active/paused run (if any) + queued runs that sort ahead under
+  // the claim order. Delegates the ordering/counting to the pure ./queue-order
+  // module (the same comparator claimNextQueuedRun mirrors), so the surfaced
+  // "N jobs ahead" estimate can never disagree with what actually gets claimed.
+  //
+  // `opts.agentOwned`/`opts.runId` describe the TARGET run's tier + tiebreak. A
+  // manual target (default) counts only manual runs queued ahead — a queued agent
+  // run with a lower queue_order does NOT block a person's run. An agent target
+  // counts ALL queued manual runs plus agent runs with an earlier slot.
+  async getJobsAheadCount(
+    queueOrder: number,
+    opts?: { agentOwned?: boolean; runId?: number },
+  ): Promise<number> {
+    const rows = await db.select({
+      id: labOptimizationRuns.id,
+      status: labOptimizationRuns.status,
+      agentOwned: labOptimizationRuns.agentOwned,
+      queueOrder: labOptimizationRuns.queueOrder,
+    })
       .from(labOptimizationRuns)
-      .where(or(
-        inArray(labOptimizationRuns.status, ["running", "paused"]),
-        and(eq(labOptimizationRuns.status, "queued"), sql`${labOptimizationRuns.queueOrder} < ${queueOrder}`),
-      )!);
-    return result[0]?.cnt ?? 0;
+      .where(inArray(labOptimizationRuns.status, ["running", "paused", "queued"]));
+    const target: QueueClaimRun = {
+      agentOwned: opts?.agentOwned ?? false,
+      queueOrder,
+      id: opts?.runId ?? Number.MAX_SAFE_INTEGER,
+    };
+    return countJobsAhead(target, rows as QueueCensusRun[]);
+  }
+
+  // Does this wallet have its OWN manual (user-driven) run running or queued? Manual
+  // runs always claim before agent-owned runs (Task #200 fairness), so for an agent
+  // run this means a person's backtest is genuinely ahead of it — drives the
+  // "waiting on your manual run" copy.
+  async walletHasManualRunAhead(walletAddress: string): Promise<boolean> {
+    const rows = await db.select({ id: labOptimizationRuns.id })
+      .from(labOptimizationRuns)
+      .where(and(
+        eq(labOptimizationRuns.userId, walletAddress),
+        eq(labOptimizationRuns.agentOwned, false),
+        inArray(labOptimizationRuns.status, ["running", "paused", "queued"]),
+      )!)
+      .limit(1);
+    return rows.length > 0;
   }
 
   // The user's OWN sequential number for a run (their 1st run = 1, 2nd = 2, ...).

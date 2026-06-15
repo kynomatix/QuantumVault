@@ -266,8 +266,16 @@ export function toStrategyMatchDto(s: LabStrategy, score: number): StrategyMatch
   };
 }
 
-export function toQueuePositionDto(input: { jobsAhead: number; hasActiveRun: boolean }): QueuePositionDto {
-  return { jobsAhead: Math.max(0, Math.trunc(input.jobsAhead)), hasActiveRun: input.hasActiveRun };
+export function toQueuePositionDto(input: {
+  jobsAhead: number;
+  hasActiveRun: boolean;
+  waitingOnManualRun?: boolean;
+}): QueuePositionDto {
+  return {
+    jobsAhead: Math.max(0, Math.trunc(input.jobsAhead)),
+    hasActiveRun: input.hasActiveRun,
+    ...(input.waitingOnManualRun != null ? { waitingOnManualRun: input.waitingOnManualRun } : {}),
+  };
 }
 
 /** Defensive: insights reportData is the AI Creator's jsonb (shape not fixed yet). */

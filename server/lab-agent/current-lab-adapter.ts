@@ -71,16 +71,34 @@ export type AdapterStorage = Pick<
   | "getJobByRunId"
   | "getLatestInsightsReport"
   | "getJobsAheadCount"
+  | "walletHasManualRunAhead"
   | "hasActiveRun"
   | "createStrategy"
   | "createRun"
   | "getNextQueueOrder"
   | "getAgentRun"
+  | "getAgentRunsForTask"
   | "markAgentRunCancelled"
 >;
 
 /** Default out-of-sample holdout for agent runs when the caller omits one (§7b validity). */
 const DEFAULT_AGENT_OOS_FRACTION = 0.2;
+
+/**
+ * Leash (Task #200): cap how many of a task's backtests may sit in-flight at once.
+ * The auto-planner queues one multi-symbol run per phase, so this bounds a runaway
+ * loop (or a buggy planner) from flooding the single shared worker. Counted from the
+ * DB (authoritative), not the planner's own tally, so it holds across crash/replay.
+ */
+const MAX_QUEUED_AGENT_BACKTESTS = 3;
+
+/** Raw run statuses that still occupy a worker/queue slot (everything non-terminal). */
+const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<string> = new Set([
+  "queued",
+  "running",
+  "paused",
+  "fetching",
+]);
 
 /** Minimum timeframe the agent may backtest: sub-hour bars overfit and burn data budget. */
 const MIN_TIMEFRAME_MINUTES = 60;
@@ -486,7 +504,10 @@ export class CurrentLabAdapter implements LabAgentAdapter {
       : null;
     let jobsAhead: number | null = null;
     if (run.status === "queued" && run.queueOrder != null) {
-      jobsAhead = await this.storage.getJobsAheadCount(run.queueOrder);
+      jobsAhead = await this.storage.getJobsAheadCount(run.queueOrder, {
+        agentOwned: run.agentOwned === true,
+        runId: run.id,
+      });
     }
     return toRunStatusDto(run, { progress, jobsAhead });
   }
@@ -496,8 +517,10 @@ export class CurrentLabAdapter implements LabAgentAdapter {
     _input: LabAgentToolkitInput<"getQueuePosition">,
   ): Promise<LabAgentToolkitOutput<"getQueuePosition">> {
     const hasActiveRun = await this.storage.hasActiveRun(ctx.walletAddress);
-    const jobsAhead = await this.storage.getJobsAheadCount(QUEUE_TAIL);
-    return toQueuePositionDto({ jobsAhead, hasActiveRun });
+    // An agent run would queue at the tail (behind every manual + agent run).
+    const jobsAhead = await this.storage.getJobsAheadCount(QUEUE_TAIL, { agentOwned: true });
+    const waitingOnManualRun = await this.storage.walletHasManualRunAhead(ctx.walletAddress);
+    return toQueuePositionDto({ jobsAhead, hasActiveRun, waitingOnManualRun });
   }
 
   // -------------------------------------------------------------------------
@@ -1053,6 +1076,21 @@ export class CurrentLabAdapter implements LabAgentAdapter {
     const existing = await this.storage.getAgentRun(ctx.walletAddress, taskId, idempotencyKey);
     if (existing) {
       return { run: existing, idempotent: true, correlationId: existing.agentCorrelationId ?? "" };
+    }
+    // Max-queued leash (Task #200): refuse a NEW enqueue once this task already has
+    // MAX_QUEUED_AGENT_BACKTESTS non-terminal runs in flight. Checked AFTER the
+    // idempotent early-return so a /step replay of an already-counted run is never
+    // blocked. Counted from the DB so it survives crash/replay and a desynced planner
+    // tally. Retryable:false — capacity won't free up by re-issuing the same call.
+    const taskRuns = await this.storage.getAgentRunsForTask(ctx.walletAddress, taskId);
+    const inFlight = taskRuns.filter((r) => ACTIVE_AGENT_RUN_STATUSES.has(r.status)).length;
+    if (inFlight >= MAX_QUEUED_AGENT_BACKTESTS) {
+      throw new ToolkitError(
+        "conflict",
+        `This task already has ${inFlight} backtests in flight (max ${MAX_QUEUED_AGENT_BACKTESTS}). ` +
+          "Let them finish before queueing another.",
+        false,
+      );
     }
     const correlationId = ctx.correlationId ?? randomUUID();
     const queueOrder = await this.storage.getNextQueueOrder(ctx.walletAddress);

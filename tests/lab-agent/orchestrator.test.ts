@@ -13,7 +13,15 @@ import {
   type OrchestratorDeps,
   type OrchestratorStorage,
 } from "../../server/lab-agent/orchestrator";
-import { MalformedDecisionError, type BrainDecision, type BrainFn } from "../../server/lab-agent/chat-brain";
+import {
+  MalformedDecisionError,
+  defaultAutoMemory,
+  type BrainDecision,
+  type BrainFn,
+  type AutoMemory,
+  type PaidTool,
+} from "../../server/lab-agent/chat-brain";
+import { createAutoPlanner } from "../../server/lab-agent/auto-planner";
 import type { LabAgentTask, LabAgentMessage } from "@shared/schema";
 import type { LabAgentToolkit } from "../../server/lab-agent/toolkit";
 
@@ -480,8 +488,8 @@ describe("LabTurnOrchestrator — reconcile / stop gates", () => {
     expect(brain.rec.calls).toBe(0);
   });
 
-  it("does not call the brain when a cancel was requested", async () => {
-    const store = makeStore({ cancelRequestedAt: new Date() });
+  it("winds an AUTO run down (no brain call) when a cancel was requested", async () => {
+    const store = makeStore({ mode: "auto", cancelRequestedAt: new Date() });
     const toolkit = makeToolkit({});
     const brain = makeBrain([{ action: "final", message: "nope" }]);
     const orch = makeOrch(store, toolkit);
@@ -489,6 +497,26 @@ describe("LabTurnOrchestrator — reconcile / stop gates", () => {
     const r = await orch.advance(1, { brain: brain.fn, hasKey: true });
     expect(r.outcome).toBe("stopped");
     expect(brain.rec.calls).toBe(0);
+    // The stop is CONSUMED: flag cleared + dropped back to chat so it can't re-fire.
+    expect(store.tasks.get(1)!.cancelRequestedAt).toBeNull();
+    expect(store.tasks.get(1)!.mode).toBe("chat");
+  });
+
+  it("clears a STALE cancel flag on a chat task WITHOUT swallowing the turn", async () => {
+    // A stop landing in the tiny window AFTER an auto turn finished + flipped to chat
+    // leaves a stale cancelRequestedAt on a chat-mode task. The gate must clear it and
+    // STILL answer the turn — winding down here would poison the user's next message.
+    const store = makeStore({ mode: "chat", cancelRequestedAt: new Date() });
+    await seedUser(store, "hello again");
+    const toolkit = makeToolkit({});
+    const brain = makeBrain([{ action: "final", message: "answered" }]);
+    const orch = makeOrch(store, toolkit);
+
+    const r = await orch.advance(1, { brain: brain.fn, hasKey: true });
+    expect(r.outcome).toBe("final");
+    expect(brain.rec.calls).toBe(1);
+    expect(store.tasks.get(1)!.cancelRequestedAt).toBeNull();
+    expect(store.agentMessages().at(-1)!.content).toBe("answered");
   });
 
   it("reconcile at entry can stop the turn before any brain call", async () => {
@@ -504,5 +532,168 @@ describe("LabTurnOrchestrator — reconcile / stop gates", () => {
     const r = await orch.advance(1, { brain: brain.fn, hasKey: true });
     expect(r.outcome).toBe("stopped");
     expect(brain.rec.calls).toBe(0);
+  });
+});
+
+// The deterministic planner is unit-tested in auto-planner.test.ts. These lock the
+// ORCHESTRATOR integration of the Task #200 confirm gate: a PAID step never runs without
+// a persisted matching confirmedToken, an approved step runs exactly once and bills its
+// estimate, and a stop drops a live auto run back to chat so nothing can re-drive it.
+describe("LabTurnOrchestrator — auto mode confirm gate", () => {
+  const estimatePaidCostUsd = (t: PaidTool) => (t === "createStrategyFromText" ? 0.06 : 0.12);
+
+  it("parks on the PAID create with confirm/decline chips and NEVER runs the tool", async () => {
+    const store = makeStore({
+      mode: "auto",
+      goal: "a momentum strategy on SOL",
+      memory: { auto: defaultAutoMemory() } as unknown as Record<string, unknown>,
+    });
+    const toolkit = makeToolkit({});
+    const orch = makeOrch(store, toolkit);
+    const brain = createAutoPlanner({ estimatePaidCostUsd });
+
+    const r = await orch.advance(1, { brain, hasKey: true });
+
+    expect(r.outcome).toBe("awaiting_confirm");
+    expect(toolkit.countOf("createStrategyFromText")).toBe(0); // paid tool did NOT run
+    const task = store.tasks.get(1)!;
+    expect(task.status).toBe("awaiting_input");
+    expect(task.turnState).toBe("ready");
+    const auto = (task.memory as any).auto;
+    expect(auto.pendingConfirm.tool).toBe("createStrategyFromText");
+    expect(auto.pendingConfirm.estCostUsd).toBeCloseTo(0.06, 5);
+    expect(auto.confirmedToken ?? null).toBeNull(); // no approval persisted yet
+    expect(task.spendEstimateUsd ?? 0).toBe(0); // un-approved step is never billed
+    // confirm + decline chips are posted as sentinel "send" messages
+    const chips = store.agentMessages().at(-1)!.suggestedActions as any[];
+    expect(chips.some((c) => String(c.id).startsWith("auto-confirm-"))).toBe(true);
+    expect(chips.some((c) => String(c.id).startsWith("auto-decline-"))).toBe(true);
+  });
+
+  it("runs the PAID create EXACTLY once after a matching confirmedToken, bills it, then parks on the backtest", async () => {
+    const auto: AutoMemory = {
+      ...defaultAutoMemory(),
+      phase: "create",
+      pendingConfirm: {
+        tool: "createStrategyFromText",
+        token: "tok-9",
+        estCostUsd: 0.06,
+        args: { prompt: "momentum on SOL" },
+      },
+      confirmedToken: "tok-9",
+    };
+    const store = makeStore({
+      mode: "auto",
+      goal: "momentum on SOL",
+      memory: { auto } as unknown as Record<string, unknown>,
+    });
+    const toolkit = makeToolkit({
+      createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }),
+      runOptimization: () => ({ ok: true, data: { runId: 101, correlationId: "c-101" } }),
+    });
+    const orch = makeOrch(store, toolkit);
+    const brain = createAutoPlanner({ estimatePaidCostUsd });
+
+    const r = await orch.advance(1, { brain, hasKey: true });
+
+    expect(toolkit.countOf("createStrategyFromText")).toBe(1); // ran exactly once
+    expect(r.outcome).toBe("waiting"); // advanced create→backtest→async run, parked
+    const task = store.tasks.get(1)!;
+    expect((task.memory as any).currentStrategyId).toBe(7);
+    expect((task.memory as any).auto.pendingConfirm ?? null).toBeNull(); // gate cleared
+    expect(task.spendEstimateUsd).toBeCloseTo(0.06, 5); // billed the approved estimate
+  });
+
+  it("a confirmed token that does NOT match the pending token re-asks instead of running the paid tool", async () => {
+    const auto: AutoMemory = {
+      ...defaultAutoMemory(),
+      phase: "create",
+      pendingConfirm: {
+        tool: "createStrategyFromText",
+        token: "tok-A",
+        estCostUsd: 0.06,
+        args: { prompt: "momentum on SOL" },
+      },
+      confirmedToken: "tok-STALE",
+    };
+    const store = makeStore({
+      mode: "auto",
+      goal: "momentum on SOL",
+      memory: { auto } as unknown as Record<string, unknown>,
+    });
+    const toolkit = makeToolkit({ createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }) });
+    const orch = makeOrch(store, toolkit);
+    const brain = createAutoPlanner({ estimatePaidCostUsd });
+
+    const r = await orch.advance(1, { brain, hasKey: true });
+
+    expect(r.outcome).toBe("awaiting_confirm");
+    expect(toolkit.countOf("createStrategyFromText")).toBe(0); // token mismatch ⇒ no spend
+    expect(store.tasks.get(1)!.spendEstimateUsd ?? 0).toBe(0);
+  });
+
+  it("a stop on a LIVE auto run winds down, flips mode→chat, and clears the cancel flag", async () => {
+    const store = makeStore({
+      mode: "auto",
+      cancelRequestedAt: new Date(),
+      memory: { auto: defaultAutoMemory() } as unknown as Record<string, unknown>,
+    });
+    const toolkit = makeToolkit({});
+    const orch = makeOrch(store, toolkit);
+    const brain = createAutoPlanner({ estimatePaidCostUsd });
+
+    const r = await orch.advance(1, { brain, hasKey: true });
+
+    expect(r.outcome).toBe("stopped");
+    const task = store.tasks.get(1)!;
+    expect(task.mode).toBe("chat"); // dropped back so a later /step can't re-drive the planner
+    expect(task.cancelRequestedAt ?? null).toBeNull(); // signal consumed
+    expect(toolkit.calls.length).toBe(0); // no tool ran
+  });
+
+  it("a stop landing mid-iteration (after the gate, before the await_confirm park) winds down instead of stranding", async () => {
+    // The loop's top gate only sees a stop set BEFORE the iteration begins. A Stop can still
+    // land AFTER the gate but before the paid-step park — and await_confirm is the ONE park
+    // that stays in auto + ready (final/degrade flip to chat), where the client then stops
+    // polling so nothing else would consume the flag. The pre-park re-check must convert it
+    // to a clean stop rather than leave the task at auto + ready + cancelRequestedAt.
+    const store = makeStore({
+      mode: "auto",
+      goal: "momentum on SOL",
+      memory: { auto: defaultAutoMemory() } as unknown as Record<string, unknown>,
+    });
+    const toolkit = makeToolkit({});
+    const orch = makeOrch(store, toolkit);
+    // Custom brain: simulate a Stop click DURING this iteration (set the flag as a side
+    // effect), then return the paid-step gate the deterministic planner would emit. usage is
+    // undefined to mirror the LLM-free planner (no cost bump).
+    let calls = 0;
+    const brain: BrainFn = async () => {
+      calls++;
+      store.tasks.get(1)!.cancelRequestedAt = new Date();
+      return {
+        decision: {
+          action: "await_confirm",
+          tool: "createStrategyFromText",
+          args: { prompt: "momentum on SOL" },
+          estCostUsd: 0.06,
+          reason: "Create the first strategy draft.",
+        },
+        usage: undefined,
+      };
+    };
+
+    const r = await orch.advance(1, { brain, hasKey: true });
+
+    expect(r.outcome).toBe("stopped");
+    expect(calls).toBe(1);
+    const task = store.tasks.get(1)!;
+    expect(task.mode).toBe("chat"); // dropped back so a later /step can't re-drive the planner
+    expect(task.cancelRequestedAt ?? null).toBeNull(); // signal consumed
+    expect(task.turnState).toBe("ready");
+    expect(task.status).toBe("active"); // NOT stranded at awaiting_input
+    // The confirm prompt was never posted — we re-checked BEFORE requestConfirmation.
+    const chips = store.agentMessages().flatMap((m) => (m.suggestedActions as any[]) ?? []);
+    expect(chips.some((c) => String(c.id).startsWith("auto-confirm-"))).toBe(false);
   });
 });

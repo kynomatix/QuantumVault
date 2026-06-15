@@ -26,14 +26,15 @@ import {
 } from "../session-v3";
 import { parsePineScript } from "../lab/pine-parser";
 import { draftStrategy, improveStrategy } from "./creator";
-import { getCreatorModelCatalog, isSelectableModel, estimateCallCostUsd } from "./models-catalog";
+import { getCreatorModelCatalog, isSelectableModel, estimateCallCostUsd, getModelPrice } from "./models-catalog";
 import { LlmGatewayError, checkRateLimit } from "./router";
 import { startCreatorJob, getCreatorJob, CreatorJobConflictError } from "./creator-jobs";
 import { labStorage } from "../lab/storage";
 import { SEED_GREETING, composeAgentReply } from "../lab-agent/chat-replies";
-import { decideTurnAction, type BrainFn } from "../lab-agent/chat-brain";
+import { decideTurnAction, defaultAutoMemory, type BrainFn, type AutoMemory, type PaidTool } from "../lab-agent/chat-brain";
+import { createAutoPlanner } from "../lab-agent/auto-planner";
 import { looksLikeApiKey } from "@shared/api-key-detect";
-import { createLabTurnOrchestrator } from "../lab-agent/orchestrator";
+import { createLabTurnOrchestrator, AUTO_CONFIRM_PREFIX, AUTO_DECLINE_PREFIX } from "../lab-agent/orchestrator";
 import { LabAgentToolkit } from "../lab-agent/toolkit";
 import { createCurrentLabAdapter } from "../lab-agent/current-lab-adapter";
 import { reconcileTask } from "../lab-agent/reconciler";
@@ -125,6 +126,11 @@ export function registerCreatorRoutes(
     status: t.status,
     turnState: t.turnState,
     activeRunId: t.activeRunId ?? null,
+    // Auto-mode watchability (Task #200): the dock shows the Stop control + spend-so-far
+    // while mode==="auto", and reflects a pending stop the instant it's requested.
+    mode: t.mode,
+    spendEstimateUsd: t.spendEstimateUsd ?? 0,
+    cancelRequested: t.cancelRequestedAt != null,
   });
 
   // --- Phase C turn orchestrator (one shared instance) -------------------------
@@ -169,21 +175,77 @@ export function registerCreatorRoutes(
     limits: { hardSpendCapUsd: LAB_CHAT_TASK_SPEND_CAP_USD },
   });
 
-  // Decrypt the BYO key transiently, bind it (+ optional model) into a brain seam,
-  // and kick off a background turn. The key buffer is zeroized before returning —
-  // the brain closure holds only the immutable string copy (same pattern as
-  // /draft). "no-key" means the key was deleted or the session is locked between
-  // the meta read and now; the caller degrades to the deterministic shell.
-  const startTurnWithKey = async (
+  // --- auto-mode (Task #200) paid-cost estimator -------------------------------
+  // The deterministic planner has no LLM usage, so it can't price a paid step from
+  // real token counts. Instead it asks for a CONSERVATIVE pre-call estimate: a fixed
+  // token assumption × the live catalog price for the default drafter model (the same
+  // model the Creator uses for createStrategyFromText / improve). The estimate is the
+  // number shown in the confirm prompt and the value billed against the spend cap.
+  const AUTO_DRAFTER_MODEL = "moonshotai/kimi-k2.6";
+  // Conservative token assumptions per paid tool (prompt + completion). Sized a touch
+  // high so the confirm est never UNDER-states the spend the user is approving.
+  const PAID_TOOL_TOKENS: Record<PaidTool, { prompt: number; completion: number }> = {
+    createStrategyFromText: { prompt: 6000, completion: 10000 },
+    improve: { prompt: 12000, completion: 10000 },
+  };
+  // Fallback per-million prices when the live catalog has no entry (fail-soft) — set
+  // above kimi-k2.6's real price so a missing quote still over-estimates, never under.
+  const FALLBACK_PROMPT_PER_M = 1.0;
+  const FALLBACK_COMPLETION_PER_M = 4.0;
+  // Fetch the drafter price ONCE per turn, then return a SYNC estimator the pure
+  // planner can call. (getModelPrice is async + cached; the planner must stay pure.)
+  const buildPaidCostEstimator = async (): Promise<(tool: PaidTool) => number> => {
+    let pPerM = FALLBACK_PROMPT_PER_M;
+    let cPerM = FALLBACK_COMPLETION_PER_M;
+    try {
+      const price = await getModelPrice(AUTO_DRAFTER_MODEL);
+      if (price.promptPerM != null) pPerM = price.promptPerM;
+      if (price.completionPerM != null) cPerM = price.completionPerM;
+    } catch {
+      /* live pricing unavailable → keep the conservative fallback */
+    }
+    return (tool: PaidTool): number => {
+      const t = PAID_TOOL_TOKENS[tool];
+      const cost = (t.prompt / 1e6) * pPerM + (t.completion / 1e6) * cPerM;
+      return Math.round(cost * 100) / 100;
+    };
+  };
+
+  // Start a background turn for a task, picking the brain by the task's MODE.
+  //
+  //   chat → decrypt the BYO key transiently and bind it (+ optional model) into the
+  //          LLM brain seam. The buffer is zeroized before returning; the closure
+  //          holds only the immutable string copy (same pattern as /draft).
+  //   auto → the DETERMINISTIC planner (no key bound — it's LLM-free). The PAID tools
+  //          it schedules resolve the key per-call via the adapter's resolveLlmKey, so
+  //          we still require ciphertext + umk here so those tools CAN run.
+  //
+  // "no-key" means the key was deleted or the session is locked between the meta read
+  // and now; the caller degrades to the deterministic shell (chat) or ends the run.
+  const startTaskTurn = async (
     walletAddress: string,
     taskId: number,
     model: string | undefined,
+    mode: string,
   ): Promise<"started" | "already" | "no-key"> => {
     const ciphertext = await storage.getWalletLlmApiKeyCiphertext(walletAddress);
     if (!ciphertext) return "no-key";
     const sessionRes = getSessionByWalletAddress(walletAddress);
     const umk = sessionRes?.session?.umk;
     if (!umk) return "no-key";
+
+    if (mode === "auto") {
+      const estimatePaidCostUsd = await buildPaidCostEstimator();
+      const brain = createAutoPlanner({ estimatePaidCostUsd });
+      const started = startLabTurn({
+        taskId,
+        walletAddress,
+        orchestrator: labOrchestrator,
+        opts: { brain, hasKey: true },
+      });
+      return started ? "started" : "already";
+    }
+
     let keyBuf: Buffer | null = null;
     try {
       keyBuf = decryptLlmApiKeyV3(umk, ciphertext, walletAddress);
@@ -199,6 +261,27 @@ export function registerCreatorRoutes(
     } finally {
       if (keyBuf) keyBuf.fill(0);
     }
+  };
+
+  // Read the typed `auto` sub-object out of a task's memory jsonb (null when absent).
+  const readAutoMemory = (task: LabAgentTask): AutoMemory | null => {
+    const mem = task.memory as { auto?: AutoMemory } | null;
+    return mem?.auto ?? null;
+  };
+
+  // Instant-Stop / decline helper: cancel this task's agent-owned QUEUED runs so the
+  // shared worker frees up immediately. markAgentRunCancelled CAS's on status='queued',
+  // so a run the worker already claimed is left alone (the child owns its lifecycle).
+  const cancelAgentQueuedRuns = async (walletAddress: string, taskId: number): Promise<number> => {
+    const runs = await labStorage.getAgentRunsForTask(walletAddress, taskId);
+    let cancelled = 0;
+    for (const run of runs) {
+      if (run.status === "queued") {
+        const ok = await labStorage.markAgentRunCancelled(run.id);
+        if (ok) cancelled++;
+      }
+    }
+    return cancelled;
   };
 
   // Find-or-create this wallet's active chat task (seeded with a greeting on first
@@ -243,6 +326,84 @@ export function registerCreatorRoutes(
       if (content.length > MAX_CHAT_CONTENT) {
         return res.status(400).json({ error: "That message is too long." });
       }
+
+      // --- auto-mode control signals (Task #200) -------------------------------
+      // The orchestrator's confirm prompt renders "Yes, spend ~$X" / "No, stop here"
+      // as kind:"send" chips carrying these sentinels (see requestConfirmation). They
+      // are CONTROL signals, not chat the user typed — intercept them HERE, before the
+      // secret guard and before persisting, so they never land in the transcript.
+      if (content.startsWith(AUTO_CONFIRM_PREFIX) || content.startsWith(AUTO_DECLINE_PREFIX)) {
+        const isConfirm = content.startsWith(AUTO_CONFIRM_PREFIX);
+        const prefix = isConfirm ? AUTO_CONFIRM_PREFIX : AUTO_DECLINE_PREFIX;
+        const token = content.slice(prefix.length).trim();
+        const task = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+        if (!task) return res.status(404).json({ error: "Conversation not found." });
+        const auto = readAutoMemory(task);
+        const pendingToken = auto?.pendingConfirm?.token;
+        // CAS: act only when THIS exact pending token is still outstanding (and not
+        // already confirmed). A stale/duplicate chip — double-click, retry, an old
+        // transcript — is an idempotent no-op: return the current state untouched.
+        const matches =
+          task.mode === "auto" &&
+          !!pendingToken &&
+          pendingToken === token &&
+          auto?.confirmedToken !== token;
+        if (!matches) {
+          const current = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
+          return res.status(202).json({ messages: current, task: toTurnTaskDto(task) });
+        }
+
+        if (isConfirm) {
+          // Approve the paid step: persist confirmedToken (KEEP pendingConfirm so the
+          // orchestrator can still read its estCostUsd to bill the spend cap), flip to a
+          // running turn, and re-drive the deterministic planner — which now sees a
+          // matching token and runs the paid tool.
+          const nextAuto: AutoMemory = { ...(auto as AutoMemory), confirmedToken: token };
+          await labStorage.updateAgentTask(taskId, {
+            memory: { ...((task.memory as Record<string, unknown>) ?? {}), auto: nextAuto },
+            status: "active",
+            turnState: "running_turn",
+            turnStateChangedAt: new Date(),
+          });
+          const outcome = await startTaskTurn(r.walletAddress, taskId, undefined, "auto");
+          if (outcome === "no-key") {
+            // Key/session gone between park and confirm: end cleanly so the run doesn't
+            // hang awaiting a key the paid tool can't resolve.
+            await labStorage.updateAgentTask(taskId, {
+              turnState: "ready", turnStateChangedAt: new Date(),
+            });
+          }
+          const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+          const msgs = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
+          return res.status(202).json({ messages: msgs, task: updated ? toTurnTaskDto(updated) : null });
+        }
+
+        // Decline: cancel agent-owned QUEUED runs (free the shared worker), clear the
+        // confirm gate, drop back to chat, and post a plain agent note so the transcript
+        // shows the run stopped. Nothing was spent — the paid tool never ran. Decline IS a
+        // stop, so also clear any pending cancelRequestedAt (closes the ultra-narrow window
+        // where a Stop raced this very park and would otherwise leave a stale flag on the
+        // now chat-mode task until the next orchestrator entry).
+        await cancelAgentQueuedRuns(r.walletAddress, taskId);
+        const nextAuto: AutoMemory = { ...(auto as AutoMemory), pendingConfirm: null, confirmedToken: null };
+        await labStorage.updateAgentTask(taskId, {
+          memory: { ...((task.memory as Record<string, unknown>) ?? {}), auto: nextAuto },
+          mode: "chat",
+          status: "active",
+          turnState: "ready",
+          cancelRequestedAt: null,
+          turnStateChangedAt: new Date(),
+        });
+        await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
+          role: "agent",
+          content:
+            "Stopped before the paid step — nothing was spent. You're back in chat. Ask me anything, or start a new auto run when you're ready.",
+        });
+        const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+        const msgs = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
+        return res.status(200).json({ messages: msgs, task: updated ? toTurnTaskDto(updated) : null });
+      }
+
       // Pasted-secret guard (security): a pasted API key must NEVER be persisted
       // as a chat message. Reject BEFORE createAgentMessageForWallet so the secret
       // never lands in lab_agent_messages. The error echoes no key material and
@@ -321,7 +482,7 @@ export function registerCreatorRoutes(
           turnState: "running_turn", turnStateChangedAt: new Date(),
         });
 
-        const outcome = await startTurnWithKey(r.walletAddress, taskId, model);
+        const outcome = await startTaskTurn(r.walletAddress, taskId, model, existing.mode);
         if (outcome === "no-key") {
           // Key deleted or session locked between the meta read and the decrypt.
           await labStorage.updateAgentTask(taskId, {
@@ -358,13 +519,37 @@ export function registerCreatorRoutes(
       const task = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
       if (!task) return res.status(404).json({ error: "Conversation not found." });
 
-      // Nothing to resume once the turn is back to ready (or never started).
-      if (task.turnState !== "running_turn" && task.turnState !== "waiting_for_tool") {
+      // A turn is already advancing in this process: cheap no-op (the CAS lease would
+      // reject a second advance anyway). Avoids a needless key decrypt per poll. A running
+      // loop also consumes any pending Stop itself, at its gate (before the brain), so leave
+      // it alone — don't consume its flag from here.
+      if (isLabTurnRunning(taskId)) {
         return res.status(202).json({ task: toTurnTaskDto(task), resumed: false });
       }
-      // A turn is already advancing in this process: cheap no-op (the CAS lease would
-      // reject a second advance anyway). Avoids a needless key decrypt per poll.
-      if (isLabTurnRunning(taskId)) {
+
+      // No live loop, but a Stop is pending: consume it HERE, key-free, BEFORE the
+      // "nothing to resume" check below — an await_confirm park sits at turnState=ready, so
+      // gating consumption on a live turnState would miss it. Stopping never runs a tool, so
+      // it must not hinge on the LLM key that startTaskTurn (below) needs. Primary stop
+      // consumption is in the orchestrator + /auto/stop; this is defense-in-depth for any
+      // stray /step. Drop back to chat + clear the parked-run marker.
+      if (task.cancelRequestedAt) {
+        await labStorage.updateAgentTask(taskId, {
+          cancelRequestedAt: null,
+          mode: "chat",
+          status: "active",
+          turnState: "ready",
+          turnStateChangedAt: new Date(),
+          currentStep: null,
+          activeRunId: null,
+          loopCount: 0,
+        });
+        const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+        return res.status(202).json({ task: updated ? toTurnTaskDto(updated) : null, resumed: false });
+      }
+
+      // Nothing to resume once the turn is back to ready (or never started).
+      if (task.turnState !== "running_turn" && task.turnState !== "waiting_for_tool") {
         return res.status(202).json({ task: toTurnTaskDto(task), resumed: false });
       }
 
@@ -374,13 +559,17 @@ export function registerCreatorRoutes(
         return res.status(400).json({ error: "That model isn't available to choose." });
       }
 
-      const outcome = await startTurnWithKey(r.walletAddress, taskId, model);
+      const outcome = await startTaskTurn(r.walletAddress, taskId, model, task.mode);
       if (outcome === "no-key") {
         // Key/session gone mid-turn: the orchestrator needs the key to interpret a
-        // finished run, so end the parked turn cleanly (ready) rather than hang. A
-        // pending run, if any, is folded later if the user re-adds their key.
+        // finished run, so end the parked turn cleanly (ready) rather than hang. A pending
+        // run, if any, is folded later if the user re-adds their key. A pending Stop can't
+        // strand here: it's consumed key-free at the top of /step, and a Stop racing this
+        // no-key step finalizes directly in /auto/stop (its isLabTurnRunning route sees no
+        // live loop, since a no-key step never starts one).
         await labStorage.updateAgentTask(taskId, {
-          turnState: "ready", turnStateChangedAt: new Date(),
+          turnState: "ready",
+          turnStateChangedAt: new Date(),
         });
         const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
         return res.status(202).json({ task: updated ? toTurnTaskDto(updated) : null, resumed: false });
@@ -389,6 +578,137 @@ export function registerCreatorRoutes(
       return res.status(202).json({ task: updated ? toTurnTaskDto(updated) : null, resumed: true });
     } catch (err: any) {
       sendError(res, err, "Could not resume the assistant.");
+    }
+  });
+
+  // --- auto mode (Task #200): watched auto-grind loop --------------------------
+  // Start a watched auto run on this task: reset the pipeline state, set a goal, flip
+  // the task into "auto" mode, and kick off the deterministic planner. The planner
+  // auto-flows the FREE pipeline (create → backtest sweep across the asset basket →
+  // insights) and STOPS with a confirm prompt before each PAID step.
+  app.post("/api/lab/agent/chat/:taskId/auto/start", ...guards, async (req: Request, res: Response) => {
+    const r = req as any;
+    try {
+      const taskId = parseTaskId(req.params.taskId);
+      if (taskId === null) return res.status(400).json({ error: "Invalid conversation id." });
+      const goal = typeof req.body?.goal === "string" ? req.body.goal.trim() : "";
+      if (!goal) return res.status(400).json({ error: "Describe the strategy you want me to build first." });
+      if (goal.length > MAX_CHAT_CONTENT) {
+        return res.status(400).json({ error: "That description is too long." });
+      }
+      // Pasted-secret guard: the goal is persisted (and echoed in the transcript), so a
+      // pasted key must never land here. Same rule as a chat message.
+      if (looksLikeApiKey(goal)) {
+        return res.status(400).json({
+          error:
+            "Don't paste your API key here. Add it securely in the Creator — it goes straight to encrypted storage and is never saved in this chat.",
+        });
+      }
+      // Auto needs the BYO key: even though the planner is LLM-free, the PAID steps it
+      // schedules spend the user's OpenRouter key. Refuse up front (clear message) if
+      // there's no key, rather than starting a run that can't reach its paid steps.
+      const keyMeta = await storage.getWalletLlmApiKeyMeta(r.walletAddress);
+      if (!keyMeta.hasKey) {
+        return res.status(400).json({
+          error: "Add your OpenRouter key in the Creator first — auto mode uses it for the AI build/improve steps.",
+        });
+      }
+
+      const task = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+      if (!task) return res.status(404).json({ error: "Conversation not found." });
+      // Single-flight: never start an auto run over a live turn (a chat turn, or an
+      // already-running auto run). The client must wait for turnState to settle.
+      if (task.turnState !== "ready") {
+        return res.status(409).json({ error: "Finish the current turn before starting an auto run." });
+      }
+
+      // Record the goal in the transcript so the watcher sees what was asked, then reset
+      // the pipeline state to a clean budget (each watched run gets its own spend cap +
+      // improve/step leashes) and switch the task into auto mode.
+      await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, { role: "user", content: goal });
+      await labStorage.updateAgentTask(taskId, {
+        goal,
+        mode: "auto",
+        status: "active",
+        memory: { ...((task.memory as Record<string, unknown>) ?? {}), auto: defaultAutoMemory() },
+        spendEstimateUsd: 0,
+        cancelRequestedAt: null,
+        turnState: "running_turn",
+        turnStateChangedAt: new Date(),
+      });
+
+      const outcome = await startTaskTurn(r.walletAddress, taskId, undefined, "auto");
+      if (outcome === "no-key") {
+        // Key/session vanished between the meta read and the decrypt: revert cleanly.
+        await labStorage.updateAgentTask(taskId, {
+          mode: "chat", turnState: "ready", turnStateChangedAt: new Date(),
+        });
+        return res.status(400).json({ error: "Your session is locked — reconnect your wallet and try again." });
+      }
+      const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+      const msgs = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
+      return res.status(202).json({ messages: msgs, task: updated ? toTurnTaskDto(updated) : null });
+    } catch (err: any) {
+      sendError(res, err, "Could not start the auto run.");
+    }
+  });
+
+  // Instant Stop: cancel agent-owned QUEUED runs (free the shared worker now), signal a
+  // running segment to wind down, clear any confirm gate, and drop back to chat. Safe to
+  // call at any point — idempotent if the run already ended.
+  app.post("/api/lab/agent/chat/:taskId/auto/stop", ...guards, async (req: Request, res: Response) => {
+    const r = req as any;
+    try {
+      const taskId = parseTaskId(req.params.taskId);
+      if (taskId === null) return res.status(400).json({ error: "Invalid conversation id." });
+      const task = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+      if (!task) return res.status(404).json({ error: "Conversation not found." });
+
+      const cancelled = await cancelAgentQueuedRuns(r.walletAddress, taskId);
+      const auto = readAutoMemory(task);
+      const nextAuto: AutoMemory | undefined = auto
+        ? { ...auto, pendingConfirm: null, confirmedToken: null }
+        : undefined;
+      const memoryPatch = nextAuto
+        ? { memory: { ...((task.memory as Record<string, unknown>) ?? {}), auto: nextAuto } }
+        : {};
+      // Route by whether a segment is ACTIVELY advancing in this process — NOT by
+      // turnState. Only a live loop can consume cancelRequestedAt at its gate (before the
+      // brain, no LLM key needed). A PARKED/orphaned/idle auto turn has no such loop, and
+      // its only re-entry (/step) needs the key — a stop must never depend on that. So we
+      // finalize those directly here; only a truly-running loop is signalled + consumed.
+      if (isLabTurnRunning(taskId)) {
+        // Signal the running loop; it winds down + flips mode→chat at its next gate. If it
+        // parks before seeing the flag, the /step poll consumes it key-free (top of /step).
+        await labStorage.updateAgentTask(taskId, { cancelRequestedAt: new Date(), ...memoryPatch });
+      } else {
+        // No live loop: drop straight back to chat, clearing any parked-run marker AND the
+        // flag, so nothing strands and the next turn isn't poisoned. Queued agent runs were
+        // already cancelled above; a run the worker already claimed finishes on its own.
+        await labStorage.updateAgentTask(taskId, {
+          mode: "chat",
+          status: "active",
+          turnState: "ready",
+          turnStateChangedAt: new Date(),
+          currentStep: null,
+          activeRunId: null,
+          cancelRequestedAt: null,
+          loopCount: 0,
+          ...memoryPatch,
+        });
+      }
+      await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
+        role: "agent",
+        content:
+          cancelled > 0
+            ? `Stopped. I cancelled ${cancelled} queued backtest${cancelled === 1 ? "" : "s"} and freed the worker. You're back in chat.`
+            : "Stopped. You're back in chat — ask me anything, or start a new auto run when you're ready.",
+      });
+      const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+      const msgs = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
+      return res.status(200).json({ messages: msgs, task: updated ? toTurnTaskDto(updated) : null });
+    } catch (err: any) {
+      sendError(res, err, "Could not stop the auto run.");
     }
   });
 
