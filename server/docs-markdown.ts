@@ -27,9 +27,11 @@ export const DOCS_MARKDOWN = `# QuantumVault Documentation
 12. [QuantumLab Overview](#quantumlab-overview)
 13. [Strategy Library](#strategy-library)
 14. [Optimizer](#optimizer)
+   - [Out-of-Sample Validation & Robustness Score](#out-of-sample-validation--robustness-score)
 15. [Backtesting Engine](#backtesting-engine)
 16. [Results & Heatmap](#results--heatmap)
 17. [Insights & Guided Mode](#insights--guided-mode)
+18. [Lab Assistant](#lab-assistant)
 
 ---
 
@@ -855,6 +857,27 @@ The optimizer is the core of QuantumLab. It takes your strategy's parsed paramet
 1. **Random Search** — The optimizer generates random parameter combinations within each input's min/max range, respecting step sizes and option lists. Each combination is backtested against the historical data and scored.
 2. **Refinement** — The top K results become "seeds." The optimizer generates small jittered variations around each seed — tweaking values by small amounts to explore nearby configurations. This often finds improvements that random search misses.
 
+### Out-of-Sample Validation & Robustness Score
+
+A backtest that's been tuned to its own history will look great on paper and lose money live — this is called *overfitting*, and it's the single biggest reason optimized strategies fail in the real world. QuantumLab guards against it with an out-of-sample (OOS) holdout.
+
+**How the holdout works:**
+
+- When you set an out-of-sample fraction, QuantumLab reserves the most recent slice of your date range (for example, the final 20%) as a holdout the optimizer is never allowed to see.
+- The random search and refinement run **only** on the older in-sample portion. The optimizer picks its winners without ever touching the holdout — so it can't memorize it.
+- The surviving configurations are then replayed across the full period, and their trades are split into in-sample (IS) and out-of-sample (OOS) groups by entry time.
+
+**The Robustness Score** re-ranks results to reward strategies that hold up on data they were never trained on:
+
+- Out-of-sample performance is weighted roughly **twice** as heavily as in-sample (about 0.65 vs 0.35).
+- A divergence penalty pushes down any strategy whose risk-adjusted return collapses from in-sample to out-of-sample — the tell-tale signature of overfitting.
+- The underlying quality score is risk-first: Sharpe ratio leads, followed by return-to-drawdown, profit factor, and win rate, all discounted by a trade-count confidence factor so a handful of lucky trades can't top the rankings.
+- If the holdout produced too few trades to judge (fewer than 5), it's marked **insufficient** rather than shown as a misleading number, and the result is honestly demoted instead of rewarded.
+
+A configuration with strong, consistent out-of-sample numbers is far more likely to survive live conditions than one that only shines in-sample. In the Results table, this robustness surfaces as a plain-language verdict ("Robust", "Some decay", and so on) alongside each result's out-of-sample net profit, with the full in-sample vs out-of-sample breakdown in the Robustness tab.
+
+> **Honest limitation:** the holdout is a single in-sample / out-of-sample split, not a rolling walk-forward. Slippage is modeled only as a configurable cost (a small charge deducted on each fill), not a simulation of worse fill prices or order-queue effects. Use robustness to weed out overfit configurations — not as a guarantee of live profit.
+
 ### Deep Search
 
 Deep Search is an optional mode that adds 3 additional refinement rounds after the standard random + refine pass. Each round re-ranks all results and refines the top seeds again with a progressively tighter jitter radius:
@@ -985,6 +1008,7 @@ The 0.8 safety factor provides a 20% buffer. The hard cap is 20x regardless of h
 
 - **Run History** — Lists all completed and paused optimization runs with date, ticker/timeframe combos tested, number of results found, and status.
 - **Result Cards** — Each result shows composite score, net profit %, win rate, max drawdown, profit factor, total trades, and the full parameter set used.
+- **OOS / Robustness Column** — When a run used an out-of-sample holdout, each result also shows its out-of-sample (OOS) net profit and a robustness verdict (e.g. "Robust" or "Some decay") for how well it held up on data the optimizer never saw (see Optimizer → Out-of-Sample Validation & Robustness Score). Judge configurations by robustness, not raw net profit — it's the best on-platform defense against overfitting.
 - **Trade Inspector** — Click any result to see its full trade list with entry/exit dates, direction, prices, PnL, and exit reason.
 - **Equity Curve** — Visual plot of account equity over time for any individual result.
 - **Export to Pine Script** — Generates Pine Script code with optimized parameter values injected back into your original strategy.
@@ -1066,6 +1090,39 @@ Guided Mode is an optional feature that uses your saved Insights reports to make
 > **Warning:** Don't enable Guided Mode on your first optimization runs. The sensitivity analysis needs at least ~4,000 total configurations tested across multiple runs to distinguish real patterns from noise. Using it too early may narrow the search prematurely.
 
 > **Note:** Guided Mode is off by default. The toggle only appears when the selected strategy has at least one saved Insights report. Regenerate your report after running more optimizations to update the top configs that perturbation uses.
+
+---
+
+## Lab Assistant
+
+The Lab Assistant is an AI chat built into QuantumLab that can actually *drive* the lab for you. Instead of clicking through every tab, you describe what you want in plain English and the assistant does the work — drafting strategies, running and refining backtests, reading your results, and explaining what's going on.
+
+### What It Can Do
+
+- **Draft a strategy from an idea** — Describe a strategy in plain English ("a breakout strategy on SOL that uses a trailing stop") and the assistant writes the Pine Script and saves it to your library.
+- **Run and refine backtests** — Ask it to backtest a strategy across markets and timeframes, then refine the best configurations. It sets up the runs and watches them complete.
+- **Read and rank your results** — It pulls up your results and ranks them by robustness (out-of-sample performance), so you see what actually held up, not just what fit history best.
+- **Explain wins and losses** — Ask why a strategy is winning or losing and it walks through the metrics in everyday language.
+- **Improve a weak strategy** — Point it at an underperformer and it suggests and applies concrete changes.
+
+### Getting Started
+
+1. Open QuantumLab and tap the assistant button (the chat button on the QuantumLab screen).
+2. Tell it what you want to do. You can chat and navigate the lab without any setup.
+3. To let it run AI-powered work (drafting, refining, insights), add your own OpenRouter API key in the AI Strategy Creator. The assistant uses *your* key, so you stay in control of model choice and cost.
+
+### Auto-Run
+
+Type a goal into the composer and tap **Auto** to hand the whole loop to the assistant: it drafts, backtests, and refines toward your goal, pausing to confirm before any paid AI step. Tapping Auto with an empty composer simply explains what Auto does — it never silently does nothing.
+
+### Your Key Stays Private
+
+- The assistant never needs your key just to chat or move you around the lab — only the AI-powered actions do.
+- Your API key goes straight into an encrypted keystore. If you ever paste a key into the chat by mistake, it is rejected on the spot and never stored as a message.
+
+### Reconnecting
+
+If your session goes idle and you reconnect your wallet, the assistant may tell you it's "locked" — your key is still saved, but the session needs a quick re-sign to unlock it. Tap **Reconnect to unlock**, approve the signature in your wallet, and it's back to full strength. (Until then, it will only give canned answers rather than pretending everything is fine.)
 
 ---
 

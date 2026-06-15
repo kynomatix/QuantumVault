@@ -32,6 +32,7 @@ type DocSection =
   | 'quantumlab-engine'
   | 'quantumlab-results'
   | 'quantumlab-insights'
+  | 'lab-assistant'
   | 'quantumlab-agent-api';
 
 interface NavItem {
@@ -58,6 +59,7 @@ const navItems: NavItem[] = [
   { id: 'quantumlab-engine', label: 'Backtesting Engine', icon: Target },
   { id: 'quantumlab-results', label: 'Results & Heatmap', icon: BarChart3 },
   { id: 'quantumlab-insights', label: 'Insights & Guided Mode', icon: Lightbulb },
+  { id: 'lab-assistant', label: 'Lab Assistant', icon: Sparkles },
   { id: 'quantumlab-agent-api', label: 'QuantumLab Agent API', icon: Cpu },
 ];
 
@@ -2086,6 +2088,48 @@ function QuantumLabOptimizerSection() {
         </div>
       </div>
 
+      <SubHeading>Out-of-Sample Validation & Robustness Score</SubHeading>
+      <Paragraph>
+        A backtest that's been tuned to its own history will look great on paper and lose money live — this is called
+        {' '}<em>overfitting</em>, and it's the single biggest reason optimized strategies fail in the real world. QuantumLab
+        guards against it with an out-of-sample (OOS) holdout.
+      </Paragraph>
+      <div className="space-y-3 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Crosshair className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">How the Holdout Works</h4>
+          </div>
+          <div className="space-y-2 text-white/60 text-sm">
+            <p>When you set an out-of-sample fraction, QuantumLab reserves the most recent slice of your date range (for example, the final 20%) as a holdout the optimizer is never allowed to see.</p>
+            <p>The random search and refinement run <strong className="text-white/80">only</strong> on the older in-sample portion — so the optimizer picks its winners without ever touching the holdout, and can't memorize it.</p>
+            <p>The surviving configurations are then replayed across the full period, and their trades are split into in-sample (IS) and out-of-sample (OOS) groups by entry time.</p>
+          </div>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Shield className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">The Robustness Score</h4>
+          </div>
+          <div className="space-y-2 text-white/60 text-sm">
+            <p>Re-ranks results to reward strategies that hold up on data they were never trained on:</p>
+            <p><strong className="text-white/80">OOS weighted ~2x</strong> — out-of-sample performance counts roughly twice as much as in-sample (about 0.65 vs 0.35).</p>
+            <p><strong className="text-white/80">Divergence penalty</strong> — any strategy whose risk-adjusted return collapses from in-sample to out-of-sample gets pushed down; that collapse is the tell-tale signature of overfitting.</p>
+            <p><strong className="text-white/80">Risk-first quality</strong> — the underlying score leads with Sharpe ratio, then return-to-drawdown, profit factor, and win rate, all discounted by a trade-count confidence factor so a handful of lucky trades can't top the rankings.</p>
+            <p><strong className="text-white/80">Honest about thin data</strong> — if the holdout produced fewer than 5 trades, it's marked <em>insufficient</em> rather than shown as a misleading number, and the result is demoted instead of rewarded.</p>
+          </div>
+        </div>
+      </div>
+      <Paragraph>
+        In the Results table, this robustness surfaces as a plain-language verdict ("Robust", "Some decay", and so on)
+        alongside each result's out-of-sample net profit, with the full in-sample vs out-of-sample breakdown in the Robustness tab.
+      </Paragraph>
+      <Alert type="warning">
+        The holdout is a single in-sample / out-of-sample split, not a rolling walk-forward. Slippage is modeled only as a
+        configurable cost (a small charge deducted on each fill), not a simulation of worse fill prices or order-queue effects.
+        Use robustness to weed out overfit configurations — not as a guarantee of live profit.
+      </Alert>
+
       <SubHeading>Deep Search</SubHeading>
       <Paragraph>
         Deep Search is an optional mode that adds 3 additional refinement rounds after the standard random + refine pass. 
@@ -2437,6 +2481,10 @@ function QuantumLabResultsSection() {
               </div>
               <p className="text-white/40 text-xs mt-2">A high Sharpe with a modest net profit is often more deployable than a high net profit with a low Sharpe — the consistent strategy survives live conditions better.</p>
             </div>
+            <div>
+              <span className="text-violet-300 text-sm font-medium">OOS / Robustness</span>
+              <p className="text-white/50 text-xs mt-0.5">When a run used an out-of-sample holdout, each result shows its out-of-sample (OOS) net profit and a robustness verdict (e.g. "Robust" or "Some decay") for how well it held up on data the optimizer never trained on. Judge by robustness, not raw net profit — it's the best on-platform defense against overfitting. See <em>Optimizer → Out-of-Sample Validation &amp; Robustness Score</em> for how it's ranked.</p>
+            </div>
           </div>
         </div>
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
@@ -2653,6 +2701,99 @@ function QuantumLabInsightsSection() {
   );
 }
 
+function LabAssistantSection() {
+  return (
+    <div>
+      <SectionHeading>
+        <Sparkles className="w-6 h-6 text-violet-400" />
+        Lab Assistant
+      </SectionHeading>
+      <Paragraph>
+        The Lab Assistant is an AI chat built into QuantumLab that can actually <em>drive</em> the lab for you. Instead of
+        clicking through every tab, you describe what you want in plain English and the assistant does the work — drafting
+        strategies, running and refining backtests, reading your results, and explaining what's going on.
+      </Paragraph>
+
+      <SubHeading>What It Can Do</SubHeading>
+      <div className="space-y-3 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <FileText className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Draft a Strategy from an Idea</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Describe a strategy in plain English ("a breakout strategy on SOL that uses a trailing stop") and the assistant
+            writes the Pine Script and saves it to your library.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <SlidersHorizontal className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Run and Refine Backtests</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Ask it to backtest a strategy across markets and timeframes, then refine the best configurations. It sets up
+            the runs and watches them complete.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <BarChart3 className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Read and Rank Your Results</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            It pulls up your results and ranks them by robustness (out-of-sample performance), so you see what actually
+            held up — not just what fit history best.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Lightbulb className="w-5 h-5 text-violet-400" />
+            <h4 className="font-medium text-white">Explain Wins and Losses</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Ask why a strategy is winning or losing and it walks through the metrics in everyday language, then suggests and
+            applies concrete changes to improve a weak strategy.
+          </p>
+        </div>
+      </div>
+
+      <SubHeading>Getting Started</SubHeading>
+      <StepList steps={[
+        'Open QuantumLab and tap the assistant button (the chat button on the QuantumLab screen).',
+        'Tell it what you want to do. You can chat and navigate the lab without any setup.',
+        'To let it run AI-powered work (drafting, refining, insights), add your own OpenRouter API key in the AI Strategy Creator. The assistant uses your key, so you stay in control of model choice and cost.',
+      ]} />
+
+      <SubHeading>Auto-Run</SubHeading>
+      <Paragraph>
+        Type a goal into the composer and tap <strong className="text-white/80">Auto</strong> to hand the whole loop to the
+        assistant: it drafts, backtests, and refines toward your goal, pausing to confirm before any paid AI step. Tapping
+        Auto with an empty composer simply explains what Auto does — it never silently does nothing.
+      </Paragraph>
+
+      <SubHeading>Your Key Stays Private</SubHeading>
+      <div className="p-4 rounded-lg bg-violet-500/10 border border-violet-500/30 mb-6">
+        <div className="space-y-2 text-white/60 text-sm">
+          <p>The assistant never needs your key just to chat or move you around the lab — only the AI-powered actions do.</p>
+          <p>Your API key goes straight into an encrypted keystore. If you ever paste a key into the chat by mistake, it is rejected on the spot and never stored as a message.</p>
+        </div>
+      </div>
+
+      <SubHeading>Reconnecting</SubHeading>
+      <Paragraph>
+        If your session goes idle and you reconnect your wallet, the assistant may tell you it's "locked" — your key is
+        still saved, but the session needs a quick re-sign to unlock it. Tap <strong className="text-white/80">Reconnect to
+        unlock</strong>, approve the signature in your wallet, and it's back to full strength.
+      </Paragraph>
+      <Alert type="info">
+        While locked, the assistant only gives canned answers rather than pretending everything is fine — a one-tap
+        reconnect restores its full AI capabilities.
+      </Alert>
+    </div>
+  );
+}
+
 function QuantumLabAgentApiSection() {
   return (
     <div>
@@ -2841,6 +2982,7 @@ const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet:
   { id: 'quantumlab-engine', label: 'Backtesting Engine', snippet: 'Dual engine architecture: native TypeScript engine for speed, Pine Script interpreter for broad strategy support.', keywords: ['engine', 'backtesting engine', 'typescript engine', 'pine interpreter', 'performance', 'fast', 'speed', 'worker thread', 'isolated'] },
   { id: 'quantumlab-results', label: 'Results & Heatmap', snippet: 'View backtest results: equity curve, trade list, PnL breakdown, and parameter heatmap.', keywords: ['results', 'heatmap', 'equity curve', 'chart', 'pnl', 'trade list', 'outcome', 'return', 'performance', 'report'] },
   { id: 'quantumlab-insights', label: 'Insights & Guided Mode', snippet: 'Guided mode walks you through optimization step by step. Insights highlight key risk and return metrics.', keywords: ['insights', 'guided', 'guided mode', 'risk', 'metrics', 'analysis', 'recommendation', 'step by step', 'beginner'] },
+  { id: 'lab-assistant', label: 'Lab Assistant', snippet: 'The in-lab AI chat that drafts strategies, runs and refines backtests, ranks results by robustness, and explains wins and losses — using your own OpenRouter key.', keywords: ['lab assistant', 'assistant', 'chat', 'ai chat', 'agent', 'openrouter', 'api key', 'draft strategy', 'auto', 'auto-run', 'reconnect', 'locked', 'help', 'guide', 'drive', 'robustness'] },
   { id: 'quantumlab-agent-api', label: 'QuantumLab Agent API', snippet: 'HTTP API for AI agents to parse Pine Script, submit backtest runs, poll progress, and read results using a Bearer token.', keywords: ['agent api', 'api token', 'bearer token', 'qv_', 'mcp', 'claude', 'programmatic', 'automation', 'parse-pine', 'run-optimization', 'backtest api', 'quantumlab api', 'lab api', 'http api', 'external', 'script', 'headless', 'token'] },
 ];
 
@@ -2895,6 +3037,8 @@ export default function DocsPage() {
         return <QuantumLabResultsSection />;
       case 'quantumlab-insights':
         return <QuantumLabInsightsSection />;
+      case 'lab-assistant':
+        return <LabAssistantSection />;
       case 'quantumlab-agent-api':
         return <QuantumLabAgentApiSection />;
       default:
