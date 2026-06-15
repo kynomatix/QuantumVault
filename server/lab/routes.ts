@@ -529,6 +529,14 @@ export function registerLabRoutes(app: Express): void {
         totalTrades: r.totalTrades,
         sharpeRatio: r.sharpeRatio,
         params: r.params,
+        // Validity (Task 188): the IS/OOS window metrics live on every row but
+        // were being dropped here — they are tiny JSONB objects (not the heavy
+        // trades/equityCurve arrays this slim projection exists to omit). Without
+        // them the client's OOS / Robustness column renders blank and the caveat
+        // banner misfires ("had a holdout but produced no out-of-sample results")
+        // even though the holdout DID produce metrics. Keep them in the list.
+        isMetrics: r.isMetrics,
+        oosMetrics: r.oosMetrics,
       }));
       res.json(slim);
     } catch (err: any) {
