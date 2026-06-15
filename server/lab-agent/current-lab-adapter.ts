@@ -909,7 +909,11 @@ export class CurrentLabAdapter implements LabAgentAdapter {
     if (tickers.length === 0 || timeframes.length === 0) {
       throw new ToolkitError("conflict", "The base run has no market scope to mirror.", false);
     }
-    const oosFraction = srcConfig?.outOfSampleFraction ?? baseRun.oosFraction ?? DEFAULT_AGENT_OOS_FRACTION;
+    // The improved strategy's fresh run MUST be validated out-of-sample. A base run
+    // with NO holdout (null OR 0) must not propagate that gap — fall back to the
+    // default so robustness can never be silently lost (mirrors refineFrom's rule).
+    const recoveredOos = srcConfig?.outOfSampleFraction ?? baseRun.oosFraction ?? null;
+    const oosFraction = recoveredOos != null && recoveredOos > 0 ? recoveredOos : DEFAULT_AGENT_OOS_FRACTION;
     const slippage = srcConfig?.slippage ?? baseRun.slippage ?? DEFAULT_LAB_SLIPPAGE;
     const startDate = srcConfig?.startDate ?? baseRun.startDate ?? isoDaysAgo(365);
     const endDate = srcConfig?.endDate ?? baseRun.endDate ?? isoDaysAgo(0);

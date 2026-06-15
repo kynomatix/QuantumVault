@@ -78,6 +78,48 @@ describe("composeAgentReply", () => {
   });
 });
 
+describe("composeAgentReply: result-aware next-step chips", () => {
+  it("appends NO next-step chips when no result context is given (back-compat)", () => {
+    const r = composeAgentReply("what's my best result?");
+    expect(r.suggestedActions.some((a) => a.id.startsWith("next-"))).toBe(false);
+  });
+
+  it("offers Refine when a finished run is in context", () => {
+    const r = composeAgentReply("what's my best result?", true, { lastRunId: 42 });
+    const refine = r.suggestedActions.find((a) => a.id === "next-refine");
+    expect(refine).toBeDefined();
+    expect(refine!.kind).toBe("send");
+    expect((refine as any).message).toContain("42");
+    // A run alone does not unlock the strategy-scoped chips.
+    expect(r.suggestedActions.some((a) => a.id === "next-improve")).toBe(false);
+    expectValidActions(r.suggestedActions);
+  });
+
+  it("offers Improve + try-another-asset when a strategy is in context", () => {
+    const r = composeAgentReply("what's my best result?", true, { strategyId: 7 });
+    expect(r.suggestedActions.some((a) => a.id === "next-improve")).toBe(true);
+    expect(r.suggestedActions.some((a) => a.id === "next-another-asset")).toBe(true);
+    expect(r.suggestedActions.some((a) => a.id === "next-refine")).toBe(false);
+    expectValidActions(r.suggestedActions);
+  });
+
+  it("offers all three when both a run and a strategy are in context", () => {
+    const r = composeAgentReply("what's my best result?", true, { strategyId: 7, lastRunId: 42 });
+    for (const id of ["next-refine", "next-improve", "next-another-asset"]) {
+      expect(r.suggestedActions.some((a) => a.id === id)).toBe(true);
+    }
+    // Base chips are preserved (next-step chips are appended, never replace them).
+    const base = composeAgentReply("what's my best result?", true);
+    for (const a of base.suggestedActions) {
+      expect(r.suggestedActions.some((x) => x.id === a.id)).toBe(true);
+    }
+    // No duplicate ids.
+    const ids = r.suggestedActions.map((a) => a.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expectValidActions(r.suggestedActions);
+  });
+});
+
 describe("key guidance", () => {
   it("nudges to the secure key entry for AI drafting when no key is saved", () => {
     const r = composeAgentReply("create a new strategy for me", false);

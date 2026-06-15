@@ -270,10 +270,15 @@ export const getRunStatusInput = z.object({ runId: z.number().int().positive() }
 export const getQueuePositionInput = z.object({}).strict();
 
 // ---- Write (lab:write) ----
+// createStrategyFromText is SYNC: it drafts + persists a strategy and returns its
+// id immediately — it does NOT queue a run, so there is nothing to dedupe and the
+// adapter ignores any key. The orchestrator only injects idempotency on the ASYNC
+// (run-queuing) path, so this field MUST be optional or the real agent path (brain
+// emits no key) would fail contract validation before the LLM call.
 export const createStrategyFromTextInput = z.object({
   prompt: z.string().min(1),
   name: z.string().optional(),
-  idempotencyKey,
+  idempotencyKey: idempotencyKey.optional(),
 }).strict();
 
 export const createStrategyFromTemplateInput = z.object({
