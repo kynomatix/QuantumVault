@@ -520,8 +520,8 @@ export class LabTurnOrchestrator {
       }
 
       // sync tool (reads + cancelRun)
-      const ok = await this.executeSyncTool(task, decision.tool, decision.args, nextAuto, paidEstUsd);
-      if (!ok) {
+      const sync = await this.executeSyncTool(task, decision.tool, decision.args, nextAuto, paidEstUsd);
+      if (!sync.ok) {
         toolErrorStreak++;
         if (toolErrorStreak > this.limits.maxToolErrorRetries) {
           await this.degrade(task, opts.hasKey, userText);
@@ -530,6 +530,12 @@ export class LabTurnOrchestrator {
         continue;
       }
       toolErrorStreak = 0;
+      // A successful createStrategyFromText returns its own deterministic confirmation and
+      // ENDS the turn here — we never ask the brain to summarize a known-good outcome.
+      if (sync.finalMessage) {
+        await this.finalReply(task, sync.finalMessage, opts.hasKey, userText, nextAuto);
+        return { outcome: "final" };
+      }
     }
   }
 
@@ -622,12 +628,12 @@ export class LabTurnOrchestrator {
     args: Record<string, unknown>,
     nextAuto?: AutoMemory,
     paidEstUsd?: number,
-  ): Promise<boolean> {
+  ): Promise<{ ok: false } | { ok: true; finalMessage?: string }> {
     const stepIndex = task.stepIndex;
     const res = await this.toolkit.call(this.ctx(task), tool, args);
     if (!res.ok) {
       await this.foldToolError(task, tool, res.error.message, stepIndex);
-      return false;
+      return { ok: false };
     }
     const summary = `${tool} result: ${capJson(res.data, TOOL_RESULT_CHARS)}`;
     await this.appendToolMessage(task, summary);
@@ -640,6 +646,16 @@ export class LabTurnOrchestrator {
     // then overlay the planner's next phase so it advances atomically with this success.
     const memory = readMemory(task);
     if (args && typeof args.strategyId === "number") memory.currentStrategyId = args.strategyId;
+    // A tool that RETURNS a strategyId (createStrategyFromText drafts a new one; findStrategy
+    // resolves one) makes that the strategy the user is now working with — lift it so the
+    // result-aware chips (and the deterministic draft confirmation below) point at it. The
+    // args-based lift above only covers tools that take strategyId as INPUT.
+    const newStrategyId =
+      res.data && typeof res.data === "object" &&
+      typeof (res.data as { strategyId?: unknown }).strategyId === "number"
+        ? (res.data as { strategyId: number }).strategyId
+        : null;
+    if (newStrategyId != null) memory.currentStrategyId = newStrategyId;
     if (nextAuto !== undefined) memory.auto = nextAuto;
     (task as { memory?: unknown }).memory = memory;
     await this.storage.updateAgentTask(task.id, {
@@ -651,7 +667,25 @@ export class LabTurnOrchestrator {
     // sync-tool replay risk (shared with the chat path) — a crash there can re-draft;
     // the planner's post-success currentStrategyId guard covers the common case.
     if (paidEstUsd != null) await this.recordPaidEstimate(task, paidEstUsd);
-    return true;
+
+    // createStrategyFromText has a KNOWN, structured outcome (a new strategyId + name).
+    // Report it DETERMINISTICALLY in chat mode instead of running a brain summary turn — a
+    // hallucinated post-tool summary must never tell the user a real, successful draft
+    // "failed" (prod incident: a fabricated "X is not a valid model for this request").
+    // Auto mode is excluded on purpose: its planner continues past the create to queue the
+    // backtest, and its tests assert that path.
+    let finalMessage: string | undefined;
+    if (task.mode !== "auto" && tool === "createStrategyFromText" && newStrategyId != null) {
+      const name =
+        res.data && typeof res.data === "object" &&
+        typeof (res.data as { name?: unknown }).name === "string"
+          ? (res.data as { name: string }).name.trim()
+          : "";
+      if (name) {
+        finalMessage = `Drafted "${name}" (#${newStrategyId}). Want me to backtest it across a few markets next?`;
+      }
+    }
+    return { ok: true, finalMessage };
   }
 
   // Fold a finished async run: record the outcome, clear the step, advance step_index.

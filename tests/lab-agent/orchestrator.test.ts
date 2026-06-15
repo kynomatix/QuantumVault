@@ -225,6 +225,72 @@ describe("LabTurnOrchestrator — multi-tool turn", () => {
   });
 });
 
+describe("LabTurnOrchestrator — deterministic createStrategyFromText reply", () => {
+  // Prod incident: the draft tool SUCCEEDED (strategy created) but the brain's post-tool
+  // summary turn hallucinated "articleCactus is not a valid model for this request.",
+  // telling the user a real success had failed. A successful chat-mode draft must report
+  // its own KNOWN outcome deterministically and never run a brain summary turn.
+  it("reports a successful draft deterministically, never the brain's post-tool summary", async () => {
+    const store = makeStore(); // chat mode (default)
+    await seedUser(store, "make me a trend strategy with partial TPs and a breakeven move");
+    const toolkit = makeToolkit({
+      createStrategyFromText: () => ({
+        ok: true,
+        data: { strategyId: 28, name: "Trend Catcher Partial TP BE" },
+      }),
+    });
+    // The brain picks the tool, then (would) hallucinate a false failure on the summary turn.
+    const brain = makeBrain([
+      { action: "tool", tool: "createStrategyFromText", args: { prompt: "trend with partial TPs" } },
+      { action: "final", message: "articleCactus is not a valid model for this request." },
+    ]);
+    const orch = makeOrch(store, toolkit);
+
+    const res = await orch.advance(1, { brain: brain.fn, hasKey: true });
+
+    expect(res.outcome).toBe("final");
+    expect(toolkit.countOf("createStrategyFromText")).toBe(1);
+    // The summary turn is never asked of the brain — only the tool decision was made.
+    expect(brain.rec.calls).toBe(1);
+
+    const task = store.tasks.get(1)!;
+    expect((task.memory as any).currentStrategyId).toBe(28);
+
+    const lastAgent = store.agentMessages().at(-1)!;
+    expect(lastAgent.content).toContain("Trend Catcher Partial TP BE");
+    expect(lastAgent.content).toContain("#28");
+    expect(lastAgent.content).not.toContain("articleCactus");
+    expect(lastAgent.suggestedActions.length).toBeGreaterThan(0);
+  });
+
+  it("does NOT emit a success reply when the draft tool fails", async () => {
+    const store = makeStore();
+    await seedUser(store, "make me a strategy");
+    const toolkit = makeToolkit({
+      createStrategyFromText: () => ({
+        ok: false,
+        error: { message: "draft failed to compile", retryable: true },
+      }),
+    });
+    const brain = makeBrain([
+      { action: "tool", tool: "createStrategyFromText", args: { prompt: "x" } },
+      { action: "final", message: "I couldn't draft that — try rephrasing your idea." },
+    ]);
+    const orch = makeOrch(store, toolkit);
+
+    const res = await orch.advance(1, { brain: brain.fn, hasKey: true });
+
+    expect(res.outcome).toBe("final");
+    const task = store.tasks.get(1)!;
+    // The failed draft lifts no strategyId — it stays at the readMemory default (null),
+    // and we never claim a real strategy was created.
+    expect((task.memory as any).currentStrategyId).toBeNull();
+    const lastAgent = store.agentMessages().at(-1)!;
+    expect(lastAgent.content).toBe("I couldn't draft that — try rephrasing your idea.");
+    expect(lastAgent.content).not.toContain("#");
+  });
+});
+
 describe("LabTurnOrchestrator — async run wait then resume", () => {
   it("parks on a queued run, then resume folds it with NO re-exec / no double-enqueue", async () => {
     const store = makeStore();
