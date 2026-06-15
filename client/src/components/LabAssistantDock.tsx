@@ -228,11 +228,18 @@ export function LabAssistantDock({
       return (await res.json()) as { task?: TurnTask | null; resumed: boolean; messages?: ChatMessage[] };
     },
     onSuccess: (data) => {
-      if (!data.task) return;
-      // /step can return a message too (the locked-session note when the turn loses the
-      // key mid-flight) — merge it so it renders before polling stops at turn_state ready.
+      // Only touch the cache when /step actually carries a message (the locked-session
+      // note when a turn loses its key mid-flight). A normal /step is a no-op that returns
+      // just the task with NO transcript. Writing the cache then would (a) bump
+      // messagesQuery.dataUpdatedAt and re-fire the /step effect in a tight loop, and
+      // (b) let /step's task flip turn_state→ready and STOP the GET poll BEFORE it fetches
+      // the agent reply — exactly "the reply only shows after I refresh." The GET poll owns
+      // turn_state + the transcript (it always returns them together); a /step must only
+      // ever ADD its own message, never the turn_state, so polling keeps running until the
+      // poll itself sees ready alongside the new reply.
+      if (!data.messages || data.messages.length === 0) return;
       qc.setQueryData<MessagesResponse>(messagesKey(taskId, walletAddress), (prev) =>
-        mergeMessages(prev, { messages: data.messages ?? [], task: data.task }),
+        mergeMessages(prev, { messages: data.messages! }),
       );
     },
   });
