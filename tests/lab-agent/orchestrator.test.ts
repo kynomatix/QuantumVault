@@ -385,6 +385,53 @@ describe("LabTurnOrchestrator — async run wait then resume", () => {
   });
 });
 
+describe("LabTurnOrchestrator — auto mode invalidates a stale read on async queue", () => {
+  it("clears autoLastTool when graduating so the next evaluate re-fetches fresh results", async () => {
+    // A robust SOL result is already stashed (getTopResults). The deterministic planner
+    // graduates → queues runOptimization on the REST of the basket. executeAsyncTool MUST
+    // clear autoLastTool so the next evaluate tick is forced to re-fetch getTopResults for
+    // the graduation run; otherwise it re-reads the stale SOL stash and finals "SOL-specific"
+    // on the wrong data (never reading the ETH/ARB results).
+    const robustSol = {
+      runId: 1, ticker: "SOL", timeframe: "1h", rank: 1, netProfitPercent: 10,
+      winRatePercent: 55, maxDrawdownPercent: 8, profitFactor: 1.4, sharpeRatio: 1.0,
+      totalTrades: 40, params: {}, oos: { sharpeRatio: 0.8 },
+    };
+    const store = makeStore({
+      mode: "auto",
+      goal: "momentum on SOL",
+      memory: {
+        currentStrategyId: 9,
+        ledger: [],
+        autoLastTool: {
+          tool: "getTopResults",
+          data: { strategyId: 9, runId: 1, rankedBy: "lab_objective", results: [robustSol] },
+        },
+        auto: { ...defaultAutoMemory(), phase: "evaluate", graduated: false, symbols: ["SOL", "ETH", "ARB"], autoStepCount: 3 },
+      } as any,
+    });
+    await seedUser(store, "go");
+    const toolkit = makeToolkit({
+      runOptimization: () => ({
+        ok: true,
+        data: { runId: 7, correlationId: "c7", status: "queued", idempotent: false, jobsAhead: 0 },
+      }),
+    });
+    const planner = createAutoPlanner({ estimatePaidCostUsd: () => 0.01 });
+    const orch = makeOrch(store, toolkit);
+
+    const r = await orch.advance(1, { brain: planner, hasKey: true });
+
+    expect(r.outcome).toBe("waiting");
+    const task = store.tasks.get(1)!;
+    const call = toolkit.calls.find((c) => c.method === "runOptimization");
+    expect(call).toBeTruthy();
+    expect(call!.args.symbols).toEqual(["ETH", "ARB"]); // graduated to the rest of the basket
+    expect((task.memory as any).auto.graduated).toBe(true);
+    expect((task.memory as any).autoLastTool).toBeNull(); // stale SOL read invalidated
+  });
+});
+
 describe("LabTurnOrchestrator — crash replay of an executing step", () => {
   it("replays the STORED async tool (not the brain) and reuses the stored idempotency key", async () => {
     const FIXED_KEY = "fixed-key-123";

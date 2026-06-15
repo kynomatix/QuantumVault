@@ -67,7 +67,7 @@ const DEFAULT_LIMITS: OrchestratorLimits = {
   hardSpendCapUsd: 2.0,
   maxMalformedRetries: 2,
   maxToolErrorRetries: 3,
-  maxAutoSteps: 14, // sits a touch above the planner's own cap so its graceful final fires first
+  maxAutoSteps: 20, // sits above the planner's own cap (18) so its graceful final fires first
 };
 
 const LEDGER_CAP = 40; // bound the working-memory step ledger
@@ -569,6 +569,13 @@ export class LabTurnOrchestrator {
     };
     if (nextAuto !== undefined) {
       priorMemory.auto = nextAuto;
+      // A fresh async run (runOptimization/improve) makes any previously stashed read
+      // result STALE: the next evaluate tick MUST re-fetch getTopResults so it branches on
+      // THIS run's results, not the prior stage's. The planner's evaluate gate keys off
+      // lastToolResult.tool === "getTopResults"; without clearing here, a graduation run
+      // would be evaluated against the proving stage's stale getTopResults and never read
+      // its own results. Clearing autoLastTool forces the re-fetch.
+      priorMemory.autoLastTool = null;
       (task as { memory?: unknown }).memory = priorMemory;
       p1.memory = priorMemory as unknown as Record<string, unknown>;
     }

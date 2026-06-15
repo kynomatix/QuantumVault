@@ -82,21 +82,23 @@ describe("auto-planner: pipeline order", () => {
     expect(nextAuto.phase).toBe("done");
   });
 
-  it("create phase with an EXISTING strategy skips create and backtests directly", () => {
+  it("create phase with an EXISTING strategy skips create and PROVES on SOL first", () => {
     const { decision, nextAuto } = planAutoTurn(ctx({ currentStrategyId: 42 }), deps());
     expect(decision.action).toBe("tool");
     if (decision.action !== "tool") throw new Error("unreachable");
     expect(decision.tool).toBe("runOptimization");
     expect(decision.args).toMatchObject({
       strategyId: 42,
-      symbols: ["SOL", "ETH", "ARB"],
+      symbols: ["SOL"],
+      timeframes: ["1h", "2h", "4h"],
       stages: ["random", "refine", "deep"],
       outOfSampleFraction: 0.2,
     });
     expect(nextAuto.phase).toBe("evaluate");
+    expect(nextAuto.graduated).toBe(false);
   });
 
-  it("backtest phase runs the multi-symbol, multi-stage optimization then evaluates", () => {
+  it("backtest phase PROVES on SOL only (1h/2h/4h) then evaluates", () => {
     const { decision, nextAuto } = planAutoTurn(
       ctx({ memory: mem({ phase: "backtest" }), currentStrategyId: 9 }),
       deps(),
@@ -104,8 +106,14 @@ describe("auto-planner: pipeline order", () => {
     expect(decision.action).toBe("tool");
     if (decision.action !== "tool") throw new Error("unreachable");
     expect(decision.tool).toBe("runOptimization");
-    expect(decision.args).toMatchObject({ strategyId: 9, stages: ["random", "refine", "deep"] });
+    expect(decision.args).toMatchObject({
+      strategyId: 9,
+      symbols: ["SOL"],
+      timeframes: ["1h", "2h", "4h"],
+      stages: ["random", "refine", "deep"],
+    });
     expect(nextAuto.phase).toBe("evaluate");
+    expect(nextAuto.graduated).toBe(false);
   });
 
   it("evaluate phase first READS the ranked results (getTopResults), staying in evaluate", () => {
@@ -122,18 +130,22 @@ describe("auto-planner: pipeline order", () => {
 });
 
 describe("auto-planner: robustness branch", () => {
-  it("a ROBUST result short-circuits to a successful final", () => {
-    const robust = result({ sharpeRatio: 1.2, oos: oos(1.0) });
+  it("a ROBUST result on SOL GRADUATES to the rest of the basket (ETH/ARB)", () => {
+    const robust = result({ ticker: "SOL", sharpeRatio: 1.2, oos: oos(1.0) });
     const { decision, nextAuto } = planAutoTurn(
       ctx({
-        memory: mem({ phase: "evaluate" }),
+        memory: mem({ phase: "evaluate", graduated: false }),
         currentStrategyId: 9,
         lastToolResult: { tool: "getTopResults", data: topResults([robust]) },
       }),
       deps(),
     );
-    expect(decision.action).toBe("final");
-    expect(nextAuto.phase).toBe("done");
+    expect(decision.action).toBe("tool");
+    if (decision.action !== "tool") throw new Error("unreachable");
+    expect(decision.tool).toBe("runOptimization");
+    expect(decision.args).toMatchObject({ strategyId: 9, symbols: ["ETH", "ARB"] });
+    expect(nextAuto.phase).toBe("evaluate");
+    expect(nextAuto.graduated).toBe(true);
   });
 
   it("NO robust result continues to insights (free), advancing toward improve", () => {
@@ -150,6 +162,136 @@ describe("auto-planner: robustness branch", () => {
     if (decision.action !== "tool") throw new Error("unreachable");
     expect(decision.tool).toBe("generateInsights");
     expect(nextAuto.phase).toBe("improve");
+  });
+});
+
+describe("auto-planner: SOL-first graduation", () => {
+  it("PROVING: a robust SOL result with a single-symbol basket finals (nothing to graduate to)", () => {
+    const robust = result({ ticker: "SOL", sharpeRatio: 1.2, oos: oos(1.0) });
+    const { decision, nextAuto } = planAutoTurn(
+      ctx({
+        memory: mem({ phase: "evaluate", graduated: false, symbols: ["SOL"] }),
+        currentStrategyId: 9,
+        lastToolResult: { tool: "getTopResults", data: topResults([robust]) },
+      }),
+      deps(),
+    );
+    expect(decision.action).toBe("final");
+    expect(nextAuto.phase).toBe("done");
+  });
+
+  it("PROVING is scoped to SOL: a robust ETH row does NOT count while proving", () => {
+    const weakSol = result({ ticker: "SOL", sharpeRatio: 1.2, oos: null });
+    const robustEth = result({ ticker: "ETH", sharpeRatio: 1.2, oos: oos(1.0) });
+    const { decision, nextAuto } = planAutoTurn(
+      ctx({
+        memory: mem({ phase: "evaluate", graduated: false }),
+        currentStrategyId: 9,
+        lastToolResult: { tool: "getTopResults", data: topResults([weakSol, robustEth]) },
+      }),
+      deps(),
+    );
+    expect(decision.action).toBe("tool");
+    if (decision.action !== "tool") throw new Error("unreachable");
+    expect(decision.tool).toBe("generateInsights");
+    expect(nextAuto.phase).toBe("improve");
+  });
+
+  it("GRADUATED: a robust graduation result finals as 'generalized'", () => {
+    const robustSol = result({ ticker: "SOL", sharpeRatio: 1.0, oos: oos(0.8) });
+    const robustEth = result({ ticker: "ETH", timeframe: "2h", sharpeRatio: 1.0, oos: oos(0.9) });
+    const { decision, nextAuto } = planAutoTurn(
+      ctx({
+        memory: mem({ phase: "evaluate", graduated: true }),
+        currentStrategyId: 9,
+        lastToolResult: { tool: "getTopResults", data: topResults([robustSol, robustEth]) },
+      }),
+      deps(),
+    );
+    expect(decision.action).toBe("final");
+    if (decision.action !== "final") throw new Error("unreachable");
+    expect(decision.message).toMatch(/generalized/i);
+    expect(nextAuto.phase).toBe("done");
+  });
+
+  it("GRADUATED: SOL robust but ETH/ARB not robust → finals as SOL-specific (no improve)", () => {
+    const robustSol = result({ ticker: "SOL", sharpeRatio: 1.0, oos: oos(0.8) });
+    const weakEth = result({ ticker: "ETH", sharpeRatio: 1.0, oos: null });
+    const { decision, nextAuto } = planAutoTurn(
+      ctx({
+        memory: mem({ phase: "evaluate", graduated: true }),
+        currentStrategyId: 9,
+        lastToolResult: { tool: "getTopResults", data: topResults([robustSol, weakEth]) },
+      }),
+      deps(),
+    );
+    expect(decision.action).toBe("final");
+    if (decision.action !== "final") throw new Error("unreachable");
+    expect(decision.message).toMatch(/SOL-specific/i);
+    expect(nextAuto.phase).toBe("done");
+  });
+
+  it("an empty/malformed basket falls back to proving on SOL (never widens to all symbols)", () => {
+    const { decision } = planAutoTurn(
+      ctx({ memory: mem({ phase: "backtest", symbols: [] }), currentStrategyId: 9 }),
+      deps(),
+    );
+    expect(decision.action).toBe("tool");
+    if (decision.action !== "tool") throw new Error("unreachable");
+    expect(decision.args).toMatchObject({ symbols: ["SOL"] });
+  });
+
+  it("a basket with non-string junk is sanitized — proves on the clean symbol, never throws", () => {
+    const { decision } = planAutoTurn(
+      ctx({
+        memory: mem({ phase: "backtest", symbols: [null as unknown as string, 123 as unknown as string, "SOL"] }),
+        currentStrategyId: 9,
+      }),
+      deps(),
+    );
+    expect(decision.action).toBe("tool");
+    if (decision.action !== "tool") throw new Error("unreachable");
+    expect(decision.args).toMatchObject({ symbols: ["SOL"] });
+  });
+
+  it("GRADUATED graduation leg re-fetches, then yields the nuanced verdict AT the cap boundary", () => {
+    // Regression (off-by-one). The longest graceful path proves on SOL only after the LAST
+    // improve, then graduates: runOptimization(ETH/ARB) → getTopResults → evaluate. Because
+    // the async runOptimization CLEARS autoLastTool, the graduated stage must FIRST re-fetch
+    // (tick A) and the nuanced verdict only lands on the NEXT tick (tick B), at the boundary
+    // autoStepCount the real pipeline reaches (18). The cap must leave room for that final
+    // evaluate or it degrades to a generic "step limit" message.
+
+    // Tick A — graduated but no fresh results yet (autoLastTool was cleared by the async run):
+    // must RE-FETCH getTopResults, never hand down a verdict on stale pre-run data.
+    const fetchAgain = planAutoTurn(
+      ctx({
+        memory: mem({ phase: "evaluate", graduated: true, autoStepCount: 17 }),
+        currentStrategyId: 9,
+        lastToolResult: null,
+      }),
+      deps(),
+    ).decision;
+    expect(fetchAgain.action).toBe("tool");
+    if (fetchAgain.action !== "tool") throw new Error("unreachable");
+    expect(fetchAgain.tool).toBe("getTopResults");
+
+    // Tick B — at the boundary count (18) with the fresh graduated results in hand: the
+    // nuanced "generalized" verdict must fire, NOT the step-limit fallback.
+    const robustSol = result({ ticker: "SOL", sharpeRatio: 1.0, oos: oos(0.8) });
+    const robustEth = result({ ticker: "ETH", timeframe: "2h", sharpeRatio: 1.0, oos: oos(0.9) });
+    const verdict = planAutoTurn(
+      ctx({
+        memory: mem({ phase: "evaluate", graduated: true, autoStepCount: 18 }),
+        currentStrategyId: 9,
+        lastToolResult: { tool: "getTopResults", data: topResults([robustSol, robustEth]) },
+      }),
+      deps(),
+    ).decision;
+    expect(verdict.action).toBe("final");
+    if (verdict.action !== "final") throw new Error("unreachable");
+    expect(verdict.message).toMatch(/generalized/i);
+    expect(verdict.message).not.toMatch(/step limit/i);
   });
 });
 

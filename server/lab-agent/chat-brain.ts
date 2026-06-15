@@ -254,6 +254,12 @@ export interface AutoMemory {
    * whitelist (fail-closed). A non-whitelisted run leaves this false → watched mode.
    */
   handsOff?: boolean;
+  /**
+   * SOL-first graduation gate. False/undefined = still PROVING on the primary symbol
+   * (symbols[0], normally SOL). Set true once a robust out-of-sample result holds up on
+   * the primary and the pipeline has graduated to backtesting the remaining symbols.
+   */
+  graduated?: boolean;
 }
 
 export const DEFAULT_AUTO_SYMBOLS = ["SOL", "ETH", "ARB"];
@@ -269,6 +275,7 @@ export function defaultAutoMemory(): AutoMemory {
     pendingConfirm: null,
     confirmedToken: null,
     handsOff: false,
+    graduated: false,
   };
 }
 

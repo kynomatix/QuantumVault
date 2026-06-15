@@ -4,8 +4,12 @@
 // orchestrator seam the chat brain uses, but instead of asking a model it walks a
 // fixed pipeline —
 //
-//   create → backtest (random+refine+deep across SOL/ETH/ARB) → evaluate →
-//   insights → gated improve (≤3) → done
+//   create → prove on SOL (random+refine+deep) → evaluate → graduate to ETH/ARB →
+//   evaluate → insights → gated improve (≤3) → done
+//
+// SOL-first: rather than averaging a strategy across SOL/ETH/ARB in one run (which can
+// bury a SOL-specific edge), the pipeline PROVES it on the primary symbol first and only
+// GRADUATES to the wider basket once it holds up out-of-sample on SOL.
 //
 // Every tick returns ONE decision plus the NEXT persisted `auto` state. `usage` is
 // ALWAYS undefined, so the orchestrator does NOT count a tick as a brain call or
@@ -31,7 +35,7 @@ import type { BacktestResultDto, TopResultsDto } from "@shared/lab-agent-contrac
 
 export const AUTO_PLANNER_MODEL = "auto-planner";
 
-const DEFAULT_AUTO_TIMEFRAMES = ["1h", "4h"];
+const DEFAULT_AUTO_TIMEFRAMES = ["1h", "2h", "4h"];
 const DEFAULT_OOS_FRACTION = 0.2;
 const TOP_RESULTS_LIMIT = 10;
 /** OOS Sharpe must hold at least this fraction of in-sample Sharpe (curve-fit guard). */
@@ -47,7 +51,14 @@ export interface AutoPlannerLimits {
 }
 
 export const DEFAULT_AUTO_PLANNER_LIMITS: AutoPlannerLimits = {
-  maxAutoSteps: 12,
+  // Bumped to absorb the SOL-first graduation leg. The longest graceful path is "not robust
+  // until the 3rd improve, then it graduates": 3 improve loops + a graduation leg
+  // (runOptimization → getTopResults → evaluate). The async runOptimization CLEARS
+  // autoLastTool, so the graduated stage must re-fetch fresh results before its verdict —
+  // that final evaluate lands at entry autoStepCount 18, so this must sit at/above 19 or the
+  // nuanced "generalized / SOL-specific" verdict degrades to a generic "step limit". Stays
+  // below the orchestrator's net (20) so the planner's own graceful final still fires first.
+  maxAutoSteps: 19,
   maxImproveLoops: 3,
   spendCapFraction: 0.9,
 };
@@ -73,7 +84,50 @@ function final(message: string, nextAuto: AutoMemory): AutoPlanResult {
   return { decision: { action: "final", message }, nextAuto };
 }
 
-/** The one multi-symbol, multi-stage cheap optimization the pipeline runs. */
+/** The full target basket, normalized so a malformed/empty memory still yields a usable
+ *  SOL-first flow. An empty/corrupt list falls back to the DEFAULT basket — which is itself
+ *  SOL-first (proving still scopes to SOL, then graduates to the rest), so this is the
+ *  intended default, not a silent "widen to everything". Non-string entries from a corrupted
+ *  persisted blob are dropped so downstream `.toUpperCase()` can never throw. */
+function basketOf(a: AutoMemory): string[] {
+  const clean = Array.isArray(a.symbols)
+    ? a.symbols.filter((s): s is string => typeof s === "string" && s.length > 0)
+    : [];
+  return clean.length ? clean : [...defaultAutoMemory().symbols];
+}
+
+/** The single symbol the pipeline PROVES on first — prefer SOL, else the basket's first. */
+function provingSymbol(a: AutoMemory): string {
+  const basket = basketOf(a);
+  return basket.includes("SOL") ? "SOL" : basket[0];
+}
+
+/** SOL-first stage 1: backtest only the proving symbol. */
+function provingSymbols(a: AutoMemory): string[] {
+  return [provingSymbol(a)];
+}
+
+/** SOL-first stage 2: the remaining symbols we graduate to once the proving symbol holds up. */
+function graduationSymbols(a: AutoMemory): string[] {
+  const primary = provingSymbol(a);
+  return basketOf(a).filter((s) => s !== primary);
+}
+
+/** Results restricted to a symbol set (ticker match, case-insensitive). getTopResults spans
+ *  ALL runs of the strategy, so we scope each stage's robustness check to its own symbols. */
+function resultsForSymbols(
+  results: readonly BacktestResultDto[],
+  symbols: string[],
+): BacktestResultDto[] {
+  const want = new Set(symbols.map((s) => s.toUpperCase()));
+  return results.filter((r) => want.has((r.ticker ?? "").toUpperCase()));
+}
+
+function oosSharpeText(r: BacktestResultDto): string {
+  return r.oos?.sharpeRatio?.toFixed(2) ?? "n/a";
+}
+
+/** One stage's cheap multi-stage optimization over an explicit symbol set. */
 function backtestArgs(strategyId: number, symbols: string[]): Record<string, unknown> {
   return {
     strategyId,
@@ -157,28 +211,34 @@ export function planAutoTurn(ctx: AutoTurnContext, deps: AutoPlannerDeps): AutoP
       // memory wasn't persisted). Don't pay to draft a second one — skip straight to
       // backtesting the strategy we already have. Mirrors the case "create" guard.
       if (ctx.currentStrategyId != null) {
-        return tool("runOptimization", backtestArgs(ctx.currentStrategyId, a.symbols), {
+        return tool("runOptimization", backtestArgs(ctx.currentStrategyId, provingSymbols(cleared)), {
           ...cleared,
           phase: "evaluate",
+          graduated: false,
         });
       }
-      return tool("createStrategyFromText", pc.args, { ...cleared, phase: "backtest" });
+      return tool("createStrategyFromText", pc.args, { ...cleared, phase: "backtest", graduated: false });
     }
     // improve: queues a fresh backtest of the rewritten strategy; count it, re-evaluate.
+    // The improved strategy is a fresh contender → re-prove on the primary symbol first
+    // (improve mirrors the base run's SOL-only scope), so reset the graduation gate.
     return tool("improve", pc.args, {
       ...cleared,
       phase: "evaluate",
       improveCount: cleared.improveCount + 1,
+      graduated: false,
     });
   }
 
   switch (a.phase) {
     case "create": {
       if (ctx.currentStrategyId != null) {
-        // A strategy already exists — skip the paid create and go straight to backtesting.
-        return tool("runOptimization", backtestArgs(ctx.currentStrategyId, a.symbols), {
+        // A strategy already exists — skip the paid create and go straight to PROVING it
+        // on the primary symbol (SOL-first).
+        return tool("runOptimization", backtestArgs(ctx.currentStrategyId, provingSymbols(stepped)), {
           ...stepped,
           phase: "evaluate",
+          graduated: false,
         });
       }
       const goal = (ctx.goal ?? "").trim();
@@ -204,9 +264,11 @@ export function planAutoTurn(ctx: AutoTurnContext, deps: AutoPlannerDeps): AutoP
       if (ctx.currentStrategyId == null) {
         return final("I couldn't find a strategy to backtest, so I've stopped.", { ...stepped, phase: "done" });
       }
-      return tool("runOptimization", backtestArgs(ctx.currentStrategyId, a.symbols), {
+      // SOL-first: prove the strategy on the primary symbol before widening the basket.
+      return tool("runOptimization", backtestArgs(ctx.currentStrategyId, provingSymbols(stepped)), {
         ...stepped,
         phase: "evaluate",
+        graduated: false,
       });
     }
 
@@ -221,16 +283,58 @@ export function planAutoTurn(ctx: AutoTurnContext, deps: AutoPlannerDeps): AutoP
         return tool("getTopResults", { strategyId: sid, limit: TOP_RESULTS_LIMIT }, { ...stepped });
       }
       const top = ctx.lastToolResult.data as TopResultsDto | undefined;
-      const robust = top && Array.isArray(top.results) ? pickRobustResult(top.results) : null;
-      if (robust) {
+      const allResults = top && Array.isArray(top.results) ? top.results : [];
+      const proving = provingSymbols(a);
+      const graduation = graduationSymbols(a);
+
+      if (!a.graduated) {
+        // STAGE 1 — PROVING: does it hold up out-of-sample on the primary symbol?
+        const robustProving = pickRobustResult(resultsForSymbols(allResults, proving));
+        if (robustProving) {
+          if (graduation.length > 0) {
+            // Graduate: confirm it generalizes beyond the proving symbol.
+            return tool("runOptimization", backtestArgs(sid, graduation), {
+              ...stepped,
+              phase: "evaluate",
+              graduated: true,
+            });
+          }
+          // Nothing to graduate to — the proving result IS the deliverable.
+          return final(
+            `Proved out on ${robustProving.ticker} ${robustProving.timeframe}: it held up ` +
+              `out-of-sample (OOS Sharpe ${oosSharpeText(robustProving)}). I've stopped here — it's good enough.`,
+            { ...stepped, phase: "done" },
+          );
+        }
+        // Not robust even on the proving symbol — surface insights (free), then improve.
+        return tool("generateInsights", { strategyId: sid }, { ...stepped, phase: "improve" });
+      }
+
+      // STAGE 2 — GRADUATED: did it GENERALIZE beyond the proving symbol?
+      const robustGrad = pickRobustResult(resultsForSymbols(allResults, graduation));
+      if (robustGrad) {
         return final(
-          `Found a robust configuration: ${robust.ticker} ${robust.timeframe} held up out-of-sample ` +
-            `(OOS Sharpe ${robust.oos?.sharpeRatio?.toFixed(2) ?? "n/a"}). I've stopped here — it's good enough.`,
+          `Proved out on ${proving[0]} first, then it generalized — ${robustGrad.ticker} ` +
+            `${robustGrad.timeframe} also held up out-of-sample (OOS Sharpe ${oosSharpeText(robustGrad)}). ` +
+            `I've stopped here.`,
           { ...stepped, phase: "done" },
         );
       }
-      // Not robust yet — surface insights (free), then consider a paid improve.
-      return tool("generateInsights", { strategyId: sid }, { ...stepped, phase: "improve" });
+      const robustProving = pickRobustResult(resultsForSymbols(allResults, proving));
+      if (robustProving) {
+        return final(
+          `It held up out-of-sample on ${robustProving.ticker} ${robustProving.timeframe} ` +
+            `(OOS Sharpe ${oosSharpeText(robustProving)}) but did NOT generalize to ${graduation.join("/")}, ` +
+            `so treat it as ${robustProving.ticker}-specific. I've stopped here.`,
+          { ...stepped, phase: "done" },
+        );
+      }
+      // Defensive: we only graduate after a robust proving result, so reaching here means
+      // the proving evidence vanished (e.g. dedup across runs). Stop honestly.
+      return final(
+        "I ran the backtests but couldn't confirm a result that holds up out-of-sample, so I've stopped.",
+        { ...stepped, phase: "done" },
+      );
     }
 
     case "insights": {
