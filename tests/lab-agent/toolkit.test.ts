@@ -58,6 +58,14 @@ function makeFakeStorage() {
       1: { id: 1, strategyId: 1, reportData: { summary: "Solid trend strategy.", directionalBias: "long", paramSensitivity: [{ param: "length", impact: 0.8 }] }, totalResults: 5, totalRuns: 1, createdAt: now },
     } as Record<number, any>,
 
+    // Strategy-level ticker×timeframe grid (each cell aggregates that combo's runs).
+    heatmapCells: {
+      1: [
+        { ticker: "SOL", timeframe: "2h", avgSharpe: 1.2 },
+        { ticker: "ETH", timeframe: "4h", avgSharpe: 0.8 },
+      ],
+    } as Record<number, any[]>,
+
     async getStrategies(wallet?: string) {
       this.lastGetStrategiesArg = wallet;
       return this.strategies.filter((s) => !wallet || s.userId === wallet);
@@ -75,6 +83,14 @@ function makeFakeStorage() {
     },
     async getTopResultsForStrategy(strategyId: number, limit = 10) {
       return (this.topResults[strategyId] ?? []).slice(0, limit);
+    },
+    async getHeatmapCells(_wallet: string, strategyId: number) {
+      return { cells: this.heatmapCells[strategyId] ?? [] };
+    },
+    async createStrategy(data: any) {
+      const row = { id: ++this.nextRunId, createdAt: now, ...data };
+      this.lastCreatedStrategy = row;
+      return row;
     },
     getJobByRunId(_runId: number) {
       return undefined; // no in-memory job in this (main-process-like) fake
