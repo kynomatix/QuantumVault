@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildChatMessages,
   generateLabChatReply,
+  coerceProseToFinal,
   DEFAULT_CHAT_MODEL,
   type ChatBrainInput,
 } from "../../server/lab-agent/chat-brain";
@@ -122,5 +123,72 @@ describe("buildChatMessages", () => {
 describe("generateLabChatReply", () => {
   it("is exported as the brain entry point (network path is integration-tested)", () => {
     expect(typeof generateLabChatReply).toBe("function");
+  });
+});
+
+describe("coerceProseToFinal", () => {
+  // A turn where a tool actually ran: a user turn followed by a tool result. This is the
+  // ONLY shape the salvage should ever rescue (a post-tool prose answer).
+  const afterTool = (prose: string): Parameters<typeof coerceProseToFinal>[1] => [
+    { role: "user", content: "what's my most robust result?" },
+    { role: "tool", content: "getTopResults result: {\"runId\":371,\"net\":418.73}" },
+  ];
+
+  it("salvages clean post-tool prose into a final decision (the degrade-after-tools fix)", () => {
+    const prose =
+      "Your most robust strategy is Stop-Run Reversal v2 — on SOL/USDT 1h it's up 418.73% net.";
+    const out = coerceProseToFinal(prose, afterTool(prose));
+    expect(out).not.toBeNull();
+    expect(out?.action).toBe("final");
+    expect(out?.message).toBe(prose);
+  });
+
+  it("returns null when NO tool ran this turn (don't rescue a fresh no-tool prose turn)", () => {
+    const prose = "I'm doing great, thanks for asking! How can I help with your strategies?";
+    const noTool: Parameters<typeof coerceProseToFinal>[1] = [
+      { role: "agent", content: "earlier reply" },
+      { role: "tool", content: "old tool result: {}" }, // a PRIOR turn's tool, before the user
+      { role: "user", content: "how are you?" },
+    ];
+    expect(coerceProseToFinal(prose, noTool)).toBeNull();
+  });
+
+  it("rejects output containing JSON braces (a half / broken decision, not prose)", () => {
+    const broken = 'Here is the result {"action":"final"';
+    expect(coerceProseToFinal(broken, afterTool(broken))).toBeNull();
+  });
+
+  it("rejects output containing code fences", () => {
+    const fenced = "Here are your results:\n```json\n[1,2,3]\n```";
+    expect(coerceProseToFinal(fenced, afterTool(fenced))).toBeNull();
+  });
+
+  it("rejects output leaking reasoning/thinking markers", () => {
+    const thinky = "<think>let me decide</think> Your best result is up 418%.";
+    expect(coerceProseToFinal(thinky, afterTool(thinky))).toBeNull();
+  });
+
+  it("rejects plain-text reasoning prefixes (no XML tag)", () => {
+    for (const lead of ["Reasoning: ", "Thinking - ", "Scratchpad: "]) {
+      const leak = `${lead}the user wants the heatmap, so I should read it and report.`;
+      expect(coerceProseToFinal(leak, afterTool(leak))).toBeNull();
+    }
+  });
+
+  it("rejects array-shaped malformed output (brackets are not prose)", () => {
+    const arr = '["Your best result is Stop-Run Reversal v2, up 418.73% net."]';
+    expect(coerceProseToFinal(arr, afterTool(arr))).toBeNull();
+  });
+
+  it("rejects too-short output", () => {
+    const tiny = "ok";
+    expect(coerceProseToFinal(tiny, afterTool(tiny))).toBeNull();
+  });
+
+  it("caps an over-long answer to the salvage ceiling", () => {
+    const huge = "a".repeat(2500); // clean prose, no braces/fences/markers
+    const out = coerceProseToFinal(huge, afterTool(huge));
+    expect(out).not.toBeNull();
+    expect(out!.message.length).toBeLessThanOrEqual(2000);
   });
 });

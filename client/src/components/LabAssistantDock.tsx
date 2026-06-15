@@ -15,7 +15,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { Sparkles, Send, X, Bot, Loader2, Wallet, Square, Activity, Wand2 } from "lucide-react";
+import { Sparkles, Send, X, Bot, Loader2, Wallet, Square, Activity, Wand2, ChevronDown } from "lucide-react";
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import type { AgentSuggestedAction } from "@shared/schema";
 import { looksLikeApiKey } from "@shared/api-key-detect";
@@ -109,6 +109,68 @@ function renderRichText(text: string): ReactNode {
   );
 }
 
+// Friendly one-line labels for the agent's tool steps, so a collapsed step reads like
+// "Read your top backtest results" instead of a raw "getTopResults result: {…}" blob.
+const TOOL_STEP_LABELS: Record<string, string> = {
+  listStrategies: "Checked your strategies",
+  findStrategy: "Looked up a strategy",
+  getTopResults: "Read your top backtest results",
+  getHeatmap: "Read the parameter heatmap",
+  getInsightsReport: "Reviewed your insights report",
+  generateInsights: "Computed fresh insights",
+  getRunStatus: "Checked run status",
+  getQueuePosition: "Checked the run queue",
+  createStrategyFromText: "Drafted a strategy",
+  runOptimization: "Queued a backtest",
+  refineFrom: "Queued a refine",
+  improve: "Queued an improvement",
+  cancelRun: "Cancelled a run",
+};
+
+// A tool message shaped "<toolName> result: <payload>" is the agent's raw working data —
+// useful for trust, noisy in the flow. Collapse it behind a one-line "what it did" label
+// the user can expand (like Replit/ChatGPT folding tool/thinking steps), so the answer
+// isn't buried under JSON "garble". Friendly progress lines (no "result:" payload, e.g.
+// the auto-run step feed) keep rendering as a plain inline log line.
+function ToolStep({ id, content }: { id: number; content: string }) {
+  const match = /^(\w+)\s+result:/.exec(content);
+  const [expanded, setExpanded] = useState(false);
+  if (!match) {
+    return (
+      <div
+        data-testid={`message-lab-assistant-${id}`}
+        className="flex items-start gap-2 px-1 text-[11px] leading-relaxed text-white/45"
+      >
+        <Activity className="mt-0.5 h-3 w-3 shrink-0 text-indigo-300/70" />
+        <span className="whitespace-pre-wrap break-words">{content}</span>
+      </div>
+    );
+  }
+  const label = TOOL_STEP_LABELS[match[1]] ?? "Checked lab data";
+  return (
+    <div data-testid={`message-lab-assistant-${id}`} className="px-1">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        data-testid={`toggle-lab-assistant-tool-${id}`}
+        className="flex w-full items-center gap-1.5 text-left text-[11px] leading-relaxed text-white/45 transition-colors hover:text-white/70"
+      >
+        <Activity className="h-3 w-3 shrink-0 text-indigo-300/70" />
+        <span className="flex-1">{label}</span>
+        <ChevronDown className={cn("h-3 w-3 shrink-0 transition-transform", expanded && "rotate-180")} />
+      </button>
+      {expanded && (
+        <pre
+          data-testid={`detail-lab-assistant-tool-${id}`}
+          className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-black/30 px-2 py-1.5 text-[10px] leading-relaxed text-white/50"
+        >
+          {content}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 export function LabAssistantDock({
   walletAddress,
   sessionConnected = false,
@@ -137,6 +199,19 @@ export function LabAssistantDock({
   // Stale-session reconnect (re-sign): busy flag + last error for the button.
   const [reconnectBusy, setReconnectBusy] = useState(false);
   const [reconnectError, setReconnectError] = useState<string | null>(null);
+  // Auto-resend after reconnect: the question that hit a locked-session reply, plus a
+  // one-shot arm flag set ONLY by a successful reconnect — so the resend can't loop on
+  // canChat (the session may already read "connected" at lock time).
+  const pendingResendRef = useRef<string | null>(null);
+  const [resendArmed, setResendArmed] = useState(false);
+  // Always-current snapshots of the active wallet + task. A mutation that resolves AFTER
+  // the user switches wallet/task reads these (NOT its closure, which can be stale) to
+  // detect it's orphaned and drop its response — so wallet A's reply, or A's resend
+  // question, can never land in wallet B's conversation. Updated every render (refs only).
+  const walletRef = useRef(walletAddress);
+  walletRef.current = walletAddress;
+  const taskIdRef = useRef(taskId);
+  taskIdRef.current = taskId;
   const qc = useQueryClient();
   const listRef = useRef<HTMLDivElement | null>(null);
   // Opens the Solana wallet-adapter picker so a fully signed-out user can connect
@@ -169,6 +244,10 @@ export function LabAssistantDock({
     setTaskId(null);
     setReconnectError(null);
     setReconnectBusy(false);
+    // Drop any pending auto-resend so wallet A's locked question can never be sent into
+    // wallet B's conversation after a switch + reconnect.
+    pendingResendRef.current = null;
+    setResendArmed(false);
   }, [walletAddress]);
 
   // Don't let a stale reconnect error linger once the session is healthy again.
@@ -221,13 +300,27 @@ export function LabAssistantDock({
       const res = await apiRequest("POST", `/api/lab/agent/chat/${taskId}/messages`, { content });
       return (await res.json()) as MessagesResponse;
     },
-    onSuccess: (data) => {
+    // Snapshot which wallet + task this send belongs to, captured synchronously at send
+    // time. onSuccess compares it to the live wallet/task to drop a stale response.
+    onMutate: (content) => ({ wallet: walletAddress, taskId, content }),
+    onSuccess: (data, _content, ctx) => {
+      // Stale-response guard: if the user switched wallet (or task) while this POST was
+      // in flight, drop the response entirely — don't write wallet A's reply into wallet
+      // B's cache, and (critically) don't stash A's question into the shared resend ref.
+      if (!ctx || ctx.wallet !== walletRef.current || ctx.taskId !== taskIdRef.current) return;
       // Merge the returned message(s) + task so the user's line and the running_turn
       // state show instantly; the poll loop (driven by turn_state) then takes over
       // and surfaces the assistant's tool/agent messages as the turn advances.
       qc.setQueryData<MessagesResponse>(messagesKey(taskId, walletAddress), (prev) =>
         mergeMessages(prev, data),
       );
+      // If the reply came back as a "session locked" degrade (it carries a reconnect
+      // chip), stash the question so a successful reconnect can auto-resend it — the user
+      // shouldn't have to retype what they just asked. Any normal reply clears it.
+      const locked = (data.messages ?? []).some(
+        (msg) => msg.role === "agent" && msg.suggestedActions?.some((a) => a.kind === "reconnect"),
+      );
+      pendingResendRef.current = locked ? ctx.content : null;
     },
     onError: (err) => {
       // Don't swallow a hard send failure — show why (the normal degrade path returns
@@ -344,6 +437,27 @@ export function LabAssistantDock({
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, open, send.isPending, turnActive]);
 
+  // After a successful reconnect, auto-resend the question that hit the locked-session
+  // reply so the user doesn't have to retype it. Gated on resendArmed (set ONLY by
+  // handleReconnect) so it can't loop, then waits for the session + task to be live and
+  // the chat to be idle. A still-locked resend re-stashes the question but leaves the arm
+  // off, so it stops cleanly instead of looping.
+  useEffect(() => {
+    if (!resendArmed) return;
+    const pending = pendingResendRef.current;
+    if (!pending) {
+      setResendArmed(false);
+      return;
+    }
+    if (canChat && !turnActive && !send.isPending && !reconnectBusy) {
+      pendingResendRef.current = null;
+      setResendArmed(false);
+      setNotice(null);
+      send.mutate(pending);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resendArmed, canChat, turnActive, send.isPending, reconnectBusy]);
+
   // Re-establish a stale server session in place (re-sign in the wallet),
   // mirroring the Creator's re-auth flow, so a user whose session went idle can
   // get back to chatting without leaving the assistant. Must be gesture-driven:
@@ -366,6 +480,10 @@ export function LabAssistantDock({
       if (walletAddress && taskId === null && !ensure.isPending) {
         ensure.mutate(walletAddress);
       }
+      // Arm the auto-resend of the question that hit the locked-session reply. The effect
+      // below fires it once the session + task are live and the chat is idle. Armed here
+      // (after a real reconnect) — never off canChat alone, which could loop.
+      if (pendingResendRef.current) setResendArmed(true);
     } finally {
       setReconnectBusy(false);
     }
@@ -610,20 +728,11 @@ export function LabAssistantDock({
           )}
 
           {messages.map((m) => {
-            // Tool messages are the live step feed (queued/finished backtests, insights
-            // progress). Render them as compact muted log lines, not chat bubbles, so the
-            // auto-run reads like a progress log rather than the assistant talking to itself.
+            // Tool messages are the agent's working steps. ToolStep collapses raw
+            // "<tool> result: <payload>" blobs behind an expandable one-line label and
+            // renders friendly progress lines (the auto-run step feed) inline as before.
             if (m.role === "tool") {
-              return (
-                <div
-                  key={m.id}
-                  data-testid={`message-lab-assistant-${m.id}`}
-                  className="flex items-start gap-2 px-1 text-[11px] leading-relaxed text-white/45"
-                >
-                  <Activity className="mt-0.5 h-3 w-3 shrink-0 text-indigo-300/70" />
-                  <span className="whitespace-pre-wrap break-words">{m.content}</span>
-                </div>
-              );
+              return <ToolStep key={m.id} id={m.id} content={m.content} />;
             }
             const isUser = m.role === "user";
             return (

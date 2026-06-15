@@ -358,6 +358,9 @@ const DECIDE_SYSTEM_PROMPT = [
   "- Never fabricate PnL, win rate, or parameter values you were not given by a tool.",
   "- After you queue a run you will be resumed when it finishes; read its results then.",
   "- When you have answered the user or have nothing left to do, use action:final.",
+  '- After a tool returns data, your NEXT output MUST be a {"action":"final","message":"..."}',
+  "  JSON object that answers the user directly in plain language — name the strategy,",
+  "  numbers, or finding you read. Do NOT reply as bare prose; the JSON envelope is required.",
 ].join("\n");
 
 // Extract the first balanced top-level JSON object from a model response. Models
@@ -412,6 +415,59 @@ export function parseBrainDecision(raw: string): BrainDecision {
   return parsed.data;
 }
 
+// Salvage bounds for a prose-as-final fallback (see coerceProseToFinal).
+const MIN_PROSE_FINAL_CHARS = 16;
+const MAX_PROSE_FINAL_CHARS = 2000;
+
+// Did a tool actually run THIS turn? True when at least one role:"tool" message
+// follows the most-recent user turn in the bounded transcript. Gates the prose
+// salvage so it only ever rescues a post-tool answer, never a fresh no-tool turn.
+function toolRanThisTurn(
+  recentMessages: { role: "user" | "agent" | "tool"; content: string }[],
+): boolean {
+  let lastUser = -1;
+  for (let i = recentMessages.length - 1; i >= 0; i--) {
+    if (recentMessages[i].role === "user") {
+      lastUser = i;
+      break;
+    }
+  }
+  if (lastUser < 0) return false;
+  for (let i = lastUser + 1; i < recentMessages.length; i++) {
+    if (recentMessages[i].role === "tool") return true;
+  }
+  return false;
+}
+
+/**
+ * Rescue a post-tool answer the model wrote as plain prose instead of the required
+ * {"action":"final",...} envelope. Without this, that prose fails parseBrainDecision,
+ * burns the malformed-retry budget, and degrades to a CANNED reply — throwing away the
+ * tool data the model just gathered (the "it ran the tools but gave a useless answer"
+ * bug). Deliberately conservative: only fires when a tool ran this turn AND the output
+ * is clean natural-language prose — never half-JSON, code fences, or reasoning/thinking
+ * markers (so we never surface a broken decision or chain-of-thought to the user).
+ * Exported for unit testing.
+ */
+export function coerceProseToFinal(
+  raw: string,
+  recentMessages: { role: "user" | "agent" | "tool"; content: string }[],
+): { action: "final"; message: string } | null {
+  if (!toolRanThisTurn(recentMessages)) return null;
+  const text = (raw ?? "").trim();
+  if (text.length < MIN_PROSE_FINAL_CHARS) return null;
+  // Reject anything that isn't clean prose: brace/bracket fragments (a half or broken
+  // object/array decision), code fences, or model reasoning/thinking markers — either as
+  // XML-like tags or as plain "Reasoning:"/"Thinking -" line prefixes.
+  if (/[{}[\]]/.test(text)) return null;
+  if (text.includes("```")) return null;
+  if (/<\s*\/?\s*(think|thinking|reason|reasoning|scratchpad)\b/i.test(text)) return null;
+  if (/^\s*(thinking|reasoning|scratchpad|thought)\b\s*[:\-—]/im.test(text)) return null;
+  const message = text.slice(0, MAX_PROSE_FINAL_CHARS).trim();
+  if (message.length < MIN_PROSE_FINAL_CHARS) return null;
+  return { action: "final", message };
+}
+
 /**
  * Make ONE turn decision on the user's key. Throws MalformedDecisionError when the
  * model's output can't be parsed/validated (the orchestrator retries within a
@@ -431,7 +487,20 @@ export async function decideTurnAction(
     temperature: DECIDE_TEMPERATURE,
     timeoutMs: DECIDE_TIMEOUT_MS,
   });
-  const decision = parseBrainDecision(content);
+  let decision: BrainDecision;
+  try {
+    decision = parseBrainDecision(content);
+  } catch (err) {
+    // The model wrote a post-tool answer as plain prose instead of the JSON envelope.
+    // Salvage it (gated on a tool having run this turn) rather than degrade to a canned
+    // reply that discards the data it just gathered. Usage is still billed (the call
+    // happened) — we only reinterpret the SAME response.
+    if (err instanceof MalformedDecisionError) {
+      const salvaged = coerceProseToFinal(content, input.recentMessages);
+      if (salvaged) return { decision: salvaged, usage, model };
+    }
+    throw err;
+  }
   return { decision, usage, model };
 }
 
