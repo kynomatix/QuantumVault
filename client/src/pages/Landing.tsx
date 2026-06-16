@@ -24,13 +24,16 @@ import {
   type LucideIcon
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import LaunchVideo from '@/components/LaunchVideo';
 import { useWallet } from '@/hooks/useWallet';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
 
 // Code-split: the QuantumLab sizzle is a heavy animation, so it lives in its own
 // chunk and is only fetched/mounted once its section scrolls near the viewport.
 const QuantumLabVideo = lazy(() => import('@/components/QuantumLabVideo'));
+
+// Same treatment for the "From signal to live trade" launch video — its animation
+// engine is heavy, so it's code-split and only fetched once it scrolls near view.
+const LaunchVideo = lazy(() => import('@/components/LaunchVideo'));
 
 // Lightweight in-frame placeholder shown until the lazy chunk loads / scrolls in.
 function LabVideoPlaceholder() {
@@ -83,6 +86,62 @@ function LazyLabShowcase() {
         </Suspense>
       ) : (
         <LabVideoPlaceholder />
+      )}
+    </div>
+  );
+}
+
+// Lightweight in-frame placeholder shown until the launch-video chunk loads / scrolls in.
+function LaunchVideoPlaceholder() {
+  return (
+    <div
+      className="absolute inset-0 flex items-center justify-center bg-[#05060e]"
+      data-testid="launch-video-placeholder"
+    >
+      <div className="flex flex-col items-center gap-4">
+        <img
+          src="/images/qv-launch-logo.webp"
+          alt="QuantumVault"
+          className="w-14 h-14 object-contain opacity-50 animate-pulse"
+        />
+        <span className="text-xs tracking-[0.3em] text-white/30 font-mono">QUANTUMVAULT</span>
+      </div>
+    </div>
+  );
+}
+
+// Defers mounting (and therefore the dynamic import) until the frame is close to
+// the viewport, so the launch-video chunk adds no weight to the initial page load.
+function LazyLaunchShowcase() {
+  const ref = useRef<HTMLDivElement>(null);
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === 'undefined') {
+      setShow(true);
+      return;
+    }
+    const io = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setShow(true);
+          io.disconnect();
+        }
+      },
+      { rootMargin: '400px' },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+  return (
+    <div ref={ref} className="relative w-full aspect-[16/9]" data-testid="launch-video">
+      {show ? (
+        <Suspense fallback={<LaunchVideoPlaceholder />}>
+          <LaunchVideo />
+        </Suspense>
+      ) : (
+        <LaunchVideoPlaceholder />
       )}
     </div>
   );
@@ -924,9 +983,7 @@ export default function Landing() {
               transition={{ duration: 0.7, delay: 0.1 }}
               className="relative rounded-2xl overflow-hidden border border-primary/20 shadow-2xl shadow-primary/20"
             >
-              <div className="relative w-full aspect-[16/9]" data-testid="launch-video">
-                <LaunchVideo />
-              </div>
+              <LazyLaunchShowcase />
             </motion.div>
           </div>
         </section>
