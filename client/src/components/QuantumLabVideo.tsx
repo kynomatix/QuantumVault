@@ -944,7 +944,7 @@ function DeployModal({ lt }) {
         <div style={{ marginTop: 16 }}>
           <div style={{ fontFamily: FUI, fontSize: 14, color: C.faint, marginBottom: 8 }}>Exchange</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '13px 16px', borderRadius: 12, background: 'rgba(15,16,30,0.85)', border: '1px solid rgba(150,130,255,0.18)' }}>
-            <div style={{ width: 22, height: 22, borderRadius: 6, background: `linear-gradient(140deg, ${C.purpleHi}, ${C.blue})`, transform: 'rotate(45deg)' }} />
+            <img src="/images/exchange/Pacifica.webp" alt="Pacifica" width={22} height={22} style={{ width: 22, height: 22, objectFit: 'contain' }} />
             <span style={{ fontFamily: FUI, fontWeight: 700, fontSize: 18, color: C.text }}>Pacifica</span>
             <span style={{ marginLeft: 'auto', color: C.faint }}>▾</span>
           </div>
