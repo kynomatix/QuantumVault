@@ -1,0 +1,5 @@
+{
+  "type": "commonjs",
+  "private": true,
+  "description": "QuantumVault DeFiLlama TVL adapter — staging copy. index.js is copy-paste ready for projects/quantumvault/index.js in a DefiLlama-Adapters fork (that repo is CommonJS). This package.json only marks the dir as CommonJS so it stays testable inside this ESM repo."
+}
