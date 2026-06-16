@@ -136,6 +136,8 @@ export type OosSummaryDto = z.infer<typeof oosSummaryDtoSchema>;
  * later phase if needed.
  */
 export const backtestResultDtoSchema = z.object({
+  /** Stable id of this saved result row — pass to refineFrom to quick-hone THIS exact result. */
+  resultId: z.number().int(),
   runId: z.number().int(),
   ticker: z.string(),
   timeframe: z.string(),
@@ -310,9 +312,22 @@ export const runOptimizationInput = z.object({
 }).strict();
 
 export const refineFromInput = z.object({
-  runId: z.number().int().positive(),
+  /**
+   * Refine a whole finished run around its best params — the heavier hone
+   * (coordinate tune + insights + DEEP search). Provide EITHER this or resultId.
+   */
+  runId: z.number().int().positive().optional(),
+  /**
+   * Quick, targeted hone of ONE specific saved result (its `resultId` from
+   * getTopResults). The server looks up that result's EXACT saved params and seeds
+   * them with DEEP SEARCH OFF — the per-row "refresh" the UI offers. Repeatable.
+   */
+  resultId: z.number().int().positive().optional(),
   idempotencyKey,
-}).strict();
+}).strict().refine(
+  (v) => (v.runId == null) !== (v.resultId == null),
+  { message: "Provide exactly one of runId or resultId." },
+);
 
 // generateInsights is a SYNCHRONOUS, side-effect-free compute (no LLM, no persist):
 // it derives insights from the strategy's EXISTING backtest results, so it is a

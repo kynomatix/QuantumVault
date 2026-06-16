@@ -212,6 +212,7 @@ export function toBacktestResultDto(
   opts: { oosFraction: number | null | undefined },
 ): BacktestResultDto {
   return {
+    resultId: row.id,
     runId: row.runId,
     ticker: row.ticker,
     timeframe: row.timeframe,

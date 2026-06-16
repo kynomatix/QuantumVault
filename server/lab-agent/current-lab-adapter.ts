@@ -67,6 +67,7 @@ export type AdapterStorage = Pick<
   | "getRuns"
   | "getRun"
   | "getTopResultsForStrategy"
+  | "getResult"
   | "getHeatmapCells"
   | "getJobByRunId"
   | "getLatestInsightsReport"
@@ -693,13 +694,54 @@ export class CurrentLabAdapter implements LabAgentAdapter {
     input: LabAgentToolkitInput<"refineFrom">,
   ): Promise<LabAgentToolkitOutput<"refineFrom">> {
     const taskId = this.requireTaskId(ctx);
-    const source = await this.storage.getRun(input.runId);
-    if (!source || source.userId !== ctx.walletAddress) {
-      throw new ToolkitError("not_found", `Run ${input.runId} not found.`, false);
-    }
+
+    // Resolve the SOURCE run and — when a specific result is named — that result's
+    // EXACT saved params. resultId is the per-result QUICK hone (mirrors the UI's
+    // per-row "refresh"): the server looks up the result's params + its OWN
+    // ticker/timeframe (NOT the source run's first combo, which would mis-target a
+    // multi-combo run) and seeds them with deep search OFF. runId (no resultId) is
+    // the heavier whole-run refine (deep search ON), unchanged.
+    const resolved = await (async () => {
+      if (input.resultId != null) {
+        const result = await this.storage.getResult(input.resultId);
+        if (!result) {
+          throw new ToolkitError("not_found", `Result ${input.resultId} not found.`, false);
+        }
+        const run = await this.storage.getRun(result.runId);
+        // Wallet isolation rides the parent run; hide a foreign result as not_found.
+        if (!run || run.userId !== ctx.walletAddress) {
+          throw new ToolkitError("not_found", `Result ${input.resultId} not found.`, false);
+        }
+        return {
+          source: run,
+          sourceRunId: result.runId,
+          seedParams: (result.params ?? {}) as Record<string, unknown>,
+          seedTicker: result.ticker as string,
+          seedTimeframe: result.timeframe as string,
+        };
+      }
+      if (input.runId != null) {
+        const run = await this.storage.getRun(input.runId);
+        if (!run || run.userId !== ctx.walletAddress) {
+          throw new ToolkitError("not_found", `Run ${input.runId} not found.`, false);
+        }
+        return {
+          source: run,
+          sourceRunId: input.runId,
+          seedParams: undefined as Record<string, unknown> | undefined,
+          seedTicker: undefined as string | undefined,
+          seedTimeframe: undefined as string | undefined,
+        };
+      }
+      // The contract's refine() already guards this; belt-and-suspenders.
+      throw new ToolkitError("invalid_input", "Provide a runId or a resultId to refine.", false);
+    })();
+    const { source, sourceRunId, seedParams, seedTicker, seedTimeframe } = resolved;
+    const seeded = seedParams != null;
+
     const strategy = source.strategyId != null ? await this.storage.getStrategy(source.strategyId) : undefined;
     if (!strategy || strategy.userId !== ctx.walletAddress) {
-      throw new ToolkitError("not_found", `Strategy for run ${input.runId} not found.`, false);
+      throw new ToolkitError("not_found", `Strategy for run ${sourceRunId} not found.`, false);
     }
     const parsedInputs = (strategy.parsedInputs as LabPineInput[] | null) ?? [];
     if (parsedInputs.length === 0) {
@@ -707,8 +749,10 @@ export class CurrentLabAdapter implements LabAgentAdapter {
     }
     const srcTickers = Array.isArray(source.tickers) ? (source.tickers as string[]) : [];
     const srcTimeframes = Array.isArray(source.timeframes) ? (source.timeframes as string[]) : [];
-    const ticker = srcTickers[0];
-    const timeframe = srcTimeframes[0];
+    // Seeded mode launches on the SELECTED result's own combo; whole-run mode
+    // keeps the source run's first combo (unchanged).
+    const ticker = seedTicker ?? srcTickers[0];
+    const timeframe = seedTimeframe ?? srcTimeframes[0];
     if (!ticker || !timeframe) {
       throw new ToolkitError("invalid_input", "Source run has no ticker/timeframe to refine from.", false);
     }
@@ -764,14 +808,43 @@ export class CurrentLabAdapter implements LabAgentAdapter {
       mode: "sweep",
       strategyId: strategy.id,
       engineType: isNative ? settings.engineType : undefined,
-      // Refine = the deep/coordinate honing pass that consumes prior insights.
+      // Refine consumes prior insights + coordinate-tunes. Seeded (per-result)
+      // mode is the QUICK hone — deep search OFF — matching the UI's per-row
+      // refresh; whole-run mode keeps deep search ON for the heavier pass.
       useInsights: true,
-      deepSearch: true,
+      deepSearch: !seeded,
       coordinateTune: true,
       outOfSampleFraction: oosFraction,
       slippage,
     };
     if (isNative) delete (config as Partial<LabOptimizationConfig>).pineScript;
+
+    // Seeded mode threads the result's EXACT params to the worker the SAME way the
+    // UI /refine route does: guidedInsightsPerCombo[combo].topConfigs with a max
+    // score so the worker picks it as the coordinate-tune seed. type:"refine" lets
+    // pumpQueue force coordinateTune/useInsights while leaving deepSearch:false.
+    // Mirror the UI /refine route: pumpQueue reads processOrdersOnClose as a
+    // TOP-LEVEL snapshot field (sibling to config) and threads it to the worker's
+    // engine. Omitting it would run a process_orders_on_close=true strategy under
+    // the wrong Pine fill semantics (close vs next-bar open) — i.e. NOT a faithful
+    // mirror of the per-row refresh, and inaccurate results. Applies to BOTH paths.
+    const processOrdersOnClose: boolean | undefined = settings.processOrdersOnClose;
+    const configSnapshot = seeded
+      ? {
+          type: "refine",
+          config,
+          processOrdersOnClose,
+          sourceRunId,
+          targetTicker: ticker,
+          targetTimeframe: timeframe,
+          guidedInsightsPerCombo: {
+            [`${ticker}|${timeframe}`]: {
+              paramSensitivity: [],
+              topConfigs: [{ params: seedParams, score: Number.MAX_SAFE_INTEGER }],
+            },
+          },
+        }
+      : { type: "new", config, processOrdersOnClose, sourceRunId };
 
     const { run, idempotent, correlationId } = await this.idempotentEnqueue(
       ctx,
@@ -795,7 +868,7 @@ export class CurrentLabAdapter implements LabAgentAdapter {
         oosFraction,
         slippage,
         // sourceRunId lets the live route's dup-check also see agent refines.
-        configSnapshot: { type: "new", config, sourceRunId: input.runId } as any,
+        configSnapshot: configSnapshot as any,
         agentTaskId: taskId,
         agentIdempotencyKey: input.idempotencyKey,
         agentCorrelationId: correlationId,

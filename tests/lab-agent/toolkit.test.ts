@@ -86,6 +86,13 @@ function makeFakeStorage() {
     async getTopResultsForStrategy(strategyId: number, limit = 10) {
       return (this.topResults[strategyId] ?? []).slice(0, limit);
     },
+    async getResult(resultId: number) {
+      for (const rows of Object.values(this.topResults)) {
+        const hit = (rows as any[]).find((r) => r.id === resultId);
+        if (hit) return hit;
+      }
+      return undefined;
+    },
     async getHeatmapCells(_wallet: string, strategyId: number) {
       return { cells: this.heatmapCells[strategyId] ?? [] };
     },
@@ -172,7 +179,7 @@ function makeControlToolkit() {
   fake.strategies.push({
     id: 4, userId: WALLET, name: "AGENT STRAT", description: null,
     parsedInputs: [{ name: "length", type: "int", defaultValue: 14 }],
-    pineScript: "//@version=5\nstrategy('x')", strategySettings: {}, createdAt: now,
+    pineScript: "//@version=5\nstrategy('x')", strategySettings: { processOrdersOnClose: true }, createdAt: now,
   });
   fake.strategies.push({
     id: 5, userId: WALLET, name: "NO PARAMS", description: null,
@@ -571,6 +578,8 @@ describe("control: refineFrom", () => {
     expect(fake.lastCreated.configSnapshot.config.deepSearch).toBe(true);
     expect(fake.lastCreated.configSnapshot.config.coordinateTune).toBe(true);
     expect(fake.lastCreated.configSnapshot.config.useInsights).toBe(true);
+    // process_orders_on_close threaded from strategy settings (UI parity).
+    expect(fake.lastCreated.configSnapshot.processOrdersOnClose).toBe(true);
   });
 
   it("requires an owning task (forbidden without taskId)", async () => {
@@ -596,6 +605,75 @@ describe("control: refineFrom", () => {
     if (!first.ok || !second.ok) return;
     expect(second.data.idempotent).toBe(true);
     expect(second.data.runId).toBe(first.data.runId);
+  });
+});
+
+describe("control: refineFrom (per-result quick hone)", () => {
+  it("seeds the SELECTED result's exact saved params, targets its combo, deep search OFF", async () => {
+    const { fake, toolkit } = makeControlToolkit();
+    // resultId 400 → run 30 (WALLET), params {length:14}, SOL/2h.
+    const res = await toolkit.call(wctx, "refineFrom", { resultId: 400, idempotencyKey: "ref-seed-1" });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.data.status).toBe("queued");
+    const snap = fake.lastCreated.configSnapshot;
+    expect(snap.type).toBe("refine");
+    expect(snap.sourceRunId).toBe(30);
+    // The result's OWN combo, not the source run's first combo.
+    expect(snap.targetTicker).toBe("SOL");
+    expect(snap.targetTimeframe).toBe("2h");
+    // QUICK hone: deep search OFF (the whole-run refine keeps it ON), tune + insights ON.
+    expect(snap.config.deepSearch).toBe(false);
+    expect(snap.config.coordinateTune).toBe(true);
+    expect(snap.config.useInsights).toBe(true);
+    // Seeded with the result's EXACT saved params (server-looked-up, not LLM-typed).
+    expect(snap.guidedInsightsPerCombo["SOL|2h"].topConfigs[0].params).toEqual({ length: 14 });
+    // Mirrors the UI refresh button: process_orders_on_close threaded from settings.
+    expect(snap.processOrdersOnClose).toBe(true);
+    // Still inherits the parent run's holdout (0.33) — guardrail intact.
+    expect(fake.lastCreated.oosFraction).toBe(0.33);
+  });
+
+  it("is repeatable on distinct keys (queues each hone)", async () => {
+    const { toolkit } = makeControlToolkit();
+    const first = await toolkit.call(wctx, "refineFrom", { resultId: 400, idempotencyKey: "ref-seed-a" });
+    const second = await toolkit.call(wctx, "refineFrom", { resultId: 400, idempotencyKey: "ref-seed-b" });
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(second.data.idempotent).toBe(false);
+    expect(second.data.runId).not.toBe(first.data.runId);
+  });
+
+  it("rejects an unknown resultId as not_found", async () => {
+    const { toolkit } = makeControlToolkit();
+    const res = await toolkit.call(wctx, "refineFrom", { resultId: 123456, idempotencyKey: "ref-seed-missing" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("not_found");
+  });
+
+  it("hides another wallet's result as not_found (isolation rides the parent run)", async () => {
+    const { fake, toolkit } = makeControlToolkit();
+    // Plant a result whose parent run (12) belongs to OTHER.
+    fake.topResults[3] = [
+      { id: 999, runId: 12, rank: 1, ticker: "BTC", timeframe: "4h", netProfitPercent: 1, winRatePercent: 1, maxDrawdownPercent: 1, profitFactor: 1, totalTrades: 1, sharpeRatio: 1, params: {}, isMetrics: null, oosMetrics: null },
+    ];
+    const res = await toolkit.call(wctx, "refineFrom", { resultId: 999, idempotencyKey: "ref-seed-other" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("not_found");
+  });
+
+  it("rejects supplying BOTH runId and resultId (invalid_input)", async () => {
+    const { toolkit } = makeControlToolkit();
+    const res = await toolkit.call(wctx, "refineFrom", { runId: 30, resultId: 400, idempotencyKey: "ref-seed-both" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("invalid_input");
+  });
+
+  it("rejects supplying NEITHER runId nor resultId (invalid_input)", async () => {
+    const { toolkit } = makeControlToolkit();
+    const res = await toolkit.call(wctx, "refineFrom", { idempotencyKey: "ref-seed-none" } as any);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("invalid_input");
   });
 });
 
