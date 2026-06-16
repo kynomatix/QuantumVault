@@ -897,9 +897,12 @@ function SceneGenerator() {
 function DeployModal({ lt }) {
   const slideP = Easing.easeOutCubic(clamp((lt - 0.8) / 0.8, 0, 1));
   const depositPulse = (0.5 + 0.5 * Math.sin(lt * 4)) * clamp((lt - 1.6) / 0.5, 0, 1);
-  const row = (label, value, color) => (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 0' }}>
-      <span style={{ fontFamily: FUI, fontSize: 17, color: C.sub }}>{label}</span>
+  const row = (label, value, color, badge) => (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: badge ? '7px 8px' : '7px 0', margin: badge ? '0 -8px' : 0, borderRadius: badge ? 8 : 0, background: badge ? 'rgba(139,92,246,0.08)' : 'transparent' }}>
+      <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontFamily: FUI, fontSize: 17, color: C.sub }}>{label}</span>
+        {badge && <span style={{ fontFamily: FUI, fontWeight: 800, fontSize: 11, letterSpacing: '0.07em', color: C.purpleHi, background: 'rgba(139,92,246,0.18)', border: '1px solid rgba(150,130,255,0.4)', borderRadius: 6, padding: '2px 6px' }}>AUTO</span>}
+      </span>
       <span style={{ fontFamily: FUI, fontWeight: 700, fontSize: 19, color }}>{value}</span>
     </div>
   );
@@ -933,7 +936,7 @@ function DeployModal({ lt }) {
         <div style={{ fontFamily: FUI, fontSize: 13.5, color: C.faint, marginBottom: 16 }}>Available in agent wallet: $0.00 USDC</div>
         <div style={{ borderTop: '1px solid rgba(150,130,255,0.1)', paddingTop: 14 }}>
           {row('Investment Amount', '$462', C.text)}
-          {row('Equity Buffer', '+$538', C.cyan)}
+          {row('Equity Buffer', '+$538', C.cyan, true)}
           {/* slider */}
           <div style={{ position: 'relative', height: 8, borderRadius: 4, background: 'rgba(40,42,66,0.9)', margin: '12px 0 8px' }}>
             <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${46 * slideP}%`, borderRadius: 4, background: `linear-gradient(90deg, ${C.violet}, ${C.purple})` }} />
@@ -950,7 +953,7 @@ function DeployModal({ lt }) {
           </div>
         </div>
         <div style={{ borderTop: '1px solid rgba(150,130,255,0.1)', marginTop: 16, paddingTop: 10 }}>
-          {row('Set Leverage', '3×', C.purpleHi)}
+          {row('Set Leverage', '3×', C.purpleHi, true)}
           {row('Projected Profit', '+$3858.35', C.cyan)}
           {row('Worst-Case Loss', '−$358.28', C.purpleHi)}
         </div>
@@ -982,29 +985,50 @@ function DeployModal({ lt }) {
 function SceneDeployModal() {
   const { localTime: lt, duration: dur } = useSprite();
   const fly = flyStyle(lt, dur, { ry0: 22, ryHold: -7, rx0: 12, rxHold: 4, y0: 120, zHold: 0, inDur: 0.85 });
-  const statP = Easing.easeOutCubic(clamp((lt - 0.9) / 0.6, 0, 1));
-  const exitMain = Easing.easeInCubic(clamp((lt - (dur - 0.5)) / 0.5, 0, 1));
-  const stats = [['Projected profit', '+$3,858', C.cyan, 'trending-up'], ['Worst-case loss', '−$358', C.purpleHi, 'shield'], ['Leverage', '3×', C.text, 'gauge']];
+  const exitP = Easing.easeInCubic(clamp((lt - (dur - 0.45)) / 0.45, 0, 1));
+  const reveal = (d, dist) => {
+    const p = Easing.easeOutCubic(clamp((lt - d) / 0.55, 0, 1));
+    return { opacity: p * (1 - exitP), transform: `translateY(${(1 - p) * dist}px)` };
+  };
+  const tiles = [
+    ['Equity buffer', '+$538', C.cyan, 'shield', true],
+    ['Leverage', '3×', C.purpleHi, 'gauge', true],
+    ['Projected profit', '+$3,858', C.greenHi, 'trending-up', false],
+  ];
   return (
     <div style={{ position: 'absolute', inset: 0 }}>
-      <Headline lt={lt} dur={dur} x={90} y={150} size={70} lines={[<span key="a">Deploy in a</span>, <span key="b"><GradText>few clicks.</GradText></span>]} sub="Equity buffer for drawdowns and leverage — both auto-calculated from your backtest results, not guessed. Spelled out before a cent moves." maxW={680} />
-      <div style={{ position: 'absolute', left: 96, top: 560, display: 'flex', flexDirection: 'column', gap: 16, opacity: statP * (1 - exitMain) }}>
-        {stats.map((s, i) => {
-          const p = Easing.easeOutCubic(clamp((lt - (0.9 + i * 0.13)) / 0.5, 0, 1));
-          return (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 16, opacity: p, transform: `translateX(${(1 - p) * 24}px)` }}>
-              <div style={{ width: 52, height: 52, borderRadius: 14, background: 'linear-gradient(150deg, rgba(139,92,246,0.28), rgba(59,130,246,0.18))', border: '1px solid rgba(150,130,255,0.26)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon name={s[3]} size={24} color={s[2]} /></div>
+      <div style={{ position: 'absolute', left: 96, top: 0, bottom: 0, width: 760, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+        <div style={{ overflow: 'hidden', padding: '0 6px', margin: '0 -6px' }}>
+          <div style={{ ...reveal(0.18, 60), fontFamily: FD, fontWeight: 600, fontSize: 70, lineHeight: 1.04, color: C.text, letterSpacing: '-0.035em' }}>Deploy in a</div>
+        </div>
+        <div style={{ overflow: 'hidden', padding: '0 6px', margin: '0 -6px' }}>
+          <div style={{ ...reveal(0.30, 60), fontFamily: FD, fontWeight: 600, fontSize: 70, lineHeight: 1.04, letterSpacing: '-0.035em' }}><GradText>few clicks.</GradText></div>
+        </div>
+        <div style={{ marginTop: 20, ...reveal(0.46, 16), fontFamily: FUI, fontWeight: 500, fontSize: 19, color: C.sub, maxWidth: 580, lineHeight: 1.45 }}>Your equity buffer and leverage are calculated from the backtest — not guessed.</div>
+        <div style={{ marginTop: 32, ...reveal(0.62, 14), display: 'flex', alignItems: 'center', gap: 9 }}>
+          <Icon name="zap" size={16} color={C.purpleHi} />
+          <span style={{ fontFamily: FUI, fontWeight: 800, fontSize: 13, letterSpacing: '0.16em', color: C.faint }}>CALCULATED FOR YOU — NO GUESSWORK</span>
+        </div>
+        <div style={{ marginTop: 18, display: 'flex', flexDirection: 'column', gap: 15 }}>
+          {tiles.map(([label, val, color, ic, auto], i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 16, ...reveal(0.72 + i * 0.12, 24) }}>
+              <div style={{ width: 52, height: 52, borderRadius: 14, background: 'linear-gradient(150deg, rgba(139,92,246,0.28), rgba(59,130,246,0.18))', border: '1px solid rgba(150,130,255,0.26)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon name={ic} size={24} color={color} /></div>
               <div>
-                <div style={{ fontFamily: FUI, fontSize: 15, color: C.faint }}>{s[0]}</div>
-                <div style={{ fontFamily: FM, fontWeight: 700, fontSize: 36, color: s[2], lineHeight: 1.1 }}>{s[1]}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontFamily: FUI, fontSize: 15, color: C.faint }}>{label}</span>
+                  {auto && <span style={{ fontFamily: FUI, fontWeight: 800, fontSize: 11, letterSpacing: '0.08em', color: C.purpleHi, background: 'rgba(139,92,246,0.16)', border: '1px solid rgba(150,130,255,0.35)', borderRadius: 6, padding: '2px 7px' }}>AUTO</span>}
+                </div>
+                <div style={{ fontFamily: FM, fontWeight: 700, fontSize: 36, color, lineHeight: 1.1 }}>{val}</div>
               </div>
             </div>
-          );
-        })}
+          ))}
+        </div>
       </div>
       <Stage3D style={{ perspectiveOrigin: '70% 50%' }}>
-        <div style={{ position: 'absolute', left: 1180, top: 44, ...fly, transformStyle: 'preserve-3d' }}>
-          <div style={{ transform: 'scale(0.93)', transformOrigin: 'top center' }}><DeployModal lt={lt} /></div>
+        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 120, transformStyle: 'preserve-3d' }}>
+          <div style={{ ...fly, transformStyle: 'preserve-3d' }}>
+            <div style={{ transform: 'scale(0.8)', transformOrigin: 'center' }}><DeployModal lt={lt} /></div>
+          </div>
         </div>
       </Stage3D>
     </div>
