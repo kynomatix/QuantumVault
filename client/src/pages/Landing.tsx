@@ -1,5 +1,5 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, lazy, Suspense } from 'react';
 import { motion, useScroll, useTransform, useMotionTemplate, type MotionProps, type MotionValue, type Variants } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { useQuery } from '@tanstack/react-query';
@@ -20,12 +20,73 @@ import {
   KeyRound,
   PiggyBank,
   Percent,
+  FlaskConical,
   type LucideIcon
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import LaunchVideo from '@/components/LaunchVideo';
 import { useWallet } from '@/hooks/useWallet';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
+
+// Code-split: the QuantumLab sizzle is a heavy animation, so it lives in its own
+// chunk and is only fetched/mounted once its section scrolls near the viewport.
+const QuantumLabVideo = lazy(() => import('@/components/QuantumLabVideo'));
+
+// Lightweight in-frame placeholder shown until the lazy chunk loads / scrolls in.
+function LabVideoPlaceholder() {
+  return (
+    <div
+      className="absolute inset-0 flex items-center justify-center bg-[#05060e]"
+      data-testid="quantumlab-video-placeholder"
+    >
+      <div className="flex flex-col items-center gap-4">
+        <img
+          src="/images/qv-launch-logo.webp"
+          alt="QuantumLab"
+          className="w-14 h-14 object-contain opacity-50 animate-pulse"
+        />
+        <span className="text-xs tracking-[0.3em] text-white/30 font-mono">QUANTUMLAB</span>
+      </div>
+    </div>
+  );
+}
+
+// Defers mounting (and therefore the dynamic import) until the frame is close to
+// the viewport, so the animation chunk adds no weight to the initial page load.
+function LazyLabShowcase() {
+  const ref = useRef<HTMLDivElement>(null);
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === 'undefined') {
+      setShow(true);
+      return;
+    }
+    const io = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setShow(true);
+          io.disconnect();
+        }
+      },
+      { rootMargin: '400px' },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+  return (
+    <div ref={ref} className="relative w-full aspect-[16/9]" data-testid="quantumlab-video">
+      {show ? (
+        <Suspense fallback={<LabVideoPlaceholder />}>
+          <QuantumLabVideo />
+        </Suspense>
+      ) : (
+        <LabVideoPlaceholder />
+      )}
+    </div>
+  );
+}
 
 interface PlatformMetrics {
   tvl: number;
@@ -1162,6 +1223,41 @@ export default function Landing() {
                 ))}
               </div>
             </div>
+          </div>
+        </section>
+
+        <section className="relative py-24 px-6 bg-background overflow-hidden">
+          <div className="absolute inset-0 bg-gradient-to-b from-background via-black to-background" />
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[700px] h-[700px] bg-accent/10 rounded-full blur-[160px]" />
+          <div className="max-w-6xl mx-auto relative z-10">
+            <motion.div
+              initial={prefersReducedMotion ? false : { opacity: 0, y: 24 }}
+              whileInView={prefersReducedMotion ? undefined : { opacity: 1, y: 0 }}
+              viewport={{ once: true, margin: "-100px" }}
+              transition={{ duration: 0.6 }}
+              className="text-center mb-12"
+            >
+              <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-primary/30 bg-primary/10 text-sm text-primary mb-5">
+                <FlaskConical className="w-4 h-4" />
+                Inside QuantumLab
+              </span>
+              <h2 className="text-4xl sm:text-5xl lg:text-6xl font-display font-bold text-white mb-4">
+                Backtest, optimize, <span className="gradient-text">deploy</span>
+              </h2>
+              <p className="text-lg text-white/60 max-w-2xl mx-auto">
+                Generate a strategy with the Lab Assistant, stress-test thousands of
+                variants, then go live in one click — watch the whole Lab workflow.
+              </p>
+            </motion.div>
+            <motion.div
+              initial={prefersReducedMotion ? false : { opacity: 0, y: 30 }}
+              whileInView={prefersReducedMotion ? undefined : { opacity: 1, y: 0 }}
+              viewport={{ once: true, margin: "-80px" }}
+              transition={{ duration: 0.7, delay: 0.1 }}
+              className="relative rounded-2xl overflow-hidden border border-primary/20 shadow-2xl shadow-primary/20"
+            >
+              <LazyLabShowcase />
+            </motion.div>
           </div>
         </section>
 
