@@ -987,7 +987,7 @@ function SceneDeployModal() {
   const stats = [['Projected profit', '+$3,858', C.cyan, 'trending-up'], ['Worst-case loss', '−$358', C.purpleHi, 'shield'], ['Leverage', '3×', C.text, 'gauge']];
   return (
     <div style={{ position: 'absolute', inset: 0 }}>
-      <Headline lt={lt} dur={dur} x={90} y={150} size={70} lines={[<span key="a">Deploy in a</span>, <span key="b"><GradText>few clicks.</GradText></span>]} sub="Export the Pine script, create the bot, fund it — projected and worst-case spelled out before a cent moves." maxW={680} />
+      <Headline lt={lt} dur={dur} x={90} y={150} size={70} lines={[<span key="a">Deploy in a</span>, <span key="b"><GradText>few clicks.</GradText></span>]} sub="Equity buffer for drawdowns and leverage — both auto-calculated from your backtest results, not guessed. Spelled out before a cent moves." maxW={680} />
       <div style={{ position: 'absolute', left: 96, top: 560, display: 'flex', flexDirection: 'column', gap: 16, opacity: statP * (1 - exitMain) }}>
         {stats.map((s, i) => {
           const p = Easing.easeOutCubic(clamp((lt - (0.9 + i * 0.13)) / 0.5, 0, 1));
