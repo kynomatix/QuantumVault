@@ -177,6 +177,7 @@ export function LabAssistantDock({
   onReconnect,
   reconnecting = false,
   onNavigate,
+  openSignal = 0,
 }: {
   walletAddress: string | null;
   sessionConnected?: boolean;
@@ -187,8 +188,21 @@ export function LabAssistantDock({
   // premature "Reconnect" tap over an in-progress signature.
   reconnecting?: boolean;
   onNavigate: (tab: string) => void;
+  // One-way "please open" trigger: the parent bumps this counter (e.g. from the
+  // hub's "Chat to Lab Assistant" button) to expand the dock. 0 = no request.
+  openSignal?: number;
 }) {
   const [open, setOpen] = useState(false);
+  // Open the dock when the parent bumps openSignal. Seed the ref with the value
+  // at mount so a stale signal can't auto-open on remount (the dock only mounts
+  // while on the hub tab) — we open only when the value actually increases.
+  const lastOpenSignalRef = useRef(openSignal);
+  useEffect(() => {
+    if (openSignal !== lastOpenSignalRef.current) {
+      lastOpenSignalRef.current = openSignal;
+      if (openSignal > 0) setOpen(true);
+    }
+  }, [openSignal]);
   const [taskId, setTaskId] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
   // Inline notice (e.g. the pasted-API-key guard) shown just above the composer.

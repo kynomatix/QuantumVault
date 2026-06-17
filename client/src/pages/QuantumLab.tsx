@@ -515,11 +515,13 @@ async function copyPineWithParams(pineScript: string, params: Record<string, any
 function LabHub({
   onNavigate,
   onOpenQueue,
+  onOpenAssistant,
   strategiesCount,
   queueCount,
 }: {
   onNavigate: (tab: MainTab) => void;
   onOpenQueue: () => void;
+  onOpenAssistant: () => void;
   strategiesCount: number;
   queueCount: number;
 }) {
@@ -624,6 +626,25 @@ function LabHub({
             <span className="font-medium">{queueCount} {queueCount === 1 ? "job" : "jobs"} in queue</span>
           </button>
         </div>
+      </motion.div>
+
+      {/* Lab Assistant — prominent entry point (the moat: chat-driven quant workflow) */}
+      <motion.div {...fade(0.05)} className="flex justify-center">
+        <button
+          type="button"
+          onClick={onOpenAssistant}
+          data-testid="button-hub-assistant"
+          className="group relative inline-flex w-full max-w-xl items-center gap-4 rounded-2xl bg-gradient-to-r from-violet-600 via-indigo-600 to-blue-600 px-6 py-5 text-left text-white shadow-[0_0_45px_-8px_rgba(124,92,255,0.65)] transition-all hover:-translate-y-0.5 hover:shadow-[0_0_60px_-6px_rgba(124,92,255,0.85)]"
+        >
+          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white/15 ring-1 ring-white/20">
+            <Sparkles className="h-5 w-5" />
+          </span>
+          <span className="flex flex-col leading-tight">
+            <span className="text-lg font-display font-bold tracking-tight">Chat to Lab Assistant</span>
+            <span className="text-sm text-white/75">Your AI quant — build, backtest &amp; refine strategies by chatting.</span>
+          </span>
+          <ArrowUpRight className="ml-auto h-5 w-5 shrink-0 opacity-70 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
+        </button>
       </motion.div>
 
       {/* How it works — glowing signal ribbon */}
@@ -743,6 +764,8 @@ function LabHub({
 
 export default function QuantumLab() {
   const [mainTab, setMainTab] = useState<MainTab>("hub");
+  // Bumped by the hub's "Chat to Lab Assistant" button to expand the dock.
+  const [assistantOpenSignal, setAssistantOpenSignal] = useState(0);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeRunId, setActiveRunId] = useState<number | null>(null);
   const [activeHistoryRunId, setActiveHistoryRunId] = useState<number | null>(null);
@@ -1245,6 +1268,7 @@ export default function QuantumLab() {
           <LabHub
             onNavigate={setMainTab}
             onOpenQueue={() => setQueueOpen(true)}
+            onOpenAssistant={() => setAssistantOpenSignal((s) => s + 1)}
             strategiesCount={strategies?.length ?? 0}
             queueCount={queueCount}
           />
@@ -1469,6 +1493,7 @@ export default function QuantumLab() {
           onReconnect={retryAuth}
           reconnecting={signingInProgress}
           onNavigate={(tab) => setMainTab(tab as MainTab)}
+          openSignal={assistantOpenSignal}
         />
       )}
       <QueueDrawer open={queueOpen} onOpenChange={setQueueOpen} />
