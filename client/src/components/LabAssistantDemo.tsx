@@ -9,6 +9,7 @@ import {
   Wand2,
   FlaskConical,
   Microscope,
+  Send,
 } from "lucide-react";
 
 /**
@@ -137,35 +138,36 @@ export default function LabAssistantDemo() {
   return (
     <div
       ref={wrapRef}
-      className="relative overflow-hidden rounded-2xl border border-primary/20 bg-gradient-to-b from-card/90 to-black/80 shadow-2xl shadow-primary/10"
+      className="mx-auto w-full max-w-[390px]"
       data-testid="demo-lab-assistant"
     >
-      <div
-        className="absolute inset-0 pointer-events-none opacity-60"
-        style={{
-          background:
-            "radial-gradient(600px 240px at 80% -10%, rgba(139,92,246,0.18), transparent 70%)",
-        }}
-      />
+      <div className="relative overflow-hidden rounded-2xl border border-primary/20 bg-gradient-to-b from-card/90 to-black/80 shadow-2xl shadow-primary/10">
+        <div
+          className="absolute inset-0 pointer-events-none opacity-60"
+          style={{
+            background:
+              "radial-gradient(600px 240px at 80% -10%, rgba(139,92,246,0.18), transparent 70%)",
+          }}
+        />
 
-      {/* header */}
-      <div className="relative flex items-center gap-3 border-b border-white/10 px-4 sm:px-6 py-3.5">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-accent">
-          <Sparkles className="h-4 w-4 text-white" />
+        {/* header — same compact frame as the real Lab Assistant popup */}
+        <div className="relative flex items-center gap-2.5 border-b border-white/10 px-4 py-3">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-accent">
+            <Sparkles className="h-4 w-4 text-white" />
+          </div>
+          <div className="min-w-0 leading-tight">
+            <div className="text-sm font-semibold text-white">Lab Assistant</div>
+            <div className="text-[10px] text-white/45">QuantumLab</div>
+          </div>
+          <span className="ml-auto inline-flex shrink-0 items-center gap-1.5 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-medium text-emerald-300">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            Live demo
+          </span>
         </div>
-        <div className="min-w-0">
-          <div className="text-sm font-semibold text-white">Lab Assistant</div>
-          <div className="text-[11px] text-white/45">QuantumLab</div>
-        </div>
-        <span className="ml-auto inline-flex items-center gap-1.5 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 text-[11px] font-medium text-emerald-300">
-          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-          Live demo · no wallet needed
-        </span>
-      </div>
 
       {/* body */}
       <div
-        className="relative px-4 sm:px-6 py-5 space-y-4"
+        className="relative px-4 py-4 space-y-3.5"
         style={{ opacity: globalOpacity, minHeight: 360 }}
       >
         {/* user bubble */}
@@ -311,9 +313,20 @@ export default function LabAssistantDemo() {
         )}
       </div>
 
-      <div className="relative border-t border-white/10 px-4 sm:px-6 py-2.5 text-center text-[11px] text-white/35">
-        Illustrative demo. Numbers are for illustration only. Trading involves risk of loss.
+        {/* composer — visual only, this is a no-wallet demo */}
+        <div className="relative flex items-center gap-2 border-t border-white/10 px-3 py-2.5">
+          <div className="flex-1 truncate rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-[12.5px] text-white/30">
+            Ask the Lab Assistant...
+          </div>
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-accent text-white">
+            <Send className="h-4 w-4" />
+          </span>
+        </div>
       </div>
+
+      <p className="mt-3 text-center text-[11px] text-white/35">
+        Illustrative demo. Numbers are for illustration only. Trading involves risk of loss.
+      </p>
     </div>
   );
 }
