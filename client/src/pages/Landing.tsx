@@ -35,6 +35,10 @@ const QuantumLabVideo = lazy(() => import('@/components/QuantumLabVideo'));
 // engine is heavy, so it's code-split and only fetched once it scrolls near view.
 const LaunchVideo = lazy(() => import('@/components/LaunchVideo'));
 
+// The no-wallet "canned demo" of the Lab Assistant is code-split too, so it only
+// loads (and its animation loop only runs) once it scrolls near the viewport.
+const LabAssistantDemo = lazy(() => import('@/components/LabAssistantDemo'));
+
 // Lightweight in-frame placeholder shown until the lazy chunk loads / scrolls in.
 function LabVideoPlaceholder() {
   return (
@@ -86,6 +90,47 @@ function LazyLabShowcase() {
         </Suspense>
       ) : (
         <LabVideoPlaceholder />
+      )}
+    </div>
+  );
+}
+
+// Defers mounting the canned Lab Assistant demo until it scrolls near the viewport,
+// so the looping animation adds no weight or CPU to the initial page load.
+function LazyLabAssistantDemo() {
+  const ref = useRef<HTMLDivElement>(null);
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === 'undefined') {
+      setShow(true);
+      return;
+    }
+    const io = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setShow(true);
+          io.disconnect();
+        }
+      },
+      { rootMargin: '300px' },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+  return (
+    <div ref={ref} className="w-full">
+      {show ? (
+        <Suspense
+          fallback={
+            <div className="h-[420px] rounded-2xl border border-primary/20 bg-card/40 animate-pulse" />
+          }
+        >
+          <LabAssistantDemo />
+        </Suspense>
+      ) : (
+        <div className="h-[420px] rounded-2xl border border-primary/20 bg-card/40" />
       )}
     </div>
   );
@@ -1315,6 +1360,53 @@ export default function Landing() {
             >
               <LazyLabShowcase />
             </motion.div>
+          </div>
+        </section>
+
+        <section className="relative py-24 px-6 bg-background overflow-hidden">
+          <div className="absolute inset-0 bg-gradient-to-b from-background via-black to-background" />
+          <div className="absolute top-1/3 left-1/2 -translate-x-1/2 w-[600px] h-[600px] bg-primary/10 rounded-full blur-[160px]" />
+          <div className="max-w-3xl mx-auto relative z-10">
+            <motion.div
+              initial={prefersReducedMotion ? false : { opacity: 0, y: 24 }}
+              whileInView={prefersReducedMotion ? undefined : { opacity: 1, y: 0 }}
+              viewport={{ once: true, margin: "-100px" }}
+              transition={{ duration: 0.6 }}
+              className="text-center mb-10"
+            >
+              <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-primary/30 bg-primary/10 text-sm text-primary mb-5">
+                <Sparkles className="w-4 h-4" />
+                See it think
+              </span>
+              <h2 className="text-4xl sm:text-5xl font-display font-bold text-white mb-4">
+                Just ask. It does the <span className="gradient-text">whole job</span>.
+              </h2>
+              <p className="text-lg text-white/60 max-w-2xl mx-auto">
+                Tell the Lab Assistant what you want in plain English. It writes the
+                strategy, backtests thousands of variants, cuts what overfits, and
+                checks it on data it never saw. No wallet needed to watch.
+              </p>
+            </motion.div>
+            <motion.div
+              initial={prefersReducedMotion ? false : { opacity: 0, y: 30 }}
+              whileInView={prefersReducedMotion ? undefined : { opacity: 1, y: 0 }}
+              viewport={{ once: true, margin: "-80px" }}
+              transition={{ duration: 0.7, delay: 0.1 }}
+            >
+              <LazyLabAssistantDemo />
+            </motion.div>
+            <div className="mt-8 text-center">
+              <Button
+                size="lg"
+                variant="outline"
+                className="border-primary/40 bg-primary/5 hover:bg-primary/10 text-white"
+                onClick={() => navigate('/quantumlab')}
+                data-testid="button-open-lab-assistant"
+              >
+                Open the Lab Assistant
+                <ArrowRight className="ml-2 w-4 h-4" />
+              </Button>
+            </div>
           </div>
         </section>
 

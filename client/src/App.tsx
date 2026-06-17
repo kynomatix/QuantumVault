@@ -6,6 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { WalletProvider } from "@/components/WalletProvider";
 import { ConfirmDialogProvider } from "@/hooks/useConfirm";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import SiteAnalytics from "@/components/SiteAnalytics";
 import NotFound from "@/pages/not-found";
 import Landing from "@/pages/Landing";
 import AppPage from "@/pages/App";
@@ -43,6 +44,7 @@ function App() {
         <WalletProvider>
           <TooltipProvider>
             <ConfirmDialogProvider>
+              <SiteAnalytics />
               <Toaster />
               <Router />
             </ConfirmDialogProvider>

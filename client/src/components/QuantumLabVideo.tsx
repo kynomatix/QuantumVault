@@ -588,6 +588,92 @@ function SceneOutcome() {
   );
 }
 
+// Scene 3.5: "Looks great. Now prove it." out-of-sample + robustness (the moat)
+function SceneRobustness() {
+  const { localTime: lt, duration: dur } = useSprite();
+  const exitP = Easing.easeInCubic(clamp((lt - (dur - 0.5)) / 0.5, 0, 1));
+  const panelP = Easing.easeOutCubic(clamp((lt - 0.25) / 0.6, 0, 1));
+  const inP = Easing.easeOutCubic(clamp((lt - 0.9) / 1.5, 0, 1));
+  const splitP = Easing.easeOutCubic(clamp((lt - 2.2) / 0.5, 0, 1));
+  const oosP = Easing.easeOutCubic(clamp((lt - 2.7) / 1.5, 0, 1));
+  const badgeP = Easing.easeOutBack(clamp((lt - 4.2) / 0.6, 0, 1));
+  const endDots = clamp((oosP - 0.82) / 0.18, 0, 1);
+  const inPath = 'M 30 420 C 150 396, 210 356, 300 366 S 470 300, 560 280 S 660 196, 720 150';
+  const overfitPath = 'M 720 150 C 800 156, 870 220, 940 270 S 1120 384, 1230 408';
+  const robustPath = 'M 720 150 C 820 128, 900 114, 990 88 S 1160 60, 1230 50';
+  const dash = (p) => ({ pathLength: 1, strokeDasharray: `${clamp(p, 0, 1)} 1` });
+  const ovl = (style) => ({ position: 'absolute', fontFamily: FUI, ...style });
+  return (
+    <div style={{ position: 'absolute', inset: 0 }}>
+      <Headline
+        lt={lt}
+        dur={dur}
+        x={960}
+        y={46}
+        size={58}
+        align="center"
+        lines={[<span key="a">Looks great. <GradText>Now prove it.</GradText></span>]}
+        sub="Every strategy is scored on price it never saw while tuning. Curve-fit winners fall apart on that unseen data, so you catch them before you risk a cent."
+        maxW={1380}
+      />
+      <div style={{ position: 'absolute', left: '50%', top: 318, width: 1340, transform: `translateX(-50%) translateY(${(1 - panelP) * 40}px)`, opacity: clamp(panelP, 0, 1) * (1 - exitP) }}>
+        <div style={{ ...panelBase, padding: '24px 30px 26px', boxShadow: neon('rgba(139,92,246,0.3)', 'rgba(59,130,246,0.2)') }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 13, marginBottom: 16 }}>
+            <div style={{ width: 44, height: 44, borderRadius: 12, background: 'linear-gradient(150deg, rgba(139,92,246,0.4), rgba(59,130,246,0.25))', border: '1px solid rgba(150,130,255,0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon name="shield" size={22} color={C.purpleHi} /></div>
+            <div>
+              <div style={{ fontFamily: FD, fontWeight: 600, fontSize: 24, color: C.text }}>Out-of-sample validation</div>
+              <div style={{ fontFamily: FUI, fontSize: 14, color: C.faint, marginTop: 2 }}>Holdout tested · judged on data it was never tuned on</div>
+            </div>
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 14, opacity: clamp(badgeP, 0, 1), transform: `scale(${0.85 + clamp(badgeP, 0, 1) * 0.15})` }}>
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ fontFamily: FUI, fontSize: 11.5, fontWeight: 700, letterSpacing: '0.1em', color: C.faint }}>ROBUSTNESS</div>
+                <div style={{ fontFamily: FM, fontWeight: 700, fontSize: 30, color: C.greenHi, lineHeight: 1.05 }}>87<span style={{ fontSize: 15, color: C.faint }}> / 100</span></div>
+              </div>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 7, fontFamily: FUI, fontWeight: 800, fontSize: 13, letterSpacing: '0.05em', color: '#54e5a8', padding: '9px 14px', borderRadius: 10, background: 'rgba(52,211,153,0.13)', border: '1px solid rgba(52,229,168,0.4)' }}><Icon name="circle-check" size={16} color="#54e5a8" /> HOLDS UP</span>
+            </div>
+          </div>
+          <div style={{ position: 'relative', width: '100%', aspectRatio: '1260 / 470' }}>
+            <svg viewBox="0 0 1260 470" width="100%" height="100%" style={{ display: 'block', overflow: 'visible' }}>
+              <defs>
+                <linearGradient id="qvOosShade" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0" stopColor="rgba(70,160,255,0.12)" />
+                  <stop offset="1" stopColor="rgba(70,160,255,0)" />
+                </linearGradient>
+              </defs>
+              {[110, 200, 290, 380].map((y) => <line key={y} x1="20" y1={y} x2="1240" y2={y} stroke="rgba(150,130,255,0.08)" strokeWidth="1" />)}
+              <rect x="720" y="8" width={520 * clamp(splitP, 0, 1)} height="452" fill="url(#qvOosShade)" />
+              <line x1="720" y1={231 - 219 * clamp(splitP, 0, 1)} x2="720" y2={231 + 219 * clamp(splitP, 0, 1)} stroke="rgba(70,198,255,0.6)" strokeWidth="2" strokeDasharray="6 7" style={{ opacity: clamp(splitP, 0, 1) }} />
+              <path d={inPath} fill="none" stroke={C.purpleHi} strokeWidth="4" strokeLinecap="round" {...dash(inP)} style={{ filter: 'drop-shadow(0 0 8px rgba(139,92,246,0.5))' }} />
+              <path d={overfitPath} fill="none" stroke={C.red} strokeWidth="4" strokeLinecap="round" {...dash(oosP)} style={{ filter: 'drop-shadow(0 0 8px rgba(244,86,110,0.45))' }} />
+              <path d={robustPath} fill="none" stroke={C.greenHi} strokeWidth="4.5" strokeLinecap="round" {...dash(oosP)} style={{ filter: 'drop-shadow(0 0 10px rgba(52,229,168,0.55))' }} />
+              <circle cx="1230" cy="50" r="6" fill={C.greenHi} style={{ opacity: endDots }} />
+              <circle cx="1230" cy="408" r="6" fill={C.red} style={{ opacity: endDots }} />
+            </svg>
+            <div style={{ ...ovl({ left: '3%', top: '6%' }), opacity: clamp(inP * 1.4, 0, 1) }}>
+              <div style={{ fontWeight: 800, fontSize: 13, letterSpacing: '0.1em', color: C.purpleHi }}>IN-SAMPLE</div>
+              <div style={{ fontSize: 12.5, color: C.faint, marginTop: 1 }}>tuned here</div>
+            </div>
+            <div style={{ ...ovl({ left: '58.5%', top: '6%' }), opacity: clamp(splitP, 0, 1) }}>
+              <div style={{ fontWeight: 800, fontSize: 13, letterSpacing: '0.1em', color: C.cyan }}>OUT-OF-SAMPLE</div>
+              <div style={{ fontSize: 12.5, color: C.faint, marginTop: 1 }}>never seen during tuning</div>
+            </div>
+            <div style={{ ...ovl({ left: '83%', top: '0%' }), opacity: endDots }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, fontSize: 14, color: C.greenHi }}><Icon name="circle-check" size={15} color={C.greenHi} /> Holds up</div>
+            </div>
+            <div style={{ ...ovl({ left: '83%', top: '86%' }), opacity: endDots }}>
+              <div style={{ fontWeight: 700, fontSize: 14, color: C.red }}>✕ Overfit, fades</div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, marginTop: 14, opacity: clamp((lt - 3.6) / 0.6, 0, 1) * (1 - exitP) }}>
+            <Icon name="shield" size={15} color={C.purpleHi} />
+            <span style={{ fontFamily: FUI, fontSize: 16, color: C.sub }}>We only deploy what survives on the right of that line, not the strategies that just look good on paper.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Scene 4 — "Go live in one click." — deploy morph
 function SceneDeploy() {
   const { localTime: lt, duration: dur } = useSprite();
@@ -1074,7 +1160,7 @@ function SceneLockup() {
 }
 
 /* ───────────────────────── Stage shell ───────────────────────── */
-const W = 1920, H = 1080, DUR = 56;
+const W = 1920, H = 1080, DUR = 62.8;
 function StageShell({ children }) {
   const [time, setTime] = React.useState(0);
   const [playing, setPlaying] = React.useState(true);
@@ -1134,9 +1220,10 @@ export default function QuantumLabVideo() {
         <Sprite start={19.7} end={25.4}><SceneConfig /></Sprite>
         <Sprite start={25.3} end={31.2}><SceneHeatmap /></Sprite>
         <Sprite start={31.1} end={37.4}><SceneOutcome /></Sprite>
-        <Sprite start={37.3} end={43.6}><SceneDeployModal /></Sprite>
-        <Sprite start={43.5} end={48.3}><SceneDeploy /></Sprite>
-        <Sprite start={48.2} end={56.0}><SceneLockup /></Sprite>
+        <Sprite start={37.3} end={44.2}><SceneRobustness /></Sprite>
+        <Sprite start={44.1} end={50.4}><SceneDeployModal /></Sprite>
+        <Sprite start={50.3} end={55.1}><SceneDeploy /></Sprite>
+        <Sprite start={55.0} end={62.8}><SceneLockup /></Sprite>
       </StageShell>
     </div>
   );
