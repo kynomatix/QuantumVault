@@ -634,16 +634,14 @@ function LabHub({
           type="button"
           onClick={onOpenAssistant}
           data-testid="button-hub-assistant"
-          className="group relative inline-flex w-full max-w-xl items-center gap-4 rounded-2xl bg-gradient-to-r from-violet-600 via-indigo-600 to-blue-600 px-6 py-5 text-left text-white shadow-[0_0_45px_-8px_rgba(124,92,255,0.65)] transition-all hover:-translate-y-0.5 hover:shadow-[0_0_60px_-6px_rgba(124,92,255,0.85)]"
+          className="group relative inline-flex flex-col items-center gap-1 rounded-2xl bg-gradient-to-r from-violet-600 via-indigo-600 to-blue-600 px-8 py-3.5 text-center text-white shadow-[0_0_30px_-10px_rgba(124,92,255,0.6)] transition-all hover:-translate-y-0.5 hover:shadow-[0_0_40px_-8px_rgba(124,92,255,0.8)]"
         >
-          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white/15 ring-1 ring-white/20">
-            <Sparkles className="h-5 w-5" />
+          <span className="flex items-center gap-2">
+            <Sparkles className="h-4 w-4 shrink-0" />
+            <span className="text-base font-display font-bold tracking-tight">Chat to Lab Assistant</span>
           </span>
-          <span className="flex flex-col leading-tight">
-            <span className="text-lg font-display font-bold tracking-tight">Chat to Lab Assistant</span>
-            <span className="text-sm text-white/75">Your AI quant — build, backtest &amp; refine strategies by chatting.</span>
-          </span>
-          <ArrowUpRight className="ml-auto h-5 w-5 shrink-0 opacity-70 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
+          <span className="text-sm font-medium text-white/90">Your AI quant</span>
+          <span className="text-[11px] text-white/70">build, backtest &amp; refine strategies by chatting</span>
         </button>
       </motion.div>
 
