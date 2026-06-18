@@ -15,7 +15,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { Sparkles, Send, X, Bot, Loader2, Wallet, Square, Activity, Wand2, ChevronDown, ShieldCheck, ShieldAlert, TrendingUp, Rocket, Settings2, Lock } from "lucide-react";
+import { Sparkles, Send, X, Bot, Loader2, Wallet, Square, Activity, Wand2, ChevronDown, ShieldCheck, ShieldAlert, TrendingUp, Rocket, Settings2 } from "lucide-react";
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import type { AgentSuggestedAction, LabTradeRecord } from "@shared/schema";
 import { looksLikeApiKey } from "@shared/api-key-detect";
@@ -467,11 +467,6 @@ export function LabAssistantDock({
   // canChat (the session may already read "connected" at lock time).
   const pendingResendRef = useRef<string | null>(null);
   const [resendArmed, setResendArmed] = useState(false);
-  // True once a successful in-place re-sign has cleared the lock, so the loud locked
-  // banner hides immediately even when there's no pending question to auto-resend (e.g.
-  // re-signing from an old locked transcript). A fresh locked reply flips it back off so
-  // a brand-new lock re-shows the banner.
-  const [lockResolved, setLockResolved] = useState(false);
   // Always-current snapshots of the active wallet + task. A mutation that resolves AFTER
   // the user switches wallet/task reads these (NOT its closure, which can be stale) to
   // detect it's orphaned and drop its response — so wallet A's reply, or A's resend
@@ -517,7 +512,6 @@ export function LabAssistantDock({
     // wallet B's conversation after a switch + reconnect.
     pendingResendRef.current = null;
     setResendArmed(false);
-    setLockResolved(false);
   }, [walletAddress]);
 
   // Don't let a stale reconnect error linger once the session is healthy again.
@@ -566,12 +560,14 @@ export function LabAssistantDock({
   const handsOffEligible = handsOffEligibilityQuery.data?.eligible === true;
 
   // Remember the hands-off choice per wallet so it survives a refresh, instead of
-  // resetting to off every page load. Restored ONCE per wallet, and only after we know
-  // eligibility, so a wallet that isn't allowed never restores it on (the server also
-  // re-checks on /auto/start). Saved on toggle below.
+  // resetting to off every page load. The eligibility query is disabled until the dock
+  // opens, so we wait for isSuccess (not merely !isLoading, since a disabled query is
+  // not "loading") before restoring. Otherwise we'd mark the wallet restored too early,
+  // see "not eligible", and never read the saved value. Restored ONCE per wallet, and
+  // only if still eligible (the server re-checks on /auto/start too). Saved on toggle below.
   const handsOffRestoredFor = useRef<string | null>(null);
   useEffect(() => {
-    if (!walletAddress || handsOffEligibilityQuery.isLoading) return;
+    if (!walletAddress || !handsOffEligibilityQuery.isSuccess) return;
     if (handsOffRestoredFor.current === walletAddress) return;
     handsOffRestoredFor.current = walletAddress;
     if (!handsOffEligible) {
@@ -583,7 +579,7 @@ export function LabAssistantDock({
     } catch {
       /* localStorage unavailable (private mode etc.); just leave it off. */
     }
-  }, [walletAddress, handsOffEligible, handsOffEligibilityQuery.isLoading]);
+  }, [walletAddress, handsOffEligible, handsOffEligibilityQuery.isSuccess]);
 
   const send = useMutation({
     mutationFn: async (content: string) => {
@@ -611,10 +607,6 @@ export function LabAssistantDock({
         (msg) => msg.role === "agent" && msg.suggestedActions?.some((a) => a.kind === "reconnect"),
       );
       pendingResendRef.current = locked ? ctx.content : null;
-      // A fresh locked reply re-arms the loud banner (a prior successful re-sign may have
-      // hidden it). A normal reply leaves the flag alone; the reconnect chip is gone from
-      // the latest message anyway, so the banner stays hidden.
-      if (locked) setLockResolved(false);
     },
     onError: (err) => {
       // Don't swallow a hard send failure — show why (the normal degrade path returns
@@ -768,10 +760,6 @@ export function LabAssistantDock({
         );
         return;
       }
-      // Session is live again: hide the locked banner right away, even when there's no
-      // pending question to auto-resend, so re-signing from an old locked transcript
-      // doesn't leave the banner stuck on while the session is actually healthy.
-      setLockResolved(true);
       // Session is live again. If there's still no chat task, start one now —
       // when the session was already "connected" (an expired ensure), the
       // sessionConnected prop won't change, so the auto-effect can't re-fire.
@@ -895,12 +883,6 @@ export function LabAssistantDock({
   // Chips ride the most recent assistant message.
   const lastAgent = [...messages].reverse().find((m) => m.role === "agent");
   const chips = lastAgent?.suggestedActions ?? [];
-  // A locked session (saved key, no in-memory UMK after an idle reconnect) surfaces as a
-  // reconnect chip on the latest agent reply. When that happens, show a loud persistent
-  // banner with a one-tap re-sign (below) and drop the now-redundant reconnect chip from
-  // the bottom row, so there's a single clear unlock CTA instead of two.
-  const sessionLocked = signedIn && !lockResolved && chips.some((a) => a.kind === "reconnect");
-  const visibleChips = sessionLocked ? chips.filter((a) => a.kind !== "reconnect") : chips;
   const isLoading = ensure.isPending || (messagesQuery.isLoading && messages.length === 0);
   // Auto button "engaged" look: lit while armed, while a run is live, or while starting.
   const autoActive = autoArmed || isAuto || autoStart.isPending;
@@ -1064,45 +1046,6 @@ export function LabAssistantDock({
           </div>
         )}
 
-        {/* Locked-session banner: loud, persistent, one-tap re-sign. Stays pinned above
-            the transcript (outside the scroll area) so the user can't keep chatting into
-            canned replies without noticing the session needs a re-sign. */}
-        {sessionLocked && (
-          <div
-            data-testid="lab-assistant-locked-banner"
-            className="flex items-start gap-2.5 border-b border-amber-400/20 bg-amber-500/10 px-4 py-3"
-          >
-            <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-amber-500/20 text-amber-300">
-              <Lock className="h-3.5 w-3.5" />
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className="text-xs font-semibold text-amber-100">Chat is locked</p>
-              <p className="mt-0.5 text-[11px] leading-relaxed text-amber-200/80">
-                Your key is saved, but the session needs a quick re-sign. Until then you’ll
-                only get canned replies, not real answers.
-              </p>
-              <button
-                type="button"
-                onClick={handleReconnect}
-                disabled={reconnectBusy || reconnecting}
-                data-testid="button-lab-assistant-unlock"
-                className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-amber-400 px-3.5 py-1.5 text-xs font-semibold text-amber-950 transition-colors hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {(reconnectBusy || reconnecting) && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                {reconnectBusy || reconnecting ? "Unlocking…" : "Re-sign to unlock"}
-              </button>
-              {reconnectError && (
-                <p
-                  className="mt-1.5 text-[11px] text-amber-200/90"
-                  data-testid="text-lab-assistant-unlock-error"
-                >
-                  {reconnectError}
-                </p>
-              )}
-            </div>
-          </div>
-        )}
-
         {/* Transcript */}
         <div
           ref={listRef}
@@ -1241,9 +1184,9 @@ export function LabAssistantDock({
         </div>
 
         {/* Option bubbles */}
-        {visibleChips.length > 0 && (
+        {chips.length > 0 && (
           <div className="flex flex-wrap gap-1.5 border-t border-white/10 px-4 py-2.5">
-            {visibleChips.map((a) => (
+            {chips.map((a) => (
               <button
                 key={a.id}
                 type="button"
