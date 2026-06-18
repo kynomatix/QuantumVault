@@ -565,6 +565,26 @@ export function LabAssistantDock({
   });
   const handsOffEligible = handsOffEligibilityQuery.data?.eligible === true;
 
+  // Remember the hands-off choice per wallet so it survives a refresh, instead of
+  // resetting to off every page load. Restored ONCE per wallet, and only after we know
+  // eligibility, so a wallet that isn't allowed never restores it on (the server also
+  // re-checks on /auto/start). Saved on toggle below.
+  const handsOffRestoredFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!walletAddress || handsOffEligibilityQuery.isLoading) return;
+    if (handsOffRestoredFor.current === walletAddress) return;
+    handsOffRestoredFor.current = walletAddress;
+    if (!handsOffEligible) {
+      setHandsOff(false);
+      return;
+    }
+    try {
+      setHandsOff(localStorage.getItem(`qv-lab-handsoff:${walletAddress}`) === "1");
+    } catch {
+      /* localStorage unavailable (private mode etc.); just leave it off. */
+    }
+  }, [walletAddress, handsOffEligible, handsOffEligibilityQuery.isLoading]);
+
   const send = useMutation({
     mutationFn: async (content: string) => {
       const res = await apiRequest("POST", `/api/lab/agent/chat/${taskId}/messages`, { content });
@@ -959,7 +979,17 @@ export function LabAssistantDock({
                   <input
                     type="checkbox"
                     checked={handsOff}
-                    onChange={(e) => setHandsOff(e.target.checked)}
+                    onChange={(e) => {
+                      const next = e.target.checked;
+                      setHandsOff(next);
+                      if (walletAddress) {
+                        try {
+                          localStorage.setItem(`qv-lab-handsoff:${walletAddress}`, next ? "1" : "0");
+                        } catch {
+                          /* localStorage unavailable; choice just won't persist. */
+                        }
+                      }
+                    }}
                     disabled={isAuto || turnActive}
                     data-testid="checkbox-lab-assistant-handsoff"
                     className="mt-0.5 h-4 w-4 shrink-0 accent-indigo-500 disabled:opacity-50"
