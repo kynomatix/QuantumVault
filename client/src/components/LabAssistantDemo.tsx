@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Sparkles, ShieldCheck, TrendingUp, Rocket, Wand2, Send } from "lucide-react";
+import { Sparkles, ShieldCheck, TrendingUp, Rocket, Wand2, Send, Zap } from "lucide-react";
 import {
   QUANT_AGENT_STAGES,
   QuantAgentStepRow,
@@ -19,7 +19,22 @@ import {
  * the trigger users would otherwise not discover.
  */
 
-const CYCLE = 13500; // ms per loop
+const CYCLE = 17000; // ms per loop (extended to fit the deploy-setup beat)
+
+// Demo strategy numbers (illustrative). The raw backtest is the honest 1x result; a
+// low 4% drawdown is exactly what lets the auto-sizer safely lever up. The live
+// max-safe math is floor((100 / drawdown) * 0.8), capped per market (SOL caps at 20x);
+// the losing-streak check usually trims it a notch, landing here around 18x (~72%
+// post-leverage drawdown, just under the engine's 80% liquidation-warning line).
+const NET = 142; // net return % at 1x
+const WIN = 61; // win rate %
+const DD = 4; // max drawdown % at 1x
+const ROBUST = 87; // robustness score (out of 100)
+const LEV = 18; // auto-suggested leverage
+const DD_LEV = DD * LEV; // ~72% drawdown at the suggested leverage
+const NET_LEV = NET * LEV; // ~2,556% return at the suggested leverage (illustrative)
+const CAPITAL = 1000; // suggested equity ($)
+const BUFFER = Math.round((DD_LEV / 100) * CAPITAL); // ~$720 drawdown buffer
 
 const PROMPT =
   "Build me a mean-reversion bot for SOL that only trades in a range.";
@@ -113,8 +128,8 @@ export default function LabAssistantDemo() {
     ? 1
     : t < 450
       ? t / 450
-      : t > 12500
-        ? Math.max(0, (13500 - t) / 1000)
+      : t > 16000
+        ? Math.max(0, (17000 - t) / 1000)
         : 1;
 
   const userText = typed(PROMPT, t, 500, 34);
@@ -145,6 +160,17 @@ export default function LabAssistantDemo() {
   const cardP = ease((t - 8200) / 700);
   const countP = ease((t - 8400) / 1300);
   const showCard = t > 8100;
+
+  // Deploy beat: the Deploy button gets "tapped", then the card expands into a
+  // simplified, honest preview of the real deploy modal (auto-sized leverage,
+  // post-leverage return + drawdown, suggested equity). Mirrors the live dock card.
+  const deployTap = !reduced && t > 10300 && t < 10800;
+  const deployPress = deployTap
+    ? 1 - 0.1 * Math.sin(((t - 10300) / 500) * Math.PI)
+    : 1;
+  const showDeploy = t > 10800;
+  const deployP = ease((t - 10800) / 600);
+  const levCount = ease((t - 11000) / 1100);
 
   const caret = Math.sin(t / 90) > 0;
 
@@ -272,14 +298,14 @@ export default function LabAssistantDemo() {
                 </span>
                 <span className="ml-auto inline-flex items-center gap-1.5 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
                   <ShieldCheck className="h-3.5 w-3.5" />
-                  Robustness {Math.round(87 * countP)} / 100 · holds up out-of-sample
+                  Robustness {Math.round(ROBUST * countP)} / 100 · holds up out-of-sample
                 </span>
               </div>
               <div className="grid grid-cols-3 divide-x divide-white/10">
                 {[
-                  { k: "Net return", v: `+${Math.round(142 * countP)}%`, c: "text-emerald-300" },
-                  { k: "Win rate", v: `${Math.round(61 * countP)}%`, c: "text-white" },
-                  { k: "Max drawdown", v: `${Math.round(-14 * countP)}%`, c: "text-white/80" },
+                  { k: "Net return", v: `+${Math.round(NET * countP)}%`, c: "text-emerald-300" },
+                  { k: "Win rate", v: `${Math.round(WIN * countP)}%`, c: "text-white" },
+                  { k: "Max drawdown", v: `${Math.round(-DD * countP)}%`, c: "text-white/80" },
                 ].map((m) => (
                   <div key={m.k} className="px-3 py-3 text-center">
                     <div className={`font-mono text-lg sm:text-xl font-bold ${m.c}`}>
@@ -289,19 +315,73 @@ export default function LabAssistantDemo() {
                   </div>
                 ))}
               </div>
-              <div className="flex items-center gap-2 px-4 py-3">
-                <TrendingUp className="h-3.5 w-3.5 text-emerald-300 shrink-0" />
-                <span className="text-[12px] text-white/55">
-                  Tested on data it never saw while tuning, so it is far less likely to be curve-fit.
-                </span>
-                <span
-                  className="ml-auto inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-primary to-accent px-3 py-1.5 text-[12.5px] font-semibold text-white shadow-lg shadow-primary/30"
-                  style={{ opacity: ease((t - 9200) / 600) }}
+              {!showDeploy ? (
+                <div className="flex items-center gap-2 px-4 py-3">
+                  <TrendingUp className="h-3.5 w-3.5 text-emerald-300 shrink-0" />
+                  <span className="text-[12px] text-white/55">
+                    Tested on data it never saw while tuning, so it is far less likely to be curve-fit.
+                  </span>
+                  <span
+                    className="ml-auto inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-primary to-accent px-3 py-1.5 text-[12.5px] font-semibold text-white shadow-lg shadow-primary/30"
+                    style={{ opacity: ease((t - 9200) / 600), transform: `scale(${deployPress})` }}
+                    data-testid="demo-deploy-button"
+                  >
+                    <Rocket className="h-3.5 w-3.5" />
+                    Deploy
+                  </span>
+                </div>
+              ) : (
+                <div
+                  className="border-t border-white/10 px-4 py-3"
+                  style={{ opacity: deployP, transform: `translateY(${(1 - deployP) * 8}px)` }}
+                  data-testid="demo-deploy-preview"
                 >
-                  <Rocket className="h-3.5 w-3.5" />
-                  Deploy
-                </span>
-              </div>
+                  <div className="flex items-center gap-1.5 text-[11px] font-semibold text-indigo-200">
+                    <Zap className="h-3.5 w-3.5" />
+                    Auto-sized deploy setup
+                  </div>
+
+                  {/* hero: the suggested leverage, derived from the low drawdown */}
+                  <div className="mt-2.5 flex items-center gap-3 rounded-lg border border-indigo-400/25 bg-indigo-500/[0.08] px-3 py-2.5">
+                    <div className="shrink-0 text-center">
+                      <div className="font-mono text-2xl font-bold leading-none text-white">
+                        {Math.max(1, Math.round(LEV * levCount))}x
+                      </div>
+                      <div className="mt-1 text-[9px] text-white/45">leverage</div>
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-white/55">
+                      Auto-sized from this strategy's {DD}% drawdown. A low drawdown is what lets it safely lever up.
+                    </p>
+                  </div>
+
+                  {/* the trade-off, shown honestly: bigger upside, bigger drawdown */}
+                  <div className="mt-2 grid grid-cols-3 gap-2">
+                    <div className="rounded-lg bg-white/[0.03] px-2 py-2 text-center">
+                      <div className="font-mono text-sm font-bold text-emerald-300">
+                        +{Math.round(NET_LEV * levCount).toLocaleString()}%
+                      </div>
+                      <div className="mt-0.5 text-[9px] text-white/45">return at {LEV}x</div>
+                    </div>
+                    <div className="rounded-lg bg-white/[0.03] px-2 py-2 text-center">
+                      <div className="font-mono text-sm font-bold text-white/80">
+                        ~{Math.round(DD_LEV * levCount)}%
+                      </div>
+                      <div className="mt-0.5 text-[9px] text-white/45">drawdown at {LEV}x</div>
+                    </div>
+                    <div className="rounded-lg bg-white/[0.03] px-2 py-2 text-center">
+                      <div className="font-mono text-sm font-bold text-white">
+                        ${CAPITAL.toLocaleString()}
+                      </div>
+                      <div className="mt-0.5 text-[9px] text-white/45">+${BUFFER} buffer</div>
+                    </div>
+                  </div>
+
+                  <span className="mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-lg bg-gradient-to-r from-primary to-accent px-3 py-2 text-[12.5px] font-semibold text-white shadow-lg shadow-primary/30">
+                    <Rocket className="h-3.5 w-3.5" />
+                    Deploy at {LEV}x
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         )}
