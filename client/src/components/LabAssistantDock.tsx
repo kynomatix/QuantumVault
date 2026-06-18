@@ -686,6 +686,26 @@ export function LabAssistantDock({
   // Auto-mode watch state: the banner + Stop control show while mode==="auto".
   const isAuto = task?.mode === "auto";
   const spend = task?.spendEstimateUsd ?? 0;
+
+  // Quant-agent checklist collapse. The checklist sits pinned above the chat while a run
+  // drives it. Once the run finishes it would otherwise stay fully expanded and eat most
+  // of the panel, so we fold it down to its one-line header on completion. The user can
+  // re-open it any time with the header chevron, and a fresh run re-opens it so live
+  // progress stays visible. The deploy result card below is left untouched either way.
+  const autoPhase = task?.auto?.phase ?? null;
+  const autoRunActive = autoPhase != null && autoPhase !== "done";
+  const [autoChecklistCollapsed, setAutoChecklistCollapsed] = useState(false);
+  const autoWasActive = useRef(false);
+  useEffect(() => {
+    if (autoPhase === "done") {
+      setAutoChecklistCollapsed(true);
+    } else if (autoRunActive && !autoWasActive.current) {
+      // A run just (re)started: show the steps. Only on the inactive->active edge, so a
+      // manual collapse mid-run isn't fought by the next phase tick.
+      setAutoChecklistCollapsed(false);
+    }
+    autoWasActive.current = autoRunActive;
+  }, [autoPhase, autoRunActive]);
   const stopPending = stop.isPending || task?.cancelRequested === true;
   // Auto mode that's parked (not actively working) means the planner is waiting on a
   // paid-step confirm chip — finalReply/degrade flip mode→chat on every other ending, so
@@ -1035,7 +1055,11 @@ export function LabAssistantDock({
             Purely additive: derived from the polled DTO, never touches the turn loop. */}
         {task?.auto && (
           <div className="space-y-2.5 border-b border-white/10 px-3 py-2.5">
-            <QuantAgentChecklist auto={task.auto} />
+            <QuantAgentChecklist
+              auto={task.auto}
+              collapsed={autoChecklistCollapsed}
+              onToggleCollapsed={() => setAutoChecklistCollapsed((v) => !v)}
+            />
             {task.auto.deployableResult && (
               <AgentDeployCard
                 deployable={task.auto.deployableResult}

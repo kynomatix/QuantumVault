@@ -8,6 +8,7 @@ import {
   Clock,
   Minus,
   AlertTriangle,
+  ChevronDown,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -241,9 +242,14 @@ export function QuantAgentStepRow({
 export default function QuantAgentChecklist({
   auto,
   className,
+  collapsed = false,
+  onToggleCollapsed,
 }: {
   auto: AutoChecklistDto | null | undefined;
   className?: string;
+  collapsed?: boolean;
+  /** When provided, a chevron lets the user fold the step rows down to this header. */
+  onToggleCollapsed?: () => void;
 }) {
   const steps = deriveQuantAgentSteps(auto);
   const status = deriveChecklistStatus(auto);
@@ -256,7 +262,7 @@ export default function QuantAgentChecklist({
         className,
       )}
     >
-      <div className="mb-2 flex items-center gap-2">
+      <div className={cn("flex items-center gap-2", collapsed ? "" : "mb-2")}>
         <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-indigo-500 to-violet-500 text-white">
           <Wand2 className="h-3 w-3" />
         </span>
@@ -267,12 +273,28 @@ export default function QuantAgentChecklist({
         <span className="ml-auto text-[11px] tabular-nums text-white/40">
           {done}/{steps.length}
         </span>
+        {onToggleCollapsed && (
+          <button
+            type="button"
+            onClick={onToggleCollapsed}
+            data-testid="button-quant-agent-collapse"
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? "Show the steps" : "Hide the steps"}
+            className="-mr-1 rounded p-0.5 text-white/40 transition-colors hover:bg-white/10 hover:text-white"
+          >
+            <ChevronDown
+              className={cn("h-3.5 w-3.5 transition-transform", collapsed && "-rotate-90")}
+            />
+          </button>
+        )}
       </div>
-      <div className="space-y-2">
-        {QUANT_AGENT_STAGES.map((stage, i) => (
-          <QuantAgentStepRow key={stage.id} stage={stage} step={steps[i]} />
-        ))}
-      </div>
+      {!collapsed && (
+        <div className="space-y-2">
+          {QUANT_AGENT_STAGES.map((stage, i) => (
+            <QuantAgentStepRow key={stage.id} stage={stage} step={steps[i]} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
