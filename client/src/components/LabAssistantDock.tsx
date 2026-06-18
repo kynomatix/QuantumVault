@@ -417,6 +417,7 @@ export function LabAssistantDock({
   onNavigate,
   openSignal = 0,
   onDeploy,
+  onOpenChange,
 }: {
   walletAddress: string | null;
   sessionConnected?: boolean;
@@ -434,6 +435,9 @@ export function LabAssistantDock({
   // recommended leverage; the parent opens the existing deploy modal pre-filled. The
   // dock NEVER deploys on its own (money path).
   onDeploy?: (target: AgentDeployTarget) => void;
+  // Reports the panel's open/closed state up so the page can dock it to the side
+  // (reflow the lab content narrower) instead of overlaying it. Fires on unmount too.
+  onOpenChange?: (open: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
   // Open the dock when the parent bumps openSignal. Seed the ref with the value
@@ -446,6 +450,13 @@ export function LabAssistantDock({
       if (openSignal > 0) setOpen(true);
     }
   }, [openSignal]);
+  // Report open/closed up so the page can dock the panel (push its content narrower)
+  // instead of overlaying it. The unmount cleanup restores full width when the dock
+  // goes away (e.g. switching off the hub tab) without needing a manual close.
+  useEffect(() => {
+    onOpenChange?.(open);
+  }, [open, onOpenChange]);
+  useEffect(() => () => onOpenChange?.(false), [onOpenChange]);
   const [taskId, setTaskId] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
   // Inline notice (e.g. the pasted-API-key guard) shown just above the composer.
@@ -912,9 +923,9 @@ export function LabAssistantDock({
   return (
     <div
       data-testid="lab-assistant-dock"
-      className="fixed bottom-5 right-5 z-[60] w-[min(92vw,380px)]"
+      className="fixed inset-y-0 right-0 z-[60] w-full animate-in slide-in-from-right duration-300 sm:w-[400px]"
     >
-      <Card className="flex h-[min(70vh,560px)] flex-col overflow-hidden border-white/10 bg-slate-900/95 backdrop-blur-xl">
+      <Card className="flex h-full flex-col overflow-hidden rounded-none border-y-0 border-r-0 border-l border-white/10 bg-slate-900/95 shadow-2xl shadow-black/50 backdrop-blur-xl">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
           <div className="flex items-center gap-2">
@@ -1064,7 +1075,14 @@ export function LabAssistantDock({
               <AgentDeployCard
                 deployable={task.auto.deployableResult}
                 walletAddress={walletAddress}
-                onDeploy={onDeploy}
+                onDeploy={(target) => {
+                  // Close the docked panel before the deploy modal opens. The dock sits
+                  // at z-[60] (above the shadcn modal's z-50) and is full-width on phones,
+                  // so leaving it open would cover the modal. Closing also un-pushes the
+                  // page so the modal is centred in the full viewport.
+                  setOpen(false);
+                  onDeploy?.(target);
+                }}
               />
             )}
           </div>

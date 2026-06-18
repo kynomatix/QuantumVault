@@ -663,6 +663,10 @@ export default function QuantumLab() {
   const [mainTab, setMainTab] = useState<MainTab>("hub");
   // Bumped by the hub's "Chat to Lab Assistant" button to expand the dock.
   const [assistantOpenSignal, setAssistantOpenSignal] = useState(0);
+  // Whether the Lab Assistant panel is docked open. When it is (on the hub tab), the
+  // page reflows narrower on desktop so the panel sits beside the lab instead of over
+  // it (Brave-sidebar style). The dock reports this through onOpenChange.
+  const [assistantOpen, setAssistantOpen] = useState(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeRunId, setActiveRunId] = useState<number | null>(null);
   const [activeHistoryRunId, setActiveHistoryRunId] = useState<number | null>(null);
@@ -1351,7 +1355,12 @@ export default function QuantumLab() {
   };
 
   return (
-    <div className="min-h-screen overflow-x-clip bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
+    <div
+      className={cn(
+        "min-h-screen overflow-x-clip bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 transition-[padding] duration-300 ease-out",
+        assistantOpen && mainTab === "hub" && "lg:pr-[400px]",
+      )}
+    >
       <header className="sticky top-0 z-50 border-b border-white/10 bg-slate-950/80 backdrop-blur-xl">
         <div className="max-w-7xl mx-auto px-2 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-12 sm:h-16">
@@ -1430,6 +1439,7 @@ export default function QuantumLab() {
           onNavigate={(tab) => setMainTab(tab as MainTab)}
           openSignal={assistantOpenSignal}
           onDeploy={handleAgentDeploy}
+          onOpenChange={setAssistantOpen}
         />
       )}
       {/* One controlled deploy modal driven by the Lab Assistant's Deploy tap. Mounted
