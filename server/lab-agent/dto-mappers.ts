@@ -39,6 +39,7 @@ import type {
   InsightsReportDto,
   HeatmapDto,
 } from "@shared/lab-agent-contract";
+import { getMaxLeverageFromTiers, suggestedLeverageFromDrawdown } from "@shared/leverage";
 
 const MAX_ERROR_REASON_CHARS = 240;
 /** Hard cap on heatmap cells handed to the agent (context-size guard). */
@@ -211,6 +212,14 @@ export function toBacktestResultDto(
   row: LabOptResult,
   opts: { oosFraction: number | null | undefined },
 ): BacktestResultDto {
+  // Drawdown-sized leverage + the simple "profit at that leverage" figure, computed
+  // here (not by the chat model) so the number is honest and matches the deploy card.
+  const suggestedLeverage = suggestedLeverageFromDrawdown(
+    row.maxDrawdownPercent,
+    getMaxLeverageFromTiers(row.ticker),
+  );
+  const leveragedNetProfitPercent =
+    Math.round(row.netProfitPercent * suggestedLeverage * 10) / 10;
   return {
     resultId: row.id,
     runId: row.runId,
@@ -223,6 +232,8 @@ export function toBacktestResultDto(
     profitFactor: row.profitFactor,
     sharpeRatio: row.sharpeRatio ?? null,
     totalTrades: row.totalTrades,
+    suggestedLeverage,
+    leveragedNetProfitPercent,
     params: (row.params ?? {}) as Record<string, unknown>,
     oos: toOosSummaryDto(row.oosMetrics, opts.oosFraction),
   };

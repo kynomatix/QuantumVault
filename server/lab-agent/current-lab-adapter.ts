@@ -436,13 +436,27 @@ export class CurrentLabAdapter implements LabAgentAdapter {
       throw new ToolkitError("not_found", `Strategy ${input.strategyId} not found.`, false);
     }
     const limit = input.limit ?? 10;
+    const wantTf = input.timeframe?.trim().toLowerCase();
+    const wantTk = input.ticker?.trim().toUpperCase();
+    const filtering = Boolean(wantTf || wantTk);
     // Re-rank by ROBUSTNESS, not the lab's headline (leveraged-profit) objective.
     // Fetch a wider candidate pool than `limit` so the robustness sort has real
     // choice beyond the lab's own top-by-profit slice, then keep the most robust
     // `limit`. This is what makes the agent recommend durable configs over
-    // curve-fits (docs/QUANTUMLAB_ACCURACY_DIAGNOSIS.md).
-    const candidatePool = Math.min(50, limit * 5);
-    const rows = await this.storage.getTopResultsForStrategy(input.strategyId, candidatePool);
+    // curve-fits (docs/QUANTUMLAB_ACCURACY_DIAGNOSIS.md). When a specific
+    // timeframe/ticker is requested, widen the pool to the strategy's full set
+    // first so the requested combo is ALWAYS present (the storage returns one
+    // best row per combo), then filter to it; otherwise a freshly run combo can
+    // be sliced off and we'd report a stale older one.
+    const candidatePool = filtering ? 200 : Math.min(50, limit * 5);
+    let rows = await this.storage.getTopResultsForStrategy(input.strategyId, candidatePool);
+    if (filtering) {
+      rows = rows.filter(
+        (r: any) =>
+          (!wantTf || String(r.timeframe ?? "").toLowerCase() === wantTf) &&
+          (!wantTk || String(r.ticker ?? "").toUpperCase() === wantTk),
+      );
+    }
     // The OOS holdout fraction is a per-RUN property and these top results span
     // multiple runs, so resolve each row's fraction from its own run. A null
     // fraction means that run carried no holdout → the result is UNVALIDATED.

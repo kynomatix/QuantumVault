@@ -264,6 +264,30 @@ describe("toBacktestResultDto", () => {
     expect(dto.sharpeRatio).toBeNull();
     expect(dto.oos?.netProfitPercent).toBe(5);
   });
+  it("derives a suggested leverage from drawdown + ticker cap and the leveraged net profit", () => {
+    // BTC cap is 50; floor((100/8)*0.8) = 10, well under the cap.
+    const dto = toBacktestResultDto(makeResult(), { oosFraction: null });
+    expect(dto.suggestedLeverage).toBe(10);
+    // 12.5% net * 10x, rounded to 1dp.
+    expect(dto.leveragedNetProfitPercent).toBe(125);
+  });
+  it("caps the suggested leverage at the ticker's tier max", () => {
+    // SOL cap is 20; a tiny 2% drawdown would suggest 40x, so it must clamp to 20.
+    const dto = toBacktestResultDto(
+      makeResult({ ticker: "SOL", maxDrawdownPercent: 2 }),
+      { oosFraction: null },
+    );
+    expect(dto.suggestedLeverage).toBe(20);
+    expect(dto.leveragedNetProfitPercent).toBe(250);
+  });
+  it("falls back to 1x leverage when drawdown is non-positive", () => {
+    const dto = toBacktestResultDto(
+      makeResult({ maxDrawdownPercent: 0 }),
+      { oosFraction: null },
+    );
+    expect(dto.suggestedLeverage).toBe(1);
+    expect(dto.leveragedNetProfitPercent).toBe(12.5);
+  });
 });
 
 describe("toTopResultsDto", () => {

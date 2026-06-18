@@ -31,6 +31,42 @@ function availableSymbolsBlock(): string {
   );
 }
 
+// Available-ticker names that are also common English words; only count them when the
+// user typed them in uppercase (ticker convention), so "near the top" or "that's lit"
+// are not mistaken for the NEAR / LIT markets.
+const AMBIGUOUS_LOWER_TICKERS = new Set(["near", "lit", "mon", "mega", "pump", "trump"]);
+
+// Available tickers the user named verbatim in a message. Whole-word matches against the
+// schema's ticker list; case-insensitive EXCEPT for the ambiguous English-word names
+// above, which require an exact uppercase match. Used to tell the brain plainly that a
+// named ticker IS backtestable, fixing the first-ask "that's unavailable" refusal.
+export function namedAvailableTickers(text: string): string[] {
+  if (!text) return [];
+  const out: string[] = [];
+  for (const { name } of LAB_AVAILABLE_TICKERS) {
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const flags = AMBIGUOUS_LOWER_TICKERS.has(name.toLowerCase()) ? "" : "i";
+    const re = new RegExp(`(?<![A-Za-z0-9])${esc}(?![A-Za-z0-9])`, flags);
+    if (re.test(text)) out.push(name);
+  }
+  return out;
+}
+
+// Strong "these named tickers ARE available" line built from the latest user message,
+// or "" when none were named. Appended to BOTH prompt builders.
+function namedAvailableTickersLine(
+  recent: ReadonlyArray<{ role: string; content: string }>,
+): string {
+  const lastUser = [...recent].reverse().find((m) => m.role === "user");
+  const named = namedAvailableTickers(lastUser?.content ?? "");
+  if (named.length === 0) return "";
+  return (
+    `\n\nThe user just named these tickers, which ARE in the available list above and ARE ` +
+    `backtestable here: ${named.join(", ")}. Use them exactly as named; do NOT tell the user ` +
+    `they are unavailable.`
+  );
+}
+
 // Default chat model: "cheapest capable" per docs/LAB_AGENT_SANDBOX_PLAN.md §5.
 // DeepSeek V4 Pro is the catalog's value/capability pick; an override may pass a
 // different selectable model (validated in the route, not here).
@@ -95,7 +131,7 @@ export function buildChatMessages(input: ChatBrainInput): LlmMessage[] {
   const base = goal
     ? `${SYSTEM_PROMPT}\n\nThe user's current focus for this conversation: ${goal.slice(0, MAX_GOAL_CHARS)}`
     : SYSTEM_PROMPT;
-  const system = `${base}\n\n${availableSymbolsBlock()}`;
+  const system = `${base}\n\n${availableSymbolsBlock()}${namedAvailableTickersLine(input.recentMessages)}`;
 
   const history = input.recentMessages
     .filter((m) => typeof m.content === "string" && m.content.trim().length > 0)
@@ -371,7 +407,7 @@ const DECIDE_SYSTEM_PROMPT = [
   "Available tools and their args (call NOTHING else):",
   '- listStrategies {} — the user\'s strategies.',
   '- findStrategy {"query":"name"} — fuzzy-find a strategy by name.',
-  '- getTopResults {"strategyId":N,"limit":N?} — ROBUSTNESS-ranked backtest results (rank 1 = most robust). Each carries a resultId you can pass to refineFrom to quick-hone THAT exact result.',
+  '- getTopResults {"strategyId":N,"limit":N?,"timeframe":"4h"?,"ticker":"HYPE"?} — ROBUSTNESS-ranked backtest results (rank 1 = most robust). Pass timeframe and/or ticker to get the best result for EXACTLY that combo (use this whenever the user asks about a specific timeframe or asset so the freshest matching result is returned). Each carries a resultId you can pass to refineFrom to quick-hone THAT exact result.',
   '- getHeatmap {"strategyId":N} — ticker×timeframe grid of avg Sharpe across the strategy\'s runs.',
   '- getInsightsReport {"strategyId":N} — the latest saved insights report, if any.',
   '- generateInsights {"strategyId":N} — compute FRESH insights (which params drive profit + a robustness read) from existing results. Free, no key.',
@@ -419,6 +455,23 @@ const DECIDE_SYSTEM_PROMPT = [
   '- After a tool returns data, your NEXT output MUST be a {"action":"final","message":"..."}',
   "  JSON object that answers the user directly in plain language — name the strategy,",
   "  numbers, or finding you read. Do NOT reply as bare prose; the JSON envelope is required.",
+  "- When you report a backtest RESULT, format it as clean SEPARATE LINES (the chat keeps",
+  "  line breaks and renders **bold**), never one long comma-separated sentence. Lead with",
+  "  the ticker + timeframe, then one metric per line. ALWAYS include the number of trades",
+  "  and a leverage line. Use this exact shape, filling in the real numbers:",
+  "    **<TICKER> <timeframe>** (rank <n>)",
+  "    **Net:** +<net>%  (about +<leveraged>% at <lev>x suggested leverage)",
+  "    **Win rate:** <win>%   **Trades:** <trades>",
+  "    **Max drawdown:** <dd>%   **Sharpe:** <sharpe>",
+  "    **Out of sample:** <oos net / win / Sharpe, or 'none, so unvalidated'>",
+  "  For the leverage line use the tool's suggestedLeverage and leveragedNetProfitPercent",
+  "  fields (leverage is sized from the result's max drawdown); never invent them, and omit",
+  "  that line only if those fields are missing. Use plain punctuation, no em dashes.",
+  "- If the user asked about SPECIFIC timeframe(s) or asset(s), report the best result FOR",
+  "  EACH one they asked about by reading the timeframe and ticker fields, even if a",
+  "  different combo is the global rank 1. Call getTopResults with the timeframe (and ticker)",
+  "  filter set to each requested combo so the freshest matching result is returned, and",
+  "  NEVER substitute an older run's result for the one they just asked you to test.",
 ].join("\n");
 
 // Extract the first balanced top-level JSON object from a model response. Models
@@ -619,6 +672,7 @@ export function buildDecisionMessages(input: BrainTurnContext): LlmMessage[] {
   const digest = (input.memoryDigest ?? "").trim();
   let system = DECIDE_SYSTEM_PROMPT;
   system += `\n\n${availableSymbolsBlock()}`;
+  system += namedAvailableTickersLine(input.recentMessages);
   if (goal) system += `\n\nThe user's stated goal: ${goal.slice(0, MAX_GOAL_CHARS)}`;
   if (digest) system += `\n\nWorking memory so far:\n${digest.slice(0, MAX_CONTEXT_CHARS)}`;
 

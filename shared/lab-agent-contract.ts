@@ -148,6 +148,13 @@ export const backtestResultDtoSchema = z.object({
   profitFactor: z.number(),
   sharpeRatio: z.number().nullable(),
   totalTrades: z.number().int(),
+  /**
+   * Leverage sized from this result's max drawdown (floor((100/maxDD)*0.8), at least
+   * 1x, capped at the venue max for the ticker). Same basis as the deploy risk card.
+   */
+  suggestedLeverage: z.number(),
+  /** netProfitPercent times suggestedLeverage: a simple "profit at that leverage" estimate. */
+  leveragedNetProfitPercent: z.number(),
   /** Tuned parameter set for this combo. */
   params: z.record(z.string(), z.unknown()),
   /**
@@ -270,6 +277,12 @@ export const listTemplatesInput = z.object({}).strict();
 export const getTopResultsInput = z.object({
   strategyId: z.number().int().positive(),
   limit: z.number().int().min(1).max(50).optional(),
+  // Optional server-side filter. When the user asks about a SPECIFIC timeframe
+  // or asset, pass it here so that exact combo is returned deterministically,
+  // even if it ranks low by robustness. Without it the final slice can drop a
+  // freshly run combo and the agent reports a stale older one instead.
+  timeframe: z.string().min(1).max(8).optional(),
+  ticker: z.string().min(1).max(16).optional(),
 }).strict();
 export const getHeatmapInput = z.object({ strategyId: z.number().int().positive() }).strict();
 export const getInsightsReportInput = z.object({

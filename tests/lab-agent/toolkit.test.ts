@@ -367,6 +367,36 @@ describe("reads: getTopResults", () => {
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.code).toBe("not_found");
   });
+
+  it("filters to the requested timeframe/ticker so a freshly run combo is never dropped", async () => {
+    const { fake, toolkit } = makeToolkit();
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    fake.strategies.push({ id: 7, userId: WALLET, name: "FILTER", description: null, createdAt: now });
+    // A high-net 1h combo would dominate the robustness slice; the freshly run
+    // 12h / 2h combos must still be returnable when the user asks for them.
+    fake.topResults[7] = [
+      { id: 701, runId: 70, rank: 1, ticker: "BTC", timeframe: "1h", netProfitPercent: 90, winRatePercent: 60, maxDrawdownPercent: 10, profitFactor: 2.0, totalTrades: 80, sharpeRatio: 1.5, params: {}, isMetrics: null, oosMetrics: null },
+      { id: 702, runId: 71, rank: 1, ticker: "HYPE", timeframe: "12h", netProfitPercent: 20, winRatePercent: 55, maxDrawdownPercent: 12, profitFactor: 1.4, totalTrades: 25, sharpeRatio: 0.9, params: {}, isMetrics: null, oosMetrics: null },
+      { id: 703, runId: 71, rank: 2, ticker: "HYPE", timeframe: "2h", netProfitPercent: 15, winRatePercent: 52, maxDrawdownPercent: 9, profitFactor: 1.3, totalTrades: 18, sharpeRatio: 0.8, params: {}, isMetrics: null, oosMetrics: null },
+    ];
+
+    // Timeframe filter narrows to exactly that timeframe (case-insensitive).
+    const byTf = await toolkit.call(ctx, "getTopResults", { strategyId: 7, timeframe: "12H" });
+    expect(byTf.ok).toBe(true);
+    if (byTf.ok) {
+      expect(byTf.data.results).toHaveLength(1);
+      expect(byTf.data.results[0].ticker).toBe("HYPE");
+      expect(byTf.data.results[0].timeframe).toBe("12h");
+    }
+
+    // Ticker filter keeps both of that ticker's combos and excludes the others.
+    const byTicker = await toolkit.call(ctx, "getTopResults", { strategyId: 7, ticker: "hype" });
+    expect(byTicker.ok).toBe(true);
+    if (byTicker.ok) {
+      expect(byTicker.data.results.every((r) => r.ticker === "HYPE")).toBe(true);
+      expect(byTicker.data.results.map((r) => r.timeframe).sort()).toEqual(["12h", "2h"]);
+    }
+  });
 });
 
 describe("reads: getInsightsReport", () => {

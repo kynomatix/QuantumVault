@@ -14,13 +14,6 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuLabel,
-  DropdownMenuCheckboxItem,
-} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { Sparkles, Send, X, Bot, Loader2, Wallet, Square, Activity, Wand2, ChevronDown, ShieldCheck, ShieldAlert, TrendingUp, Rocket, Settings2 } from "lucide-react";
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
@@ -415,6 +408,12 @@ export function LabAssistantDock({
   // Task 201: hands-off toggle. Only ever offered to admin-whitelisted wallets; the
   // server re-checks eligibility on /auto/start so a stale UI can't force it on.
   const [handsOff, setHandsOff] = useState(false);
+  // Inline settings panel that wipes down inside the dock. Replaces the old portal
+  // dropdown, which locked page scroll while open.
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Auto button "armed" state: tapping Auto with an empty composer lights it up and
+  // waits for the goal text, so the user gets instant feedback that Auto is engaged.
+  const [autoArmed, setAutoArmed] = useState(false);
   // Stale-session reconnect (re-sign): busy flag + last error for the button.
   const [reconnectBusy, setReconnectBusy] = useState(false);
   const [reconnectError, setReconnectError] = useState<string | null>(null);
@@ -722,21 +721,40 @@ export function LabAssistantDock({
       );
       return;
     }
+    // When Auto is armed, Enter / Send launches the auto-run with this text as the
+    // goal instead of sending a one-off chat message.
+    if (autoArmed) {
+      launchAuto(content);
+      return;
+    }
     setNotice(null);
     setDraft("");
     send.mutate(content);
   }
 
-  // Kick off a watched auto-grind run using the composer text as the goal. Same
-  // pasted-key guard as a chat send — the goal is persisted + echoed, so a key must
-  // never land here (the server rejects it too).
-  function startAuto() {
-    const goal = draft.trim();
+  // Auto button handler. Tap with an EMPTY composer to "arm" it (the button lights up
+  // and the placeholder asks for the goal); tap again to cancel, or type the goal and
+  // press Enter / Send to launch. Tapping WITH text already typed launches immediately.
+  function toggleAuto() {
     if (!canChat || autoStart.isPending || turnActive || isAuto) return;
+    const goal = draft.trim();
+    if (autoArmed) {
+      if (!goal) {
+        setAutoArmed(false); // armed but still empty: tapping again cancels
+        return;
+      }
+      if (looksLikeApiKey(goal)) {
+        setDraft("");
+        setNotice(
+          "That looked like an API key, so I didn't send it. Add your key in the Creator — it's stored encrypted and never shown in this chat.",
+        );
+        return;
+      }
+      launchAuto(goal);
+      return;
+    }
     if (!goal) {
-      // Empty composer: focus the input so the user knows where to type, instead of
-      // throwing a big banner. The button stays clickable while empty (a tap teaches the
-      // feature), and its tooltip already explains what Auto does.
+      setAutoArmed(true); // empty: arm + show it's engaged, then focus the input
       inputRef.current?.focus();
       return;
     }
@@ -747,8 +765,15 @@ export function LabAssistantDock({
       );
       return;
     }
+    launchAuto(goal);
+  }
+
+  // Kick off the watched auto-grind run. The goal is persisted + echoed, so the same
+  // pasted-key guard as a chat send runs before we reach here.
+  function launchAuto(goal: string) {
     setNotice(null);
     setDraft("");
+    setAutoArmed(false);
     // Only request hands-off when the wallet is actually eligible; the server re-checks.
     autoStart.mutate({ goal, handsOff: handsOff && handsOffEligible });
   }
@@ -762,6 +787,9 @@ export function LabAssistantDock({
     } else if (action.kind === "reconnect") {
       void handleReconnect();
     } else if (action.kind === "send" && action.message && canChat && !send.isPending && !turnActive) {
+      // A chip is a normal chat send, not an Auto goal: disarm first so a
+      // lingering armed state can't hijack the user's next typed message.
+      setAutoArmed(false);
       send.mutate(action.message);
     }
   }
@@ -789,8 +817,8 @@ export function LabAssistantDock({
   const lastAgent = [...messages].reverse().find((m) => m.role === "agent");
   const chips = lastAgent?.suggestedActions ?? [];
   const isLoading = ensure.isPending || (messagesQuery.isLoading && messages.length === 0);
-  // Auto button "engaged" look: lit while a run is live or while it's starting.
-  const autoActive = isAuto || autoStart.isPending;
+  // Auto button "engaged" look: lit while armed, while a run is live, or while starting.
+  const autoActive = autoArmed || isAuto || autoStart.isPending;
   // Signed in, but the chat session couldn't be created (e.g. session expired).
   const sessionProblem = signedIn && ensure.isError;
 
@@ -815,32 +843,22 @@ export function LabAssistantDock({
             {/* Task 201: hands-off lives in a small options menu next to the X, only for
                 admin-whitelisted wallets. Keeps the chat area free of a big checkbox row. */}
             {handsOffEligible && (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    type="button"
-                    data-testid="button-lab-assistant-options"
-                    className="rounded-md p-1 text-white/50 transition-colors hover:bg-white/5 hover:text-white"
-                    aria-label="Assistant options"
-                  >
-                    <Settings2 className="h-4 w-4" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-64">
-                  <DropdownMenuLabel>Options</DropdownMenuLabel>
-                  <DropdownMenuCheckboxItem
-                    checked={handsOff}
-                    onCheckedChange={(v) => setHandsOff(Boolean(v))}
-                    disabled={isAuto || turnActive}
-                    data-testid="checkbox-lab-assistant-handsoff"
-                  >
-                    <span>
-                      Hands-off mode
-                      <span className="ml-1 text-white/40">(auto-approve paid steps; caps still apply)</span>
-                    </span>
-                  </DropdownMenuCheckboxItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <button
+                type="button"
+                onClick={() => setSettingsOpen((v) => !v)}
+                data-testid="button-lab-assistant-options"
+                aria-expanded={settingsOpen}
+                aria-controls="lab-assistant-settings-panel"
+                aria-label="Assistant settings"
+                className={cn(
+                  "rounded-md p-1 transition-colors",
+                  settingsOpen
+                    ? "bg-white/10 text-white"
+                    : "text-white/50 hover:bg-white/5 hover:text-white",
+                )}
+              >
+                <Settings2 className="h-4 w-4" />
+              </button>
             )}
             <button
               type="button"
@@ -853,6 +871,57 @@ export function LabAssistantDock({
             </button>
           </div>
         </div>
+
+        {/* Settings: wipes down INSIDE the dock (no portal, so it never locks page
+            scroll the way the old dropdown did). The header gear opens/closes it. */}
+        {handsOffEligible && (
+          <div
+            id="lab-assistant-settings-panel"
+            role="region"
+            aria-label="Assistant settings"
+            data-testid="lab-assistant-settings-panel"
+            className={cn(
+              "grid transition-[grid-template-rows] duration-200 ease-in-out",
+              settingsOpen ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+            )}
+          >
+            <div className="overflow-hidden">
+              <div className="space-y-3 border-b border-white/10 bg-white/[0.02] px-4 py-3">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-white/40">
+                  Assistant settings
+                </p>
+                <label className="flex cursor-pointer items-start gap-2 text-xs text-white/80">
+                  <input
+                    type="checkbox"
+                    checked={handsOff}
+                    onChange={(e) => setHandsOff(e.target.checked)}
+                    disabled={isAuto || turnActive}
+                    data-testid="checkbox-lab-assistant-handsoff"
+                    className="mt-0.5 h-4 w-4 shrink-0 accent-indigo-500 disabled:opacity-50"
+                  />
+                  <span>
+                    Hands-off mode
+                    <span className="block text-white/40">
+                      Auto-approve paid steps; caps still apply.
+                    </span>
+                  </span>
+                </label>
+                <div className="flex justify-end">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setSettingsOpen(false)}
+                    data-testid="button-lab-assistant-settings-done"
+                    className="h-7 border border-white/10 px-3 text-xs text-white/80 hover:bg-white/5"
+                  >
+                    Done
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Auto-run watch banner (Task #200): always visible while mode==="auto" —
             shows live status + approved spend so far, and the always-available Stop. */}
@@ -1086,9 +1155,11 @@ export function LabAssistantDock({
                 ? "Assistant is working…"
                 : awaitingConfirm
                   ? "Use the buttons above to continue…"
-                  : canChat
-                    ? "Ask the assistant…"
-                    : signedIn
+                  : autoArmed
+                    ? "Type your goal, then press Enter to start Auto…"
+                    : canChat
+                      ? "Ask the assistant…"
+                      : signedIn
                       ? "Starting chat…"
                       : walletAddress
                         ? "Finish signing in to chat"
@@ -1103,7 +1174,7 @@ export function LabAssistantDock({
             type="button"
             size="sm"
             variant="ghost"
-            onClick={startAuto}
+            onClick={toggleAuto}
             disabled={autoStart.isPending || !canChat || turnActive || isAuto}
             title="Auto-run this as a goal — I'll build, backtest and refine, pausing to confirm before any paid AI step."
             data-testid="button-lab-assistant-auto"

@@ -5,6 +5,7 @@ import {
   generateLabChatReply,
   coerceProseToFinal,
   isSafeDirectAnswerTurn,
+  namedAvailableTickers,
   DEFAULT_CHAT_MODEL,
   type ChatBrainInput,
   type BrainTurnContext,
@@ -157,6 +158,73 @@ describe("available backtest symbols injection", () => {
     // Single named ticker is allowed; never call a listed ticker unavailable.
     expect(/single named ticker is fine/i.test(sys)).toBe(true);
     expect(/never tell the user it is unavailable/i.test(sys)).toBe(true);
+  });
+
+  it("injects a 'these ARE backtestable' line naming the ticker the user mentioned", () => {
+    const sys = buildDecisionMessages(decisionBase())[0].content;
+    expect(sys).toMatch(/named these tickers/);
+    expect(sys).toMatch(/backtestable here: HYPE/);
+    // Same injection in the conversational prompt.
+    const chatSys = buildChatMessages(
+      baseInput({ recentMessages: [{ role: "user", content: "try a scalper on HYPE" }] }),
+    )[0].content;
+    expect(chatSys).toMatch(/backtestable here: HYPE/);
+  });
+
+  it("omits the injection line when the user named no available ticker", () => {
+    const sys = buildDecisionMessages(
+      decisionBase({ recentMessages: [{ role: "user", content: "how do you work?" }] }),
+    )[0].content;
+    expect(sys).not.toMatch(/backtestable here/);
+  });
+});
+
+describe("namedAvailableTickers", () => {
+  it("detects a plainly named ticker (the HYPE first-ask regression)", () => {
+    expect(namedAvailableTickers("backtest a trend bot on HYPE")).toContain("HYPE");
+  });
+
+  it("is case-insensitive for unambiguous symbols", () => {
+    const found = namedAvailableTickers("let's try sol and eth");
+    expect(found).toContain("SOL");
+    expect(found).toContain("ETH");
+  });
+
+  it("only matches whole words, never substrings", () => {
+    // "sol" lives inside "absolutely"/"solid" but must NOT be detected.
+    expect(namedAvailableTickers("an absolutely solid foundation")).not.toContain("SOL");
+  });
+
+  it("requires uppercase for ambiguous English-word tickers like NEAR", () => {
+    expect(namedAvailableTickers("buy near the close")).not.toContain("NEAR");
+    expect(namedAvailableTickers("go long NEAR now")).toContain("NEAR");
+  });
+
+  it("returns nothing for empty text", () => {
+    expect(namedAvailableTickers("")).toEqual([]);
+  });
+});
+
+// The result-summary formatting + per-timeframe rules the brain must follow so the dock
+// renders clean bold lines with trades + a leverage line, and reports the combo the user
+// actually asked for (not a stale older run).
+describe("result formatting rules", () => {
+  const sys = buildDecisionMessages({ goal: null, recentMessages: [] })[0].content;
+  const flat = sys.replace(/\s+/g, " ");
+
+  it("requires trades and a drawdown-sized leverage line from the DTO fields", () => {
+    expect(flat).toContain("Trades:");
+    expect(flat).toContain("suggestedLeverage");
+    expect(flat).toContain("leveragedNetProfitPercent");
+  });
+
+  it("forbids em dashes in the formatted result", () => {
+    expect(/no em dashes/i.test(flat)).toBe(true);
+  });
+
+  it("tells the brain to report the best result for EACH requested combo", () => {
+    expect(/report the best result for each/i.test(flat)).toBe(true);
+    expect(/never substitute an older run/i.test(flat)).toBe(true);
   });
 });
 
