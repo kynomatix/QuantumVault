@@ -33,6 +33,7 @@ import { labStorage } from "../lab/storage";
 import { SEED_GREETING, composeAgentReply, SESSION_LOCKED_REPLY } from "../lab-agent/chat-replies";
 import { decideTurnAction, defaultAutoMemory, type BrainFn, type AutoMemory, type PaidTool } from "../lab-agent/chat-brain";
 import { createAutoPlanner } from "../lab-agent/auto-planner";
+import { selectDeployableResult, type AutoDeployableResultView } from "./deployable-result";
 import { looksLikeApiKey } from "@shared/api-key-detect";
 import { createLabTurnOrchestrator, AUTO_CONFIRM_PREFIX, AUTO_DECLINE_PREFIX } from "../lab-agent/orchestrator";
 import { LabAgentToolkit } from "../lab-agent/toolkit";
@@ -134,6 +135,10 @@ export function registerCreatorRoutes(
     jobsAhead: number | null;
   };
 
+  // AutoDeployableResultView + selectDeployableResult live in ./deployable-result
+  // (pure + unit-tested). Filled in by the GET messages route (async getTopResults
+  // read) so the dock can render a real result card + Deploy button.
+
   // The "quant agent" progress view the dock renders as an animated checklist while an
   // auto run is in flight (and as a completed record once it lands). Derived ONLY from
   // the persisted planner memory; we expose the phase + loop counters + a pending paid
@@ -152,6 +157,7 @@ export function registerCreatorRoutes(
         ? { tool: auto.pendingConfirm.tool, estCostUsd: auto.pendingConfirm.estCostUsd }
         : null,
       activeRun: null as AutoActiveRunView | null,
+      deployableResult: null as AutoDeployableResultView | null,
     };
   };
 
@@ -386,6 +392,38 @@ export function registerCreatorRoutes(
           }
         } catch {
           /* run-status read is best-effort; never fail the messages poll over it */
+        }
+      }
+      // Enrich the deployable-result card: the best result the agent has for its current
+      // strategy, so the dock can show a real result card + Deploy button (which only
+      // OPENS the deploy modal, a money path). Best-effort; never breaks the poll.
+      if (taskDto.auto && task.mode === "auto") {
+        const currentStrategyId =
+          typeof (task.memory as { currentStrategyId?: unknown } | null)?.currentStrategyId === "number"
+            ? ((task.memory as { currentStrategyId: number }).currentStrategyId)
+            : null;
+        if (currentStrategyId != null) {
+          try {
+            const topRes = await labToolkit.call(
+              {
+                walletAddress: r.walletAddress,
+                taskId,
+                correlationId: `task-${taskId}`,
+                allow: { read: true, write: false },
+              },
+              "getTopResults",
+              { strategyId: currentStrategyId, limit: 20 },
+            );
+            if (topRes.ok) {
+              const results = Array.isArray(topRes.data?.results) ? topRes.data.results : [];
+              taskDto.auto.deployableResult = selectDeployableResult(results, {
+                strategyId: currentStrategyId,
+                runActive: task.activeRunId != null,
+              });
+            }
+          } catch {
+            /* deployable-result read is best-effort; never fail the messages poll over it */
+          }
         }
       }
       res.json({ messages, task: taskDto });

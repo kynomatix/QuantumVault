@@ -15,11 +15,12 @@ import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { Sparkles, Send, X, Bot, Loader2, Wallet, Square, Activity, Wand2, ChevronDown } from "lucide-react";
+import { Sparkles, Send, X, Bot, Loader2, Wallet, Square, Activity, Wand2, ChevronDown, ShieldCheck, ShieldAlert, TrendingUp, Rocket } from "lucide-react";
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
-import type { AgentSuggestedAction } from "@shared/schema";
+import type { AgentSuggestedAction, LabTradeRecord } from "@shared/schema";
 import { looksLikeApiKey } from "@shared/api-key-detect";
 import QuantAgentChecklist, { type AutoChecklistDto } from "@/components/QuantAgentChecklist";
+import { calculateRiskAnalysis } from "@/lib/risk-analysis";
 
 type ChatRole = "user" | "agent" | "tool";
 
@@ -174,6 +175,195 @@ function ToolStep({ id, content }: { id: number; content: string }) {
   );
 }
 
+// What the dock hands the parent when the user taps Deploy on the agent result card.
+// RAW (1x) backtest numbers plus the computed recommended leverage; the parent fetches
+// the strategy (pineScript + name) by strategyId and opens the existing deploy modal,
+// which re-applies the leverage internally. The dock NEVER deploys; it only opens the
+// modal (money path).
+export interface AgentDeployTarget {
+  strategyId: number;
+  resultId: number;
+  leverage: number;
+  drawdownPercent: number;
+  streakDrawdownPercent: number;
+  profitPercent: number;
+  winRatePercent: number;
+  ticker?: string;
+  timeframe?: string;
+  params?: Record<string, any>;
+}
+
+// Shape of GET /api/lab/results/:resultId (a lab_optimization_results row). trades /
+// equityCurve are jsonb and can be null on legacy rows; everything else is required.
+interface FullLabResult {
+  netProfitPercent: number;
+  winRatePercent: number;
+  maxDrawdownPercent: number;
+  params: Record<string, any>;
+  trades?: LabTradeRecord[] | null;
+  equityCurve?: { time: string; equity: number }[] | null;
+  ticker: string;
+  timeframe: string;
+}
+
+// The real, post-leverage result card the agent surfaces once it has a deployable
+// result. Fetches the full result row, runs the SAME risk math the QuantumLab deploy
+// flow uses (calculateRiskAnalysis -> recommendedLeverage), and shows the numbers the
+// user will actually trade at. The Deploy button only OPENS the deploy modal; it never
+// deploys on its own (money path).
+function AgentDeployCard({
+  deployable,
+  walletAddress,
+  onDeploy,
+}: {
+  deployable: NonNullable<AutoChecklistDto["deployableResult"]>;
+  walletAddress: string | null;
+  onDeploy?: (target: AgentDeployTarget) => void;
+}) {
+  const ready = deployable.status === "ready" && deployable.bestResultId != null;
+  const enabled = ready && !!walletAddress;
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ["lab-deploy-result", deployable.bestResultId, walletAddress],
+    enabled,
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/lab/results/${deployable.bestResultId}`);
+      return (await res.json()) as FullLabResult;
+    },
+  });
+
+  // Pending / unavailable: a small honest line, no fake numbers.
+  if (!ready) {
+    return (
+      <div
+        data-testid="agent-deploy-card-empty"
+        className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5 text-[12px] text-white/55"
+      >
+        <Activity className="h-3.5 w-3.5 shrink-0 text-indigo-300/70" />
+        {deployable.status === "pending"
+          ? "Backtest running. Your deployable result will appear here when it lands."
+          : "No deployable result yet."}
+      </div>
+    );
+  }
+
+  if (isLoading) {
+    return (
+      <div
+        data-testid="agent-deploy-card-loading"
+        className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5 text-[12px] text-white/55"
+      >
+        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-indigo-300" />
+        Analyzing risk and recommended leverage...
+      </div>
+    );
+  }
+
+  if (isError || !data) {
+    return (
+      <div
+        data-testid="agent-deploy-card-error"
+        className="flex items-center gap-2 rounded-xl border border-yellow-400/25 bg-yellow-400/[0.06] px-3 py-2.5 text-[12px] text-yellow-200/80"
+      >
+        <ShieldAlert className="h-3.5 w-3.5 shrink-0" />
+        Couldn't load the result to deploy. Open the result in QuantumLab to deploy it.
+      </div>
+    );
+  }
+
+  const trades = (data.trades ?? []) as LabTradeRecord[];
+  const analysis = calculateRiskAnalysis(
+    trades,
+    data.netProfitPercent,
+    data.maxDrawdownPercent,
+    data.winRatePercent,
+    data.equityCurve ?? undefined,
+    data.ticker,
+  );
+  const recLev = analysis.recommendedLeverage;
+  // Post-leverage figures: the numbers people actually trade at, not the 1x backtest.
+  const postLevReturn = data.netProfitPercent * recLev;
+  const postLevDD = data.maxDrawdownPercent * recLev;
+  const robust = deployable.oosSharpe != null && deployable.oosSharpe > 0;
+
+  const stats: { k: string; v: string; c: string }[] = [
+    {
+      k: `Net return (${recLev}x)`,
+      v: `${postLevReturn >= 0 ? "+" : ""}${Math.round(postLevReturn)}%`,
+      c: postLevReturn >= 0 ? "text-emerald-300" : "text-red-300",
+    },
+    { k: "Win rate", v: `${Math.round(data.winRatePercent)}%`, c: "text-white" },
+    { k: `Max drawdown (${recLev}x)`, v: `-${Math.round(postLevDD)}%`, c: "text-white/80" },
+  ];
+
+  const handleDeploy = () => {
+    onDeploy?.({
+      strategyId: deployable.strategyId,
+      resultId: deployable.bestResultId!,
+      leverage: recLev,
+      drawdownPercent: data.maxDrawdownPercent,
+      streakDrawdownPercent: analysis.streakDrawdownPercent,
+      profitPercent: data.netProfitPercent,
+      winRatePercent: data.winRatePercent,
+      ticker: data.ticker,
+      timeframe: data.timeframe,
+      params: data.params,
+    });
+  };
+
+  return (
+    <div
+      data-testid="agent-deploy-card"
+      className="w-full overflow-hidden rounded-xl border border-emerald-400/25 bg-gradient-to-br from-emerald-400/[0.07] to-card/60"
+    >
+      <div className="flex flex-wrap items-center gap-2 border-b border-white/10 px-3 py-2.5">
+        <span className="text-sm font-semibold text-white" data-testid="text-agent-deploy-title">
+          {data.ticker} · {data.timeframe}
+        </span>
+        <span
+          data-testid="badge-agent-deploy-robustness"
+          className={cn(
+            "ml-auto inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold",
+            robust
+              ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-300"
+              : "border-yellow-400/30 bg-yellow-400/10 text-yellow-200",
+          )}
+        >
+          {robust ? <ShieldCheck className="h-3.5 w-3.5" /> : <ShieldAlert className="h-3.5 w-3.5" />}
+          {robust
+            ? `Holds up out-of-sample (Sharpe ${deployable.oosSharpe!.toFixed(2)})`
+            : "Unvalidated (no out-of-sample holdout)"}
+        </span>
+      </div>
+      <div className="grid grid-cols-3 divide-x divide-white/10">
+        {stats.map((m) => (
+          <div key={m.k} className="px-2 py-3 text-center">
+            <div className={cn("font-mono text-lg font-bold", m.c)} data-testid={`text-agent-deploy-${m.k}`}>
+              {m.v}
+            </div>
+            <div className="mt-0.5 text-[11px] text-white/45">{m.k}</div>
+          </div>
+        ))}
+      </div>
+      <div className="flex items-center gap-2 px-3 py-2.5">
+        <TrendingUp className="h-3.5 w-3.5 shrink-0 text-emerald-300" />
+        <span className="text-[11.5px] leading-snug text-white/55">
+          Shown at {recLev}x, the leverage the risk math recommends for this strategy.
+        </span>
+        <Button
+          type="button"
+          size="sm"
+          onClick={handleDeploy}
+          data-testid="button-agent-deploy"
+          className="ml-auto h-8 shrink-0 gap-1.5 bg-gradient-to-r from-primary to-accent text-[12.5px] font-semibold text-white shadow-lg shadow-primary/30"
+        >
+          <Rocket className="h-3.5 w-3.5" />
+          Deploy
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function LabAssistantDock({
   walletAddress,
   sessionConnected = false,
@@ -181,6 +371,7 @@ export function LabAssistantDock({
   reconnecting = false,
   onNavigate,
   openSignal = 0,
+  onDeploy,
 }: {
   walletAddress: string | null;
   sessionConnected?: boolean;
@@ -194,6 +385,10 @@ export function LabAssistantDock({
   // One-way "please open" trigger: the parent bumps this counter (e.g. from the
   // hub's "Chat to Lab Assistant" button) to expand the dock. 0 = no request.
   openSignal?: number;
+  // Tapped Deploy on the agent result card. The dock passes RAW backtest numbers +
+  // recommended leverage; the parent opens the existing deploy modal pre-filled. The
+  // dock NEVER deploys on its own (money path).
+  onDeploy?: (target: AgentDeployTarget) => void;
 }) {
   const [open, setOpen] = useState(false);
   // Open the dock when the parent bumps openSignal. Seed the ref with the value
@@ -653,8 +848,15 @@ export function LabAssistantDock({
             the task carries an `auto` slice (a live run, or a finished one we still show).
             Purely additive: derived from the polled DTO, never touches the turn loop. */}
         {task?.auto && (
-          <div className="border-b border-white/10 px-3 py-2.5">
+          <div className="space-y-2.5 border-b border-white/10 px-3 py-2.5">
             <QuantAgentChecklist auto={task.auto} />
+            {task.auto.deployableResult && (
+              <AgentDeployCard
+                deployable={task.auto.deployableResult}
+                walletAddress={walletAddress}
+                onDeploy={onDeploy}
+              />
+            )}
           </div>
         )}
 

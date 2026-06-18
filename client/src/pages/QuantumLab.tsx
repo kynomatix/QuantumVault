@@ -16,7 +16,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogTrigger, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { LabAssistantDock } from "@/components/LabAssistantDock";
+import { LabAssistantDock, type AgentDeployTarget } from "@/components/LabAssistantDock";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -53,9 +53,9 @@ import type {
   LabTradeRecord, LabRiskAnalysis, LabWindowMetrics, LabOosMetrics,
 } from "@shared/schema";
 import { LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES } from "@shared/schema";
+import { calculateRiskAnalysis, CONSERVATIVE_FALLBACK } from "@/lib/risk-analysis";
 
 type MainTab = "hub" | "main" | "results" | "heatmap" | "insights" | "creator";
-const CONSERVATIVE_FALLBACK = 5;
 
 // ── Task 188: backtest robustness (in-sample vs out-of-sample) ──────────────
 // Pure, null-safe verdict derived from a result's IS/OOS partition metrics.
@@ -244,107 +244,6 @@ const EXAMPLE_PINE = `// Paste your Pine Script strategy here
 // float kcMult = input.float(1.5, "KC Multiplier", minval=0.5, maxval=3.0, step=0.1, group=g_squeeze)
 //
 // Date inputs like input.time() will be detected and excluded from optimization.`;
-
-function calculateRiskAnalysis(
-  trades: LabTradeRecord[],
-  netProfitPercent: number,
-  maxDrawdownPercent: number,
-  winRatePercent: number,
-  equityCurve?: { time: string; equity: number }[],
-  ticker?: string,
-  maxLeverageOverride?: number
-): LabRiskAnalysis {
-  const closedTrades = trades.filter(t => t.exitReason !== "Open Position");
-  if (closedTrades.length === 0) {
-    return {
-      maxDrawdownPercent, recommendedLeverage: 1, maxSafeLeverage: 1, liquidationBuffer: 0,
-      longestLosingStreak: 0, avgLossPercent: 0, avgWinPercent: 0,
-      worstTradePercent: 0, recoveryFactor: 0, kellyPercent: 0, riskOfRuin: 100,
-      recommendedWalletAllocation: 0, minCapitalRequired: 0, streakDrawdownPercent: 0,
-      avgBarsInDrawdown: 0, riskRating: "EXTREME",
-      recommendations: ["Insufficient trade data for risk analysis."],
-    };
-  }
-
-  const wins = closedTrades.filter(t => t.pnlPercent > 0);
-  const losses = closedTrades.filter(t => t.pnlPercent <= 0);
-  const avgWinPercent = wins.length > 0 ? wins.reduce((s, t) => s + t.pnlPercent, 0) / wins.length : 0;
-  const avgLossPercent = losses.length > 0 ? Math.abs(losses.reduce((s, t) => s + t.pnlPercent, 0) / losses.length) : 0;
-  const worstTradePercent = Math.min(...closedTrades.map(t => t.pnlPercent));
-
-  let longestLosingStreak = 0, currentStreak = 0;
-  for (const t of closedTrades) {
-    if (t.pnlPercent <= 0) { currentStreak++; longestLosingStreak = Math.max(longestLosingStreak, currentStreak); }
-    else { currentStreak = 0; }
-  }
-  const streakDrawdownPercent = longestLosingStreak * avgLossPercent;
-
-  let avgBarsInDrawdown = 0;
-  if (equityCurve && equityCurve.length > 1) {
-    let peakEquity = equityCurve[0].equity, drawdownBars = 0, drawdownPeriods = 0, totalDrawdownBars = 0, inDrawdown = false;
-    for (const pt of equityCurve) {
-      if (pt.equity >= peakEquity) { peakEquity = pt.equity; if (inDrawdown) { totalDrawdownBars += drawdownBars; drawdownPeriods++; drawdownBars = 0; inDrawdown = false; } }
-      else { inDrawdown = true; drawdownBars++; }
-    }
-    if (inDrawdown) { totalDrawdownBars += drawdownBars; drawdownPeriods++; }
-    avgBarsInDrawdown = drawdownPeriods > 0 ? Math.round(totalDrawdownBars / drawdownPeriods) : 0;
-  }
-
-  const winRate = winRatePercent / 100, lossRate = 1 - winRate;
-  const kellyPercent = avgLossPercent > 0 && avgWinPercent > 0
-    ? Math.max(0, (winRate * avgWinPercent - lossRate * avgLossPercent) / avgWinPercent) * 100 : 0;
-
-  let riskOfRuin = 0;
-  if (avgWinPercent > 0 && avgLossPercent > 0 && winRate > 0 && winRate < 1) {
-    const rr = avgWinPercent / avgLossPercent;
-    const edgeRatio = (1 + rr) * winRate - 1;
-    if (edgeRatio <= 0) riskOfRuin = 100;
-    else { const q = lossRate / winRate; const bankrollUnits = 100 / avgLossPercent; riskOfRuin = Math.min(100, Math.max(0, Math.pow(q, bankrollUnits) * 100)); }
-  }
-
-  const recoveryFactor = maxDrawdownPercent > 0 ? netProfitPercent / maxDrawdownPercent : 0;
-
-  const MAX_LEVERAGE_CAP = maxLeverageOverride ?? (ticker ? getMaxLeverage(ticker) : CONSERVATIVE_FALLBACK);
-  const maxSafeLeverage = maxDrawdownPercent > 0 ? Math.min(MAX_LEVERAGE_CAP, Math.max(1, Math.floor((100 / maxDrawdownPercent) * 0.8))) : 1;
-  const streakSafety = streakDrawdownPercent > 0 ? Math.min(MAX_LEVERAGE_CAP, Math.max(1, Math.floor(100 / (streakDrawdownPercent * 1.5)))) : maxSafeLeverage;
-  const recommendedLeverage = Math.max(1, Math.min(maxSafeLeverage, streakSafety));
-  const recDD = maxDrawdownPercent * recommendedLeverage;
-  const liquidationBuffer = recDD > 0 ? Math.round((100 - recDD) / 100 * 100) : 0;
-
-  const fixedTradeSize = 1000;
-  const recDrawdownDollar = (maxDrawdownPercent * recommendedLeverage / 100) * fixedTradeSize;
-  const recStreakDollar = (streakDrawdownPercent * recommendedLeverage / 100) * fixedTradeSize;
-  const worstCaseBuffer = Math.max(recDrawdownDollar, recStreakDollar) * 1.5;
-  const recommendedWalletAllocation = Math.round(fixedTradeSize + worstCaseBuffer);
-  const minCapitalRequired = Math.round(fixedTradeSize + recDrawdownDollar);
-
-  let riskRating: LabRiskAnalysis["riskRating"];
-  if (recDD <= 15 && longestLosingStreak <= 3 && recoveryFactor >= 3) riskRating = "LOW";
-  else if (recDD <= 35 && longestLosingStreak <= 6 && recoveryFactor >= 1.5) riskRating = "MODERATE";
-  else if (recDD <= 60 && recoveryFactor >= 0.5) riskRating = "HIGH";
-  else riskRating = "EXTREME";
-
-  const recommendations: string[] = [];
-  recommendations.push(`Use ${recommendedLeverage}x leverage (max safe: ${maxSafeLeverage}x). At ${recommendedLeverage}x, max drawdown would be ${recDD.toFixed(1)}%.`);
-  if (longestLosingStreak >= 4) recommendations.push(`Strategy had ${longestLosingStreak} consecutive losses (${(streakDrawdownPercent * recommendedLeverage).toFixed(1)}% at ${recommendedLeverage}x). Allocate extra buffer capital.`);
-  if (recommendedLeverage <= 2) recommendations.push(`High per-trade drawdown limits leverage to ${recommendedLeverage}x. Consider tightening stop losses.`);
-  recommendations.push(`Allocate at least $${recommendedWalletAllocation} per $1,000 trade size to survive worst-case drawdowns at ${recommendedLeverage}x.`);
-  if (recoveryFactor < 1) recommendations.push(`Recovery factor is ${recoveryFactor.toFixed(2)} — drawdowns are larger than returns. High risk.`);
-  else if (recoveryFactor >= 3) recommendations.push(`Strong recovery factor of ${recoveryFactor.toFixed(2)} — strategy recovers well from drawdowns.`);
-  if (riskOfRuin > 20) recommendations.push(`Risk of ruin is ${riskOfRuin.toFixed(1)}%. Use half-Kelly position sizing to protect capital.`);
-  if (kellyPercent > 0) recommendations.push(`Kelly criterion suggests ${kellyPercent.toFixed(1)}% of capital per trade. Use half-Kelly (${(kellyPercent / 2).toFixed(1)}%) for safety.`);
-  if (avgBarsInDrawdown > 20) recommendations.push(`Average drawdown lasts ${avgBarsInDrawdown} bars. Be patient — early losses are normal.`);
-
-  return {
-    maxDrawdownPercent: Math.round(maxDrawdownPercent * 100) / 100, recommendedLeverage, maxSafeLeverage,
-    liquidationBuffer: Math.max(0, liquidationBuffer), longestLosingStreak,
-    avgLossPercent: Math.round(avgLossPercent * 100) / 100, avgWinPercent: Math.round(avgWinPercent * 100) / 100,
-    worstTradePercent: Math.round(worstTradePercent * 100) / 100, recoveryFactor: Math.round(recoveryFactor * 100) / 100,
-    kellyPercent: Math.round(kellyPercent * 100) / 100, riskOfRuin: Math.round(riskOfRuin * 100) / 100,
-    recommendedWalletAllocation, minCapitalRequired, streakDrawdownPercent: Math.round(streakDrawdownPercent * 100) / 100,
-    avgBarsInDrawdown, riskRating, recommendations,
-  };
-}
 
 function groupByCategory(inputs: LabPineInput[]): Record<string, LabPineInput[]> {
   const groups: Record<string, LabPineInput[]> = {};
@@ -769,6 +668,20 @@ export default function QuantumLab() {
   const [activeHistoryRunId, setActiveHistoryRunId] = useState<number | null>(null);
   const [targetCombo, setTargetCombo] = useState<{ ticker: string; timeframe: string } | null>(null);
   const [selectedStrategy, setSelectedStrategy] = useState<LabStrategy | null>(null);
+  // The Lab Assistant's "Deploy" tap opens ONE controlled deploy modal, pre-filled from
+  // the agent's chosen result + recommended leverage. null = closed. RAW (1x) numbers;
+  // BotSetupAdvisor re-applies leverage internally.
+  const [agentDeployTarget, setAgentDeployTarget] = useState<{
+    leverage: number;
+    drawdownPercent: number;
+    streakDrawdownPercent: number;
+    profitPercent: number;
+    ticker?: string;
+    timeframe?: string;
+    strategyName: string;
+    pineScript: string;
+    params?: Record<string, any>;
+  } | null>(null);
   const { toast } = useToast();
   const { getMaxLeverage } = useLeverageLimits();
   const { publicKeyString: walletAddress, sessionConnected, retryAuth, signingInProgress } = useWallet();
@@ -781,6 +694,7 @@ export default function QuantumLab() {
     setActiveHistoryRunId(null);
     setTargetCombo(null);
     setSelectedStrategy(null);
+    setAgentDeployTarget(null);
     autoReconnectingRef.current = false;
     lastReconnectRunIdRef.current = null;
     reconnectTokenRef.current++;
@@ -789,6 +703,29 @@ export default function QuantumLab() {
       return typeof k === "string" && k.startsWith("/api/lab");
     }});
   }, [walletAddress]);
+
+  // Lab Assistant "Deploy" tap. Fetch the strategy (pineScript + name) for the result's
+  // strategyId, then open the existing deploy modal pre-filled at the recommended
+  // leverage. This NEVER auto-deploys; it only opens the modal (money path).
+  const handleAgentDeploy = async (target: AgentDeployTarget) => {
+    try {
+      const res = await apiRequest("GET", `/api/lab/strategies/${target.strategyId}`);
+      const strategy = await res.json();
+      setAgentDeployTarget({
+        leverage: target.leverage,
+        drawdownPercent: target.drawdownPercent,
+        streakDrawdownPercent: target.streakDrawdownPercent,
+        profitPercent: target.profitPercent,
+        ticker: target.ticker,
+        timeframe: target.timeframe,
+        strategyName: strategy.name,
+        pineScript: strategy.pineScript,
+        params: target.params,
+      });
+    } catch {
+      toast({ title: "Couldn't load the strategy to deploy", variant: "destructive" });
+    }
+  };
 
   const [queueOpen, setQueueOpen] = useState(false);
   const activeJobIdRef = useRef<string | null>(null);
@@ -1492,6 +1429,25 @@ export default function QuantumLab() {
           reconnecting={signingInProgress}
           onNavigate={(tab) => setMainTab(tab as MainTab)}
           openSignal={assistantOpenSignal}
+          onDeploy={handleAgentDeploy}
+        />
+      )}
+      {/* One controlled deploy modal driven by the Lab Assistant's Deploy tap. Mounted
+          only while a target is set, so each deploy gets a fresh form + balance fetch.
+          The per-row deploy triggers elsewhere use their own internal-state instances. */}
+      {agentDeployTarget && (
+        <BotSetupAdvisor
+          open={true}
+          onOpenChange={(o) => { if (!o) setAgentDeployTarget(null); }}
+          leverage={agentDeployTarget.leverage}
+          drawdownPercent={agentDeployTarget.drawdownPercent}
+          streakDrawdownPercent={agentDeployTarget.streakDrawdownPercent}
+          profitPercent={agentDeployTarget.profitPercent}
+          ticker={agentDeployTarget.ticker}
+          timeframe={agentDeployTarget.timeframe}
+          strategyName={agentDeployTarget.strategyName}
+          pineScript={agentDeployTarget.pineScript}
+          params={agentDeployTarget.params}
         />
       )}
       <QueueDrawer open={queueOpen} onOpenChange={setQueueOpen} />
@@ -4946,7 +4902,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
   );
 }
 
-function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, profitPercent, isRecommended, ticker, timeframe, strategyName, pineScript, params, children }: { leverage: number; drawdownPercent: number; streakDrawdownPercent?: number; profitPercent: number; isRecommended?: boolean; ticker?: string; timeframe?: string; strategyName?: string; pineScript?: string; params?: Record<string, any>; children: React.ReactNode }) {
+function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, profitPercent, isRecommended, ticker, timeframe, strategyName, pineScript, params, children, open: controlledOpen, onOpenChange }: { leverage: number; drawdownPercent: number; streakDrawdownPercent?: number; profitPercent: number; isRecommended?: boolean; ticker?: string; timeframe?: string; strategyName?: string; pineScript?: string; params?: Record<string, any>; children?: React.ReactNode; open?: boolean; onOpenChange?: (open: boolean) => void }) {
   const [capital, setCapital] = useState("1000");
   const capitalNum = parseFloat(capital) || 0;
   const { toast } = useToast();
@@ -4955,6 +4911,16 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const bindAgentWallet = useBindAgentWallet({ signMessage, publicKey });
 
   const [isOpen, setIsOpen] = useState(false);
+  // Controllable: when `open`/`onOpenChange` are passed (agent-deploy path), the
+  // parent drives the dialog; otherwise we fall back to internal state (the existing
+  // per-row trigger path). Either way `dialogOpen`/`setDialogOpen` are the single
+  // source the dialog reads from.
+  const isControlled = controlledOpen !== undefined;
+  const dialogOpen = isControlled ? controlledOpen : isOpen;
+  const setDialogOpen = (v: boolean) => {
+    if (!isControlled) setIsOpen(v);
+    onOpenChange?.(v);
+  };
   const [isCreating, setIsCreating] = useState(false);
   const [isDepositingUsdc, setIsDepositingUsdc] = useState(false);
   const [isDepositingSol, setIsDepositingSol] = useState(false);
@@ -5058,9 +5024,18 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
     // heatmap renders 4 of them per selected cell, so every cell tap kicked off
     // 4 redundant /api/agent/balance calls (the "struggling to load" jank on
     // mobile). The dialog's own onOpenChange handles the open-time fetch.
-    if (isOpen && walletAddress && sessionConnected) fetchBalanceAndAgent(true);
+    if (dialogOpen && walletAddress && sessionConnected) fetchBalanceAndAgent(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deployProtocol]);
+
+  // Open-time balance fetch. The per-row trigger path used to do this inline in the
+  // Dialog's onOpenChange, but the controlled agent-deploy path opens via parent state
+  // (no onOpenChange fires), so we drive the fetch off the open flag instead. This
+  // covers both paths, and the `!balanceChecked` guard keeps it to one fetch per open.
+  useEffect(() => {
+    if (dialogOpen && isAuthenticated && !balanceChecked) fetchBalanceAndAgent();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dialogOpen]);
 
   const generateBotName = () => {
     const base = (ticker || "").split("/")[0].toUpperCase();
@@ -5344,10 +5319,12 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const disabledReason = getDisabledReason();
 
   return (
-    <Dialog open={isOpen} onOpenChange={(open) => { setIsOpen(open); if (open && isAuthenticated && !balanceChecked) fetchBalanceAndAgent(); }}>
-      <DialogTrigger asChild>
-        {children}
-      </DialogTrigger>
+    <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+      {children ? (
+        <DialogTrigger asChild>
+          {children}
+        </DialogTrigger>
+      ) : null}
       <DialogContent className="w-80 max-w-[90vw] bg-slate-900 border-white/10 p-0 gap-0 sm:rounded-lg">
         {createdBot ? (
           <div className="p-4 space-y-3">

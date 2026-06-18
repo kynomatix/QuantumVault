@@ -35,6 +35,23 @@ export interface AutoChecklistDto {
     progressPct: number | null;
     jobsAhead: number | null;
   } | null;
+  // The best result the agent has for its current strategy, so the dock can render a
+  // real result card + Deploy button (which only OPENS the deploy modal; money path).
+  // Headline numbers only; the dock fetches the full result row on demand for the
+  // post-leverage math. Mirror of AutoDeployableResultView in
+  // server/ai-assistant/deployable-result.ts. Present only on auto tasks.
+  deployableResult?: {
+    status: "ready" | "pending" | "unavailable";
+    strategyId: number;
+    bestResultId: number | null;
+    runId: number | null;
+    ticker: string | null;
+    timeframe: string | null;
+    netProfitPercent: number | null;
+    maxDrawdownPercent: number | null;
+    winRatePercent: number | null;
+    oosSharpe: number | null;
+  } | null;
 }
 
 export type StageState = "pending" | "running" | "waiting" | "done" | "skipped" | "failed";
