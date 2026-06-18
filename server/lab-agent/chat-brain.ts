@@ -385,6 +385,14 @@ const DECIDE_SYSTEM_PROMPT = [
   '  {"action":"final","message":"..."} that describes your real, current abilities',
   "  (drafting, backtesting across assets, refining, robustness-ranking results, insights,",
   "  improving) in plain, confident language, and offer to actually do one of them next.",
+  "- SCOPE, be honest about limits: your tools work ONLY inside this backtesting lab",
+  "  (drafting, backtesting, refining, robustness-ranking, insights, run status for the",
+  "  user's lab strategies). You CANNOT see a live or deployed bot's real trades or PnL,",
+  "  you CANNOT read or change the user's TradingView account or its alert limits, and you",
+  "  do NOT operate the live trading dashboard. If the user asks about any of those, say so",
+  "  plainly in one sentence (do not pretend, do not deflect to a menu), then offer what",
+  "  you CAN do, such as backtesting or stress-testing that strategy here before they rely",
+  "  on it live.",
   '- After a tool returns data, your NEXT output MUST be a {"action":"final","message":"..."}',
   "  JSON object that answers the user directly in plain language — name the strategy,",
   "  numbers, or finding you read. Do NOT reply as bare prose; the JSON envelope is required.",
@@ -479,8 +487,15 @@ function toolRanThisTurn(
 export function coerceProseToFinal(
   raw: string,
   recentMessages: { role: "user" | "agent" | "tool"; content: string }[],
+  opts?: { requireToolRan?: boolean },
 ): { action: "final"; message: string } | null {
-  if (!toolRanThisTurn(recentMessages)) return null;
+  // By default only a POST-TOOL prose answer is rescued (the in-loop decideTurnAction
+  // path). The orchestrator's LAST-RESORT chat salvage passes requireToolRan:false to
+  // also rescue a clean no-tool conversational answer once the model has burned its
+  // retry budget writing prose instead of the JSON envelope (gated upstream by
+  // isSafeDirectAnswerTurn so a data/action ask can never surface fabricated prose).
+  const requireToolRan = opts?.requireToolRan ?? true;
+  if (requireToolRan && !toolRanThisTurn(recentMessages)) return null;
   const text = (raw ?? "").trim();
   if (text.length < MIN_PROSE_FINAL_CHARS) return null;
   // Reject anything that isn't clean prose: brace/bracket fragments (a half or broken
@@ -493,6 +508,48 @@ export function coerceProseToFinal(
   const message = text.slice(0, MAX_PROSE_FINAL_CHARS).trim();
   if (message.length < MIN_PROSE_FINAL_CHARS) return null;
   return { action: "final", message };
+}
+
+/**
+ * Is this user turn one we can safely answer DIRECTLY from the model's own prose if it
+ * fails to emit the JSON envelope? True for conversational / scope / how-it-works /
+ * capability questions. FALSE for any in-scope lab DATA or metric ask (best result, PnL,
+ * win rate, drawdown, rankings, "my results") and for clear lab ACTION asks (backtest,
+ * optimize, refine, improve, cancel, "draft me a strategy") because those must go through
+ * a tool, so salvaging prose there risks a fabricated number or a falsely claimed action.
+ * Used ONLY for the orchestrator's last-resort salvage. Exported for unit testing.
+ */
+export function isSafeDirectAnswerTurn(userText: string): boolean {
+  const t = (userText ?? "").trim();
+  if (!t) return false;
+  // In-scope lab DATA / metrics / rankings / performance a tool should supply (a
+  // salvaged prose answer here could fabricate a number).
+  if (
+    /\b(pnl|p&l|win[\s-]?rate|draw\s?down|sharpe|profit|returns?|equity|perform\w*|best result|top results?|leaderboard|ranked|ranking|my (results?|runs?|backtests?|numbers?|stats?))\b/i.test(
+      t,
+    )
+  ) {
+    return false;
+  }
+  if (/\b(best|top)\s+(runs?|results?|configs?|strateg\w*)\b/i.test(t)) return false;
+  if (/\bwhich\b[^.?!]*\bbest\b/i.test(t)) return false;
+  // Clear lab ACTIONS the model should perform via a tool, not describe in prose.
+  if (/\b(backtest|back-test|optimi[sz]e|optimi[sz]ation|refine|improve|cancel)\b/i.test(t)) {
+    return false;
+  }
+  // A request to make a NEW strategy ("draft me a momentum bot", "can you create a Pine
+  // bot?") must call the create tool, not salvage prose, even when phrased politely as a
+  // question. Allow ONLY a genuine how/why/what-is explanation of the mechanism
+  // ("how does it create strategies under the hood?").
+  const explanatory =
+    /\b(how|why|under the hood|explain)\b/i.test(t) || /\bwhat (is|are|does|do)\b/i.test(t);
+  if (
+    !explanatory &&
+    /\b(draft|create|build|make|generate|write)\b[^.?!]*\b(strateg\w*|bots?|scripts?|pine)\b/i.test(t)
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /**

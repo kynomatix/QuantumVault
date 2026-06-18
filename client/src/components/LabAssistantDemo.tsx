@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Sparkles, ShieldCheck, TrendingUp, Rocket, Wand2, Send, Zap } from "lucide-react";
 import {
   QUANT_AGENT_STAGES,
@@ -20,6 +20,14 @@ import {
  */
 
 const CYCLE = 17000; // ms per loop (extended to fit the deploy-setup beat)
+
+// Fixed chat viewport height. Like the real dock, the window never lengthens;
+// the message list scrolls down to new content instead. The finished checklist
+// measures ~380px, so this leaves a little headroom: the checklist always fits
+// (the first scroll happens only when the result card lands, never during the
+// checklist) and the full deploy card is never cut off, even with small
+// per-device font-rendering variance.
+const VIEWPORT_H = 392;
 
 // Demo strategy numbers (illustrative). The raw backtest is the honest 1x result; a
 // low 4% drawdown is exactly what lets the auto-sizer safely lever up. The live
@@ -67,6 +75,10 @@ export default function LabAssistantDemo() {
   const [t, setT] = useState(0);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const reducedRef = useRef(false);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const innerRef = useRef<HTMLDivElement | null>(null);
+  const preCardScrollRef = useRef(0);
+  const cardScrollRef = useRef(0);
 
   useEffect(() => {
     const mq = typeof window !== "undefined" && window.matchMedia
@@ -172,6 +184,46 @@ export default function LabAssistantDemo() {
   const deployP = ease((t - 10800) / 600);
   const levCount = ease((t - 11000) / 1100);
 
+  // Simulate the real dock's chat scroll: the window is a fixed-height viewport
+  // and the message list scrolls down to keep the newest content in view. The
+  // first scroll lands when the result card appears under the finished checklist,
+  // then again when the deploy preview opens. scrollTop is driven straight off
+  // the clock so it stays in sync and resets cleanly each loop. Heights are
+  // measured live, so the newest content is never cut off.
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    const inner = innerRef.current;
+    if (!el || !inner) return;
+    // Live-measured so the newest content is never cut off, whatever width the
+    // device wraps the text to. maxScroll is 0 while everything fits (normal
+    // widths) and grows once content overflows the fixed viewport.
+    const maxScroll = Math.max(0, inner.offsetHeight - el.clientHeight);
+    if (reduced) {
+      el.scrollTop = maxScroll;
+      return;
+    }
+    let target: number;
+    if (showDeploy) {
+      // Deploy preview opened: glide from the result-card bottom to the new
+      // bottom. Fall back to the bottom if the card beat never rendered.
+      const start = cardScrollRef.current || maxScroll;
+      target = start + (maxScroll - start) * ease((t - 10800) / 1100);
+    } else if (showCard) {
+      // Result card landed: glide from the checklist bottom to the new bottom.
+      cardScrollRef.current = maxScroll;
+      const start = preCardScrollRef.current;
+      target = start + (maxScroll - start) * ease((t - 8300) / 800);
+    } else {
+      // Checklist / intro: rest at the bottom. A no-op on normal widths (the
+      // content fits, maxScroll = 0, so the first scroll is when the result
+      // lands) and on narrow screens it keeps the newest row in view so the
+      // checklist is never cut off.
+      preCardScrollRef.current = maxScroll;
+      target = maxScroll;
+    }
+    el.scrollTop = target;
+  });
+
   const caret = Math.sin(t / 90) > 0;
 
   return (
@@ -204,11 +256,15 @@ export default function LabAssistantDemo() {
           </span>
         </div>
 
-      {/* body */}
+      {/* body: fixed-height chat viewport that scrolls down to new messages,
+          mirroring the real dock so the window never lengthens. */}
       <div
-        className="relative px-4 py-4 space-y-3.5"
-        style={{ opacity: globalOpacity, minHeight: 360 }}
+        ref={scrollRef}
+        className="relative overflow-hidden"
+        style={{ opacity: globalOpacity, height: VIEWPORT_H }}
+        data-testid="demo-chat-viewport"
       >
+        <div ref={innerRef} className="px-4 py-4 space-y-3.5">
         {/* user bubble */}
         <div className="flex justify-end">
           <div className="max-w-[88%] rounded-2xl rounded-tr-sm bg-primary/15 border border-primary/25 px-4 py-2.5 text-[13.5px] sm:text-sm text-white/90">
@@ -385,6 +441,7 @@ export default function LabAssistantDemo() {
             </div>
           </div>
         )}
+        </div>
       </div>
 
         {/* composer: visual only, this is a no-wallet demo. The "Auto" pill is

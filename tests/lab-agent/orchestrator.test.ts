@@ -562,6 +562,47 @@ describe("LabTurnOrchestrator — repair budgets", () => {
     expect(brain.rec.calls).toBe(3);
   });
 
+  it("salvages a chat-mode conversational answer from prose once retries are exhausted", async () => {
+    const store = makeStore();
+    await seedUser(store, "how does the creator work?");
+    const toolkit = makeToolkit({});
+    const prose =
+      "Under the hood I send your plain-English idea to an AI that writes a Pine strategy, then I can backtest it for you.";
+    const brain = makeBrain([{ throw: new MalformedDecisionError("not json", prose) }]);
+    const orch = makeOrch(store, toolkit, { limits: { maxMalformedRetries: 2, maxBrainCalls: 50, maxSegmentIterations: 50 } });
+
+    const r = await orch.advance(1, { brain: brain.fn, hasKey: true });
+    expect(r.outcome).toBe("final");
+    expect(brain.rec.calls).toBe(3); // exhausted the repair budget first
+    expect(store.agentMessages().at(-1)!.content).toBe(prose);
+  });
+
+  it("does NOT salvage prose in auto mode (planner output must not become a final)", async () => {
+    const store = makeStore({ mode: "auto" });
+    await seedUser(store, "how does the creator work?");
+    const toolkit = makeToolkit({});
+    const prose = "Some plausible prose answer that should not end an auto pipeline turn.";
+    const brain = makeBrain([{ throw: new MalformedDecisionError("not json", prose) }]);
+    const orch = makeOrch(store, toolkit, { limits: { maxMalformedRetries: 2, maxBrainCalls: 50, maxSegmentIterations: 50 } });
+
+    const r = await orch.advance(1, { brain: brain.fn, hasKey: true });
+    expect(r.outcome).toBe("halted_malformed");
+  });
+
+  it("does NOT salvage prose for an in-scope DATA question (no fabricated numbers)", async () => {
+    const store = makeStore();
+    await seedUser(store, "what's my best result?");
+    const toolkit = makeToolkit({});
+    const prose = "Your best result is Stop-Run Reversal v2, up 418% net on SOL.";
+    const brain = makeBrain([{ throw: new MalformedDecisionError("not json", prose) }]);
+    const orch = makeOrch(store, toolkit, { limits: { maxMalformedRetries: 2, maxBrainCalls: 50, maxSegmentIterations: 50 } });
+
+    const r = await orch.advance(1, { brain: brain.fn, hasKey: true });
+    expect(r.outcome).toBe("halted_malformed");
+    // degraded to the deterministic shell, NOT the model's fabricated prose
+    expect(store.agentMessages().at(-1)!.content).not.toBe(prose);
+  });
+
   it("degrades on a non-malformed brain transport error", async () => {
     const store = makeStore();
     await seedUser(store, "x");

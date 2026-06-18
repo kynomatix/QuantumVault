@@ -40,6 +40,8 @@ import {
   ASYNC_TOOLS,
   PAID_TOOLS,
   MalformedDecisionError,
+  coerceProseToFinal,
+  isSafeDirectAnswerTurn,
   defaultAutoMemory,
   type AutoMemory,
   type BrainDecision,
@@ -443,6 +445,19 @@ export class LabTurnOrchestrator {
         if (e instanceof MalformedDecisionError) {
           malformedStreak++;
           if (malformedStreak <= this.limits.maxMalformedRetries) continue; // bounded repair
+          // LAST RESORT: the model kept answering as prose instead of the JSON envelope.
+          // For a CHAT-mode conversational / scope / how-it-works question (never the auto
+          // planner, never a data or action ask), surface the model's own clean answer
+          // rather than the canned menu. That is the "it stopped being conversational"
+          // complaint. coerceProseToFinal still rejects half-JSON, fences, and thinking
+          // markers, so anything not clean prose falls through to the deterministic degrade.
+          if (task.mode === "chat" && isSafeDirectAnswerTurn(userText)) {
+            const salvaged = coerceProseToFinal(e.raw ?? "", [], { requireToolRan: false });
+            if (salvaged) {
+              await this.finalReply(task, salvaged.message, opts.hasKey, userText);
+              return { outcome: "final" };
+            }
+          }
           await this.degrade(task, opts.hasKey, userText);
           return { outcome: "halted_malformed" };
         }

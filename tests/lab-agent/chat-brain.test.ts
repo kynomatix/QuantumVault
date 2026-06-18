@@ -3,6 +3,7 @@ import {
   buildChatMessages,
   generateLabChatReply,
   coerceProseToFinal,
+  isSafeDirectAnswerTurn,
   DEFAULT_CHAT_MODEL,
   type ChatBrainInput,
 } from "../../server/lab-agent/chat-brain";
@@ -190,5 +191,74 @@ describe("coerceProseToFinal", () => {
     const out = coerceProseToFinal(huge, afterTool(huge));
     expect(out).not.toBeNull();
     expect(out!.message.length).toBeLessThanOrEqual(2000);
+  });
+
+  it("with requireToolRan:false, salvages clean prose even when NO tool ran (last-resort chat salvage)", () => {
+    const prose =
+      "I live in the backtesting lab, so I can't see a deployed bot's live trades. But I can backtest that strategy here.";
+    const noTool: Parameters<typeof coerceProseToFinal>[1] = [
+      { role: "user", content: "can you see how my deployed bot is doing?" },
+    ];
+    expect(coerceProseToFinal(prose, noTool)).toBeNull(); // default: gated off when no tool ran
+    const out = coerceProseToFinal(prose, noTool, { requireToolRan: false });
+    expect(out?.action).toBe("final");
+    expect(out?.message).toBe(prose);
+  });
+
+  it("with requireToolRan:false, still rejects half-JSON / fences / thinking markers", () => {
+    const noTool: Parameters<typeof coerceProseToFinal>[1] = [];
+    expect(coerceProseToFinal('Sure, here you go {"action":"final"', noTool, { requireToolRan: false })).toBeNull();
+    expect(coerceProseToFinal("here you go\n```json\n[1]\n```", noTool, { requireToolRan: false })).toBeNull();
+    expect(coerceProseToFinal("<think>hmm</think> ok here is your answer now", noTool, { requireToolRan: false })).toBeNull();
+  });
+});
+
+describe("isSafeDirectAnswerTurn", () => {
+  it("allows conversational / scope / how-it-works questions", () => {
+    for (const q of [
+      "how does the creator work",
+      "can you explain how it works though?",
+      "but how does it actually create strategies, under the hood?",
+      "I don't have pro tradingview, only a couple of alerts, is that a blocker?",
+      "If I deployed a strategy here, can you see how its trades are going?",
+      "who are you and what can you do?",
+    ]) {
+      expect(isSafeDirectAnswerTurn(q)).toBe(true);
+    }
+  });
+
+  it("rejects in-scope DATA / metric / performance asks (so salvage can't fabricate a number)", () => {
+    for (const q of [
+      "what's my best result?",
+      "what is my best result",
+      "show me my results",
+      "how's my pnl looking",
+      "what's my win rate and drawdown",
+      "how did my strategy perform?",
+      "which run performed best?",
+      "what's my best run?",
+    ]) {
+      expect(isSafeDirectAnswerTurn(q)).toBe(false);
+    }
+  });
+
+  it("rejects clear lab ACTION asks (must go through a tool), even when phrased politely", () => {
+    for (const q of [
+      "optimize my SOL strategy",
+      "backtest my RSI bot",
+      "refine that run",
+      "improve my losing strategy",
+      "draft me a momentum strategy",
+      "can you draft me a momentum strategy?",
+      "could you create a Pine bot for ETH?",
+      "can you build me a strategy?",
+    ]) {
+      expect(isSafeDirectAnswerTurn(q)).toBe(false);
+    }
+  });
+
+  it("returns false for empty input", () => {
+    expect(isSafeDirectAnswerTurn("")).toBe(false);
+    expect(isSafeDirectAnswerTurn("   ")).toBe(false);
   });
 });
