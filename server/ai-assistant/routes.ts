@@ -892,10 +892,23 @@ export function registerCreatorRoutes(
 
       const task = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
       if (!task) return res.status(404).json({ error: "Conversation not found." });
-      // Single-flight: never start an auto run over a live turn (a chat turn, or an
-      // already-running auto run). The client must wait for turnState to settle.
-      if (task.turnState !== "ready") {
+      // Single-flight: block a new auto run only over a turn that is ACTIVELY advancing.
+      // "Active" = a live in-process loop (isLabTurnRunning) OR an unexpired DB turn-lease
+      // (the cross-process CAS guard; a parked turn RELEASES its lease in advance()'s
+      // finally, so a non-null unexpired lease means a segment is mid-flight right now). A
+      // non-ready turnState with NEITHER is an ORPHANED/parked turn — the client stopped
+      // polling /step, or a turn ended without resetting state — and nothing will ever
+      // finish it. Starting fresh RECLAIMS it instead of wedging the user behind a
+      // permanent "finish the current turn" 409. Routes by liveness, like /stop.
+      const leaseActive =
+        task.turnLeaseExpiresAt != null && task.turnLeaseExpiresAt.getTime() > Date.now();
+      if (task.turnState !== "ready" && (isLabTurnRunning(taskId) || leaseActive)) {
         return res.status(409).json({ error: "Finish the current turn before starting an auto run." });
+      }
+      // Reclaiming an orphaned/parked turn: cancel any agent-owned run it left queued so a
+      // stale backtest can't keep consuming the shared worker under the fresh run.
+      if (task.turnState !== "ready") {
+        await cancelAgentQueuedRuns(r.walletAddress, taskId);
       }
 
       // Hands-off intent: the client may ASK for hands-off; whether it takes effect is
@@ -912,8 +925,13 @@ export function registerCreatorRoutes(
       }
 
       // Record the goal in the transcript so the watcher sees what was asked, then reset
-      // the pipeline state to a clean budget (each watched run gets its own spend cap +
-      // improve/step leashes) and switch the task into auto mode.
+      // the pipeline to a clean slate so a fresh auto run starts at the create phase (and
+      // its style gate). EVERY per-run pipeline pointer is cleared: a leftover
+      // currentStrategyId from a previous strategy makes the planner SKIP create — and
+      // thus the style gate — to optimize the OLD strategy without confirmation; a leftover
+      // currentStep/activeRunId would replay or reconcile a stale step instead of starting
+      // fresh. (The reauth PARK deliberately PRESERVES these for resume; a new START clears
+      // them.) The fresh budget also gives each watched run its own spend + step leashes.
       await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, { role: "user", content: goal });
       await labStorage.updateAgentTask(taskId, {
         goal,
@@ -921,10 +939,16 @@ export function registerCreatorRoutes(
         status: "active",
         memory: {
           ...((task.memory as Record<string, unknown>) ?? {}),
+          currentStrategyId: null,
+          lastFinishedRunId: null,
+          autoLastTool: null,
           auto: { ...defaultAutoMemory(), handsOff: effectiveHandsOff },
         },
         spendEstimateUsd: 0,
         cancelRequestedAt: null,
+        currentStep: null,
+        activeRunId: null,
+        loopCount: 0,
         turnState: "running_turn",
         turnStateChangedAt: new Date(),
       });
@@ -938,7 +962,11 @@ export function registerCreatorRoutes(
         // (signedIn=true), so the signed-out Reconnect panel is NOT rendered. The parked
         // checklist's "Continue session" chip gives the one-tap re-sign. (If the key was
         // actually deleted in that sliver, resume re-detects it and posts the re-add note.)
-        await pauseAutoForReauth(r.walletAddress, taskId, task, {
+        // Use the POST-RESET task so the park spreads the just-cleared memory (it merges
+        // ...task.memory). Passing the stale pre-reset `task` would reintroduce the leaked
+        // currentStrategyId/autoLastTool and skip the style gate again after re-sign.
+        const afterReset = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+        await pauseAutoForReauth(r.walletAddress, taskId, afterReset ?? task, {
           ...defaultAutoMemory(),
           handsOff: effectiveHandsOff,
         });
