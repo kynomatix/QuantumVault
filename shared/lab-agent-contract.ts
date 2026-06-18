@@ -155,6 +155,20 @@ export const backtestResultDtoSchema = z.object({
   suggestedLeverage: z.number(),
   /** netProfitPercent times suggestedLeverage: a simple "profit at that leverage" estimate. */
   leveragedNetProfitPercent: z.number(),
+  /**
+   * OOS-aware durability score for this result (higher = steadier): blends in-sample
+   * and out-of-sample quality and penalizes Sharpe decay. Lets the agent show a
+   * robustness view ALONGSIDE the post-leverage profit order, so a high-profit
+   * curve-fit stands out (high profit rank, low robustness rank).
+   */
+  robustnessScore: z.number(),
+  /**
+   * 1-based position of this result within the returned set when ordered by
+   * robustnessScore (1 = most robust of the set). The list itself stays ordered by
+   * post-leverage profit; this field carries the SECOND, robustness ordering in the
+   * same payload so the user can see both at once.
+   */
+  robustnessRank: z.number().int(),
   /** Tuned parameter set for this combo. */
   params: z.record(z.string(), z.unknown()),
   /**

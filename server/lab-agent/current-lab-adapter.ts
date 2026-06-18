@@ -47,6 +47,7 @@ import {
   toStrategyDto,
   toStrategyMatchDto,
   toBacktestResultDto,
+  withRobustnessRanks,
   toInsightsReportDto,
   toHeatmapDto,
   toRunStatusDto,
@@ -439,15 +440,15 @@ export class CurrentLabAdapter implements LabAgentAdapter {
     const wantTf = input.timeframe?.trim().toLowerCase();
     const wantTk = input.ticker?.trim().toUpperCase();
     const filtering = Boolean(wantTf || wantTk);
-    // Re-rank by ROBUSTNESS, not the lab's headline (leveraged-profit) objective.
-    // Fetch a wider candidate pool than `limit` so the robustness sort has real
-    // choice beyond the lab's own top-by-profit slice, then keep the most robust
-    // `limit`. This is what makes the agent recommend durable configs over
-    // curve-fits (docs/QUANTUMLAB_ACCURACY_DIAGNOSIS.md). When a specific
-    // timeframe/ticker is requested, widen the pool to the strategy's full set
-    // first so the requested combo is ALWAYS present (the storage returns one
-    // best row per combo), then filter to it; otherwise a freshly run combo can
-    // be sliced off and we'd report a stale older one.
+    // Fetch a wider candidate pool than `limit` so BOTH orderings we return have
+    // real choice. The list is ordered by post-leverage profit (the headline
+    // number), and each result also carries a robustnessRank so the agent can point
+    // out the most durable config too, not just the flashiest one
+    // (docs/QUANTUMLAB_ACCURACY_DIAGNOSIS.md). When a specific timeframe/ticker is
+    // requested, widen the pool to the strategy's full set first so the requested
+    // combo is ALWAYS present (the storage returns one best row per combo), then
+    // filter to it; otherwise a freshly run combo can be sliced off and we'd report
+    // a stale older one.
     const candidatePool = filtering ? 200 : Math.min(50, limit * 5);
     let rows = await this.storage.getTopResultsForStrategy(input.strategyId, candidatePool);
     if (filtering) {
@@ -465,15 +466,17 @@ export class CurrentLabAdapter implements LabAgentAdapter {
     for (const r of runs) oosByRun.set(r.id, r.oosFraction ?? null);
     // Rank by POST-LEVERAGE performance (leveragedNetProfitPercent), matching the lab's
     // Results tab so the user sees the SAME order in chat as on that tab (rank 1 = highest
-    // leveraged return). Each result still carries its out-of-sample metrics so the brain
-    // can flag the top leveraged picks that are likely curve-fits. The auto pipeline's
-    // separate graduation gate (auto-planner pickRobustResult) is what actually decides
-    // what is safe to widen to more assets or treat as proven.
+    // leveraged return). Each result ALSO carries its out-of-sample metrics and a
+    // robustnessRank (1 = steadiest of the set, out-of-sample aware) so the brain can
+    // show both the flashiest pick and the most durable one, and flag a top leveraged
+    // pick that is likely a curve-fit. The auto pipeline's separate graduation gate
+    // (auto-planner pickRobustResult) is what actually decides what is safe to widen
+    // to more assets or treat as proven.
     const ranked = rows
       .map((row: any) => toBacktestResultDto(row, { oosFraction: oosByRun.get(row.runId) ?? null }))
       .sort((a, b) => (b.leveragedNetProfitPercent ?? 0) - (a.leveragedNetProfitPercent ?? 0))
       .slice(0, limit);
-    const results = ranked.map((dto, idx) => ({ ...dto, rank: idx + 1 }));
+    const results = withRobustnessRanks(ranked.map((dto, idx) => ({ ...dto, rank: idx + 1 })));
     // Strategy-level set spanning runs → top-level runId is null; each result
     // carries its own runId.
     return {

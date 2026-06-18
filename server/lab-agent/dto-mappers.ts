@@ -40,6 +40,7 @@ import type {
   HeatmapDto,
 } from "@shared/lab-agent-contract";
 import { getMaxLeverageFromTiers, suggestedLeverageFromDrawdown } from "@shared/leverage";
+import { robustnessRank } from "../lab/metrics";
 
 const MAX_ERROR_REASON_CHARS = 240;
 /** Hard cap on heatmap cells handed to the agent (context-size guard). */
@@ -220,6 +221,20 @@ export function toBacktestResultDto(
   );
   const leveragedNetProfitPercent =
     Math.round(row.netProfitPercent * suggestedLeverage * 10) / 10;
+  // OOS-aware durability score (higher = steadier). Computed here so the agent can
+  // present a robustness view next to the headline profit number. `robustnessRank`
+  // needs the whole set, so it is a placeholder here and is filled in by
+  // withRobustnessRanks once the caller has the full list.
+  const robustnessScore = robustnessRank({
+    netProfitPercent: row.netProfitPercent,
+    winRatePercent: row.winRatePercent,
+    maxDrawdownPercent: row.maxDrawdownPercent,
+    profitFactor: row.profitFactor,
+    totalTrades: row.totalTrades,
+    sharpeRatio: row.sharpeRatio ?? undefined,
+    is: row.isMetrics ?? undefined,
+    oos: row.oosMetrics ?? undefined,
+  });
   return {
     resultId: row.id,
     runId: row.runId,
@@ -234,9 +249,24 @@ export function toBacktestResultDto(
     totalTrades: row.totalTrades,
     suggestedLeverage,
     leveragedNetProfitPercent,
+    robustnessScore,
+    robustnessRank: 0,
     params: (row.params ?? {}) as Record<string, unknown>,
     oos: toOosSummaryDto(row.oosMetrics, opts.oosFraction),
   };
+}
+
+/**
+ * Fill in each result's `robustnessRank` (1 = highest robustnessScore) over the
+ * given set. The array's own order is left untouched (it stays in whatever primary
+ * order the caller built, e.g. post-leverage profit), so a single payload carries
+ * BOTH the profit ordering (`rank`) and the robustness ordering (`robustnessRank`).
+ */
+export function withRobustnessRanks(results: BacktestResultDto[]): BacktestResultDto[] {
+  const byRobust = [...results].sort((a, b) => b.robustnessScore - a.robustnessScore);
+  const rankById = new Map<number, number>();
+  byRobust.forEach((r, idx) => rankById.set(r.resultId, idx + 1));
+  return results.map((r) => ({ ...r, robustnessRank: rankById.get(r.resultId) ?? r.robustnessRank }));
 }
 
 export function toTopResultsDto(
@@ -248,10 +278,11 @@ export function toTopResultsDto(
   return {
     strategyId,
     runId: runId ?? null,
-    // Honest: the current lab ranks by its own objective, not robustness. The
-    // adapter switches this to "robustness" only once it actually re-ranks.
+    // The list order is the lab's own objective (profit-weighted), NOT robustness;
+    // each result additionally carries a robustnessRank so the robustness ordering
+    // travels in the same payload.
     rankedBy: "lab_objective",
-    results: rows.map((r) => toBacktestResultDto(r, opts)),
+    results: withRobustnessRanks(rows.map((r) => toBacktestResultDto(r, opts))),
   };
 }
 

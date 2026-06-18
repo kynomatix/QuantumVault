@@ -810,6 +810,46 @@ describe("reads: getTopResults ranks by POST-LEVERAGE performance (matches the R
       [...rows].sort((a, b) => lev(b) - lev(a)).map((r) => lev(r)),
     );
   });
+
+  it("carries a SECOND robustness ordering (robustnessRank) that can differ from the profit order", async () => {
+    const { fake, toolkit } = makeToolkit();
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    fake.strategies.push({ id: 9, userId: WALLET, name: "BOTH", description: null, createdAt: now });
+    // SOL: biggest headline net but worst drawdown and NO out-of-sample -> flashiest
+    //   by leveraged profit, but not durable.
+    // BTC: middling, but its Sharpe COLLAPSES out-of-sample -> a curve-fit.
+    // ETH: small absolute net (so it is LAST by leveraged profit) but a high Sharpe
+    //   that HOLDS up out-of-sample -> the steadiest, so robustnessRank 1.
+    const rows = [
+      { id: 901, runId: 90, rank: 1, ticker: "SOL", timeframe: "4h", netProfitPercent: 80, winRatePercent: 50, maxDrawdownPercent: 40, profitFactor: 1.2, totalTrades: 60, sharpeRatio: 0.5, params: {}, isMetrics: null, oosMetrics: null },
+      { id: 902, runId: 90, rank: 2, ticker: "BTC", timeframe: "4h", netProfitPercent: 30, winRatePercent: 58, maxDrawdownPercent: 20, profitFactor: 1.8, totalTrades: 50, sharpeRatio: 1.3, params: {},
+        isMetrics: { netProfitPercent: 32, winRatePercent: 58, maxDrawdownPercent: 20, profitFactor: 1.9, totalTrades: 38, sharpeRatio: 1.3 },
+        oosMetrics: { sufficient: true, netProfitPercent: 5, winRatePercent: 50, maxDrawdownPercent: 25, profitFactor: 1.1, totalTrades: 12, sharpeRatio: 0.4 } },
+      { id: 903, runId: 90, rank: 3, ticker: "ETH", timeframe: "4h", netProfitPercent: 12, winRatePercent: 66, maxDrawdownPercent: 10, profitFactor: 2.6, totalTrades: 45, sharpeRatio: 1.9, params: {},
+        isMetrics: { netProfitPercent: 14, winRatePercent: 66, maxDrawdownPercent: 9, profitFactor: 2.7, totalTrades: 33, sharpeRatio: 1.9 },
+        oosMetrics: { sufficient: true, netProfitPercent: 10, winRatePercent: 62, maxDrawdownPercent: 11, profitFactor: 2.2, totalTrades: 13, sharpeRatio: 1.6 } },
+    ];
+    fake.topResults[9] = rows;
+
+    const res = await toolkit.call(ctx, "getTopResults", { strategyId: 9 });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const out = res.data.results;
+    // Every result carries both a numeric robustness score and an integer rank.
+    expect(out.every((r) => Number.isFinite(r.robustnessScore))).toBe(true);
+    expect(out.every((r) => Number.isInteger(r.robustnessRank))).toBe(true);
+    // robustnessRank is a 1..N permutation over the returned set.
+    expect([...out.map((r) => r.robustnessRank)].sort((a, b) => a - b)).toEqual([1, 2, 3]);
+    // The steady, out-of-sample-confirmed config (ETH) is the most robust.
+    expect(out.find((r) => r.ticker === "ETH")?.robustnessRank).toBe(1);
+    // The flashiest by leveraged profit (rank 1) is NOT the most robust -> the two
+    // orderings genuinely differ, which is the whole point of carrying both.
+    const byProfit = out.map((r) => r.ticker);
+    const byRobust = [...out].sort((a, b) => a.robustnessRank - b.robustnessRank).map((r) => r.ticker);
+    expect(out[0].rank).toBe(1);
+    expect(out[0].robustnessRank).not.toBe(1);
+    expect(byProfit).not.toEqual(byRobust);
+  });
 });
 
 describe("generateInsights (deterministic, no LLM, no persist)", () => {
