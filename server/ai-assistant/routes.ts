@@ -35,7 +35,8 @@ import { decideTurnAction, defaultAutoMemory, type BrainFn, type AutoMemory, typ
 import { createAutoPlanner } from "../lab-agent/auto-planner";
 import { selectDeployableResult, type AutoDeployableResultView } from "./deployable-result";
 import { looksLikeApiKey } from "@shared/api-key-detect";
-import { createLabTurnOrchestrator, AUTO_CONFIRM_PREFIX, AUTO_DECLINE_PREFIX } from "../lab-agent/orchestrator";
+import { createLabTurnOrchestrator, AUTO_CONFIRM_PREFIX, AUTO_DECLINE_PREFIX, AUTO_STYLE_PREFIX } from "../lab-agent/orchestrator";
+import { styleById } from "../lab-agent/strategy-styles";
 import { LabAgentToolkit } from "../lab-agent/toolkit";
 import { createCurrentLabAdapter } from "../lab-agent/current-lab-adapter";
 import { reconcileTask } from "../lab-agent/reconciler";
@@ -573,6 +574,62 @@ export function registerCreatorRoutes(
         const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
         const msgs = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
         return res.status(200).json({ messages: msgs, task: updated ? toTurnTaskDto(updated) : null });
+      }
+
+      // --- auto-mode style gate signal (create phase) --------------------------
+      // The planner's "what kind of strategy?" prompt renders each option as a kind:"send"
+      // chip carrying this sentinel + a style id. Like the confirm sentinels it's a CONTROL
+      // signal, not chat the user typed: intercept it HERE, before the secret guard. Record
+      // the chosen style on memory, then re-drive the planner so it drafts with that style.
+      if (content.startsWith(AUTO_STYLE_PREFIX)) {
+        const styleId = content.slice(AUTO_STYLE_PREFIX.length).trim();
+        const task = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+        if (!task) return res.status(404).json({ error: "Conversation not found." });
+        const auto = readAutoMemory(task);
+        const style = styleById(styleId);
+        // CAS: act only while THIS run is genuinely awaiting a style and the id is known. A
+        // stale/duplicate chip (double-click, an old transcript) is an idempotent no-op.
+        const matches =
+          task.mode === "auto" && auto?.awaitingStyle === true && !auto?.style && !!style;
+        if (!matches) {
+          const current = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
+          return res.status(202).json({ messages: current, task: toTurnTaskDto(task) });
+        }
+        // Record the choice as a readable user line (unlike the confirm sentinel, the style
+        // pick is a real decision worth showing), apply it, and re-drive the planner.
+        await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
+          role: "user",
+          content: style!.label,
+        });
+        const nextAuto: AutoMemory = { ...(auto as AutoMemory), style: styleId, awaitingStyle: false };
+        await labStorage.updateAgentTask(taskId, {
+          memory: { ...((task.memory as Record<string, unknown>) ?? {}), auto: nextAuto },
+          status: "active",
+          turnState: "running_turn",
+          turnStateChangedAt: new Date(),
+        });
+        const outcome = await startTaskTurn(r.walletAddress, taskId, undefined, "auto");
+        if (outcome === "no-key") {
+          // Key/session gone between the pick and the re-drive. If the key still EXISTS this
+          // is a locked session: PARK for a re-sign (keeping the chosen style). If it was
+          // DELETED, re-signing can't help, so drop to chat with a re-add note.
+          const keyMeta = await storage.getWalletLlmApiKeyMeta(r.walletAddress);
+          if (!keyMeta.hasKey) {
+            await labStorage.updateAgentTask(taskId, {
+              mode: "chat", status: "active", turnState: "ready", turnStateChangedAt: new Date(),
+            });
+            await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
+              role: "agent",
+              content: KEY_MISSING_REPLY.content,
+              suggestedActions: KEY_MISSING_REPLY.suggestedActions,
+            });
+          } else {
+            await pauseAutoForReauth(r.walletAddress, taskId, task, nextAuto);
+          }
+        }
+        const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+        const msgs = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
+        return res.status(202).json({ messages: msgs, task: updated ? toTurnTaskDto(updated) : null });
       }
 
       // Pasted-secret guard (security): a pasted API key must NEVER be persisted

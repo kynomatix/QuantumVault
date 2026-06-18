@@ -31,6 +31,7 @@ import {
   type PaidTool,
   type WorkingTool,
 } from "./chat-brain";
+import { buildStyledPrompt, matchStyleInText, styleById } from "./strategy-styles";
 import type { BacktestResultDto, TopResultsDto } from "@shared/lab-agent-contract";
 
 export const AUTO_PLANNER_MODEL = "auto-planner";
@@ -82,6 +83,23 @@ function tool(t: WorkingTool, args: Record<string, unknown>, nextAuto: AutoMemor
 
 function final(message: string, nextAuto: AutoMemory): AutoPlanResult {
   return { decision: { action: "final", message }, nextAuto };
+}
+
+/** Park on the create-phase style gate: ask the user which KIND of strategy to build and
+ *  wait for a pick. Pre-detects a style from the goal text for a one-tap confirm. Used by
+ *  the create phase AND the confirm-replay path so a paid draft can NEVER run before a
+ *  style is chosen (fail closed). */
+function styleGate(goal: string, nextAuto: AutoMemory): AutoPlanResult {
+  const detectedStyleId = matchStyleInText(goal);
+  const detected = styleById(detectedStyleId);
+  const message = detected
+    ? `It sounds like you want a ${detected.label.toLowerCase()} strategy. ` +
+      "Pick it below to confirm, or choose a different style first."
+    : "Before I build it, what kind of strategy should I create? Pick one below to get started.";
+  return {
+    decision: { action: "await_style", message, detectedStyleId },
+    nextAuto: { ...nextAuto, awaitingStyle: true },
+  };
 }
 
 /** The full target basket, normalized so a malformed/empty memory still yields a usable
@@ -217,6 +235,12 @@ export function planAutoTurn(ctx: AutoTurnContext, deps: AutoPlannerDeps): AutoP
           graduated: false,
         });
       }
+      // Fail closed: a confirmed create with no chosen style can only come from
+      // legacy/in-flight memory written before the style gate existed. Never draft
+      // blindly. Drop the stale confirm and ask which KIND to build first.
+      if (!a.style) {
+        return styleGate((ctx.goal ?? "").trim(), cleared);
+      }
       return tool("createStrategyFromText", pc.args, { ...cleared, phase: "backtest", graduated: false });
     }
     // improve: queues a fresh backtest of the rewritten strategy; count it, re-evaluate.
@@ -249,11 +273,20 @@ export function planAutoTurn(ctx: AutoTurnContext, deps: AutoPlannerDeps): AutoP
           { ...stepped, phase: "done" },
         );
       }
+      // Style gate: before drafting a NEW strategy, ask the user which KIND to build and
+      // wait for them to pick. This fires in BOTH watched and hands-off mode (choosing a
+      // direction is not a spend, so there's deliberately no hands-off bypass). Once
+      // `style` is set (by the style chip route), fold it into the create prompt and
+      // proceed to the paid draft.
+      if (!a.style) {
+        return styleGate(goal, stepped);
+      }
+      const styleLabel = (styleById(a.style)?.label ?? "custom").toLowerCase();
       return requestPaid(
         "createStrategyFromText",
-        { prompt: goal },
-        "I'll draft a strategy from your idea using AI.",
-        stepped,
+        { prompt: buildStyledPrompt(goal, a.style) },
+        `I'll draft a ${styleLabel} strategy from your idea using AI.`,
+        { ...stepped, awaitingStyle: false },
         ctx,
         deps,
         limits,

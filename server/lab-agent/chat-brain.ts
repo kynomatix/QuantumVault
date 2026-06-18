@@ -234,7 +234,13 @@ export type BrainDecision =
   // STOP before a PAID tool and ask the user to approve the spend. The LLM chat brain
   // NEVER emits it — it is deliberately absent from `brainDecisionSchema`, so a model
   // can never trigger a paid step unprompted.
-  | { action: "await_confirm"; tool: PaidTool; args: Record<string, unknown>; estCostUsd: number; reason: string };
+  | { action: "await_confirm"; tool: PaidTool; args: Record<string, unknown>; estCostUsd: number; reason: string }
+  // Backend-only (auto mode): the deterministic planner emits this BEFORE drafting a NEW
+  // strategy to ask the user which KIND to build (breakout, mean reversion, etc.). Like
+  // await_confirm it is planner-only and deliberately absent from brainDecisionSchema, so
+  // the LLM chat brain can never emit it. `detectedStyleId` is a style guessed from the
+  // goal (or null when none is obvious).
+  | { action: "await_style"; message: string; detectedStyleId?: string | null };
 
 const toolDecisionSchema = z.object({
   action: z.literal("tool"),
@@ -318,6 +324,15 @@ export interface AutoMemory {
    * so a wallet re-sign + /auto/resume picks up exactly where it left off. Cleared on resume.
    */
   pausedForReauth?: boolean | null;
+  /**
+   * Auto mode create-phase STYLE gate. `awaitingStyle` is true while the run is PARKED
+   * asking the user what KIND of strategy to build (breakout, mean reversion, etc.); the
+   * planner will not draft until `style` is set. `style` is a chosen STRATEGY_STYLES id
+   * (or a free-text style for a typed answer) that gets folded into the create prompt. A
+   * fresh auto run resets both.
+   */
+  style?: string | null;
+  awaitingStyle?: boolean | null;
 }
 
 // The auto-pipeline's target basket. SOL is the PROVING symbol (proved first); the rest
@@ -339,6 +354,8 @@ export function defaultAutoMemory(): AutoMemory {
     handsOff: false,
     graduated: false,
     pausedForReauth: false,
+    style: null,
+    awaitingStyle: false,
   };
 }
 

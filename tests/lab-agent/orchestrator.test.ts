@@ -701,7 +701,9 @@ describe("LabTurnOrchestrator — auto mode confirm gate", () => {
     const store = makeStore({
       mode: "auto",
       goal: "a momentum strategy on SOL",
-      memory: { auto: defaultAutoMemory() } as unknown as Record<string, unknown>,
+      // A style is already chosen, so the run is at the PAID-create confirm. The style gate
+      // itself is exercised by its own tests; seeding it keeps this test on the confirm gate.
+      memory: { auto: { ...defaultAutoMemory(), style: "trend" } } as unknown as Record<string, unknown>,
     });
     const toolkit = makeToolkit({});
     const orch = makeOrch(store, toolkit);
@@ -736,6 +738,7 @@ describe("LabTurnOrchestrator — auto mode confirm gate", () => {
         args: { prompt: "momentum on SOL" },
       },
       confirmedToken: "tok-9",
+      style: "trend", // style chosen earlier; a confirmed create only exists past the style gate
     };
     const store = makeStore({
       mode: "auto",
@@ -770,6 +773,7 @@ describe("LabTurnOrchestrator — auto mode confirm gate", () => {
         args: { prompt: "momentum on SOL" },
       },
       confirmedToken: "tok-STALE",
+      style: "trend", // style already chosen; this test exercises the confirm-token CAS
     };
     const store = makeStore({
       mode: "auto",
@@ -861,9 +865,36 @@ describe("LabTurnOrchestrator — auto mode confirm gate", () => {
 describe("LabTurnOrchestrator — hands-off (autonomous) mode", () => {
   const estimatePaidCostUsd = (t: PaidTool) => (t === "createStrategyFromText" ? 0.06 : 0.12);
 
+  // Hands-off auto memory. A style is chosen by default so these tests land at the PAID-create
+  // step they exercise; the style gate firing in hands-off mode is covered by its own test
+  // (pass { style: null } to reach the gate).
   function handsOffMemory(over: Partial<AutoMemory> = {}): Record<string, unknown> {
-    return { auto: { ...defaultAutoMemory(), handsOff: true, ...over } } as unknown as Record<string, unknown>;
+    return { auto: { ...defaultAutoMemory(), handsOff: true, style: "trend", ...over } } as unknown as Record<string, unknown>;
   }
+
+  it("the style gate STILL fires in hands-off mode (a direction choice is not a spend)", async () => {
+    const store = makeStore({
+      mode: "auto",
+      goal: "build me a strategy on SOL",
+      memory: handsOffMemory({ style: null }),
+    });
+    const toolkit = makeToolkit({ createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }) });
+    const orch = makeOrch(store, toolkit, { isHandsOffApproved: async () => true });
+    const brain = createAutoPlanner({ estimatePaidCostUsd });
+
+    const r = await orch.advance(1, { brain, hasKey: true });
+
+    expect(r.outcome).toBe("awaiting_style"); // parks for the KIND even though hands-off is on
+    expect(toolkit.countOf("createStrategyFromText")).toBe(0); // no draft until a style is picked
+    const task = store.tasks.get(1)!;
+    expect(task.status).toBe("awaiting_input");
+    expect(task.turnState).toBe("ready"); // stays in auto + ready, like the confirm park
+    expect((task.memory as any).auto.awaitingStyle).toBe(true);
+    // style chips are posted, and NO auto-approval happened
+    const chips = store.agentMessages().at(-1)!.suggestedActions as any[];
+    expect(chips.some((c) => String(c.id).startsWith("auto-style-"))).toBe(true);
+    expect(store.messages.some((m) => m.role === "tool" && String(m.content).includes("auto-approved"))).toBe(false);
+  });
 
   it("auto-runs the PAID create with NO confirm park — bills it once and posts a single note", async () => {
     const store = makeStore({ mode: "auto", goal: "a momentum strategy on SOL", memory: handsOffMemory() });

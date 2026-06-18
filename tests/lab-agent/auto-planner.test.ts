@@ -62,18 +62,58 @@ function topResults(results: BacktestResultDto[]): TopResultsDto {
 }
 
 describe("auto-planner: pipeline order", () => {
-  it("create phase with NO strategy asks to confirm the PAID create (never a bare tool call)", () => {
+  it("create phase with NO style FIRST asks which KIND of strategy (style gate), never a paid step", () => {
     const { decision, nextAuto } = planAutoTurn(ctx(), deps());
+    expect(decision.action).toBe("await_style");
+    if (decision.action !== "await_style") throw new Error("unreachable");
+    // The goal mentions momentum, so the trend style is pre-detected for a one-tap confirm.
+    expect(decision.detectedStyleId).toBe("trend");
+    expect(decision.message.length).toBeGreaterThan(0);
+    // Parked awaiting the pick: no phase advance, no paid step queued yet.
+    expect(nextAuto.phase).toBe("create");
+    expect(nextAuto.awaitingStyle).toBe(true);
+    expect(nextAuto.autoStepCount).toBe(1);
+  });
+
+  it("style gate with a generic goal detects no style (open question, no pre-pick)", () => {
+    const { decision } = planAutoTurn(ctx({ goal: "make me money on SOL" }), deps());
+    expect(decision.action).toBe("await_style");
+    if (decision.action !== "await_style") throw new Error("unreachable");
+    expect(decision.detectedStyleId ?? null).toBeNull();
+  });
+
+  it("create phase with a CHOSEN style asks to confirm the PAID create, folding the style into the prompt", () => {
+    const { decision, nextAuto } = planAutoTurn(ctx({ memory: mem({ style: "breakout" }) }), deps());
     expect(decision.action).toBe("await_confirm");
     if (decision.action !== "await_confirm") throw new Error("unreachable");
     expect(decision.tool).toBe("createStrategyFromText");
-    expect(decision.args).toEqual({ prompt: "a momentum strategy on SOL" });
+    const prompt = String((decision.args as { prompt: string }).prompt);
+    expect(prompt).toContain("a momentum strategy on SOL"); // original goal preserved
+    expect(prompt.toLowerCase()).toContain("breakout"); // chosen style folded in
     expect(decision.estCostUsd).toBe(PAID_EST);
     // Phase does NOT advance yet — it advances only once the user confirms.
     expect(nextAuto.phase).toBe("create");
+    expect(nextAuto.awaitingStyle).toBe(false);
     expect(nextAuto.autoStepCount).toBe(1);
     // The planner never mints the token — the orchestrator does.
     expect(nextAuto.pendingConfirm ?? null).toBeNull();
+  });
+
+  it("a confirmed PAID create with NO style re-asks the style gate (fail closed, never drafts blindly)", () => {
+    // Legacy/in-flight memory: an approved create confirm but no style was ever chosen
+    // (e.g. memory written before the style gate existed). The replay path must NOT draft.
+    const auto = mem({
+      phase: "create",
+      style: null,
+      pendingConfirm: { tool: "createStrategyFromText", token: "tok-1", estCostUsd: PAID_EST, args: { prompt: "x" } },
+      confirmedToken: "tok-1",
+    });
+    const { decision, nextAuto } = planAutoTurn(ctx({ memory: auto, currentStrategyId: null }), deps());
+    expect(decision.action).toBe("await_style");
+    // The stale confirm is dropped so it can never run on a later tick.
+    expect(nextAuto.pendingConfirm ?? null).toBeNull();
+    expect(nextAuto.confirmedToken ?? null).toBeNull();
+    expect(nextAuto.awaitingStyle).toBe(true);
   });
 
   it("create phase asks for a description when there is no goal and no strategy", () => {
@@ -304,7 +344,8 @@ describe("auto-planner: confirmed paid steps", () => {
       args: { prompt: "x" },
     };
     const { decision, nextAuto } = planAutoTurn(
-      ctx({ memory: mem({ phase: "create", pendingConfirm, confirmedToken: "tok-1" }) }),
+      // style chosen earlier: a confirmed create only ever exists after the style gate.
+      ctx({ memory: mem({ phase: "create", style: "trend", pendingConfirm, confirmedToken: "tok-1" }) }),
       deps(),
     );
     expect(decision.action).toBe("tool");
@@ -390,7 +431,7 @@ describe("auto-planner: caps and guards", () => {
 
   it("the pre-spend 90% guard refuses to ask for a paid step and finals instead", () => {
     // cap=2.0, 90% = 1.8; spendSoFar 1.79 + est 0.05 = 1.84 > 1.8 → halt.
-    const { decision, nextAuto } = planAutoTurn(ctx({ spendSoFarUsd: 1.79 }), deps());
+    const { decision, nextAuto } = planAutoTurn(ctx({ spendSoFarUsd: 1.79, memory: mem({ style: "trend" }) }), deps());
     expect(decision.action).toBe("final");
     expect(nextAuto.phase).toBe("done");
     expect((decision as { message: string }).message).toMatch(/spend cap/i);
@@ -398,7 +439,7 @@ describe("auto-planner: caps and guards", () => {
 
   it("just under the 90% guard still asks to confirm", () => {
     // 1.70 + 0.05 = 1.75 < 1.8 → allowed.
-    const { decision } = planAutoTurn(ctx({ spendSoFarUsd: 1.7 }), deps());
+    const { decision } = planAutoTurn(ctx({ spendSoFarUsd: 1.7, memory: mem({ style: "trend" }) }), deps());
     expect(decision.action).toBe("await_confirm");
   });
 });

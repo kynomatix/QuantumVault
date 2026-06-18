@@ -49,6 +49,7 @@ import {
   type BrainTurnContext,
   type WorkingTool,
 } from "./chat-brain";
+import { STRATEGY_STYLES, styleById } from "./strategy-styles";
 import type { NextStepContext } from "./chat-replies";
 
 // --- tunables (§7; per docs §13 these are the safety nets, not budgets) ----------
@@ -83,6 +84,10 @@ const AUTO_TOOL_DATA_CAP = 16000; // cap the auto stashed tool result (still hol
 // pendingConfirm token that must match for a paid step to run.
 export const AUTO_CONFIRM_PREFIX = "__auto_confirm__:";
 export const AUTO_DECLINE_PREFIX = "__auto_decline__:";
+// Sentinel for the auto-mode create-phase STYLE chips. The planner's "what kind of
+// strategy?" prompt renders each option as a kind:"send" chip carrying this prefix + a
+// style id; the /messages route decodes it like the confirm sentinels above.
+export const AUTO_STYLE_PREFIX = "__auto_style__:";
 
 // A task is terminal when it can no longer think. Mirrors task-store's set but kept
 // local so the orchestrator does not depend on the auto-loop task store.
@@ -135,6 +140,7 @@ export type AdvanceOutcome =
   | "final" // the brain finished the turn with a reply
   | "waiting" // parked on an async run; the client should POST /step
   | "awaiting_confirm" // auto mode parked on a PAID step; the user must confirm/decline
+  | "awaiting_style" // auto mode parked on the create-phase style gate; user picks a kind
   | "stopped" // task terminal or stop requested; brain not called
   | "halted_iterations" // hit the global brain-call cap; degraded
   | "halted_spend" // hit the hard spend cap; degraded
@@ -517,6 +523,18 @@ export class LabTurnOrchestrator {
         // ...and once more AFTER the park write, to catch a Stop that raced it.
         if (await this.stopAutoIfRequested(taskId)) return { outcome: "stopped" };
         return { outcome: "awaiting_confirm" };
+      }
+
+      if (decision.action === "await_style") {
+        // The create-phase STYLE gate. Like await_confirm this is a park that stays in
+        // auto + ready (it does NOT flip to chat), so the run resumes once the user picks a
+        // style. It fires in hands-off mode too: choosing a direction is not a spend, so
+        // there is deliberately no hands-off auto-approve here. Honor a racing Stop both
+        // before and after the park write, mirroring the confirm gate.
+        if (await this.stopAutoIfRequested(taskId)) return { outcome: "stopped" };
+        await this.requestStyleSelection(task, decision, nextAuto);
+        if (await this.stopAutoIfRequested(taskId)) return { outcome: "stopped" };
+        return { outcome: "awaiting_style" };
       }
 
       // decision.action === "tool"
@@ -1003,6 +1021,67 @@ export class LabTurnOrchestrator {
       loopCount: 0,
       turnStateChangedAt: this.now(),
     });
+  }
+
+  // Park an auto turn on the create-phase STYLE gate: post the "what kind of strategy?"
+  // prompt once (idempotent on re-drive) with one send-chip per style, and move the task to
+  // awaiting_input. The planner will not draft until the style route writes memory.auto.style.
+  // This park keeps mode "auto", so the user's pick resumes the run.
+  private async requestStyleSelection(
+    task: LabAgentTask,
+    decision: Extract<BrainDecision, { action: "await_style" }>,
+    nextAuto?: AutoMemory,
+  ): Promise<void> {
+    const memory = readMemory(task);
+    // Idempotency reads the PERSISTED state (a re-drive must not re-ask); the base for a
+    // fresh ask is the planner's nextAuto so the advanced step count sticks.
+    const persisted = memory.auto;
+    const base = nextAuto ?? persisted ?? defaultAutoMemory();
+    const alreadyAsked = persisted?.awaitingStyle === true && !persisted?.style;
+    if (!alreadyAsked) {
+      memory.auto = { ...base, awaitingStyle: true, style: null };
+      (task as { memory?: unknown }).memory = memory;
+      const chips = this.buildStyleChips(decision.detectedStyleId);
+      await this.storage.createAgentMessageForWallet(task.walletAddress, task.id, {
+        role: "agent",
+        content: decision.message,
+        suggestedActions: chips,
+      });
+      await this.storage.updateAgentTask(task.id, { memory: memory as unknown as Record<string, unknown> });
+    }
+    await this.storage.updateAgentTask(task.id, {
+      status: "awaiting_input",
+      turnState: "ready",
+      currentStep: null,
+      loopCount: 0,
+      turnStateChangedAt: this.now(),
+    });
+  }
+
+  // One kind:"send" chip per strategy style, each carrying the style sentinel the /messages
+  // route decodes. A style detected from the goal is hoisted to the front as a "Yes, <style>"
+  // confirm chip so the user can accept their stated direction in one tap.
+  private buildStyleChips(detectedStyleId?: string | null): AgentSuggestedAction[] {
+    const detected = styleById(detectedStyleId);
+    const chips: AgentSuggestedAction[] = [];
+    if (detected) {
+      chips.push({
+        id: `auto-style-${detected.id}`,
+        label: `Yes, ${detected.label.toLowerCase()}`,
+        kind: "send",
+        message: `${AUTO_STYLE_PREFIX}${detected.id}`,
+      });
+    }
+    for (const s of STRATEGY_STYLES) {
+      if (detected && s.id === detected.id) continue;
+      chips.push({
+        id: `auto-style-${s.id}`,
+        label: s.label,
+        kind: "send",
+        message: `${AUTO_STYLE_PREFIX}${s.id}`,
+      });
+    }
+    return chips;
   }
 
   // Task 201 — LIVE, fail-closed hands-off gate. Wraps the injected whitelist check so a
