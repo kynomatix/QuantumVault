@@ -9,7 +9,7 @@ import { describe, it, expect } from "vitest";
 import { LabAgentToolkit, type LabAgentAdapter } from "../../server/lab-agent/toolkit";
 import { createCurrentLabAdapter, type AdapterStorage } from "../../server/lab-agent/current-lab-adapter";
 import { DEFAULT_LAB_SLIPPAGE } from "../../server/lab/friction";
-import { robustnessRank } from "../../server/lab/metrics";
+import { getMaxLeverageFromTiers, suggestedLeverageFromDrawdown } from "../../shared/leverage";
 
 const WALLET = "wallet-AAA";
 const OTHER = "wallet-BBB";
@@ -347,12 +347,12 @@ describe("reads: findStrategy", () => {
 });
 
 describe("reads: getTopResults", () => {
-  it("returns robustness ranking with per-run OOS resolved", async () => {
+  it("ranks by post-leverage performance with per-run OOS resolved", async () => {
     const { toolkit } = makeToolkit();
     const res = await toolkit.call(ctx, "getTopResults", { strategyId: 1 });
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(res.data.rankedBy).toBe("robustness");
+    expect(res.data.rankedBy).toBe("lab_objective");
     expect(res.data.runId).toBeNull(); // spans runs
     expect(res.data.results).toHaveLength(1);
     const r = res.data.results[0];
@@ -772,45 +772,43 @@ describe("reads: getHeatmap (strategy-level ticker×timeframe grid)", () => {
   });
 });
 
-describe("reads: getTopResults re-ranks by ROBUSTNESS, not the headline number", () => {
-  // Same structural map the adapter applies before robustnessRank.
-  const rrank = (row: any) =>
-    robustnessRank({
-      netProfitPercent: row.netProfitPercent,
-      winRatePercent: row.winRatePercent,
-      maxDrawdownPercent: row.maxDrawdownPercent,
-      profitFactor: row.profitFactor,
-      totalTrades: row.totalTrades,
-      sharpeRatio: row.sharpeRatio ?? undefined,
-      is: row.isMetrics ?? undefined,
-      oos: row.oosMetrics ?? undefined,
-    });
+describe("reads: getTopResults ranks by POST-LEVERAGE performance (matches the Results tab)", () => {
+  // Mirror the adapter's own post-leverage figure: net profit times the
+  // drawdown-sized suggested leverage (same shared helpers the DTO uses), so a
+  // high-net but high-drawdown config can still rank below a steadier one once
+  // its leverage is capped down for risk.
+  const lev = (row: any) =>
+    Math.round(
+      row.netProfitPercent *
+        suggestedLeverageFromDrawdown(row.maxDrawdownPercent, getMaxLeverageFromTiers(row.ticker)) *
+        10,
+    ) / 10;
 
-  it("demotes a high-net but high-risk config below a risk-adjusted one", async () => {
+  it("orders results by post-leverage net profit, highest first", async () => {
     const { fake, toolkit } = makeToolkit();
     const now = new Date("2026-01-01T00:00:00.000Z");
     fake.strategies.push({ id: 6, userId: WALLET, name: "RERANK", description: null, createdAt: now });
     // DB order (by the lab's profit rank): SOL, ETH, BTC. SOL has the biggest
-    // headline net (80%) but the worst risk; ETH the best risk-adjusted profile.
+    // headline net (80%) but the worst drawdown; ETH the steadiest.
     const rows = [
       { id: 601, runId: 60, rank: 1, ticker: "SOL", timeframe: "2h", netProfitPercent: 80, winRatePercent: 50, maxDrawdownPercent: 40, profitFactor: 1.2, totalTrades: 60, sharpeRatio: 0.5, params: {}, isMetrics: null, oosMetrics: null },
       { id: 602, runId: 60, rank: 2, ticker: "ETH", timeframe: "2h", netProfitPercent: 30, winRatePercent: 65, maxDrawdownPercent: 8, profitFactor: 2.5, totalTrades: 45, sharpeRatio: 1.8, params: {}, isMetrics: null, oosMetrics: null },
       { id: 603, runId: 60, rank: 3, ticker: "BTC", timeframe: "2h", netProfitPercent: 55, winRatePercent: 58, maxDrawdownPercent: 20, profitFactor: 1.8, totalTrades: 50, sharpeRatio: 1.1, params: {}, isMetrics: null, oosMetrics: null },
     ];
     fake.topResults[6] = rows;
-    const expectedOrder = [...rows].sort((a, b) => rrank(b) - rrank(a)).map((r) => r.ticker);
+    const expectedOrder = [...rows].sort((a, b) => lev(b) - lev(a)).map((r) => r.ticker);
 
     const res = await toolkit.call(ctx, "getTopResults", { strategyId: 6 });
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(res.data.rankedBy).toBe("robustness");
+    expect(res.data.rankedBy).toBe("lab_objective");
     expect(res.data.runId).toBeNull();
+    // Exactly the post-leverage order, and renumbered to it (rank 1 = highest leveraged return).
     expect(res.data.results.map((r) => r.ticker)).toEqual(expectedOrder);
-    // Renumbered to the robustness order (1 = most robust), not the DB rank.
     expect(res.data.results.map((r) => r.rank)).toEqual([1, 2, 3]);
-    // The headline net-profit winner (SOL) is NOT first — it's demoted to last.
-    expect(res.data.results[0].ticker).not.toBe("SOL");
-    expect(res.data.results[res.data.results.length - 1].ticker).toBe("SOL");
+    expect(res.data.results.map((r) => r.leveragedNetProfitPercent)).toEqual(
+      [...rows].sort((a, b) => lev(b) - lev(a)).map((r) => lev(r)),
+    );
   });
 });
 

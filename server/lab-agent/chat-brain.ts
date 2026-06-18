@@ -312,6 +312,12 @@ export interface AutoMemory {
    * the primary and the pipeline has graduated to backtesting the remaining symbols.
    */
   graduated?: boolean;
+  /**
+   * Set true when an auto run hits a locked session (the 30-min UMK timeout) mid-flight.
+   * The run is PARKED, not killed: mode stays "auto" and every other field is preserved,
+   * so a wallet re-sign + /auto/resume picks up exactly where it left off. Cleared on resume.
+   */
+  pausedForReauth?: boolean | null;
 }
 
 // The auto-pipeline's target basket. SOL is the PROVING symbol (proved first); the rest
@@ -332,6 +338,7 @@ export function defaultAutoMemory(): AutoMemory {
     confirmedToken: null,
     handsOff: false,
     graduated: false,
+    pausedForReauth: false,
   };
 }
 
@@ -407,7 +414,7 @@ const DECIDE_SYSTEM_PROMPT = [
   "Available tools and their args (call NOTHING else):",
   '- listStrategies {} — the user\'s strategies.',
   '- findStrategy {"query":"name"} — fuzzy-find a strategy by name.',
-  '- getTopResults {"strategyId":N,"limit":N?,"timeframe":"4h"?,"ticker":"HYPE"?} — ROBUSTNESS-ranked backtest results (rank 1 = most robust). Pass timeframe and/or ticker to get the best result for EXACTLY that combo (use this whenever the user asks about a specific timeframe or asset so the freshest matching result is returned). Each carries a resultId you can pass to refineFrom to quick-hone THAT exact result.',
+  '- getTopResults {"strategyId":N,"limit":N?,"timeframe":"4h"?,"ticker":"HYPE"?} — backtest results ranked by post-leverage performance (rank 1 = highest leveraged return), matching the Results tab; each result also carries its out-of-sample check so you can flag curve-fits. Pass timeframe and/or ticker to get the best result for EXACTLY that combo (use this whenever the user asks about a specific timeframe or asset so the freshest matching result is returned). Each carries a resultId you can pass to refineFrom to quick-hone THAT exact result.',
   '- getHeatmap {"strategyId":N} — ticker×timeframe grid of avg Sharpe across the strategy\'s runs.',
   '- getInsightsReport {"strategyId":N} — the latest saved insights report, if any.',
   '- generateInsights {"strategyId":N} — compute FRESH insights (which params drive profit + a robustness read) from existing results. Free, no key.',
@@ -446,7 +453,7 @@ const DECIDE_SYSTEM_PROMPT = [
   "  THAT result's own reliability, not to insight quality. If only a few similar results",
   "  exist (e.g. a narrow refine), say plainly the report will be weak and recommend a broader",
   "  optimization first; state how many results were analyzed (from the tool summary).",
-  "- RANK and recommend by ROBUSTNESS, not headline profit: a result validated out-of-sample with steady Sharpe/drawdown beats a bigger in-sample return. getTopResults is already robustness-ranked.",
+  "- PRESENT results in getTopResults order, which is ranked by post-leverage performance to match the Results tab (rank 1 = highest leveraged return). For EACH result you discuss, also report its out-of-sample check as a clearly-labeled robustness note, and warn plainly when the top leveraged result is unvalidated or its Sharpe collapses out-of-sample (a likely curve-fit the user should be cautious about deploying).",
   "- KEEP a result only if it holds up out-of-sample (oos sufficient AND its Sharpe doesn't collapse vs in-sample); otherwise treat it as a curve-fit to KILL or re-test, never as a win.",
   "- A result with NO out-of-sample (oos:null) is UNVALIDATED, not good — say so; never present it as proven.",
   "- Never fabricate PnL, win rate, or parameter values you were not given by a tool.",
@@ -455,10 +462,10 @@ const DECIDE_SYSTEM_PROMPT = [
   "- If the user asks what you can do, who you are, how you work, or poses a hypothetical",
   "  that needs no lookup, do NOT call a tool — answer DIRECTLY with",
   '  {"action":"final","message":"..."} that describes your real, current abilities',
-  "  (drafting, backtesting across assets, refining, robustness-ranking results, insights,",
+  "  (drafting, backtesting across assets, refining, ranking results, insights,",
   "  improving) in plain, confident language, and offer to actually do one of them next.",
   "- SCOPE, be honest about limits: your tools work ONLY inside this backtesting lab",
-  "  (drafting, backtesting, refining, robustness-ranking, insights, run status for the",
+  "  (drafting, backtesting, refining, ranking, insights, run status for the",
   "  user's lab strategies). You CANNOT see a live or deployed bot's real trades or PnL,",
   "  you CANNOT read or change the user's TradingView account or its alert limits, and you",
   "  do NOT operate the live trading dashboard. If the user asks about any of those, say so",

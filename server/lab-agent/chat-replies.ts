@@ -73,12 +73,37 @@ export const SESSION_LOCKED_REPLY: ComposedReply = {
   suggestedActions: [{ id: "reconnect-session", label: "Reconnect to unlock", kind: "reconnect" }],
 };
 
+/** Two-button reply for a PAUSED auto run. The 30-min session UMK expired mid-run, so
+ *  instead of killing the run we park it and let the user choose: re-sign and pick up where
+ *  we left off, or clear it and start fresh. Both chips are kind:"reconnect" (they re-sign
+ *  first); the dock branches on the id to either resume or stop. */
+export const REAUTH_PAUSED_REPLY: ComposedReply = {
+  content:
+    "Your session timed out, so I paused this auto run instead of dropping it. Your progress is " +
+    "saved. Tap “Continue session” to re-sign and pick up where we left off, or “Start a new one” " +
+    "to clear it and begin fresh.",
+  suggestedActions: [
+    { id: "reauth-continue", label: "Continue session", kind: "reconnect" },
+    { id: "reauth-fresh", label: "Start a new one", kind: "reconnect" },
+  ],
+};
+
+/** Fallback for when an auto run loses the key because it was DELETED (not just a locked
+ *  session): re-signing can't help, so drop back to chat and point the user to re-add the
+ *  key in the Creator. */
+export const KEY_MISSING_REPLY: ComposedReply = {
+  content:
+    "I can't reach your OpenRouter key anymore, so I stopped this auto run. Add your key again in " +
+    "the Creator, then start a new run.",
+  suggestedActions: [{ id: "nav-add-key", label: "Add your API key", kind: "navigate", tab: "creator" }],
+};
+
 /** First message seeded into a brand-new chat task. */
 export const SEED_GREETING: ComposedReply = {
   content:
     "Hi — I'm your Lab Assistant. I can drive QuantumLab for you: draft a strategy from " +
     "a plain-English idea, run and refine backtests across assets, pull up and " +
-    "robustness-rank your results, explain why a strategy wins or loses, and improve a " +
+    "rank your results, explain why a strategy wins or loses, and improve a " +
     "weak one. Just tell me what you want and I'll do it. What would you like to start with?",
   suggestedActions: STARTER_ACTIONS,
 };

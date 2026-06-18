@@ -596,11 +596,15 @@ export function LabAssistantDock({
       qc.setQueryData<MessagesResponse>(messagesKey(taskId, walletAddress), (prev) =>
         mergeMessages(prev, data),
       );
-      // If the reply came back as a "session locked" degrade (it carries a reconnect
-      // chip), stash the question so a successful reconnect can auto-resend it — the user
-      // shouldn't have to retype what they just asked. Any normal reply clears it.
+      // If the reply came back as a "session locked" degrade (it carries the plain
+      // reconnect-session chip), stash the question so a successful reconnect can auto-resend
+      // it — the user shouldn't have to retype what they just asked. Any normal reply clears
+      // it. Only the plain chip arms resend: the auto-run reauth chips (reauth-continue /
+      // reauth-fresh) resume the pipeline, they don't re-send a typed question.
       const locked = (data.messages ?? []).some(
-        (msg) => msg.role === "agent" && msg.suggestedActions?.some((a) => a.kind === "reconnect"),
+        (msg) =>
+          msg.role === "agent" &&
+          msg.suggestedActions?.some((a) => a.kind === "reconnect" && a.id === "reconnect-session"),
       );
       pendingResendRef.current = locked ? ctx.content : null;
     },
@@ -670,6 +674,25 @@ export function LabAssistantDock({
       qc.setQueryData<MessagesResponse>(messagesKey(taskId, walletAddress), (prev) =>
         mergeMessages(prev, data),
       );
+    },
+  });
+
+  // Resume a PARKED auto run after the 30-min session expired mid-run and the user re-signed.
+  // The server re-enters the orchestrator from the preserved step (or re-parks / drops to chat
+  // if the key is still locked / was deleted). Merges the returned messages + task so the
+  // checklist flips back to "working" without a manual refresh.
+  const resume = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/lab/agent/chat/${taskId}/auto/resume`);
+      return (await res.json()) as MessagesResponse;
+    },
+    onSuccess: (data) => {
+      qc.setQueryData<MessagesResponse>(messagesKey(taskId, walletAddress), (prev) =>
+        mergeMessages(prev, data),
+      );
+    },
+    onError: (err) => {
+      setNotice(apiErrorMessage(err, "Couldn't resume the run. Try again."));
     },
   });
 
@@ -791,6 +814,35 @@ export function LabAssistantDock({
     }
   }
 
+  // Re-sign, then either RESUME the parked auto run from where it left off ("continue") or
+  // STOP it and drop back to chat ("fresh"). Used by the two chips on the auto-run pause
+  // notice. Unlike handleReconnect this never arms a resend: a parked run has no typed
+  // question waiting, so we clear any stale stash first so the resend effect can't fire.
+  async function handleReauth(mode: "continue" | "fresh") {
+    if (!onReconnect || reconnectBusy) return;
+    pendingResendRef.current = null;
+    setResendArmed(false);
+    setReconnectBusy(true);
+    setReconnectError(null);
+    try {
+      const ok = await onReconnect();
+      if (!ok) {
+        setReconnectError(
+          "Sign-in didn’t finish. Approve the request in your wallet, then try again.",
+        );
+        return;
+      }
+      setNotice(null);
+      if (mode === "continue") {
+        resume.mutate();
+      } else {
+        stop.mutate();
+      }
+    } finally {
+      setReconnectBusy(false);
+    }
+  }
+
   function submitDraft() {
     const content = draft.trim();
     if (!content || !canChat || send.isPending || turnActive || awaitingConfirm) return;
@@ -868,7 +920,12 @@ export function LabAssistantDock({
     if (action.kind === "navigate" && action.tab) {
       onNavigate(action.tab);
     } else if (action.kind === "reconnect") {
-      void handleReconnect();
+      // The auto-run pause notice carries two re-sign chips: "Continue session" resumes the
+      // parked run from where it left off; "Start a new one" re-signs then stops it back to
+      // chat. Any other reconnect chip is the plain locked-session re-sign.
+      if (action.id === "reauth-continue") void handleReauth("continue");
+      else if (action.id === "reauth-fresh") void handleReauth("fresh");
+      else void handleReconnect();
     } else if (action.kind === "send" && action.message && canChat && !send.isPending && !turnActive) {
       // A chip is a normal chat send, not an Auto goal: disarm first so a
       // lingering armed state can't hijack the user's next typed message.

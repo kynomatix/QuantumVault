@@ -29,6 +29,9 @@ export interface AutoChecklistDto {
   phase: "create" | "backtest" | "evaluate" | "insights" | "improve" | "done";
   improveCount: number;
   graduated: boolean;
+  // True when the auto run is parked on a locked session (30-min UMK timeout) and is
+  // waiting on a wallet re-sign to resume. The dock shows Continue / Start-new chips.
+  pausedForReauth?: boolean;
   pendingConfirm: { tool: "createStrategyFromText" | "improve"; estCostUsd: number } | null;
   activeRun: {
     status: string;

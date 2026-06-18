@@ -463,22 +463,23 @@ export class CurrentLabAdapter implements LabAgentAdapter {
     const runs = await this.storage.getRuns(input.strategyId);
     const oosByRun = new Map<number, number | null>();
     for (const r of runs) oosByRun.set(r.id, r.oosFraction ?? null);
+    // Rank by POST-LEVERAGE performance (leveragedNetProfitPercent), matching the lab's
+    // Results tab so the user sees the SAME order in chat as on that tab (rank 1 = highest
+    // leveraged return). Each result still carries its out-of-sample metrics so the brain
+    // can flag the top leveraged picks that are likely curve-fits. The auto pipeline's
+    // separate graduation gate (auto-planner pickRobustResult) is what actually decides
+    // what is safe to widen to more assets or treat as proven.
     const ranked = rows
-      .map((row: any) => ({ row, score: rankRow(row) }))
-      .sort((a, b) => b.score - a.score)
+      .map((row: any) => toBacktestResultDto(row, { oosFraction: oosByRun.get(row.runId) ?? null }))
+      .sort((a, b) => (b.leveragedNetProfitPercent ?? 0) - (a.leveragedNetProfitPercent ?? 0))
       .slice(0, limit);
-    const results = ranked.map(({ row }, idx) => ({
-      ...toBacktestResultDto(row, { oosFraction: oosByRun.get(row.runId) ?? null }),
-      // Renumber to the robustness order (1 = most robust), overriding the DB
-      // rank which reflects the lab's profit objective.
-      rank: idx + 1,
-    }));
+    const results = ranked.map((dto, idx) => ({ ...dto, rank: idx + 1 }));
     // Strategy-level set spanning runs → top-level runId is null; each result
     // carries its own runId.
     return {
       strategyId: input.strategyId,
       runId: null,
-      rankedBy: "robustness",
+      rankedBy: "lab_objective",
       results,
     };
   }

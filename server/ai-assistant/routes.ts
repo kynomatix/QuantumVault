@@ -30,7 +30,7 @@ import { getCreatorModelCatalog, isSelectableModel, estimateCallCostUsd, getMode
 import { LlmGatewayError, checkRateLimit } from "./router";
 import { startCreatorJob, getCreatorJob, CreatorJobConflictError } from "./creator-jobs";
 import { labStorage } from "../lab/storage";
-import { SEED_GREETING, composeAgentReply, SESSION_LOCKED_REPLY } from "../lab-agent/chat-replies";
+import { SEED_GREETING, composeAgentReply, SESSION_LOCKED_REPLY, REAUTH_PAUSED_REPLY, KEY_MISSING_REPLY } from "../lab-agent/chat-replies";
 import { decideTurnAction, defaultAutoMemory, type BrainFn, type AutoMemory, type PaidTool } from "../lab-agent/chat-brain";
 import { createAutoPlanner } from "../lab-agent/auto-planner";
 import { selectDeployableResult, type AutoDeployableResultView } from "./deployable-result";
@@ -153,6 +153,7 @@ export function registerCreatorRoutes(
       phase: auto.phase,
       improveCount: auto.improveCount ?? 0,
       graduated: auto.graduated === true,
+      pausedForReauth: auto.pausedForReauth === true,
       pendingConfirm: auto.pendingConfirm
         ? { tool: auto.pendingConfirm.tool, estCostUsd: auto.pendingConfirm.estCostUsd }
         : null,
@@ -324,6 +325,47 @@ export function registerCreatorRoutes(
     }
   };
 
+  // Park a locked AUTO run instead of killing it. The 30-min session UMK expired mid-flight,
+  // so keep the run's full state and wait for a wallet re-sign (POST .../auto/resume). The task
+  // STAYS in auto mode (the dock keeps the checklist + a disabled composer) at
+  // status="awaiting_input" / turnState="ready" so the client stops driving /step. Every
+  // pipeline field (currentStep, activeRunId, loopCount, pendingConfirm, confirmedToken) is
+  // PRESERVED by the partial updateAgentTask; only auto.pausedForReauth flips true. Posts the
+  // two-chip REAUTH_PAUSED_REPLY once (dup-guarded) so a second no-key site for the same park
+  // doesn't stack duplicate prompts.
+  const pauseAutoForReauth = async (
+    walletAddress: string,
+    taskId: number,
+    task: LabAgentTask,
+    auto: AutoMemory,
+  ): Promise<void> => {
+    const nextAuto: AutoMemory = { ...auto, pausedForReauth: true };
+    await labStorage.updateAgentTask(taskId, {
+      memory: { ...((task.memory as Record<string, unknown>) ?? {}), auto: nextAuto },
+      mode: "auto",
+      status: "awaiting_input",
+      turnState: "ready",
+      turnStateChangedAt: new Date(),
+    });
+    // Dup-guard: if the latest agent message already carries the reauth-continue chip, this
+    // park was already announced (e.g. /step posted it, then an auto-confirm re-hit the same
+    // lock), don't stack a second identical prompt.
+    const msgs = await labStorage.listAgentMessagesForWallet(walletAddress, taskId);
+    const last = msgs[msgs.length - 1] as
+      | { role?: string; suggestedActions?: Array<{ id?: string }> }
+      | undefined;
+    const alreadyPrompted =
+      last?.role === "agent" &&
+      Array.isArray(last.suggestedActions) &&
+      last.suggestedActions.some((a) => a?.id === "reauth-continue");
+    if (alreadyPrompted) return;
+    await labStorage.createAgentMessageForWallet(walletAddress, taskId, {
+      role: "agent",
+      content: REAUTH_PAUSED_REPLY.content,
+      suggestedActions: REAUTH_PAUSED_REPLY.suggestedActions,
+    });
+  };
+
   // Instant-Stop / decline helper: cancel this task's agent-owned QUEUED runs so the
   // shared worker frees up immediately. markAgentRunCancelled CAS's on status='queued',
   // so a run the worker already claimed is left alone (the child owns its lifecycle).
@@ -483,18 +525,24 @@ export function registerCreatorRoutes(
           });
           const outcome = await startTaskTurn(r.walletAddress, taskId, undefined, "auto");
           if (outcome === "no-key") {
-            // Key/session gone between park and confirm (UMK dropped after an idle
-            // reconnect): end the run AND tell the user why with a one-tap re-sign, rather
-            // than silently dropping the paid step they just approved. Back to chat so the
-            // dock isn't stranded awaiting a confirm it can never fulfil.
-            await labStorage.updateAgentTask(taskId, {
-              mode: "chat", status: "active", turnState: "ready", turnStateChangedAt: new Date(),
-            });
-            await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
-              role: "agent",
-              content: SESSION_LOCKED_REPLY.content,
-              suggestedActions: SESSION_LOCKED_REPLY.suggestedActions,
-            });
+            // Key/session gone between approve and re-drive (UMK dropped after an idle
+            // reconnect). If the key still EXISTS this is just a locked session: PARK the run
+            // for a re-sign (keeping the approval) rather than dropping the paid step the user
+            // just OK'd. If the key was DELETED, re-signing can't help, so drop to chat with a
+            // re-add note. Pass nextAuto so the confirmedToken/pendingConfirm survive the park.
+            const keyMeta = await storage.getWalletLlmApiKeyMeta(r.walletAddress);
+            if (!keyMeta.hasKey) {
+              await labStorage.updateAgentTask(taskId, {
+                mode: "chat", status: "active", turnState: "ready", turnStateChangedAt: new Date(),
+              });
+              await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
+                role: "agent",
+                content: KEY_MISSING_REPLY.content,
+                suggestedActions: KEY_MISSING_REPLY.suggestedActions,
+              });
+            } else {
+              await pauseAutoForReauth(r.walletAddress, taskId, task, nextAuto);
+            }
           }
           const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
           const msgs = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
@@ -693,17 +741,40 @@ export function registerCreatorRoutes(
 
       const outcome = await startTaskTurn(r.walletAddress, taskId, model, task.mode);
       if (outcome === "no-key") {
-        // Key/session gone mid-turn (the UMK dropped after an idle reconnect): the
-        // orchestrator needs the key to interpret a finished run, so end the parked turn
-        // rather than hang. Crucially, POST the locked-session note + re-sign chip — this
-        // is the exact "no reply" symptom when an auto goal's turn loses the key, and a
-        // silent reset to ready leaves the user staring at nothing. Drop back to chat so
-        // the dock isn't stranded in an awaiting-confirm state with a disabled composer.
-        // Posted once: the next /step early-returns at the ready guard above (no dupes).
-        // A pending run, if any, is folded later if the user re-adds their key. A pending
-        // Stop can't strand here: it's consumed key-free at the top of /step, and a Stop
-        // racing this no-key step finalizes directly in /auto/stop (its isLabTurnRunning
-        // route sees no live loop, since a no-key step never starts one).
+        if (task.mode === "auto") {
+          // An AUTO run lost the key mid-flight (the UMK dropped after an idle reconnect).
+          // Don't kill it: if the key still EXISTS it's just a locked session, so PARK the run
+          // for a re-sign. Parking preserves currentStep/activeRunId so resume picks the
+          // in-flight run up exactly where it left off (a queued backtest keeps running and is
+          // folded once we resume). If the key was DELETED, re-signing can't help, so drop to
+          // chat with a re-add note.
+          const keyMeta = await storage.getWalletLlmApiKeyMeta(r.walletAddress);
+          const auto = readAutoMemory(task);
+          if (!keyMeta.hasKey || !auto) {
+            await labStorage.updateAgentTask(taskId, {
+              mode: "chat", status: "active", turnState: "ready", turnStateChangedAt: new Date(),
+            });
+            await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
+              role: "agent",
+              content: KEY_MISSING_REPLY.content,
+              suggestedActions: KEY_MISSING_REPLY.suggestedActions,
+            });
+          } else {
+            await pauseAutoForReauth(r.walletAddress, taskId, task, auto);
+          }
+          const updatedAuto = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+          const msgsAuto = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
+          return res.status(202).json({
+            task: updatedAuto ? toTurnTaskDto(updatedAuto) : null,
+            resumed: false,
+            messages: msgsAuto,
+          });
+        }
+        // Chat-mode degrade (unchanged): the orchestrator needs the key to interpret a finished
+        // run, so end the parked turn rather than hang. POST the locked-session note + re-sign
+        // chip. This is the exact "no reply" symptom when a turn loses the key, and a silent
+        // reset to ready leaves the user staring at nothing. Drop back to chat so the dock isn't
+        // stranded. Posted once: the next /step early-returns at the ready guard above.
         await labStorage.updateAgentTask(taskId, {
           mode: "chat",
           status: "active",
@@ -803,21 +874,16 @@ export function registerCreatorRoutes(
 
       const outcome = await startTaskTurn(r.walletAddress, taskId, undefined, "auto");
       if (outcome === "no-key") {
-        // Key/session locked between the meta read and the decrypt (UMK dropped after an
-        // idle reconnect): revert to chat AND post the locked-session note with a re-sign
-        // chip, rather than a bare 400. In this exact state the composer is visible
-        // (signedIn=true), so the signed-out Reconnect panel is NOT rendered — a plain
-        // error toast would tell the user to reconnect with no in-dock button to do it.
-        // Posting the chip (mirrors the /messages, /step and auto-confirm no-key sites)
-        // gives a one-tap re-sign. The goal we just recorded stays in the transcript; a
-        // later re-signed /auto/start starts a fresh run.
-        await labStorage.updateAgentTask(taskId, {
-          mode: "chat", status: "active", turnState: "ready", turnStateChangedAt: new Date(),
-        });
-        await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
-          role: "agent",
-          content: SESSION_LOCKED_REPLY.content,
-          suggestedActions: SESSION_LOCKED_REPLY.suggestedActions,
+        // hasKey was true moments ago (checked above), so this is a locked session: the UMK
+        // dropped between the meta read and the decrypt (an idle reconnect). PARK the
+        // just-started run for a re-sign rather than discarding the goal the user just gave;
+        // resume kicks the pipeline off from this fresh state. The composer is visible here
+        // (signedIn=true), so the signed-out Reconnect panel is NOT rendered. The parked
+        // checklist's "Continue session" chip gives the one-tap re-sign. (If the key was
+        // actually deleted in that sliver, resume re-detects it and posts the re-add note.)
+        await pauseAutoForReauth(r.walletAddress, taskId, task, {
+          ...defaultAutoMemory(),
+          handsOff: effectiveHandsOff,
         });
         const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
         const msgs = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
@@ -887,6 +953,120 @@ export function registerCreatorRoutes(
       return res.status(200).json({ messages: msgs, task: updated ? toTurnTaskDto(updated) : null });
     } catch (err: any) {
       sendError(res, err, "Could not stop the auto run.");
+    }
+  });
+
+  // Resume a PARKED auto run after a wallet re-sign. The 30-min session UMK expired mid-run and
+  // we parked instead of killing, so the dock calls this once the user taps "Continue session"
+  // and the re-sign has reloaded the session UMK. Wallet-scoped. Stop wins: a pending
+  // cancelRequestedAt is honored first (the user changed their mind). If the run isn't actually
+  // parked it's an idempotent no-op. Otherwise: re-validate a stale hands-off approval, clear the
+  // pause flag, flip back to a running turn, and re-enter the orchestrator, which reconciles +
+  // resumes from the preserved currentStep/activeRunId. A still-locked session re-parks; a
+  // deleted key drops to chat with the re-add note.
+  app.post("/api/lab/agent/chat/:taskId/auto/resume", ...guards, async (req: Request, res: Response) => {
+    const r = req as any;
+    try {
+      const taskId = parseTaskId(req.params.taskId);
+      if (taskId === null) return res.status(400).json({ error: "Invalid conversation id." });
+      const task = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+      if (!task) return res.status(404).json({ error: "Conversation not found." });
+
+      // Stop wins: a Stop requested while parked (or racing this resume) is honored. Consume the
+      // flag, cancel agent-owned queued runs, drop back to chat. Mirrors /auto/stop's no-live-loop
+      // branch (a parked run has no running loop).
+      if (task.cancelRequestedAt) {
+        const cancelled = await cancelAgentQueuedRuns(r.walletAddress, taskId);
+        const stopAuto = readAutoMemory(task);
+        const stopPatch = stopAuto
+          ? {
+              memory: {
+                ...((task.memory as Record<string, unknown>) ?? {}),
+                auto: { ...stopAuto, pendingConfirm: null, confirmedToken: null, pausedForReauth: false },
+              },
+            }
+          : {};
+        await labStorage.updateAgentTask(taskId, {
+          cancelRequestedAt: null,
+          mode: "chat",
+          status: "active",
+          turnState: "ready",
+          turnStateChangedAt: new Date(),
+          currentStep: null,
+          activeRunId: null,
+          loopCount: 0,
+          ...stopPatch,
+        });
+        await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
+          role: "agent",
+          content:
+            cancelled > 0
+              ? `Stopped. I cancelled ${cancelled} queued backtest${cancelled === 1 ? "" : "s"} and freed the worker. You're back in chat.`
+              : "Stopped. You're back in chat — ask me anything, or start a new auto run when you're ready.",
+        });
+        const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+        const msgs = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
+        return res.status(200).json({ messages: msgs, task: updated ? toTurnTaskDto(updated) : null });
+      }
+
+      const auto = readAutoMemory(task);
+      // Idempotent: only a parked run resumes. A double-tap, or a resume on a run that's already
+      // moving, is a harmless no-op.
+      if (!auto || auto.pausedForReauth !== true) {
+        const msgs = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
+        return res.status(202).json({ messages: msgs, task: toTurnTaskDto(task) });
+      }
+
+      // Re-validate a stale hands-off approval: if this run auto-approved a paid step
+      // (confirmedToken on a pendingConfirm) under hands-off and the wallet's eligibility was
+      // revoked while parked, DON'T silently spend on resume: clear the approval so the pending
+      // confirm surfaces a watched-mode chip again. A human-approved (watched) token is kept.
+      let nextAuto: AutoMemory = { ...auto, pausedForReauth: false };
+      if (auto.handsOff && auto.confirmedToken && auto.pendingConfirm) {
+        let stillEligible = false;
+        try {
+          stillEligible = await isHandsOffEligible(r.walletAddress);
+        } catch {
+          stillEligible = false; // fail-closed: eligibility read failed, require a fresh confirm
+        }
+        if (!stillEligible) nextAuto = { ...nextAuto, confirmedToken: null };
+      }
+      await labStorage.updateAgentTask(taskId, {
+        memory: { ...((task.memory as Record<string, unknown>) ?? {}), auto: nextAuto },
+        mode: "auto",
+        status: "active",
+        turnState: "running_turn",
+        turnStateChangedAt: new Date(),
+      });
+
+      const outcome = await startTaskTurn(r.walletAddress, taskId, undefined, "auto");
+      if (outcome === "no-key") {
+        // Still no key right after the re-sign. If the key was DELETED, re-signing can't bring it
+        // back, so drop to chat with the re-add note. If it's just STILL locked, re-park (the
+        // existing prompt stays via the dup-guard) so the user can try the re-sign again.
+        const keyMeta = await storage.getWalletLlmApiKeyMeta(r.walletAddress);
+        const reread = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+        if (!keyMeta.hasKey || !reread) {
+          await labStorage.updateAgentTask(taskId, {
+            mode: "chat",
+            status: "active",
+            turnState: "ready",
+            turnStateChangedAt: new Date(),
+          });
+          await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
+            role: "agent",
+            content: KEY_MISSING_REPLY.content,
+            suggestedActions: KEY_MISSING_REPLY.suggestedActions,
+          });
+        } else {
+          await pauseAutoForReauth(r.walletAddress, taskId, reread, readAutoMemory(reread) ?? nextAuto);
+        }
+      }
+      const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+      const msgs = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
+      return res.status(202).json({ messages: msgs, task: updated ? toTurnTaskDto(updated) : null });
+    } catch (err: any) {
+      sendError(res, err, "Could not resume the auto run.");
     }
   });
 
