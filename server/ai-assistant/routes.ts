@@ -204,6 +204,18 @@ export function registerCreatorRoutes(
     if (!umk) return null;
     return decryptLlmApiKeyV3(umk, ciphertext, walletAddress);
   };
+  // Hands-off auto-approval policy. Open to everyone by default: any user with their own
+  // AI key can run the agent end to end without approval taps. The only thing it auto-approves
+  // is the user's own AI-key spend (already hard-capped); it never auto-trades real funds or
+  // deploys live bots on its own. To lock it back down later set HANDSOFF_OPEN_TO_ALL=false,
+  // and it falls back to the admin whitelist (wallets.hands_off_approved). Checked live.
+  // Tolerant of case/whitespace so a mistyped "FALSE" or " false " still locks down.
+  const handsOffOpenToAll = () => (process.env.HANDSOFF_OPEN_TO_ALL ?? "").trim().toLowerCase() !== "false";
+  const isHandsOffEligible = async (wallet: string): Promise<boolean> => {
+    if (handsOffOpenToAll()) return true;
+    return storage.isHandsOffApproved(wallet);
+  };
+
   const labToolkit = new LabAgentToolkit(createCurrentLabAdapter(labStorage, kickLabQueue, resolveLlmKey));
   const labOrchestrator = createLabTurnOrchestrator({
     storage: labStorage,
@@ -212,9 +224,10 @@ export function registerCreatorRoutes(
     composeReply: composeAgentReply,
     estimateCost: estimateCallCostUsd,
     limits: { hardSpendCapUsd: LAB_CHAT_TASK_SPEND_CAP_USD },
-    // Task 201: LIVE hands-off gate — re-checked fail-closed before EVERY auto-approval,
-    // so revoking a wallet's whitelist instantly drops its running auto run to watched mode.
-    isHandsOffApproved: (wallet: string) => storage.isHandsOffApproved(wallet),
+    // LIVE hands-off gate: re-checked before EVERY auto-approval. Open to all by default;
+    // when locked down it falls back to the admin whitelist, so revoking a wallet then
+    // instantly drops its running auto run back to watched mode.
+    isHandsOffApproved: (wallet: string) => isHandsOffEligible(wallet),
   });
 
   // --- auto-mode (Task #200) paid-cost estimator -------------------------------
@@ -719,16 +732,16 @@ export function registerCreatorRoutes(
         return res.status(409).json({ error: "Finish the current turn before starting an auto run." });
       }
 
-      // Task 201 — hands-off intent: the client may ASK for hands-off, but it only takes
-      // effect for an admin-whitelisted wallet (checked live, fail-closed). A non-eligible
-      // request silently falls back to watched mode — same run, just with confirm chips.
+      // Hands-off intent: the client may ASK for hands-off; whether it takes effect is
+      // decided live by isHandsOffEligible (open to all by default, else admin whitelist).
+      // A non-eligible request silently falls back to watched mode, same run with confirm chips.
       const wantsHandsOff = req.body?.handsOff === true;
       let effectiveHandsOff = false;
       if (wantsHandsOff) {
         try {
-          effectiveHandsOff = await storage.isHandsOffApproved(r.walletAddress);
+          effectiveHandsOff = await isHandsOffEligible(r.walletAddress);
         } catch {
-          effectiveHandsOff = false; // fail-closed: whitelist read failed → watched mode
+          effectiveHandsOff = false; // fail-closed: eligibility read failed, use watched mode
         }
       }
 
@@ -839,13 +852,13 @@ export function registerCreatorRoutes(
     }
   });
 
-  // Task 201 — is THIS wallet allowed to run hands-off (auto-approve paid steps without
-  // check-ins)? Drives the dock's hands-off toggle. Wallet-scoped + fail-closed: any read
-  // error reports ineligible, so the UI never offers hands-off it can't actually grant.
+  // Is THIS wallet allowed to run hands-off (auto-approve paid steps without check-ins)?
+  // Drives the dock's hands-off toggle. Open to all by default, else the admin whitelist.
+  // Fail-closed: any read error reports ineligible, so the UI never offers what it can't grant.
   app.get("/api/lab/agent/handsoff-eligibility", ...guards, async (req: Request, res: Response) => {
     const r = req as any;
     try {
-      const eligible = await storage.isHandsOffApproved(r.walletAddress);
+      const eligible = await isHandsOffEligible(r.walletAddress);
       return res.status(200).json({ eligible: !!eligible });
     } catch {
       return res.status(200).json({ eligible: false });
