@@ -119,6 +119,42 @@ export function registerCreatorRoutes(
     const n = Number(raw);
     return Number.isInteger(n) && n > 0 ? n : null;
   };
+  // Read the typed `auto` sub-object out of a task's memory jsonb (null when absent).
+  const readAutoMemory = (task: LabAgentTask): AutoMemory | null => {
+    const mem = task.memory as { auto?: AutoMemory } | null;
+    return mem?.auto ?? null;
+  };
+
+  // The live run's status as the quant-agent checklist needs it (filled in by the GET
+  // messages route, which can do the async run-status read). Bounded on purpose.
+  type AutoActiveRunView = {
+    status: string;
+    stage: string | null;
+    progressPct: number | null;
+    jobsAhead: number | null;
+  };
+
+  // The "quant agent" progress view the dock renders as an animated checklist while an
+  // auto run is in flight (and as a completed record once it lands). Derived ONLY from
+  // the persisted planner memory; we expose the phase + loop counters + a pending paid
+  // confirm, never the confirm token or its raw args. `activeRun` is left null here and
+  // enriched by the GET messages route.
+  const toAutoChecklistDto = (t: LabAgentTask) => {
+    const auto = readAutoMemory(t);
+    // Only surface the checklist when it's relevant: a live auto run, or a finished one
+    // whose terminal state we still want to show. A plain chat task carries no checklist.
+    if (!auto || (t.mode !== "auto" && auto.phase !== "done")) return null;
+    return {
+      phase: auto.phase,
+      improveCount: auto.improveCount ?? 0,
+      graduated: auto.graduated === true,
+      pendingConfirm: auto.pendingConfirm
+        ? { tool: auto.pendingConfirm.tool, estCostUsd: auto.pendingConfirm.estCostUsd }
+        : null,
+      activeRun: null as AutoActiveRunView | null,
+    };
+  };
+
   // The turn-loop view the client polls on: enough to decide whether to keep
   // polling (running_turn), drive a resume (waiting_for_tool), or stop (ready).
   const toTurnTaskDto = (t: LabAgentTask) => ({
@@ -131,6 +167,8 @@ export function registerCreatorRoutes(
     mode: t.mode,
     spendEstimateUsd: t.spendEstimateUsd ?? 0,
     cancelRequested: t.cancelRequestedAt != null,
+    // The quant-agent checklist view (null for a plain chat task).
+    auto: toAutoChecklistDto(t),
   });
 
   // --- Phase C turn orchestrator (one shared instance) -------------------------
@@ -166,9 +204,10 @@ export function registerCreatorRoutes(
     if (!umk) return null;
     return decryptLlmApiKeyV3(umk, ciphertext, walletAddress);
   };
+  const labToolkit = new LabAgentToolkit(createCurrentLabAdapter(labStorage, kickLabQueue, resolveLlmKey));
   const labOrchestrator = createLabTurnOrchestrator({
     storage: labStorage,
-    toolkit: new LabAgentToolkit(createCurrentLabAdapter(labStorage, kickLabQueue, resolveLlmKey)),
+    toolkit: labToolkit,
     reconcile: (taskId: number) => reconcileTask(labStorage, taskId),
     composeReply: composeAgentReply,
     estimateCost: estimateCallCostUsd,
@@ -266,12 +305,6 @@ export function registerCreatorRoutes(
     }
   };
 
-  // Read the typed `auto` sub-object out of a task's memory jsonb (null when absent).
-  const readAutoMemory = (task: LabAgentTask): AutoMemory | null => {
-    const mem = task.memory as { auto?: AutoMemory } | null;
-    return mem?.auto ?? null;
-  };
-
   // Instant-Stop / decline helper: cancel this task's agent-owned QUEUED runs so the
   // shared worker frees up immediately. markAgentRunCancelled CAS's on status='queued',
   // so a run the worker already claimed is left alone (the child owns its lifecycle).
@@ -313,7 +346,36 @@ export function registerCreatorRoutes(
         return res.status(404).json({ error: "Conversation not found." });
       }
       const messages = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
-      res.json({ messages, task: toTurnTaskDto(task) });
+      const taskDto = toTurnTaskDto(task);
+      // Enrich the quant-agent checklist with the live run's status (queue position /
+      // progress) so the dock can honestly show "backtest running" even after the planner
+      // has advanced phase to "evaluate". Best-effort: a missing run status never breaks
+      // the poll, and exposes nothing beyond status/stage/progress/queue position.
+      if (taskDto.auto && task.mode === "auto" && task.activeRunId != null) {
+        try {
+          const statusRes = await labToolkit.call(
+            {
+              walletAddress: r.walletAddress,
+              taskId,
+              correlationId: `task-${taskId}`,
+              allow: { read: true, write: false },
+            },
+            "getRunStatus",
+            { runId: task.activeRunId },
+          );
+          if (statusRes.ok) {
+            taskDto.auto.activeRun = {
+              status: statusRes.data.status,
+              stage: statusRes.data.stage,
+              progressPct: statusRes.data.progressPct,
+              jobsAhead: statusRes.data.jobsAhead,
+            };
+          }
+        } catch {
+          /* run-status read is best-effort; never fail the messages poll over it */
+        }
+      }
+      res.json({ messages, task: taskDto });
     } catch (err: any) {
       sendError(res, err, "Could not load messages.");
     }

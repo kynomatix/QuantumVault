@@ -1,16 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import { Sparkles, ShieldCheck, TrendingUp, Rocket, Wand2, Send } from "lucide-react";
 import {
-  Sparkles,
-  Check,
-  Loader2,
-  ShieldCheck,
-  TrendingUp,
-  Rocket,
-  Wand2,
-  FlaskConical,
-  Microscope,
-  Send,
-} from "lucide-react";
+  QUANT_AGENT_STAGES,
+  QuantAgentStepRow,
+  type StageState,
+} from "@/components/QuantAgentChecklist";
 
 /**
  * No-wallet, auto-looping "canned demo" of the Lab Assistant.
@@ -18,6 +12,11 @@ import {
  * so the animation loops cleanly and there is no real network / wallet / key.
  * Pauses when off screen, and renders a static finished state for users who
  * prefer reduced motion.
+ *
+ * The step rows reuse the SAME QuantAgentStepRow + stage list as the live dock,
+ * so what the user sees here is exactly what the real "quant agent" checklist
+ * looks like. The demo also acts out tapping the "Auto" button, since that is
+ * the trigger users would otherwise not discover.
  */
 
 const CYCLE = 13500; // ms per loop
@@ -26,21 +25,16 @@ const PROMPT =
   "Build me a mean-reversion bot for SOL that only trades in a range.";
 
 const REPLY =
-  "On it. I'll draft it, backtest thousands of variants, then only keep it if it survives data it never saw.";
+  "Auto's on. I'll draft it, backtest thousands of variants, then only keep it if it survives data it never saw.";
 
-type Step = {
-  icon: typeof Wand2;
-  label: string;
-  sub: string;
-  run: number; // ms the spinner starts
-  done: number; // ms the check appears
-};
-
-const STEPS: Step[] = [
-  { icon: Wand2, label: "Create", sub: "Drafts a Pine strategy from your words", run: 4200, done: 4900 },
-  { icon: FlaskConical, label: "Backtest", sub: "Sweeps thousands of parameter combos", run: 4900, done: 5800 },
-  { icon: Microscope, label: "Refine", sub: "Cuts what overfits, keeps what holds up", run: 5800, done: 6700 },
-  { icon: ShieldCheck, label: "Validate", sub: "Scores it on price it never saw", run: 6700, done: 7700 },
+// Per-stage timings, aligned 1:1 with QUANT_AGENT_STAGES. `final` is the state the
+// row settles into: the first three complete, "Improve if needed" is skipped because
+// the strategy held up on the first try (honest happy path, matches the live mapping).
+const STEP_TIMES: { run: number; settle: number; final: StageState }[] = [
+  { run: 4400, settle: 5100, final: "done" },
+  { run: 5100, settle: 6000, final: "done" },
+  { run: 6000, settle: 6900, final: "done" },
+  { run: 6900, settle: 7600, final: "skipped" },
 ];
 
 function typed(full: string, t: number, start: number, cps: number) {
@@ -125,9 +119,28 @@ export default function LabAssistantDemo() {
 
   const userText = typed(PROMPT, t, 500, 34);
   const userTyping = t > 500 && userText.length < PROMPT.length;
-  const showThinking = t > 2600 && t < 3500;
-  const replyText = typed(REPLY, t, 3500, 48);
-  const showReply = t > 3500;
+
+  // "Auto" button teach beat: after the goal is typed, the pill draws attention,
+  // gets tapped, then stays "on" so users learn the trigger before the run starts.
+  const autoPulse = !reduced && t > 2300 && t < 2700;
+  const autoPressing = !reduced && t >= 2700 && t < 3100;
+  const autoPress = autoPressing ? 1 - 0.12 * Math.sin(((t - 2700) / 400) * Math.PI) : 1;
+  const autoOn = reduced || t >= 2950;
+  const hintOpacity = reduced
+    ? 0
+    : t < 2300
+      ? 0
+      : t < 2500
+        ? (t - 2300) / 200
+        : t < 3100
+          ? 1
+          : t < 3300
+            ? (3300 - t) / 200
+            : 0;
+
+  const showThinking = t > 3200 && t < 3900;
+  const replyText = typed(REPLY, t, 3900, 48);
+  const showReply = t > 3900;
 
   const cardP = ease((t - 8200) / 700);
   const countP = ease((t - 8400) / 1300);
@@ -150,7 +163,7 @@ export default function LabAssistantDemo() {
           }}
         />
 
-        {/* header — same compact frame as the real Lab Assistant popup */}
+        {/* header: same compact frame as the real Lab Assistant popup */}
         <div className="relative flex items-center gap-2.5 border-b border-white/10 px-4 py-3">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-accent">
             <Sparkles className="h-4 w-4 text-white" />
@@ -207,49 +220,30 @@ export default function LabAssistantDemo() {
                   <>
                     <div className="leading-relaxed">{replyText}</div>
 
-                    {/* step pipeline */}
-                    {t > 4000 && (
-                      <div className="mt-3 space-y-2">
-                        {STEPS.map((s, i) => {
-                          const isDone = t >= s.done;
-                          const isRunning = t >= s.run && t < s.done;
-                          const shown = t >= s.run - 150;
-                          if (!shown) return null;
-                          const Icon = s.icon;
+                    {/* quant-agent checklist: same rows the live dock renders */}
+                    {t > 4200 && (
+                      <div className="mt-3 space-y-2" data-testid="demo-quant-agent-steps">
+                        {QUANT_AGENT_STAGES.map((stage, i) => {
+                          const tm = STEP_TIMES[i];
+                          if (t < tm.run - 150) return null;
+                          const state: StageState =
+                            t >= tm.settle ? tm.final : t >= tm.run ? "running" : "pending";
+                          const detail =
+                            i === 3
+                              ? state === "skipped"
+                                ? "Held up first try, no fixes needed"
+                                : state === "running"
+                                  ? "Checking if it needs a rewrite"
+                                  : undefined
+                              : undefined;
+                          const p = ease((t - (tm.run - 150)) / 350);
                           return (
                             <div
-                              key={s.label}
-                              className="flex items-start gap-2.5"
-                              style={{
-                                opacity: ease((t - (s.run - 150)) / 350),
-                                transform: `translateY(${(1 - ease((t - (s.run - 150)) / 350)) * 6}px)`,
-                              }}
-                              data-testid={`demo-step-${s.label.toLowerCase()}`}
+                              key={stage.id}
+                              style={{ opacity: p, transform: `translateY(${(1 - p) * 6}px)` }}
+                              data-testid={`demo-step-${stage.id}`}
                             >
-                              <div
-                                className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border ${
-                                  isDone
-                                    ? "border-emerald-400/40 bg-emerald-400/15 text-emerald-300"
-                                    : "border-primary/40 bg-primary/15 text-primary"
-                                }`}
-                              >
-                                {isDone ? (
-                                  <Check className="h-3 w-3" />
-                                ) : isRunning ? (
-                                  <Loader2 className="h-3 w-3 animate-spin" />
-                                ) : (
-                                  <Icon className="h-3 w-3" />
-                                )}
-                              </div>
-                              <div className="min-w-0">
-                                <span className="text-[13px] font-semibold text-white">
-                                  {s.label}
-                                </span>
-                                <span className="text-[12.5px] text-white/45">
-                                  {"  "}
-                                  {s.sub}
-                                </span>
-                              </div>
+                              <QuantAgentStepRow stage={stage} step={{ state, detail }} />
                             </div>
                           );
                         })}
@@ -313,11 +307,46 @@ export default function LabAssistantDemo() {
         )}
       </div>
 
-        {/* composer — visual only, this is a no-wallet demo */}
+        {/* composer: visual only, this is a no-wallet demo. The "Auto" pill is
+            highlighted and tapped so users learn it runs the whole pipeline. */}
         <div className="relative flex items-center gap-2 border-t border-white/10 px-3 py-2.5">
+          {/* teach caption pointing at the Auto pill */}
+          {hintOpacity > 0 && (
+            <div
+              className="pointer-events-none absolute -top-8 right-11 z-10"
+              style={{ opacity: hintOpacity }}
+              data-testid="demo-auto-hint"
+            >
+              <span className="relative inline-block rounded-lg border border-indigo-400/40 bg-indigo-500/90 px-2.5 py-1 text-[11px] font-medium text-white shadow-lg shadow-indigo-500/30">
+                Tap Auto to run it end to end
+                <span className="absolute -bottom-1 right-4 h-2 w-2 rotate-45 border-b border-r border-indigo-400/40 bg-indigo-500/90" />
+              </span>
+            </div>
+          )}
+
           <div className="flex-1 truncate rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-[12.5px] text-white/30">
             Ask the Lab Assistant...
           </div>
+
+          {/* Auto pill */}
+          <span className="relative shrink-0">
+            {autoPulse && (
+              <span className="absolute inset-0 rounded-lg border border-indigo-400/60 animate-ping" />
+            )}
+            <span
+              className={`relative inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[12px] font-semibold transition-colors ${
+                autoOn
+                  ? "border-transparent bg-gradient-to-r from-indigo-500 to-violet-500 text-white shadow-lg shadow-indigo-500/30"
+                  : "border-indigo-400/50 bg-indigo-500/10 text-indigo-200"
+              }`}
+              style={{ transform: `scale(${autoPress})` }}
+              data-testid="demo-auto-button"
+            >
+              <Wand2 className="h-3.5 w-3.5" />
+              Auto
+            </span>
+          </span>
+
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-accent text-white">
             <Send className="h-4 w-4" />
           </span>

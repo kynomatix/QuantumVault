@@ -19,6 +19,7 @@ import { Sparkles, Send, X, Bot, Loader2, Wallet, Square, Activity, Wand2, Chevr
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import type { AgentSuggestedAction } from "@shared/schema";
 import { looksLikeApiKey } from "@shared/api-key-detect";
+import QuantAgentChecklist, { type AutoChecklistDto } from "@/components/QuantAgentChecklist";
 
 type ChatRole = "user" | "agent" | "tool";
 
@@ -51,6 +52,8 @@ interface TurnTask {
   mode?: string;
   spendEstimateUsd?: number;
   cancelRequested?: boolean;
+  // The quant-agent checklist slice (present only while an Auto run is live or finished).
+  auto?: AutoChecklistDto | null;
 }
 
 interface MessagesResponse {
@@ -643,6 +646,15 @@ export function LabAssistantDock({
             >
               <Square className="h-3 w-3" /> Stop
             </button>
+          </div>
+        )}
+
+        {/* Quant-agent checklist: the live task list the Auto run drives. Present whenever
+            the task carries an `auto` slice (a live run, or a finished one we still show).
+            Purely additive: derived from the polled DTO, never touches the turn loop. */}
+        {task?.auto && (
+          <div className="border-b border-white/10 px-3 py-2.5">
+            <QuantAgentChecklist auto={task.auto} />
           </div>
         )}
 
