@@ -102,8 +102,9 @@ const INTENTS: Intent[] = [
     test: /\b(draft|create|build|make|new|generate|write)\b[^.?!]*\b(strateg\w*|bots?|scripts?|pine)\b|\b(strateg\w*|bots?|scripts?|pine)\b[^.?!]*\b(draft|create|build|make|new|generate|write)\b|suggest (a |an )?(strateg\w*|idea)/i,
     reply: () => ({
       content:
-        "I can draft a strategy for you — just describe what you want in plain English and I'll write the Pine and " +
-        "backtest it across a few assets. You can also open the Creator to draft it by hand.",
+        "I draft strategies from a plain-English idea, then write the Pine and backtest it for you. " +
+        "Tell me the strategy you want (the asset, the style, and any rules) and I'll build it. " +
+        "You can also open the Creator to draft one by hand.",
       suggestedActions: [NAV.draft, NAV.backtest, ASK.help],
     }),
     needsKey: true,

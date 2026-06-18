@@ -1,12 +1,15 @@
 import { describe, it, expect } from "vitest";
 import {
   buildChatMessages,
+  buildDecisionMessages,
   generateLabChatReply,
   coerceProseToFinal,
   isSafeDirectAnswerTurn,
   DEFAULT_CHAT_MODEL,
   type ChatBrainInput,
+  type BrainTurnContext,
 } from "../../server/lab-agent/chat-brain";
+import { LAB_AVAILABLE_TICKERS } from "../../shared/schema";
 
 // chat-brain is the Phase C0 conversational brain. The pure, deterministic surface
 // is buildChatMessages (prompt assembly + context bounding); the networked surface
@@ -118,6 +121,42 @@ describe("buildChatMessages", () => {
       baseInput({ recentMessages: [{ role: "user", content: "  spaced  " }] }),
     );
     expect(msgs[msgs.length - 1].content).toBe("spaced");
+  });
+});
+
+// Regression: the brain used to refuse a valid ticker (e.g. HYPE) as "not available"
+// and deflect to SOL/ETH/ARB, because it was never told the real ticker universe and a
+// rule pushed it off single symbols. Both prompts now carry the live AVAILABLE list from
+// the schema source of truth, and the rules honor an explicitly named single symbol.
+describe("available backtest symbols injection", () => {
+  const decisionBase = (over: Partial<BrainTurnContext> = {}): BrainTurnContext => ({
+    goal: null,
+    recentMessages: [{ role: "user", content: "backtest a trend bot on HYPE" }],
+    ...over,
+  });
+
+  it("lists every schema ticker in the decision system prompt", () => {
+    const sys = buildDecisionMessages(decisionBase())[0].content;
+    expect(sys).toMatch(/AVAILABLE BACKTEST SYMBOLS/);
+    for (const t of LAB_AVAILABLE_TICKERS) {
+      expect(sys).toContain(t.name);
+    }
+    // The exact ticker the user was wrongly refused must be present.
+    expect(sys).toContain("HYPE");
+  });
+
+  it("also lists the tickers in the conversational chat prompt", () => {
+    const sys = buildChatMessages(baseInput())[0].content;
+    expect(sys).toMatch(/AVAILABLE BACKTEST SYMBOLS/);
+    expect(sys).toContain("HYPE");
+  });
+
+  it("instructs the brain to honor an explicitly named single ticker", () => {
+    // Collapse line-wrap whitespace so phrases that span prompt lines still match.
+    const sys = buildDecisionMessages(decisionBase())[0].content.replace(/\s+/g, " ");
+    // Single named ticker is allowed; never call a listed ticker unavailable.
+    expect(/single named ticker is fine/i.test(sys)).toBe(true);
+    expect(/never tell the user it is unavailable/i.test(sys)).toBe(true);
   });
 });
 

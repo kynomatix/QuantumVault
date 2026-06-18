@@ -15,6 +15,21 @@
 import { z } from "zod";
 import { callOpenRouterWithUsage, type LlmMessage, type LlmUsage } from "../ai-assistant/router";
 import type { LabAgentToolkitMethod } from "@shared/lab-agent-contract";
+import { LAB_AVAILABLE_TICKERS } from "@shared/schema";
+
+// The exact set of tickers the lab can backtest, from the single source of truth in
+// shared/schema.ts. Injected into the brain's system prompt every turn so the model
+// knows the real universe and never hallucinates that a valid ticker (e.g. HYPE) is
+// unavailable. Rendered once at module load; the list is static.
+const LAB_BACKTEST_SYMBOLS = LAB_AVAILABLE_TICKERS.map((t) => t.name).join(", ");
+
+/** The "AVAILABLE BACKTEST SYMBOLS" block appended to both system prompts. */
+function availableSymbolsBlock(): string {
+  return (
+    "AVAILABLE BACKTEST SYMBOLS (the ONLY tickers the lab can backtest, use the exact name as written):\n" +
+    LAB_BACKTEST_SYMBOLS
+  );
+}
 
 // Default chat model: "cheapest capable" per docs/LAB_AGENT_SANDBOX_PLAN.md §5.
 // DeepSeek V4 Pro is the catalog's value/capability pick; an override may pass a
@@ -77,9 +92,10 @@ function toLlmRole(role: "user" | "agent" | "tool"): "user" | "assistant" {
 // restored to chronological order. Exported for unit testing.
 export function buildChatMessages(input: ChatBrainInput): LlmMessage[] {
   const goal = (input.goal ?? "").trim();
-  const system = goal
+  const base = goal
     ? `${SYSTEM_PROMPT}\n\nThe user's current focus for this conversation: ${goal.slice(0, MAX_GOAL_CHARS)}`
     : SYSTEM_PROMPT;
+  const system = `${base}\n\n${availableSymbolsBlock()}`;
 
   const history = input.recentMessages
     .filter((m) => typeof m.content === "string" && m.content.trim().length > 0)
@@ -371,7 +387,14 @@ const DECIDE_SYSTEM_PROMPT = [
   "run ids, or numbers: discover them with listStrategies / findStrategy / getTopResults first.",
   "",
   "Operating rules (§6):",
-  "- Backtest ACROSS assets (e.g. SOL, ETH, ARB), never a single symbol — robustness, not a spike.",
+  "- You can backtest ONLY the tickers in the AVAILABLE BACKTEST SYMBOLS list below, using the",
+  "  exact name as written. That list is the source of truth: if a ticker is in it, it IS",
+  "  available, so NEVER tell the user it is unavailable or unsupported. Only if a requested",
+  "  ticker is genuinely absent from the list do you say so plainly, then name the closest",
+  "  tickers that ARE in the list. Never guess or assume which tickers exist.",
+  "- When the user names specific ticker(s) to backtest, use EXACTLY those. A single named",
+  "  ticker is fine; honor the request. Only when the user names NONE do you pick a few liquid",
+  "  majors for breadth, since robustness across assets beats a single spike.",
   "- Use 1H timeframes or higher; sub-hour bars overfit and waste data budget.",
   "- Exhaust the cheap deterministic pipeline (random -> refine -> deep) before suggesting any paid improve.",
   "- RANK and recommend by ROBUSTNESS, not headline profit: a result validated out-of-sample with steady Sharpe/drawdown beats a bigger in-sample return. getTopResults is already robustness-ranked.",
@@ -595,6 +618,7 @@ export function buildDecisionMessages(input: BrainTurnContext): LlmMessage[] {
   const goal = (input.goal ?? "").trim();
   const digest = (input.memoryDigest ?? "").trim();
   let system = DECIDE_SYSTEM_PROMPT;
+  system += `\n\n${availableSymbolsBlock()}`;
   if (goal) system += `\n\nThe user's stated goal: ${goal.slice(0, MAX_GOAL_CHARS)}`;
   if (digest) system += `\n\nWorking memory so far:\n${digest.slice(0, MAX_CONTEXT_CHARS)}`;
 
