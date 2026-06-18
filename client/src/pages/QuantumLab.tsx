@@ -661,11 +661,10 @@ function LabHub({
 
 export default function QuantumLab() {
   const [mainTab, setMainTab] = useState<MainTab>("hub");
-  // Bumped by the hub's "Chat to Lab Assistant" button to expand the dock.
-  const [assistantOpenSignal, setAssistantOpenSignal] = useState(0);
-  // Whether the Lab Assistant panel is docked open. When it is (on the hub tab), the
-  // page reflows narrower on desktop so the panel sits beside the lab instead of over
-  // it (Brave-sidebar style). The dock reports this through onOpenChange.
+  // Whether the Lab Assistant panel is docked open. When it is, the page reflows
+  // narrower on desktop so the panel sits beside the lab instead of over it
+  // (Brave-sidebar style). The dock stays mounted on every tab and is controlled
+  // through this state, so it persists as you move between tabs.
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeRunId, setActiveRunId] = useState<number | null>(null);
@@ -732,6 +731,16 @@ export default function QuantumLab() {
   };
 
   const [queueOpen, setQueueOpen] = useState(false);
+  // The Lab Assistant dock and the run-queue drawer both slide in from the right, so
+  // only one may be open at a time. Opening either one closes the other.
+  const openAssistant = (next: boolean) => {
+    setAssistantOpen(next);
+    if (next) setQueueOpen(false);
+  };
+  const openQueue = () => {
+    setQueueOpen(true);
+    setAssistantOpen(false);
+  };
   const activeJobIdRef = useRef<string | null>(null);
   useEffect(() => { activeJobIdRef.current = activeJobId; }, [activeJobId]);
   const autoReconnectingRef = useRef(false);
@@ -1206,8 +1215,8 @@ export default function QuantumLab() {
         return (
           <LabHub
             onNavigate={setMainTab}
-            onOpenQueue={() => setQueueOpen(true)}
-            onOpenAssistant={() => setAssistantOpenSignal((s) => s + 1)}
+            onOpenQueue={openQueue}
+            onOpenAssistant={() => openAssistant(true)}
             strategiesCount={strategies?.length ?? 0}
             queueCount={queueCount}
           />
@@ -1358,7 +1367,7 @@ export default function QuantumLab() {
     <div
       className={cn(
         "min-h-screen overflow-x-clip bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 transition-[padding] duration-300 ease-out",
-        assistantOpen && mainTab === "hub" && "lg:pr-[400px]",
+        assistantOpen && "lg:pr-[400px]",
       )}
     >
       <header className="sticky top-0 z-50 border-b border-white/10 bg-slate-950/80 backdrop-blur-xl">
@@ -1402,7 +1411,7 @@ export default function QuantumLab() {
                 );
               })}
               <button
-                onClick={() => setQueueOpen(true)}
+                onClick={openQueue}
                 className="flex items-center gap-1.5 px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors text-white/50 hover:text-white hover:bg-white/5 relative"
                 data-testid="nav-queue"
               >
@@ -1430,18 +1439,19 @@ export default function QuantumLab() {
         </motion.div>
       </div>
 
-      {mainTab === "hub" && (
-        <LabAssistantDock
-          walletAddress={walletAddress ?? null}
-          sessionConnected={sessionConnected}
-          onReconnect={retryAuth}
-          reconnecting={signingInProgress}
-          onNavigate={(tab) => setMainTab(tab as MainTab)}
-          openSignal={assistantOpenSignal}
-          onDeploy={handleAgentDeploy}
-          onOpenChange={setAssistantOpen}
-        />
-      )}
+      {/* Mounted on every tab (not gated on the hub) so the assistant persists as you
+          move around the lab. Open state is owned here and shared with the run queue so
+          only one right-side panel shows at a time. */}
+      <LabAssistantDock
+        walletAddress={walletAddress ?? null}
+        sessionConnected={sessionConnected}
+        onReconnect={retryAuth}
+        reconnecting={signingInProgress}
+        onNavigate={(tab) => setMainTab(tab as MainTab)}
+        open={assistantOpen}
+        onOpenChange={openAssistant}
+        onDeploy={handleAgentDeploy}
+      />
       {/* One controlled deploy modal driven by the Lab Assistant's Deploy tap. Mounted
           only while a target is set, so each deploy gets a fresh form + balance fetch.
           The per-row deploy triggers elsewhere use their own internal-state instances. */}

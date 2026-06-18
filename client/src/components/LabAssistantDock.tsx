@@ -415,9 +415,9 @@ export function LabAssistantDock({
   onReconnect,
   reconnecting = false,
   onNavigate,
-  openSignal = 0,
-  onDeploy,
+  open,
   onOpenChange,
+  onDeploy,
 }: {
   walletAddress: string | null;
   sessionConnected?: boolean;
@@ -428,35 +428,20 @@ export function LabAssistantDock({
   // premature "Reconnect" tap over an in-progress signature.
   reconnecting?: boolean;
   onNavigate: (tab: string) => void;
-  // One-way "please open" trigger: the parent bumps this counter (e.g. from the
-  // hub's "Chat to Lab Assistant" button) to expand the dock. 0 = no request.
-  openSignal?: number;
+  // Whether the panel is open. The page owns this state (controlled) so the dock can
+  // stay mounted on every lab tab while the page docks it to the side (reflows the
+  // content narrower) and keeps only one right-side panel (this or the run queue) open.
+  open: boolean;
+  // Open/close requests from inside the dock (the FAB, the close button, the deploy
+  // handoff). The page applies them and reflows its content to match.
+  onOpenChange: (open: boolean) => void;
   // Tapped Deploy on the agent result card. The dock passes RAW backtest numbers +
   // recommended leverage; the parent opens the existing deploy modal pre-filled. The
   // dock NEVER deploys on its own (money path).
   onDeploy?: (target: AgentDeployTarget) => void;
-  // Reports the panel's open/closed state up so the page can dock it to the side
-  // (reflow the lab content narrower) instead of overlaying it. Fires on unmount too.
-  onOpenChange?: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  // Open the dock when the parent bumps openSignal. Seed the ref with the value
-  // at mount so a stale signal can't auto-open on remount (the dock only mounts
-  // while on the hub tab) — we open only when the value actually increases.
-  const lastOpenSignalRef = useRef(openSignal);
-  useEffect(() => {
-    if (openSignal !== lastOpenSignalRef.current) {
-      lastOpenSignalRef.current = openSignal;
-      if (openSignal > 0) setOpen(true);
-    }
-  }, [openSignal]);
-  // Report open/closed up so the page can dock the panel (push its content narrower)
-  // instead of overlaying it. The unmount cleanup restores full width when the dock
-  // goes away (e.g. switching off the hub tab) without needing a manual close.
-  useEffect(() => {
-    onOpenChange?.(open);
-  }, [open, onOpenChange]);
-  useEffect(() => () => onOpenChange?.(false), [onOpenChange]);
+  // Controlled open: every internal toggle routes through the page's setter.
+  const setOpen = (next: boolean) => onOpenChange(next);
   const [taskId, setTaskId] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
   // Inline notice (e.g. the pasted-API-key guard) shown just above the composer.
