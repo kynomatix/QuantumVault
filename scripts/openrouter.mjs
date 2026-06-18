@@ -36,9 +36,9 @@
  * Routing (primary / fallback / budget):
  *   code-review    qwen/qwen3.7-max         / moonshotai/kimi-k2.7-code   / deepseek/deepseek-v4-pro
  *   plan-audit     qwen/qwen3.7-max         / deepseek/deepseek-v4-pro    / deepseek/deepseek-v4-pro
- *   architecture   qwen/qwen3.7-max         / zhipuai/glm-5.1             / deepseek/deepseek-v4-pro
+ *   architecture   qwen/qwen3.7-max         / z-ai/glm-5.1                / deepseek/deepseek-v4-pro
  *   algorithm      qwen/qwen3.7-max         / moonshotai/kimi-k2.7-code   / deepseek/deepseek-v4-pro
- *   frontend       zhipuai/glm-5.1          / qwen/qwen3.7-max            / deepseek/deepseek-v4-pro
+ *   frontend       z-ai/glm-5.2             / z-ai/glm-5.1                / deepseek/deepseek-v4-pro
  *   large-context  minimax/minimax-m3       / qwen/qwen3.7-max            / deepseek/deepseek-v4-pro
  *   batch          deepseek/deepseek-v4-pro / minimax/minimax-m3          / deepseek/deepseek-v4-flash
  *   sanity         deepseek/deepseek-v4-pro / moonshotai/kimi-k2.7-code   / deepseek/deepseek-v4-flash
@@ -56,7 +56,8 @@ const MODELS = {
   DEEPSEEK_FLASH:  'deepseek/deepseek-v4-flash',
   KIMI_K26:        'moonshotai/kimi-k2.6',
   KIMI_K27_CODE:   'moonshotai/kimi-k2.7-code',
-  GLM_51:          'zhipuai/glm-5.1',
+  GLM_51:          'z-ai/glm-5.1',
+  GLM_52:          'z-ai/glm-5.2',
   MINIMAX_M3:      'minimax/minimax-m3',
 };
 
@@ -149,8 +150,8 @@ Show your working. A verdict without a trace is not useful.`,
   },
 
   'frontend': {
-    primary:  MODELS.GLM_51,
-    fallback: MODELS.QWEN_37_MAX,
+    primary:  MODELS.GLM_52,
+    fallback: MODELS.GLM_51,
     budget:   MODELS.DEEPSEEK_V4_PRO,
     temperature: 0.15,
     maxTokens:   4096,
