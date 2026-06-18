@@ -15,7 +15,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { Sparkles, Send, X, Bot, Loader2, Wallet, Square, Activity, Wand2, ChevronDown, ShieldCheck, ShieldAlert, TrendingUp, Rocket, Settings2 } from "lucide-react";
+import { Sparkles, Send, X, Bot, Loader2, Wallet, Square, Activity, Wand2, ChevronDown, ShieldCheck, ShieldAlert, TrendingUp, Rocket, Settings2, Lock } from "lucide-react";
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import type { AgentSuggestedAction, LabTradeRecord } from "@shared/schema";
 import { looksLikeApiKey } from "@shared/api-key-detect";
@@ -95,22 +95,67 @@ function apiErrorMessage(err: unknown, fallback: string): string {
   return body || fallback;
 }
 
-// Render the small slice of markdown the assistant emits — currently just **bold** —
-// without pulling in a markdown dependency. We split on the bold delimiter and wrap
-// the captured (odd-index) segments in <strong>; everything else stays a plain text
-// node. There's no dangerouslySetInnerHTML, so the content remains inert React text
-// with no injection surface. Newlines are preserved by whitespace-pre-wrap on the
-// parent, and a lone/unmatched ** simply renders literally.
-function renderRichText(text: string): ReactNode {
+// Inline formatting within a single line: **bold** spans only, no markdown dependency.
+// We split on the bold delimiter and wrap the captured (odd-index) segments in <strong>;
+// everything else stays a plain text node. There's no dangerouslySetInnerHTML, so the
+// content stays inert React text with no injection surface, and a lone/unmatched **
+// renders literally. Multi-space metric columns survive because the parent line keeps
+// whitespace-pre-wrap.
+function renderInline(text: string, keyPrefix: string): ReactNode[] {
   return text.split(/\*\*(.+?)\*\*/g).map((seg, i) =>
     i % 2 === 1 ? (
-      <strong key={i} className="font-semibold">
+      <strong key={`${keyPrefix}-b${i}`} className="font-semibold">
         {seg}
       </strong>
     ) : (
-      seg
+      <span key={`${keyPrefix}-t${i}`}>{seg}</span>
     ),
   );
+}
+
+// Light markdown for chat replies: **bold**, bullet lines ("- ", "* ", or "• "),
+// horizontal dividers (a line of only dashes), and blank-line spacers. This lets the
+// assistant stack result "cards" with a one-line verdict on top, divided by a rule,
+// and stay scannable in a narrow dock. Output is block-level, so the caller wraps it
+// in a <div> (a <p> cannot legally hold block children).
+function renderRichText(text: string): ReactNode {
+  const lines = text.split("\n");
+  const out: ReactNode[] = [];
+  lines.forEach((line, idx) => {
+    const trimmed = line.trim();
+    // Divider: a whole line of 3+ dashes. Never matches "-50%" or "Net: -5%".
+    if (/^-{3,}$/.test(trimmed)) {
+      out.push(<hr key={`hr-${idx}`} className="my-2 border-white/10" />);
+      return;
+    }
+    // Bullet: a dash/star/dot FOLLOWED BY a space (the space keeps negative numbers
+    // like "-3%" from being read as bullets).
+    const bullet = /^([-*•])\s+(.*)$/.exec(trimmed);
+    if (bullet) {
+      out.push(
+        <div key={`li-${idx}`} className="flex gap-1.5">
+          <span className="mt-[0.1em] shrink-0 text-indigo-300/70">•</span>
+          <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">
+            {renderInline(bullet[2], `li-${idx}`)}
+          </span>
+        </div>,
+      );
+      return;
+    }
+    // Blank line: a small vertical gap between cards/paragraphs.
+    if (trimmed === "") {
+      out.push(<div key={`sp-${idx}`} className="h-1.5" />);
+      return;
+    }
+    // Regular line: keep whitespace-pre-wrap so multi-space metric columns
+    // ("Win rate: X   Trades: Y") do not collapse.
+    out.push(
+      <div key={`ln-${idx}`} className="whitespace-pre-wrap break-words">
+        {renderInline(line, `ln-${idx}`)}
+      </div>,
+    );
+  });
+  return out;
 }
 
 // Friendly one-line labels for the agent's tool steps, so a collapsed step reads like
@@ -422,6 +467,11 @@ export function LabAssistantDock({
   // canChat (the session may already read "connected" at lock time).
   const pendingResendRef = useRef<string | null>(null);
   const [resendArmed, setResendArmed] = useState(false);
+  // True once a successful in-place re-sign has cleared the lock, so the loud locked
+  // banner hides immediately even when there's no pending question to auto-resend (e.g.
+  // re-signing from an old locked transcript). A fresh locked reply flips it back off so
+  // a brand-new lock re-shows the banner.
+  const [lockResolved, setLockResolved] = useState(false);
   // Always-current snapshots of the active wallet + task. A mutation that resolves AFTER
   // the user switches wallet/task reads these (NOT its closure, which can be stale) to
   // detect it's orphaned and drop its response — so wallet A's reply, or A's resend
@@ -467,6 +517,7 @@ export function LabAssistantDock({
     // wallet B's conversation after a switch + reconnect.
     pendingResendRef.current = null;
     setResendArmed(false);
+    setLockResolved(false);
   }, [walletAddress]);
 
   // Don't let a stale reconnect error linger once the session is healthy again.
@@ -540,6 +591,10 @@ export function LabAssistantDock({
         (msg) => msg.role === "agent" && msg.suggestedActions?.some((a) => a.kind === "reconnect"),
       );
       pendingResendRef.current = locked ? ctx.content : null;
+      // A fresh locked reply re-arms the loud banner (a prior successful re-sign may have
+      // hidden it). A normal reply leaves the flag alone; the reconnect chip is gone from
+      // the latest message anyway, so the banner stays hidden.
+      if (locked) setLockResolved(false);
     },
     onError: (err) => {
       // Don't swallow a hard send failure — show why (the normal degrade path returns
@@ -693,6 +748,10 @@ export function LabAssistantDock({
         );
         return;
       }
+      // Session is live again: hide the locked banner right away, even when there's no
+      // pending question to auto-resend, so re-signing from an old locked transcript
+      // doesn't leave the banner stuck on while the session is actually healthy.
+      setLockResolved(true);
       // Session is live again. If there's still no chat task, start one now —
       // when the session was already "connected" (an expired ensure), the
       // sessionConnected prop won't change, so the auto-effect can't re-fire.
@@ -816,6 +875,12 @@ export function LabAssistantDock({
   // Chips ride the most recent assistant message.
   const lastAgent = [...messages].reverse().find((m) => m.role === "agent");
   const chips = lastAgent?.suggestedActions ?? [];
+  // A locked session (saved key, no in-memory UMK after an idle reconnect) surfaces as a
+  // reconnect chip on the latest agent reply. When that happens, show a loud persistent
+  // banner with a one-tap re-sign (below) and drop the now-redundant reconnect chip from
+  // the bottom row, so there's a single clear unlock CTA instead of two.
+  const sessionLocked = signedIn && !lockResolved && chips.some((a) => a.kind === "reconnect");
+  const visibleChips = sessionLocked ? chips.filter((a) => a.kind !== "reconnect") : chips;
   const isLoading = ensure.isPending || (messagesQuery.isLoading && messages.length === 0);
   // Auto button "engaged" look: lit while armed, while a run is live, or while starting.
   const autoActive = autoArmed || isAuto || autoStart.isPending;
@@ -969,6 +1034,45 @@ export function LabAssistantDock({
           </div>
         )}
 
+        {/* Locked-session banner: loud, persistent, one-tap re-sign. Stays pinned above
+            the transcript (outside the scroll area) so the user can't keep chatting into
+            canned replies without noticing the session needs a re-sign. */}
+        {sessionLocked && (
+          <div
+            data-testid="lab-assistant-locked-banner"
+            className="flex items-start gap-2.5 border-b border-amber-400/20 bg-amber-500/10 px-4 py-3"
+          >
+            <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-amber-500/20 text-amber-300">
+              <Lock className="h-3.5 w-3.5" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-semibold text-amber-100">Chat is locked</p>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-amber-200/80">
+                Your key is saved, but the session needs a quick re-sign. Until then you’ll
+                only get canned replies, not real answers.
+              </p>
+              <button
+                type="button"
+                onClick={handleReconnect}
+                disabled={reconnectBusy || reconnecting}
+                data-testid="button-lab-assistant-unlock"
+                className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-amber-400 px-3.5 py-1.5 text-xs font-semibold text-amber-950 transition-colors hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {(reconnectBusy || reconnecting) && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                {reconnectBusy || reconnecting ? "Unlocking…" : "Re-sign to unlock"}
+              </button>
+              {reconnectError && (
+                <p
+                  className="mt-1.5 text-[11px] text-amber-200/90"
+                  data-testid="text-lab-assistant-unlock-error"
+                >
+                  {reconnectError}
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Transcript */}
         <div
           ref={listRef}
@@ -1091,7 +1195,7 @@ export function LabAssistantDock({
                       <Bot className="h-3 w-3" /> Assistant
                     </span>
                   )}
-                  <p className="whitespace-pre-wrap break-words leading-relaxed">{renderRichText(m.content)}</p>
+                  <div className="break-words leading-relaxed">{renderRichText(m.content)}</div>
                 </div>
               </div>
             );
@@ -1107,9 +1211,9 @@ export function LabAssistantDock({
         </div>
 
         {/* Option bubbles */}
-        {chips.length > 0 && (
+        {visibleChips.length > 0 && (
           <div className="flex flex-wrap gap-1.5 border-t border-white/10 px-4 py-2.5">
-            {chips.map((a) => (
+            {visibleChips.map((a) => (
               <button
                 key={a.id}
                 type="button"
