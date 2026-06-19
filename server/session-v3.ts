@@ -62,7 +62,11 @@ function parseLegacyAgentKeyPlaintext(plaintext: string): Uint8Array {
   throw new Error('Legacy agent key plaintext is neither valid base58 (64 bytes) nor a 64-element JSON array');
 }
 
-const SESSION_TTL_MS = 30 * 60 * 1000;
+// Interactive session lock: how long a signed-in wallet's decrypted UMK stays usable
+// (it gates the AI Creator key and trade execution) before a re-sign is required.
+// 4 hours, so a long Auto run or Lab session does not lock mid-work. The UMK lives
+// only in server memory for this window (owner-approved security tradeoff).
+const SESSION_TTL_MS = 4 * 60 * 60 * 1000;
 const NONCE_TTL_MS = 5 * 60 * 1000;
 const REVEAL_MNEMONIC_NONCE_TTL_MS = 2 * 60 * 1000;
 

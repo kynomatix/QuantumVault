@@ -677,7 +677,7 @@ export function LabAssistantDock({
     },
   });
 
-  // Resume a PARKED auto run after the 30-min session expired mid-run and the user re-signed.
+  // Resume a PARKED auto run after the session expired mid-run and the user re-signed.
   // The server re-enters the orchestrator from the preserved step (or re-parks / drops to chat
   // if the key is still locked / was deleted). Merges the returned messages + task so the
   // checklist flips back to "working" without a manual refresh.
@@ -693,6 +693,24 @@ export function LabAssistantDock({
     },
     onError: (err) => {
       setNotice(apiErrorMessage(err, "Couldn't resume the run. Try again."));
+    },
+  });
+
+  // Manual remove (user ask): once an auto run is DONE, clear its finished summary +
+  // best-strategy card from the dock without starting a new run. The server persists the
+  // dismissal (and resets it on the next /auto/start), so it stays gone across polls.
+  const dismiss = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/lab/agent/chat/${taskId}/auto/dismiss`);
+      return (await res.json()) as { task: MessagesResponse["task"] };
+    },
+    onSuccess: (data) => {
+      qc.setQueryData<MessagesResponse>(messagesKey(taskId, walletAddress), (prev) =>
+        prev ? { ...prev, task: data.task } : prev,
+      );
+    },
+    onError: (err) => {
+      setNotice(apiErrorMessage(err, "Couldn't remove the summary. Try again."));
     },
   });
 
@@ -1126,6 +1144,22 @@ export function LabAssistantDock({
                   onDeploy?.(target);
                 }}
               />
+            )}
+            {/* Manual remove (user ask): once the run is done, let the user clear the
+                finished summary + best-strategy card from the dock without starting a new
+                run. The server persists the dismissal (it resets on the next auto run). */}
+            {task.auto.phase === "done" && (
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => dismiss.mutate()}
+                  disabled={dismiss.isPending}
+                  data-testid="button-lab-assistant-dismiss-summary"
+                  className="inline-flex items-center gap-1 rounded-full border border-white/15 px-2.5 py-1 text-[11px] font-medium text-white/60 transition-colors hover:bg-white/10 hover:text-white/80 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <X className="h-3 w-3" /> Remove
+                </button>
+              </div>
             )}
           </div>
         )}

@@ -333,6 +333,12 @@ export interface AutoMemory {
    */
   style?: string | null;
   awaitingStyle?: boolean | null;
+  /**
+   * Set true when the user MANUALLY removes a finished auto run's summary from the dock
+   * (only valid at phase "done"). Hides the checklist + best-strategy card without starting
+   * a new run. A fresh /auto/start resets it (defaultAutoMemory), so the next run shows again.
+   */
+  dismissed?: boolean | null;
 }
 
 // The auto-pipeline's target basket. SOL is the PROVING symbol (proved first); the rest
@@ -356,6 +362,7 @@ export function defaultAutoMemory(): AutoMemory {
     pausedForReauth: false,
     style: null,
     awaitingStyle: false,
+    dismissed: false,
   };
 }
 

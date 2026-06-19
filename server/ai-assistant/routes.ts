@@ -150,6 +150,9 @@ export function registerCreatorRoutes(
     // Only surface the checklist when it's relevant: a live auto run, or a finished one
     // whose terminal state we still want to show. A plain chat task carries no checklist.
     if (!auto || (t.mode !== "auto" && auto.phase !== "done")) return null;
+    // Manually removed: a finished run the user dismissed from the dock drops its checklist
+    // entirely (a fresh /auto/start resets the flag, so a new run shows its checklist again).
+    if (auto.phase === "done" && auto.dismissed === true) return null;
     return {
       phase: auto.phase,
       improveCount: auto.improveCount ?? 0,
@@ -440,7 +443,10 @@ export function registerCreatorRoutes(
       // Enrich the deployable-result card: the best result the agent has for its current
       // strategy, so the dock can show a real result card + Deploy button (which only
       // OPENS the deploy modal, a money path). Best-effort; never breaks the poll.
-      if (taskDto.auto && task.mode === "auto") {
+      // Gate on the checklist DTO alone, not mode==="auto": a finished auto run flips
+      // mode back to "chat" but keeps the checklist (phase "done") and currentStrategyId,
+      // so this keeps the best-strategy card on the panel after the run ends.
+      if (taskDto.auto) {
         const currentStrategyId =
           typeof (task.memory as { currentStrategyId?: unknown } | null)?.currentStrategyId === "number"
             ? ((task.memory as { currentStrategyId: number }).currentStrategyId)
@@ -1041,7 +1047,36 @@ export function registerCreatorRoutes(
     }
   });
 
-  // Resume a PARKED auto run after a wallet re-sign. The 30-min session UMK expired mid-run and
+  // Manually remove a FINISHED auto run's summary from the dock (user ask). Only valid once
+  // the run is done (phase "done"): it hides the checklist + best-strategy card without
+  // starting a new run. A live/auto run is never dismissed here (use Stop for that). A fresh
+  // /auto/start resets the flag, so the next run shows its checklist again. Wallet-scoped,
+  // idempotent.
+  app.post("/api/lab/agent/chat/:taskId/auto/dismiss", ...guards, async (req: Request, res: Response) => {
+    const r = req as any;
+    try {
+      const taskId = parseTaskId(req.params.taskId);
+      if (taskId === null) return res.status(400).json({ error: "Invalid conversation id." });
+      const task = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+      if (!task) return res.status(404).json({ error: "Conversation not found." });
+
+      const auto = readAutoMemory(task);
+      // Only a finished run can be dismissed. A live auto run (not yet "done") must be
+      // stopped, not hidden, so its watch banner + Stop stay honest. No-op otherwise.
+      if (auto && auto.phase === "done") {
+        const nextAuto: AutoMemory = { ...auto, dismissed: true };
+        await labStorage.updateAgentTask(taskId, {
+          memory: { ...((task.memory as Record<string, unknown>) ?? {}), auto: nextAuto },
+        });
+      }
+      const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+      return res.status(200).json({ task: updated ? toTurnTaskDto(updated) : null });
+    } catch (err: any) {
+      sendError(res, err, "Could not remove the run summary.");
+    }
+  });
+
+  // Resume a PARKED auto run after a wallet re-sign. The session UMK expired mid-run and
   // we parked instead of killing, so the dock calls this once the user taps "Continue session"
   // and the re-sign has reloaded the session UMK. Wallet-scoped. Stop wins: a pending
   // cancelRequestedAt is honored first (the user changed their mind). If the run isn't actually
