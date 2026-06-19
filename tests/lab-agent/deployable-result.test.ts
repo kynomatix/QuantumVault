@@ -27,6 +27,10 @@ function result(over: Partial<BacktestResultDto> = {}): BacktestResultDto {
     profitFactor: 1.8,
     sharpeRatio: 2,
     totalTrades: 50,
+    suggestedLeverage: 5,
+    leveragedNetProfitPercent: 200,
+    robustnessScore: 0.5,
+    robustnessRank: 1,
     params: {},
     oos: null,
     ...over,
@@ -78,5 +82,22 @@ describe("selectDeployableResult", () => {
     const view = selectDeployableResult([], { strategyId: 2, runActive: false });
     expect(view.status).toBe("unavailable");
     expect(view.bestResultId).toBeNull();
+  });
+
+  it("degen profile prefers the biggest after-leverage result over an OOS-robust one", () => {
+    const robust = result({ resultId: 1, leveragedNetProfitPercent: 300, sharpeRatio: 2, oos: oos({ sharpeRatio: 1.5 }) });
+    const huge = result({ resultId: 2, leveragedNetProfitPercent: 1800, totalTrades: 60, oos: null });
+    const view = selectDeployableResult([robust, huge], { strategyId: 9, runActive: false, profile: "degen" });
+    expect(view.status).toBe("ready");
+    expect(view.bestResultId).toBe(2);
+  });
+
+  it("degen profile falls back to the OOS-robust result when none clear the after-leverage bar", () => {
+    const robust = result({ resultId: 1, leveragedNetProfitPercent: 300, sharpeRatio: 2, oos: oos({ sharpeRatio: 1.5 }) });
+    const weak = result({ resultId: 2, leveragedNetProfitPercent: 200, oos: null });
+    const view = selectDeployableResult([robust, weak], { strategyId: 9, runActive: false, profile: "degen" });
+    expect(view.status).toBe("ready");
+    expect(view.bestResultId).toBe(1);
+    expect(view.oosSharpe).toBe(1.5);
   });
 });

@@ -9,6 +9,7 @@ import { describe, it, expect } from "vitest";
 import {
   planAutoTurn,
   pickRobustResult,
+  pickDegenResult,
   DEFAULT_AUTO_PLANNER_LIMITS,
   type AutoPlannerDeps,
 } from "../../server/lab-agent/auto-planner";
@@ -41,6 +42,7 @@ function mem(over: Partial<AutoMemory> = {}): AutoMemory {
 
 function result(over: Partial<BacktestResultDto> = {}): BacktestResultDto {
   return {
+    resultId: 100,
     runId: 1,
     ticker: "SOL",
     timeframe: "1h",
@@ -51,6 +53,10 @@ function result(over: Partial<BacktestResultDto> = {}): BacktestResultDto {
     profitFactor: 1.4,
     sharpeRatio: 1.0,
     totalTrades: 40,
+    suggestedLeverage: 5,
+    leveragedNetProfitPercent: 50,
+    robustnessScore: 0.5,
+    robustnessRank: 1,
     params: {},
     oos: null,
     ...over,
@@ -174,7 +180,8 @@ describe("auto-planner: robustness branch", () => {
     const robust = result({ ticker: "SOL", sharpeRatio: 1.2, oos: oos(1.0) });
     const { decision, nextAuto } = planAutoTurn(
       ctx({
-        memory: mem({ phase: "evaluate", graduated: false }),
+        // Pin the basket so the graduation set is exactly ETH/ARB (the default basket is wider).
+        memory: mem({ phase: "evaluate", graduated: false, symbols: ["SOL", "ETH", "ARB"] }),
         currentStrategyId: 9,
         lastToolResult: { tool: "getTopResults", data: topResults([robust]) },
       }),
@@ -455,6 +462,120 @@ describe("auto-planner: pickRobustResult", () => {
     const a = result({ runId: 1, sharpeRatio: 1.0, oos: oos(0.8) });
     const b = result({ runId: 2, sharpeRatio: 1.0, oos: oos(1.3) });
     expect(pickRobustResult([a, b])?.runId).toBe(2);
+  });
+});
+
+describe("auto-planner: degen success profile", () => {
+  it("a robust but SUB-target result (800% after leverage) is NOT good enough (keeps improving)", () => {
+    const subTarget = result({
+      ticker: "SOL",
+      sharpeRatio: 1.2,
+      oos: oos(1.0),
+      leveragedNetProfitPercent: 800,
+      totalTrades: 60,
+    });
+    const { decision, nextAuto } = planAutoTurn(
+      ctx({
+        memory: mem({ phase: "evaluate", graduated: false, successProfile: "degen", symbols: ["SOL", "ETH"] }),
+        currentStrategyId: 9,
+        lastToolResult: { tool: "getTopResults", data: topResults([subTarget]) },
+      }),
+      deps(),
+    );
+    expect(decision.action).toBe("tool");
+    if (decision.action !== "tool") throw new Error("unreachable");
+    expect(decision.tool).toBe("generateInsights");
+    expect(nextAuto.phase).toBe("improve");
+  });
+
+  it("a STRONG result (1200% after leverage, enough trades) GRADUATES to more coins (no OOS needed)", () => {
+    const strong = result({
+      ticker: "SOL",
+      leveragedNetProfitPercent: 1200,
+      totalTrades: 80,
+      oos: null, // degen does NOT require out-of-sample
+    });
+    const { decision, nextAuto } = planAutoTurn(
+      ctx({
+        memory: mem({ phase: "evaluate", graduated: false, successProfile: "degen", symbols: ["SOL", "ETH", "AVAX"] }),
+        currentStrategyId: 9,
+        lastToolResult: { tool: "getTopResults", data: topResults([strong]) },
+      }),
+      deps(),
+    );
+    expect(decision.action).toBe("tool");
+    if (decision.action !== "tool") throw new Error("unreachable");
+    expect(decision.tool).toBe("runOptimization");
+    expect(decision.args).toMatchObject({ symbols: ["ETH", "AVAX"] });
+    expect(nextAuto.graduated).toBe(true);
+  });
+
+  it("a huge return with too FEW trades (3000% over 10 trades) is NOT good enough (keeps improving)", () => {
+    const fewTrades = result({
+      ticker: "SOL",
+      leveragedNetProfitPercent: 3000,
+      totalTrades: 10,
+      oos: null,
+    });
+    const { decision, nextAuto } = planAutoTurn(
+      ctx({
+        memory: mem({ phase: "evaluate", graduated: false, successProfile: "degen", symbols: ["SOL", "ETH"] }),
+        currentStrategyId: 9,
+        lastToolResult: { tool: "getTopResults", data: topResults([fewTrades]) },
+      }),
+      deps(),
+    );
+    expect(decision.action).toBe("tool");
+    if (decision.action !== "tool") throw new Error("unreachable");
+    expect(decision.tool).toBe("generateInsights");
+    expect(nextAuto.phase).toBe("improve");
+  });
+
+  it("degen STOPS on a strong single-symbol basket with the after-leverage verdict (not OOS)", () => {
+    const strong = result({
+      ticker: "SOL",
+      leveragedNetProfitPercent: 1500,
+      totalTrades: 50,
+      oos: null,
+    });
+    const { decision, nextAuto } = planAutoTurn(
+      ctx({
+        memory: mem({ phase: "evaluate", graduated: false, successProfile: "degen", symbols: ["SOL"] }),
+        currentStrategyId: 9,
+        lastToolResult: { tool: "getTopResults", data: topResults([strong]) },
+      }),
+      deps(),
+    );
+    expect(decision.action).toBe("final");
+    if (decision.action !== "final") throw new Error("unreachable");
+    expect(decision.message).toMatch(/after leverage/i);
+    expect(nextAuto.phase).toBe("done");
+  });
+});
+
+describe("auto-planner: pickDegenResult", () => {
+  it("requires BOTH the after-leverage return floor AND enough trades", () => {
+    expect(pickDegenResult([result({ leveragedNetProfitPercent: 800, totalTrades: 100 })])).toBeNull();
+    expect(pickDegenResult([result({ leveragedNetProfitPercent: 5000, totalTrades: 5 })])).toBeNull();
+    expect(pickDegenResult([result({ leveragedNetProfitPercent: 1000, totalTrades: 30 })])).not.toBeNull();
+  });
+
+  it("picks the highest after-leverage return among qualifiers", () => {
+    const a = result({ runId: 1, leveragedNetProfitPercent: 1200, totalTrades: 40 });
+    const b = result({ runId: 2, leveragedNetProfitPercent: 2500, totalTrades: 40 });
+    expect(pickDegenResult([a, b])?.runId).toBe(2);
+  });
+
+  it("breaks a tie toward the LOWER drawdown", () => {
+    const a = result({ runId: 1, leveragedNetProfitPercent: 1500, totalTrades: 40, maxDrawdownPercent: 20 });
+    const b = result({ runId: 2, leveragedNetProfitPercent: 1500, totalTrades: 40, maxDrawdownPercent: 9 });
+    expect(pickDegenResult([a, b])?.runId).toBe(2);
+  });
+
+  it("does NOT require out-of-sample data (unlike the safe path)", () => {
+    expect(
+      pickDegenResult([result({ leveragedNetProfitPercent: 1500, totalTrades: 50, oos: null })]),
+    ).not.toBeNull();
   });
 });
 

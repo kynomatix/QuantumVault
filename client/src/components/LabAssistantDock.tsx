@@ -449,6 +449,12 @@ export function LabAssistantDock({
   // Task 201: hands-off toggle. Only ever offered to admin-whitelisted wallets; the
   // server re-checks eligibility on /auto/start so a stale UI can't force it on.
   const [handsOff, setHandsOff] = useState(false);
+  // Success path the user picks for an auto run (Ask 3). "safe" = Sharpe + out-of-sample
+  // robustness (the conservative default); "degen" = biggest after-leverage profit + low
+  // drawdown. Open to ALL wallets (unlike hands-off). Persisted per wallet so it survives
+  // a refresh; restored once per wallet in the effect below.
+  const [successProfile, setSuccessProfile] = useState<"safe" | "degen">("safe");
+  const profileRestoredFor = useRef<string | null>(null);
   // Inline settings panel that wipes down inside the dock. Replaces the old portal
   // dropdown, which locked page scroll while open.
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -577,6 +583,20 @@ export function LabAssistantDock({
     }
   }, [walletAddress, handsOffEligible, handsOffEligibilityQuery.isSuccess]);
 
+  // Restore the chosen success path per wallet so it survives a refresh. Open to ALL
+  // wallets, so there's no eligibility gate here, unlike hands-off above. Restored once
+  // per wallet; saved on each pick in the settings panel below.
+  useEffect(() => {
+    if (!walletAddress) return;
+    if (profileRestoredFor.current === walletAddress) return;
+    profileRestoredFor.current = walletAddress;
+    try {
+      setSuccessProfile(localStorage.getItem(`qv-lab-success-profile:${walletAddress}`) === "degen" ? "degen" : "safe");
+    } catch {
+      /* localStorage unavailable (private mode etc.); just default to safe. */
+    }
+  }, [walletAddress]);
+
   const send = useMutation({
     mutationFn: async (content: string) => {
       const res = await apiRequest("POST", `/api/lab/agent/chat/${taskId}/messages`, { content });
@@ -646,8 +666,20 @@ export function LabAssistantDock({
   // deterministic tick. The poll loop + /step effect then drive it forward, parking with
   // confirm chips (cost in the label) before each PAID step.
   const autoStart = useMutation({
-    mutationFn: async ({ goal, handsOff }: { goal: string; handsOff: boolean }) => {
-      const res = await apiRequest("POST", `/api/lab/agent/chat/${taskId}/auto/start`, { goal, handsOff });
+    mutationFn: async ({
+      goal,
+      handsOff,
+      profile,
+    }: {
+      goal: string;
+      handsOff: boolean;
+      profile: "safe" | "degen";
+    }) => {
+      const res = await apiRequest("POST", `/api/lab/agent/chat/${taskId}/auto/start`, {
+        goal,
+        handsOff,
+        profile,
+      });
       return (await res.json()) as MessagesResponse;
     },
     onSuccess: (data) => {
@@ -928,7 +960,7 @@ export function LabAssistantDock({
     setDraft("");
     setAutoArmed(false);
     // Only request hands-off when the wallet is actually eligible; the server re-checks.
-    autoStart.mutate({ goal, handsOff: handsOff && handsOffEligible });
+    autoStart.mutate({ goal, handsOff: handsOff && handsOffEligible, profile: successProfile });
   }
 
   function handleAction(action: AgentSuggestedAction) {
@@ -998,26 +1030,24 @@ export function LabAssistantDock({
             </div>
           </div>
           <div className="flex items-center gap-1">
-            {/* Task 201: hands-off lives in a small options menu next to the X, only for
-                admin-whitelisted wallets. Keeps the chat area free of a big checkbox row. */}
-            {handsOffEligible && (
-              <button
-                type="button"
-                onClick={() => setSettingsOpen((v) => !v)}
-                data-testid="button-lab-assistant-options"
-                aria-expanded={settingsOpen}
-                aria-controls="lab-assistant-settings-panel"
-                aria-label="Assistant settings"
-                className={cn(
-                  "rounded-md p-1 transition-colors",
-                  settingsOpen
-                    ? "bg-white/10 text-white"
-                    : "text-white/50 hover:bg-white/5 hover:text-white",
-                )}
-              >
-                <Settings2 className="h-4 w-4" />
-              </button>
-            )}
+            {/* Settings gear: success path is offered to EVERY wallet; hands-off mode is
+                gated to eligible wallets inside the panel itself. */}
+            <button
+              type="button"
+              onClick={() => setSettingsOpen((v) => !v)}
+              data-testid="button-lab-assistant-options"
+              aria-expanded={settingsOpen}
+              aria-controls="lab-assistant-settings-panel"
+              aria-label="Assistant settings"
+              className={cn(
+                "rounded-md p-1 transition-colors",
+                settingsOpen
+                  ? "bg-white/10 text-white"
+                  : "text-white/50 hover:bg-white/5 hover:text-white",
+              )}
+            >
+              <Settings2 className="h-4 w-4" />
+            </button>
             <button
               type="button"
               onClick={() => setOpen(false)}
@@ -1031,23 +1061,65 @@ export function LabAssistantDock({
         </div>
 
         {/* Settings: wipes down INSIDE the dock (no portal, so it never locks page
-            scroll the way the old dropdown did). The header gear opens/closes it. */}
-        {handsOffEligible && (
-          <div
-            id="lab-assistant-settings-panel"
-            role="region"
-            aria-label="Assistant settings"
-            data-testid="lab-assistant-settings-panel"
-            className={cn(
-              "grid transition-[grid-template-rows] duration-200 ease-in-out",
-              settingsOpen ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
-            )}
-          >
-            <div className="overflow-hidden">
-              <div className="space-y-3 border-b border-white/10 bg-white/[0.02] px-4 py-3">
-                <p className="text-[10px] font-semibold uppercase tracking-wide text-white/40">
-                  Assistant settings
-                </p>
+            scroll the way the old dropdown did). The header gear opens/closes it. The
+            success path is offered to ALL wallets; hands-off only to eligible ones. */}
+        <div
+          id="lab-assistant-settings-panel"
+          role="region"
+          aria-label="Assistant settings"
+          data-testid="lab-assistant-settings-panel"
+          className={cn(
+            "grid transition-[grid-template-rows] duration-200 ease-in-out",
+            settingsOpen ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+          )}
+        >
+          <div className="overflow-hidden">
+            <div className="space-y-3 border-b border-white/10 bg-white/[0.02] px-4 py-3">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-white/40">
+                Assistant settings
+              </p>
+
+              {/* Ask 3: which success path the auto run aims for. The agent does the same
+                  work either way; this only changes what counts as good enough to stop. */}
+              <div className="space-y-1.5">
+                <p className="text-xs font-medium text-white/80">Success path</p>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {(["safe", "degen"] as const).map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => {
+                        setSuccessProfile(p);
+                        if (walletAddress) {
+                          try {
+                            localStorage.setItem(`qv-lab-success-profile:${walletAddress}`, p);
+                          } catch {
+                            /* localStorage unavailable; choice just won't persist. */
+                          }
+                        }
+                      }}
+                      disabled={isAuto || turnActive}
+                      aria-pressed={successProfile === p}
+                      data-testid={`button-lab-assistant-profile-${p}`}
+                      className={cn(
+                        "rounded-md border px-2 py-1.5 text-left text-xs transition-colors disabled:opacity-50",
+                        successProfile === p
+                          ? "border-indigo-400/60 bg-indigo-500/15 text-white"
+                          : "border-white/10 bg-white/[0.02] text-white/70 hover:bg-white/5",
+                      )}
+                    >
+                      <span className="block font-semibold">{p === "safe" ? "Safe" : "Degen"}</span>
+                      <span className="block text-white/40">
+                        {p === "safe"
+                          ? "Sharpe + out-of-sample robustness"
+                          : "Max profit after leverage, low drawdown"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {handsOffEligible && (
                 <label className="flex cursor-pointer items-start gap-2 text-xs text-white/80">
                   <input
                     type="checkbox"
@@ -1074,22 +1146,22 @@ export function LabAssistantDock({
                     </span>
                   </span>
                 </label>
-                <div className="flex justify-end">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setSettingsOpen(false)}
-                    data-testid="button-lab-assistant-settings-done"
-                    className="h-7 border border-white/10 px-3 text-xs text-white/80 hover:bg-white/5"
-                  >
-                    Done
-                  </Button>
-                </div>
+              )}
+              <div className="flex justify-end">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setSettingsOpen(false)}
+                  data-testid="button-lab-assistant-settings-done"
+                  className="h-7 border border-white/10 px-3 text-xs text-white/80 hover:bg-white/5"
+                >
+                  Done
+                </Button>
               </div>
             </div>
           </div>
-        )}
+        </div>
 
         {/* Auto-run watch banner (Task #200): always visible while mode==="auto" —
             shows live status + approved spend so far, and the always-available Stop. */}

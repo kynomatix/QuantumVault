@@ -339,13 +339,21 @@ export interface AutoMemory {
    * a new run. A fresh /auto/start resets it (defaultAutoMemory), so the next run shows again.
    */
   dismissed?: boolean | null;
+  /**
+   * Which success path the USER chose for this auto run. "safe" = best risk-adjusted
+   * (Sharpe + out-of-sample robustness), the conservative default. "degen" = the biggest
+   * after-leverage profit with the lowest drawdown and enough trades, no out-of-sample
+   * gate. The planner uses this to decide what counts as good enough to stop on. A fresh
+   * /auto/start resets it.
+   */
+  successProfile?: "safe" | "degen" | null;
 }
 
 // The auto-pipeline's target basket. SOL is the PROVING symbol (proved first); the rest
-// are the GRADUATION set it widens to once SOL holds up out-of-sample (see auto-planner.ts
-// + docs/LAB_AGENT_SANDBOX_PLAN.md §6b). ⚠️ ETH/ARB are PLACEHOLDER graduation tickers —
-// swap them here for better candidates whenever we pick them; keep SOL first as the prover.
-export const DEFAULT_AUTO_SYMBOLS = ["SOL", "ETH", "ARB"];
+// are the GRADUATION set it widens to once SOL clears the chosen success path (see
+// auto-planner.ts + docs/LAB_AGENT_SANDBOX_PLAN.md). Curated liquid majors so one
+// graduation run stays sane on the shared worker; keep SOL first as the prover.
+export const DEFAULT_AUTO_SYMBOLS = ["SOL", "ETH", "BTC", "BNB", "AVAX", "LINK", "ARB"];
 
 /** The zero-value AutoMemory for a fresh auto task. */
 export function defaultAutoMemory(): AutoMemory {
@@ -363,6 +371,7 @@ export function defaultAutoMemory(): AutoMemory {
     style: null,
     awaitingStyle: false,
     dismissed: false,
+    successProfile: "safe",
   };
 }
 

@@ -41,6 +41,10 @@ const DEFAULT_OOS_FRACTION = 0.2;
 const TOP_RESULTS_LIMIT = 10;
 /** OOS Sharpe must hold at least this fraction of in-sample Sharpe (curve-fit guard). */
 const OOS_SHARPE_RETENTION = 0.5;
+/** Degen success floor: a result must clear this after-leverage return to count as a win. */
+const MIN_DEGEN_LEVERAGED_RETURN_PCT = 1000;
+/** Degen success floor: enough trades that the bot fills often, not a handful over years. */
+const MIN_DEGEN_TRADES = 30;
 
 export interface AutoPlannerLimits {
   /** Hard cap on planner ticks for a single task (belt-and-suspenders with the orchestrator). */
@@ -172,6 +176,58 @@ export function pickRobustResult(results: readonly BacktestResultDto[]): Backtes
     if (oos.sharpeRatio > bestOos) best = r;
   }
   return best;
+}
+
+/**
+ * The best DEGEN result, or null if none clears the bar. The degen path is the user's
+ * deliberate choice to chase raw upside, so it does NOT gate on out-of-sample Sharpe (that
+ * is the SAFE path). It requires a big after-leverage return AND enough trades, then ranks
+ * by after-leverage profit, which already rewards low drawdown because suggestedLeverage is
+ * sized from drawdown. Ties break toward the lower drawdown.
+ */
+export function pickDegenResult(
+  results: readonly BacktestResultDto[],
+  opts: { minLeveragedReturnPct?: number; minTrades?: number } = {},
+): BacktestResultDto | null {
+  const minReturn = opts.minLeveragedReturnPct ?? MIN_DEGEN_LEVERAGED_RETURN_PCT;
+  const minTrades = opts.minTrades ?? MIN_DEGEN_TRADES;
+  let best: BacktestResultDto | null = null;
+  for (const r of results) {
+    // Negated form so a missing / NaN field is skipped, never treated as a qualifier.
+    if (!(r.leveragedNetProfitPercent >= minReturn)) continue;
+    if (!(r.totalTrades >= minTrades)) continue;
+    if (best == null) {
+      best = r;
+    } else if (r.leveragedNetProfitPercent > best.leveragedNetProfitPercent) {
+      best = r;
+    } else if (
+      r.leveragedNetProfitPercent === best.leveragedNetProfitPercent &&
+      r.maxDrawdownPercent < best.maxDrawdownPercent
+    ) {
+      best = r;
+    }
+  }
+  return best;
+}
+
+/** The success pick for a run's chosen path: degen chases after-leverage upside, safe
+ *  chases out-of-sample robustness. Unset memory defaults to safe (back-compat). */
+function pickForProfile(
+  results: readonly BacktestResultDto[],
+  profile: AutoMemory["successProfile"],
+): BacktestResultDto | null {
+  return profile === "degen" ? pickDegenResult(results) : pickRobustResult(results);
+}
+
+/** One-line description of WHY a result won, in the language of the chosen path. */
+function successText(r: BacktestResultDto, profile: AutoMemory["successProfile"]): string {
+  if (profile === "degen") {
+    return (
+      `${Math.round(r.leveragedNetProfitPercent)}% after leverage over ${r.totalTrades} trades ` +
+      `(max drawdown ${r.maxDrawdownPercent.toFixed(1)}%)`
+    );
+  }
+  return `OOS Sharpe ${oosSharpeText(r)}`;
 }
 
 function requestPaid(
@@ -319,53 +375,55 @@ export function planAutoTurn(ctx: AutoTurnContext, deps: AutoPlannerDeps): AutoP
       const allResults = top && Array.isArray(top.results) ? top.results : [];
       const proving = provingSymbols(a);
       const graduation = graduationSymbols(a);
+      const profile = a.successProfile;
 
       if (!a.graduated) {
-        // STAGE 1 — PROVING: does it hold up out-of-sample on the primary symbol?
-        const robustProving = pickRobustResult(resultsForSymbols(allResults, proving));
-        if (robustProving) {
+        // STAGE 1 PROVING: does it clear the chosen bar on the primary symbol?
+        const winProving = pickForProfile(resultsForSymbols(allResults, proving), profile);
+        if (winProving) {
           if (graduation.length > 0) {
-            // Graduate: confirm it generalizes beyond the proving symbol.
+            // Strong on the prover, so widen to more coins to see if it holds up beyond it.
             return tool("runOptimization", backtestArgs(sid, graduation), {
               ...stepped,
               phase: "evaluate",
               graduated: true,
             });
           }
-          // Nothing to graduate to — the proving result IS the deliverable.
+          // Nothing to widen to: the proving result IS the deliverable.
           return final(
-            `Proved out on ${robustProving.ticker} ${robustProving.timeframe}: it held up ` +
-              `out-of-sample (OOS Sharpe ${oosSharpeText(robustProving)}). I've stopped here — it's good enough.`,
+            `Proved out on ${winProving.ticker} ${winProving.timeframe}: ${successText(winProving, profile)}. ` +
+              "I've stopped here, it's good enough.",
             { ...stepped, phase: "done" },
           );
         }
-        // Not robust even on the proving symbol — surface insights (free), then improve.
+        // Not good enough on the proving symbol yet: surface insights (free), then improve.
         return tool("generateInsights", { strategyId: sid }, { ...stepped, phase: "improve" });
       }
 
-      // STAGE 2 — GRADUATED: did it GENERALIZE beyond the proving symbol?
-      const robustGrad = pickRobustResult(resultsForSymbols(allResults, graduation));
-      if (robustGrad) {
+      // STAGE 2 GRADUATED: did it hold up on the wider basket too?
+      const winGrad = pickForProfile(resultsForSymbols(allResults, graduation), profile);
+      if (winGrad) {
         return final(
-          `Proved out on ${proving[0]} first, then it generalized — ${robustGrad.ticker} ` +
-            `${robustGrad.timeframe} also held up out-of-sample (OOS Sharpe ${oosSharpeText(robustGrad)}). ` +
-            `I've stopped here.`,
+          `Proved out on ${proving[0]} first, then it generalized: ${winGrad.ticker} ` +
+            `${winGrad.timeframe} also cleared the bar (${successText(winGrad, profile)}). I've stopped here.`,
           { ...stepped, phase: "done" },
         );
       }
-      const robustProving = pickRobustResult(resultsForSymbols(allResults, proving));
-      if (robustProving) {
+      const winProving = pickForProfile(resultsForSymbols(allResults, proving), profile);
+      if (winProving) {
         return final(
-          `It held up out-of-sample on ${robustProving.ticker} ${robustProving.timeframe} ` +
-            `(OOS Sharpe ${oosSharpeText(robustProving)}) but did NOT generalize to ${graduation.join("/")}, ` +
-            `so treat it as ${robustProving.ticker}-specific. I've stopped here.`,
+          `It cleared the bar on ${winProving.ticker} ${winProving.timeframe} ` +
+            `(${successText(winProving, profile)}) but not on the other markets (${graduation.join("/")}), ` +
+            `so treat it as ${winProving.ticker}-specific. I've stopped here.`,
           { ...stepped, phase: "done" },
         );
       }
-      // Defensive: we only graduate after a robust proving result, so reaching here means
-      // the proving evidence vanished (e.g. dedup across runs). Stop honestly.
+      // Defensive: we only widen after a strong proving result, so reaching here means the
+      // proving evidence vanished (e.g. dedup across runs). Stop honestly.
       return final(
-        "I ran the backtests but couldn't confirm a result that holds up out-of-sample, so I've stopped.",
+        profile === "degen"
+          ? "I ran the backtests but couldn't find a result that clears your after-leverage target, so I've stopped."
+          : "I ran the backtests but couldn't confirm a result that holds up out-of-sample, so I've stopped.",
         { ...stepped, phase: "done" },
       );
     }
@@ -385,8 +443,11 @@ export function planAutoTurn(ctx: AutoTurnContext, deps: AutoPlannerDeps): AutoP
       }
       if (a.improveCount >= limits.maxImproveLoops) {
         return final(
-          `I've used all ${limits.maxImproveLoops} improvement rounds for this task without a result that ` +
-            "holds up out-of-sample. I've stopped so it doesn't keep spending — tell me if you'd like a new angle.",
+          a.successProfile === "degen"
+            ? `I've used all ${limits.maxImproveLoops} improvement rounds for this task without clearing your ` +
+                "after-leverage target. I've stopped so it doesn't keep spending, tell me if you'd like a new angle."
+            : `I've used all ${limits.maxImproveLoops} improvement rounds for this task without a result that ` +
+                "holds up out-of-sample. I've stopped so it doesn't keep spending, tell me if you'd like a new angle.",
           { ...stepped, phase: "done" },
         );
       }
@@ -395,10 +456,15 @@ export function planAutoTurn(ctx: AutoTurnContext, deps: AutoPlannerDeps): AutoP
         {
           strategyId: sid,
           guidance:
-            "Improve out-of-sample robustness: reduce overfitting and steady the Sharpe and drawdown " +
-            "based on the latest insights.",
+            a.successProfile === "degen"
+              ? "Push for the biggest after-leverage profit with the lowest drawdown and enough trades to fill " +
+                "often, based on the latest insights."
+              : "Improve out-of-sample robustness: reduce overfitting and steady the Sharpe and drawdown " +
+                "based on the latest insights.",
         },
-        "I'll rewrite the strategy with AI to chase better out-of-sample robustness.",
+        a.successProfile === "degen"
+          ? "I'll rewrite the strategy with AI to chase a bigger after-leverage return."
+          : "I'll rewrite the strategy with AI to chase better out-of-sample robustness.",
         stepped,
         ctx,
         deps,

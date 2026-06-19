@@ -468,6 +468,7 @@ export function registerCreatorRoutes(
               taskDto.auto.deployableResult = selectDeployableResult(results, {
                 strategyId: currentStrategyId,
                 runActive: task.activeRunId != null,
+                profile: readAutoMemory(task)?.successProfile ?? "safe",
               });
             }
           } catch {
@@ -930,6 +931,10 @@ export function registerCreatorRoutes(
         }
       }
 
+      // Success path the user chose for this run (open to everyone, unlike hands-off):
+      // "degen" chases the biggest after-leverage profit; anything else stays "safe".
+      const successProfile: "safe" | "degen" = req.body?.profile === "degen" ? "degen" : "safe";
+
       // Record the goal in the transcript so the watcher sees what was asked, then reset
       // the pipeline to a clean slate so a fresh auto run starts at the create phase (and
       // its style gate). EVERY per-run pipeline pointer is cleared: a leftover
@@ -948,7 +953,7 @@ export function registerCreatorRoutes(
           currentStrategyId: null,
           lastFinishedRunId: null,
           autoLastTool: null,
-          auto: { ...defaultAutoMemory(), handsOff: effectiveHandsOff },
+          auto: { ...defaultAutoMemory(), handsOff: effectiveHandsOff, successProfile },
         },
         spendEstimateUsd: 0,
         cancelRequestedAt: null,
@@ -975,6 +980,7 @@ export function registerCreatorRoutes(
         await pauseAutoForReauth(r.walletAddress, taskId, afterReset ?? task, {
           ...defaultAutoMemory(),
           handsOff: effectiveHandsOff,
+          successProfile,
         });
         const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
         const msgs = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
