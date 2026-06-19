@@ -655,7 +655,7 @@ export class CurrentLabAdapter implements LabAgentAdapter {
       const filtered = input.symbols.filter((s) => !tested.has(s.trim().toUpperCase()));
       if (filtered.length === 0) {
         throw new ToolkitError(
-          "invalid_input",
+          "all_tickers_tested",
           `Every requested ticker was already backtested for this strategy (${[...tested].sort().join(", ")}). ` +
             "Pick markets that aren't in that list.",
           false,

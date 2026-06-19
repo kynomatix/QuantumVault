@@ -384,13 +384,34 @@ export function planAutoTurn(ctx: AutoTurnContext, deps: AutoPlannerDeps): AutoP
         // STAGE 1 PROVING: does it clear the chosen bar on the primary symbol?
         const winProving = pickForProfile(resultsForSymbols(allResults, proving), profile);
         if (winProving) {
-          if (graduation.length > 0) {
-            // Strong on the prover, so widen to more coins to see if it holds up beyond it.
+          // Widen to the rest of the basket to see if the edge generalizes, but only if
+          // there's somewhere new to widen to. If every graduation market is already
+          // backtested for this strategy (widenExhausted, set by the orchestrator when the
+          // widen run came back "every market already tested"), re-issuing the same widen
+          // just fails forever, so evaluate the coverage we already have instead.
+          if (graduation.length > 0 && !a.widenExhausted) {
             return tool("runOptimization", backtestArgs(sid, graduation, true), {
               ...stepped,
               phase: "evaluate",
               graduated: true,
             });
+          }
+          if (a.widenExhausted) {
+            const winGrad = pickForProfile(resultsForSymbols(allResults, graduation), profile);
+            if (winGrad) {
+              return final(
+                `Proved out on ${winProving.ticker} ${winProving.timeframe}. The other markets are ` +
+                  `already backtested for this strategy, and ${winGrad.ticker} ${winGrad.timeframe} ` +
+                  `clears the bar too (${successText(winGrad, profile)}). I've stopped here.`,
+                { ...stepped, phase: "done" },
+              );
+            }
+            return final(
+              `Proved out on ${winProving.ticker} ${winProving.timeframe}: ${successText(winProving, profile)}. ` +
+                "Every other market I'd widen to is already backtested for this strategy, so this is the one " +
+                "to use. I've stopped here.",
+              { ...stepped, phase: "done" },
+            );
           }
           // Nothing to widen to: the proving result IS the deliverable.
           return final(

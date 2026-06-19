@@ -247,6 +247,42 @@ describe("auto-planner: SOL-first graduation", () => {
     expect(nextAuto.phase).toBe("improve");
   });
 
+  it("PROVING + widenExhausted: every market already tested → STOPS instead of re-running the widen", () => {
+    // The widen run came back "every market already tested" (orchestrator set widenExhausted).
+    // The planner must NOT re-issue the doomed widen; it finalizes with the result it has.
+    const robustSol = result({ ticker: "SOL", sharpeRatio: 1.2, oos: oos(1.0) });
+    const { decision, nextAuto } = planAutoTurn(
+      ctx({
+        memory: mem({ phase: "evaluate", graduated: false, symbols: ["SOL", "ETH", "ARB"], widenExhausted: true }),
+        currentStrategyId: 9,
+        lastToolResult: { tool: "getTopResults", data: topResults([robustSol]) },
+      }),
+      deps(),
+    );
+    expect(decision.action).toBe("final");
+    if (decision.action !== "final") throw new Error("unreachable");
+    expect(decision.message).toMatch(/already backtested/i);
+    expect(nextAuto.phase).toBe("done");
+  });
+
+  it("PROVING + widenExhausted: a robust graduation result already in hand finals as generalized", () => {
+    const robustSol = result({ ticker: "SOL", sharpeRatio: 1.0, oos: oos(0.8) });
+    const robustEth = result({ ticker: "ETH", timeframe: "2h", sharpeRatio: 1.0, oos: oos(0.9) });
+    const { decision, nextAuto } = planAutoTurn(
+      ctx({
+        memory: mem({ phase: "evaluate", graduated: false, symbols: ["SOL", "ETH", "ARB"], widenExhausted: true }),
+        currentStrategyId: 9,
+        lastToolResult: { tool: "getTopResults", data: topResults([robustSol, robustEth]) },
+      }),
+      deps(),
+    );
+    expect(decision.action).toBe("final");
+    if (decision.action !== "final") throw new Error("unreachable");
+    expect(decision.message).toMatch(/ETH/);
+    expect(decision.message).toMatch(/already backtested/i);
+    expect(nextAuto.phase).toBe("done");
+  });
+
   it("GRADUATED: a robust graduation result finals as 'generalized'", () => {
     const robustSol = result({ ticker: "SOL", sharpeRatio: 1.0, oos: oos(0.8) });
     const robustEth = result({ ticker: "ETH", timeframe: "2h", sharpeRatio: 1.0, oos: oos(0.9) });

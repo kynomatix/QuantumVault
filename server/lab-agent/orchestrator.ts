@@ -622,6 +622,14 @@ export class LabTurnOrchestrator {
       if (nextAuto !== undefined) {
         const m = readMemory(task);
         m.auto = priorAuto;
+        // Terminal "every market already tested" failure on a widen run: flag it on the
+        // (rolled-back) auto memory so the deterministic planner finalizes with the results
+        // it already has next tick. Without this, the planner re-issues the same doomed widen
+        // forever: the interleaved getTopResults success keeps resetting the orchestrator's
+        // toolErrorStreak, so that guard never trips and it burns ticks to the step cap.
+        if (res.error.code === "all_tickers_tested" && m.auto) {
+          m.auto = { ...m.auto, widenExhausted: true };
+        }
         (task as { memory?: unknown }).memory = m;
         clear.memory = m as unknown as Record<string, unknown>;
       }

@@ -347,6 +347,13 @@ export interface AutoMemory {
    * /auto/start resets it.
    */
   successProfile?: "safe" | "degen" | null;
+  /**
+   * Set true by the orchestrator when a graduation/widen run comes back "every market already
+   * tested" for this strategy. The deterministic planner reads it to STOP and report the
+   * result it already has, instead of re-issuing the same doomed widen until the step cap.
+   * A fresh /auto/start resets it (defaultAutoMemory).
+   */
+  widenExhausted?: boolean | null;
 }
 
 // The auto-pipeline's target basket. SOL is the PROVING symbol (proved first); the rest
@@ -372,6 +379,7 @@ export function defaultAutoMemory(): AutoMemory {
     awaitingStyle: false,
     dismissed: false,
     successProfile: "safe",
+    widenExhausted: false,
   };
 }
 

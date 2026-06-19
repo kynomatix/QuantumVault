@@ -430,6 +430,56 @@ describe("LabTurnOrchestrator — auto mode invalidates a stale read on async qu
     expect((task.memory as any).auto.graduated).toBe(true);
     expect((task.memory as any).autoLastTool).toBeNull(); // stale SOL read invalidated
   });
+
+  it("flags widenExhausted (surviving the rollback) when the widen run says every ticker is already tested", async () => {
+    // A robust SOL result is stashed and the basket has graduation symbols, so the planner
+    // launches the widen runOptimization. The adapter rejects it terminally (all tickers
+    // already backtested). executeAsyncTool rolls auto memory back BUT must overlay
+    // widenExhausted:true so the next planner tick finalizes instead of re-issuing the same
+    // doomed widen forever (the interleaved getTopResults success resets toolErrorStreak, so
+    // that guard never trips).
+    const robustSol = {
+      runId: 1, ticker: "SOL", timeframe: "1h", rank: 1, netProfitPercent: 10,
+      winRatePercent: 55, maxDrawdownPercent: 8, profitFactor: 1.4, sharpeRatio: 1.0,
+      totalTrades: 40, params: {}, oos: { sharpeRatio: 0.8 },
+    };
+    const store = makeStore({
+      mode: "auto",
+      goal: "momentum on SOL",
+      memory: {
+        currentStrategyId: 9,
+        ledger: [],
+        autoLastTool: {
+          tool: "getTopResults",
+          data: { strategyId: 9, runId: 1, rankedBy: "lab_objective", results: [robustSol] },
+        },
+        auto: { ...defaultAutoMemory(), phase: "evaluate", graduated: false, symbols: ["SOL", "ETH", "ARB"], autoStepCount: 3 },
+      } as any,
+    });
+    await seedUser(store, "go");
+    const toolkit = makeToolkit({
+      runOptimization: () => ({
+        ok: false,
+        error: { code: "all_tickers_tested", message: "Every requested ticker was already backtested for this strategy.", retryable: false },
+      }),
+      getTopResults: () => ({
+        ok: true,
+        data: { strategyId: 9, runId: 1, rankedBy: "lab_objective", results: [robustSol] },
+      }),
+    });
+    const planner = createAutoPlanner({ estimatePaidCostUsd: () => 0.01 });
+    const orch = makeOrch(store, toolkit);
+
+    const r = await orch.advance(1, { brain: planner, hasKey: true });
+
+    // The whole loop breaks within ONE advance: widen fails → widenExhausted flagged
+    // (survives the rollback) → re-fetch → finalize. It does NOT re-issue the widen.
+    expect(r.outcome).toBe("final");
+    const task = store.tasks.get(1)!;
+    expect((task.memory as any).auto.widenExhausted).toBe(true); // survives the rollback
+    expect((task.memory as any).auto.graduated).toBe(false); // phase advance rolled back
+    expect(toolkit.countOf("runOptimization")).toBe(1); // the doomed widen ran exactly once
+  });
 });
 
 describe("LabTurnOrchestrator — crash replay of an executing step", () => {

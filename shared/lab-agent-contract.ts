@@ -75,6 +75,7 @@ export const toolkitErrorCodeEnum = z.enum([
   "queue_full",
   "lab_unavailable",
   "not_implemented", // method exists in the contract but not wired this phase
+  "all_tickers_tested", // widen requested but every ticker is already backtested for this strategy
   "internal",
 ]);
 export type ToolkitErrorCode = z.infer<typeof toolkitErrorCodeEnum>;
