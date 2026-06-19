@@ -18,6 +18,28 @@ export function serveStatic(app: Express) {
     );
   }
 
+  // Validate and cache index.html at STARTUP rather than reading it on every
+  // request. This does two things:
+  //   1. Self-heal on bad builds: if index.html is missing/unreadable, we throw
+  //      here during startup (before httpServer.listen), so the process never
+  //      becomes healthy. The deployment health check then rejects this build
+  //      and keeps serving the previous good one — instead of promoting a build
+  //      that 500s every request (the failure mode that took the whole site
+  //      down and required a manual re-publish to recover).
+  //   2. Performance: the SPA shell is an immutable build artifact in
+  //      production, so there's no reason to hit the disk on every request.
+  const indexPath = path.resolve(distPath, "index.html");
+  let indexHtmlTemplate: string;
+  try {
+    indexHtmlTemplate = fs.readFileSync(indexPath, "utf8");
+  } catch (err) {
+    throw new Error(
+      `Could not read the SPA shell at ${indexPath}. The client build is ` +
+        `incomplete or corrupt; refusing to start so a broken build is not ` +
+        `served. Underlying error: ${(err as Error).message}`,
+    );
+  }
+
   console.log(`[static] Serving static files from: ${distPath}`);
 
   // Replit autoscale wraps every response in `Cache-Control: private, max-age=0`,
@@ -75,11 +97,9 @@ export function serveStatic(app: Express) {
   // fall through to index.html — dynamically set og:url to the actual request
   // URL so X/LinkedIn don't deduplicate sub-route cards against the root cache
   app.use("*", (req, res) => {
-    const indexPath = path.resolve(distPath, "index.html");
-    let html = fs.readFileSync(indexPath, "utf8");
     const canonicalBase = "https://myquantumvault.com";
     const requestUrl = `${canonicalBase}${req.path === "/" ? "" : req.path}`;
-    html = html.replace(
+    const html = indexHtmlTemplate.replace(
       /<meta\s+property="og:url"\s+content="[^"]*"\s*\/>/,
       `<meta property="og:url" content="${requestUrl}" />`
     );
