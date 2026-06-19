@@ -182,6 +182,93 @@ function eliminateDeadCode(
   return result;
 }
 
+// --- Strict declaration validation (AI Creator compile-repair gate) --------------
+//
+// Our runtime is lenient: a ":=" (or "+=" etc.) to a name that was never declared with
+// "=" / "var" is silently auto-created as a global. TradingView's Pine compiler REJECTS
+// that ("Undeclared identifier ...", CE10272 / CE10194). So an AI-generated script can
+// pass our engine, run fine in QuantumLab, yet fail the moment a user pastes it into
+// TradingView. To keep generated strategies valid on BOTH engines, the Creator runs this
+// check and feeds any violation back into its repair loop.
+//
+// This is intentionally NOT wired into the runtime compile path, so existing saved
+// strategies that rely on the lenient behavior keep running unchanged.
+//
+// Flat (not strict per-scope) by design: a name declared ANYWHERE in the script counts
+// as declared, so we only flag a name that is reassigned but never declared at all (the
+// real bug) and never raise a false positive that could block an otherwise-valid draft.
+// Built-ins (close, na, ...) are deliberately NOT exempted: they are read-only, so a
+// reassignment to one is always invalid Pine and should be flagged too.
+
+function collectDeclaredNames(stmts: Stmt[], out: Set<string>): void {
+  for (const s of stmts) {
+    if (s.k === "decl") out.add(s.name);
+    else if (s.k === "multi_decl") for (const n of s.names) out.add(n);
+    else if (s.k === "func_decl") {
+      out.add(s.name);
+      for (const p of s.params) out.add(p);
+      collectDeclaredNames(s.body, out);
+    } else if (s.k === "for") {
+      out.add(s.v);
+      collectDeclaredNames(s.body, out);
+    } else if (s.k === "while") {
+      collectDeclaredNames(s.body, out);
+    } else if (s.k === "if") {
+      collectDeclaredNames(s.body, out);
+      for (const ei of s.elifs) collectDeclaredNames(ei.body, out);
+      if (s.el) collectDeclaredNames(s.el, out);
+    } else if (s.k === "switch") {
+      for (const c of s.cases) collectDeclaredNames(c.body, out);
+    }
+  }
+}
+
+function collectReassignTargets(stmts: Stmt[], out: Set<string>): void {
+  for (const s of stmts) {
+    if ((s.k === "reassign" || s.k === "aug") && s.target.k === "id") out.add(s.target.name);
+    if (s.k === "func_decl") collectReassignTargets(s.body, out);
+    else if (s.k === "for") collectReassignTargets(s.body, out);
+    else if (s.k === "while") collectReassignTargets(s.body, out);
+    else if (s.k === "if") {
+      collectReassignTargets(s.body, out);
+      for (const ei of s.elifs) collectReassignTargets(ei.body, out);
+      if (s.el) collectReassignTargets(s.el, out);
+    } else if (s.k === "switch") {
+      for (const c of s.cases) collectReassignTargets(c.body, out);
+    }
+  }
+}
+
+function lineOfReassign(source: string, name: string): number | null {
+  const lines = source.split("\n");
+  const re = new RegExp("^\\s*" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*(:=|\\+=|-=|\\*=|/=)");
+  for (let i = 0; i < lines.length; i++) {
+    if (re.test(lines[i])) return i + 1;
+  }
+  return null;
+}
+
+// Returns one human-readable error per identifier that is reassigned (:= or +=/-=/*=//=)
+// but never declared anywhere. Empty array means clean.
+export function findUndeclaredReassignments(ast: Stmt[], source: string): string[] {
+  const declared = new Set<string>();
+  collectDeclaredNames(ast, declared);
+  const targets = new Set<string>();
+  collectReassignTargets(ast, targets);
+
+  const errors: string[] = [];
+  for (const name of targets) {
+    if (declared.has(name)) continue;
+    const line = lineOfReassign(source, name);
+    const where = line ? ` (line ${line})` : "";
+    errors.push(
+      `Undeclared identifier "${name}"${where}: it is reassigned with ":=" but never declared. ` +
+      `Declare it before first use with "=" (for example "var float ${name} = na"), or use "=" on its first assignment.`,
+    );
+  }
+  return errors;
+}
+
 export function compilePineHotLoop(
   hotStmts: Stmt[],
   userFunctions: Record<string, { params: string[]; body: Stmt[] }>,

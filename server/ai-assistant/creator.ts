@@ -11,6 +11,7 @@
 // as a hand-pasted Pine script today).
 
 import { compilePine } from '../lab/pine/index';
+import { findUndeclaredReassignments } from '../lab/pine/compiler';
 import {
   callOpenRouter,
   checkRateLimit,
@@ -67,6 +68,7 @@ function systemPrompt(): string {
     '- OHLCV only. Do NOT use request.security() or any higher-timeframe data request (the engine rejects it). Express higher-timeframe context with long-lookback EMAs / ATR / Donchian on the base series instead.',
     '- No external libraries or imports. alertcondition() / alert_message= are ignored in a backtest — do not emit them.',
     '- Do NOT use `math.sum` (the engine computes it incorrectly); use `ta.sma(x, n) * n` or a manual loop for rolling sums.',
+    '- DECLARE every variable with `=` (or `var` / `varip`) BEFORE you reassign it with `:=`. Never use `:=` (or `+=`, `-=`, etc.) on a name that was not already declared; that is a compile error. If a value is set inside if-branches, declare it once at the top (e.g. `var float stopDist = na`) and reassign with `:=` inside the branches.',
     '- BACKTEST DATE WINDOW (REQUIRED on every strategy — QuantumLab reads these inputs BY NAME). Include this block verbatim and gate EVERY entry condition with `and inDateRange`:',
     '    useDateFilter = input.bool(true, "Enable Date Filter", group="Date Range")',
     '    backtestStart = input.time(timestamp("1 Jan 2020"), "Start Date", group="Date Range")',
@@ -115,7 +117,14 @@ function stripLeadingPreamble(pine: string): string {
 
 function tryCompile(pine: string): { ok: boolean; error: string | null } {
   try {
-    compilePine(pine);
+    const plan = compilePine(pine);
+    // Our engine is lenient about `:=` to a never-declared variable, but TradingView
+    // rejects it. Catch it here so the repair loop fixes it and the saved script is
+    // valid Pine on both engines.
+    const declErrors = findUndeclaredReassignments(plan.ast, pine);
+    if (declErrors.length > 0) {
+      return { ok: false, error: declErrors.join('\n').slice(0, 600) };
+    }
     return { ok: true, error: null };
   } catch (e: any) {
     return { ok: false, error: (e?.message ?? 'Unknown compile error').slice(0, 600) };
