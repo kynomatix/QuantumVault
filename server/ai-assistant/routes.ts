@@ -178,6 +178,13 @@ export function registerCreatorRoutes(
     mode: t.mode,
     spendEstimateUsd: t.spendEstimateUsd ?? 0,
     cancelRequested: t.cancelRequestedAt != null,
+    // Whether a strategy is already in progress for this task. The dock uses this to offer
+    // "Continue current strategy" vs "Build a new one" when Auto is pressed mid-strategy (A),
+    // instead of silently wiping the in-progress work. null = nothing to continue.
+    currentStrategyId:
+      typeof (t.memory as { currentStrategyId?: unknown } | null)?.currentStrategyId === "number"
+        ? ((t.memory as { currentStrategyId: number }).currentStrategyId)
+        : null,
     // The quant-agent checklist view (null for a plain chat task).
     auto: toAutoChecklistDto(t),
   });
@@ -704,6 +711,16 @@ export function registerCreatorRoutes(
 
       if (!keyMeta.hasKey) return await degradeToShell();
 
+      // Early lock guard (C): the wallet HAS a saved key but this session can't unlock it
+      // (the in-memory UMK is gone after a session expiry + reconnect). Surface the honest
+      // re-sign reply + chip UP FRONT — before checkRateLimit/startTaskTurn — so a locked
+      // user ALWAYS gets the re-sign path and never the generic capability pitch. Without
+      // this, rapid retries while locked trip the rate limiter and fall into the catch-block
+      // degrade (the keyless capability shell), which reads as "the assistant gave up".
+      if (!getSessionByWalletAddress(r.walletAddress)?.session?.umk) {
+        return await degradeToShell({ sessionLocked: true });
+      }
+
       try {
         // Validate an optional model override before doing any work.
         const rawModel = typeof req.body?.model === "string" ? req.body.model.trim() : "";
@@ -874,18 +891,24 @@ export function registerCreatorRoutes(
     try {
       const taskId = parseTaskId(req.params.taskId);
       if (taskId === null) return res.status(400).json({ error: "Invalid conversation id." });
+      // CONTINUE mode (A): "keep working on the strategy I already have" rather than wiping
+      // it for a brand-new build. It needs NO goal (it reuses the existing strategy) and so
+      // skips the goal/pasted-key checks below. The fresh-build path is unchanged.
+      const wantContinue = req.body?.continue === true;
       const goal = typeof req.body?.goal === "string" ? req.body.goal.trim() : "";
-      if (!goal) return res.status(400).json({ error: "Describe the strategy you want me to build first." });
-      if (goal.length > MAX_CHAT_CONTENT) {
-        return res.status(400).json({ error: "That description is too long." });
-      }
-      // Pasted-secret guard: the goal is persisted (and echoed in the transcript), so a
-      // pasted key must never land here. Same rule as a chat message.
-      if (looksLikeApiKey(goal)) {
-        return res.status(400).json({
-          error:
-            "Don't paste your API key here. Add it securely in the Creator — it goes straight to encrypted storage and is never saved in this chat.",
-        });
+      if (!wantContinue) {
+        if (!goal) return res.status(400).json({ error: "Describe the strategy you want me to build first." });
+        if (goal.length > MAX_CHAT_CONTENT) {
+          return res.status(400).json({ error: "That description is too long." });
+        }
+        // Pasted-secret guard: the goal is persisted (and echoed in the transcript), so a
+        // pasted key must never land here. Same rule as a chat message.
+        if (looksLikeApiKey(goal)) {
+          return res.status(400).json({
+            error:
+              "Don't paste your API key here. Add it securely in the Creator — it goes straight to encrypted storage and is never saved in this chat.",
+          });
+        }
       }
       // Auto needs the BYO key: even though the planner is LLM-free, the PAID steps it
       // schedules spend the user's OpenRouter key. Refuse up front (clear message) if
@@ -916,6 +939,65 @@ export function registerCreatorRoutes(
       // stale backtest can't keep consuming the shared worker under the fresh run.
       if (task.turnState !== "ready") {
         await cancelAgentQueuedRuns(r.walletAddress, taskId);
+      }
+
+      // CONTINUE (A): keep the strategy the user is already iterating on instead of wiping
+      // it for a brand-new build. The anti-leak invariant (a leftover currentStrategyId must
+      // never SILENTLY skip the create/style gate) still holds: continue is EXPLICIT (the
+      // client only sends continue:true behind a dedicated "Continue current strategy" chip),
+      // and we still hand the planner a FRESH auto memory — only currentStrategyId is kept on
+      // purpose, so the planner re-enters at runOptimization on the existing strategy. We
+      // preserve the prior run's hands-off / success-profile choices (the chip carries no new
+      // ones). Everything else (step/run pointers, spend, loop count) resets like a new run.
+      if (wantContinue) {
+        const memObj = (task.memory as Record<string, unknown>) ?? {};
+        const currentStrategyId =
+          typeof memObj.currentStrategyId === "number" ? memObj.currentStrategyId : null;
+        if (currentStrategyId == null) {
+          return res.status(400).json({
+            error: "There's no strategy in progress to continue. Tell me what to build and I'll start a fresh one.",
+          });
+        }
+        const priorAuto = readAutoMemory(task);
+        const contHandsOff = priorAuto?.handsOff ?? false;
+        const contProfile: "safe" | "degen" = priorAuto?.successProfile === "degen" ? "degen" : "safe";
+        await labStorage.createAgentMessageForWallet(r.walletAddress, taskId, {
+          role: "user",
+          content: "Continue current strategy",
+        });
+        await labStorage.updateAgentTask(taskId, {
+          mode: "auto",
+          status: "active",
+          memory: {
+            ...memObj,
+            currentStrategyId,
+            lastFinishedRunId: null,
+            autoLastTool: null,
+            auto: { ...defaultAutoMemory(), handsOff: contHandsOff, successProfile: contProfile },
+          },
+          spendEstimateUsd: 0,
+          cancelRequestedAt: null,
+          currentStep: null,
+          activeRunId: null,
+          loopCount: 0,
+          turnState: "running_turn",
+          turnStateChangedAt: new Date(),
+        });
+        const contOutcome = await startTaskTurn(r.walletAddress, taskId, undefined, "auto");
+        if (contOutcome === "no-key") {
+          // Locked session: same park-for-reauth path as the fresh build. Spread the
+          // just-written memory (keeps currentStrategyId) so resume re-enters on the
+          // existing strategy after the user re-signs.
+          const afterReset = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+          await pauseAutoForReauth(r.walletAddress, taskId, afterReset ?? task, {
+            ...defaultAutoMemory(),
+            handsOff: contHandsOff,
+            successProfile: contProfile,
+          });
+        }
+        const updated = await labStorage.getAgentTaskForWallet(r.walletAddress, taskId);
+        const msgs = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
+        return res.status(202).json({ messages: msgs, task: updated ? toTurnTaskDto(updated) : null });
       }
 
       // Hands-off intent: the client may ASK for hands-off; whether it takes effect is

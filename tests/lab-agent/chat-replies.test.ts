@@ -52,6 +52,19 @@ describe("SESSION_LOCKED_REPLY", () => {
     expect(reconnect[0].tab).toBeUndefined();
     expect(reconnect[0].message).toBeUndefined();
   });
+
+  it("gives an honest 're-sign to continue' message, not a 'canned/idle' pitch (C)", () => {
+    const text = SESSION_LOCKED_REPLY.content.toLowerCase();
+    // The honest cause + path: the session expired and a re-sign restores it.
+    expect(text).toMatch(/expired/);
+    expect(text).toMatch(/reconnect|re-sign|sign/);
+    // Must NOT claim the assistant only gives canned answers or that the session "went idle"
+    // (both were misleading — the real cause is an expired session, not idleness).
+    expect(text).not.toMatch(/canned/);
+    expect(text).not.toMatch(/idle/);
+    // Honor the user's strict no-new-em-dash rule.
+    expect(SESSION_LOCKED_REPLY.content).not.toContain("\u2014");
+  });
 });
 
 describe("composeAgentReply", () => {

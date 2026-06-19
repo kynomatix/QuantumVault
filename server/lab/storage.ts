@@ -93,6 +93,8 @@ export interface ILabStorage {
 
   getTopResultsForStrategy(strategyId: number, limit?: number): Promise<any[]>;
 
+  getTestedTickers(strategyId: number, userId: string): Promise<string[]>;
+
   getQueuedRuns(walletAddress: string): Promise<LabOptimizationRun[]>;
   getNextQueueOrder(walletAddress: string): Promise<number>;
   reorderQueue(walletAddress: string, orderedIds: number[]): Promise<void>;
@@ -343,6 +345,26 @@ export class LabDatabaseStorage implements ILabStorage {
       return db.select().from(labOptimizationRuns).where(and(...conditions)).orderBy(desc(labOptimizationRuns.createdAt));
     }
     return db.select().from(labOptimizationRuns).orderBy(desc(labOptimizationRuns.createdAt));
+  }
+
+  /** Distinct, upper-cased tickers already backtested for this strategy by this user.
+   *  Drives the "test on more/new tickers ⇒ no overlap" rule: callers subtract these
+   *  from a requested symbol set. Reads only the tickers column across all of the
+   *  strategy's runs (queued/running/complete alike — a queued run still claims that
+   *  market so we don't double-book it). */
+  async getTestedTickers(strategyId: number, userId: string): Promise<string[]> {
+    const rows = await db
+      .select({ tickers: labOptimizationRuns.tickers })
+      .from(labOptimizationRuns)
+      .where(and(eq(labOptimizationRuns.strategyId, strategyId), eq(labOptimizationRuns.userId, userId)));
+    const seen = new Set<string>();
+    for (const row of rows) {
+      const arr = Array.isArray(row.tickers) ? row.tickers : [];
+      for (const t of arr) {
+        if (typeof t === "string" && t.trim().length > 0) seen.add(t.trim().toUpperCase());
+      }
+    }
+    return [...seen];
   }
 
   async getRun(id: number): Promise<LabOptimizationRun | undefined> {

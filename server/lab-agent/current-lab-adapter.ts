@@ -81,6 +81,7 @@ export type AdapterStorage = Pick<
   | "getAgentRun"
   | "getAgentRunsForTask"
   | "markAgentRunCancelled"
+  | "getTestedTickers"
 >;
 
 /** Default out-of-sample holdout for agent runs when the caller omits one (§7b validity). */
@@ -642,6 +643,25 @@ export class CurrentLabAdapter implements LabAgentAdapter {
     if (parsedInputs.length === 0) {
       throw new ToolkitError("invalid_input", "Strategy has no parameters to optimize.", false);
     }
+    // "Test on more/new tickers ⇒ no overlap" (B): drop any symbol already backtested for
+    // this strategy so a widen-the-coverage request never re-covers ground. Off by default
+    // so a deliberate single-ticker re-run still works.
+    let symbols = input.symbols;
+    if (input.excludeTestedTickers) {
+      const tested = new Set(
+        (await this.storage.getTestedTickers(input.strategyId, ctx.walletAddress)).map((s) => s.toUpperCase()),
+      );
+      const filtered = input.symbols.filter((s) => !tested.has(s.trim().toUpperCase()));
+      if (filtered.length === 0) {
+        throw new ToolkitError(
+          "invalid_input",
+          `Every requested ticker was already backtested for this strategy (${[...tested].sort().join(", ")}). ` +
+            "Pick markets that aren't in that list.",
+          false,
+        );
+      }
+      symbols = filtered;
+    }
     const settings = (strategy.strategySettings ?? {}) as Record<string, any>;
     const isNative = settings.nativeEngine === true;
     const knobs = mapStagesToKnobs(input.stages);
@@ -653,7 +673,7 @@ export class CurrentLabAdapter implements LabAgentAdapter {
     const config: LabOptimizationConfig = {
       pineScript: strategy.pineScript ?? "",
       parsedInputs,
-      tickers: input.symbols,
+      tickers: symbols,
       timeframes: input.timeframes,
       startDate,
       endDate,
@@ -683,7 +703,7 @@ export class CurrentLabAdapter implements LabAgentAdapter {
       ({ correlationId, queueOrder }) => ({
         strategyId: input.strategyId,
         userId: ctx.walletAddress,
-        tickers: input.symbols,
+        tickers: symbols,
         timeframes: input.timeframes,
         startDate,
         endDate,

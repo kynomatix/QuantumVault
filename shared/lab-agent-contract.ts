@@ -333,6 +333,10 @@ export const runOptimizationInput = z.object({
   stages: z.array(optimizationStageEnum).min(1).default(["random", "refine", "deep"]),
   /** Holdout fraction (0..0.9). The adapter sets a default and re-threads on refine (§6). */
   outOfSampleFraction: z.number().min(0).max(0.9).optional(),
+  /** When true, the adapter drops any symbol already backtested for this strategy so a
+   *  "test on more/new tickers" request never re-covers ground. Set it for new-market
+   *  requests; leave it off to deliberately re-run a specific ticker. */
+  excludeTestedTickers: z.boolean().optional(),
   startDate: z.string().optional(),
   endDate: z.string().optional(),
   idempotencyKey,

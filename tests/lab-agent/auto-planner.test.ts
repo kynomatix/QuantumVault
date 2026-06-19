@@ -191,6 +191,9 @@ describe("auto-planner: robustness branch", () => {
     if (decision.action !== "tool") throw new Error("unreachable");
     expect(decision.tool).toBe("runOptimization");
     expect(decision.args).toMatchObject({ strategyId: 9, symbols: ["ETH", "ARB"] });
+    // B: the graduation leg must exclude already-tested tickers so it never re-runs a market
+    // the proving leg already covered.
+    expect(decision.args).toMatchObject({ excludeTestedTickers: true });
     expect(nextAuto.phase).toBe("evaluate");
     expect(nextAuto.graduated).toBe(true);
   });

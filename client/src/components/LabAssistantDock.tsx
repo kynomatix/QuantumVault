@@ -53,6 +53,9 @@ interface TurnTask {
   mode?: string;
   spendEstimateUsd?: number;
   cancelRequested?: boolean;
+  // Whether a strategy is already in progress for this task. Drives the "Continue current
+  // strategy" vs "Build a new one" choice when Auto is pressed mid-strategy (A). null = none.
+  currentStrategyId?: number | null;
   // The quant-agent checklist slice (present only while an Auto run is live or finished).
   auto?: AutoChecklistDto | null;
 }
@@ -461,6 +464,9 @@ export function LabAssistantDock({
   // Auto button "armed" state: tapping Auto with an empty composer lights it up and
   // waits for the goal text, so the user gets instant feedback that Auto is engaged.
   const [autoArmed, setAutoArmed] = useState(false);
+  // Continue-vs-fresh choice (A): tapping Auto with an EMPTY composer while a strategy is
+  // already in progress shows a 2-button prompt instead of silently wiping that work.
+  const [autoChoice, setAutoChoice] = useState(false);
   // Stale-session reconnect (re-sign): busy flag + last error for the button.
   const [reconnectBusy, setReconnectBusy] = useState(false);
   const [reconnectError, setReconnectError] = useState<string | null>(null);
@@ -514,7 +520,18 @@ export function LabAssistantDock({
     // wallet B's conversation after a switch + reconnect.
     pendingResendRef.current = null;
     setResendArmed(false);
+    // Drop any in-progress Auto arming/choice so it can't reappear against the next
+    // wallet's conversation.
+    setAutoArmed(false);
+    setAutoChoice(false);
   }, [walletAddress]);
+
+  // Reset the Auto arming/choice state whenever the active conversation changes, so a
+  // continue/fresh prompt or an armed Auto from one task can't linger onto another.
+  useEffect(() => {
+    setAutoArmed(false);
+    setAutoChoice(false);
+  }, [taskId]);
 
   // Don't let a stale reconnect error linger once the session is healthy again.
   useEffect(() => {
@@ -670,16 +687,19 @@ export function LabAssistantDock({
       goal,
       handsOff,
       profile,
+      continueRun,
     }: {
-      goal: string;
-      handsOff: boolean;
-      profile: "safe" | "degen";
+      goal?: string;
+      handsOff?: boolean;
+      profile?: "safe" | "degen";
+      // Continue the in-progress strategy instead of wiping it for a new build (A). When set,
+      // the server reuses the existing strategy and ignores goal/handsOff/profile.
+      continueRun?: boolean;
     }) => {
-      const res = await apiRequest("POST", `/api/lab/agent/chat/${taskId}/auto/start`, {
-        goal,
-        handsOff,
-        profile,
-      });
+      const body = continueRun
+        ? { continue: true }
+        : { goal, handsOff, profile };
+      const res = await apiRequest("POST", `/api/lab/agent/chat/${taskId}/auto/start`, body);
       return (await res.json()) as MessagesResponse;
     },
     onSuccess: (data) => {
@@ -923,6 +943,10 @@ export function LabAssistantDock({
   function toggleAuto() {
     if (!canChat || autoStart.isPending || turnActive || isAuto) return;
     const goal = draft.trim();
+    if (autoChoice) {
+      setAutoChoice(false); // showing the choice prompt: tapping Auto again dismisses it
+      return;
+    }
     if (autoArmed) {
       if (!goal) {
         setAutoArmed(false); // armed but still empty: tapping again cancels
@@ -939,6 +963,12 @@ export function LabAssistantDock({
       return;
     }
     if (!goal) {
+      // Empty composer + a strategy already in progress: ask whether to CONTINUE that work
+      // or start over, instead of silently wiping it (A). Otherwise arm for a fresh goal.
+      if (task?.currentStrategyId != null) {
+        setAutoChoice(true);
+        return;
+      }
       setAutoArmed(true); // empty: arm + show it's engaged, then focus the input
       inputRef.current?.focus();
       return;
@@ -1393,6 +1423,48 @@ export function LabAssistantDock({
                 {a.label}
               </button>
             ))}
+          </div>
+        )}
+
+        {autoChoice && task?.currentStrategyId != null && !turnActive && !isAuto && (
+          <div
+            data-testid="panel-lab-assistant-auto-choice"
+            className="border-t border-indigo-400/20 bg-indigo-500/5 px-3 py-2.5"
+          >
+            <p className="mb-2 text-xs text-white/70">
+              You have a strategy in progress. Keep working on it, or start a brand-new one?
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => {
+                  setAutoChoice(false);
+                  setNotice(null);
+                  autoStart.mutate({ continueRun: true });
+                }}
+                disabled={autoStart.isPending}
+                data-testid="button-lab-assistant-auto-continue"
+                className="bg-indigo-600 text-xs hover:bg-indigo-500"
+              >
+                Continue current strategy
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setAutoChoice(false);
+                  setAutoArmed(true);
+                  inputRef.current?.focus();
+                }}
+                disabled={autoStart.isPending}
+                data-testid="button-lab-assistant-auto-fresh"
+                className="border border-indigo-400/40 bg-indigo-500/10 text-xs text-indigo-200 hover:bg-indigo-500/20"
+              >
+                Build a new one
+              </Button>
+            </div>
           </div>
         )}
 

@@ -149,14 +149,17 @@ function oosSharpeText(r: BacktestResultDto): string {
   return r.oos?.sharpeRatio?.toFixed(2) ?? "n/a";
 }
 
-/** One stage's cheap multi-stage optimization over an explicit symbol set. */
-function backtestArgs(strategyId: number, symbols: string[]): Record<string, unknown> {
+/** One stage's cheap multi-stage optimization over an explicit symbol set. `excludeTested`
+ *  is set on the graduation/widen step so the adapter drops any market already covered for
+ *  this strategy (no-overlap), never re-running ground the proving stage already walked. */
+function backtestArgs(strategyId: number, symbols: string[], excludeTested = false): Record<string, unknown> {
   return {
     strategyId,
     symbols: symbols.length ? symbols : [...defaultAutoMemory().symbols],
     timeframes: DEFAULT_AUTO_TIMEFRAMES,
     stages: ["random", "refine", "deep"],
     outOfSampleFraction: DEFAULT_OOS_FRACTION,
+    ...(excludeTested ? { excludeTestedTickers: true } : {}),
   };
 }
 
@@ -383,7 +386,7 @@ export function planAutoTurn(ctx: AutoTurnContext, deps: AutoPlannerDeps): AutoP
         if (winProving) {
           if (graduation.length > 0) {
             // Strong on the prover, so widen to more coins to see if it holds up beyond it.
-            return tool("runOptimization", backtestArgs(sid, graduation), {
+            return tool("runOptimization", backtestArgs(sid, graduation, true), {
               ...stepped,
               phase: "evaluate",
               graduated: true,
