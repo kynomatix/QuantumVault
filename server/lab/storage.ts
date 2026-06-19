@@ -38,6 +38,7 @@ export interface LabJob {
 export interface ILabStorage {
   createStrategy(data: InsertLabStrategy): Promise<LabStrategy>;
   getStrategies(walletAddress?: string): Promise<LabStrategy[]>;
+  getLatestStrategyIdForTask(walletAddress: string, agentTaskId: number): Promise<number | null>;
   getStrategy(id: number): Promise<LabStrategy | undefined>;
   updateStrategy(id: number, data: Partial<InsertLabStrategy>): Promise<LabStrategy | undefined>;
   deleteStrategy(id: number): Promise<void>;
@@ -93,7 +94,7 @@ export interface ILabStorage {
 
   getTopResultsForStrategy(strategyId: number, limit?: number): Promise<any[]>;
 
-  getTestedTickers(strategyId: number, userId: string): Promise<string[]>;
+  getTestedTickers(strategyId: number, userId: string, agentTaskId?: number | null): Promise<string[]>;
 
   getQueuedRuns(walletAddress: string): Promise<LabOptimizationRun[]>;
   getNextQueueOrder(walletAddress: string): Promise<number>;
@@ -318,6 +319,26 @@ export class LabDatabaseStorage implements ILabStorage {
     return db.select().from(labStrategies).orderBy(desc(labStrategies.createdAt));
   }
 
+  /** The strategy id THIS agent conversation was last working on (the strategy of the most
+   *  recent run under this wallet + task), or null. Used to offer Auto "Continue" when the
+   *  in-memory currentStrategyId pointer was lost across a fragmented/multi-device session.
+   *  Task-scoped on purpose (NOT wallet-global): Continue must resume the strategy this
+   *  conversation actually built, never adopt an unrelated "most recent" strategy the wallet
+   *  happened to create in some other thread. Null ⇒ this conversation has no runs yet, so
+   *  there is genuinely nothing to continue (the dock hides the chip / the route 400s). */
+  async getLatestStrategyIdForTask(walletAddress: string, agentTaskId: number): Promise<number | null> {
+    const [row] = await db
+      .select({ strategyId: labOptimizationRuns.strategyId })
+      .from(labOptimizationRuns)
+      .where(and(
+        eq(labOptimizationRuns.userId, walletAddress),
+        eq(labOptimizationRuns.agentTaskId, agentTaskId),
+      ))
+      .orderBy(desc(labOptimizationRuns.createdAt))
+      .limit(1);
+    return row?.strategyId ?? null;
+  }
+
   async getStrategy(id: number): Promise<LabStrategy | undefined> {
     const [strategy] = await db.select().from(labStrategies).where(eq(labStrategies.id, id));
     return strategy;
@@ -349,21 +370,50 @@ export class LabDatabaseStorage implements ILabStorage {
 
   /** Distinct, upper-cased tickers already backtested for this strategy by this user.
    *  Drives the "test on more/new tickers ⇒ no overlap" rule: callers subtract these
-   *  from a requested symbol set. Reads only the tickers column across all of the
-   *  strategy's runs (queued/running/complete alike — a queued run still claims that
-   *  market so we don't double-book it). */
-  async getTestedTickers(strategyId: number, userId: string): Promise<string[]> {
-    const rows = await db
+   *  from a requested symbol set. Unions two sources so coverage matches what the
+   *  heatmap shows: (1) the tickers column across ALL of the strategy's runs
+   *  (queued/running/complete alike — a queued run still claims that market so we don't
+   *  double-book it), and (2) every ticker that actually produced a result row (a run can
+   *  finish with a populated heatmap but an empty/legacy tickers column — source (1) alone
+   *  would miss it and re-suggest an already-tested market).
+   *  LINEAGE: `improve` forks a NEW strategy id, so a strategyId-only scope would forget every
+   *  market tested on the prior version and re-suggest it. When an agentTaskId is passed we
+   *  also include every run under this conversation (any forked strategy it produced), so a
+   *  "test more tickers" widen never re-books a market the same conversation already covered.
+   *  Without an agentTaskId (e.g. a manual/non-agent caller) it stays strictly strategy-scoped. */
+  async getTestedTickers(strategyId: number, userId: string, agentTaskId?: number | null): Promise<string[]> {
+    const seen = new Set<string>();
+    const add = (t: unknown) => {
+      if (typeof t === "string" && t.trim().length > 0) seen.add(t.trim().toUpperCase());
+    };
+    // Scope to this user AND (this strategy OR — when given — every run in this conversation,
+    // which spans the improve-forked strategy lineage).
+    const scope = agentTaskId != null
+      ? and(
+          eq(labOptimizationRuns.userId, userId),
+          or(
+            eq(labOptimizationRuns.strategyId, strategyId),
+            eq(labOptimizationRuns.agentTaskId, agentTaskId),
+          ),
+        )
+      : and(eq(labOptimizationRuns.userId, userId), eq(labOptimizationRuns.strategyId, strategyId));
+    // (1) queue-time intent: tickers claimed by any run, any status.
+    const runRows = await db
       .select({ tickers: labOptimizationRuns.tickers })
       .from(labOptimizationRuns)
-      .where(and(eq(labOptimizationRuns.strategyId, strategyId), eq(labOptimizationRuns.userId, userId)));
-    const seen = new Set<string>();
-    for (const row of rows) {
+      .where(scope);
+    for (const row of runRows) {
       const arr = Array.isArray(row.tickers) ? row.tickers : [];
-      for (const t of arr) {
-        if (typeof t === "string" && t.trim().length > 0) seen.add(t.trim().toUpperCase());
-      }
+      for (const t of arr) add(t);
     }
+    // (2) authoritative completed record: every ticker with a result row under the in-scope
+    // runs. Catches runs whose tickers column was never populated.
+    const resultRows = await db
+      .selectDistinct({ ticker: labOptimizationResults.ticker })
+      .from(labOptimizationResults)
+      .innerJoin(labOptimizationRuns, eq(labOptimizationRuns.id, labOptimizationResults.runId))
+      .where(scope);
+    for (const row of resultRows) add(row.ticker);
     return [...seen];
   }
 

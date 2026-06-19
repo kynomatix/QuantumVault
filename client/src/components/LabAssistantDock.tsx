@@ -56,6 +56,7 @@ interface TurnTask {
   // Whether a strategy is already in progress for this task. Drives the "Continue current
   // strategy" vs "Build a new one" choice when Auto is pressed mid-strategy (A). null = none.
   currentStrategyId?: number | null;
+  resumableStrategyId?: number | null;
   // The quant-agent checklist slice (present only while an Auto run is live or finished).
   auto?: AutoChecklistDto | null;
 }
@@ -965,7 +966,7 @@ export function LabAssistantDock({
     if (!goal) {
       // Empty composer + a strategy already in progress: ask whether to CONTINUE that work
       // or start over, instead of silently wiping it (A). Otherwise arm for a fresh goal.
-      if (task?.currentStrategyId != null) {
+      if (task?.currentStrategyId != null || task?.resumableStrategyId != null) {
         setAutoChoice(true);
         return;
       }
@@ -1396,8 +1397,8 @@ export function LabAssistantDock({
 
           {(send.isPending || turnActive) && (
             <div className="flex justify-start" data-testid="lab-assistant-sending">
-              <div className="flex items-center gap-2 rounded-2xl rounded-bl-sm bg-white/[0.06] px-3 py-2 text-xs text-white/40">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" /> {workingLabel}
+              <div className="flex items-center gap-2 rounded-2xl rounded-bl-sm bg-white/[0.08] px-3 py-2 text-xs text-white/70">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-300" /> {workingLabel}
               </div>
             </div>
           )}
@@ -1426,13 +1427,13 @@ export function LabAssistantDock({
           </div>
         )}
 
-        {autoChoice && task?.currentStrategyId != null && !turnActive && !isAuto && (
+        {autoChoice && (task?.currentStrategyId != null || task?.resumableStrategyId != null) && !turnActive && !isAuto && (
           <div
             data-testid="panel-lab-assistant-auto-choice"
             className="border-t border-indigo-400/20 bg-indigo-500/5 px-3 py-2.5"
           >
             <p className="mb-2 text-xs text-white/70">
-              You have a strategy in progress. Keep working on it, or start a brand-new one?
+              Want to keep working on your most recent strategy, or start a brand-new one?
             </p>
             <div className="flex flex-wrap gap-2">
               <Button

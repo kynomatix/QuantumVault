@@ -185,6 +185,11 @@ export function registerCreatorRoutes(
       typeof (t.memory as { currentStrategyId?: unknown } | null)?.currentStrategyId === "number"
         ? ((t.memory as { currentStrategyId: number }).currentStrategyId)
         : null,
+    // Auto-resume (A): a fallback strategy to offer "Continue" on when currentStrategyId is
+    // null (the in-memory pointer was lost across a fragmented/multi-device session). Only
+    // the GET-task poll populates this (it needs a DB lookup); every other DTO build leaves
+    // it null.
+    resumableStrategyId: null as number | null,
     // The quant-agent checklist view (null for a plain chat task).
     auto: toAutoChecklistDto(t),
   });
@@ -419,6 +424,16 @@ export function registerCreatorRoutes(
       }
       const messages = await labStorage.listAgentMessagesForWallet(r.walletAddress, taskId);
       const taskDto = toTurnTaskDto(task);
+      // Auto-resume (A): when nothing is actively pinned, surface the wallet's most-recent
+      // strategy so the dock can still offer "Continue" instead of forcing a brand-new build
+      // after a fragmented/multi-device session lost the in-memory pointer. Best-effort.
+      if (taskDto.currentStrategyId == null) {
+        try {
+          taskDto.resumableStrategyId = await labStorage.getLatestStrategyIdForTask(r.walletAddress, task.id);
+        } catch {
+          /* a failed lookup just hides the resume chip, never breaks the poll */
+        }
+      }
       // Enrich the quant-agent checklist with the live run's status (queue position /
       // progress) so the dock can honestly show "backtest running" even after the planner
       // has advanced phase to "evaluate". Best-effort: a missing run status never breaks
@@ -951,11 +966,20 @@ export function registerCreatorRoutes(
       // ones). Everything else (step/run pointers, spend, loop count) resets like a new run.
       if (wantContinue) {
         const memObj = (task.memory as Record<string, unknown>) ?? {};
-        const currentStrategyId =
+        let currentStrategyId =
           typeof memObj.currentStrategyId === "number" ? memObj.currentStrategyId : null;
         if (currentStrategyId == null) {
+          // Pointer lost across a fragmented/multi-device session: adopt the wallet's
+          // most-recent strategy so "Continue" resumes real work instead of dead-ending.
+          // This is EXPLICIT (the user tapped "Continue"), so it doesn't violate the
+          // anti-leak invariant — that only bans SILENTLY skipping the create/style gate on
+          // a fresh build. The adopted id is written into memory below, so the planner
+          // re-enters at runOptimization on it.
+          currentStrategyId = await labStorage.getLatestStrategyIdForTask(r.walletAddress, taskId);
+        }
+        if (currentStrategyId == null) {
           return res.status(400).json({
-            error: "There's no strategy in progress to continue. Tell me what to build and I'll start a fresh one.",
+            error: "There's no strategy to continue yet. Tell me what to build and I'll start a fresh one.",
           });
         }
         const priorAuto = readAutoMemory(task);

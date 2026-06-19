@@ -645,11 +645,12 @@ export class CurrentLabAdapter implements LabAgentAdapter {
     }
     // "Test on more/new tickers ⇒ no overlap" (B): drop any symbol already backtested for
     // this strategy so a widen-the-coverage request never re-covers ground. Off by default
-    // so a deliberate single-ticker re-run still works.
+    // so a deliberate single-ticker re-run still works. Pass taskId so coverage spans every
+    // strategy this conversation forked via `improve` (not just the current strategy id).
     let symbols = input.symbols;
     if (input.excludeTestedTickers) {
       const tested = new Set(
-        (await this.storage.getTestedTickers(input.strategyId, ctx.walletAddress)).map((s) => s.toUpperCase()),
+        (await this.storage.getTestedTickers(input.strategyId, ctx.walletAddress, taskId)).map((s) => s.toUpperCase()),
       );
       const filtered = input.symbols.filter((s) => !tested.has(s.trim().toUpperCase()));
       if (filtered.length === 0) {
