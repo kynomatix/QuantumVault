@@ -216,9 +216,9 @@ class SwapYieldRoute implements YieldRoute {
 }
 
 /**
- * Resolves the yield route for an asset. The kamino route currently serves
- * read-only valuation + previews; its park/unpark fail closed until Phase 2b/2c,
- * and the kamino asset stays disabled in the registry so they are never reached.
+ * Resolves the yield route for an asset. The kamino route is fully wired:
+ * valuation, previews, and park/unpark (direct Kamino Lend deposit/redeem with
+ * realized on-chain output-delta verification, fail closed on any failure).
  */
 export function getYieldRoute(asset: YieldAsset): YieldRoute {
   switch (asset.route) {

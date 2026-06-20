@@ -309,9 +309,9 @@ async function buildReserveInstructions(
 }
 
 /**
- * Kamino Lend route. Phase 2a wires read-only valuation + previews. park/unpark
- * are added in Phase 2b/2c; until then they fail closed, and the kamino asset
- * stays disabled in the registry so they are never reached.
+ * Kamino Lend route. Wires valuation + previews and park/unpark (direct Kamino
+ * Lend deposit/redeem). park/unpark verify the realized on-chain output-delta via
+ * executeAgentInstructions and fail closed on any build or exec failure.
  */
 export class KaminoYieldRoute implements YieldRoute {
   readonly kind = "kamino" as const;

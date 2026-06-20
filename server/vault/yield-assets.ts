@@ -66,15 +66,16 @@ const YIELD_ASSETS: YieldAsset[] = [
     displayName: "Kamino USDC",
     // kUSDC collateral (cToken) mint for the Kamino main-market USDC reserve,
     // verified on-chain (see .agents/memory/kamino-usdc-onchain-facts.md and
-    // KAMINO_KUSDC_MINT in kamino-route.ts). Stays disabled until the direct route
-    // ships and a mainnet round-trip smoke passes.
+    // KAMINO_KUSDC_MINT in kamino-route.ts). Direct Kamino Lend route is wired
+    // (valuation + deposit + withdraw). Enabled at the user's request; the user
+    // is running the mainnet deposit/withdraw round-trip smoke themselves in dev.
     mint: "B8V6WVjPxW1UGwVDfxH2d2r8SyT4cqn7dQRK6XneVa7D",
     decimals: 6,
     route: "kamino",
     valuation: "redemption_rate",
     defaultEligible: true,
     tag: "Yield-bearing stablecoin. Kamino lending, ~4-9%.",
-    enabled: false,
+    enabled: true,
   },
   {
     key: "perena_usd_star",
