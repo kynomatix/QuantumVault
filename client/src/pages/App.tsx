@@ -101,6 +101,7 @@ import {
 } from "@/components/ui/sheet";
 import { apiRequest, queryClient, walletAuthHeaders } from '@/lib/queryClient';
 import { BotManagementDrawer } from '@/components/BotManagementDrawer';
+import VaultIdleFunds from '@/components/VaultIdleFunds';
 import { ExchangeBadge } from '@/components/ExchangeBadge';
 import { CreateBotModal } from '@/components/CreateBotModal';
 import { TradeHistoryModal } from '@/components/TradeHistoryModal';
@@ -141,7 +142,7 @@ import { Transaction } from '@solana/web3.js';
 import { Buffer } from 'buffer';
 import { confirmTransactionWithFallback } from '@/lib/solana-utils';
 
-type NavItem = 'dashboard' | 'bots' | 'portfolio' | 'marketplace' | 'leaderboard' | 'settings' | 'wallet';
+type NavItem = 'dashboard' | 'bots' | 'portfolio' | 'marketplace' | 'leaderboard' | 'settings' | 'wallet' | 'vault';
 type MarketplaceSortBy = 'pnl7d' | 'pnl30d' | 'pnl90d' | 'pnlAllTime' | 'subscribers';
 
 interface ReferralOverviewResponse {
@@ -1866,6 +1867,7 @@ export default function AppPage() {
               { id: 'bots' as NavItem, icon: Bot, label: 'My Bots' },
               { id: 'marketplace' as NavItem, icon: Store, label: 'Marketplace' },
               { id: 'wallet' as NavItem, icon: Wallet, label: 'Wallet' },
+              { id: 'vault' as NavItem, icon: VaultIcon, label: 'Vault' },
               { id: 'portfolio' as NavItem, icon: BarChart3, label: 'Portfolio' },
               { id: 'leaderboard' as NavItem, icon: Users, label: 'Leaderboard' },
               { id: 'settings' as NavItem, icon: Settings, label: 'Settings' },
@@ -2103,14 +2105,14 @@ export default function AppPage() {
                 <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-violet-500 rounded-full animate-pulse" />
               )}
             </a>
-            <a 
-              href="/vaults" 
+            <button 
+              onClick={() => { setActiveNav('vault'); setSidebarOpen(false); }}
               className="p-2 hover:bg-muted rounded-lg"
-              data-testid="link-vaults-header"
+              data-testid="button-vault-header"
               title="Vault"
             >
               <VaultIcon className="w-5 h-5 text-muted-foreground" />
-            </a>
+            </button>
             <a 
               href="/analytics" 
               className="p-2 hover:bg-muted rounded-lg"
@@ -2278,6 +2280,34 @@ export default function AppPage() {
 
         <main className="p-4 lg:p-6">
           <AnimatePresence mode="wait">
+            {activeNav === 'vault' && (
+              <motion.div
+                key="vault"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="max-w-2xl space-y-6"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 rounded-full bg-primary/20">
+                    <VaultIcon className="w-6 h-6 text-primary" />
+                  </div>
+                  <div>
+                    <h1 className="font-display font-bold text-2xl" data-testid="text-vaults-title">
+                      Vault
+                    </h1>
+                    <p className="text-sm text-muted-foreground">
+                      Earn yield on idle USDC. Your funds stay in your own wallet.
+                    </p>
+                  </div>
+                </div>
+                <section className="gradient-border p-0 noise">
+                  <div className="p-4 sm:p-6">
+                    <VaultIdleFunds active={activeNav === 'vault'} />
+                  </div>
+                </section>
+              </motion.div>
+            )}
             {activeNav === 'dashboard' && (
               <motion.div
                 key="dashboard"

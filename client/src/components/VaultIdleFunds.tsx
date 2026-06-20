@@ -183,9 +183,9 @@ function PreviewBox({
 /**
  * The full Idle Funds (Vault) module: master toggle, spare-USDC stat, parked
  * positions, parkable assets, default-asset override, and the park/unpark
- * dialogs. Rendered by the standalone /vaults page. `active` gates the data
- * queries (the page passes active); it lets a future host mount this module
- * lazily without firing its queries until shown.
+ * dialogs. Rendered inline by the "Vault" tab in the app sidebar (App.tsx).
+ * `active` gates the data queries (the host passes active); it lets the module
+ * mount lazily without firing its queries until the tab is shown.
  *
  * When `botId` is passed (embedded in the bot drawer), it runs in per-bot mode:
  * the account-level master toggle and default-asset setting are hidden, all
