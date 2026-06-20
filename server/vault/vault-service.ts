@@ -18,7 +18,7 @@
  */
 
 import Decimal from "decimal.js";
-import { getAgentUsdcBalance, getAgentTokenBalanceRaw } from "../agent-wallet";
+import { getAgentUsdcBalance, getAgentTokenBalanceRaw, getAgentTokenBalanceRawStrict, USDC_MINT } from "../agent-wallet";
 import { storage } from "../storage";
 import { getEnabledYieldAssets, getYieldAssetByKey, type YieldAsset } from "./yield-assets";
 import { getYieldRoute, VAULT_MAX_PRICE_IMPACT } from "./yield-routes";
@@ -124,20 +124,37 @@ export async function parkUsdc(params: {
   agentPublicKey: string;
   agentSecretKey: Uint8Array;
   assetKey: string;
-  amountUsdc: number;
+  amountUsdc?: number; // ignored when `all` is true
+  all?: boolean;
   slippageBps?: number;
 }): Promise<ParkResult> {
   const asset = getYieldAssetByKey(params.assetKey);
   if (!asset) return { success: false, error: "Unknown or disabled asset" };
-  if (!(params.amountUsdc > 0)) return { success: false, error: "Amount must be greater than zero" };
 
-  const inputRaw = toRaw(params.amountUsdc, USDC_DECIMALS);
-  if (inputRaw <= BigInt(0)) return { success: false, error: "Amount is too small" };
+  let inputRaw: bigint;
+  if (params.all) {
+    // All-in park: read the RAW on-chain USDC balance with the STRICT reader, which
+    // THROWS on an unreadable balance (fail closed) instead of reporting 0. We park
+    // 100% of it; any passed amountUsdc is ignored. A genuinely missing ATA reads as
+    // 0 -> "no spare USDC", never a fabricated baseline.
+    const bal = await getAgentTokenBalanceRawStrict(params.agentPublicKey, USDC_MINT);
+    if (bal.amountRaw !== "0" && bal.decimals !== USDC_DECIMALS) {
+      return { success: false, error: "Unexpected USDC decimals on-chain." };
+    }
+    inputRaw = BigInt(bal.amountRaw);
+    if (inputRaw <= BigInt(0)) return { success: false, error: "No spare USDC to park." };
+  } else {
+    if (!(params.amountUsdc && params.amountUsdc > 0)) {
+      return { success: false, error: "Amount must be greater than zero" };
+    }
+    inputRaw = toRaw(params.amountUsdc, USDC_DECIMALS);
+    if (inputRaw <= BigInt(0)) return { success: false, error: "Amount is too small" };
 
-  // Spare USDC check against on-chain balance.
-  const spareUsdc = await getAgentUsdcBalance(params.agentPublicKey);
-  if (inputRaw > toRaw(spareUsdc, USDC_DECIMALS)) {
-    return { success: false, error: `Not enough spare USDC in your bot wallet. Available: ${spareUsdc.toFixed(2)} USDC.` };
+    // Spare USDC check against on-chain balance.
+    const spareUsdc = await getAgentUsdcBalance(params.agentPublicKey);
+    if (inputRaw > toRaw(spareUsdc, USDC_DECIMALS)) {
+      return { success: false, error: `Not enough spare USDC in your bot wallet. Available: ${spareUsdc.toFixed(2)} USDC.` };
+    }
   }
 
   const route = getYieldRoute(asset);

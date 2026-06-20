@@ -7777,12 +7777,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // shared account vault.
   app.post("/api/vault/park", requireWallet, async (req, res) => {
     try {
-      const { assetKey, amountUsdc, sessionId, botId } = req.body || {};
+      const { assetKey, amountUsdc, all, sessionId, botId } = req.body || {};
       if (!assetKey || typeof assetKey !== "string") {
         return res.status(400).json({ error: "assetKey required" });
       }
-      if (typeof amountUsdc !== "number" || !(amountUsdc > 0)) {
-        return res.status(400).json({ error: "amountUsdc must be a positive number" });
+      const parkAll = all === true;
+      if (!parkAll && (typeof amountUsdc !== "number" || !(amountUsdc > 0))) {
+        return res.status(400).json({ error: "amountUsdc must be a positive number, or set all=true" });
       }
       let slippageBps: number | undefined;
       if (typeof req.body.slippageBps === "number" && req.body.slippageBps > 0) {
@@ -7819,7 +7820,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           agentPublicKey: scope.agentPublicKey,
           agentSecretKey: agentKeyResult.secretKey,
           assetKey,
-          amountUsdc,
+          amountUsdc: parkAll ? undefined : amountUsdc,
+          all: parkAll,
           slippageBps,
         });
       } finally {
