@@ -400,6 +400,19 @@ export async function ensureSchema() {
         CONSTRAINT vault_positions_wallet_asset_unique UNIQUE (wallet_address, asset_key)
       )`,
       `CREATE INDEX IF NOT EXISTS idx_vault_positions_wallet ON vault_positions (wallet_address)`,
+
+      // --- Phase 4 Vaults: per-bot scoping for vault_positions. ---
+      // trading_bot_id NULL = account-level vault (main agent wallet); non-null =
+      // a specific bot's own per-bot wallet (Flash independent_trader). Additive +
+      // idempotent. ORDER MATTERS: create the new partial unique indexes BEFORE
+      // dropping the old blanket unique constraint, so uniqueness is never briefly
+      // unenforced if a later statement fails. Plain column (no FK): on-chain is
+      // truth, so an orphan cost-basis row after a bot delete is benign clutter.
+      `ALTER TABLE vault_positions ADD COLUMN IF NOT EXISTS trading_bot_id varchar`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS vault_positions_account_unique ON vault_positions (wallet_address, asset_key) WHERE trading_bot_id IS NULL`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS vault_positions_bot_unique ON vault_positions (wallet_address, trading_bot_id, asset_key) WHERE trading_bot_id IS NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS idx_vault_positions_bot ON vault_positions (trading_bot_id) WHERE trading_bot_id IS NOT NULL`,
+      `ALTER TABLE vault_positions DROP CONSTRAINT IF EXISTS vault_positions_wallet_asset_unique`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner

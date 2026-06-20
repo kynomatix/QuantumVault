@@ -1,9 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AnimatePresence, motion } from "framer-motion";
 import {
-  Vault as VaultIcon,
-  ChevronDown,
   TrendingUp,
   TrendingDown,
   Loader2,
@@ -37,12 +34,15 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 
-interface YieldAssetInfo {
+export interface YieldAssetInfo {
   key: string;
   displayName: string;
   mint: string;
   decimals: number;
-  type: string;
+  route: string;
+  valuation: string;
+  /** True when the token's USDC price floats with the market (basis risk). */
+  priceFloats: boolean;
   tag: string;
   defaultEligible: boolean;
 }
@@ -51,6 +51,9 @@ interface AssetsResponse {
   spareUsdc: number;
   maxPriceImpactPct: number;
   assets: YieldAssetInfo[];
+  /** Echoed by the server: which wallet this acted on (per-bot vs shared account). */
+  scope?: "account" | "bot";
+  tradingBotId?: string | null;
 }
 
 interface PositionView {
@@ -58,7 +61,8 @@ interface PositionView {
   displayName: string;
   mint: string;
   decimals: number;
-  type: string;
+  route: string;
+  valuation: string;
   tag: string;
   defaultEligible: boolean;
   onChainAmountRaw: string;
@@ -76,7 +80,7 @@ interface PreviewResponse {
   reason?: string;
 }
 
-interface VaultSettings {
+export interface VaultSettings {
   vaultEnabled: boolean;
   vaultDefaultAsset: string | null;
 }
@@ -176,18 +180,28 @@ function PreviewBox({
   );
 }
 
-export default function VaultSettingsSection({
-  expanded,
-  onToggle,
-}: {
-  expanded: boolean;
-  onToggle: () => void;
-}) {
+/**
+ * The full Idle Funds (Vault) module: master toggle, spare-USDC stat, parked
+ * positions, parkable assets, default-asset override, and the park/unpark
+ * dialogs. Rendered by the standalone /vaults page. `active` gates the data
+ * queries (the page passes active); it lets a future host mount this module
+ * lazily without firing its queries until shown.
+ *
+ * When `botId` is passed (embedded in the bot drawer), it runs in per-bot mode:
+ * the account-level master toggle and default-asset setting are hidden, all
+ * reads/writes carry `?botId=`/`botId`, and a scope note explains whether this
+ * acts on the bot's own wallet (Flash) or the shared account vault (Pacifica/Drift).
+ */
+export default function VaultIdleFunds({ active = true, botId }: { active?: boolean; botId?: string }) {
   const { publicKeyString, sessionConnected } = useWallet();
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
   const connected = !!publicKeyString && sessionConnected;
+  // Embedded (per-bot) mode: rendered inside a bot drawer for a single bot. The
+  // drawer's own reveal toggle gates this, so we skip the account-level master
+  // toggle and default-asset setting, and scope all reads/writes to ?botId=.
+  const embedded = !!botId;
 
   // Persisted vault settings (enable + default asset).
   const settingsQuery = useQuery<VaultSettings>({
@@ -198,10 +212,11 @@ export default function VaultSettingsSection({
       if (!res.ok) throw new Error(data.error || "Failed to load settings");
       return { vaultEnabled: !!data.vaultEnabled, vaultDefaultAsset: data.vaultDefaultAsset ?? null };
     },
-    enabled: expanded && connected,
+    enabled: active && connected && !embedded,
   });
 
-  const vaultOn = settingsQuery.data?.vaultEnabled ?? false;
+  // In embedded mode the drawer toggle is the gate, so the park UI is always "on".
+  const vaultOn = embedded ? true : (settingsQuery.data?.vaultEnabled ?? false);
   const defaultAsset = settingsQuery.data?.vaultDefaultAsset ?? null;
   const [savingSettings, setSavingSettings] = useState(false);
 
@@ -229,36 +244,41 @@ export default function VaultSettingsSection({
   };
 
   // Vault data (assets to park, current positions).
+  const botQuery = botId ? `?botId=${encodeURIComponent(botId)}` : "";
+
   const assetsQuery = useQuery<AssetsResponse>({
-    queryKey: ["vault-assets", publicKeyString],
+    queryKey: ["vault-assets", publicKeyString, botId ?? null],
     queryFn: async () => {
-      const res = await fetch(`/api/vault/assets`, { credentials: "include", headers: walletAuthHeaders() });
+      const res = await fetch(`/api/vault/assets${botQuery}`, { credentials: "include", headers: walletAuthHeaders() });
       const data = await safeResponseJson(res);
       if (!res.ok) throw new Error(data.error || "Failed to load vault assets");
       return data as AssetsResponse;
     },
-    enabled: expanded && connected && vaultOn,
+    enabled: active && connected && vaultOn,
   });
 
-  const positionsQuery = useQuery<{ positions: PositionView[] }>({
-    queryKey: ["vault-positions", publicKeyString],
+  const positionsQuery = useQuery<{ positions: PositionView[]; scope?: "account" | "bot" }>({
+    queryKey: ["vault-positions", publicKeyString, botId ?? null],
     queryFn: async () => {
-      const res = await fetch(`/api/vault/positions`, { credentials: "include", headers: walletAuthHeaders() });
+      const res = await fetch(`/api/vault/positions${botQuery}`, { credentials: "include", headers: walletAuthHeaders() });
       const data = await safeResponseJson(res);
       if (!res.ok) throw new Error(data.error || "Failed to load positions");
-      return data as { positions: PositionView[] };
+      return data as { positions: PositionView[]; scope?: "account" | "bot" };
     },
-    enabled: expanded && connected,
+    enabled: active && connected,
   });
 
   const spareUsdc = assetsQuery.data?.spareUsdc ?? 0;
   const maxImpact = assetsQuery.data?.maxPriceImpactPct ?? 0.005;
   const assets = assetsQuery.data?.assets ?? [];
   const positions = positionsQuery.data?.positions ?? [];
+  // Which wallet the server actually acted on. A Flash bot → its own per-bot wallet
+  // ("bot"); a Pacifica/Drift bot shares the main account wallet ("account").
+  const scope = assetsQuery.data?.scope ?? positionsQuery.data?.scope ?? null;
 
   const refetchAll = () => {
-    queryClient.invalidateQueries({ queryKey: ["vault-assets", publicKeyString] });
-    queryClient.invalidateQueries({ queryKey: ["vault-positions", publicKeyString] });
+    queryClient.invalidateQueries({ queryKey: ["vault-assets", publicKeyString, botId ?? null] });
+    queryClient.invalidateQueries({ queryKey: ["vault-positions", publicKeyString, botId ?? null] });
   };
 
   // --- Park dialog ---
@@ -299,7 +319,7 @@ export default function VaultSettingsSection({
       const res = await fetch("/api/vault/park", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
-        body: JSON.stringify({ assetKey: parkAsset.key, amountUsdc: parkNum, sessionId }),
+        body: JSON.stringify({ assetKey: parkAsset.key, amountUsdc: parkNum, sessionId, botId }),
         credentials: "include",
       });
       const data = await safeResponseJson(res);
@@ -354,7 +374,7 @@ export default function VaultSettingsSection({
     setUnparking(true);
     try {
       const sessionId = await getSessionId();
-      const body: Record<string, unknown> = { assetKey: unparkPos.assetKey, sessionId };
+      const body: Record<string, unknown> = { assetKey: unparkPos.assetKey, sessionId, botId };
       if (unparkAll) body.all = true;
       else body.amountToken = unparkNum;
       const res = await fetch("/api/vault/unpark", {
@@ -473,172 +493,153 @@ export default function VaultSettingsSection({
   );
 
   return (
-    <div className="gradient-border p-0 noise">
-      <button
-        onClick={onToggle}
-        className="w-full p-4 flex items-center justify-between cursor-pointer hover:bg-muted/10 transition-colors rounded-t-xl"
-        data-testid="button-toggle-vault"
-      >
-        <div className="flex items-center gap-3">
-          <div className="p-2 rounded-full bg-primary/20">
-            <VaultIcon className="w-5 h-5 text-primary" />
-          </div>
-          <h3 className="font-display font-semibold">Vault</h3>
-          {vaultOn && (
-            <span className="text-xs px-2 py-0.5 bg-green-500/20 text-green-500 rounded-full" data-testid="badge-vault-on">
-              On
-            </span>
-          )}
-        </div>
-        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${expanded ? "rotate-180" : ""}`} />
-      </button>
-      <AnimatePresence>
-        {expanded && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2 }}
-            className="overflow-hidden"
-          >
-            <div className="px-4 pb-4 space-y-4">
-              {/* Master toggle */}
-              <div className="flex items-start justify-between gap-3 bg-muted/30 rounded-lg border border-border/50 p-4">
-                <div className="flex-1">
-                  <p className="font-medium">Enable Vault</p>
-                  <p className="text-sm text-muted-foreground mt-1">
-                    Put idle USDC to work by parking it in a yield token. Your funds always stay in your own wallet.
-                  </p>
-                </div>
-                <Switch
-                  checked={vaultOn}
-                  disabled={!connected || settingsQuery.isLoading || savingSettings}
-                  onCheckedChange={(checked) => saveVaultSettings({ vaultEnabled: checked })}
-                  data-testid="switch-vault-enabled"
-                />
-              </div>
-
-              {!connected ? (
-                <p className="text-sm text-muted-foreground" data-testid="text-vault-disconnected">
-                  Connect and sign in to use the Vault.
-                </p>
-              ) : !vaultOn ? (
-                <>
-                  <p className="text-sm text-muted-foreground" data-testid="text-vault-off-hint">
-                    Turn on to see your options for earning yield on spare USDC.
-                  </p>
-                  {/* Even when off, never hide existing parked funds. */}
-                  {hasPositions && (
-                    <div className="space-y-2">
-                      <p className="text-xs text-amber-500 flex items-start gap-1.5" data-testid="text-vault-off-positions">
-                        <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                        Vault is off, so you cannot park new funds. You can still unpark what you already have.
-                      </p>
-                      {positionsBlock}
-                    </div>
-                  )}
-                </>
-              ) : (
-                <>
-                  {/* Custody reassurance */}
-                  <div
-                    className="rounded-lg border border-border bg-muted/30 p-3 flex items-start gap-2 text-sm text-muted-foreground"
-                    data-testid="box-vault-about"
-                  >
-                    <ShieldCheck className="w-4 h-4 mt-0.5 shrink-0 text-primary" />
-                    <span>
-                      Your funds never leave your wallet. We only handle the swap. Each park or unpark is capped at{" "}
-                      {(maxImpact * 100).toFixed(2)}% price impact.
-                    </span>
-                  </div>
-
-                  {/* Spare USDC stat */}
-                  <div className="bg-muted/30 rounded-lg border border-border/50 p-3 flex items-center gap-2">
-                    <Wallet className="w-4 h-4 text-muted-foreground" />
-                    <span className="text-sm text-muted-foreground">USDC available to park</span>
-                    <span className="ml-auto text-lg font-bold tabular-nums" data-testid="text-spare-usdc">
-                      {assetsQuery.isLoading ? "..." : usd(spareUsdc)}
-                    </span>
-                  </div>
-
-                  {/* Positions first when they exist, else assets first. */}
-                  {hasPositions && positionsBlock}
-
-                  {/* Parkable assets */}
-                  <section data-testid="section-vault-assets">
-                    <h4 className="text-sm font-semibold mb-2">Available to park</h4>
-                    {assetsQuery.isLoading ? (
-                      <Skeleton className="h-16 w-full" />
-                    ) : assets.length === 0 ? (
-                      <p className="text-muted-foreground text-sm" data-testid="text-no-assets">
-                        No yield assets are available right now.
-                      </p>
-                    ) : (
-                      <div className="rounded-lg border border-border/50 divide-y divide-border/40">
-                        {assets.map((a) => (
-                          <div
-                            key={a.key}
-                            className="p-3 flex items-center justify-between gap-3"
-                            data-testid={`row-asset-${a.key}`}
-                          >
-                            <div className="min-w-0">
-                              <div className="font-medium flex items-center gap-2">
-                                {a.displayName}
-                                <Badge variant="secondary" data-testid={`badge-tag-${a.key}`}>
-                                  {a.tag}
-                                </Badge>
-                              </div>
-                              {a.type === "floating_nav" && (
-                                <p className="text-xs text-muted-foreground mt-0.5">
-                                  Value goes up and down with the market.
-                                </p>
-                              )}
-                            </div>
-                            <Button
-                              size="sm"
-                              onClick={() => {
-                                setParkAsset(a);
-                                setParkAmount("");
-                              }}
-                              disabled={spareUsdc <= 0}
-                              data-testid={`button-park-${a.key}`}
-                            >
-                              Park
-                            </Button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </section>
-
-                  {/* Default asset override (subtle footer) */}
-                  {assets.length > 0 && (
-                    <div className="flex items-center gap-2 pt-1" data-testid="row-default-asset">
-                      <span className="text-xs text-muted-foreground">Default for new parks</span>
-                      <Select
-                        value={defaultAsset ?? ""}
-                        disabled={savingSettings}
-                        onValueChange={(v) => saveVaultSettings({ vaultDefaultAsset: v })}
-                      >
-                        <SelectTrigger className="h-8 w-44 text-xs ml-auto" data-testid="select-default-asset">
-                          <SelectValue placeholder="Choose a token" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {assets.map((a) => (
-                            <SelectItem key={a.key} value={a.key} data-testid={`option-default-${a.key}`}>
-                              {a.displayName}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  )}
-                </>
-              )}
+    <>
+      <div className="space-y-4">
+        {/* Master toggle (account-level only; the bot drawer has its own reveal toggle) */}
+        {!embedded && (
+          <div className="flex items-start justify-between gap-3 bg-muted/30 rounded-lg border border-border/50 p-4">
+            <div className="flex-1">
+              <p className="font-medium">Enable Vault</p>
+              <p className="text-sm text-muted-foreground mt-1">
+                Put idle USDC to work by parking it in a yield token. Your funds always stay in your own wallet.
+              </p>
             </div>
-          </motion.div>
+            <Switch
+              checked={vaultOn}
+              disabled={!connected || settingsQuery.isLoading || savingSettings}
+              onCheckedChange={(checked) => saveVaultSettings({ vaultEnabled: checked })}
+              data-testid="switch-vault-enabled"
+            />
+          </div>
         )}
-      </AnimatePresence>
+
+        {!connected ? (
+          <p className="text-sm text-muted-foreground" data-testid="text-vault-disconnected">
+            Connect and sign in to use the Vault.
+          </p>
+        ) : !vaultOn ? (
+          <>
+            <p className="text-sm text-muted-foreground" data-testid="text-vault-off-hint">
+              Turn on to see your options for earning yield on spare USDC.
+            </p>
+            {/* Even when off, never hide existing parked funds. */}
+            {hasPositions && (
+              <div className="space-y-2">
+                <p className="text-xs text-amber-500 flex items-start gap-1.5" data-testid="text-vault-off-positions">
+                  <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                  Vault is off, so you cannot park new funds. You can still unpark what you already have.
+                </p>
+                {positionsBlock}
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            {/* Custody reassurance */}
+            <div
+              className="rounded-lg border border-border bg-muted/30 p-3 flex items-start gap-2 text-sm text-muted-foreground"
+              data-testid="box-vault-about"
+            >
+              <ShieldCheck className="w-4 h-4 mt-0.5 shrink-0 text-primary" />
+              <span>
+                Your funds never leave your wallet. We only handle the swap. Each park or unpark is capped at{" "}
+                {(maxImpact * 100).toFixed(2)}% price impact.
+              </span>
+            </div>
+
+            {/* Per-bot scope note: explain which wallet this acts on. */}
+            {embedded && scope && (
+              <p className="text-xs text-muted-foreground" data-testid="text-vault-scope-note">
+                {scope === "account"
+                  ? "This bot shares your main account wallet, so parking here uses your shared account vault."
+                  : "Parking here uses this bot's own wallet (its spare USDC)."}
+              </p>
+            )}
+
+            {/* Spare USDC stat */}
+            <div className="bg-muted/30 rounded-lg border border-border/50 p-3 flex items-center gap-2">
+              <Wallet className="w-4 h-4 text-muted-foreground" />
+              <span className="text-sm text-muted-foreground">USDC available to park</span>
+              <span className="ml-auto text-lg font-bold tabular-nums" data-testid="text-spare-usdc">
+                {assetsQuery.isLoading ? "..." : usd(spareUsdc)}
+              </span>
+            </div>
+
+            {/* Positions first when they exist, else assets first. */}
+            {hasPositions && positionsBlock}
+
+            {/* Parkable assets */}
+            <section data-testid="section-vault-assets">
+              <h4 className="text-sm font-semibold mb-2">Available to park</h4>
+              {assetsQuery.isLoading ? (
+                <Skeleton className="h-16 w-full" />
+              ) : assets.length === 0 ? (
+                <p className="text-muted-foreground text-sm" data-testid="text-no-assets">
+                  No yield assets are available right now.
+                </p>
+              ) : (
+                <div className="rounded-lg border border-border/50 divide-y divide-border/40">
+                  {assets.map((a) => (
+                    <div
+                      key={a.key}
+                      className="p-3 flex items-center justify-between gap-3"
+                      data-testid={`row-asset-${a.key}`}
+                    >
+                      <div className="min-w-0">
+                        <div className="font-medium flex items-center gap-2">
+                          {a.displayName}
+                          <Badge variant="secondary" data-testid={`badge-tag-${a.key}`}>
+                            {a.tag}
+                          </Badge>
+                        </div>
+                        {a.priceFloats && (
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            Value goes up and down with the market.
+                          </p>
+                        )}
+                      </div>
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          setParkAsset(a);
+                          setParkAmount("");
+                        }}
+                        disabled={spareUsdc <= 0}
+                        data-testid={`button-park-${a.key}`}
+                      >
+                        Park
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            {/* Default asset override (subtle footer; account-level only) */}
+            {!embedded && assets.length > 0 && (
+              <div className="flex items-center gap-2 pt-1" data-testid="row-default-asset">
+                <span className="text-xs text-muted-foreground">Default for new parks</span>
+                <Select
+                  value={defaultAsset ?? ""}
+                  disabled={savingSettings}
+                  onValueChange={(v) => saveVaultSettings({ vaultDefaultAsset: v })}
+                >
+                  <SelectTrigger className="h-8 w-44 text-xs ml-auto" data-testid="select-default-asset">
+                    <SelectValue placeholder="Choose a token" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {assets.map((a) => (
+                      <SelectItem key={a.key} value={a.key} data-testid={`option-default-${a.key}`}>
+                        {a.displayName}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+          </>
+        )}
+      </div>
 
       {/* Park dialog */}
       <Dialog open={!!parkAsset} onOpenChange={(o) => { if (!o) closePark(); }}>
@@ -668,7 +669,7 @@ export default function VaultSettingsSection({
                 data-testid="input-park-amount"
               />
             </div>
-            {parkAsset?.type === "floating_nav" && (
+            {parkAsset?.priceFloats && (
               <div
                 className="flex items-start gap-2 text-xs text-muted-foreground rounded-lg border border-border bg-muted/30 p-2.5"
                 data-testid="warning-floating-nav-park"
@@ -768,6 +769,6 @@ export default function VaultSettingsSection({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </>
   );
 }

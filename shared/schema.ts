@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, decimal, timestamp, boolean, jsonb, unique, json, index, serial, real, check } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, decimal, timestamp, boolean, jsonb, unique, uniqueIndex, json, index, serial, real, check } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -381,6 +381,11 @@ export type EquityEvent = typeof equityEvents.$inferSelect;
 export const vaultPositions = pgTable("vault_positions", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   walletAddress: text("wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  // Scope (Phase 4): NULL = account-level vault (the main agent wallet). Non-null
+  // = a specific bot's own per-bot wallet (Flash independent_trader model). Plain
+  // column, no FK on purpose: on-chain is truth, so an orphan cost-basis row left
+  // after a bot is deleted is benign clutter, never a money error.
+  tradingBotId: varchar("trading_bot_id"),
   assetKey: text("asset_key").notNull(),
   mint: text("mint").notNull(),
   // Current parked balance in token base units (raw integer string).
@@ -391,7 +396,16 @@ export const vaultPositions = pgTable("vault_positions", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
-  uniqueWalletAsset: unique("vault_positions_wallet_asset_unique").on(table.walletAddress, table.assetKey),
+  // Account-scope rows (trading_bot_id IS NULL): one row per (wallet, asset).
+  // This partial index reproduces the old blanket unique for existing rows.
+  uniqueAccountAsset: uniqueIndex("vault_positions_account_unique")
+    .on(table.walletAddress, table.assetKey)
+    .where(sql`trading_bot_id IS NULL`),
+  // Per-bot-scope rows: one row per (wallet, bot, asset).
+  uniqueBotAsset: uniqueIndex("vault_positions_bot_unique")
+    .on(table.walletAddress, table.tradingBotId, table.assetKey)
+    .where(sql`trading_bot_id IS NOT NULL`),
+  botIdx: index("idx_vault_positions_bot").on(table.tradingBotId).where(sql`trading_bot_id IS NOT NULL`),
 }));
 
 export const insertVaultPositionSchema = createInsertSchema(vaultPositions).omit({

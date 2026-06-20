@@ -1,36 +1,32 @@
 /**
- * Phase 0a Vaults: service layer.
+ * Vaults: service layer.
  *
- * Composes the generalized agent swap primitive (server/agent-wallet) with the
- * cost-basis accounting in storage and live Jupiter quotes. Two user actions:
+ * Composes the per-asset yield route (server/vault/yield-routes) with the
+ * cost-basis accounting in storage. Two user actions:
  *
- *   parkUsdc    spare agent-wallet USDC  ->  yield token
- *   unparkToUsdc  yield token            ->  USDC
+ *   parkUsdc      spare agent-wallet USDC  ->  yield token
+ *   unparkToUsdc  yield token              ->  USDC
+ *
+ * The route handles the on-chain leg and valuation; this layer handles balance
+ * checks and DB accounting, and stays protocol-agnostic (it never assumes a swap).
  *
  * Money-safety rules:
- *  - On-chain is the source of truth. The swap is fail-closed (realized delta),
- *    and a DB write that fails AFTER a successful on-chain swap is surfaced as a
+ *  - On-chain is the source of truth. The route is fail-closed (realized delta),
+ *    and a DB write that fails AFTER a successful on-chain leg is surfaced as a
  *    non-fatal warning, never reported as a money failure.
- *  - Every swap is gated on a fresh live quote and a price-impact cap; a null
- *    (unavailable) price impact is rejected, not ignored.
  *  - Only registry assets with a hand-verified mint are routable.
  */
 
 import Decimal from "decimal.js";
-import {
-  executeAgentSwap,
-  getAgentUsdcBalance,
-  getAgentTokenBalanceRaw,
-  USDC_MINT,
-} from "../agent-wallet";
-import { getBestQuote } from "../swap/index.js";
+import { getAgentUsdcBalance, getAgentTokenBalanceRaw } from "../agent-wallet";
 import { storage } from "../storage";
 import { getEnabledYieldAssets, getYieldAssetByKey, type YieldAsset } from "./yield-assets";
+import { getYieldRoute, VAULT_MAX_PRICE_IMPACT } from "./yield-routes";
 import type { VaultPosition } from "@shared/schema";
 
+export { VAULT_MAX_PRICE_IMPACT } from "./yield-routes";
+
 const USDC_DECIMALS = 6;
-/** Reject any vault swap whose router price impact exceeds 0.5%. */
-export const VAULT_MAX_PRICE_IMPACT = 0.005;
 const DEFAULT_SLIPPAGE_BPS = 100;
 const MAX_SLIPPAGE_BPS = 500;
 
@@ -83,45 +79,28 @@ export async function previewVaultSwap(params: {
   if (!asset) return { ...base, reason: "Unknown or disabled asset" };
   if (!(params.amount > 0)) return { ...base, reason: "Amount must be greater than zero" };
 
-  const inputMint = params.direction === "park" ? USDC_MINT : asset.mint;
-  const outputMint = params.direction === "park" ? asset.mint : USDC_MINT;
   const inDecimals = params.direction === "park" ? USDC_DECIMALS : asset.decimals;
   const outDecimals = params.direction === "park" ? asset.decimals : USDC_DECIMALS;
 
   const inputRaw = toRaw(params.amount, inDecimals);
   if (inputRaw <= BigInt(0)) return { ...base, reason: "Amount is too small" };
 
-  const quote = await getBestQuote({
-    inputMint,
-    outputMint,
-    amountRaw: inputRaw.toString(),
-    slippageBps: clampSlippage(params.slippageBps),
-  });
-  if (!quote) {
-    return { ...base, inputRaw: inputRaw.toString(), reason: "No swap route available for this asset" };
-  }
+  const route = getYieldRoute(asset);
+  const slippage = clampSlippage(params.slippageBps);
+  const p =
+    params.direction === "park"
+      ? await route.previewPark(inputRaw, slippage)
+      : await route.previewUnpark(inputRaw, slippage);
 
-  const impact = quote.priceImpactPct;
-  let wouldReject = false;
-  let reason: string | undefined;
-  if (impact === null || impact === undefined) {
-    wouldReject = true;
-    reason = "The router did not report a price impact";
-  } else if (impact > VAULT_MAX_PRICE_IMPACT) {
-    wouldReject = true;
-    reason = `Price impact ${(impact * 100).toFixed(2)}% exceeds the ${(VAULT_MAX_PRICE_IMPACT * 100).toFixed(2)}% cap`;
-  }
-
-  const expectedOutRaw = quote.outAmountRaw;
   return {
     assetKey: asset.key,
     direction: params.direction,
     inputRaw: inputRaw.toString(),
-    expectedOutRaw,
-    expectedOut: fromRaw(BigInt(expectedOutRaw), outDecimals),
-    priceImpactPct: impact ?? null,
-    wouldReject,
-    reason,
+    expectedOutRaw: p.expectedOutRaw,
+    expectedOut: p.expectedOutRaw === null ? null : fromRaw(BigInt(p.expectedOutRaw), outDecimals),
+    priceImpactPct: p.priceImpactPct,
+    wouldReject: p.wouldReject,
+    reason: p.reason,
   };
 }
 
@@ -140,6 +119,8 @@ export interface ParkResult {
 
 export async function parkUsdc(params: {
   walletAddress: string;
+  /** Vault scope: omit/null = account vault; a bot id = that bot's per-bot wallet. */
+  tradingBotId?: string | null;
   agentPublicKey: string;
   agentSecretKey: Uint8Array;
   assetKey: string;
@@ -159,45 +140,44 @@ export async function parkUsdc(params: {
     return { success: false, error: `Not enough spare USDC in your bot wallet. Available: ${spareUsdc.toFixed(2)} USDC.` };
   }
 
-  const swap = await executeAgentSwap({
+  const route = getYieldRoute(asset);
+  const exec = await route.park({
     agentPublicKey: params.agentPublicKey,
     agentSecretKey: params.agentSecretKey,
-    inputMint: USDC_MINT,
-    outputMint: asset.mint,
-    amountRaw: inputRaw.toString(),
+    amountUsdcRaw: inputRaw,
     slippageBps: clampSlippage(params.slippageBps),
-    maxPriceImpactPct: VAULT_MAX_PRICE_IMPACT,
   });
-  if (!swap.success || !swap.outputReceivedRaw) {
-    return { success: false, priceImpactPct: swap.priceImpactPct ?? null, error: swap.error || "Swap failed" };
+  if (!exec.success || !exec.outputReceivedRaw) {
+    return { success: false, priceImpactPct: exec.priceImpactPct ?? null, error: exec.error || "Park failed" };
   }
 
   // ExactIn: USDC spent equals exactly the input amount.
   const usdcSpent = fromRaw(inputRaw, USDC_DECIMALS);
 
   let position: VaultPosition | undefined;
-  let dbWarning: string | undefined;
+  let dbWarning: string | undefined = exec.warning;
   try {
     position = await storage.applyVaultPark({
       walletAddress: params.walletAddress,
+      tradingBotId: params.tradingBotId ?? null,
       assetKey: asset.key,
       mint: asset.mint,
-      tokensReceivedRaw: swap.outputReceivedRaw,
+      tokensReceivedRaw: exec.outputReceivedRaw,
       usdcSpent,
-      txSignature: swap.signature,
+      txSignature: exec.signature,
       notes: `Parked ${usdcSpent.toFixed(6)} USDC into ${asset.displayName}`,
     });
   } catch (e: any) {
-    dbWarning = `Swap succeeded on-chain (signature ${swap.signature}) but recording your cost basis failed. Your funds are safe in the bot wallet.`;
-    console.error("[Vault] applyVaultPark failed after a successful swap", e);
+    dbWarning = `Park succeeded on-chain (signature ${exec.signature}) but recording your cost basis failed. Your funds are safe in the bot wallet.`;
+    console.error("[Vault] applyVaultPark failed after a successful park", e);
   }
 
   return {
     success: true,
-    signature: swap.signature,
-    tokensReceived: swap.outputReceived,
+    signature: exec.signature,
+    tokensReceived: exec.outputReceived,
     usdcSpent,
-    priceImpactPct: swap.priceImpactPct ?? null,
+    priceImpactPct: exec.priceImpactPct ?? null,
     position,
     dbWarning,
   };
@@ -220,6 +200,8 @@ export interface UnparkResult {
 
 export async function unparkToUsdc(params: {
   walletAddress: string;
+  /** Vault scope: omit/null = account vault; a bot id = that bot's per-bot wallet. */
+  tradingBotId?: string | null;
   agentPublicKey: string;
   agentSecretKey: Uint8Array;
   assetKey: string;
@@ -249,50 +231,50 @@ export async function unparkToUsdc(params: {
     if (sellRaw > onChainRaw) sellRaw = onChainRaw; // clamp to available
   }
 
-  const swap = await executeAgentSwap({
+  const route = getYieldRoute(asset);
+  const exec = await route.unpark({
     agentPublicKey: params.agentPublicKey,
     agentSecretKey: params.agentSecretKey,
-    inputMint: asset.mint,
-    outputMint: USDC_MINT,
-    amountRaw: sellRaw.toString(),
+    amountTokenRaw: sellRaw,
     slippageBps: clampSlippage(params.slippageBps),
-    maxPriceImpactPct: VAULT_MAX_PRICE_IMPACT,
   });
-  if (!swap.success || swap.outputReceived === undefined) {
-    return { success: false, priceImpactPct: swap.priceImpactPct ?? null, error: swap.error || "Swap failed" };
+  if (!exec.success || !exec.outputReceivedRaw) {
+    return { success: false, priceImpactPct: exec.priceImpactPct ?? null, error: exec.error || "Unpark failed" };
   }
 
-  const usdcReceived = swap.outputReceived;
+  // Derive USDC received from the on-chain measured raw delta, not the UI estimate.
+  const usdcReceived = fromRaw(BigInt(exec.outputReceivedRaw), USDC_DECIMALS);
   let position: VaultPosition | undefined;
   let costBasisRemoved: number | undefined;
   let realizedPnl: number | undefined;
-  let dbWarning: string | undefined;
+  let dbWarning: string | undefined = exec.warning;
   try {
     const r = await storage.applyVaultUnpark({
       walletAddress: params.walletAddress,
+      tradingBotId: params.tradingBotId ?? null,
       assetKey: asset.key,
       mint: asset.mint,
       tokensSoldRaw: sellRaw.toString(),
       usdcReceived,
-      txSignature: swap.signature,
+      txSignature: exec.signature,
       notesPrefix: `Unparked ${asset.displayName}.`,
     });
     position = r.position;
     costBasisRemoved = r.costBasisRemoved;
     realizedPnl = r.realizedPnl;
   } catch (e: any) {
-    dbWarning = `Swap succeeded on-chain (signature ${swap.signature}) but updating your cost basis failed. Your USDC is safe in the bot wallet.`;
-    console.error("[Vault] applyVaultUnpark failed after a successful swap", e);
+    dbWarning = `Unpark succeeded on-chain (signature ${exec.signature}) but updating your cost basis failed. Your USDC is safe in the bot wallet.`;
+    console.error("[Vault] applyVaultUnpark failed after a successful unpark", e);
   }
 
   return {
     success: true,
-    signature: swap.signature,
+    signature: exec.signature,
     usdcReceived,
     tokensSold: fromRaw(sellRaw, asset.decimals),
     costBasisRemoved,
     realizedPnl,
-    priceImpactPct: swap.priceImpactPct ?? null,
+    priceImpactPct: exec.priceImpactPct ?? null,
     position,
     dbWarning,
   };
@@ -305,7 +287,8 @@ export interface VaultPositionView {
   displayName: string;
   mint: string;
   decimals: number;
-  type: YieldAsset["type"];
+  route: YieldAsset["route"];
+  valuation: YieldAsset["valuation"];
   tag: string;
   defaultEligible: boolean;
   onChainAmountRaw: string;
@@ -328,9 +311,10 @@ export interface VaultPositionView {
 export async function getVaultPositionViews(
   walletAddress: string,
   agentPublicKey: string,
+  tradingBotId?: string | null,
 ): Promise<VaultPositionView[]> {
   const enabled = getEnabledYieldAssets();
-  const dbRows = await storage.getVaultPositions(walletAddress);
+  const dbRows = await storage.getVaultPositions(walletAddress, tradingBotId ?? null);
   const dbByKey = new Map(dbRows.map((r) => [r.assetKey, r] as const));
 
   const views: VaultPositionView[] = [];
@@ -351,17 +335,8 @@ export async function getVaultPositionViews(
 
     let currentValueUsdc: number | null = hasOnChain ? null : 0;
     if (hasOnChain) {
-      try {
-        const q = await getBestQuote({
-          inputMint: asset.mint,
-          outputMint: USDC_MINT,
-          amountRaw: onChainRaw.toString(),
-          slippageBps: DEFAULT_SLIPPAGE_BPS,
-        });
-        if (q) currentValueUsdc = fromRaw(BigInt(q.outAmountRaw), USDC_DECIMALS);
-      } catch {
-        // leave null: quote unavailable
-      }
+      const val = await getYieldRoute(asset).valueInUsdc(onChainRaw);
+      currentValueUsdc = val.valueUsdcRaw === null ? null : fromRaw(BigInt(val.valueUsdcRaw), USDC_DECIMALS);
     }
 
     const costBasisUsdc = dbRow ? Number(dbRow.usdcCostBasis) : null;
@@ -374,7 +349,8 @@ export async function getVaultPositionViews(
       displayName: asset.displayName,
       mint: asset.mint,
       decimals: asset.decimals,
-      type: asset.type,
+      route: asset.route,
+      valuation: asset.valuation,
       tag: asset.tag,
       defaultEligible: asset.defaultEligible,
       onChainAmountRaw: onChainRaw.toString(),

@@ -1,4 +1,4 @@
-import { Connection, PublicKey, Keypair, Transaction, VersionedTransaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import { Connection, PublicKey, Keypair, Transaction, VersionedTransaction, TransactionMessage, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, LAMPORTS_PER_SOL, type AddressLookupTableAccount } from '@solana/web3.js';
 import bs58 from 'bs58';
 import BN from 'bn.js';
 import { getBestQuote, getProviderByName } from './swap/index.js';
@@ -19,7 +19,7 @@ const MAINNET_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const DEVNET_USDC_MINT = '8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2';
 export const USDC_MINT = IS_MAINNET ? MAINNET_USDC_MINT : DEVNET_USDC_MINT;
 
-const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+export const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 
 function getSolanaRpcUrl(): string {
@@ -42,7 +42,12 @@ function getConnection(): Connection {
   return connectionInstance;
 }
 
-function getAssociatedTokenAddressSync(
+/** Shared mainnet RPC connection for server-signed flows (e.g. the vault Kamino route). */
+export function getServerConnection(): Connection {
+  return getConnection();
+}
+
+export function getAssociatedTokenAddressSync(
   mint: PublicKey,
   owner: PublicKey,
 ): PublicKey {
@@ -292,6 +297,35 @@ function createAssociatedTokenAccountInstruction(
     keys,
     programId: ASSOCIATED_TOKEN_PROGRAM_ID,
     data: Buffer.alloc(0),
+  });
+}
+
+/**
+ * Idempotent associated-token-account creation (no-op if the ATA already exists).
+ * Same account layout as the plain create, but the data byte `1` selects the
+ * CreateIdempotent instruction so it can be safely included in every tx without a
+ * prior existence check or risk of "account already in use".
+ */
+export function createIdempotentAtaInstruction(
+  payer: PublicKey,
+  associatedToken: PublicKey,
+  owner: PublicKey,
+  mint: PublicKey,
+): TransactionInstruction {
+  const keys = [
+    { pubkey: payer, isSigner: true, isWritable: true },
+    { pubkey: associatedToken, isSigner: false, isWritable: true },
+    { pubkey: owner, isSigner: false, isWritable: false },
+    { pubkey: mint, isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+  ];
+
+  return new TransactionInstruction({
+    keys,
+    programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+    data: Buffer.from([1]),
   });
 }
 
@@ -567,6 +601,48 @@ export async function getAgentTokenBalanceRaw(
 }
 
 /**
+ * STRICT balance read for MONEY paths. Unlike getAgentTokenBalanceRaw (which fails
+ * OPEN to 0 on any error), this only returns 0 when the ATA genuinely does not
+ * exist; an RPC/parse failure THROWS so a caller using the balance as a money
+ * baseline fails CLOSED instead of treating an unreadable balance as zero.
+ *
+ * Why this matters: executeAgentInstructions / executeAgentSwap compute the
+ * credited amount as (after - outBefore). If outBefore silently collapsed to 0
+ * while the wallet already held the output token, a dropped tx plus a later good
+ * read would fabricate a positive delta and report a false success. The baseline
+ * MUST be real or the operation must refuse to start.
+ */
+export async function getAgentTokenBalanceRawStrict(
+  agentPublicKey: string,
+  mint: string,
+): Promise<{ amountRaw: string; decimals: number; uiAmount: number }> {
+  const connection = getConnection();
+  const agentPubkey = new PublicKey(agentPublicKey);
+
+  if (mint === NATIVE_SOL_MINT) {
+    const lamports = await connection.getBalance(agentPubkey);
+    return { amountRaw: String(lamports), decimals: 9, uiAmount: lamports / LAMPORTS_PER_SOL };
+  }
+
+  const ata = getAssociatedTokenAddressSync(new PublicKey(mint), agentPubkey);
+  try {
+    const bal = await connection.getTokenAccountBalance(ata);
+    return {
+      amountRaw: bal.value.amount,
+      decimals: bal.value.decimals,
+      uiAmount: bal.value.uiAmount || 0,
+    };
+  } catch (e) {
+    // Disambiguate genuine absence (legit 0) from an RPC/parse failure. A null
+    // account info means the ATA truly does not exist; any throw here propagates
+    // (fail closed). An existing account whose balance read failed re-throws.
+    const info = await connection.getAccountInfo(ata);
+    if (info === null) return { amountRaw: '0', decimals: 0, uiAmount: 0 };
+    throw e instanceof Error ? e : new Error('Token balance read failed');
+  }
+}
+
+/**
  * Builds a USER-SIGNED transaction moving `amountRaw` base units of an arbitrary
  * SPL `mint` from the user's main wallet into the agent wallet ATA (created if
  * missing). This is the "deposit any asset" on-ramp; the server later swaps the
@@ -730,7 +806,7 @@ export async function executeAgentSwap(params: AgentSwapParams): Promise<AgentSw
     }
 
     // 4) Output-token balance BEFORE: the realized delta is our source of truth.
-    const outBefore = BigInt((await getAgentTokenBalanceRaw(agentPublicKey, outputMint)).amountRaw);
+    const outBefore = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, outputMint)).amountRaw);
 
     // 5) Build, sign, and send the swap transaction.
     const swapTxB64 = await provider.buildSwapTransaction(quote, agentPublicKey);
@@ -790,6 +866,142 @@ export async function executeAgentSwap(params: AgentSwapParams): Promise<AgentSw
     };
   } catch (error: any) {
     return { success: false, error: error?.message || 'Swap failed' };
+  }
+}
+
+export interface AgentInstructionsExecParams {
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  /** Pre-built instructions to sign and send as ONE transaction. */
+  instructions: TransactionInstruction[];
+  /**
+   * The mint whose realized POSITIVE balance delta on the agent wallet proves the
+   * operation succeeded. This measured delta is the source of truth: an ambiguous
+   * confirmation can never fabricate funds (fail-closed).
+   */
+  verifyOutputMint: string;
+  /** Minimum SOL the agent must hold for gas (+ any first-time ATA rent). */
+  minSolGas?: number;
+  /** Optional address lookup tables (e.g. Kamino reserve ops do not need any). */
+  addressLookupTables?: AddressLookupTableAccount[];
+  /** Short label used in error messages (e.g. "Kamino park"). */
+  label?: string;
+}
+
+export interface AgentInstructionsExecResult {
+  success: boolean;
+  signature?: string;
+  /** Realized output-token delta, raw base units (on-chain measured). */
+  outputReceivedRaw?: string;
+  /** Realized output-token delta, UI units. */
+  outputReceived?: number;
+  error?: string;
+}
+
+/** Default SOL gas floor for a generic server-signed instruction batch. */
+const DEFAULT_INSTRUCTIONS_MIN_SOL_GAS = 0.01;
+
+/**
+ * SERVER-SIGNED execution of a pre-built instruction batch from the agent wallet.
+ * This is the generalized money-safety core shared by non-swap on-chain flows
+ * (e.g. the vault Kamino deposit/withdraw): it owns the gas precheck, the sign +
+ * send, the status-poll confirmation, and the realized-delta verification, so the
+ * caller only has to build correct instructions.
+ *
+ * Fail-closed: the realized balance delta of `verifyOutputMint` is the source of
+ * truth, so an ambiguous confirmation can never fabricate credited funds. The
+ * caller composes the instructions (Kamino route builds its own deposit/redeem).
+ */
+export async function executeAgentInstructions(
+  params: AgentInstructionsExecParams,
+): Promise<AgentInstructionsExecResult> {
+  const {
+    agentPublicKey,
+    agentSecretKey,
+    instructions,
+    verifyOutputMint,
+    minSolGas = DEFAULT_INSTRUCTIONS_MIN_SOL_GAS,
+    addressLookupTables = [],
+    label = 'Transaction',
+  } = params;
+
+  try {
+    if (!instructions.length) {
+      return { success: false, error: `${label}: no instructions to execute` };
+    }
+
+    const connection = getConnection();
+    const agentKeypair = resolveAgentKeypair(agentSecretKey);
+    const agentPubkey = new PublicKey(agentPublicKey);
+
+    // 1) Agent needs SOL to pay fees (+ any first-time ATA rent).
+    const solLamports = await connection.getBalance(agentPubkey);
+    if (solLamports / LAMPORTS_PER_SOL < minSolGas) {
+      return { success: false, error: `Insufficient SOL in bot wallet for gas (need ~${minSolGas} SOL). Please top up SOL and retry.` };
+    }
+
+    // 2) Output-token balance BEFORE: the realized delta is our source of truth.
+    const outBefore = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, verifyOutputMint)).amountRaw);
+
+    // 3) Build, sign, and send a v0 transaction.
+    const { blockhash } = await connection.getLatestBlockhash('confirmed');
+    const message = new TransactionMessage({
+      payerKey: agentPubkey,
+      recentBlockhash: blockhash,
+      instructions,
+    }).compileToV0Message(addressLookupTables);
+    const tx = new VersionedTransaction(message);
+    tx.sign([agentKeypair]);
+
+    const signature = await connection.sendRawTransaction(tx.serialize(), {
+      skipPreflight: false,
+      preflightCommitment: 'confirmed',
+      maxRetries: 3,
+    });
+
+    // 4) Confirm by polling signature status (avoids the blockhash /
+    //    lastValidBlockHeight mismatch of confirmTransaction). We VERIFY via the
+    //    output delta below regardless, so this stays fail-closed.
+    let confirmedErr: unknown = null;
+    for (let i = 0; i < 20; i++) {
+      const statuses = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+      const st = statuses.value[0];
+      if (st) {
+        if (st.err) { confirmedErr = st.err; break; }
+        if (st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized') break;
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    if (confirmedErr) {
+      return { success: false, signature, error: `${label} failed on-chain: ${JSON.stringify(confirmedErr)}` };
+    }
+
+    // 5) Verify the realized output-token delta (retry for RPC lag / late finalization).
+    let deltaRaw = BigInt(0);
+    let outDecimals = 0;
+    for (let i = 0; i < 6; i++) {
+      const after = await getAgentTokenBalanceRaw(agentPublicKey, verifyOutputMint);
+      outDecimals = after.decimals;
+      deltaRaw = BigInt(after.amountRaw) - outBefore;
+      if (deltaRaw > BigInt(0)) break;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    if (deltaRaw <= BigInt(0)) {
+      return {
+        success: false,
+        signature,
+        error: `${label} landed but no output increase was detected, please refresh and retry`,
+      };
+    }
+
+    return {
+      success: true,
+      signature,
+      outputReceivedRaw: deltaRaw.toString(),
+      outputReceived: Number(deltaRaw) / Math.pow(10, outDecimals || 0),
+    };
+  } catch (error: any) {
+    return { success: false, error: error?.message || `${label} failed` };
   }
 }
 

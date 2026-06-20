@@ -150,6 +150,20 @@ async function _resolveBotSubaccountSecretKey(
 }
 
 /**
+ * Phase 4 Vaults guard: detect any parked yield-token (Vault) balances held in a
+ * wallet. The Flash sweep moves only USDC + reclaimable SOL, so a parked yield
+ * token (Perena USD*, ONyc, Kamino, ...) would be STRANDED by a recover/delete
+ * sweep. Uses the STRICT balance reader so an unreadable balance THROWS (fail
+ * closed) instead of collapsing to 0: an RPC/parse failure can never be misread
+ * as "no parked tokens" and let the sweep strand parked Vault funds. The pure
+ * iteration lives in ./vault/parked-tokens so the fail-closed invariant is unit
+ * testable; here we bind it to the strict on-chain reader.
+ */
+function detectParkedYieldTokens(walletPubkey: string): Promise<string[]> {
+  return detectParkedYieldTokensPure(walletPubkey, getAgentTokenBalanceRawStrict);
+}
+
+/**
  * Core close+sweep+verify for a Flash per-bot wallet, given an ALREADY-resolved
  * secret key. Closes any open positions, cancels leftover trigger (TP/SL) orders,
  * tops up gas from the agent, sweeps ALL funds back to the agent wallet, and verifies
@@ -214,6 +228,22 @@ async function _sweepFlashWalletToAgent(
   positions = await flashAdapter.getPositions(subId);
   if (positions.length > 0) {
     return empty(`${positions.length} position(s) still open after close attempt`);
+  }
+
+  // 1b) Parked-Vault guard. The sweep below moves only USDC + reclaimable SOL, so
+  // any parked yield tokens in this bot wallet would be STRANDED. Block and tell
+  // the user to unpark first — never silently leave funds behind, and never
+  // auto-sell (that would be an unconsented swap with slippage). Reads fail CLOSED.
+  try {
+    const parked = await detectParkedYieldTokens(subId);
+    if (parked.length > 0) {
+      return empty(
+        `This bot wallet still holds parked Vault funds (${parked.join(', ')}). ` +
+        `Unpark them back to USDC first, then retry.`,
+      );
+    }
+  } catch (yieldErr: any) {
+    return empty(`Could not verify parked Vault balances before sweep: ${yieldErr?.message || yieldErr}`);
   }
 
   // 2) Gas top-up so the bot wallet can pay its own sweep fee (USDC-rich/SOL-poor).
@@ -1398,10 +1428,11 @@ async function settleAllPnl(
 }
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
-import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRaw, NATIVE_SOL_MINT } from "./agent-wallet";
+import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, NATIVE_SOL_MINT } from "./agent-wallet";
 import { getBestQuote } from "./swap/index.js";
 import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
 import { getEnabledYieldAssets } from "./vault/yield-assets";
+import { detectParkedYieldTokens as detectParkedYieldTokensPure } from "./vault/parked-tokens";
 import { getUserFungibleTokens } from "./swap/helius-tokens.js";
 
 const SWAP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -1413,7 +1444,7 @@ import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable
 import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification, type TradeNotification, buildDefaultInlineKeyboard } from "./notification-service";
 import { classifySignal } from "./trading/signal-classifier";
 import { registerTelegramMiniAppRoutes } from "./telegram-mini-app";
-import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, healExecutionUmkFromStorage, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3, rebindRetainedKeyToBotUuidV3, decryptMnemonic, deriveBotKeypairFromAgentSeed, BOT_DERIVATION_PATH_VERSION } from "./session-v3";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, healExecutionUmkFromStorage, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, decryptBotSubaccountKey, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3, rebindRetainedKeyToBotUuidV3, decryptMnemonic, deriveBotKeypairFromAgentSeed, BOT_DERIVATION_PATH_VERSION } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback, cancelRetryJobsForBot } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { DOCS_MARKDOWN } from "./docs-markdown";
@@ -7585,16 +7616,81 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
   // === Phase 0a Vaults: manual park / unpark of spare agent-wallet USDC =======
 
-  // List enabled yield assets + the wallet's spare (idle) agent-wallet USDC.
+  // Phase 4: a vault request can target the shared ACCOUNT vault (the main agent
+  // wallet) or a single bot's OWN per-bot wallet. Resolve which one. A request
+  // with no botId, or one for a subaccount-model bot (Pacifica/Drift, which share
+  // the account wallet), maps to the account vault. Only a per-bot-wallet bot
+  // (Flash independent_trader) gets its own scope. Validates bot ownership so a
+  // caller can never act on another wallet's bot. The returned `scope` is echoed
+  // to the client so its copy can never drift from what actually happened.
+  type VaultBot = NonNullable<Awaited<ReturnType<typeof storage.getTradingBotById>>>;
+  type ResolvedVaultScope = {
+    scope: 'account' | 'bot';
+    tradingBotId: string | null;
+    agentPublicKey: string | null;
+    bot?: VaultBot;
+  };
+  async function resolveVaultScope(
+    walletAddress: string,
+    wallet: NonNullable<Awaited<ReturnType<typeof storage.getWallet>>>,
+    botId?: string | null,
+  ): Promise<{ ok: true; scope: ResolvedVaultScope } | { ok: false; status: number; error: string }> {
+    if (botId) {
+      const bot = await storage.getTradingBotById(botId);
+      if (!bot || bot.walletAddress !== walletAddress) {
+        return { ok: false, status: 404, error: "Bot not found" };
+      }
+      const adapter = getAdapterForBot(bot);
+      if (adapter.subaccountCaps?.accountModel === 'independent_trader') {
+        // Flash-style per-bot wallet: act on the bot's OWN wallet.
+        if (!bot.protocolSubaccountId) {
+          return { ok: false, status: 400, error: "This bot's wallet is not set up yet. Fund the bot first." };
+        }
+        return { ok: true, scope: { scope: 'bot', tradingBotId: bot.id, agentPublicKey: bot.protocolSubaccountId, bot } };
+      }
+      // Subaccount-model bot (Pacifica/Drift): shares the account vault — fall through.
+    }
+    return { ok: true, scope: { scope: 'account', tradingBotId: null, agentPublicKey: wallet.agentPublicKey ?? null } };
+  }
+
+  // Decrypt the signing key for a resolved scope using the INTERACTIVE session UMK
+  // (these are manual user actions). Account scope unlocks the main agent key; bot
+  // scope unlocks that bot's per-bot wallet key. Returns {secretKey, cleanup} — the
+  // caller MUST call cleanup() in a finally block. Null means re-key needed.
+  async function decryptVaultScopeKey(
+    scope: ResolvedVaultScope,
+    walletAddress: string,
+    wallet: NonNullable<Awaited<ReturnType<typeof storage.getWallet>>>,
+    umk: Buffer,
+  ): Promise<{ secretKey: Uint8Array; cleanup: () => void } | null> {
+    if (scope.scope === 'bot' && scope.bot) {
+      return await decryptBotSubaccountKey({
+        id: scope.bot.id,
+        walletAddress: scope.bot.walletAddress,
+        protocolSubaccountId: scope.bot.protocolSubaccountId,
+        botSubaccountKeyEncrypted: scope.bot.botSubaccountKeyEncrypted,
+        botSubaccountKeyEncryptedV3: scope.bot.botSubaccountKeyEncryptedV3,
+        derivationIndex: scope.bot.derivationIndex,
+        derivationPathVersion: scope.bot.derivationPathVersion,
+      }, umk);
+    }
+    return await decryptAgentKeyStrict(walletAddress, umk, wallet, scope.agentPublicKey!);
+  }
+
+  // List enabled yield assets + the scope's spare (idle) USDC. Optional ?botId=.
   app.get("/api/vault/assets", requireWallet, async (req, res) => {
     try {
       const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet) return res.status(404).json({ error: "Wallet not found" });
 
+      const resolved = await resolveVaultScope(req.walletAddress!, wallet, req.query.botId ? String(req.query.botId) : null);
+      if (!resolved.ok) return res.status(resolved.status).json({ error: resolved.error });
+      const { scope } = resolved;
+
       let spareUsdc = 0;
-      if (wallet.agentPublicKey) {
+      if (scope.agentPublicKey) {
         try {
-          spareUsdc = await getAgentUsdcBalance(wallet.agentPublicKey);
+          spareUsdc = await getAgentUsdcBalance(scope.agentPublicKey);
         } catch {
           spareUsdc = 0;
         }
@@ -7605,27 +7701,34 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         displayName: a.displayName,
         mint: a.mint,
         decimals: a.decimals,
-        type: a.type,
+        route: a.route,
+        valuation: a.valuation,
+        /** True when the token's USDC price floats with the market (basis risk). */
+        priceFloats: a.valuation === "market_quote",
         tag: a.tag,
         defaultEligible: a.defaultEligible,
       }));
 
-      res.json({ spareUsdc, maxPriceImpactPct: VAULT_MAX_PRICE_IMPACT, assets });
+      res.json({ spareUsdc, maxPriceImpactPct: VAULT_MAX_PRICE_IMPACT, assets, scope: scope.scope, tradingBotId: scope.tradingBotId });
     } catch (error: any) {
       console.error("[Vault] assets error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
     }
   });
 
-  // On-chain valued positions + recorded cost basis + unrealized P/L.
+  // On-chain valued positions + recorded cost basis + unrealized P/L. Optional ?botId=.
   app.get("/api/vault/positions", requireWallet, async (req, res) => {
     try {
       const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet) return res.status(404).json({ error: "Wallet not found" });
-      if (!wallet.agentPublicKey) return res.json({ positions: [] });
 
-      const positions = await getVaultPositionViews(req.walletAddress!, wallet.agentPublicKey);
-      res.json({ positions });
+      const resolved = await resolveVaultScope(req.walletAddress!, wallet, req.query.botId ? String(req.query.botId) : null);
+      if (!resolved.ok) return res.status(resolved.status).json({ error: resolved.error });
+      const { scope } = resolved;
+      if (!scope.agentPublicKey) return res.json({ positions: [], scope: scope.scope, tradingBotId: scope.tradingBotId });
+
+      const positions = await getVaultPositionViews(req.walletAddress!, scope.agentPublicKey, scope.tradingBotId);
+      res.json({ positions, scope: scope.scope, tradingBotId: scope.tradingBotId });
     } catch (error: any) {
       console.error("[Vault] positions error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
@@ -7662,9 +7765,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   });
 
   // Park spare USDC into a yield asset. Interactive session UMK (manual action).
+  // Optional botId targets a single bot's per-bot wallet (Flash); otherwise the
+  // shared account vault.
   app.post("/api/vault/park", requireWallet, async (req, res) => {
     try {
-      const { assetKey, amountUsdc, sessionId } = req.body || {};
+      const { assetKey, amountUsdc, sessionId, botId } = req.body || {};
       if (!assetKey || typeof assetKey !== "string") {
         return res.status(400).json({ error: "assetKey required" });
       }
@@ -7678,9 +7783,6 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet) return res.status(404).json({ error: "Wallet not found" });
-      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
-        return res.status(400).json({ error: "Agent wallet not initialized" });
-      }
 
       if (!sessionId) return res.status(400).json({ error: "Session ID required for security verification" });
       const session = getSession(sessionId);
@@ -7691,7 +7793,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
       }
 
-      const agentKeyResult = await decryptAgentKeyStrict(req.walletAddress!, session.umk, wallet, wallet.agentPublicKey);
+      const resolved = await resolveVaultScope(req.walletAddress!, wallet, botId ? String(botId) : null);
+      if (!resolved.ok) return res.status(resolved.status).json({ error: resolved.error });
+      const { scope } = resolved;
+      if (!scope.agentPublicKey) return res.status(400).json({ error: "Agent wallet not initialized" });
+
+      const agentKeyResult = await decryptVaultScopeKey(scope, req.walletAddress!, wallet, session.umk);
       if (!agentKeyResult) {
         return res.status(400).json({ error: "Your wallet needs to be re-keyed. Please sign out and sign back in." });
       }
@@ -7700,7 +7807,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       try {
         result = await parkUsdc({
           walletAddress: req.walletAddress!,
-          agentPublicKey: wallet.agentPublicKey,
+          tradingBotId: scope.tradingBotId,
+          agentPublicKey: scope.agentPublicKey,
           agentSecretKey: agentKeyResult.secretKey,
           assetKey,
           amountUsdc,
@@ -7713,7 +7821,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!result.success) {
         return res.status(400).json({ error: result.error || "Park failed", priceImpactPct: result.priceImpactPct ?? null });
       }
-      res.json(result);
+      res.json({ ...result, scope: scope.scope, tradingBotId: scope.tradingBotId });
     } catch (error: any) {
       console.error("[Vault] park error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
@@ -7721,9 +7829,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   });
 
   // Unpark a yield asset back to USDC. Interactive session UMK (manual action).
+  // Optional botId targets a single bot's per-bot wallet (Flash); otherwise the
+  // shared account vault.
   app.post("/api/vault/unpark", requireWallet, async (req, res) => {
     try {
-      const { assetKey, amountToken, all, sessionId } = req.body || {};
+      const { assetKey, amountToken, all, sessionId, botId } = req.body || {};
       if (!assetKey || typeof assetKey !== "string") {
         return res.status(400).json({ error: "assetKey required" });
       }
@@ -7738,9 +7848,6 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet) return res.status(404).json({ error: "Wallet not found" });
-      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
-        return res.status(400).json({ error: "Agent wallet not initialized" });
-      }
 
       if (!sessionId) return res.status(400).json({ error: "Session ID required for security verification" });
       const session = getSession(sessionId);
@@ -7751,7 +7858,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
       }
 
-      const agentKeyResult = await decryptAgentKeyStrict(req.walletAddress!, session.umk, wallet, wallet.agentPublicKey);
+      const resolved = await resolveVaultScope(req.walletAddress!, wallet, botId ? String(botId) : null);
+      if (!resolved.ok) return res.status(resolved.status).json({ error: resolved.error });
+      const { scope } = resolved;
+      if (!scope.agentPublicKey) return res.status(400).json({ error: "Agent wallet not initialized" });
+
+      const agentKeyResult = await decryptVaultScopeKey(scope, req.walletAddress!, wallet, session.umk);
       if (!agentKeyResult) {
         return res.status(400).json({ error: "Your wallet needs to be re-keyed. Please sign out and sign back in." });
       }
@@ -7760,7 +7872,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       try {
         result = await unparkToUsdc({
           walletAddress: req.walletAddress!,
-          agentPublicKey: wallet.agentPublicKey,
+          tradingBotId: scope.tradingBotId,
+          agentPublicKey: scope.agentPublicKey,
           agentSecretKey: agentKeyResult.secretKey,
           assetKey,
           amountToken: unparkAll ? undefined : amountToken,
@@ -7774,7 +7887,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!result.success) {
         return res.status(400).json({ error: result.error || "Unpark failed", priceImpactPct: result.priceImpactPct ?? null });
       }
-      res.json(result);
+      res.json({ ...result, scope: scope.scope, tradingBotId: scope.tradingBotId });
     } catch (error: any) {
       console.error("[Vault] unpark error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });

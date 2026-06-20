@@ -1,5 +1,6 @@
-import { eq, ne, desc, sql, and, or, ilike, gte, lte, lt, inArray, isNotNull } from "drizzle-orm";
+import { eq, ne, desc, sql, and, or, ilike, gte, lte, lt, inArray, isNotNull, isNull } from "drizzle-orm";
 import { createHash, randomBytes } from "crypto";
+import { vaultLockKey as computeVaultLockKey } from "./vault/scope";
 import { db } from "./db";
 import Decimal from "decimal.js";
 import {
@@ -335,10 +336,10 @@ export interface IStorage {
   getBotNetDeposited(tradingBotId: string): Promise<number>;
 
   // Phase 0a Vaults.
-  getVaultPosition(walletAddress: string, assetKey: string): Promise<VaultPosition | undefined>;
-  getVaultPositions(walletAddress: string): Promise<VaultPosition[]>;
-  applyVaultPark(p: { walletAddress: string; assetKey: string; mint: string; tokensReceivedRaw: string; usdcSpent: number; txSignature?: string; txBlockTime?: Date; notes?: string; }): Promise<VaultPosition>;
-  applyVaultUnpark(p: { walletAddress: string; assetKey: string; mint: string; tokensSoldRaw: string; usdcReceived: number; txSignature?: string; txBlockTime?: Date; notesPrefix?: string; }): Promise<{ position: VaultPosition; costBasisRemoved: number; realizedPnl: number }>;
+  getVaultPosition(walletAddress: string, assetKey: string, tradingBotId?: string | null): Promise<VaultPosition | undefined>;
+  getVaultPositions(walletAddress: string, tradingBotId?: string | null): Promise<VaultPosition[]>;
+  applyVaultPark(p: { walletAddress: string; tradingBotId?: string | null; assetKey: string; mint: string; tokensReceivedRaw: string; usdcSpent: number; txSignature?: string; txBlockTime?: Date; notes?: string; }): Promise<VaultPosition>;
+  applyVaultUnpark(p: { walletAddress: string; tradingBotId?: string | null; assetKey: string; mint: string; tokensSoldRaw: string; usdcReceived: number; txSignature?: string; txBlockTime?: Date; notesPrefix?: string; }): Promise<{ position: VaultPosition; costBasisRemoved: number; realizedPnl: number }>;
 
   getBotPosition(tradingBotId: string, market: string): Promise<BotPosition | undefined>;
   getBotPositions(walletAddress: string): Promise<BotPosition[]>;
@@ -1971,16 +1972,31 @@ export class DatabaseStorage implements IStorage {
 
   // --- Phase 0a Vaults -------------------------------------------------------
 
-  async getVaultPosition(walletAddress: string, assetKey: string): Promise<VaultPosition | undefined> {
+  // Scope (Phase 4): tradingBotId === null|undefined ⇒ account-level vault rows
+  // (trading_bot_id IS NULL). A non-null id ⇒ that specific bot's per-bot wallet.
+  private vaultScopeCond(tradingBotId: string | null | undefined) {
+    return tradingBotId == null
+      ? isNull(vaultPositions.tradingBotId)
+      : eq(vaultPositions.tradingBotId, tradingBotId);
+  }
+
+  // Stable, unambiguous advisory-lock key for a (wallet, scope, asset) tuple.
+  // Delegates to the shared, pure helper so account and per-bot rows never share
+  // a lock slot (see server/vault/scope.ts).
+  private vaultLockKey(walletAddress: string, tradingBotId: string | null | undefined, assetKey: string): number {
+    return computeVaultLockKey(walletAddress, tradingBotId, assetKey);
+  }
+
+  async getVaultPosition(walletAddress: string, assetKey: string, tradingBotId: string | null = null): Promise<VaultPosition | undefined> {
     const result = await db.select().from(vaultPositions)
-      .where(and(eq(vaultPositions.walletAddress, walletAddress), eq(vaultPositions.assetKey, assetKey)))
+      .where(and(eq(vaultPositions.walletAddress, walletAddress), this.vaultScopeCond(tradingBotId), eq(vaultPositions.assetKey, assetKey)))
       .limit(1);
     return result[0];
   }
 
-  async getVaultPositions(walletAddress: string): Promise<VaultPosition[]> {
+  async getVaultPositions(walletAddress: string, tradingBotId: string | null = null): Promise<VaultPosition[]> {
     return await db.select().from(vaultPositions)
-      .where(eq(vaultPositions.walletAddress, walletAddress))
+      .where(and(eq(vaultPositions.walletAddress, walletAddress), this.vaultScopeCond(tradingBotId)))
       .orderBy(desc(vaultPositions.updatedAt));
   }
 
@@ -1989,6 +2005,7 @@ export class DatabaseStorage implements IStorage {
   // token delta and the exact USDC spent are computed by the caller before this.
   async applyVaultPark(p: {
     walletAddress: string;
+    tradingBotId?: string | null;
     assetKey: string;
     mint: string;
     tokensReceivedRaw: string;
@@ -1997,12 +2014,13 @@ export class DatabaseStorage implements IStorage {
     txBlockTime?: Date;
     notes?: string;
   }): Promise<VaultPosition> {
+    const tradingBotId = p.tradingBotId ?? null;
     return await db.transaction(async (tx) => {
-      const lockKey = createHash('sha1').update(`${p.walletAddress}:${p.assetKey}`).digest().readInt32BE(0);
+      const lockKey = this.vaultLockKey(p.walletAddress, tradingBotId, p.assetKey);
       await tx.execute(sql`SELECT pg_advisory_xact_lock(${778811}, ${lockKey})`);
 
       const existing = (await tx.select().from(vaultPositions)
-        .where(and(eq(vaultPositions.walletAddress, p.walletAddress), eq(vaultPositions.assetKey, p.assetKey)))
+        .where(and(eq(vaultPositions.walletAddress, p.walletAddress), this.vaultScopeCond(tradingBotId), eq(vaultPositions.assetKey, p.assetKey)))
         .limit(1))[0];
 
       const newTokens = (BigInt(existing?.tokenAmountRaw ?? '0') + BigInt(p.tokensReceivedRaw)).toString();
@@ -2016,7 +2034,7 @@ export class DatabaseStorage implements IStorage {
           .returning())[0];
       } else {
         row = (await tx.insert(vaultPositions)
-          .values({ walletAddress: p.walletAddress, assetKey: p.assetKey, mint: p.mint, tokenAmountRaw: newTokens, usdcCostBasis: newBasis, status: 'active' })
+          .values({ walletAddress: p.walletAddress, tradingBotId, assetKey: p.assetKey, mint: p.mint, tokenAmountRaw: newTokens, usdcCostBasis: newBasis, status: 'active' })
           .returning())[0];
       }
 
@@ -2039,6 +2057,7 @@ export class DatabaseStorage implements IStorage {
   // as a taxable equity event. Returns the updated row and the realized figures.
   async applyVaultUnpark(p: {
     walletAddress: string;
+    tradingBotId?: string | null;
     assetKey: string;
     mint: string;
     tokensSoldRaw: string;
@@ -2047,12 +2066,13 @@ export class DatabaseStorage implements IStorage {
     txBlockTime?: Date;
     notesPrefix?: string;
   }): Promise<{ position: VaultPosition; costBasisRemoved: number; realizedPnl: number }> {
+    const tradingBotId = p.tradingBotId ?? null;
     return await db.transaction(async (tx) => {
-      const lockKey = createHash('sha1').update(`${p.walletAddress}:${p.assetKey}`).digest().readInt32BE(0);
+      const lockKey = this.vaultLockKey(p.walletAddress, tradingBotId, p.assetKey);
       await tx.execute(sql`SELECT pg_advisory_xact_lock(${778811}, ${lockKey})`);
 
       const existing = (await tx.select().from(vaultPositions)
-        .where(and(eq(vaultPositions.walletAddress, p.walletAddress), eq(vaultPositions.assetKey, p.assetKey)))
+        .where(and(eq(vaultPositions.walletAddress, p.walletAddress), this.vaultScopeCond(tradingBotId), eq(vaultPositions.assetKey, p.assetKey)))
         .limit(1))[0];
       if (!existing) {
         // No recorded basis (e.g. tokens held on-chain with no DB row, or a prior
@@ -2062,6 +2082,7 @@ export class DatabaseStorage implements IStorage {
         // 0/0 row so the position is represented and the event is attached.
         const closedRow = (await tx.insert(vaultPositions).values({
           walletAddress: p.walletAddress,
+          tradingBotId,
           assetKey: p.assetKey,
           mint: p.mint,
           tokenAmountRaw: '0',

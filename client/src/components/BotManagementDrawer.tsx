@@ -32,6 +32,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
+import VaultIdleFunds from '@/components/VaultIdleFunds';
 import {
   Bot,
   Copy,
@@ -227,6 +228,7 @@ export function BotManagementDrawer({
   const wallet = useWallet();
 
   const [activeTab, setActiveTab] = useState('overview');
+  const [showVaultPark, setShowVaultPark] = useState(false);
   const [botBalance, setBotBalance] = useState<number>(0);
   const [mainAccountBalance, setMainAccountBalance] = useState<number>(0);
   const [exchangeBalance, setExchangeBalance] = useState<number>(0);
@@ -2651,6 +2653,31 @@ export function BotManagementDrawer({
                   </div>
                 )}
               </div>
+            </div>
+
+            {/* Park idle funds (per-bot). Manual reveal only; automation is out of scope. */}
+            <div className="p-4 rounded-xl border bg-muted/20" data-testid="section-bot-vault-park">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <Wallet className="w-4 h-4 text-primary" />
+                  <div>
+                    <h3 className="font-semibold text-sm">Park idle funds</h3>
+                    <p className="text-xs text-muted-foreground">
+                      Earn yield on this bot's spare USDC while it waits between trades.
+                    </p>
+                  </div>
+                </div>
+                <Switch
+                  checked={showVaultPark}
+                  onCheckedChange={setShowVaultPark}
+                  data-testid="switch-bot-vault-park"
+                />
+              </div>
+              {showVaultPark && displayBot?.id && (
+                <div className="mt-4">
+                  <VaultIdleFunds botId={displayBot.id} />
+                </div>
+              )}
             </div>
 
             {(displayBot?.botSubaccountIdentifier || (displayBot?.driftSubaccountId !== null && displayBot?.driftSubaccountId !== undefined)) && (
