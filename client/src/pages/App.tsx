@@ -32,7 +32,6 @@ import {
   Star,
   Zap,
   FlaskConical,
-  Vault as VaultIcon,
   Shield,
   ChevronRight,
   ChevronDown,
@@ -101,6 +100,7 @@ import {
 } from "@/components/ui/sheet";
 import { apiRequest, queryClient, walletAuthHeaders } from '@/lib/queryClient';
 import { BotManagementDrawer } from '@/components/BotManagementDrawer';
+import VaultSettingsSection from '@/components/VaultSettingsSection';
 import { ExchangeBadge } from '@/components/ExchangeBadge';
 import { CreateBotModal } from '@/components/CreateBotModal';
 import { TradeHistoryModal } from '@/components/TradeHistoryModal';
@@ -293,7 +293,7 @@ export default function AppPage() {
   const [telegramConnectError, setTelegramConnectError] = useState<string | null>(null);
   const [telegramSecondsLeft, setTelegramSecondsLeft] = useState(0);
   const [telegramTestSending, setTelegramTestSending] = useState(false);
-  const [expandedSection, setExpandedSection] = useState<'account' | 'trading' | 'notifications' | 'security' | 'api' | 'danger' | null>(null);
+  const [expandedSection, setExpandedSection] = useState<'account' | 'trading' | 'vault' | 'notifications' | 'security' | 'api' | 'danger' | null>(null);
   // API tokens (for AI agents like Claude/MCP, n8n, scripts).
   const [apiTokens, setApiTokens] = useState<Array<{ id: number; name: string; tokenPrefix: string; lastUsedAt: string | null; createdAt: string }>>([]);
   const [apiTokensLoading, setApiTokensLoading] = useState(false);
@@ -2102,14 +2102,6 @@ export default function AppPage() {
               {hasActiveLabRun && (
                 <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-violet-500 rounded-full animate-pulse" />
               )}
-            </a>
-            <a 
-              href="/vault" 
-              className="p-2 hover:bg-muted rounded-lg"
-              data-testid="link-vault-header"
-              title="Vault"
-            >
-              <VaultIcon className="w-5 h-5 text-muted-foreground" />
             </a>
             <a 
               href="/analytics" 
@@ -4129,6 +4121,12 @@ export default function AppPage() {
                         )}
                       </AnimatePresence>
                     </div>
+
+                    {/* Vault Section */}
+                    <VaultSettingsSection
+                      expanded={expandedSection === 'vault'}
+                      onToggle={() => setExpandedSection(expandedSection === 'vault' ? null : 'vault')}
+                    />
 
                     {/* Notifications Section */}
                     <div className="gradient-border p-0 noise">

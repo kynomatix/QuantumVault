@@ -249,6 +249,10 @@ export async function ensureSchema() {
       `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS llm_api_key_provider text`,
       `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS llm_api_key_updated_at timestamp`,
 
+      // Vaults Phase 0a: account-level manual park/unpark settings. Additive + idempotent.
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS vault_enabled boolean NOT NULL DEFAULT false`,
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS vault_default_asset text`,
+
       `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS derivation_index integer`,
       `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS derivation_path_version integer`,
       `DO $$ BEGIN

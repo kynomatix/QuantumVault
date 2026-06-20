@@ -4474,6 +4474,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         notifyPositionClosed: wallet.notifyPositionClosed ?? true,
         dailySummaryEnabled: wallet.dailySummaryEnabled ?? false,
         telegramConnected: wallet.telegramConnected ?? false,
+        vaultEnabled: wallet.vaultEnabled ?? false,
+        vaultDefaultAsset: wallet.vaultDefaultAsset ?? null,
         referralCode: wallet.referralCode,
         referredBy: wallet.referredBy,
       });
@@ -4485,7 +4487,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
   app.put("/api/wallet/settings", requireWallet, async (req, res) => {
     try {
-      const { displayName, xUsername, defaultLeverage, slippageBps, notificationsEnabled, notifyTradeExecuted, notifyTradeFailed, notifyPositionClosed, dailySummaryEnabled } = req.body;
+      const { displayName, xUsername, defaultLeverage, slippageBps, notificationsEnabled, notifyTradeExecuted, notifyTradeFailed, notifyPositionClosed, dailySummaryEnabled, vaultEnabled, vaultDefaultAsset } = req.body;
       
       const updates: any = {};
       if (displayName !== undefined) updates.displayName = displayName;
@@ -4509,6 +4511,19 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (notifyTradeFailed !== undefined) updates.notifyTradeFailed = !!notifyTradeFailed;
       if (notifyPositionClosed !== undefined) updates.notifyPositionClosed = !!notifyPositionClosed;
       if (dailySummaryEnabled !== undefined) updates.dailySummaryEnabled = !!dailySummaryEnabled;
+      if (vaultEnabled !== undefined) updates.vaultEnabled = !!vaultEnabled;
+      if (vaultDefaultAsset !== undefined) {
+        if (vaultDefaultAsset === null || vaultDefaultAsset === "") {
+          updates.vaultDefaultAsset = null;
+        } else if (
+          typeof vaultDefaultAsset === "string" &&
+          getEnabledYieldAssets().some((a) => a.key === vaultDefaultAsset)
+        ) {
+          updates.vaultDefaultAsset = vaultDefaultAsset;
+        } else {
+          return res.status(400).json({ error: "Unknown vault asset" });
+        }
+      }
 
       if (Object.keys(updates).length === 0) {
         return res.status(400).json({ error: "No valid updates provided" });
@@ -4529,6 +4544,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         notifyPositionClosed: wallet.notifyPositionClosed ?? true,
         dailySummaryEnabled: wallet.dailySummaryEnabled ?? false,
         telegramConnected: wallet.telegramConnected ?? false,
+        vaultEnabled: wallet.vaultEnabled ?? false,
+        vaultDefaultAsset: wallet.vaultDefaultAsset ?? null,
       });
     } catch (error) {
       console.error("Update wallet settings error:", error);

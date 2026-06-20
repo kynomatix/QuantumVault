@@ -1,0 +1,773 @@
+import { useEffect, useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  Vault as VaultIcon,
+  ChevronDown,
+  TrendingUp,
+  TrendingDown,
+  Loader2,
+  Info,
+  AlertTriangle,
+  Wallet,
+  ShieldCheck,
+} from "lucide-react";
+import { useWallet } from "@/hooks/useWallet";
+import { useToast } from "@/hooks/use-toast";
+import { walletAuthHeaders } from "@/lib/queryClient";
+import { safeResponseJson } from "@/lib/safe-fetch";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
+
+interface YieldAssetInfo {
+  key: string;
+  displayName: string;
+  mint: string;
+  decimals: number;
+  type: string;
+  tag: string;
+  defaultEligible: boolean;
+}
+
+interface AssetsResponse {
+  spareUsdc: number;
+  maxPriceImpactPct: number;
+  assets: YieldAssetInfo[];
+}
+
+interface PositionView {
+  assetKey: string;
+  displayName: string;
+  mint: string;
+  decimals: number;
+  type: string;
+  tag: string;
+  defaultEligible: boolean;
+  onChainAmountRaw: string;
+  onChainAmount: number;
+  currentValueUsdc: number | null;
+  costBasisUsdc: number | null;
+  unrealizedPnl: number | null;
+  costBasisMissing: boolean;
+}
+
+interface PreviewResponse {
+  expectedOut: number | null;
+  priceImpactPct: number | null;
+  wouldReject: boolean;
+  reason?: string;
+}
+
+interface VaultSettings {
+  vaultEnabled: boolean;
+  vaultDefaultAsset: string | null;
+}
+
+const usd = (n: number | null | undefined, dp = 2) =>
+  n === null || n === undefined
+    ? "n/a"
+    : `$${n.toLocaleString(undefined, { minimumFractionDigits: dp, maximumFractionDigits: dp })}`;
+const tok = (n: number | null | undefined) =>
+  n === null || n === undefined ? "n/a" : n.toLocaleString(undefined, { maximumFractionDigits: 6 });
+
+async function getSessionId(): Promise<string> {
+  const res = await fetch("/api/auth/session", { credentials: "include" });
+  if (!res.ok) throw new Error("Could not verify your session. Please reconnect your wallet.");
+  const data = await safeResponseJson(res);
+  if (!data.hasSession || !data.sessionId) {
+    throw new Error("No active session. Please reconnect your wallet.");
+  }
+  return data.sessionId as string;
+}
+
+function usePreview(args: {
+  open: boolean;
+  assetKey: string | null;
+  direction: "park" | "unpark";
+  amount: number;
+  wallet: string | null;
+}) {
+  const { open, assetKey, direction, amount, wallet } = args;
+  const [debounced, setDebounced] = useState(0);
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced(amount), 350);
+    return () => clearTimeout(id);
+  }, [amount]);
+
+  return useQuery<PreviewResponse>({
+    queryKey: ["vault-preview", assetKey, direction, debounced, wallet],
+    queryFn: async () => {
+      const res = await fetch(
+        `/api/vault/preview?assetKey=${encodeURIComponent(assetKey!)}&direction=${direction}&amount=${debounced}`,
+        { credentials: "include", headers: walletAuthHeaders() },
+      );
+      const data = await safeResponseJson(res);
+      if (!res.ok) throw new Error(data.error || "Preview failed");
+      return data as PreviewResponse;
+    },
+    enabled: open && !!assetKey && !!wallet && debounced > 0,
+    staleTime: 8000,
+    retry: false,
+  });
+}
+
+function PreviewBox({
+  loading,
+  preview,
+  outLabel,
+  cap,
+}: {
+  loading: boolean;
+  preview: PreviewResponse | undefined;
+  outLabel: string;
+  cap: number;
+}) {
+  if (loading) {
+    return <Skeleton className="h-16 w-full" data-testid="skeleton-preview" />;
+  }
+  if (!preview) return null;
+  const impactPct = preview.priceImpactPct === null ? null : preview.priceImpactPct * 100;
+  return (
+    <div className="rounded-lg border border-border bg-muted/40 p-3 text-sm space-y-1" data-testid="box-preview">
+      <div className="flex items-center justify-between">
+        <span className="text-muted-foreground">You receive (estimated)</span>
+        <span className="font-medium tabular-nums" data-testid="text-preview-out">
+          {tok(preview.expectedOut)} {outLabel}
+        </span>
+      </div>
+      <div className="flex items-center justify-between">
+        <span className="text-muted-foreground">Price impact</span>
+        <span
+          className={
+            impactPct !== null && impactPct > cap * 100
+              ? "text-destructive font-medium tabular-nums"
+              : "font-medium tabular-nums"
+          }
+          data-testid="text-preview-impact"
+        >
+          {impactPct === null ? "unknown" : `${impactPct.toFixed(2)}%`}
+        </span>
+      </div>
+      {preview.wouldReject && (
+        <div className="flex items-start gap-2 text-destructive pt-1" data-testid="text-preview-reject">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span>{preview.reason || "This swap would move the price too much. Try a smaller amount."}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function VaultSettingsSection({
+  expanded,
+  onToggle,
+}: {
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const { publicKeyString, sessionConnected } = useWallet();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const connected = !!publicKeyString && sessionConnected;
+
+  // Persisted vault settings (enable + default asset).
+  const settingsQuery = useQuery<VaultSettings>({
+    queryKey: ["vault-settings", publicKeyString],
+    queryFn: async () => {
+      const res = await fetch(`/api/wallet/settings`, { credentials: "include", headers: walletAuthHeaders() });
+      const data = await safeResponseJson(res);
+      if (!res.ok) throw new Error(data.error || "Failed to load settings");
+      return { vaultEnabled: !!data.vaultEnabled, vaultDefaultAsset: data.vaultDefaultAsset ?? null };
+    },
+    enabled: expanded && connected,
+  });
+
+  const vaultOn = settingsQuery.data?.vaultEnabled ?? false;
+  const defaultAsset = settingsQuery.data?.vaultDefaultAsset ?? null;
+  const [savingSettings, setSavingSettings] = useState(false);
+
+  const saveVaultSettings = async (patch: Partial<VaultSettings>) => {
+    setSavingSettings(true);
+    try {
+      const res = await fetch("/api/wallet/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+        credentials: "include",
+        body: JSON.stringify(patch),
+      });
+      const data = await safeResponseJson(res);
+      if (!res.ok) throw new Error(data.error || "Failed to save");
+      queryClient.setQueryData<VaultSettings>(["vault-settings", publicKeyString], {
+        vaultEnabled: !!data.vaultEnabled,
+        vaultDefaultAsset: data.vaultDefaultAsset ?? null,
+      });
+    } catch (e: any) {
+      toast({ title: "Could not save", description: e.message || "Please try again.", variant: "destructive" });
+      settingsQuery.refetch();
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  // Vault data (assets to park, current positions).
+  const assetsQuery = useQuery<AssetsResponse>({
+    queryKey: ["vault-assets", publicKeyString],
+    queryFn: async () => {
+      const res = await fetch(`/api/vault/assets`, { credentials: "include", headers: walletAuthHeaders() });
+      const data = await safeResponseJson(res);
+      if (!res.ok) throw new Error(data.error || "Failed to load vault assets");
+      return data as AssetsResponse;
+    },
+    enabled: expanded && connected && vaultOn,
+  });
+
+  const positionsQuery = useQuery<{ positions: PositionView[] }>({
+    queryKey: ["vault-positions", publicKeyString],
+    queryFn: async () => {
+      const res = await fetch(`/api/vault/positions`, { credentials: "include", headers: walletAuthHeaders() });
+      const data = await safeResponseJson(res);
+      if (!res.ok) throw new Error(data.error || "Failed to load positions");
+      return data as { positions: PositionView[] };
+    },
+    enabled: expanded && connected,
+  });
+
+  const spareUsdc = assetsQuery.data?.spareUsdc ?? 0;
+  const maxImpact = assetsQuery.data?.maxPriceImpactPct ?? 0.005;
+  const assets = assetsQuery.data?.assets ?? [];
+  const positions = positionsQuery.data?.positions ?? [];
+
+  const refetchAll = () => {
+    queryClient.invalidateQueries({ queryKey: ["vault-assets", publicKeyString] });
+    queryClient.invalidateQueries({ queryKey: ["vault-positions", publicKeyString] });
+  };
+
+  // --- Park dialog ---
+  const [parkAsset, setParkAsset] = useState<YieldAssetInfo | null>(null);
+  const [parkAmount, setParkAmount] = useState("");
+  const [parking, setParking] = useState(false);
+  const parkNum = Number(parkAmount) || 0;
+  const parkPreview = usePreview({
+    open: !!parkAsset,
+    assetKey: parkAsset?.key ?? null,
+    direction: "park",
+    amount: parkNum,
+    wallet: publicKeyString,
+  });
+
+  const closePark = () => {
+    setParkAsset(null);
+    setParkAmount("");
+  };
+
+  const handlePark = async () => {
+    if (!parkAsset) return;
+    if (!(parkNum > 0)) {
+      toast({ title: "Enter an amount", description: "Type how much USDC to park.", variant: "destructive" });
+      return;
+    }
+    if (parkNum > spareUsdc + 1e-9) {
+      toast({
+        title: "Not enough spare USDC",
+        description: `You have ${usd(spareUsdc)} available to park.`,
+        variant: "destructive",
+      });
+      return;
+    }
+    setParking(true);
+    try {
+      const sessionId = await getSessionId();
+      const res = await fetch("/api/vault/park", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+        body: JSON.stringify({ assetKey: parkAsset.key, amountUsdc: parkNum, sessionId }),
+        credentials: "include",
+      });
+      const data = await safeResponseJson(res);
+      if (!res.ok) throw new Error(data.error || "Park failed");
+      toast({
+        title: "Parked",
+        description: `Received ${tok(data.tokensReceived)} ${parkAsset.displayName}.${data.dbWarning ? ` ${data.dbWarning}` : ""}`,
+      });
+      closePark();
+      refetchAll();
+    } catch (e: any) {
+      toast({ title: "Park failed", description: e.message || "Something went wrong.", variant: "destructive" });
+    } finally {
+      setParking(false);
+    }
+  };
+
+  // --- Unpark dialog ---
+  const [unparkPos, setUnparkPos] = useState<PositionView | null>(null);
+  const [unparkAmount, setUnparkAmount] = useState("");
+  const [unparkAll, setUnparkAll] = useState(false);
+  const [unparking, setUnparking] = useState(false);
+  const unparkNum = Number(unparkAmount) || 0;
+  const unparkPreview = usePreview({
+    open: !!unparkPos,
+    assetKey: unparkPos?.assetKey ?? null,
+    direction: "unpark",
+    amount: unparkNum,
+    wallet: publicKeyString,
+  });
+
+  const closeUnpark = () => {
+    setUnparkPos(null);
+    setUnparkAmount("");
+    setUnparkAll(false);
+  };
+
+  const handleUnpark = async () => {
+    if (!unparkPos) return;
+    if (!unparkAll && !(unparkNum > 0)) {
+      toast({ title: "Enter an amount", description: "Type how much to unpark, or choose Max.", variant: "destructive" });
+      return;
+    }
+    if (!unparkAll && unparkNum > unparkPos.onChainAmount + 1e-9) {
+      toast({
+        title: "Amount too high",
+        description: `You hold ${tok(unparkPos.onChainAmount)} ${unparkPos.displayName}.`,
+        variant: "destructive",
+      });
+      return;
+    }
+    setUnparking(true);
+    try {
+      const sessionId = await getSessionId();
+      const body: Record<string, unknown> = { assetKey: unparkPos.assetKey, sessionId };
+      if (unparkAll) body.all = true;
+      else body.amountToken = unparkNum;
+      const res = await fetch("/api/vault/unpark", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+        body: JSON.stringify(body),
+        credentials: "include",
+      });
+      const data = await safeResponseJson(res);
+      if (!res.ok) throw new Error(data.error || "Unpark failed");
+      const pnl =
+        typeof data.realizedPnl === "number"
+          ? ` Realized P/L: ${data.realizedPnl >= 0 ? "+" : ""}${usd(data.realizedPnl)}.`
+          : "";
+      toast({
+        title: "Unparked",
+        description: `Received ${usd(data.usdcReceived)} USDC.${pnl}${data.dbWarning ? ` ${data.dbWarning}` : ""}`,
+      });
+      closeUnpark();
+      refetchAll();
+    } catch (e: any) {
+      toast({ title: "Unpark failed", description: e.message || "Something went wrong.", variant: "destructive" });
+    } finally {
+      setUnparking(false);
+    }
+  };
+
+  const totalParked = useMemo(
+    () => positions.reduce((sum, p) => sum + (p.currentValueUsdc ?? 0), 0),
+    [positions],
+  );
+
+  const hasPositions = positions.length > 0;
+
+  const positionsBlock = (
+    <section data-testid="section-vault-positions">
+      <h4 className="text-sm font-semibold mb-2">Your parked positions</h4>
+      {positionsQuery.isLoading ? (
+        <Skeleton className="h-20 w-full" />
+      ) : !hasPositions ? (
+        <p className="text-muted-foreground text-sm" data-testid="text-no-positions">
+          You have not parked anything yet.
+        </p>
+      ) : (
+        <div className="rounded-lg border border-border/50 divide-y divide-border/40 max-h-72 overflow-y-auto">
+          {positions.map((p) => {
+            const pnl = p.unrealizedPnl;
+            const pnlPositive = (pnl ?? 0) >= 0;
+            return (
+              <div key={p.assetKey} className="p-3" data-testid={`row-position-${p.assetKey}`}>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="font-medium truncate">{p.displayName}</div>
+                    <div className="text-xs text-muted-foreground tabular-nums">
+                      {tok(p.onChainAmount)} held
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setUnparkPos(p);
+                      setUnparkAll(false);
+                      setUnparkAmount("");
+                    }}
+                    data-testid={`button-unpark-${p.assetKey}`}
+                  >
+                    Unpark
+                  </Button>
+                </div>
+                <div className="grid grid-cols-3 gap-2 mt-2 text-xs">
+                  <div>
+                    <div className="text-muted-foreground">Value</div>
+                    <div className="font-medium tabular-nums" data-testid={`text-value-${p.assetKey}`}>
+                      {usd(p.currentValueUsdc)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-muted-foreground">Cost</div>
+                    <div className="font-medium tabular-nums" data-testid={`text-basis-${p.assetKey}`}>
+                      {p.costBasisMissing ? "unknown" : usd(p.costBasisUsdc)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-muted-foreground">P/L</div>
+                    <div
+                      className={`font-medium flex items-center gap-1 tabular-nums ${
+                        pnl === null ? "" : pnlPositive ? "text-emerald-500" : "text-destructive"
+                      }`}
+                      data-testid={`text-pnl-${p.assetKey}`}
+                    >
+                      {pnl === null ? (
+                        "n/a"
+                      ) : (
+                        <>
+                          {pnlPositive ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                          {pnlPositive ? "+" : ""}
+                          {usd(pnl)}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                {p.costBasisMissing && (
+                  <p className="text-xs text-muted-foreground flex items-start gap-1.5 mt-2">
+                    <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                    We found this token in your wallet but have no record of its cost, so P/L is unavailable.
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+
+  return (
+    <div className="gradient-border p-0 noise">
+      <button
+        onClick={onToggle}
+        className="w-full p-4 flex items-center justify-between cursor-pointer hover:bg-muted/10 transition-colors rounded-t-xl"
+        data-testid="button-toggle-vault"
+      >
+        <div className="flex items-center gap-3">
+          <div className="p-2 rounded-full bg-primary/20">
+            <VaultIcon className="w-5 h-5 text-primary" />
+          </div>
+          <h3 className="font-display font-semibold">Vault</h3>
+          {vaultOn && (
+            <span className="text-xs px-2 py-0.5 bg-green-500/20 text-green-500 rounded-full" data-testid="badge-vault-on">
+              On
+            </span>
+          )}
+        </div>
+        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${expanded ? "rotate-180" : ""}`} />
+      </button>
+      <AnimatePresence>
+        {expanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="overflow-hidden"
+          >
+            <div className="px-4 pb-4 space-y-4">
+              {/* Master toggle */}
+              <div className="flex items-start justify-between gap-3 bg-muted/30 rounded-lg border border-border/50 p-4">
+                <div className="flex-1">
+                  <p className="font-medium">Enable Vault</p>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    Put idle USDC to work by parking it in a yield token. Your funds always stay in your own wallet.
+                  </p>
+                </div>
+                <Switch
+                  checked={vaultOn}
+                  disabled={!connected || settingsQuery.isLoading || savingSettings}
+                  onCheckedChange={(checked) => saveVaultSettings({ vaultEnabled: checked })}
+                  data-testid="switch-vault-enabled"
+                />
+              </div>
+
+              {!connected ? (
+                <p className="text-sm text-muted-foreground" data-testid="text-vault-disconnected">
+                  Connect and sign in to use the Vault.
+                </p>
+              ) : !vaultOn ? (
+                <>
+                  <p className="text-sm text-muted-foreground" data-testid="text-vault-off-hint">
+                    Turn on to see your options for earning yield on spare USDC.
+                  </p>
+                  {/* Even when off, never hide existing parked funds. */}
+                  {hasPositions && (
+                    <div className="space-y-2">
+                      <p className="text-xs text-amber-500 flex items-start gap-1.5" data-testid="text-vault-off-positions">
+                        <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                        Vault is off, so you cannot park new funds. You can still unpark what you already have.
+                      </p>
+                      {positionsBlock}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  {/* Custody reassurance */}
+                  <div
+                    className="rounded-lg border border-border bg-muted/30 p-3 flex items-start gap-2 text-sm text-muted-foreground"
+                    data-testid="box-vault-about"
+                  >
+                    <ShieldCheck className="w-4 h-4 mt-0.5 shrink-0 text-primary" />
+                    <span>
+                      Your funds never leave your wallet. We only handle the swap. Each park or unpark is capped at{" "}
+                      {(maxImpact * 100).toFixed(2)}% price impact.
+                    </span>
+                  </div>
+
+                  {/* Spare USDC stat */}
+                  <div className="bg-muted/30 rounded-lg border border-border/50 p-3 flex items-center gap-2">
+                    <Wallet className="w-4 h-4 text-muted-foreground" />
+                    <span className="text-sm text-muted-foreground">USDC available to park</span>
+                    <span className="ml-auto text-lg font-bold tabular-nums" data-testid="text-spare-usdc">
+                      {assetsQuery.isLoading ? "..." : usd(spareUsdc)}
+                    </span>
+                  </div>
+
+                  {/* Positions first when they exist, else assets first. */}
+                  {hasPositions && positionsBlock}
+
+                  {/* Parkable assets */}
+                  <section data-testid="section-vault-assets">
+                    <h4 className="text-sm font-semibold mb-2">Available to park</h4>
+                    {assetsQuery.isLoading ? (
+                      <Skeleton className="h-16 w-full" />
+                    ) : assets.length === 0 ? (
+                      <p className="text-muted-foreground text-sm" data-testid="text-no-assets">
+                        No yield assets are available right now.
+                      </p>
+                    ) : (
+                      <div className="rounded-lg border border-border/50 divide-y divide-border/40">
+                        {assets.map((a) => (
+                          <div
+                            key={a.key}
+                            className="p-3 flex items-center justify-between gap-3"
+                            data-testid={`row-asset-${a.key}`}
+                          >
+                            <div className="min-w-0">
+                              <div className="font-medium flex items-center gap-2">
+                                {a.displayName}
+                                <Badge variant="secondary" data-testid={`badge-tag-${a.key}`}>
+                                  {a.tag}
+                                </Badge>
+                              </div>
+                              {a.type === "floating_nav" && (
+                                <p className="text-xs text-muted-foreground mt-0.5">
+                                  Value goes up and down with the market.
+                                </p>
+                              )}
+                            </div>
+                            <Button
+                              size="sm"
+                              onClick={() => {
+                                setParkAsset(a);
+                                setParkAmount("");
+                              }}
+                              disabled={spareUsdc <= 0}
+                              data-testid={`button-park-${a.key}`}
+                            >
+                              Park
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+
+                  {/* Default asset override (subtle footer) */}
+                  {assets.length > 0 && (
+                    <div className="flex items-center gap-2 pt-1" data-testid="row-default-asset">
+                      <span className="text-xs text-muted-foreground">Default for new parks</span>
+                      <Select
+                        value={defaultAsset ?? ""}
+                        disabled={savingSettings}
+                        onValueChange={(v) => saveVaultSettings({ vaultDefaultAsset: v })}
+                      >
+                        <SelectTrigger className="h-8 w-44 text-xs ml-auto" data-testid="select-default-asset">
+                          <SelectValue placeholder="Choose a token" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {assets.map((a) => (
+                            <SelectItem key={a.key} value={a.key} data-testid={`option-default-${a.key}`}>
+                              {a.displayName}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Park dialog */}
+      <Dialog open={!!parkAsset} onOpenChange={(o) => { if (!o) closePark(); }}>
+        <DialogContent data-testid="dialog-park">
+          <DialogHeader>
+            <DialogTitle>Park USDC into {parkAsset?.displayName}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <Label htmlFor="park-amount">Amount (USDC)</Label>
+                <button
+                  type="button"
+                  className="text-xs text-primary hover:underline"
+                  onClick={() => setParkAmount(String(spareUsdc))}
+                  data-testid="button-park-max"
+                >
+                  Max {usd(spareUsdc)}
+                </button>
+              </div>
+              <Input
+                id="park-amount"
+                inputMode="decimal"
+                placeholder="0.00"
+                value={parkAmount}
+                onChange={(e) => setParkAmount(e.target.value)}
+                data-testid="input-park-amount"
+              />
+            </div>
+            {parkAsset?.type === "floating_nav" && (
+              <div
+                className="flex items-start gap-2 text-xs text-muted-foreground rounded-lg border border-border bg-muted/30 p-2.5"
+                data-testid="warning-floating-nav-park"
+              >
+                <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-amber-500" />
+                <span>
+                  This token's value goes up and down with the market. You may get back more or less than you put in.
+                </span>
+              </div>
+            )}
+            <PreviewBox
+              loading={parkPreview.isFetching}
+              preview={parkPreview.data}
+              outLabel={parkAsset?.displayName ?? ""}
+              cap={maxImpact}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closePark} disabled={parking} data-testid="button-park-cancel">
+              Cancel
+            </Button>
+            <Button
+              onClick={handlePark}
+              disabled={parking || (parkPreview.data?.wouldReject ?? false)}
+              data-testid="button-park-confirm"
+            >
+              {parking ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Parking
+                </>
+              ) : (
+                "Confirm park"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Unpark dialog */}
+      <Dialog open={!!unparkPos} onOpenChange={(o) => { if (!o) closeUnpark(); }}>
+        <DialogContent data-testid="dialog-unpark">
+          <DialogHeader>
+            <DialogTitle>Unpark {unparkPos?.displayName} to USDC</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <Label htmlFor="unpark-amount">Amount ({unparkPos?.displayName})</Label>
+                <button
+                  type="button"
+                  className="text-xs text-primary hover:underline"
+                  onClick={() => {
+                    setUnparkAll(true);
+                    setUnparkAmount(unparkPos ? String(unparkPos.onChainAmount) : "");
+                  }}
+                  data-testid="button-unpark-max"
+                >
+                  Max {tok(unparkPos?.onChainAmount)}
+                </button>
+              </div>
+              <Input
+                id="unpark-amount"
+                inputMode="decimal"
+                placeholder="0.00"
+                value={unparkAmount}
+                onChange={(e) => {
+                  setUnparkAmount(e.target.value);
+                  setUnparkAll(false);
+                }}
+                data-testid="input-unpark-amount"
+              />
+              {unparkAll && (
+                <p className="text-xs text-muted-foreground mt-1" data-testid="text-unpark-all">
+                  Unparking your full balance (uses live on-chain amount).
+                </p>
+              )}
+            </div>
+            <PreviewBox loading={unparkPreview.isFetching} preview={unparkPreview.data} outLabel="USDC" cap={maxImpact} />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeUnpark} disabled={unparking} data-testid="button-unpark-cancel">
+              Cancel
+            </Button>
+            <Button
+              onClick={handleUnpark}
+              disabled={unparking || (unparkPreview.data?.wouldReject ?? false)}
+              data-testid="button-unpark-confirm"
+            >
+              {unparking ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Unparking
+                </>
+              ) : (
+                "Confirm unpark"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}

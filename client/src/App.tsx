@@ -16,7 +16,6 @@ import PitchDeck from "@/pages/PitchDeck";
 import PitchDeckV2 from "@/pages/PitchDeckV2";
 import Admin from "@/pages/Admin";
 import QuantumLab from "@/pages/QuantumLab";
-import VaultPage from "@/pages/Vault";
 import MarketplaceBotPage from "@/pages/MarketplaceBotPage";
 import TelegramMiniApp from "@/pages/TelegramMiniApp";
 
@@ -31,7 +30,6 @@ function Router() {
       <Route path="/pitch-deck-v2" component={PitchDeckV2} />
       <Route path="/admin" component={Admin} />
       <Route path="/quantumlab" component={QuantumLab} />
-      <Route path="/vault" component={VaultPage} />
       <Route path="/marketplace/:id" component={MarketplaceBotPage} />
       <Route path="/tg" component={TelegramMiniApp} />
       <Route component={NotFound} />
