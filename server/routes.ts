@@ -7812,8 +7812,29 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(400).json({ error: "Your wallet needs to be re-keyed. Please sign out and sign back in." });
       }
 
+      // Funder = the account agent that backstops gas. For a per-bot (Flash) wallet we
+      // must ALSO unlock the main agent so it can top up the bot's SOL; for an account
+      // vault the payer already IS the main agent (reuse the key we just decrypted).
+      // The decrypt + service call share ONE try/finally so both keys are always
+      // wiped, even if the second decrypt throws.
+      let funderCleanup: (() => void) | null = null;
       let result;
       try {
+        let funderPublicKey = scope.agentPublicKey;
+        let funderSecretKey = agentKeyResult.secretKey;
+        if (scope.scope === 'bot') {
+          if (!wallet.agentPublicKey) {
+            return res.status(400).json({ error: "Account wallet is not initialized to cover bot gas." });
+          }
+          const funderKey = await decryptAgentKeyStrict(req.walletAddress!, session.umk, wallet, wallet.agentPublicKey);
+          if (!funderKey) {
+            return res.status(400).json({ error: "Your wallet needs to be re-keyed. Please sign out and sign back in." });
+          }
+          funderPublicKey = wallet.agentPublicKey;
+          funderSecretKey = funderKey.secretKey;
+          funderCleanup = funderKey.cleanup;
+        }
+
         result = await parkUsdc({
           walletAddress: req.walletAddress!,
           tradingBotId: scope.tradingBotId,
@@ -7823,13 +7844,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           amountUsdc: parkAll ? undefined : amountUsdc,
           all: parkAll,
           slippageBps,
+          funderPublicKey: funderPublicKey ?? undefined,
+          funderSecretKey,
         });
       } finally {
         agentKeyResult.cleanup();
+        funderCleanup?.();
       }
 
-      if (!result.success) {
-        return res.status(400).json({ error: result.error || "Park failed", priceImpactPct: result.priceImpactPct ?? null });
+      if (!result || !result.success) {
+        return res.status(400).json({ error: result?.error || "Park failed", priceImpactPct: result?.priceImpactPct ?? null });
       }
       res.json({ ...result, scope: scope.scope, tradingBotId: scope.tradingBotId });
     } catch (error: any) {
@@ -7878,8 +7902,29 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(400).json({ error: "Your wallet needs to be re-keyed. Please sign out and sign back in." });
       }
 
+      // Funder = the account agent that backstops gas. For a per-bot (Flash) wallet we
+      // must ALSO unlock the main agent so it can top up the bot's SOL; for an account
+      // vault the payer already IS the main agent (reuse the key we just decrypted).
+      // The decrypt + service call share ONE try/finally so both keys are always
+      // wiped, even if the second decrypt throws.
+      let funderCleanup: (() => void) | null = null;
       let result;
       try {
+        let funderPublicKey = scope.agentPublicKey;
+        let funderSecretKey = agentKeyResult.secretKey;
+        if (scope.scope === 'bot') {
+          if (!wallet.agentPublicKey) {
+            return res.status(400).json({ error: "Account wallet is not initialized to cover bot gas." });
+          }
+          const funderKey = await decryptAgentKeyStrict(req.walletAddress!, session.umk, wallet, wallet.agentPublicKey);
+          if (!funderKey) {
+            return res.status(400).json({ error: "Your wallet needs to be re-keyed. Please sign out and sign back in." });
+          }
+          funderPublicKey = wallet.agentPublicKey;
+          funderSecretKey = funderKey.secretKey;
+          funderCleanup = funderKey.cleanup;
+        }
+
         result = await unparkToUsdc({
           walletAddress: req.walletAddress!,
           tradingBotId: scope.tradingBotId,
@@ -7889,13 +7934,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           amountToken: unparkAll ? undefined : amountToken,
           all: unparkAll,
           slippageBps,
+          funderPublicKey: funderPublicKey ?? undefined,
+          funderSecretKey,
         });
       } finally {
         agentKeyResult.cleanup();
+        funderCleanup?.();
       }
 
-      if (!result.success) {
-        return res.status(400).json({ error: result.error || "Unpark failed", priceImpactPct: result.priceImpactPct ?? null });
+      if (!result || !result.success) {
+        return res.status(400).json({ error: result?.error || "Unpark failed", priceImpactPct: result?.priceImpactPct ?? null });
       }
       res.json({ ...result, scope: scope.scope, tradingBotId: scope.tradingBotId });
     } catch (error: any) {

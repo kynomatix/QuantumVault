@@ -187,13 +187,6 @@ async function loadFreshUsdcReserve(connection: Connection): Promise<LoadedReser
   }
 }
 
-/**
- * SOL gas floor for a Kamino park. Covers the tx fee plus a possible first-time
- * kUSDC ATA rent (~0.002 SOL).
- */
-const KAMINO_PARK_MIN_SOL_GAS = 0.01;
-/** SOL gas floor for a Kamino unpark (USDC ATA normally already exists). */
-const KAMINO_UNPARK_MIN_SOL_GAS = 0.005;
 /** Compute-unit ceiling for a single refresh + deposit/redeem batch. */
 const KAMINO_RESERVE_OP_COMPUTE_UNITS = 400_000;
 
@@ -409,7 +402,6 @@ export class KaminoYieldRoute implements YieldRoute {
         agentSecretKey: args.agentSecretKey,
         instructions,
         verifyOutputMint: KAMINO_KUSDC_MINT,
-        minSolGas: KAMINO_PARK_MIN_SOL_GAS,
         label: "Kamino park",
       });
       if (!exec.success || !exec.outputReceivedRaw) {
@@ -451,7 +443,6 @@ export class KaminoYieldRoute implements YieldRoute {
         agentSecretKey: args.agentSecretKey,
         instructions,
         verifyOutputMint: USDC_MINT,
-        minSolGas: KAMINO_UNPARK_MIN_SOL_GAS,
         label: "Kamino unpark",
       });
       if (!exec.success || !exec.outputReceivedRaw) {

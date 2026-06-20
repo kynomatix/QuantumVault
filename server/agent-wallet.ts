@@ -58,6 +58,43 @@ export function getAssociatedTokenAddressSync(
   return address;
 }
 
+/** Byte size of an SPL token account; drives its rent-exempt minimum. */
+const SPL_TOKEN_ACCOUNT_SIZE = 165;
+/**
+ * Bounded SOL buffer for a single server-signed tx: the base signature fee plus a
+ * small priority/slack allowance. This is NOT a stand-in for the token-account rent
+ * (that is added separately and EXACTLY, only when the destination ATA must be
+ * created). Keeping it tight is what lets a freshly funded per-bot wallet park
+ * without an arbitrary 0.01 SOL floor.
+ */
+export const GAS_FEE_BUFFER_LAMPORTS = Math.round(0.001 * LAMPORTS_PER_SOL);
+
+/**
+ * The minimum lamports a SIGNING wallet must hold to land one vault op: the bounded
+ * fee buffer, PLUS the EXACT SPL token-account rent only when the destination token
+ * account (`destMint` ATA on `owner`) does not yet exist. Native SOL output needs no
+ * ATA, so it costs only the fee buffer.
+ *
+ * This is the SINGLE source of the gas figure, shared by the exec-core gas gate AND
+ * the vault auto-funder (server/vault/gas-funding.ts), so the precheck and the
+ * top-up amount can never disagree.
+ */
+export async function computeRequiredGasLamports(
+  connection: Connection,
+  owner: PublicKey,
+  destMint: string | null | undefined,
+): Promise<number> {
+  let lamports = GAS_FEE_BUFFER_LAMPORTS;
+  if (destMint && destMint !== NATIVE_SOL_MINT) {
+    const ata = getAssociatedTokenAddressSync(new PublicKey(destMint), owner);
+    const info = await connection.getAccountInfo(ata);
+    if (!info) {
+      lamports += await connection.getMinimumBalanceForRentExemption(SPL_TOKEN_ACCOUNT_SIZE);
+    }
+  }
+  return lamports;
+}
+
 export interface AgentWallet {
   publicKey: string;
   secretKey: Uint8Array;
@@ -712,7 +749,11 @@ export interface AgentSwapParams {
    * so a money path never flies blind. Leave undefined to skip the impact gate.
    */
   maxPriceImpactPct?: number;
-  /** Minimum SOL the agent must hold for gas (+ first-time output ATA rent). */
+  /**
+   * OPTIONAL extra SOL floor (UI units). The gas gate already requires the real
+   * cost (fee + exact ATA rent when missing); this only RAISES it. Vault paths
+   * leave it unset.
+   */
   minSolGas?: number;
 }
 
@@ -729,10 +770,6 @@ export interface AgentSwapResult {
   priceImpactPct?: number | null;
   error?: string;
 }
-
-/** Default SOL gas floor for vault swaps. Covers the swap fee plus the rent of a
- *  first-time output-token ATA that Jupiter may create. */
-const DEFAULT_SWAP_MIN_SOL_GAS = 0.01;
 
 /**
  * SERVER-SIGNED swap of an exact amount of `inputMint` into `outputMint` from the
@@ -752,7 +789,7 @@ export async function executeAgentSwap(params: AgentSwapParams): Promise<AgentSw
     amountRaw,
     slippageBps = 100,
     maxPriceImpactPct,
-    minSolGas = DEFAULT_SWAP_MIN_SOL_GAS,
+    minSolGas,
   } = params;
 
   try {
@@ -768,10 +805,16 @@ export async function executeAgentSwap(params: AgentSwapParams): Promise<AgentSw
     const agentKeypair = resolveAgentKeypair(agentSecretKey);
     const agentPubkey = new PublicKey(agentPublicKey);
 
-    // 1) Agent needs SOL to pay swap fees (+ first-time output ATA rent).
+    // 1) Gas gate: the wallet must hold enough SOL for the swap fee PLUS the EXACT
+    //    rent of a first-time output-token ATA (only when it does not yet exist).
+    //    This is the real cost, never an arbitrary fixed floor. `minSolGas`, when a
+    //    caller passes it, only RAISES the bar (an optional extra floor).
+    const requiredLamports = await computeRequiredGasLamports(connection, agentPubkey, outputMint);
+    const floorLamports = typeof minSolGas === 'number' ? Math.round(minSolGas * LAMPORTS_PER_SOL) : 0;
+    const gateLamports = Math.max(requiredLamports, floorLamports);
     const solLamports = await connection.getBalance(agentPubkey);
-    if (solLamports / LAMPORTS_PER_SOL < minSolGas) {
-      return { success: false, error: `Insufficient SOL in bot wallet for swap gas (need ~${minSolGas} SOL). Please top up SOL and retry.` };
+    if (solLamports < gateLamports) {
+      return { success: false, error: `Insufficient SOL in bot wallet for swap gas (need ~${(gateLamports / LAMPORTS_PER_SOL).toFixed(4)} SOL).` };
     }
 
     // 2) Quote the exact input into the output mint.
@@ -880,7 +923,11 @@ export interface AgentInstructionsExecParams {
    * confirmation can never fabricate funds (fail-closed).
    */
   verifyOutputMint: string;
-  /** Minimum SOL the agent must hold for gas (+ any first-time ATA rent). */
+  /**
+   * OPTIONAL extra SOL floor (UI units). The gas gate already requires the real
+   * cost (fee + exact ATA rent when missing); this only RAISES it. Vault paths
+   * leave it unset.
+   */
   minSolGas?: number;
   /** Optional address lookup tables (e.g. Kamino reserve ops do not need any). */
   addressLookupTables?: AddressLookupTableAccount[];
@@ -897,9 +944,6 @@ export interface AgentInstructionsExecResult {
   outputReceived?: number;
   error?: string;
 }
-
-/** Default SOL gas floor for a generic server-signed instruction batch. */
-const DEFAULT_INSTRUCTIONS_MIN_SOL_GAS = 0.01;
 
 /**
  * SERVER-SIGNED execution of a pre-built instruction batch from the agent wallet.
@@ -920,7 +964,7 @@ export async function executeAgentInstructions(
     agentSecretKey,
     instructions,
     verifyOutputMint,
-    minSolGas = DEFAULT_INSTRUCTIONS_MIN_SOL_GAS,
+    minSolGas,
     addressLookupTables = [],
     label = 'Transaction',
   } = params;
@@ -934,10 +978,16 @@ export async function executeAgentInstructions(
     const agentKeypair = resolveAgentKeypair(agentSecretKey);
     const agentPubkey = new PublicKey(agentPublicKey);
 
-    // 1) Agent needs SOL to pay fees (+ any first-time ATA rent).
+    // 1) Gas gate: the wallet must hold enough SOL for the tx fee PLUS the EXACT
+    //    rent of a first-time output-token ATA (only when it does not yet exist).
+    //    This is the real cost, never an arbitrary fixed floor. `minSolGas`, when a
+    //    caller passes it, only RAISES the bar (an optional extra floor).
+    const requiredLamports = await computeRequiredGasLamports(connection, agentPubkey, verifyOutputMint);
+    const floorLamports = typeof minSolGas === 'number' ? Math.round(minSolGas * LAMPORTS_PER_SOL) : 0;
+    const gateLamports = Math.max(requiredLamports, floorLamports);
     const solLamports = await connection.getBalance(agentPubkey);
-    if (solLamports / LAMPORTS_PER_SOL < minSolGas) {
-      return { success: false, error: `Insufficient SOL in bot wallet for gas (need ~${minSolGas} SOL). Please top up SOL and retry.` };
+    if (solLamports < gateLamports) {
+      return { success: false, error: `${label}: insufficient SOL in bot wallet for gas (need ~${(gateLamports / LAMPORTS_PER_SOL).toFixed(4)} SOL).` };
     }
 
     // 2) Output-token balance BEFORE: the realized delta is our source of truth.

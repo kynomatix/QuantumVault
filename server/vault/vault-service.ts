@@ -22,6 +22,8 @@ import { getAgentUsdcBalance, getAgentTokenBalanceRaw, getAgentTokenBalanceRawSt
 import { storage } from "../storage";
 import { getEnabledYieldAssets, getYieldAssetByKey, type YieldAsset } from "./yield-assets";
 import { getYieldRoute, VAULT_MAX_PRICE_IMPACT } from "./yield-routes";
+import { ensureVaultGas } from "./gas-funding";
+import { vaultLockKey } from "./scope";
 import type { VaultPosition } from "@shared/schema";
 
 export { VAULT_MAX_PRICE_IMPACT } from "./yield-routes";
@@ -43,6 +45,34 @@ function toRaw(amountUi: number, decimals: number): bigint {
 
 function fromRaw(raw: bigint, decimals: number): number {
   return Number(new Decimal(raw.toString()).div(new Decimal(10).pow(decimals)).toFixed(decimals));
+}
+
+// --- Per-scope serializer ---------------------------------------------------
+
+/**
+ * Lightweight in-process async mutex keyed by (wallet, scope, asset). A vault
+ * park/unpark moves on-chain funds (gas top-up + swap/redeem) and then records cost
+ * basis; two concurrent clicks or retries on the SAME scope must never interleave
+ * those on-chain legs. This serializes the WHOLE op without ever holding a DB
+ * transaction across on-chain calls (the brief cost-basis write keeps its own DB
+ * advisory lock inside storage).
+ */
+const scopeTails = new Map<number, Promise<void>>();
+async function withScopeLock<T>(key: number, fn: () => Promise<T>): Promise<T> {
+  const prev = scopeTails.get(key) ?? Promise.resolve();
+  let resolveNext!: () => void;
+  const next = new Promise<void>((r) => {
+    resolveNext = r;
+  });
+  const myTail = prev.then(() => next);
+  scopeTails.set(key, myTail);
+  await prev.catch(() => {});
+  try {
+    return await fn();
+  } finally {
+    resolveNext();
+    if (scopeTails.get(key) === myTail) scopeTails.delete(key);
+  }
 }
 
 // --- Preview ----------------------------------------------------------------
@@ -127,9 +157,33 @@ export async function parkUsdc(params: {
   amountUsdc?: number; // ignored when `all` is true
   all?: boolean;
   slippageBps?: number;
+  /** Account agent that backstops gas. For a per-bot wallet this is the main agent. */
+  funderPublicKey?: string;
+  funderSecretKey?: Uint8Array;
 }): Promise<ParkResult> {
   const asset = getYieldAssetByKey(params.assetKey);
   if (!asset) return { success: false, error: "Unknown or disabled asset" };
+
+  return withScopeLock(vaultLockKey(params.walletAddress, params.tradingBotId ?? null, params.assetKey), async () => {
+    // Money-safety: a per-bot vault MUST gas off a SEPARATE account funder. Without
+    // an explicit, distinct funder the gas backstop would fall back to the bot's own
+    // key and could sell the bot's trading USDC for gas. Fail closed instead.
+    if (params.tradingBotId) {
+      if (!params.funderPublicKey || !params.funderSecretKey || params.funderPublicKey === params.agentPublicKey) {
+        return { success: false, error: "Per-bot vault gas requires a separate account funder wallet." };
+      }
+    }
+    // Hands-off gas: make sure the paying wallet can cover the tx fee + (first-time)
+    // yield-token ATA rent BEFORE the swap. The account agent backstops a short bot
+    // wallet; a short agent buys SOL with its own USDC. Fail closed if it cannot.
+    const gas = await ensureVaultGas({
+      payingPublicKey: params.agentPublicKey,
+      funderPublicKey: params.funderPublicKey ?? params.agentPublicKey,
+      funderSecretKey: params.funderSecretKey ?? params.agentSecretKey,
+      destMint: asset.mint,
+      label: "Park",
+    });
+    if (!gas.ok) return { success: false, error: gas.error || "Could not cover the network gas for this park." };
 
   let inputRaw: bigint;
   if (params.all) {
@@ -198,6 +252,7 @@ export async function parkUsdc(params: {
     position,
     dbWarning,
   };
+  });
 }
 
 // --- Unpark -----------------------------------------------------------------
@@ -225,9 +280,31 @@ export async function unparkToUsdc(params: {
   amountToken?: number; // ignored when `all` is true
   all?: boolean;
   slippageBps?: number;
+  /** Account agent that backstops gas. For a per-bot wallet this is the main agent. */
+  funderPublicKey?: string;
+  funderSecretKey?: Uint8Array;
 }): Promise<UnparkResult> {
   const asset = getYieldAssetByKey(params.assetKey);
   if (!asset) return { success: false, error: "Unknown or disabled asset" };
+
+  return withScopeLock(vaultLockKey(params.walletAddress, params.tradingBotId ?? null, params.assetKey), async () => {
+    // Money-safety: a per-bot vault MUST gas off a SEPARATE account funder (see
+    // parkUsdc). Fail closed if no distinct funder was supplied.
+    if (params.tradingBotId) {
+      if (!params.funderPublicKey || !params.funderSecretKey || params.funderPublicKey === params.agentPublicKey) {
+        return { success: false, error: "Per-bot vault gas requires a separate account funder wallet." };
+      }
+    }
+    // Hands-off gas: make sure the paying wallet can cover the tx fee + (first-time)
+    // USDC ATA rent BEFORE the redeem/swap. Fail closed if gas cannot be covered.
+    const gas = await ensureVaultGas({
+      payingPublicKey: params.agentPublicKey,
+      funderPublicKey: params.funderPublicKey ?? params.agentPublicKey,
+      funderSecretKey: params.funderSecretKey ?? params.agentSecretKey,
+      destMint: USDC_MINT,
+      label: "Unpark",
+    });
+    if (!gas.ok) return { success: false, error: gas.error || "Could not cover the network gas for this unpark." };
 
   // On-chain token balance is the truth for how much can be sold.
   const onChain = await getAgentTokenBalanceRaw(params.agentPublicKey, asset.mint);
@@ -295,6 +372,7 @@ export async function unparkToUsdc(params: {
     position,
     dbWarning,
   };
+  });
 }
 
 // --- Valuation --------------------------------------------------------------

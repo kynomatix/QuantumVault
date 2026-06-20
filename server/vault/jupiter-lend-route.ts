@@ -55,10 +55,6 @@ export const JLUSDC_DECIMALS = 6;
 
 const VALUATION_SOURCE = "redemption_rate";
 
-/** SOL gas floor for a park (tx fee + a possible first-time jlUSDC ATA rent). */
-const JUPITER_LEND_PARK_MIN_SOL_GAS = 0.01;
-/** SOL gas floor for an unpark (USDC ATA normally already exists). */
-const JUPITER_LEND_UNPARK_MIN_SOL_GAS = 0.005;
 /** Compute-unit ceiling for a single deposit/redeem batch. */
 const JUPITER_LEND_OP_COMPUTE_UNITS = 400_000;
 
@@ -208,7 +204,6 @@ export class JupiterLendYieldRoute implements YieldRoute {
         agentSecretKey: args.agentSecretKey,
         instructions,
         verifyOutputMint: JLUSDC_MINT,
-        minSolGas: JUPITER_LEND_PARK_MIN_SOL_GAS,
         label: "Jupiter Lend park",
       });
       if (!exec.success || !exec.outputReceivedRaw) {
@@ -244,7 +239,6 @@ export class JupiterLendYieldRoute implements YieldRoute {
         agentSecretKey: args.agentSecretKey,
         instructions,
         verifyOutputMint: USDC_MINT,
-        minSolGas: JUPITER_LEND_UNPARK_MIN_SOL_GAS,
         label: "Jupiter Lend unpark",
       });
       if (!exec.success || !exec.outputReceivedRaw) {
