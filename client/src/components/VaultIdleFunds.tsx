@@ -22,6 +22,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
 export interface YieldAssetInfo {
@@ -191,20 +199,23 @@ function RiskChip({ riskClass }: { riskClass: string }) {
 }
 
 /**
- * Vaults: earn on idle funds, one tap in and out.
+ * Vaults: earn on idle funds, one tap in and out. The component has two modes.
  *
- * Each yield destination is its own card (like a bot card on My Bots): name, APY,
- * risk chip, and — when funds are parked — the held balance and P/L. There is no
- * page-level on/off switch; the cards are the feature. Tapping a card opens a
+ * Account mode (no `botId`): the teaching home for the /app Vaults tab. Each yield
+ * destination is its own card (like a bot card on My Bots): name, APY, risk chip,
+ * and, when funds are parked, the held balance and P/L. Tapping a card opens a
  * detail sheet with two automatic actions and NO amount inputs:
  *   - "Park all spare USDC"  -> the server parks the full on-chain spare balance.
  *   - "Unpark all to USDC"   -> the server pulls the full held balance back.
  *
- * `active` gates the data queries (the host passes active) so the module mounts
- * lazily. When `botId` is passed (embedded in the bot drawer) it runs in per-bot
- * mode: the cards stack in a single column, a scope note is shown, and all
- * reads/writes carry `botId`. A future per-asset "Auto" mode slots in as another
- * card without changing this structure.
+ * Per-bot mode (`botId` passed, embedded in the bot drawer): a deliberately simple
+ * form, NOT the card grid. The drawer wrapper already supplies the on/off reveal
+ * switch and heading, so here it is just a scope note, a token dropdown, a little
+ * info for the selected token, and the same one-tap park-all / unpark-all actions.
+ *
+ * Either way the money path is identical (all-in / all-out, `{ all: true }`) and all
+ * reads/writes carry `botId` in per-bot mode. `active` gates the data queries so the
+ * module mounts lazily.
  */
 export default function VaultIdleFunds({ active = true, botId }: { active?: boolean; botId?: string }) {
   const { publicKeyString, sessionConnected } = useWallet();
@@ -268,9 +279,19 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
   const [parking, setParking] = useState(false);
   const [unparking, setUnparking] = useState(false);
   const [showHow, setShowHow] = useState(false);
+  // Per-bot (embedded) mode: the token chosen in the compact dropdown.
+  const [embAssetKey, setEmbAssetKey] = useState<string | null>(null);
 
   const detailHeld = detailAsset ? positionByKey.get(detailAsset.key)?.onChainAmount ?? 0 : 0;
   const detailPosition = detailAsset ? positionByKey.get(detailAsset.key) ?? null : null;
+
+  // Embedded selection + its current holding (drives the per-bot dropdown form).
+  const embAsset = useMemo(
+    () => assets.find((a) => a.key === embAssetKey) ?? null,
+    [assets, embAssetKey],
+  );
+  const embPosition = embAsset ? positionByKey.get(embAsset.key) ?? null : null;
+  const embHeld = embPosition?.onChainAmount ?? 0;
 
   const parkPreview = usePreview({
     open: !!detailAsset,
@@ -287,13 +308,44 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
     wallet: publicKeyString,
   });
 
+  // Embedded (per-bot) previews, keyed off the dropdown selection.
+  const embParkPreview = usePreview({
+    open: embedded && !!embAsset && spareUsdc > 0,
+    assetKey: embAsset?.key ?? null,
+    direction: "park",
+    amount: spareUsdc,
+    wallet: publicKeyString,
+  });
+  const embUnparkPreview = usePreview({
+    open: embedded && !!embAsset && embHeld > 0,
+    assetKey: embAsset?.key ?? null,
+    direction: "unpark",
+    amount: embHeld,
+    wallet: publicKeyString,
+  });
+
   // Close the detail sheet when the tab is hidden.
   useEffect(() => {
     if (!active) setDetailAsset(null);
   }, [active]);
 
-  const handleParkAll = async () => {
-    if (!detailAsset) return;
+  // Embedded mode: keep a sensible token selected so the dropdown is never empty.
+  // Prefer one that is already earning, then the default-eligible asset, then the
+  // first available token.
+  useEffect(() => {
+    if (!embedded || assets.length === 0) return;
+    setEmbAssetKey((prev) => {
+      if (prev && assets.some((a) => a.key === prev)) return prev;
+      const held = positions.find((p) => p.onChainAmount > 0);
+      if (held && assets.some((a) => a.key === held.assetKey)) return held.assetKey;
+      const def = assets.find((a) => a.defaultEligible);
+      return def?.key ?? assets[0].key;
+    });
+  }, [embedded, assets, positions]);
+
+  const handleParkAll = async (assetArg?: YieldAssetInfo) => {
+    const asset = assetArg ?? detailAsset;
+    if (!asset) return;
     if (!(spareUsdc > 0)) {
       toast({ title: "No spare USDC", description: "There is no idle USDC to park right now.", variant: "destructive" });
       return;
@@ -304,14 +356,14 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
       const res = await fetch("/api/vault/park", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
-        body: JSON.stringify({ assetKey: detailAsset.key, all: true, sessionId, botId }),
+        body: JSON.stringify({ assetKey: asset.key, all: true, sessionId, botId }),
         credentials: "include",
       });
       const data = await safeResponseJson(res);
       if (!res.ok) throw new Error(data.error || "Park failed");
       toast({
         title: "Parked",
-        description: `Put ${usd(data.usdcSpent)} to work in ${detailAsset.displayName}.${data.dbWarning ? ` ${data.dbWarning}` : ""}`,
+        description: `Put ${usd(data.usdcSpent)} to work in ${asset.displayName}.${data.dbWarning ? ` ${data.dbWarning}` : ""}`,
       });
       setDetailAsset(null);
       refetchAll();
@@ -526,9 +578,12 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
       </div>
     );
   } else if (embedded) {
-    // -------- Per-bot mode: cards stacked in one column. --------
+    // -------- Per-bot mode: a simple token dropdown + one-tap all-in/all-out. --------
+    // The bot drawer supplies the on/off reveal switch and the heading copy, so we
+    // stay minimal here: pick a token, see a little info, park or unpark all. No
+    // card grid (that look belongs to the account Vaults tab only).
     body = (
-      <div className="space-y-4" data-testid="vault-embedded">
+      <div className="space-y-3" data-testid="vault-embedded">
         {scope && (
           <p className="text-xs text-muted-foreground" data-testid="text-vault-scope-note">
             {scope === "account"
@@ -536,8 +591,137 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
               : "Earning uses this bot's own wallet (its spare USDC)."}
           </p>
         )}
-        {summaryBar}
-        {cardGrid("grid grid-cols-1 gap-4")}
+
+        <div className="flex items-center justify-between rounded-lg border border-border/50 bg-muted/30 px-3 py-2">
+          <span className="text-xs text-muted-foreground flex items-center gap-1.5">
+            <Wallet className="w-3.5 h-3.5" /> Spare USDC
+          </span>
+          <span className="text-sm font-semibold tabular-nums" data-testid="text-spare-usdc">
+            {assetsQuery.isLoading ? "..." : usd(spareUsdc)}
+          </span>
+        </div>
+
+        {assetsQuery.isLoading ? (
+          <Skeleton className="h-9 w-full" />
+        ) : assets.length === 0 ? (
+          <p className="text-muted-foreground text-sm" data-testid="text-no-assets">
+            No yield tokens are available right now.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            <div>
+              <Label className="text-xs text-muted-foreground mb-1 block">Token</Label>
+              <Select value={embAsset?.key ?? ""} onValueChange={(k) => setEmbAssetKey(k)}>
+                <SelectTrigger className="h-9" data-testid="select-park-asset">
+                  <SelectValue placeholder="Choose a token" />
+                </SelectTrigger>
+                <SelectContent>
+                  {assets.map((a) => (
+                    <SelectItem key={a.key} value={a.key} data-testid={`option-park-${a.key}`}>
+                      <span className="flex items-center gap-2">
+                        <span className="font-medium">{a.displayName}</span>
+                        <span className="text-xs text-muted-foreground tabular-nums">{a.apyLabel}</span>
+                        <RiskChip riskClass={a.riskClass} />
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {embAsset && (
+              <>
+                <div
+                  className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs"
+                  data-testid="text-selected-meta"
+                >
+                  <span className="text-muted-foreground tabular-nums">{embAsset.apyLabel} APY</span>
+                  <RiskChip riskClass={embAsset.riskClass} />
+                  {embAsset.mayLoseValue && (
+                    <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                      <AlertTriangle className="w-3 h-3" /> may lose value
+                    </span>
+                  )}
+                </div>
+
+                {embHeld > 0 && embPosition && (
+                  <div
+                    className={cn(
+                      "rounded-lg px-3 py-2 flex items-center justify-between text-sm border",
+                      (embPosition.unrealizedPnl ?? 0) >= 0
+                        ? "bg-emerald-500/10 border-emerald-500/20"
+                        : "bg-red-500/10 border-red-500/20",
+                    )}
+                    data-testid="box-embedded-earning"
+                  >
+                    <span className="font-medium">Earning {usd(embPosition.currentValueUsdc)}</span>
+                    {embPosition.unrealizedPnl !== null && (
+                      <span
+                        className={cn(
+                          "font-semibold flex items-center gap-1",
+                          (embPosition.unrealizedPnl ?? 0) >= 0 ? "text-emerald-500" : "text-red-500",
+                        )}
+                      >
+                        {(embPosition.unrealizedPnl ?? 0) >= 0 ? (
+                          <TrendingUp className="w-3.5 h-3.5" />
+                        ) : (
+                          <TrendingDown className="w-3.5 h-3.5" />
+                        )}
+                        {(embPosition.unrealizedPnl ?? 0) >= 0 ? "+" : ""}
+                        {usd(embPosition.unrealizedPnl)}
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {spareUsdc > 0 && (
+                  <PreviewBox
+                    loading={embParkPreview.isFetching}
+                    preview={embParkPreview.data}
+                    outLabel={embAsset.displayName}
+                    cap={maxImpact}
+                  />
+                )}
+                <Button
+                  onClick={() => handleParkAll(embAsset)}
+                  disabled={parking || !(spareUsdc > 0) || (embParkPreview.data?.wouldReject ?? false)}
+                  className="w-full"
+                  data-testid="button-embedded-park-all"
+                >
+                  {parking ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Parking
+                    </>
+                  ) : (
+                    "Park all spare USDC"
+                  )}
+                </Button>
+                {!(spareUsdc > 0) && (
+                  <p className="text-xs text-muted-foreground text-center">No idle USDC to add right now.</p>
+                )}
+
+                {embHeld > 0 && (
+                  <Button
+                    variant="outline"
+                    onClick={() => handleUnparkAll(embAsset.key, embAsset.displayName)}
+                    disabled={unparking || (embUnparkPreview.data?.wouldReject ?? false)}
+                    className="w-full"
+                    data-testid="button-embedded-unpark-all"
+                  >
+                    {unparking ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Unparking
+                      </>
+                    ) : (
+                      "Unpark all to USDC"
+                    )}
+                  </Button>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
         {howLink}
       </div>
     );
@@ -632,7 +816,7 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
                     />
                   )}
                   <Button
-                    onClick={handleParkAll}
+                    onClick={() => handleParkAll()}
                     disabled={parking || !(spareUsdc > 0) || (parkPreview.data?.wouldReject ?? false)}
                     className="w-full"
                     data-testid="button-park-all"
