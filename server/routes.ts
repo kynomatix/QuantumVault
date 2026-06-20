@@ -9,6 +9,7 @@ import crypto from "crypto";
 import bs58 from "bs58";
 import { Keypair } from "@solana/web3.js";
 import { storage, DatabaseStorage } from "./storage";
+import { sumNetDepositedFromEvents, isVaultInternalEvent } from "./equity-events-util";
 import { recordCriticalError } from "./error-log";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents, marketplaceEquitySnapshots, userApiTokens, labOptimizationRuns } from "@shared/schema";
 import type { Request as ExpressRequest, Response as ExpressResponse, NextFunction } from "express";
@@ -1736,6 +1737,109 @@ async function autoUnparkAccountVaultForUsdc(args: {
   }
 }
 
+/**
+ * Per-bot (independent_trader, e.g. Flash) sibling of autoUnparkAccountVaultForUsdc.
+ *
+ * A per-bot vault parks the bot's spare USDC in the bot's OWN wallet, so the bot's
+ * key must sign the redeem/swap and the ACCOUNT agent backstops gas (the per-bot
+ * wallet holds no SOL of its own). Money-safety:
+ *   - signs with the bot key, ALWAYS wiped in finally (even on throw);
+ *   - fails closed (returns 0, never throws) so a bad read can't crash the trade;
+ *   - credits ONLY the realized on-chain usdcReceived delta;
+ *   - `all` (profit-reinvest) mobilizes the bot's full parked capital.
+ */
+async function autoUnparkPerBotVaultForUsdc(args: {
+  walletAddress: string;
+  botCtx: BotSubaccountContext;
+  funderPublicKey: string;     // account agent that backstops the bot's gas
+  funderSecretKey: Uint8Array; // account agent secret (already decrypted)
+  neededUsdc: number;
+  all?: boolean;               // profit-reinvest: unpark ALL parked capital
+  logPrefix: string;
+}): Promise<number> {
+  const { walletAddress, botCtx, funderPublicKey, funderSecretKey, neededUsdc, all, logPrefix } = args;
+  if (!all && !(neededUsdc > 0)) return 0;
+
+  let botKey: { secretKey: Uint8Array; cleanup: () => void };
+  try {
+    botKey = await _resolveBotSubaccountSecretKey(botCtx);
+  } catch (e: any) {
+    console.log(`${logPrefix} Per-bot Vault auto-unpark: cannot unlock bot signing key: ${e.message}`);
+    return 0;
+  }
+
+  try {
+    const views = await getVaultPositionViews(walletAddress, botCtx.botPublicKey, botCtx.botId);
+    const routable = views
+      .filter(
+        (v) =>
+          v.onChainAmount > 0 &&
+          v.currentValueUsdc != null &&
+          v.currentValueUsdc > 0 &&
+          getYieldAssetByKey(v.assetKey) != null,
+      )
+      .sort((a, b) => (b.currentValueUsdc ?? 0) - (a.currentValueUsdc ?? 0));
+    if (routable.length === 0) {
+      if (!all) console.log(`${logPrefix} Per-bot Vault auto-unpark: no routable parked funds to cover $${neededUsdc.toFixed(2)}`);
+      return 0;
+    }
+
+    // Small buffer so swap slippage/fees don't leave the top-up a few cents short.
+    const BUFFER = 1.02;
+    let remaining = neededUsdc;
+    let realizedTotal = 0;
+    for (const v of routable) {
+      if (!all && remaining <= 0) break;
+      let res;
+      if (all) {
+        // Mobilize the bot's full parked capital (profit-reinvest uses all margin).
+        res = await unparkToUsdc({
+          walletAddress,
+          tradingBotId: botCtx.botId,
+          agentPublicKey: botCtx.botPublicKey,
+          agentSecretKey: botKey.secretKey,
+          assetKey: v.assetKey,
+          all: true,
+          funderPublicKey,
+          funderSecretKey,
+        });
+      } else {
+        const pricePerToken = v.currentValueUsdc! / v.onChainAmount; // USDC per token
+        if (!(pricePerToken > 0)) continue;
+        let tokenAmount = (remaining * BUFFER) / pricePerToken;
+        if (!(tokenAmount > 0)) continue;
+        if (tokenAmount > v.onChainAmount) tokenAmount = v.onChainAmount; // cap to held
+        res = await unparkToUsdc({
+          walletAddress,
+          tradingBotId: botCtx.botId,
+          agentPublicKey: botCtx.botPublicKey,
+          agentSecretKey: botKey.secretKey,
+          assetKey: v.assetKey,
+          amountToken: tokenAmount,
+          funderPublicKey,
+          funderSecretKey,
+        });
+      }
+      if (res.success && res.usdcReceived && res.usdcReceived > 0) {
+        realizedTotal += res.usdcReceived;
+        remaining -= res.usdcReceived;
+        console.log(
+          `${logPrefix} Per-bot Vault auto-unpark: ${v.assetKey} → $${res.usdcReceived.toFixed(2)}` +
+          (all ? ' (all)' : ` (need $${neededUsdc.toFixed(2)}, still short $${Math.max(0, remaining).toFixed(2)})`),
+        );
+      } else {
+        console.log(`${logPrefix} Per-bot Vault auto-unpark of ${v.assetKey} failed: ${res.error || 'no USDC received'}`);
+      }
+    }
+    return realizedTotal;
+  } catch (e: any) {
+    console.log(`${logPrefix} Per-bot Vault auto-unpark error: ${e.message}`);
+    return 0;
+  } finally {
+    botKey.cleanup();
+  }
+}
+
 async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<TradeSizingResult> {
   const {
     agentPublicKey,
@@ -1768,6 +1872,16 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
   if (botLeverage > marketMaxLeverage) {
     console.log(`${logPrefix} Leverage capped: ${botLeverage}x → ${marketMaxLeverage}x (${market} max)`);
   }
+
+  // Minimum equity to place a viable on-chain order (base-unit AND notional USD
+  // minimums). Hoisted here so the per-bot auto-unpark below can floor its restore
+  // target at it; the underfunded guard further down reuses these same values.
+  const minOrderSize = getMinOrderSize(market);
+  const minOrderUsd = getMinOrderSizeUsd(market);
+  const minEquityFromBase = (minOrderSize * oraclePrice / effectiveLeverage) * 1.2;
+  const minEquityFromUsd = (minOrderUsd / effectiveLeverage) * 1.15;
+  const minEquityNeeded = Math.max(minEquityFromBase, minEquityFromUsd);
+  const minEquityThreshold = Math.max(0.50, minEquityNeeded);
 
   // Validate base capital for non-profit-reinvest mode
   if (baseCapital <= 0 && !profitReinvestEnabled) {
@@ -1813,6 +1927,69 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
       maxTradeableValue: 0,
       effectiveLeverage,
     };
+  }
+
+  // STEP 1.5: Per-bot (independent_trader, e.g. Flash) auto-unpark. A parked bot's
+  // spare USDC sits in its OWN wallet, not on the exchange, so restore JUST-ENOUGH
+  // on demand (bank-like, hands-off) before the underfunded guard / sizing. The
+  // parked funds ARE the bot's own capital, so this runs regardless of autoTopUp
+  // (which only moves NEW capital from the account agent — and is a no-op for Flash).
+  // Money-safety: the cheap fail-open read above only DECIDES whether we might be
+  // short; we then confirm with a STRICT (fail-closed) on-chain read before selling
+  // any yield, credit only realized USDC, and re-read the balance from chain after
+  // — a trade is NEVER sized off the unpark estimate. Healthy fixed-size bots do
+  // zero extra IO here (the shortfall gate stays false).
+  if (isIndependentTrader && botCtx) {
+    let targetNeed: number;
+    let unparkAll = false;
+    if (profitReinvestEnabled) {
+      unparkAll = true; // profit-reinvest uses full margin → mobilize all parked capital
+      targetNeed = Number.POSITIVE_INFINITY;
+    } else if (autoTopUp) {
+      targetNeed = Math.max(effectiveLeverage > 0 ? baseCapital / effectiveLeverage : 0, minEquityThreshold);
+    } else {
+      const intendedNotional = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
+      const tradeCollateral = effectiveLeverage > 0 ? (intendedNotional / effectiveLeverage) / 0.95 : 0;
+      targetNeed = Math.max(tradeCollateral, minEquityThreshold);
+    }
+
+    if (unparkAll || freeCollateral < targetNeed) {
+      const collMint = adapter.collateralMint || SWAP_USDC_MINT;
+      const readStrictWalletUsdc = async (): Promise<number | null> => {
+        try {
+          const raw = await getAgentTokenBalanceRawStrict(botCtx.botPublicKey, collMint);
+          return Number(BigInt(raw.amountRaw)) / 1e6;
+        } catch {
+          return null;
+        }
+      };
+      const strictUsdc = await readStrictWalletUsdc();
+      if (strictUsdc == null) {
+        console.warn(`${logPrefix} Per-bot Vault: strict collateral read failed; skipping auto-unpark (no yield sale on a guess).`);
+      } else {
+        // Trust the strict read over the fail-open one (corrects a transient $0
+        // so a momentary RPC blip can't false-pause a genuinely funded bot).
+        freeCollateral = Math.max(freeCollateral, strictUsdc);
+        if (unparkAll || strictUsdc < targetNeed) {
+          const agentKeypair = resolveAgentKeypair(agentPrivateKeyEncrypted);
+          const realized = await autoUnparkPerBotVaultForUsdc({
+            walletAddress,
+            botCtx,
+            funderPublicKey: agentPublicKey,
+            funderSecretKey: agentKeypair.secretKey,
+            neededUsdc: unparkAll ? 0 : (targetNeed - strictUsdc),
+            all: unparkAll,
+            logPrefix,
+          });
+          if (realized > 0) {
+            // Re-read from chain — NEVER size a trade off the unpark estimate.
+            const reread = await readStrictWalletUsdc();
+            if (reread != null) freeCollateral = Math.max(freeCollateral, reread);
+            console.log(`${logPrefix} Per-bot Vault auto-unpark restored $${realized.toFixed(2)}; free collateral now ~$${freeCollateral.toFixed(2)}`);
+          }
+        }
+      }
+    }
   }
 
   // STEP 2: Auto top-up (run FIRST, before any trade size calculations)
@@ -1952,14 +2129,8 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
   }
 
   // GUARD: Minimum equity check - prevent submitting trades that will fail on-chain
-  // Check BOTH base-unit minimum AND notional USD minimum (Pacifica enforces $10 notional minimum)
-  const minOrderSize = getMinOrderSize(market);
-  const minOrderUsd = getMinOrderSizeUsd(market);
-  const minEquityFromBase = (minOrderSize * oraclePrice / effectiveLeverage) * 1.2;
-  const minEquityFromUsd = (minOrderUsd / effectiveLeverage) * 1.15;
-  const minEquityNeeded = Math.max(minEquityFromBase, minEquityFromUsd);
-  const minEquityThreshold = Math.max(0.50, minEquityNeeded);
-  
+  // (minOrderSize / minOrderUsd / minEquityThreshold are hoisted above so the
+  // per-bot auto-unpark can floor its restore target at the same minimum.)
   if (freeCollateral < minEquityThreshold) {
     const pauseReason = `Bot underfunded: $${freeCollateral.toFixed(2)} equity available but need $${minEquityThreshold.toFixed(2)} minimum for ${market} ($${minOrderUsd} min notional at ${effectiveLeverage}x leverage). Top up your bot to continue trading.`;
     console.log(`${logPrefix} ${pauseReason}`);
@@ -5521,7 +5692,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             botBalance = liveInfo.totalCollateral;
           } else {
           const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
-          const netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
+          const netDeposited = sumNetDepositedFromEvents(botEvents);
           const position = await storage.getBotPosition(bot.id, bot.market);
           const realizedPnl = parseFloat(position?.realizedPnl || '0');
           const totalFees = parseFloat(position?.totalFees || '0');
@@ -8440,7 +8611,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       } catch (e) { /* prices unavailable */ }
 
       const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
-      const netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
+      const netDeposited = sumNetDepositedFromEvents(botEvents);
       const position = await storage.getBotPosition(bot.id, bot.market);
       const realizedPnl = parseFloat(position?.realizedPnl || '0');
       const totalFees = parseFloat(position?.totalFees || '0');
@@ -8547,7 +8718,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           source: 'protocol',
         };
       } else {
-        const eventsNetDeposited = (botEvents as any[]).reduce((sum: number, e: any) => sum + parseFloat(e.amount || '0'), 0);
+        const eventsNetDeposited = sumNetDepositedFromEvents(botEvents as any[]);
         if (eventsNetDeposited > 0) netDeposited = eventsNetDeposited;
         
         const realizedPnl = parseFloat(dbPosition?.realizedPnl || '0');
@@ -8695,8 +8866,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         
         try {
           const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
-          netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
+          netDeposited = sumNetDepositedFromEvents(botEvents);
           totalDeposits = botEvents.reduce((sum, e) => {
+            if (isVaultInternalEvent(e.eventType)) return sum;
             const amt = parseFloat(e.amount || '0');
             return amt > 0 ? sum + amt : sum;
           }, 0);
@@ -11100,7 +11272,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       for (const bot of bots) {
         try {
           const events = await storage.getBotEquityEvents(bot.id, 1000);
-          netDepositedByBot[bot.id] = events.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
+          netDepositedByBot[bot.id] = sumNetDepositedFromEvents(events);
         } catch {
           netDepositedByBot[bot.id] = 0;
         }
@@ -14729,7 +14901,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             let prices: Record<string, number> = {};
             try { prices = await getAllPrices(); } catch (e) { /* prices unavailable */ }
             const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
-            const netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
+            const netDeposited = sumNetDepositedFromEvents(botEvents);
             const position = await storage.getBotPosition(bot.id, bot.market);
             const realizedPnl = parseFloat(position?.realizedPnl || '0');
             const totalFees = parseFloat(position?.totalFees || '0');
@@ -15145,7 +15317,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         storage.getBotEquityEvents(bot.id, 1000),
       ]);
 
-      const netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
+      const netDeposited = sumNetDepositedFromEvents(botEvents);
       const realizedPnl = parseFloat(position?.realizedPnl || "0");
       const totalFees = parseFloat(position?.totalFees || "0");
       
@@ -15250,9 +15422,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       let netDeposited = 0;
       if (tradingBot) {
         const equityEvents = await storage.getBotEquityEvents(publishedBot.tradingBotId, 1000);
-        // Amounts in equity_events are already signed (+ for deposits, - for withdrawals)
-        // Just sum all amounts to get net deposited
-        netDeposited = equityEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
+        // Sum signed deposit/withdrawal amounts, EXCLUDING internal Vault park/unpark
+        // reallocations (otherwise a parked creator's public PnL% reads as a false loss).
+        netDeposited = sumNetDepositedFromEvents(equityEvents);
       }
       
       // Build chart data showing performance since publish (starts at 0%)

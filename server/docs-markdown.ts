@@ -781,7 +781,7 @@ Vaults put your idle USDC to work. Instead of letting spare cash sit unused betw
 - **Custody, not a casino** — Your funds stay in your own agent wallet the whole time. QuantumVault only signs the move into and out of the yield token; it never takes custody of your money.
 - **One tap in, one tap out** — There are no sliders or amounts to set. "Park all spare USDC" puts your full idle balance to work; "Unpark all to USDC" pulls the whole position back. The platform reads your real on-chain balance and moves all of it.
 - **Always counted** — Parked funds still count as part of your balance and your profit/loss, so parking money never looks like a loss. The live value of your position is always included in your totals.
-- **Funds your trades automatically** — When you open a trade and your spendable USDC isn't enough, your account Vault automatically pulls back just enough to cover it and leaves the rest earning. You never have to unpark by hand before trading.
+- **Funds your trades automatically** — When you open a trade and your spendable USDC isn't enough, your Vault automatically pulls back just enough to cover it and leaves the rest earning — whether the spare cash is parked at your account level or set aside for an individual bot. You never have to unpark by hand before trading.
 
 ### Where to Find It
 
@@ -833,11 +833,11 @@ Vaults are built money-safe first. The platform never guesses about your money �
 
 ### Parked Funds Still Count
 
-Your parked position is always included in your total balance and your profit/loss. Parking spare USDC into a Vault never shows up as a loss — the live value of what you've parked is counted right alongside your trading funds.
+Your parked position is always included in your total balance and your profit/loss — whether you park at your account level or for an individual bot. Parking spare USDC into a Vault never shows up as a loss, and a bot whose spare cash is parked never reads as empty: the live value of what you've parked is counted right alongside your trading funds.
 
 ### Parked Funds Back Your Trades
 
-When you place a trade — by hand or from a TradingView/webhook signal — and your spendable USDC isn't enough to cover it, QuantumVault automatically unparks just enough from your account Vault to fund the trade, plus a small buffer for fees and price movement. The rest stays parked and keeps earning. You don't have to remember to unpark first; it happens as part of placing the trade.
+When you place a trade — by hand or from a TradingView/webhook signal — and your spendable USDC isn't enough to cover it, QuantumVault automatically unparks just enough to fund the trade, plus a small buffer for fees and price movement. This works the same whether the spare cash is parked at your account level or set aside for an individual bot, so a parked bot is never falsely paused as "underfunded." The rest stays parked and keeps earning. You don't have to remember to unpark first; it happens as part of placing the trade.
 
 > **Note:** This auto-funding is hands-off by design — you keep your spare cash earning, and the platform pulls back only what a trade actually needs.
 

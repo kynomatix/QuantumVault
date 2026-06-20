@@ -1,5 +1,7 @@
 import { storage } from "./storage";
 import { getDefaultAdapter, getAdapterForBot } from "./protocol/adapter-registry";
+import { sumVaultPositionValueUsdc } from "./vault/vault-service";
+import { sumNetDepositedFromEvents } from "./equity-events-util";
 import type { ProtocolAdapter } from "./protocol/adapter";
 import type { TradingBot, Wallet } from "@shared/schema";
 
@@ -59,7 +61,8 @@ export async function takePnlSnapshots(): Promise<void> {
           continue;
         }
         
-        const accountInfo = await getAccountEquity(adapterArgs.account, adapterArgs.subaccountId, getAdapterForBot(sourceTradingBot));
+        const snapshotAdapter = getAdapterForBot(sourceTradingBot);
+        const accountInfo = await getAccountEquity(adapterArgs.account, adapterArgs.subaccountId, snapshotAdapter);
         
         const stats = sourceTradingBot.stats as any || {};
         const realizedPnl = stats.totalPnl || 0;
@@ -69,11 +72,23 @@ export async function takePnlSnapshots(): Promise<void> {
         const canonicalCounts = await storage.getCanonicalBotTradeStats(sourceTradingBot.id);
         const totalTrades = canonicalCounts.totalTrades;
         const winningTrades = canonicalCounts.winningTrades;
-        const creatorEquity = accountInfo.usdcBalance;
+        let creatorEquity = accountInfo.usdcBalance;
+        // Per-bot (independent_trader, e.g. Flash) vaults park the bot's spare USDC
+        // in its OWN wallet. Count it as equity so a parked-but-idle bot isn't shown
+        // a false $0. Fail-closed: if the parked value can't be read (ok:false),
+        // skip this bot's snapshot rather than persist an understated equity.
+        if (snapshotAdapter.subaccountCaps?.accountModel === 'independent_trader') {
+          const parked = await sumVaultPositionValueUsdc(adapterArgs.account);
+          if (!parked.ok) {
+            console.log(`[PnL Snapshots] Skipping bot ${sourceTradingBot.id} (${sourceTradingBot.name}): parked Vault value unreadable (fail-closed).`);
+            continue;
+          }
+          creatorEquity += parked.valueUsdc;
+        }
         
         // Get actual net deposited from equity events (same as bot management drawer)
         const botEvents = await storage.getBotEquityEvents(sourceTradingBot.id, 1000);
-        const netDeposited = botEvents.reduce((sum, e) => sum + parseFloat(e.amount || '0'), 0);
+        const netDeposited = sumNetDepositedFromEvents(botEvents);
         // Fall back to maxPositionSize if no equity events (legacy data)
         const maxPosSize = typeof sourceTradingBot.maxPositionSize === 'string' 
           ? parseFloat(sourceTradingBot.maxPositionSize) 

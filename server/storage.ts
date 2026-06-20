@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "crypto";
 import { vaultLockKey as computeVaultLockKey } from "./vault/scope";
 import { db } from "./db";
 import Decimal from "decimal.js";
+import { sumNetDepositedFromEvents } from "./equity-events-util";
 import {
   users,
   wallets,
@@ -2040,6 +2041,7 @@ export class DatabaseStorage implements IStorage {
 
       await tx.insert(equityEvents).values({
         walletAddress: p.walletAddress,
+        tradingBotId,
         eventType: 'vault_park',
         amount: new Decimal(p.usdcSpent).toFixed(6),
         assetType: 'USDC',
@@ -2093,6 +2095,7 @@ export class DatabaseStorage implements IStorage {
         const noBasisNotes = `${p.notesPrefix ? p.notesPrefix + ' ' : ''}cost basis unknown (no recorded basis), realized P/L not computed`;
         await tx.insert(equityEvents).values({
           walletAddress: p.walletAddress,
+          tradingBotId,
           eventType: 'vault_unpark',
           amount: new Decimal(p.usdcReceived).toFixed(6),
           assetType: 'USDC',
@@ -2132,6 +2135,7 @@ export class DatabaseStorage implements IStorage {
       const notes = `${p.notesPrefix ? p.notesPrefix + ' ' : ''}cost basis removed ${costBasisRemoved.toFixed(6)} USDC, realized P/L ${realizedPnl.toFixed(6)} USDC`;
       await tx.insert(equityEvents).values({
         walletAddress: p.walletAddress,
+        tradingBotId,
         eventType: 'vault_unpark',
         amount: new Decimal(p.usdcReceived).toFixed(6),
         assetType: 'USDC',
@@ -2150,10 +2154,8 @@ export class DatabaseStorage implements IStorage {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(${893742}, ${lockKey})`);
 
       const events = await tx.select().from(equityEvents).where(eq(equityEvents.tradingBotId, botId));
-      let freshDeposited = 0;
-      for (const event of events) {
-        freshDeposited += parseFloat(event.amount);
-      }
+      // Exclude internal Vault park/unpark reallocations — they are not deposits.
+      const freshDeposited = sumNetDepositedFromEvents(events);
       const freshGap = onChainBalance - freshDeposited;
 
       if (freshGap <= 1.0) {
@@ -2183,12 +2185,8 @@ export class DatabaseStorage implements IStorage {
 
   async getBotNetDeposited(tradingBotId: string): Promise<number> {
     const events = await db.select().from(equityEvents).where(eq(equityEvents.tradingBotId, tradingBotId));
-    let netDeposited = 0;
-    for (const event of events) {
-      const amount = parseFloat(event.amount);
-      netDeposited += amount;
-    }
-    return netDeposited;
+    // Exclude internal Vault park/unpark reallocations — they are not deposits.
+    return sumNetDepositedFromEvents(events);
   }
 
   async getWalletNetDeposited(walletAddress: string): Promise<number> {

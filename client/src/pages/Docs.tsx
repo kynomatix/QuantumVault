@@ -1882,8 +1882,9 @@ function VaultsOverviewSection() {
             <h4 className="font-medium text-white">Funds Your Trades Automatically</h4>
           </div>
           <p className="text-white/60 text-sm">
-            When you open a trade and your spendable USDC isn't enough, your account Vault automatically pulls back 
-            just enough to cover it — and leaves the rest earning. You never have to unpark by hand before trading.
+            When you open a trade and your spendable USDC isn't enough, your Vault automatically pulls back 
+            just enough to cover it — and leaves the rest earning — whether the spare cash is parked at your account 
+            level or set aside for an individual bot. You never have to unpark by hand before trading.
           </p>
         </div>
       </div>
@@ -2036,17 +2037,19 @@ function VaultsSafetySection() {
 
       <SubHeading>Parked Funds Still Count</SubHeading>
       <Paragraph>
-        Your parked position is always included in your total balance and your profit/loss. Parking spare USDC into 
-        a Vault never shows up as a loss — the live value of what you've parked is counted right alongside your 
-        trading funds.
+        Your parked position is always included in your total balance and your profit/loss — whether you park at your 
+        account level or for an individual bot. Parking spare USDC into a Vault never shows up as a loss, and a bot 
+        whose spare cash is parked never reads as empty: the live value of what you've parked is counted right 
+        alongside your trading funds.
       </Paragraph>
 
       <SubHeading>Parked Funds Back Your Trades</SubHeading>
       <Paragraph>
         When you place a trade — by hand or from a TradingView/webhook signal — and your spendable USDC isn't enough 
-        to cover it, QuantumVault automatically unparks just enough from your account Vault to fund the trade, plus a 
-        small buffer for fees and price movement. The rest stays parked and keeps earning. You don't have to remember 
-        to unpark first; it happens as part of placing the trade.
+        to cover it, QuantumVault automatically unparks just enough to fund the trade, plus a small buffer for fees 
+        and price movement. This works the same whether the spare cash is parked at your account level or set aside 
+        for an individual bot, so a parked bot is never falsely paused as "underfunded." The rest stays parked and 
+        keeps earning. You don't have to remember to unpark first; it happens as part of placing the trade.
       </Paragraph>
 
       <Alert type="info">
@@ -3211,7 +3214,7 @@ const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet:
   { id: 'ai-agents', label: 'AI Agent Integration', snippet: 'Use AI agents (Claude, GPT, etc.) to send trade signals to QuantumVault via the agent API.', keywords: ['ai', 'agent', 'claude', 'gpt', 'openai', 'llm', 'language model', 'api', 'integration', 'programmatic', 'automated', 'server execution key'] },
   { id: 'vaults-overview', label: 'Vaults Overview', snippet: 'Vaults put idle USDC to work earning yield. One tap to park all spare USDC, one tap to unpark it back.', keywords: ['vault', 'vaults', 'earn', 'yield', 'idle', 'spare', 'park', 'unpark', 'interest', 'apy', 'save', 'savings', 'passive', 'stablecoin'] },
   { id: 'vaults-destinations', label: 'Yield Destinations', snippet: 'The yield options available in Vaults: Kamino USDC, Perena USD*, Jupiter Lend USDC, Ondo USDY, and OnRe ONyc.', keywords: ['destination', 'destinations', 'yield', 'apy', 'kamino', 'perena', 'jupiter lend', 'ondo', 'usdy', 'onre', 'onyc', 'stablecoin', 'stable', 'floating', 'reinsurance', 'treasury'] },
-  { id: 'vaults-safety', label: 'Safety & Funding', snippet: 'How Vaults stay money-safe (on-chain truth, realized amounts, price-impact cap) and auto-unpark from your account Vault to fund trades.', keywords: ['safety', 'safe', 'money', 'on-chain', 'realized', 'price impact', 'fail closed', 'equity', 'balance', 'auto unpark', 'fund trade', 'top up', 'collateral'] },
+  { id: 'vaults-safety', label: 'Safety & Funding', snippet: 'How Vaults stay money-safe (on-chain truth, realized amounts, price-impact cap) and auto-unpark — at the account level or per bot — to fund trades.', keywords: ['safety', 'safe', 'money', 'on-chain', 'realized', 'price impact', 'fail closed', 'equity', 'balance', 'auto unpark', 'fund trade', 'top up', 'collateral', 'per bot', 'per-bot'] },
   { id: 'quantumlab-overview', label: 'QuantumLab Overview', snippet: 'QuantumLab is the built-in backtesting and strategy optimization engine. Test strategies before deploying them live.', keywords: ['quantumlab', 'quantum lab', 'backtest', 'backtesting', 'lab', 'test', 'simulation', 'historical', 'strategy', 'candle', 'ohlc'] },
   { id: 'quantumlab-strategies', label: 'Strategy Library', snippet: 'Write and save Pine Script strategies in QuantumLab. Load from the library to backtest or optimize.', keywords: ['strategy', 'library', 'pine script', 'pine', 'script', 'code', 'write', 'save', 'load', 'indicator', 'signal', 'entry', 'exit'] },
   { id: 'quantumlab-optimizer', label: 'Optimizer', snippet: 'Run random search and refinement optimization to find the best parameters for your strategy.', keywords: ['optimizer', 'optimize', 'optimization', 'parameter', 'tune', 'search', 'random search', 'refinement', 'coordinate', 'best', 'sharpe', 'drawdown', 'win rate'] },
