@@ -81,10 +81,13 @@ export interface YieldAsset {
  *  - Perena USD*: real mint, decimals 6, NAV mint/redeem route both ways up to ~20k
  *    USDC at ~0.05% impact (single route, output scales linearly).
  *  - JupUSD (Jupiter USD): Jupiter VERIFIED mint, decimals 6, ~$13.8M liquidity.
- *    USDC round trip at $500/$2k/$5k showed ~0% price impact both ways.
+ *    USDC round trip at $500/$2k/$5k showed ~0% price impact both ways. NOW DISABLED:
+ *    plain JupUSD passes NO yield to holders (yield needs a Jupiter Lend deposit ->
+ *    jlJupUSD, a different route). See the jupusd row comment.
  *  - USDY (Ondo): Jupiter VERIFIED mint, decimals 6, ~$1.9M liquidity. USDC round
  *    trip at $500/$2k/$5k: buy ~0%, sell ~0.3% (under the 0.5% cap). Treasury-backed,
- *    price floats UP. Opt-in (not a default) given the exit spread and float.
+ *    price floats UP. NOW DISABLED pending compliance: Ondo's terms prohibit US
+ *    persons from acquiring USDY (Reg S). See the usdy row comment.
  */
 const YIELD_ASSETS: YieldAsset[] = [
   {
@@ -127,21 +130,29 @@ const YIELD_ASSETS: YieldAsset[] = [
   {
     key: "jupusd",
     displayName: "Jupiter USD",
-    // JupUSD, Jupiter's yield-bearing stablecoin. Mint from Jupiter's VERIFIED
-    // token list (isVerified=true, organicScore 93, ~$13.8M liquidity), confirmed
-    // by a USDC round-trip swap probe at $500/$2k/$5k (~0% impact both ways).
+    // DISABLED 2026-06-20: JupUSD does NOT pass yield to a passive holder. By
+    // design (to stay regulatory-compliant) the plain JupUSD token earns nothing;
+    // its reserve yield is routed to Jupiter's treasury, not to holders. Yield
+    // accrues ONLY if JupUSD is deposited into Jupiter Lend Earn (which mints
+    // jlJupUSD), a different token and route. Parking USDC into plain JupUSD via a
+    // swap (this route) would earn ~0% while paying the swap spread, so the old
+    // "yield-bearing ~4-5%" copy was simply wrong. The real yield-bearing Jupiter
+    // option is Jupiter Lend (see the disabled jupiter_lend_usdc row); wire and
+    // enable THAT once its mint + deposit/withdraw route are verified, not this.
+    // Mint kept (Jupiter VERIFIED list, ~$13.8M liq, ~0% round-trip impact) so the
+    // teardown sweep still detects any stray balance.
     mint: "JuprjznTrTSp2UFa3ZBUFgwdAmtZCq4MQCwysN55USD",
     decimals: 6,
     route: "jupiter",
     valuation: "market_quote",
-    defaultEligible: true,
+    defaultEligible: false,
     riskClass: "stable",
     mayLoseValue: false,
-    apyLabel: "~4-5%",
-    tag: "Yield-bearing stablecoin. Backed by US Treasuries (Jupiter).",
+    apyLabel: "~0% (no native yield)",
+    tag: "Plain reserve stablecoin. Earns only via Jupiter Lend, not by holding.",
     riskNote:
-      "Jupiter's yield-bearing stablecoin, backed by tokenized US Treasuries. Trades near $1 with deep liquidity; value accrues over time.",
-    enabled: true,
+      "Jupiter's reserve-backed stablecoin. Holding it does not earn yield on its own; yield only comes from depositing it into Jupiter Lend. Disabled here until that lending route is wired.",
+    enabled: false,
   },
   {
     key: "onyc",
@@ -162,9 +173,15 @@ const YIELD_ASSETS: YieldAsset[] = [
   {
     key: "usdy",
     displayName: "Ondo USDY",
-    // USDY, Ondo's Treasury-backed yield token. Mint from Jupiter's VERIFIED token
-    // list (isVerified=true, ~$1.9M liquidity), confirmed by a USDC round-trip swap
-    // probe at $500/$2k/$5k (buy ~0%, sell ~0.3%, under the 0.5% cap). Price floats UP.
+    // DISABLED 2026-06-20 pending COMPLIANCE sign-off. Ondo's own eligibility terms
+    // prohibit US persons from subscribing for, acquiring, or redeeming USDY
+    // (Regulation S; USDY is an unregistered security outside the US). A secondary-
+    // market swap into USDY still counts as "acquiring" under those terms, so
+    // offering it as a named, public park option to a userbase that may include US
+    // persons is a legal question, not a copy tweak. Do NOT re-enable until whoever
+    // owns compliance confirms in writing. Mint kept (Jupiter VERIFIED list, ~$1.9M
+    // liq, round-trip buy ~0% / sell ~0.3%) so the teardown sweep still detects any
+    // stray balance.
     mint: "A1KLoBrKBde8Ty9qtNQUtq3C2ortoC3u7twggz7sEto6",
     decimals: 6,
     route: "jupiter",
@@ -173,10 +190,10 @@ const YIELD_ASSETS: YieldAsset[] = [
     riskClass: "float",
     mayLoseValue: false,
     apyLabel: "~4-5%",
-    tag: "Treasury-backed yield token. Price floats up; small exit spread.",
+    tag: "Treasury-backed yield token. Restricted to non-US persons (compliance).",
     riskNote:
-      "Ondo's yield-bearing token, backed by short-term US Treasuries. The price floats UP as it earns, so it is not a fixed $1 token, and selling back to USDC costs a small spread (around 0.3%).",
-    enabled: true,
+      "Ondo's Treasury-backed yield token. Ondo's terms restrict it to non-US persons (Regulation S). Disabled here pending a compliance decision before it can be a public option.",
+    enabled: false,
   },
   // --- Present but DISABLED: not yet verified/wired. Do NOT enable until ready. ---
   {
