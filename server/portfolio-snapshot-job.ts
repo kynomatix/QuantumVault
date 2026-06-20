@@ -3,6 +3,7 @@ import { storage } from "./storage";
 import { getDefaultAdapter, getAdapterForBot } from "./protocol/adapter-registry";
 import type { ProtocolAdapter } from "./protocol/adapter";
 import { reconcileWalletDeposits } from "./deposit-reconciler";
+import { sumVaultPositionValueUsdc } from "./vault/vault-service";
 import type { TradingBot, Wallet } from "@shared/schema";
 
 const MAINNET_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -154,18 +155,44 @@ export async function computeWalletTotalBalance(
     const spl = await getAgentSplBalance(wallet.agentPublicKey);
     if (spl == null) ok = false;
     else totalBalance += spl;
+
+    // Parked ACCOUNT-vault funds are still the user's equity (idle USDC swapped
+    // into a yield token off-exchange), just not on the agent wallet as USDC.
+    // Count their live USD value or the totalBalance reads as a phantom loss.
+    // Fail closed: an unreadable balance / unpriceable token skips the snapshot.
+    const av = await sumVaultPositionValueUsdc(wallet.agentPublicKey);
+    if (!av.ok) {
+      ok = false;
+      console.warn(`[computeWalletTotalBalance] account-vault valuation failed (wallet ${walletAddress.slice(0, 8)}…) — partial total only`);
+    } else {
+      totalBalance += av.valueUsdc;
+    }
   }
 
   for (const bot of bots) {
     if (bot.isActive) activeBotCount++;
     const adapterArgs = resolveBotAdapterArgs(bot, wallet);
     if (!adapterArgs) continue;
-    const bal = await getAccountBalance(adapterArgs.account, adapterArgs.subaccountId, getAdapterForBot(bot));
+    const adapter = getAdapterForBot(bot);
+    const bal = await getAccountBalance(adapterArgs.account, adapterArgs.subaccountId, adapter);
     if (bal == null) {
       ok = false;
       console.warn(`[computeWalletTotalBalance] balance read failed for bot ${bot.id} (wallet ${walletAddress.slice(0, 8)}…) — partial total only`);
     } else {
       totalBalance += bal;
+    }
+
+    // Per-bot Vault: only independent_trader venues (Flash) park into the bot's
+    // OWN wallet. Account-model venues (Pacifica/Drift) share the account vault
+    // counted above, so don't re-read them here.
+    if (adapter.subaccountCaps?.accountModel === 'independent_trader') {
+      const bv = await sumVaultPositionValueUsdc(adapterArgs.account);
+      if (!bv.ok) {
+        ok = false;
+        console.warn(`[computeWalletTotalBalance] per-bot vault valuation failed for bot ${bot.id} (wallet ${walletAddress.slice(0, 8)}…) — partial total only`);
+      } else {
+        totalBalance += bv.valueUsdc;
+      }
     }
   }
 

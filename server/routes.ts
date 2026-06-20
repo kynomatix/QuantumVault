@@ -1431,7 +1431,7 @@ import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
 import { getBestQuote } from "./swap/index.js";
 import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
-import { getEnabledYieldAssets } from "./vault/yield-assets";
+import { getEnabledYieldAssets, getYieldAssetByKey } from "./vault/yield-assets";
 import { detectParkedYieldTokens as detectParkedYieldTokensPure } from "./vault/parked-tokens";
 import { getUserFungibleTokens } from "./swap/helius-tokens.js";
 
@@ -1657,6 +1657,85 @@ interface TradeSizingResult {
   shouldPauseBot?: boolean;
 }
 
+/**
+ * Money-safety: auto-unpark just enough ACCOUNT-vault yield back into the agent
+ * wallet as USDC to cover a trade top-up shortfall. This is a "bank sweep" — it
+ * unparks only what the trade still needs (plus a small slippage/fee buffer) and
+ * leaves the rest earning. ACCOUNT scope only (Pacifica/Drift share one account
+ * vault). Per-bot Flash vaults are intentionally NOT swept here: that needs the
+ * bot's own signing key + a separate gas funder and is handled elsewhere.
+ *
+ * Returns the realized on-chain USDC delta now sitting in the agent wallet (the
+ * sum of each unpark's measured `usdcReceived`). Returns 0 — never throws — on
+ * any failure, so a failed sweep degrades to the existing "proceed with available
+ * margin / pause" behavior rather than blocking the trade.
+ *
+ * Idempotent across retries / proxy reaps: a reaped attempt leaves the unparked
+ * USDC in the agent wallet, which the caller's deposit leg picks up next signal;
+ * this only unparks the still-missing remainder. Each unpark runs under the
+ * vault's per-scope lock (in unparkToUsdc), so concurrent signals can't double-sell.
+ */
+async function autoUnparkAccountVaultForUsdc(args: {
+  walletAddress: string;
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  neededUsdc: number;
+  logPrefix: string;
+}): Promise<number> {
+  const { walletAddress, agentPublicKey, agentSecretKey, neededUsdc, logPrefix } = args;
+  if (!(neededUsdc > 0)) return 0;
+  try {
+    const views = await getVaultPositionViews(walletAddress, agentPublicKey, null);
+    const routable = views
+      .filter(
+        (v) =>
+          v.onChainAmount > 0 &&
+          v.currentValueUsdc != null &&
+          v.currentValueUsdc > 0 &&
+          getYieldAssetByKey(v.assetKey) != null,
+      )
+      .sort((a, b) => (b.currentValueUsdc ?? 0) - (a.currentValueUsdc ?? 0));
+    if (routable.length === 0) {
+      console.log(`${logPrefix} Vault auto-unpark: no routable parked funds to cover $${neededUsdc.toFixed(2)}`);
+      return 0;
+    }
+
+    // Small buffer so swap slippage/fees don't leave the top-up a few cents short.
+    const BUFFER = 1.02;
+    let remaining = neededUsdc;
+    let realizedTotal = 0;
+    for (const v of routable) {
+      if (remaining <= 0) break;
+      const pricePerToken = v.currentValueUsdc! / v.onChainAmount; // USDC per token
+      if (!(pricePerToken > 0)) continue;
+      let tokenAmount = (remaining * BUFFER) / pricePerToken;
+      if (!(tokenAmount > 0)) continue;
+      if (tokenAmount > v.onChainAmount) tokenAmount = v.onChainAmount; // cap to held
+      const res = await unparkToUsdc({
+        walletAddress,
+        tradingBotId: null, // account scope: agent is its own gas funder
+        agentPublicKey,
+        agentSecretKey,
+        assetKey: v.assetKey,
+        amountToken: tokenAmount,
+      });
+      if (res.success && res.usdcReceived && res.usdcReceived > 0) {
+        realizedTotal += res.usdcReceived;
+        remaining -= res.usdcReceived;
+        console.log(
+          `${logPrefix} Vault auto-unpark: ${tokenAmount.toFixed(6)} ${v.assetKey} → $${res.usdcReceived.toFixed(2)} (need $${neededUsdc.toFixed(2)}, still short $${Math.max(0, remaining).toFixed(2)})`,
+        );
+      } else {
+        console.log(`${logPrefix} Vault auto-unpark of ${v.assetKey} failed: ${res.error || 'no USDC received'}`);
+      }
+    }
+    return realizedTotal;
+  } catch (e: any) {
+    console.log(`${logPrefix} Vault auto-unpark error: ${e.message}`);
+    return 0;
+  }
+}
+
 async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<TradeSizingResult> {
   const {
     agentPublicKey,
@@ -1675,6 +1754,11 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
     botCtx,
     adapter = getDefaultAdapter(),
   } = params;
+
+  // Per-bot (independent_trader, e.g. Flash) vaults park into the bot's OWN
+  // wallet and need the bot's signing key + a separate gas funder, so the
+  // account-scope auto-unpark below is skipped for them (handled elsewhere).
+  const isIndependentTrader = adapter.subaccountCaps?.accountModel === 'independent_trader';
 
   // Calculate effective leverage (capped by market max)
   const botLeverage = Math.max(1, leverage || 1);
@@ -1748,9 +1832,43 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
           const agentKeypair = resolveAgentKeypair(agentPrivateKeyEncrypted);
           const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
 
-          const agentAccountInfo = await getExchangeAccountInfo(agentPublicKey, 0, adapter);
-          const agentFreeCollateral = agentAccountInfo.freeCollateral;
+          let agentAccountInfo = await getExchangeAccountInfo(agentPublicKey, 0, adapter);
+          let agentFreeCollateral = agentAccountInfo.freeCollateral;
           console.log(`${logPrefix} Agent main account free collateral: $${agentFreeCollateral.toFixed(2)}, need: $${depositAmount.toFixed(2)}`);
+
+          // Refill the agent's exchange collateral from spare wallet USDC when it's
+          // short, auto-unparking just enough from the account Vault if the wallet
+          // is also short. Skipped for per-bot (independent_trader) vaults.
+          if (agentFreeCollateral < depositAmount && !isIndependentTrader) {
+            const shortfallToExchange = depositAmount - agentFreeCollateral;
+            let walletUsdc = await getAgentUsdcBalance(agentPublicKey);
+            if (walletUsdc < shortfallToExchange) {
+              const realized = await autoUnparkAccountVaultForUsdc({
+                walletAddress,
+                agentPublicKey,
+                agentSecretKey: agentKeypair.secretKey,
+                neededUsdc: shortfallToExchange - walletUsdc,
+                logPrefix,
+              });
+              if (realized > 0) walletUsdc = await getAgentUsdcBalance(agentPublicKey);
+            }
+            // Only refill when we can FULLY cover the shortfall — a partial deposit
+            // wouldn't satisfy the transfer gate below and would strand USDC in the
+            // (uncounted) agent main exchange account. If short, leave the unparked
+            // USDC in the agent wallet (counted as equity) and let the trade fail
+            // gracefully; the next signal retries.
+            const depositToExchange = Math.ceil(shortfallToExchange * 100) / 100;
+            if (walletUsdc >= depositToExchange) {
+              const dep = await executeAgentDeposit(agentPublicKey, agentKeypair.secretKey, depositToExchange, 0, adapter);
+              if (dep.success) {
+                console.log(`${logPrefix} Refilled agent exchange with $${depositToExchange.toFixed(2)} from wallet USDC (incl. any Vault sweep)`);
+                agentAccountInfo = await getExchangeAccountInfo(agentPublicKey, 0, adapter);
+                agentFreeCollateral = agentAccountInfo.freeCollateral;
+              } else {
+                console.log(`${logPrefix} Agent exchange refill deposit failed: ${dep.error}`);
+              }
+            }
+          }
 
           if (agentFreeCollateral >= depositAmount) {
             console.log(`${logPrefix} Transferring $${depositAmount} from agent to bot subaccount ${botCtx.botPublicKey}`);
@@ -1779,8 +1897,24 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
             console.log(`${logPrefix} Agent main ($${agentFreeCollateral.toFixed(2)}) insufficient for top-up ($${depositAmount.toFixed(2)})`);
           }
         } else {
-          const agentUsdcBalance = await getAgentUsdcBalance(agentPublicKey);
+          let agentUsdcBalance = await getAgentUsdcBalance(agentPublicKey);
           console.log(`${logPrefix} Agent wallet USDC balance: $${agentUsdcBalance.toFixed(2)}, need: $${topUpNeeded.toFixed(2)}`);
+
+          // Auto-unpark just enough from the account Vault when plain wallet USDC
+          // can't cover the top-up. Skipped for per-bot (independent_trader) vaults.
+          if (agentUsdcBalance < topUpNeeded && !isIndependentTrader) {
+            const realized = await autoUnparkAccountVaultForUsdc({
+              walletAddress,
+              agentPublicKey,
+              agentSecretKey: agentPrivateKeyEncrypted,
+              neededUsdc: topUpNeeded - agentUsdcBalance,
+              logPrefix,
+            });
+            if (realized > 0) {
+              agentUsdcBalance = await getAgentUsdcBalance(agentPublicKey);
+              console.log(`${logPrefix} Agent wallet USDC after Vault sweep: $${agentUsdcBalance.toFixed(2)}`);
+            }
+          }
 
           if (agentUsdcBalance >= topUpNeeded) {
             const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
@@ -1919,7 +2053,39 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
             const agentKeypair = resolveAgentKeypair(agentPrivateKeyEncrypted);
             const depositAmount = Math.ceil(shortfall * 100) / 100;
 
-            const agentAccountInfo = await getExchangeAccountInfo(agentPublicKey, 0, adapter);
+            let agentAccountInfo = await getExchangeAccountInfo(agentPublicKey, 0, adapter);
+
+            // Refill agent exchange from spare wallet USDC when short, auto-unparking
+            // just enough from the account Vault if the wallet is also short. Skipped
+            // for per-bot (independent_trader) vaults.
+            if (agentAccountInfo.freeCollateral < depositAmount && !isIndependentTrader) {
+              const shortfallToExchange = depositAmount - agentAccountInfo.freeCollateral;
+              let walletUsdc = await getAgentUsdcBalance(agentPublicKey);
+              if (walletUsdc < shortfallToExchange) {
+                const realized = await autoUnparkAccountVaultForUsdc({
+                  walletAddress,
+                  agentPublicKey,
+                  agentSecretKey: agentKeypair.secretKey,
+                  neededUsdc: shortfallToExchange - walletUsdc,
+                  logPrefix,
+                });
+                if (realized > 0) walletUsdc = await getAgentUsdcBalance(agentPublicKey);
+              }
+              // Full-coverage-only refill (see primary path): a partial deposit would
+              // strand USDC in the uncounted agent main exchange. If short, leave the
+              // unparked USDC in the agent wallet (counted) and let the trade pause.
+              const depositToExchange = Math.ceil(shortfallToExchange * 100) / 100;
+              if (walletUsdc >= depositToExchange) {
+                const dep = await executeAgentDeposit(agentPublicKey, agentKeypair.secretKey, depositToExchange, 0, adapter);
+                if (dep.success) {
+                  console.log(`${logPrefix} Secondary: refilled agent exchange with $${depositToExchange.toFixed(2)} from wallet USDC (incl. any Vault sweep)`);
+                  agentAccountInfo = await getExchangeAccountInfo(agentPublicKey, 0, adapter);
+                } else {
+                  console.log(`${logPrefix} Secondary: agent exchange refill deposit failed: ${dep.error}`);
+                }
+              }
+            }
+
             if (agentAccountInfo.freeCollateral >= depositAmount) {
               const transferResult = await adapter.transferBetweenSubaccounts({
                 agentSecretKey: agentKeypair.secretKey,
@@ -1949,8 +2115,24 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
               return { success: false, tradeAmountUsd, finalContractSize: contractSize, freeCollateral, maxTradeableValue, effectiveLeverage, error: pauseReason, pauseReason, shouldPauseBot: true };
             }
           } else {
-          const agentUsdcBalance = await getAgentUsdcBalance(agentPublicKey);
+          let agentUsdcBalance = await getAgentUsdcBalance(agentPublicKey);
           console.log(`${logPrefix} Agent wallet USDC balance: $${agentUsdcBalance.toFixed(2)}, shortfall: $${shortfall.toFixed(2)}`);
+
+          // Auto-unpark just enough from the account Vault when plain wallet USDC
+          // can't cover the shortfall. Skipped for per-bot (independent_trader) vaults.
+          if (agentUsdcBalance < shortfall && !isIndependentTrader) {
+            const realized = await autoUnparkAccountVaultForUsdc({
+              walletAddress,
+              agentPublicKey,
+              agentSecretKey: agentPrivateKeyEncrypted,
+              neededUsdc: shortfall - agentUsdcBalance,
+              logPrefix,
+            });
+            if (realized > 0) {
+              agentUsdcBalance = await getAgentUsdcBalance(agentPublicKey);
+              console.log(`${logPrefix} Agent wallet USDC after Vault sweep: $${agentUsdcBalance.toFixed(2)}`);
+            }
+          }
 
           if (agentUsdcBalance >= shortfall) {
             const depositAmount = Math.ceil(shortfall * 100) / 100;

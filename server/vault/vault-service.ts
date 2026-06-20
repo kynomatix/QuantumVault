@@ -20,7 +20,7 @@
 import Decimal from "decimal.js";
 import { getAgentUsdcBalance, getAgentTokenBalanceRaw, getAgentTokenBalanceRawStrict, USDC_MINT } from "../agent-wallet";
 import { storage } from "../storage";
-import { getEnabledYieldAssets, getYieldAssetByKey, type YieldAsset } from "./yield-assets";
+import { getEnabledYieldAssets, getDetectableYieldAssets, getYieldAssetByKey, type YieldAsset } from "./yield-assets";
 import { getYieldRoute, VAULT_MAX_PRICE_IMPACT } from "./yield-routes";
 import { ensureVaultGas } from "./gas-funding";
 import { vaultLockKey } from "./scope";
@@ -457,4 +457,44 @@ export async function getVaultPositionViews(
     });
   }
   return views;
+}
+
+/**
+ * Sum the live USDC value of every yield token a wallet holds on-chain, for
+ * counting parked Vault funds as equity (NOT for moving money). This reads the
+ * DETECTABLE asset set (enabled OR disabled with a real mint) so a token that
+ * was parked and later disabled is still valued.
+ *
+ * Money-safety / fail-closed: this feeds balance snapshots and the live
+ * portfolio total, so it MUST never fabricate a number. It uses the STRICT
+ * balance reader (throws on an unreadable balance) and returns `ok: false` if
+ * any read throws OR a held token cannot be priced. The caller then refuses to
+ * persist/serve a partial total (mirrors the snapshot writer's failed-read
+ * skip), and the next read retries on fresh data.
+ *
+ * @param agentPublicKey the wallet that holds the tokens — the account agent for
+ *   the account vault, or a bot's own wallet pubkey for a per-bot Flash vault.
+ */
+export async function sumVaultPositionValueUsdc(
+  agentPublicKey: string,
+): Promise<{ valueUsdc: number; ok: boolean }> {
+  let valueUsdc = 0;
+  for (const asset of getDetectableYieldAssets()) {
+    let raw: bigint;
+    try {
+      const bal = await getAgentTokenBalanceRawStrict(agentPublicKey, asset.mint);
+      raw = BigInt(bal.amountRaw);
+    } catch {
+      return { valueUsdc: 0, ok: false }; // unreadable balance — fail closed
+    }
+    if (raw <= BigInt(0)) continue;
+    try {
+      const val = await getYieldRoute(asset).valueInUsdc(raw);
+      if (val.valueUsdcRaw === null) return { valueUsdc: 0, ok: false }; // held but unpriceable
+      valueUsdc += fromRaw(BigInt(val.valueUsdcRaw), USDC_DECIMALS);
+    } catch {
+      return { valueUsdc: 0, ok: false }; // valuation threw — fail closed
+    }
+  }
+  return { valueUsdc, ok: true };
 }
