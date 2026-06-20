@@ -45,12 +45,43 @@ export interface YieldAssetInfo {
   riskClass: "stable" | "float";
   /** True only for assets that can actually lose value (drives the "may lose value" hint). */
   mayLoseValue: boolean;
-  /** Approximate APY label (carries a "~" qualifier). */
+  /** Legacy approximate label. Kept for back-compat; the UI prefers `apy`. */
   apyLabel: string;
+  /** Realized net APY (percent) from the yield oracle, or null when not measurable. */
+  apy: number | null;
+  apyBase: number | null;
+  apyReward: number | null;
+  /** Why apy is / isn't a number: "trailing" | "accruing" | "unavailable". */
+  apyMethod: "trailing" | "accruing" | "unavailable";
+  apyAsOf: number | null;
   tag: string;
   /** Longer plain-language note for the detail dialog. */
   riskNote: string;
   defaultEligible: boolean;
+}
+
+// --- Realized-APY display helpers (yield oracle). The oracle returns a real
+// measured number or null with a reason; we NEVER show a marketing/target rate.
+function fmtApyPct(n: number): string {
+  return `${n.toFixed(1)}%`;
+}
+/** Full inline phrase used where "<rate> APY" used to be shown. */
+function apyInline(a: YieldAssetInfo): string {
+  if (a.apy != null) return `${fmtApyPct(a.apy)} APY`;
+  if (a.apyMethod === "accruing") return "Earning · rate building";
+  return "Rate unavailable";
+}
+/** Compact form for the dropdown row. */
+function apyCompact(a: YieldAssetInfo): string {
+  if (a.apy != null) return fmtApyPct(a.apy);
+  if (a.apyMethod === "accruing") return "Building";
+  return "—";
+}
+/** Number-only value for the big stat box (the "APY" label sits beneath it). */
+function apyStat(a: YieldAssetInfo): string {
+  if (a.apy != null) return fmtApyPct(a.apy);
+  if (a.apyMethod === "accruing") return "Building";
+  return "—";
 }
 
 interface AssetsResponse {
@@ -237,6 +268,9 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
       return data as AssetsResponse;
     },
     enabled: active && connected,
+    // Realized APY is built async/non-blocking on the server; poll so cold-start
+    // numbers and slow APY drift appear without a manual refresh.
+    refetchInterval: 60_000,
   });
 
   const positionsQuery = useQuery<{ positions: PositionView[]; scope?: "account" | "bot" }>({
@@ -462,7 +496,7 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
             <div className="min-w-0">
               <h3 className="font-semibold text-base truncate">{a.displayName}</h3>
               <p className="text-sm text-muted-foreground flex items-center gap-2">
-                <span className="tabular-nums">{a.apyLabel} APY</span>
+                <span className="tabular-nums" data-testid={`text-card-apy-${a.key}`}>{apyInline(a)}</span>
                 <RiskChip riskClass={a.riskClass} />
               </p>
             </div>
@@ -500,7 +534,7 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
 
         <div className="grid grid-cols-3 gap-3 text-center">
           <div className="p-2.5 rounded-lg bg-muted/30">
-            <p className="text-lg font-bold tabular-nums">{a.apyLabel}</p>
+            <p className="text-lg font-bold tabular-nums" data-testid={`stat-card-apy-${a.key}`}>{apyStat(a)}</p>
             <p className="text-xs text-muted-foreground">APY</p>
           </div>
           <div className="p-2.5 rounded-lg bg-muted/30">
@@ -620,7 +654,7 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
                     <SelectItem key={a.key} value={a.key} data-testid={`option-park-${a.key}`}>
                       <span className="flex items-center gap-2">
                         <span className="font-medium">{a.displayName}</span>
-                        <span className="text-xs text-muted-foreground tabular-nums">{a.apyLabel}</span>
+                        <span className="text-xs text-muted-foreground tabular-nums">{apyCompact(a)}</span>
                         <RiskChip riskClass={a.riskClass} />
                       </span>
                     </SelectItem>
@@ -635,7 +669,7 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
                   className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs"
                   data-testid="text-selected-meta"
                 >
-                  <span className="text-muted-foreground tabular-nums">{embAsset.apyLabel} APY</span>
+                  <span className="text-muted-foreground tabular-nums" data-testid="text-selected-apy">{apyInline(embAsset)}</span>
                   <RiskChip riskClass={embAsset.riskClass} />
                   {embAsset.mayLoseValue && (
                     <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
@@ -748,7 +782,7 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
               <DialogHeader>
                 <DialogTitle className="flex flex-wrap items-center gap-2">
                   {detailAsset.displayName}
-                  <span className="text-xs font-normal text-muted-foreground tabular-nums">{detailAsset.apyLabel} APY</span>
+                  <span className="text-xs font-normal text-muted-foreground tabular-nums">{apyInline(detailAsset)}</span>
                   <RiskChip riskClass={detailAsset.riskClass} />
                 </DialogTitle>
               </DialogHeader>

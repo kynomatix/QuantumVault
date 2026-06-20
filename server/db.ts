@@ -413,6 +413,18 @@ export async function ensureSchema() {
       `CREATE UNIQUE INDEX IF NOT EXISTS vault_positions_bot_unique ON vault_positions (wallet_address, trading_bot_id, asset_key) WHERE trading_bot_id IS NOT NULL`,
       `CREATE INDEX IF NOT EXISTS idx_vault_positions_bot ON vault_positions (trading_bot_id) WHERE trading_bot_id IS NOT NULL`,
       `ALTER TABLE vault_positions DROP CONSTRAINT IF EXISTS vault_positions_wallet_asset_unique`,
+
+      // --- Phase 1 Vaults: yield-oracle realized-APY price snapshots. ---
+      // Display-only series; the yield oracle annualizes the movement of each
+      // asset's on-chain price over time. One row per (asset, sample). Additive +
+      // idempotent. Compound index serves the per-asset trailing-window scan.
+      `CREATE TABLE IF NOT EXISTS yield_price_snapshots (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        asset_key text NOT NULL,
+        price_usdc_per_token numeric(30, 12) NOT NULL,
+        as_of timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_yield_price_snapshots_asset_time ON yield_price_snapshots (asset_key, as_of)`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner

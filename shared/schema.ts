@@ -416,6 +416,33 @@ export const insertVaultPositionSchema = createInsertSchema(vaultPositions).omit
 export type InsertVaultPosition = z.infer<typeof insertVaultPositionSchema>;
 export type VaultPosition = typeof vaultPositions.$inferSelect;
 
+// Phase 1 Vaults: yield-oracle price/rate snapshots. The yield oracle measures
+// REALIZED APY per asset from the movement of its own on-chain price over time,
+// never a protocol's projected/marketing rate. One row per (asset, sample):
+//   - redemption_rate assets (Kamino, Jupiter Lend): priceUsdcPerToken is the
+//     on-chain redemption rate (USDC per whole token), noise-free.
+//   - market_quote assets (Perena USD*, ONyc, USDY): priceUsdcPerToken is a fixed
+//     reference $1000 USDC->token buy quote, reduced to USDC per whole token.
+// assetKey is the stable registry key from server/vault/yield-assets.ts. Rows are
+// pruned past a bounded retention window; this table is display-only (no money).
+export const yieldPriceSnapshots = pgTable("yield_price_snapshots", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  assetKey: text("asset_key").notNull(),
+  // USDC value of one whole token at sample time. High precision; display-only.
+  priceUsdcPerToken: decimal("price_usdc_per_token", { precision: 30, scale: 12 }).notNull(),
+  asOf: timestamp("as_of").defaultNow().notNull(),
+}, (table) => ({
+  // Trailing-window reads scan one asset's series ordered by time.
+  assetTimeIdx: index("idx_yield_price_snapshots_asset_time").on(table.assetKey, table.asOf),
+}));
+
+export const insertYieldPriceSnapshotSchema = createInsertSchema(yieldPriceSnapshots).omit({
+  id: true,
+  asOf: true,
+});
+export type InsertYieldPriceSnapshot = z.infer<typeof insertYieldPriceSnapshotSchema>;
+export type YieldPriceSnapshot = typeof yieldPriceSnapshots.$inferSelect;
+
 export const webhookLogs = pgTable("webhook_logs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   tradingBotId: varchar("trading_bot_id").references(() => tradingBots.id, { onDelete: "set null" }),

@@ -1433,6 +1433,7 @@ import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransactio
 import { getBestQuote } from "./swap/index.js";
 import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
 import { getEnabledYieldAssets, getYieldAssetByKey } from "./vault/yield-assets";
+import { getYieldTableCached } from "./vault/yield-oracle";
 import { detectParkedYieldTokens as detectParkedYieldTokensPure } from "./vault/parked-tokens";
 import { getUserFungibleTokens } from "./swap/helius-tokens.js";
 
@@ -8052,26 +8053,42 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
 
-      const assets = getEnabledYieldAssets().map((a) => ({
-        key: a.key,
-        displayName: a.displayName,
-        mint: a.mint,
-        decimals: a.decimals,
-        route: a.route,
-        valuation: a.valuation,
-        /** True when the token's USDC price floats with the market (basis risk). */
-        priceFloats: a.valuation === "market_quote",
-        /** User-facing risk tier for the inline chip: "stable" | "float". */
-        riskClass: a.riskClass,
-        /** True only for assets that can actually lose value (inline "may lose value" hint). */
-        mayLoseValue: a.mayLoseValue,
-        /** Approximate APY label (carries a "~" qualifier). */
-        apyLabel: a.apyLabel,
-        tag: a.tag,
-        /** Longer plain-language note for the Vault tab detail/expand. */
-        riskNote: a.riskNote,
-        defaultEligible: a.defaultEligible,
-      }));
+      // Realized-APY table from the yield oracle. NON-BLOCKING: serves the cached
+      // table (or {} on a cold process) and kicks an async refresh; this endpoint
+      // never waits on external quotes/RPC. apy is a real measured number or null
+      // (with `apyMethod` saying why) — the client never shows a marketing number.
+      const yieldTable = getYieldTableCached();
+      const assets = getEnabledYieldAssets().map((a) => {
+        const y = yieldTable[a.key];
+        return {
+          key: a.key,
+          displayName: a.displayName,
+          mint: a.mint,
+          decimals: a.decimals,
+          route: a.route,
+          valuation: a.valuation,
+          /** True when the token's USDC price floats with the market (basis risk). */
+          priceFloats: a.valuation === "market_quote",
+          /** User-facing risk tier for the inline chip: "stable" | "float". */
+          riskClass: a.riskClass,
+          /** True only for assets that can actually lose value (inline "may lose value" hint). */
+          mayLoseValue: a.mayLoseValue,
+          /** Legacy approximate label. Kept for back-compat; the UI prefers `apy`. */
+          apyLabel: a.apyLabel,
+          /** Realized net APY (percent) or null when not yet measurable/stale. */
+          apy: y?.apy ?? null,
+          apyBase: y?.apyBase ?? null,
+          apyReward: y?.apyReward ?? null,
+          /** "trailing" | "accruing" | "unavailable" — why apy is or isn't a number. */
+          apyMethod: y?.method ?? "unavailable",
+          /** ms epoch of the freshest sample backing apy, or null. */
+          apyAsOf: y?.asOf ?? null,
+          tag: a.tag,
+          /** Longer plain-language note for the Vault tab detail/expand. */
+          riskNote: a.riskNote,
+          defaultEligible: a.defaultEligible,
+        };
+      });
 
       res.json({ spareUsdc, maxPriceImpactPct: VAULT_MAX_PRICE_IMPACT, assets, scope: scope.scope, tradingBotId: scope.tradingBotId });
     } catch (error: any) {

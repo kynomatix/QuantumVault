@@ -15,6 +15,7 @@ import {
   botPositions,
   equityEvents,
   vaultPositions,
+  yieldPriceSnapshots,
   webhookLogs,
   subscriptions,
   portfolios,
@@ -49,6 +50,8 @@ import {
   type EquityEvent,
   type InsertEquityEvent,
   type VaultPosition,
+  type YieldPriceSnapshot,
+  type InsertYieldPriceSnapshot,
   type WebhookLog,
   type InsertWebhookLog,
   type Subscription,
@@ -341,6 +344,11 @@ export interface IStorage {
   getVaultPositions(walletAddress: string, tradingBotId?: string | null): Promise<VaultPosition[]>;
   applyVaultPark(p: { walletAddress: string; tradingBotId?: string | null; assetKey: string; mint: string; tokensReceivedRaw: string; usdcSpent: number; txSignature?: string; txBlockTime?: Date; notes?: string; }): Promise<VaultPosition>;
   applyVaultUnpark(p: { walletAddress: string; tradingBotId?: string | null; assetKey: string; mint: string; tokensSoldRaw: string; usdcReceived: number; txSignature?: string; txBlockTime?: Date; notesPrefix?: string; }): Promise<{ position: VaultPosition; costBasisRemoved: number; realizedPnl: number }>;
+
+  // Phase 1 Vaults yield oracle: display-only realized-APY price snapshots.
+  insertYieldPriceSnapshot(s: InsertYieldPriceSnapshot): Promise<YieldPriceSnapshot>;
+  getYieldPriceSnapshots(assetKey: string, since: Date): Promise<YieldPriceSnapshot[]>;
+  pruneYieldPriceSnapshots(olderThan: Date): Promise<void>;
 
   getBotPosition(tradingBotId: string, market: string): Promise<BotPosition | undefined>;
   getBotPositions(walletAddress: string): Promise<BotPosition[]>;
@@ -2146,6 +2154,23 @@ export class DatabaseStorage implements IStorage {
 
       return { position: row, costBasisRemoved: costBasisRemoved.toNumber(), realizedPnl: realizedPnl.toNumber() };
     });
+  }
+
+  // --- Phase 1 Vaults yield oracle (display-only price snapshots). ---
+  async insertYieldPriceSnapshot(s: InsertYieldPriceSnapshot): Promise<YieldPriceSnapshot> {
+    return (await db.insert(yieldPriceSnapshots).values(s).returning())[0];
+  }
+
+  // One asset's series at or after `since`, oldest first (drives trailing-window APY).
+  async getYieldPriceSnapshots(assetKey: string, since: Date): Promise<YieldPriceSnapshot[]> {
+    return await db.select().from(yieldPriceSnapshots)
+      .where(and(eq(yieldPriceSnapshots.assetKey, assetKey), gte(yieldPriceSnapshots.asOf, since)))
+      .orderBy(yieldPriceSnapshots.asOf);
+  }
+
+  // Bounded retention: drop snapshots older than the cutoff (cross-asset).
+  async pruneYieldPriceSnapshots(olderThan: Date): Promise<void> {
+    await db.delete(yieldPriceSnapshots).where(lt(yieldPriceSnapshots.asOf, olderThan));
   }
 
   async reconcileDeposit(walletAddress: string, botId: string, gap: number, onChainBalance: number): Promise<boolean> {
