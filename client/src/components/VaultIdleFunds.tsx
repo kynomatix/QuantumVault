@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   TrendingUp,
@@ -9,14 +9,15 @@ import {
   Wallet,
   ShieldCheck,
   HelpCircle,
+  ChevronRight,
+  ArrowLeft,
+  Landmark,
 } from "lucide-react";
 import { useWallet } from "@/hooks/useWallet";
 import { useToast } from "@/hooks/use-toast";
 import { walletAuthHeaders } from "@/lib/queryClient";
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
@@ -25,19 +26,7 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 
 export interface YieldAssetInfo {
@@ -56,7 +45,7 @@ export interface YieldAssetInfo {
   /** Approximate APY label (carries a "~" qualifier). */
   apyLabel: string;
   tag: string;
-  /** Longer plain-language note for the detail popover. */
+  /** Longer plain-language note for the detail dialog. */
   riskNote: string;
   defaultEligible: boolean;
 }
@@ -116,6 +105,11 @@ async function getSessionId(): Promise<string> {
   return data.sessionId as string;
 }
 
+/**
+ * Preview the result of a full park/unpark. The amount is fixed by the action
+ * (all spare USDC in, or the full held balance out) and is passed only so the
+ * server can estimate price impact; the user never types it.
+ */
 function usePreview(args: {
   open: boolean;
   assetKey: string | null;
@@ -124,24 +118,18 @@ function usePreview(args: {
   wallet: string | null;
 }) {
   const { open, assetKey, direction, amount, wallet } = args;
-  const [debounced, setDebounced] = useState(0);
-  useEffect(() => {
-    const id = setTimeout(() => setDebounced(amount), 350);
-    return () => clearTimeout(id);
-  }, [amount]);
-
   return useQuery<PreviewResponse>({
-    queryKey: ["vault-preview", assetKey, direction, debounced, wallet],
+    queryKey: ["vault-preview", assetKey, direction, amount, wallet],
     queryFn: async () => {
       const res = await fetch(
-        `/api/vault/preview?assetKey=${encodeURIComponent(assetKey!)}&direction=${direction}&amount=${debounced}`,
+        `/api/vault/preview?assetKey=${encodeURIComponent(assetKey!)}&direction=${direction}&amount=${amount}`,
         { credentials: "include", headers: walletAuthHeaders() },
       );
       const data = await safeResponseJson(res);
       if (!res.ok) throw new Error(data.error || "Preview failed");
       return data as PreviewResponse;
     },
-    enabled: open && !!assetKey && !!wallet && debounced > 0,
+    enabled: open && !!assetKey && !!wallet && amount > 0,
     staleTime: 8000,
     retry: false,
   });
@@ -187,7 +175,7 @@ function PreviewBox({
       {preview.wouldReject && (
         <div className="flex items-start gap-2 text-destructive pt-1" data-testid="text-preview-reject">
           <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
-          <span>{preview.reason || "This swap would move the price too much. Try a smaller amount."}</span>
+          <span>{preview.reason || "This swap would move the price too much. Try again later."}</span>
         </div>
       )}
     </div>
@@ -213,16 +201,19 @@ function RiskChip({ riskClass }: { riskClass: string }) {
 }
 
 /**
- * The full Idle Funds (Vault) module: master toggle, spare-USDC stat, parked
- * positions, parkable assets, default-asset override, and the park/unpark
- * dialogs. Rendered inline by the "Vault" tab in the app sidebar (App.tsx).
- * `active` gates the data queries (the host passes active); it lets the module
- * mount lazily without firing its queries until the tab is shown.
+ * Vaults: earn on idle funds, one tap in and out.
  *
- * When `botId` is passed (embedded in the bot drawer), it runs in per-bot mode:
- * the account-level master toggle and default-asset setting are hidden, all
- * reads/writes carry `?botId=`/`botId`, and a scope note explains whether this
- * acts on the bot's own wallet (Flash) or the shared account vault (Pacifica/Drift).
+ * The account tab shows a single "Earn" product card; tapping it opens the list
+ * of yield destinations. A future "Auto" mode slots in as a second product card.
+ * Each destination is a tappable card (name, APY, risk, held balance + P/L) that
+ * opens a detail sheet with two automatic actions and NO amount inputs:
+ *   - "Park all spare USDC"  -> the server parks the full on-chain spare balance.
+ *   - "Unpark all to USDC"   -> the server pulls the full held balance back.
+ *
+ * `active` gates the data queries (the host passes active) so the module mounts
+ * lazily. When `botId` is passed (embedded in the bot drawer) it runs in per-bot
+ * mode: the account-level master toggle is hidden, the product-card layer is
+ * skipped (it is already scoped to one bot), and all reads/writes carry `botId`.
  */
 export default function VaultIdleFunds({ active = true, botId }: { active?: boolean; botId?: string }) {
   const { publicKeyString, sessionConnected } = useWallet();
@@ -230,12 +221,9 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
   const queryClient = useQueryClient();
 
   const connected = !!publicKeyString && sessionConnected;
-  // Embedded (per-bot) mode: rendered inside a bot drawer for a single bot. The
-  // drawer's own reveal toggle gates this, so we skip the account-level master
-  // toggle and default-asset setting, and scope all reads/writes to ?botId=.
   const embedded = !!botId;
 
-  // Persisted vault settings (enable + default asset).
+  // Persisted vault settings (master enable).
   const settingsQuery = useQuery<VaultSettings>({
     queryKey: ["vault-settings", publicKeyString],
     queryFn: async () => {
@@ -247,9 +235,8 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
     enabled: active && connected && !embedded,
   });
 
-  // In embedded mode the drawer toggle is the gate, so the park UI is always "on".
+  // In embedded mode the drawer toggle is the gate, so the vault UI is always "on".
   const vaultOn = embedded ? true : (settingsQuery.data?.vaultEnabled ?? false);
-  const defaultAsset = settingsQuery.data?.vaultDefaultAsset ?? null;
   const [savingSettings, setSavingSettings] = useState(false);
 
   const saveVaultSettings = async (patch: Partial<VaultSettings>) => {
@@ -313,39 +300,58 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
     queryClient.invalidateQueries({ queryKey: ["vault-positions", publicKeyString, botId ?? null] });
   };
 
-  // --- Park dialog / embedded inline form ---
-  // parkAsset doubles as the embedded dropdown selection (no dialog in that mode).
-  const [parkAsset, setParkAsset] = useState<YieldAssetInfo | null>(null);
-  const [parkAmount, setParkAmount] = useState("");
+  const positionByKey = useMemo(() => {
+    const m = new Map<string, PositionView>();
+    for (const p of positions) m.set(p.assetKey, p);
+    return m;
+  }, [positions]);
+
+  const totalParked = useMemo(
+    () => positions.reduce((sum, p) => sum + (p.currentValueUsdc ?? 0), 0),
+    [positions],
+  );
+  const hasPositions = positions.length > 0;
+
+  // Account mode: whether the "Earn" product card is expanded into the list.
+  const [productOpen, setProductOpen] = useState(false);
+  // The destination whose detail sheet is open (drives both park-all + unpark-all).
+  const [detailAsset, setDetailAsset] = useState<YieldAssetInfo | null>(null);
+  // Confirm sheet for unparking a holding that has no parkable asset row.
+  const [unparkConfirm, setUnparkConfirm] = useState<{ assetKey: string; displayName: string } | null>(null);
   const [parking, setParking] = useState(false);
-  // "How parking works" dialog (embedded/per-bot mode only).
+  const [unparking, setUnparking] = useState(false);
   const [showHow, setShowHow] = useState(false);
-  const parkNum = Number(parkAmount) || 0;
+
+  const detailHeld = detailAsset ? positionByKey.get(detailAsset.key)?.onChainAmount ?? 0 : 0;
+  const detailPosition = detailAsset ? positionByKey.get(detailAsset.key) ?? null : null;
+
   const parkPreview = usePreview({
-    open: !!parkAsset,
-    assetKey: parkAsset?.key ?? null,
+    open: !!detailAsset,
+    assetKey: detailAsset?.key ?? null,
     direction: "park",
-    amount: parkNum,
+    amount: spareUsdc,
+    wallet: publicKeyString,
+  });
+  const unparkPreview = usePreview({
+    open: !!detailAsset && detailHeld > 0,
+    assetKey: detailAsset?.key ?? null,
+    direction: "unpark",
+    amount: detailHeld,
     wallet: publicKeyString,
   });
 
-  const closePark = () => {
-    setParkAsset(null);
-    setParkAmount("");
-  };
-
-  const handlePark = async () => {
-    if (!parkAsset) return;
-    if (!(parkNum > 0)) {
-      toast({ title: "Enter an amount", description: "Type how much USDC to park.", variant: "destructive" });
-      return;
+  // Reset the expanded/detail state when the tab is hidden or the vault is off.
+  useEffect(() => {
+    if (!active || !vaultOn) {
+      setProductOpen(false);
+      setDetailAsset(null);
     }
-    if (parkNum > spareUsdc + 1e-9) {
-      toast({
-        title: "Not enough spare USDC",
-        description: `You have ${usd(spareUsdc)} available to park.`,
-        variant: "destructive",
-      });
+  }, [active, vaultOn]);
+
+  const handleParkAll = async () => {
+    if (!detailAsset) return;
+    if (!(spareUsdc > 0)) {
+      toast({ title: "No spare USDC", description: "There is no idle USDC to park right now.", variant: "destructive" });
       return;
     }
     setParking(true);
@@ -354,18 +360,16 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
       const res = await fetch("/api/vault/park", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
-        body: JSON.stringify({ assetKey: parkAsset.key, amountUsdc: parkNum, sessionId, botId }),
+        body: JSON.stringify({ assetKey: detailAsset.key, all: true, sessionId, botId }),
         credentials: "include",
       });
       const data = await safeResponseJson(res);
       if (!res.ok) throw new Error(data.error || "Park failed");
       toast({
         title: "Parked",
-        description: `Received ${tok(data.tokensReceived)} ${parkAsset.displayName}.${data.dbWarning ? ` ${data.dbWarning}` : ""}`,
+        description: `Put ${usd(data.usdcSpent)} to work in ${detailAsset.displayName}.${data.dbWarning ? ` ${data.dbWarning}` : ""}`,
       });
-      // Embedded keeps the token selected (only clears the amount); account closes the dialog.
-      if (embedded) setParkAmount("");
-      else closePark();
+      setDetailAsset(null);
       refetchAll();
     } catch (e: any) {
       toast({ title: "Park failed", description: e.message || "Something went wrong.", variant: "destructive" });
@@ -374,56 +378,14 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
     }
   };
 
-  // Embedded mode: auto-select a sensible default token so the dropdown isn't empty.
-  useEffect(() => {
-    if (!embedded || parkAsset || assets.length === 0) return;
-    setParkAsset(assets.find((a) => a.defaultEligible) ?? assets[0]);
-  }, [embedded, assets, parkAsset]);
-
-  // --- Unpark dialog ---
-  const [unparkPos, setUnparkPos] = useState<PositionView | null>(null);
-  const [unparkAmount, setUnparkAmount] = useState("");
-  const [unparkAll, setUnparkAll] = useState(false);
-  const [unparking, setUnparking] = useState(false);
-  const unparkNum = Number(unparkAmount) || 0;
-  const unparkPreview = usePreview({
-    open: !!unparkPos,
-    assetKey: unparkPos?.assetKey ?? null,
-    direction: "unpark",
-    amount: unparkNum,
-    wallet: publicKeyString,
-  });
-
-  const closeUnpark = () => {
-    setUnparkPos(null);
-    setUnparkAmount("");
-    setUnparkAll(false);
-  };
-
-  const handleUnpark = async () => {
-    if (!unparkPos) return;
-    if (!unparkAll && !(unparkNum > 0)) {
-      toast({ title: "Enter an amount", description: "Type how much to unpark, or choose Max.", variant: "destructive" });
-      return;
-    }
-    if (!unparkAll && unparkNum > unparkPos.onChainAmount + 1e-9) {
-      toast({
-        title: "Amount too high",
-        description: `You hold ${tok(unparkPos.onChainAmount)} ${unparkPos.displayName}.`,
-        variant: "destructive",
-      });
-      return;
-    }
+  const handleUnparkAll = async (assetKey: string, displayName: string) => {
     setUnparking(true);
     try {
       const sessionId = await getSessionId();
-      const body: Record<string, unknown> = { assetKey: unparkPos.assetKey, sessionId, botId };
-      if (unparkAll) body.all = true;
-      else body.amountToken = unparkNum;
       const res = await fetch("/api/vault/unpark", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ assetKey, all: true, sessionId, botId }),
         credentials: "include",
       });
       const data = await safeResponseJson(res);
@@ -436,7 +398,8 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
         title: "Unparked",
         description: `Received ${usd(data.usdcReceived)} USDC.${pnl}${data.dbWarning ? ` ${data.dbWarning}` : ""}`,
       });
-      closeUnpark();
+      setDetailAsset(null);
+      setUnparkConfirm(null);
       refetchAll();
     } catch (e: any) {
       toast({ title: "Unpark failed", description: e.message || "Something went wrong.", variant: "destructive" });
@@ -445,511 +408,434 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
     }
   };
 
-  const totalParked = useMemo(
-    () => positions.reduce((sum, p) => sum + (p.currentValueUsdc ?? 0), 0),
-    [positions],
+  // --- Reusable pieces -------------------------------------------------------
+
+  const spareStat = (
+    <div className="bg-muted/30 rounded-lg border border-border/50 p-3 flex items-center gap-2">
+      <Wallet className="w-4 h-4 text-muted-foreground" />
+      <span className="text-sm text-muted-foreground">USDC available to earn</span>
+      <span className="ml-auto text-lg font-bold tabular-nums" data-testid="text-spare-usdc">
+        {assetsQuery.isLoading ? "..." : usd(spareUsdc)}
+      </span>
+    </div>
   );
 
-  const hasPositions = positions.length > 0;
-
-  const positionsBlock = (
-    <section data-testid="section-vault-positions">
-      <h4 className="text-sm font-semibold mb-2">Your parked positions</h4>
-      {positionsQuery.isLoading ? (
-        <Skeleton className="h-20 w-full" />
-      ) : !hasPositions ? (
-        <p className="text-muted-foreground text-sm" data-testid="text-no-positions">
-          You have not parked anything yet.
-        </p>
-      ) : (
-        <div className="rounded-lg border border-border/50 divide-y divide-border/40 max-h-72 overflow-y-auto">
-          {positions.map((p) => {
-            const pnl = p.unrealizedPnl;
-            const pnlPositive = (pnl ?? 0) >= 0;
-            return (
-              <div key={p.assetKey} className="p-3" data-testid={`row-position-${p.assetKey}`}>
-                <div className="flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="font-medium truncate">{p.displayName}</div>
-                    <div className="text-xs text-muted-foreground tabular-nums">
-                      {tok(p.onChainAmount)} held
-                    </div>
-                  </div>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => {
-                      setUnparkPos(p);
-                      setUnparkAll(false);
-                      setUnparkAmount("");
-                    }}
-                    data-testid={`button-unpark-${p.assetKey}`}
-                  >
-                    Unpark
-                  </Button>
-                </div>
-                <div className="grid grid-cols-3 gap-2 mt-2 text-xs">
-                  <div>
-                    <div className="text-muted-foreground">Value</div>
-                    <div className="font-medium tabular-nums" data-testid={`text-value-${p.assetKey}`}>
-                      {usd(p.currentValueUsdc)}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-muted-foreground">Cost</div>
-                    <div className="font-medium tabular-nums" data-testid={`text-basis-${p.assetKey}`}>
-                      {p.costBasisMissing ? "unknown" : usd(p.costBasisUsdc)}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-muted-foreground">P/L</div>
-                    <div
-                      className={`font-medium flex items-center gap-1 tabular-nums ${
-                        pnl === null ? "" : pnlPositive ? "text-emerald-500" : "text-destructive"
-                      }`}
-                      data-testid={`text-pnl-${p.assetKey}`}
-                    >
-                      {pnl === null ? (
-                        "n/a"
-                      ) : (
-                        <>
-                          {pnlPositive ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-                          {pnlPositive ? "+" : ""}
-                          {usd(pnl)}
-                        </>
-                      )}
-                    </div>
-                  </div>
-                </div>
-                {p.costBasisMissing && (
-                  <p className="text-xs text-muted-foreground flex items-start gap-1.5 mt-2">
-                    <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                    We found this token in your wallet but have no record of its cost, so P/L is unavailable.
-                  </p>
-                )}
-              </div>
-            );
-          })}
+  const renderAssetCard = (a: YieldAssetInfo) => {
+    const pos = positionByKey.get(a.key);
+    const held = pos?.onChainAmount ?? 0;
+    const value = pos?.currentValueUsdc ?? null;
+    const pnl = pos?.unrealizedPnl ?? null;
+    const pnlPositive = (pnl ?? 0) >= 0;
+    return (
+      <button
+        key={a.key}
+        type="button"
+        onClick={() => setDetailAsset(a)}
+        className="w-full text-left rounded-lg border border-border/50 hover:border-primary/50 hover:bg-muted/40 transition-colors p-3 flex items-center justify-between gap-3"
+        data-testid={`card-asset-${a.key}`}
+      >
+        <div className="min-w-0 space-y-1">
+          <div className="font-medium flex flex-wrap items-center gap-2">
+            {a.displayName}
+            <span className="text-xs text-muted-foreground tabular-nums">{a.apyLabel} APY</span>
+            <RiskChip riskClass={a.riskClass} />
+          </div>
+          {a.mayLoseValue && (
+            <p className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+              <AlertTriangle className="w-3 h-3" /> Can lose value.
+            </p>
+          )}
+          {held > 0 ? (
+            <div className="text-xs tabular-nums text-muted-foreground" data-testid={`text-card-holding-${a.key}`}>
+              Earning {usd(value)}
+              {pnl !== null && (
+                <span className={pnlPositive ? "text-emerald-500 ml-1" : "text-destructive ml-1"}>
+                  ({pnlPositive ? "+" : ""}
+                  {usd(pnl)})
+                </span>
+              )}
+            </div>
+          ) : (
+            <div className="text-xs text-muted-foreground">{a.tag}</div>
+          )}
         </div>
-      )}
-    </section>
+        <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />
+      </button>
+    );
+  };
+
+  const renderHoldingCard = (p: PositionView) => {
+    const pnl = p.unrealizedPnl;
+    const pnlPositive = (pnl ?? 0) >= 0;
+    return (
+      <div key={p.assetKey} className="rounded-lg border border-border/50 p-3 space-y-2" data-testid={`row-position-${p.assetKey}`}>
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="font-medium truncate">{p.displayName}</div>
+            <div className="text-xs text-muted-foreground tabular-nums">{tok(p.onChainAmount)} held</div>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setUnparkConfirm({ assetKey: p.assetKey, displayName: p.displayName })}
+            data-testid={`button-unpark-${p.assetKey}`}
+          >
+            Unpark all
+          </Button>
+        </div>
+        <div className="grid grid-cols-3 gap-2 text-xs">
+          <div>
+            <div className="text-muted-foreground">Value</div>
+            <div className="font-medium tabular-nums" data-testid={`text-value-${p.assetKey}`}>{usd(p.currentValueUsdc)}</div>
+          </div>
+          <div>
+            <div className="text-muted-foreground">Cost</div>
+            <div className="font-medium tabular-nums" data-testid={`text-basis-${p.assetKey}`}>
+              {p.costBasisMissing ? "unknown" : usd(p.costBasisUsdc)}
+            </div>
+          </div>
+          <div>
+            <div className="text-muted-foreground">P/L</div>
+            <div
+              className={`font-medium flex items-center gap-1 tabular-nums ${
+                pnl === null ? "" : pnlPositive ? "text-emerald-500" : "text-destructive"
+              }`}
+              data-testid={`text-pnl-${p.assetKey}`}
+            >
+              {pnl === null ? (
+                "n/a"
+              ) : (
+                <>
+                  {pnlPositive ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                  {pnlPositive ? "+" : ""}
+                  {usd(pnl)}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+        {p.costBasisMissing && (
+          <p className="text-xs text-muted-foreground flex items-start gap-1.5">
+            <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            We found this token in your wallet but have no record of its cost, so P/L is unavailable.
+          </p>
+        )}
+      </div>
+    );
+  };
+
+  // The destination list (shared by account-expanded and embedded modes).
+  const destinationList = (
+    <div className="space-y-3">
+      {spareStat}
+      <section data-testid="section-vault-assets" className="space-y-2">
+        <h4 className="text-sm font-semibold">Where to earn</h4>
+        {assetsQuery.isLoading ? (
+          <Skeleton className="h-16 w-full" />
+        ) : assets.length === 0 ? (
+          <p className="text-muted-foreground text-sm" data-testid="text-no-assets">
+            No yield destinations are available right now.
+          </p>
+        ) : (
+          <div className="space-y-2">{assets.map(renderAssetCard)}</div>
+        )}
+      </section>
+    </div>
   );
+
+  // --- Render ----------------------------------------------------------------
+
+  let body: ReactNode;
+
+  if (!connected) {
+    body = (
+      <p className="text-sm text-muted-foreground" data-testid="text-vault-disconnected">
+        Connect and sign in to use Vaults.
+      </p>
+    );
+  } else if (embedded) {
+    // -------- Per-bot mode: destinations directly, no product-card layer. --------
+    body = (
+      <div className="space-y-3" data-testid="vault-embedded">
+        {scope && (
+          <p className="text-xs text-muted-foreground" data-testid="text-vault-scope-note">
+            {scope === "account"
+              ? "This bot shares your main account wallet, so earning uses your shared account vault."
+              : "Earning uses this bot's own wallet (its spare USDC)."}
+          </p>
+        )}
+        {destinationList}
+        <button
+          type="button"
+          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          onClick={() => setShowHow(true)}
+          data-testid="link-how-it-works"
+        >
+          <HelpCircle className="w-3.5 h-3.5" /> How Vaults work
+        </button>
+      </div>
+    );
+  } else if (!vaultOn) {
+    // -------- Account mode, vault off: offer to turn on; never hide funds. --------
+    body = (
+      <div className="space-y-4">
+        <div className="flex items-start justify-between gap-3 bg-muted/30 rounded-lg border border-border/50 p-4">
+          <div className="flex-1">
+            <p className="font-medium">Enable Vaults</p>
+            <p className="text-sm text-muted-foreground mt-1">
+              Earn on idle USDC. One tap in, one tap out. Your funds always stay in your own wallet.
+            </p>
+          </div>
+          <Switch
+            checked={vaultOn}
+            disabled={!connected || settingsQuery.isLoading || savingSettings}
+            onCheckedChange={(checked) => saveVaultSettings({ vaultEnabled: checked })}
+            data-testid="switch-vault-enabled"
+          />
+        </div>
+        {hasPositions && (
+          <div className="space-y-2">
+            <p className="text-xs text-amber-500 flex items-start gap-1.5" data-testid="text-vault-off-positions">
+              <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              Vaults are off, so you cannot add new funds. You can still pull back what you already have.
+            </p>
+            {positions.map(renderHoldingCard)}
+          </div>
+        )}
+      </div>
+    );
+  } else if (productOpen) {
+    // -------- Account mode, vault on, product opened: destinations. --------
+    body = (
+      <div className="space-y-4">
+        <button
+          type="button"
+          className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+          onClick={() => setProductOpen(false)}
+          data-testid="button-vault-back"
+        >
+          <ArrowLeft className="w-4 h-4" /> Vaults
+        </button>
+        {destinationList}
+        <button
+          type="button"
+          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          onClick={() => setShowHow(true)}
+          data-testid="link-how-it-works"
+        >
+          <HelpCircle className="w-3.5 h-3.5" /> How Vaults work
+        </button>
+      </div>
+    );
+  } else {
+    // -------- Account mode, vault on: the product home (one card for now). --------
+    body = (
+      <div className="space-y-4">
+        <div className="flex items-start justify-between gap-3 bg-muted/30 rounded-lg border border-border/50 p-4">
+          <div className="flex-1">
+            <p className="font-medium">Vaults on</p>
+            <p className="text-sm text-muted-foreground mt-1">
+              Earn on idle USDC. One tap in, one tap out. Your funds always stay in your own wallet.
+            </p>
+          </div>
+          <Switch
+            checked={vaultOn}
+            disabled={!connected || settingsQuery.isLoading || savingSettings}
+            onCheckedChange={(checked) => saveVaultSettings({ vaultEnabled: checked })}
+            data-testid="switch-vault-enabled"
+          />
+        </div>
+
+        {/* Product cards. One today; a future "Auto" mode slots in beside it. */}
+        <div className="grid gap-3 sm:grid-cols-2">
+          <button
+            type="button"
+            onClick={() => setProductOpen(true)}
+            className="text-left rounded-xl border border-border/60 hover:border-primary/50 hover:bg-muted/40 transition-colors p-4 flex flex-col gap-3"
+            data-testid="card-product-earn"
+          >
+            <div className="flex items-center justify-between">
+              <div className="p-2 rounded-lg bg-primary/15">
+                <Landmark className="w-5 h-5 text-primary" />
+              </div>
+              <ChevronRight className="w-4 h-4 text-muted-foreground" />
+            </div>
+            <div>
+              <div className="font-semibold">Earn</div>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Put idle USDC to work. One tap in, one tap out.
+              </p>
+            </div>
+            <div className="mt-auto pt-2 border-t border-border/40 grid grid-cols-2 gap-2 text-xs">
+              <div>
+                <div className="text-muted-foreground">Currently earning</div>
+                <div className="font-semibold tabular-nums" data-testid="text-product-earning">
+                  {positionsQuery.isLoading ? "..." : usd(totalParked)}
+                </div>
+              </div>
+              <div>
+                <div className="text-muted-foreground">Available to add</div>
+                <div className="font-semibold tabular-nums" data-testid="text-product-available">
+                  {assetsQuery.isLoading ? "..." : usd(spareUsdc)}
+                </div>
+              </div>
+            </div>
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <>
-      <div className="space-y-4">
-        {/* Master toggle (account-level only; the bot drawer has its own reveal toggle) */}
-        {!embedded && (
-          <div className="flex items-start justify-between gap-3 bg-muted/30 rounded-lg border border-border/50 p-4">
-            <div className="flex-1">
-              <p className="font-medium">Enable Vault</p>
-              <p className="text-sm text-muted-foreground mt-1">
-                Put idle USDC to work by parking it in a yield token. Your funds always stay in your own wallet.
-              </p>
-            </div>
-            <Switch
-              checked={vaultOn}
-              disabled={!connected || settingsQuery.isLoading || savingSettings}
-              onCheckedChange={(checked) => saveVaultSettings({ vaultEnabled: checked })}
-              data-testid="switch-vault-enabled"
-            />
-          </div>
-        )}
+      {body}
 
-        {!connected ? (
-          <p className="text-sm text-muted-foreground" data-testid="text-vault-disconnected">
-            Connect and sign in to use the Vault.
-          </p>
-        ) : !vaultOn ? (
-          <>
-            <p className="text-sm text-muted-foreground" data-testid="text-vault-off-hint">
-              Turn on to see your options for earning yield on spare USDC.
-            </p>
-            {/* Even when off, never hide existing parked funds. */}
-            {hasPositions && (
-              <div className="space-y-2">
-                <p className="text-xs text-amber-500 flex items-start gap-1.5" data-testid="text-vault-off-positions">
-                  <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                  Vault is off, so you cannot park new funds. You can still unpark what you already have.
-                </p>
-                {positionsBlock}
-              </div>
-            )}
-          </>
-        ) : embedded ? (
-          /* ---------- Compact per-bot dropdown form ---------- */
-          <div className="space-y-3" data-testid="vault-embedded">
-            {scope && (
-              <p className="text-xs text-muted-foreground" data-testid="text-vault-scope-note">
-                {scope === "account"
-                  ? "This bot shares your main account wallet, so parking uses your shared account vault."
-                  : "Parking uses this bot's own wallet (its spare USDC)."}
-              </p>
-            )}
+      {/* Destination detail sheet: park all / unpark all, no amount inputs. */}
+      <Dialog open={!!detailAsset} onOpenChange={(o) => { if (!o) setDetailAsset(null); }}>
+        <DialogContent data-testid="dialog-asset-detail">
+          {detailAsset && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex flex-wrap items-center gap-2">
+                  {detailAsset.displayName}
+                  <span className="text-xs font-normal text-muted-foreground tabular-nums">{detailAsset.apyLabel} APY</span>
+                  <RiskChip riskClass={detailAsset.riskClass} />
+                </DialogTitle>
+              </DialogHeader>
 
-            <div className="flex items-center justify-between rounded-lg border border-border/50 bg-muted/30 px-3 py-2">
-              <span className="text-xs text-muted-foreground flex items-center gap-1.5">
-                <Wallet className="w-3.5 h-3.5" /> Spare USDC
-              </span>
-              <span className="text-sm font-semibold tabular-nums" data-testid="text-spare-usdc">
-                {assetsQuery.isLoading ? "..." : usd(spareUsdc)}
-              </span>
-            </div>
-
-            {assetsQuery.isLoading ? (
-              <Skeleton className="h-9 w-full" />
-            ) : assets.length === 0 ? (
-              <p className="text-muted-foreground text-sm" data-testid="text-no-assets">
-                No yield tokens are available right now.
-              </p>
-            ) : (
-              <div className="space-y-3">
-                <div>
-                  <Label className="text-xs text-muted-foreground mb-1 block">Token</Label>
-                  <Select
-                    value={parkAsset?.key ?? ""}
-                    onValueChange={(k) => {
-                      setParkAsset(assets.find((a) => a.key === k) ?? null);
-                      setParkAmount("");
-                    }}
-                  >
-                    <SelectTrigger className="h-9" data-testid="select-park-asset">
-                      <SelectValue placeholder="Choose a token" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {assets.map((a) => (
-                        <SelectItem key={a.key} value={a.key} data-testid={`option-park-${a.key}`}>
-                          <span className="flex items-center gap-2">
-                            <span className="font-medium">{a.displayName}</span>
-                            <span className="text-xs text-muted-foreground">{a.apyLabel}</span>
-                            <RiskChip riskClass={a.riskClass} />
-                          </span>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+              <div className="space-y-4">
+                <div className="flex items-start gap-2 text-sm text-muted-foreground rounded-lg border border-border bg-muted/30 p-3">
+                  <ShieldCheck className="w-4 h-4 mt-0.5 shrink-0 text-primary" />
+                  <span data-testid="text-detail-note">{detailAsset.riskNote}</span>
                 </div>
 
-                {parkAsset && (
-                  <>
-                    <div
-                      className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs"
-                      data-testid="text-selected-meta"
-                    >
-                      <span className="text-muted-foreground tabular-nums">{parkAsset.apyLabel} APY</span>
-                      <RiskChip riskClass={parkAsset.riskClass} />
-                      {parkAsset.mayLoseValue && (
-                        <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
-                          <AlertTriangle className="w-3 h-3" /> may lose value
-                        </span>
-                      )}
-                    </div>
+                {detailAsset.mayLoseValue && (
+                  <div
+                    className="flex items-start gap-2 text-xs text-amber-600 dark:text-amber-400 rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5"
+                    data-testid="warning-detail-may-lose"
+                  >
+                    <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                    <span>This token can lose value. Only add funds you are comfortable putting at risk.</span>
+                  </div>
+                )}
 
+                {/* Current holding */}
+                {detailPosition && detailHeld > 0 && (
+                  <div className="rounded-lg border border-border/50 p-3 grid grid-cols-3 gap-2 text-xs" data-testid="box-detail-holding">
                     <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <Label htmlFor="park-amount" className="text-xs text-muted-foreground">
-                          Amount (USDC)
-                        </Label>
-                        <button
-                          type="button"
-                          className="text-xs text-primary hover:underline disabled:opacity-50"
-                          onClick={() => setParkAmount(String(spareUsdc))}
-                          disabled={spareUsdc <= 0}
-                          data-testid="button-park-max"
-                        >
-                          Max {usd(spareUsdc)}
-                        </button>
-                      </div>
-                      <Input
-                        id="park-amount"
-                        inputMode="decimal"
-                        placeholder="0.00"
-                        value={parkAmount}
-                        onChange={(e) => setParkAmount(e.target.value)}
-                        data-testid="input-park-amount"
-                      />
+                      <div className="text-muted-foreground">Value</div>
+                      <div className="font-medium tabular-nums">{usd(detailPosition.currentValueUsdc)}</div>
                     </div>
+                    <div>
+                      <div className="text-muted-foreground">Cost</div>
+                      <div className="font-medium tabular-nums">
+                        {detailPosition.costBasisMissing ? "unknown" : usd(detailPosition.costBasisUsdc)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-muted-foreground">P/L</div>
+                      <div
+                        className={`font-medium tabular-nums ${
+                          detailPosition.unrealizedPnl === null
+                            ? ""
+                            : (detailPosition.unrealizedPnl ?? 0) >= 0
+                              ? "text-emerald-500"
+                              : "text-destructive"
+                        }`}
+                      >
+                        {detailPosition.unrealizedPnl === null
+                          ? "n/a"
+                          : `${(detailPosition.unrealizedPnl ?? 0) >= 0 ? "+" : ""}${usd(detailPosition.unrealizedPnl)}`}
+                      </div>
+                    </div>
+                  </div>
+                )}
 
-                    {parkNum > 0 && (
-                      <PreviewBox
-                        loading={parkPreview.isFetching}
-                        preview={parkPreview.data}
-                        outLabel={parkAsset.displayName}
-                        cap={maxImpact}
-                      />
+                {/* Park all */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">Spare USDC to add</span>
+                    <span className="font-semibold tabular-nums" data-testid="text-detail-spare">{usd(spareUsdc)}</span>
+                  </div>
+                  {spareUsdc > 0 && (
+                    <PreviewBox
+                      loading={parkPreview.isFetching}
+                      preview={parkPreview.data}
+                      outLabel={detailAsset.displayName}
+                      cap={maxImpact}
+                    />
+                  )}
+                  <Button
+                    onClick={handleParkAll}
+                    disabled={parking || !(spareUsdc > 0) || (parkPreview.data?.wouldReject ?? false)}
+                    className="w-full"
+                    data-testid="button-park-all"
+                  >
+                    {parking ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Parking
+                      </>
+                    ) : (
+                      "Park all spare USDC"
                     )}
+                  </Button>
+                  {!(spareUsdc > 0) && (
+                    <p className="text-xs text-muted-foreground text-center">No idle USDC to add right now.</p>
+                  )}
+                </div>
 
+                {/* Unpark all */}
+                {detailHeld > 0 && (
+                  <div className="space-y-2 border-t border-border/40 pt-4">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-muted-foreground">Your balance</span>
+                      <span className="font-semibold tabular-nums">{tok(detailHeld)}</span>
+                    </div>
+                    <PreviewBox
+                      loading={unparkPreview.isFetching}
+                      preview={unparkPreview.data}
+                      outLabel="USDC"
+                      cap={maxImpact}
+                    />
                     <Button
-                      onClick={handlePark}
-                      disabled={parking || !(parkNum > 0) || (parkPreview.data?.wouldReject ?? false)}
+                      variant="outline"
+                      onClick={() => handleUnparkAll(detailAsset.key, detailAsset.displayName)}
+                      disabled={unparking || (unparkPreview.data?.wouldReject ?? false)}
                       className="w-full"
-                      data-testid="button-park-confirm"
+                      data-testid="button-unpark-all"
                     >
-                      {parking ? (
+                      {unparking ? (
                         <>
-                          <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Parking
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Unparking
                         </>
                       ) : (
-                        "Park"
+                        "Unpark all to USDC"
                       )}
                     </Button>
-                  </>
+                  </div>
                 )}
               </div>
-            )}
-
-            {hasPositions && positionsBlock}
-
-            <button
-              type="button"
-              className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-              onClick={() => setShowHow(true)}
-              data-testid="link-how-it-works"
-            >
-              <HelpCircle className="w-3.5 h-3.5" /> How parking works
-            </button>
-          </div>
-        ) : (
-          /* ---------- Account-level full module (teaching home) ---------- */
-          <>
-            <div
-              className="rounded-lg border border-border bg-muted/30 p-3 space-y-2 text-sm"
-              data-testid="box-vault-about"
-            >
-              <div className="flex items-start gap-2 text-muted-foreground">
-                <ShieldCheck className="w-4 h-4 mt-0.5 shrink-0 text-primary" />
-                <span>
-                  Park idle USDC into a yield token to earn while it waits. Your funds never leave your
-                  wallet; we only handle the swap, and each park or unpark is capped at{" "}
-                  {(maxImpact * 100).toFixed(2)}% price impact.
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pl-6 text-xs text-muted-foreground">
-                <span className="flex items-center gap-1.5">
-                  <RiskChip riskClass="stable" /> trades near $1, earns yield
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <RiskChip riskClass="float" /> price can move
-                </span>
-              </div>
-            </div>
-
-            {/* Spare USDC stat */}
-            <div className="bg-muted/30 rounded-lg border border-border/50 p-3 flex items-center gap-2">
-              <Wallet className="w-4 h-4 text-muted-foreground" />
-              <span className="text-sm text-muted-foreground">USDC available to park</span>
-              <span className="ml-auto text-lg font-bold tabular-nums" data-testid="text-spare-usdc">
-                {assetsQuery.isLoading ? "..." : usd(spareUsdc)}
-              </span>
-            </div>
-
-            {hasPositions && positionsBlock}
-
-            {/* Parkable assets table */}
-            <section data-testid="section-vault-assets">
-              <h4 className="text-sm font-semibold mb-2">Available to park</h4>
-              {assetsQuery.isLoading ? (
-                <Skeleton className="h-16 w-full" />
-              ) : assets.length === 0 ? (
-                <p className="text-muted-foreground text-sm" data-testid="text-no-assets">
-                  No yield assets are available right now.
-                </p>
-              ) : (
-                <div className="rounded-lg border border-border/50 divide-y divide-border/40">
-                  {assets.map((a) => (
-                    <div
-                      key={a.key}
-                      className="p-3 flex items-center justify-between gap-3"
-                      data-testid={`row-asset-${a.key}`}
-                    >
-                      <div className="min-w-0">
-                        <div className="font-medium flex flex-wrap items-center gap-2">
-                          {a.displayName}
-                          <span className="text-xs text-muted-foreground tabular-nums">{a.apyLabel} APY</span>
-                          <RiskChip riskClass={a.riskClass} />
-                          <Popover>
-                            <PopoverTrigger asChild>
-                              <button
-                                type="button"
-                                className="text-muted-foreground hover:text-foreground"
-                                aria-label={`About ${a.displayName}`}
-                                data-testid={`button-detail-${a.key}`}
-                              >
-                                <Info className="w-3.5 h-3.5" />
-                              </button>
-                            </PopoverTrigger>
-                            <PopoverContent
-                              className="max-w-xs text-xs leading-relaxed"
-                              data-testid={`popover-detail-${a.key}`}
-                            >
-                              {a.riskNote}
-                            </PopoverContent>
-                          </Popover>
-                        </div>
-                        {a.mayLoseValue && (
-                          <p className="mt-0.5 flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
-                            <AlertTriangle className="w-3 h-3" /> Can lose value.
-                          </p>
-                        )}
-                      </div>
-                      <Button
-                        size="sm"
-                        onClick={() => {
-                          setParkAsset(a);
-                          setParkAmount("");
-                        }}
-                        disabled={spareUsdc <= 0}
-                        data-testid={`button-park-${a.key}`}
-                      >
-                        Park
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
-
-            {/* Default asset override (subtle footer; account-level only) */}
-            {assets.length > 0 && (
-              <div className="flex items-center gap-2 pt-1" data-testid="row-default-asset">
-                <span className="text-xs text-muted-foreground">Default for new parks</span>
-                <Select
-                  value={defaultAsset ?? ""}
-                  disabled={savingSettings}
-                  onValueChange={(v) => saveVaultSettings({ vaultDefaultAsset: v })}
-                >
-                  <SelectTrigger className="h-8 w-44 text-xs ml-auto" data-testid="select-default-asset">
-                    <SelectValue placeholder="Choose a token" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {assets.map((a) => (
-                      <SelectItem key={a.key} value={a.key} data-testid={`option-default-${a.key}`}>
-                        {a.displayName}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-
-      {/* Park dialog (account mode only; embedded mode parks inline). */}
-      <Dialog open={!embedded && !!parkAsset} onOpenChange={(o) => { if (!o) closePark(); }}>
-        <DialogContent data-testid="dialog-park">
-          <DialogHeader>
-            <DialogTitle>Park USDC into {parkAsset?.displayName}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <Label htmlFor="park-amount">Amount (USDC)</Label>
-                <button
-                  type="button"
-                  className="text-xs text-primary hover:underline"
-                  onClick={() => setParkAmount(String(spareUsdc))}
-                  data-testid="button-park-max"
-                >
-                  Max {usd(spareUsdc)}
-                </button>
-              </div>
-              <Input
-                id="park-amount"
-                inputMode="decimal"
-                placeholder="0.00"
-                value={parkAmount}
-                onChange={(e) => setParkAmount(e.target.value)}
-                data-testid="input-park-amount"
-              />
-            </div>
-            {parkAsset?.priceFloats && (
-              <div
-                className="flex items-start gap-2 text-xs text-muted-foreground rounded-lg border border-border bg-muted/30 p-2.5"
-                data-testid="warning-floating-nav-park"
-              >
-                <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-amber-500" />
-                <span>
-                  This token's value goes up and down with the market. You may get back more or less than you put in.
-                </span>
-              </div>
-            )}
-            <PreviewBox
-              loading={parkPreview.isFetching}
-              preview={parkPreview.data}
-              outLabel={parkAsset?.displayName ?? ""}
-              cap={maxImpact}
-            />
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={closePark} disabled={parking} data-testid="button-park-cancel">
-              Cancel
-            </Button>
-            <Button
-              onClick={handlePark}
-              disabled={parking || (parkPreview.data?.wouldReject ?? false)}
-              data-testid="button-park-confirm"
-            >
-              {parking ? (
-                <>
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Parking
-                </>
-              ) : (
-                "Confirm park"
-              )}
-            </Button>
-          </DialogFooter>
+            </>
+          )}
         </DialogContent>
       </Dialog>
 
-      {/* Unpark dialog */}
-      <Dialog open={!!unparkPos} onOpenChange={(o) => { if (!o) closeUnpark(); }}>
-        <DialogContent data-testid="dialog-unpark">
+      {/* Confirm unpark for an "other holding" (no parkable asset row). */}
+      <Dialog open={!!unparkConfirm} onOpenChange={(o) => { if (!o) setUnparkConfirm(null); }}>
+        <DialogContent data-testid="dialog-unpark-confirm">
           <DialogHeader>
-            <DialogTitle>Unpark {unparkPos?.displayName} to USDC</DialogTitle>
+            <DialogTitle>Unpark {unparkConfirm?.displayName} to USDC</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4">
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <Label htmlFor="unpark-amount">Amount ({unparkPos?.displayName})</Label>
-                <button
-                  type="button"
-                  className="text-xs text-primary hover:underline"
-                  onClick={() => {
-                    setUnparkAll(true);
-                    setUnparkAmount(unparkPos ? String(unparkPos.onChainAmount) : "");
-                  }}
-                  data-testid="button-unpark-max"
-                >
-                  Max {tok(unparkPos?.onChainAmount)}
-                </button>
-              </div>
-              <Input
-                id="unpark-amount"
-                inputMode="decimal"
-                placeholder="0.00"
-                value={unparkAmount}
-                onChange={(e) => {
-                  setUnparkAmount(e.target.value);
-                  setUnparkAll(false);
-                }}
-                data-testid="input-unpark-amount"
-              />
-              {unparkAll && (
-                <p className="text-xs text-muted-foreground mt-1" data-testid="text-unpark-all">
-                  Unparking your full balance (uses live on-chain amount).
-                </p>
-              )}
-            </div>
-            <PreviewBox loading={unparkPreview.isFetching} preview={unparkPreview.data} outLabel="USDC" cap={maxImpact} />
-          </div>
+          <p className="text-sm text-muted-foreground">
+            This pulls your full {unparkConfirm?.displayName} balance back to USDC, using the live on-chain amount.
+          </p>
           <DialogFooter>
-            <Button variant="outline" onClick={closeUnpark} disabled={unparking} data-testid="button-unpark-cancel">
+            <Button variant="outline" onClick={() => setUnparkConfirm(null)} disabled={unparking} data-testid="button-unpark-cancel">
               Cancel
             </Button>
             <Button
-              onClick={handleUnpark}
-              disabled={unparking || (unparkPreview.data?.wouldReject ?? false)}
+              onClick={() => unparkConfirm && handleUnparkAll(unparkConfirm.assetKey, unparkConfirm.displayName)}
+              disabled={unparking}
               data-testid="button-unpark-confirm"
             >
               {unparking ? (
@@ -957,33 +843,32 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Unparking
                 </>
               ) : (
-                "Confirm unpark"
+                "Unpark all"
               )}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* How parking works (embedded/per-bot mode link) */}
+      {/* How Vaults work */}
       <Dialog open={showHow} onOpenChange={setShowHow}>
         <DialogContent data-testid="dialog-how-it-works">
           <DialogHeader>
-            <DialogTitle>How parking works</DialogTitle>
+            <DialogTitle>How Vaults work</DialogTitle>
           </DialogHeader>
           <div className="space-y-3 text-sm text-muted-foreground">
             <p>
-              Parking puts idle USDC into a yield token so it earns while it waits. Your funds stay in
-              this wallet; we only do the swap.
+              Vaults put idle USDC into a yield destination so it earns while it waits. Tap in to add all your spare
+              USDC; tap out to pull your full balance back. Your funds stay in this wallet; we only handle the move.
             </p>
             <p>
-              Each park or unpark is capped at {(maxImpact * 100).toFixed(2)}% price impact, so a thin
-              market cannot move your money at a bad price.
+              Each move is capped at {(maxImpact * 100).toFixed(2)}% price impact, so a thin market cannot move your
+              money at a bad price.
             </p>
             <p className="flex flex-wrap items-center gap-1.5">
-              <RiskChip riskClass="stable" /> tokens trade near $1 and earn yield.
-              <RiskChip riskClass="float" /> tokens can move in price, and one (OnRe ONyc) can lose value.
+              <RiskChip riskClass="stable" /> trades near $1 and earns yield.
+              <RiskChip riskClass="float" /> price can move, and one (OnRe ONyc) can lose value.
             </p>
-            <p>See the Vault tab in the sidebar for full details on each token.</p>
           </div>
         </DialogContent>
       </Dialog>

@@ -1867,7 +1867,7 @@ export default function AppPage() {
               { id: 'bots' as NavItem, icon: Bot, label: 'My Bots' },
               { id: 'marketplace' as NavItem, icon: Store, label: 'Marketplace' },
               { id: 'wallet' as NavItem, icon: Wallet, label: 'Wallet' },
-              { id: 'vault' as NavItem, icon: VaultIcon, label: 'Vault' },
+              { id: 'vault' as NavItem, icon: VaultIcon, label: 'Vaults' },
               { id: 'portfolio' as NavItem, icon: BarChart3, label: 'Portfolio' },
               { id: 'leaderboard' as NavItem, icon: Users, label: 'Leaderboard' },
               { id: 'settings' as NavItem, icon: Settings, label: 'Settings' },
@@ -2105,14 +2105,6 @@ export default function AppPage() {
                 <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-violet-500 rounded-full animate-pulse" />
               )}
             </a>
-            <button 
-              onClick={() => { setActiveNav('vault'); setSidebarOpen(false); }}
-              className="p-2 hover:bg-muted rounded-lg"
-              data-testid="button-vault-header"
-              title="Vault"
-            >
-              <VaultIcon className="w-5 h-5 text-muted-foreground" />
-            </button>
             <a 
               href="/analytics" 
               className="p-2 hover:bg-muted rounded-lg"
@@ -2294,10 +2286,10 @@ export default function AppPage() {
                   </div>
                   <div>
                     <h1 className="font-display font-bold text-2xl" data-testid="text-vaults-title">
-                      Vault
+                      Vaults
                     </h1>
                     <p className="text-sm text-muted-foreground">
-                      Earn yield on idle USDC. Your funds stay in your own wallet.
+                      Earn on idle funds. One tap in, one tap out. Your funds stay in your own wallet.
                     </p>
                   </div>
                 </div>
