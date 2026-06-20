@@ -304,6 +304,7 @@ export default function AppPage() {
   const [copiedToken, setCopiedToken] = useState(false);
   const [closeAllDialogOpen, setCloseAllDialogOpen] = useState(false);
   const [closingAllPositions, setClosingAllPositions] = useState(false);
+  const [recoveringRent, setRecoveringRent] = useState(false);
   const [resetTradingDialogOpen, setResetTradingDialogOpen] = useState(false);
   const [resettingTradingAccount, setResettingTradingAccount] = useState(false);
   const [resetStep, setResetStep] = useState<'idle' | 'closing' | 'settling' | 'sweeping' | 'withdrawing' | 'deleting' | 'complete'>('idle');
@@ -983,6 +984,51 @@ export default function AppPage() {
       });
     } finally {
       setClosingAllPositions(false);
+    }
+  };
+
+  const handleRecoverTokenRents = async () => {
+    setRecoveringRent(true);
+    try {
+      const sessionRes = await fetch('/api/auth/session', { credentials: 'include' });
+      const sessionData = await safeResponseJson(sessionRes);
+      if (!sessionData.hasSession || !sessionData.sessionId) {
+        throw new Error('Please reconnect your wallet and try again.');
+      }
+      const res = await fetch('/api/wallet/recover-token-rents', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(solanaWallet.publicKey ? { 'x-wallet-address': solanaWallet.publicKey.toString() } : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify({ sessionId: sessionData.sessionId }),
+      });
+      const data = await safeResponseJson(res);
+      if (!res.ok) {
+        throw new Error(data.error || data.message || 'Could not recover rent right now.');
+      }
+      if (data.closedCount > 0) {
+        const sol = Number(data.solReclaimed || 0).toFixed(4);
+        toast({
+          title: data.partial ? 'Partly recovered' : 'Rent reclaimed',
+          description: `Recovered ${sol} SOL from ${data.closedCount} unused account${data.closedCount === 1 ? '' : 's'}.${data.partial ? ' Some accounts were left for a retry.' : ''}`,
+        });
+      } else {
+        toast({
+          title: 'Nothing to recover',
+          description: 'You have no unused token accounts right now.',
+        });
+      }
+      handleRefreshAll();
+    } catch (error: any) {
+      toast({
+        title: 'Recovery failed',
+        description: error.message || 'Could not recover rent right now.',
+        variant: 'destructive',
+      });
+    } finally {
+      setRecoveringRent(false);
     }
   };
 
@@ -4644,6 +4690,41 @@ export default function AppPage() {
                           </motion.div>
                         )}
                       </AnimatePresence>
+                    </div>
+
+                    {/* Account Upkeep: reclaim SOL rent from empty token accounts */}
+                    <div className="gradient-border p-0 noise">
+                      <div className="p-4">
+                        <div className="flex items-center gap-3 mb-2">
+                          <div className="p-2 rounded-full bg-emerald-500/15">
+                            <Fuel className="w-5 h-5 text-emerald-400" />
+                          </div>
+                          <h3 className="font-display font-semibold">Recover unused rent</h3>
+                        </div>
+                        <p className="text-sm text-muted-foreground mb-3">
+                          Solana holds a small SOL deposit (called rent) for every token account your wallet
+                          opens. This returns that SOL to your account for any accounts you no longer use.
+                          It only touches empty accounts, so your balances are never affected.
+                        </p>
+                        <Button
+                          variant="outline"
+                          onClick={handleRecoverTokenRents}
+                          disabled={recoveringRent}
+                          data-testid="button-recover-rent"
+                        >
+                          {recoveringRent ? (
+                            <>
+                              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                              Recovering...
+                            </>
+                          ) : (
+                            <>
+                              <Fuel className="w-4 h-4 mr-2" />
+                              Recover unused rent
+                            </>
+                          )}
+                        </Button>
+                      </div>
                     </div>
 
                     {/* Danger Zone Section */}

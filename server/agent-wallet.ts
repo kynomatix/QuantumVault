@@ -1100,3 +1100,180 @@ export async function executeAgentSwapToUsdc(
     error: r.error,
   };
 }
+
+/**
+ * Build an SPL Token `CloseAccount` instruction (instruction index 9) by hand. This file
+ * deliberately avoids importing from '@solana/spl-token' (its types resolve as non-ESM
+ * here and fail typecheck — see flash-adapter's baseline TS2305s), and rolls its own token
+ * primitives. CloseAccount keys: [account(w), destination(w), owner(signer)].
+ */
+function buildCloseAccountIx(account: PublicKey, destination: PublicKey, owner: PublicKey): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: TOKEN_PROGRAM_ID,
+    keys: [
+      { pubkey: account, isSigner: false, isWritable: true },
+      { pubkey: destination, isSigner: false, isWritable: true },
+      { pubkey: owner, isSigner: true, isWritable: false },
+    ],
+    data: Buffer.from([9]),
+  });
+}
+
+export interface RecoverRentResult {
+  success: boolean;
+  /** Number of empty token accounts actually closed (on-chain confirmed). */
+  closedCount: number;
+  /** Total token accounts the owner had at scan time. */
+  scannedCount: number;
+  /** Accounts skipped because they still held a balance (USDC, parked yield, etc.). */
+  skippedNonEmpty: number;
+  /** REALIZED native-SOL gain (rent reclaimed minus fees paid), read from chain. */
+  solReclaimed: number;
+  signatures: string[];
+  /** True when a later batch failed/timed out after earlier closes already landed. */
+  partial: boolean;
+  /** Human-readable reason the run stopped early (only set when partial). */
+  stoppedReason?: string;
+  error?: string;
+}
+
+/**
+ * Close the agent wallet's EMPTY (zero-balance) SPL token accounts to reclaim the SOL
+ * rent Solana escrows for each one (~0.00204 SOL per account). The reclaimed rent is
+ * returned to the agent wallet itself, topping up its hands-off gas reserve.
+ *
+ * Money-safety:
+ *  - Only accounts whose on-chain balance reads exactly '0' are ever included. The SPL
+ *    Token program ADDITIONALLY rejects CloseAccount on a non-empty account on-chain, so
+ *    a parked yield token or a USDC balance can never be burned even if a read were stale.
+ *  - Fails closed: if the account listing throws, nothing is closed. Below the bare
+ *    network-fee floor, it returns a clear error instead of half-acting.
+ *  - `solReclaimed` is the REALIZED native-lamport delta (after - before), never an
+ *    estimate. An emptied USDC ATA is safe to close: it is re-created automatically on
+ *    the next deposit/swap.
+ */
+export async function recoverEmptyTokenAccountRents(params: {
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+}): Promise<RecoverRentResult> {
+  const base: RecoverRentResult = {
+    success: false, closedCount: 0, scannedCount: 0, skippedNonEmpty: 0, solReclaimed: 0, signatures: [], partial: false,
+  };
+  try {
+    const connection = getConnection();
+    const agentKeypair = resolveAgentKeypair(params.agentSecretKey);
+    const owner = new PublicKey(params.agentPublicKey);
+
+    // The wallet must hold at least the single-signature network fee to sign anything.
+    // True zero boundary -> fail closed with a clear message (recover nothing).
+    const lamportsBefore = await connection.getBalance(owner, 'confirmed');
+    if (lamportsBefore < 5000) {
+      return { ...base, error: 'Not enough SOL to pay the network fee. Add a little SOL and try again.' };
+    }
+
+    // List the owner's classic SPL token accounts. A throw here -> recover nothing.
+    const parsed = await connection.getParsedTokenAccountsByOwner(owner, { programId: TOKEN_PROGRAM_ID }, 'confirmed');
+    const scannedCount = parsed.value.length;
+
+    const candidates: PublicKey[] = [];
+    let skippedNonEmpty = 0;
+    for (const { pubkey, account } of parsed.value) {
+      const amount: string | undefined = (account.data as any)?.parsed?.info?.tokenAmount?.amount;
+      if (amount === '0') {
+        candidates.push(pubkey);
+      } else {
+        skippedNonEmpty++;
+      }
+    }
+
+    // Strict per-account re-read right before queuing. This isolates a single stale or
+    // unreadable account (skip it) instead of letting it fail an entire batch. Fail
+    // closed: any read error or non-zero balance => the account is NOT closed.
+    const toClose: PublicKey[] = [];
+    for (const pubkey of candidates) {
+      try {
+        const bal = await connection.getTokenAccountBalance(pubkey, 'confirmed');
+        if (bal.value.amount === '0') {
+          toClose.push(pubkey);
+        } else {
+          skippedNonEmpty++;
+        }
+      } catch {
+        // Unreadable -> leave it alone (fail closed); it simply is not counted as closed.
+      }
+    }
+
+    if (toClose.length === 0) {
+      return { success: true, closedCount: 0, scannedCount, skippedNonEmpty, solReclaimed: 0, signatures: [], partial: false };
+    }
+
+    // Close in batches. The program enforces zero-balance-to-close, so a stale read can
+    // at worst fail a batch on-chain, never burn tokens. Stop on the first failed batch
+    // and report what already succeeded (the realized delta below is the source of truth).
+    const BATCH = 18;
+    const signatures: string[] = [];
+    let closedCount = 0;
+    let partial = false;
+    let stoppedReason: string | undefined;
+    for (let i = 0; i < toClose.length; i += BATCH) {
+      const chunk = toClose.slice(i, i + BATCH);
+      const ixs = chunk.map((acct) => buildCloseAccountIx(acct, owner, owner));
+      const { blockhash } = await connection.getLatestBlockhash('confirmed');
+      const message = new TransactionMessage({
+        payerKey: owner,
+        recentBlockhash: blockhash,
+        instructions: ixs,
+      }).compileToV0Message();
+      const tx = new VersionedTransaction(message);
+      tx.sign([agentKeypair]);
+
+      const signature = await connection.sendRawTransaction(tx.serialize(), {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+        maxRetries: 3,
+      });
+
+      let onChainErr: unknown = null;
+      let confirmed = false;
+      for (let t = 0; t < 20; t++) {
+        const statuses = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+        const st = statuses.value[0];
+        if (st) {
+          if (st.err) { onChainErr = st.err; break; }
+          if (st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized') { confirmed = true; break; }
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+      if (onChainErr) {
+        partial = true;
+        stoppedReason = `A close transaction failed on-chain (${JSON.stringify(onChainErr)}). Remaining accounts were left for a retry.`;
+        break;
+      }
+      if (!confirmed) {
+        partial = true;
+        stoppedReason = 'A close transaction was not confirmed in time (it may still land). Remaining accounts were left for a retry.';
+        break;
+      }
+
+      signatures.push(signature);
+      closedCount += chunk.length;
+    }
+
+    // Realized SOL gained = on-chain native delta (rent reclaimed minus fees paid).
+    let lamportsAfter = lamportsBefore;
+    for (let i = 0; i < 6; i++) {
+      lamportsAfter = await connection.getBalance(owner, 'confirmed');
+      if (lamportsAfter !== lamportsBefore) break;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    const solReclaimed = Math.max(0, (lamportsAfter - lamportsBefore) / LAMPORTS_PER_SOL);
+
+    if (closedCount === 0) {
+      return { ...base, scannedCount, skippedNonEmpty, partial, stoppedReason, error: stoppedReason || 'Could not confirm the account close on-chain. Please refresh and try again.' };
+    }
+
+    return { success: true, closedCount, scannedCount, skippedNonEmpty, solReclaimed, signatures, partial, stoppedReason };
+  } catch (error: any) {
+    return { ...base, error: error?.message || 'Rent recovery failed' };
+  }
+}

@@ -1428,7 +1428,7 @@ async function settleAllPnl(
 }
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
-import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, NATIVE_SOL_MINT } from "./agent-wallet";
+import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
 import { getBestQuote } from "./swap/index.js";
 import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
 import { getEnabledYieldAssets } from "./vault/yield-assets";
@@ -2931,6 +2931,9 @@ function parseSignalForRouting(body: any): { action: string | null; contracts: s
 // bot-market combination. The promise chain ensures only one webhook handler
 // for a given key runs at a time. Keys auto-expire when the handler returns.
 const botWebhookLocks = new Map<string, Promise<void>>();
+
+// One token-rent recovery per wallet at a time (see /api/wallet/recover-token-rents).
+const recoverRentInFlight = new Set<string>();
 
 function acquireBotWebhookLock(key: string): Promise<() => void> {
   let release!: () => void;
@@ -7948,6 +7951,58 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       res.json({ ...result, scope: scope.scope, tradingBotId: scope.tradingBotId });
     } catch (error: any) {
       console.error("[Vault] unpark error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // Reclaim the SOL rent escrowed by the agent wallet's EMPTY token accounts. Benign,
+  // money-positive maintenance (lives in Settings, NOT the danger zone). Money-safe: it
+  // only closes zero-balance accounts and the SPL program also rejects closing a
+  // non-empty one, so parked yield / USDC can never be burned. Interactive session UMK.
+  app.post("/api/wallet/recover-token-rents", requireWallet, async (req, res) => {
+    try {
+      const { sessionId } = req.body || {};
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+
+      if (!sessionId) return res.status(400).json({ error: "Session ID required for security verification" });
+      const session = getSession(sessionId);
+      if (!session || session.walletAddress !== req.walletAddress) {
+        return res.status(401).json({ error: "Invalid or expired session. Please reconnect your wallet." });
+      }
+      if (!session.umk) {
+        return res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
+      }
+      if (!wallet.agentPublicKey) return res.status(400).json({ error: "Agent wallet not initialized" });
+
+      // One recovery per wallet at a time. Concurrent clicks/retries would otherwise
+      // race to close the same accounts (the later tx just fails harmlessly, but a clean
+      // 409 is clearer). The on-chain close is idempotent regardless.
+      if (recoverRentInFlight.has(req.walletAddress!)) {
+        return res.status(409).json({ error: "A recovery is already running. Please wait for it to finish." });
+      }
+      recoverRentInFlight.add(req.walletAddress!);
+
+      let agentKey: Awaited<ReturnType<typeof decryptAgentKeyStrict>> = null;
+      try {
+        agentKey = await decryptAgentKeyStrict(req.walletAddress!, session.umk, wallet, wallet.agentPublicKey);
+        if (!agentKey) {
+          return res.status(400).json({ error: "Your wallet needs to be re-keyed. Please sign out and sign back in." });
+        }
+        const result = await recoverEmptyTokenAccountRents({
+          agentPublicKey: wallet.agentPublicKey,
+          agentSecretKey: agentKey.secretKey,
+        });
+        if (!result.success) {
+          return res.status(400).json({ error: result.error || "Rent recovery failed" });
+        }
+        res.json(result);
+      } finally {
+        agentKey?.cleanup();
+        recoverRentInFlight.delete(req.walletAddress!);
+      }
+    } catch (error: any) {
+      console.error("[Wallet] recover-token-rents error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
     }
   });
