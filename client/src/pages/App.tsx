@@ -2278,7 +2278,7 @@ export default function AppPage() {
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -10 }}
-                className="max-w-2xl space-y-6"
+                className="max-w-5xl space-y-6"
               >
                 <div className="flex items-center gap-3">
                   <div className="p-2.5 rounded-full bg-primary/20">
@@ -2293,11 +2293,7 @@ export default function AppPage() {
                     </p>
                   </div>
                 </div>
-                <section className="gradient-border p-0 noise">
-                  <div className="p-4 sm:p-6">
-                    <VaultIdleFunds active={activeNav === 'vault'} />
-                  </div>
-                </section>
+                <VaultIdleFunds active={activeNav === 'vault'} />
               </motion.div>
             )}
             {activeNav === 'dashboard' && (
