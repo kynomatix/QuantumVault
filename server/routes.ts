@@ -1400,6 +1400,8 @@ import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-
 import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRaw, NATIVE_SOL_MINT } from "./agent-wallet";
 import { getBestQuote } from "./swap/index.js";
+import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
+import { getEnabledYieldAssets } from "./vault/yield-assets";
 import { getUserFungibleTokens } from "./swap/helius-tokens.js";
 
 const SWAP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -7560,6 +7562,204 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       });
     } catch (error: any) {
       console.error("Swap-to-USDC error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // === Phase 0a Vaults: manual park / unpark of spare agent-wallet USDC =======
+
+  // List enabled yield assets + the wallet's spare (idle) agent-wallet USDC.
+  app.get("/api/vault/assets", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+
+      let spareUsdc = 0;
+      if (wallet.agentPublicKey) {
+        try {
+          spareUsdc = await getAgentUsdcBalance(wallet.agentPublicKey);
+        } catch {
+          spareUsdc = 0;
+        }
+      }
+
+      const assets = getEnabledYieldAssets().map((a) => ({
+        key: a.key,
+        displayName: a.displayName,
+        mint: a.mint,
+        decimals: a.decimals,
+        type: a.type,
+        tag: a.tag,
+        defaultEligible: a.defaultEligible,
+      }));
+
+      res.json({ spareUsdc, maxPriceImpactPct: VAULT_MAX_PRICE_IMPACT, assets });
+    } catch (error: any) {
+      console.error("[Vault] assets error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // On-chain valued positions + recorded cost basis + unrealized P/L.
+  app.get("/api/vault/positions", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+      if (!wallet.agentPublicKey) return res.json({ positions: [] });
+
+      const positions = await getVaultPositionViews(req.walletAddress!, wallet.agentPublicKey);
+      res.json({ positions });
+    } catch (error: any) {
+      console.error("[Vault] positions error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // Live preview: what a hypothetical park/unpark would yield (read-only quote).
+  app.get("/api/vault/preview", requireWallet, async (req, res) => {
+    try {
+      const assetKey = String(req.query.assetKey || "");
+      const direction = String(req.query.direction || "");
+      const amount = Number(req.query.amount);
+
+      if (!assetKey) return res.status(400).json({ error: "assetKey required" });
+      if (direction !== "park" && direction !== "unpark") {
+        return res.status(400).json({ error: "direction must be 'park' or 'unpark'" });
+      }
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return res.status(400).json({ error: "amount must be a positive number" });
+      }
+
+      let slippageBps: number | undefined;
+      if (req.query.slippageBps !== undefined) {
+        const s = Number(req.query.slippageBps);
+        if (Number.isFinite(s) && s > 0) slippageBps = s;
+      }
+
+      const preview = await previewVaultSwap({ assetKey, direction, amount, slippageBps });
+      res.json(preview);
+    } catch (error: any) {
+      console.error("[Vault] preview error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // Park spare USDC into a yield asset. Interactive session UMK (manual action).
+  app.post("/api/vault/park", requireWallet, async (req, res) => {
+    try {
+      const { assetKey, amountUsdc, sessionId } = req.body || {};
+      if (!assetKey || typeof assetKey !== "string") {
+        return res.status(400).json({ error: "assetKey required" });
+      }
+      if (typeof amountUsdc !== "number" || !(amountUsdc > 0)) {
+        return res.status(400).json({ error: "amountUsdc must be a positive number" });
+      }
+      let slippageBps: number | undefined;
+      if (typeof req.body.slippageBps === "number" && req.body.slippageBps > 0) {
+        slippageBps = req.body.slippageBps;
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      if (!sessionId) return res.status(400).json({ error: "Session ID required for security verification" });
+      const session = getSession(sessionId);
+      if (!session || session.walletAddress !== req.walletAddress) {
+        return res.status(401).json({ error: "Invalid or expired session. Please reconnect your wallet." });
+      }
+      if (!session.umk) {
+        return res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
+      }
+
+      const agentKeyResult = await decryptAgentKeyStrict(req.walletAddress!, session.umk, wallet, wallet.agentPublicKey);
+      if (!agentKeyResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed. Please sign out and sign back in." });
+      }
+
+      let result;
+      try {
+        result = await parkUsdc({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: wallet.agentPublicKey,
+          agentSecretKey: agentKeyResult.secretKey,
+          assetKey,
+          amountUsdc,
+          slippageBps,
+        });
+      } finally {
+        agentKeyResult.cleanup();
+      }
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error || "Park failed", priceImpactPct: result.priceImpactPct ?? null });
+      }
+      res.json(result);
+    } catch (error: any) {
+      console.error("[Vault] park error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // Unpark a yield asset back to USDC. Interactive session UMK (manual action).
+  app.post("/api/vault/unpark", requireWallet, async (req, res) => {
+    try {
+      const { assetKey, amountToken, all, sessionId } = req.body || {};
+      if (!assetKey || typeof assetKey !== "string") {
+        return res.status(400).json({ error: "assetKey required" });
+      }
+      const unparkAll = all === true;
+      if (!unparkAll && (typeof amountToken !== "number" || !(amountToken > 0))) {
+        return res.status(400).json({ error: "amountToken must be a positive number, or set all=true" });
+      }
+      let slippageBps: number | undefined;
+      if (typeof req.body.slippageBps === "number" && req.body.slippageBps > 0) {
+        slippageBps = req.body.slippageBps;
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
+        return res.status(400).json({ error: "Agent wallet not initialized" });
+      }
+
+      if (!sessionId) return res.status(400).json({ error: "Session ID required for security verification" });
+      const session = getSession(sessionId);
+      if (!session || session.walletAddress !== req.walletAddress) {
+        return res.status(401).json({ error: "Invalid or expired session. Please reconnect your wallet." });
+      }
+      if (!session.umk) {
+        return res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
+      }
+
+      const agentKeyResult = await decryptAgentKeyStrict(req.walletAddress!, session.umk, wallet, wallet.agentPublicKey);
+      if (!agentKeyResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed. Please sign out and sign back in." });
+      }
+
+      let result;
+      try {
+        result = await unparkToUsdc({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: wallet.agentPublicKey,
+          agentSecretKey: agentKeyResult.secretKey,
+          assetKey,
+          amountToken: unparkAll ? undefined : amountToken,
+          all: unparkAll,
+          slippageBps,
+        });
+      } finally {
+        agentKeyResult.cleanup();
+      }
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error || "Unpark failed", priceImpactPct: result.priceImpactPct ?? null });
+      }
+      res.json(result);
+    } catch (error: any) {
+      console.error("[Vault] unpark error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
     }
   });

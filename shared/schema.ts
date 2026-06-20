@@ -372,6 +372,34 @@ export const insertEquityEventSchema = createInsertSchema(equityEvents).omit({
 export type InsertEquityEvent = z.infer<typeof insertEquityEventSchema>;
 export type EquityEvent = typeof equityEvents.$inferSelect;
 
+// Phase 0a Vaults: per-wallet parked yield-asset positions. The on-chain token
+// balance is the display source of truth; this row is the cost-basis accounting
+// cache. One row per (wallet, asset). assetKey is a stable registry key from
+// server/vault/yield-assets.ts, never a raw mint or symbol.
+export const vaultPositions = pgTable("vault_positions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: text("wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  assetKey: text("asset_key").notNull(),
+  mint: text("mint").notNull(),
+  // Current parked balance in token base units (raw integer string).
+  tokenAmountRaw: text("token_amount_raw").notNull().default('0'),
+  // Cumulative USDC spent for the current holding (average-cost basis).
+  usdcCostBasis: decimal("usdc_cost_basis", { precision: 20, scale: 6 }).notNull().default('0'),
+  status: text("status").notNull().default('active'),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  uniqueWalletAsset: unique("vault_positions_wallet_asset_unique").on(table.walletAddress, table.assetKey),
+}));
+
+export const insertVaultPositionSchema = createInsertSchema(vaultPositions).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertVaultPosition = z.infer<typeof insertVaultPositionSchema>;
+export type VaultPosition = typeof vaultPositions.$inferSelect;
+
 export const webhookLogs = pgTable("webhook_logs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   tradingBotId: varchar("trading_bot_id").references(() => tradingBots.id, { onDelete: "set null" }),

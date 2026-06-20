@@ -32,6 +32,7 @@ import {
   Star,
   Zap,
   FlaskConical,
+  Vault as VaultIcon,
   Shield,
   ChevronRight,
   ChevronDown,
@@ -2101,6 +2102,14 @@ export default function AppPage() {
               {hasActiveLabRun && (
                 <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-violet-500 rounded-full animate-pulse" />
               )}
+            </a>
+            <a 
+              href="/vault" 
+              className="p-2 hover:bg-muted rounded-lg"
+              data-testid="link-vault-header"
+              title="Vault"
+            >
+              <VaultIcon className="w-5 h-5 text-muted-foreground" />
             </a>
             <a 
               href="/analytics" 

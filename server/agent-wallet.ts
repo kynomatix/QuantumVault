@@ -17,7 +17,7 @@ const IS_MAINNET = SOLANA_ENV === 'mainnet-beta';
 
 const MAINNET_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const DEVNET_USDC_MINT = '8zGuJQqwhZafTah7Uc7Z4tXRnguqkn5KLFAP8oV6PHe2';
-const USDC_MINT = IS_MAINNET ? MAINNET_USDC_MINT : DEVNET_USDC_MINT;
+export const USDC_MINT = IS_MAINNET ? MAINNET_USDC_MINT : DEVNET_USDC_MINT;
 
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
@@ -622,56 +622,106 @@ export async function buildTokenTransferToAgentTransaction(
   };
 }
 
+export interface AgentSwapParams {
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  inputMint: string;
+  outputMint: string;
+  /** Exact input amount to sell, raw base units (ExactIn). */
+  amountRaw: string;
+  slippageBps?: number;
+  /**
+   * Reject the swap when the router's price impact exceeds this fraction
+   * (0.005 = 0.5%). When set, a null/unavailable price impact is also rejected
+   * so a money path never flies blind. Leave undefined to skip the impact gate.
+   */
+  maxPriceImpactPct?: number;
+  /** Minimum SOL the agent must hold for gas (+ first-time output ATA rent). */
+  minSolGas?: number;
+}
+
+export interface AgentSwapResult {
+  success: boolean;
+  signature?: string;
+  /** Realized output-token delta, raw base units. This is the source of truth. */
+  outputReceivedRaw?: string;
+  /** Realized output-token delta in UI units. */
+  outputReceived?: number;
+  /** Exact input amount that was sold (ExactIn), raw base units. */
+  inAmountRaw?: string;
+  /** Price impact the quote was priced at (fraction), or null when unavailable. */
+  priceImpactPct?: number | null;
+  error?: string;
+}
+
+/** Default SOL gas floor for vault swaps. Covers the swap fee plus the rent of a
+ *  first-time output-token ATA that Jupiter may create. */
+const DEFAULT_SWAP_MIN_SOL_GAS = 0.01;
+
 /**
- * SERVER-SIGNED swap of the agent wallet's full balance of `inputMint` → USDC,
- * via the swap aggregator (Jupiter today). Fail-closed: the realized USDC
- * balance delta is the source of truth, so an ambiguous confirmation can never
- * fabricate credited funds. Native SOL input retains a gas reserve.
+ * SERVER-SIGNED swap of an exact amount of `inputMint` into `outputMint` from the
+ * agent wallet, via the swap aggregator (Jupiter today). This is the generalized
+ * core that both the deposit-to-USDC flow and the vault Park/Unpark flow share.
  *
- * Returns the actual USDC received (delta) and the swap signature on success.
+ * Fail-closed: the realized OUTPUT-token balance delta is the source of truth, so
+ * an ambiguous confirmation can never fabricate credited funds. For an ExactIn
+ * swap the input spent equals `amountRaw` exactly.
  */
-export async function executeAgentSwapToUsdc(
-  agentPublicKey: string,
-  agentSecretKey: Uint8Array,
-  inputMint: string,
-  slippageBps: number = 100,
-): Promise<{ success: boolean; signature?: string; usdcReceived?: number; inAmountRaw?: string; error?: string }> {
+export async function executeAgentSwap(params: AgentSwapParams): Promise<AgentSwapResult> {
+  const {
+    agentPublicKey,
+    agentSecretKey,
+    inputMint,
+    outputMint,
+    amountRaw,
+    slippageBps = 100,
+    maxPriceImpactPct,
+    minSolGas = DEFAULT_SWAP_MIN_SOL_GAS,
+  } = params;
+
   try {
-    if (inputMint === USDC_MINT) {
-      return { success: false, error: 'Input token is already USDC — no swap needed' };
+    if (inputMint === outputMint) {
+      return { success: false, error: 'Input and output token are the same, no swap needed' };
+    }
+    const amount = BigInt(amountRaw);
+    if (amount <= BigInt(0)) {
+      return { success: false, error: 'No balance available to swap' };
     }
 
     const connection = getConnection();
     const agentKeypair = resolveAgentKeypair(agentSecretKey);
     const agentPubkey = new PublicKey(agentPublicKey);
 
-    // 1) Determine how much of the input token we can swap.
-    const tokenBal = await getAgentTokenBalanceRaw(agentPublicKey, inputMint);
-    let amountToSwap = BigInt(tokenBal.amountRaw);
-
-    if (inputMint === NATIVE_SOL_MINT) {
-      const reserveLamports = BigInt(Math.round(SWAP_SOL_GAS_RESERVE * LAMPORTS_PER_SOL));
-      amountToSwap = amountToSwap > reserveLamports ? amountToSwap - reserveLamports : BigInt(0);
-    }
-    if (amountToSwap <= BigInt(0)) {
-      return { success: false, error: 'No balance available to swap' };
-    }
-
-    // 2) Agent needs SOL to pay swap fees (+ wSOL rent for native input).
+    // 1) Agent needs SOL to pay swap fees (+ first-time output ATA rent).
     const solLamports = await connection.getBalance(agentPubkey);
-    if (solLamports / LAMPORTS_PER_SOL < 0.005) {
-      return { success: false, error: 'Insufficient SOL in bot wallet for swap gas (need ~0.005 SOL)' };
+    if (solLamports / LAMPORTS_PER_SOL < minSolGas) {
+      return { success: false, error: `Insufficient SOL in bot wallet for swap gas (need ~${minSolGas} SOL). Please top up SOL and retry.` };
     }
 
-    // 3) Quote inputMint → USDC.
+    // 2) Quote the exact input into the output mint.
     const quote = await getBestQuote({
       inputMint,
-      outputMint: USDC_MINT,
-      amountRaw: amountToSwap.toString(),
+      outputMint,
+      amountRaw: amount.toString(),
       slippageBps,
     });
     if (!quote) {
       return { success: false, error: 'No swap route available for this token' };
+    }
+
+    // 3) Price-impact gate. Reject above the cap, and reject a null impact when a
+    //    cap is set: moving idle capital must never proceed on an unknown impact.
+    if (typeof maxPriceImpactPct === 'number') {
+      if (quote.priceImpactPct === null || quote.priceImpactPct === undefined) {
+        return { success: false, priceImpactPct: null, error: 'Swap rejected: the router did not report a price impact' };
+      }
+      if (quote.priceImpactPct > maxPriceImpactPct) {
+        return {
+          success: false,
+          priceImpactPct: quote.priceImpactPct,
+          error: `Swap rejected: price impact ${(quote.priceImpactPct * 100).toFixed(2)}% exceeds the ${(maxPriceImpactPct * 100).toFixed(2)}% cap`,
+        };
+      }
     }
 
     const provider = getProviderByName(quote.provider);
@@ -679,8 +729,8 @@ export async function executeAgentSwapToUsdc(
       return { success: false, error: `Swap provider ${quote.provider} unavailable` };
     }
 
-    // 4) USDC balance BEFORE — the realized delta is our source of truth.
-    const usdcBefore = await getAgentUsdcBalance(agentPublicKey);
+    // 4) Output-token balance BEFORE: the realized delta is our source of truth.
+    const outBefore = BigInt((await getAgentTokenBalanceRaw(agentPublicKey, outputMint)).amountRaw);
 
     // 5) Build, sign, and send the swap transaction.
     const swapTxB64 = await provider.buildSwapTransaction(quote, agentPublicKey);
@@ -695,8 +745,8 @@ export async function executeAgentSwapToUsdc(
 
     // 6) Confirm by polling signature status (avoids the blockhash /
     //    lastValidBlockHeight mismatch of confirmTransaction, which can falsely
-    //    time out). We VERIFY via the USDC balance delta below regardless of
-    //    outcome, so this stays fail-closed.
+    //    time out). We VERIFY via the output delta below regardless of outcome,
+    //    so this stays fail-closed.
     let confirmedErr: unknown = null;
     for (let i = 0; i < 20; i++) {
       const statuses = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
@@ -711,25 +761,80 @@ export async function executeAgentSwapToUsdc(
       return { success: false, signature, error: `Swap transaction failed on-chain: ${JSON.stringify(confirmedErr)}` };
     }
 
-    // 7) Verify the realized USDC delta (retry for RPC lag / late finalization).
-    let usdcReceived = 0;
+    // 7) Verify the realized output-token delta (retry for RPC lag / late finalization).
+    let deltaRaw = BigInt(0);
+    let outDecimals = 0;
     for (let i = 0; i < 6; i++) {
-      const usdcAfter = await getAgentUsdcBalance(agentPublicKey);
-      usdcReceived = usdcAfter - usdcBefore;
-      if (usdcReceived > 0) break;
+      const after = await getAgentTokenBalanceRaw(agentPublicKey, outputMint);
+      outDecimals = after.decimals;
+      deltaRaw = BigInt(after.amountRaw) - outBefore;
+      if (deltaRaw > BigInt(0)) break;
       await new Promise((r) => setTimeout(r, 1500));
     }
 
-    if (usdcReceived <= 0) {
+    if (deltaRaw <= BigInt(0)) {
       return {
         success: false,
         signature,
-        error: 'Swap landed but no USDC increase was detected — please refresh and retry',
+        error: 'Swap landed but no output increase was detected, please refresh and retry',
       };
     }
 
-    return { success: true, signature, usdcReceived, inAmountRaw: amountToSwap.toString() };
+    return {
+      success: true,
+      signature,
+      outputReceivedRaw: deltaRaw.toString(),
+      outputReceived: Number(deltaRaw) / Math.pow(10, outDecimals),
+      inAmountRaw: amount.toString(),
+      priceImpactPct: quote.priceImpactPct,
+    };
   } catch (error: any) {
     return { success: false, error: error?.message || 'Swap failed' };
   }
+}
+
+/**
+ * SERVER-SIGNED swap of the agent wallet's FULL balance of `inputMint` into USDC.
+ * Thin wrapper over executeAgentSwap. Native SOL input retains a gas reserve.
+ * Returns the actual USDC received (delta) and the swap signature on success.
+ */
+export async function executeAgentSwapToUsdc(
+  agentPublicKey: string,
+  agentSecretKey: Uint8Array,
+  inputMint: string,
+  slippageBps: number = 100,
+): Promise<{ success: boolean; signature?: string; usdcReceived?: number; inAmountRaw?: string; error?: string }> {
+  if (inputMint === USDC_MINT) {
+    return { success: false, error: 'Input token is already USDC, no swap needed' };
+  }
+
+  // Swap the full input balance, retaining a SOL gas reserve when selling native SOL.
+  const tokenBal = await getAgentTokenBalanceRaw(agentPublicKey, inputMint);
+  let amountToSwap = BigInt(tokenBal.amountRaw);
+  if (inputMint === NATIVE_SOL_MINT) {
+    const reserveLamports = BigInt(Math.round(SWAP_SOL_GAS_RESERVE * LAMPORTS_PER_SOL));
+    amountToSwap = amountToSwap > reserveLamports ? amountToSwap - reserveLamports : BigInt(0);
+  }
+  if (amountToSwap <= BigInt(0)) {
+    return { success: false, error: 'No balance available to swap' };
+  }
+
+  // Preserve the prior 0.005 SOL gas floor for this flow (no behavior change).
+  const r = await executeAgentSwap({
+    agentPublicKey,
+    agentSecretKey,
+    inputMint,
+    outputMint: USDC_MINT,
+    amountRaw: amountToSwap.toString(),
+    slippageBps,
+    minSolGas: 0.005,
+  });
+
+  return {
+    success: r.success,
+    signature: r.signature,
+    usdcReceived: r.outputReceived,
+    inAmountRaw: r.inAmountRaw,
+    error: r.error,
+  };
 }

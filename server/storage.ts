@@ -12,6 +12,7 @@ import {
   botTrades,
   botPositions,
   equityEvents,
+  vaultPositions,
   webhookLogs,
   subscriptions,
   portfolios,
@@ -45,6 +46,7 @@ import {
   type InsertBotPosition,
   type EquityEvent,
   type InsertEquityEvent,
+  type VaultPosition,
   type WebhookLog,
   type InsertWebhookLog,
   type Subscription,
@@ -331,6 +333,12 @@ export interface IStorage {
   getEquityEvents(walletAddress: string, limit?: number): Promise<EquityEvent[]>;
   getBotEquityEvents(tradingBotId: string, limit?: number): Promise<EquityEvent[]>;
   getBotNetDeposited(tradingBotId: string): Promise<number>;
+
+  // Phase 0a Vaults.
+  getVaultPosition(walletAddress: string, assetKey: string): Promise<VaultPosition | undefined>;
+  getVaultPositions(walletAddress: string): Promise<VaultPosition[]>;
+  applyVaultPark(p: { walletAddress: string; assetKey: string; mint: string; tokensReceivedRaw: string; usdcSpent: number; txSignature?: string; txBlockTime?: Date; notes?: string; }): Promise<VaultPosition>;
+  applyVaultUnpark(p: { walletAddress: string; assetKey: string; mint: string; tokensSoldRaw: string; usdcReceived: number; txSignature?: string; txBlockTime?: Date; notesPrefix?: string; }): Promise<{ position: VaultPosition; costBasisRemoved: number; realizedPnl: number }>;
 
   getBotPosition(tradingBotId: string, market: string): Promise<BotPosition | undefined>;
   getBotPositions(walletAddress: string): Promise<BotPosition[]>;
@@ -1959,6 +1967,160 @@ export class DatabaseStorage implements IStorage {
   async getEquityEventByTxSignature(txSignature: string): Promise<EquityEvent | undefined> {
     const result = await db.select().from(equityEvents).where(eq(equityEvents.txSignature, txSignature)).limit(1);
     return result[0];
+  }
+
+  // --- Phase 0a Vaults -------------------------------------------------------
+
+  async getVaultPosition(walletAddress: string, assetKey: string): Promise<VaultPosition | undefined> {
+    const result = await db.select().from(vaultPositions)
+      .where(and(eq(vaultPositions.walletAddress, walletAddress), eq(vaultPositions.assetKey, assetKey)))
+      .limit(1);
+    return result[0];
+  }
+
+  async getVaultPositions(walletAddress: string): Promise<VaultPosition[]> {
+    return await db.select().from(vaultPositions)
+      .where(eq(vaultPositions.walletAddress, walletAddress))
+      .orderBy(desc(vaultPositions.updatedAt));
+  }
+
+  // Atomic: add parked tokens + add USDC cost basis (average cost) and record the
+  // swap as a taxable equity event, all in one transaction. The realized on-chain
+  // token delta and the exact USDC spent are computed by the caller before this.
+  async applyVaultPark(p: {
+    walletAddress: string;
+    assetKey: string;
+    mint: string;
+    tokensReceivedRaw: string;
+    usdcSpent: number;
+    txSignature?: string;
+    txBlockTime?: Date;
+    notes?: string;
+  }): Promise<VaultPosition> {
+    return await db.transaction(async (tx) => {
+      const lockKey = createHash('sha1').update(`${p.walletAddress}:${p.assetKey}`).digest().readInt32BE(0);
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${778811}, ${lockKey})`);
+
+      const existing = (await tx.select().from(vaultPositions)
+        .where(and(eq(vaultPositions.walletAddress, p.walletAddress), eq(vaultPositions.assetKey, p.assetKey)))
+        .limit(1))[0];
+
+      const newTokens = (BigInt(existing?.tokenAmountRaw ?? '0') + BigInt(p.tokensReceivedRaw)).toString();
+      const newBasis = new Decimal(existing?.usdcCostBasis ?? '0').plus(p.usdcSpent).toFixed(6);
+
+      let row: VaultPosition;
+      if (existing) {
+        row = (await tx.update(vaultPositions)
+          .set({ tokenAmountRaw: newTokens, usdcCostBasis: newBasis, mint: p.mint, status: 'active', updatedAt: new Date() })
+          .where(eq(vaultPositions.id, existing.id))
+          .returning())[0];
+      } else {
+        row = (await tx.insert(vaultPositions)
+          .values({ walletAddress: p.walletAddress, assetKey: p.assetKey, mint: p.mint, tokenAmountRaw: newTokens, usdcCostBasis: newBasis, status: 'active' })
+          .returning())[0];
+      }
+
+      await tx.insert(equityEvents).values({
+        walletAddress: p.walletAddress,
+        eventType: 'vault_park',
+        amount: new Decimal(p.usdcSpent).toFixed(6),
+        assetType: 'USDC',
+        txSignature: p.txSignature ?? null,
+        txBlockTime: p.txBlockTime ?? null,
+        notes: p.notes ?? null,
+      });
+
+      return row;
+    });
+  }
+
+  // Atomic: reduce parked tokens by the exact sold amount, remove a proportional
+  // slice of cost basis (average cost), compute realized P/L, and record the swap
+  // as a taxable equity event. Returns the updated row and the realized figures.
+  async applyVaultUnpark(p: {
+    walletAddress: string;
+    assetKey: string;
+    mint: string;
+    tokensSoldRaw: string;
+    usdcReceived: number;
+    txSignature?: string;
+    txBlockTime?: Date;
+    notesPrefix?: string;
+  }): Promise<{ position: VaultPosition; costBasisRemoved: number; realizedPnl: number }> {
+    return await db.transaction(async (tx) => {
+      const lockKey = createHash('sha1').update(`${p.walletAddress}:${p.assetKey}`).digest().readInt32BE(0);
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${778811}, ${lockKey})`);
+
+      const existing = (await tx.select().from(vaultPositions)
+        .where(and(eq(vaultPositions.walletAddress, p.walletAddress), eq(vaultPositions.assetKey, p.assetKey)))
+        .limit(1))[0];
+      if (!existing) {
+        // No recorded basis (e.g. tokens held on-chain with no DB row, or a prior
+        // park whose DB write failed after a good swap). The swap already happened
+        // on-chain, so we MUST still record the taxable event. Basis is unknown, so
+        // realized P/L cannot be computed; report 0 and note it. We persist a closed
+        // 0/0 row so the position is represented and the event is attached.
+        const closedRow = (await tx.insert(vaultPositions).values({
+          walletAddress: p.walletAddress,
+          assetKey: p.assetKey,
+          mint: p.mint,
+          tokenAmountRaw: '0',
+          usdcCostBasis: '0',
+          status: 'closed',
+        }).returning())[0];
+
+        const noBasisNotes = `${p.notesPrefix ? p.notesPrefix + ' ' : ''}cost basis unknown (no recorded basis), realized P/L not computed`;
+        await tx.insert(equityEvents).values({
+          walletAddress: p.walletAddress,
+          eventType: 'vault_unpark',
+          amount: new Decimal(p.usdcReceived).toFixed(6),
+          assetType: 'USDC',
+          txSignature: p.txSignature ?? null,
+          txBlockTime: p.txBlockTime ?? null,
+          notes: noBasisNotes,
+        });
+
+        return { position: closedRow, costBasisRemoved: 0, realizedPnl: 0 };
+      }
+
+      const beforeTokens = BigInt(existing.tokenAmountRaw);
+      let sold = BigInt(p.tokensSoldRaw);
+      if (sold > beforeTokens) sold = beforeTokens; // clamp; on-chain balance is truth
+
+      const beforeBasis = new Decimal(existing.usdcCostBasis);
+      const costBasisRemoved = beforeTokens > BigInt(0)
+        ? beforeBasis.mul(sold.toString()).div(beforeTokens.toString())
+        : new Decimal(0);
+
+      const newTokens = (beforeTokens - sold).toString();
+      const fullyClosed = newTokens === '0';
+      const newBasis = fullyClosed ? new Decimal(0) : Decimal.max(beforeBasis.minus(costBasisRemoved), 0);
+      const realizedPnl = new Decimal(p.usdcReceived).minus(costBasisRemoved);
+
+      const row = (await tx.update(vaultPositions)
+        .set({
+          tokenAmountRaw: newTokens,
+          usdcCostBasis: newBasis.toFixed(6),
+          status: fullyClosed ? 'closed' : 'active',
+          mint: p.mint,
+          updatedAt: new Date(),
+        })
+        .where(eq(vaultPositions.id, existing.id))
+        .returning())[0];
+
+      const notes = `${p.notesPrefix ? p.notesPrefix + ' ' : ''}cost basis removed ${costBasisRemoved.toFixed(6)} USDC, realized P/L ${realizedPnl.toFixed(6)} USDC`;
+      await tx.insert(equityEvents).values({
+        walletAddress: p.walletAddress,
+        eventType: 'vault_unpark',
+        amount: new Decimal(p.usdcReceived).toFixed(6),
+        assetType: 'USDC',
+        txSignature: p.txSignature ?? null,
+        txBlockTime: p.txBlockTime ?? null,
+        notes,
+      });
+
+      return { position: row, costBasisRemoved: costBasisRemoved.toNumber(), realizedPnl: realizedPnl.toNumber() };
+    });
   }
 
   async reconcileDeposit(walletAddress: string, botId: string, gap: number, onChainBalance: number): Promise<boolean> {

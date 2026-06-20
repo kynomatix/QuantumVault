@@ -379,6 +379,23 @@ export async function ensureSchema() {
       `ALTER TABLE lab_agent_tasks ADD COLUMN IF NOT EXISTS turn_state_changed_at timestamp`,
       `ALTER TABLE lab_agent_tasks ADD COLUMN IF NOT EXISTS step_index integer NOT NULL DEFAULT 0`,
       `ALTER TABLE lab_agent_tasks ADD COLUMN IF NOT EXISTS current_step jsonb`,
+
+      // --- Phase 0a Vaults: per-wallet parked yield-asset positions. ---
+      // Cost-basis accounting cache; on-chain token balance is display truth.
+      // One row per (wallet, asset). Idempotent: safe on fresh / migrated DBs.
+      `CREATE TABLE IF NOT EXISTS vault_positions (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        wallet_address text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        asset_key text NOT NULL,
+        mint text NOT NULL,
+        token_amount_raw text NOT NULL DEFAULT '0',
+        usdc_cost_basis numeric(20, 6) NOT NULL DEFAULT 0,
+        status text NOT NULL DEFAULT 'active',
+        created_at timestamp NOT NULL DEFAULT now(),
+        updated_at timestamp NOT NULL DEFAULT now(),
+        CONSTRAINT vault_positions_wallet_asset_unique UNIQUE (wallet_address, asset_key)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_vault_positions_wallet ON vault_positions (wallet_address)`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner
