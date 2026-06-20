@@ -810,13 +810,15 @@ Vaults offer a short, vetted menu of places to earn — not an endless DeFi list
 
 ### Available Destinations
 
-- **Kamino USDC** (~4-9%, Stable) — Your USDC is supplied to Kamino's USDC lending market and earns interest. Principal stays in USDC terms.
-- **Perena USD\\*** (~10%, Stable) — A yield-bearing stablecoin backed by a pool of stablecoins. Trades near $1; value accrues from the pool's yield.
-- **Jupiter Lend USDC** (~4-5%, Stable) — Your USDC is supplied to Jupiter's USDC lending market and earns interest. Principal stays in USDC terms.
-- **Ondo USDY** (~4-5%, Floating) — A Treasury-backed yield token. Non-US persons only (Regulation S). The price floats up as it earns.
-- **OnRe ONyc** (~10-12%, Floating) — Tokenized reinsurance. The price floats with insurance results and can lose value — the highest-risk option here.
+The ranges below are estimates (marked "est."). In the app, once we've measured a destination's real return from on-chain prices, the live number replaces the estimate automatically.
 
-> **Important:** APY figures are estimates, not guarantees — they move with market conditions. Floating destinations can change in value: OnRe ONyc can lose value, and Ondo USDY is restricted to non-US persons under its own terms. Choose what fits your situation.
+- **Kamino USDC** (~4-9% est., Stable) — Your USDC is supplied to Kamino's USDC lending market and earns interest. Principal stays in USDC terms.
+- **Perena USD\\*** (~10% est., Stable) — A yield-bearing stablecoin backed by a pool of stablecoins. Trades near $1; value accrues from the pool's yield.
+- **Jupiter Lend USDC** (~4-5% est., Stable) — Your USDC is supplied to Jupiter's USDC lending market and earns interest. Principal stays in USDC terms.
+- **Ondo USDY** (~4-5% est., Floating) — A Treasury-backed yield token. Non-US persons only (Regulation S). The price floats up as it earns.
+- **OnRe ONyc** (~10-12% est., Floating) — Tokenized reinsurance. The price floats with insurance results and can lose value — the highest-risk option here.
+
+> **Important:** "est." ranges are estimates, not guarantees; the app shows the real measured rate once it's available. No APY is guaranteed — they move with market conditions. Floating destinations can change in value: OnRe ONyc can lose value, and Ondo USDY is restricted to non-US persons under its own terms. Choose what fits your situation.
 
 ---
 

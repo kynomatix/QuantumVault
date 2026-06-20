@@ -16,12 +16,16 @@
  *     reduced to USDC-per-token. Swap quotes carry spread/impact noise, so this needs
  *     a LONG trailing window (>=14 days) before a number is shown.
  *
- * MONEY-SAFETY / NO-MARKETING CONTRACT (display-only, but the same discipline):
+ * MONEY-SAFETY CONTRACT (display-only, but the same discipline):
  *   - On-chain truth only. The price comes from the same routes/quotes used for money.
- *   - Fail-soft to an HONEST STATUS, never a fabricated or marketing number. When the
- *     window is too short, the source is stale, or the value is anomalous, the entry's
- *     `apy` is null and `method` says why ("accruing" / "unavailable") — the UI then
- *     shows "Earning · rate building" or "Rate unavailable", NOT a guessed percentage.
+ *   - The oracle itself NEVER fabricates or projects a number. When the window is too
+ *     short, the source is stale, or the value is anomalous, the entry's `apy` is null
+ *     and `method` says why ("accruing" / "unavailable"). It is the CALLER's job to
+ *     decide the fallback.
+ *   - DISPLAY FALLBACK (owner-approved): until `apy` is a real measured number, the UI
+ *     shows the asset's estimated RANGE (`apyLabel`) but ALWAYS clearly marked "est."
+ *     (e.g. "~4-9% est." / caption "Est. APY"), so an estimate is never mistaken for
+ *     the measured figure. The moment a real `apy` exists, it replaces the estimate.
  *   - Never throws. Any per-asset error degrades that one asset to "unavailable".
  *
  * LAZY, NON-BLOCKING (owner requirement: no background pollers):
@@ -119,7 +123,7 @@ async function samplePrice(asset: YieldAsset): Promise<number | null> {
       // would persist a wrong price that later surfaces a plausible-but-false APY
       // (the broad clamp would not catch it). Mirror the money path's impact gate
       // (yield-routes quoteWithCap): fail closed on null/non-finite/over-cap impact
-      // so the asset honestly stays "rate building" instead of showing a bad number.
+      // so the asset's `apy` honestly stays null instead of persisting a bad price.
       const impact = q.priceImpactPct;
       if (impact == null || !Number.isFinite(impact) || impact > VAULT_MAX_PRICE_IMPACT) return null;
       const tokensOut = Number(BigInt(q.outAmountRaw)) / Math.pow(10, asset.decimals);

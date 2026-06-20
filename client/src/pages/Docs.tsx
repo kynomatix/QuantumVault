@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Link } from 'wouter';
 import { motion } from 'framer-motion';
 import { 
@@ -1915,12 +1915,34 @@ function VaultsOverviewSection() {
 
 function VaultsDestinationsSection() {
   const destinations = [
-    { name: 'Kamino USDC', apy: '~4-9%', type: 'stable', note: 'Your USDC is supplied to Kamino\'s USDC lending market and earns interest. Principal stays in USDC terms.' },
-    { name: 'Perena USD*', apy: '~10%', type: 'stable', note: 'A yield-bearing stablecoin backed by a pool of stablecoins. Trades near $1; value accrues from the pool\'s yield.' },
-    { name: 'Jupiter Lend USDC', apy: '~4-5%', type: 'stable', note: 'Your USDC is supplied to Jupiter\'s USDC lending market and earns interest. Principal stays in USDC terms.' },
-    { name: 'Ondo USDY', apy: '~4-5%', type: 'float', note: 'A Treasury-backed yield token. Non-US persons only (Regulation S). The price floats up as it earns.' },
-    { name: 'OnRe ONyc', apy: '~10-12%', type: 'float', note: 'Tokenized reinsurance. The price floats with insurance results and can lose value — the highest-risk option.' },
+    { name: 'Kamino USDC', key: 'kamino_usdc', apy: '~4-9%', type: 'stable', note: 'Your USDC is supplied to Kamino\'s USDC lending market and earns interest. Principal stays in USDC terms.' },
+    { name: 'Perena USD*', key: 'perena_usd_star', apy: '~10%', type: 'stable', note: 'A yield-bearing stablecoin backed by a pool of stablecoins. Trades near $1; value accrues from the pool\'s yield.' },
+    { name: 'Jupiter Lend USDC', key: 'jupiter_lend_usdc', apy: '~4-5%', type: 'stable', note: 'Your USDC is supplied to Jupiter\'s USDC lending market and earns interest. Principal stays in USDC terms.' },
+    { name: 'Ondo USDY', key: 'usdy', apy: '~4-5%', type: 'float', note: 'A Treasury-backed yield token. Non-US persons only (Regulation S). The price floats up as it earns.' },
+    { name: 'OnRe ONyc', key: 'onyc', apy: '~10-12%', type: 'float', note: 'Tokenized reinsurance. The price floats with insurance results and can lose value — the highest-risk option.' },
   ];
+
+  // Live realized APY from the public yield oracle. Until a real number is
+  // measured we keep showing the estimated range, marked "est.".
+  const [liveApy, setLiveApy] = useState<Record<string, number | null>>({});
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/vault/yield-rates')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled || !d?.assets) return;
+        const map: Record<string, number | null> = {};
+        for (const a of d.assets) map[a.key] = typeof a.apy === 'number' ? a.apy : null;
+        setLiveApy(map);
+      })
+      .catch(() => { /* keep estimated ranges on failure */ });
+    return () => { cancelled = true; };
+  }, []);
+  const apyText = (d: { key: string; apy: string }) => {
+    const live = liveApy[d.key];
+    return live != null ? `${live.toFixed(1)}%` : `${d.apy} est.`;
+  };
+
   return (
     <div>
       <SectionHeading>
@@ -1966,7 +1988,7 @@ function VaultsDestinationsSection() {
                 <span className="font-medium text-white truncate">{d.name}</span>
                 <span className="text-xs text-white/40 whitespace-nowrap">{d.type === 'stable' ? 'Stable' : 'Floating'}</span>
               </div>
-              <span className="text-emerald-400 text-sm font-medium whitespace-nowrap">{d.apy}</span>
+              <span className="text-emerald-400 text-sm font-medium whitespace-nowrap">{apyText(d)}</span>
             </div>
             <p className="text-white/60 text-sm">{d.note}</p>
           </div>
@@ -1974,9 +1996,10 @@ function VaultsDestinationsSection() {
       </div>
 
       <Alert type="warning">
-        APY figures are estimates, not guarantees — they move with market conditions. Floating destinations can 
-        change in value: OnRe ONyc can lose value, and Ondo USDY is restricted to non-US persons under its own 
-        terms. Choose what fits your situation.
+        Rates marked "est." are estimated ranges shown until we've measured a destination's real return from 
+        on-chain prices; the measured number then replaces them automatically. No APY is ever a guarantee — they 
+        move with market conditions. Floating destinations can change in value: OnRe ONyc can lose value, and 
+        Ondo USDY is restricted to non-US persons under its own terms. Choose what fits your situation.
       </Alert>
     </div>
   );

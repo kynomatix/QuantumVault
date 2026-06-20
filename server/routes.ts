@@ -8097,6 +8097,34 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     }
   });
 
+  // PUBLIC, read-only realized-APY table for marketing/docs surfaces (no wallet).
+  // Same non-blocking oracle read as /api/vault/assets: `apy` is a real measured
+  // number or null (with `apyMethod` saying why). Display surfaces fall back to the
+  // estimated range (`apyLabel`) only when apy is null, and must label it "est.".
+  app.get("/api/vault/yield-rates", (_req, res) => {
+    try {
+      const yieldTable = getYieldTableCached();
+      const assets = getEnabledYieldAssets().map((a) => {
+        const y = yieldTable[a.key];
+        return {
+          key: a.key,
+          displayName: a.displayName,
+          riskClass: a.riskClass,
+          priceFloats: a.valuation === "market_quote",
+          mayLoseValue: a.mayLoseValue,
+          apyLabel: a.apyLabel,
+          apy: y?.apy ?? null,
+          apyMethod: y?.method ?? "unavailable",
+          apyAsOf: y?.asOf ?? null,
+        };
+      });
+      res.json({ assets });
+    } catch (error: any) {
+      console.error("[Vault] yield-rates error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
   // On-chain valued positions + recorded cost basis + unrealized P/L. Optional ?botId=.
   app.get("/api/vault/positions", requireWallet, async (req, res) => {
     try {

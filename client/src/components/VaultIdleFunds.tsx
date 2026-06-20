@@ -45,7 +45,8 @@ export interface YieldAssetInfo {
   riskClass: "stable" | "float";
   /** True only for assets that can actually lose value (drives the "may lose value" hint). */
   mayLoseValue: boolean;
-  /** Legacy approximate label. Kept for back-compat; the UI prefers `apy`. */
+  /** Estimated range (e.g. "~4-9%"). Shown — clearly marked "est." — only as a
+   *  fallback until the oracle measures a real `apy`. */
   apyLabel: string;
   /** Realized net APY (percent) from the yield oracle, or null when not measurable. */
   apy: number | null;
@@ -60,28 +61,31 @@ export interface YieldAssetInfo {
   defaultEligible: boolean;
 }
 
-// --- Realized-APY display helpers (yield oracle). The oracle returns a real
-// measured number or null with a reason; we NEVER show a marketing/target rate.
+// --- APY display helpers (yield oracle). When the oracle has measured a real
+// realized rate we show that number. Until it populates, we fall back to the
+// asset's estimated range, always marked "est." so it can never be mistaken for
+// the measured figure.
 function fmtApyPct(n: number): string {
   return `${n.toFixed(1)}%`;
+}
+/** True once the oracle has a real measured rate (vs. the estimated fallback). */
+function hasRealApy(a: YieldAssetInfo): boolean {
+  return a.apy != null;
 }
 /** Full inline phrase used where "<rate> APY" used to be shown. */
 function apyInline(a: YieldAssetInfo): string {
   if (a.apy != null) return `${fmtApyPct(a.apy)} APY`;
-  if (a.apyMethod === "accruing") return "Earning · rate building";
-  return "Rate unavailable";
+  return `${a.apyLabel} APY (est.)`;
 }
 /** Compact form for the dropdown row. */
 function apyCompact(a: YieldAssetInfo): string {
   if (a.apy != null) return fmtApyPct(a.apy);
-  if (a.apyMethod === "accruing") return "Building";
-  return "—";
+  return `${a.apyLabel} est.`;
 }
-/** Number-only value for the big stat box (the "APY" label sits beneath it). */
+/** Number-only value for the big stat box (the "APY"/"Est. APY" label sits beneath it). */
 function apyStat(a: YieldAssetInfo): string {
   if (a.apy != null) return fmtApyPct(a.apy);
-  if (a.apyMethod === "accruing") return "Building";
-  return "—";
+  return a.apyLabel;
 }
 
 interface AssetsResponse {
@@ -535,7 +539,7 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
         <div className="grid grid-cols-3 gap-3 text-center">
           <div className="p-2.5 rounded-lg bg-muted/30">
             <p className="text-lg font-bold tabular-nums" data-testid={`stat-card-apy-${a.key}`}>{apyStat(a)}</p>
-            <p className="text-xs text-muted-foreground">APY</p>
+            <p className="text-xs text-muted-foreground">{hasRealApy(a) ? "APY" : "Est. APY"}</p>
           </div>
           <div className="p-2.5 rounded-lg bg-muted/30">
             <p className="text-lg font-bold tabular-nums" data-testid={`text-card-value-${a.key}`}>
