@@ -195,7 +195,6 @@ const YIELD_ASSETS: YieldAsset[] = [
       "Ondo's Treasury-backed yield token, backed by short-term US Treasuries. Ondo's terms restrict it to non-US persons (Regulation S), so only use it if that applies to you. The price floats UP as it earns, so it is not a fixed $1 token, and selling back to USDC costs a small spread (around 0.3%).",
     enabled: true,
   },
-  // --- Present but DISABLED: not yet verified/wired. Do NOT enable until ready. ---
   {
     key: "jupiter_lend_usdc",
     displayName: "Jupiter Lend USDC",
@@ -212,20 +211,23 @@ const YIELD_ASSETS: YieldAsset[] = [
     // Exit is an in-protocol redeem, NOT a swap: on-DEX jlUSDC liquidity is
     // negligible, so the "jupiter" swap seam cannot price it.
     //
-    // KEPT DISABLED on purpose (same precedent as Kamino): flip `enabled` to true
-    // only after the platform owner runs a real mainnet deposit/withdraw round-trip.
+    // ENABLED 2026-06-20 but NOT default-eligible (defaultEligible:false): live and
+    // selectable for users who opt in, never auto-selected. The route is fully wired
+    // and fail-closed; the platform owner is running their own real mainnet
+    // deposit/withdraw round-trip to confirm it end-to-end. Same lending model and
+    // precedent as Kamino (already live).
     mint: "9BEcn9aPEmhSPbPQeFGjidRiEKki46fVQDyPpSQXPA2D",
     decimals: 6,
     route: "jupiter_lend",
     valuation: "redemption_rate",
-    defaultEligible: true,
+    defaultEligible: false,
     riskClass: "stable",
     mayLoseValue: false,
     apyLabel: "~4-5%",
     tag: "Yield-bearing stablecoin. Jupiter Lend.",
     riskNote:
-      "Your USDC is supplied to Jupiter's USDC lending market and earns interest. Principal stays in USDC terms and the value accrues over time. Disabled until a real round-trip is confirmed.",
-    enabled: false,
+      "Your USDC is supplied to Jupiter's USDC lending market and earns interest. Principal stays in USDC terms and the value accrues over time.",
+    enabled: true,
   },
 ];
 
