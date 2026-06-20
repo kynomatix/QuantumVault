@@ -24,14 +24,17 @@ export const DOCS_MARKDOWN = `# QuantumVault Documentation
 9. [Security](#security)
 10. [Trade Execution](#trade-execution)
 11. [AI Agent Integration](#ai-agent-integration)
-12. [QuantumLab Overview](#quantumlab-overview)
-13. [Strategy Library](#strategy-library)
-14. [Optimizer](#optimizer)
+12. [Vaults Overview](#vaults-overview)
+13. [Yield Destinations](#yield-destinations)
+14. [Safety & Funding](#safety--funding)
+15. [QuantumLab Overview](#quantumlab-overview)
+16. [Strategy Library](#strategy-library)
+17. [Optimizer](#optimizer)
    - [Out-of-Sample Validation & Robustness Score](#out-of-sample-validation--robustness-score)
-15. [Backtesting Engine](#backtesting-engine)
-16. [Results & Heatmap](#results--heatmap)
-17. [Insights & Guided Mode](#insights--guided-mode)
-18. [Lab Assistant](#lab-assistant)
+18. [Backtesting Engine](#backtesting-engine)
+19. [Results & Heatmap](#results--heatmap)
+20. [Insights & Guided Mode](#insights--guided-mode)
+21. [Lab Assistant](#lab-assistant)
 
 ---
 
@@ -766,6 +769,77 @@ Turn your AI trading signals into a subscription service:
 4. Earn automatically when subscribers profit
 
 > **Note:** For full API documentation including all endpoints, see the detailed integration guide at \`/docs/OPENCLAW_INTEGRATION.md\` in the repository.
+
+---
+
+## Vaults Overview
+
+Vaults put your idle USDC to work. Instead of letting spare cash sit unused between trades, you can park it in a yield destination where it earns — then pull it back whenever you need it. One tap in, one tap out, with no amounts to set.
+
+### What Makes It Different
+
+- **Custody, not a casino** — Your funds stay in your own agent wallet the whole time. QuantumVault only signs the move into and out of the yield token; it never takes custody of your money.
+- **One tap in, one tap out** — There are no sliders or amounts to set. "Park all spare USDC" puts your full idle balance to work; "Unpark all to USDC" pulls the whole position back. The platform reads your real on-chain balance and moves all of it.
+- **Always counted** — Parked funds still count as part of your balance and your profit/loss, so parking money never looks like a loss. The live value of your position is always included in your totals.
+- **Funds your trades automatically** — When you open a trade and your spendable USDC isn't enough, your account Vault automatically pulls back just enough to cover it and leaves the rest earning. You never have to unpark by hand before trading.
+
+### Where to Find It
+
+Open your dashboard and select the **Vaults** tab. You'll see how much spare USDC you have, plus a short menu of yield destinations shown as cards. Tap a card to open its details, then park or unpark.
+
+### How It Works
+
+1. Open the Vaults tab — your spare (idle) USDC is shown at the top.
+2. Pick a yield destination card and open it.
+3. Tap "Park all spare USDC" — the platform moves your full idle balance into the yield token.
+4. Your position now earns; its live value shows as "Earning" on the card.
+5. Tap "Unpark all to USDC" anytime to pull the whole balance back to plain USDC.
+
+> **Note:** Your funds stay in your wallet — QuantumVault only handles the move. Every park and unpark is capped at a small price-impact limit, so a thin market can't move your money at a bad price.
+
+---
+
+## Yield Destinations
+
+Vaults offer a short, vetted menu of places to earn — not an endless DeFi list to research. Each destination is one of two types, shown clearly on its card.
+
+### Two Types of Destination
+
+- **Stable** — Trades near $1 and earns yield. Your principal stays in USDC terms and the value accrues over time. The lower-risk choice.
+- **Floating** — The price can move up or down rather than holding a fixed $1. Higher potential yield, but one option (OnRe ONyc) can lose value.
+
+### Available Destinations
+
+- **Kamino USDC** (~4-9%, Stable) — Your USDC is supplied to Kamino's USDC lending market and earns interest. Principal stays in USDC terms.
+- **Perena USD\\*** (~10%, Stable) — A yield-bearing stablecoin backed by a pool of stablecoins. Trades near $1; value accrues from the pool's yield.
+- **Jupiter Lend USDC** (~4-5%, Stable) — Your USDC is supplied to Jupiter's USDC lending market and earns interest. Principal stays in USDC terms.
+- **Ondo USDY** (~4-5%, Floating) — A Treasury-backed yield token. Non-US persons only (Regulation S). The price floats up as it earns.
+- **OnRe ONyc** (~10-12%, Floating) — Tokenized reinsurance. The price floats with insurance results and can lose value — the highest-risk option here.
+
+> **Important:** APY figures are estimates, not guarantees — they move with market conditions. Floating destinations can change in value: OnRe ONyc can lose value, and Ondo USDY is restricted to non-US persons under its own terms. Choose what fits your situation.
+
+---
+
+## Safety & Funding
+
+Vaults are built money-safe first. The platform never guesses about your money — it reads the blockchain, acts only on what actually happened, and stops if anything looks wrong.
+
+### Money-Safety Principles
+
+- **On-chain truth** — Balances are read directly from the blockchain, never estimated. What the chain says is the source of truth.
+- **Realized amounts only** — You're credited only the actual USDC that comes back from a move, not an expected or quoted amount.
+- **Price-impact cap** — Every park and unpark is capped at a small price-impact limit, so a thin market can't move your money at a bad price.
+- **Fail-closed** — If a balance can't be read or a move looks unsafe, the action stops rather than risk your funds.
+
+### Parked Funds Still Count
+
+Your parked position is always included in your total balance and your profit/loss. Parking spare USDC into a Vault never shows up as a loss — the live value of what you've parked is counted right alongside your trading funds.
+
+### Parked Funds Back Your Trades
+
+When you place a trade — by hand or from a TradingView/webhook signal — and your spendable USDC isn't enough to cover it, QuantumVault automatically unparks just enough from your account Vault to fund the trade, plus a small buffer for fees and price movement. The rest stays parked and keeps earning. You don't have to remember to unpark first; it happens as part of placing the trade.
+
+> **Note:** This auto-funding is hands-off by design — you keep your spare cash earning, and the platform pulls back only what a trade actually needs.
 
 ---
 

@@ -8,7 +8,7 @@ import {
   AlertTriangle, Info, CheckCircle2, ArrowDown, ArrowUp,
   Shield, Lock, Key, RefreshCw, Sparkles, TrendingUp, TrendingDown, Cpu, Activity,
   FlaskConical, BarChart3, Lightbulb, Target, Layers, SlidersHorizontal, FileText,
-  ListOrdered, Search, TestTube2, Crosshair
+  ListOrdered, Search, TestTube2, Crosshair, Landmark, Coins, ShieldCheck
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -26,6 +26,9 @@ type DocSection =
   | 'security'
   | 'trade-execution'
   | 'ai-agents'
+  | 'vaults-overview'
+  | 'vaults-destinations'
+  | 'vaults-safety'
   | 'quantumlab-overview'
   | 'quantumlab-strategies'
   | 'quantumlab-optimizer'
@@ -53,6 +56,9 @@ const navItems: NavItem[] = [
   { id: 'security', label: 'Security', icon: Shield },
   { id: 'trade-execution', label: 'Trade Execution', icon: Zap },
   { id: 'ai-agents', label: 'AI Agent Integration', icon: Cpu },
+  { id: 'vaults-overview', label: 'Vaults Overview', icon: Landmark },
+  { id: 'vaults-destinations', label: 'Yield Destinations', icon: Coins },
+  { id: 'vaults-safety', label: 'Safety & Funding', icon: ShieldCheck },
   { id: 'quantumlab-overview', label: 'QuantumLab Overview', icon: FlaskConical },
   { id: 'quantumlab-strategies', label: 'Strategy Library', icon: Layers },
   { id: 'quantumlab-optimizer', label: 'Optimizer', icon: SlidersHorizontal },
@@ -1824,6 +1830,233 @@ server.tool('get_results', { ... }, async ({ runId }) => {
   );
 }
 
+function VaultsOverviewSection() {
+  return (
+    <div>
+      <SectionHeading>
+        <Landmark className="w-6 h-6 text-emerald-400" />
+        Vaults Overview
+      </SectionHeading>
+      <Paragraph>
+        Vaults put your idle USDC to work. Instead of letting spare cash sit unused between trades, you can park it 
+        in a yield destination where it earns — then pull it back whenever you need it. One tap in, one tap out, 
+        with no amounts to set.
+      </Paragraph>
+
+      <SubHeading>What Makes It Different</SubHeading>
+      <div className="grid gap-4 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Lock className="w-5 h-5 text-emerald-400" />
+            <h4 className="font-medium text-white">Custody, Not a Casino</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Your funds stay in your own agent wallet the whole time. QuantumVault only signs the move into and out 
+            of the yield token — it never takes custody of your money.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <RefreshCw className="w-5 h-5 text-emerald-400" />
+            <h4 className="font-medium text-white">One Tap In, One Tap Out</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            No sliders or amounts to fiddle with. "Park all spare USDC" puts your full idle balance to work; 
+            "Unpark all to USDC" pulls the whole position back. The platform reads your real on-chain balance 
+            and moves all of it.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <BarChart3 className="w-5 h-5 text-emerald-400" />
+            <h4 className="font-medium text-white">Always Counted</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Parked funds still count as part of your balance and your profit/loss, so parking money never looks 
+            like a loss. The live value of your position is always included in your totals.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Zap className="w-5 h-5 text-emerald-400" />
+            <h4 className="font-medium text-white">Funds Your Trades Automatically</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            When you open a trade and your spendable USDC isn't enough, your account Vault automatically pulls back 
+            just enough to cover it — and leaves the rest earning. You never have to unpark by hand before trading.
+          </p>
+        </div>
+      </div>
+
+      <SubHeading>Where to Find It</SubHeading>
+      <Paragraph>
+        Open your dashboard and select the <strong className="text-white/90">Vaults</strong> tab. You'll see how 
+        much spare USDC you have, plus a short menu of yield destinations shown as cards. Tap a card to open its 
+        details, then park or unpark.
+      </Paragraph>
+
+      <SubHeading>How It Works</SubHeading>
+      <StepList steps={[
+        'Open the Vaults tab — your spare (idle) USDC is shown at the top.',
+        'Pick a yield destination card and open it.',
+        'Tap "Park all spare USDC" — the platform moves your full idle balance into the yield token.',
+        'Your position now earns; its live value shows as "Earning" on the card.',
+        'Tap "Unpark all to USDC" anytime to pull the whole balance back to plain USDC.',
+      ]} />
+
+      <Alert type="info">
+        Your funds stay in your wallet — QuantumVault only handles the move. Every park and unpark is capped at a 
+        small price-impact limit, so a thin market can't move your money at a bad price.
+      </Alert>
+    </div>
+  );
+}
+
+function VaultsDestinationsSection() {
+  const destinations = [
+    { name: 'Kamino USDC', apy: '~4-9%', type: 'stable', note: 'Your USDC is supplied to Kamino\'s USDC lending market and earns interest. Principal stays in USDC terms.' },
+    { name: 'Perena USD*', apy: '~10%', type: 'stable', note: 'A yield-bearing stablecoin backed by a pool of stablecoins. Trades near $1; value accrues from the pool\'s yield.' },
+    { name: 'Jupiter Lend USDC', apy: '~4-5%', type: 'stable', note: 'Your USDC is supplied to Jupiter\'s USDC lending market and earns interest. Principal stays in USDC terms.' },
+    { name: 'Ondo USDY', apy: '~4-5%', type: 'float', note: 'A Treasury-backed yield token. Non-US persons only (Regulation S). The price floats up as it earns.' },
+    { name: 'OnRe ONyc', apy: '~10-12%', type: 'float', note: 'Tokenized reinsurance. The price floats with insurance results and can lose value — the highest-risk option.' },
+  ];
+  return (
+    <div>
+      <SectionHeading>
+        <Coins className="w-6 h-6 text-emerald-400" />
+        Yield Destinations
+      </SectionHeading>
+      <Paragraph>
+        Vaults offer a short, vetted menu of places to earn — not an endless DeFi list to research. Each 
+        destination is one of two types, shown clearly on its card.
+      </Paragraph>
+
+      <SubHeading>Two Types of Destination</SubHeading>
+      <div className="grid gap-4 mb-6 sm:grid-cols-2">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
+            <h4 className="font-medium text-white">Stable</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Trades near $1 and earns yield. Your principal stays in USDC terms and the value accrues over time. 
+            The lower-risk choice.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="w-2.5 h-2.5 rounded-full bg-amber-400" />
+            <h4 className="font-medium text-white">Floating</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            The price can move up or down rather than holding a fixed $1. Higher potential yield, but one option 
+            (OnRe ONyc) can lose value.
+          </p>
+        </div>
+      </div>
+
+      <SubHeading>Available Destinations</SubHeading>
+      <div className="space-y-3 mb-6">
+        {destinations.map((d) => (
+          <div key={d.name} className="p-4 rounded-lg bg-white/5 border border-white/10">
+            <div className="flex items-center justify-between gap-3 mb-1">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className={cn('w-2.5 h-2.5 rounded-full flex-shrink-0', d.type === 'stable' ? 'bg-emerald-400' : 'bg-amber-400')} />
+                <span className="font-medium text-white truncate">{d.name}</span>
+                <span className="text-xs text-white/40 whitespace-nowrap">{d.type === 'stable' ? 'Stable' : 'Floating'}</span>
+              </div>
+              <span className="text-emerald-400 text-sm font-medium whitespace-nowrap">{d.apy}</span>
+            </div>
+            <p className="text-white/60 text-sm">{d.note}</p>
+          </div>
+        ))}
+      </div>
+
+      <Alert type="warning">
+        APY figures are estimates, not guarantees — they move with market conditions. Floating destinations can 
+        change in value: OnRe ONyc can lose value, and Ondo USDY is restricted to non-US persons under its own 
+        terms. Choose what fits your situation.
+      </Alert>
+    </div>
+  );
+}
+
+function VaultsSafetySection() {
+  return (
+    <div>
+      <SectionHeading>
+        <ShieldCheck className="w-6 h-6 text-emerald-400" />
+        Safety & Funding
+      </SectionHeading>
+      <Paragraph>
+        Vaults are built money-safe first. The platform never guesses about your money — it reads the blockchain, 
+        acts only on what actually happened, and stops if anything looks wrong.
+      </Paragraph>
+
+      <SubHeading>Money-Safety Principles</SubHeading>
+      <div className="grid gap-4 mb-6 sm:grid-cols-2">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Activity className="w-5 h-5 text-emerald-400" />
+            <h4 className="font-medium text-white">On-Chain Truth</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Balances are read directly from the blockchain, never estimated. What the chain says is the source of truth.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+            <h4 className="font-medium text-white">Realized Amounts Only</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            You're credited only the actual USDC that comes back from a move — never an expected or quoted amount.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Shield className="w-5 h-5 text-emerald-400" />
+            <h4 className="font-medium text-white">Price-Impact Cap</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Every park and unpark is capped at a small price-impact limit, so a thin market can't move your money 
+            at a bad price.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Lock className="w-5 h-5 text-emerald-400" />
+            <h4 className="font-medium text-white">Fail-Closed</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            If a balance can't be read or a move looks unsafe, the action stops rather than risk your funds.
+          </p>
+        </div>
+      </div>
+
+      <SubHeading>Parked Funds Still Count</SubHeading>
+      <Paragraph>
+        Your parked position is always included in your total balance and your profit/loss. Parking spare USDC into 
+        a Vault never shows up as a loss — the live value of what you've parked is counted right alongside your 
+        trading funds.
+      </Paragraph>
+
+      <SubHeading>Parked Funds Back Your Trades</SubHeading>
+      <Paragraph>
+        When you place a trade — by hand or from a TradingView/webhook signal — and your spendable USDC isn't enough 
+        to cover it, QuantumVault automatically unparks just enough from your account Vault to fund the trade, plus a 
+        small buffer for fees and price movement. The rest stays parked and keeps earning. You don't have to remember 
+        to unpark first; it happens as part of placing the trade.
+      </Paragraph>
+
+      <Alert type="info">
+        This auto-funding is hands-off by design — you keep your spare cash earning, and the platform pulls back only 
+        what a trade actually needs.
+      </Alert>
+    </div>
+  );
+}
+
 function QuantumLabOverviewSection() {
   return (
     <div>
@@ -2976,6 +3209,9 @@ const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet:
   { id: 'security', label: 'Security', snippet: 'Execution authorization, agent wallet backup (24-word phrase), key encryption, and how your funds are protected.', keywords: ['security', 'encryption', 'private key', 'backup', 'recovery phrase', 'mnemonic', 'seed phrase', '24 word', 'authorize', 'authorization', 'execution key', 'safe', 'protect', 'reset agent wallet'] },
   { id: 'trade-execution', label: 'Trade Execution', snippet: 'How trades are routed from webhook signals through the execution engine, including retries and error handling.', keywords: ['trade execution', 'execution', 'order', 'fill', 'route', 'retry', 'error', 'failed trade', 'slippage', 'entry price', 'size', 'notional', 'fee'] },
   { id: 'ai-agents', label: 'AI Agent Integration', snippet: 'Use AI agents (Claude, GPT, etc.) to send trade signals to QuantumVault via the agent API.', keywords: ['ai', 'agent', 'claude', 'gpt', 'openai', 'llm', 'language model', 'api', 'integration', 'programmatic', 'automated', 'server execution key'] },
+  { id: 'vaults-overview', label: 'Vaults Overview', snippet: 'Vaults put idle USDC to work earning yield. One tap to park all spare USDC, one tap to unpark it back.', keywords: ['vault', 'vaults', 'earn', 'yield', 'idle', 'spare', 'park', 'unpark', 'interest', 'apy', 'save', 'savings', 'passive', 'stablecoin'] },
+  { id: 'vaults-destinations', label: 'Yield Destinations', snippet: 'The yield options available in Vaults: Kamino USDC, Perena USD*, Jupiter Lend USDC, Ondo USDY, and OnRe ONyc.', keywords: ['destination', 'destinations', 'yield', 'apy', 'kamino', 'perena', 'jupiter lend', 'ondo', 'usdy', 'onre', 'onyc', 'stablecoin', 'stable', 'floating', 'reinsurance', 'treasury'] },
+  { id: 'vaults-safety', label: 'Safety & Funding', snippet: 'How Vaults stay money-safe (on-chain truth, realized amounts, price-impact cap) and auto-unpark from your account Vault to fund trades.', keywords: ['safety', 'safe', 'money', 'on-chain', 'realized', 'price impact', 'fail closed', 'equity', 'balance', 'auto unpark', 'fund trade', 'top up', 'collateral'] },
   { id: 'quantumlab-overview', label: 'QuantumLab Overview', snippet: 'QuantumLab is the built-in backtesting and strategy optimization engine. Test strategies before deploying them live.', keywords: ['quantumlab', 'quantum lab', 'backtest', 'backtesting', 'lab', 'test', 'simulation', 'historical', 'strategy', 'candle', 'ohlc'] },
   { id: 'quantumlab-strategies', label: 'Strategy Library', snippet: 'Write and save Pine Script strategies in QuantumLab. Load from the library to backtest or optimize.', keywords: ['strategy', 'library', 'pine script', 'pine', 'script', 'code', 'write', 'save', 'load', 'indicator', 'signal', 'entry', 'exit'] },
   { id: 'quantumlab-optimizer', label: 'Optimizer', snippet: 'Run random search and refinement optimization to find the best parameters for your strategy.', keywords: ['optimizer', 'optimize', 'optimization', 'parameter', 'tune', 'search', 'random search', 'refinement', 'coordinate', 'best', 'sharpe', 'drawdown', 'win rate'] },
@@ -3025,6 +3261,12 @@ export default function DocsPage() {
         return <TradeExecutionSection />;
       case 'ai-agents':
         return <AIAgentsSection />;
+      case 'vaults-overview':
+        return <VaultsOverviewSection />;
+      case 'vaults-destinations':
+        return <VaultsDestinationsSection />;
+      case 'vaults-safety':
+        return <VaultsSafetySection />;
       case 'quantumlab-overview':
         return <QuantumLabOverviewSection />;
       case 'quantumlab-strategies':
@@ -3147,9 +3389,18 @@ export default function DocsPage() {
                 <nav className="space-y-1">
                   {navItems.map((item) => {
                     const Icon = item.icon;
+                    const isFirstVaults = item.id === 'vaults-overview';
                     const isFirstQuantumLab = item.id === 'quantumlab-overview';
                     return (
                       <div key={item.id}>
+                        {isFirstVaults && (
+                          <div className="pt-3 pb-2 mt-2 mb-1 border-t border-white/10">
+                            <div className="flex items-center gap-2 px-3">
+                              <Landmark className="w-3.5 h-3.5 text-emerald-400" />
+                              <span className="text-xs font-semibold text-emerald-400 uppercase tracking-wider">Vaults</span>
+                            </div>
+                          </div>
+                        )}
                         {isFirstQuantumLab && (
                           <div className="pt-3 pb-2 mt-2 mb-1 border-t border-white/10">
                             <div className="flex items-center gap-2 px-3">
