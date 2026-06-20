@@ -17,13 +17,22 @@
  * "onreUSD" returns pump.fun scam impersonators (see memory onre-onyc-vault.md),
  * so a name lookup could swap user funds into a scam coin. Adding an asset means
  * pasting its canonical mint here after verifying it against the protocol's own
- * docs, then flipping `enabled` to true.
+ * docs (or Jupiter's VERIFIED token list, not a bare symbol match), then flipping
+ * `enabled` to true.
  */
 
 /** How funds enter and exit a yield asset. */
 export type YieldRouteKind = "jupiter" | "kamino";
 /** How a yield holding is valued in USDC. */
 export type YieldValuation = "market_quote" | "redemption_rate";
+/**
+ * User-facing risk tier for the inline chip. Deliberately NOT the same as
+ * `valuation` (a pricing-method detail). This answers the only question a
+ * non-technical user has: "is this basically a dollar that earns, or can it move?"
+ *   stable - trades near $1, deep liquidity, value accrues. Low downside.
+ *   float  - the token's USDC price genuinely moves (basis risk / exit spread).
+ */
+export type YieldRiskClass = "stable" | "float";
 
 export interface YieldAsset {
   /** Stable registry key used by the API and DB rows (never the mint or symbol). */
@@ -44,8 +53,20 @@ export interface YieldAsset {
   valuation: YieldValuation;
   /** Whether this asset may ever be auto-selected as a default (a later concern). */
   defaultEligible: boolean;
-  /** Short, plain-language yield/structure note for the UI. */
+  /** User-facing risk tier for the inline chip (see YieldRiskClass). */
+  riskClass: YieldRiskClass;
+  /**
+   * True ONLY for assets that can actually lose principal value (e.g. tokenized
+   * reinsurance). Drives the inline "may lose value" hint. A token whose price
+   * merely floats UP (Treasury-backed) is `float` but NOT mayLoseValue.
+   */
+  mayLoseValue: boolean;
+  /** Approximate APY label for the dropdown/table. Always carries a "~" qualifier. */
+  apyLabel: string;
+  /** Short, plain-language yield/structure note for the UI (inline supporting text). */
   tag: string;
+  /** Longer plain-language note shown behind a detail/expand affordance in the Vault tab. */
+  riskNote: string;
   /** Only enabled assets can be quoted, parked, or unparked. */
   enabled: boolean;
 }
@@ -59,6 +80,11 @@ export interface YieldAsset {
  *  - ONyc: real mint, decimals 9, deep Jupiter liquidity, negligible price impact.
  *  - Perena USD*: real mint, decimals 6, NAV mint/redeem route both ways up to ~20k
  *    USDC at ~0.05% impact (single route, output scales linearly).
+ *  - JupUSD (Jupiter USD): Jupiter VERIFIED mint, decimals 6, ~$13.8M liquidity.
+ *    USDC round trip at $500/$2k/$5k showed ~0% price impact both ways.
+ *  - USDY (Ondo): Jupiter VERIFIED mint, decimals 6, ~$1.9M liquidity. USDC round
+ *    trip at $500/$2k/$5k: buy ~0%, sell ~0.3% (under the 0.5% cap). Treasury-backed,
+ *    price floats UP. Opt-in (not a default) given the exit spread and float.
  */
 const YIELD_ASSETS: YieldAsset[] = [
   {
@@ -74,7 +100,12 @@ const YIELD_ASSETS: YieldAsset[] = [
     route: "kamino",
     valuation: "redemption_rate",
     defaultEligible: true,
-    tag: "Yield-bearing stablecoin. Kamino lending, ~4-9%.",
+    riskClass: "stable",
+    mayLoseValue: false,
+    apyLabel: "~4-9%",
+    tag: "Yield-bearing stablecoin. Kamino lending.",
+    riskNote:
+      "Your USDC is supplied to Kamino's USDC lending market and earns interest. Principal stays in USDC terms and the value accrues over time.",
     enabled: true,
   },
   {
@@ -85,7 +116,31 @@ const YIELD_ASSETS: YieldAsset[] = [
     route: "jupiter",
     valuation: "market_quote",
     defaultEligible: true,
-    tag: "Yield-bearing stablecoin. Perena pool, ~10%.",
+    riskClass: "stable",
+    mayLoseValue: false,
+    apyLabel: "~10%",
+    tag: "Yield-bearing stablecoin. Perena pool.",
+    riskNote:
+      "A yield-bearing stablecoin backed by a pool of stablecoins. Trades near $1; value accrues from the pool's yield.",
+    enabled: true,
+  },
+  {
+    key: "jupusd",
+    displayName: "Jupiter USD",
+    // JupUSD, Jupiter's yield-bearing stablecoin. Mint from Jupiter's VERIFIED
+    // token list (isVerified=true, organicScore 93, ~$13.8M liquidity), confirmed
+    // by a USDC round-trip swap probe at $500/$2k/$5k (~0% impact both ways).
+    mint: "JuprjznTrTSp2UFa3ZBUFgwdAmtZCq4MQCwysN55USD",
+    decimals: 6,
+    route: "jupiter",
+    valuation: "market_quote",
+    defaultEligible: true,
+    riskClass: "stable",
+    mayLoseValue: false,
+    apyLabel: "~4-5%",
+    tag: "Yield-bearing stablecoin. Backed by US Treasuries (Jupiter).",
+    riskNote:
+      "Jupiter's yield-bearing stablecoin, backed by tokenized US Treasuries. Trades near $1 with deep liquidity; value accrues over time.",
     enabled: true,
   },
   {
@@ -96,7 +151,31 @@ const YIELD_ASSETS: YieldAsset[] = [
     route: "jupiter",
     valuation: "market_quote",
     defaultEligible: false,
-    tag: "Tokenized reinsurance, ~10-12%. Price floats, not a stablecoin.",
+    riskClass: "float",
+    mayLoseValue: true,
+    apyLabel: "~10-12%",
+    tag: "Tokenized reinsurance. Price floats, not a stablecoin.",
+    riskNote:
+      "Tokenized reinsurance. The price floats with the underlying insurance results and CAN lose value. The highest-risk option here.",
+    enabled: true,
+  },
+  {
+    key: "usdy",
+    displayName: "Ondo USDY",
+    // USDY, Ondo's Treasury-backed yield token. Mint from Jupiter's VERIFIED token
+    // list (isVerified=true, ~$1.9M liquidity), confirmed by a USDC round-trip swap
+    // probe at $500/$2k/$5k (buy ~0%, sell ~0.3%, under the 0.5% cap). Price floats UP.
+    mint: "A1KLoBrKBde8Ty9qtNQUtq3C2ortoC3u7twggz7sEto6",
+    decimals: 6,
+    route: "jupiter",
+    valuation: "market_quote",
+    defaultEligible: false,
+    riskClass: "float",
+    mayLoseValue: false,
+    apyLabel: "~4-5%",
+    tag: "Treasury-backed yield token. Price floats up; small exit spread.",
+    riskNote:
+      "Ondo's yield-bearing token, backed by short-term US Treasuries. The price floats UP as it earns, so it is not a fixed $1 token, and selling back to USDC costs a small spread (around 0.3%).",
     enabled: true,
   },
   // --- Present but DISABLED: not yet verified/wired. Do NOT enable until ready. ---
@@ -108,7 +187,12 @@ const YIELD_ASSETS: YieldAsset[] = [
     route: "jupiter",
     valuation: "market_quote",
     defaultEligible: false,
+    riskClass: "stable",
+    mayLoseValue: false,
+    apyLabel: "~5%",
     tag: "Jupiter Lend USDC (disabled; quote-first before enabling).",
+    riskNote:
+      "Placeholder. Not routable until a verified mint is pasted in and a quote round-trip is confirmed.",
     enabled: false,
   },
 ];

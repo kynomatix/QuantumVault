@@ -8,6 +8,7 @@ import {
   AlertTriangle,
   Wallet,
   ShieldCheck,
+  HelpCircle,
 } from "lucide-react";
 import { useWallet } from "@/hooks/useWallet";
 import { useToast } from "@/hooks/use-toast";
@@ -32,7 +33,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Badge } from "@/components/ui/badge";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { cn } from "@/lib/utils";
 
 export interface YieldAssetInfo {
   key: string;
@@ -43,7 +49,15 @@ export interface YieldAssetInfo {
   valuation: string;
   /** True when the token's USDC price floats with the market (basis risk). */
   priceFloats: boolean;
+  /** User-facing risk tier for the inline chip. */
+  riskClass: "stable" | "float";
+  /** True only for assets that can actually lose value (drives the "may lose value" hint). */
+  mayLoseValue: boolean;
+  /** Approximate APY label (carries a "~" qualifier). */
+  apyLabel: string;
   tag: string;
+  /** Longer plain-language note for the detail popover. */
+  riskNote: string;
   defaultEligible: boolean;
 }
 
@@ -180,6 +194,24 @@ function PreviewBox({
   );
 }
 
+/** Small inline risk pill: green "Stable" (trades near $1) or amber "Floats" (price moves). */
+function RiskChip({ riskClass }: { riskClass: string }) {
+  const isFloat = riskClass === "float";
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium leading-none whitespace-nowrap",
+        isFloat
+          ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+          : "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
+      )}
+      data-testid={`chip-risk-${isFloat ? "float" : "stable"}`}
+    >
+      {isFloat ? "Floats" : "Stable"}
+    </span>
+  );
+}
+
 /**
  * The full Idle Funds (Vault) module: master toggle, spare-USDC stat, parked
  * positions, parkable assets, default-asset override, and the park/unpark
@@ -281,10 +313,13 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
     queryClient.invalidateQueries({ queryKey: ["vault-positions", publicKeyString, botId ?? null] });
   };
 
-  // --- Park dialog ---
+  // --- Park dialog / embedded inline form ---
+  // parkAsset doubles as the embedded dropdown selection (no dialog in that mode).
   const [parkAsset, setParkAsset] = useState<YieldAssetInfo | null>(null);
   const [parkAmount, setParkAmount] = useState("");
   const [parking, setParking] = useState(false);
+  // "How parking works" dialog (embedded/per-bot mode only).
+  const [showHow, setShowHow] = useState(false);
   const parkNum = Number(parkAmount) || 0;
   const parkPreview = usePreview({
     open: !!parkAsset,
@@ -328,7 +363,9 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
         title: "Parked",
         description: `Received ${tok(data.tokensReceived)} ${parkAsset.displayName}.${data.dbWarning ? ` ${data.dbWarning}` : ""}`,
       });
-      closePark();
+      // Embedded keeps the token selected (only clears the amount); account closes the dialog.
+      if (embedded) setParkAmount("");
+      else closePark();
       refetchAll();
     } catch (e: any) {
       toast({ title: "Park failed", description: e.message || "Something went wrong.", variant: "destructive" });
@@ -336,6 +373,12 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
       setParking(false);
     }
   };
+
+  // Embedded mode: auto-select a sensible default token so the dropdown isn't empty.
+  useEffect(() => {
+    if (!embedded || parkAsset || assets.length === 0) return;
+    setParkAsset(assets.find((a) => a.defaultEligible) ?? assets[0]);
+  }, [embedded, assets, parkAsset]);
 
   // --- Unpark dialog ---
   const [unparkPos, setUnparkPos] = useState<PositionView | null>(null);
@@ -533,28 +576,163 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
               </div>
             )}
           </>
-        ) : (
-          <>
-            {/* Custody reassurance */}
-            <div
-              className="rounded-lg border border-border bg-muted/30 p-3 flex items-start gap-2 text-sm text-muted-foreground"
-              data-testid="box-vault-about"
-            >
-              <ShieldCheck className="w-4 h-4 mt-0.5 shrink-0 text-primary" />
-              <span>
-                Your funds never leave your wallet. We only handle the swap. Each park or unpark is capped at{" "}
-                {(maxImpact * 100).toFixed(2)}% price impact.
+        ) : embedded ? (
+          /* ---------- Compact per-bot dropdown form ---------- */
+          <div className="space-y-3" data-testid="vault-embedded">
+            {scope && (
+              <p className="text-xs text-muted-foreground" data-testid="text-vault-scope-note">
+                {scope === "account"
+                  ? "This bot shares your main account wallet, so parking uses your shared account vault."
+                  : "Parking uses this bot's own wallet (its spare USDC)."}
+              </p>
+            )}
+
+            <div className="flex items-center justify-between rounded-lg border border-border/50 bg-muted/30 px-3 py-2">
+              <span className="text-xs text-muted-foreground flex items-center gap-1.5">
+                <Wallet className="w-3.5 h-3.5" /> Spare USDC
+              </span>
+              <span className="text-sm font-semibold tabular-nums" data-testid="text-spare-usdc">
+                {assetsQuery.isLoading ? "..." : usd(spareUsdc)}
               </span>
             </div>
 
-            {/* Per-bot scope note: explain which wallet this acts on. */}
-            {embedded && scope && (
-              <p className="text-xs text-muted-foreground" data-testid="text-vault-scope-note">
-                {scope === "account"
-                  ? "This bot shares your main account wallet, so parking here uses your shared account vault."
-                  : "Parking here uses this bot's own wallet (its spare USDC)."}
+            {assetsQuery.isLoading ? (
+              <Skeleton className="h-9 w-full" />
+            ) : assets.length === 0 ? (
+              <p className="text-muted-foreground text-sm" data-testid="text-no-assets">
+                No yield tokens are available right now.
               </p>
+            ) : (
+              <div className="space-y-3">
+                <div>
+                  <Label className="text-xs text-muted-foreground mb-1 block">Token</Label>
+                  <Select
+                    value={parkAsset?.key ?? ""}
+                    onValueChange={(k) => {
+                      setParkAsset(assets.find((a) => a.key === k) ?? null);
+                      setParkAmount("");
+                    }}
+                  >
+                    <SelectTrigger className="h-9" data-testid="select-park-asset">
+                      <SelectValue placeholder="Choose a token" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {assets.map((a) => (
+                        <SelectItem key={a.key} value={a.key} data-testid={`option-park-${a.key}`}>
+                          <span className="flex items-center gap-2">
+                            <span className="font-medium">{a.displayName}</span>
+                            <span className="text-xs text-muted-foreground">{a.apyLabel}</span>
+                            <RiskChip riskClass={a.riskClass} />
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {parkAsset && (
+                  <>
+                    <div
+                      className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs"
+                      data-testid="text-selected-meta"
+                    >
+                      <span className="text-muted-foreground tabular-nums">{parkAsset.apyLabel} APY</span>
+                      <RiskChip riskClass={parkAsset.riskClass} />
+                      {parkAsset.mayLoseValue && (
+                        <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                          <AlertTriangle className="w-3 h-3" /> may lose value
+                        </span>
+                      )}
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <Label htmlFor="park-amount" className="text-xs text-muted-foreground">
+                          Amount (USDC)
+                        </Label>
+                        <button
+                          type="button"
+                          className="text-xs text-primary hover:underline disabled:opacity-50"
+                          onClick={() => setParkAmount(String(spareUsdc))}
+                          disabled={spareUsdc <= 0}
+                          data-testid="button-park-max"
+                        >
+                          Max {usd(spareUsdc)}
+                        </button>
+                      </div>
+                      <Input
+                        id="park-amount"
+                        inputMode="decimal"
+                        placeholder="0.00"
+                        value={parkAmount}
+                        onChange={(e) => setParkAmount(e.target.value)}
+                        data-testid="input-park-amount"
+                      />
+                    </div>
+
+                    {parkNum > 0 && (
+                      <PreviewBox
+                        loading={parkPreview.isFetching}
+                        preview={parkPreview.data}
+                        outLabel={parkAsset.displayName}
+                        cap={maxImpact}
+                      />
+                    )}
+
+                    <Button
+                      onClick={handlePark}
+                      disabled={parking || !(parkNum > 0) || (parkPreview.data?.wouldReject ?? false)}
+                      className="w-full"
+                      data-testid="button-park-confirm"
+                    >
+                      {parking ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Parking
+                        </>
+                      ) : (
+                        "Park"
+                      )}
+                    </Button>
+                  </>
+                )}
+              </div>
             )}
+
+            {hasPositions && positionsBlock}
+
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+              onClick={() => setShowHow(true)}
+              data-testid="link-how-it-works"
+            >
+              <HelpCircle className="w-3.5 h-3.5" /> How parking works
+            </button>
+          </div>
+        ) : (
+          /* ---------- Account-level full module (teaching home) ---------- */
+          <>
+            <div
+              className="rounded-lg border border-border bg-muted/30 p-3 space-y-2 text-sm"
+              data-testid="box-vault-about"
+            >
+              <div className="flex items-start gap-2 text-muted-foreground">
+                <ShieldCheck className="w-4 h-4 mt-0.5 shrink-0 text-primary" />
+                <span>
+                  Park idle USDC into a yield token to earn while it waits. Your funds never leave your
+                  wallet; we only handle the swap, and each park or unpark is capped at{" "}
+                  {(maxImpact * 100).toFixed(2)}% price impact.
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pl-6 text-xs text-muted-foreground">
+                <span className="flex items-center gap-1.5">
+                  <RiskChip riskClass="stable" /> trades near $1, earns yield
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <RiskChip riskClass="float" /> price can move
+                </span>
+              </div>
+            </div>
 
             {/* Spare USDC stat */}
             <div className="bg-muted/30 rounded-lg border border-border/50 p-3 flex items-center gap-2">
@@ -565,10 +743,9 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
               </span>
             </div>
 
-            {/* Positions first when they exist, else assets first. */}
             {hasPositions && positionsBlock}
 
-            {/* Parkable assets */}
+            {/* Parkable assets table */}
             <section data-testid="section-vault-assets">
               <h4 className="text-sm font-semibold mb-2">Available to park</h4>
               {assetsQuery.isLoading ? (
@@ -586,15 +763,32 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
                       data-testid={`row-asset-${a.key}`}
                     >
                       <div className="min-w-0">
-                        <div className="font-medium flex items-center gap-2">
+                        <div className="font-medium flex flex-wrap items-center gap-2">
                           {a.displayName}
-                          <Badge variant="secondary" data-testid={`badge-tag-${a.key}`}>
-                            {a.tag}
-                          </Badge>
+                          <span className="text-xs text-muted-foreground tabular-nums">{a.apyLabel} APY</span>
+                          <RiskChip riskClass={a.riskClass} />
+                          <Popover>
+                            <PopoverTrigger asChild>
+                              <button
+                                type="button"
+                                className="text-muted-foreground hover:text-foreground"
+                                aria-label={`About ${a.displayName}`}
+                                data-testid={`button-detail-${a.key}`}
+                              >
+                                <Info className="w-3.5 h-3.5" />
+                              </button>
+                            </PopoverTrigger>
+                            <PopoverContent
+                              className="max-w-xs text-xs leading-relaxed"
+                              data-testid={`popover-detail-${a.key}`}
+                            >
+                              {a.riskNote}
+                            </PopoverContent>
+                          </Popover>
                         </div>
-                        {a.priceFloats && (
-                          <p className="text-xs text-muted-foreground mt-0.5">
-                            Value goes up and down with the market.
+                        {a.mayLoseValue && (
+                          <p className="mt-0.5 flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+                            <AlertTriangle className="w-3 h-3" /> Can lose value.
                           </p>
                         )}
                       </div>
@@ -616,7 +810,7 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
             </section>
 
             {/* Default asset override (subtle footer; account-level only) */}
-            {!embedded && assets.length > 0 && (
+            {assets.length > 0 && (
               <div className="flex items-center gap-2 pt-1" data-testid="row-default-asset">
                 <span className="text-xs text-muted-foreground">Default for new parks</span>
                 <Select
@@ -641,8 +835,8 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
         )}
       </div>
 
-      {/* Park dialog */}
-      <Dialog open={!!parkAsset} onOpenChange={(o) => { if (!o) closePark(); }}>
+      {/* Park dialog (account mode only; embedded mode parks inline). */}
+      <Dialog open={!embedded && !!parkAsset} onOpenChange={(o) => { if (!o) closePark(); }}>
         <DialogContent data-testid="dialog-park">
           <DialogHeader>
             <DialogTitle>Park USDC into {parkAsset?.displayName}</DialogTitle>
@@ -767,6 +961,30 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
               )}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* How parking works (embedded/per-bot mode link) */}
+      <Dialog open={showHow} onOpenChange={setShowHow}>
+        <DialogContent data-testid="dialog-how-it-works">
+          <DialogHeader>
+            <DialogTitle>How parking works</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 text-sm text-muted-foreground">
+            <p>
+              Parking puts idle USDC into a yield token so it earns while it waits. Your funds stay in
+              this wallet; we only do the swap.
+            </p>
+            <p>
+              Each park or unpark is capped at {(maxImpact * 100).toFixed(2)}% price impact, so a thin
+              market cannot move your money at a bad price.
+            </p>
+            <p className="flex flex-wrap items-center gap-1.5">
+              <RiskChip riskClass="stable" /> tokens trade near $1 and earn yield.
+              <RiskChip riskClass="float" /> tokens can move in price, and one (OnRe ONyc) can lose value.
+            </p>
+            <p>See the Vault tab in the sidebar for full details on each token.</p>
+          </div>
         </DialogContent>
       </Dialog>
     </>

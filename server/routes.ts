@@ -7705,7 +7705,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         valuation: a.valuation,
         /** True when the token's USDC price floats with the market (basis risk). */
         priceFloats: a.valuation === "market_quote",
+        /** User-facing risk tier for the inline chip: "stable" | "float". */
+        riskClass: a.riskClass,
+        /** True only for assets that can actually lose value (inline "may lose value" hint). */
+        mayLoseValue: a.mayLoseValue,
+        /** Approximate APY label (carries a "~" qualifier). */
+        apyLabel: a.apyLabel,
         tag: a.tag,
+        /** Longer plain-language note for the Vault tab detail/expand. */
+        riskNote: a.riskNote,
         defaultEligible: a.defaultEligible,
       }));
 

@@ -2675,7 +2675,8 @@ export function BotManagementDrawer({
               </div>
               {showVaultPark && displayBot?.id && (
                 <div className="mt-4">
-                  <VaultIdleFunds botId={displayBot.id} />
+                  {/* key on bot id so park amount/selection never carries across a bot switch */}
+                  <VaultIdleFunds key={displayBot.id} botId={displayBot.id} />
                 </div>
               )}
             </div>
