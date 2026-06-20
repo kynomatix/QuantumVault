@@ -19,6 +19,7 @@
 import { executeAgentSwap, USDC_MINT } from "../agent-wallet";
 import { getBestQuote } from "../swap/index.js";
 import { KaminoYieldRoute } from "./kamino-route";
+import { JupiterLendYieldRoute } from "./jupiter-lend-route";
 import type { YieldAsset } from "./yield-assets";
 
 /** Reject any vault swap whose router price impact exceeds 0.5%. */
@@ -226,6 +227,8 @@ export function getYieldRoute(asset: YieldAsset): YieldRoute {
       return new SwapYieldRoute(asset);
     case "kamino":
       return new KaminoYieldRoute(asset);
+    case "jupiter_lend":
+      return new JupiterLendYieldRoute(asset);
     default:
       throw new Error(`Unknown yield route "${(asset as YieldAsset).route}" for asset ${asset.key}`);
   }

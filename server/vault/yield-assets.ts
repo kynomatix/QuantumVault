@@ -22,7 +22,7 @@
  */
 
 /** How funds enter and exit a yield asset. */
-export type YieldRouteKind = "jupiter" | "kamino";
+export type YieldRouteKind = "jupiter" | "kamino" | "jupiter_lend";
 /** How a yield holding is valued in USDC. */
 export type YieldValuation = "market_quote" | "redemption_rate";
 /**
@@ -199,32 +199,32 @@ const YIELD_ASSETS: YieldAsset[] = [
   {
     key: "jupiter_lend_usdc",
     displayName: "Jupiter Lend USDC",
-    // This is the REAL yield-bearing Jupiter option (plain JupUSD above earns the
-    // holder nothing). jlUSDC is Jupiter Lend's receipt token, the direct analogue
-    // of Kamino's kUSDC: deposit USDC -> receive jlUSDC, which accrues via the
-    // protocol's token_exchange_price (USDC_out = jlUSDC * token_exchange_price/1e12).
-    // RESEARCH (2026-06-20, verify before enabling):
-    //  - Candidate mint 9BEcn9aPEmhSPbPQeFGjidRiEKki46fVQDyPpSQXPA2D (UNVERIFIED here;
-    //    confirm on-chain decimals/supply, do NOT trust the symbol).
-    //  - The "jupiter" SWAP route below WILL NOT work: on-DEX jlUSDC liquidity is ~$16K
-    //    (pools show ~$1), so a swap fails the 0.5% impact cap / finds no route. Exit is
-    //    in-protocol redemption, not a swap.
-    //  - Enabling needs a NEW route kind ("jupiter_lend") mirroring KaminoYieldRoute:
-    //    deposit/withdraw via the @jup-ag/lend SDK (getDepositIx + withdraw), executed
-    //    through executeAgentInstructions with verifyOutputMint, redemption-rate
-    //    valuation from token_exchange_price. route stays "jupiter" only because it is
-    //    inert while disabled with an empty mint; flip it when the lend route lands.
-    mint: "",
+    // The REAL yield-bearing Jupiter option (plain JupUSD above earns the holder
+    // nothing). jlUSDC is Jupiter Lend's receipt token, the direct analogue of
+    // Kamino's kUSDC: deposit USDC -> receive jlUSDC, whose USDC redemption value
+    // accrues over time (rate = totalAssets/totalSupply from the protocol).
+    //
+    // Mint VERIFIED ON-CHAIN (2026-06-20) via the protocol's OWN registry, NOT by
+    // symbol: getLendingTokens() lists it (id 2) and getLendingTokenDetails reports
+    // asset == USDC, decimals == 6, SPL owner, supply > 0 (see JLUSDC_MINT in
+    // jupiter-lend-route.ts). The direct "jupiter_lend" deposit/redeem route is now
+    // wired (valuation + park + unpark, fail-closed realized-delta verification).
+    // Exit is an in-protocol redeem, NOT a swap: on-DEX jlUSDC liquidity is
+    // negligible, so the "jupiter" swap seam cannot price it.
+    //
+    // KEPT DISABLED on purpose (same precedent as Kamino): flip `enabled` to true
+    // only after the platform owner runs a real mainnet deposit/withdraw round-trip.
+    mint: "9BEcn9aPEmhSPbPQeFGjidRiEKki46fVQDyPpSQXPA2D",
     decimals: 6,
-    route: "jupiter",
-    valuation: "market_quote",
-    defaultEligible: false,
+    route: "jupiter_lend",
+    valuation: "redemption_rate",
+    defaultEligible: true,
     riskClass: "stable",
     mayLoseValue: false,
-    apyLabel: "~5%",
-    tag: "Jupiter Lend USDC (disabled; needs a direct lend route, not a swap).",
+    apyLabel: "~4-5%",
+    tag: "Yield-bearing stablecoin. Jupiter Lend.",
     riskNote:
-      "Placeholder. Not routable until a verified mint is pasted in, a direct Jupiter Lend deposit/withdraw route is wired (the swap route cannot price it), and a real round-trip is confirmed.",
+      "Your USDC is supplied to Jupiter's USDC lending market and earns interest. Principal stays in USDC terms and the value accrues over time. Disabled until a real round-trip is confirmed.",
     enabled: false,
   },
 ];
