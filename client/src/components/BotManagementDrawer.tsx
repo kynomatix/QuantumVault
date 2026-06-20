@@ -2673,6 +2673,19 @@ export function BotManagementDrawer({
                   data-testid="switch-bot-vault-park"
                 />
               </div>
+              {displayBot?.activeProtocol === 'pacifica' && (
+                <div
+                  className="mt-3 text-xs text-muted-foreground flex items-start gap-1.5 leading-relaxed bg-muted/30 border border-border/50 rounded-md px-2.5 py-1.5"
+                  data-testid="text-bot-vault-park-pacifica-notice"
+                >
+                  <Info className="w-3 h-3 mt-0.5 shrink-0" />
+                  <span>
+                    On Pacifica this parks your shared <span className="font-medium">account</span> idle USDC (not only this bot's).
+                    Pacifica's $1 withdrawal fee and $10 minimum apply to moving funds on or off the exchange — so it pays off
+                    mainly for funds sitting idle a while, or to hold them in self-custody and spread risk.
+                  </span>
+                </div>
+              )}
               {showVaultPark && displayBot?.id && (
                 <div className="mt-4">
                   {/* key on bot id so park amount/selection never carries across a bot switch */}
