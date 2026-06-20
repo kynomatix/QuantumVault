@@ -810,7 +810,7 @@ Vaults offer a short, vetted menu of places to earn — not an endless DeFi list
 
 ### Available Destinations
 
-The ranges below are estimates (marked "est."). In the app, once we've measured a destination's real return from on-chain prices, the live number replaces the estimate automatically.
+The ranges below are estimates (marked "est."). In the app, once a destination's real return is available, the live number replaces the estimate automatically. Measured rates come from public on-chain yield data and reflect each destination's recent realized return — not reward-token incentives a passive holder may not receive.
 
 - **Kamino USDC** (~4-9% est., Stable) — Your USDC is supplied to Kamino's USDC lending market and earns interest. Principal stays in USDC terms.
 - **Perena USD\\*** (~10% est., Stable) — A yield-bearing stablecoin backed by a pool of stablecoins. Trades near $1; value accrues from the pool's yield.

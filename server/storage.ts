@@ -16,6 +16,7 @@ import {
   equityEvents,
   vaultPositions,
   yieldPriceSnapshots,
+  yieldApyCache,
   webhookLogs,
   subscriptions,
   portfolios,
@@ -52,6 +53,8 @@ import {
   type VaultPosition,
   type YieldPriceSnapshot,
   type InsertYieldPriceSnapshot,
+  type YieldApyCache,
+  type InsertYieldApyCache,
   type WebhookLog,
   type InsertWebhookLog,
   type Subscription,
@@ -349,6 +352,8 @@ export interface IStorage {
   insertYieldPriceSnapshot(s: InsertYieldPriceSnapshot): Promise<YieldPriceSnapshot>;
   getYieldPriceSnapshots(assetKey: string, since: Date): Promise<YieldPriceSnapshot[]>;
   pruneYieldPriceSnapshots(olderThan: Date): Promise<void>;
+  upsertYieldApyCache(row: InsertYieldApyCache): Promise<void>;
+  getYieldApyCacheAll(): Promise<YieldApyCache[]>;
 
   getBotPosition(tradingBotId: string, market: string): Promise<BotPosition | undefined>;
   getBotPositions(walletAddress: string): Promise<BotPosition[]>;
@@ -2171,6 +2176,28 @@ export class DatabaseStorage implements IStorage {
   // Bounded retention: drop snapshots older than the cutoff (cross-asset).
   async pruneYieldPriceSnapshots(olderThan: Date): Promise<void> {
     await db.delete(yieldPriceSnapshots).where(lt(yieldPriceSnapshots.asOf, olderThan));
+  }
+
+  // Vaults: persist the last-good external (DeFiLlama) APY for an asset. One row
+  // per asset_key, upserted, with as_of bumped to now() so freshness is tracked.
+  async upsertYieldApyCache(row: InsertYieldApyCache): Promise<void> {
+    await db.insert(yieldApyCache).values(row).onConflictDoUpdate({
+      target: yieldApyCache.assetKey,
+      set: {
+        apy: row.apy ?? null,
+        apyBase: row.apyBase ?? null,
+        apyReward: row.apyReward ?? null,
+        apyMean30d: row.apyMean30d ?? null,
+        source: row.source,
+        poolId: row.poolId ?? null,
+        asOf: new Date(),
+      },
+    });
+  }
+
+  // All cached external-APY rows (a handful), for the oracle's last-good fallback.
+  async getYieldApyCacheAll(): Promise<YieldApyCache[]> {
+    return await db.select().from(yieldApyCache);
   }
 
   async reconcileDeposit(walletAddress: string, botId: string, gap: number, onChainBalance: number): Promise<boolean> {

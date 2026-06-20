@@ -1922,8 +1922,9 @@ function VaultsDestinationsSection() {
     { name: 'OnRe ONyc', key: 'onyc', apy: '~10-12%', type: 'float', note: 'Tokenized reinsurance. The price floats with insurance results and can lose value — the highest-risk option.' },
   ];
 
-  // Live realized APY from the public yield oracle. Until a real number is
-  // measured we keep showing the estimated range, marked "est.".
+  // Live measured APY from the public yield oracle (real numbers via the DeFiLlama
+  // yields index, or self-measured on-chain for assets it doesn't cover). Until a
+  // real number is available we keep showing the estimated range, marked "est.".
   const [liveApy, setLiveApy] = useState<Record<string, number | null>>({});
   useEffect(() => {
     let cancelled = false;
@@ -1996,10 +1997,12 @@ function VaultsDestinationsSection() {
       </div>
 
       <Alert type="warning">
-        Rates marked "est." are estimated ranges shown until we've measured a destination's real return from 
-        on-chain prices; the measured number then replaces them automatically. No APY is ever a guarantee — they 
-        move with market conditions. Floating destinations can change in value: OnRe ONyc can lose value, and 
-        Ondo USDY is restricted to non-US persons under its own terms. Choose what fits your situation.
+        Rates marked "est." are estimated ranges shown until a destination's real return is available; the 
+        measured number then replaces them automatically. Measured rates come from public on-chain yield data 
+        and reflect each destination's recent realized return — not reward-token incentives a passive holder may 
+        not receive. No APY is ever a guarantee — they move with market conditions. Floating destinations can 
+        change in value: OnRe ONyc can lose value, and Ondo USDY is restricted to non-US persons under its own 
+        terms. Choose what fits your situation.
       </Alert>
     </div>
   );

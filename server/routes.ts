@@ -8053,10 +8053,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
 
-      // Realized-APY table from the yield oracle. NON-BLOCKING: serves the cached
+      // Measured-APY table from the yield oracle. NON-BLOCKING: serves the cached
       // table (or {} on a cold process) and kicks an async refresh; this endpoint
-      // never waits on external quotes/RPC. apy is a real measured number or null
-      // (with `apyMethod` saying why) — the client never shows a marketing number.
+      // never waits on external HTTP/RPC. apy is a real measured number (from the
+      // DeFiLlama yields index, or self-measured from on-chain prices for assets
+      // DeFiLlama doesn't cover) or null (with `apyMethod` saying why) — the client
+      // never shows a marketing number.
       const yieldTable = getYieldTableCached();
       const assets = getEnabledYieldAssets().map((a) => {
         const y = yieldTable[a.key];
@@ -8079,9 +8081,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           apy: y?.apy ?? null,
           apyBase: y?.apyBase ?? null,
           apyReward: y?.apyReward ?? null,
-          /** "trailing" | "accruing" | "unavailable" — why apy is or isn't a number. */
+          /** "defillama"|"defillama_cached"|"trailing"|"accruing"|"unavailable" — why apy is or isn't a number. */
           apyMethod: y?.method ?? "unavailable",
-          /** ms epoch of the freshest sample backing apy, or null. */
+          /** ms epoch of the data backing apy, or null. */
           apyAsOf: y?.asOf ?? null,
           tag: a.tag,
           /** Longer plain-language note for the Vault tab detail/expand. */

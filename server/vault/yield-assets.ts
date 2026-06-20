@@ -69,6 +69,15 @@ export interface YieldAsset {
   riskNote: string;
   /** Only enabled assets can be quoted, parked, or unparked. */
   enabled: boolean;
+  /**
+   * DeFiLlama yields pool id (https://yields.llama.fi/pools) for this exact asset.
+   * When set, the yield oracle serves the REAL, already-measured APY from DeFiLlama
+   * (instant) instead of waiting 12h–14d to self-measure it from on-chain price
+   * snapshots. Leave undefined for assets DeFiLlama does not cover (e.g. Perena
+   * USD*), which keep the self-measured path. Verify the id against the live /pools
+   * feed (project + symbol + chain) before pasting — never guess.
+   */
+  defiLlamaPoolId?: string;
 }
 
 /**
@@ -111,6 +120,8 @@ const YIELD_ASSETS: YieldAsset[] = [
     riskNote:
       "Your USDC is supplied to Kamino's USDC lending market and earns interest. Principal stays in USDC terms and the value accrues over time.",
     enabled: true,
+    // Kamino Lend "Main Market" USDC (verified project+symbol+chain on /pools).
+    defiLlamaPoolId: "d2141a59-c199-4be7-8d4b-c8223954836b",
   },
   {
     key: "perena_usd_star",
@@ -170,6 +181,8 @@ const YIELD_ASSETS: YieldAsset[] = [
     riskNote:
       "Tokenized reinsurance. The price floats with the underlying insurance results and CAN lose value. The highest-risk option here.",
     enabled: true,
+    // OnRe ONYC (project "onre", Solana) — verified on /pools.
+    defiLlamaPoolId: "7083d6a5-e3cb-4eeb-8204-f1b735e4ecbb",
   },
   {
     key: "usdy",
@@ -194,6 +207,8 @@ const YIELD_ASSETS: YieldAsset[] = [
     riskNote:
       "Ondo's Treasury-backed yield token, backed by short-term US Treasuries. Ondo's terms restrict it to non-US persons (Regulation S), so only use it if that applies to you. The price floats UP as it earns, so it is not a fixed $1 token, and selling back to USDC costs a small spread (around 0.3%).",
     enabled: true,
+    // Ondo USDY on Solana (project "ondo-yield-assets") — verified on /pools.
+    defiLlamaPoolId: "00b83068-9f87-4411-b5d7-5d2ff48c40c4",
   },
   {
     key: "jupiter_lend_usdc",
@@ -228,6 +243,11 @@ const YIELD_ASSETS: YieldAsset[] = [
     riskNote:
       "Your USDC is supplied to Jupiter's USDC lending market and earns interest. Principal stays in USDC terms and the value accrues over time.",
     enabled: true,
+    // Jupiter Lend "Earn" USDC (project "jupiter-lend", Solana) — verified on /pools.
+    // NOTE: this pool carries an apyReward component (incentive tokens NOT reflected
+    // in the jlUSDC redemption value), so the oracle's headline rule uses apyBase
+    // here, not the reward-inflated 30-day mean.
+    defiLlamaPoolId: "d783c8df-e2ed-44b4-8317-161ccc1b5f06",
   },
 ];
 

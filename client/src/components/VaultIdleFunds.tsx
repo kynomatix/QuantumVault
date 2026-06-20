@@ -52,8 +52,10 @@ export interface YieldAssetInfo {
   apy: number | null;
   apyBase: number | null;
   apyReward: number | null;
-  /** Why apy is / isn't a number: "trailing" | "accruing" | "unavailable". */
-  apyMethod: "trailing" | "accruing" | "unavailable";
+  /** Why apy is / isn't a number. "defillama"/"defillama_cached" = real measured
+   *  rate from the DeFiLlama yields index (live / last-good); "trailing" =
+   *  self-measured from our own price series; "accruing"/"unavailable" = no number. */
+  apyMethod: "defillama" | "defillama_cached" | "trailing" | "accruing" | "unavailable";
   apyAsOf: number | null;
   tag: string;
   /** Longer plain-language note for the detail dialog. */

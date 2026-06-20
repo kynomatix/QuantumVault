@@ -1,27 +1,33 @@
 /**
  * Vaults yield oracle (Phase 1).
  *
- * Reports a REAL, REALIZED net APY per yield asset for DISPLAY, replacing the
- * static marketing `apyLabel` strings. The number is measured, never projected:
- * the oracle samples each asset's own on-chain USDC price over time and annualizes
- * the realized movement between two samples. There is no protocol "target"/"current"
- * rate involved — only what actually happened to the price.
+ * Reports a REAL, MEASURED net APY per yield asset for DISPLAY, replacing the
+ * static marketing `apyLabel` strings. The number is measured, never projected.
  *
- * Price source per asset (driven by yield-assets.ts `valuation`):
- *   - redemption_rate (Kamino, Jupiter Lend): the on-chain redemption rate, read as
- *     the USDC value of a fixed REFERENCE token amount via the route's valueInUsdc().
- *     This is a clean monotonic accrual (no spread/impact noise), so a SHORT trailing
- *     window (~12h) already yields a trustworthy number.
- *   - market_quote (Perena USD*, ONyc, USDY): a FIXED $1,000 USDC->token buy quote,
- *     reduced to USDC-per-token. Swap quotes carry spread/impact noise, so this needs
- *     a LONG trailing window (>=14 days) before a number is shown.
+ * APY SOURCE (per asset), in priority order:
+ *   1. DeFiLlama yields index (PRIMARY, instant) — for assets carrying a
+ *      `defiLlamaPoolId`. DeFiLlama has already measured the pool's realized APY, so
+ *      we serve a real number immediately instead of waiting 12h–14d to accumulate
+ *      our own price history. Headline = the trailing 30-day mean when the pool has
+ *      no incentive-token rewards, else the base yield (the part actually reflected in
+ *      the token's USDC value — incentive rewards a passive holder may not realize are
+ *      excluded). Persisted to the yield_apy_cache table as last-good.
+ *   2. DB last-good (`defillama_cached`) — if DeFiLlama is briefly unreachable, the
+ *      last persisted number is served (while fresh, < STALE_MS) so the UI never
+ *      regresses to an estimate during a transient outage.
+ *   3. Self-measured trailing series (FALLBACK + sole source for assets DeFiLlama
+ *      does not cover, e.g. Perena USD*): the oracle samples the asset's own on-chain
+ *      USDC price over time and annualizes the realized movement. redemption_rate
+ *      assets (clean monotonic accrual) need only a SHORT window (~12h); market_quote
+ *      assets (spread/impact noise) need a LONG window (>=14d) before a number shows.
  *
  * MONEY-SAFETY CONTRACT (display-only, but the same discipline):
- *   - On-chain truth only. The price comes from the same routes/quotes used for money.
- *   - The oracle itself NEVER fabricates or projects a number. When the window is too
- *     short, the source is stale, or the value is anomalous, the entry's `apy` is null
- *     and `method` says why ("accruing" / "unavailable"). It is the CALLER's job to
- *     decide the fallback.
+ *   - Measured numbers only. DeFiLlama reports realized pool APY; the self-measured
+ *     path uses the same on-chain routes/quotes used for money.
+ *   - The oracle itself NEVER fabricates or projects a number. When DeFiLlama has no
+ *     entry, the cache is stale, the self-measured window is too short, or a value is
+ *     anomalous, the entry's `apy` is null and `method` says why ("accruing" /
+ *     "unavailable"). It is the CALLER's job to decide the fallback.
  *   - DISPLAY FALLBACK (owner-approved): until `apy` is a real measured number, the UI
  *     shows the asset's estimated RANGE (`apyLabel`) but ALWAYS clearly marked "est."
  *     (e.g. "~4-9% est." / caption "Est. APY"), so an estimate is never mistaken for
@@ -37,13 +43,17 @@
 
 import { getEnabledYieldAssets, type YieldAsset } from "./yield-assets";
 import { getYieldRoute, VAULT_MAX_PRICE_IMPACT } from "./yield-routes";
+import { fetchDefiLlamaApy, type LlamaApy } from "./defillama-apy";
 import { getBestQuote } from "../swap/index.js";
 import { USDC_MINT } from "../agent-wallet";
 import { storage } from "../storage";
+import type { YieldApyCache } from "@shared/schema";
 
 /** How an asset's `apy` was derived (or why it is null). */
 export type YieldApyMethod =
-  | "trailing" // a real realized number computed from the price series
+  | "defillama" // a real measured number from the DeFiLlama yields index (live)
+  | "defillama_cached" // last-good DeFiLlama number from the DB (upstream briefly down)
+  | "trailing" // a real realized number self-measured from our own price series
   | "accruing" // not enough trailing data yet (window too short) -> "rate building"
   | "unavailable"; // source stale / anomalous / errored -> "rate unavailable"
 
@@ -145,11 +155,94 @@ async function samplePrice(asset: YieldAsset): Promise<number | null> {
   }
 }
 
+/** Round a percent to one decimal place, preserving null. */
+function round1(n: number | null | undefined): number | null {
+  if (n == null || !Number.isFinite(n)) return null;
+  return Math.round(n * 10) / 10;
+}
+
 /**
- * Compute a realized APY entry for one asset from its persisted price series plus
- * a freshly-sampled point. Never throws; degrades to an honest status entry.
+ * Pick the honest headline APY from a DeFiLlama pool record. The number must
+ * reflect what a passive holder's parked balance actually grows by (the asset's
+ * USDC value), so incentive-token rewards (apyReward) are excluded:
+ *   - reward-free pool: use the trailing 30-day mean (smoother, realized).
+ *   - pool WITH rewards: use the base yield, since the 30-day mean folds in reward
+ *     tokens that are NOT reflected in the receipt token's redemption value.
+ * Returns null when no trustworthy component exists or the value is anomalous.
  */
-async function computeEntry(asset: YieldAsset): Promise<YieldApyEntry> {
+function chooseHeadline(l: LlamaApy): number | null {
+  const base = l.apyBase != null && Number.isFinite(l.apyBase) ? l.apyBase : null;
+  const mean = l.apyMean30d != null && Number.isFinite(l.apyMean30d) ? l.apyMean30d : null;
+  const reward = l.apyReward != null && Number.isFinite(l.apyReward) ? l.apyReward : 0;
+  let v: number | null;
+  if (reward <= 0.01 && mean != null && mean > 0) v = mean;
+  else if (base != null) v = base;
+  else if (mean != null && mean > 0) v = mean;
+  else v = null;
+  if (v == null || !Number.isFinite(v) || v < APY_MIN_PCT || v > APY_MAX_PCT) return null;
+  return v;
+}
+
+/**
+ * Compute an APY entry for one asset. Never throws; degrades to an honest status.
+ *
+ * For DeFiLlama-backed assets (those with a `defiLlamaPoolId`) it serves the live
+ * measured number (persisting last-good), then the fresh DB cache, then
+ * "unavailable" — and does NO self-sampling (saves a quote/RPC per build). For
+ * uncovered assets it falls through to the self-measured trailing-series path.
+ */
+async function computeEntry(
+  asset: YieldAsset,
+  llama: LlamaApy | null,
+  cached: YieldApyCache | null,
+): Promise<YieldApyEntry> {
+  // --- DeFiLlama-backed assets: instant real number, no self-sampling. ---
+  if (asset.defiLlamaPoolId) {
+    if (llama) {
+      const headline = chooseHeadline(llama);
+      if (headline != null) {
+        // Persist last-good (best-effort) for cold-start / outage fallback.
+        try {
+          await storage.upsertYieldApyCache({
+            assetKey: asset.key,
+            apy: headline.toFixed(4),
+            apyBase: llama.apyBase != null ? llama.apyBase.toFixed(4) : null,
+            apyReward: llama.apyReward != null ? llama.apyReward.toFixed(4) : null,
+            apyMean30d: llama.apyMean30d != null ? llama.apyMean30d.toFixed(4) : null,
+            source: "defillama",
+            poolId: asset.defiLlamaPoolId,
+          });
+        } catch {
+          // persistence is best-effort
+        }
+        return {
+          apy: round1(headline),
+          apyBase: round1(llama.apyBase),
+          apyReward: round1(llama.apyReward),
+          method: "defillama",
+          asOf: Date.now(),
+        };
+      }
+    }
+    // DeFiLlama missing/failed this build -> serve last-good DB cache while fresh.
+    if (cached && cached.apy != null) {
+      const asOfMs = new Date(cached.asOf).getTime();
+      const apyNum = Number(cached.apy);
+      if (Number.isFinite(asOfMs) && Number.isFinite(apyNum) && Date.now() - asOfMs < STALE_MS) {
+        return {
+          apy: round1(apyNum),
+          apyBase: cached.apyBase != null ? round1(Number(cached.apyBase)) : null,
+          apyReward: cached.apyReward != null ? round1(Number(cached.apyReward)) : null,
+          method: "defillama_cached",
+          asOf: asOfMs,
+        };
+      }
+    }
+    // No live data and no fresh cache: honest "unavailable" (UI shows est.).
+    return unavailable();
+  }
+
+  // --- Self-measured path (assets DeFiLlama does not cover, e.g. Perena USD*). ---
   const minWindowMs =
     asset.valuation === "market_quote" ? MIN_WINDOW_MS_MARKET : MIN_WINDOW_MS_REDEMPTION;
 
@@ -205,17 +298,47 @@ async function computeEntry(asset: YieldAsset): Promise<YieldApyEntry> {
   return { apy: rounded, apyBase: rounded, apyReward: null, method: "trailing", asOf: newest.t };
 }
 
-/** Build the full table: sample + compute every enabled asset in parallel, then prune. */
+/** Build the full table: resolve every enabled asset in parallel, then prune. */
 async function buildTable(): Promise<YieldTable> {
   const assets = getEnabledYieldAssets();
-  const entries = await Promise.allSettled(assets.map((a) => computeEntry(a)));
+
+  // PRIMARY source: one DeFiLlama fetch covering all mapped pools (best-effort).
+  const poolIds = assets
+    .map((a) => a.defiLlamaPoolId)
+    .filter((p): p is string => typeof p === "string" && p.length > 0);
+  let llama: Map<string, LlamaApy> = new Map();
+  if (poolIds.length) {
+    try {
+      llama = await fetchDefiLlamaApy(poolIds);
+    } catch {
+      llama = new Map();
+    }
+  }
+
+  // Last-good cache, for the fallback when DeFiLlama is briefly unreachable.
+  const cacheByKey = new Map<string, YieldApyCache>();
+  try {
+    for (const row of await storage.getYieldApyCacheAll()) cacheByKey.set(row.assetKey, row);
+  } catch {
+    // ignore; assets simply lose the cached fallback this build
+  }
+
+  const entries = await Promise.allSettled(
+    assets.map((a) =>
+      computeEntry(
+        a,
+        a.defiLlamaPoolId ? llama.get(a.defiLlamaPoolId) ?? null : null,
+        cacheByKey.get(a.key) ?? null,
+      ),
+    ),
+  );
   const table: YieldTable = {};
   assets.forEach((a, i) => {
     const r = entries[i];
     table[a.key] = r.status === "fulfilled" ? r.value : unavailable();
   });
 
-  // Bounded retention (best-effort).
+  // Bounded retention (best-effort) for the self-measured snapshot series.
   try {
     await storage.pruneYieldPriceSnapshots(new Date(Date.now() - RETENTION_MS));
   } catch {

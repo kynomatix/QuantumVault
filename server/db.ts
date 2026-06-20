@@ -425,6 +425,22 @@ export async function ensureSchema() {
         as_of timestamp NOT NULL DEFAULT now()
       )`,
       `CREATE INDEX IF NOT EXISTS idx_yield_price_snapshots_asset_time ON yield_price_snapshots (asset_key, as_of)`,
+
+      // --- Vaults: external (DeFiLlama) realized-APY cache. ---
+      // One upserted row per asset_key holding the last-good REAL APY from the
+      // external yield index, so a cold process / restart serves a measured number
+      // immediately and the UI never regresses to an estimate during a brief upstream
+      // outage. Display-only (no money). Additive + idempotent.
+      `CREATE TABLE IF NOT EXISTS yield_apy_cache (
+        asset_key text PRIMARY KEY,
+        apy numeric(10, 4),
+        apy_base numeric(10, 4),
+        apy_reward numeric(10, 4),
+        apy_mean_30d numeric(10, 4),
+        source text NOT NULL,
+        pool_id text,
+        as_of timestamp NOT NULL DEFAULT now()
+      )`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner

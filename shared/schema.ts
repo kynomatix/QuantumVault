@@ -443,6 +443,28 @@ export const insertYieldPriceSnapshotSchema = createInsertSchema(yieldPriceSnaps
 export type InsertYieldPriceSnapshot = z.infer<typeof insertYieldPriceSnapshotSchema>;
 export type YieldPriceSnapshot = typeof yieldPriceSnapshots.$inferSelect;
 
+// Vaults yield oracle: last-good REAL APY per asset, sourced from an external yield
+// index (DeFiLlama). Display-only (no money). One row per asset_key (upserted), so a
+// cold process / restart can serve the last-known measured number immediately and the
+// UI never regresses to an estimate when the upstream is briefly unreachable. apy is
+// the headline shown; the component fields are kept for transparency/debugging.
+export const yieldApyCache = pgTable("yield_apy_cache", {
+  assetKey: text("asset_key").primaryKey(),
+  apy: decimal("apy", { precision: 10, scale: 4 }),
+  apyBase: decimal("apy_base", { precision: 10, scale: 4 }),
+  apyReward: decimal("apy_reward", { precision: 10, scale: 4 }),
+  apyMean30d: decimal("apy_mean_30d", { precision: 10, scale: 4 }),
+  source: text("source").notNull(),
+  poolId: text("pool_id"),
+  asOf: timestamp("as_of").defaultNow().notNull(),
+});
+
+export const insertYieldApyCacheSchema = createInsertSchema(yieldApyCache).omit({
+  asOf: true,
+});
+export type InsertYieldApyCache = z.infer<typeof insertYieldApyCacheSchema>;
+export type YieldApyCache = typeof yieldApyCache.$inferSelect;
+
 export const webhookLogs = pgTable("webhook_logs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   tradingBotId: varchar("trading_bot_id").references(() => tradingBots.id, { onDelete: "set null" }),
