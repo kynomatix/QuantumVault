@@ -86,8 +86,9 @@ export interface YieldAsset {
  *    jlJupUSD, a different route). See the jupusd row comment.
  *  - USDY (Ondo): Jupiter VERIFIED mint, decimals 6, ~$1.9M liquidity. USDC round
  *    trip at $500/$2k/$5k: buy ~0%, sell ~0.3% (under the 0.5% cap). Treasury-backed,
- *    price floats UP. NOW DISABLED pending compliance: Ondo's terms prohibit US
- *    persons from acquiring USDY (Reg S). See the usdy row comment.
+ *    price floats UP. ENABLED, with a non-US-only eligibility restriction (Ondo's
+ *    Reg S terms) surfaced to users in the tag + riskNote so each user self-selects.
+ *    See the usdy row comment.
  */
 const YIELD_ASSETS: YieldAsset[] = [
   {
@@ -173,15 +174,14 @@ const YIELD_ASSETS: YieldAsset[] = [
   {
     key: "usdy",
     displayName: "Ondo USDY",
-    // DISABLED 2026-06-20 pending COMPLIANCE sign-off. Ondo's own eligibility terms
-    // prohibit US persons from subscribing for, acquiring, or redeeming USDY
-    // (Regulation S; USDY is an unregistered security outside the US). A secondary-
-    // market swap into USDY still counts as "acquiring" under those terms, so
-    // offering it as a named, public park option to a userbase that may include US
-    // persons is a legal question, not a copy tweak. Do NOT re-enable until whoever
-    // owns compliance confirms in writing. Mint kept (Jupiter VERIFIED list, ~$1.9M
-    // liq, round-trip buy ~0% / sell ~0.3%) so the teardown sweep still detects any
-    // stray balance.
+    // Ondo's Treasury-backed yield token. Mint from Jupiter's VERIFIED token list
+    // (~$1.9M liq; round-trip buy ~0% / sell ~0.3%, under the 0.5% cap). Price
+    // floats UP as it earns (not a fixed $1 token).
+    // COMPLIANCE NOTE (eligibility): Ondo's own terms restrict USDY to non-US
+    // persons (Regulation S; USDY is an unregistered security outside the US). We
+    // do NOT remove the option for the user; instead the restriction is surfaced
+    // plainly in the UI copy (tag + riskNote) so each user self-selects. Keeping
+    // it available, with disclosure, is the platform owner's decision.
     mint: "A1KLoBrKBde8Ty9qtNQUtq3C2ortoC3u7twggz7sEto6",
     decimals: 6,
     route: "jupiter",
@@ -190,15 +190,30 @@ const YIELD_ASSETS: YieldAsset[] = [
     riskClass: "float",
     mayLoseValue: false,
     apyLabel: "~4-5%",
-    tag: "Treasury-backed yield token. Restricted to non-US persons (compliance).",
+    tag: "Treasury-backed yield token. Non-US persons only; price floats up.",
     riskNote:
-      "Ondo's Treasury-backed yield token. Ondo's terms restrict it to non-US persons (Regulation S). Disabled here pending a compliance decision before it can be a public option.",
-    enabled: false,
+      "Ondo's Treasury-backed yield token, backed by short-term US Treasuries. Ondo's terms restrict it to non-US persons (Regulation S), so only use it if that applies to you. The price floats UP as it earns, so it is not a fixed $1 token, and selling back to USDC costs a small spread (around 0.3%).",
+    enabled: true,
   },
   // --- Present but DISABLED: not yet verified/wired. Do NOT enable until ready. ---
   {
     key: "jupiter_lend_usdc",
     displayName: "Jupiter Lend USDC",
+    // This is the REAL yield-bearing Jupiter option (plain JupUSD above earns the
+    // holder nothing). jlUSDC is Jupiter Lend's receipt token, the direct analogue
+    // of Kamino's kUSDC: deposit USDC -> receive jlUSDC, which accrues via the
+    // protocol's token_exchange_price (USDC_out = jlUSDC * token_exchange_price/1e12).
+    // RESEARCH (2026-06-20, verify before enabling):
+    //  - Candidate mint 9BEcn9aPEmhSPbPQeFGjidRiEKki46fVQDyPpSQXPA2D (UNVERIFIED here;
+    //    confirm on-chain decimals/supply, do NOT trust the symbol).
+    //  - The "jupiter" SWAP route below WILL NOT work: on-DEX jlUSDC liquidity is ~$16K
+    //    (pools show ~$1), so a swap fails the 0.5% impact cap / finds no route. Exit is
+    //    in-protocol redemption, not a swap.
+    //  - Enabling needs a NEW route kind ("jupiter_lend") mirroring KaminoYieldRoute:
+    //    deposit/withdraw via the @jup-ag/lend SDK (getDepositIx + withdraw), executed
+    //    through executeAgentInstructions with verifyOutputMint, redemption-rate
+    //    valuation from token_exchange_price. route stays "jupiter" only because it is
+    //    inert while disabled with an empty mint; flip it when the lend route lands.
     mint: "",
     decimals: 6,
     route: "jupiter",
@@ -207,9 +222,9 @@ const YIELD_ASSETS: YieldAsset[] = [
     riskClass: "stable",
     mayLoseValue: false,
     apyLabel: "~5%",
-    tag: "Jupiter Lend USDC (disabled; quote-first before enabling).",
+    tag: "Jupiter Lend USDC (disabled; needs a direct lend route, not a swap).",
     riskNote:
-      "Placeholder. Not routable until a verified mint is pasted in and a quote round-trip is confirmed.",
+      "Placeholder. Not routable until a verified mint is pasted in, a direct Jupiter Lend deposit/withdraw route is wired (the swap route cannot price it), and a real round-trip is confirmed.",
     enabled: false,
   },
 ];
