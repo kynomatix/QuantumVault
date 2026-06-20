@@ -294,7 +294,7 @@ export default function AppPage() {
   const [telegramConnectError, setTelegramConnectError] = useState<string | null>(null);
   const [telegramSecondsLeft, setTelegramSecondsLeft] = useState(0);
   const [telegramTestSending, setTelegramTestSending] = useState(false);
-  const [expandedSection, setExpandedSection] = useState<'account' | 'trading' | 'notifications' | 'security' | 'api' | 'danger' | null>(null);
+  const [expandedSection, setExpandedSection] = useState<'account' | 'trading' | 'vault' | 'notifications' | 'security' | 'api' | 'danger' | null>(null);
   // API tokens (for AI agents like Claude/MCP, n8n, scripts).
   const [apiTokens, setApiTokens] = useState<Array<{ id: number; name: string; tokenPrefix: string; lastUsedAt: string | null; createdAt: string }>>([]);
   const [apiTokensLoading, setApiTokensLoading] = useState(false);
@@ -4194,6 +4194,63 @@ export default function AppPage() {
                       </AnimatePresence>
                     </div>
 
+                    {/* Vault Section */}
+                    <div className="gradient-border p-0 noise">
+                      <button
+                        onClick={() => setExpandedSection(expandedSection === 'vault' ? null : 'vault')}
+                        className="w-full p-4 flex items-center justify-between cursor-pointer hover:bg-muted/10 transition-colors rounded-t-xl"
+                        data-testid="button-toggle-vault"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-full bg-primary/20">
+                            <VaultIcon className="w-5 h-5 text-primary" />
+                          </div>
+                          <h3 className="font-display font-semibold">Vault</h3>
+                        </div>
+                        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${expandedSection === 'vault' ? 'rotate-180' : ''}`} />
+                      </button>
+                      <AnimatePresence>
+                        {expandedSection === 'vault' && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.2 }}
+                            className="overflow-hidden"
+                          >
+                            <div className="px-4 pb-4 space-y-4">
+                              <div>
+                                <label className="text-sm text-muted-foreground mb-1.5 block">Recover unused rent</label>
+                                <p className="text-xs text-muted-foreground mb-3">
+                                  Solana holds a small SOL deposit (called rent) for every token account your wallet
+                                  opens. This returns that SOL to your account for any accounts you no longer use.
+                                  It only touches empty accounts, so your balances are never affected.
+                                </p>
+                                <Button
+                                  variant="outline"
+                                  onClick={handleRecoverTokenRents}
+                                  disabled={recoveringRent}
+                                  data-testid="button-recover-rent"
+                                >
+                                  {recoveringRent ? (
+                                    <>
+                                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                      Recovering...
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Fuel className="w-4 h-4 mr-2" />
+                                      Recover unused rent
+                                    </>
+                                  )}
+                                </Button>
+                              </div>
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+
                     {/* Notifications Section */}
                     <div className="gradient-border p-0 noise">
                       <button
@@ -4690,41 +4747,6 @@ export default function AppPage() {
                           </motion.div>
                         )}
                       </AnimatePresence>
-                    </div>
-
-                    {/* Account Upkeep: reclaim SOL rent from empty token accounts */}
-                    <div className="gradient-border p-0 noise">
-                      <div className="p-4">
-                        <div className="flex items-center gap-3 mb-2">
-                          <div className="p-2 rounded-full bg-emerald-500/15">
-                            <Fuel className="w-5 h-5 text-emerald-400" />
-                          </div>
-                          <h3 className="font-display font-semibold">Recover unused rent</h3>
-                        </div>
-                        <p className="text-sm text-muted-foreground mb-3">
-                          Solana holds a small SOL deposit (called rent) for every token account your wallet
-                          opens. This returns that SOL to your account for any accounts you no longer use.
-                          It only touches empty accounts, so your balances are never affected.
-                        </p>
-                        <Button
-                          variant="outline"
-                          onClick={handleRecoverTokenRents}
-                          disabled={recoveringRent}
-                          data-testid="button-recover-rent"
-                        >
-                          {recoveringRent ? (
-                            <>
-                              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                              Recovering...
-                            </>
-                          ) : (
-                            <>
-                              <Fuel className="w-4 h-4 mr-2" />
-                              Recover unused rent
-                            </>
-                          )}
-                        </Button>
-                      </div>
                     </div>
 
                     {/* Danger Zone Section */}
