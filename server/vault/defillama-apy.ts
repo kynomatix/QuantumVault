@@ -10,7 +10,7 @@
  * then to the self-measured path. Display-only — never on a money path.
  *
  * BANDWIDTH NOTE: /pools returns the entire index (~10MB). We fetch it at most once
- * per oracle refresh (5-min in-memory TTL, only triggered on read — no background
+ * per oracle refresh (6h in-memory TTL, only triggered on read — no background
  * poller), extract the few pools we care about, and drop the rest so the large
  * payload is a short-lived transient. There is no smaller official endpoint that
  * also carries the 30-day mean we use.

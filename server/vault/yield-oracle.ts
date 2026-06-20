@@ -36,9 +36,16 @@
  *
  * LAZY, NON-BLOCKING (owner requirement: no background pollers):
  *   - getYieldTableCached() NEVER awaits external calls. It returns the in-memory
- *     cache immediately (or {} on a cold process) and triggers a single in-flight
- *     async refresh when the cache is missing/stale. Numbers appear on a later read.
- *   - Refreshes only happen when someone actually loads the vault assets endpoint.
+ *     cache immediately and triggers a single in-flight async refresh only when the
+ *     cache is missing/stale. Numbers appear on a later read.
+ *   - Refreshes are SLOW-POLLED: a built table is served for CACHE_TTL_MS (~6h)
+ *     before the next read triggers a refresh. There is NO background timer — a
+ *     refresh only ever runs when someone actually loads the vault assets endpoint.
+ *   - INSTANT ON BOOT: warmYieldTableFromCache() (called once at startup) seeds the
+ *     in-memory cache from the persisted last-good rows, with NO external call, so
+ *     the very first read returns real numbers immediately instead of blanking out
+ *     to the estimate for a few seconds. The first read still triggers a live
+ *     refresh to upgrade the warmed last-good values to fresh DeFiLlama numbers.
  */
 
 import { getEnabledYieldAssets, type YieldAsset } from "./yield-assets";
@@ -73,8 +80,10 @@ export type YieldTable = Record<string, YieldApyEntry>;
 
 // --- Tuning constants. ---
 
-/** Serve the cached table for this long before a refresh is triggered. */
-const CACHE_TTL_MS = 5 * 60 * 1000;
+/** Serve the cached table for this long before the next read triggers a refresh.
+ *  ~6h = slow-polled (owner: "every six hours is plenty"); APYs barely move and a
+ *  read still serves the (stale) cache instantly while the refresh runs. */
+const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 /** Reference USDC notional for market_quote price samples (raw 6dp base units). */
 const QUOTE_NOTIONAL_USDC_RAW = BigInt(1_000) * BigInt(1_000_000); // $1,000
 /** Slippage hint for the (non-executed) valuation quote. */
@@ -383,4 +392,47 @@ export function getYieldTableCached(): YieldTable {
 export async function refreshYieldTableNow(): Promise<YieldTable> {
   await triggerRefresh();
   return cache?.table ?? {};
+}
+
+/**
+ * Warm the in-memory cache from the persisted last-good rows, with NO external
+ * call, so the first read after a (re)start returns real numbers INSTANTLY
+ * instead of blanking to the estimate for a few seconds while the first live
+ * refresh runs. Best-effort and idempotent (no-op once the cache is populated).
+ *
+ * `builtAt` is left at 0 so the cache reads as already-stale: the first
+ * getYieldTableCached() still kicks off a live DeFiLlama refresh to upgrade these
+ * warmed `defillama_cached` values to fresh `defillama` numbers. Only seeds
+ * entries whose persisted row is still fresh (< STALE_MS); anything older or
+ * uncovered stays absent so the UI shows the estimate until a real number lands.
+ * Call once at server startup.
+ */
+export async function warmYieldTableFromCache(): Promise<void> {
+  if (cache) return; // already warmed/built this process
+  const byKey = new Map<string, YieldApyCache>();
+  try {
+    for (const row of await storage.getYieldApyCacheAll()) byKey.set(row.assetKey, row);
+  } catch {
+    return; // best-effort; the lazy refresh will populate on the first read
+  }
+  if (!byKey.size) return;
+  const now = Date.now();
+  const table: YieldTable = {};
+  for (const a of getEnabledYieldAssets()) {
+    if (!a.defiLlamaPoolId) continue; // self-measured assets are never cached here
+    const cached = byKey.get(a.key);
+    if (!cached || cached.apy == null) continue;
+    const asOfMs = new Date(cached.asOf).getTime();
+    const apyNum = Number(cached.apy);
+    if (!Number.isFinite(asOfMs) || !Number.isFinite(apyNum) || now - asOfMs >= STALE_MS) continue;
+    table[a.key] = {
+      apy: round1(apyNum),
+      apyBase: cached.apyBase != null ? round1(Number(cached.apyBase)) : null,
+      apyReward: cached.apyReward != null ? round1(Number(cached.apyReward)) : null,
+      method: "defillama_cached",
+      asOf: asOfMs,
+    };
+  }
+  // Re-check the guard: a concurrent read may have built a fresh table meanwhile.
+  if (!cache && Object.keys(table).length) cache = { table, builtAt: 0 };
 }

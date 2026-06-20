@@ -570,6 +570,20 @@ app.use((req, res, next) => {
   process.on("SIGTERM", () => shutdownHandler().catch(() => process.exit(1)));
   process.on("SIGINT", () => shutdownHandler().catch(() => process.exit(1)));
 
+  // Warm the Vault yield-APY cache from the DB last-good rows BEFORE we accept
+  // traffic, so the very first vault read returns real numbers instead of the
+  // estimate. DB-only + fail-soft, and bounded by a short timeout so a stalled
+  // read can never strand boot. The first read still triggers a live refresh.
+  try {
+    const { warmYieldTableFromCache } = await import("./vault/yield-oracle");
+    await Promise.race([
+      warmYieldTableFromCache(),
+      new Promise<void>((resolve) => setTimeout(resolve, 4_000)),
+    ]);
+  } catch (err) {
+    console.error("[YieldOracle] cache warm failed:", err);
+  }
+
   httpServer.listen(
     {
       port,
@@ -578,7 +592,7 @@ app.use((req, res, next) => {
     },
     async () => {
       log(`serving on port ${port}`);
-      
+
       // Staggered startup: services start in sequence with delays to avoid RPC rate-limit bursts
 
       // Immediately: orphaned trade cleanup — queue interrupted trades for retry
