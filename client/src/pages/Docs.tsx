@@ -676,6 +676,21 @@ function CreatingBotsSection() {
             setting: turn it on once and it keeps working after every trade.
           </p>
 
+          <div className="mt-5 p-4 rounded-lg bg-emerald-500/[0.07] border border-emerald-500/20">
+            <h4 className="font-medium text-white mb-1.5 text-sm flex items-center gap-2">
+              <Coins className="w-4 h-4 text-emerald-300" />
+              Choose your yield token — and switch any time
+            </h4>
+            <p className="text-white/60 text-sm leading-relaxed">
+              Each Flash bot remembers which yield Vault it parks into. Pick the token once in the bot's 
+              settings and it sticks — every auto-park and manual park uses it. Change it whenever you like 
+              and hit <strong className="text-white/80">Save</strong>: if money is already parked in the old 
+              token, QuantumVault <strong className="text-emerald-300">moves it into the new one for you</strong> — 
+              one swap, no manual unpark-then-repark. If the bot is mid-trade when you switch, the move happens 
+              automatically the next time the position fully closes.
+            </p>
+          </div>
+
           <p className="mt-4 text-sm text-emerald-300/80 flex items-center gap-2">
             <Info className="w-4 h-4" />
             Available on Flash bots, where each bot has its own isolated wallet.

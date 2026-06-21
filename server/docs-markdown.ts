@@ -240,6 +240,10 @@ When a trade signal arrives, if your bot's equity is below your investment amoun
 
 If a new trade opens during that short wait (a quick flip or re-entry), the repark is skipped, so funds the bot is about to use are never parked by mistake. Parking is also skipped when there's less than about $5 of spare cash, to avoid tiny, pointless transfers. It's a persistent per-bot setting — turn it on once and it keeps working after every trade.
 
+#### Choose your yield token — and switch any time
+
+Each Flash bot remembers which yield Vault it parks into. Pick the token once in the bot's settings and it sticks — every auto-park and manual park uses it. Change it whenever you like and hit **Save**: if money is already parked in the old token, QuantumVault **moves it into the new one for you** — one swap, no manual unpark-then-repark. If the bot is mid-trade when you switch, the move happens automatically the next time the position fully closes.
+
 > ℹ️ Available on Flash bots, where each bot has its own isolated wallet. See **Vaults → Safety & Funding** for the money-safety details.
 
 ---
