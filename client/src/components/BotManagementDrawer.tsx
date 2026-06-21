@@ -245,7 +245,6 @@ export function BotManagementDrawer({
   const wallet = useWallet();
 
   const [activeTab, setActiveTab] = useState('overview');
-  const [showVaultPark, setShowVaultPark] = useState(false);
   const [botBalance, setBotBalance] = useState<number>(0);
   // Per-bot Vault-parked value (Flash/independent_trader). OFF-exchange, NOT tradable —
   // folded into the displayed Bot Balance / PnL only, never into sizing or margin math.
@@ -2703,49 +2702,46 @@ export function BotManagementDrawer({
                     )}
                   </div>
 
-                  {/* Auto-park idle funds (Flash only — isolated per-bot wallet) */}
-                  {displayBot?.activeProtocol === 'flash' && (
-                    <div className="flex items-center justify-between py-3 border-t border-border/40">
+                  {/* Idle funds → yield: ONE unified section. The Auto toggle (Flash
+                      only) is the primary control — hands-off parking after each close,
+                      on until the user turns it off. The destination token picker and
+                      on-demand Park/Unpark live inline in the SAME section (no separate
+                      "manual" block). Pacifica has no auto path, so it shows the picker
+                      plus the shared-account caveat only. */}
+                  <div className="py-3 border-t border-border/40 space-y-3">
+                    {displayBot?.activeProtocol === 'flash' ? (
+                      <>
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="space-y-0.5">
+                            <label className="text-sm font-medium">Auto-park idle funds</label>
+                            <p className="text-xs text-muted-foreground">
+                              Automatically earn yield on this bot's spare USDC after each position fully closes — stays on until you turn it off.
+                            </p>
+                          </div>
+                          <Switch
+                            checked={editAutoParkIdle}
+                            onCheckedChange={setEditAutoParkIdle}
+                            data-testid="switch-auto-park-idle"
+                          />
+                        </div>
+                        {editAutoParkIdle && (
+                          <p className="text-xs text-emerald-500 flex items-center gap-1" data-testid="text-auto-park-idle-info">
+                            <Sparkles className="w-3 h-3 shrink-0" />
+                            Spare USDC is parked into yield about a minute after a position closes, then pulled back automatically before the next trade
+                          </p>
+                        )}
+                      </>
+                    ) : (
                       <div className="space-y-0.5">
-                        <label className="text-sm font-medium">Auto-park idle funds</label>
+                        <label className="text-sm font-medium">Earn on idle funds</label>
                         <p className="text-xs text-muted-foreground">
-                          Automatically earn yield on this bot's spare USDC after each position fully closes
+                          Move this bot's spare USDC into yield (or back) on demand.
                         </p>
                       </div>
-                      <Switch
-                        checked={editAutoParkIdle}
-                        onCheckedChange={setEditAutoParkIdle}
-                        data-testid="switch-auto-park-idle"
-                      />
-                    </div>
-                  )}
-                  {displayBot?.activeProtocol === 'flash' && editAutoParkIdle && (
-                    <p className="text-xs text-emerald-500 flex items-center gap-1 -mt-1 pb-2" data-testid="text-auto-park-idle-info">
-                      <Sparkles className="w-3 h-3 shrink-0" />
-                      Spare USDC is parked into yield about a minute after a position closes, then pulled back automatically before the next trade
-                    </p>
-                  )}
-
-                  {/* Manual park/unpark lives in this same section, tucked behind a
-                      reveal so Auto stays the default. Works on both venues (Flash
-                      per-bot wallet; Pacifica shared account). */}
-                  <div className="py-3 border-t border-border/40">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="space-y-0.5">
-                        <label className="text-sm font-medium">Park funds manually</label>
-                        <p className="text-xs text-muted-foreground">
-                          Move this bot's spare USDC into yield (or back) right now, on demand.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={showVaultPark}
-                        onCheckedChange={setShowVaultPark}
-                        data-testid="switch-bot-vault-park"
-                      />
-                    </div>
+                    )}
                     {displayBot?.activeProtocol === 'pacifica' && (
                       <div
-                        className="mt-3 text-xs text-muted-foreground flex items-start gap-1.5 leading-relaxed bg-muted/30 border border-border/50 rounded-md px-2.5 py-1.5"
+                        className="text-xs text-muted-foreground flex items-start gap-1.5 leading-relaxed bg-muted/30 border border-border/50 rounded-md px-2.5 py-1.5"
                         data-testid="text-bot-vault-park-pacifica-notice"
                       >
                         <Info className="w-3 h-3 mt-0.5 shrink-0" />
@@ -2756,11 +2752,9 @@ export function BotManagementDrawer({
                         </span>
                       </div>
                     )}
-                    {showVaultPark && displayBot?.id && (
-                      <div className="mt-4">
-                        {/* key on bot id so park amount/selection never carries across a bot switch */}
-                        <VaultIdleFunds key={displayBot.id} botId={displayBot.id} />
-                      </div>
+                    {displayBot?.id && (
+                      /* key on bot id so token/selection never carries across a bot switch */
+                      <VaultIdleFunds key={displayBot.id} botId={displayBot.id} />
                     )}
                   </div>
                 </div>
