@@ -2708,6 +2708,44 @@ export function BotManagementDrawer({
                       Spare USDC is parked into yield about a minute after a position closes, then pulled back automatically before the next trade
                     </p>
                   )}
+
+                  {/* Manual park/unpark lives in this same section, tucked behind a
+                      reveal so Auto stays the default. Works on both venues (Flash
+                      per-bot wallet; Pacifica shared account). */}
+                  <div className="py-3 border-t border-border/40">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="space-y-0.5">
+                        <label className="text-sm font-medium">Park funds manually</label>
+                        <p className="text-xs text-muted-foreground">
+                          Move this bot's spare USDC into yield (or back) right now, on demand.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={showVaultPark}
+                        onCheckedChange={setShowVaultPark}
+                        data-testid="switch-bot-vault-park"
+                      />
+                    </div>
+                    {displayBot?.activeProtocol === 'pacifica' && (
+                      <div
+                        className="mt-3 text-xs text-muted-foreground flex items-start gap-1.5 leading-relaxed bg-muted/30 border border-border/50 rounded-md px-2.5 py-1.5"
+                        data-testid="text-bot-vault-park-pacifica-notice"
+                      >
+                        <Info className="w-3 h-3 mt-0.5 shrink-0" />
+                        <span>
+                          On Pacifica this parks your shared <span className="font-medium">account</span> idle USDC (not only this bot's).
+                          Pacifica's $1 withdrawal fee and $10 minimum apply to moving funds on or off the exchange — so it pays off
+                          mainly for funds sitting idle a while, or to hold them in self-custody and spread risk.
+                        </span>
+                      </div>
+                    )}
+                    {showVaultPark && displayBot?.id && (
+                      <div className="mt-4">
+                        {/* key on bot id so park amount/selection never carries across a bot switch */}
+                        <VaultIdleFunds key={displayBot.id} botId={displayBot.id} />
+                      </div>
+                    )}
+                  </div>
                 </div>
                 
                 {hasSettingsChanges && (
@@ -2737,46 +2775,6 @@ export function BotManagementDrawer({
                   </div>
                 )}
               </div>
-            </div>
-
-            {/* Park idle funds (per-bot) — manual park/unpark. The Cash Management
-                group above has the persistent auto-park toggle (Flash). */}
-            <div className="p-4 rounded-xl border bg-muted/20" data-testid="section-bot-vault-park">
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <Wallet className="w-4 h-4 text-primary" />
-                  <div>
-                    <h3 className="font-semibold text-sm">Park funds manually</h3>
-                    <p className="text-xs text-muted-foreground">
-                      Move this bot's spare USDC into yield (or back) right now, on demand.
-                    </p>
-                  </div>
-                </div>
-                <Switch
-                  checked={showVaultPark}
-                  onCheckedChange={setShowVaultPark}
-                  data-testid="switch-bot-vault-park"
-                />
-              </div>
-              {displayBot?.activeProtocol === 'pacifica' && (
-                <div
-                  className="mt-3 text-xs text-muted-foreground flex items-start gap-1.5 leading-relaxed bg-muted/30 border border-border/50 rounded-md px-2.5 py-1.5"
-                  data-testid="text-bot-vault-park-pacifica-notice"
-                >
-                  <Info className="w-3 h-3 mt-0.5 shrink-0" />
-                  <span>
-                    On Pacifica this parks your shared <span className="font-medium">account</span> idle USDC (not only this bot's).
-                    Pacifica's $1 withdrawal fee and $10 minimum apply to moving funds on or off the exchange — so it pays off
-                    mainly for funds sitting idle a while, or to hold them in self-custody and spread risk.
-                  </span>
-                </div>
-              )}
-              {showVaultPark && displayBot?.id && (
-                <div className="mt-4">
-                  {/* key on bot id so park amount/selection never carries across a bot switch */}
-                  <VaultIdleFunds key={displayBot.id} botId={displayBot.id} />
-                </div>
-              )}
             </div>
 
             {(displayBot?.botSubaccountIdentifier || (displayBot?.driftSubaccountId !== null && displayBot?.driftSubaccountId !== undefined)) && (
