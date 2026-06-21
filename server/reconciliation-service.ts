@@ -16,7 +16,7 @@ import { maybeScheduleAutoRepark, cancelAutoRepark } from "./vault/auto-repark";
  * maybeScheduleAutoRepark.
  */
 async function applyAutoReparkTransition(
-  bot: Pick<TradingBot, "id" | "autoParkIdle" | "activeProtocol">,
+  bot: Pick<TradingBot, "id" | "autoParkIdle" | "activeProtocol" | "parkDestinationAsset">,
   becameFlat: boolean,
 ): Promise<void> {
   if (becameFlat) {

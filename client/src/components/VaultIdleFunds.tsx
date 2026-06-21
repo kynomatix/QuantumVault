@@ -281,7 +281,22 @@ function RiskChip({ riskClass }: { riskClass: string }) {
  * reads/writes carry `botId` in per-bot mode. `active` gates the data queries so the
  * module mounts lazily.
  */
-export default function VaultIdleFunds({ active = true, botId }: { active?: boolean; botId?: string }) {
+export default function VaultIdleFunds({
+  active = true,
+  botId,
+  selectedAssetKey,
+  onSelectedAssetKeyChange,
+}: {
+  active?: boolean;
+  botId?: string;
+  /**
+   * Controlled per-bot destination. When provided (drawer edit-state) the picker
+   * is CONTROLLED: its value persists on the bot's Save. `undefined` = uncontrolled
+   * (the picker keeps its own internal selection — account mode / Pacifica bots).
+   */
+  selectedAssetKey?: string | null;
+  onSelectedAssetKeyChange?: (key: string) => void;
+}) {
   const { publicKeyString, sessionConnected, retryAuth } = useWallet();
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -375,8 +390,27 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
   const [parking, setParking] = useState(false);
   const [unparking, setUnparking] = useState(false);
   const [showHow, setShowHow] = useState(false);
-  // Per-bot (embedded) mode: the token chosen in the compact dropdown.
-  const [embAssetKey, setEmbAssetKey] = useState<string | null>(null);
+  // Per-bot (embedded) mode: the token chosen in the compact dropdown. When the
+  // parent passes `selectedAssetKey` the picker is CONTROLLED (its value lives in
+  // the drawer's edit-state and persists on Save); otherwise it falls back to this
+  // internal state. The internal value is always kept valid so the dropdown is
+  // never empty even before the parent has a saved destination.
+  const controlledDestination = selectedAssetKey !== undefined;
+  const [internalEmbKey, setInternalEmbKey] = useState<string | null>(null);
+  // Effective selection. In controlled mode prefer the parent's value, but fall
+  // back to the internal default when it is null OR points at an asset that is no
+  // longer enabled/available (a previously-saved destination that got disabled) —
+  // otherwise the dropdown would render empty. The persisted value is untouched;
+  // this only affects what the picker displays until the user re-picks.
+  const controlledKeyIsAvailable =
+    selectedAssetKey != null && (assets.length === 0 || assets.some((a) => a.key === selectedAssetKey));
+  const embAssetKey = controlledDestination
+    ? (controlledKeyIsAvailable ? selectedAssetKey : internalEmbKey)
+    : internalEmbKey;
+  const handleEmbSelect = (k: string) => {
+    if (controlledDestination) onSelectedAssetKeyChange?.(k);
+    else setInternalEmbKey(k);
+  };
 
   const detailHeld = detailAsset ? positionByKey.get(detailAsset.key)?.onChainAmount ?? 0 : 0;
   const detailPosition = detailAsset ? positionByKey.get(detailAsset.key) ?? null : null;
@@ -430,7 +464,7 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
   // first available token.
   useEffect(() => {
     if (!embedded || assets.length === 0) return;
-    setEmbAssetKey((prev) => {
+    setInternalEmbKey((prev) => {
       if (prev && assets.some((a) => a.key === prev)) return prev;
       const held = positions.find((p) => p.onChainAmount > 0);
       if (held && assets.some((a) => a.key === held.assetKey)) return held.assetKey;
@@ -791,7 +825,7 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
           <div className="space-y-3">
             <div>
               <Label className="text-xs text-muted-foreground mb-1 block">Token</Label>
-              <Select value={embAsset?.key ?? ""} onValueChange={(k) => setEmbAssetKey(k)}>
+              <Select value={embAsset?.key ?? ""} onValueChange={handleEmbSelect}>
                 <SelectTrigger className="h-9" data-testid="select-park-asset">
                   <SelectValue placeholder="Choose a token" />
                 </SelectTrigger>

@@ -107,6 +107,7 @@ interface TradingBot {
   autoWithdrawThreshold?: string | null;
   autoTopUp?: boolean;
   autoParkIdle?: boolean;
+  parkDestinationAsset?: string | null;
   pauseReason?: string | null;
   riskConfig?: Record<string, unknown>;
   stats: {
@@ -275,6 +276,9 @@ export function BotManagementDrawer({
   const [editAutoWithdrawThreshold, setEditAutoWithdrawThreshold] = useState<string>('');
   const [editAutoTopUp, setEditAutoTopUp] = useState<boolean>(false);
   const [editAutoParkIdle, setEditAutoParkIdle] = useState<boolean>(false);
+  // Per-bot park DESTINATION (Flash only). null = no explicit choice yet (the
+  // picker shows a sensible default but nothing is persisted until the user picks).
+  const [editParkDestinationAsset, setEditParkDestinationAsset] = useState<string | null>(null);
   const [saveSettingsLoading, setSaveSettingsLoading] = useState(false);
   const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
   const [webhookUrlLoading, setWebhookUrlLoading] = useState(false);
@@ -391,6 +395,7 @@ export function BotManagementDrawer({
       setEditAutoWithdrawThreshold(bot.autoWithdrawThreshold ?? '');
       setEditAutoTopUp(bot.autoTopUp ?? false);
       setEditAutoParkIdle(bot.autoParkIdle ?? false);
+      setEditParkDestinationAsset(bot.parkDestinationAsset ?? null);
     }
   }, [bot]);
 
@@ -1145,6 +1150,7 @@ export function BotManagementDrawer({
           autoWithdrawThreshold: editAutoWithdrawThreshold ? parseFloat(editAutoWithdrawThreshold) : null,
           autoTopUp: editAutoTopUp,
           autoParkIdle: editAutoParkIdle,
+          ...(localBot.activeProtocol === 'flash' && { parkDestinationAsset: editParkDestinationAsset }),
         }),
       });
 
@@ -1186,6 +1192,7 @@ export function BotManagementDrawer({
       setEditAutoWithdrawThreshold(localBot.autoWithdrawThreshold ?? '');
       setEditAutoTopUp(localBot.autoTopUp ?? false);
       setEditAutoParkIdle(localBot.autoParkIdle ?? false);
+      setEditParkDestinationAsset(localBot.parkDestinationAsset ?? null);
     }
   };
 
@@ -1204,7 +1211,8 @@ export function BotManagementDrawer({
     editProfitReinvest !== (localBot.profitReinvest ?? false) ||
     editAutoWithdrawThreshold !== (localBot.autoWithdrawThreshold ?? '') ||
     editAutoTopUp !== (localBot.autoTopUp ?? false) ||
-    editAutoParkIdle !== (localBot.autoParkIdle ?? false)
+    editAutoParkIdle !== (localBot.autoParkIdle ?? false) ||
+    (localBot.activeProtocol === 'flash' && editParkDestinationAsset !== (localBot.parkDestinationAsset ?? null))
   ) : false;
 
   const formatDate = (dateString: string) => {
@@ -2753,8 +2761,20 @@ export function BotManagementDrawer({
                       </div>
                     )}
                     {displayBot?.id && (
-                      /* key on bot id so token/selection never carries across a bot switch */
-                      <VaultIdleFunds key={displayBot.id} botId={displayBot.id} />
+                      /* key on bot id so token/selection never carries across a bot switch.
+                         Flash: CONTROLLED picker — its value is the bot's persisted park
+                         destination (saved with the rest of the settings; changing it +
+                         Save migrates parked funds). Pacifica: uncontrolled local picker. */
+                      <VaultIdleFunds
+                        key={displayBot.id}
+                        botId={displayBot.id}
+                        {...(displayBot.activeProtocol === 'flash'
+                          ? {
+                              selectedAssetKey: editParkDestinationAsset,
+                              onSelectedAssetKeyChange: setEditParkDestinationAsset,
+                            }
+                          : {})}
+                      />
                     )}
                   </div>
                 </div>

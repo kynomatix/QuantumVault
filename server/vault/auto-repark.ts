@@ -34,13 +34,21 @@ export function isAutoReparkEligibleVenue(
 
 /**
  * Called when a position has FULLY closed. Arms the debounce deadline if (and
- * only if) the bot opted into auto-repark and is on an eligible venue. Idempotent
- * and re-arms to the later deadline under a double-close race.
+ * only if) the bot is on an eligible venue AND it has either opted into
+ * auto-repark OR has a persisted park destination set. Idempotent and re-arms to
+ * the later deadline under a double-close race.
+ *
+ * The `parkDestinationAsset` clause is what lets a destination MIGRATION still
+ * complete on a bot that has auto-park OFF: the user changed the destination
+ * while a position was open, so the immediate save-time scan was skipped
+ * (not flat); arming here means the very next flat close re-runs the
+ * destination-aware executor, which migrates the parked funds. A no-op once the
+ * funds already sit in the destination.
  */
 export async function maybeScheduleAutoRepark(
-  bot: Pick<TradingBot, "id" | "autoParkIdle" | "activeProtocol">,
+  bot: Pick<TradingBot, "id" | "autoParkIdle" | "activeProtocol" | "parkDestinationAsset">,
 ): Promise<void> {
-  if (!bot.autoParkIdle) return;
+  if (!bot.autoParkIdle && !bot.parkDestinationAsset) return;
   if (!isAutoReparkEligibleVenue(bot)) return;
   const dueAt = new Date(Date.now() + AUTO_REPARK_DEBOUNCE_MS);
   try {

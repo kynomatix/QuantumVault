@@ -238,6 +238,11 @@ export async function ensureSchema() {
       `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS auto_park_idle boolean NOT NULL DEFAULT false`,
       `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS auto_park_due_at timestamp`,
 
+      // Per-bot park DESTINATION (Task: persisted picker + migrate-on-save). Additive +
+      // idempotent. NULL = legacy inference. When set on a Flash bot the auto-repark
+      // executor treats it as authoritative and migrates parked funds into it.
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS park_destination_asset text`,
+
       // --- Phase 4b (Flash agent-HD wallets): recoverable per-bot wallet indices. ---
       // Additive + idempotent. The allocator lives on `wallets` (burn-on-allocate,
       // never reused). Each agent_hd bot stores its non-secret HD index + path version;

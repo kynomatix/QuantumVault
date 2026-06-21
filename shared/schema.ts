@@ -207,6 +207,13 @@ export const tradingBots = pgTable("trading_bots", {
   // server/vault/auto-repark.ts.
   autoParkIdle: boolean("auto_park_idle").default(false).notNull(),
   autoParkDueAt: timestamp("auto_park_due_at"),
+  // Per-bot park DESTINATION: the yield asset (key from server/vault/yield-assets.ts)
+  // the user picked as this bot's parking default. NULL = legacy inference (top up the
+  // currently-held asset, else the account default). When set on a Flash bot it is
+  // AUTHORITATIVE: the auto-repark/migration executor parks here and migrates any
+  // parked funds held in a different asset into it. Flash-only (per-bot isolated
+  // wallet); Pacifica picker stays a local manual selector.
+  parkDestinationAsset: text("park_destination_asset"),
   
   protocolSubaccountId: text("protocol_subaccount_id"),
   // Group D item 18 (April 17, 2026): which protocol adapter created/owns this bot.

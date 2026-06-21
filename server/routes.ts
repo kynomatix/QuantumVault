@@ -1925,8 +1925,13 @@ const AUTO_REPARK_MIN_USDC = 5;
 async function parkBotIdleFundsAutonomously(bot: TradingBot): Promise<void> {
   const logPrefix = `[AutoRepark ${bot.id.slice(0, 8)}]`;
 
-  // Re-check opt-in + venue (claimed atomically, but guard anyway).
-  if (!bot.autoParkIdle || bot.activeProtocol !== 'flash') return;
+  // Re-check venue + work-to-do (claimed atomically, but guard anyway). A bot
+  // qualifies when it is on Flash AND it either opted into auto-repark OR has a
+  // persisted park destination (which may need a migration). Either alone is
+  // enough — a destination-only bot still migrates parked funds even with
+  // auto-park off.
+  if (bot.activeProtocol !== 'flash') return;
+  if (!bot.autoParkIdle && !bot.parkDestinationAsset) return;
 
   const botCtx = getBotSubaccountContext(bot);
   if (!botCtx) {
@@ -1974,68 +1979,143 @@ async function parkBotIdleFundsAutonomously(bot: TradingBot): Promise<void> {
     return;
   }
 
+  // Resolve the bot signing key up front — both the migration unpark and the
+  // destination park need it. Cleaned up once in the outer finally.
+  let botKey: { secretKey: Uint8Array; cleanup: () => void };
   try {
-    // 3. Pick the asset: prefer one this bot already holds (top up the same
-    //    position), else the owner's default vault asset. No target → skip.
-    let assetKey: string | undefined;
+    botKey = await _resolveBotSubaccountSecretKey(botCtx);
+  } catch (e: any) {
+    console.warn(`${logPrefix} cannot unlock bot signing key — skip: ${e?.message ?? e}`);
+    funder.cleanup();
+    return;
+  }
+
+  try {
+    // 3. Read the bot's current parked positions once.
+    let views: Awaited<ReturnType<typeof getVaultPositionViews>> = [];
     try {
-      const views = await getVaultPositionViews(bot.walletAddress, botCtx.botPublicKey, bot.id);
-      const existing = views
-        .filter((v) => v.onChainAmount > 0 && getYieldAssetByKey(v.assetKey) != null)
-        .sort((a, b) => (b.currentValueUsdc ?? 0) - (a.currentValueUsdc ?? 0))[0];
-      assetKey = existing?.assetKey;
+      views = await getVaultPositionViews(bot.walletAddress, botCtx.botPublicKey, bot.id);
     } catch (e: any) {
       console.warn(`${logPrefix} could not read existing vault positions: ${e?.message ?? e}`);
     }
-    if (!assetKey) assetKey = wallet.vaultDefaultAsset ?? undefined;
-    if (!assetKey || !getYieldAssetByKey(assetKey)) {
-      console.log(`${logPrefix} no parked asset and no enabled default vault asset — skip repark`);
+    const held = views
+      .filter((v) => v.onChainAmount > 0 && getYieldAssetByKey(v.assetKey) != null)
+      .sort((a, b) => (b.currentValueUsdc ?? 0) - (a.currentValueUsdc ?? 0));
+
+    // Determine the destination asset:
+    //  - an explicit, persisted parkDestinationAsset (validated) is AUTHORITATIVE;
+    //  - else legacy inference: the asset the bot already holds (top it up), else
+    //    the owner's account default vault asset.
+    const explicitDest =
+      bot.parkDestinationAsset && getYieldAssetByKey(bot.parkDestinationAsset)
+        ? bot.parkDestinationAsset
+        : null;
+    const destAsset: string | undefined =
+      explicitDest ?? held[0]?.assetKey ?? wallet.vaultDefaultAsset ?? undefined;
+    if (!destAsset || !getYieldAssetByKey(destAsset)) {
+      console.log(`${logPrefix} no parked asset and no enabled destination/default — skip`);
       return;
     }
 
-    // 4. Spare USDC floor check (STRICT read; fail closed on read error).
+    // 4. MIGRATION: when an explicit destination is set, unpark every parked
+    //    asset that is NOT the destination so its USDC can move into the chosen
+    //    one. No-op when the funds already sit in the destination. Each unpark
+    //    fails independently and leaves the asset parked on failure (fail closed).
+    let migrated = false;
+    let migratedUsdc = 0;
+    if (explicitDest) {
+      for (const v of held) {
+        if (v.assetKey === explicitDest) continue;
+        const out = await unparkToUsdc({
+          walletAddress: bot.walletAddress,
+          tradingBotId: bot.id,
+          agentPublicKey: botCtx.botPublicKey,
+          agentSecretKey: botKey.secretKey,
+          assetKey: v.assetKey,
+          all: true,
+          funderPublicKey: wallet.agentPublicKey,
+          funderSecretKey: funder.secretKey,
+        });
+        if (out.success && (out.usdcReceived ?? 0) > 0) {
+          migrated = true;
+          migratedUsdc += out.usdcReceived ?? 0;
+          console.log(`${logPrefix} migrated ${v.assetKey} → $${(out.usdcReceived ?? 0).toFixed(2)} USDC (dest ${explicitDest})`);
+        } else {
+          console.warn(`${logPrefix} migration unpark of ${v.assetKey} failed: ${out.error ?? 'no USDC received'} — leaving it parked`);
+        }
+      }
+    }
+
+    // 5. PARK into the destination. We park when EITHER auto-park is on (normal
+    //    bank-sweep repark) OR we just migrated funds out (so the migrated USDC
+    //    lands in the new destination instead of sitting idle).
+    const shouldPark = migrated || bot.autoParkIdle;
+    if (!shouldPark) {
+      console.log(`${logPrefix} destination set, nothing to migrate, auto-park off — done`);
+      return;
+    }
+
+    // Spare USDC (STRICT read; fail closed on read error).
     const collMint = adapter.collateralMint || SWAP_USDC_MINT;
     let spareUsdc: number;
     try {
       const raw = await getAgentTokenBalanceRawStrict(botCtx.botPublicKey, collMint);
       spareUsdc = Number(BigInt(raw.amountRaw)) / 1e6;
     } catch (e: any) {
-      console.warn(`${logPrefix} strict USDC read failed — skip repark (fail closed): ${e?.message ?? e}`);
-      return;
-    }
-    if (spareUsdc < AUTO_REPARK_MIN_USDC) {
-      console.log(`${logPrefix} only $${spareUsdc.toFixed(2)} spare USDC (< $${AUTO_REPARK_MIN_USDC} floor) — skip repark`);
+      console.warn(`${logPrefix} strict USDC read failed — skip park (fail closed): ${e?.message ?? e}`);
       return;
     }
 
-    // 5. Resolve bot signing key and park ALL spare USDC (all-in, bank-like).
-    let botKey: { secretKey: Uint8Array; cleanup: () => void };
-    try {
-      botKey = await _resolveBotSubaccountSecretKey(botCtx);
-    } catch (e: any) {
-      console.warn(`${logPrefix} cannot unlock bot signing key — skip repark: ${e?.message ?? e}`);
-      return;
-    }
-    try {
+    if (bot.autoParkIdle) {
+      // Auto-park ON: bank-sweep ALL spare USDC into the destination, above the
+      // gas/swap-churn floor (a tiny park would just be undone by the next open).
+      if (spareUsdc < AUTO_REPARK_MIN_USDC) {
+        console.log(`${logPrefix} only $${spareUsdc.toFixed(2)} spare USDC (< $${AUTO_REPARK_MIN_USDC} floor) — skip park`);
+        return;
+      }
       const res = await parkUsdc({
         walletAddress: bot.walletAddress,
         tradingBotId: bot.id,
         agentPublicKey: botCtx.botPublicKey,
         agentSecretKey: botKey.secretKey,
-        assetKey,
+        assetKey: destAsset,
         all: true,
         funderPublicKey: wallet.agentPublicKey,
         funderSecretKey: funder.secretKey,
       });
       if (res.success) {
-        console.log(`${logPrefix} reparked $${(res.usdcSpent ?? 0).toFixed(2)} → ${assetKey} after full close`);
+        console.log(`${logPrefix} parked $${(res.usdcSpent ?? 0).toFixed(2)} → ${destAsset}${migrated ? ' (incl. migration)' : ' after full close'}`);
       } else {
-        console.warn(`${logPrefix} repark failed: ${res.error ?? 'unknown error'}`);
+        console.warn(`${logPrefix} park failed: ${res.error ?? 'unknown error'}`);
       }
-    } finally {
-      botKey.cleanup();
+    } else {
+      // Auto-park OFF, migration only: move ONLY the just-migrated USDC into the
+      // destination. Parking all spare USDC here would sweep the bot's unparked
+      // trading capital — exactly the auto behavior the user opted out of. Truncate
+      // to 6dp so the amount can never exceed the realized on-chain balance.
+      const moveUsdc = Math.min(spareUsdc, Math.floor(migratedUsdc * 1e6) / 1e6);
+      if (!(moveUsdc > 0)) {
+        console.log(`${logPrefix} migration produced no spendable USDC — skip park`);
+        return;
+      }
+      const res = await parkUsdc({
+        walletAddress: bot.walletAddress,
+        tradingBotId: bot.id,
+        agentPublicKey: botCtx.botPublicKey,
+        agentSecretKey: botKey.secretKey,
+        assetKey: destAsset,
+        amountUsdc: moveUsdc,
+        funderPublicKey: wallet.agentPublicKey,
+        funderSecretKey: funder.secretKey,
+      });
+      if (res.success) {
+        console.log(`${logPrefix} migrated $${(res.usdcSpent ?? 0).toFixed(2)} → ${destAsset} (auto-park off)`);
+      } else {
+        console.warn(`${logPrefix} migration park failed: ${res.error ?? 'unknown error'}`);
+      }
     }
   } finally {
+    botKey.cleanup();
     funder.cleanup();
   }
 }
@@ -10149,7 +10229,22 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
 
-      const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive, profitReinvest, autoWithdrawThreshold, autoTopUp, autoParkIdle } = req.body;
+      const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive, profitReinvest, autoWithdrawThreshold, autoTopUp, autoParkIdle, parkDestinationAsset } = req.body;
+      
+      // Per-bot park DESTINATION. Only meaningful on Flash (isolated per-bot wallet);
+      // Pacifica's picker stays a local manual selector. Accept null (clear) or an
+      // ENABLED yield-asset key; reject anything else so we never persist a routing
+      // target the executor can't honor. Stored only for Flash bots.
+      let parkDestinationUpdate: string | null | undefined = undefined;
+      if (parkDestinationAsset !== undefined && bot.activeProtocol === 'flash') {
+        if (parkDestinationAsset === null || parkDestinationAsset === '') {
+          parkDestinationUpdate = null;
+        } else if (typeof parkDestinationAsset === 'string' && getYieldAssetByKey(parkDestinationAsset)) {
+          parkDestinationUpdate = parkDestinationAsset;
+        } else {
+          return res.status(400).json({ error: "Invalid park destination asset" });
+        }
+      }
       
       if (leverage !== undefined) {
         const leverageNum = Number(leverage);
@@ -10378,7 +10473,26 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         ...(autoWithdrawThreshold !== undefined && { autoWithdrawThreshold: autoWithdrawThreshold !== null ? String(autoWithdrawThreshold) : null }),
         ...(autoTopUp !== undefined && { autoTopUp }),
         ...(autoParkIdle !== undefined && { autoParkIdle: !!autoParkIdle }),
+        ...(parkDestinationUpdate !== undefined && { parkDestinationAsset: parkDestinationUpdate }),
       });
+
+      // If the park destination CHANGED on a Flash bot, arm the auto-repark
+      // scanner (due now). When the bot is flat the next scan migrates any parked
+      // funds into the new destination; if it is mid-trade the scan skips (not
+      // flat) and the next full close re-runs the destination-aware executor
+      // (maybeScheduleAutoRepark re-arms because a destination is set). The
+      // persisted destination is the durable source of truth — eventual, hands-off.
+      if (
+        parkDestinationUpdate !== undefined &&
+        bot.activeProtocol === 'flash' &&
+        (parkDestinationUpdate ?? null) !== (bot.parkDestinationAsset ?? null)
+      ) {
+        try {
+          await storage.scheduleBotAutoParkDueAt(bot.id, new Date());
+        } catch (e) {
+          console.warn(`[Bot ${bot.id.slice(0, 8)}] failed to arm park-destination migration`, e);
+        }
+      }
 
       // Include position close info in response
       const response: any = { ...updated };
