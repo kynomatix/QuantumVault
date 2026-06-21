@@ -152,6 +152,21 @@ interface EquityEvent {
   createdAt: string;
 }
 
+// Vault park/unpark events embed the destination protocol in `notes` via a fixed
+// server template ("Parked X USDC into <Protocol>" / "Unparked <Protocol>. ...").
+// Extract it so the per-bot flows show WHERE idle funds went — e.g. so a user can
+// audit their exposure if a yield protocol has an incident. Best-effort: returns
+// null (renders nothing) if the protocol name can't be extracted.
+function parkDestinationFromNotes(eventType: string, notes: string | null): string | null {
+  if (eventType !== 'vault_park' && eventType !== 'vault_unpark') return null;
+  const n = notes ?? '';
+  const parked = n.match(/\binto\s+(.+?)\s*$/i);
+  if (parked) return parked[1].trim();
+  const unparked = n.match(/^Unparked\s+(.+?)\./i);
+  if (unparked) return unparked[1].trim();
+  return null;
+}
+
 interface BotPosition {
   hasPosition: boolean;
   side?: 'LONG' | 'SHORT';
@@ -2417,6 +2432,8 @@ export function BotManagementDrawer({
                 <div className="space-y-2 flex-1 overflow-y-auto">
                   {equityEvents.map((event) => {
                     const isPositive = parseFloat(event.amount) > 0;
+                    const destination = parkDestinationFromNotes(event.eventType, event.notes);
+                    const isVaultMove = event.eventType === 'vault_park' || event.eventType === 'vault_unpark';
                     const formatEventType = (type: string) => {
                       switch (type) {
                         case 'agent_deposit': return 'Deposit to Bot Wallet';
@@ -2444,6 +2461,13 @@ export function BotManagementDrawer({
                           </div>
                           <div>
                             <p className="text-sm font-medium">{formatEventType(event.eventType)}</p>
+                            {isVaultMove && (
+                              <p className="text-xs text-muted-foreground" data-testid={`equity-event-destination-${event.id}`}>
+                                {destination
+                                  ? `${event.eventType === 'vault_unpark' ? 'Pulled from' : 'Parked to'} ${destination}`
+                                  : 'Destination not recorded'}
+                              </p>
+                            )}
                             <p className="text-xs text-muted-foreground">
                               {formatDate(event.createdAt)}
                             </p>

@@ -24,6 +24,21 @@ interface EquityHistoryProps {
   walletAddress?: string;
 }
 
+// Vault park/unpark events embed the destination protocol in `notes` via a fixed
+// server template ("Parked X USDC into <Protocol>" / "Unparked <Protocol>. ...").
+// Extract it so the equity flows show WHERE idle funds went — e.g. so a user can
+// audit their exposure if a yield protocol has an incident. Best-effort: returns
+// null (renders nothing) if the protocol name can't be extracted.
+function parkDestinationFromNotes(eventType: string, notes: string | null): string | null {
+  if (eventType !== 'vault_park' && eventType !== 'vault_unpark') return null;
+  const n = notes ?? '';
+  const parked = n.match(/\binto\s+(.+?)\s*$/i);
+  if (parked) return parked[1].trim();
+  const unparked = n.match(/^Unparked\s+(.+?)\./i);
+  if (unparked) return unparked[1].trim();
+  return null;
+}
+
 export function EquityHistory({ walletAddress }: EquityHistoryProps) {
   const [events, setEvents] = useState<EquityEvent[]>([]);
   const [loading, setLoading] = useState(false);
@@ -101,7 +116,10 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
           </p>
         ) : (
           <div className="space-y-2 max-h-64 overflow-y-auto">
-            {events.map((event) => (
+            {events.map((event) => {
+              const destination = parkDestinationFromNotes(event.eventType, event.notes);
+              const isVaultMove = event.eventType === 'vault_park' || event.eventType === 'vault_unpark';
+              return (
               <div 
                 key={event.id} 
                 className="flex items-center justify-between py-2 border-b border-border/50 last:border-0"
@@ -120,6 +138,13 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
                         <span className="text-muted-foreground font-normal"> → {event.botName}</span>
                       )}
                     </p>
+                    {isVaultMove && (
+                      <p className="text-xs text-muted-foreground" data-testid={`equity-event-destination-${event.id}`}>
+                        {destination
+                          ? `${event.eventType === 'vault_unpark' ? 'Pulled from' : 'Parked to'} ${destination}`
+                          : 'Destination not recorded'}
+                      </p>
+                    )}
                     <p className="text-xs text-muted-foreground">
                       {format(new Date(event.createdAt), 'MMM d, yyyy h:mm a')}
                     </p>
@@ -129,7 +154,8 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
                   {isPositive(event.amount) ? '+' : ''}{parseFloat(event.amount).toFixed(event.assetType === 'SOL' ? 4 : 2)} {getAssetLabel(event.assetType)}
                 </span>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </CardContent>
