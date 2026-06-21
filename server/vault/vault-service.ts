@@ -84,6 +84,9 @@ export interface VaultPreview {
   expectedOutRaw: string | null;
   expectedOut: number | null;
   priceImpactPct: number | null;
+  /** True only for market-swap routes (Jupiter). Direct deposit/mint routes
+   *  (Kamino, Jupiter Lend) have no price impact, so the UI shows "None". */
+  impactApplies: boolean;
   wouldReject: boolean;
   reason?: string;
 }
@@ -102,6 +105,7 @@ export async function previewVaultSwap(params: {
     expectedOutRaw: null,
     expectedOut: null,
     priceImpactPct: null,
+    impactApplies: false,
     wouldReject: true,
   };
 
@@ -129,6 +133,7 @@ export async function previewVaultSwap(params: {
     expectedOutRaw: p.expectedOutRaw,
     expectedOut: p.expectedOutRaw === null ? null : fromRaw(BigInt(p.expectedOutRaw), outDecimals),
     priceImpactPct: p.priceImpactPct,
+    impactApplies: route.kind === "jupiter",
     wouldReject: p.wouldReject,
     reason: p.reason,
   };

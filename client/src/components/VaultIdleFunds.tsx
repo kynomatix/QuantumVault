@@ -120,6 +120,8 @@ interface PositionView {
 interface PreviewResponse {
   expectedOut: number | null;
   priceImpactPct: number | null;
+  /** False for direct deposit/mint routes (Kamino, Jupiter Lend) — no market price impact. */
+  impactApplies?: boolean;
   wouldReject: boolean;
   reason?: string;
 }
@@ -219,13 +221,17 @@ function PreviewBox({
         <span className="text-muted-foreground">Price impact</span>
         <span
           className={
-            impactPct !== null && impactPct > cap * 100
+            preview.impactApplies !== false && impactPct !== null && impactPct > cap * 100
               ? "text-destructive font-medium tabular-nums"
               : "font-medium tabular-nums"
           }
           data-testid="text-preview-impact"
         >
-          {impactPct === null ? "unknown" : `${impactPct.toFixed(2)}%`}
+          {preview.impactApplies === false
+            ? "None"
+            : impactPct === null
+              ? "unknown"
+              : `${impactPct.toFixed(2)}%`}
         </span>
       </div>
       {preview.wouldReject && (

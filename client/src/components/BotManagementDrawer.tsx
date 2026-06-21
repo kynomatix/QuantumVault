@@ -58,6 +58,7 @@ import {
   XCircle,
   RefreshCw,
   AlertTriangle,
+  Vault,
 } from 'lucide-react';
 import {
   AlertDialog,
@@ -1402,6 +1403,18 @@ export function BotManagementDrawer({
                       </TooltipContent>
                     </Tooltip>
                   </TooltipProvider>
+                  {parkedValueUsdc > 0 && (
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger>
+                          <Vault className="w-3 h-3 text-purple-400" data-testid="icon-bot-equity-parked" />
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>Includes ${parkedValueUsdc.toFixed(2)} parked in Vault, earning yield</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  )}
                 </div>
                 <p className="text-2xl font-bold mt-1" data-testid="text-bot-equity">
                   {balanceLoading && !hasBalanceLoaded ? (
@@ -1410,11 +1423,6 @@ export function BotManagementDrawer({
                     `$${(exchangeBalance + parkedValueUsdc).toFixed(2)}`
                   )}
                 </p>
-                {parkedValueUsdc > 0 && (
-                  <p className="text-xs text-muted-foreground mt-1" data-testid="text-bot-equity-parked-note">
-                    incl. ${parkedValueUsdc.toFixed(2)} parked in Vault
-                  </p>
-                )}
               </div>
               <div className="p-4 rounded-xl bg-muted/50 border">
                 <div className="flex items-center gap-1">
@@ -1999,7 +2007,21 @@ export function BotManagementDrawer({
               <div className="p-4 rounded-xl bg-gradient-to-br from-emerald-500/10 to-primary/10 border">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm text-muted-foreground">Bot Balance</p>
+                    <div className="flex items-center gap-1">
+                      <p className="text-sm text-muted-foreground">Bot Balance</p>
+                      {parkedValueUsdc > 0 && (
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger>
+                              <Vault className="w-3 h-3 text-purple-400" data-testid="icon-parked-value" />
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              <p>Includes ${parkedValueUsdc.toFixed(2)} parked in Vault, earning yield</p>
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      )}
+                    </div>
                     <p className="text-2xl font-bold mt-1" data-testid="text-trading-balance">
                       {balanceLoading && !hasBalanceLoaded ? (
                         <Loader2 className="w-5 h-5 animate-spin" />
@@ -2007,11 +2029,6 @@ export function BotManagementDrawer({
                         `$${(botBalance + parkedValueUsdc).toFixed(2)}`
                       )}
                     </p>
-                    {parkedValueUsdc > 0 && (
-                      <p className="text-xs text-muted-foreground mt-0.5" data-testid="text-parked-value-note">
-                        incl. ${parkedValueUsdc.toFixed(2)} parked in Vault
-                      </p>
-                    )}
                   </div>
                   <BarChart3 className="w-8 h-8 text-emerald-500/50" />
                 </div>
