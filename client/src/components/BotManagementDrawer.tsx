@@ -105,6 +105,7 @@ interface TradingBot {
   profitReinvest?: boolean;
   autoWithdrawThreshold?: string | null;
   autoTopUp?: boolean;
+  autoParkIdle?: boolean;
   pauseReason?: string | null;
   riskConfig?: Record<string, unknown>;
   stats: {
@@ -258,6 +259,7 @@ export function BotManagementDrawer({
   const [editProfitReinvest, setEditProfitReinvest] = useState<boolean>(false);
   const [editAutoWithdrawThreshold, setEditAutoWithdrawThreshold] = useState<string>('');
   const [editAutoTopUp, setEditAutoTopUp] = useState<boolean>(false);
+  const [editAutoParkIdle, setEditAutoParkIdle] = useState<boolean>(false);
   const [saveSettingsLoading, setSaveSettingsLoading] = useState(false);
   const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
   const [webhookUrlLoading, setWebhookUrlLoading] = useState(false);
@@ -373,6 +375,7 @@ export function BotManagementDrawer({
       setEditProfitReinvest(bot.profitReinvest ?? false);
       setEditAutoWithdrawThreshold(bot.autoWithdrawThreshold ?? '');
       setEditAutoTopUp(bot.autoTopUp ?? false);
+      setEditAutoParkIdle(bot.autoParkIdle ?? false);
     }
   }, [bot]);
 
@@ -1126,6 +1129,7 @@ export function BotManagementDrawer({
           profitReinvest: editProfitReinvest,
           autoWithdrawThreshold: editAutoWithdrawThreshold ? parseFloat(editAutoWithdrawThreshold) : null,
           autoTopUp: editAutoTopUp,
+          autoParkIdle: editAutoParkIdle,
         }),
       });
 
@@ -1166,6 +1170,7 @@ export function BotManagementDrawer({
       setEditProfitReinvest(localBot.profitReinvest ?? false);
       setEditAutoWithdrawThreshold(localBot.autoWithdrawThreshold ?? '');
       setEditAutoTopUp(localBot.autoTopUp ?? false);
+      setEditAutoParkIdle(localBot.autoParkIdle ?? false);
     }
   };
 
@@ -1183,7 +1188,8 @@ export function BotManagementDrawer({
     editMaxPositionSize !== getStoredInvestmentAmount() ||
     editProfitReinvest !== (localBot.profitReinvest ?? false) ||
     editAutoWithdrawThreshold !== (localBot.autoWithdrawThreshold ?? '') ||
-    editAutoTopUp !== (localBot.autoTopUp ?? false)
+    editAutoTopUp !== (localBot.autoTopUp ?? false) ||
+    editAutoParkIdle !== (localBot.autoParkIdle ?? false)
   ) : false;
 
   const formatDate = (dateString: string) => {
@@ -2559,87 +2565,124 @@ export function BotManagementDrawer({
                   )}
                 </div>
 
-                {/* Profit Reinvest Toggle */}
-                <div className="flex items-center justify-between py-3 border-t border-border/50">
-                  <div className="space-y-0.5">
-                    <label className="text-sm font-medium">Profit Reinvest</label>
-                    <p className="text-xs text-muted-foreground">
-                      When enabled, bot uses full available margin instead of fixed investment amount
-                    </p>
-                  </div>
-                  <Switch
-                    checked={editProfitReinvest}
-                    onCheckedChange={setEditProfitReinvest}
-                    data-testid="switch-profit-reinvest"
-                  />
-                </div>
+                {/* Position Growth: how the bot grows its trading position */}
+                <div className="pt-4 mt-2 border-t border-border/50">
+                  <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground" data-testid="heading-position-growth">
+                    Position Growth
+                  </h4>
 
-                {/* Auto Withdraw Threshold */}
-                <div className="space-y-2 py-3 border-t border-border/50">
-                  <div className="flex items-center justify-between">
+                  {/* Profit Reinvest Toggle */}
+                  <div className="flex items-center justify-between py-3">
                     <div className="space-y-0.5">
-                      <label className="text-sm font-medium">Auto Withdraw Threshold</label>
+                      <label className="text-sm font-medium">Profit Reinvest</label>
                       <p className="text-xs text-muted-foreground">
-                        Automatically withdraw profits to your agent wallet when equity exceeds this amount
+                        When enabled, bot uses full available margin instead of fixed investment amount
                       </p>
                     </div>
+                    <Switch
+                      checked={editProfitReinvest}
+                      onCheckedChange={setEditProfitReinvest}
+                      data-testid="switch-profit-reinvest"
+                    />
                   </div>
-                  <Input
-                    type="number"
-                    value={editAutoWithdrawThreshold}
-                    onChange={(e) => setEditAutoWithdrawThreshold(e.target.value)}
-                    placeholder="Leave empty to disable"
-                    min="0"
-                    step="1"
-                    className="w-full"
-                    data-testid="input-auto-withdraw-threshold"
-                  />
-                  {editAutoWithdrawThreshold && parseFloat(editAutoWithdrawThreshold) > 0 && (
-                    <p className="text-xs text-emerald-500 flex items-center gap-1">
-                      <Sparkles className="w-3 h-3" />
-                      When equity exceeds ${parseFloat(editAutoWithdrawThreshold).toFixed(2)}, excess profits will be withdrawn automatically
+
+                  {/* Auto Top-Up Toggle */}
+                  <div className="flex items-center justify-between py-3 border-t border-border/40">
+                    <div className="space-y-0.5">
+                      <label className={`text-sm font-medium ${mainAccountBalance <= 0 ? 'text-muted-foreground' : ''}`}>Auto top-up</label>
+                      <p className="text-xs text-muted-foreground">
+                        Automatically deposit from your agent wallet when margin is too low to trade
+                      </p>
+                    </div>
+                    <Switch
+                      checked={editAutoTopUp}
+                      onCheckedChange={setEditAutoTopUp}
+                      disabled={mainAccountBalance <= 0}
+                      data-testid="switch-auto-top-up"
+                    />
+                  </div>
+                  {mainAccountBalance <= 0 && !editAutoTopUp && (
+                    <p className="text-xs text-amber-500 flex items-center gap-1 -mt-2 pb-2">
+                      <AlertTriangle className="w-3 h-3" />
+                      Agent wallet has no USDC balance - deposit funds to enable auto top-up
                     </p>
                   )}
-                  {displayBot?.activeProtocol === 'pacifica' && editAutoWithdrawThreshold && parseFloat(editAutoWithdrawThreshold) > 0 && (
-                    <p
-                      className="text-xs text-amber-500/90 flex items-start gap-1 leading-relaxed"
-                      data-testid="text-auto-withdraw-fee-notice"
-                    >
-                      <Info className="w-3 h-3 mt-0.5 shrink-0" />
-                      <span>
-                        Pacifica charges a flat <span className="font-medium">$1 USDC</span> fee per on-chain withdrawal. To avoid the fee eating into small profits, set the threshold so each auto-withdrawal sweeps a meaningful amount (e.g. $20+). The fee is charged by the exchange — not QuantumVault.
-                      </span>
+                  {editAutoTopUp && (
+                    <p className="text-xs text-blue-500 flex items-center gap-1 -mt-2 pb-2">
+                      <Info className="w-3 h-3" />
+                      When bot needs more margin, it will deposit from your agent wallet (${mainAccountBalance.toFixed(2)} available)
                     </p>
                   )}
                 </div>
 
-                {/* Auto Top-Up Toggle */}
-                <div className="flex items-center justify-between py-3 border-t border-border/50">
-                  <div className="space-y-0.5">
-                    <label className={`text-sm font-medium ${mainAccountBalance <= 0 ? 'text-muted-foreground' : ''}`}>Auto top-up</label>
-                    <p className="text-xs text-muted-foreground">
-                      Automatically deposit from your agent wallet when margin is too low to trade
-                    </p>
+                {/* Cash Management: what happens to profits and idle cash */}
+                <div className="pt-4 mt-2 border-t border-border/50">
+                  <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground" data-testid="heading-cash-management">
+                    Cash Management
+                  </h4>
+
+                  {/* Auto Withdraw Threshold */}
+                  <div className="space-y-2 py-3">
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <label className="text-sm font-medium">Auto Withdraw Threshold</label>
+                        <p className="text-xs text-muted-foreground">
+                          Automatically withdraw profits to your agent wallet when equity exceeds this amount
+                        </p>
+                      </div>
+                    </div>
+                    <Input
+                      type="number"
+                      value={editAutoWithdrawThreshold}
+                      onChange={(e) => setEditAutoWithdrawThreshold(e.target.value)}
+                      placeholder="Leave empty to disable"
+                      min="0"
+                      step="1"
+                      className="w-full"
+                      data-testid="input-auto-withdraw-threshold"
+                    />
+                    {editAutoWithdrawThreshold && parseFloat(editAutoWithdrawThreshold) > 0 && (
+                      <p className="text-xs text-emerald-500 flex items-center gap-1">
+                        <Sparkles className="w-3 h-3" />
+                        When equity exceeds ${parseFloat(editAutoWithdrawThreshold).toFixed(2)}, excess profits will be withdrawn automatically
+                      </p>
+                    )}
+                    {displayBot?.activeProtocol === 'pacifica' && editAutoWithdrawThreshold && parseFloat(editAutoWithdrawThreshold) > 0 && (
+                      <p
+                        className="text-xs text-amber-500/90 flex items-start gap-1 leading-relaxed"
+                        data-testid="text-auto-withdraw-fee-notice"
+                      >
+                        <Info className="w-3 h-3 mt-0.5 shrink-0" />
+                        <span>
+                          Pacifica charges a flat <span className="font-medium">$1 USDC</span> fee per on-chain withdrawal. To avoid the fee eating into small profits, set the threshold so each auto-withdrawal sweeps a meaningful amount (e.g. $20+). The fee is charged by the exchange — not QuantumVault.
+                        </span>
+                      </p>
+                    )}
                   </div>
-                  <Switch
-                    checked={editAutoTopUp}
-                    onCheckedChange={setEditAutoTopUp}
-                    disabled={mainAccountBalance <= 0}
-                    data-testid="switch-auto-top-up"
-                  />
+
+                  {/* Auto-park idle funds (Flash only — isolated per-bot wallet) */}
+                  {displayBot?.activeProtocol === 'flash' && (
+                    <div className="flex items-center justify-between py-3 border-t border-border/40">
+                      <div className="space-y-0.5">
+                        <label className="text-sm font-medium">Auto-park idle funds</label>
+                        <p className="text-xs text-muted-foreground">
+                          Automatically earn yield on this bot's spare USDC after each position fully closes
+                        </p>
+                      </div>
+                      <Switch
+                        checked={editAutoParkIdle}
+                        onCheckedChange={setEditAutoParkIdle}
+                        data-testid="switch-auto-park-idle"
+                      />
+                    </div>
+                  )}
+                  {displayBot?.activeProtocol === 'flash' && editAutoParkIdle && (
+                    <p className="text-xs text-emerald-500 flex items-center gap-1 -mt-1 pb-2" data-testid="text-auto-park-idle-info">
+                      <Sparkles className="w-3 h-3 shrink-0" />
+                      Spare USDC is parked into yield about a minute after a position closes, then pulled back automatically before the next trade
+                    </p>
+                  )}
                 </div>
-                {mainAccountBalance <= 0 && !editAutoTopUp && (
-                  <p className="text-xs text-amber-500 flex items-center gap-1 -mt-2 pb-2">
-                    <AlertTriangle className="w-3 h-3" />
-                    Agent wallet has no USDC balance - deposit funds to enable auto top-up
-                  </p>
-                )}
-                {editAutoTopUp && (
-                  <p className="text-xs text-blue-500 flex items-center gap-1 -mt-2 pb-2">
-                    <Info className="w-3 h-3" />
-                    When bot needs more margin, it will deposit from your agent wallet (${mainAccountBalance.toFixed(2)} available)
-                  </p>
-                )}
                 
                 {hasSettingsChanges && (
                   <div className="flex gap-2 pt-2">
@@ -2670,15 +2713,16 @@ export function BotManagementDrawer({
               </div>
             </div>
 
-            {/* Park idle funds (per-bot). Manual reveal only; automation is out of scope. */}
+            {/* Park idle funds (per-bot) — manual park/unpark. The Cash Management
+                group above has the persistent auto-park toggle (Flash). */}
             <div className="p-4 rounded-xl border bg-muted/20" data-testid="section-bot-vault-park">
               <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
                   <Wallet className="w-4 h-4 text-primary" />
                   <div>
-                    <h3 className="font-semibold text-sm">Park idle funds</h3>
+                    <h3 className="font-semibold text-sm">Park funds manually</h3>
                     <p className="text-xs text-muted-foreground">
-                      Earn yield on this bot's spare USDC while it waits between trades.
+                      Move this bot's spare USDC into yield (or back) right now, on demand.
                     </p>
                   </div>
                 </div>

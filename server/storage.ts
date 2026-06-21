@@ -266,6 +266,12 @@ export interface IStorage {
   // reused, even if bot creation later fails) so an index always maps to one wallet.
   allocateBotDerivationIndex(walletAddress: string): Promise<number>;
   updateTradingBot(id: string, updates: Partial<InsertTradingBot>): Promise<TradingBot | undefined>;
+  // Auto-repark idle funds: arm the debounce deadline when a position fully closes,
+  // clear it when a new position opens, and atomically claim every due bot (so the
+  // periodic scanner processes each exactly once). See server/vault/auto-repark.ts.
+  scheduleBotAutoParkDueAt(id: string, dueAt: Date): Promise<void>;
+  clearBotAutoParkDueAt(id: string): Promise<void>;
+  claimDueAutoReparkBots(): Promise<TradingBot[]>;
   // Phase 4b: write V3 ciphertext for per-bot subaccount key.
   updateBotSubaccountKeyV3(id: string, encryptedV3: string): Promise<void>;
   clearTradingBotSubaccount(id: string): Promise<void>;
@@ -1138,6 +1144,37 @@ export class DatabaseStorage implements IStorage {
   async updateTradingBot(id: string, updates: Partial<InsertTradingBot>): Promise<TradingBot | undefined> {
     const result = await db.update(tradingBots).set({ ...updates, updatedAt: sql`NOW()` } as any).where(eq(tradingBots.id, id)).returning();
     return result[0];
+  }
+
+  async scheduleBotAutoParkDueAt(id: string, dueAt: Date): Promise<void> {
+    // Arm (or re-arm to the later deadline under the double-close race) the
+    // repark debounce. Does NOT bump updatedAt — this is internal scheduling
+    // state, not a user-visible bot edit.
+    await db.update(tradingBots)
+      .set({ autoParkDueAt: dueAt })
+      .where(eq(tradingBots.id, id));
+  }
+
+  async clearBotAutoParkDueAt(id: string): Promise<void> {
+    // Cancel a pending repark (a new position opened). Guarded so a normal open
+    // on a bot with nothing pending is a no-op write.
+    await db.update(tradingBots)
+      .set({ autoParkDueAt: null })
+      .where(and(eq(tradingBots.id, id), isNotNull(tradingBots.autoParkDueAt)));
+  }
+
+  async claimDueAutoReparkBots(): Promise<TradingBot[]> {
+    // Atomically claim every bot whose debounce has elapsed: null the deadline
+    // and return the rows in ONE statement so a bot is handed to the scanner
+    // exactly once even if two ticks overlap.
+    const result = await db.update(tradingBots)
+      .set({ autoParkDueAt: null })
+      .where(and(
+        isNotNull(tradingBots.autoParkDueAt),
+        lte(tradingBots.autoParkDueAt, sql`NOW()`),
+      ))
+      .returning();
+    return result;
   }
 
   async updateBotSubaccountKeyV3(id: string, encryptedV3: string): Promise<void> {

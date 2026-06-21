@@ -3,7 +3,28 @@ import { normalizeMarket } from "./protocol/symbol-registry";
 import { getDefaultAdapter, getAdapterForBot } from "./protocol/adapter-registry";
 import type { TradeRecord } from "./protocol/protocol-types";
 import type { ProtocolAdapter } from "./protocol/adapter";
+import type { TradingBot } from "@shared/schema";
 import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification } from "./notification-service";
+import { maybeScheduleAutoRepark, cancelAutoRepark } from "./vault/auto-repark";
+
+/**
+ * Auto-repark scheduling hook. Called at every position-transition return point:
+ * when a bot becomes FLAT we arm the debounce deadline (the periodic scanner
+ * re-verifies flat on-chain and parks); when it still has (or opens) a position
+ * we cancel any pending repark. Storage-only, key-free, and best-effort — it
+ * never throws into the close/sync path. Venue + opt-in gating live inside
+ * maybeScheduleAutoRepark.
+ */
+async function applyAutoReparkTransition(
+  bot: Pick<TradingBot, "id" | "autoParkIdle" | "activeProtocol">,
+  becameFlat: boolean,
+): Promise<void> {
+  if (becameFlat) {
+    await maybeScheduleAutoRepark(bot);
+  } else {
+    await cancelAutoRepark(bot.id);
+  }
+}
 
 function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
@@ -510,6 +531,9 @@ export async function syncPositionFromOnChain(
       });
       
       console.log(`[Sync] Fallback position: ${newBaseSize.toFixed(4)} ${market} @ $${newAvgEntry.toFixed(2)} (fetch failed, used trade data)`);
+      // Auto-repark: arm if this computed state is flat, else cancel. The scanner
+      // re-verifies flat on-chain before parking, so a wrong fetch-failed guess is safe.
+      await applyAutoReparkTransition(botRowForAdapter, Math.abs(newBaseSize) < 0.0001);
       return { success: true, position, tradePnl, isClosingTrade: tradePnl !== 0, onChainEntryPrice: tradeFillPrice };
     }
     
@@ -555,6 +579,8 @@ export async function syncPositionFromOnChain(
       });
       
       console.log(`[Sync] On-chain position: ${onChainBaseSize.toFixed(4)} ${market} @ $${onChainPos.entryPrice.toFixed(2)}, cumulative PnL: $${newRealizedPnl.toFixed(4)}`);
+      // Position is still open on-chain — cancel any pending repark.
+      await applyAutoReparkTransition(botRowForAdapter, false);
       return { success: true, position, tradePnl, isClosingTrade: tradePnl !== 0, onChainEntryPrice: onChainPos.entryPrice };
     } else if (tradeSize > 0 && tradeFillPrice > 0) {
       const normalizedSide = tradeSide.toLowerCase();
@@ -591,6 +617,8 @@ export async function syncPositionFromOnChain(
       });
       
       console.log(`[Sync] On-chain empty — computed from trade data: ${newBaseSize.toFixed(4)} ${market} @ $${newAvgEntry.toFixed(2)}, PnL: $${newRealizedPnl.toFixed(4)}`);
+      // Auto-repark: arm if the computed state is flat (full close), else cancel.
+      await applyAutoReparkTransition(botRowForAdapter, Math.abs(newBaseSize) < 0.0001);
       return { success: true, position, tradePnl, isClosingTrade: Math.abs(newBaseSize) < 0.0001, onChainEntryPrice: tradeFillPrice };
     } else {
       console.log(`[Sync] On-chain empty and no trade data — preserving DB position (${previousBaseSize} ${market})`);
@@ -806,6 +834,11 @@ export async function reconcileBotPosition(
       );
 
       if (closeDetection.detected) {
+        // Auto-repark: the position is gone on-chain (manual TP/SL or other
+        // external close the webhook never saw). Arm the debounce in BOTH the
+        // already-booked and full-book branches below; the scanner re-verifies
+        // flat on-chain before parking.
+        await applyAutoReparkTransition(botRowForAdapter, true);
         // Back-stop dedup: the webhook/manual/pause/subscriber close path may
         // have ALREADY booked this close under a different canonical id
         // (`tx-<close-tx-signature>` vs the reconciler's `tx-<exchange-fill-id>`),

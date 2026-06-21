@@ -1905,6 +1905,163 @@ async function autoUnparkPerBotVaultForUsdc(args: {
   }
 }
 
+// --- Auto-repark idle funds (autonomous) -----------------------------------
+// Minimum spare USDC worth parking. Below this the gas + swap cost isn't worth it
+// (and a tiny park would just churn against the next open's auto-unpark).
+const AUTO_REPARK_MIN_USDC = 5;
+
+/**
+ * Park a bot's idle USDC back into yield AFTER its position fully closed. Driven by
+ * the periodic scanner (claimDueAutoReparkBots), so it runs with NO interactive
+ * session — it resolves the bot's signing key and the account gas funder the same
+ * autonomous way the webhook auto-unpark does.
+ *
+ * Money-safety: venue-gated to Flash (isolated per-bot wallet); re-verifies the bot
+ * is FLAT on-chain first; requires a SEPARATE account funder (parkUsdc fails closed
+ * otherwise); reads spare USDC with the STRICT reader and only parks above a floor.
+ * Best-effort: on any failure it logs and returns. The deadline was already cleared
+ * by the atomic claim, so it simply won't retry until the bot's next full close.
+ */
+async function parkBotIdleFundsAutonomously(bot: TradingBot): Promise<void> {
+  const logPrefix = `[AutoRepark ${bot.id.slice(0, 8)}]`;
+
+  // Re-check opt-in + venue (claimed atomically, but guard anyway).
+  if (!bot.autoParkIdle || bot.activeProtocol !== 'flash') return;
+
+  const botCtx = getBotSubaccountContext(bot);
+  if (!botCtx) {
+    console.warn(`${logPrefix} no per-bot subaccount context — skip repark`);
+    return;
+  }
+
+  // 1. Re-verify FLAT on-chain (fail closed: a read error skips the repark).
+  const adapter = getAdapterForBot(bot);
+  let stillFlat = false;
+  try {
+    const positions = await adapter.getPositions(botCtx.botPublicKey);
+    stillFlat = !positions.some((p) => Math.abs(p.baseSize) > 0.0001);
+  } catch (e: any) {
+    console.warn(`${logPrefix} position read failed — skip repark (fail closed): ${e?.message ?? e}`);
+    return;
+  }
+  if (!stillFlat) {
+    console.log(`${logPrefix} bot reopened a position before debounce elapsed — skip repark`);
+    return;
+  }
+
+  // 2. Resolve the account gas funder autonomously (same path as the webhook).
+  const wallet = await storage.getWallet(bot.walletAddress);
+  if (!wallet?.agentPublicKey) {
+    console.warn(`${logPrefix} owner has no account agent wallet — skip repark`);
+    return;
+  }
+  const umkResult = await getUmkForWebhook(bot.walletAddress);
+  if (!umkResult) {
+    console.warn(`${logPrefix} no execution authorization for owner — skip repark`);
+    return;
+  }
+  let funder: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+  try {
+    funder = await decryptAgentKeyStrict(bot.walletAddress, umkResult.umk, wallet, wallet.agentPublicKey);
+  } catch (e: any) {
+    console.warn(`${logPrefix} account agent decrypt failed — skip repark: ${e?.message ?? e}`);
+    return;
+  } finally {
+    umkResult.cleanup();
+  }
+  if (!funder) {
+    console.warn(`${logPrefix} account agent key unavailable — skip repark`);
+    return;
+  }
+
+  try {
+    // 3. Pick the asset: prefer one this bot already holds (top up the same
+    //    position), else the owner's default vault asset. No target → skip.
+    let assetKey: string | undefined;
+    try {
+      const views = await getVaultPositionViews(bot.walletAddress, botCtx.botPublicKey, bot.id);
+      const existing = views
+        .filter((v) => v.onChainAmount > 0 && getYieldAssetByKey(v.assetKey) != null)
+        .sort((a, b) => (b.currentValueUsdc ?? 0) - (a.currentValueUsdc ?? 0))[0];
+      assetKey = existing?.assetKey;
+    } catch (e: any) {
+      console.warn(`${logPrefix} could not read existing vault positions: ${e?.message ?? e}`);
+    }
+    if (!assetKey) assetKey = wallet.vaultDefaultAsset ?? undefined;
+    if (!assetKey || !getYieldAssetByKey(assetKey)) {
+      console.log(`${logPrefix} no parked asset and no enabled default vault asset — skip repark`);
+      return;
+    }
+
+    // 4. Spare USDC floor check (STRICT read; fail closed on read error).
+    const collMint = adapter.collateralMint || SWAP_USDC_MINT;
+    let spareUsdc: number;
+    try {
+      const raw = await getAgentTokenBalanceRawStrict(botCtx.botPublicKey, collMint);
+      spareUsdc = Number(BigInt(raw.amountRaw)) / 1e6;
+    } catch (e: any) {
+      console.warn(`${logPrefix} strict USDC read failed — skip repark (fail closed): ${e?.message ?? e}`);
+      return;
+    }
+    if (spareUsdc < AUTO_REPARK_MIN_USDC) {
+      console.log(`${logPrefix} only $${spareUsdc.toFixed(2)} spare USDC (< $${AUTO_REPARK_MIN_USDC} floor) — skip repark`);
+      return;
+    }
+
+    // 5. Resolve bot signing key and park ALL spare USDC (all-in, bank-like).
+    let botKey: { secretKey: Uint8Array; cleanup: () => void };
+    try {
+      botKey = await _resolveBotSubaccountSecretKey(botCtx);
+    } catch (e: any) {
+      console.warn(`${logPrefix} cannot unlock bot signing key — skip repark: ${e?.message ?? e}`);
+      return;
+    }
+    try {
+      const res = await parkUsdc({
+        walletAddress: bot.walletAddress,
+        tradingBotId: bot.id,
+        agentPublicKey: botCtx.botPublicKey,
+        agentSecretKey: botKey.secretKey,
+        assetKey,
+        all: true,
+        funderPublicKey: wallet.agentPublicKey,
+        funderSecretKey: funder.secretKey,
+      });
+      if (res.success) {
+        console.log(`${logPrefix} reparked $${(res.usdcSpent ?? 0).toFixed(2)} → ${assetKey} after full close`);
+      } else {
+        console.warn(`${logPrefix} repark failed: ${res.error ?? 'unknown error'}`);
+      }
+    } finally {
+      botKey.cleanup();
+    }
+  } finally {
+    funder.cleanup();
+  }
+}
+
+/**
+ * Periodic scan: atomically claim every bot whose repark debounce has elapsed and
+ * repark each. The claim nulls the deadline in the same statement, so a failed or
+ * skipped repark won't retry until the bot's next full close.
+ */
+async function runAutoReparkScan(): Promise<void> {
+  let due: TradingBot[];
+  try {
+    due = await storage.claimDueAutoReparkBots();
+  } catch (e: any) {
+    console.error(`[AutoRepark] failed to claim due bots: ${e?.message ?? e}`);
+    return;
+  }
+  for (const bot of due) {
+    try {
+      await parkBotIdleFundsAutonomously(bot);
+    } catch (e: any) {
+      console.error(`[AutoRepark ${bot.id.slice(0, 8)}] repark threw: ${e?.message ?? e}`);
+    }
+  }
+}
+
 async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<TradeSizingResult> {
   const {
     agentPublicKey,
@@ -2005,6 +2162,16 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
   // — a trade is NEVER sized off the unpark estimate. Healthy fixed-size bots do
   // zero extra IO here (the shortfall gate stays false).
   if (isIndependentTrader && botCtx) {
+    // Opening/adding a position for a per-bot (Flash) vault → cancel any pending
+    // idle-repark FIRST, unconditionally. A bot that just closed still holds its
+    // spare USDC as free collateral (not yet parked by the scanner), so it can
+    // have enough to open WITHOUT unparking — and the old in-branch cancel below
+    // was then skipped, leaving the debounce armed. The scanner could fire mid-open
+    // and park the very collateral this trade is about to use. Clearing here closes
+    // that close→open race. (The post-fill sync also cancels, as a backstop.)
+    await storage.clearBotAutoParkDueAt(botId).catch((e) =>
+      console.warn(`${logPrefix} failed to cancel pending repark: ${e?.message ?? e}`));
+
     let targetNeed: number;
     let unparkAll = false;
     if (profitReinvestEnabled) {
@@ -4661,6 +4828,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
   setInterval(() => {
     cleanupExpiredNonces().catch(console.error);
+  }, 60 * 1000);
+
+  // Auto-repark idle funds: park a bot's idle USDC back into yield once its
+  // post-close debounce has elapsed (and it's still flat on-chain). ~60s cadence,
+  // matching the debounce window. Venue-gated to Flash + opt-in inside the scan.
+  setInterval(() => {
+    runAutoReparkScan().catch((e) => console.error('[AutoRepark] scan error:', e));
   }, 60 * 1000);
 
   // Emergency admin stop - immediately disables all execution for a wallet
@@ -9975,7 +10149,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
 
-      const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive, profitReinvest, autoWithdrawThreshold, autoTopUp } = req.body;
+      const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive, profitReinvest, autoWithdrawThreshold, autoTopUp, autoParkIdle } = req.body;
       
       if (leverage !== undefined) {
         const leverageNum = Number(leverage);
@@ -10203,6 +10377,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         ...(profitReinvest !== undefined && { profitReinvest }),
         ...(autoWithdrawThreshold !== undefined && { autoWithdrawThreshold: autoWithdrawThreshold !== null ? String(autoWithdrawThreshold) : null }),
         ...(autoTopUp !== undefined && { autoTopUp }),
+        ...(autoParkIdle !== undefined && { autoParkIdle: !!autoParkIdle }),
       });
 
       // Include position close info in response

@@ -231,6 +231,13 @@ export async function ensureSchema() {
       `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS pacifica_builder_approved boolean NOT NULL DEFAULT false`,
       `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS pacifica_referral_claimed boolean NOT NULL DEFAULT false`,
 
+      // Auto-repark idle funds (Task: per-bot persistent setting + server-managed
+      // debounce deadline). Additive + idempotent. auto_park_idle defaults OFF;
+      // auto_park_due_at is set when a position fully closes and cleared on open,
+      // then consumed by the periodic repark scanner. See server/vault/auto-repark.ts.
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS auto_park_idle boolean NOT NULL DEFAULT false`,
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS auto_park_due_at timestamp`,
+
       // --- Phase 4b (Flash agent-HD wallets): recoverable per-bot wallet indices. ---
       // Additive + idempotent. The allocator lives on `wallets` (burn-on-allocate,
       // never reused). Each agent_hd bot stores its non-secret HD index + path version;

@@ -197,6 +197,16 @@ export const tradingBots = pgTable("trading_bots", {
   // Auto top-up: Automatically deposit required collateral when margin is insufficient
   autoTopUp: boolean("auto_top_up").default(false).notNull(),
   pauseReason: text("pause_reason"), // Reason why bot was auto-paused (e.g., "Insufficient margin")
+
+  // Auto-repark idle funds: when ON (persistent per-bot setting), after a position
+  // FULLY closes the bot's spare USDC is automatically parked into a yield
+  // stablecoin (Flash per-bot wallets only — Pacifica is account-level + fee'd, so
+  // it stays manual). `autoParkDueAt` is the server-managed debounce deadline: set
+  // when a position closes, cleared when a new position opens; a periodic scanner
+  // reparks once it passes AND the bot is re-verified flat. See
+  // server/vault/auto-repark.ts.
+  autoParkIdle: boolean("auto_park_idle").default(false).notNull(),
+  autoParkDueAt: timestamp("auto_park_due_at"),
   
   protocolSubaccountId: text("protocol_subaccount_id"),
   // Group D item 18 (April 17, 2026): which protocol adapter created/owns this bot.
@@ -271,6 +281,7 @@ export const insertTradingBotSchema = createInsertSchema(tradingBots).omit({
   driftSubaccountId: true,
   agentPublicKey: true,
   agentPrivateKeyEncrypted: true,
+  autoParkDueAt: true, // server-managed debounce deadline, never client-set
 });
 export type InsertTradingBot = z.infer<typeof insertTradingBotSchema>;
 export type TradingBot = typeof tradingBots.$inferSelect;
