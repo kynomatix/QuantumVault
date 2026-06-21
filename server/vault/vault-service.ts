@@ -498,3 +498,84 @@ export async function sumVaultPositionValueUsdc(
   }
   return { valueUsdc, ok: true };
 }
+
+/**
+ * Value an already-fetched set of vault rows against ONE wallet, for the
+ * read-only "all parked balances" aggregate (account + per-bot). Unlike
+ * getVaultPositionViews this does NOT scan every enabled asset — it values only
+ * the rows it is handed (Vault parking always writes a row), so RPC stays
+ * bounded by the number of parked bots.
+ *
+ * Honest, not fail-open: a row whose on-chain balance can't be read (the strict
+ * reader throws) or can't be priced is returned with currentValueUsdc=null plus
+ * a warning, so the caller leaves it out of totals instead of fabricating a
+ * zero. A row that reads a genuine on-chain zero (already unparked) is dropped.
+ * Assets resolve from the DETECTABLE set (verified mints, ENABLED OR DISABLED)
+ * so a token still held after its asset was disabled is valued; blank-mint
+ * placeholder rows are skipped (they would throw on `new PublicKey("")`).
+ */
+export async function valueVaultRowsForWallet(
+  agentPublicKey: string,
+  rows: VaultPosition[],
+): Promise<{ views: VaultPositionView[]; warnings: string[] }> {
+  const byKey = new Map(getDetectableYieldAssets().map((a) => [a.key, a] as const));
+  const views: VaultPositionView[] = [];
+  const warnings: string[] = [];
+
+  for (const row of rows) {
+    const asset = byKey.get(row.assetKey);
+    if (!asset) {
+      warnings.push(`${row.assetKey} is no longer available`);
+      continue;
+    }
+
+    let onChainRaw = BigInt(0);
+    let onChainAmount = 0;
+    let unreadable = false;
+    try {
+      const bal = await getAgentTokenBalanceRawStrict(agentPublicKey, asset.mint);
+      onChainRaw = BigInt(bal.amountRaw);
+      onChainAmount = bal.uiAmount;
+    } catch {
+      unreadable = true; // fail honest: surface as "couldn't refresh", not zero
+    }
+
+    // A clean on-chain zero means the position is already emptied — don't show it.
+    if (!unreadable && onChainRaw <= BigInt(0)) continue;
+
+    let currentValueUsdc: number | null = null;
+    if (!unreadable) {
+      try {
+        const val = await getYieldRoute(asset).valueInUsdc(onChainRaw);
+        currentValueUsdc = val.valueUsdcRaw === null ? null : fromRaw(BigInt(val.valueUsdcRaw), USDC_DECIMALS);
+      } catch {
+        currentValueUsdc = null;
+      }
+    }
+    if (currentValueUsdc === null) {
+      warnings.push(`${asset.displayName} balance couldn't be refreshed`);
+    }
+
+    const costBasisUsdc = Number(row.usdcCostBasis);
+    const unrealizedPnl = currentValueUsdc !== null ? currentValueUsdc - costBasisUsdc : null;
+
+    views.push({
+      assetKey: asset.key,
+      displayName: asset.displayName,
+      mint: asset.mint,
+      decimals: asset.decimals,
+      route: asset.route,
+      valuation: asset.valuation,
+      tag: asset.tag,
+      defaultEligible: asset.defaultEligible,
+      onChainAmountRaw: onChainRaw.toString(),
+      onChainAmount,
+      currentValueUsdc,
+      costBasisUsdc,
+      unrealizedPnl,
+      costBasisMissing: false,
+    });
+  }
+
+  return { views, warnings };
+}

@@ -345,6 +345,7 @@ export interface IStorage {
   // Phase 0a Vaults.
   getVaultPosition(walletAddress: string, assetKey: string, tradingBotId?: string | null): Promise<VaultPosition | undefined>;
   getVaultPositions(walletAddress: string, tradingBotId?: string | null): Promise<VaultPosition[]>;
+  getVaultPositionsAllScopes(walletAddress: string): Promise<VaultPosition[]>;
   applyVaultPark(p: { walletAddress: string; tradingBotId?: string | null; assetKey: string; mint: string; tokensReceivedRaw: string; usdcSpent: number; txSignature?: string; txBlockTime?: Date; notes?: string; }): Promise<VaultPosition>;
   applyVaultUnpark(p: { walletAddress: string; tradingBotId?: string | null; assetKey: string; mint: string; tokensSoldRaw: string; usdcReceived: number; txSignature?: string; txBlockTime?: Date; notesPrefix?: string; }): Promise<{ position: VaultPosition; costBasisRemoved: number; realizedPnl: number }>;
 
@@ -2011,6 +2012,15 @@ export class DatabaseStorage implements IStorage {
   async getVaultPositions(walletAddress: string, tradingBotId: string | null = null): Promise<VaultPosition[]> {
     return await db.select().from(vaultPositions)
       .where(and(eq(vaultPositions.walletAddress, walletAddress), this.vaultScopeCond(tradingBotId)))
+      .orderBy(desc(vaultPositions.updatedAt));
+  }
+
+  // Every parked row the wallet owns, across ALL scopes (account + per-bot),
+  // for the read-only "all parked balances" aggregate. Grouping by scope is the
+  // caller's job (see /api/vault/positions/all).
+  async getVaultPositionsAllScopes(walletAddress: string): Promise<VaultPosition[]> {
+    return await db.select().from(vaultPositions)
+      .where(eq(vaultPositions.walletAddress, walletAddress))
       .orderBy(desc(vaultPositions.updatedAt));
   }
 

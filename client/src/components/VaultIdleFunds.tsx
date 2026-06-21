@@ -123,6 +123,26 @@ interface PreviewResponse {
   reason?: string;
 }
 
+/** One bot that has funds parked inside it (independent_trader, e.g. Flash). */
+interface VaultBotGroup {
+  botId: string;
+  botName: string;
+  positions: PositionView[];
+  /** Sum of this bot's readable parked values (unreadable rows excluded). */
+  valueUsdc: number;
+  /** True when at least one row couldn't be priced — the total is incomplete. */
+  hasUnreadable: boolean;
+}
+
+/** Aggregate of every parked balance the wallet owns: account + per-bot. */
+interface AllPositionsResponse {
+  account: PositionView[];
+  bots: VaultBotGroup[];
+  /** account + bots, with any balance the server couldn't read left out. */
+  totalParkedUsdc: number;
+  warnings: string[];
+}
+
 const usd = (n: number | null | undefined, dp = 2) =>
   n === null || n === undefined
     ? "n/a"
@@ -287,13 +307,39 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
       if (!res.ok) throw new Error(data.error || "Failed to load positions");
       return data as { positions: PositionView[]; scope?: "account" | "bot" };
     },
-    enabled: active && connected,
+    // Account mode reads the aggregate (/positions/all) instead, so this
+    // single-scope query only runs inside a per-bot drawer (embedded).
+    enabled: active && connected && embedded,
+  });
+
+  // Account mode (no botId): the main Vaults tab. Pull the AGGREGATE — the shared
+  // account vault PLUS funds parked inside individual bots — so per-bot balances
+  // show up here too, not only in each bot's drawer. Embedded (per-bot drawer)
+  // mode keeps using the single-scope /positions query above.
+  const allPositionsQuery = useQuery<AllPositionsResponse>({
+    queryKey: ["vault-positions-all", publicKeyString],
+    queryFn: async () => {
+      const res = await fetch(`/api/vault/positions/all`, { credentials: "include", headers: walletAuthHeaders() });
+      const data = await safeResponseJson(res);
+      if (!res.ok) throw new Error(data.error || "Failed to load positions");
+      return data as AllPositionsResponse;
+    },
+    enabled: active && connected && !embedded,
+    staleTime: 20_000,
   });
 
   const spareUsdc = assetsQuery.data?.spareUsdc ?? 0;
   const maxImpact = assetsQuery.data?.maxPriceImpactPct ?? 0.005;
   const assets = assetsQuery.data?.assets ?? [];
-  const positions = positionsQuery.data?.positions ?? [];
+  // Account-scope positions that drive the vault cards. Embedded mode reads the
+  // single-scope query; account mode reads the aggregate's account slice.
+  const positions = embedded
+    ? positionsQuery.data?.positions ?? []
+    : allPositionsQuery.data?.account ?? [];
+  // Funds parked inside individual bots + any read warnings (account mode only).
+  const botGroups = embedded ? [] : allPositionsQuery.data?.bots ?? [];
+  const vaultWarnings = embedded ? [] : allPositionsQuery.data?.warnings ?? [];
+  const positionsLoading = embedded ? positionsQuery.isLoading : allPositionsQuery.isLoading;
   // Which wallet the server actually acted on. A Flash bot → its own per-bot wallet
   // ("bot"); a Pacifica/Drift bot shares the main account wallet ("account").
   const scope = assetsQuery.data?.scope ?? positionsQuery.data?.scope ?? null;
@@ -301,6 +347,7 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
   const refetchAll = () => {
     queryClient.invalidateQueries({ queryKey: ["vault-assets", publicKeyString, botId ?? null] });
     queryClient.invalidateQueries({ queryKey: ["vault-positions", publicKeyString, botId ?? null] });
+    queryClient.invalidateQueries({ queryKey: ["vault-positions-all", publicKeyString] });
   };
 
   const positionByKey = useMemo(() => {
@@ -309,10 +356,12 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
     return m;
   }, [positions]);
 
-  const totalParked = useMemo(
-    () => positions.reduce((sum, p) => sum + (p.currentValueUsdc ?? 0), 0),
-    [positions],
-  );
+  // Account mode: the server already sums account + bots (and leaves out any
+  // balance it couldn't read). Embedded mode: just this bot's account-scope rows.
+  const totalParked = useMemo(() => {
+    if (!embedded && allPositionsQuery.data) return allPositionsQuery.data.totalParkedUsdc;
+    return positions.reduce((sum, p) => sum + (p.currentValueUsdc ?? 0), 0);
+  }, [embedded, allPositionsQuery.data, positions]);
 
   // The destination whose detail sheet is open (drives both park-all + unpark-all).
   const [detailAsset, setDetailAsset] = useState<YieldAssetInfo | null>(null);
@@ -459,7 +508,7 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
           <TrendingUp className="w-4 h-4 text-emerald-500" />
           <span className="text-sm text-muted-foreground">Currently earning</span>
           <span className="ml-1 text-base font-bold tabular-nums" data-testid="text-total-earning">
-            {positionsQuery.isLoading ? "..." : usd(totalParked)}
+            {positionsLoading ? "..." : usd(totalParked)}
           </span>
         </div>
       )}
@@ -606,6 +655,82 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
       <HelpCircle className="w-3.5 h-3.5" /> How Vaults work
     </button>
   );
+
+  // Read-only summary of funds parked inside individual bots. Managing them stays
+  // in each bot's own panel; here we only surface that the money exists and earns.
+  const botParkedSection =
+    botGroups.length === 0 ? null : (
+      <div className="space-y-3" data-testid="section-bot-vaults">
+        <h3 className="text-sm font-semibold text-muted-foreground">Parked inside your bots</h3>
+        <div className="space-y-2">
+          {botGroups.map((b) => (
+            <div
+              key={b.botId}
+              className="rounded-xl border border-border/50 bg-muted/20 p-4"
+              data-testid={`card-bot-vault-${b.botId}`}
+            >
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <span className="font-medium truncate" data-testid={`text-bot-vault-name-${b.botId}`}>
+                  {b.botName}
+                </span>
+                <span
+                  className="flex items-center gap-1 text-sm font-bold tabular-nums"
+                  data-testid={`text-bot-vault-total-${b.botId}`}
+                >
+                  {b.hasUnreadable && b.valueUsdc === 0 ? "—" : usd(b.valueUsdc)}
+                  {b.hasUnreadable && (
+                    <AlertTriangle
+                      className="w-3.5 h-3.5 text-amber-500"
+                      data-testid={`icon-bot-vault-partial-${b.botId}`}
+                    />
+                  )}
+                </span>
+              </div>
+              <div className="space-y-1.5">
+                {b.positions.map((p) => {
+                  const pnl = p.unrealizedPnl;
+                  const pnlPositive = (pnl ?? 0) >= 0;
+                  return (
+                    <div
+                      key={p.assetKey}
+                      className="flex items-center justify-between gap-2 text-sm"
+                      data-testid={`row-bot-vault-${b.botId}-${p.assetKey}`}
+                    >
+                      <span className="flex items-center gap-1.5 text-muted-foreground min-w-0">
+                        <Landmark className="w-3.5 h-3.5 shrink-0 text-primary" />
+                        <span className="truncate">{p.displayName}</span>
+                      </span>
+                      <span className="flex items-center gap-2 shrink-0 tabular-nums">
+                        <span className="font-medium">
+                          {p.currentValueUsdc === null ? "—" : usd(p.currentValueUsdc)}
+                        </span>
+                        {pnl !== null && (
+                          <span className={pnlPositive ? "text-emerald-500" : "text-red-400"}>
+                            {pnlPositive ? "+" : ""}
+                            {usd(pnl)}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="mt-2 text-xs text-muted-foreground">Manage this in the bot's own panel.</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+
+  const vaultWarningNote =
+    vaultWarnings.length === 0 ? null : (
+      <p
+        className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400"
+        data-testid="text-vault-warning"
+      >
+        <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> Some bot balances couldn't be refreshed just now.
+      </p>
+    );
 
   // --- Render ----------------------------------------------------------------
 
@@ -771,6 +896,8 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
       <div className="space-y-5">
         {summaryBar}
         {cardGrid("grid md:grid-cols-2 xl:grid-cols-3 gap-5")}
+        {botParkedSection}
+        {vaultWarningNote}
         {howLink}
       </div>
     );

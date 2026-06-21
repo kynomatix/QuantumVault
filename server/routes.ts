@@ -1431,7 +1431,7 @@ import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-
 import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
 import { getBestQuote } from "./swap/index.js";
-import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
+import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, valueVaultRowsForWallet, type VaultPositionView, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
 import { getEnabledYieldAssets, getYieldAssetByKey } from "./vault/yield-assets";
 import { getYieldTableCached } from "./vault/yield-oracle";
 import { detectParkedYieldTokens as detectParkedYieldTokensPure } from "./vault/parked-tokens";
@@ -8142,6 +8142,63 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       res.json({ positions, scope: scope.scope, tradingBotId: scope.tradingBotId });
     } catch (error: any) {
       console.error("[Vault] positions error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // Read-only AGGREGATE of every parked Vault balance the user owns: the shared
+  // account vault PLUS funds parked inside individual (independent_trader, e.g.
+  // Flash) bots. Powers the main Vaults tab so per-bot parked money shows up
+  // there, not only inside each bot's drawer. Display-only; never moves funds.
+  // Account scope reuses the full enabled-asset scan (so on-chain-without-DB
+  // balances still surface); per-bot scopes value only their recorded rows (one
+  // RPC batch per parked bot) and fail honest — an unreadable row is flagged in
+  // `warnings` and left out of the total, never counted as zero.
+  app.get("/api/vault/positions/all", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+
+      const warnings: string[] = [];
+
+      // Account scope: same full scan as /positions (account wallet only).
+      let account: VaultPositionView[] = [];
+      if (wallet.agentPublicKey) {
+        account = await getVaultPositionViews(req.walletAddress!, wallet.agentPublicKey, null);
+      }
+
+      // Per-bot scopes: group recorded rows by bot, value each against the bot's
+      // OWN wallet. Only independent_trader bots ever hold per-bot vault rows.
+      const allRows = await storage.getVaultPositionsAllScopes(req.walletAddress!);
+      const rowsByBot = new Map<string, typeof allRows>();
+      for (const r of allRows) {
+        if (!r.tradingBotId) continue;
+        const arr = rowsByBot.get(r.tradingBotId) ?? [];
+        arr.push(r);
+        rowsByBot.set(r.tradingBotId, arr);
+      }
+
+      const bots: { botId: string; botName: string; positions: VaultPositionView[]; valueUsdc: number; hasUnreadable: boolean }[] = [];
+      for (const [bId, rows] of rowsByBot) {
+        const bot = await storage.getTradingBotById(bId);
+        if (!bot || bot.walletAddress !== req.walletAddress!) continue; // ownership / deleted bot
+        const adapter = getAdapterForBot(bot);
+        if (adapter.subaccountCaps?.accountModel !== 'independent_trader') continue; // shares account vault
+        if (!bot.protocolSubaccountId) continue; // not funded yet → no on-chain wallet to read
+        const { views, warnings: w } = await valueVaultRowsForWallet(bot.protocolSubaccountId, rows);
+        for (const msg of w) warnings.push(`${bot.name}: ${msg}`);
+        if (views.length === 0) continue;
+        const valueUsdc = views.reduce((s, v) => s + (v.currentValueUsdc ?? 0), 0);
+        // Flag a partial total so the UI never renders an unreadable bot as $0.00.
+        const hasUnreadable = views.some((v) => v.currentValueUsdc === null);
+        bots.push({ botId: bot.id, botName: bot.name, positions: views, valueUsdc, hasUnreadable });
+      }
+
+      const accountValue = account.reduce((s, v) => s + (v.currentValueUsdc ?? 0), 0);
+      const botsValue = bots.reduce((s, b) => s + b.valueUsdc, 0);
+      res.json({ account, bots, totalParkedUsdc: accountValue + botsValue, warnings });
+    } catch (error: any) {
+      console.error("[Vault] positions/all error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
     }
   });
