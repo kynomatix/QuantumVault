@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation } from 'wouter';
 import bs58 from 'bs58';
 import { useWallet } from '@/hooks/useWallet';
+import { isSessionError, showReconnectToast } from '@/lib/reconnect-toast';
 import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useLeaderboardSparklines, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, useBotHealth, useReconcilePositions, useMarketplace, useMyMarketplaceSubscriptions, useMyPublishedBots, useUnpublishBot, useUnsubscribeFromBot, usePortfolioPerformance, type HealthMetrics, type PublishedBot, type PortfolioPerformanceData } from '@/hooks/useApi';
 import { Sparkline } from '@/components/Sparkline';
 import { useToast } from '@/hooks/use-toast';
@@ -1022,11 +1023,15 @@ export default function AppPage() {
       }
       handleRefreshAll();
     } catch (error: any) {
-      toast({
-        title: 'Recovery failed',
-        description: error.message || 'Could not recover rent right now.',
-        variant: 'destructive',
-      });
+      if (isSessionError(error)) {
+        showReconnectToast({ toast, retryAuth, title: 'Recovery failed', retry: () => handleRecoverTokenRents() });
+      } else {
+        toast({
+          title: 'Recovery failed',
+          description: error.message || 'Could not recover rent right now.',
+          variant: 'destructive',
+        });
+      }
     } finally {
       setRecoveringRent(false);
     }
@@ -1137,12 +1142,20 @@ export default function AppPage() {
       setAgentPublicKey(data.newAgentWallet);
       refetchBots();
     } catch (error: any) {
-      toast({ 
-        title: 'Reset Failed', 
-        description: error.message || 'Failed to reset agent wallet',
-        variant: 'destructive' 
-      });
-      setResetAgentDialogOpen(false);
+      if (isSessionError(error)) {
+        // Destructive action: after reconnecting, re-open the confirmation dialog
+        // so the user deliberately re-confirms the reset rather than having it
+        // silently re-run from the toast tap.
+        setResetAgentDialogOpen(false);
+        showReconnectToast({ toast, retryAuth, title: 'Reset Failed', retry: () => setResetAgentDialogOpen(true) });
+      } else {
+        toast({ 
+          title: 'Reset Failed', 
+          description: error.message || 'Failed to reset agent wallet',
+          variant: 'destructive' 
+        });
+        setResetAgentDialogOpen(false);
+      }
     } finally {
       setResettingAgentWallet(false);
       setResetAgentProgress([]);

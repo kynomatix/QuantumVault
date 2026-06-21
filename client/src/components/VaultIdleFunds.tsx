@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useWallet } from "@/hooks/useWallet";
 import { useToast } from "@/hooks/use-toast";
+import { isSessionError, showReconnectToast } from "@/lib/reconnect-toast";
 import { walletAuthHeaders } from "@/lib/queryClient";
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { Button } from "@/components/ui/button";
@@ -275,7 +276,7 @@ function RiskChip({ riskClass }: { riskClass: string }) {
  * module mounts lazily.
  */
 export default function VaultIdleFunds({ active = true, botId }: { active?: boolean; botId?: string }) {
-  const { publicKeyString, sessionConnected } = useWallet();
+  const { publicKeyString, sessionConnected, retryAuth } = useWallet();
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -457,7 +458,11 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
       setDetailAsset(null);
       refetchAll();
     } catch (e: any) {
-      toast({ title: "Park failed", description: e.message || "Something went wrong.", variant: "destructive" });
+      if (isSessionError(e)) {
+        showReconnectToast({ toast, retryAuth, title: "Park failed", retry: () => handleParkAll(asset) });
+      } else {
+        toast({ title: "Park failed", description: e.message || "Something went wrong.", variant: "destructive" });
+      }
     } finally {
       setParking(false);
     }
@@ -486,7 +491,11 @@ export default function VaultIdleFunds({ active = true, botId }: { active?: bool
       setDetailAsset(null);
       refetchAll();
     } catch (e: any) {
-      toast({ title: "Unpark failed", description: e.message || "Something went wrong.", variant: "destructive" });
+      if (isSessionError(e)) {
+        showReconnectToast({ toast, retryAuth, title: "Unpark failed", retry: () => handleUnparkAll(assetKey, displayName) });
+      } else {
+        toast({ title: "Unpark failed", description: e.message || "Something went wrong.", variant: "destructive" });
+      }
     } finally {
       setUnparking(false);
     }
