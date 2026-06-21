@@ -448,22 +448,28 @@ function CreatingBotsSection() {
       <SubHeading>Automated Capital Management</SubHeading>
       <div className="p-5 rounded-xl bg-gradient-to-r from-violet-500/10 via-fuchsia-500/10 to-purple-500/10 border border-violet-500/20 mb-8">
         <p className="text-white/80 leading-relaxed mb-4">
-          These three features let you fully automate how your bot handles money. 
+          These features let you fully automate how your bot handles money. 
           Instead of manually depositing, withdrawing, and adjusting your investment — 
-          the system does it for you.
+          the system does it for you. In a bot's settings they're grouped into 
+          <strong className="text-white/90"> Position Growth</strong> (how the bot sizes its trades) and 
+          <strong className="text-white/90"> Cash Management</strong> (what happens to profits and idle cash).
         </p>
-        <div className="grid md:grid-cols-3 gap-3 text-sm">
+        <div className="grid sm:grid-cols-2 gap-3 text-sm">
           <div className="flex items-start gap-2">
             <div className="w-2 h-2 rounded-full bg-violet-400 mt-1.5 flex-shrink-0" />
-            <span className="text-white/60"><strong className="text-violet-300">Profit Reinvest</strong> — Grow your trades as you win</span>
-          </div>
-          <div className="flex items-start gap-2">
-            <div className="w-2 h-2 rounded-full bg-fuchsia-400 mt-1.5 flex-shrink-0" />
-            <span className="text-white/60"><strong className="text-fuchsia-300">Auto Withdraw</strong> — Take profits automatically</span>
+            <span className="text-white/60"><strong className="text-violet-300">Profit Reinvest</strong> — Grow your trades as you win <span className="text-white/30">(Position Growth)</span></span>
           </div>
           <div className="flex items-start gap-2">
             <div className="w-2 h-2 rounded-full bg-sky-400 mt-1.5 flex-shrink-0" />
-            <span className="text-white/60"><strong className="text-sky-300">Auto Top-Up</strong> — Refill when running low</span>
+            <span className="text-white/60"><strong className="text-sky-300">Auto Top-Up</strong> — Refill when running low <span className="text-white/30">(Position Growth)</span></span>
+          </div>
+          <div className="flex items-start gap-2">
+            <div className="w-2 h-2 rounded-full bg-fuchsia-400 mt-1.5 flex-shrink-0" />
+            <span className="text-white/60"><strong className="text-fuchsia-300">Auto Withdraw</strong> — Take profits automatically <span className="text-white/30">(Cash Management)</span></span>
+          </div>
+          <div className="flex items-start gap-2">
+            <div className="w-2 h-2 rounded-full bg-emerald-400 mt-1.5 flex-shrink-0" />
+            <span className="text-white/60"><strong className="text-emerald-300">Auto-Park Idle Funds</strong> — Earn yield between trades <span className="text-white/30">(Cash Management · Flash)</span></span>
           </div>
         </div>
       </div>
@@ -614,18 +620,80 @@ function CreatingBotsSection() {
           </p>
         </div>
       </div>
+
+      {/* Auto-Park Idle Funds Section */}
+      <div className="relative mb-10">
+        <div className="absolute -inset-1 bg-gradient-to-r from-emerald-500/20 to-teal-500/20 rounded-2xl blur-xl opacity-50" />
+        <div className="relative p-6 rounded-xl bg-card/80 backdrop-blur-sm border border-emerald-500/20">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-500 flex items-center justify-center">
+              <Landmark className="w-5 h-5 text-white" />
+            </div>
+            <h3 className="text-xl font-semibold text-white">Auto-Park Idle Funds</h3>
+            <span className="text-[10px] uppercase tracking-wide font-medium text-emerald-300 bg-emerald-500/15 border border-emerald-500/30 rounded px-1.5 py-0.5">Flash only</span>
+          </div>
+
+          <Paragraph>
+            Turn this on and your bot's spare USDC never sits idle. About a minute after a position 
+            fully closes, the leftover cash is parked into a yield Vault automatically — then pulled 
+            back just before the next trade. You earn between trades without lifting a finger.
+          </Paragraph>
+
+          <div className="mt-4 p-4 rounded-lg bg-black/30 border border-white/10">
+            <h4 className="font-medium text-white mb-4 text-sm uppercase tracking-wide opacity-60">The full cycle</h4>
+            <div className="space-y-3">
+              <div className="flex items-center gap-4">
+                <div className="w-8 h-8 rounded-full bg-emerald-500/20 flex items-center justify-center text-sm font-medium text-emerald-300">1</div>
+                <span className="text-white/70">Spare USDC sits in a yield Vault, <strong className="text-emerald-300">earning</strong></span>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium text-white/60">2</div>
+                <span className="text-white/70">A trade signal arrives</span>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium text-white/60">3</div>
+                <span className="text-white/70">The Vault <strong className="text-white">unparks just enough</strong> to fund the trade</span>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium text-white/60">4</div>
+                <span className="text-white/70">The position opens and runs</span>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium text-white/60">5</div>
+                <span className="text-white/70">The position <strong className="text-white">fully closes</strong> (take-profit, stop-loss, or a close signal)</span>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="w-8 h-8 rounded-full bg-emerald-500/20 flex items-center justify-center text-sm font-medium text-emerald-300">6</div>
+                <span className="text-white/70">About a minute later, the leftover USDC is <strong className="text-emerald-300">parked again</strong> — back to earning</span>
+              </div>
+            </div>
+          </div>
+
+          <p className="mt-4 text-white/50 text-sm leading-relaxed">
+            If a new trade opens during that short wait (a quick flip or re-entry), the repark is skipped — 
+            funds the bot is about to use are never parked by mistake. Parking is also skipped when there's 
+            less than about $5 of spare cash, to avoid tiny, pointless transfers. It's a persistent per-bot 
+            setting: turn it on once and it keeps working after every trade.
+          </p>
+
+          <p className="mt-4 text-sm text-emerald-300/80 flex items-center gap-2">
+            <Info className="w-4 h-4" />
+            Available on Flash bots, where each bot has its own isolated wallet.
+          </p>
+        </div>
+      </div>
       
       {/* Using Together Section */}
       <div className="relative mb-8">
         <div className="absolute -inset-1 bg-gradient-to-r from-violet-500/20 via-fuchsia-500/20 to-sky-500/20 rounded-2xl blur-xl opacity-50" />
         <div className="relative p-6 rounded-xl bg-card/80 backdrop-blur-sm border border-violet-500/20">
           <h3 className="text-xl font-semibold text-white mb-2">Using These Features Together</h3>
-          <p className="text-white/50 text-sm mb-6">All three features are compatible and can create powerful automation.</p>
+          <p className="text-white/50 text-sm mb-6">These features are compatible and can create powerful automation.</p>
           
           <div className="p-4 rounded-lg bg-gradient-to-r from-violet-500/10 via-fuchsia-500/10 to-sky-500/10 border border-white/10 mb-4">
             <h4 className="font-semibold text-white mb-1">"Keep $100 Working" Strategy</h4>
             <p className="text-white/40 text-sm mb-4">
-              Profit Reinvest ON • Auto Withdraw at $100 • Auto Top-Up ON
+              Profit Reinvest ON • Auto Withdraw at $100 • Auto Top-Up ON • Auto-Park ON (Flash)
             </p>
             
             <div className="grid md:grid-cols-3 gap-3">
@@ -2082,6 +2150,32 @@ function VaultsSafetySection() {
         This auto-funding is hands-off by design — you keep your spare cash earning, and the platform pulls back only 
         what a trade actually needs.
       </Alert>
+
+      <SubHeading>Reparked After Each Trade (Auto-Park Idle Funds)</SubHeading>
+      <Paragraph>
+        The other half of hands-off cash management. Turn on <strong className="text-white/90">Auto-park idle 
+        funds</strong> in a bot's settings and, about a minute after the bot's position fully closes, all its spare 
+        USDC is parked back into yield automatically — so the cash earns between trades instead of sitting idle. If a 
+        new trade opens during that short wait (a quick flip or re-entry), the repark is skipped, so funds the bot is 
+        about to use are never parked by mistake. Parking is also skipped when there's less than about $5 of spare 
+        cash, to avoid tiny, pointless transfers.
+      </Paragraph>
+      <Paragraph>
+        Put together with the auto-funding above, a Flash bot runs a fully automatic loop:
+      </Paragraph>
+      <StepList steps={[
+        'Spare USDC sits in a yield Vault, earning.',
+        'A trade signal arrives.',
+        'The Vault unparks just enough to fund the trade.',
+        'The position opens and runs.',
+        'The position fully closes (take-profit, stop-loss, or a close signal).',
+        'About a minute later, the leftover USDC is parked again — back to earning.',
+      ]} />
+      <Alert type="info">
+        Auto-park idle funds is available on Flash bots, where each bot has its own isolated wallet. It's a 
+        persistent per-bot setting — turn it on once and it keeps working after every trade. All the same 
+        money-safety rules apply: on-chain truth, realized amounts only, price-impact cap, and fail-closed.
+      </Alert>
     </div>
   );
 }
@@ -3230,7 +3324,7 @@ const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet:
   { id: 'getting-started', label: 'Getting Started', snippet: 'Overview of how QuantumVault works: connect wallet, fund account, create bot, connect TradingView.', keywords: ['getting started', 'overview', 'intro', 'introduction', 'how it works', 'quickstart', 'first steps', 'onboarding', 'setup'] },
   { id: 'wallet-setup', label: 'Wallet Setup', snippet: 'Connect your Phantom or Solana wallet. Understand the two-wallet system: your personal wallet and your agent wallet.', keywords: ['wallet', 'phantom', 'solana', 'agent wallet', 'connect wallet', 'wallet standard', 'mobile wallet adapter', 'mwa', 'seeker'] },
   { id: 'funding', label: 'Funding Your Account', snippet: 'Deposit SOL for fees and USDC for trading. Understand how capital flows from your wallet to trading subaccounts.', keywords: ['fund', 'funding', 'deposit', 'usdc', 'sol', 'capital', 'money', 'balance', 'transfer', 'withdraw', 'withdrawal'] },
-  { id: 'creating-bots', label: 'Creating Bots', snippet: 'Set up a trading bot: pick a market, leverage, investment amount, direction. Enable Profit Reinvest, Auto Withdraw, and Auto Top-Up.', keywords: ['bot', 'create bot', 'leverage', 'market', 'investment', 'direction', 'long', 'short', 'profit reinvest', 'auto withdraw', 'auto top-up', 'top up', 'compound', 'reinvest', 'perp', 'perpetual', 'sol-perp', 'btc-perp', 'eth-perp'] },
+  { id: 'creating-bots', label: 'Creating Bots', snippet: 'Set up a trading bot: pick a market, leverage, investment amount, direction. Group settings into Position Growth (Profit Reinvest, Auto Top-Up) and Cash Management (Auto Withdraw, Auto-Park Idle Funds).', keywords: ['bot', 'create bot', 'leverage', 'market', 'investment', 'direction', 'long', 'short', 'profit reinvest', 'auto withdraw', 'auto top-up', 'top up', 'compound', 'reinvest', 'perp', 'perpetual', 'sol-perp', 'btc-perp', 'eth-perp', 'position growth', 'cash management', 'auto park', 'auto-park', 'idle funds', 'park idle'] },
   { id: 'tradingview', label: 'TradingView Integration', snippet: 'Set up TradingView webhook alerts to trigger your bot. Includes the JSON payload format and alert message template.', keywords: ['tradingview', 'webhook', 'alert', 'pine script', 'signal', 'json', 'payload', 'url', 'strategy', 'indicator', 'automation', 'trigger'] },
   { id: 'bot-management', label: 'Bot Management', snippet: 'Monitor positions, pause and resume bots, close trades manually, view PnL history and trade logs.', keywords: ['manage', 'management', 'pause', 'resume', 'stop', 'close', 'position', 'pnl', 'profit', 'loss', 'trade history', 'logs', 'monitor', 'status', 'active', 'inactive'] },
   { id: 'marketplace', label: 'Marketplace', snippet: 'Subscribe to signal bots published by other traders. Publish your own bot to earn profit-sharing fees.', keywords: ['marketplace', 'signal', 'subscribe', 'subscription', 'publish', 'creator', 'profit share', 'profit sharing', 'fee', 'community', 'leaderboard', 'copy trading', 'follower'] },
@@ -3240,7 +3334,7 @@ const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet:
   { id: 'ai-agents', label: 'AI Agent Integration', snippet: 'Use AI agents (Claude, GPT, etc.) to send trade signals to QuantumVault via the agent API.', keywords: ['ai', 'agent', 'claude', 'gpt', 'openai', 'llm', 'language model', 'api', 'integration', 'programmatic', 'automated', 'server execution key'] },
   { id: 'vaults-overview', label: 'Vaults Overview', snippet: 'Vaults put idle USDC to work earning yield. One tap to park all spare USDC, one tap to unpark it back.', keywords: ['vault', 'vaults', 'earn', 'yield', 'idle', 'spare', 'park', 'unpark', 'interest', 'apy', 'save', 'savings', 'passive', 'stablecoin'] },
   { id: 'vaults-destinations', label: 'Yield Destinations', snippet: 'The yield options available in Vaults: Kamino USDC, Perena USD*, Jupiter Lend USDC, Ondo USDY, and OnRe ONyc.', keywords: ['destination', 'destinations', 'yield', 'apy', 'kamino', 'perena', 'jupiter lend', 'ondo', 'usdy', 'onre', 'onyc', 'stablecoin', 'stable', 'floating', 'reinsurance', 'treasury'] },
-  { id: 'vaults-safety', label: 'Safety & Funding', snippet: 'How Vaults stay money-safe (on-chain truth, realized amounts, price-impact cap) and auto-unpark — at the account level or per bot — to fund trades.', keywords: ['safety', 'safe', 'money', 'on-chain', 'realized', 'price impact', 'fail closed', 'equity', 'balance', 'auto unpark', 'fund trade', 'top up', 'collateral', 'per bot', 'per-bot'] },
+  { id: 'vaults-safety', label: 'Safety & Funding', snippet: 'How Vaults stay money-safe (on-chain truth, realized amounts, price-impact cap), auto-unpark to fund trades, and auto-park idle funds back into yield after a position closes (Flash).', keywords: ['safety', 'safe', 'money', 'on-chain', 'realized', 'price impact', 'fail closed', 'equity', 'balance', 'auto unpark', 'fund trade', 'top up', 'collateral', 'per bot', 'per-bot', 'auto park', 'auto-park', 'repark', 'idle funds', 'after close', 'earn between trades', 'flash'] },
   { id: 'quantumlab-overview', label: 'QuantumLab Overview', snippet: 'QuantumLab is the built-in backtesting and strategy optimization engine. Test strategies before deploying them live.', keywords: ['quantumlab', 'quantum lab', 'backtest', 'backtesting', 'lab', 'test', 'simulation', 'historical', 'strategy', 'candle', 'ohlc'] },
   { id: 'quantumlab-strategies', label: 'Strategy Library', snippet: 'Write and save Pine Script strategies in QuantumLab. Load from the library to backtest or optimize.', keywords: ['strategy', 'library', 'pine script', 'pine', 'script', 'code', 'write', 'save', 'load', 'indicator', 'signal', 'entry', 'exit'] },
   { id: 'quantumlab-optimizer', label: 'Optimizer', snippet: 'Run random search and refinement optimization to find the best parameters for your strategy.', keywords: ['optimizer', 'optimize', 'optimization', 'parameter', 'tune', 'search', 'random search', 'refinement', 'coordinate', 'best', 'sharpe', 'drawdown', 'win rate'] },

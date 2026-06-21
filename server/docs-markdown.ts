@@ -16,6 +16,7 @@ export const DOCS_MARKDOWN = `# QuantumVault Documentation
    - [Profit Reinvest](#profit-reinvest)
    - [Auto Withdraw](#auto-withdraw)
    - [Auto Top-Up](#auto-top-up)
+   - [Auto-Park Idle Funds](#auto-park-idle-funds)
    - [Using These Features Together](#using-these-features-together)
 5. [TradingView Integration](#tradingview-integration)
 6. [Bot Management](#bot-management)
@@ -162,11 +163,12 @@ Bots are automated trading agents that execute trades based on TradingView webho
 
 ### Automated Capital Management
 
-These three features let you fully automate how your bot handles money. Instead of manually depositing, withdrawing, and adjusting your investment — the system does it for you.
+These features let you fully automate how your bot handles money. Instead of manually depositing, withdrawing, and adjusting your investment — the system does it for you. In a bot's settings they're grouped into **Position Growth** (how the bot sizes its trades) and **Cash Management** (what happens to profits and idle cash).
 
-- **Profit Reinvest** — Grow your trades as you win
-- **Auto Withdraw** — Take profits automatically
-- **Auto Top-Up** — Refill when running low
+- **Profit Reinvest** — Grow your trades as you win *(Position Growth)*
+- **Auto Top-Up** — Refill when running low *(Position Growth)*
+- **Auto Withdraw** — Take profits automatically *(Cash Management)*
+- **Auto-Park Idle Funds** — Earn yield between trades, Flash only *(Cash Management)*
 
 ---
 
@@ -223,13 +225,32 @@ When a trade signal arrives, if your bot's equity is below your investment amoun
 
 ---
 
+### Auto-Park Idle Funds
+
+*Flash bots only.* Turn this on and your bot's spare USDC never sits idle. About a minute after a position fully closes, the leftover cash is parked into a yield Vault automatically — then pulled back just before the next trade. You earn between trades without lifting a finger.
+
+#### The full cycle
+
+1. Spare USDC sits in a yield Vault, earning.
+2. A trade signal arrives.
+3. The Vault unparks just enough to fund the trade.
+4. The position opens and runs.
+5. The position fully closes (take-profit, stop-loss, or a close signal).
+6. About a minute later, the leftover USDC is parked again — back to earning.
+
+If a new trade opens during that short wait (a quick flip or re-entry), the repark is skipped, so funds the bot is about to use are never parked by mistake. Parking is also skipped when there's less than about $5 of spare cash, to avoid tiny, pointless transfers. It's a persistent per-bot setting — turn it on once and it keeps working after every trade.
+
+> ℹ️ Available on Flash bots, where each bot has its own isolated wallet. See **Vaults → Safety & Funding** for the money-safety details.
+
+---
+
 ### Using These Features Together
 
-All three features are compatible and can create powerful automation.
+These features are compatible and can create powerful automation.
 
 #### "Keep $100 Working" Strategy
 
-**Configuration:** Profit Reinvest ON • Auto Withdraw at $100 • Auto Top-Up ON
+**Configuration:** Profit Reinvest ON • Auto Withdraw at $100 • Auto Top-Up ON • Auto-Park ON (Flash)
 
 | When you win | When you lose | The result |
 |---|---|---|
@@ -842,6 +863,21 @@ Your parked position is always included in your total balance and your profit/lo
 When you place a trade — by hand or from a TradingView/webhook signal — and your spendable USDC isn't enough to cover it, QuantumVault automatically unparks just enough to fund the trade, plus a small buffer for fees and price movement. This works the same whether the spare cash is parked at your account level or set aside for an individual bot, so a parked bot is never falsely paused as "underfunded." The rest stays parked and keeps earning. You don't have to remember to unpark first; it happens as part of placing the trade.
 
 > **Note:** This auto-funding is hands-off by design — you keep your spare cash earning, and the platform pulls back only what a trade actually needs.
+
+### Reparked After Each Trade (Auto-Park Idle Funds)
+
+The other half of hands-off cash management. Turn on **Auto-park idle funds** in a bot's settings and, about a minute after the bot's position fully closes, all its spare USDC is parked back into yield automatically — so the cash earns between trades instead of sitting idle. If a new trade opens during that short wait (a quick flip or re-entry), the repark is skipped, so funds the bot is about to use are never parked by mistake. Parking is also skipped when there's less than about $5 of spare cash, to avoid tiny, pointless transfers.
+
+Put together with the auto-funding above, a Flash bot runs a fully automatic loop:
+
+1. Spare USDC sits in a yield Vault, earning.
+2. A trade signal arrives.
+3. The Vault unparks just enough to fund the trade.
+4. The position opens and runs.
+5. The position fully closes (take-profit, stop-loss, or a close signal).
+6. About a minute later, the leftover USDC is parked again — back to earning.
+
+> **Note:** Auto-park idle funds is available on Flash bots, where each bot has its own isolated wallet. It's a persistent per-bot setting — turn it on once and it keeps working after every trade. All the same money-safety rules apply: on-chain truth, realized amounts only, price-impact cap, and fail-closed.
 
 ---
 
