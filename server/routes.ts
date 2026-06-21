@@ -1299,6 +1299,70 @@ async function getExchangeAccountInfoForBot(agentPublicKey: string, subAccountId
   return getExchangeAccountInfo(agentPublicKey, subAccountId, adapter);
 }
 
+/**
+ * Build the set of this wallet's bot ids that currently have at least one parked
+ * Vault row. Parking ALWAYS writes a vault_positions row, so this lets the
+ * per-bot equity reads skip the (multi-asset, on-chain) parked-value valuation
+ * for bots that never parked — bounding RPC to actually-parked bots on the
+ * list/loop endpoints. Best-effort: on a DB read failure returns an empty set
+ * (the parked add is simply skipped; equity is transiently understated and
+ * self-corrects on the next read).
+ */
+async function getParkedBotIdSet(walletAddress: string): Promise<Set<string>> {
+  try {
+    const rows = await storage.getVaultPositionsAllScopes(walletAddress);
+    const set = new Set<string>();
+    for (const r of rows) if (r.tradingBotId) set.add(r.tradingBotId);
+    return set;
+  } catch (err) {
+    console.warn(`[parked-equity] getVaultPositionsAllScopes failed for ${walletAddress.slice(0, 8)}…:`, err);
+    return new Set<string>();
+  }
+}
+
+/**
+ * DISPLAY-ONLY equity adjustment. For Flash-style per-bot (independent_trader)
+ * bots, spare USDC parked in a Vault yield asset lives in the bot's OWN wallet
+ * (protocolSubaccountId), OFF the exchange — so the live exchange balance
+ * (totalCollateral) excludes it and a parked-but-idle bot looks like it lost the
+ * parked amount. This adds the live USD value of those parked tokens back to the
+ * displayed equity/balance/PnL, mirroring the periodic PnL snapshot job.
+ *
+ * Money-safety: best-effort / FAIL-OPEN (unlike the snapshot's fail-closed) —
+ * these are display reads, so an unreadable parked value returns the base figure
+ * unchanged (with parkedValueUnavailable:true) rather than erroring the card.
+ * NEVER use this for freeCollateral, margin, health, liquidation, or trade
+ * sizing: parked funds are equity but NOT tradable collateral. Only added for
+ * independent_trader to avoid double-counting account-model venues, and keyed on
+ * protocolSubaccountId (the bot's own wallet), never the account agent wallet.
+ */
+async function addParkedValueForBotDisplayEquity(
+  bot: TradingBot,
+  adapter: ProtocolAdapter,
+  baseUsdc: number,
+  opts?: { hasVaultRows?: boolean },
+): Promise<{ equityUsdc: number; parkedValueUsdc: number; parkedValueIncluded: boolean; parkedValueUnavailable: boolean }> {
+  const unchanged = { equityUsdc: baseUsdc, parkedValueUsdc: 0, parkedValueIncluded: false, parkedValueUnavailable: false };
+  if (adapter.subaccountCaps?.accountModel !== 'independent_trader') return unchanged;
+  if (!bot.protocolSubaccountId) return unchanged;
+  if (opts?.hasVaultRows === false) return unchanged;
+  try {
+    const parked = await sumVaultPositionValueUsdc(bot.protocolSubaccountId);
+    if (!parked.ok) {
+      return { equityUsdc: baseUsdc, parkedValueUsdc: 0, parkedValueIncluded: false, parkedValueUnavailable: true };
+    }
+    return {
+      equityUsdc: baseUsdc + parked.valueUsdc,
+      parkedValueUsdc: parked.valueUsdc,
+      parkedValueIncluded: true,
+      parkedValueUnavailable: false,
+    };
+  } catch (err) {
+    console.warn(`[parked-equity] parked valuation failed for bot ${bot.id.slice(0, 8)}…:`, err);
+    return { equityUsdc: baseUsdc, parkedValueUsdc: 0, parkedValueIncluded: false, parkedValueUnavailable: true };
+  }
+}
+
 async function closePerpPosition(
   encryptedPrivateKey: Uint8Array,
   market: string,
@@ -1431,7 +1495,7 @@ import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-
 import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
 import { getBestQuote } from "./swap/index.js";
-import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, valueVaultRowsForWallet, type VaultPositionView, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
+import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, valueVaultRowsForWallet, sumVaultPositionValueUsdc, type VaultPositionView, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
 import { getEnabledYieldAssets, getYieldAssetByKey } from "./vault/yield-assets";
 import { getYieldTableCached } from "./vault/yield-oracle";
 import { detectParkedYieldTokens as detectParkedYieldTokensPure } from "./vault/parked-tokens";
@@ -5689,7 +5753,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         try {
           const capBotCtx = getBotSubaccountContext(bot);
           if (capBotCtx) {
-            const liveInfo = await getExchangeAccountInfoForBot('', 0, capBotCtx, getAdapterForBot(bot));
+            const capAdapter = getAdapterForBot(bot);
+            const liveInfo = await getExchangeAccountInfoForBot('', 0, capBotCtx, capAdapter);
+            // RAW exchange collateral only — capital pool feeds withdraw validation
+            // (mainAccountBalance = exchangeBalance - allocatedToBot). Parked Vault funds
+            // are OFF-exchange and NOT directly withdrawable, so they are excluded here.
             botBalance = liveInfo.totalCollateral;
           } else {
           const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
@@ -8690,9 +8758,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       if (balBotCtx) {
         try {
-          const liveInfo = await getExchangeAccountInfoForBot(wallet.agentPublicKey!, subAccountId, balBotCtx, getAdapterForBot(bot));
-          const livePositions = await getPerpPositions(wallet.agentPublicKey!, subAccountId, balBotCtx, getAdapterForBot(bot));
+          const balAdapter = getAdapterForBot(bot);
+          const liveInfo = await getExchangeAccountInfoForBot(wallet.agentPublicKey!, subAccountId, balBotCtx, balAdapter);
+          const livePositions = await getPerpPositions(wallet.agentPublicKey!, subAccountId, balBotCtx, balAdapter);
           const hasOpen = livePositions.some((p: any) => Math.abs(p.baseAssetAmount) > 0.0001);
+          const balVaultRows = await storage.getVaultPositions(bot.walletAddress, bot.id);
+          const balAdj = await addParkedValueForBotDisplayEquity(bot, balAdapter, liveInfo.totalCollateral, { hasVaultRows: balVaultRows.length > 0 });
+          // Tradable/margin fields stay RAW (exchange collateral only). Parked Vault value
+          // is OFF-exchange and NOT tradable — surfaced separately for display-equity/PnL only.
           return res.json({
             balance: liveInfo.totalCollateral,
             usdcBalance: liveInfo.usdcBalance,
@@ -8702,6 +8775,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             subAccountId: balBotCtx.botPublicKey,
             subaccountExists: true,
             unrealizedPnl: liveInfo.unrealizedPnl,
+            parkedValueUsdc: balAdj.parkedValueUsdc,
+            parkedValueIncluded: balAdj.parkedValueIncluded,
+            parkedValueUnavailable: balAdj.parkedValueUnavailable,
             source: 'protocol',
           });
         } catch (err: any) {
@@ -8813,7 +8889,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const liveAccountInfo = results[6].status === 'fulfilled' ? results[6].value : null;
       
       let accountInfo;
+      let overviewParked = { parkedValueUsdc: 0, parkedValueIncluded: false, parkedValueUnavailable: false };
       if (overviewBotCtx && liveAccountInfo) {
+        const overviewVaultRows = await storage.getVaultPositions(bot.walletAddress, bot.id);
+        const ovAdj = await addParkedValueForBotDisplayEquity(bot, getAdapterForBot(bot), liveAccountInfo.totalCollateral, { hasVaultRows: overviewVaultRows.length > 0 });
+        overviewParked = { parkedValueUsdc: ovAdj.parkedValueUsdc, parkedValueIncluded: ovAdj.parkedValueIncluded, parkedValueUnavailable: ovAdj.parkedValueUnavailable };
+        // Tradable/margin fields stay RAW (exchange collateral only). Parked Vault value
+        // is OFF-exchange and NOT tradable — surfaced separately for display-equity/PnL only.
         accountInfo = {
           usdcBalance: liveAccountInfo.totalCollateral,
           totalCollateral: liveAccountInfo.totalCollateral,
@@ -8918,6 +9000,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         freeCollateral: accountInfo.freeCollateral,
         hasOpenPositions: accountInfo.hasOpenPositions,
         subAccountId,
+        // Per-bot (Flash/independent_trader) parked Vault value, surfaced as SEPARATE
+        // metadata. The equity fields above are RAW exchange collateral (NOT folded) so
+        // they stay safe for trade-sizing/margin; the client composes parked into
+        // DISPLAY-only equity/PnL spots and explains the difference to the user.
+        parkedValueUsdc: overviewParked.parkedValueUsdc,
+        parkedValueIncluded: overviewParked.parkedValueIncluded,
+        parkedValueUnavailable: overviewParked.parkedValueUnavailable,
         
         // From getAgentUsdcBalance
         mainAccountBalance,
@@ -8948,6 +9037,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     try {
       const bots = await storage.getTradingBots(req.walletAddress!);
       const wallet = await storage.getWallet(req.walletAddress!);
+      const listParkedBotIds = await getParkedBotIdSet(req.walletAddress!);
       
       let prices: Record<string, number> = {};
       try {
@@ -8978,8 +9068,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           }, 0);
 
           if (botCtx && wallet?.agentPublicKey) {
-            const liveInfo = await getExchangeAccountInfoForBot(wallet.agentPublicKey, 0, botCtx, getAdapterForBot(bot));
-            botBalance = liveInfo.totalCollateral;
+            const listAdapter = getAdapterForBot(bot);
+            const liveInfo = await getExchangeAccountInfoForBot(wallet.agentPublicKey, 0, botCtx, listAdapter);
+            const listAdj = await addParkedValueForBotDisplayEquity(bot, listAdapter, liveInfo.totalCollateral, { hasVaultRows: listParkedBotIds.has(bot.id) });
+            botBalance = listAdj.equityUsdc;
             netPnl = botBalance - netDeposited;
             netPnlPercent = totalDeposits > 0 ? (netPnl / totalDeposits) * 100 : 0;
           } else {
