@@ -33,6 +33,20 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
+/**
+ * Per-project logos for each yield destination (white marks designed to sit on the
+ * card's gradient tile). Keyed by the registry asset key. Any asset without a logo
+ * falls back to the generic Landmark glyph. Files: client/public/images/vaults.
+ */
+const VAULT_LOGOS: Record<string, string> = {
+  kamino_usdc: "/images/vaults/kamino_white.webp",
+  perena_usd_star: "/images/vaults/perena_white.webp",
+  jupiter_lend_usdc: "/images/vaults/jupiter_white.webp",
+  jupusd: "/images/vaults/jupiter_white.webp",
+  usdy: "/images/vaults/ondo_white.webp",
+  onyc: "/images/vaults/onre_white.webp",
+};
+
 export interface YieldAssetInfo {
   key: string;
   displayName: string;
@@ -595,7 +609,16 @@ export default function VaultIdleFunds({
                 isEarning ? "bg-gradient-to-br from-primary to-accent" : "bg-gradient-to-br from-primary/30 to-accent/30"
               }`}
             >
-              <Landmark className={`w-6 h-6 ${isEarning ? "text-white" : "text-primary"}`} />
+              {VAULT_LOGOS[a.key] ? (
+                <img
+                  src={VAULT_LOGOS[a.key]}
+                  alt=""
+                  aria-hidden="true"
+                  className="w-7 h-7 object-contain"
+                />
+              ) : (
+                <Landmark className={`w-6 h-6 ${isEarning ? "text-white" : "text-primary"}`} />
+              )}
             </div>
             <div className="min-w-0">
               <h3 className="font-semibold text-base truncate">{a.displayName}</h3>
