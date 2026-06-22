@@ -2756,7 +2756,7 @@ export function BotManagementDrawer({
                                 className={`rounded-md border px-3 py-2 text-left transition-colors ${editVaultAllOut ? 'border-primary bg-primary/10' : 'border-border/50 [@media(hover:hover)]:hover:border-border'}`}
                                 data-testid="button-vault-mode-all-out"
                               >
-                                <span className="block text-xs font-medium">Full buffer</span>
+                                <span className="block text-xs font-medium">Full Buffer</span>
                                 <span className="block text-[11px] text-muted-foreground mt-0.5">Safest — pulls all yield back</span>
                               </button>
                               <button
@@ -2765,7 +2765,7 @@ export function BotManagementDrawer({
                                 className={`rounded-md border px-3 py-2 text-left transition-colors ${!editVaultAllOut ? 'border-primary bg-primary/10' : 'border-border/50 [@media(hover:hover)]:hover:border-border'}`}
                                 data-testid="button-vault-mode-spare"
                               >
-                                <span className="block text-xs font-medium">Keep spare earning</span>
+                                <span className="block text-xs font-medium">Keep Spare Earning</span>
                                 <span className="block text-[11px] text-muted-foreground mt-0.5">Pulls only what's needed</span>
                               </button>
                             </div>
