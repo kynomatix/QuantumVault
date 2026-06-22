@@ -1709,6 +1709,11 @@ interface TradeSizingParams {
   logPrefix: string;
   botCtx?: BotSubaccountContext | null;
   adapter?: ReturnType<typeof getDefaultAdapter>;
+  // On-open unpark mode for per-bot (Flash) vaults. TRUE (default = safest):
+  // mobilize ALL parked funds on open (full equity buffer). FALSE ("spare only"):
+  // pull back just the margin the trade needs, leave the rest earning. Defaults
+  // fail-safe true if a caller omits it.
+  vaultAllOut?: boolean;
 }
 
 interface TradeSizingResult {
@@ -2159,6 +2164,7 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
     logPrefix,
     botCtx,
     adapter = getDefaultAdapter(),
+    vaultAllOut = true,
   } = params;
 
   // Per-bot (independent_trader, e.g. Flash) vaults park into the bot's OWN
@@ -2218,17 +2224,26 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
         error: 'Cannot execute trade: profit reinvest enabled but collateral check failed',
       };
     }
-    // Fallback for normal mode
-    tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
-    const contractSize = tradeAmountUsd / oraclePrice;
-    return {
-      success: true,
-      tradeAmountUsd,
-      finalContractSize: contractSize,
-      freeCollateral: 0,
-      maxTradeableValue: 0,
-      effectiveLeverage,
-    };
+    // Fallback for normal mode — but NOT for a safe-default all-out Flash bot.
+    // Returning a buffer-blind trade size here would skip the per-bot auto-unpark
+    // and full-buffer verification below, opening a position without restoring the
+    // parked equity buffer (the exact condition that liquidated a user). For
+    // vaultAllOut=true we instead leave freeCollateral=0 and fall through so STEP 1.5
+    // reads the bot wallet with the STRICT reader, unparks, and fails closed if the
+    // full buffer can't be confirmed.
+    if (!(isIndependentTrader && botCtx && vaultAllOut === true)) {
+      tradeAmountUsd = signalPercent > 0 ? (signalPercent / 100) * baseCapital : baseCapital;
+      const contractSize = tradeAmountUsd / oraclePrice;
+      return {
+        success: true,
+        tradeAmountUsd,
+        finalContractSize: contractSize,
+        freeCollateral: 0,
+        maxTradeableValue: 0,
+        effectiveLeverage,
+      };
+    }
+    // vaultAllOut Flash: fall through with freeCollateral = 0 (handled by STEP 1.5).
   }
 
   // STEP 1.5: Per-bot (independent_trader, e.g. Flash) auto-unpark. A parked bot's
@@ -2253,9 +2268,12 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
       console.warn(`${logPrefix} failed to cancel pending repark: ${e?.message ?? e}`));
 
     let targetNeed: number;
-    let unparkAll = false;
+    // All-out mode (vaultAllOut, the safe default) OR profit-reinvest → mobilize ALL
+    // parked capital on open so the full equity buffer backs the position (parking can
+    // never strip the cushion that keeps it off liquidation). "Spare only"
+    // (vaultAllOut === false) pulls back just-enough and leaves the rest earning.
+    let unparkAll = profitReinvestEnabled || vaultAllOut === true;
     if (profitReinvestEnabled) {
-      unparkAll = true; // profit-reinvest uses full margin → mobilize all parked capital
       targetNeed = Number.POSITIVE_INFINITY;
     } else if (autoTopUp) {
       targetNeed = Math.max(effectiveLeverage > 0 ? baseCapital / effectiveLeverage : 0, minEquityThreshold);
@@ -2300,6 +2318,47 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
             console.log(`${logPrefix} Per-bot Vault auto-unpark restored $${realized.toFixed(2)}; free collateral now ~$${freeCollateral.toFixed(2)}`);
           }
         }
+      }
+    }
+
+    // SAFE-DEFAULT full-buffer verification (vaultAllOut=true). The contract is
+    // "every parked dollar is back before we open." After the all-out unpark above,
+    // CONFIRM the bot wallet holds NO parked yield tokens — using the fail-closed
+    // strict detector (it THROWS on any unreadable balance, and a successful all-out
+    // unpark leaves a zero token balance). If funds remain (unpark fell short / was
+    // skipped because a read failed) or we cannot confirm, REFUSE the open rather
+    // than trade with a thinned buffer — the exact condition that liquidated a user.
+    // This fails the single trade WITHOUT pausing the bot, so the next signal retries
+    // automatically once the yield route / RPC recovers. "Spare only"
+    // (vaultAllOut=false) intentionally skips this: the user opted into a thinner
+    // buffer to keep idle funds earning.
+    if (vaultAllOut === true) {
+      let stillParked: string[];
+      try {
+        stillParked = await detectParkedYieldTokens(botCtx.botPublicKey);
+      } catch (verifyErr: any) {
+        console.warn(`${logPrefix} Per-bot Vault full-buffer check could not confirm parked funds cleared (${verifyErr?.message ?? verifyErr}); refusing open.`);
+        return {
+          success: false,
+          tradeAmountUsd: 0,
+          finalContractSize: 0,
+          freeCollateral,
+          maxTradeableValue: 0,
+          effectiveLeverage,
+          error: 'Vault safety: could not confirm your parked funds were returned before opening (full-buffer mode). Trade skipped to protect against liquidation; it will retry on the next signal.',
+        };
+      }
+      if (stillParked.length > 0) {
+        console.warn(`${logPrefix} Per-bot Vault full-buffer check: parked funds still present after unpark (${stillParked.join(', ')}); refusing open.`);
+        return {
+          success: false,
+          tradeAmountUsd: 0,
+          finalContractSize: 0,
+          freeCollateral,
+          maxTradeableValue: 0,
+          effectiveLeverage,
+          error: `Vault safety: parked funds (${stillParked.join(', ')}) could not be returned before opening (full-buffer mode). Trade skipped to protect against liquidation; it will retry on the next signal.`,
+        };
       }
     }
   }
@@ -4063,6 +4122,7 @@ async function routeSignalToSubscribers(
             logPrefix: `[Subscriber Routing] Bot ${subBot.id}`,
             botCtx: subBotCtx,
             adapter: getAdapterForBot(subBot),
+            vaultAllOut: subBot.vaultAllOut ?? true,
           });
 
           if (!sizingResult.success) {
@@ -7826,6 +7886,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         logPrefix: "[ManualTrade]",
         botCtx: manualBotCtx,
         adapter: getAdapterForBot(bot),
+        vaultAllOut: bot.vaultAllOut ?? true,
       });
 
       if (!sizingResult.success) {
@@ -10293,7 +10354,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
 
-      const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive, profitReinvest, autoWithdrawThreshold, autoTopUp, autoParkIdle, parkDestinationAsset } = req.body;
+      const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive, profitReinvest, autoWithdrawThreshold, autoTopUp, autoParkIdle, parkDestinationAsset, vaultAllOut } = req.body;
       
       // Per-bot park DESTINATION. Only meaningful on Flash (isolated per-bot wallet);
       // Pacifica's picker stays a local manual selector. Accept null (clear) or an
@@ -10537,6 +10598,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         ...(autoWithdrawThreshold !== undefined && { autoWithdrawThreshold: autoWithdrawThreshold !== null ? String(autoWithdrawThreshold) : null }),
         ...(autoTopUp !== undefined && { autoTopUp }),
         ...(autoParkIdle !== undefined && { autoParkIdle: !!autoParkIdle }),
+        ...(vaultAllOut !== undefined && { vaultAllOut: !!vaultAllOut }),
         ...(parkDestinationUpdate !== undefined && { parkDestinationAsset: parkDestinationUpdate }),
       });
 
@@ -13395,6 +13457,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         logPrefix: "[Webhook]",
         botCtx: webhookBotCtx,
         adapter: getAdapterForBot(bot),
+        vaultAllOut: bot.vaultAllOut ?? true,
       });
 
       if (!sizingResult.success) {
@@ -14641,6 +14704,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         logPrefix: "[User Webhook]",
         botCtx: userWebhookBotCtx,
         adapter: getAdapterForBot(bot),
+        vaultAllOut: bot.vaultAllOut ?? true,
       });
 
       if (!sizingResult.success) {
@@ -18965,6 +19029,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               logPrefix: `[Debug Routing] Bot ${subBot.id}`,
               botCtx: debugSubBotCtx,
               adapter: getAdapterForBot(subBot),
+              vaultAllOut: subBot.vaultAllOut ?? true,
             });
             
             subResult.sizingSuccess = sizingResult.success;

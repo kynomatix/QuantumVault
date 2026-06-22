@@ -107,6 +107,7 @@ interface TradingBot {
   autoWithdrawThreshold?: string | null;
   autoTopUp?: boolean;
   autoParkIdle?: boolean;
+  vaultAllOut?: boolean;
   parkDestinationAsset?: string | null;
   pauseReason?: string | null;
   riskConfig?: Record<string, unknown>;
@@ -276,6 +277,9 @@ export function BotManagementDrawer({
   const [editAutoWithdrawThreshold, setEditAutoWithdrawThreshold] = useState<string>('');
   const [editAutoTopUp, setEditAutoTopUp] = useState<boolean>(false);
   const [editAutoParkIdle, setEditAutoParkIdle] = useState<boolean>(false);
+  // On-open unpark mode (Flash only). TRUE (default) = all-out / full buffer (safest);
+  // FALSE = "spare only" (keep idle funds earning during a trade).
+  const [editVaultAllOut, setEditVaultAllOut] = useState<boolean>(true);
   // Per-bot park DESTINATION (Flash only). null = no explicit choice yet (the
   // picker shows a sensible default but nothing is persisted until the user picks).
   const [editParkDestinationAsset, setEditParkDestinationAsset] = useState<string | null>(null);
@@ -395,6 +399,7 @@ export function BotManagementDrawer({
       setEditAutoWithdrawThreshold(bot.autoWithdrawThreshold ?? '');
       setEditAutoTopUp(bot.autoTopUp ?? false);
       setEditAutoParkIdle(bot.autoParkIdle ?? false);
+      setEditVaultAllOut(bot.vaultAllOut ?? true);
       setEditParkDestinationAsset(bot.parkDestinationAsset ?? null);
     }
   }, [bot]);
@@ -1150,6 +1155,7 @@ export function BotManagementDrawer({
           autoWithdrawThreshold: editAutoWithdrawThreshold ? parseFloat(editAutoWithdrawThreshold) : null,
           autoTopUp: editAutoTopUp,
           autoParkIdle: editAutoParkIdle,
+          ...(localBot.activeProtocol === 'flash' && { vaultAllOut: editVaultAllOut }),
           ...(localBot.activeProtocol === 'flash' && { parkDestinationAsset: editParkDestinationAsset }),
         }),
       });
@@ -1192,6 +1198,7 @@ export function BotManagementDrawer({
       setEditAutoWithdrawThreshold(localBot.autoWithdrawThreshold ?? '');
       setEditAutoTopUp(localBot.autoTopUp ?? false);
       setEditAutoParkIdle(localBot.autoParkIdle ?? false);
+      setEditVaultAllOut(localBot.vaultAllOut ?? true);
       setEditParkDestinationAsset(localBot.parkDestinationAsset ?? null);
     }
   };
@@ -1212,6 +1219,7 @@ export function BotManagementDrawer({
     editAutoWithdrawThreshold !== (localBot.autoWithdrawThreshold ?? '') ||
     editAutoTopUp !== (localBot.autoTopUp ?? false) ||
     editAutoParkIdle !== (localBot.autoParkIdle ?? false) ||
+    (localBot.activeProtocol === 'flash' && editVaultAllOut !== (localBot.vaultAllOut ?? true)) ||
     (localBot.activeProtocol === 'flash' && editParkDestinationAsset !== (localBot.parkDestinationAsset ?? null))
   ) : false;
 
@@ -2737,6 +2745,36 @@ export function BotManagementDrawer({
                             <Sparkles className="w-3 h-3 shrink-0" />
                             Spare USDC is parked into yield about a minute after a position closes, then pulled back automatically before the next trade
                           </p>
+                        )}
+                        {editAutoParkIdle && (
+                          <div className="space-y-2" data-testid="group-vault-park-mode">
+                            <p className="text-xs font-medium text-foreground/90">When a trade opens</p>
+                            <div className="grid grid-cols-2 gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setEditVaultAllOut(true)}
+                                className={`rounded-md border px-3 py-2 text-left transition-colors ${editVaultAllOut ? 'border-primary bg-primary/10' : 'border-border/50 [@media(hover:hover)]:hover:border-border'}`}
+                                data-testid="button-vault-mode-all-out"
+                              >
+                                <span className="block text-xs font-medium">Full buffer</span>
+                                <span className="block text-[11px] text-muted-foreground mt-0.5">Safest — pulls all yield back</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEditVaultAllOut(false)}
+                                className={`rounded-md border px-3 py-2 text-left transition-colors ${!editVaultAllOut ? 'border-primary bg-primary/10' : 'border-border/50 [@media(hover:hover)]:hover:border-border'}`}
+                                data-testid="button-vault-mode-spare"
+                              >
+                                <span className="block text-xs font-medium">Keep spare earning</span>
+                                <span className="block text-[11px] text-muted-foreground mt-0.5">Pulls only what's needed</span>
+                              </button>
+                            </div>
+                            <p className="text-[11px] text-muted-foreground leading-relaxed" data-testid="text-vault-mode-explainer">
+                              {editVaultAllOut
+                                ? 'When a position opens, all parked USDC is pulled back so your full balance cushions the trade against liquidation.'
+                                : 'When a position opens, only the margin the trade needs is pulled back — the rest keeps earning, leaving a thinner safety cushion.'}
+                            </p>
+                          </div>
                         )}
                       </>
                     ) : (

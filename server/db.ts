@@ -242,6 +242,9 @@ export async function ensureSchema() {
       // idempotent. NULL = legacy inference. When set on a Flash bot the auto-repark
       // executor treats it as authoritative and migrates parked funds into it.
       `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS park_destination_asset text`,
+      // On-open unpark mode (Flash vaults). Defaults TRUE = all-out (safest): existing
+      // auto-park bots become full-buffer-on-open automatically. Additive + idempotent.
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS vault_all_out boolean NOT NULL DEFAULT true`,
 
       // --- Phase 4b (Flash agent-HD wallets): recoverable per-bot wallet indices. ---
       // Additive + idempotent. The allocator lives on `wallets` (burn-on-allocate,

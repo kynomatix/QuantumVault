@@ -214,6 +214,13 @@ export const tradingBots = pgTable("trading_bots", {
   // parked funds held in a different asset into it. Flash-only (per-bot isolated
   // wallet); Pacifica picker stays a local manual selector.
   parkDestinationAsset: text("park_destination_asset"),
+  // On-open unpark MODE (Flash per-bot vaults). TRUE (default = safest): when a
+  // position opens, ALL parked funds are pulled back so the full equity buffer backs
+  // the trade (parking can never strip the cushion that keeps it off liquidation).
+  // FALSE ("spare only"): pull back just the margin the trade needs; the rest keeps
+  // earning, leaving a thinner buffer. Flat-parking is identical in both modes — this
+  // only governs the on-open unpark AMOUNT. See computeTradeSizingAndTopUp.
+  vaultAllOut: boolean("vault_all_out").default(true).notNull(),
   
   protocolSubaccountId: text("protocol_subaccount_id"),
   // Group D item 18 (April 17, 2026): which protocol adapter created/owns this bot.
