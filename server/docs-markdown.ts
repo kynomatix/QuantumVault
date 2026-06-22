@@ -233,7 +233,7 @@ When a trade signal arrives, if your bot's equity is below your investment amoun
 
 1. Spare USDC sits in a yield Vault, earning.
 2. A trade signal arrives.
-3. The Vault unparks just enough to fund the trade.
+3. The Vault unparks to back the trade — by default, everything, for the full safety buffer.
 4. The position opens and runs.
 5. The position fully closes (take-profit, stop-loss, or a close signal).
 6. About a minute later, the leftover USDC is parked again — back to earning.
@@ -243,6 +243,10 @@ If a new trade opens during that short wait (a quick flip or re-entry), the repa
 #### Choose your yield token — and switch any time
 
 Each Flash bot remembers which yield Vault it parks into. Pick the token once in the bot's settings and it sticks — every auto-park and manual park uses it. Change it whenever you like and hit **Save**: if money is already parked in the old token, QuantumVault **moves it into the new one for you** — one swap, no manual unpark-then-repark. If the bot is mid-trade when you switch, the move happens automatically the next time the position fully closes.
+
+#### Full buffer, or keep spare earning
+
+You decide how much comes back when a position opens. **Full buffer** (the default, and the safest) pulls **all** your parked USDC back, so your entire cash cushion is backing the trade — parking can never thin the buffer that keeps a position away from its liquidation price. **Keep spare earning** pulls back only enough to fund the trade and leaves the rest earning yield — a slimmer cushion, your call. In **Full buffer** mode, if your parked funds can't be pulled back when a trade is about to open, the bot **skips that signal and tries again** rather than opening with a reduced buffer. Keep spare earning trades with whatever margin is already free.
 
 > ℹ️ Available on Flash bots, where each bot has its own isolated wallet. See **Vaults → Safety & Funding** for the money-safety details.
 
@@ -806,7 +810,7 @@ Vaults put your idle USDC to work. Instead of letting spare cash sit unused betw
 - **Custody, not a casino** — Your funds stay in your own agent wallet the whole time. QuantumVault only signs the move into and out of the yield token; it never takes custody of your money.
 - **One tap in, one tap out** — There are no sliders or amounts to set. "Park all spare USDC" puts your full idle balance to work; "Unpark all to USDC" pulls the whole position back. The platform reads your real on-chain balance and moves all of it.
 - **Always counted** — Parked funds still count as part of your balance and your profit/loss, so parking money never looks like a loss. The live value of your position is always included in your totals.
-- **Funds your trades automatically** — When you open a trade and your spendable USDC isn't enough, your Vault automatically pulls back just enough to cover it and leaves the rest earning — whether the spare cash is parked at your account level or set aside for an individual bot. You never have to unpark by hand before trading.
+- **Funds your trades automatically** — When you open a trade and your spendable USDC isn't enough, your Vault automatically pulls it back to fund the position — a Flash bot restores its full safety buffer by default, while account-level parking pulls back just what's needed. You never have to unpark by hand before trading.
 
 ### Where to Find It
 
@@ -864,9 +868,9 @@ Your parked position is always included in your total balance and your profit/lo
 
 ### Parked Funds Back Your Trades
 
-When you place a trade — by hand or from a TradingView/webhook signal — and your spendable USDC isn't enough to cover it, QuantumVault automatically unparks just enough to fund the trade, plus a small buffer for fees and price movement. This works the same whether the spare cash is parked at your account level or set aside for an individual bot, so a parked bot is never falsely paused as "underfunded." The rest stays parked and keeps earning. You don't have to remember to unpark first; it happens as part of placing the trade.
+When you place a trade — by hand or from a TradingView/webhook signal — and your spendable USDC isn't enough to cover it, QuantumVault automatically unparks your spare cash to fund it. A Flash bot pulls back its **full buffer** by default — every parked dollar, so your whole cushion backs the position (you can switch it to just-enough in the bot's settings). Account-level parking pulls back just what the trade needs, plus a small buffer for fees and price movement. Either way, a parked bot is never falsely paused as "underfunded," the rest keeps earning, and you don't have to remember to unpark first.
 
-> **Note:** This auto-funding is hands-off by design — you keep your spare cash earning, and the platform pulls back only what a trade actually needs.
+> **Note:** This auto-funding is hands-off by design. A Flash bot restores its full buffer by default; account-level parking pulls back only what the trade needs. Either way, you don't lift a finger.
 
 ### Reparked After Each Trade (Auto-Park Idle Funds)
 
@@ -876,7 +880,7 @@ Put together with the auto-funding above, a Flash bot runs a fully automatic loo
 
 1. Spare USDC sits in a yield Vault, earning.
 2. A trade signal arrives.
-3. The Vault unparks just enough to fund the trade.
+3. The Vault unparks to back the trade — by default, everything, for the full safety buffer.
 4. The position opens and runs.
 5. The position fully closes (take-profit, stop-loss, or a close signal).
 6. About a minute later, the leftover USDC is parked again — back to earning.

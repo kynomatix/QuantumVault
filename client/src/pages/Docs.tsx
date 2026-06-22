@@ -652,7 +652,7 @@ function CreatingBotsSection() {
               </div>
               <div className="flex items-center gap-4">
                 <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium text-white/60">3</div>
-                <span className="text-white/70">The Vault <strong className="text-white">unparks just enough</strong> to fund the trade</span>
+                <span className="text-white/70">The Vault <strong className="text-white">unparks to back the trade</strong> — by default, <strong className="text-emerald-300">everything</strong>, for the full safety buffer</span>
               </div>
               <div className="flex items-center gap-4">
                 <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium text-white/60">4</div>
@@ -688,6 +688,27 @@ function CreatingBotsSection() {
               token, QuantumVault <strong className="text-emerald-300">moves it into the new one for you</strong> — 
               one swap, no manual unpark-then-repark. If the bot is mid-trade when you switch, the move happens 
               automatically the next time the position fully closes.
+            </p>
+          </div>
+
+          <div className="mt-5 p-4 rounded-lg bg-emerald-500/[0.07] border border-emerald-500/20">
+            <h4 className="font-medium text-white mb-1.5 text-sm flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-emerald-300" />
+              Full buffer, or keep spare earning
+            </h4>
+            <p className="text-white/60 text-sm leading-relaxed">
+              You decide how much comes back when a position opens. <strong className="text-emerald-300">Full 
+              buffer</strong> (the default, and the safest) pulls <strong className="text-white">all</strong> your 
+              parked USDC back, so your entire cash cushion is backing the trade — parking can never thin the buffer 
+              that keeps a position away from its liquidation price. <strong className="text-white/80">Keep spare 
+              earning</strong> pulls back only enough to fund the trade and leaves the rest earning yield — a slimmer 
+              cushion, your call.
+            </p>
+            <p className="text-white/60 text-sm leading-relaxed mt-2">
+              In <strong className="text-emerald-300">Full buffer</strong> mode, if your parked funds can't be pulled 
+              back when a trade is about to open, the bot <strong className="text-white">skips that signal and tries 
+              again</strong> rather than opening with a reduced buffer. Keep spare earning trades with whatever margin 
+              is already free.
             </p>
           </div>
 
@@ -1965,9 +1986,9 @@ function VaultsOverviewSection() {
             <h4 className="font-medium text-white">Funds Your Trades Automatically</h4>
           </div>
           <p className="text-white/60 text-sm">
-            When you open a trade and your spendable USDC isn't enough, your Vault automatically pulls back 
-            just enough to cover it — and leaves the rest earning — whether the spare cash is parked at your account 
-            level or set aside for an individual bot. You never have to unpark by hand before trading.
+            When you open a trade and your spendable USDC isn't enough, your Vault automatically pulls it back to 
+            fund the position — a Flash bot restores its full safety buffer by default, while account-level parking 
+            pulls back just what's needed. You never have to unpark by hand before trading.
           </p>
         </div>
       </div>
@@ -2155,15 +2176,16 @@ function VaultsSafetySection() {
       <SubHeading>Parked Funds Back Your Trades</SubHeading>
       <Paragraph>
         When you place a trade — by hand or from a TradingView/webhook signal — and your spendable USDC isn't enough 
-        to cover it, QuantumVault automatically unparks just enough to fund the trade, plus a small buffer for fees 
-        and price movement. This works the same whether the spare cash is parked at your account level or set aside 
-        for an individual bot, so a parked bot is never falsely paused as "underfunded." The rest stays parked and 
-        keeps earning. You don't have to remember to unpark first; it happens as part of placing the trade.
+        to cover it, QuantumVault automatically unparks your spare cash to fund it. A Flash bot pulls back its 
+        <strong className="text-white/90"> full buffer</strong> by default — every parked dollar, so your whole cushion 
+        backs the position (you can switch it to just-enough in the bot's settings). Account-level parking pulls back 
+        just what the trade needs, plus a small buffer for fees and price movement. Either way, a parked bot is never 
+        falsely paused as "underfunded," the rest keeps earning, and you don't have to remember to unpark first.
       </Paragraph>
 
       <Alert type="info">
-        This auto-funding is hands-off by design — you keep your spare cash earning, and the platform pulls back only 
-        what a trade actually needs.
+        This auto-funding is hands-off by design. A Flash bot restores its full buffer by default; account-level 
+        parking pulls back only what the trade needs. Either way, you don't lift a finger.
       </Alert>
 
       <SubHeading>Reparked After Each Trade (Auto-Park Idle Funds)</SubHeading>
@@ -2181,7 +2203,7 @@ function VaultsSafetySection() {
       <StepList steps={[
         'Spare USDC sits in a yield Vault, earning.',
         'A trade signal arrives.',
-        'The Vault unparks just enough to fund the trade.',
+        'The Vault unparks to back the trade — by default, everything, for the full safety buffer.',
         'The position opens and runs.',
         'The position fully closes (take-profit, stop-loss, or a close signal).',
         'About a minute later, the leftover USDC is parked again — back to earning.',
