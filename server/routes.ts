@@ -8356,6 +8356,61 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     return await decryptAgentKeyStrict(walletAddress, umk, wallet, scope.agentPublicKey!);
   }
 
+  // Money-safety guard: refuse to park while a position that draws on this scope's
+  // collateral is open. Idle USDC in a trading account IS the equity buffer that
+  // keeps an open position away from its liquidation price — parking it can drop
+  // the health factor to 0 (real liquidations have happened this way). The Vault is
+  // all-in / all-out: you only park while FLAT; auto-park already re-checks flat,
+  // so this guard covers the manual park path.
+  //
+  // FAIL CLOSED: on-chain reads go straight to the adapter (NOT the fail-open
+  // getPerpPositions helper) so a read error BLOCKS the park rather than letting it
+  // slip through. Mirrors assertNoOpenPositionBeforeProtocolSwitch.
+  //   - scope='bot' (Flash isolated wallet): check only THAT bot's position.
+  //   - scope='account' (Pacifica/Drift): the account vault is SHARED reserve/top-up
+  //     capital, so ANY open position on ANY subaccount-model bot of this wallet
+  //     needs the buffer — enumerate them all. Flash bots are excluded (isolated).
+  async function assertVaultScopeFlatForParking(
+    walletAddress: string,
+    wallet: NonNullable<Awaited<ReturnType<typeof storage.getWallet>>>,
+    scope: ResolvedVaultScope,
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const DUST = 0.0001;
+    const firstOpen = (positions: Awaited<ReturnType<ProtocolAdapter['getPositions']>>) =>
+      positions.find((p) => Math.abs(p.baseSize || 0) > DUST);
+    try {
+      if (scope.scope === 'bot' && scope.bot) {
+        const bot = scope.bot;
+        if (!bot.protocolSubaccountId) return { ok: true }; // wallet not set up → nothing parked
+        const open = firstOpen(await getAdapterForBot(bot).getPositions(bot.protocolSubaccountId));
+        if (open) return { ok: false, reason: `Your ${normalizeMarket(open.internalSymbol)} bot has an open position.` };
+        return { ok: true };
+      }
+
+      // Account scope: enumerate every bot that shares the account margin.
+      const bots = await storage.getTradingBots(walletAddress);
+      for (const bot of bots) {
+        const adapter = getAdapterForBot(bot);
+        if (adapter.subaccountCaps?.accountModel === 'independent_trader') continue; // Flash = isolated, excluded
+        let account: string | null;
+        let subIdStr: string | undefined;
+        if (bot.protocolSubaccountId) {
+          account = bot.protocolSubaccountId; // external-key (Pacifica) — read that account
+          subIdStr = undefined;
+        } else {
+          account = wallet.agentPublicKey ?? null; // legacy Drift — agent main + subaccount
+          subIdStr = _subIdStr(bot.driftSubaccountId ?? 0);
+        }
+        if (!account) continue;
+        const open = firstOpen(await adapter.getPositions(account, subIdStr));
+        if (open) return { ok: false, reason: `Your ${normalizeMarket(open.internalSymbol)} bot has an open position.` };
+      }
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, reason: `couldn't verify your positions are flat (${err?.message || String(err)})` };
+    }
+  }
+
   // List enabled yield assets + the scope's spare (idle) USDC. Optional ?botId=.
   app.get("/api/vault/assets", requireWallet, async (req, res) => {
     try {
@@ -8588,6 +8643,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!resolved.ok) return res.status(resolved.status).json({ error: resolved.error });
       const { scope } = resolved;
       if (!scope.agentPublicKey) return res.status(400).json({ error: "Agent wallet not initialized" });
+
+      // Money-safety: never park while a position is open — that idle USDC is the
+      // liquidation buffer. Fail closed (a read error blocks the park).
+      const flatCheck = await assertVaultScopeFlatForParking(req.walletAddress!, wallet, scope);
+      if (!flatCheck.ok) {
+        return res.status(409).json({
+          error: `Can't move funds to Earn while a position is open — these funds are your liquidation buffer (${flatCheck.reason}). They'll be available to park once you're flat.`,
+        });
+      }
 
       const agentKeyResult = await decryptVaultScopeKey(scope, req.walletAddress!, wallet, session.umk);
       if (!agentKeyResult) {
