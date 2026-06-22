@@ -2729,7 +2729,7 @@ export function BotManagementDrawer({
                       <>
                         <div className="flex items-center justify-between gap-3">
                           <div className="space-y-0.5">
-                            <label className="text-sm font-medium">Auto-park idle funds</label>
+                            <label className="text-sm font-medium">Auto-Park Idle Funds</label>
                             <p className="text-xs text-muted-foreground">
                               Automatically earn yield on this bot's spare USDC after each position fully closes — stays on until you turn it off.
                             </p>
