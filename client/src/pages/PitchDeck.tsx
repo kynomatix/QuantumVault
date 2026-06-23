@@ -753,7 +753,8 @@ function CompetitiveSlide() {
     ["Non-Custodial", true, false, false],
     ["DeFi Perpetuals", true, false, false],
     ["Open Marketplace (Anyone Can Post)", true, false, false],
-    ["AI Strategy Creator", true, false, false],
+    ["AI Strategy Creator (Agentic Copilot)", true, false, false],
+    ["Idle Funds Yield (Vaults)", true, false, false],
     ["Signal Marketplace", true, true, false],
     ["Profit Sharing", true, true, false],
     ["TradingView Webhooks", true, true, true],
@@ -799,10 +800,10 @@ function CompetitiveSlide() {
       
       <motion.div variants={fadeIn} className="grid grid-cols-2 md:grid-cols-4 gap-3 max-w-4xl w-full">
         {[
-          { icon: <Rocket className="w-5 h-5" />, title: "First Mover", desc: "Early in Pacifica ecosystem" },
+          { icon: <Rocket className="w-5 h-5" />, title: "PerpDEX Pioneer", desc: "First yield-integrated perp bot platform on-chain" },
           { icon: <Shield className="w-5 h-5" />, title: "Security First", desc: "Non-custodial by design" },
           { icon: <Store className="w-5 h-5" />, title: "Network Effects", desc: "Marketplace flywheel" },
-          { icon: <Layers className="w-5 h-5" />, title: "Full Stack", desc: "End-to-end solution" }
+          { icon: <BrainCircuit className="w-5 h-5" />, title: "Yield + AI Edge", desc: "Vaults earn idle USDC; AI agent creates & optimizes strategies" }
         ].map((item, i) => (
           <div key={i} className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.06] text-center">
             <div className="text-primary mb-2 flex justify-center">{item.icon}</div>
