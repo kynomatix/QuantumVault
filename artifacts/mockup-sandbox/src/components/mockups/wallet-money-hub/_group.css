@@ -10,6 +10,11 @@
   --elevate-1: rgba(255, 255, 255, 0.04);
   --elevate-2: rgba(255, 255, 255, 0.08);
 
+  /* Match the main app's typography exactly (client/src/index.css) so page
+     titles read as the same product. App uses text-2xl font-display font-bold. */
+  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-display: 'Plus Jakarta Sans', system-ui, sans-serif;
+
   --background: 234 28% 5%;
   --foreground: 235 20% 98%;
   --border: 235 28% 16%;
@@ -46,4 +51,13 @@
   --gradient-dark: linear-gradient(180deg, hsl(234 28% 6%) 0%, hsl(234 28% 3%) 100%);
   --gradient-card: linear-gradient(135deg, rgba(99, 102, 241, 0.08) 0%, rgba(59, 130, 246, 0.04) 100%);
   --gradient-glow: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(99, 102, 241, 0.3) 0%, transparent 70%);
+}
+
+/* App-standard typography utilities (mirror client/src/index.css) so page
+   titles render in the exact same family/weight as the real product. */
+.font-display {
+  font-family: var(--font-display);
+}
+.font-sans {
+  font-family: var(--font-sans);
 }
