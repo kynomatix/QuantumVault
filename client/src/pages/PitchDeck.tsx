@@ -818,11 +818,11 @@ function CompetitiveSlide() {
 
 function QuantumLabSlide() {
   const pipelineSteps = [
-    { icon: <ArrowRight className="w-5 h-5" />, label: "Import Strategy", desc: "Pine Script parsing" },
-    { icon: <SlidersHorizontal className="w-5 h-5" />, label: "Extract Parameters", desc: "Auto-detect ranges" },
-    { icon: <BrainCircuit className="w-5 h-5" />, label: "Optimize", desc: "1000s of combos" },
-    { icon: <Microscope className="w-5 h-5" />, label: "Backtest", desc: "Historical data" },
-    { icon: <ShieldCheck className="w-5 h-5" />, label: "Deploy", desc: "With confidence" },
+    { icon: <Sparkles className="w-5 h-5" />, label: "Describe It", desc: "Plain English prompt" },
+    { icon: <BrainCircuit className="w-5 h-5" />, label: "AI Writes It", desc: "Pine Script generated" },
+    { icon: <SlidersHorizontal className="w-5 h-5" />, label: "Optimize", desc: "1,000s of combos" },
+    { icon: <Microscope className="w-5 h-5" />, label: "Backtest", desc: "Historical validation" },
+    { icon: <Zap className="w-5 h-5" />, label: "Deploy Bot", desc: "Live in minutes" },
   ];
 
   const stats = [
@@ -851,13 +851,13 @@ function QuantumLabSlide() {
       </motion.div>
 
       <motion.p variants={fadeIn} className="text-lg md:text-xl text-muted-foreground mb-3 text-center max-w-2xl">
-        Built-in backtesting & strategy optimization engine
+        AI Quant Agent that creates, optimizes, and deploys strategies — describe what you want in plain English
       </motion.p>
 
       <motion.div variants={fadeIn} className="mb-10">
         <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-gradient-to-r from-fuchsia-500/20 to-violet-500/20 border border-fuchsia-500/30 text-fuchsia-300 text-sm font-semibold">
-          <TestTubes className="w-4 h-4" />
-          No Competitor Offers This Natively
+          <BrainCircuit className="w-4 h-4" />
+          From Prompt to Live Bot — No Code Required
         </span>
       </motion.div>
 
@@ -921,15 +921,15 @@ function QuantumLabSlide() {
               <ul className="space-y-1.5 text-sm text-muted-foreground">
                 <li className="flex items-start gap-2">
                   <CheckCircle2 className="w-4 h-4 text-fuchsia-400 mt-0.5 flex-shrink-0" />
-                  <span>Users import Pine Script strategies and instantly get optimized parameters — no coding required</span>
+                  <span>Describe a strategy in plain English — the AI Quant Agent writes Pine Script, runs the optimizer, and surfaces the best result</span>
                 </li>
                 <li className="flex items-start gap-2">
                   <CheckCircle2 className="w-4 h-4 text-fuchsia-400 mt-0.5 flex-shrink-0" />
-                  <span>Risk analysis with safe leverage recommendations prevents catastrophic losses</span>
+                  <span>Agentic hands-off mode: AI manages the full create → optimize → backtest → refine → deploy loop autonomously</span>
                 </li>
                 <li className="flex items-start gap-2">
                   <CheckCircle2 className="w-4 h-4 text-fuchsia-400 mt-0.5 flex-shrink-0" />
-                  <span>Dramatically increases user stickiness — once calibrated, users won't leave</span>
+                  <span>Dramatically increases stickiness — once a user has an AI-calibrated strategy, they won't leave</span>
                 </li>
               </ul>
             </div>
