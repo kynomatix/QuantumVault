@@ -9,9 +9,7 @@ import {
   ExternalLink,
   Fuel,
   ArrowRight,
-  Bitcoin,
   Coins,
-  Layers,
   ArrowDownToLine,
   ArrowUpFromLine,
   Landmark,
@@ -19,6 +17,7 @@ import {
   ArrowLeftRight,
   Coins as CoinsIcon,
   TrendingUp,
+  History,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -32,53 +31,39 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 
-type Asset = {
-  name: string;
-  ticker: string;
-  amount: string;
-  value: string;
-  weight: number;
-  bar: string;
-  chip: string;
-  label?: string;
-  icon?: typeof Bitcoin;
-};
+type Asset = { ticker: string; value: string; weight: number; bar: string };
 
+// Collateral basket — every asset backing the Trading Agent (Variant B treatment).
 const ASSETS: Asset[] = [
-  { name: "USD Coin", ticker: "USDC", amount: "4,820.16", value: "$4,820", weight: 56, bar: "bg-blue-400", chip: "bg-blue-500/15 text-blue-300", label: "US" },
-  { name: "Solana", ticker: "SOL", amount: "14.2", value: "$2,180", weight: 25, bar: "bg-violet-400", chip: "bg-violet-500/15 text-violet-300", label: "S" },
-  { name: "Wrapped BTC", ticker: "wBTC", amount: "0.018", value: "$1,150", weight: 13, bar: "bg-fuchsia-400", chip: "bg-fuchsia-500/15 text-fuchsia-300", icon: Bitcoin },
-  { name: "Wrapped ETH", ticker: "wETH", amount: "0.14", value: "$420", weight: 5, bar: "bg-indigo-400", chip: "bg-indigo-500/15 text-indigo-300", icon: Coins },
-  { name: "Sanctum Infinity", ticker: "INF", amount: "1.9", value: "$70", weight: 1, bar: "bg-teal-400", chip: "bg-teal-500/15 text-teal-300", icon: Layers },
+  { ticker: "USDC", value: "$4,820", weight: 56, bar: "bg-blue-400" },
+  { ticker: "SOL", value: "$2,180", weight: 25, bar: "bg-violet-400" },
+  { ticker: "wBTC", value: "$1,150", weight: 13, bar: "bg-fuchsia-400" },
+  { ticker: "wETH", value: "$420", weight: 5, bar: "bg-indigo-400" },
+  { ticker: "INF", value: "$70", weight: 1, bar: "bg-teal-400" },
 ];
 
-type PickToken = { ticker: string; balance: string; est: string; swap: boolean; dot: string };
-
-// Tokens a user can pay with — anything non-USDC is auto-routed through Jupiter.
-// `balance` here is the amount held in YOUR WALLET (Phantom).
-const WALLET_TOKENS: PickToken[] = [
-  { ticker: "USDC", balance: "6,140.55", est: "$6,140", swap: false, dot: "bg-blue-400" },
-  { ticker: "SOL", balance: "2.10", est: "≈ $320", swap: true, dot: "bg-violet-400" },
-  { ticker: "wBTC", balance: "0.018", est: "≈ $1,150", swap: true, dot: "bg-fuchsia-400" },
-  { ticker: "wETH", balance: "0.14", est: "≈ $420", swap: true, dot: "bg-indigo-400" },
-];
-
-// Same tokens, but the amounts the TRADING AGENT holds (mirrors the collateral basket).
-const AGENT_BALANCES: Record<string, string> = {
-  USDC: "4,820.16",
-  SOL: "14.2",
-  wBTC: "0.018",
-  wETH: "0.14",
-};
-
-// Swappable tokens shown inside the "Any asset" deposit popup (USDC excluded —
-// it has its own no-swap tab). Mirrors the live DepositPanel token list.
+// Swappable tokens shown inside the deposit/repay popups (USDC excluded — it has
+// its own no-swap tab). Mirrors the live DepositPanel token list.
 type SwapToken = { symbol: string; name: string; amount: string; usd: string; est: string; dot: string };
 const SWAP_TOKENS: SwapToken[] = [
   { symbol: "SOL", name: "Solana", amount: "2.10", usd: "$320.18", est: "318.40", dot: "bg-violet-400" },
   { symbol: "wBTC", name: "Wrapped BTC", amount: "0.018", usd: "$1,150.40", est: "1,146.90", dot: "bg-fuchsia-400" },
   { symbol: "wETH", name: "Wrapped Ether", amount: "0.14", usd: "$420.66", est: "419.20", dot: "bg-indigo-400" },
   { symbol: "BONK", name: "Bonk", amount: "1,920,500", usd: "$48.90", est: "48.55", dot: "bg-yellow-400" },
+];
+
+// Transaction history ("money flows") — mirrors the live EquityHistory list.
+// Colour coding: money-in = emerald, money-out = rose, gas = orange (orange stays
+// reserved for gas only).
+type MoneyFlow = { dir: "in" | "out" | "gas"; label: string; date: string; amount: string };
+const MONEY_FLOWS: MoneyFlow[] = [
+  { dir: "in", label: "Deposit to Trading Agent", date: "Jun 22, 2026 · 2:14 PM", amount: "+2,000.00 USDC" },
+  { dir: "in", label: "Borrow USDC", date: "Jun 21, 2026 · 9:03 AM", amount: "+1,200.00 USDC" },
+  { dir: "out", label: "Repay debt", date: "Jun 20, 2026 · 6:48 PM", amount: "−500.00 USDC" },
+  { dir: "in", label: "Deposit SOL → USDC (swap)", date: "Jun 19, 2026 · 11:20 AM", amount: "+318.40 USDC" },
+  { dir: "out", label: "Withdraw to Your Wallet", date: "Jun 18, 2026 · 4:32 PM", amount: "−800.00 USDC" },
+  { dir: "gas", label: "Gas Top-Up", date: "Jun 17, 2026 · 8:10 AM", amount: "+0.20 SOL" },
+  { dir: "in", label: "Deposit to Trading Agent", date: "Jun 15, 2026 · 1:05 PM", amount: "+5,000.00 USDC" },
 ];
 
 function AddressRow({ address, copied, onCopy, external }: { address: string; copied: boolean; onCopy: () => void; external?: boolean }) {
@@ -93,46 +78,6 @@ function AddressRow({ address, copied, onCopy, external }: { address: string; co
       <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground" onClick={onCopy}>
         {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
       </Button>
-    </div>
-  );
-}
-
-function Pill({ label, active, icon: Icon, onClick }: { label: string; active: boolean; icon: typeof Bot; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      aria-pressed={active}
-      className={`flex-1 px-3 py-2 rounded-lg flex items-center justify-center gap-1.5 text-xs font-medium border transition-colors ${
-        active ? "bg-primary/10 text-primary border-primary/30" : "bg-muted/40 text-muted-foreground border-transparent hover:text-foreground"
-      }`}
-    >
-      <Icon className="w-3.5 h-3.5" /> {label}
-    </button>
-  );
-}
-
-function TokenPicker({ tokens, selected, onSelect }: { tokens: PickToken[]; selected: string; onSelect: (t: string) => void }) {
-  return (
-    <div className="space-y-1.5">
-      <div className="text-xs text-muted-foreground">Pay with</div>
-      <div className="flex flex-wrap gap-2">
-        {tokens.map((t) => {
-          const active = t.ticker === selected;
-          return (
-            <button
-              key={t.ticker}
-              onClick={() => onSelect(t.ticker)}
-              aria-pressed={active}
-              className={`flex items-center gap-2 rounded-full pl-2 pr-3 py-1.5 border text-xs transition-colors ${
-                active ? "border-primary/40 bg-primary/10 text-foreground" : "border-border bg-background/40 text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <span className={`w-2.5 h-2.5 rounded-full ${t.dot}`} />
-              <span className="font-medium">{t.ticker}</span>
-            </button>
-          );
-        })}
-      </div>
     </div>
   );
 }
@@ -165,6 +110,15 @@ function SwapNote({ token }: { token: string }) {
   );
 }
 
+function GasFeeNote() {
+  return (
+    <div className="text-xs text-amber-500/80 bg-amber-500/10 rounded-lg p-2.5 flex items-start gap-2">
+      <Fuel className="w-4 h-4 shrink-0 mt-0.5" />
+      <span>You'll need a little SOL in your wallet for the network fee (~0.005 SOL).</span>
+    </div>
+  );
+}
+
 function FlowChip({ kind, label }: { kind: "wallet" | "agent" | "loan"; label: string }) {
   const Icon = kind === "wallet" ? Wallet : kind === "agent" ? Bot : Landmark;
   const cls = kind === "agent" || kind === "loan" ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground";
@@ -179,7 +133,8 @@ function Flow({ children }: { children: React.ReactNode }) {
   return <div className="flex items-center justify-center gap-3 text-xs">{children}</div>;
 }
 
-function DepositCard({ icon: Icon, title, desc, onClick }: { icon: typeof Wallet; title: string; desc: string; onClick: () => void }) {
+// A tappable card that opens a popup (mirrors the live deposit-card pattern).
+function ActionCard({ icon: Icon, title, desc, onClick }: { icon: typeof Wallet; title: string; desc: string; onClick: () => void }) {
   return (
     <button
       onClick={onClick}
@@ -196,24 +151,23 @@ function DepositCard({ icon: Icon, title, desc, onClick }: { icon: typeof Wallet
   );
 }
 
-function GasFeeNote() {
-  return (
-    <div className="text-xs text-amber-500/80 bg-amber-500/10 rounded-lg p-2.5 flex items-start gap-2">
-      <Fuel className="w-4 h-4 shrink-0 mt-0.5" />
-      <span>You'll need a little SOL in your wallet for the network fee (~0.005 SOL).</span>
-    </div>
-  );
-}
-
-// Popup that mirrors the live DepositPanel: a USDC tab (direct) and an
-// "Any asset" tab (pick a wallet token, auto-swapped to USDC via Jupiter).
-function DepositDialog({
+// One popup serving both Deposit and Repay: a direct-USDC tab and an "Any asset"
+// tab (pick a wallet token, auto-swapped to USDC via Jupiter). Mirrors the live
+// DepositPanel so deposit + repay stay visually identical.
+function FundingDialog({
   open,
   onOpenChange,
   tab,
   onTabChange,
   swapToken,
   onSwapToken,
+  title,
+  description,
+  summary,
+  usdcTabLabel,
+  usdcBalance,
+  usdcCta,
+  tokenCta,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -221,32 +175,36 @@ function DepositDialog({
   onTabChange: (v: "usdc" | "token") => void;
   swapToken: string;
   onSwapToken: (s: string) => void;
+  title: string;
+  description: string;
+  summary?: React.ReactNode;
+  usdcTabLabel: string;
+  usdcBalance: string;
+  usdcCta: string;
+  tokenCta: string;
 }) {
   const sel = SWAP_TOKENS.find((t) => t.symbol === swapToken)!;
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Deposit to Trading Agent</DialogTitle>
-          <DialogDescription>Add funds to your server-managed trading agent.</DialogDescription>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
+
+        {summary}
 
         <Tabs value={tab} onValueChange={(v) => onTabChange(v as "usdc" | "token")}>
           <TabsList className="grid grid-cols-2 w-full bg-muted/50">
-            <TabsTrigger value="usdc"><Wallet className="w-4 h-4 mr-2" />Deposit USDC</TabsTrigger>
+            <TabsTrigger value="usdc"><Wallet className="w-4 h-4 mr-2" />{usdcTabLabel}</TabsTrigger>
             <TabsTrigger value="token"><Coins className="w-4 h-4 mr-2" />Any asset</TabsTrigger>
           </TabsList>
 
           {/* USDC — direct, no swap */}
           <TabsContent value="usdc" className="mt-4 space-y-4">
-            <Flow>
-              <FlowChip kind="wallet" label="Your Wallet" />
-              <ArrowRight className="w-4 h-4 text-muted-foreground" />
-              <FlowChip kind="agent" label="Trading Agent" />
-            </Flow>
-            <AmountField token="USDC" balance="Available $6,140.55" />
+            <AmountField token="USDC" balance={usdcBalance} />
             <GasFeeNote />
-            <Button className="w-full h-11">Deposit USDC</Button>
+            <Button className="w-full h-11">{usdcCta}</Button>
           </TabsContent>
 
           {/* Any asset — pick a token, swap to USDC */}
@@ -296,12 +254,9 @@ function DepositDialog({
               </div>
             </div>
 
-            <p className="text-xs text-muted-foreground flex items-center gap-1.5">
-              <ArrowLeftRight className="w-3.5 h-3.5 text-accent" />
-              {sel.symbol} is auto-swapped to USDC via Jupiter — you only ever hold USDC collateral.
-            </p>
+            <SwapNote token={sel.symbol} />
             <GasFeeNote />
-            <Button className="w-full h-11">Deposit &amp; Convert to USDC</Button>
+            <Button className="w-full h-11">{tokenCta}</Button>
           </TabsContent>
         </Tabs>
       </DialogContent>
@@ -309,17 +264,58 @@ function DepositDialog({
   );
 }
 
+function MoneyFlows() {
+  return (
+    <Card className="border-border bg-card">
+      <CardContent className="p-6 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <History className="w-4 h-4 text-muted-foreground" />
+            <h2 className="font-semibold leading-tight">Transaction History</h2>
+          </div>
+          <Button variant="ghost" size="sm" className="text-muted-foreground">
+            <RefreshCw className="w-4 h-4" />
+          </Button>
+        </div>
+
+        <div className="space-y-0.5">
+          {MONEY_FLOWS.map((f, i) => {
+            const Icon = f.dir === "gas" ? Fuel : f.dir === "in" ? ArrowDownToLine : ArrowUpFromLine;
+            const tone = f.dir === "gas" ? "text-orange-400" : f.dir === "in" ? "text-emerald-400" : "text-rose-300";
+            const wrap = f.dir === "gas" ? "bg-orange-500/10" : f.dir === "in" ? "bg-emerald-500/10" : "bg-rose-500/10";
+            return (
+              <div key={i} className="flex items-center justify-between py-2.5 border-b border-border/40 last:border-0">
+                <div className="flex items-center gap-3">
+                  <span className={`w-8 h-8 rounded-lg flex items-center justify-center ${wrap}`}>
+                    <Icon className={`w-4 h-4 ${tone}`} />
+                  </span>
+                  <div>
+                    <p className="text-sm font-medium">{f.label}</p>
+                    <p className="text-xs text-muted-foreground">{f.date}</p>
+                  </div>
+                </div>
+                <span className={`font-mono text-sm tabular-nums ${tone}`}>{f.amount}</span>
+              </div>
+            );
+          })}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function ActionPanel() {
   const [tab, setTab] = useState("deposit");
-  const [repayToken, setRepayToken] = useState("USDC");
-  const [repaySource, setRepaySource] = useState<"agent" | "wallet">("agent");
 
-  // Deposit popup (mirrors the live two-card → dialog flow).
+  // Deposit popup (two cards → one shared dialog).
   const [depositOpen, setDepositOpen] = useState(false);
   const [depositTab, setDepositTab] = useState<"usdc" | "token">("usdc");
-  const [swapToken, setSwapToken] = useState("SOL");
+  const [depositSwap, setDepositSwap] = useState("SOL");
 
-  const rep = WALLET_TOKENS.find((t) => t.ticker === repayToken)!;
+  // Repay popup — same card → dialog pattern as deposit (no source selector).
+  const [repayOpen, setRepayOpen] = useState(false);
+  const [repayTab, setRepayTab] = useState<"usdc" | "token">("usdc");
+  const [repaySwap, setRepaySwap] = useState("SOL");
 
   return (
     <Card className="border-border bg-card">
@@ -333,7 +329,7 @@ function ActionPanel() {
             <TabsTrigger value="gas"><Fuel className="w-4 h-4 mr-1.5" />Gas</TabsTrigger>
           </TabsList>
 
-          {/* DEPOSIT — two cards that open the existing deposit popup */}
+          {/* DEPOSIT — two cards that open the shared popup */}
           <TabsContent value="deposit" className="mt-5 space-y-4">
             <Flow>
               <FlowChip kind="wallet" label="Your Wallet" />
@@ -341,26 +337,32 @@ function ActionPanel() {
               <FlowChip kind="agent" label="Trading Agent" />
             </Flow>
             <div className="grid sm:grid-cols-2 gap-3">
-              <DepositCard
+              <ActionCard
                 icon={Wallet}
                 title="Deposit USDC"
                 desc="Move USDC straight from your wallet into the trading agent."
                 onClick={() => { setDepositTab("usdc"); setDepositOpen(true); }}
               />
-              <DepositCard
+              <ActionCard
                 icon={Coins}
                 title="Deposit any asset"
                 desc="Deposit SOL, BONK, or any token — we auto-swap it to USDC."
                 onClick={() => { setDepositTab("token"); setDepositOpen(true); }}
               />
             </div>
-            <DepositDialog
+            <FundingDialog
               open={depositOpen}
               onOpenChange={setDepositOpen}
               tab={depositTab}
               onTabChange={setDepositTab}
-              swapToken={swapToken}
-              onSwapToken={setSwapToken}
+              swapToken={depositSwap}
+              onSwapToken={setDepositSwap}
+              title="Deposit to Trading Agent"
+              description="Add funds to your server-managed trading agent."
+              usdcTabLabel="Deposit USDC"
+              usdcBalance="Available $6,140.55"
+              usdcCta="Deposit USDC"
+              tokenCta="Deposit & Convert to USDC"
             />
           </TabsContent>
 
@@ -395,32 +397,46 @@ function ActionPanel() {
             <Button className="w-full h-11">Borrow USDC</Button>
           </TabsContent>
 
-          {/* REPAY — any token, from agent OR your wallet */}
+          {/* REPAY — same card → popup pattern as Deposit */}
           <TabsContent value="repay" className="mt-5 space-y-4">
             <div className="flex items-center justify-between rounded-xl border border-border bg-background/40 px-4 py-3">
               <span className="text-sm text-muted-foreground">Outstanding debt</span>
               <span className="text-lg font-semibold tabular-nums">$1,200</span>
             </div>
-            <div className="space-y-1.5">
-              <div className="text-xs text-muted-foreground">Pay from</div>
-              <div className="flex gap-2">
-                <Pill label="Trading Agent" icon={Bot} active={repaySource === "agent"} onClick={() => setRepaySource("agent")} />
-                <Pill label="Your Wallet" icon={Wallet} active={repaySource === "wallet"} onClick={() => setRepaySource("wallet")} />
-              </div>
+            <div className="grid sm:grid-cols-2 gap-3">
+              <ActionCard
+                icon={Wallet}
+                title="Repay with USDC"
+                desc="Pay your debt down directly with USDC."
+                onClick={() => { setRepayTab("usdc"); setRepayOpen(true); }}
+              />
+              <ActionCard
+                icon={Coins}
+                title="Repay with any asset"
+                desc="Pay with SOL, BONK, or any token — we auto-swap it to USDC."
+                onClick={() => { setRepayTab("token"); setRepayOpen(true); }}
+              />
             </div>
-            <TokenPicker tokens={WALLET_TOKENS} selected={repayToken} onSelect={setRepayToken} />
-            <AmountField
-              token={repayToken}
-              balance={
-                repaySource === "agent"
-                  ? `Agent ${AGENT_BALANCES[repayToken]} ${repayToken}`
-                  : `Wallet ${rep.balance} ${repayToken}`
+            <FundingDialog
+              open={repayOpen}
+              onOpenChange={setRepayOpen}
+              tab={repayTab}
+              onTabChange={setRepayTab}
+              swapToken={repaySwap}
+              onSwapToken={setRepaySwap}
+              title="Repay debt"
+              description="Pay down your borrowed USDC."
+              summary={
+                <div className="flex items-center justify-between rounded-lg border border-border bg-background/40 px-3 py-2.5 text-sm">
+                  <span className="text-muted-foreground">Outstanding debt</span>
+                  <span className="font-semibold tabular-nums">$1,200</span>
+                </div>
               }
+              usdcTabLabel="Repay USDC"
+              usdcBalance="Available $6,140.55"
+              usdcCta="Repay debt"
+              tokenCta="Repay & Convert to USDC"
             />
-            <SwapNote token={repayToken} />
-            <Button className="w-full h-11">
-              {repayToken === "USDC" ? "Repay debt" : `Repay with ${repayToken} (swap to USDC)`}
-            </Button>
           </TabsContent>
 
           {/* GAS */}
@@ -472,7 +488,7 @@ export function OverviewFlows() {
           </Button>
         </div>
 
-        {/* KPI strip — headline numbers, now incl. the debt picture */}
+        {/* KPI strip — headline numbers, incl. the debt picture */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <Card className="border-primary/20 bg-primary/5">
             <CardContent className="p-5">
@@ -598,6 +614,9 @@ export function OverviewFlows() {
 
         {/* Move funds — full transaction surface */}
         <ActionPanel />
+
+        {/* Money flows — transaction history at the bottom */}
+        <MoneyFlows />
       </div>
     </div>
   );
