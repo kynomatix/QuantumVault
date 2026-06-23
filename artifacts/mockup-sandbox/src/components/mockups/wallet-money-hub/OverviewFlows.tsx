@@ -24,6 +24,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
 
 type Asset = {
   name: string;
@@ -63,6 +70,16 @@ const AGENT_BALANCES: Record<string, string> = {
   wBTC: "0.018",
   wETH: "0.14",
 };
+
+// Swappable tokens shown inside the "Any asset" deposit popup (USDC excluded —
+// it has its own no-swap tab). Mirrors the live DepositPanel token list.
+type SwapToken = { symbol: string; name: string; amount: string; usd: string; est: string; dot: string };
+const SWAP_TOKENS: SwapToken[] = [
+  { symbol: "SOL", name: "Solana", amount: "2.10", usd: "$320.18", est: "318.40", dot: "bg-violet-400" },
+  { symbol: "wBTC", name: "Wrapped BTC", amount: "0.018", usd: "$1,150.40", est: "1,146.90", dot: "bg-fuchsia-400" },
+  { symbol: "wETH", name: "Wrapped Ether", amount: "0.14", usd: "$420.66", est: "419.20", dot: "bg-indigo-400" },
+  { symbol: "BONK", name: "Bonk", amount: "1,920,500", usd: "$48.90", est: "48.55", dot: "bg-yellow-400" },
+];
 
 function AddressRow({ address, copied, onCopy, external }: { address: string; copied: boolean; onCopy: () => void; external?: boolean }) {
   return (
@@ -162,13 +179,146 @@ function Flow({ children }: { children: React.ReactNode }) {
   return <div className="flex items-center justify-center gap-3 text-xs">{children}</div>;
 }
 
+function DepositCard({ icon: Icon, title, desc, onClick }: { icon: typeof Wallet; title: string; desc: string; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="group text-left p-4 rounded-xl border border-border bg-muted/30 hover:border-primary/40 hover:bg-primary/5 transition-colors"
+    >
+      <div className="flex items-center gap-2 mb-1.5">
+        <div className="p-1.5 rounded-lg bg-primary/10">
+          <Icon className="w-4 h-4 text-primary" />
+        </div>
+        <span className="font-medium">{title}</span>
+      </div>
+      <p className="text-xs text-muted-foreground">{desc}</p>
+    </button>
+  );
+}
+
+function GasFeeNote() {
+  return (
+    <div className="text-xs text-amber-500/80 bg-amber-500/10 rounded-lg p-2.5 flex items-start gap-2">
+      <Fuel className="w-4 h-4 shrink-0 mt-0.5" />
+      <span>You'll need a little SOL in your wallet for the network fee (~0.005 SOL).</span>
+    </div>
+  );
+}
+
+// Popup that mirrors the live DepositPanel: a USDC tab (direct) and an
+// "Any asset" tab (pick a wallet token, auto-swapped to USDC via Jupiter).
+function DepositDialog({
+  open,
+  onOpenChange,
+  tab,
+  onTabChange,
+  swapToken,
+  onSwapToken,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  tab: "usdc" | "token";
+  onTabChange: (v: "usdc" | "token") => void;
+  swapToken: string;
+  onSwapToken: (s: string) => void;
+}) {
+  const sel = SWAP_TOKENS.find((t) => t.symbol === swapToken)!;
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Deposit to Trading Agent</DialogTitle>
+          <DialogDescription>Add funds to your server-managed trading agent.</DialogDescription>
+        </DialogHeader>
+
+        <Tabs value={tab} onValueChange={(v) => onTabChange(v as "usdc" | "token")}>
+          <TabsList className="grid grid-cols-2 w-full bg-muted/50">
+            <TabsTrigger value="usdc"><Wallet className="w-4 h-4 mr-2" />Deposit USDC</TabsTrigger>
+            <TabsTrigger value="token"><Coins className="w-4 h-4 mr-2" />Any asset</TabsTrigger>
+          </TabsList>
+
+          {/* USDC — direct, no swap */}
+          <TabsContent value="usdc" className="mt-4 space-y-4">
+            <Flow>
+              <FlowChip kind="wallet" label="Your Wallet" />
+              <ArrowRight className="w-4 h-4 text-muted-foreground" />
+              <FlowChip kind="agent" label="Trading Agent" />
+            </Flow>
+            <AmountField token="USDC" balance="Available $6,140.55" />
+            <GasFeeNote />
+            <Button className="w-full h-11">Deposit USDC</Button>
+          </TabsContent>
+
+          {/* Any asset — pick a token, swap to USDC */}
+          <TabsContent value="token" className="mt-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">Select a token</span>
+              <button className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1">
+                <RefreshCw className="w-3 h-3" /> Refresh
+              </button>
+            </div>
+
+            <div className="max-h-44 overflow-y-auto rounded-lg border border-border divide-y divide-border/60">
+              {SWAP_TOKENS.map((t) => (
+                <button
+                  key={t.symbol}
+                  onClick={() => onSwapToken(t.symbol)}
+                  aria-pressed={t.symbol === swapToken}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/50 ${
+                    t.symbol === swapToken ? "bg-primary/10" : ""
+                  }`}
+                >
+                  <span className={`w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-semibold text-background ${t.dot}`}>
+                    {t.symbol.slice(0, 2)}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">{t.symbol}</p>
+                    <p className="text-xs text-muted-foreground truncate">{t.name}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-sm font-mono">{t.amount}</p>
+                    <p className="text-xs text-muted-foreground">{t.usd}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+
+            <AmountField token={sel.symbol} balance={`Available ${sel.amount} ${sel.symbol}`} />
+
+            <div className="rounded-lg bg-muted/40 p-3 text-sm space-y-1.5">
+              <div className="flex items-center justify-between text-muted-foreground">
+                <span>You receive (est.)</span>
+                <span className="font-mono font-semibold text-foreground">≈ ${sel.est} USDC</span>
+              </div>
+              <div className="flex items-center justify-between text-xs text-muted-foreground">
+                <span>Price impact</span>
+                <span>0.04%</span>
+              </div>
+            </div>
+
+            <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+              <ArrowLeftRight className="w-3.5 h-3.5 text-accent" />
+              {sel.symbol} is auto-swapped to USDC via Jupiter — you only ever hold USDC collateral.
+            </p>
+            <GasFeeNote />
+            <Button className="w-full h-11">Deposit &amp; Convert to USDC</Button>
+          </TabsContent>
+        </Tabs>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function ActionPanel() {
   const [tab, setTab] = useState("deposit");
-  const [depositToken, setDepositToken] = useState("SOL");
   const [repayToken, setRepayToken] = useState("USDC");
   const [repaySource, setRepaySource] = useState<"agent" | "wallet">("agent");
 
-  const dep = WALLET_TOKENS.find((t) => t.ticker === depositToken)!;
+  // Deposit popup (mirrors the live two-card → dialog flow).
+  const [depositOpen, setDepositOpen] = useState(false);
+  const [depositTab, setDepositTab] = useState<"usdc" | "token">("usdc");
+  const [swapToken, setSwapToken] = useState("SOL");
+
   const rep = WALLET_TOKENS.find((t) => t.ticker === repayToken)!;
 
   return (
@@ -183,19 +333,35 @@ function ActionPanel() {
             <TabsTrigger value="gas"><Fuel className="w-4 h-4 mr-1.5" />Gas</TabsTrigger>
           </TabsList>
 
-          {/* DEPOSIT — any token, swapped to USDC via Jupiter */}
+          {/* DEPOSIT — two cards that open the existing deposit popup */}
           <TabsContent value="deposit" className="mt-5 space-y-4">
             <Flow>
               <FlowChip kind="wallet" label="Your Wallet" />
               <ArrowRight className="w-4 h-4 text-muted-foreground" />
               <FlowChip kind="agent" label="Trading Agent" />
             </Flow>
-            <TokenPicker tokens={WALLET_TOKENS} selected={depositToken} onSelect={setDepositToken} />
-            <AmountField token={depositToken} balance={`Wallet ${dep.balance} ${depositToken}`} />
-            <SwapNote token={depositToken} />
-            <Button className="w-full h-11">
-              {depositToken === "USDC" ? "Deposit USDC to Trading Agent" : `Deposit ${depositToken} & swap to USDC`}
-            </Button>
+            <div className="grid sm:grid-cols-2 gap-3">
+              <DepositCard
+                icon={Wallet}
+                title="Deposit USDC"
+                desc="Move USDC straight from your wallet into the trading agent."
+                onClick={() => { setDepositTab("usdc"); setDepositOpen(true); }}
+              />
+              <DepositCard
+                icon={Coins}
+                title="Deposit any asset"
+                desc="Deposit SOL, BONK, or any token — we auto-swap it to USDC."
+                onClick={() => { setDepositTab("token"); setDepositOpen(true); }}
+              />
+            </div>
+            <DepositDialog
+              open={depositOpen}
+              onOpenChange={setDepositOpen}
+              tab={depositTab}
+              onTabChange={setDepositTab}
+              swapToken={swapToken}
+              onSwapToken={setSwapToken}
+            />
           </TabsContent>
 
           {/* WITHDRAW */}
