@@ -1163,8 +1163,7 @@ function TeamSlide() {
             />
           </div>
           <h3 className="text-2xl font-bold mb-1">Kryptolytix</h3>
-          <p className="text-primary mb-1">Founder & Lead Developer</p>
-          <p className="text-violet-400 text-sm mb-4">Pacifica Builder</p>
+          <p className="text-primary mb-4">Founder & Lead Developer</p>
           <p className="text-sm text-muted-foreground mb-6 max-w-sm mx-auto">
             Full-stack developer with deep expertise in Solana, DeFi protocols, 
             and automated trading systems. Previously built trading infrastructure 
