@@ -361,11 +361,18 @@ function ProductFeaturesSlide() {
       border: "border-blue-500/30"
     },
     {
-      icon: <Layers className="w-6 h-6" />,
-      title: "Vaults (Coming)",
-      description: "Multi-asset collateral and intelligent borrowing for capital efficiency",
-      gradient: "from-indigo-500/20 to-violet-500/10",
-      border: "border-indigo-500/30"
+      icon: <PiggyBank className="w-6 h-6" />,
+      title: "Vaults",
+      description: "Park idle USDC into a yield stablecoin between trades — auto-unparks when a bot opens, auto-reparks when it closes. Hands-free.",
+      gradient: "from-emerald-500/20 to-teal-500/10",
+      border: "border-emerald-500/30"
+    },
+    {
+      icon: <BrainCircuit className="w-6 h-6" />,
+      title: "AI Strategy Creator",
+      description: "Generate, backtest, and deploy Pine Script strategies with AI — paste a prompt into QuantumLab, run the optimizer, deploy the best result as a live bot.",
+      gradient: "from-fuchsia-500/20 to-violet-500/10",
+      border: "border-fuchsia-500/30"
     }
   ];
 
@@ -728,7 +735,7 @@ function CompetitiveSlide() {
     ["Non-Custodial", true, false, false],
     ["DeFi Perpetuals", true, false, false],
     ["Open Marketplace (Anyone Can Post)", true, false, false],
-    ["AI Portfolio Management", "Coming Soon", false, false],
+    ["AI Strategy Creator", true, false, false],
     ["Signal Marketplace", true, true, false],
     ["Profit Sharing", true, true, false],
     ["TradingView Webhooks", true, true, true],
@@ -999,17 +1006,17 @@ function RoadmapSlide() {
       status: "current",
       items: [
         "Flash Trade production rollout",
-        "Per-bot wallet isolation",
-        "Grid trading",
-        "Advanced analytics",
-        "Mobile optimization",
+        "Per-bot wallet isolation (Flash)",
+        "Vault idle-funds MVP (earn yield between trades)",
+        "AI Strategy Creator (QuantumLab AI chat)",
+        "Vault full-buffer safety controls",
       ]
     },
     {
       quarter: "Q3 2026",
-      title: "AI & Multi-Exchange",
+      title: "Expand & Automate",
       status: "upcoming",
-      items: ["Multi-exchange smart routing (auto best-price)", "AI portfolio management", "Smart bot optimization", "Predictive analytics", "Auto risk adjustment"]
+      items: ["Grid trading bots", "New exchange integrations", "Multi-exchange smart routing", "AI trading optimization", "Advanced analytics & mobile"]
     },
     {
       quarter: "Q4 2026",
@@ -1065,34 +1072,50 @@ function RoadmapSlide() {
 function VaultsSlide() {
   return (
     <Slide>
-      <SectionBadge color="accent"><Rocket className="w-4 h-4" /> Coming Q3 2026</SectionBadge>
+      <SectionBadge color="sky"><PiggyBank className="w-4 h-4" /> Live Now</SectionBadge>
       
       <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-4 text-center">
-        Vaults: Capital Efficiency
+        Vaults: Idle Funds Earn
       </motion.h2>
-      <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-12 text-center max-w-2xl">
-        Advanced capital management utilizing Pacifica's lending and borrowing
+      <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-10 text-center max-w-2xl">
+        Spare USDC earns yield between every trade — automatically, safely, without any manual steps
       </motion.p>
       
-      <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-2 gap-5 max-w-4xl w-full">
+      <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-2 gap-5 max-w-4xl w-full mb-8">
         {[
-          { icon: <Layers className="w-6 h-6" />, title: "Multi-Asset Collateral", desc: "Deposit USDC, SOL, BTC, ETH, or LSTs as collateral" },
-          { icon: <Coins className="w-6 h-6" />, title: "Intelligent Borrowing", desc: "Borrow USDC against collateral without selling assets" },
-          { icon: <PiggyBank className="w-6 h-6" />, title: "Yield Optimization", desc: "Earn staking yields while using assets as collateral" },
-          { icon: <Sparkles className="w-6 h-6" />, title: "Trading Rewards", desc: "Auto-collect and compound trading reward tokens" }
+          { icon: <PiggyBank className="w-6 h-6" />, title: "One-Tap Park", desc: "All spare USDC moves into a yield-bearing stablecoin — no amount to set, no DeFi dashboard to manage" },
+          { icon: <Zap className="w-6 h-6" />, title: "Full Buffer on Open", desc: "When a bot opens a position, every parked dollar returns — the whole safety cushion, never a thin buffer" },
+          { icon: <RefreshCw className="w-6 h-6" />, title: "Auto-Reparks on Close", desc: "After a position closes, idle USDC parks itself again — funds never sit earning nothing between trades" },
+          { icon: <ShieldCheck className="w-6 h-6" />, title: "Non-Custodial & Fail-Closed", desc: "Funds stay in your own agent wallet. On-chain truth, realized amounts — if anything is unclear, the trade waits" }
         ].map((feature, i) => (
           <motion.div 
             key={i}
             variants={fadeIn}
-            className="p-6 rounded-2xl bg-gradient-to-br from-accent/10 to-accent/5 border border-accent/20"
+            className="p-6 rounded-2xl bg-gradient-to-br from-emerald-500/10 to-teal-500/5 border border-emerald-500/20"
           >
-            <div className="w-12 h-12 rounded-xl bg-accent/10 flex items-center justify-center text-accent mb-4">
+            <div className="w-12 h-12 rounded-xl bg-emerald-500/10 flex items-center justify-center text-emerald-400 mb-4">
               {feature.icon}
             </div>
             <h3 className="font-bold text-lg mb-2">{feature.title}</h3>
             <p className="text-sm text-muted-foreground">{feature.desc}</p>
           </motion.div>
         ))}
+      </motion.div>
+
+      <motion.div variants={fadeIn} className="p-5 rounded-2xl bg-gradient-to-r from-emerald-500/5 via-teal-500/5 to-sky-500/5 border border-white/10 max-w-4xl w-full">
+        <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+          <div>
+            <div className="font-bold mb-1">Phase 1 shipped · Roadmap ahead</div>
+            <div className="text-sm text-muted-foreground">Multi-asset collateral, intelligent borrowing, and auto-routing to highest-yield destinations — Q4 2026</div>
+          </div>
+          <div className="flex items-center gap-2 text-sm flex-shrink-0">
+            <span className="px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-400">Idle USDC</span>
+            <ArrowRight className="w-4 h-4 text-muted-foreground" />
+            <span className="px-3 py-1 rounded-full bg-teal-500/20 text-teal-400">Earning Yield</span>
+            <ArrowRight className="w-4 h-4 text-muted-foreground" />
+            <span className="px-3 py-1 rounded-full bg-sky-500/20 text-sky-400">Back in 1 tap</span>
+          </div>
+        </div>
       </motion.div>
     </Slide>
   );
@@ -1287,9 +1310,9 @@ export default function PitchDeck() {
     <BusinessModelSlide key="business" />,
     <CompetitiveSlide key="competitive" />,
     <QuantumLabSlide key="quantumlab" />,
+    <VaultsSlide key="vaults" />,
     <TechStackSlide key="tech" />,
     <RoadmapSlide key="roadmap" />,
-    <VaultsSlide key="vaults" />,
     <TeamSlide key="team" />,
     <AskSlide key="ask" />,
     <ClosingSlide key="closing" />
