@@ -113,6 +113,11 @@ export type ClaimedSpare = {
   botId: string | null;
   claimToken: string | null;
   status: string;
+  // HD-derivation metadata retained from the original bot. NULL/NULL for legacy
+  // random-key spares; non-null for HD spares (the reused bot inherits these so the
+  // seed fallback re-derives the SAME pubkey).
+  derivationIndex: number | null;
+  derivationPathVersion: number | null;
 };
 
 /** Input for storage.recordError — the central admin error-log upsert (see error_log table). */
@@ -898,6 +903,11 @@ export class DatabaseStorage implements IStorage {
     agentPublicKey: string | null;
     subaccountKeyEncryptedV3: string;
     aadVersion: number;
+    // HD-derivation metadata of the bot being deleted. Retained on the spare so a
+    // future reuse can re-stamp the SAME index on the new bot (seed re-derives the
+    // same pubkey). NULL/NULL for legacy random-key bots (blob-only, as before).
+    derivationIndex?: number | null;
+    derivationPathVersion?: number | null;
   }): Promise<void> {
     await db.insert(protocolSubaccounts)
       .values({
@@ -909,6 +919,8 @@ export class DatabaseStorage implements IStorage {
         agentPublicKey: params.agentPublicKey,
         subaccountKeyEncryptedV3: params.subaccountKeyEncryptedV3,
         aadVersion: params.aadVersion,
+        derivationIndex: params.derivationIndex ?? null,
+        derivationPathVersion: params.derivationPathVersion ?? null,
         releasedAt: sql`NOW()`,
         lastVerifiedEmptyAt: sql`NOW()`,
         lastError: null,
@@ -923,6 +935,8 @@ export class DatabaseStorage implements IStorage {
           agentPublicKey: params.agentPublicKey,
           subaccountKeyEncryptedV3: params.subaccountKeyEncryptedV3,
           aadVersion: params.aadVersion,
+          derivationIndex: params.derivationIndex ?? null,
+          derivationPathVersion: params.derivationPathVersion ?? null,
           releasedAt: sql`NOW()`,
           lastVerifiedEmptyAt: sql`NOW()`,
           lastError: null,
@@ -938,6 +952,14 @@ export class DatabaseStorage implements IStorage {
     agentPublicKey: string | null;
     lastError: string;
     claimToken?: string;
+    // Optional structured HD-recovery metadata. When supplied (always BOTH or
+    // NEITHER), the seed re-derives this subaccount's signing key as
+    // deriveBotKeypairFromAgentSeed(seed, derivationIndex) — typed columns make
+    // recovery deterministic instead of parsing it out of lastError. OMIT on the
+    // reuse/CAS path: the pooled row already carries the spare's ORIGINAL index and
+    // we must not overwrite it.
+    derivationIndex?: number | null;
+    derivationPathVersion?: number | null;
   }): Promise<boolean> {
     // Fund-safety: by the time this is called the caller has decided funds are genuinely
     // stranded (sweep failed / stranding on delete). Surface it in the admin panel even if
@@ -949,6 +971,11 @@ export class DatabaseStorage implements IStorage {
       message: `Subaccount quarantined as stuck_funds: ${params.lastError || "sweep failed / funds stranded"}`,
       context: { protocol: params.protocol, subaccountId: params.protocolSubaccountId, botId: params.botId },
     })).catch(() => {});
+    // Only overwrite derivation columns when the caller explicitly supplies them, so
+    // an omitting caller (e.g. reuse CAS) leaves any existing original index intact.
+    const derivationSet: Record<string, any> = {};
+    if (params.derivationIndex !== undefined) derivationSet.derivationIndex = params.derivationIndex;
+    if (params.derivationPathVersion !== undefined) derivationSet.derivationPathVersion = params.derivationPathVersion;
     // §5.1.4 CAS-guarded quarantine. When a claimToken is supplied the caller is a
     // lease holder (reuse-on-create / lease-recovery). A TTL-based recovery assumes
     // a slow holder is dead and can reclaim+re-finalize the slot to another owner;
@@ -964,6 +991,7 @@ export class DatabaseStorage implements IStorage {
           lastError: params.lastError,
           claimToken: null,
           claimedAt: null,
+          ...derivationSet,
         } as any)
         .where(and(
           eq(protocolSubaccounts.protocol, params.protocol),
@@ -989,6 +1017,7 @@ export class DatabaseStorage implements IStorage {
         status: 'stuck_funds',
         agentPublicKey: params.agentPublicKey,
         lastError: params.lastError,
+        ...derivationSet,
       } as any)
       .onConflictDoUpdate({
         target: [protocolSubaccounts.protocol, protocolSubaccounts.protocolSubaccountId],
@@ -998,6 +1027,7 @@ export class DatabaseStorage implements IStorage {
           status: 'stuck_funds',
           agentPublicKey: params.agentPublicKey,
           lastError: params.lastError,
+          ...derivationSet,
         } as any,
       });
     return true;
@@ -1013,23 +1043,39 @@ export class DatabaseStorage implements IStorage {
     // concurrent creates fan out across distinct rows (never the same one), then
     // flip it to 'reserving' under our claim token. Only rows that still have a
     // retained key + on-chain id are eligible — a keyless spare can't be re-signed.
+    // HD-recoverability race guard: a reused HD spare re-stamps its ORIGINAL
+    // derivation index onto the new bot. Pooling (poolSubaccountAsSpare) runs BEFORE
+    // the old bot row is deleted, so for a brief window the old bot still holds that
+    // index. If we claimed the spare in that window the new INSERT would collide on
+    // the trading_bots (wallet_address, derivation_index) UNIQUE. So skip any HD spare
+    // whose index is still held by a live trading_bots row; once the delete lands it
+    // becomes claimable. Legacy random spares (derivation_index IS NULL) are unaffected.
     const result = await db.execute(sql`
       UPDATE protocol_subaccounts
       SET status = 'reserving', claim_token = ${params.claimToken}, claimed_at = NOW()
       WHERE id = (
-        SELECT id FROM protocol_subaccounts
-        WHERE wallet_address = ${params.walletAddress}
-          AND protocol = ${params.protocol}
-          AND agent_public_key = ${params.agentPublicKey}
-          AND status = 'spare'
-          AND protocol_subaccount_id IS NOT NULL
-          AND subaccount_key_encrypted_v3 IS NOT NULL
-        ORDER BY released_at ASC NULLS FIRST
+        SELECT ps.id FROM protocol_subaccounts ps
+        WHERE ps.wallet_address = ${params.walletAddress}
+          AND ps.protocol = ${params.protocol}
+          AND ps.agent_public_key = ${params.agentPublicKey}
+          AND ps.status = 'spare'
+          AND ps.protocol_subaccount_id IS NOT NULL
+          AND ps.subaccount_key_encrypted_v3 IS NOT NULL
+          AND (
+            ps.derivation_index IS NULL
+            OR NOT EXISTS (
+              SELECT 1 FROM trading_bots tb
+              WHERE tb.wallet_address = ps.wallet_address
+                AND tb.derivation_index = ps.derivation_index
+            )
+          )
+        ORDER BY ps.released_at ASC NULLS FIRST
         FOR UPDATE SKIP LOCKED
         LIMIT 1
       )
       RETURNING id, wallet_address, protocol, protocol_subaccount_id, agent_public_key,
-                subaccount_key_encrypted_v3, aad_version, bot_id, claim_token, status
+                subaccount_key_encrypted_v3, aad_version, bot_id, claim_token, status,
+                derivation_index, derivation_path_version
     `);
     const row: any = (result as any).rows?.[0] ?? (result as any)[0];
     if (!row) return undefined;
@@ -1044,6 +1090,8 @@ export class DatabaseStorage implements IStorage {
       botId: row.bot_id,
       claimToken: row.claim_token,
       status: row.status,
+      derivationIndex: row.derivation_index == null ? null : Number(row.derivation_index),
+      derivationPathVersion: row.derivation_path_version == null ? null : Number(row.derivation_path_version),
     };
   }
 

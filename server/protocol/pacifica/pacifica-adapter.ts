@@ -247,6 +247,12 @@ export class PacificaAdapter implements ProtocolAdapter {
       maxSubaccounts: null,
       settlementType: 'hybrid',
       requiresExternalSubaccountKey: true,
+      // Each Pacifica bot's subaccount signing key is HD-derived from the owner's
+      // agent recovery phrase (monotonic per-wallet index), exactly like Flash. This
+      // gives the key a durable SECOND recovery source (seed + index) beyond the
+      // encrypted V3 blob, so it survives a key-blob loss (corruption / AAD mismatch /
+      // the one-time v1→v3 UMK regeneration that orphaned the early random-key bots).
+      walletDerivation: 'agent_hd',
     };
   }
 

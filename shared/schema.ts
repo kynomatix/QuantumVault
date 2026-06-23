@@ -1034,6 +1034,12 @@ export const protocolSubaccounts = pgTable("protocol_subaccounts", {
   // Per-reservation claim token + lease start for concurrency-safe reuse (§5.1).
   claimToken: text("claim_token"),
   claimedAt: timestamp("claimed_at"),
+  // HD-derivation metadata carried over from the bot that owned this subaccount.
+  // On reuse the new bot MUST inherit the spare's ORIGINAL index (not a freshly
+  // allocated one) so the seed fallback re-derives the SAME on-chain pubkey. NULL
+  // for legacy random-key spares → the reused bot stays blob-only (no worse than before).
+  derivationIndex: integer("derivation_index"),
+  derivationPathVersion: integer("derivation_path_version"),
 }, (table) => ([
   unique("uq_protocol_subaccount").on(table.protocol, table.protocolSubaccountId),
   index("idx_protocol_subaccounts_wallet_protocol").on(table.walletAddress, table.protocol),

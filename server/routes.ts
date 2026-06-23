@@ -751,6 +751,10 @@ async function recycleDeletedSubaccount(
       agentPublicKey,
       subaccountKeyEncryptedV3: rebound.encryptedV3,
       aadVersion: rebound.aadVersion,
+      // Retain the bot's HD index so a future reuse re-stamps the SAME index on the
+      // new bot (seed re-derives the same pubkey). NULL/NULL for legacy random bots.
+      derivationIndex: bot.derivationIndex ?? null,
+      derivationPathVersion: bot.derivationPathVersion ?? null,
     });
     console.log(`${logPrefix} Pooled subaccount ${acct.slice(0, 8)}... as spare for reuse`);
     return { ok: true, pooled: true };
@@ -9772,6 +9776,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 // Stay 'pending' until the post-insert rebind writes the bot-row key,
                 // mirroring the fresh-provision path's CHECK-constraint handling.
                 subaccountStatus = 'pending';
+                // HD-recoverability: the reused bot MUST carry the spare's ORIGINAL
+                // derivation index — NOT the fresh index burned at allocate time — so the
+                // seed fallback re-derives the SAME on-chain pubkey for this recycled
+                // subaccount. Legacy random spares carry NULL/NULL → the reused bot stays
+                // blob-only (no worse than before). The freshly-allocated index is
+                // harmlessly wasted (monotonic, never reused — no collision).
+                botDerivationIndex = spare.derivationIndex;
+                botDerivationPathVersion = spare.derivationPathVersion;
                 _reuseContext = {
                   claimToken,
                   protocol: adapter.protocolName,
@@ -10094,6 +10106,65 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             error: `Could not create the bot. Your $${rb.usdcSwept.toFixed(2)} was returned to your wallet — please try again.`,
           });
         }
+        // Non-Flash external-key venues (Pacifica): provisionFundedSubaccount already
+        // moved funds INTO the subaccount before this failed INSERT, so there is no
+        // trading_bots row to carry the recovery metadata. Pacifica subaccount funds
+        // can ONLY be moved by the subaccount's own key (the main account's authority
+        // does NOT reach them), and with agent_hd that key == deriveBotKeypairFromAgentSeed
+        // (seed, index) — so the funds stay re-derivable, but ONLY if the funded
+        // subaccount is durably recorded. A bare rethrow would lose the subaccount
+        // address with no marker. Quarantine it (stuck_funds, captures the address +
+        // derivation index for recovery, surfaces a critical admin alert) and fail
+        // closed — NEVER drop a funded external-key subaccount on the floor.
+        if (createAdapter.protocolName !== 'flash' && pendingBotSecretKeyForV3 && botSubaccountPublicKey) {
+          try {
+            await storage.markSubaccountStuckFunds({
+              walletAddress: req.walletAddress!,
+              protocol: createAdapter.protocolName,
+              protocolSubaccountId: botSubaccountPublicKey,
+              botId: null,
+              agentPublicKey: wallet?.agentPublicKey ?? null,
+              lastError: `bot INSERT failed after funding (derivationIndex=${botDerivationIndex ?? 'n/a'}, pathVersion=${botDerivationPathVersion ?? 'n/a'}): ${insertErr?.message || insertErr}`,
+              derivationIndex: botDerivationIndex ?? null,
+              derivationPathVersion: botDerivationPathVersion ?? null,
+            });
+            console.error(`[Bot Creation] CRITICAL: bot INSERT failed after funding ${createAdapter.protocolName} subaccount ${botSubaccountPublicKey}; quarantined as stuck_funds for recovery (derivationIndex=${botDerivationIndex})`);
+          } catch (quarErr: any) {
+            console.error(`[Bot Creation] CRITICAL: bot INSERT failed AND could not quarantine funded subaccount ${botSubaccountPublicKey}: ${quarErr?.message || quarErr} (original insertErr: ${insertErr?.message || insertErr})`);
+          }
+          try { pendingBotSecretKeyForV3.fill(0); } catch {}
+          return res.status(500).json({
+            error: `We couldn't finish creating your bot, but your funds are safe in your ${createAdapter.protocolName} subaccount and recoverable. Please contact support before retrying.`,
+          });
+        }
+        // Reuse path (REUSE_ON_CREATE): the spare was CLAIMED ('reserving' + claimToken
+        // lease) and reuseSubaccount() already transferred funds INTO it BEFORE this
+        // failed INSERT. Here the signing key is NOT in pendingBotSecretKeyForV3 (it's
+        // the RETAINED pooled key, recoverable), so the branch above is skipped. Without
+        // an immediate marker the slot would sit 'reserving' until the TTL-lease recovery
+        // job reclaims it. CAS-quarantine it now (guarded by claimToken so a
+        // concurrently-reclaiming recovery owner is never clobbered). Do NOT pass a
+        // derivation index — the pooled row already carries the spare's ORIGINAL one and
+        // overwriting it could break the seed re-derive. Fail closed.
+        if (createAdapter.protocolName !== 'flash' && _reuseContext) {
+          try {
+            await storage.markSubaccountStuckFunds({
+              walletAddress: req.walletAddress!,
+              protocol: _reuseContext.protocol,
+              protocolSubaccountId: _reuseContext.protocolSubaccountId,
+              botId: null,
+              agentPublicKey: _reuseContext.agentPublicKey,
+              lastError: `bot INSERT failed after reuse-funding: ${insertErr?.message || insertErr}`,
+              claimToken: _reuseContext.claimToken,
+            });
+            console.error(`[Bot Creation][Reuse] CRITICAL: bot INSERT failed after reuse-funding subaccount ${_reuseContext.protocolSubaccountId}; CAS-quarantined as stuck_funds for recovery (insertErr: ${insertErr?.message || insertErr})`);
+          } catch (quarErr: any) {
+            console.error(`[Bot Creation][Reuse] CRITICAL: bot INSERT failed AND could not quarantine reused subaccount ${_reuseContext.protocolSubaccountId}: ${quarErr?.message || quarErr} (original insertErr: ${insertErr?.message || insertErr})`);
+          }
+          return res.status(500).json({
+            error: `We couldn't finish creating your bot, but your funds are safe in your ${createAdapter.protocolName} subaccount and recoverable. Please contact support before retrying.`,
+          });
+        }
         throw insertErr;
       }
 
@@ -10157,10 +10228,25 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 error: `Failed to secure bot subaccount key and could not fully return funds. Your bot wallet ${botSubaccountPublicKey} may still hold funds — please contact support before creating another bot.`,
               });
             }
+            // Flash wallet CONFIRMED empty — the per-bot wallet is disposable and is
+            // itself re-derivable from the agent seed, so deleting the now-empty row
+            // strands nothing.
+            try { await storage.deleteTradingBot(bot.id); } catch {}
+            return res.status(500).json({ error: `Failed to secure bot subaccount key: ${v3Err.message}` });
           }
-          // Wallet confirmed empty (or non-Flash) — safe to delete the row.
-          try { await storage.deleteTradingBot(bot.id); } catch {}
-          return res.status(500).json({ error: `Failed to secure bot subaccount key: ${v3Err.message}` });
+          // Non-Flash external-key venues (Pacifica): the deposit+transfer already
+          // landed funds INSIDE this subaccount BEFORE this V3 write. With agent_hd
+          // derivation the row's protocolSubaccountId + derivationIndex/
+          // derivationPathVersion IS the key's recovery source — the seed re-derives
+          // the key even with NO V3 blob (decryptBotSubaccountKey re-derives and
+          // rehydrates the cache on next access). Deleting the row here would discard
+          // that recovery metadata and STRAND the funds. Preserve the row as 'error'
+          // and fail closed — NEVER delete a funded external-key subaccount row.
+          try { await storage.updateTradingBot(bot.id, { subaccountStatus: 'error' } as any); } catch {}
+          console.error(`[Bot Creation] CRITICAL: V3 write failed for funded ${createAdapter.protocolName} subaccount ${botSubaccountPublicKey} (bot ${bot.id}); preserving row as 'error' — key re-derivable from seed (derivationIndex=${botDerivationIndex})`);
+          return res.status(500).json({
+            error: `We couldn't finish setting up your bot, but your funds are safe and recoverable. Please reconnect your wallet and try again — if it keeps failing, contact support.`,
+          });
         } finally {
           try { _botSubUmk?.cleanup(); } catch {}
           // Zeroize the secret key buffer we held in memory.
@@ -10924,6 +11010,48 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             withdrawnToWallet: sweepResult.withdrawnToWallet ?? false,
             withdrawnAmount: sweepResult.amount,
             message
+          });
+        }
+      }
+
+      // Recovery-metadata guard (HD external-key venues, non-Flash). A Pacifica row
+      // whose subaccount is funded on-chain but did NOT qualify for the active-context
+      // sweep above — e.g. status 'error' from a create-time V3-write failure, so it
+      // has no usable ciphertext and getBotSubaccountContext() returned null — still
+      // carries its protocolSubaccountId + derivationIndex, which IS the seed-recovery
+      // handle (the signing key == deriveBotKeypairFromAgentSeed(seed, index)). Unlike
+      // Flash (which has an orphaned-wallet recovery scanner + disposable wallets),
+      // a Pacifica subaccount's pubkey is only known FROM this row — falling through to
+      // the generic delete below would drop it and strand the funds with NO marker.
+      // Persist a durable stuck_funds quarantine in protocol_subaccounts (keyed by
+      // protocol+subaccountId, independent of the bot row, carrying the structured
+      // derivation index) BEFORE allowing deletion. Over-quarantine is benign: admin/
+      // recovery verifies-empty and clears it.
+      if (
+        bot.subaccountAuthMode === 'external_key' &&
+        bot.activeProtocol !== 'flash' &&
+        bot.protocolSubaccountId &&
+        bot.derivationIndex !== null && bot.derivationIndex !== undefined &&
+        !getBotSubaccountContext(bot)
+      ) {
+        try {
+          await storage.markSubaccountStuckFunds({
+            walletAddress: bot.walletAddress,
+            protocol: (bot.activeProtocol as string | null) ?? 'pacifica',
+            protocolSubaccountId: bot.protocolSubaccountId,
+            botId: null,
+            agentPublicKey: agentAddress ?? null,
+            lastError: `bot deleted while subaccountStatus='${bot.subaccountStatus}' (no active signing context); funds may remain — key re-derivable from seed (derivationIndex=${bot.derivationIndex}, pathVersion=${bot.derivationPathVersion})`,
+            derivationIndex: bot.derivationIndex,
+            derivationPathVersion: bot.derivationPathVersion,
+          });
+          console.error(`[Delete] CRITICAL: external-key subaccount ${bot.protocolSubaccountId} (bot ${bot.id}, status=${bot.subaccountStatus}) had no active sweep context; quarantined as stuck_funds (derivationIndex=${bot.derivationIndex}) before deletion.`);
+        } catch (quarErr: any) {
+          // Fail CLOSED: if the recovery handle can't be recorded, do NOT delete the
+          // row — deleting would lose the only copy of protocolSubaccountId + index.
+          console.error(`[Delete] Could not record recovery quarantine for ${bot.protocolSubaccountId}; refusing to delete: ${quarErr?.message || quarErr}`);
+          return res.status(500).json({
+            error: `We couldn't safely delete this bot because its recovery details couldn't be saved. Your funds are not lost. Please try again, or contact support.`,
           });
         }
       }

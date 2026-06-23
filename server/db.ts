@@ -286,6 +286,26 @@ export async function ensureSchema() {
            UNIQUE (wallet_address, derivation_index);
        EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 
+      // --- HD-derivation metadata on the spare pool (Pacifica agent_hd reuse). ---
+      // When a Pacifica bot is deleted its subaccount is swept-empty and pooled as a
+      // spare. On reuse the new bot MUST inherit the spare's ORIGINAL derivation index
+      // so the seed fallback re-derives the SAME pubkey (else pubkey-mismatch →
+      // fail-closed → the reused slot silently loses recoverability). Additive +
+      // idempotent. Legacy random-key spares carry NULL/NULL → blob-only, as before.
+      `ALTER TABLE protocol_subaccounts ADD COLUMN IF NOT EXISTS derivation_index integer`,
+      `ALTER TABLE protocol_subaccounts ADD COLUMN IF NOT EXISTS derivation_path_version integer`,
+      `DO $$ BEGIN
+         ALTER TABLE protocol_subaccounts ADD CONSTRAINT protocol_subaccounts_derivation_index_positive
+           CHECK (derivation_index IS NULL OR derivation_index >= 1);
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+      `DO $$ BEGIN
+         ALTER TABLE protocol_subaccounts ADD CONSTRAINT protocol_subaccounts_derivation_dual_model
+           CHECK (
+             (derivation_index IS NULL AND derivation_path_version IS NULL)
+             OR (derivation_index IS NOT NULL AND derivation_path_version IS NOT NULL)
+           );
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+
       `INSERT INTO lab_strategies (user_id, name, description, pine_script, parsed_inputs, groups, strategy_settings)
        SELECT 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez',
               src.name, src.description, src.pine_script, src.parsed_inputs, src.groups, src.strategy_settings
