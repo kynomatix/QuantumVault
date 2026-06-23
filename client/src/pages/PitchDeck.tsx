@@ -461,18 +461,35 @@ function HowItWorksSlide() {
         })}
       </motion.div>
       
-      <motion.div variants={fadeIn} className="p-6 rounded-2xl bg-slate-800/30 border border-slate-700/40 max-w-4xl">
-        <h3 className="font-bold mb-4 text-center">Signal Flow</h3>
-        <div className="flex flex-wrap items-center justify-center gap-3 text-sm">
-          <span className="px-4 py-2 rounded-xl bg-slate-700/30 border border-slate-600/40 text-slate-300 font-medium">TradingView Alert</span>
-          <ArrowRight className="w-5 h-5 text-slate-500" />
-          <span className="px-4 py-2 rounded-xl bg-slate-600/30 border border-slate-500/40 text-slate-200 font-medium">Webhook</span>
-          <ArrowRight className="w-5 h-5 text-indigo-500/60" />
-          <span className="px-4 py-2 rounded-xl bg-indigo-800/30 border border-indigo-600/40 text-indigo-300 font-medium">QuantumVault</span>
-          <ArrowRight className="w-5 h-5 text-indigo-400/60" />
-          <span className="px-4 py-2 rounded-xl bg-violet-800/30 border border-violet-600/40 text-violet-300 font-medium">Pacifica</span>
-          <ArrowRight className="w-5 h-5 text-violet-400/60" />
-          <span className="px-4 py-2 rounded-xl bg-violet-700/40 border border-violet-500/50 text-violet-200 font-medium">Position Executed</span>
+      <motion.div variants={fadeIn} className="p-5 rounded-2xl bg-slate-800/30 border border-slate-700/40 max-w-4xl w-full space-y-4">
+        <div>
+          <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Signal Flow</div>
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="px-3 py-1.5 rounded-lg bg-slate-700/30 border border-slate-600/40 text-slate-300 font-medium">TradingView Alert</span>
+            <ArrowRight className="w-4 h-4 text-slate-500 flex-shrink-0" />
+            <span className="px-3 py-1.5 rounded-lg bg-slate-600/30 border border-slate-500/40 text-slate-200 font-medium">Webhook</span>
+            <ArrowRight className="w-4 h-4 text-indigo-500/60 flex-shrink-0" />
+            <span className="px-3 py-1.5 rounded-lg bg-indigo-800/30 border border-indigo-600/40 text-indigo-300 font-medium">QuantumVault</span>
+            <ArrowRight className="w-4 h-4 text-indigo-400/60 flex-shrink-0" />
+            <span className="px-3 py-1.5 rounded-lg bg-violet-800/30 border border-violet-600/40 text-violet-300 font-medium">Exchange</span>
+            <ArrowRight className="w-4 h-4 text-violet-400/60 flex-shrink-0" />
+            <span className="px-3 py-1.5 rounded-lg bg-violet-700/40 border border-violet-500/50 text-violet-200 font-medium">Trade Executed</span>
+          </div>
+        </div>
+        <div className="border-t border-white/[0.05]" />
+        <div>
+          <div className="text-xs font-semibold text-emerald-400/70 uppercase tracking-wider mb-2">Idle Funds (Vault)</div>
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="px-3 py-1.5 rounded-lg bg-slate-700/20 border border-slate-600/30 text-slate-400 font-medium">Bot Flat</span>
+            <ArrowRight className="w-4 h-4 text-emerald-600/50 flex-shrink-0" />
+            <span className="px-3 py-1.5 rounded-lg bg-emerald-900/30 border border-emerald-700/40 text-emerald-300 font-medium">Auto-Park</span>
+            <ArrowRight className="w-4 h-4 text-emerald-500/60 flex-shrink-0" />
+            <span className="px-3 py-1.5 rounded-lg bg-emerald-800/40 border border-emerald-600/50 text-emerald-200 font-medium">Earning Yield</span>
+            <ArrowRight className="w-4 h-4 text-teal-400/50 flex-shrink-0" />
+            <span className="px-3 py-1.5 rounded-lg bg-teal-900/30 border border-teal-700/40 text-teal-300 font-medium">Auto-Unpark on Open</span>
+            <ArrowRight className="w-4 h-4 text-violet-400/60 flex-shrink-0" />
+            <span className="px-3 py-1.5 rounded-lg bg-violet-800/30 border border-violet-600/40 text-violet-300 font-medium">Full Buffer Ready</span>
+          </div>
         </div>
       </motion.div>
     </Slide>
