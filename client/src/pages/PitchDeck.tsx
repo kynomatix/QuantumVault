@@ -196,6 +196,7 @@ function ProblemSlide() {
     { problem: "No way to verify trader performance", solution: "On-chain PnL history anyone can audit" },
     { problem: "Traders can't monetize strategies", solution: "Signal marketplace with profit sharing" },
     { problem: "Manual trading is exhausting", solution: "24/7 automated execution" },
+    { problem: "Trading funds sit idle between positions, earning nothing", solution: "Vaults auto-park idle USDC into yield — unparks instantly on open" },
   ];
 
   return (
