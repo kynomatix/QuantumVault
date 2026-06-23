@@ -1,5 +1,5 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type ReactNode, type ElementType } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import bs58 from 'bs58';
 import { useToast } from '@/hooks/use-toast';
@@ -59,7 +59,9 @@ import {
   RefreshCw,
   AlertTriangle,
   Vault,
+  ChevronDown,
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -231,6 +233,63 @@ interface BotManagementDrawerProps {
   xUsername?: string;
 }
 
+function DrawerSettingsPanel({
+  id,
+  expandedPanel,
+  setExpandedPanel,
+  icon: Icon,
+  title,
+  destructive = false,
+  testId,
+  bodyClassName = 'space-y-4',
+  children,
+}: {
+  id: string;
+  expandedPanel: string | null;
+  setExpandedPanel: (v: string | null) => void;
+  icon: ElementType;
+  title: string;
+  destructive?: boolean;
+  testId?: string;
+  bodyClassName?: string;
+  children: ReactNode;
+}) {
+  const open = expandedPanel === id;
+  return (
+    <div className={`rounded-xl border ${destructive ? 'border-destructive/30 bg-destructive/5' : 'border-border/50 bg-muted/20'}`}>
+      <button
+        type="button"
+        onClick={() => setExpandedPanel(open ? null : id)}
+        className="w-full p-4 flex items-center justify-between cursor-pointer hover:bg-muted/10 transition-colors rounded-xl"
+        data-testid={testId}
+      >
+        <div className="flex items-center gap-3">
+          <div className={`p-2 rounded-full ${destructive ? 'bg-destructive/20' : 'bg-primary/20'}`}>
+            <Icon className={`w-4 h-4 ${destructive ? 'text-destructive' : 'text-primary'}`} />
+          </div>
+          <h3 className={`font-semibold text-sm ${destructive ? 'text-destructive' : ''}`}>{title}</h3>
+        </div>
+        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform shrink-0 ${open ? 'rotate-180' : ''}`} />
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="overflow-hidden"
+          >
+            <div className={`px-4 pb-4 ${bodyClassName}`}>
+              {children}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 export function BotManagementDrawer({
   bot,
   isOpen,
@@ -247,6 +306,10 @@ export function BotManagementDrawer({
   const wallet = useWallet();
 
   const [activeTab, setActiveTab] = useState('overview');
+  // Bot Settings tab: accordion (one panel open at a time), mirroring the main
+  // Settings page, so the growing list of per-bot controls (parking now, borrow
+  // management later) doesn't pile into one long scroll.
+  const [expandedSettingsPanel, setExpandedSettingsPanel] = useState<string | null>('general');
   const [botBalance, setBotBalance] = useState<number>(0);
   // Per-bot Vault-parked value (Flash/independent_trader). OFF-exchange, NOT tradable —
   // folded into the displayed Bot Balance / PnL only, never into sizing or margin math.
@@ -401,6 +464,7 @@ export function BotManagementDrawer({
       setEditAutoParkIdle(bot.autoParkIdle ?? false);
       setEditVaultAllOut(bot.vaultAllOut ?? true);
       setEditParkDestinationAsset(bot.parkDestinationAsset ?? null);
+      setExpandedSettingsPanel('general');
     }
   }, [bot]);
 
@@ -2516,14 +2580,15 @@ export function BotManagementDrawer({
             </div>
           </TabsContent>
 
-          <TabsContent value="settings" className="space-y-4 mt-4">
-            <div className="p-4 rounded-xl border bg-muted/20">
-              <div className="flex items-center gap-2 mb-4">
-                <Settings className="w-4 h-4 text-primary" />
-                <h3 className="font-semibold text-sm">Bot Settings</h3>
-              </div>
-              
-              <div className="space-y-4">
+          <TabsContent value="settings" className="space-y-3 mt-4">
+            <DrawerSettingsPanel
+              id="general"
+              expandedPanel={expandedSettingsPanel}
+              setExpandedPanel={setExpandedSettingsPanel}
+              icon={Settings}
+              title="General"
+              testId="button-toggle-settings-general"
+            >
                 <div className="space-y-2">
                   <label className="text-sm text-muted-foreground">Bot Name</label>
                   <Input
@@ -2622,13 +2687,17 @@ export function BotManagementDrawer({
                     })()
                   )}
                 </div>
+            </DrawerSettingsPanel>
 
-                {/* Position Growth: how the bot grows its trading position */}
-                <div className="pt-4 mt-2 border-t border-border/50">
-                  <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground" data-testid="heading-position-growth">
-                    Position Growth
-                  </h4>
-
+            <DrawerSettingsPanel
+              id="growth"
+              expandedPanel={expandedSettingsPanel}
+              setExpandedPanel={setExpandedSettingsPanel}
+              icon={TrendingUp}
+              title="Position Growth"
+              testId="button-toggle-settings-growth"
+              bodyClassName=""
+            >
                   {/* Profit Reinvest Toggle */}
                   <div className="flex items-center justify-between py-3">
                     <div className="space-y-0.5">
@@ -2671,14 +2740,17 @@ export function BotManagementDrawer({
                       When bot needs more margin, it will deposit from your agent wallet (${mainAccountBalance.toFixed(2)} available)
                     </p>
                   )}
-                </div>
+            </DrawerSettingsPanel>
 
-                {/* Cash Management: what happens to profits and idle cash */}
-                <div className="pt-4 mt-2 border-t border-border/50">
-                  <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground" data-testid="heading-cash-management">
-                    Cash Management
-                  </h4>
-
+            <DrawerSettingsPanel
+              id="cash"
+              expandedPanel={expandedSettingsPanel}
+              setExpandedPanel={setExpandedSettingsPanel}
+              icon={Wallet}
+              title="Cash Management"
+              testId="button-toggle-settings-cash"
+              bodyClassName=""
+            >
                   {/* Auto Withdraw Threshold */}
                   <div className="space-y-2 py-3">
                     <div className="flex items-center justify-between">
@@ -2815,43 +2887,22 @@ export function BotManagementDrawer({
                       />
                     )}
                   </div>
-                </div>
-                
-                {hasSettingsChanges && (
-                  <div className="flex gap-2 pt-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleCancelEdit}
-                      disabled={saveSettingsLoading}
-                      className="flex-1"
-                      data-testid="button-cancel-settings"
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={handleSaveSettings}
-                      disabled={saveSettingsLoading}
-                      className="flex-1"
-                      data-testid="button-save-settings"
-                    >
-                      {saveSettingsLoading ? (
-                        <Loader2 className="w-4 h-4 animate-spin mr-1" />
-                      ) : null}
-                      Save Changes
-                    </Button>
-                  </div>
-                )}
-              </div>
-            </div>
+            </DrawerSettingsPanel>
 
             {(displayBot?.botSubaccountIdentifier || (displayBot?.driftSubaccountId !== null && displayBot?.driftSubaccountId !== undefined)) && (
-              <div className="p-4 rounded-xl border border-border/50 bg-muted/30">
+              <DrawerSettingsPanel
+                id="subaccount"
+                expandedPanel={expandedSettingsPanel}
+                setExpandedPanel={setExpandedSettingsPanel}
+                icon={Info}
+                title="Trading Subaccount"
+                testId="button-toggle-settings-subaccount"
+                bodyClassName="space-y-2"
+              >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <Info className="w-4 h-4 text-muted-foreground" />
-                    <span className="text-sm text-muted-foreground">Trading Subaccount</span>
+                    <span className="text-sm text-muted-foreground">Address</span>
                   </div>
                   {displayBot.botSubaccountIdentifier ? (
                     <div className="flex items-center gap-1.5">
@@ -2906,19 +2957,24 @@ export function BotManagementDrawer({
                     </span>
                   )}
                 </div>
-                <p className="text-xs text-muted-foreground mt-2">
+                <p className="text-xs text-muted-foreground">
                   This bot's funds are isolated in its own trading subaccount.
                   Each bot operates independently with separate balances and positions.
                 </p>
-              </div>
+              </DrawerSettingsPanel>
             )}
 
-            <div className="p-4 rounded-xl border border-destructive/30 bg-destructive/5">
-              <div className="flex items-center gap-2 mb-3">
-                <Trash2 className="w-4 h-4 text-destructive" />
-                <h3 className="font-semibold text-sm text-destructive">Danger Zone</h3>
-              </div>
-              <p className="text-xs text-muted-foreground mb-4">
+            <DrawerSettingsPanel
+              id="danger"
+              expandedPanel={expandedSettingsPanel}
+              setExpandedPanel={setExpandedSettingsPanel}
+              icon={Trash2}
+              title="Danger Zone"
+              destructive
+              testId="button-toggle-settings-danger"
+              bodyClassName="space-y-3"
+            >
+              <p className="text-xs text-muted-foreground">
                 Permanently delete this bot and all associated trade history. Any funds should be withdrawn first.
               </p>
               <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
@@ -2959,7 +3015,35 @@ export function BotManagementDrawer({
                   </AlertDialogFooter>
                 </AlertDialogContent>
               </AlertDialog>
-            </div>
+            </DrawerSettingsPanel>
+
+            {hasSettingsChanges && (
+              <div className="flex items-center gap-2 pt-1">
+                <span className="text-[11px] text-muted-foreground mr-auto flex items-center gap-1">
+                  <Info className="w-3 h-3" /> Unsaved changes
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleCancelEdit}
+                  disabled={saveSettingsLoading}
+                  data-testid="button-cancel-settings"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={handleSaveSettings}
+                  disabled={saveSettingsLoading}
+                  data-testid="button-save-settings"
+                >
+                  {saveSettingsLoading ? (
+                    <Loader2 className="w-4 h-4 animate-spin mr-1" />
+                  ) : null}
+                  Save Changes
+                </Button>
+              </div>
+            )}
           </TabsContent>
         </Tabs>
         </>
