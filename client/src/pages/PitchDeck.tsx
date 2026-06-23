@@ -380,25 +380,25 @@ function ProductFeaturesSlide() {
     <Slide>
       <SectionBadge color="accent"><Sparkles className="w-4 h-4" /> Product</SectionBadge>
       
-      <motion.h2 variants={fadeIn} className="text-4xl md:text-5xl lg:text-6xl font-display font-bold mb-4 text-center">
+      <motion.h2 variants={fadeIn} className="text-3xl md:text-4xl font-display font-bold mb-2 text-center">
         Core Features
       </motion.h2>
-      <motion.p variants={fadeIn} className="text-lg text-muted-foreground mb-12 text-center max-w-2xl">
+      <motion.p variants={fadeIn} className="text-sm text-muted-foreground mb-5 text-center max-w-2xl">
         Enterprise-grade infrastructure built on Pacifica
       </motion.p>
       
-      <motion.div variants={fadeIn} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 max-w-6xl w-full">
+      <motion.div variants={fadeIn} className="grid grid-cols-2 md:grid-cols-3 gap-3 max-w-5xl w-full">
         {features.map((feature, i) => (
           <motion.div 
             key={i}
             variants={fadeIn}
-            className={`p-6 rounded-2xl bg-gradient-to-br ${feature.gradient} border ${feature.border} hover:scale-[1.02] transition-transform`}
+            className={`p-3 rounded-xl bg-gradient-to-br ${feature.gradient} border ${feature.border} hover:scale-[1.02] transition-transform`}
           >
-            <div className="w-12 h-12 rounded-xl bg-background/50 backdrop-blur-sm flex items-center justify-center mb-4 text-white">
+            <div className="w-8 h-8 rounded-lg bg-background/50 backdrop-blur-sm flex items-center justify-center mb-2 text-white">
               {feature.icon}
             </div>
-            <h3 className="font-bold text-lg mb-2">{feature.title}</h3>
-            <p className="text-sm text-muted-foreground">{feature.description}</p>
+            <h3 className="font-bold text-sm mb-1">{feature.title}</h3>
+            <p className="text-xs text-muted-foreground leading-relaxed">{feature.description}</p>
           </motion.div>
         ))}
       </motion.div>
