@@ -4,5 +4,6 @@ export const modules: ModuleMap = {
   "./components/mockups/lab-hub-redesign/ControlCenter.tsx": () => import("../components/mockups/lab-hub-redesign/ControlCenter.tsx"),
   "./components/mockups/lab-hub-redesign/Current.tsx": () => import("../components/mockups/lab-hub-redesign/Current.tsx"),
   "./components/mockups/lab-hub-redesign/Guided.tsx": () => import("../components/mockups/lab-hub-redesign/Guided.tsx"),
-  "./components/mockups/lab-hub-redesign/Launchpad.tsx": () => import("../components/mockups/lab-hub-redesign/Launchpad.tsx")
+  "./components/mockups/lab-hub-redesign/Launchpad.tsx": () => import("../components/mockups/lab-hub-redesign/Launchpad.tsx"),
+  "./components/mockups/wallet-money-hub/MoneyHub.tsx": () => import("../components/mockups/wallet-money-hub/MoneyHub.tsx")
 };

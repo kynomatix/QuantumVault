@@ -1,0 +1,49 @@
+/* QuantumVault brand tokens (dark blurple/blue) — mirrors the main app's
+   client/src/index.css :root/.dark so this mockup matches the real product.
+   Every component in this group imports './_group.css'. */
+
+:root,
+.dark {
+  --button-outline: rgba(255, 255, 255, 0.1);
+  --badge-outline: rgba(255, 255, 255, 0.08);
+  --opaque-button-border-intensity: 12;
+  --elevate-1: rgba(255, 255, 255, 0.04);
+  --elevate-2: rgba(255, 255, 255, 0.08);
+
+  --background: 234 28% 5%;
+  --foreground: 235 20% 98%;
+  --border: 235 28% 16%;
+  --card: 235 26% 9%;
+  --card-foreground: 235 20% 98%;
+  --card-border: 235 30% 18%;
+  --popover: 235 30% 10%;
+  --popover-foreground: 235 20% 98%;
+  --primary: 248 90% 66%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 244 65% 58%;
+  --secondary-foreground: 0 0% 100%;
+  --muted: 235 22% 16%;
+  --muted-foreground: 235 14% 62%;
+  --accent: 217 90% 58%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 70% 50%;
+  --destructive-foreground: 0 0% 100%;
+  --input: 235 26% 18%;
+  --ring: 248 90% 66%;
+
+  --chart-1: 248 90% 66%;
+  --chart-2: 217 90% 58%;
+  --chart-3: 200 80% 55%;
+  --chart-4: 160 70% 45%;
+  --chart-5: 280 70% 60%;
+
+  --radius: 0.75rem;
+  --shadow-glow: 0 0 60px rgba(99, 102, 241, 0.32);
+  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(99, 102, 241, 0.1);
+  --shadow-elevated: 0 8px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(99, 102, 241, 0.15);
+
+  --gradient-purple: linear-gradient(135deg, hsl(248 90% 66%) 0%, hsl(225 90% 62%) 50%, hsl(210 90% 56%) 100%);
+  --gradient-dark: linear-gradient(180deg, hsl(234 28% 6%) 0%, hsl(234 28% 3%) 100%);
+  --gradient-card: linear-gradient(135deg, rgba(99, 102, 241, 0.08) 0%, rgba(59, 130, 246, 0.04) 100%);
+  --gradient-glow: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(99, 102, 241, 0.3) 0%, transparent 70%);
+}
