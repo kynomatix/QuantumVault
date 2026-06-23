@@ -821,7 +821,7 @@ function QuantumLabSlide() {
     { icon: <Sparkles className="w-5 h-5" />, label: "Describe It", desc: "Plain English prompt" },
     { icon: <BrainCircuit className="w-5 h-5" />, label: "AI Writes It", desc: "Pine Script generated" },
     { icon: <SlidersHorizontal className="w-5 h-5" />, label: "Optimize", desc: "1,000s of combos" },
-    { icon: <Microscope className="w-5 h-5" />, label: "Backtest", desc: "Historical validation" },
+    { icon: <Microscope className="w-5 h-5" />, label: "Backtest + OOS", desc: "In-sample + holdout" },
     { icon: <Zap className="w-5 h-5" />, label: "Deploy Bot", desc: "Live in minutes" },
   ];
 
@@ -929,7 +929,11 @@ function QuantumLabSlide() {
                 </li>
                 <li className="flex items-start gap-2">
                   <CheckCircle2 className="w-4 h-4 text-fuchsia-400 mt-0.5 flex-shrink-0" />
-                  <span>Dramatically increases stickiness — once a user has an AI-calibrated strategy, they won't leave</span>
+                  <span>Out-of-sample testing and robustness scoring expose curve-fitted strategies before they go live — competitors skip this entirely</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-fuchsia-400 mt-0.5 flex-shrink-0" />
+                  <span>Dramatically increases stickiness — once a user has an AI-calibrated, OOS-validated strategy, they won't leave</span>
                 </li>
               </ul>
             </div>
