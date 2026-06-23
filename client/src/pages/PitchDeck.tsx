@@ -163,7 +163,7 @@ function TitleSlide() {
         variants={fadeIn}
         className="text-xl md:text-2xl lg:text-3xl text-primary font-medium max-w-3xl mb-6 relative z-10"
       >
-        Automated Trading Infrastructure for Pacifica
+        Automated Trading Infrastructure for Solana Perps
       </motion.p>
       
       <motion.p 
@@ -273,8 +273,8 @@ function MarketOpportunitySlide() {
           </h3>
           <ul className="space-y-3 text-sm">
             <li><strong className="text-white">TAM:</strong> <span className="text-muted-foreground">$612B+ monthly DeFi perpetual futures volume</span></li>
-            <li><strong className="text-white">SAM:</strong> <span className="text-muted-foreground">$10B+ Pacifica monthly volume</span></li>
-            <li><strong className="text-white">SOM:</strong> <span className="text-muted-foreground">$300M+ monthly bot-routed volume on Pacifica — Pionex captured $1B+/day on CEX rails; we're the first serious bot platform on Pacifica's $10B/month rails</span></li>
+            <li><strong className="text-white">SAM:</strong> <span className="text-muted-foreground">$10B+ monthly volume across leading Solana perp DEXs (Pacifica, Phoenix, Flash, Drift and more)</span></li>
+            <li><strong className="text-white">SOM:</strong> <span className="text-muted-foreground">$300M+ monthly bot-routed volume across Solana perp DEXs — Pionex captured $1B+/day on CEX rails; we're the first serious multi-exchange bot platform on Solana's perp DEX ecosystem</span></li>
           </ul>
         </div>
         <div className="p-6 rounded-2xl bg-white/[0.02] border border-white/[0.06]">
@@ -385,7 +385,7 @@ function ProductFeaturesSlide() {
         Core Features
       </motion.h2>
       <motion.p variants={fadeIn} className="text-sm text-muted-foreground mb-5 text-center max-w-2xl">
-        Enterprise-grade infrastructure built on Pacifica
+        Multi-exchange infrastructure built for Solana Perps
       </motion.p>
       
       <motion.div variants={fadeIn} className="grid grid-cols-2 md:grid-cols-3 gap-3 max-w-5xl w-full">
