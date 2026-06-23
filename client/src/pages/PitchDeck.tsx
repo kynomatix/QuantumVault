@@ -273,7 +273,7 @@ function MarketOpportunitySlide() {
           </h3>
           <ul className="space-y-3 text-sm">
             <li><strong className="text-white">TAM:</strong> <span className="text-muted-foreground">$612B+ monthly DeFi perpetual futures volume</span></li>
-            <li><strong className="text-white">SAM:</strong> <span className="text-muted-foreground">$10B+ monthly volume across leading Solana perp DEXs (Pacifica, Phoenix, Flash, Drift and more)</span></li>
+            <li><strong className="text-white">SAM:</strong> <span className="text-muted-foreground">$10B+ monthly volume across leading Solana perp DEXs (Pacifica, Phoenix, Flash and more)</span></li>
             <li><strong className="text-white">SOM:</strong> <span className="text-muted-foreground">$300M+ monthly bot-routed volume across Solana perp DEXs — Pionex captured $1B+/day on CEX rails; we're the first serious multi-exchange bot platform on Solana's perp DEX ecosystem</span></li>
           </ul>
         </div>
