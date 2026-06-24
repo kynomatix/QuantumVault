@@ -7,6 +7,7 @@ export const modules: ModuleMap = {
   "./components/mockups/lab-hub-redesign/Launchpad.tsx": () => import("../components/mockups/lab-hub-redesign/Launchpad.tsx"),
   "./components/mockups/wallet-money-hub/AgentBasket.tsx": () => import("../components/mockups/wallet-money-hub/AgentBasket.tsx"),
   "./components/mockups/wallet-money-hub/CleanLedger.tsx": () => import("../components/mockups/wallet-money-hub/CleanLedger.tsx"),
+  "./components/mockups/wallet-money-hub/LendingClarity.tsx": () => import("../components/mockups/wallet-money-hub/LendingClarity.tsx"),
   "./components/mockups/wallet-money-hub/MoneyHub.tsx": () => import("../components/mockups/wallet-money-hub/MoneyHub.tsx"),
   "./components/mockups/wallet-money-hub/OverviewFirst.tsx": () => import("../components/mockups/wallet-money-hub/OverviewFirst.tsx"),
   "./components/mockups/wallet-money-hub/OverviewFlows.tsx": () => import("../components/mockups/wallet-money-hub/OverviewFlows.tsx")
