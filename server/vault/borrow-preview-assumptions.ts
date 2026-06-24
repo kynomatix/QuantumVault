@@ -50,9 +50,9 @@ export interface BorrowPreviewAssumptions {
  */
 export const BORROW_PREVIEW_ASSUMPTIONS: BorrowPreviewAssumptions = {
   suggestedSafeLtv: previewOnly(
-    0.4,
-    true,
-    "OWNER_PENDING: ~40% safe-default LTV hint. The Phase C HARD max-LTV cap is a separate owner decision (audit floated 25-30% for a hands-off product vs our 40-50% band).",
+    0.25,
+    false,
+    "25% safe-default LTV hint — deliberately a buffer BELOW the ratified 0.30 hard max-LTV cap in borrow-risk-policy.ts (Decision Wall #1, 2026-06-24). Still a UI hint only; the enforced cap lives in the policy, never here.",
   ),
   borrowAprHintCeiling: previewOnly(
     0.2,

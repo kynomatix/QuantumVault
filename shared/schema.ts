@@ -441,6 +441,83 @@ export const insertVaultPositionSchema = createInsertSchema(vaultPositions).omit
 export type InsertVaultPosition = z.infer<typeof insertVaultPositionSchema>;
 export type VaultPosition = typeof vaultPositions.$inferSelect;
 
+// Vaults borrow engine (Phase A scaffold → Phase C reads). DB-cache of borrow
+// positions opened against LST collateral via a lending venue (Jupiter Lend on
+// Fluid). On-chain is the single source of truth (mirrors vaultPositions); these
+// rows are a cache + audit trail, never the authority for a money decision.
+// Mirrors the idempotent DDL in server/db.ts (CREATE TABLE IF NOT EXISTS
+// borrow_positions / borrow_operations) so db:push sees no drift. Columns are
+// policy-neutral: the hard max-LTV cap and fee model live in borrow-risk-policy.ts,
+// never in this schema. No writers yet — Phase C wires read-only paths only.
+export const borrowPositions = pgTable("borrow_positions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: text("wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  // NULL = account-level borrow; non-null = a specific bot's per-bot wallet.
+  tradingBotId: varchar("trading_bot_id"),
+  debtVenue: text("debt_venue").notNull(),
+  venueVaultId: text("venue_vault_id"),
+  collateralAssetKey: text("collateral_asset_key").notNull(),
+  collateralMint: text("collateral_mint").notNull(),
+  collateralAmountRaw: text("collateral_amount_raw").notNull().default('0'),
+  debtAssetKey: text("debt_asset_key").notNull().default('usdc'),
+  debtMint: text("debt_mint").notNull(),
+  debtAmountRaw: text("debt_amount_raw").notNull().default('0'),
+  attributedBotId: varchar("attributed_bot_id"),
+  status: text("status").notNull().default('pending'),
+  // Last health read cached for display/monitoring. On-chain remains authority.
+  healthSnapshot: jsonb("health_snapshot").$type<{
+    healthFactor?: number | null;
+    ltv?: number | null;
+    collateralValueUsd?: number | null;
+    debtUsd?: number | null;
+    source?: string;
+    [k: string]: unknown;
+  } | null>(),
+  healthAsOf: timestamp("health_as_of"),
+  healthSource: text("health_source"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  walletIdx: index("idx_borrow_positions_wallet").on(table.walletAddress),
+  botIdx: index("idx_borrow_positions_bot").on(table.tradingBotId).where(sql`trading_bot_id IS NOT NULL`),
+}));
+
+export const insertBorrowPositionSchema = createInsertSchema(borrowPositions).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertBorrowPosition = z.infer<typeof insertBorrowPositionSchema>;
+export type BorrowPosition = typeof borrowPositions.$inferSelect;
+
+// Append-only AUDIT log of every multi-hop borrow/repay/carry operation, so the
+// (future) money state machine is resumable + idempotent: unique operation id +
+// per-step on-chain tx signatures + status/step. Mirrors the audited park/unpark
+// safety model. No writers yet.
+export const borrowOperations = pgTable("borrow_operations", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: text("wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  borrowPositionId: varchar("borrow_position_id"),
+  operationType: text("operation_type").notNull(),
+  status: text("status").notNull().default('pending'),
+  step: text("step"),
+  txSignatures: jsonb("tx_signatures").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+  error: text("error"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  walletIdx: index("idx_borrow_operations_wallet").on(table.walletAddress),
+  positionIdx: index("idx_borrow_operations_position").on(table.borrowPositionId).where(sql`borrow_position_id IS NOT NULL`),
+}));
+
+export const insertBorrowOperationSchema = createInsertSchema(borrowOperations).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertBorrowOperation = z.infer<typeof insertBorrowOperationSchema>;
+export type BorrowOperation = typeof borrowOperations.$inferSelect;
+
 // Phase 1 Vaults: yield-oracle price/rate snapshots. The yield oracle measures
 // REALIZED APY per asset from the movement of its own on-chain price over time,
 // never a protocol's projected/marketing rate. One row per (asset, sample):

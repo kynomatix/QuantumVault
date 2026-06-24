@@ -15,6 +15,8 @@ import {
   botPositions,
   equityEvents,
   vaultPositions,
+  borrowPositions,
+  borrowOperations,
   yieldPriceSnapshots,
   yieldApyCache,
   webhookLogs,
@@ -51,6 +53,8 @@ import {
   type EquityEvent,
   type InsertEquityEvent,
   type VaultPosition,
+  type BorrowPosition,
+  type BorrowOperation,
   type YieldPriceSnapshot,
   type InsertYieldPriceSnapshot,
   type YieldApyCache,
@@ -359,6 +363,15 @@ export interface IStorage {
   getVaultPositionsAllScopes(walletAddress: string): Promise<VaultPosition[]>;
   applyVaultPark(p: { walletAddress: string; tradingBotId?: string | null; assetKey: string; mint: string; tokensReceivedRaw: string; usdcSpent: number; txSignature?: string; txBlockTime?: Date; notes?: string; }): Promise<VaultPosition>;
   applyVaultUnpark(p: { walletAddress: string; tradingBotId?: string | null; assetKey: string; mint: string; tokensSoldRaw: string; usdcReceived: number; txSignature?: string; txBlockTime?: Date; notesPrefix?: string; }): Promise<{ position: VaultPosition; costBasisRemoved: number; realizedPnl: number }>;
+
+  // Vaults borrow engine (Phase C, READ-ONLY). On-chain is the source of truth;
+  // these readers expose the DB-cache/audit rows for display and the exposure
+  // builder. No writers here — borrow/repay money paths are gated on owner go-ahead.
+  getBorrowPosition(walletAddress: string, id: string): Promise<BorrowPosition | undefined>;
+  getBorrowPositions(walletAddress: string, tradingBotId?: string | null): Promise<BorrowPosition[]>;
+  getBorrowPositionsAllScopes(walletAddress: string): Promise<BorrowPosition[]>;
+  getActiveBorrowPositionsAllWallets(): Promise<BorrowPosition[]>;
+  getBorrowOperations(walletAddress: string, borrowPositionId?: string | null): Promise<BorrowOperation[]>;
 
   // Phase 1 Vaults yield oracle: display-only realized-APY price snapshots.
   insertYieldPriceSnapshot(s: InsertYieldPriceSnapshot): Promise<YieldPriceSnapshot>;
@@ -2107,6 +2120,55 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(vaultPositions)
       .where(eq(vaultPositions.walletAddress, walletAddress))
       .orderBy(desc(vaultPositions.updatedAt));
+  }
+
+  // --- Vaults borrow engine (Phase C, READ-ONLY) ---
+  // Scope mirrors the vault readers: tradingBotId === null|undefined ⇒
+  // account-level rows (trading_bot_id IS NULL); a non-null id ⇒ that bot's
+  // per-bot wallet. On-chain remains the source of truth; these are cache reads.
+  private borrowScopeCond(tradingBotId: string | null | undefined) {
+    return tradingBotId == null
+      ? isNull(borrowPositions.tradingBotId)
+      : eq(borrowPositions.tradingBotId, tradingBotId);
+  }
+
+  async getBorrowPosition(walletAddress: string, id: string): Promise<BorrowPosition | undefined> {
+    const result = await db.select().from(borrowPositions)
+      .where(and(eq(borrowPositions.walletAddress, walletAddress), eq(borrowPositions.id, id)))
+      .limit(1);
+    return result[0];
+  }
+
+  async getBorrowPositions(walletAddress: string, tradingBotId: string | null = null): Promise<BorrowPosition[]> {
+    return await db.select().from(borrowPositions)
+      .where(and(eq(borrowPositions.walletAddress, walletAddress), this.borrowScopeCond(tradingBotId)))
+      .orderBy(desc(borrowPositions.updatedAt));
+  }
+
+  // Every borrow row the wallet owns, across ALL scopes (account + per-bot), for
+  // the read-only exposure aggregate. Grouping by scope is the caller's job.
+  async getBorrowPositionsAllScopes(walletAddress: string): Promise<BorrowPosition[]> {
+    return await db.select().from(borrowPositions)
+      .where(eq(borrowPositions.walletAddress, walletAddress))
+      .orderBy(desc(borrowPositions.updatedAt));
+  }
+
+  // Platform-wide active borrow rows for the monitor (Phase C read path) and the
+  // aggregate-exposure circuit-breaker input. Terminal rows ('closed' = repaid,
+  // 'failed' = never opened) are excluded — they carry no live platform debt.
+  async getActiveBorrowPositionsAllWallets(): Promise<BorrowPosition[]> {
+    return await db.select().from(borrowPositions)
+      .where(and(ne(borrowPositions.status, 'closed'), ne(borrowPositions.status, 'failed')))
+      .orderBy(desc(borrowPositions.updatedAt));
+  }
+
+  async getBorrowOperations(walletAddress: string, borrowPositionId: string | null = null): Promise<BorrowOperation[]> {
+    const cond = borrowPositionId == null
+      ? eq(borrowOperations.walletAddress, walletAddress)
+      : and(eq(borrowOperations.walletAddress, walletAddress), eq(borrowOperations.borrowPositionId, borrowPositionId));
+    return await db.select().from(borrowOperations)
+      .where(cond)
+      .orderBy(desc(borrowOperations.createdAt));
   }
 
   // Atomic: add parked tokens + add USDC cost basis (average cost) and record the

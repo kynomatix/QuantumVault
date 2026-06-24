@@ -1503,6 +1503,8 @@ import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, valueV
 import { getEnabledYieldAssets, getYieldAssetByKey } from "./vault/yield-assets";
 import { getYieldTableCached } from "./vault/yield-oracle";
 import { detectParkedYieldTokens as detectParkedYieldTokensPure } from "./vault/parked-tokens";
+import { JupiterLendBorrowRoute } from "./vault/jupiter-lend-borrow-route";
+import { previewBorrowEligibility } from "./vault/borrow-eligibility";
 import { getUserFungibleTokens } from "./swap/helius-tokens.js";
 
 const SWAP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -8670,6 +8672,50 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       res.json(preview);
     } catch (error: any) {
       console.error("[Vault] preview error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // READ-ONLY borrow eligibility + projection (Phase C, brick #4). NEVER moves
+  // money: it reads the live vault config + platform exposure cache, runs the
+  // enforced risk gate, and returns the projection (LTV/health) plus an honest
+  // allow/deny. Borrowing is not live — the gate currently fails closed on the
+  // not-yet-wired oracle-freshness check and the owner-pending beta allowlist;
+  // the projection is still useful. Body: { collateralMint, collateralRaw,
+  // requestedDebtRaw } (raw = base-unit integer strings).
+  app.post("/api/vault/borrow/preview", requireWallet, async (req, res) => {
+    try {
+      const { collateralMint, collateralRaw, requestedDebtRaw } = req.body || {};
+      if (!collateralMint || typeof collateralMint !== "string") {
+        return res.status(400).json({ error: "collateralMint required" });
+      }
+      const parseRaw = (v: unknown, name: string): bigint | { error: string } => {
+        if (typeof v !== "string" || v.trim() === "") return { error: `${name} must be a base-unit integer string` };
+        try {
+          const b = BigInt(v);
+          if (b < BigInt(0)) return { error: `${name} must be non-negative` };
+          return b;
+        } catch {
+          return { error: `${name} must be a base-unit integer string` };
+        }
+      };
+      const collateralParsed = parseRaw(collateralRaw, "collateralRaw");
+      if (typeof collateralParsed === "object") return res.status(400).json(collateralParsed);
+      const debtParsed = parseRaw(requestedDebtRaw, "requestedDebtRaw");
+      if (typeof debtParsed === "object") return res.status(400).json(debtParsed);
+
+      const borrowRoute = new JupiterLendBorrowRoute();
+      const result = await previewBorrowEligibility(
+        req.walletAddress!,
+        { collateralMint, collateralRaw: collateralParsed, requestedDebtRaw: debtParsed },
+        {
+          getVaultConfig: (mint) => borrowRoute.getVaultConfig(mint),
+          getActiveBorrowPositionsAllWallets: () => storage.getActiveBorrowPositionsAllWallets(),
+        },
+      );
+      res.json(result);
+    } catch (error: any) {
+      console.error("[Vault] borrow preview error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
     }
   });
