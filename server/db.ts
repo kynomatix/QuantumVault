@@ -497,6 +497,7 @@ export async function ensureSchema() {
         trading_bot_id varchar,
         debt_venue text NOT NULL,
         venue_vault_id text,
+        venue_position_id text,
         collateral_asset_key text NOT NULL,
         collateral_mint text NOT NULL,
         collateral_amount_raw text NOT NULL DEFAULT '0',
@@ -513,6 +514,9 @@ export async function ensureSchema() {
       )`,
       `CREATE INDEX IF NOT EXISTS idx_borrow_positions_wallet ON borrow_positions (wallet_address)`,
       `CREATE INDEX IF NOT EXISTS idx_borrow_positions_bot ON borrow_positions (trading_bot_id) WHERE trading_bot_id IS NOT NULL`,
+      // Additive: persist the venue's position id (Jupiter Lend NFT) for repay/
+      // close/monitor. Idempotent for DBs created before this column existed.
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS venue_position_id text`,
 
       // --- Vaults borrow engine (Phase A scaffold): money-op AUDIT log. ---
       // Append-only record of every multi-hop borrow/repay/carry operation, so

@@ -196,6 +196,18 @@ export async function computeWalletTotalBalance(
     }
   }
 
+  // Borrowed USDC is a LIABILITY, never equity. Subtract the wallet's open borrow
+  // debt (our authoritative DB ledger, recorded conservatively at open) from the
+  // total. Fail closed: if the debt is unreadable, mark the snapshot partial
+  // rather than silently over-reporting equity by omitting a real liability.
+  try {
+    const borrowDebtUsd = await storage.sumOpenBorrowDebtUsdc(walletAddress);
+    totalBalance -= borrowDebtUsd;
+  } catch {
+    ok = false;
+    console.warn(`[computeWalletTotalBalance] borrow-debt read failed (wallet ${walletAddress.slice(0, 8)}…) — partial total only`);
+  }
+
   return { totalBalance, activeBotCount, ok };
 }
 

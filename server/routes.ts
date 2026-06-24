@@ -1506,6 +1506,8 @@ import { detectParkedYieldTokens as detectParkedYieldTokensPure } from "./vault/
 import { JupiterLendBorrowRoute } from "./vault/jupiter-lend-borrow-route";
 import { previewBorrowEligibility } from "./vault/borrow-eligibility";
 import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
+import { isBorrowOwnerWallet, isCollateralVaultAllowlisted } from "./vault/borrow-allowlist";
+import { executeBorrowOpen, executeBorrowClose } from "./vault/jupiter-lend-borrow-executor";
 import { getUserFungibleTokens } from "./swap/helius-tokens.js";
 
 const SWAP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -8718,6 +8720,151 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       res.json(result);
     } catch (error: any) {
       console.error("[Vault] borrow preview error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // OPEN a borrow: deposit collateral + borrow USDC against it. THE money path.
+  // MVP: account scope only, owner-wallet gated, allowlisted collateral vault
+  // only. The executor re-runs the enforced risk gate immediately before signing
+  // and records borrowed USDC as a LIABILITY. Body: { collateralMint,
+  // collateralRaw, requestedDebtRaw, sessionId } (raw = base-unit integer strings).
+  app.post("/api/vault/borrow/open", requireWallet, async (req, res) => {
+    try {
+      // Owner-wallet gate (fail closed: BORROW_OWNER_WALLET must be set and match).
+      if (!isBorrowOwnerWallet(req.walletAddress!)) {
+        return res.status(403).json({ error: "Borrowing is not available for this wallet yet." });
+      }
+
+      const { collateralMint, collateralRaw, requestedDebtRaw, sessionId } = req.body || {};
+      if (!collateralMint || typeof collateralMint !== "string") {
+        return res.status(400).json({ error: "collateralMint required" });
+      }
+      const parsePositive = (v: unknown, name: string): bigint | { error: string } => {
+        if (typeof v !== "string" || v.trim() === "") return { error: `${name} must be a base-unit integer string` };
+        try {
+          const b = BigInt(v);
+          if (b <= BigInt(0)) return { error: `${name} must be greater than zero` };
+          return b;
+        } catch {
+          return { error: `${name} must be a base-unit integer string` };
+        }
+      };
+      const collateralParsed = parsePositive(collateralRaw, "collateralRaw");
+      if (typeof collateralParsed === "object") return res.status(400).json(collateralParsed);
+      const debtParsed = parsePositive(requestedDebtRaw, "requestedDebtRaw");
+      if (typeof debtParsed === "object") return res.status(400).json(debtParsed);
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+
+      if (!sessionId) return res.status(400).json({ error: "Session ID required for security verification" });
+      const session = getSession(sessionId);
+      if (!session || session.walletAddress !== req.walletAddress) {
+        return res.status(401).json({ error: "Invalid or expired session. Please reconnect your wallet." });
+      }
+      if (!session.umk) {
+        return res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
+      }
+
+      // Collateral allowlist by RESOLVED on-chain vault id (never a client mint).
+      const borrowRoute = new JupiterLendBorrowRoute();
+      const cfg = await borrowRoute.getVaultConfig(collateralMint);
+      if (!cfg) return res.status(400).json({ error: "Borrow vault is unavailable right now." });
+      if (!isCollateralVaultAllowlisted(cfg.vaultId)) {
+        return res.status(403).json({ error: "This collateral is not available for borrowing yet." });
+      }
+
+      // Account scope only (MVP): no botId.
+      const resolved = await resolveVaultScope(req.walletAddress!, wallet, null);
+      if (!resolved.ok) return res.status(resolved.status).json({ error: resolved.error });
+      const { scope } = resolved;
+      if (!scope.agentPublicKey) return res.status(400).json({ error: "Agent wallet not initialized" });
+
+      const agentKeyResult = await decryptVaultScopeKey(scope, req.walletAddress!, wallet, session.umk);
+      if (!agentKeyResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed. Please sign out and sign back in." });
+      }
+
+      let result;
+      try {
+        result = await executeBorrowOpen({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: scope.agentPublicKey,
+          agentSecretKey: agentKeyResult.secretKey,
+          collateralMint,
+          collateralRaw: collateralParsed,
+          requestedDebtRaw: debtParsed,
+          tradingBotId: null,
+        });
+      } finally {
+        agentKeyResult.cleanup();
+      }
+
+      if (!result || !result.success) {
+        return res.status(400).json({ error: result?.error || "Borrow failed" });
+      }
+      res.json(result);
+    } catch (error: any) {
+      console.error("[Vault] borrow open error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // CLOSE a borrow in full: repay ALL debt + withdraw ALL collateral. THE money
+  // path. MVP: account scope only, owner-wallet gated. The wallet must hold
+  // enough USDC to repay. Body: { borrowPositionId, sessionId }.
+  app.post("/api/vault/borrow/close", requireWallet, async (req, res) => {
+    try {
+      if (!isBorrowOwnerWallet(req.walletAddress!)) {
+        return res.status(403).json({ error: "Borrowing is not available for this wallet yet." });
+      }
+
+      const { borrowPositionId, sessionId } = req.body || {};
+      if (!borrowPositionId || typeof borrowPositionId !== "string") {
+        return res.status(400).json({ error: "borrowPositionId required" });
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+
+      if (!sessionId) return res.status(400).json({ error: "Session ID required for security verification" });
+      const session = getSession(sessionId);
+      if (!session || session.walletAddress !== req.walletAddress) {
+        return res.status(401).json({ error: "Invalid or expired session. Please reconnect your wallet." });
+      }
+      if (!session.umk) {
+        return res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
+      }
+
+      const resolved = await resolveVaultScope(req.walletAddress!, wallet, null);
+      if (!resolved.ok) return res.status(resolved.status).json({ error: resolved.error });
+      const { scope } = resolved;
+      if (!scope.agentPublicKey) return res.status(400).json({ error: "Agent wallet not initialized" });
+
+      const agentKeyResult = await decryptVaultScopeKey(scope, req.walletAddress!, wallet, session.umk);
+      if (!agentKeyResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed. Please sign out and sign back in." });
+      }
+
+      let result;
+      try {
+        result = await executeBorrowClose({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: scope.agentPublicKey,
+          agentSecretKey: agentKeyResult.secretKey,
+          borrowPositionId,
+        });
+      } finally {
+        agentKeyResult.cleanup();
+      }
+
+      if (!result || !result.success) {
+        return res.status(400).json({ error: result?.error || "Close failed" });
+      }
+      res.json(result);
+    } catch (error: any) {
+      console.error("[Vault] borrow close error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
     }
   });

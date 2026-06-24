@@ -943,6 +943,16 @@ export interface AgentInstructionsExecResult {
   /** Realized output-token delta, UI units. */
   outputReceived?: number;
   error?: string;
+  /**
+   * TRUE only when the transaction landed on-chain and FAILED atomically (the
+   * signature status carried an `err`). This is the one failure mode where it is
+   * provably safe to treat the operation as "no state changed" even though a
+   * `signature` exists — nothing was committed. A plain `success:false` with a
+   * signature but WITHOUT this flag is AMBIGUOUS (sent, possibly confirmed, but
+   * the output delta could not be verified) and callers must NOT assume the tx
+   * had no effect. Optional/back-compat: only set on the on-chain-failure path.
+   */
+  onChainFailed?: boolean;
 }
 
 /**
@@ -1023,7 +1033,9 @@ export async function executeAgentInstructions(
       await new Promise((r) => setTimeout(r, 1500));
     }
     if (confirmedErr) {
-      return { success: false, signature, error: `${label} failed on-chain: ${JSON.stringify(confirmedErr)}` };
+      // The tx landed and FAILED atomically — nothing was committed. Flag it so
+      // callers can safely treat this as "no state changed" despite the signature.
+      return { success: false, signature, onChainFailed: true, error: `${label} failed on-chain: ${JSON.stringify(confirmedErr)}` };
     }
 
     // 5) Verify the realized output-token delta (retry for RPC lag / late finalization).

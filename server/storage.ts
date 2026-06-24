@@ -372,6 +372,11 @@ export interface IStorage {
   getBorrowPositionsAllScopes(walletAddress: string): Promise<BorrowPosition[]>;
   getActiveBorrowPositionsAllWallets(): Promise<BorrowPosition[]>;
   getBorrowOperations(walletAddress: string, borrowPositionId?: string | null): Promise<BorrowOperation[]>;
+  createBorrowPosition(p: { walletAddress: string; tradingBotId?: string | null; debtVenue: string; venueVaultId?: string | null; venuePositionId?: string | null; collateralAssetKey: string; collateralMint: string; collateralAmountRaw?: string; debtAssetKey?: string; debtMint: string; debtAmountRaw?: string; attributedBotId?: string | null; status?: string; }): Promise<BorrowPosition>;
+  updateBorrowPosition(id: string, patch: { venuePositionId?: string | null; venueVaultId?: string | null; collateralAmountRaw?: string; debtAmountRaw?: string; status?: string; attributedBotId?: string | null; healthSnapshot?: BorrowPosition['healthSnapshot']; healthAsOf?: Date | null; healthSource?: string | null; }, ifStatus?: string): Promise<BorrowPosition | undefined>;
+  createBorrowOperation(p: { walletAddress: string; borrowPositionId?: string | null; operationType: string; status?: string; step?: string | null; }): Promise<BorrowOperation>;
+  updateBorrowOperation(id: string, patch: { status?: string; step?: string | null; error?: string | null; borrowPositionId?: string | null; appendTxSignature?: string; }): Promise<BorrowOperation | undefined>;
+  sumOpenBorrowDebtUsdc(walletAddress: string): Promise<number>;
 
   // Phase 1 Vaults yield oracle: display-only realized-APY price snapshots.
   insertYieldPriceSnapshot(s: InsertYieldPriceSnapshot): Promise<YieldPriceSnapshot>;
@@ -2169,6 +2174,141 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(borrowOperations)
       .where(cond)
       .orderBy(desc(borrowOperations.createdAt));
+  }
+
+  // ---- Borrow money-state WRITERS (Phase D money engine) ---------------------
+  // Mirror the audited park/unpark safety model: a 'pending' position row plus an
+  // append-only operation log give the executor a resumable, idempotent record.
+  // Status transitions use optional CAS (ifStatus) so a resume/recovery holder
+  // can never double-apply a terminal write.
+
+  async createBorrowPosition(p: {
+    walletAddress: string;
+    tradingBotId?: string | null;
+    debtVenue: string;
+    venueVaultId?: string | null;
+    venuePositionId?: string | null;
+    collateralAssetKey: string;
+    collateralMint: string;
+    collateralAmountRaw?: string;
+    debtAssetKey?: string;
+    debtMint: string;
+    debtAmountRaw?: string;
+    attributedBotId?: string | null;
+    status?: string;
+  }): Promise<BorrowPosition> {
+    const rows = await db.insert(borrowPositions).values({
+      walletAddress: p.walletAddress,
+      tradingBotId: p.tradingBotId ?? null,
+      debtVenue: p.debtVenue,
+      venueVaultId: p.venueVaultId ?? null,
+      venuePositionId: p.venuePositionId ?? null,
+      collateralAssetKey: p.collateralAssetKey,
+      collateralMint: p.collateralMint,
+      collateralAmountRaw: p.collateralAmountRaw ?? '0',
+      debtAssetKey: p.debtAssetKey ?? 'usdc',
+      debtMint: p.debtMint,
+      debtAmountRaw: p.debtAmountRaw ?? '0',
+      attributedBotId: p.attributedBotId ?? null,
+      status: p.status ?? 'pending',
+    }).returning();
+    return rows[0];
+  }
+
+  // Update a borrow position. When `ifStatus` is given the write is a CAS: it
+  // only lands if the row is STILL in that status (returns undefined on loss),
+  // so two executors / a crash-resume cannot both apply a terminal transition.
+  async updateBorrowPosition(
+    id: string,
+    patch: {
+      venuePositionId?: string | null;
+      venueVaultId?: string | null;
+      collateralAmountRaw?: string;
+      debtAmountRaw?: string;
+      status?: string;
+      attributedBotId?: string | null;
+      healthSnapshot?: BorrowPosition['healthSnapshot'];
+      healthAsOf?: Date | null;
+      healthSource?: string | null;
+    },
+    ifStatus?: string,
+  ): Promise<BorrowPosition | undefined> {
+    const cond = ifStatus
+      ? and(eq(borrowPositions.id, id), eq(borrowPositions.status, ifStatus))
+      : eq(borrowPositions.id, id);
+    const rows = await db.update(borrowPositions)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(cond)
+      .returning();
+    return rows[0];
+  }
+
+  async createBorrowOperation(p: {
+    walletAddress: string;
+    borrowPositionId?: string | null;
+    operationType: string;
+    status?: string;
+    step?: string | null;
+  }): Promise<BorrowOperation> {
+    const rows = await db.insert(borrowOperations).values({
+      walletAddress: p.walletAddress,
+      borrowPositionId: p.borrowPositionId ?? null,
+      operationType: p.operationType,
+      status: p.status ?? 'pending',
+      step: p.step ?? null,
+    }).returning();
+    return rows[0];
+  }
+
+  // Update an operation-log row. `appendTxSignature` does an atomic jsonb array
+  // append (row-level), so per-step signatures accumulate without a read-modify-
+  // write race. All other fields are plain sets.
+  async updateBorrowOperation(
+    id: string,
+    patch: {
+      status?: string;
+      step?: string | null;
+      error?: string | null;
+      borrowPositionId?: string | null;
+      appendTxSignature?: string;
+    },
+  ): Promise<BorrowOperation | undefined> {
+    const sets: Record<string, unknown> = { updatedAt: new Date() };
+    if (patch.status !== undefined) sets.status = patch.status;
+    if (patch.step !== undefined) sets.step = patch.step;
+    if (patch.error !== undefined) sets.error = patch.error;
+    if (patch.borrowPositionId !== undefined) sets.borrowPositionId = patch.borrowPositionId;
+    if (patch.appendTxSignature) {
+      sets.txSignatures = sql`${borrowOperations.txSignatures} || ${JSON.stringify([patch.appendTxSignature])}::jsonb`;
+    }
+    const rows = await db.update(borrowOperations).set(sets).where(eq(borrowOperations.id, id)).returning();
+    return rows[0];
+  }
+
+  // Sum of the wallet's OPEN borrow debt (USDC), in USD — the liability to
+  // subtract from displayed net worth so borrowed USDC sitting in the wallet is
+  // not counted as equity. Sources the DB cache (refreshed from on-chain on
+  // open/close/monitor), mirroring how parked vault value is surfaced. Only
+  // USDC-denominated debt is summed (MVP is USDC-only); terminal rows excluded.
+  async sumOpenBorrowDebtUsdc(walletAddress: string): Promise<number> {
+    const rows = await db.select({
+      debtAmountRaw: borrowPositions.debtAmountRaw,
+      debtAssetKey: borrowPositions.debtAssetKey,
+    }).from(borrowPositions)
+      .where(and(
+        eq(borrowPositions.walletAddress, walletAddress),
+        ne(borrowPositions.status, 'closed'),
+        ne(borrowPositions.status, 'failed'),
+      ));
+    let totalRaw = BigInt(0);
+    for (const r of rows) {
+      if (String(r.debtAssetKey).toLowerCase() !== 'usdc') continue;
+      try {
+        const v = BigInt(r.debtAmountRaw);
+        if (v > BigInt(0)) totalRaw += v;
+      } catch { /* writes are always valid integer strings; unreachable */ }
+    }
+    return new Decimal(totalRaw.toString()).div(1_000_000).toNumber();
   }
 
   // Atomic: add parked tokens + add USDC cost basis (average cost) and record the

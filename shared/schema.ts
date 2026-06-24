@@ -456,6 +456,10 @@ export const borrowPositions = pgTable("borrow_positions", {
   tradingBotId: varchar("trading_bot_id"),
   debtVenue: text("debt_venue").notNull(),
   venueVaultId: text("venue_vault_id"),
+  // The venue's own position identifier (Jupiter Lend position NFT id). Minted at
+  // open; required to repay/close/monitor the EXACT position later. Null until the
+  // open transaction confirms and the venue assigns it.
+  venuePositionId: text("venue_position_id"),
   collateralAssetKey: text("collateral_asset_key").notNull(),
   collateralMint: text("collateral_mint").notNull(),
   collateralAmountRaw: text("collateral_amount_raw").notNull().default('0'),
