@@ -1506,7 +1506,7 @@ import { detectParkedYieldTokens as detectParkedYieldTokensPure } from "./vault/
 import { JupiterLendBorrowRoute } from "./vault/jupiter-lend-borrow-route";
 import { previewBorrowEligibility } from "./vault/borrow-eligibility";
 import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
-import { isBorrowOwnerWallet, isCollateralVaultAllowlisted } from "./vault/borrow-allowlist";
+import { isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose } from "./vault/jupiter-lend-borrow-executor";
 import { getUserFungibleTokens } from "./swap/helius-tokens.js";
 
@@ -8679,6 +8679,39 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     }
   });
 
+  // READ-ONLY launch borrow config: the allowlisted collateral vault(s) the UI
+  // renders the Borrow form from (collateral symbol/decimals, max LTV, live
+  // borrowable, oracle price). Server-derived from ALLOWED_BORROW_VAULT_IDS —
+  // the client never supplies a vault id or mint. `eligible` tells the UI
+  // whether the owner-gated money path is open for this wallet. No money path,
+  // no UMK/session; reads only public protocol config + the caller's wallet.
+  app.get("/api/vault/borrow/config", requireWallet, async (req, res) => {
+    try {
+      const borrowRoute = new JupiterLendBorrowRoute();
+      const configs = await borrowRoute.getLaunchVaultConfigs(ALLOWED_BORROW_VAULT_IDS);
+      const collaterals = configs.map((c) => ({
+        vaultId: c.vaultId,
+        collateralMint: c.collateralMint,
+        collateralSymbol: c.collateralSymbol,
+        collateralDecimals: c.collateralDecimals,
+        debtMint: c.debtMint,
+        debtSymbol: c.debtSymbol,
+        debtDecimals: c.debtDecimals,
+        maxLtv: c.maxLtv,
+        liquidationThreshold: c.liquidationThreshold,
+        borrowApr: c.borrowApr,
+        minimumBorrowingRaw: c.minimumBorrowingRaw,
+        borrowableUsdcRaw: c.borrowableUsdcRaw,
+        oraclePriceLiquidateUsd: c.oraclePriceLiquidateUsd,
+        marketPriceUsd: c.marketPriceUsd,
+      }));
+      res.json({ eligible: isBorrowOwnerWallet(req.walletAddress!), collaterals });
+    } catch (error: any) {
+      console.error("[Vault] borrow config read error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
   // READ-ONLY borrow eligibility + projection (Phase C, brick #4). NEVER moves
   // money: it reads the live vault config + platform exposure cache, runs the
   // enforced risk gate, and returns the projection (LTV/health) plus an honest
@@ -8693,11 +8726,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(400).json({ error: "collateralMint required" });
       }
       const parseRaw = (v: unknown, name: string): bigint | { error: string } => {
-        if (typeof v !== "string" || v.trim() === "") return { error: `${name} must be a base-unit integer string` };
+        // Strict: base-unit integer strings only (no 0x.., +1, whitespace, decimals).
+        if (typeof v !== "string" || !/^\d+$/.test(v)) return { error: `${name} must be a base-unit integer string` };
         try {
-          const b = BigInt(v);
-          if (b < BigInt(0)) return { error: `${name} must be non-negative` };
-          return b;
+          return BigInt(v);
         } catch {
           return { error: `${name} must be a base-unit integer string` };
         }
@@ -8741,7 +8773,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(400).json({ error: "collateralMint required" });
       }
       const parsePositive = (v: unknown, name: string): bigint | { error: string } => {
-        if (typeof v !== "string" || v.trim() === "") return { error: `${name} must be a base-unit integer string` };
+        // Strict: base-unit integer strings only (no 0x.., +1, whitespace, decimals).
+        if (typeof v !== "string" || !/^\d+$/.test(v)) return { error: `${name} must be a base-unit integer string` };
         try {
           const b = BigInt(v);
           if (b <= BigInt(0)) return { error: `${name} must be greater than zero` };

@@ -1,6 +1,6 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { walletAuthHeaders } from "@/lib/queryClient";
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { useLocation } from 'wouter';
 import { useWallet } from '@/hooks/useWallet';
@@ -71,6 +71,47 @@ interface BorrowPositionsResponse {
   positions: BorrowPosition[];
 }
 
+// Launch borrow collateral config (server-derived from the on-chain vault). The
+// client NEVER supplies a vault id or mint — it only reads these to render the
+// form and convert typed amounts to base units.
+interface BorrowCollateral {
+  vaultId: number;
+  collateralMint: string;
+  collateralSymbol: string;
+  collateralDecimals: number;
+  debtMint: string;
+  debtSymbol: string;
+  debtDecimals: number;
+  maxLtv: number;
+  liquidationThreshold: number;
+  borrowApr: number;
+  minimumBorrowingRaw: string;
+  borrowableUsdcRaw: string;
+  oraclePriceLiquidateUsd: number;
+  marketPriceUsd: number;
+}
+
+interface BorrowConfigResponse {
+  eligible: boolean;
+  collaterals: BorrowCollateral[];
+}
+
+// Read-only projection from the server risk gate. `allowed` reflects the FULL
+// enforced gate (incl. the owner/allowlist check); it is advisory on the client.
+interface BorrowPreviewResult {
+  ok: boolean;
+  allowed: boolean;
+  projection: {
+    collateralValueUsd: number | null;
+    projectedLtv: number | null;
+    projectedHealthFactor: number | null;
+    effectiveMaxLtv: number | null;
+    projectedDebtUsd: number | null;
+    maxAllowedAdditionalDebtRaw: string | null;
+  } | null;
+  reasons: { code: string; severity: string; message: string }[];
+}
+
 interface WalletContentProps {
   initialTab?: 'deposit' | 'withdraw' | 'gas';
 }
@@ -85,6 +126,23 @@ async function getSessionId(): Promise<string> {
     throw new Error('No active session. Please reconnect your wallet.');
   }
   return data.sessionId as string;
+}
+
+// Convert a user-typed decimal amount into a base-unit integer STRING for a money
+// path. String math only (never parseFloat): rejects empty, negatives, scientific
+// notation, commas, and over-precision (more fraction digits than `decimals`).
+// Returns null on any invalid input so callers fail closed.
+function toRawBaseUnits(amount: string, decimals: number): string | null {
+  const s = (amount ?? '').trim();
+  if (!/^\d+(\.\d+)?$/.test(s)) return null;
+  const [intPart, fracPart = ''] = s.split('.');
+  if (fracPart.length > decimals) return null;
+  const combined = intPart + fracPart.padEnd(decimals, '0');
+  try {
+    return BigInt(combined).toString();
+  } catch {
+    return null;
+  }
 }
 
 type KpiTone = 'primary' | 'accent' | 'neutral' | 'emerald';
@@ -168,6 +226,15 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
   const [borrow, setBorrow] = useState<BorrowPositionsResponse | null>(null);
   const [closingLoanId, setClosingLoanId] = useState<string | null>(null);
 
+  const [borrowConfig, setBorrowConfig] = useState<BorrowConfigResponse | null>(null);
+  const [borrowConfigLoading, setBorrowConfigLoading] = useState(false);
+  const [borrowCollateralAmount, setBorrowCollateralAmount] = useState('');
+  const [borrowDebtAmount, setBorrowDebtAmount] = useState('');
+  const [borrowPreview, setBorrowPreview] = useState<BorrowPreviewResult | null>(null);
+  const [borrowPreviewLoading, setBorrowPreviewLoading] = useState(false);
+  const [isOpeningBorrow, setIsOpeningBorrow] = useState(false);
+  const borrowPreviewSeqRef = useRef(0);
+
   const [copiedAgentAddress, setCopiedAgentAddress] = useState(false);
 
   const [solDepositAmount, setSolDepositAmount] = useState('');
@@ -242,20 +309,85 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
     }
   };
 
+  // Read the launch borrow config (allowlisted collateral + live vault facts) and
+  // whether the owner-gated money path is open for this wallet. Read-only.
+  const fetchBorrowConfig = async () => {
+    if (!publicKeyString) return;
+    setBorrowConfigLoading(true);
+    try {
+      const res = await fetch('/api/vault/borrow/config', {
+        credentials: 'include',
+        headers: walletAuthHeaders(),
+      });
+      if (!res.ok) { setBorrowConfig(null); return; }
+      const data = await safeResponseJson(res);
+      setBorrowConfig(data);
+    } catch (error) {
+      console.error('Error fetching borrow config:', error);
+      setBorrowConfig(null);
+    } finally {
+      setBorrowConfigLoading(false);
+    }
+  };
+
   useEffect(() => {
     // Clear any prior loan data immediately on wallet switch/disconnect so a stale
     // (other-wallet) loan card can never flash if the refetch is slow or fails.
     setBorrow(null);
+    setBorrowConfig(null);
+    setBorrowPreview(null);
+    setBorrowCollateralAmount('');
+    setBorrowDebtAmount('');
     if (connected && publicKeyString) {
       fetchCapitalPool();
       fetchAgentBalance();
       fetchUserSolBalance();
       fetchBorrowPositions();
+      fetchBorrowConfig();
     }
   }, [connected, publicKeyString]);
 
+  // Debounced, race-guarded live borrow projection. Read-only: asks the server
+  // risk gate what a hypothetical borrow would look like (LTV/health) and whether
+  // it would be allowed. The `allowed` shown here is ADVISORY — the open route
+  // re-runs the full gate immediately before signing.
+  useEffect(() => {
+    // Invalidate any in-flight preview on EVERY input change (incl. clear/invalid),
+    // so a slow prior request can't write a stale projection back after the user
+    // has already changed or cleared the amount.
+    const seq = ++borrowPreviewSeqRef.current;
+    const cfg = borrowConfig?.collaterals?.[0];
+    if (!cfg) { setBorrowPreview(null); setBorrowPreviewLoading(false); return; }
+    const collRaw = toRawBaseUnits(borrowCollateralAmount, cfg.collateralDecimals);
+    const debtRaw = toRawBaseUnits(borrowDebtAmount || '0', cfg.debtDecimals);
+    if (collRaw === null || debtRaw === null || BigInt(collRaw) <= 0n) {
+      setBorrowPreview(null);
+      setBorrowPreviewLoading(false);
+      return;
+    }
+    setBorrowPreviewLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch('/api/vault/borrow/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...walletAuthHeaders() },
+          body: JSON.stringify({ collateralMint: cfg.collateralMint, collateralRaw: collRaw, requestedDebtRaw: debtRaw }),
+          credentials: 'include',
+        });
+        const data = await safeResponseJson(res);
+        if (seq !== borrowPreviewSeqRef.current) return;
+        setBorrowPreview(res.ok ? data : null);
+      } catch {
+        if (seq === borrowPreviewSeqRef.current) setBorrowPreview(null);
+      } finally {
+        if (seq === borrowPreviewSeqRef.current) setBorrowPreviewLoading(false);
+      }
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [borrowCollateralAmount, borrowDebtAmount, borrowConfig]);
+
   const handleRefresh = async () => {
-    await Promise.all([fetchUsdcBalance(), fetchCapitalPool(), fetchAgentBalance(), fetchUserSolBalance(), fetchBorrowPositions()]);
+    await Promise.all([fetchUsdcBalance(), fetchCapitalPool(), fetchAgentBalance(), fetchUserSolBalance(), fetchBorrowPositions(), fetchBorrowConfig()]);
     toast({ title: 'Balances refreshed' });
   };
 
@@ -760,8 +892,15 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
         credentials: 'include',
       });
       const data = await safeResponseJson(response);
-      if (!response.ok) throw new Error(data.error || 'Failed to close loan');
-      toast({ title: 'Loan closed', description: 'Your debt was repaid and your collateral returned.' });
+      if (!response.ok || !data.success) throw new Error(data.error || 'Failed to close loan');
+      const warn = data.verifyWarning || data.dbWarning;
+      if (data.finalized === true) {
+        toast({ title: 'Loan closed', description: warn || 'Your debt was repaid and your collateral returned.' });
+      } else {
+        // Repayment tx landed but on-chain verification is still pending. Do NOT
+        // claim the loan is closed; keep the liability visible until reconciled.
+        toast({ title: 'Repayment sent \u2014 verifying', description: warn || 'The repayment landed on-chain and we\u2019re confirming it. Your loan stays listed until it\u2019s verified closed.' });
+      }
       await Promise.all([fetchBorrowPositions(), fetchAgentBalance(), fetchUsdcBalance(), fetchCapitalPool()]);
     } catch (error: any) {
       console.error('Close loan error:', error);
@@ -771,11 +910,66 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
     }
   };
 
+  // Open a borrow: lock collateral + borrow USDC. THE money path on the client.
+  // Amounts are parsed to base-unit strings (never floats); the server re-runs the
+  // full risk gate before signing. Treat ONLY response.ok && data.success as
+  // success — a signature can be present on a failed attempt.
+  const handleOpenBorrow = async () => {
+    const cfg = borrowConfig?.collaterals?.[0];
+    if (!cfg) return;
+    const collRaw = toRawBaseUnits(borrowCollateralAmount, cfg.collateralDecimals);
+    const debtRaw = toRawBaseUnits(borrowDebtAmount, cfg.debtDecimals);
+    if (collRaw === null || debtRaw === null || BigInt(collRaw) <= 0n || BigInt(debtRaw) <= 0n) {
+      toast({ title: 'Enter valid amounts', description: 'Check the collateral and borrow amounts.', variant: 'destructive' });
+      return;
+    }
+    setIsOpeningBorrow(true);
+    try {
+      const sessionId = await getSessionId();
+      const response = await fetch('/api/vault/borrow/open', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...walletAuthHeaders() },
+        body: JSON.stringify({ collateralMint: cfg.collateralMint, collateralRaw: collRaw, requestedDebtRaw: debtRaw, sessionId }),
+        credentials: 'include',
+      });
+      const data = await safeResponseJson(response);
+      if (!response.ok || !data.success) throw new Error(data.error || 'Borrow failed');
+      const warn = data.verifyWarning || data.dbWarning;
+      toast({
+        title: 'Borrow complete',
+        description: warn || 'Your USDC loan is open. Borrowed USDC is a liability you owe.',
+      });
+      setBorrowCollateralAmount('');
+      setBorrowDebtAmount('');
+      setBorrowPreview(null);
+      await Promise.all([fetchBorrowPositions(), fetchBorrowConfig(), fetchAgentBalance(), fetchUsdcBalance(), fetchCapitalPool()]);
+    } catch (error: any) {
+      console.error('Open borrow error:', error);
+      toast({ title: 'Could not borrow', description: error.message || 'Please try again', variant: 'destructive' });
+      // Refresh advisory config/eligibility so the UI reflects server truth.
+      fetchBorrowConfig();
+    } finally {
+      setIsOpeningBorrow(false);
+    }
+  };
+
   if (!connected) {
     return null;
   }
 
   const isLoading = usdcLoading || capitalLoading || agentLoading || solLoading;
+
+  const borrowCol = borrowConfig?.collaterals?.[0] ?? null;
+  const borrowProj = borrowPreview?.projection ?? null;
+  const borrowCollRaw = borrowCol ? toRawBaseUnits(borrowCollateralAmount, borrowCol.collateralDecimals) : null;
+  const borrowDebtRaw = borrowCol ? toRawBaseUnits(borrowDebtAmount, borrowCol.debtDecimals) : null;
+  const borrowAmountsValid = !!borrowCollRaw && !!borrowDebtRaw && BigInt(borrowCollRaw) > 0n && BigInt(borrowDebtRaw) > 0n;
+  const borrowBlockReasons = borrowPreview && !borrowPreview.allowed
+    ? borrowPreview.reasons.filter((r) => r.severity !== 'info')
+    : [];
+  const canBorrow = !!borrowConfig?.eligible && !!borrowPreview?.allowed && borrowAmountsValid && !borrowPreviewLoading && !isOpeningBorrow;
+  const fmtPct = (f: number | null | undefined) => (f == null || !Number.isFinite(f) ? '\u2014' : `${(f * 100).toFixed(1)}%`);
+  const fmtUsd = (n: number | null | undefined) => (n == null || !Number.isFinite(n) ? '\u2014' : `$${n.toFixed(2)}`);
 
   return (
     <motion.div
@@ -983,7 +1177,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       <Card className="border-border/50 bg-card/50 backdrop-blur-sm">
         <CardContent className="pt-6">
           <Tabs defaultValue={initialTab} className="w-full">
-            <TabsList className="grid w-full grid-cols-3 mb-6">
+            <TabsList className="grid w-full grid-cols-5 mb-6">
               <TabsTrigger value="deposit" className="flex items-center gap-2" data-testid="tab-deposit">
                 <ArrowDownToLine className="w-4 h-4" />
                 <span className="hidden sm:inline">Deposit</span>
@@ -991,6 +1185,14 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
               <TabsTrigger value="withdraw" className="flex items-center gap-2" data-testid="tab-withdraw">
                 <ArrowUpFromLine className="w-4 h-4" />
                 <span className="hidden sm:inline">Withdraw</span>
+              </TabsTrigger>
+              <TabsTrigger value="borrow" className="flex items-center gap-2" data-testid="tab-borrow">
+                <Landmark className="w-4 h-4" />
+                <span className="hidden sm:inline">Borrow</span>
+              </TabsTrigger>
+              <TabsTrigger value="repay" className="flex items-center gap-2" data-testid="tab-repay">
+                <RotateCcw className="w-4 h-4" />
+                <span className="hidden sm:inline">Repay</span>
               </TabsTrigger>
               <TabsTrigger value="gas" className="flex items-center gap-2" data-testid="tab-gas">
                 <Fuel className="w-4 h-4" />
@@ -1102,6 +1304,177 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                     </>
                   )}
                 </Button>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="borrow" className="space-y-4">
+              <div className="flex items-center justify-center gap-4 py-1">
+                <div className="flex items-center gap-2 px-3 py-2 bg-muted/50 rounded-lg">
+                  <Coins className="w-4 h-4 text-muted-foreground" />
+                  <span className="text-sm font-medium">{borrowCol ? `${borrowCol.collateralSymbol} collateral` : 'Collateral'}</span>
+                </div>
+                <ArrowRight className="w-5 h-5 text-muted-foreground" />
+                <div className="flex items-center gap-2 px-3 py-2 bg-accent/10 border border-accent/20 rounded-lg">
+                  <Landmark className="w-4 h-4 text-accent" />
+                  <span className="text-sm font-medium text-accent">Borrow USDC</span>
+                </div>
+              </div>
+
+              {borrowConfigLoading && !borrowConfig ? (
+                <div className="flex justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-muted-foreground" /></div>
+              ) : !borrowCol ? (
+                <div className="p-5 bg-muted/30 rounded-xl text-sm text-muted-foreground text-center" data-testid="text-borrow-unavailable">
+                  Borrowing is unavailable right now. Please try again shortly.
+                </div>
+              ) : (
+                <div className="p-5 bg-muted/30 rounded-xl space-y-5">
+                  <div className="flex items-start gap-2 p-3 rounded-lg bg-accent/10 border border-accent/20">
+                    <AlertTriangle className="w-4 h-4 text-accent mt-0.5 shrink-0" />
+                    <p className="text-xs text-muted-foreground">
+                      Borrowing locks your {borrowCol.collateralSymbol} as collateral and creates a USDC loan you owe. If {borrowCol.collateralSymbol} falls in value, your collateral can be liquidated. Borrowed USDC is a liability, not a deposit.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="text-sm font-medium">Collateral ({borrowCol.collateralSymbol})</label>
+                    <Input
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="0.0"
+                      value={borrowCollateralAmount}
+                      onChange={(e) => setBorrowCollateralAmount(e.target.value)}
+                      className="mt-2 text-lg"
+                      data-testid="input-borrow-collateral"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1.5">
+                      The {borrowCol.collateralSymbol} must already be held by your trading agent. It is locked while the loan is open.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="text-sm font-medium">Borrow (USDC)</label>
+                    <Input
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={borrowDebtAmount}
+                      onChange={(e) => setBorrowDebtAmount(e.target.value)}
+                      className="mt-2 text-lg"
+                      data-testid="input-borrow-debt"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1.5">
+                      Max loan-to-value {fmtPct(borrowCol.maxLtv)} · Borrow APR {fmtPct(borrowCol.borrowApr)}
+                    </p>
+                  </div>
+
+                  {borrowAmountsValid && (
+                    <div className="rounded-lg border border-border bg-background/40 p-4 space-y-2" data-testid="panel-borrow-projection">
+                      {borrowPreviewLoading ? (
+                        <div className="flex items-center justify-center py-2"><Loader2 className="w-4 h-4 animate-spin text-muted-foreground" /></div>
+                      ) : borrowProj ? (
+                        <>
+                          <div className="flex justify-between text-sm">
+                            <span className="text-muted-foreground">Collateral value</span>
+                            <span className="tabular-nums" data-testid="text-borrow-collateral-value">{fmtUsd(borrowProj.collateralValueUsd)}</span>
+                          </div>
+                          <div className="flex justify-between text-sm">
+                            <span className="text-muted-foreground">Projected loan-to-value</span>
+                            <span className="tabular-nums" data-testid="text-borrow-ltv">{fmtPct(borrowProj.projectedLtv)} <span className="text-muted-foreground">/ {fmtPct(borrowProj.effectiveMaxLtv)} max</span></span>
+                          </div>
+                          <div className="flex justify-between text-sm">
+                            <span className="text-muted-foreground">Health factor</span>
+                            <span className="tabular-nums" data-testid="text-borrow-health">{borrowProj.projectedHealthFactor == null || !Number.isFinite(borrowProj.projectedHealthFactor) ? '\u2014' : borrowProj.projectedHealthFactor.toFixed(2)}</span>
+                          </div>
+                          <div className="flex justify-between text-sm">
+                            <span className="text-muted-foreground">Liquidation reference price</span>
+                            <span className="tabular-nums" data-testid="text-borrow-liq-price">{fmtUsd(borrowCol.oraclePriceLiquidateUsd)} <span className="text-muted-foreground">/ {borrowCol.collateralSymbol}</span></span>
+                          </div>
+                        </>
+                      ) : (
+                        <p className="text-sm text-muted-foreground text-center">Projection unavailable right now.</p>
+                      )}
+                    </div>
+                  )}
+
+                  {borrowBlockReasons.length > 0 && (
+                    <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 space-y-1" data-testid="panel-borrow-reasons">
+                      {borrowBlockReasons.map((r, i) => (
+                        <p key={i} className="text-xs text-destructive flex items-start gap-1.5">
+                          <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" /> {r.message}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+
+                  {!borrowConfig?.eligible && (
+                    <p className="text-xs text-muted-foreground text-center" data-testid="text-borrow-not-enabled">
+                      Borrowing isn't enabled for your wallet yet.
+                    </p>
+                  )}
+
+                  <Button
+                    className="w-full bg-gradient-to-r from-accent to-primary h-12 text-base"
+                    onClick={handleOpenBorrow}
+                    disabled={!canBorrow}
+                    data-testid="button-borrow"
+                  >
+                    {isOpeningBorrow ? (
+                      <><Loader2 className="w-5 h-5 mr-2 animate-spin" /> Processing...</>
+                    ) : (
+                      <><Landmark className="w-5 h-5 mr-2" /> Borrow USDC</>
+                    )}
+                  </Button>
+                </div>
+              )}
+            </TabsContent>
+
+            <TabsContent value="repay" className="space-y-4">
+              <div className="p-5 bg-muted/30 rounded-xl space-y-4">
+                <div className="flex items-center gap-2">
+                  <RotateCcw className="w-4 h-4 text-accent" />
+                  <span className="text-sm font-medium">Repay a loan in full</span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Repaying closes your loan completely and returns your collateral. Your trading agent must hold enough USDC to cover the debt plus a small buffer. Partial repayment isn't available yet.
+                </p>
+                {borrow === null ? (
+                  <div className="flex justify-center py-6"><Loader2 className="w-5 h-5 animate-spin text-muted-foreground" /></div>
+                ) : !borrow.eligible ? (
+                  <p className="text-sm text-muted-foreground" data-testid="text-repay-not-enabled">Borrowing isn't enabled for your wallet yet.</p>
+                ) : borrow.positions.length === 0 ? (
+                  <p className="text-sm text-muted-foreground" data-testid="text-no-loans">You have no open loans.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {borrow.positions.map((p) => {
+                      const d = p.debtAmountRaw ? Number(p.debtAmountRaw) / 1e6 : null;
+                      const dUsd = d != null && Number.isFinite(d) ? d : null;
+                      return (
+                        <div key={p.id} className="rounded-xl border border-border bg-background/40 p-4 space-y-3" data-testid={`repay-loan-${p.id}`}>
+                          <div>
+                            <p className="text-xs text-muted-foreground">Outstanding debt</p>
+                            <p className="text-xl font-semibold tabular-nums text-accent" data-testid={`text-repay-debt-${p.id}`}>
+                              {dUsd === null ? '\u2014' : `$${dUsd.toFixed(2)}`}
+                              <span className="text-xs font-normal text-muted-foreground ml-1">USDC</span>
+                            </p>
+                          </div>
+                          <Button
+                            variant="outline"
+                            className="w-full border-accent/40 text-accent hover:bg-accent/10"
+                            onClick={() => handleCloseLoan(p.id)}
+                            disabled={closingLoanId === p.id}
+                            data-testid={`button-repay-loan-${p.id}`}
+                          >
+                            {closingLoanId === p.id ? (
+                              <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Repaying...</>
+                            ) : (
+                              <><RotateCcw className="w-4 h-4 mr-2" /> Repay in full & return collateral</>
+                            )}
+                          </Button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </TabsContent>
 

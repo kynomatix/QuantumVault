@@ -353,6 +353,31 @@ export class JupiterLendBorrowRoute {
     }
   }
 
+  /**
+   * Decoded configs for the LAUNCH-allowlisted borrow vaults — the read-only
+   * source the UI uses to render the Borrow form (collateral symbol/decimals,
+   * max LTV, live borrowable, oracle price). It is server-derived: the caller
+   * passes the launch allowlist (`ALLOWED_BORROW_VAULT_IDS`); the client never
+   * supplies vault ids or mints. One `getVaults()` fetch, decode each row, keep
+   * only USDC-debt vaults whose decoded `vaultId` is in the allowlist. Returns
+   * [] (fail closed) on any read/decoding failure — never a guessed config.
+   */
+  async getLaunchVaultConfigs(allowedVaultIds: ReadonlySet<number>): Promise<BorrowVaultConfig[]> {
+    try {
+      const { Client } = await import("@jup-ag/lend/api");
+      const client = new Client();
+      const vaults = await client.borrow.getVaults();
+      const out: BorrowVaultConfig[] = [];
+      for (const v of vaults) {
+        const cfg = decodeVaultConfig(v);
+        if (cfg && allowedVaultIds.has(cfg.vaultId)) out.push(cfg);
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
   /** Convenience: fetch config then project a hypothetical borrow. */
   async previewBorrowForCollateral(
     collateralMint: string,
