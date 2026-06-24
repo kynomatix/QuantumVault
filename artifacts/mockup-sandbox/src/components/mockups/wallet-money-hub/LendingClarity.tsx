@@ -856,8 +856,9 @@ export function LendingClarity() {
           <Button variant="outline" size="sm" className="shrink-0"><RefreshCw className="w-4 h-4 mr-2" /> Refresh</Button>
         </div>
 
-        {/* KPI strip - the lending picture up top */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* KPI strip - lending totals up top. Health is PER POOL (pools are
+            isolated), so there is deliberately no single aggregate health number. */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <Card className="border-teal-500/20 bg-teal-500/5">
             <CardContent className="p-5">
               <div className="flex items-center gap-2 text-xs text-muted-foreground"><CoinsIcon className="w-3.5 h-3.5 text-teal-300" /> Total Collateral</div>
@@ -869,6 +870,7 @@ export function LendingClarity() {
             <CardContent className="p-5">
               <div className="flex items-center gap-2 text-xs text-muted-foreground"><TrendingUp className="w-3.5 h-3.5 text-accent" /> Available to Borrow</div>
               <div className="text-2xl font-semibold tabular-nums text-accent mt-1.5">{fmtUsd(AVAILABLE_TO_BORROW)}</div>
+              <div className="text-[11px] text-muted-foreground mt-0.5">across all pools</div>
             </CardContent>
           </Card>
           <Card className="border-border bg-card">
@@ -876,13 +878,6 @@ export function LendingClarity() {
               <div className="flex items-center gap-2 text-xs text-muted-foreground"><Landmark className="w-3.5 h-3.5 text-muted-foreground" /> Borrowed</div>
               <div className="text-2xl font-semibold tabular-nums mt-1.5">{fmtUsd(TOTAL_BORROWED)}</div>
               <div className="text-[11px] text-muted-foreground mt-0.5">of {fmtUsd(TOTAL_BORROW_LIMIT)} limit · a liability</div>
-            </CardContent>
-          </Card>
-          <Card className="border-border bg-card">
-            <CardContent className="p-5">
-              <div className="flex items-center gap-2 text-xs text-muted-foreground"><HeartPulse className="w-3.5 h-3.5 text-emerald-400" /> Loan Health</div>
-              <div className="text-2xl font-semibold tabular-nums text-emerald-300 mt-1.5">82%</div>
-              <div className="text-[11px] text-emerald-400/70 mt-0.5">Safe · well above liquidation</div>
             </CardContent>
           </Card>
         </div>
@@ -906,55 +901,12 @@ export function LendingClarity() {
             </CardContent>
           </Card>
 
-          <Card className="border-primary/20 bg-primary/5">
-            <CardContent className="p-6 space-y-4">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-lg bg-primary/15 flex items-center justify-center"><Bot className="w-4.5 h-4.5 text-primary" /></div>
-                <div>
-                  <h2 className="font-semibold leading-tight">Trading Agent</h2>
-                  <p className="text-xs text-muted-foreground">Server-managed · trades & holds collateral</p>
-                </div>
-              </div>
-              <AddressRow address="4kMt…2aB1" copied={copiedAgent} onCopy={() => copy("agent")} external />
-              <div className="grid grid-cols-2 gap-3">
-                <div className="rounded-xl border border-primary/20 bg-primary/10 p-4"><div className="text-xs text-primary/80">Trading USDC</div><div className="text-xl font-semibold tabular-nums mt-1 text-primary">$4,820</div></div>
-                <div className="rounded-xl border border-orange-500/20 bg-orange-500/5 p-4"><div className="text-xs text-orange-300/90 flex items-center gap-1"><Fuel className="w-3 h-3" /> Gas (SOL)</div><div className="text-xl font-semibold tabular-nums mt-1 text-orange-300">0.42</div></div>
-              </div>
-            </CardContent>
-          </Card>
+          <TradingAgentCard copied={copiedAgent} onCopy={() => copy("agent")} />
         </div>
 
-        {/* Supplied collateral - the lending pool, separate from trading USDC above */}
-        <Card className="border-teal-500/20 bg-card">
-          <CardContent className="p-6 space-y-4">
-            <div className="flex items-end justify-between gap-4">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-lg bg-teal-500/10 flex items-center justify-center"><Coins className="w-4.5 h-4.5 text-teal-300" /></div>
-                <div>
-                  <h2 className="font-semibold leading-tight">Supplied collateral</h2>
-                  <p className="text-xs text-muted-foreground mt-0.5">Held as-is · borrow USDC against these</p>
-                </div>
-              </div>
-              <span className="text-xs text-muted-foreground tabular-nums">{COLLATERAL.length} assets · {fmtUsd(TOTAL_SUPPLIED)}</span>
-            </div>
-            <div className="flex h-3 w-full rounded-full overflow-hidden bg-muted">
-              {COLLATERAL.map((a) => (<div key={a.symbol} className={a.dot} style={{ width: `${a.weight}%` }} title={`${a.symbol} ${a.weight}%`} />))}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {COLLATERAL.map((a) => (
-                <div key={a.symbol} className="flex items-center gap-2 rounded-full border border-border bg-background/40 pl-2 pr-3 py-1">
-                  <span className={`w-2.5 h-2.5 rounded-full ${a.dot}`} />
-                  <span className="text-xs font-medium">{a.symbol}</span>
-                  <span className="text-xs text-muted-foreground tabular-nums">{fmtUsd(a.suppliedUsd)}</span>
-                  <span className="text-[10px] text-muted-foreground/70 tabular-nums">{a.weight}%</span>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Action panel */}
-        <ActionPanel />
+        {/* Lending collateral - isolated per-pool positions, each with its own
+            borrow / repay / withdraw and its OWN health (no blended number). */}
+        <LendingSection />
 
         {/* Transaction history */}
         <MoneyFlows />
