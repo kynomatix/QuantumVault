@@ -18,6 +18,7 @@ import {
   Coins as CoinsIcon,
   TrendingUp,
   History,
+  HeartPulse,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -515,12 +516,13 @@ export function OverviewFlows() {
               <div className="text-[11px] text-muted-foreground mt-0.5">of $5,180 limit</div>
             </CardContent>
           </Card>
-          <Card className="border-orange-500/20 bg-orange-500/5">
+          <Card className="border-emerald-500/20 bg-emerald-500/5">
             <CardContent className="p-5">
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <Fuel className="w-3.5 h-3.5 text-orange-400" /> Gas (SOL)
+                <HeartPulse className="w-3.5 h-3.5 text-emerald-400" /> Loan Health
               </div>
-              <div className="text-2xl font-semibold tabular-nums text-orange-300 mt-1.5">0.42</div>
+              <div className="text-2xl font-semibold tabular-nums text-emerald-300 mt-1.5">82%</div>
+              <div className="text-[11px] text-emerald-400/70 mt-0.5">Safe · well above liquidation</div>
             </CardContent>
           </Card>
         </div>
