@@ -1,5 +1,5 @@
 import "./_group.css";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Wallet,
   Bot,
@@ -22,6 +22,7 @@ import {
   ShieldCheck,
   Info,
   Lock,
+  Unlock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -262,10 +263,15 @@ function FundingDialog({
                 <span>Price impact</span><span>0.04%</span>
               </div>
             </div>
-            <p className="text-xs text-muted-foreground flex items-center gap-1.5">
-              <ArrowLeftRight className="w-3.5 h-3.5 text-accent" />
-              {sel.symbol} is auto-swapped to USDC via Jupiter — your trading agent only ever holds USDC.
-            </p>
+            {/* Mirror of the lending callout — make the swap unmistakable. */}
+            <div className="flex items-start gap-2 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2.5">
+              <ArrowLeftRight className="w-4 h-4 text-primary mt-0.5 shrink-0" />
+              <p className="text-xs text-muted-foreground">
+                This goes to <span className="text-primary font-medium">trading</span>. Your {sel.symbol} is
+                {" "}<span className="text-foreground font-medium">swapped to USDC</span> via Jupiter — your bots only ever
+                trade with USDC, never {sel.symbol}.
+              </p>
+            </div>
             <GasFeeNote />
             <Button className="w-full h-11">{tokenCta}</Button>
           </TabsContent>
@@ -332,6 +338,189 @@ function SupplyDialog({ open, onOpenChange, sel, onSel }: { open: boolean; onOpe
         </div>
         <GasFeeNote />
         <Button className="w-full h-11 bg-teal-500 hover:bg-teal-500/90 text-background">Supply {token.symbol} as collateral</Button>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Repay popup with a SOURCE selector. The owner's point: you shouldn't have to
+ *  pull profits out of your trading agent to your wallet before paying a loan.
+ *  So repay straight from the agent (where profits sit) OR your wallet — with
+ *  USDC, or by converting supplied collateral / a wallet token. */
+function RepayDialog({ open, onOpenChange, mode }: { open: boolean; onOpenChange: (v: boolean) => void; mode: "usdc" | "asset" }) {
+  const [source, setSource] = useState<string>(mode === "usdc" ? "agent" : "supplied");
+  const [walletTok, setWalletTok] = useState("SOL");
+  const [supTok, setSupTok] = useState(COLLATERAL[0].symbol);
+  useEffect(() => { setSource(mode === "usdc" ? "agent" : "supplied"); }, [mode, open]);
+
+  const sourceOptions = mode === "usdc"
+    ? [
+        { id: "agent", icon: Bot, label: "From Trading Agent", sub: "Trading USDC · $4,820" },
+        { id: "wallet", icon: Wallet, label: "From Your Wallet", sub: "USDC · $6,140.55" },
+      ]
+    : [
+        { id: "supplied", icon: Coins, label: "Supplied collateral", sub: "Use INF, JitoSOL…" },
+        { id: "wallet", icon: Wallet, label: "Your Wallet", sub: "Swap SOL, wBTC…" },
+      ];
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Repay debt</DialogTitle>
+          <DialogDescription>Pay down your borrowed USDC — from wherever's easiest.</DialogDescription>
+        </DialogHeader>
+
+        <div className="flex items-center justify-between rounded-lg border border-border bg-background/40 px-3 py-2.5 text-sm">
+          <span className="text-muted-foreground">Outstanding debt</span>
+          <span className="font-semibold tabular-nums text-accent">{fmtUsd(TOTAL_BORROWED)}</span>
+        </div>
+
+        {/* SOURCE selector */}
+        <div className="space-y-1.5">
+          <span className="text-xs text-muted-foreground">Pay from</span>
+          <div className="flex gap-2">
+            {sourceOptions.map((o) => {
+              const active = o.id === source;
+              const Icon = o.icon;
+              return (
+                <button key={o.id} onClick={() => setSource(o.id)} aria-pressed={active}
+                  className={`flex-1 rounded-lg border px-3 py-2.5 text-left transition-colors ${active ? "border-primary/50 bg-primary/10" : "border-border bg-background/40 hover:bg-muted/50"}`}>
+                  <div className="flex items-center gap-1.5 text-sm font-medium"><Icon className="w-3.5 h-3.5" />{o.label}</div>
+                  <div className="text-[11px] text-muted-foreground mt-0.5">{o.sub}</div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {mode === "usdc" ? (
+          <>
+            <AmountField token="USDC" balance={source === "agent" ? "Trading Agent $4,820" : "Wallet $6,140.55"} />
+            <p className="text-xs text-muted-foreground flex items-start gap-1.5">
+              <Info className="w-3.5 h-3.5 text-primary mt-0.5 shrink-0" />
+              {source === "agent"
+                ? "Paid straight from your trading agent's USDC — your profits clear the debt with no transfer to your wallet first."
+                : "Paid from the USDC in your connected wallet."}
+            </p>
+            <GasFeeNote />
+            <Button className="w-full h-11">Repay debt</Button>
+          </>
+        ) : source === "supplied" ? (
+          <>
+            <span className="text-sm font-medium">Use which collateral</span>
+            <div className="max-h-40 overflow-y-auto rounded-lg border border-border divide-y divide-border/60">
+              {COLLATERAL.map((c) => (
+                <button key={c.symbol} onClick={() => setSupTok(c.symbol)} aria-pressed={c.symbol === supTok}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/50 ${c.symbol === supTok ? "bg-primary/10" : ""}`}>
+                  <span className={`w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-semibold text-background ${c.dot}`}>{c.symbol.slice(0, 2)}</span>
+                  <div className="flex-1 min-w-0"><p className="text-sm font-medium truncate">{c.symbol}</p><p className="text-xs text-muted-foreground truncate">{c.name}</p></div>
+                  <div className="text-right"><p className="text-sm font-mono">{fmtUsd(c.suppliedUsd)}</p><p className="text-[11px] text-muted-foreground">supplied</p></div>
+                </button>
+              ))}
+            </div>
+            <AmountField token={supTok} balance={`Supplied ${COLLATERAL.find((c) => c.symbol === supTok)!.supplied}`} />
+            <div className="flex items-start gap-2 rounded-lg border border-accent/20 bg-accent/10 px-3 py-2.5">
+              <Info className="w-4 h-4 text-accent mt-0.5 shrink-0" />
+              <p className="text-xs text-muted-foreground">Repaying with supplied collateral <span className="text-foreground font-medium">reduces both your loan and that collateral</span> — it's converted to USDC to clear the debt.</p>
+            </div>
+            <Button className="w-full h-11">Repay with {supTok}</Button>
+          </>
+        ) : (
+          <>
+            <span className="text-sm font-medium">Pay with which token</span>
+            <div className="max-h-40 overflow-y-auto rounded-lg border border-border divide-y divide-border/60">
+              {SWAP_TOKENS.map((t) => (
+                <button key={t.symbol} onClick={() => setWalletTok(t.symbol)} aria-pressed={t.symbol === walletTok}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/50 ${t.symbol === walletTok ? "bg-primary/10" : ""}`}>
+                  <span className={`w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-semibold text-background ${t.dot}`}>{t.symbol.slice(0, 2)}</span>
+                  <div className="flex-1 min-w-0"><p className="text-sm font-medium truncate">{t.symbol}</p><p className="text-xs text-muted-foreground truncate">{t.name}</p></div>
+                  <div className="text-right"><p className="text-sm font-mono">{t.amount}</p><p className="text-xs text-muted-foreground">{t.usd}</p></div>
+                </button>
+              ))}
+            </div>
+            <AmountField token={walletTok} balance={`Wallet ${SWAP_TOKENS.find((t) => t.symbol === walletTok)!.amount} ${walletTok}`} />
+            <div className="flex items-start gap-2 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2.5">
+              <ArrowLeftRight className="w-4 h-4 text-primary mt-0.5 shrink-0" />
+              <p className="text-xs text-muted-foreground">Your {walletTok} is <span className="text-foreground font-medium">swapped to USDC</span> via Jupiter, then used to pay down the loan.</p>
+            </div>
+            <Button className="w-full h-11">Repay & Convert to USDC</Button>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Withdraw trading USDC from the agent back to the wallet. */
+function WithdrawUsdcDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Withdraw USDC</DialogTitle>
+          <DialogDescription>Move trading USDC from your agent back to your connected wallet.</DialogDescription>
+        </DialogHeader>
+        <AmountField token="USDC" balance="Withdrawable 4,820.16 USDC" />
+        <GasFeeNote />
+        <Button variant="outline" className="w-full h-11">Withdraw to Your Wallet</Button>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Un-supply collateral. Assets backing an open loan are partly locked; we show
+ *  exactly how much is free and how much is held until the loan is repaid. */
+function WithdrawCollateralDialog({ open, onOpenChange, sel, onSel }: { open: boolean; onOpenChange: (v: boolean) => void; sel: string; onSel: (s: string) => void }) {
+  const c = COLLATERAL.find((x) => x.symbol === sel)!;
+  const lockedUsd = c.maxLtv ? Math.round(c.borrowedUsd / (c.maxLtv / 100)) : 0;
+  const freeUsd = Math.max(0, c.suppliedUsd - lockedUsd);
+  const hasLoan = c.borrowedUsd > 0;
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Withdraw collateral</DialogTitle>
+          <DialogDescription>Send a supplied asset back to your wallet — as itself, no swap.</DialogDescription>
+        </DialogHeader>
+
+        <span className="text-sm font-medium">Select an asset</span>
+        <div className="max-h-44 overflow-y-auto rounded-lg border border-border divide-y divide-border/60">
+          {COLLATERAL.map((x) => {
+            const xl = x.maxLtv ? Math.round(x.borrowedUsd / (x.maxLtv / 100)) : 0;
+            const xf = Math.max(0, x.suppliedUsd - xl);
+            return (
+              <button key={x.symbol} onClick={() => onSel(x.symbol)} aria-pressed={x.symbol === sel}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/50 ${x.symbol === sel ? "bg-teal-500/10" : ""}`}>
+                <span className={`w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-semibold text-background ${x.dot}`}>{x.symbol.slice(0, 2)}</span>
+                <div className="flex-1 min-w-0"><p className="text-sm font-medium truncate">{x.symbol}</p><p className="text-xs text-muted-foreground truncate">{x.supplied}</p></div>
+                <div className="text-right">
+                  <p className="text-sm font-mono">{fmtUsd(xf)}</p>
+                  <p className="text-[11px] text-muted-foreground">{x.borrowedUsd > 0 ? "free now" : "withdrawable"}</p>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        <AmountField token={c.symbol} balance={`Free ${fmtUsd(freeUsd)} of ${fmtUsd(c.suppliedUsd)}`} />
+
+        {hasLoan ? (
+          <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5">
+            <Lock className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
+            <p className="text-xs text-muted-foreground">
+              {fmtUsd(lockedUsd)} of your {c.symbol} backs your {fmtUsd(c.borrowedUsd)} loan and is <span className="text-foreground font-medium">locked</span>.
+              {" "}Only {fmtUsd(freeUsd)} is free now — repay the loan to unlock the rest.
+            </p>
+          </div>
+        ) : (
+          <div className="flex items-start gap-2 rounded-lg border border-teal-500/30 bg-teal-500/10 px-3 py-2.5">
+            <Unlock className="w-4 h-4 text-teal-300 mt-0.5 shrink-0" />
+            <p className="text-xs text-muted-foreground">No loan against your {c.symbol} — it's fully free to withdraw, returned as {c.symbol} (no swap).</p>
+          </div>
+        )}
+        <GasFeeNote />
+        <Button variant="outline" className="w-full h-11">Withdraw {c.symbol} to Your Wallet</Button>
       </DialogContent>
     </Dialog>
   );
@@ -498,9 +687,11 @@ function ActionPanel() {
   const [depositSwap, setDepositSwap] = useState("SOL");
   const [supplyOpen, setSupplyOpen] = useState(false);
   const [supplySel, setSupplySel] = useState("INF");
+  const [wUsdcOpen, setWUsdcOpen] = useState(false);
+  const [wColOpen, setWColOpen] = useState(false);
+  const [wColSel, setWColSel] = useState(COLLATERAL.find((c) => c.borrowedUsd === 0)?.symbol ?? COLLATERAL[0].symbol);
   const [repayOpen, setRepayOpen] = useState(false);
-  const [repayTab, setRepayTab] = useState<"usdc" | "token">("usdc");
-  const [repaySwap, setRepaySwap] = useState("SOL");
+  const [repayMode, setRepayMode] = useState<"usdc" | "asset">("usdc");
 
   return (
     <Card className="border-border bg-card">
@@ -556,15 +747,40 @@ function ActionPanel() {
             <SupplyDialog open={supplyOpen} onOpenChange={setSupplyOpen} sel={supplySel} onSel={setSupplySel} />
           </TabsContent>
 
-          {/* WITHDRAW */}
+          {/* WITHDRAW — two paths, mirroring Add funds: pull trading USDC, or
+              un-supply collateral (which Add funds can put in but nothing could take out). */}
           <TabsContent value="withdraw" className="mt-5 space-y-4">
-            <Flow>
-              <FlowChip kind="agent" label="Trading Agent" />
-              <ArrowRight className="w-4 h-4 text-muted-foreground" />
-              <FlowChip kind="wallet" label="Your Wallet" />
-            </Flow>
-            <AmountField token="USDC" balance="Withdrawable 4,820.16 USDC" />
-            <Button variant="outline" className="w-full h-11">Withdraw to Your Wallet</Button>
+            <div className="grid sm:grid-cols-2 gap-3">
+              <div className="space-y-2">
+                <Flow>
+                  <FlowChip kind="agent" label="Trading Agent" />
+                  <ArrowRight className="w-4 h-4 text-muted-foreground" />
+                  <FlowChip kind="wallet" label="Your Wallet" />
+                </Flow>
+                <ActionCard
+                  icon={Wallet}
+                  title="Withdraw USDC — from trading"
+                  desc="Move trading USDC from your agent back to your connected wallet."
+                  onClick={() => setWUsdcOpen(true)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Flow>
+                  <FlowChip kind="collateral" label="Lending" />
+                  <ArrowRight className="w-4 h-4 text-muted-foreground" />
+                  <FlowChip kind="wallet" label="Your Wallet" />
+                </Flow>
+                <ActionCard
+                  icon={Coins}
+                  tone="teal"
+                  title="Withdraw collateral — un-supply"
+                  desc="Pull supplied assets back to your wallet as-is. Assets backing a loan stay locked until you repay."
+                  onClick={() => setWColOpen(true)}
+                />
+              </div>
+            </div>
+            <WithdrawUsdcDialog open={wUsdcOpen} onOpenChange={setWUsdcOpen} />
+            <WithdrawCollateralDialog open={wColOpen} onOpenChange={setWColOpen} sel={wColSel} onSel={setWColSel} />
           </TabsContent>
 
           {/* BORROW */}
@@ -577,21 +793,10 @@ function ActionPanel() {
               <span className="text-lg font-semibold tabular-nums text-accent">{fmtUsd(TOTAL_BORROWED)}</span>
             </div>
             <div className="grid sm:grid-cols-2 gap-3">
-              <ActionCard icon={Wallet} title="Repay with USDC" desc="Pay your debt down directly with USDC." onClick={() => { setRepayTab("usdc"); setRepayOpen(true); }} />
-              <ActionCard icon={Coins} title="Repay with any asset" desc="Pay with SOL, BONK, or any token — we auto-swap it to USDC." onClick={() => { setRepayTab("token"); setRepayOpen(true); }} />
+              <ActionCard icon={Wallet} title="Repay with USDC" desc="Pay down directly with USDC — from your agent or your wallet." onClick={() => { setRepayMode("usdc"); setRepayOpen(true); }} />
+              <ActionCard icon={Coins} title="Repay with any asset" desc="Pay with supplied collateral or a wallet token — auto-swapped to USDC." onClick={() => { setRepayMode("asset"); setRepayOpen(true); }} />
             </div>
-            <FundingDialog
-              open={repayOpen} onOpenChange={setRepayOpen} tab={repayTab} onTabChange={setRepayTab}
-              swapToken={repaySwap} onSwapToken={setRepaySwap}
-              title="Repay debt" description="Pay down your borrowed USDC."
-              summary={
-                <div className="flex items-center justify-between rounded-lg border border-border bg-background/40 px-3 py-2.5 text-sm">
-                  <span className="text-muted-foreground">Outstanding debt</span>
-                  <span className="font-semibold tabular-nums text-accent">{fmtUsd(TOTAL_BORROWED)}</span>
-                </div>
-              }
-              usdcTabLabel="Repay USDC" usdcBalance="Available $6,140.55" usdcCta="Repay debt" tokenCta="Repay & Convert to USDC"
-            />
+            <RepayDialog open={repayOpen} onOpenChange={setRepayOpen} mode={repayMode} />
           </TabsContent>
 
           {/* GAS */}
