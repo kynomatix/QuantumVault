@@ -13,6 +13,7 @@ import { startProfitShareRetryJob } from "./profit-share-retry-job";
 import { startReferralRewardsRetryJob } from "./referral-rewards-retry-job";
 import { startPacificaReferralBackfillJob } from "./pacifica-referral-backfill-job";
 import { initLeverageCache, setOnCacheRefreshed } from "./leverage-cache-service";
+import { initLiveDataSpine, stopLiveDataSpine } from "./live-data-spine/spine-service";
 import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
 import { startTelegramDailySummaryJob } from "./telegram-daily-summary-job";
 import { recordCriticalError, flushErrorLog } from "./error-log";
@@ -562,6 +563,11 @@ app.use((req, res, next) => {
 
   const shutdownHandler = async () => {
     console.log("[Main] Shutting down...");
+    try {
+      stopLiveDataSpine();
+    } catch (e) {
+      console.warn("[Main] Spine stop error (non-fatal):", (e as Error)?.message);
+    }
     await flushErrorLog().catch(() => {});
     await labSupervisor.shutdown();
     await closePool().catch((e) => console.warn("[Main] Pool close error (non-fatal):", e.message));
@@ -773,6 +779,19 @@ app.use((req, res, next) => {
         runPrune();
         setInterval(runPrune, 24 * 60 * 60 * 1000);
       }, 77_000);
+
+      // ~82s: Live-Data & Monitoring Spine (Phase 0, READ-ONLY shadow mode).
+      // Gated by SPINE_ENABLED (default off) — no-op when unset. Uses Pacifica's
+      // public prices WS + Pyth Hermes SSE (no Solana RPC), so it is independent
+      // of the RPC rate-limit budget; started last as lowest priority.
+      setTimeout(() => {
+        log('[Staggered startup] Initializing Live-Data Spine (shadow mode)');
+        try {
+          initLiveDataSpine();
+        } catch (err) {
+          console.error('[Spine] init failed:', err);
+        }
+      }, 82_000);
     },
   );
 })();
