@@ -153,17 +153,68 @@ describe("previewBorrowEligibility (async wrapper, money-adjacent path)", () => 
       {
         getVaultConfig: async () => vault(),
         getActiveBorrowPositionsAllWallets: async () => [],
+        readBorrowOracleContext: async () => ({ publishAgeSec: null, priceMove1hAbs: null }),
       },
     );
     expect(r.ok).toBe(true);
-    // Owner-wallet + vault 43 allowlisted → both allowlist gates clear, yet the
-    // wrapper hardwires UNREADABLE_ORACLE_CONTEXT so the gate MUST still deny.
+    // Owner-wallet + vault 43 allowlisted → both allowlist gates clear, yet an
+    // UNREADABLE oracle reading still makes the enforced gate deny.
     expect(r.allowed).toBe(false);
     expect(r.reasons.some((x) => x.code === "not_borrow_allowlisted")).toBe(false);
     expect(r.reasons.some((x) => x.code === "collateral_not_allowlisted")).toBe(false);
     expect(r.reasons.some((x) => x.code === "oracle_unreadable")).toBe(true);
     expect(r.reasons.some((x) => x.code === "price_move_unreadable")).toBe(true);
     expect(r.projection!.projectedLtv).toBeCloseTo(0.05, 6);
+  });
+
+  it("owner + allowlisted collateral + FRESH oracle → oracle gates clear and a well-sized borrow is allowed", async () => {
+    process.env.BORROW_OWNER_WALLET = WALLET;
+    const r = await previewBorrowEligibility(
+      WALLET,
+      {
+        collateralMint: INF_MINT,
+        collateralRaw: BigInt(10_000_000_000),
+        requestedDebtRaw: BigInt(100_000_000),
+      },
+      {
+        getVaultConfig: async () => vault(),
+        getActiveBorrowPositionsAllWallets: async () => [],
+        readBorrowOracleContext: async () => ({ publishAgeSec: 5, priceMove1hAbs: 0.01 }),
+      },
+    );
+    expect(r.ok).toBe(true);
+    // A fresh oracle removes the last technical blocker (owner gate already
+    // cleared), so the wired reader lets a well-sized borrow pass every gate.
+    expect(r.reasons.some((x) => x.code === "oracle_unreadable")).toBe(false);
+    expect(r.reasons.some((x) => x.code === "price_move_unreadable")).toBe(false);
+    expect(r.reasons.some((x) => x.code === "oracle_stale")).toBe(false);
+    expect(r.reasons.some((x) => x.code === "price_volatility_freeze")).toBe(false);
+    expect(r.allowed).toBe(true);
+  });
+
+  it("a reader that THROWS still fails closed (structured deny, never a 500 bypass)", async () => {
+    process.env.BORROW_OWNER_WALLET = WALLET;
+    const r = await previewBorrowEligibility(
+      WALLET,
+      {
+        collateralMint: INF_MINT,
+        collateralRaw: BigInt(10_000_000_000),
+        requestedDebtRaw: BigInt(100_000_000),
+      },
+      {
+        getVaultConfig: async () => vault(),
+        getActiveBorrowPositionsAllWallets: async () => [],
+        readBorrowOracleContext: async () => {
+          throw new Error("hermes blew up");
+        },
+      },
+    );
+    // The wrapper swallows a throwing reader to UNREADABLE so the enforced gate
+    // denies on oracle codes instead of letting a 500 bypass the gate.
+    expect(r.ok).toBe(true);
+    expect(r.allowed).toBe(false);
+    expect(r.reasons.some((x) => x.code === "oracle_unreadable")).toBe(true);
+    expect(r.reasons.some((x) => x.code === "price_move_unreadable")).toBe(true);
   });
 
   it("unreadable vault config → wrapper denies without touching exposure", async () => {
@@ -181,6 +232,7 @@ describe("previewBorrowEligibility (async wrapper, money-adjacent path)", () => 
           exposureCalled = true;
           return [];
         },
+        readBorrowOracleContext: async () => ({ publishAgeSec: null, priceMove1hAbs: null }),
       },
     );
     expect(r.ok).toBe(false);

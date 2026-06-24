@@ -1505,6 +1505,7 @@ import { getYieldTableCached } from "./vault/yield-oracle";
 import { detectParkedYieldTokens as detectParkedYieldTokensPure } from "./vault/parked-tokens";
 import { JupiterLendBorrowRoute } from "./vault/jupiter-lend-borrow-route";
 import { previewBorrowEligibility } from "./vault/borrow-eligibility";
+import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { getUserFungibleTokens } from "./swap/helius-tokens.js";
 
 const SWAP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -8711,6 +8712,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         {
           getVaultConfig: (mint) => borrowRoute.getVaultConfig(mint),
           getActiveBorrowPositionsAllWallets: () => storage.getActiveBorrowPositionsAllWallets(),
+          readBorrowOracleContext: (vault) => readBorrowOracleContext(vault),
         },
       );
       res.json(result);

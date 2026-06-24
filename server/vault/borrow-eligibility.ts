@@ -14,12 +14,13 @@
  *     Fully testable with no I/O.
  *   - `previewBorrowEligibility` is the thin async wrapper that does the I/O.
  *
- * ORACLE FRESHNESS (deliberate, honest gap): the oracle publish age + 1h price
- * move are NOT readable yet (no freshness reader is built — that is a separate
- * non-money sub-build with a design fork). We therefore pass an UNREADABLE oracle
- * context, so the enforced gate fails closed (`oracle_unreadable` /
- * `price_move_unreadable`). The PROJECTION is still returned; only the authorize
- * decision is (correctly) withheld until freshness is wired.
+ * ORACLE FRESHNESS: the oracle publish age + 1h price move are read by an
+ * injected `readBorrowOracleContext(vault)` (see `borrow-oracle-freshness.ts`),
+ * which itself fails closed to {null,null} on ANY uncertainty. So a vault with no
+ * verified feed mapping, or any unreadable Hermes read, still makes the enforced
+ * gate fail closed (`oracle_unreadable` / `price_move_unreadable`). The
+ * `UNREADABLE_ORACLE_CONTEXT` constant below is retained for the vault-unreadable
+ * short-circuit (no vault → nothing to read) and for tests.
  */
 
 import {
@@ -40,14 +41,18 @@ import {
   isBorrowOwnerWallet,
 } from "./borrow-allowlist";
 
-/** Oracle freshness is not wired yet → unreadable → enforced gate fails closed. */
+/**
+ * Unreadable oracle reading (both null) → enforced gate fails closed. Retained
+ * for the vault-unreadable short-circuit (no vault → nothing to read), the
+ * throwing-reader guard in `previewBorrowEligibility`, and tests.
+ */
 export const UNREADABLE_ORACLE_CONTEXT: BorrowOracleContext = {
   publishAgeSec: null,
   priceMove1hAbs: null,
 };
 
 const NOT_LIVE_REASON =
-  "Borrowing is in read-only preview. Live oracle-freshness checks, the beta allowlist, and borrow execution are not enabled yet.";
+  "Borrowing is in read-only preview. The beta allowlist and borrow execution are not enabled yet.";
 
 export interface BorrowPreviewFacts {
   walletAddress: string;
@@ -188,6 +193,12 @@ export interface BorrowEligibilityDeps {
       walletAddress: string;
     }[]
   >;
+  /**
+   * Reads the collateral oracle's freshness facts (publish age + 1h move) for a
+   * resolved vault. MUST fail closed to {null,null} on any uncertainty; the
+   * enforced gate turns either null into a hard deny.
+   */
+  readBorrowOracleContext: (vault: BorrowVaultConfig) => Promise<BorrowOracleContext>;
 }
 
 /**
@@ -240,6 +251,20 @@ export async function previewBorrowEligibility(
     }
   }
 
+  // Oracle freshness for THIS vault. The reader fails closed to {null,null} on
+  // any uncertainty (unmapped feed, unreadable Hermes, wrong-map cross-check),
+  // which the enforced gate turns into a hard deny. Belt-and-suspenders: if a
+  // (future/custom) injected reader THROWS instead of returning structured
+  // nulls, swallow it to UNREADABLE so a faulty DI caller still gets a deny —
+  // never a 500 that skips the oracle gate. The production reader already
+  // catches internally.
+  let oracle: BorrowOracleContext;
+  try {
+    oracle = await deps.readBorrowOracleContext(vault);
+  } catch {
+    oracle = UNREADABLE_ORACLE_CONTEXT;
+  }
+
   return evaluateBorrowPreview({
     walletAddress,
     vault,
@@ -247,6 +272,6 @@ export async function previewBorrowEligibility(
     collateralRaw: params.collateralRaw,
     existingDebtRaw,
     requestedDebtRaw: params.requestedDebtRaw,
-    oracle: UNREADABLE_ORACLE_CONTEXT,
+    oracle,
   });
 }
