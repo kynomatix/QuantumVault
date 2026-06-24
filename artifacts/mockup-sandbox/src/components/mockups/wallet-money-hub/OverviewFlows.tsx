@@ -53,17 +53,17 @@ const SWAP_TOKENS: SwapToken[] = [
   { symbol: "BONK", name: "Bonk", amount: "1,920,500", usd: "$48.90", est: "48.55", dot: "bg-yellow-400" },
 ];
 
-// Transaction history ("money flows") — mirrors the live EquityHistory list.
-// Colour coding: money-in = emerald, money-out = rose, gas = orange (orange stays
-// reserved for gas only).
-type MoneyFlow = { dir: "in" | "out" | "gas"; label: string; date: string; amount: string };
+// Transaction history ("money flows") — mirrors the live EquityHistory list 1:1,
+// including its colours: money-in = green, money-out = orange (this is the existing
+// component; the real page will reuse it as-is, not a reinvented one).
+type MoneyFlow = { dir: "in" | "out"; label: string; date: string; amount: string };
 const MONEY_FLOWS: MoneyFlow[] = [
   { dir: "in", label: "Deposit to Trading Agent", date: "Jun 22, 2026 · 2:14 PM", amount: "+2,000.00 USDC" },
   { dir: "in", label: "Borrow USDC", date: "Jun 21, 2026 · 9:03 AM", amount: "+1,200.00 USDC" },
   { dir: "out", label: "Repay debt", date: "Jun 20, 2026 · 6:48 PM", amount: "−500.00 USDC" },
   { dir: "in", label: "Deposit SOL → USDC (swap)", date: "Jun 19, 2026 · 11:20 AM", amount: "+318.40 USDC" },
   { dir: "out", label: "Withdraw to Your Wallet", date: "Jun 18, 2026 · 4:32 PM", amount: "−800.00 USDC" },
-  { dir: "gas", label: "Gas Top-Up", date: "Jun 17, 2026 · 8:10 AM", amount: "+0.20 SOL" },
+  { dir: "in", label: "Gas Top-Up", date: "Jun 17, 2026 · 8:10 AM", amount: "+0.20 SOL" },
   { dir: "in", label: "Deposit to Trading Agent", date: "Jun 15, 2026 · 1:05 PM", amount: "+5,000.00 USDC" },
 ];
 
@@ -281,9 +281,9 @@ function MoneyFlows() {
 
         <div className="space-y-0.5">
           {MONEY_FLOWS.map((f, i) => {
-            const Icon = f.dir === "gas" ? Fuel : f.dir === "in" ? ArrowDownToLine : ArrowUpFromLine;
-            const tone = f.dir === "gas" ? "text-orange-400" : f.dir === "in" ? "text-emerald-400" : "text-rose-300";
-            const wrap = f.dir === "gas" ? "bg-orange-500/10" : f.dir === "in" ? "bg-emerald-500/10" : "bg-rose-500/10";
+            const Icon = f.dir === "in" ? ArrowDownToLine : ArrowUpFromLine;
+            const tone = f.dir === "in" ? "text-green-500" : "text-orange-500";
+            const wrap = f.dir === "in" ? "bg-green-500/10" : "bg-orange-500/10";
             return (
               <div key={i} className="flex items-center justify-between py-2.5 border-b border-border/40 last:border-0">
                 <div className="flex items-center gap-3">
