@@ -1,4 +1,5 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
+import { walletAuthHeaders } from "@/lib/queryClient";
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { useLocation } from 'wouter';
@@ -16,7 +17,12 @@ import {
   Check,
   Bot,
   ArrowRight,
-  ExternalLink
+  ExternalLink,
+  TrendingUp,
+  Landmark,
+  HeartPulse,
+  AlertTriangle,
+  RotateCcw
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -50,8 +56,85 @@ interface AgentWallet {
   solBalance: number;
 }
 
+interface BorrowPosition {
+  id: string;
+  status: string;
+  debtAmountRaw: string | null;
+  collateralAmountRaw: string | null;
+  collateralMint: string | null;
+  liveHealth: { liquidatable?: boolean } | null;
+  healthIsLive: boolean;
+}
+
+interface BorrowPositionsResponse {
+  eligible: boolean;
+  positions: BorrowPosition[];
+}
+
 interface WalletContentProps {
   initialTab?: 'deposit' | 'withdraw' | 'gas';
+}
+
+// Fetch the active interactive session id for money-moving actions (mirrors the
+// Vault park/unpark pattern). Throws a user-facing message if there's no session.
+async function getSessionId(): Promise<string> {
+  const res = await fetch('/api/auth/session', { credentials: 'include' });
+  if (!res.ok) throw new Error('Could not verify your session. Please reconnect your wallet.');
+  const data = await safeResponseJson(res);
+  if (!data.hasSession || !data.sessionId) {
+    throw new Error('No active session. Please reconnect your wallet.');
+  }
+  return data.sessionId as string;
+}
+
+type KpiTone = 'primary' | 'accent' | 'neutral' | 'emerald';
+
+// Headline figure in the Variant D KPI strip. Shows a spinner while its source
+// is loading and an em dash (never a fake $0.00) when the value failed to load.
+function Kpi({ icon: Icon, label, value, loading, tone, testId }: {
+  icon: typeof Wallet;
+  label: string;
+  value: number | null;
+  loading: boolean;
+  tone: KpiTone;
+  testId: string;
+}) {
+  const cardCls = {
+    primary: 'border-primary/20 bg-primary/5',
+    accent: 'border-accent/20 bg-accent/5',
+    neutral: 'border-border bg-card',
+    emerald: 'border-emerald-500/20 bg-emerald-500/5',
+  }[tone];
+  const iconCls = {
+    primary: 'text-primary',
+    accent: 'text-accent',
+    neutral: 'text-muted-foreground',
+    emerald: 'text-emerald-400',
+  }[tone];
+  const valueCls = {
+    primary: 'text-primary',
+    accent: 'text-accent',
+    neutral: '',
+    emerald: 'text-emerald-400',
+  }[tone];
+  return (
+    <Card className={cardCls}>
+      <CardContent className="p-5">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Icon className={`w-3.5 h-3.5 ${iconCls}`} /> {label}
+        </div>
+        <div className={`text-2xl font-semibold tabular-nums mt-1.5 ${valueCls}`} data-testid={testId}>
+          {loading ? (
+            <Loader2 className="w-5 h-5 animate-spin" />
+          ) : value === null ? (
+            '\u2014'
+          ) : (
+            `$${value.toFixed(2)}`
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
@@ -81,6 +164,9 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
 
   const [agentWallet, setAgentWallet] = useState<AgentWallet | null>(null);
   const [agentLoading, setAgentLoading] = useState(false);
+
+  const [borrow, setBorrow] = useState<BorrowPositionsResponse | null>(null);
+  const [closingLoanId, setClosingLoanId] = useState<string | null>(null);
 
   const [copiedAgentAddress, setCopiedAgentAddress] = useState(false);
 
@@ -138,16 +224,38 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
     }
   };
 
+  // Read any standing borrow positions. Borrow is an owner-gated MVP, so this is
+  // empty for non-eligible wallets and (today) for everyone, since no position
+  // exists yet. Loan surfaces render only when eligible AND a position is present.
+  const fetchBorrowPositions = async () => {
+    if (!publicKeyString) return;
+    try {
+      const res = await fetch('/api/vault/borrow/positions', {
+        credentials: 'include',
+        headers: walletAuthHeaders(),
+      });
+      if (!res.ok) return;
+      const data = await safeResponseJson(res);
+      setBorrow(data);
+    } catch (error) {
+      console.error('Error fetching borrow positions:', error);
+    }
+  };
+
   useEffect(() => {
+    // Clear any prior loan data immediately on wallet switch/disconnect so a stale
+    // (other-wallet) loan card can never flash if the refetch is slow or fails.
+    setBorrow(null);
     if (connected && publicKeyString) {
       fetchCapitalPool();
       fetchAgentBalance();
       fetchUserSolBalance();
+      fetchBorrowPositions();
     }
   }, [connected, publicKeyString]);
 
   const handleRefresh = async () => {
-    await Promise.all([fetchUsdcBalance(), fetchCapitalPool(), fetchAgentBalance(), fetchUserSolBalance()]);
+    await Promise.all([fetchUsdcBalance(), fetchCapitalPool(), fetchAgentBalance(), fetchUserSolBalance(), fetchBorrowPositions()]);
     toast({ title: 'Balances refreshed' });
   };
 
@@ -638,6 +746,31 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
     }
   };
 
+  // Close an open loan in full: repay all debt and return collateral. This is a
+  // destructive money action, so it requires an interactive session. Borrow is an
+  // owner-gated MVP with full-close only (no partial repay yet).
+  const handleCloseLoan = async (positionId: string) => {
+    setClosingLoanId(positionId);
+    try {
+      const sessionId = await getSessionId();
+      const response = await fetch('/api/vault/borrow/close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...walletAuthHeaders() },
+        body: JSON.stringify({ borrowPositionId: positionId, sessionId }),
+        credentials: 'include',
+      });
+      const data = await safeResponseJson(response);
+      if (!response.ok) throw new Error(data.error || 'Failed to close loan');
+      toast({ title: 'Loan closed', description: 'Your debt was repaid and your collateral returned.' });
+      await Promise.all([fetchBorrowPositions(), fetchAgentBalance(), fetchUsdcBalance(), fetchCapitalPool()]);
+    } catch (error: any) {
+      console.error('Close loan error:', error);
+      toast({ title: 'Could not close loan', description: error.message || 'Please try again', variant: 'destructive' });
+    } finally {
+      setClosingLoanId(null);
+    }
+  };
+
   if (!connected) {
     return null;
   }
@@ -669,6 +802,15 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
         </Button>
       </div>
 
+      {/* KPI strip — real headline figures only. No borrow / credit-limit numbers
+          are shown because no endpoint exposes them honestly today. */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <Kpi icon={TrendingUp} label="Total Equity" tone="primary" loading={capitalLoading} value={capitalPool ? capitalPool.totalEquity : null} testId="text-kpi-total-equity" />
+        <Kpi icon={Bot} label="Allocated to Bots" tone="accent" loading={capitalLoading} value={capitalPool ? capitalPool.allocatedToBot : null} testId="text-kpi-allocated" />
+        <Kpi icon={Coins} label="In Trading Agent" tone="neutral" loading={agentLoading} value={agentWallet ? agentWallet.balance : null} testId="text-kpi-agent-usdc" />
+        <Kpi icon={Wallet} label="In Your Wallet" tone="emerald" loading={usdcLoading} value={usdcBalance ?? null} testId="text-kpi-wallet-usdc" />
+      </div>
+
       <Card className="border-border/50 bg-gradient-to-br from-card/80 to-card/40 backdrop-blur-sm overflow-hidden">
         <CardContent className="p-0">
           <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-border/50">
@@ -697,13 +839,13 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                 <div className="p-3 rounded-lg bg-muted/30">
                   <p className="text-xs text-muted-foreground mb-1">USDC</p>
                   <p className="text-xl font-mono font-semibold" data-testid="text-wallet-usdc">
-                    {usdcLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : `$${(usdcBalance ?? 0).toFixed(2)}`}
+                    {usdcLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : usdcBalance == null ? '\u2014' : `$${usdcBalance.toFixed(2)}`}
                   </p>
                 </div>
                 <div className="p-3 rounded-lg bg-muted/30">
                   <p className="text-xs text-muted-foreground mb-1">SOL</p>
                   <p className="text-xl font-mono font-semibold" data-testid="text-user-sol-balance">
-                    {solLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : `${(userSolBalance ?? 0).toFixed(4)}`}
+                    {solLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : userSolBalance == null ? '\u2014' : `${userSolBalance.toFixed(4)}`}
                   </p>
                 </div>
               </div>
@@ -750,7 +892,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                 <div className="p-3 rounded-lg bg-primary/10 border border-primary/20">
                   <p className="text-xs text-primary/70 mb-1">USDC Balance</p>
                   <p className="text-xl font-mono font-semibold text-primary" data-testid="text-agent-balance">
-                    {agentLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : `$${(agentWallet?.balance ?? 0).toFixed(2)}`}
+                    {agentLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : agentWallet == null ? '\u2014' : `$${agentWallet.balance.toFixed(2)}`}
                   </p>
                 </div>
                 <div className="p-3 rounded-lg bg-orange-500/10 border border-orange-500/20">
@@ -758,7 +900,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                     <Fuel className="w-3 h-3" /> Gas (SOL)
                   </p>
                   <p className="text-xl font-mono font-semibold text-orange-500" data-testid="text-agent-sol-balance">
-                    {agentLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : `${(agentWallet?.solBalance ?? 0).toFixed(4)}`}
+                    {agentLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : agentWallet == null ? '\u2014' : `${agentWallet.solBalance.toFixed(4)}`}
                   </p>
                 </div>
               </div>
@@ -766,6 +908,77 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
           </div>
         </CardContent>
       </Card>
+
+      {/* Your loan — liability card. Owner-gated (eligible) and only rendered when
+          a real borrow position exists. A loan is DEBT, never a green deposit. */}
+      {borrow?.eligible && borrow.positions.length > 0 && (
+        <Card className="border-accent/30 bg-accent/5" data-testid="card-loans">
+          <CardContent className="p-6 space-y-4">
+            <div className="flex items-center gap-2">
+              <Landmark className="w-4 h-4 text-accent" />
+              <h2 className="font-semibold leading-tight">Your loan</h2>
+            </div>
+            <p className="text-xs text-muted-foreground -mt-2">
+              Borrowed USDC is money you owe — a liability, not a deposit.
+            </p>
+            {borrow.positions.map((p) => {
+              const rawDebt = p.debtAmountRaw ? Number(p.debtAmountRaw) / 1e6 : null;
+              const debtUsd = rawDebt != null && Number.isFinite(rawDebt) ? rawDebt : null;
+              const atRisk = p.liveHealth?.liquidatable === true;
+              return (
+                <div
+                  key={p.id}
+                  className="rounded-xl border border-border bg-background/40 p-4 space-y-3"
+                  data-testid={`card-loan-${p.id}`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Outstanding debt</p>
+                      <p className="text-2xl font-semibold tabular-nums text-accent" data-testid={`text-loan-debt-${p.id}`}>
+                        {debtUsd === null ? '\u2014' : `$${debtUsd.toFixed(2)}`}
+                        <span className="text-sm font-normal text-muted-foreground ml-1">USDC</span>
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      {atRisk ? (
+                        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-destructive" data-testid={`text-loan-risk-${p.id}`}>
+                          <AlertTriangle className="w-3.5 h-3.5" /> At liquidation risk
+                        </span>
+                      ) : p.healthIsLive ? (
+                        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground" data-testid={`text-loan-risk-${p.id}`}>
+                          <HeartPulse className="w-3.5 h-3.5" /> Healthy
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground" data-testid={`text-loan-risk-${p.id}`}>
+                          <HeartPulse className="w-3.5 h-3.5" /> Health unavailable
+                        </span>
+                      )}
+                      <p className="text-[11px] text-muted-foreground mt-1 capitalize">{p.status}</p>
+                    </div>
+                  </div>
+                  <Button
+                    variant="outline"
+                    className="w-full border-accent/40 text-accent hover:bg-accent/10"
+                    onClick={() => handleCloseLoan(p.id)}
+                    disabled={closingLoanId === p.id}
+                    data-testid={`button-close-loan-${p.id}`}
+                  >
+                    {closingLoanId === p.id ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Closing...
+                      </>
+                    ) : (
+                      <>
+                        <RotateCcw className="w-4 h-4 mr-2" /> Close loan in full
+                      </>
+                    )}
+                  </Button>
+                </div>
+              );
+            })}
+          </CardContent>
+        </Card>
+      )}
 
       <Card className="border-border/50 bg-card/50 backdrop-blur-sm">
         <CardContent className="pt-6">
@@ -849,7 +1062,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                   <div className="flex items-center justify-between mb-2">
                     <label className="text-sm font-medium">Amount (USDC)</label>
                     <span className="text-xs text-muted-foreground">
-                      Available: ${(agentWallet?.balance ?? 0).toFixed(2)}
+                      Available: {agentWallet == null ? '\u2014' : `$${agentWallet.balance.toFixed(2)}`}
                     </span>
                   </div>
                   <div className="flex gap-2">
@@ -910,13 +1123,13 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                 <div className="p-4 bg-muted/30 rounded-xl">
                   <p className="text-xs text-muted-foreground mb-2">Your Wallet SOL</p>
                   <p className="font-mono text-xl font-semibold" data-testid="text-gas-user-sol">
-                    {solLoading ? <Loader2 className="w-4 h-4 animate-spin inline" /> : `${(userSolBalance ?? 0).toFixed(4)}`}
+                    {solLoading ? <Loader2 className="w-4 h-4 animate-spin inline" /> : userSolBalance == null ? '\u2014' : `${userSolBalance.toFixed(4)}`}
                   </p>
                 </div>
                 <div className="p-4 bg-orange-500/10 border border-orange-500/20 rounded-xl">
                   <p className="text-xs text-orange-500/70 mb-2">Agent Gas Balance</p>
                   <p className="font-mono text-xl font-semibold text-orange-500" data-testid="text-gas-agent-sol">
-                    {agentLoading ? <Loader2 className="w-4 h-4 animate-spin inline" /> : `${(agentWallet?.solBalance ?? 0).toFixed(4)}`}
+                    {agentLoading ? <Loader2 className="w-4 h-4 animate-spin inline" /> : agentWallet == null ? '\u2014' : `${agentWallet.solBalance.toFixed(4)}`}
                   </p>
                 </div>
               </div>
@@ -940,7 +1153,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                   <div className="flex items-center justify-between mb-2">
                     <label className="text-sm font-medium">Deposit Amount (SOL)</label>
                     <span className="text-xs text-muted-foreground">
-                      Available: {(userSolBalance ?? 0).toFixed(4)} SOL
+                      Available: {userSolBalance == null ? '\u2014' : userSolBalance.toFixed(4)} SOL
                     </span>
                   </div>
                   <div className="flex gap-2">
@@ -1005,7 +1218,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                   <div className="flex items-center justify-between mb-2">
                     <label className="text-sm font-medium">Withdraw Amount (SOL)</label>
                     <span className="text-xs text-muted-foreground">
-                      Available: {Math.max(0, (agentWallet?.solBalance ?? 0) - 0.005).toFixed(4)} SOL
+                      Available: {agentWallet == null ? '\u2014' : Math.max(0, agentWallet.solBalance - 0.005).toFixed(4)} SOL
                     </span>
                   </div>
                   <div className="flex gap-2">
