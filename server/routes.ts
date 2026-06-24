@@ -8869,6 +8869,57 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     }
   });
 
+  // READ a wallet's active borrow position(s) + best-effort LIVE health for the
+  // standing "Your loan" card. Read-only: no money, no UMK/session (it only reads
+  // public on-chain state + DB rows scoped to the caller's wallet). `eligible`
+  // tells the UI whether to surface the Borrow action (owner-gated MVP). Live
+  // health is best-effort and fails SOFT to the stored snapshot (readLivePosition
+  // Health returns null for both "no position" and an RPC error, so a null here is
+  // never treated as "loan repaid" — terminal status comes only from the executor).
+  app.get("/api/vault/borrow/positions", requireWallet, async (req, res) => {
+    try {
+      const rows = await storage.getBorrowPositions(req.walletAddress!, null);
+      const active = rows.filter((r) => r.status !== "closed" && r.status !== "failed");
+
+      const borrowRoute = new JupiterLendBorrowRoute();
+      const positions = await Promise.all(
+        active.map(async (r) => {
+          let liveHealth: Awaited<ReturnType<typeof borrowRoute.readLivePositionHealth>> = null;
+          const posIdNum = r.venuePositionId != null ? Number(r.venuePositionId) : NaN;
+          if (Number.isFinite(posIdNum) && posIdNum > 0 && r.collateralMint) {
+            try {
+              liveHealth = await borrowRoute.readLivePositionHealth(r.collateralMint, posIdNum);
+            } catch {
+              // fail SOFT to the stored snapshot; never infer a close from a read miss
+            }
+          }
+          return {
+            id: r.id,
+            status: r.status,
+            debtVenue: r.debtVenue,
+            venueVaultId: r.venueVaultId,
+            venuePositionId: r.venuePositionId,
+            collateralAssetKey: r.collateralAssetKey,
+            collateralMint: r.collateralMint,
+            collateralAmountRaw: r.collateralAmountRaw,
+            debtAssetKey: r.debtAssetKey,
+            debtMint: r.debtMint,
+            debtAmountRaw: r.debtAmountRaw,
+            liveHealth,
+            healthIsLive: liveHealth != null,
+            healthSnapshot: r.healthSnapshot ?? null,
+            healthAsOf: r.healthAsOf ?? null,
+          };
+        }),
+      );
+
+      res.json({ eligible: isBorrowOwnerWallet(req.walletAddress!), positions });
+    } catch (error: any) {
+      console.error("[Vault] borrow positions read error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
   // Park spare USDC into a yield asset. Interactive session UMK (manual action).
   // Optional botId targets a single bot's per-bot wallet (Flash); otherwise the
   // shared account vault.
