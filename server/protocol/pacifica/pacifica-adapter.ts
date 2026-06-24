@@ -253,6 +253,14 @@ export class PacificaAdapter implements ProtocolAdapter {
       // encrypted V3 blob, so it survives a key-blob loss (corruption / AAD mismatch /
       // the one-time v1→v3 UMK regeneration that orphaned the early random-key bots).
       walletDerivation: 'agent_hd',
+      // Borrow/carry (Vault borrow engine, Phase A): funds live in the exchange
+      // subaccount (not a pledgeable wallet) → NO per-bot debt, NO carry-on-close.
+      // Account-level borrow (agent-main → Jupiter Lend) is still available; the
+      // $1 fee + $10 min make per-bot round-trips uneconomic.
+      custodyModel: 'exchange_subaccount',
+      supportsPerBotExternalDebt: false,
+      supportsCarryOnClose: false,
+      roundTripWithdrawalEconomics: 'fixed_fee_high_min',
     };
   }
 

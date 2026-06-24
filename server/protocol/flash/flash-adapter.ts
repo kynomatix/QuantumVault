@@ -233,6 +233,12 @@ export class FlashAdapter implements ProtocolAdapter {
       // Phase 4b: each Flash bot owns its own minted Solana wallet, derived from the
       // owner's agent seed so it's recoverable from the recovery phrase + HD index.
       walletDerivation: 'agent_hd',
+      // Borrow/carry (Vault borrow engine, Phase A): a Flash bot owns a pledgeable
+      // on-chain wallet → full per-bot debt + carry-on-close; withdrawals are cheap.
+      custodyModel: 'per_bot_wallet',
+      supportsPerBotExternalDebt: true,
+      supportsCarryOnClose: true,
+      roundTripWithdrawalEconomics: 'negligible',
     };
   }
 

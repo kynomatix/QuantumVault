@@ -346,6 +346,46 @@ export interface AdapterCapabilities {
   //                back to the funds (unrecoverable if lost).
   // Omitted/undefined is treated as 'random' (legacy behaviour) for back-compat.
   walletDerivation?: 'agent_hd' | 'random';
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Borrow / carry capability gates — Vault borrow engine, Phase A (2026-06-24).
+  // The borrow/carry logic MUST gate on THESE explicit flags. Do NOT infer debt
+  // capability from `walletDerivation`, and never branch on protocol name
+  // (architect audit 2026-06-24). Account-level borrow (agent-main wallet →
+  // Jupiter Lend, on-chain, never touches the trading venue) is available to ALL
+  // venues regardless of these flags — they gate only PER-BOT debt and carry.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  // Where a bot's trading funds physically live — determines whether the bot can
+  // itself pledge collateral to an external lending protocol:
+  //   'per_bot_wallet'      — bot owns an on-chain wallet (Flash independent_trader)
+  //                           that can HOLD and PLEDGE collateral → per-bot debt is
+  //                           physically possible.
+  //   'exchange_subaccount' — funds sit inside the exchange's margin subaccount
+  //                           (Pacifica, Drift); no free wallet to pledge, so any
+  //                           borrow stays ACCOUNT-level on the agent-main wallet.
+  custodyModel: 'per_bot_wallet' | 'exchange_subaccount';
+
+  // Can a bot hold its OWN isolated borrow position (collateral in the bot wallet,
+  // pledged to the lending protocol)? Requires custodyModel === 'per_bot_wallet'.
+  supportsPerBotExternalDebt: boolean;
+
+  // On bot close, can borrowed funds be repaid / carried to the Vault economically
+  // at the PER-BOT level? False when round-tripping the venue's funds is
+  // uneconomical (see roundTripWithdrawalEconomics). Requires
+  // supportsPerBotExternalDebt.
+  supportsCarryOnClose: boolean;
+
+  // Qualitative per-withdraw economics that gate per-bot carry/repay round-trips.
+  // EXPLICIT (do not infer from protocol name). Concrete fee/min figures live in
+  // each adapter's own withdrawal constants; this is the gate input the carry
+  // advisor reads:
+  //   'negligible'         — no fixed fee, tiny minimum → carry round-trips are
+  //                          cheap (Flash: no withdraw fee, $0.1 transfer min).
+  //   'fixed_fee_high_min' — a fixed per-withdraw fee + high minimum make a typical
+  //                          per-bot carry uneconomic (Pacifica: $1 fee + $10 min).
+  //   'on_chain_only'      — only on-chain rent/tx cost (Drift subaccounts).
+  roundTripWithdrawalEconomics: 'negligible' | 'fixed_fee_high_min' | 'on_chain_only';
 }
 
 export type Unsubscribe = () => void;

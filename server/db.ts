@@ -476,6 +476,63 @@ export async function ensureSchema() {
         pool_id text,
         as_of timestamp NOT NULL DEFAULT now()
       )`,
+
+      // --- Vaults borrow engine (Phase A scaffold): debt LEDGER. ---
+      // Empty + additive; NO writers wired yet (Phase A = spec & hard gates, no
+      // money moves). One row per isolated borrow position. Scope mirrors
+      // vault_positions / server/vault/scope.ts: trading_bot_id NULL = account
+      // level (agent-main wallet pledges to Jupiter Lend/Fluid); non-null = a
+      // bot's own per-bot wallet (Flash). MONEY-SAFETY: debt is a LIABILITY — it
+      // is NEVER folded into equity_events / sumNetDepositedFromEvents (that
+      // would fabricate PnL); displayed equity = assets − debt. Health is read
+      // AUTHORITATIVELY on-chain (REST = cross-check only); health_as_of is the
+      // ORACLE publish time, never the pool liquidity lastUpdateTimestamp. The
+      // active-position uniqueness model is deferred to the build phase (no
+      // writers exist to constrain yet); only non-unique scope indexes here.
+      // Policy-neutral columns only: hard max-LTV cap and fee/monetization model
+      // are PENDING owner decisions and live in config/policy, not this schema.
+      `CREATE TABLE IF NOT EXISTS borrow_positions (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        wallet_address text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        trading_bot_id varchar,
+        debt_venue text NOT NULL,
+        venue_vault_id text,
+        collateral_asset_key text NOT NULL,
+        collateral_mint text NOT NULL,
+        collateral_amount_raw text NOT NULL DEFAULT '0',
+        debt_asset_key text NOT NULL DEFAULT 'usdc',
+        debt_mint text NOT NULL,
+        debt_amount_raw text NOT NULL DEFAULT '0',
+        attributed_bot_id varchar,
+        status text NOT NULL DEFAULT 'pending',
+        health_snapshot jsonb,
+        health_as_of timestamp,
+        health_source text,
+        created_at timestamp NOT NULL DEFAULT now(),
+        updated_at timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_borrow_positions_wallet ON borrow_positions (wallet_address)`,
+      `CREATE INDEX IF NOT EXISTS idx_borrow_positions_bot ON borrow_positions (trading_bot_id) WHERE trading_bot_id IS NOT NULL`,
+
+      // --- Vaults borrow engine (Phase A scaffold): money-op AUDIT log. ---
+      // Append-only record of every multi-hop borrow/repay/carry operation, so
+      // the (future) money state machine is resumable + idempotent: DB-unique
+      // operation id + per-step on-chain tx signatures + status/step, mirroring
+      // the audited park/unpark safety model. Empty + additive; no writers yet.
+      `CREATE TABLE IF NOT EXISTS borrow_operations (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        wallet_address text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        borrow_position_id varchar,
+        operation_type text NOT NULL,
+        status text NOT NULL DEFAULT 'pending',
+        step text,
+        tx_signatures jsonb NOT NULL DEFAULT '[]',
+        error text,
+        created_at timestamp NOT NULL DEFAULT now(),
+        updated_at timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_borrow_operations_wallet ON borrow_operations (wallet_address)`,
+      `CREATE INDEX IF NOT EXISTS idx_borrow_operations_position ON borrow_operations (borrow_position_id) WHERE borrow_position_id IS NOT NULL`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner

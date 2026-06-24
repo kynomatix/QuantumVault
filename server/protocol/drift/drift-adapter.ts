@@ -205,6 +205,13 @@ export class DriftAdapter implements ProtocolAdapter {
       // 12g/12f contract — Drift derives subaccount keys from the main key,
       // routes.ts must NOT generate a fresh sub keypair for Drift bots.
       requiresExternalSubaccountKey: false,
+      // Borrow/carry (Vault borrow engine, Phase A): legacy subaccount venue —
+      // funds live in the Drift margin account (not a pledgeable wallet) → NO
+      // per-bot debt, NO carry-on-close. On-chain withdrawals carry only rent/tx.
+      custodyModel: 'exchange_subaccount',
+      supportsPerBotExternalDebt: false,
+      supportsCarryOnClose: false,
+      roundTripWithdrawalEconomics: 'on_chain_only',
     };
   }
 

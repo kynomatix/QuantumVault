@@ -109,6 +109,13 @@ describe('PacificaAdapter contract compliance', () => {
       expect(typeof caps.supportsCloseSubaccount).toBe('boolean');
       expect(caps.maxSubaccounts === null || typeof caps.maxSubaccounts === 'number').toBe(true);
       expect(['on-chain', 'off-chain', 'hybrid']).toContain(caps.settlementType);
+      // Borrow/carry capability gates (Vault borrow engine, Phase A)
+      expect(['per_bot_wallet', 'exchange_subaccount']).toContain(caps.custodyModel);
+      expect(typeof caps.supportsPerBotExternalDebt).toBe('boolean');
+      expect(typeof caps.supportsCarryOnClose).toBe('boolean');
+      expect(['negligible', 'fixed_fee_high_min', 'on_chain_only']).toContain(
+        caps.roundTripWithdrawalEconomics,
+      );
     });
 
     it('optional methods match capability flags', () => {
