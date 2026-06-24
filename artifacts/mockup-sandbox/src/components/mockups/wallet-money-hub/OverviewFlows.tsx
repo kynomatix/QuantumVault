@@ -54,17 +54,25 @@ const SWAP_TOKENS: SwapToken[] = [
 ];
 
 // Transaction history ("money flows") — mirrors the live EquityHistory list 1:1,
-// including its colours: money-in = green, money-out = orange (this is the existing
-// component; the real page will reuse it as-is, not a reinvented one).
-type MoneyFlow = { dir: "in" | "out"; label: string; date: string; amount: string };
+// including its colours: money-in = green, money-out = orange. Borrow + repay get
+// their OWN liability treatment (NOT deposit-green) so a loan never reads as profit
+// or as money the user put in — matches the locked money-safety rule (a borrow is a
+// liability inflow, a repay a debt paydown; neither is a net-deposit).
+type MoneyFlow = {
+  kind: "in" | "out" | "borrow" | "repay";
+  label: string;
+  date: string;
+  amount: string;
+  sub?: string;
+};
 const MONEY_FLOWS: MoneyFlow[] = [
-  { dir: "in", label: "Deposit to Trading Agent", date: "Jun 22, 2026 · 2:14 PM", amount: "+2,000.00 USDC" },
-  { dir: "in", label: "Borrow USDC", date: "Jun 21, 2026 · 9:03 AM", amount: "+1,200.00 USDC" },
-  { dir: "out", label: "Repay debt", date: "Jun 20, 2026 · 6:48 PM", amount: "−500.00 USDC" },
-  { dir: "in", label: "Deposit SOL → USDC (swap)", date: "Jun 19, 2026 · 11:20 AM", amount: "+318.40 USDC" },
-  { dir: "out", label: "Withdraw to Your Wallet", date: "Jun 18, 2026 · 4:32 PM", amount: "−800.00 USDC" },
-  { dir: "in", label: "Gas Top-Up", date: "Jun 17, 2026 · 8:10 AM", amount: "+0.20 SOL" },
-  { dir: "in", label: "Deposit to Trading Agent", date: "Jun 15, 2026 · 1:05 PM", amount: "+5,000.00 USDC" },
+  { kind: "in", label: "Deposit to Trading Agent", date: "Jun 22, 2026 · 2:14 PM", amount: "+2,000.00 USDC" },
+  { kind: "borrow", label: "Borrow USDC", date: "Jun 21, 2026 · 9:03 AM", amount: "+1,200.00 USDC", sub: "Loan — adds debt, not a deposit" },
+  { kind: "repay", label: "Repay debt", date: "Jun 20, 2026 · 6:48 PM", amount: "−500.00 USDC", sub: "Debt paydown" },
+  { kind: "in", label: "Deposit SOL → USDC (swap)", date: "Jun 19, 2026 · 11:20 AM", amount: "+318.40 USDC" },
+  { kind: "out", label: "Withdraw to Your Wallet", date: "Jun 18, 2026 · 4:32 PM", amount: "−800.00 USDC" },
+  { kind: "in", label: "Gas Top-Up", date: "Jun 17, 2026 · 8:10 AM", amount: "+0.20 SOL" },
+  { kind: "in", label: "Deposit to Trading Agent", date: "Jun 15, 2026 · 1:05 PM", amount: "+5,000.00 USDC" },
 ];
 
 function AddressRow({ address, copied, onCopy, external }: { address: string; copied: boolean; onCopy: () => void; external?: boolean }) {
@@ -281,9 +289,12 @@ function MoneyFlows() {
 
         <div className="space-y-0.5">
           {MONEY_FLOWS.map((f, i) => {
-            const Icon = f.dir === "in" ? ArrowDownToLine : ArrowUpFromLine;
-            const tone = f.dir === "in" ? "text-green-500" : "text-orange-500";
-            const wrap = f.dir === "in" ? "bg-green-500/10" : "bg-orange-500/10";
+            const { Icon, tone, wrap } = {
+              in:     { Icon: ArrowDownToLine, tone: "text-green-500",        wrap: "bg-green-500/10" },
+              out:    { Icon: ArrowUpFromLine, tone: "text-orange-500",       wrap: "bg-orange-500/10" },
+              borrow: { Icon: Landmark,        tone: "text-accent",           wrap: "bg-accent/10" },
+              repay:  { Icon: RotateCcw,       tone: "text-muted-foreground", wrap: "bg-muted" },
+            }[f.kind];
             return (
               <div key={i} className="flex items-center justify-between py-2.5 border-b border-border/40 last:border-0">
                 <div className="flex items-center gap-3">
@@ -292,6 +303,7 @@ function MoneyFlows() {
                   </span>
                   <div>
                     <p className="text-sm font-medium">{f.label}</p>
+                    {f.sub && <p className={`text-[11px] ${tone}`}>{f.sub}</p>}
                     <p className="text-xs text-muted-foreground">{f.date}</p>
                   </div>
                 </div>
