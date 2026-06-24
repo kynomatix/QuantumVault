@@ -354,11 +354,11 @@ function SupplyDialog({ open, onOpenChange, sel, onSel }: { open: boolean; onOpe
  *  pull profits out of your trading agent to your wallet before paying a loan.
  *  So repay straight from the agent (where profits sit) OR your wallet - with
  *  USDC, or by converting supplied collateral / a wallet token. */
-function RepayDialog({ open, onOpenChange, mode }: { open: boolean; onOpenChange: (v: boolean) => void; mode: "usdc" | "asset" }) {
+function RepayDialog({ open, onOpenChange, mode, debtUsd, assetSym }: { open: boolean; onOpenChange: (v: boolean) => void; mode: "usdc" | "asset"; debtUsd: number; assetSym: string }) {
   const [source, setSource] = useState<string>(mode === "usdc" ? "agent" : "supplied");
   const [walletTok, setWalletTok] = useState("SOL");
-  const [supTok, setSupTok] = useState(COLLATERAL[0].symbol);
-  useEffect(() => { setSource(mode === "usdc" ? "agent" : "supplied"); }, [mode, open]);
+  const [supTok, setSupTok] = useState(assetSym);
+  useEffect(() => { setSource(mode === "usdc" ? "agent" : "supplied"); setSupTok(assetSym); }, [mode, open, assetSym]);
 
   const sourceOptions = mode === "usdc"
     ? [
@@ -373,34 +373,34 @@ function RepayDialog({ open, onOpenChange, mode }: { open: boolean; onOpenChange
   // Max-repay cap: never repay beyond the outstanding debt (overpaying is impossible).
   // If the chosen source can't cover the full debt, Max uses the whole balance instead.
   const fmtTok = (n: number) => (n >= 1 ? n.toLocaleString("en-US", { maximumFractionDigits: 2 }) : n.toFixed(4));
-  const usdcMaxFill = TOTAL_BORROWED.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const usdcMaxFill = debtUsd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const supObj = COLLATERAL.find((c) => c.symbol === supTok)!;
   const supAvail = parseFloat(supObj.supplied);
-  const supNeeded = (TOTAL_BORROWED * supAvail) / supObj.suppliedUsd;
+  const supNeeded = supObj.suppliedUsd ? (debtUsd * supAvail) / supObj.suppliedUsd : 0;
   const supCapTok = Math.min(supNeeded, supAvail);
   const supNote = supNeeded <= supAvail
-    ? `Max caps at ~${fmtTok(supCapTok)} ${supTok}, enough to clear your ${fmtUsd(TOTAL_BORROWED)} debt.`
-    : `Max uses your full ${fmtTok(supCapTok)} ${supTok}, paying down part of your ${fmtUsd(TOTAL_BORROWED)} debt.`;
+    ? `Max caps at ~${fmtTok(supCapTok)} ${supTok}, enough to clear your ${fmtUsd(debtUsd)} debt.`
+    : `Max uses your full ${fmtTok(supCapTok)} ${supTok}, paying down part of your ${fmtUsd(debtUsd)} debt.`;
   const walObj = SWAP_TOKENS.find((t) => t.symbol === walletTok)!;
   const walAmt = parseFloat(walObj.amount.replace(/,/g, ""));
   const walUsd = parseFloat(walObj.usd.replace(/[^0-9.]/g, ""));
-  const walNeeded = (TOTAL_BORROWED * walAmt) / walUsd;
+  const walNeeded = (debtUsd * walAmt) / walUsd;
   const walCapTok = Math.min(walNeeded, walAmt);
   const walNote = walNeeded <= walAmt
-    ? `Max caps at ~${fmtTok(walCapTok)} ${walletTok}, enough to clear your ${fmtUsd(TOTAL_BORROWED)} debt.`
-    : `Max uses your full ${fmtTok(walCapTok)} ${walletTok}, paying down part of your ${fmtUsd(TOTAL_BORROWED)} debt.`;
+    ? `Max caps at ~${fmtTok(walCapTok)} ${walletTok}, enough to clear your ${fmtUsd(debtUsd)} debt.`
+    : `Max uses your full ${fmtTok(walCapTok)} ${walletTok}, paying down part of your ${fmtUsd(debtUsd)} debt.`;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Repay debt</DialogTitle>
-          <DialogDescription>Pay down your borrowed USDC - from wherever's easiest.</DialogDescription>
+          <DialogTitle>Repay {assetSym} loan</DialogTitle>
+          <DialogDescription>Pay down the USDC you borrowed against {assetSym} - from wherever's easiest.</DialogDescription>
         </DialogHeader>
 
         <div className="flex items-center justify-between rounded-lg border border-border bg-background/40 px-3 py-2.5 text-sm">
           <span className="text-muted-foreground">Outstanding debt</span>
-          <span className="font-semibold tabular-nums text-accent">{fmtUsd(TOTAL_BORROWED)}</span>
+          <span className="font-semibold tabular-nums text-accent">{fmtUsd(debtUsd)}</span>
         </div>
 
         {/* SOURCE selector */}
@@ -423,7 +423,7 @@ function RepayDialog({ open, onOpenChange, mode }: { open: boolean; onOpenChange
 
         {mode === "usdc" ? (
           <>
-            <AmountField token="USDC" balance={source === "agent" ? "Trading Agent $4,820" : "Wallet $6,140.55"} maxFill={usdcMaxFill} capNote={`Max caps at your ${fmtUsd(TOTAL_BORROWED)} outstanding debt, never more.`} />
+            <AmountField token="USDC" balance={source === "agent" ? "Trading Agent $4,820" : "Wallet $6,140.55"} maxFill={usdcMaxFill} capNote={`Max caps at your ${fmtUsd(debtUsd)} outstanding debt, never more.`} />
             <p className="text-xs text-muted-foreground flex items-start gap-1.5">
               <Info className="w-3.5 h-3.5 text-primary mt-0.5 shrink-0" />
               {source === "agent"
@@ -594,259 +594,248 @@ function MoneyFlows() {
   );
 }
 
-/** Borrow tab - standard lending, kept clean. Pick collateral → borrow USDC,
- *  then see every supplied asset as its own isolated position below. */
-function BorrowPanel() {
-  const [selected, setSelected] = useState(COLLATERAL[0].symbol);
-  const col = COLLATERAL.find((c) => c.symbol === selected)!;
-  const colLimit = Math.round((col.suppliedUsd * col.maxLtv) / 100);
-  const colAvail = colLimit - col.borrowedUsd;
-
+/** Borrow USDC against a SINGLE supplied asset. Each collateral is its own
+ *  isolated Jupiter Lend pool, so borrowing is always per-asset - there is no
+ *  blended, cross-collateral borrow. */
+function BorrowDialog({ open, onOpenChange, sel }: { open: boolean; onOpenChange: (v: boolean) => void; sel: string }) {
+  const col = COLLATERAL.find((c) => c.symbol === sel);
+  if (!col) return null;
+  const limit = Math.round((col.suppliedUsd * col.maxLtv) / 100);
+  const avail = Math.max(0, limit - col.borrowedUsd);
+  const pct = limit ? (col.borrowedUsd / limit) * 100 : 0;
+  const availFill = avail.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return (
-    <div className="mt-5 space-y-5">
-      <Flow>
-        <FlowChip kind="collateral" label={`${col.symbol} collateral`} />
-        <ArrowRight className="w-4 h-4 text-muted-foreground" />
-        <FlowChip kind="loan" label="Borrow USDC" />
-      </Flow>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Borrow against {col.symbol}</DialogTitle>
+          <DialogDescription>Borrow USDC against your {col.symbol} - it stays supplied as collateral the whole time.</DialogDescription>
+        </DialogHeader>
 
-      {/* Liability warning - borrowing is never framed as income. */}
-      <div className="flex items-start gap-2 p-3 rounded-lg bg-accent/10 border border-accent/20">
-        <Info className="w-4 h-4 text-accent mt-0.5 shrink-0" />
-        <p className="text-xs text-muted-foreground">
-          Borrowed USDC is a <span className="text-accent font-medium">liability you owe</span>, not a deposit. Your {col.symbol}
-          {" "}stays locked while the loan is open and can be liquidated if it falls in value.
-        </p>
-      </div>
-
-      {/* Choose which supplied collateral to borrow against. */}
-      <div className="space-y-2">
-        <span className="text-sm font-medium">Borrow against</span>
-        <div className="flex flex-wrap gap-2">
-          {COLLATERAL.map((c) => (
-            <button key={c.symbol} onClick={() => setSelected(c.symbol)} aria-pressed={c.symbol === selected}
-              className={`flex items-center gap-2 rounded-full border pl-2 pr-3 py-1.5 text-sm transition-colors ${c.symbol === selected ? "border-accent/50 bg-accent/10 text-foreground" : "border-border bg-background/40 text-muted-foreground hover:bg-muted/50"}`}>
-              <span className={`w-2.5 h-2.5 rounded-full ${c.dot}`} />
-              {c.symbol}
-            </button>
-          ))}
+        {/* Liability warning - borrowing is never framed as income. */}
+        <div className="flex items-start gap-2 p-3 rounded-lg bg-accent/10 border border-accent/20">
+          <Info className="w-4 h-4 text-accent mt-0.5 shrink-0" />
+          <p className="text-xs text-muted-foreground">
+            Borrowed USDC is a <span className="text-accent font-medium">liability you owe</span>, not a deposit. Your {col.symbol}
+            {" "}stays locked while the loan is open and can be liquidated if it falls in value.
+          </p>
         </div>
-      </div>
 
-      <AmountField token="USDC" balance={`Available to borrow ${fmtUsd(colAvail)}`} />
+        <AmountField token="USDC" balance={`Available to borrow ${fmtUsd(avail)}`} maxFill={availFill} capNote={`Max caps at ${fmtUsd(avail)} - the most you can safely borrow against this ${col.symbol}.`} />
 
-      {/* Per-asset borrow usage. */}
-      <div className="space-y-1.5">
-        <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-          <span>Borrow used on {col.symbol}</span>
-          <span className="tabular-nums">{fmtUsd(col.borrowedUsd)} / {fmtUsd(colLimit)} limit</span>
+        {/* This pool's borrow usage. */}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+            <span>Borrow used on {col.symbol}</span>
+            <span className="tabular-nums">{fmtUsd(col.borrowedUsd)} / {fmtUsd(limit)} limit</span>
+          </div>
+          <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+            <div className="h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
+          </div>
         </div>
-        <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-          <div className="h-full rounded-full bg-accent" style={{ width: `${colLimit ? (col.borrowedUsd / colLimit) * 100 : 0}%` }} />
-        </div>
-      </div>
 
-      {/* Projection. */}
-      <div className="rounded-lg border border-border bg-background/40 p-4 space-y-2 text-sm">
-        <div className="flex justify-between"><span className="text-muted-foreground">Collateral value</span><span className="tabular-nums">{fmtUsd(col.suppliedUsd)}</span></div>
-        <div className="flex justify-between"><span className="text-muted-foreground">Max loan-to-value</span><span className="tabular-nums">{col.maxLtv}%</span></div>
-        <div className="flex justify-between"><span className="text-muted-foreground">Borrow APR</span><span className="tabular-nums">{col.borrowApr}%</span></div>
-        <div className="flex justify-between"><span className="text-muted-foreground">Health after borrow</span><span className="tabular-nums text-emerald-300">Safe</span></div>
-      </div>
-
-      <Button className="w-full h-11 bg-gradient-to-r from-accent to-primary text-white"><Landmark className="w-4 h-4 mr-2" />Borrow USDC</Button>
-
-      {/* Your supplied positions - the "deposited assets" the owner asked for. */}
-      <div className="pt-1 space-y-2">
-        <div className="flex items-center justify-between">
-          <span className="text-sm font-medium">Your collateral positions</span>
-          <span className="text-xs text-muted-foreground tabular-nums">{COLLATERAL.length} assets · {fmtUsd(TOTAL_SUPPLIED)}</span>
+        {/* Pool facts. */}
+        <div className="rounded-lg border border-border bg-background/40 p-4 space-y-2 text-sm">
+          <div className="flex justify-between"><span className="text-muted-foreground">Collateral value</span><span className="tabular-nums">{fmtUsd(col.suppliedUsd)}</span></div>
+          <div className="flex justify-between"><span className="text-muted-foreground">Max loan-to-value</span><span className="tabular-nums">{col.maxLtv}%</span></div>
+          <div className="flex justify-between"><span className="text-muted-foreground">Borrow APR</span><span className="tabular-nums">{col.borrowApr}%</span></div>
         </div>
-        <div className="space-y-2">
-          {COLLATERAL.map((c) => {
-            const limit = Math.round((c.suppliedUsd * c.maxLtv) / 100);
-            const pct = limit ? (c.borrowedUsd / limit) * 100 : 0;
-            const hasLoan = c.borrowedUsd > 0;
-            return (
-              <div key={c.symbol} className="rounded-xl border border-border bg-background/40 p-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2.5">
-                    <span className={`w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-semibold text-background ${c.dot}`}>{c.symbol.slice(0, 2)}</span>
-                    <div>
-                      <p className="text-sm font-medium leading-tight">{c.symbol}</p>
-                      <p className="text-xs text-muted-foreground">{c.supplied}</p>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-sm font-semibold tabular-nums">{fmtUsd(c.suppliedUsd)}</p>
-                    <p className="text-[11px] text-muted-foreground">supplied</p>
-                  </div>
-                </div>
-                <div className="mt-3 flex items-center gap-3">
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between text-[11px] mb-1">
-                      <span className="text-muted-foreground">{hasLoan ? "Borrowed" : "No loan"}</span>
-                      <span className="tabular-nums text-accent">{hasLoan ? fmtUsd(c.borrowedUsd) : "-"}</span>
-                    </div>
-                    <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-                      <div className="h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
-                    </div>
-                  </div>
-                  {hasLoan ? (
-                    <span className="flex items-center gap-1 text-[11px] text-emerald-300"><ShieldCheck className="w-3.5 h-3.5" /> 82%</span>
-                  ) : (
-                    <Button size="sm" variant="outline" className="h-7 px-3 text-xs" onClick={() => setSelected(c.symbol)}>Borrow</Button>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
+
+        <GasFeeNote />
+        <Button className="w-full h-11 bg-gradient-to-r from-accent to-primary text-white"><Landmark className="w-4 h-4 mr-2" />Borrow USDC</Button>
+      </DialogContent>
+    </Dialog>
   );
 }
 
-function ActionPanel() {
-  const [tab, setTab] = useState("deposit");
+/** Per-pool health from borrow usage. Pools are ISOLATED, so there is no single
+ *  aggregate health number - each loan is judged on its own collateral only.
+ *  null = no loan on this pool (nothing to show). */
+function poolHealth(borrowedUsd: number, limit: number) {
+  if (borrowedUsd <= 0) return null;
+  const used = limit ? borrowedUsd / limit : 1;
+  if (used < 0.6) return { label: "Safe", cls: "text-emerald-300", Icon: ShieldCheck };
+  if (used < 0.85) return { label: "Caution", cls: "text-amber-300", Icon: HeartPulse };
+  return { label: "At risk", cls: "text-red-400", Icon: HeartPulse };
+}
+
+/** SOL top-up, reached from the contextual "Top up" link on the network-fee tile. */
+function GasTopUpDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Top up network fees</DialogTitle>
+          <DialogDescription>Add SOL so your agent can keep paying Solana network fees.</DialogDescription>
+        </DialogHeader>
+        <AmountField token="SOL" balance="Wallet 2.10 SOL" />
+        <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+          <Fuel className="w-3.5 h-3.5 text-orange-400" />
+          The agent keeps a small SOL reserve to cover Solana network fees.
+        </p>
+        <Button className="w-full h-11 bg-orange-500 hover:bg-orange-500/90 text-white">Top up SOL</Button>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** TRADING bucket - the agent's tradable USDC + its SOL fee reserve, with
+ *  Deposit / Withdraw attached directly to the money (no separate action strip). */
+function TradingAgentCard({ copied, onCopy }: { copied: boolean; onCopy: () => void }) {
   const [depositOpen, setDepositOpen] = useState(false);
   const [depositTab, setDepositTab] = useState<"usdc" | "token">("usdc");
   const [depositSwap, setDepositSwap] = useState("SOL");
-  const [supplyOpen, setSupplyOpen] = useState(false);
-  const [supplySel, setSupplySel] = useState("INF");
   const [wUsdcOpen, setWUsdcOpen] = useState(false);
-  const [wColOpen, setWColOpen] = useState(false);
-  const [wColSel, setWColSel] = useState(COLLATERAL.find((c) => c.borrowedUsd === 0)?.symbol ?? COLLATERAL[0].symbol);
-  const [repayOpen, setRepayOpen] = useState(false);
-  const [repayMode, setRepayMode] = useState<"usdc" | "asset">("usdc");
-
+  const [gasOpen, setGasOpen] = useState(false);
   return (
-    <Card className="border-border bg-card">
-      <CardContent className="p-6">
-        <Tabs value={tab} onValueChange={setTab}>
-          <TabsList className="grid grid-cols-5 w-full bg-muted/50">
-            <TabsTrigger value="deposit"><ArrowDownToLine className="w-4 h-4 mr-1.5" />Add funds</TabsTrigger>
-            <TabsTrigger value="withdraw"><ArrowUpFromLine className="w-4 h-4 mr-1.5" />Withdraw</TabsTrigger>
-            <TabsTrigger value="borrow"><Landmark className="w-4 h-4 mr-1.5" />Borrow</TabsTrigger>
-            <TabsTrigger value="repay"><RotateCcw className="w-4 h-4 mr-1.5" />Repay</TabsTrigger>
-            <TabsTrigger value="gas"><Fuel className="w-4 h-4 mr-1.5" />Gas</TabsTrigger>
-          </TabsList>
-
-          {/* ADD FUNDS - the corrected two-card model. The split is the whole point:
-              left card = money to TRADE with (USDC, swap path). right card = collateral
-              to BORROW against (held as-is, lending). */}
-          <TabsContent value="deposit" className="mt-5 space-y-4">
-            <div className="grid sm:grid-cols-2 gap-3">
-              <div className="space-y-2">
-                <Flow>
-                  <FlowChip kind="wallet" label="Your Wallet" />
-                  <ArrowRight className="w-4 h-4 text-muted-foreground" />
-                  <FlowChip kind="agent" label="Trading Agent" />
-                </Flow>
-                <ActionCard
-                  icon={Wallet}
-                  title="Deposit USDC - to trade"
-                  desc="Fund your bots. USDC goes straight in; any other token is auto-swapped to USDC."
-                  onClick={() => { setDepositTab("usdc"); setDepositOpen(true); }}
-                />
-              </div>
-              <div className="space-y-2">
-                <Flow>
-                  <FlowChip kind="wallet" label="Your Wallet" />
-                  <ArrowRight className="w-4 h-4 text-muted-foreground" />
-                  <FlowChip kind="collateral" label="Lending" />
-                </Flow>
-                <ActionCard
-                  icon={Coins}
-                  tone="teal"
-                  title="Supply collateral - to borrow"
-                  desc="Hold INF, JitoSOL, cbBTC and more as-is (no swap) so you can borrow USDC against them."
-                  onClick={() => setSupplyOpen(true)}
-                />
-              </div>
+    <Card className="border-primary/20 bg-primary/5">
+      <CardContent className="p-6 space-y-4">
+        <div className="flex items-center gap-2.5">
+          <div className="w-9 h-9 rounded-lg bg-primary/15 flex items-center justify-center"><Bot className="w-4.5 h-4.5 text-primary" /></div>
+          <div>
+            <h2 className="font-semibold leading-tight">Trading Agent</h2>
+            <p className="text-xs text-muted-foreground">Server-managed · trades USDC for your bots</p>
+          </div>
+        </div>
+        <AddressRow address="4kMt…2aB1" copied={copied} onCopy={onCopy} external />
+        <div className="grid grid-cols-2 gap-3">
+          <div className="rounded-xl border border-primary/20 bg-primary/10 p-4">
+            <div className="text-xs text-primary/80">Trading USDC</div>
+            <div className="text-xl font-semibold tabular-nums mt-1 text-primary">$4,820</div>
+          </div>
+          <div className="rounded-xl border border-orange-500/20 bg-orange-500/5 p-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-xs text-orange-300/90 flex items-center gap-1"><Fuel className="w-3 h-3" /> Network fee (SOL)</div>
+              <button onClick={() => setGasOpen(true)} className="text-[11px] text-orange-300 hover:text-orange-200 underline underline-offset-2">Top up</button>
             </div>
-            <FundingDialog
-              open={depositOpen} onOpenChange={setDepositOpen} tab={depositTab} onTabChange={setDepositTab}
-              swapToken={depositSwap} onSwapToken={setDepositSwap}
-              title="Deposit to Trading Agent" description="Add USDC for your bots to trade with."
-              usdcTabLabel="Deposit USDC" usdcBalance="Available $6,140.55" usdcCta="Deposit USDC" tokenCta="Deposit & Convert to USDC"
-            />
-            <SupplyDialog open={supplyOpen} onOpenChange={setSupplyOpen} sel={supplySel} onSel={setSupplySel} />
-          </TabsContent>
-
-          {/* WITHDRAW - two paths, mirroring Add funds: pull trading USDC, or
-              un-supply collateral (which Add funds can put in but nothing could take out). */}
-          <TabsContent value="withdraw" className="mt-5 space-y-4">
-            <div className="grid sm:grid-cols-2 gap-3">
-              <div className="space-y-2">
-                <Flow>
-                  <FlowChip kind="agent" label="Trading Agent" />
-                  <ArrowRight className="w-4 h-4 text-muted-foreground" />
-                  <FlowChip kind="wallet" label="Your Wallet" />
-                </Flow>
-                <ActionCard
-                  icon={Wallet}
-                  title="Withdraw USDC - from trading"
-                  desc="Move trading USDC from your agent back to your connected wallet."
-                  onClick={() => setWUsdcOpen(true)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Flow>
-                  <FlowChip kind="collateral" label="Lending" />
-                  <ArrowRight className="w-4 h-4 text-muted-foreground" />
-                  <FlowChip kind="wallet" label="Your Wallet" />
-                </Flow>
-                <ActionCard
-                  icon={Coins}
-                  tone="teal"
-                  title="Withdraw collateral - un-supply"
-                  desc="Pull supplied assets back to your wallet as-is. Assets backing a loan stay locked until you repay."
-                  onClick={() => setWColOpen(true)}
-                />
-              </div>
-            </div>
-            <WithdrawUsdcDialog open={wUsdcOpen} onOpenChange={setWUsdcOpen} />
-            <WithdrawCollateralDialog open={wColOpen} onOpenChange={setWColOpen} sel={wColSel} onSel={setWColSel} />
-          </TabsContent>
-
-          {/* BORROW */}
-          <TabsContent value="borrow"><BorrowPanel /></TabsContent>
-
-          {/* REPAY */}
-          <TabsContent value="repay" className="mt-5 space-y-4">
-            <div className="flex items-center justify-between rounded-xl border border-border bg-background/40 px-4 py-3">
-              <span className="text-sm text-muted-foreground">Outstanding debt</span>
-              <span className="text-lg font-semibold tabular-nums text-accent">{fmtUsd(TOTAL_BORROWED)}</span>
-            </div>
-            <div className="grid sm:grid-cols-2 gap-3">
-              <ActionCard icon={Wallet} title="Repay with USDC" desc="Pay down directly with USDC - from your agent or your wallet." onClick={() => { setRepayMode("usdc"); setRepayOpen(true); }} />
-              <ActionCard icon={Coins} title="Repay with any asset" desc="Pay with supplied collateral or a wallet token - auto-swapped to USDC." onClick={() => { setRepayMode("asset"); setRepayOpen(true); }} />
-            </div>
-            <RepayDialog open={repayOpen} onOpenChange={setRepayOpen} mode={repayMode} />
-          </TabsContent>
-
-          {/* GAS */}
-          <TabsContent value="gas" className="mt-5 space-y-4">
-            <Flow>
-              <FlowChip kind="wallet" label="Your Wallet" />
-              <ArrowRight className="w-4 h-4 text-muted-foreground" />
-              <FlowChip kind="agent" label="Trading Agent" />
-            </Flow>
-            <AmountField token="SOL" balance="Wallet 2.10 SOL" />
-            <p className="text-xs text-muted-foreground flex items-center gap-1.5">
-              <Fuel className="w-3.5 h-3.5 text-orange-400" />
-              The agent keeps a small SOL reserve to pay Solana network fees.
-            </p>
-            <Button className="w-full h-11 bg-orange-500 hover:bg-orange-500/90 text-white">Top up Gas</Button>
-          </TabsContent>
-        </Tabs>
+            <div className="text-xl font-semibold tabular-nums mt-1 text-orange-300">0.42</div>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Button className="h-10" onClick={() => { setDepositTab("usdc"); setDepositOpen(true); }}><ArrowDownToLine className="w-4 h-4 mr-2" />Deposit</Button>
+          <Button variant="outline" className="h-10" onClick={() => setWUsdcOpen(true)}><ArrowUpFromLine className="w-4 h-4 mr-2" />Withdraw</Button>
+        </div>
+        <FundingDialog
+          open={depositOpen} onOpenChange={setDepositOpen} tab={depositTab} onTabChange={setDepositTab}
+          swapToken={depositSwap} onSwapToken={setDepositSwap}
+          title="Deposit to Trading Agent" description="Add USDC for your bots to trade with."
+          usdcTabLabel="Deposit USDC" usdcBalance="Available $6,140.55" usdcCta="Deposit USDC" tokenCta="Deposit & Convert to USDC"
+        />
+        <WithdrawUsdcDialog open={wUsdcOpen} onOpenChange={setWUsdcOpen} />
+        <GasTopUpDialog open={gasOpen} onOpenChange={setGasOpen} />
       </CardContent>
     </Card>
   );
 }
 
-export function LendingClarity() {
+/** LENDING bucket - supplied collateral shown as isolated per-pool positions.
+ *  Every action (Add collateral / Borrow / Repay / Withdraw) hangs off the money
+ *  it acts on, and each pool carries its OWN health (no blended number). */
+function LendingSection() {
+  const [supplyOpen, setSupplyOpen] = useState(false);
+  const [supplySel, setSupplySel] = useState(SUPPLY_TOKENS[0].symbol);
+  const [borrowOpen, setBorrowOpen] = useState(false);
+  const [borrowSel, setBorrowSel] = useState(COLLATERAL[0].symbol);
+  const [repayOpen, setRepayOpen] = useState(false);
+  const [repaySel, setRepaySel] = useState(COLLATERAL[0].symbol);
+  const [wColOpen, setWColOpen] = useState(false);
+  const [wColSel, setWColSel] = useState(COLLATERAL[0].symbol);
+
+  const repayPool = COLLATERAL.find((c) => c.symbol === repaySel)!;
+
+  return (
+    <Card className="border-teal-500/20 bg-card">
+      <CardContent className="p-6 space-y-4">
+        <div className="flex items-end justify-between gap-4">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-lg bg-teal-500/10 flex items-center justify-center"><Coins className="w-4.5 h-4.5 text-teal-300" /></div>
+            <div>
+              <h2 className="font-semibold leading-tight">Lending collateral</h2>
+              <p className="text-xs text-muted-foreground mt-0.5">Held as-is · each asset borrows USDC on its own</p>
+            </div>
+          </div>
+          <Button size="sm" className="bg-teal-500 hover:bg-teal-500/90 text-background shrink-0" onClick={() => setSupplyOpen(true)}>
+            <Coins className="w-4 h-4 mr-2" />Add collateral
+          </Button>
+        </div>
+
+        <div className="flex items-center justify-between text-xs text-muted-foreground tabular-nums">
+          <span>{COLLATERAL.length} assets supplied</span>
+          <span>{fmtUsd(TOTAL_SUPPLIED)} collateral · {fmtUsd(TOTAL_BORROWED)} borrowed</span>
+        </div>
+
+        {/* Each supplied asset = one isolated pool, with its own borrow/health. */}
+        <div className="space-y-2.5">
+          {COLLATERAL.map((c) => {
+            const limit = Math.round((c.suppliedUsd * c.maxLtv) / 100);
+            const avail = Math.max(0, limit - c.borrowedUsd);
+            const pct = limit ? (c.borrowedUsd / limit) * 100 : 0;
+            const hasLoan = c.borrowedUsd > 0;
+            const health = poolHealth(c.borrowedUsd, limit);
+            return (
+              <div key={c.symbol} className="rounded-xl border border-border bg-background/40 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <span className={`w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-semibold text-background shrink-0 ${c.dot}`}>{c.symbol.slice(0, 2)}</span>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium leading-tight">{c.symbol}</p>
+                      <p className="text-xs text-muted-foreground truncate">{c.supplied}</p>
+                    </div>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <p className="text-sm font-semibold tabular-nums">{fmtUsd(c.suppliedUsd)}</p>
+                    <p className="text-[11px] text-muted-foreground">supplied</p>
+                  </div>
+                </div>
+
+                <div className="mt-3 space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-muted-foreground">{hasLoan ? "Borrowed" : "No loan"}</span>
+                    <span className="flex items-center gap-2">
+                      {hasLoan
+                        ? <span className="tabular-nums text-accent">{fmtUsd(c.borrowedUsd)} / {fmtUsd(limit)}</span>
+                        : <span className="tabular-nums text-muted-foreground">borrow up to {fmtUsd(limit)}</span>}
+                      {health && <span className={`flex items-center gap-1 ${health.cls}`}><health.Icon className="w-3.5 h-3.5" />{health.label}</span>}
+                    </span>
+                  </div>
+                  {hasLoan && (
+                    <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                      <div className="h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button size="sm" className="h-8 px-3 text-xs bg-gradient-to-r from-accent to-primary text-white" disabled={avail <= 0}
+                    onClick={() => { setBorrowSel(c.symbol); setBorrowOpen(true); }}>
+                    <Landmark className="w-3.5 h-3.5 mr-1.5" />{hasLoan ? "Borrow more" : "Borrow"}
+                  </Button>
+                  {hasLoan && (
+                    <Button size="sm" variant="outline" className="h-8 px-3 text-xs"
+                      onClick={() => { setRepaySel(c.symbol); setRepayOpen(true); }}>
+                      <RotateCcw className="w-3.5 h-3.5 mr-1.5" />Repay
+                    </Button>
+                  )}
+                  <Button size="sm" variant="ghost" className="h-8 px-3 text-xs text-muted-foreground"
+                    onClick={() => { setWColSel(c.symbol); setWColOpen(true); }}>
+                    <ArrowUpFromLine className="w-3.5 h-3.5 mr-1.5" />Withdraw
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <SupplyDialog open={supplyOpen} onOpenChange={setSupplyOpen} sel={supplySel} onSel={setSupplySel} />
+        <BorrowDialog open={borrowOpen} onOpenChange={setBorrowOpen} sel={borrowSel} />
+        <RepayDialog open={repayOpen} onOpenChange={setRepayOpen} mode="usdc" debtUsd={repayPool.borrowedUsd} assetSym={repayPool.symbol} />
+        <WithdrawCollateralDialog open={wColOpen} onOpenChange={setWColOpen} sel={wColSel} onSel={setWColSel} />
+      </CardContent>
+    </Card>
+  );
+}
+
+export function LendingClarityReworked() {
   const [copiedWallet, setCopiedWallet] = useState(false);
   const [copiedAgent, setCopiedAgent] = useState(false);
   const copy = (which: "wallet" | "agent") => {
@@ -867,8 +856,9 @@ export function LendingClarity() {
           <Button variant="outline" size="sm" className="shrink-0"><RefreshCw className="w-4 h-4 mr-2" /> Refresh</Button>
         </div>
 
-        {/* KPI strip - the lending picture up top */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* KPI strip - lending totals up top. Health is PER POOL (pools are
+            isolated), so there is deliberately no single aggregate health number. */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <Card className="border-teal-500/20 bg-teal-500/5">
             <CardContent className="p-5">
               <div className="flex items-center gap-2 text-xs text-muted-foreground"><CoinsIcon className="w-3.5 h-3.5 text-teal-300" /> Total Collateral</div>
@@ -880,6 +870,7 @@ export function LendingClarity() {
             <CardContent className="p-5">
               <div className="flex items-center gap-2 text-xs text-muted-foreground"><TrendingUp className="w-3.5 h-3.5 text-accent" /> Available to Borrow</div>
               <div className="text-2xl font-semibold tabular-nums text-accent mt-1.5">{fmtUsd(AVAILABLE_TO_BORROW)}</div>
+              <div className="text-[11px] text-muted-foreground mt-0.5">across all pools</div>
             </CardContent>
           </Card>
           <Card className="border-border bg-card">
@@ -887,13 +878,6 @@ export function LendingClarity() {
               <div className="flex items-center gap-2 text-xs text-muted-foreground"><Landmark className="w-3.5 h-3.5 text-muted-foreground" /> Borrowed</div>
               <div className="text-2xl font-semibold tabular-nums mt-1.5">{fmtUsd(TOTAL_BORROWED)}</div>
               <div className="text-[11px] text-muted-foreground mt-0.5">of {fmtUsd(TOTAL_BORROW_LIMIT)} limit · a liability</div>
-            </CardContent>
-          </Card>
-          <Card className="border-border bg-card">
-            <CardContent className="p-5">
-              <div className="flex items-center gap-2 text-xs text-muted-foreground"><HeartPulse className="w-3.5 h-3.5 text-emerald-400" /> Loan Health</div>
-              <div className="text-2xl font-semibold tabular-nums text-emerald-300 mt-1.5">82%</div>
-              <div className="text-[11px] text-emerald-400/70 mt-0.5">Safe · well above liquidation</div>
             </CardContent>
           </Card>
         </div>
@@ -917,55 +901,12 @@ export function LendingClarity() {
             </CardContent>
           </Card>
 
-          <Card className="border-primary/20 bg-primary/5">
-            <CardContent className="p-6 space-y-4">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-lg bg-primary/15 flex items-center justify-center"><Bot className="w-4.5 h-4.5 text-primary" /></div>
-                <div>
-                  <h2 className="font-semibold leading-tight">Trading Agent</h2>
-                  <p className="text-xs text-muted-foreground">Server-managed · trades & holds collateral</p>
-                </div>
-              </div>
-              <AddressRow address="4kMt…2aB1" copied={copiedAgent} onCopy={() => copy("agent")} external />
-              <div className="grid grid-cols-2 gap-3">
-                <div className="rounded-xl border border-primary/20 bg-primary/10 p-4"><div className="text-xs text-primary/80">Trading USDC</div><div className="text-xl font-semibold tabular-nums mt-1 text-primary">$4,820</div></div>
-                <div className="rounded-xl border border-orange-500/20 bg-orange-500/5 p-4"><div className="text-xs text-orange-300/90 flex items-center gap-1"><Fuel className="w-3 h-3" /> Gas (SOL)</div><div className="text-xl font-semibold tabular-nums mt-1 text-orange-300">0.42</div></div>
-              </div>
-            </CardContent>
-          </Card>
+          <TradingAgentCard copied={copiedAgent} onCopy={() => copy("agent")} />
         </div>
 
-        {/* Supplied collateral - the lending pool, separate from trading USDC above */}
-        <Card className="border-teal-500/20 bg-card">
-          <CardContent className="p-6 space-y-4">
-            <div className="flex items-end justify-between gap-4">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-lg bg-teal-500/10 flex items-center justify-center"><Coins className="w-4.5 h-4.5 text-teal-300" /></div>
-                <div>
-                  <h2 className="font-semibold leading-tight">Supplied collateral</h2>
-                  <p className="text-xs text-muted-foreground mt-0.5">Held as-is · borrow USDC against these</p>
-                </div>
-              </div>
-              <span className="text-xs text-muted-foreground tabular-nums">{COLLATERAL.length} assets · {fmtUsd(TOTAL_SUPPLIED)}</span>
-            </div>
-            <div className="flex h-3 w-full rounded-full overflow-hidden bg-muted">
-              {COLLATERAL.map((a) => (<div key={a.symbol} className={a.dot} style={{ width: `${a.weight}%` }} title={`${a.symbol} ${a.weight}%`} />))}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {COLLATERAL.map((a) => (
-                <div key={a.symbol} className="flex items-center gap-2 rounded-full border border-border bg-background/40 pl-2 pr-3 py-1">
-                  <span className={`w-2.5 h-2.5 rounded-full ${a.dot}`} />
-                  <span className="text-xs font-medium">{a.symbol}</span>
-                  <span className="text-xs text-muted-foreground tabular-nums">{fmtUsd(a.suppliedUsd)}</span>
-                  <span className="text-[10px] text-muted-foreground/70 tabular-nums">{a.weight}%</span>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Action panel */}
-        <ActionPanel />
+        {/* Lending collateral - isolated per-pool positions, each with its own
+            borrow / repay / withdraw and its OWN health (no blended number). */}
+        <LendingSection />
 
         {/* Transaction history */}
         <MoneyFlows />
