@@ -255,6 +255,15 @@ export function SupplyCollateralDialog({
     }
     setSubmitting(true);
     try {
+      // FAILSAFE — verify the session is LIVE before any money moves. Step 1 below
+      // transfers the asset into the trading agent; if the session were already
+      // stale, the lock (Step 2) would fail and strand the asset there. getSessionId()
+      // hits the server and fails closed on a stale/missing session, so we catch it
+      // HERE — before the transfer — and route to the reconnect toast. On retry this
+      // pre-flight runs again, so no transfer happens until the session is valid.
+      setStatusText('Checking your session…');
+      await getSessionId();
+
       // Step 1: user-signed transfer of the asset into the trading agent (NO swap).
       setStatusText('Building transfer…');
       const depRes = await fetch(
