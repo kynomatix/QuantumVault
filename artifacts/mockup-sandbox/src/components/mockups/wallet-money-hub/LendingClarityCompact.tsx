@@ -92,6 +92,7 @@ const TOTAL_BORROW_LIMIT = Math.round(
   COLLATERAL.reduce((a, c) => a + (c.suppliedUsd * c.maxLtv) / 100, 0),
 );
 const AVAILABLE_TO_BORROW = TOTAL_BORROW_LIMIT - TOTAL_BORROWED;
+const SUPPLIED_SORTED = [...COLLATERAL].sort((a, b) => b.suppliedUsd - a.suppliedUsd);
 
 const fmtUsd = (n: number) => `$${n.toLocaleString("en-US")}`;
 
@@ -803,6 +804,32 @@ function LendingSection() {
               <p className="text-[11px] text-muted-foreground">Borrowed</p>
               <p className="text-base font-semibold tabular-nums mt-0.5 text-accent">{fmtUsd(TOTAL_BORROWED)}</p>
               <p className="text-[11px] text-muted-foreground">a liability</p>
+            </div>
+          </div>
+
+          {/* Supplied-collateral split bar (owner liked this from the BEFORE
+              layout) - shows the asset mix compactly without listing pools.
+              Widths come from real supplied value; legend caps at top 5. */}
+          <div className="space-y-2">
+            <div className="flex h-2.5 w-full rounded-full overflow-hidden bg-muted">
+              {SUPPLIED_SORTED.map((a) => (
+                <div key={a.symbol} className={a.dot} style={{ width: `${(a.suppliedUsd / TOTAL_SUPPLIED) * 100}%` }} title={`${a.symbol} ${Math.round((a.suppliedUsd / TOTAL_SUPPLIED) * 100)}%`} />
+              ))}
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {SUPPLIED_SORTED.slice(0, 5).map((a) => (
+                <div key={a.symbol} className="flex items-center gap-1.5 rounded-full border border-border bg-background/40 pl-2 pr-2.5 py-0.5">
+                  <span className={`w-2 h-2 rounded-full ${a.dot}`} />
+                  <span className="text-[11px] font-medium">{a.symbol}</span>
+                  <span className="text-[11px] text-muted-foreground tabular-nums">{fmtUsd(a.suppliedUsd)}</span>
+                  <span className="text-[10px] text-muted-foreground/70 tabular-nums">{Math.round((a.suppliedUsd / TOTAL_SUPPLIED) * 100)}%</span>
+                </div>
+              ))}
+              {SUPPLIED_SORTED.length > 5 && (
+                <div className="flex items-center rounded-full border border-border/60 bg-background/40 px-2.5 py-0.5 text-[11px] text-muted-foreground">
+                  +{SUPPLIED_SORTED.length - 5} more
+                </div>
+              )}
             </div>
           </div>
 
