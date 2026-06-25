@@ -77,13 +77,13 @@ type Collateral = {
 const COLLATERAL: Collateral[] = [
   { symbol: "INF", name: "Infinity (Sanctum)", supplied: "38.40 INF", suppliedUsd: 4200, borrowedUsd: 1200, maxLtv: 50, borrowApr: 6.2, weight: 28, dot: "bg-teal-400" },
   { symbol: "JitoSOL", name: "Jito Staked SOL", supplied: "13.10 JitoSOL", suppliedUsd: 2180, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.4, weight: 15, dot: "bg-violet-400" },
-  { symbol: "cbBTC", name: "Coinbase BTC", supplied: "0.018 cbBTC", suppliedUsd: 1150, borrowedUsd: 0, maxLtv: 70, borrowApr: 4.8, weight: 8, dot: "bg-fuchsia-400" },
-  { symbol: "mSOL", name: "Marinade SOL", supplied: "2.52 mSOL", suppliedUsd: 420, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.4, weight: 3, dot: "bg-indigo-400" },
-  { symbol: "JLP", name: "Jupiter LP", supplied: "142.0 JLP", suppliedUsd: 690, borrowedUsd: 0, maxLtv: 60, borrowApr: 7.1, weight: 5, dot: "bg-emerald-400" },
-  { symbol: "bSOL", name: "BlazeStake SOL", supplied: "9.80 bSOL", suppliedUsd: 1620, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.6, weight: 11, dot: "bg-cyan-400" },
-  { symbol: "jupSOL", name: "Jupiter Staked SOL", supplied: "6.40 jupSOL", suppliedUsd: 1080, borrowedUsd: 520, maxLtv: 60, borrowApr: 5.9, weight: 7, dot: "bg-lime-400" },
-  { symbol: "hSOL", name: "Helius Staked SOL", supplied: "5.10 hSOL", suppliedUsd: 845, borrowedUsd: 0, maxLtv: 60, borrowApr: 5.7, weight: 6, dot: "bg-rose-400" },
-  { symbol: "vSOL", name: "The Vault SOL", supplied: "3.30 vSOL", suppliedUsd: 560, borrowedUsd: 0, maxLtv: 60, borrowApr: 6.0, weight: 4, dot: "bg-amber-400" },
+  { symbol: "cbBTC", name: "Coinbase BTC", supplied: "0.018 cbBTC", suppliedUsd: 1150, borrowedUsd: 0, maxLtv: 70, borrowApr: 4.8, weight: 8, dot: "bg-blue-400" },
+  { symbol: "mSOL", name: "Marinade SOL", supplied: "2.52 mSOL", suppliedUsd: 420, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.4, weight: 3, dot: "bg-cyan-400" },
+  { symbol: "JLP", name: "Jupiter LP", supplied: "142.0 JLP", suppliedUsd: 690, borrowedUsd: 0, maxLtv: 60, borrowApr: 7.1, weight: 5, dot: "bg-pink-500" },
+  { symbol: "bSOL", name: "BlazeStake SOL", supplied: "9.80 bSOL", suppliedUsd: 1620, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.6, weight: 11, dot: "bg-pink-400" },
+  { symbol: "jupSOL", name: "Jupiter Staked SOL", supplied: "6.40 jupSOL", suppliedUsd: 1080, borrowedUsd: 520, maxLtv: 60, borrowApr: 5.9, weight: 7, dot: "bg-teal-300" },
+  { symbol: "hSOL", name: "Helius Staked SOL", supplied: "5.10 hSOL", suppliedUsd: 845, borrowedUsd: 0, maxLtv: 60, borrowApr: 5.7, weight: 6, dot: "bg-purple-400" },
+  { symbol: "vSOL", name: "The Vault SOL", supplied: "3.30 vSOL", suppliedUsd: 560, borrowedUsd: 0, maxLtv: 60, borrowApr: 6.0, weight: 4, dot: "bg-sky-400" },
 ];
 
 const TOTAL_SUPPLIED = COLLATERAL.reduce((a, c) => a + c.suppliedUsd, 0);
