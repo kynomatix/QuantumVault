@@ -611,9 +611,9 @@ function MoneyFlows() {
         <div className="space-y-0.5">
           {visible.map((f, i) => {
             const meta = {
-              in:     { Icon: ArrowDownToLine, tone: "text-[#09B397]",        wrap: "bg-[#09B397]/10" },
+              in:     { Icon: ArrowDownToLine, tone: "text-[#0CC5A6]",        wrap: "bg-[#0CC5A6]/10" },
               out:    { Icon: ArrowUpFromLine, tone: "text-orange-500",       wrap: "bg-orange-500/10" },
-              supply: { Icon: Coins,           tone: "text-[#09B397]",        wrap: "bg-[#09B397]/10" },
+              supply: { Icon: Coins,           tone: "text-[#0CC5A6]",        wrap: "bg-[#0CC5A6]/10" },
               borrow: { Icon: Landmark,        tone: "text-sky-400",          wrap: "bg-sky-500/10" },
               repay:  { Icon: RotateCcw,       tone: "text-muted-foreground", wrap: "bg-muted" },
             }[f.kind];
