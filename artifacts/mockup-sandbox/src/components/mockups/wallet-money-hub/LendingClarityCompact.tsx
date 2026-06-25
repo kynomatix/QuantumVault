@@ -119,16 +119,16 @@ const SUPPLY_TOKENS: SupplyToken[] = [
 // ── Transaction history - liability treatment for borrow/repay ────────────
 type MoneyFlow = { kind: "in" | "out" | "supply" | "borrow" | "repay"; label: string; date: string; amount: string; sub?: string };
 const MONEY_FLOWS: MoneyFlow[] = [
-  { kind: "supply", label: "Supply INF collateral", date: "Jun 22, 2026 · 2:14 PM", amount: "+12.40 INF", sub: "Held as collateral - not swapped" },
-  { kind: "borrow", label: "Borrow USDC against INF", date: "Jun 21, 2026 · 9:03 AM", amount: "+1,200.00 USDC", sub: "Loan - adds debt, not a deposit" },
-  { kind: "supply", label: "Supply jupSOL collateral", date: "Jun 21, 2026 · 8:40 AM", amount: "+6.40 jupSOL", sub: "Held as collateral - not swapped" },
-  { kind: "borrow", label: "Borrow USDC against jupSOL", date: "Jun 20, 2026 · 7:55 PM", amount: "+520.00 USDC", sub: "Loan - adds debt, not a deposit" },
-  { kind: "repay", label: "Repay debt", date: "Jun 20, 2026 · 6:48 PM", amount: "−500.00 USDC", sub: "Debt paydown" },
-  { kind: "in", label: "Deposit SOL → USDC (swap)", date: "Jun 19, 2026 · 11:20 AM", amount: "+318.40 USDC" },
+  { kind: "supply", label: "Supply INF Collateral", date: "Jun 22, 2026 · 2:14 PM", amount: "+12.40 INF", sub: "Held as collateral - not swapped" },
+  { kind: "borrow", label: "Borrow USDC Against INF", date: "Jun 21, 2026 · 9:03 AM", amount: "+1,200.00 USDC", sub: "Loan - adds debt, not a deposit" },
+  { kind: "supply", label: "Supply jupSOL Collateral", date: "Jun 21, 2026 · 8:40 AM", amount: "+6.40 jupSOL", sub: "Held as collateral - not swapped" },
+  { kind: "borrow", label: "Borrow USDC Against jupSOL", date: "Jun 20, 2026 · 7:55 PM", amount: "+520.00 USDC", sub: "Loan - adds debt, not a deposit" },
+  { kind: "repay", label: "Repay Debt", date: "Jun 20, 2026 · 6:48 PM", amount: "−500.00 USDC", sub: "Debt paydown" },
+  { kind: "in", label: "Deposit SOL → USDC (Swap)", date: "Jun 19, 2026 · 11:20 AM", amount: "+318.40 USDC" },
   { kind: "out", label: "Withdraw to Your Wallet", date: "Jun 18, 2026 · 4:32 PM", amount: "−800.00 USDC" },
-  { kind: "supply", label: "Supply bSOL collateral", date: "Jun 17, 2026 · 3:22 PM", amount: "+9.80 bSOL", sub: "Held as collateral - not swapped" },
+  { kind: "supply", label: "Supply bSOL Collateral", date: "Jun 17, 2026 · 3:22 PM", amount: "+9.80 bSOL", sub: "Held as collateral - not swapped" },
   { kind: "in", label: "Deposit to Trading Agent", date: "Jun 15, 2026 · 1:05 PM", amount: "+5,000.00 USDC" },
-  { kind: "supply", label: "Supply JitoSOL collateral", date: "Jun 14, 2026 · 10:11 AM", amount: "+13.10 JitoSOL", sub: "Held as collateral - not swapped" },
+  { kind: "supply", label: "Supply JitoSOL Collateral", date: "Jun 14, 2026 · 10:11 AM", amount: "+13.10 JitoSOL", sub: "Held as collateral - not swapped" },
 ];
 
 function AddressRow({ address, copied, onCopy, external }: { address: string; copied: boolean; onCopy: () => void; external?: boolean }) {
@@ -767,8 +767,6 @@ function LendingSection() {
 
   const repayPool = COLLATERAL.find((c) => c.symbol === repaySel)!;
   const loanPools = COLLATERAL.filter((c) => c.borrowedUsd > 0);
-  const idleCount = COLLATERAL.length - loanPools.length;
-  const visiblePools = poolsOpen ? COLLATERAL : loanPools;
 
   return (
     <Card className="border-teal-500/20 bg-card">
@@ -786,28 +784,46 @@ function LendingSection() {
           </Button>
         </div>
 
-        {/* Collapsed by default: a summary bar you expand. With many supplied
-            assets this keeps the page short - only pools that need attention
-            (active loans) stay visible until you choose to see the rest. */}
-        <button onClick={() => setPoolsOpen((o) => !o)} className="w-full flex items-center justify-between gap-3 rounded-xl border border-border bg-background/40 px-4 py-3 text-left hover:bg-muted/30 transition-colors">
-          <div className="min-w-0">
-            <div className="text-sm font-medium tabular-nums">{fmtUsd(TOTAL_SUPPLIED)} <span className="text-muted-foreground font-normal">collateral · {COLLATERAL.length} assets</span></div>
-            <div className="text-[11px] text-muted-foreground mt-0.5 tabular-nums">{fmtUsd(AVAILABLE_TO_BORROW)} available to borrow · {fmtUsd(TOTAL_BORROWED)} borrowed</div>
+        {/* HEADBOARD: a fixed-height summary that never grows. The per-pool rows
+            stay hidden behind "View all pools" so page length is constant no
+            matter how many assets are supplied or how many carry a loan. */}
+        <div className="rounded-xl border border-border bg-background/40 p-4 space-y-3">
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <p className="text-[11px] text-muted-foreground">Collateral</p>
+              <p className="text-base font-semibold tabular-nums mt-0.5">{fmtUsd(TOTAL_SUPPLIED)}</p>
+              <p className="text-[11px] text-muted-foreground">{COLLATERAL.length} assets</p>
+            </div>
+            <div>
+              <p className="text-[11px] text-muted-foreground">Available to borrow</p>
+              <p className="text-base font-semibold tabular-nums mt-0.5 text-teal-300">{fmtUsd(AVAILABLE_TO_BORROW)}</p>
+              <p className="text-[11px] text-muted-foreground">across all pools</p>
+            </div>
+            <div>
+              <p className="text-[11px] text-muted-foreground">Borrowed</p>
+              <p className="text-base font-semibold tabular-nums mt-0.5 text-accent">{fmtUsd(TOTAL_BORROWED)}</p>
+              <p className="text-[11px] text-muted-foreground">a liability</p>
+            </div>
           </div>
-          <span className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
-            {poolsOpen ? "Collapse" : "View all"}
+
+          {loanPools.length > 0 && (
+            <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground border-t border-border/50 pt-2.5">
+              <HeartPulse className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span>{loanPools.length} of {COLLATERAL.length} pool{loanPools.length > 1 ? "s have" : " has"} an active loan — open to check each one's health.</span>
+            </div>
+          )}
+
+          <button onClick={() => setPoolsOpen((o) => !o)} className="w-full flex items-center justify-center gap-1.5 text-xs font-medium py-2 rounded-lg border border-border/60 hover:bg-muted/30 transition-colors" data-testid="button-toggle-pools">
+            {poolsOpen ? "Hide pools" : `View all ${COLLATERAL.length} pools`}
             {poolsOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-          </span>
-        </button>
+          </button>
+        </div>
 
-        {!poolsOpen && loanPools.length > 0 && (
-          <p className="text-[11px] text-muted-foreground -mt-1">Showing {loanPools.length} pool{loanPools.length > 1 ? "s" : ""} with an active loan - the rest are tucked away.</p>
-        )}
-
-        {/* Each supplied asset = one isolated pool, with its own borrow/health. */}
-        {visiblePools.length > 0 && (
+        {/* Each supplied asset = one isolated pool, with its own borrow/health.
+            Hidden until the user opens the headboard. */}
+        {poolsOpen && (
         <div className="space-y-2.5">
-          {visiblePools.map((c) => {
+          {COLLATERAL.map((c) => {
             const limit = Math.round((c.suppliedUsd * c.maxLtv) / 100);
             const avail = Math.max(0, limit - c.borrowedUsd);
             const pct = limit ? (c.borrowedUsd / limit) * 100 : 0;
@@ -866,12 +882,6 @@ function LendingSection() {
             );
           })}
         </div>
-        )}
-
-        {!poolsOpen && (
-          <button onClick={() => setPoolsOpen(true)} className="w-full text-xs text-muted-foreground hover:text-foreground py-2 rounded-lg border border-dashed border-border/60 hover:bg-muted/30 transition-colors">
-            {loanPools.length > 0 ? `Show ${idleCount} more supplied assets (no loan)` : `Show all ${COLLATERAL.length} supplied assets`}
-          </button>
         )}
 
         <SupplyDialog open={supplyOpen} onOpenChange={setSupplyOpen} sel={supplySel} onSel={setSupplySel} />
