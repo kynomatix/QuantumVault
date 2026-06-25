@@ -611,11 +611,11 @@ function MoneyFlows() {
         <div className="space-y-0.5">
           {visible.map((f, i) => {
             const meta = {
-              in:     { Icon: ArrowDownToLine, tone: "text-[#35D4BA]",        wrap: "bg-[#35D4BA]/10" },
+              in:     { Icon: ArrowDownToLine, tone: "text-chart-4",          wrap: "bg-chart-4/10" },
               out:    { Icon: ArrowUpFromLine, tone: "text-orange-500",       wrap: "bg-orange-500/10" },
-              supply: { Icon: Coins,           tone: "text-[#35D4BA]",        wrap: "bg-[#35D4BA]/10" },
+              supply: { Icon: Coins,           tone: "text-chart-4",          wrap: "bg-chart-4/10" },
               borrow: { Icon: Landmark,        tone: "text-sky-400",          wrap: "bg-sky-500/10" },
-              repay:  { Icon: RotateCcw,       tone: "text-muted-foreground", wrap: "bg-muted" },
+              repay:  { Icon: RotateCcw,       tone: "text-orange-500",       wrap: "bg-orange-500/10" },
             }[f.kind];
             const { Icon, tone, wrap } = meta;
             return (
@@ -624,11 +624,11 @@ function MoneyFlows() {
                   <span className={`w-8 h-8 rounded-lg flex items-center justify-center ${wrap}`}><Icon className={`w-4 h-4 ${tone}`} /></span>
                   <div>
                     <p className="text-sm font-medium">{f.label}</p>
-                    {f.sub && <p className="text-[11px] text-chart-4">{f.sub}</p>}
+                    {f.sub && <p className={`text-[11px] ${tone}`}>{f.sub}</p>}
                     <p className="text-xs text-muted-foreground">{f.date}</p>
                   </div>
                 </div>
-                <span className="font-mono text-sm tabular-nums text-chart-4">{f.amount}</span>
+                <span className={`font-mono text-sm tabular-nums ${tone}`}>{f.amount}</span>
               </div>
             );
           })}
