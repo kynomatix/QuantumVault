@@ -503,15 +503,32 @@ export const borrowOperations = pgTable("borrow_operations", {
   walletAddress: text("wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),
   borrowPositionId: varchar("borrow_position_id"),
   operationType: text("operation_type").notNull(),
+  // Caller-supplied idempotency key (one per logical user action). A retry of the
+  // SAME logical op reuses the existing row instead of re-executing — the linchpin
+  // of crash-safe multi-hop repays where a 5-min lock can't span the whole op.
+  // UNIQUE per wallet (partial index, non-null only).
+  clientRequestId: text("client_request_id"),
   status: text("status").notNull().default('pending'),
+  // Resumable step. Single-tx ops use simple steps; multi-hop repays advance
+  // through initialized -> transfer_confirmed -> swap_confirmed -> repay_confirmed
+  // -> final_read, persisted BEFORE each on-chain action so a crash resumes from
+  // the last CONFIRMED step (never re-spends a confirmed leg).
   step: text("step"),
   txSignatures: jsonb("tx_signatures").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+  // Resume context: op params + per-step observed on-chain amounts (merged
+  // progressively via jsonb `||`, never read-modify-write). On-chain stays the
+  // authority; this is the crash-recovery breadcrumb, not a source of truth.
+  metadata: jsonb("metadata").$type<Record<string, unknown> | null>(),
+  // Final, immutable result payload (so an idempotent re-request returns the same
+  // answer without re-running the op).
+  result: jsonb("result").$type<Record<string, unknown> | null>(),
   error: text("error"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
   walletIdx: index("idx_borrow_operations_wallet").on(table.walletAddress),
   positionIdx: index("idx_borrow_operations_position").on(table.borrowPositionId).where(sql`borrow_position_id IS NOT NULL`),
+  clientReqIdx: uniqueIndex("uq_borrow_operations_client_req").on(table.walletAddress, table.clientRequestId).where(sql`client_request_id IS NOT NULL`),
 }));
 
 export const insertBorrowOperationSchema = createInsertSchema(borrowOperations).omit({

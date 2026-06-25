@@ -405,6 +405,209 @@ export function evaluateBorrowRequest(input: BorrowPolicyInput): BorrowPolicyDec
   };
 }
 
+/** Facts for a collateral-WITHDRAW decision. All on-chain-authoritative. */
+export interface CollateralWithdrawInput {
+  /** Decoded, on-chain-authoritative vault config. */
+  vault: BorrowVaultConfig;
+  /** Current on-chain collateral backing the position, raw base units. */
+  liveCollateralRaw: bigint;
+  /** Current on-chain debt — UNCHANGED by a withdraw — raw base units (6 dp USDC). */
+  liveDebtRaw: bigint;
+  /** Collateral to withdraw now, raw; or "max" to withdraw down to the cap. */
+  requestedWithdrawRaw: bigint | "max";
+  /** Oracle freshness. Required (fail closed) only when debt remains. */
+  oracle: BorrowOracleContext;
+}
+
+export interface CollateralWithdrawDecision {
+  allowed: boolean;
+  /** Collateral remaining after an EXACT withdraw, raw; null for "max"/unreadable. */
+  postCollateralRaw: string | null;
+  postLtv: number | null;
+  postHealthFactor: number | null;
+  effectiveMaxLtv: number;
+  /**
+   * Largest collateral (raw) the caller could withdraw and still pass every
+   * gate. When debt remains, this is the amount that brings the position to
+   * exactly `effectiveMaxLtv` (rounded DOWN, conservative). The executor MUST
+   * resolve a "max" request WITH debt to THIS amount — never the protocol's
+   * MAX_WITHDRAW sentinel, which would withdraw down to the looser protocol
+   * collateral factor (e.g. 0.75) and leave the loan in the danger zone.
+   * When debt is zero, this is the full collateral. null if unreadable.
+   */
+  maxWithdrawableRaw: string | null;
+  reasons: BorrowPolicyReason[];
+}
+
+/**
+ * THE ENFORCED GATE for pulling collateral OUT of an existing borrow position.
+ * Pure. Withdrawing collateral WORSENS health, so this is the opposite-direction
+ * sibling of `evaluateBorrowRequest`: debt is held constant and collateral
+ * shrinks. The money path must refuse unless `allowed === true`, and must re-run
+ * this immediately before signing.
+ *
+ * Rules (fail closed):
+ *   - debt == 0  → no liquidation risk; allow withdrawing ALL collateral.
+ *   - debt  > 0  → the oracle must be readable + fresh + not mid-crash; the
+ *                  post-withdraw LTV must stay <= min(hardMaxLtv, vault.maxLtv)
+ *                  and post-withdraw health must stay above the urgent band.
+ */
+export function evaluateCollateralWithdraw(input: CollateralWithdrawInput): CollateralWithdrawDecision {
+  const cb = BORROW_RISK_POLICY.circuitBreakers;
+  const alerts = BORROW_RISK_POLICY.alerts;
+  const { vault } = input;
+  const reasons: BorrowPolicyReason[] = [];
+  const deny = (code: string, message: string, facts?: Record<string, unknown>) =>
+    reasons.push({ code, severity: "deny", message, facts });
+
+  const finite = (n: number) => typeof n === "number" && Number.isFinite(n);
+  const nonNegFinite = (n: number) => finite(n) && n >= 0;
+  const unitRange = (n: number) => finite(n) && n > 0 && n <= 1;
+  const isDecimals = (n: number) => Number.isInteger(n) && n >= 0 && n <= 18;
+
+  const effectiveMaxLtv = Math.min(
+    BORROW_RISK_POLICY.hardMaxLtv,
+    finite(vault.maxLtv) ? vault.maxLtv : BORROW_RISK_POLICY.hardMaxLtv,
+  );
+
+  const fail = (postCollateralRaw: string | null = null): CollateralWithdrawDecision => ({
+    allowed: false,
+    postCollateralRaw,
+    postLtv: null,
+    postHealthFactor: null,
+    effectiveMaxLtv,
+    maxWithdrawableRaw: null,
+    reasons,
+  });
+
+  // ── Vault sanity (fail closed) ───────────────────────────────────────────
+  const badFacts: string[] = [];
+  if (!unitRange(vault.maxLtv)) badFacts.push("maxLtv");
+  if (!unitRange(vault.liquidationThreshold)) badFacts.push("liquidationThreshold");
+  if (!(finite(vault.oraclePriceLiquidateUsd) && vault.oraclePriceLiquidateUsd > 0))
+    badFacts.push("oraclePriceLiquidateUsd");
+  if (!isDecimals(vault.collateralDecimals)) badFacts.push("collateralDecimals");
+  if (!isDecimals(vault.debtDecimals)) badFacts.push("debtDecimals");
+  if (input.liveCollateralRaw < 0n) badFacts.push("liveCollateralRaw");
+  if (input.liveDebtRaw < 0n) badFacts.push("liveDebtRaw");
+  if (input.requestedWithdrawRaw !== "max" && input.requestedWithdrawRaw <= 0n)
+    badFacts.push("requestedWithdrawRaw");
+  if (badFacts.length > 0) {
+    deny("invalid_inputs", "One or more risk inputs are missing or invalid; refusing to withdraw.", {
+      fields: badFacts,
+    });
+    return fail();
+  }
+
+  const price = vault.oraclePriceLiquidateUsd;
+  const colDiv = 10 ** vault.collateralDecimals;
+  const debtDiv = 10 ** vault.debtDecimals;
+  const debtUsd = Number(input.liveDebtRaw) / debtDiv;
+  const hasDebt = input.liveDebtRaw > 0n;
+
+  // ── No debt → no liquidation risk; allow the full withdraw. ──────────────
+  if (!hasDebt) {
+    const isMax = input.requestedWithdrawRaw === "max";
+    if (!isMax && (input.requestedWithdrawRaw as bigint) > input.liveCollateralRaw) {
+      deny("exceeds_collateral", "Cannot withdraw more collateral than the position holds.", {
+        requestedWithdrawRaw: (input.requestedWithdrawRaw as bigint).toString(),
+        liveCollateralRaw: input.liveCollateralRaw.toString(),
+      });
+      return fail();
+    }
+    const postCollateralRaw = isMax
+      ? "0"
+      : (input.liveCollateralRaw - (input.requestedWithdrawRaw as bigint)).toString();
+    return {
+      allowed: true,
+      postCollateralRaw,
+      postLtv: 0,
+      postHealthFactor: null,
+      effectiveMaxLtv,
+      maxWithdrawableRaw: input.liveCollateralRaw.toString(),
+      reasons,
+    };
+  }
+
+  // ── Debt remains → oracle must be readable, fresh, and not mid-crash. ─────
+  if (input.oracle.publishAgeSec === null) {
+    deny("oracle_unreadable", "Could not read the oracle's publish time; refusing to withdraw collateral.");
+  } else if (input.oracle.publishAgeSec > cb.oracleMaxAgeSec) {
+    deny("oracle_stale", "Oracle price is stale; refusing to withdraw collateral until it refreshes.", {
+      publishAgeSec: input.oracle.publishAgeSec,
+    });
+  }
+  if (input.oracle.priceMove1hAbs === null) {
+    deny("price_move_unreadable", "Could not read recent price volatility; refusing to withdraw collateral.");
+  } else if (nonNegFinite(input.oracle.priceMove1hAbs) && input.oracle.priceMove1hAbs > cb.priceMove1hCeiling) {
+    deny("price_volatility_freeze", "Collateral price is moving too fast right now; withdrawals are paused.", {
+      priceMove1hAbs: input.oracle.priceMove1hAbs,
+    });
+  }
+
+  // Largest withdraw that keeps LTV <= effectiveMaxLtv (round the kept collateral
+  // UP, so the withdraw is rounded DOWN — conservative). minColValueUsd is the
+  // collateral USD needed to keep debt at exactly the cap.
+  const minColValueUsd = debtUsd / effectiveMaxLtv;
+  const minColTokens = minColValueUsd / price;
+  const minColRaw = BigInt(Math.ceil(minColTokens * colDiv));
+  const maxWithdrawableRaw = input.liveCollateralRaw > minColRaw ? input.liveCollateralRaw - minColRaw : 0n;
+
+  // Resolve the requested withdraw to an exact post-collateral.
+  const isMax = input.requestedWithdrawRaw === "max";
+  const requestedRaw = isMax ? maxWithdrawableRaw : (input.requestedWithdrawRaw as bigint);
+
+  if (!isMax && requestedRaw > input.liveCollateralRaw) {
+    deny("exceeds_collateral", "Cannot withdraw more collateral than the position holds.", {
+      requestedWithdrawRaw: requestedRaw.toString(),
+      liveCollateralRaw: input.liveCollateralRaw.toString(),
+    });
+  }
+
+  const postCollateralRaw = input.liveCollateralRaw > requestedRaw ? input.liveCollateralRaw - requestedRaw : 0n;
+  const postColTokens = Number(postCollateralRaw) / colDiv;
+  const postColValueUsd = postColTokens * price;
+
+  let postLtv: number | null = null;
+  let postHealthFactor: number | null = null;
+  if (!(postColValueUsd > 0)) {
+    // Withdrawing (nearly) all collateral while debt remains is never allowed.
+    deny("withdraw_leaves_no_collateral", "Cannot withdraw this much while the loan still has debt.");
+  } else {
+    postLtv = debtUsd / postColValueUsd;
+    postHealthFactor = (postColValueUsd * vault.liquidationThreshold) / debtUsd;
+    if (postLtv > effectiveMaxLtv + LTV_EPSILON) {
+      deny(
+        "exceeds_max_ltv",
+        `This withdrawal would push LTV to ${(postLtv * 100).toFixed(1)}%, above the ${(
+          effectiveMaxLtv * 100
+        ).toFixed(0)}% cap.`,
+        { postLtv, effectiveMaxLtv },
+      );
+    }
+    if (postHealthFactor < alerts.healthFactorUrgent) {
+      deny(
+        "health_below_urgent",
+        `This withdrawal would push the loan into the danger zone (health ${postHealthFactor.toFixed(
+          2,
+        )}, urgent below ${alerts.healthFactorUrgent}).`,
+        { postHealthFactor },
+      );
+    }
+  }
+
+  const allowed = reasons.every((r) => r.severity !== "deny");
+  return {
+    allowed,
+    postCollateralRaw: postCollateralRaw.toString(),
+    postLtv,
+    postHealthFactor,
+    effectiveMaxLtv,
+    maxWithdrawableRaw: maxWithdrawableRaw.toString(),
+    reasons,
+  };
+}
+
 /**
  * Carry-profit-share fee (Decision Wall #4). PURE. Takes a cut of POSITIVE net
  * carry only — never a fee on the borrow itself, and zero when carry is zero or

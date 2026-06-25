@@ -26,7 +26,15 @@
  *     re-read on-chain amounts.
  */
 
-/** An operate amount, SDK-free. `max` maps to MAX_REPAY/MAX_WITHDRAW sentinels. */
+/**
+ * An operate amount, SDK-free. `max` maps to MAX_REPAY/MAX_WITHDRAW sentinels.
+ *
+ * `exact.raw` is SIGNED. The SDK's `getOperateIx` reads a signed BN per leg:
+ *   - collateral: POSITIVE deposits, NEGATIVE withdraws, `0n` = no change.
+ *   - debt:       POSITIVE borrows,  NEGATIVE repays,    `0n` = no change.
+ * The executor maps a negative `raw` straight to `new BN(raw.toString())`
+ * (bn.js parses the leading "-"); `withinToleranceBps` already handles negatives.
+ */
 export type AmountSpec = { kind: "exact"; raw: bigint } | { kind: "max" };
 
 /** The SDK-free shape of a `getOperateIx` call. positionId 0 => mint a new one. */
@@ -100,6 +108,90 @@ export function planBorrowClose(positionId: number): OperatePlan {
   };
 }
 
+/**
+ * Plan a SUPPLY-ONLY deposit: add `collateralRaw` collateral, NO debt change.
+ * positionId 0 mints a fresh supply-only position; a real positionId adds to an
+ * existing one (the executor prefers add-to-existing over minting a 2nd position
+ * for the same wallet+vault). Supply only IMPROVES health, so it carries no LTV
+ * gate — but it has NO positive output delta (collateral LEAVES the wallet), so
+ * the executor proves success by an AUTHORITATIVE position re-read, not a delta.
+ */
+export function planSupplyCollateral(positionId: number, collateralRaw: bigint): OperatePlan {
+  if (!Number.isInteger(positionId) || positionId < 0) {
+    throw new Error("planSupplyCollateral: positionId must be a non-negative integer (0 = new)");
+  }
+  if (collateralRaw <= 0n) throw new Error("planSupplyCollateral: collateralRaw must be > 0");
+  return {
+    positionId,
+    colAmount: { kind: "exact", raw: collateralRaw },
+    debtAmount: { kind: "exact", raw: 0n },
+  };
+}
+
+/**
+ * Plan a BORROW-MORE: borrow additional `debtRaw` USDC against an EXISTING
+ * position's collateral (no new collateral). Requires a real (minted) positionId.
+ * Debt-increasing, so the executor MUST re-run the enforced risk gate
+ * (`evaluateBorrowRequest` with LIVE total collateral + debt) before signing.
+ */
+export function planBorrowMore(positionId: number, debtRaw: bigint): OperatePlan {
+  if (!Number.isInteger(positionId) || positionId <= 0) {
+    throw new Error("planBorrowMore: a real (minted) positionId is required");
+  }
+  if (debtRaw <= 0n) throw new Error("planBorrowMore: debtRaw must be > 0");
+  return {
+    positionId,
+    colAmount: { kind: "exact", raw: 0n },
+    debtAmount: { kind: "exact", raw: debtRaw },
+  };
+}
+
+/**
+ * Plan a REPAY: reduce an existing position's debt, NO collateral change. Pass a
+ * positive `bigint` for a partial repay (mapped to a NEGATIVE debt leg) or
+ * `"max"` to repay ALL debt while KEEPING the collateral (the MAX_REPAY
+ * sentinel). Repay only IMPROVES health, so it carries no LTV gate — but USDC
+ * LEAVES the wallet with no positive output delta, so the executor proves the
+ * repay by an AUTHORITATIVE position re-read (debt decreased), failing CLOSED on
+ * the dangerous direction (never reduce recorded debt without on-chain proof).
+ */
+export function planRepayPartial(positionId: number, amount: bigint | "max"): OperatePlan {
+  if (!Number.isInteger(positionId) || positionId <= 0) {
+    throw new Error("planRepayPartial: a real (minted) positionId is required");
+  }
+  if (amount !== "max" && amount <= 0n) {
+    throw new Error("planRepayPartial: amount (USDC to repay) must be > 0 or 'max'");
+  }
+  return {
+    positionId,
+    colAmount: { kind: "exact", raw: 0n },
+    debtAmount: amount === "max" ? { kind: "max" } : { kind: "exact", raw: -amount },
+  };
+}
+
+/**
+ * Plan a WITHDRAW: pull collateral out of an existing position, NO debt change.
+ * Pass a positive `bigint` for a partial withdraw (mapped to a NEGATIVE
+ * collateral leg) or `"max"` to withdraw ALL withdrawable collateral (the
+ * MAX_WITHDRAW sentinel; the protocol caps it at the LTV limit when debt
+ * remains). Withdrawing collateral WORSENS health, so the executor MUST re-run
+ * the collateral-withdraw risk gate (`evaluateCollateralWithdraw`) before
+ * signing. Requires a real positionId.
+ */
+export function planWithdrawPartial(positionId: number, amount: bigint | "max"): OperatePlan {
+  if (!Number.isInteger(positionId) || positionId <= 0) {
+    throw new Error("planWithdrawPartial: a real (minted) positionId is required");
+  }
+  if (amount !== "max" && amount <= 0n) {
+    throw new Error("planWithdrawPartial: amount (collateral to withdraw) must be > 0 or 'max'");
+  }
+  return {
+    positionId,
+    colAmount: amount === "max" ? { kind: "max" } : { kind: "exact", raw: -amount },
+    debtAmount: { kind: "exact", raw: 0n },
+  };
+}
+
 export interface OpenVerifyFacts {
   requestedCollateralRaw: bigint;
   requestedDebtRaw: bigint;
@@ -163,4 +255,105 @@ export function verifyCloseOutcome(f: CloseVerifyFacts): VerifyResult {
  */
 export function hasSufficientRepayBalance(usdcBalanceRaw: bigint, debtRaw: bigint, bufferRaw: bigint = 0n): boolean {
   return usdcBalanceRaw >= debtRaw + bufferRaw;
+}
+
+// --- New-op verify predicates ----------------------------------------------
+// Two classes, mirroring the open/close contract:
+//   * borrow-more / withdraw HAVE a positive output delta (USDC / collateral
+//     lands in the wallet). The delta is the independent money-moved proof and
+//     these predicates are ADVISORY (a miss is a logged warning post-confirm).
+//   * supply / repay have NO positive output delta (funds LEAVE the wallet).
+//     There the position re-read IS the proof, so the executor treats a non-ok
+//     here as a fail-CLOSED on the dangerous direction (never record more
+//     collateral / less debt than the chain proves).
+
+export interface SupplyVerifyFacts {
+  /** getCurrentPosition.colRaw BEFORE the supply (0 when minting a new position). */
+  preColRaw: bigint;
+  /** getCurrentPosition.colRaw AFTER the supply. */
+  postColRaw: bigint;
+  /** Collateral the caller intended to deposit, raw. */
+  depositedRaw: bigint;
+  toleranceBps?: number;
+}
+
+/** Supply is proven only when collateral INCREASED by ~the deposit. */
+export function verifySupplyOutcome(f: SupplyVerifyFacts): VerifyResult {
+  const tol = f.toleranceBps ?? DEFAULT_TOLERANCE_BPS;
+  const delta = f.postColRaw - f.preColRaw;
+  if (delta <= 0n) return { ok: false, reason: "collateral_not_increased" };
+  if (!withinToleranceBps(delta, f.depositedRaw, tol)) return { ok: false, reason: "collateral_delta_mismatch" };
+  return { ok: true };
+}
+
+export interface RepayVerifyFacts {
+  /** getCurrentPosition.debtRaw BEFORE the repay. */
+  preDebtRaw: bigint;
+  /** getCurrentPosition.debtRaw AFTER the repay. */
+  postDebtRaw: bigint;
+  /** USDC the caller intended to repay (ignored when fullRepay). */
+  repaidRaw: bigint;
+  /** True for a `max` (repay-all-keep-collateral) repay: assert debt <= dust. */
+  fullRepay?: boolean;
+  dustThresholdRaw?: bigint;
+  toleranceBps?: number;
+}
+
+/** Repay is proven only when debt DECREASED by ~the repay (or cleared, if full). */
+export function verifyRepayOutcome(f: RepayVerifyFacts): VerifyResult {
+  const tol = f.toleranceBps ?? DEFAULT_TOLERANCE_BPS;
+  const reduced = f.preDebtRaw - f.postDebtRaw;
+  if (reduced <= 0n) return { ok: false, reason: "debt_not_reduced" };
+  if (f.fullRepay) {
+    const dust = f.dustThresholdRaw ?? DEFAULT_DEBT_DUST_RAW;
+    if (f.postDebtRaw > dust) return { ok: false, reason: "debt_not_cleared" };
+    return { ok: true };
+  }
+  if (!withinToleranceBps(reduced, f.repaidRaw, tol)) return { ok: false, reason: "repay_delta_mismatch" };
+  return { ok: true };
+}
+
+export interface BorrowMoreVerifyFacts {
+  preDebtRaw: bigint;
+  postDebtRaw: bigint;
+  /** Realized borrowed-USDC delta on the wallet (executeAgentInstructions proof). */
+  usdcDeltaRaw: bigint;
+  /** USDC the caller intended to borrow, raw. */
+  borrowedRaw: bigint;
+  toleranceBps?: number;
+}
+
+/** ADVISORY: borrow-more landed USDC AND debt grew by ~the borrowed amount. */
+export function verifyBorrowMoreOutcome(f: BorrowMoreVerifyFacts): VerifyResult {
+  const tol = f.toleranceBps ?? DEFAULT_TOLERANCE_BPS;
+  if (f.usdcDeltaRaw <= 0n) return { ok: false, reason: "no_borrowed_usdc_received" };
+  const added = f.postDebtRaw - f.preDebtRaw;
+  if (added <= 0n) return { ok: false, reason: "debt_not_increased" };
+  if (!withinToleranceBps(f.usdcDeltaRaw, f.borrowedRaw, tol)) return { ok: false, reason: "received_usdc_mismatch" };
+  if (!withinToleranceBps(added, f.borrowedRaw, tol)) return { ok: false, reason: "debt_delta_mismatch" };
+  return { ok: true };
+}
+
+export interface WithdrawVerifyFacts {
+  preColRaw: bigint;
+  postColRaw: bigint;
+  /** Realized collateral delta returned to the wallet (must be > 0). */
+  collateralDeltaRaw: bigint;
+  /** Collateral the caller intended to withdraw (ignored when fullWithdraw). */
+  withdrawnRaw: bigint;
+  /** True for a `max` withdraw: skip the exact-amount tolerance check. */
+  fullWithdraw?: boolean;
+  toleranceBps?: number;
+}
+
+/** ADVISORY: withdraw returned collateral AND the position's collateral shrank. */
+export function verifyWithdrawOutcome(f: WithdrawVerifyFacts): VerifyResult {
+  const tol = f.toleranceBps ?? DEFAULT_TOLERANCE_BPS;
+  if (f.collateralDeltaRaw <= 0n) return { ok: false, reason: "no_collateral_returned" };
+  const reduced = f.preColRaw - f.postColRaw;
+  if (reduced <= 0n) return { ok: false, reason: "collateral_not_reduced" };
+  if (!f.fullWithdraw && !withinToleranceBps(f.collateralDeltaRaw, f.withdrawnRaw, tol)) {
+    return { ok: false, reason: "collateral_delta_mismatch" };
+  }
+  return { ok: true };
 }

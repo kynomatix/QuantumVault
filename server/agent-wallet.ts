@@ -933,6 +933,23 @@ export interface AgentInstructionsExecParams {
   addressLookupTables?: AddressLookupTableAccount[];
   /** Short label used in error messages (e.g. "Kamino park"). */
   label?: string;
+  /**
+   * OPTIONAL write-ahead durability hook, called EXACTLY ONCE AFTER the tx is
+   * signed but STRICTLY BEFORE it is broadcast (`sendRawTransaction`). The
+   * signature is already deterministic once signed, so a multi-hop orchestrator
+   * can durably record the signature + its blockhash validity window BEFORE the
+   * irreversible broadcast. This makes "no sig recorded" == "tx never broadcast"
+   * a TRUE invariant, so a crash anywhere is reconciled by SIGNATURE STATUS (never
+   * by a stale wallet balance, which reads 0 while a tx is in-flight) and a
+   * recorded-but-never-actually-broadcast sig safely reconciles to "expired" once
+   * its blockhash window passes.
+   *
+   * CONTRACT: this hook is FATAL — if it throws, the tx is NOT broadcast and the
+   * whole op fails closed with no signature (nothing moved, safe to retry). Never
+   * swallow a failure here and continue to broadcast: that would re-open the
+   * double-spend hole this hook exists to close.
+   */
+  onBeforeBroadcast?: (info: { signature: string; blockhash: string; lastValidBlockHeight: number }) => void | Promise<void>;
 }
 
 export interface AgentInstructionsExecResult {
@@ -1004,7 +1021,7 @@ export async function executeAgentInstructions(
     const outBefore = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, verifyOutputMint)).amountRaw);
 
     // 3) Build, sign, and send a v0 transaction.
-    const { blockhash } = await connection.getLatestBlockhash('confirmed');
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
     const message = new TransactionMessage({
       payerKey: agentPubkey,
       recentBlockhash: blockhash,
@@ -1013,11 +1030,32 @@ export async function executeAgentInstructions(
     const tx = new VersionedTransaction(message);
     tx.sign([agentKeypair]);
 
-    const signature = await connection.sendRawTransaction(tx.serialize(), {
+    // The signature is deterministic once the tx is signed — it is the first
+    // signature of the signed tx, identical to what sendRawTransaction returns.
+    const signature = bs58.encode(tx.signatures[0]);
+
+    // 3b) WRITE-AHEAD durability hook: record the signature + its blockhash window
+    //     STRICTLY BEFORE the irreversible broadcast. This is FATAL — if it throws
+    //     we abort WITHOUT broadcasting (propagates to the outer catch -> returns
+    //     {success:false} with NO signature, so nothing moved and a retry is safe).
+    //     Persisting after broadcast (the old design) left a window where the tx was
+    //     on the wire but unrecorded -> resume mistook "no sig" for "never broadcast"
+    //     -> double-withdraw. Recording first makes that invariant true; a recorded
+    //     sig that never actually lands reconciles to "expired" once the window passes.
+    if (params.onBeforeBroadcast) {
+      await params.onBeforeBroadcast({ signature, blockhash, lastValidBlockHeight });
+    }
+
+    const sentSignature = await connection.sendRawTransaction(tx.serialize(), {
       skipPreflight: false,
       preflightCommitment: 'confirmed',
       maxRetries: 3,
     });
+    if (sentSignature !== signature) {
+      // Should be impossible (same signed tx); guard anyway so the recorded sig and
+      // the broadcast sig can never silently diverge.
+      console.error(`[executeAgentInstructions] ${label}: broadcast signature ${sentSignature} != precomputed ${signature}`);
+    }
 
     // 4) Confirm by polling signature status (avoids the blockhash /
     //    lastValidBlockHeight mismatch of confirmTransaction). We VERIFY via the
@@ -1067,6 +1105,126 @@ export async function executeAgentInstructions(
   }
 }
 
+export interface AgentInstructionsConfirmParams {
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  instructions: TransactionInstruction[];
+  /**
+   * OPTIONAL mint whose first-time ATA rent must be covered by the gas gate. For
+   * ops where funds only LEAVE the wallet (supply collateral / repay USDC) no
+   * inbound ATA is created, so leave it unset (fee buffer only).
+   */
+  gasDestMint?: string | null;
+  /** OPTIONAL extra SOL floor (UI units). Only RAISES the computed gas bar. */
+  minSolGas?: number;
+  addressLookupTables?: AddressLookupTableAccount[];
+  label?: string;
+}
+
+export interface AgentInstructionsConfirmResult {
+  /** TRUE only when the tx confirmed on-chain AND did not fail atomically. */
+  success: boolean;
+  signature?: string;
+  /** TRUE when the tx landed but FAILED atomically (st.err) — nothing committed. */
+  onChainFailed?: boolean;
+  error?: string;
+}
+
+/**
+ * SERVER-SIGNED execution of a pre-built instruction batch that confirms by
+ * status-poll but does NOT verify an output-token delta. This is the sibling of
+ * `executeAgentInstructions` for money ops where funds LEAVE the wallet and so
+ * there is no positive inbound delta to measure (e.g. SUPPLY collateral, REPAY
+ * USDC). The independent money-moved proof for those ops is an AUTHORITATIVE
+ * position re-read by the caller (collateral increased / debt decreased), which
+ * the caller MUST treat as fail-CLOSED on the dangerous direction.
+ *
+ * Contract:
+ *   - `success: true`  => the tx confirmed and did NOT fail atomically. The
+ *                          caller still owns the authoritative re-read.
+ *   - `onChainFailed`  => the tx landed and reverted (st.err): provably nothing
+ *                          changed; the caller may safely treat it as no-op.
+ *   - `success:false` WITHOUT `onChainFailed` but WITH a `signature` is
+ *     AMBIGUOUS (sent, maybe confirmed): the caller must NOT assume no effect.
+ *
+ * This NEVER fabricates a success from a balance read, so it is safe for the
+ * funds-leave-the-wallet direction where a fail-open delta read is meaningless.
+ */
+export async function executeAgentInstructionsConfirmOnly(
+  params: AgentInstructionsConfirmParams,
+): Promise<AgentInstructionsConfirmResult> {
+  const {
+    agentPublicKey,
+    agentSecretKey,
+    instructions,
+    gasDestMint = null,
+    minSolGas,
+    addressLookupTables = [],
+    label = 'Transaction',
+  } = params;
+
+  try {
+    if (!instructions.length) {
+      return { success: false, error: `${label}: no instructions to execute` };
+    }
+
+    const connection = getConnection();
+    const agentKeypair = resolveAgentKeypair(agentSecretKey);
+    const agentPubkey = new PublicKey(agentPublicKey);
+
+    // 1) Gas gate: real fee buffer (+ exact ATA rent only when a first-time
+    //    inbound ATA is named). `minSolGas` only RAISES the bar.
+    const requiredLamports = await computeRequiredGasLamports(connection, agentPubkey, gasDestMint);
+    const floorLamports = typeof minSolGas === 'number' ? Math.round(minSolGas * LAMPORTS_PER_SOL) : 0;
+    const gateLamports = Math.max(requiredLamports, floorLamports);
+    const solLamports = await connection.getBalance(agentPubkey);
+    if (solLamports < gateLamports) {
+      return { success: false, error: `${label}: insufficient SOL in bot wallet for gas (need ~${(gateLamports / LAMPORTS_PER_SOL).toFixed(4)} SOL).` };
+    }
+
+    // 2) Build, sign, and send a v0 transaction.
+    const { blockhash } = await connection.getLatestBlockhash('confirmed');
+    const message = new TransactionMessage({
+      payerKey: agentPubkey,
+      recentBlockhash: blockhash,
+      instructions,
+    }).compileToV0Message(addressLookupTables);
+    const tx = new VersionedTransaction(message);
+    tx.sign([agentKeypair]);
+
+    const signature = await connection.sendRawTransaction(tx.serialize(), {
+      skipPreflight: false,
+      preflightCommitment: 'confirmed',
+      maxRetries: 3,
+    });
+
+    // 3) Confirm by polling signature status.
+    let confirmed = false;
+    let confirmedErr: unknown = null;
+    for (let i = 0; i < 20; i++) {
+      const statuses = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+      const st = statuses.value[0];
+      if (st) {
+        if (st.err) { confirmedErr = st.err; break; }
+        if (st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized') { confirmed = true; break; }
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    if (confirmedErr) {
+      return { success: false, signature, onChainFailed: true, error: `${label} failed on-chain: ${JSON.stringify(confirmedErr)}` };
+    }
+    if (!confirmed) {
+      // Sent but not seen confirmed within the poll window — AMBIGUOUS. The caller
+      // must re-read the position and fail closed on the dangerous direction.
+      return { success: false, signature, error: `${label} was sent but could not be confirmed in time; please refresh and check.` };
+    }
+
+    return { success: true, signature };
+  } catch (error: any) {
+    return { success: false, error: error?.message || `${label} failed` };
+  }
+}
+
 /**
  * SERVER-SIGNED swap of the agent wallet's FULL balance of `inputMint` into USDC.
  * Thin wrapper over executeAgentSwap. Native SOL input retains a gas reserve.
@@ -1077,7 +1235,7 @@ export async function executeAgentSwapToUsdc(
   agentSecretKey: Uint8Array,
   inputMint: string,
   slippageBps: number = 100,
-): Promise<{ success: boolean; signature?: string; usdcReceived?: number; inAmountRaw?: string; error?: string }> {
+): Promise<{ success: boolean; signature?: string; usdcReceived?: number; usdcReceivedRaw?: string; inAmountRaw?: string; error?: string }> {
   if (inputMint === USDC_MINT) {
     return { success: false, error: 'Input token is already USDC, no swap needed' };
   }
@@ -1108,6 +1266,7 @@ export async function executeAgentSwapToUsdc(
     success: r.success,
     signature: r.signature,
     usdcReceived: r.outputReceived,
+    usdcReceivedRaw: r.outputReceivedRaw,
     inAmountRaw: r.inAmountRaw,
     error: r.error,
   };

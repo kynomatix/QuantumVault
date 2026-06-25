@@ -178,6 +178,15 @@ export interface PreviewBorrowParams {
   collateralMint: string;
   collateralRaw: bigint;
   requestedDebtRaw: bigint;
+  /**
+   * OVERRIDE the wallet's current debt for this collateral with a LIVE on-chain
+   * read instead of summing the cache. The money path (borrow-more) reads the
+   * exact position health immediately before signing and passes that here so the
+   * per-position LTV/health projection is authoritative, not cache-stale. The
+   * platform-wide exposure book (aggregate/concentration breakers) still derives
+   * from the cache, which is the correct platform-debt ledger.
+   */
+  existingDebtRawOverride?: bigint;
 }
 
 export interface BorrowEligibilityDeps {
@@ -237,7 +246,10 @@ export async function previewBorrowEligibility(
   // for the per-position projection. Mirrors the exposure builder's validity
   // rules; an unreadable own-row leaves existingDebt at 0 only because the
   // platform exposure book (above) will already have failed closed on it.
-  let existingDebtRaw = BigInt(0);
+  // When the money path supplies a LIVE on-chain read (borrow-more), that is the
+  // authority for the per-position projection and we skip the cache sum.
+  let existingDebtRaw = params.existingDebtRawOverride ?? BigInt(0);
+  if (params.existingDebtRawOverride === undefined)
   for (const r of rows) {
     if (r.walletAddress !== walletAddress) continue;
     if (r.collateralMint !== params.collateralMint) continue;

@@ -374,8 +374,10 @@ export interface IStorage {
   getBorrowOperations(walletAddress: string, borrowPositionId?: string | null): Promise<BorrowOperation[]>;
   createBorrowPosition(p: { walletAddress: string; tradingBotId?: string | null; debtVenue: string; venueVaultId?: string | null; venuePositionId?: string | null; collateralAssetKey: string; collateralMint: string; collateralAmountRaw?: string; debtAssetKey?: string; debtMint: string; debtAmountRaw?: string; attributedBotId?: string | null; status?: string; }): Promise<BorrowPosition>;
   updateBorrowPosition(id: string, patch: { venuePositionId?: string | null; venueVaultId?: string | null; collateralAmountRaw?: string; debtAmountRaw?: string; status?: string; attributedBotId?: string | null; healthSnapshot?: BorrowPosition['healthSnapshot']; healthAsOf?: Date | null; healthSource?: string | null; }, ifStatus?: string): Promise<BorrowPosition | undefined>;
-  createBorrowOperation(p: { walletAddress: string; borrowPositionId?: string | null; operationType: string; status?: string; step?: string | null; }): Promise<BorrowOperation>;
-  updateBorrowOperation(id: string, patch: { status?: string; step?: string | null; error?: string | null; borrowPositionId?: string | null; appendTxSignature?: string; }): Promise<BorrowOperation | undefined>;
+  createBorrowOperation(p: { walletAddress: string; borrowPositionId?: string | null; operationType: string; status?: string; step?: string | null; clientRequestId?: string | null; metadata?: Record<string, unknown> | null; }): Promise<BorrowOperation>;
+  updateBorrowOperation(id: string, patch: { status?: string; step?: string | null; error?: string | null; borrowPositionId?: string | null; appendTxSignature?: string; metadata?: Record<string, unknown> | null; mergeMetadata?: Record<string, unknown>; result?: Record<string, unknown> | null; }): Promise<BorrowOperation | undefined>;
+  getBorrowOperationById(id: string): Promise<BorrowOperation | undefined>;
+  getBorrowOperationByClientRequestId(walletAddress: string, clientRequestId: string): Promise<BorrowOperation | undefined>;
   sumOpenBorrowDebtUsdc(walletAddress: string): Promise<number>;
 
   // Phase 1 Vaults yield oracle: display-only realized-APY price snapshots.
@@ -2249,6 +2251,8 @@ export class DatabaseStorage implements IStorage {
     operationType: string;
     status?: string;
     step?: string | null;
+    clientRequestId?: string | null;
+    metadata?: Record<string, unknown> | null;
   }): Promise<BorrowOperation> {
     const rows = await db.insert(borrowOperations).values({
       walletAddress: p.walletAddress,
@@ -2256,13 +2260,17 @@ export class DatabaseStorage implements IStorage {
       operationType: p.operationType,
       status: p.status ?? 'pending',
       step: p.step ?? null,
+      clientRequestId: p.clientRequestId ?? null,
+      metadata: p.metadata ?? null,
     }).returning();
     return rows[0];
   }
 
   // Update an operation-log row. `appendTxSignature` does an atomic jsonb array
   // append (row-level), so per-step signatures accumulate without a read-modify-
-  // write race. All other fields are plain sets.
+  // write race. `mergeMetadata` likewise merges into the existing jsonb via `||`
+  // (progressive step breadcrumbs); `metadata` REPLACES it wholesale. All other
+  // fields are plain sets.
   async updateBorrowOperation(
     id: string,
     patch: {
@@ -2271,6 +2279,9 @@ export class DatabaseStorage implements IStorage {
       error?: string | null;
       borrowPositionId?: string | null;
       appendTxSignature?: string;
+      metadata?: Record<string, unknown> | null;
+      mergeMetadata?: Record<string, unknown>;
+      result?: Record<string, unknown> | null;
     },
   ): Promise<BorrowOperation | undefined> {
     const sets: Record<string, unknown> = { updatedAt: new Date() };
@@ -2281,7 +2292,28 @@ export class DatabaseStorage implements IStorage {
     if (patch.appendTxSignature) {
       sets.txSignatures = sql`${borrowOperations.txSignatures} || ${JSON.stringify([patch.appendTxSignature])}::jsonb`;
     }
+    if (patch.metadata !== undefined) {
+      sets.metadata = patch.metadata;
+    } else if (patch.mergeMetadata !== undefined) {
+      sets.metadata = sql`COALESCE(${borrowOperations.metadata}, '{}'::jsonb) || ${JSON.stringify(patch.mergeMetadata)}::jsonb`;
+    }
+    if (patch.result !== undefined) sets.result = patch.result;
     const rows = await db.update(borrowOperations).set(sets).where(eq(borrowOperations.id, id)).returning();
+    return rows[0];
+  }
+
+  async getBorrowOperationById(id: string): Promise<BorrowOperation | undefined> {
+    const rows = await db.select().from(borrowOperations).where(eq(borrowOperations.id, id)).limit(1);
+    return rows[0];
+  }
+
+  // Idempotency lookup: a retried logical op (same wallet + client request id)
+  // resolves to its existing row so the caller can resume / return the result
+  // instead of re-executing. The partial UNIQUE index guarantees at most one.
+  async getBorrowOperationByClientRequestId(walletAddress: string, clientRequestId: string): Promise<BorrowOperation | undefined> {
+    const rows = await db.select().from(borrowOperations)
+      .where(and(eq(borrowOperations.walletAddress, walletAddress), eq(borrowOperations.clientRequestId, clientRequestId)))
+      .limit(1);
     return rows[0];
   }
 

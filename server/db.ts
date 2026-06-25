@@ -537,6 +537,16 @@ export async function ensureSchema() {
       )`,
       `CREATE INDEX IF NOT EXISTS idx_borrow_operations_wallet ON borrow_operations (wallet_address)`,
       `CREATE INDEX IF NOT EXISTS idx_borrow_operations_position ON borrow_operations (borrow_position_id) WHERE borrow_position_id IS NOT NULL`,
+      // Additive (resumable + idempotent multi-hop repays): caller idempotency
+      // key + resume-context metadata + immutable result payload. Idempotent for
+      // DBs created before these columns existed. Each ALTER is its own statement
+      // so a re-run that no-ops one never skips a later migration.
+      `ALTER TABLE borrow_operations ADD COLUMN IF NOT EXISTS client_request_id text`,
+      `ALTER TABLE borrow_operations ADD COLUMN IF NOT EXISTS metadata jsonb`,
+      `ALTER TABLE borrow_operations ADD COLUMN IF NOT EXISTS result jsonb`,
+      // UNIQUE per (wallet, client_request_id) so a retried logical op reuses its
+      // row instead of double-executing. Partial: only enforced on non-null keys.
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_borrow_operations_client_req ON borrow_operations (wallet_address, client_request_id) WHERE client_request_id IS NOT NULL`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner

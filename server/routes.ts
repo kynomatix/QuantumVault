@@ -1507,7 +1507,8 @@ import { JupiterLendBorrowRoute } from "./vault/jupiter-lend-borrow-route";
 import { previewBorrowEligibility } from "./vault/borrow-eligibility";
 import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
-import { executeBorrowOpen, executeBorrowClose } from "./vault/jupiter-lend-borrow-executor";
+import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral } from "./vault/jupiter-lend-borrow-executor";
+import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken } from "./vault/jupiter-lend-repay-multihop";
 import { getUserFungibleTokens } from "./swap/helius-tokens.js";
 
 const SWAP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -8898,6 +8899,389 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       res.json(result);
     } catch (error: any) {
       console.error("[Vault] borrow close error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // ----------------------------------------------------------------------------
+  // PER-OP borrow money paths (T004). Each mirrors open/close: owner-gated,
+  // session/UMK verified, account scope only, agent key decrypted just-in-time and
+  // ALWAYS wiped in a finally. Executors own the money-safety (re-run the risk
+  // gate, realized on-chain delta = truth, fail closed). Routes stay thin:
+  // strict base-unit validation in, structured result out.
+  // ----------------------------------------------------------------------------
+
+  // Strict base-unit integer string (no 0x, +, whitespace, decimals). >0 enforced.
+  const parsePositiveRaw = (v: unknown, name: string): bigint | { error: string } => {
+    if (typeof v !== "string" || !/^\d+$/.test(v)) return { error: `${name} must be a base-unit integer string` };
+    try {
+      const b = BigInt(v);
+      if (b <= BigInt(0)) return { error: `${name} must be greater than zero` };
+      return b;
+    } catch {
+      return { error: `${name} must be a base-unit integer string` };
+    }
+  };
+  // Like the above but also accepts the literal "max".
+  const parseAmountOrMax = (v: unknown, name: string): bigint | "max" | { error: string } => {
+    if (v === "max") return "max";
+    return parsePositiveRaw(v, name);
+  };
+
+  // Owner gate + wallet + session/UMK + account scope + decrypted agent key.
+  // Writes the appropriate error response and returns null on any failure (caller
+  // just `if (!ctx) return;`). On success the caller MUST cleanup the key (finally).
+  const prepareBorrowOpContext = async (
+    req: any,
+    res: any,
+    sessionId: unknown,
+  ): Promise<{ wallet: any; scope: any; agentKeyResult: { secretKey: Uint8Array; cleanup: () => void } } | null> => {
+    if (!isBorrowOwnerWallet(req.walletAddress!)) {
+      res.status(403).json({ error: "Borrowing is not available for this wallet yet." });
+      return null;
+    }
+    const wallet = await storage.getWallet(req.walletAddress!);
+    if (!wallet) {
+      res.status(404).json({ error: "Wallet not found" });
+      return null;
+    }
+    if (!sessionId) {
+      res.status(400).json({ error: "Session ID required for security verification" });
+      return null;
+    }
+    const session = getSession(sessionId as string);
+    if (!session || session.walletAddress !== req.walletAddress) {
+      res.status(401).json({ error: "Invalid or expired session. Please reconnect your wallet." });
+      return null;
+    }
+    if (!session.umk) {
+      res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
+      return null;
+    }
+    const resolved = await resolveVaultScope(req.walletAddress!, wallet, null);
+    if (!resolved.ok) {
+      res.status(resolved.status).json({ error: resolved.error });
+      return null;
+    }
+    const { scope } = resolved;
+    if (!scope.agentPublicKey) {
+      res.status(400).json({ error: "Agent wallet not initialized" });
+      return null;
+    }
+    const agentKeyResult = await decryptVaultScopeKey(scope, req.walletAddress!, wallet, session.umk);
+    if (!agentKeyResult) {
+      res.status(400).json({ error: "Your wallet needs to be re-keyed. Please sign out and sign back in." });
+      return null;
+    }
+    return { wallet, scope, agentKeyResult };
+  };
+
+  // Map a multi-hop repay result to an HTTP response. success -> 200; funds-safe
+  // but a leg needs retry (needsAttention) -> 202 with the structured state (same
+  // clientRequestId resumes); a hard precondition failure -> 400.
+  const sendMultiHopResult = (res: any, result: { success: boolean; needsAttention?: boolean; error?: string; step?: string } | null) => {
+    if (!result) return res.status(500).json({ error: "Repay failed" });
+    if (result.success) return res.json(result);
+    if (result.needsAttention) return res.status(202).json(result);
+    return res.status(400).json({ error: result.error || "Repay failed", step: result.step });
+  };
+
+  // SUPPLY more collateral into an existing position (or mint a supply-only one).
+  // Body: { collateralMint, collateralRaw, borrowPositionId?, sessionId }.
+  app.post("/api/vault/borrow/supply", requireWallet, async (req, res) => {
+    try {
+      const { collateralMint, collateralRaw, borrowPositionId, sessionId } = req.body || {};
+      if (!collateralMint || typeof collateralMint !== "string") {
+        return res.status(400).json({ error: "collateralMint required" });
+      }
+      if (borrowPositionId != null && typeof borrowPositionId !== "string") {
+        return res.status(400).json({ error: "borrowPositionId must be a string" });
+      }
+      const collateralParsed = parsePositiveRaw(collateralRaw, "collateralRaw");
+      if (typeof collateralParsed === "object") return res.status(400).json(collateralParsed);
+
+      const ctx = await prepareBorrowOpContext(req, res, sessionId);
+      if (!ctx) return;
+
+      let result;
+      try {
+        // Collateral allowlist by RESOLVED on-chain vault id (never a client mint).
+        const borrowRoute = new JupiterLendBorrowRoute();
+        const cfg = await borrowRoute.getVaultConfig(collateralMint);
+        if (!cfg) return res.status(400).json({ error: "Borrow vault is unavailable right now." });
+        if (!isCollateralVaultAllowlisted(cfg.vaultId)) {
+          return res.status(403).json({ error: "This collateral is not available for borrowing yet." });
+        }
+        result = await executeSupplyCollateral({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: ctx.scope.agentPublicKey,
+          agentSecretKey: ctx.agentKeyResult.secretKey,
+          collateralMint,
+          collateralRaw: collateralParsed,
+          borrowPositionId: borrowPositionId ?? null,
+          tradingBotId: null,
+        });
+      } finally {
+        ctx.agentKeyResult.cleanup();
+      }
+
+      if (!result || !result.success) {
+        return res.status(400).json({ error: result?.error || "Supply failed" });
+      }
+      res.json(result);
+    } catch (error: any) {
+      console.error("[Vault] borrow supply error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // BORROW MORE USDC against an existing position. Debt-increasing: the executor
+  // re-runs the enforced risk gate with LIVE col/debt before signing.
+  // Body: { borrowPositionId, requestedDebtRaw, sessionId }.
+  app.post("/api/vault/borrow/borrow-more", requireWallet, async (req, res) => {
+    try {
+      const { borrowPositionId, requestedDebtRaw, sessionId } = req.body || {};
+      if (!borrowPositionId || typeof borrowPositionId !== "string") {
+        return res.status(400).json({ error: "borrowPositionId required" });
+      }
+      const debtParsed = parsePositiveRaw(requestedDebtRaw, "requestedDebtRaw");
+      if (typeof debtParsed === "object") return res.status(400).json(debtParsed);
+
+      const ctx = await prepareBorrowOpContext(req, res, sessionId);
+      if (!ctx) return;
+
+      let result;
+      try {
+        result = await executeBorrowMore({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: ctx.scope.agentPublicKey,
+          agentSecretKey: ctx.agentKeyResult.secretKey,
+          borrowPositionId,
+          requestedDebtRaw: debtParsed,
+        });
+      } finally {
+        ctx.agentKeyResult.cleanup();
+      }
+
+      if (!result || !result.success) {
+        return res.status(400).json({ error: result?.error || "Borrow failed" });
+      }
+      res.json(result);
+    } catch (error: any) {
+      console.error("[Vault] borrow-more error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // REPAY from the Trading Agent's own USDC (source #1, single-tx). amountRaw is a
+  // base-unit string OR "max" to clear ALL debt. Body: { borrowPositionId,
+  // amountRaw, sessionId }.
+  app.post("/api/vault/borrow/repay", requireWallet, async (req, res) => {
+    try {
+      const { borrowPositionId, amountRaw, sessionId } = req.body || {};
+      if (!borrowPositionId || typeof borrowPositionId !== "string") {
+        return res.status(400).json({ error: "borrowPositionId required" });
+      }
+      const amount = parseAmountOrMax(amountRaw, "amountRaw");
+      if (typeof amount === "object") return res.status(400).json(amount);
+
+      const ctx = await prepareBorrowOpContext(req, res, sessionId);
+      if (!ctx) return;
+
+      let result;
+      try {
+        result = await executeRepayFromAgentUsdc({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: ctx.scope.agentPublicKey,
+          agentSecretKey: ctx.agentKeyResult.secretKey,
+          borrowPositionId,
+          amount,
+        });
+      } finally {
+        ctx.agentKeyResult.cleanup();
+      }
+
+      if (!result || !result.success) {
+        return res.status(400).json({ error: result?.error || "Repay failed" });
+      }
+      res.json(result);
+    } catch (error: any) {
+      console.error("[Vault] borrow repay error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // WITHDRAW collateral from a position (deleverage by removing collateral, debt
+  // unchanged). The executor's evaluateCollateralWithdraw gate enforces post-LTV /
+  // health. amountRaw = base-unit string OR "max". Body: { borrowPositionId,
+  // amountRaw, sessionId }.
+  app.post("/api/vault/borrow/withdraw-collateral", requireWallet, async (req, res) => {
+    try {
+      const { borrowPositionId, amountRaw, sessionId } = req.body || {};
+      if (!borrowPositionId || typeof borrowPositionId !== "string") {
+        return res.status(400).json({ error: "borrowPositionId required" });
+      }
+      const amount = parseAmountOrMax(amountRaw, "amountRaw");
+      if (typeof amount === "object") return res.status(400).json(amount);
+
+      const ctx = await prepareBorrowOpContext(req, res, sessionId);
+      if (!ctx) return;
+
+      let result;
+      try {
+        result = await executeWithdrawCollateral({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: ctx.scope.agentPublicKey,
+          agentSecretKey: ctx.agentKeyResult.secretKey,
+          borrowPositionId,
+          amount,
+        });
+      } finally {
+        ctx.agentKeyResult.cleanup();
+      }
+
+      if (!result || !result.success) {
+        return res.status(400).json({ error: result?.error || "Withdraw failed" });
+      }
+      res.json(result);
+    } catch (error: any) {
+      console.error("[Vault] withdraw-collateral error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // REPAY from the user's OWN wallet USDC (source #2, multi-hop). The client first
+  // sends a user-signed USDC transfer (wallet -> agent), waits for confirmation,
+  // then calls this with that signature. The executor reads the REALIZED credited
+  // USDC from that tx (source of truth). Idempotent via clientRequestId. Body:
+  // { borrowPositionId, clientRequestId, transferSignature, requestedRepayRaw?, sessionId }.
+  app.post("/api/vault/borrow/repay/wallet-usdc", requireWallet, async (req, res) => {
+    try {
+      const { borrowPositionId, clientRequestId, transferSignature, requestedRepayRaw, sessionId } = req.body || {};
+      if (!borrowPositionId || typeof borrowPositionId !== "string") {
+        return res.status(400).json({ error: "borrowPositionId required" });
+      }
+      if (!clientRequestId || typeof clientRequestId !== "string") {
+        return res.status(400).json({ error: "clientRequestId required" });
+      }
+      if (!transferSignature || typeof transferSignature !== "string") {
+        return res.status(400).json({ error: "transferSignature required" });
+      }
+      let requestedRepay: bigint | undefined;
+      if (requestedRepayRaw != null) {
+        const parsed = parsePositiveRaw(requestedRepayRaw, "requestedRepayRaw");
+        if (typeof parsed === "object") return res.status(400).json(parsed);
+        requestedRepay = parsed;
+      }
+
+      const ctx = await prepareBorrowOpContext(req, res, sessionId);
+      if (!ctx) return;
+
+      let result;
+      try {
+        result = await executeRepayFromWalletUsdc({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: ctx.scope.agentPublicKey,
+          agentSecretKey: ctx.agentKeyResult.secretKey,
+          borrowPositionId,
+          clientRequestId,
+          transferSignature,
+          requestedRepayRaw: requestedRepay,
+        });
+      } finally {
+        ctx.agentKeyResult.cleanup();
+      }
+      sendMultiHopResult(res, result);
+    } catch (error: any) {
+      console.error("[Vault] repay wallet-usdc error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // REPAY by DELEVERAGING deposited collateral (source #3, multi-hop): withdraw
+  // collateral -> swap to USDC -> repay. Fully server-side. Idempotent via
+  // clientRequestId; resume authority is the agent's collateral balance. Body:
+  // { borrowPositionId, clientRequestId, collateralRaw, slippageBps?, sessionId }.
+  app.post("/api/vault/borrow/repay/deleverage", requireWallet, async (req, res) => {
+    try {
+      const { borrowPositionId, clientRequestId, collateralRaw, slippageBps, sessionId } = req.body || {};
+      if (!borrowPositionId || typeof borrowPositionId !== "string") {
+        return res.status(400).json({ error: "borrowPositionId required" });
+      }
+      if (!clientRequestId || typeof clientRequestId !== "string") {
+        return res.status(400).json({ error: "clientRequestId required" });
+      }
+      const collateralParsed = parsePositiveRaw(collateralRaw, "collateralRaw");
+      if (typeof collateralParsed === "object") return res.status(400).json(collateralParsed);
+      if (slippageBps != null && (typeof slippageBps !== "number" || !Number.isFinite(slippageBps))) {
+        return res.status(400).json({ error: "slippageBps must be a number" });
+      }
+
+      const ctx = await prepareBorrowOpContext(req, res, sessionId);
+      if (!ctx) return;
+
+      let result;
+      try {
+        result = await executeDeleverageRepay({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: ctx.scope.agentPublicKey,
+          agentSecretKey: ctx.agentKeyResult.secretKey,
+          borrowPositionId,
+          clientRequestId,
+          collateralRaw: collateralParsed,
+          slippageBps,
+        });
+      } finally {
+        ctx.agentKeyResult.cleanup();
+      }
+      sendMultiHopResult(res, result);
+    } catch (error: any) {
+      console.error("[Vault] repay deleverage error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // REPAY with ANY wallet token (source #4, multi-hop): the client first transfers
+  // the token (wallet -> agent) and waits for confirmation, then calls this. We
+  // swap the agent's full balance of that token to USDC and repay. Parked savings
+  // assets are rejected by the executor. Idempotent via clientRequestId. Body:
+  // { borrowPositionId, clientRequestId, tokenMint, slippageBps?, sessionId }.
+  app.post("/api/vault/borrow/repay/wallet-token", requireWallet, async (req, res) => {
+    try {
+      const { borrowPositionId, clientRequestId, tokenMint, slippageBps, sessionId } = req.body || {};
+      if (!borrowPositionId || typeof borrowPositionId !== "string") {
+        return res.status(400).json({ error: "borrowPositionId required" });
+      }
+      if (!clientRequestId || typeof clientRequestId !== "string") {
+        return res.status(400).json({ error: "clientRequestId required" });
+      }
+      if (!tokenMint || typeof tokenMint !== "string") {
+        return res.status(400).json({ error: "tokenMint required" });
+      }
+      if (slippageBps != null && (typeof slippageBps !== "number" || !Number.isFinite(slippageBps))) {
+        return res.status(400).json({ error: "slippageBps must be a number" });
+      }
+
+      const ctx = await prepareBorrowOpContext(req, res, sessionId);
+      if (!ctx) return;
+
+      let result;
+      try {
+        result = await executeRepayFromWalletToken({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: ctx.scope.agentPublicKey,
+          agentSecretKey: ctx.agentKeyResult.secretKey,
+          borrowPositionId,
+          clientRequestId,
+          tokenMint,
+          slippageBps,
+        });
+      } finally {
+        ctx.agentKeyResult.cleanup();
+      }
+      sendMultiHopResult(res, result);
+    } catch (error: any) {
+      console.error("[Vault] repay wallet-token error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
     }
   });

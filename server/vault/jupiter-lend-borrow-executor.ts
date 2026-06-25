@@ -32,6 +32,7 @@
 import Decimal from "decimal.js";
 import {
   executeAgentInstructions,
+  executeAgentInstructionsConfirmOnly,
   getServerConnection,
   getAgentTokenBalanceRawStrict,
   USDC_MINT,
@@ -42,11 +43,20 @@ import { ensureVaultGas } from "./gas-funding";
 import { JupiterLendBorrowRoute, type BorrowVaultConfig } from "./jupiter-lend-borrow-route";
 import { previewBorrowEligibility } from "./borrow-eligibility";
 import { readBorrowOracleContext } from "./borrow-oracle-freshness";
+import { evaluateCollateralWithdraw } from "./borrow-risk-policy";
 import {
   planBorrowOpen,
   planBorrowClose,
+  planSupplyCollateral,
+  planBorrowMore,
+  planRepayPartial,
+  planWithdrawPartial,
   verifyOpenOutcome,
   verifyCloseOutcome,
+  verifySupplyOutcome,
+  verifyRepayOutcome,
+  verifyBorrowMoreOutcome,
+  verifyWithdrawOutcome,
   hasSufficientRepayBalance,
   type AmountSpec,
 } from "./borrow-engine-core";
@@ -61,7 +71,7 @@ const REPAY_BUFFER_BPS = 50;
 // clicks/retries on the SAME borrow scope must never interleave. Serialize the
 // WHOLE op without ever holding a DB tx across on-chain calls.
 const scopeTails = new Map<string, Promise<void>>();
-async function withBorrowLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+export async function withBorrowLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const prev = scopeTails.get(key) ?? Promise.resolve();
   let release!: () => void;
   const gate = new Promise<void>((r) => (release = r));
@@ -568,6 +578,859 @@ export async function executeBorrowClose(params: BorrowCloseParams): Promise<Bor
       collateralReturned: fromRaw(collateralDeltaRaw, cfg.collateralDecimals),
       observedDebtRaw: observedDebtRaw != null ? observedDebtRaw.toString() : undefined,
       finalized,
+      verifyWarning,
+      dbWarning,
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// PHASE 1 SINGLE-TX MONEY OPS (supply / borrow-more / repay-from-agent /
+// withdraw). Two safety classes, exactly as borrow-engine-core documents:
+//   * borrow-more & withdraw RECEIVE a positive output delta (USDC / collateral
+//     lands in the wallet) -> executeAgentInstructions is the money-moved proof;
+//     the recovered-failure handling mirrors the OPEN path (a returned signature
+//     that we cannot disprove is recorded, never dropped).
+//   * supply & repay send funds OUT with no positive delta ->
+//     executeAgentInstructionsConfirmOnly + an AUTHORITATIVE position re-read is
+//     the proof, and we fail CLOSED on the dangerous direction (never record
+//     MORE collateral / LESS debt than the chain proves).
+// All four serialize on the per-scope borrow lock, target the EXACT minted
+// venuePositionId, and persist on-chain truth. Per-bot scope is still deferred.
+// ---------------------------------------------------------------------------
+
+/** Load + validate an EXISTING open, account-scope position owned by the wallet. */
+async function loadOpenAccountPosition(
+  walletAddress: string,
+  borrowPositionId: string,
+): Promise<{ ok: true; position: Awaited<ReturnType<typeof storage.getBorrowPosition>> & {}; nftId: number } | { ok: false; error: string }> {
+  const position = await storage.getBorrowPosition(walletAddress, borrowPositionId);
+  if (!position) return { ok: false, error: "Borrow position not found." };
+  if (position.tradingBotId) return { ok: false, error: "Per-bot borrow scope is not supported yet (account scope only)." };
+  if (position.status !== "open") return { ok: false, error: `Borrow position is not open (status: ${position.status}).` };
+  if (!position.venuePositionId) return { ok: false, error: "Borrow position has no on-chain id yet." };
+  const nftId = Number(position.venuePositionId);
+  if (!Number.isInteger(nftId) || nftId <= 0) return { ok: false, error: "Borrow position has an invalid on-chain id." };
+  return { ok: true, position, nftId };
+}
+
+// --- SUPPLY collateral ------------------------------------------------------
+
+export interface SupplyCollateralParams {
+  walletAddress: string;
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  /** Collateral mint that resolves the Jupiter Lend vault. */
+  collateralMint: string;
+  /** Collateral to deposit, raw base units. Must already sit in the agent wallet. */
+  collateralRaw: bigint;
+  /**
+   * Add to THIS existing position. Omit to add to the wallet's single open
+   * position for this collateral, or to MINT a new supply-only position when none
+   * exists. Multiple open positions for the same collateral + no id => refused.
+   */
+  borrowPositionId?: string | null;
+  tradingBotId?: string | null;
+}
+
+export interface SupplyCollateralResult {
+  success: boolean;
+  borrowPositionId?: string;
+  venuePositionId?: number;
+  signature?: string;
+  observedCollateralRaw?: string;
+  collateralValueUsd?: number | null;
+  verifyWarning?: string;
+  dbWarning?: string;
+  error?: string;
+}
+
+export async function executeSupplyCollateral(params: SupplyCollateralParams): Promise<SupplyCollateralResult> {
+  const tradingBotId = params.tradingBotId ?? null;
+  if (tradingBotId) return { success: false, error: "Per-bot borrow scope is not supported yet (account scope only)." };
+  if (params.collateralRaw <= 0n) return { success: false, error: "Collateral must be greater than zero." };
+
+  const borrowRoute = new JupiterLendBorrowRoute();
+  const cfg = await borrowRoute.getVaultConfig(params.collateralMint);
+  if (!cfg) return { success: false, error: "Borrow vault is unavailable right now." };
+
+  return withBorrowLock(borrowLockKey(params.walletAddress, tradingBotId, cfg.vaultId), async () => {
+    // 1) Resolve the target position (prefer add-to-existing over a 2nd NFT).
+    let existing: (Awaited<ReturnType<typeof storage.getBorrowPosition>> & {}) | null = null;
+    if (params.borrowPositionId) {
+      const loaded = await loadOpenAccountPosition(params.walletAddress, params.borrowPositionId);
+      if (!loaded.ok) return { success: false, error: loaded.error };
+      if (loaded.position!.collateralMint !== params.collateralMint) {
+        return { success: false, error: "Collateral mint does not match the selected position." };
+      }
+      existing = loaded.position!;
+    } else {
+      const open = (await storage.getBorrowPositions(params.walletAddress, null)).filter(
+        (p) => p.status === "open" && p.collateralMint === params.collateralMint && !p.tradingBotId,
+      );
+      if (open.length > 1) {
+        return { success: false, error: "You have multiple open positions for this collateral; choose which one to add to." };
+      }
+      existing = open[0] ?? null;
+    }
+
+    const targetNftId = existing ? Number(existing.venuePositionId) : 0;
+    if (existing && (!Number.isInteger(targetNftId) || targetNftId <= 0)) {
+      return { success: false, error: "Selected position has an invalid on-chain id." };
+    }
+
+    // 2) Strict balance: the agent wallet must actually hold the collateral.
+    //    Fail CLOSED if unreadable (never sign against an unknown balance).
+    let colBal: bigint;
+    try {
+      colBal = BigInt((await getAgentTokenBalanceRawStrict(params.agentPublicKey, params.collateralMint)).amountRaw);
+    } catch {
+      return { success: false, error: "Could not read the collateral balance; refusing to supply." };
+    }
+    if (colBal < params.collateralRaw) {
+      return { success: false, error: `Not enough ${cfg.collateralSymbol} in the trading wallet to supply.` };
+    }
+
+    // 3) Gas: collateral only LEAVES the wallet, so no inbound ATA rent.
+    const gas = await ensureVaultGas({
+      payingPublicKey: params.agentPublicKey,
+      funderPublicKey: params.agentPublicKey,
+      funderSecretKey: params.agentSecretKey,
+      destMint: null,
+      label: "Add Collateral",
+    });
+    if (!gas.ok) return { success: false, error: gas.error || "Could not cover the network gas to add collateral." };
+
+    // 4) Pre-read live collateral (0 for a new mint) — the supply proof baseline.
+    const preLive = existing ? await borrowRoute.readLivePositionHealth(params.collateralMint, targetNftId) : null;
+    const preColRaw = preLive ? BigInt(preLive.collateralRaw) : 0n;
+
+    // 5) Pure plan -> SDK ix. positionId 0 mints a new supply-only NFT.
+    const plan = planSupplyCollateral(targetNftId, params.collateralRaw);
+    const borrow = await import("@jup-ag/lend/borrow");
+    const BN = (await import("bn.js")).default;
+    const connection = getServerConnection();
+    const signer = new PublicKey(params.agentPublicKey);
+
+    let operate;
+    try {
+      operate = await borrow.getOperateIx({
+        vaultId: cfg.vaultId,
+        positionId: plan.positionId,
+        colAmount: specToBN(BN, plan.colAmount, "col", borrow.MAX_WITHDRAW_AMOUNT, borrow.MAX_REPAY_AMOUNT),
+        debtAmount: specToBN(BN, plan.debtAmount, "debt", borrow.MAX_WITHDRAW_AMOUNT, borrow.MAX_REPAY_AMOUNT),
+        connection,
+        signer,
+      });
+    } catch (e: any) {
+      return { success: false, error: `Could not build the supply transaction: ${e?.message || e}` };
+    }
+    if (!operate?.ixs?.length) return { success: false, error: "Supply transaction had no instructions." };
+
+    const nftId = existing ? targetNftId : Number(operate.nftId);
+
+    // 6) Resumable record BEFORE signing. A new mint gets a 'pending' position
+    //    (collateral 0 — never over-report); an existing one just logs the op.
+    let position = existing;
+    if (!position) {
+      position = await storage.createBorrowPosition({
+        walletAddress: params.walletAddress,
+        tradingBotId,
+        debtVenue: DEBT_VENUE,
+        venueVaultId: String(cfg.vaultId),
+        venuePositionId: String(nftId),
+        collateralAssetKey: cfg.collateralSymbol.toLowerCase(),
+        collateralMint: cfg.collateralMint,
+        collateralAmountRaw: "0",
+        debtAssetKey: "usdc",
+        debtMint: cfg.debtMint,
+        debtAmountRaw: "0",
+        status: "pending",
+      });
+    }
+    const op = await storage.createBorrowOperation({
+      walletAddress: params.walletAddress,
+      borrowPositionId: position!.id,
+      operationType: "supply_collateral",
+      status: "pending",
+      step: "gate_passed",
+    });
+
+    // 7) THE money move (confirm-only: funds leave, no positive delta to verify).
+    const exec = await executeAgentInstructionsConfirmOnly({
+      agentPublicKey: params.agentPublicKey,
+      agentSecretKey: params.agentSecretKey,
+      instructions: operate.ixs,
+      gasDestMint: null,
+      addressLookupTables: operate.addressLookupTableAccounts,
+      label: "Add Collateral",
+    });
+
+    // 8) Provably-nothing-moved => mark failed (safe; funds still in the wallet).
+    if (exec.onChainFailed || !exec.signature) {
+      await storage.updateBorrowOperation(op.id, { status: "failed", step: "exec_failed", error: exec.error || "supply failed", ...(exec.signature ? { appendTxSignature: exec.signature } : {}) });
+      if (!existing) await storage.updateBorrowPosition(position!.id, { status: "failed" }, "pending");
+      return { success: false, signature: exec.signature, error: exec.error || "Adding collateral failed." };
+    }
+
+    // 9) AUTHORITATIVE re-read is the proof. Record on-chain truth; fail CLOSED on
+    //    the dangerous direction (never record MORE collateral than proven).
+    const postLive = await borrowRoute.readLivePositionHealth(params.collateralMint, nftId);
+    let observedColRaw: bigint;
+    let observedDebtRaw: bigint;
+    let oraclePriceUsd: number | null = null;
+    let healthSource: string;
+    let verifyWarning: string | undefined;
+
+    if (postLive) {
+      observedColRaw = BigInt(postLive.collateralRaw);
+      observedDebtRaw = BigInt(postLive.debtRaw);
+      oraclePriceUsd = postLive.oraclePriceUsd;
+      healthSource = "supply_onchain";
+      const v = verifySupplyOutcome({ preColRaw, postColRaw: observedColRaw, depositedRaw: params.collateralRaw });
+      if (!v.ok) {
+        verifyWarning = `Add Collateral sent (signature ${exec.signature}) but the position read differs (${v.reason}). Recorded the on-chain collateral.`;
+        console.warn(`[Borrow] supply verify miss: ${v.reason}`, { positionId: position!.id, nftId });
+      }
+    } else {
+      // Confirmed (or ambiguous) but unreadable: keep the PRE collateral so we
+      // never over-report. A live re-read self-heals the increase later.
+      observedColRaw = preColRaw;
+      observedDebtRaw = existing ? BigInt(existing.debtAmountRaw) : 0n;
+      healthSource = existing ? (existing.healthSource ?? "supply_unverified") : "supply_unverified";
+      verifyWarning = `Add Collateral confirmed (signature ${exec.signature}) but the position could not be re-read; kept the prior collateral pending reconcile.`;
+      console.warn("[Borrow] supply could not re-read position", { positionId: position!.id, nftId });
+    }
+
+    const health = buildHealthSnapshot(cfg, observedColRaw, observedDebtRaw, oraclePriceUsd, healthSource);
+    let dbWarning: string | undefined;
+    const updated = await storage.updateBorrowPosition(
+      position!.id,
+      {
+        venuePositionId: String(nftId),
+        status: "open",
+        collateralAmountRaw: observedColRaw.toString(),
+        debtAmountRaw: observedDebtRaw.toString(),
+        healthSnapshot: health.snapshot,
+        healthAsOf: new Date(),
+        healthSource,
+      },
+      existing ? "open" : "pending",
+    );
+    if (!updated) {
+      dbWarning = `Collateral added (signature ${exec.signature}) but the position record was updated by another process.`;
+      console.warn("[Borrow] supply CAS lost", { positionId: position!.id });
+    }
+    await storage.updateBorrowOperation(op.id, { status: "succeeded", step: "supply_confirmed", appendTxSignature: exec.signature });
+
+    return {
+      success: true,
+      borrowPositionId: position!.id,
+      venuePositionId: nftId,
+      signature: exec.signature,
+      observedCollateralRaw: observedColRaw.toString(),
+      collateralValueUsd: health.collateralValueUsd,
+      verifyWarning,
+      dbWarning,
+    };
+  });
+}
+
+// --- BORROW MORE ------------------------------------------------------------
+
+export interface BorrowMoreParams {
+  walletAddress: string;
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  borrowPositionId: string;
+  /** ADDITIONAL USDC to borrow, raw base units (6 dp). */
+  requestedDebtRaw: bigint;
+}
+
+export interface BorrowMoreResult {
+  success: boolean;
+  signature?: string;
+  borrowedUsdc?: number;
+  observedDebtRaw?: string;
+  verifyWarning?: string;
+  dbWarning?: string;
+  error?: string;
+}
+
+export async function executeBorrowMore(params: BorrowMoreParams): Promise<BorrowMoreResult> {
+  if (params.requestedDebtRaw <= 0n) return { success: false, error: "Borrow amount must be greater than zero." };
+
+  const loaded = await loadOpenAccountPosition(params.walletAddress, params.borrowPositionId);
+  if (!loaded.ok) return { success: false, error: loaded.error };
+  const { position, nftId } = loaded;
+
+  const borrowRoute = new JupiterLendBorrowRoute();
+  const cfg = await borrowRoute.getVaultConfig(position!.collateralMint);
+  if (!cfg) return { success: false, error: "Borrow vault is unavailable right now." };
+
+  return withBorrowLock(borrowLockKey(params.walletAddress, null, cfg.vaultId), async () => {
+    // 1) LIVE position read — the authority for the per-position risk projection.
+    //    Fail CLOSED if unreadable (never borrow more against an unknown debt).
+    const live = await borrowRoute.readLivePositionHealth(position!.collateralMint, nftId);
+    if (!live) return { success: false, error: "Could not read the live position; refusing to borrow more." };
+    const liveColRaw = BigInt(live.collateralRaw);
+    const preDebtRaw = BigInt(live.debtRaw);
+
+    // 2) ENFORCED risk gate with LIVE total collateral + LIVE existing debt.
+    const elig = await previewBorrowEligibility(
+      params.walletAddress,
+      {
+        collateralMint: position!.collateralMint,
+        collateralRaw: liveColRaw,
+        requestedDebtRaw: params.requestedDebtRaw,
+        existingDebtRawOverride: preDebtRaw,
+      },
+      buildEligibilityDeps(borrowRoute),
+    );
+    if (!elig.ok) return { success: false, error: "Could not fully evaluate borrow risk; refusing to borrow." };
+    if (!elig.allowed) {
+      const deny = elig.reasons?.find((r) => r.severity === "deny");
+      return { success: false, error: deny?.message || "This borrow is not allowed under the risk limits." };
+    }
+
+    // 3) Gas: borrowed USDC lands -> cover first-time USDC ATA rent + fee.
+    const gas = await ensureVaultGas({
+      payingPublicKey: params.agentPublicKey,
+      funderPublicKey: params.agentPublicKey,
+      funderSecretKey: params.agentSecretKey,
+      destMint: USDC_MINT,
+      label: "Borrow",
+    });
+    if (!gas.ok) return { success: false, error: gas.error || "Could not cover the network gas for this borrow." };
+
+    // 4) Pure plan -> SDK ix against the EXACT minted position.
+    const plan = planBorrowMore(nftId, params.requestedDebtRaw);
+    const borrow = await import("@jup-ag/lend/borrow");
+    const BN = (await import("bn.js")).default;
+    const connection = getServerConnection();
+    const signer = new PublicKey(params.agentPublicKey);
+
+    let operate;
+    try {
+      operate = await borrow.getOperateIx({
+        vaultId: cfg.vaultId,
+        positionId: plan.positionId,
+        colAmount: specToBN(BN, plan.colAmount, "col", borrow.MAX_WITHDRAW_AMOUNT, borrow.MAX_REPAY_AMOUNT),
+        debtAmount: specToBN(BN, plan.debtAmount, "debt", borrow.MAX_WITHDRAW_AMOUNT, borrow.MAX_REPAY_AMOUNT),
+        connection,
+        signer,
+      });
+    } catch (e: any) {
+      return { success: false, error: `Could not build the borrow transaction: ${e?.message || e}` };
+    }
+    if (!operate?.ixs?.length) return { success: false, error: "Borrow transaction had no instructions." };
+
+    const op = await storage.createBorrowOperation({
+      walletAddress: params.walletAddress,
+      borrowPositionId: position!.id,
+      operationType: "borrow_more",
+      status: "pending",
+      step: "gate_passed",
+    });
+
+    // 5) THE money move: verify a POSITIVE USDC delta lands in the wallet.
+    const exec = await executeAgentInstructions({
+      agentPublicKey: params.agentPublicKey,
+      agentSecretKey: params.agentSecretKey,
+      instructions: operate.ixs,
+      verifyOutputMint: USDC_MINT,
+      addressLookupTables: operate.addressLookupTableAccounts,
+      label: "Borrow more",
+    });
+
+    // 6) Decide whether money moved (mirror OPEN: a returned signature we cannot
+    //    disprove must be RECORDED — never drop the new debt).
+    let usdcDeltaRaw: bigint;
+    let preReadLive: Awaited<ReturnType<typeof borrowRoute.readLivePositionHealth>> = null;
+    const recovered = !(exec.success && exec.outputReceivedRaw);
+    if (!recovered) {
+      usdcDeltaRaw = BigInt(exec.outputReceivedRaw!);
+    } else if (!exec.signature || exec.onChainFailed) {
+      await storage.updateBorrowOperation(op.id, { status: "failed", step: "exec_failed", error: exec.error || "borrow more failed", ...(exec.signature ? { appendTxSignature: exec.signature } : {}) });
+      return { success: false, signature: exec.signature, error: exec.error || "Borrow failed." };
+    } else {
+      preReadLive = await borrowRoute.readLivePositionHealth(position!.collateralMint, nftId);
+      if (preReadLive && BigInt(preReadLive.debtRaw) <= preDebtRaw) {
+        // Definitive read: debt did not grow -> nothing moved.
+        await storage.updateBorrowOperation(op.id, { status: "failed", step: "exec_failed", error: exec.error || "borrow more failed", appendTxSignature: exec.signature });
+        return { success: false, signature: exec.signature, error: exec.error || "Borrow failed." };
+      }
+      usdcDeltaRaw = preReadLive ? BigInt(preReadLive.debtRaw) - preDebtRaw : params.requestedDebtRaw;
+    }
+
+    // 7) Read AUTHORITATIVE debt; from here we persist reality (never under-report
+    //    debt). Reuse the probe read if we have it.
+    const after = preReadLive ?? await borrowRoute.readLivePositionHealth(position!.collateralMint, nftId);
+    let observedColRaw: bigint;
+    let observedDebtRaw: bigint;
+    let oraclePriceUsd: number | null = null;
+    let healthSource: string;
+    if (after) {
+      observedColRaw = BigInt(after.collateralRaw);
+      observedDebtRaw = BigInt(after.debtRaw);
+      oraclePriceUsd = after.oraclePriceUsd;
+      healthSource = "borrow_more_onchain";
+    } else {
+      // Conservative liability: never under-report. Use the larger of the read
+      // baseline + request and the realized delta.
+      observedColRaw = liveColRaw;
+      observedDebtRaw = preDebtRaw + (usdcDeltaRaw > params.requestedDebtRaw ? usdcDeltaRaw : params.requestedDebtRaw);
+      healthSource = "borrow_more_unverified";
+    }
+
+    let verifyWarning: string | undefined;
+    if (recovered) {
+      verifyWarning = `Borrow execution reported an error but the transaction was sent (signature ${exec.signature}); recorded the on-chain debt to avoid losing it.`;
+      console.warn("[Borrow] borrow-more recovered from reported exec failure", { positionId: position!.id, nftId, hadLiveRead: !!after });
+    }
+    if (after) {
+      const v = verifyBorrowMoreOutcome({ preDebtRaw, postDebtRaw: observedDebtRaw, usdcDeltaRaw, borrowedRaw: params.requestedDebtRaw });
+      if (!v.ok) {
+        const miss = `Borrow landed (signature ${exec.signature}) but the position read differs (${v.reason}). Recorded the on-chain debt.`;
+        verifyWarning = verifyWarning ? `${verifyWarning} ${miss}` : miss;
+        console.warn(`[Borrow] borrow-more verify miss: ${v.reason}`, { positionId: position!.id, nftId });
+      }
+    } else {
+      const unread = `Borrow landed (signature ${exec.signature}) but the position could not be re-read; recorded a conservative debt estimate pending reconcile.`;
+      verifyWarning = verifyWarning ? `${verifyWarning} ${unread}` : unread;
+    }
+
+    const health = buildHealthSnapshot(cfg, observedColRaw, observedDebtRaw, oraclePriceUsd, healthSource);
+    let dbWarning: string | undefined;
+    const updated = await storage.updateBorrowPosition(
+      position!.id,
+      {
+        status: "open",
+        collateralAmountRaw: observedColRaw.toString(),
+        debtAmountRaw: observedDebtRaw.toString(),
+        healthSnapshot: health.snapshot,
+        healthAsOf: new Date(),
+        healthSource,
+      },
+      "open",
+    );
+    if (!updated) {
+      dbWarning = `Borrow succeeded (signature ${exec.signature}) but the position record was updated by another process.`;
+      console.warn("[Borrow] borrow-more CAS lost", { positionId: position!.id });
+    }
+    await storage.updateBorrowOperation(op.id, { status: "succeeded", step: "borrow_more_confirmed", appendTxSignature: exec.signature });
+
+    return {
+      success: true,
+      signature: exec.signature,
+      borrowedUsdc: fromRaw(usdcDeltaRaw, cfg.debtDecimals),
+      observedDebtRaw: observedDebtRaw.toString(),
+      verifyWarning,
+      dbWarning,
+    };
+  });
+}
+
+// --- REPAY from the Trading Agent's USDC (single-tx; canonical source #1) ----
+
+export interface RepayFromAgentUsdcParams {
+  walletAddress: string;
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  borrowPositionId: string;
+  /** USDC to repay, raw base units; or "max" to repay ALL debt (keep collateral). */
+  amount: bigint | "max";
+}
+
+export interface RepayResult {
+  success: boolean;
+  signature?: string;
+  repaidUsdc?: number;
+  observedDebtRaw?: string;
+  /** true when the debt is fully cleared (collateral may remain). */
+  fullyRepaid?: boolean;
+  verifyWarning?: string;
+  dbWarning?: string;
+  error?: string;
+}
+
+export async function executeRepayFromAgentUsdc(params: RepayFromAgentUsdcParams): Promise<RepayResult> {
+  if (params.amount !== "max" && params.amount <= 0n) {
+    return { success: false, error: "Repay amount must be greater than zero." };
+  }
+
+  const loaded = await loadOpenAccountPosition(params.walletAddress, params.borrowPositionId);
+  if (!loaded.ok) return { success: false, error: loaded.error };
+  const { position, nftId } = loaded;
+
+  const borrowRoute = new JupiterLendBorrowRoute();
+  const cfg = await borrowRoute.getVaultConfig(position!.collateralMint);
+  if (!cfg) return { success: false, error: "Borrow vault is unavailable right now." };
+
+  return withBorrowLock(borrowLockKey(params.walletAddress, null, cfg.vaultId), async () => {
+    // 1) LIVE debt — required to cap the repay and prove it later. Fail CLOSED.
+    const live = await borrowRoute.readLivePositionHealth(position!.collateralMint, nftId);
+    if (!live) return { success: false, error: "Could not read the live position; refusing to repay." };
+    const preDebtRaw = BigInt(live.debtRaw);
+    if (preDebtRaw <= 0n) return { success: false, error: "This position has no debt to repay." };
+
+    // 2) Resolve the repay leg. "max" repays ALL (keep collateral); a partial is
+    //    CAPPED at the live debt so we never overpay.
+    const isMax = params.amount === "max";
+    const repayRaw = isMax ? preDebtRaw : (params.amount as bigint > preDebtRaw ? preDebtRaw : params.amount as bigint);
+
+    // 3) Strict USDC balance (+ interest buffer). Fail CLOSED if unreadable.
+    let usdcBal: bigint;
+    try {
+      usdcBal = BigInt((await getAgentTokenBalanceRawStrict(params.agentPublicKey, USDC_MINT)).amountRaw);
+    } catch {
+      return { success: false, error: "Could not read the USDC balance; refusing to repay." };
+    }
+    const buffer = isMax ? (preDebtRaw * BigInt(REPAY_BUFFER_BPS)) / 10_000n : 0n;
+    if (!hasSufficientRepayBalance(usdcBal, repayRaw, buffer)) {
+      return { success: false, error: `Not enough USDC in the trading wallet to repay (need ~${fromRaw(repayRaw + buffer, cfg.debtDecimals).toFixed(2)} USDC).` };
+    }
+
+    // 4) Gas: USDC only LEAVES the wallet -> no inbound ATA rent.
+    const gas = await ensureVaultGas({
+      payingPublicKey: params.agentPublicKey,
+      funderPublicKey: params.agentPublicKey,
+      funderSecretKey: params.agentSecretKey,
+      destMint: null,
+      label: "Repay",
+    });
+    if (!gas.ok) return { success: false, error: gas.error || "Could not cover the network gas for this repay." };
+
+    // 5) Pure plan -> SDK ix.
+    const plan = planRepayPartial(nftId, isMax ? "max" : repayRaw);
+    const borrow = await import("@jup-ag/lend/borrow");
+    const BN = (await import("bn.js")).default;
+    const connection = getServerConnection();
+    const signer = new PublicKey(params.agentPublicKey);
+
+    let operate;
+    try {
+      operate = await borrow.getOperateIx({
+        vaultId: cfg.vaultId,
+        positionId: plan.positionId,
+        colAmount: specToBN(BN, plan.colAmount, "col", borrow.MAX_WITHDRAW_AMOUNT, borrow.MAX_REPAY_AMOUNT),
+        debtAmount: specToBN(BN, plan.debtAmount, "debt", borrow.MAX_WITHDRAW_AMOUNT, borrow.MAX_REPAY_AMOUNT),
+        connection,
+        signer,
+      });
+    } catch (e: any) {
+      return { success: false, error: `Could not build the repay transaction: ${e?.message || e}` };
+    }
+    if (!operate?.ixs?.length) return { success: false, error: "Repay transaction had no instructions." };
+
+    const op = await storage.createBorrowOperation({
+      walletAddress: params.walletAddress,
+      borrowPositionId: position!.id,
+      operationType: "repay_agent_usdc",
+      status: "pending",
+      step: "gate_passed",
+    });
+
+    // 6) THE money move (confirm-only: USDC leaves, no positive delta to verify).
+    const exec = await executeAgentInstructionsConfirmOnly({
+      agentPublicKey: params.agentPublicKey,
+      agentSecretKey: params.agentSecretKey,
+      instructions: operate.ixs,
+      gasDestMint: null,
+      addressLookupTables: operate.addressLookupTableAccounts,
+      label: "Repay",
+    });
+
+    // 7) Provably-nothing-moved => mark failed (safe; USDC still in the wallet).
+    if (exec.onChainFailed || !exec.signature) {
+      await storage.updateBorrowOperation(op.id, { status: "failed", step: "exec_failed", error: exec.error || "repay failed", ...(exec.signature ? { appendTxSignature: exec.signature } : {}) });
+      return { success: false, signature: exec.signature, error: exec.error || "Repay failed." };
+    }
+
+    // 8) AUTHORITATIVE re-read is the proof. Fail CLOSED on the dangerous
+    //    direction: never record LESS debt than the chain proves.
+    const after = await borrowRoute.readLivePositionHealth(position!.collateralMint, nftId);
+    let observedColRaw: bigint;
+    let observedDebtRaw: bigint;
+    let oraclePriceUsd: number | null = null;
+    let healthSource: string;
+    let verifyWarning: string | undefined;
+    let fullyRepaid = false;
+
+    if (after) {
+      observedColRaw = BigInt(after.collateralRaw);
+      observedDebtRaw = BigInt(after.debtRaw);
+      oraclePriceUsd = after.oraclePriceUsd;
+      healthSource = "repay_onchain";
+      const v = verifyRepayOutcome({ preDebtRaw, postDebtRaw: observedDebtRaw, repaidRaw: repayRaw, fullRepay: isMax });
+      if (v.ok) {
+        fullyRepaid = isMax || observedDebtRaw <= 0n;
+      } else {
+        verifyWarning = `Repay sent (signature ${exec.signature}) but the position read differs (${v.reason}). Recorded the on-chain debt.`;
+        console.warn(`[Borrow] repay verify miss: ${v.reason}`, { positionId: position!.id, nftId });
+      }
+    } else {
+      // Confirmed but unreadable: KEEP the higher pre-debt so we never under-report.
+      observedColRaw = BigInt(position!.collateralAmountRaw);
+      observedDebtRaw = preDebtRaw;
+      healthSource = "repay_unverified";
+      verifyWarning = `Repay confirmed (signature ${exec.signature}) but the position could not be re-read; kept the prior debt pending reconcile.`;
+      console.warn("[Borrow] repay could not re-read position", { positionId: position!.id, nftId });
+    }
+
+    const health = buildHealthSnapshot(cfg, observedColRaw, observedDebtRaw, oraclePriceUsd, healthSource);
+    let dbWarning: string | undefined;
+    const updated = await storage.updateBorrowPosition(
+      position!.id,
+      {
+        status: "open",
+        collateralAmountRaw: observedColRaw.toString(),
+        debtAmountRaw: observedDebtRaw.toString(),
+        healthSnapshot: health.snapshot,
+        healthAsOf: new Date(),
+        healthSource,
+      },
+      "open",
+    );
+    if (!updated) {
+      dbWarning = `Repay confirmed (signature ${exec.signature}) but the position record was updated by another process.`;
+      console.warn("[Borrow] repay CAS lost", { positionId: position!.id });
+    }
+    await storage.updateBorrowOperation(op.id, { status: "succeeded", step: fullyRepaid ? "repay_full_confirmed" : "repay_confirmed", appendTxSignature: exec.signature });
+
+    return {
+      success: true,
+      signature: exec.signature,
+      repaidUsdc: fromRaw(after ? (preDebtRaw - observedDebtRaw > 0n ? preDebtRaw - observedDebtRaw : 0n) : repayRaw, cfg.debtDecimals),
+      observedDebtRaw: observedDebtRaw.toString(),
+      fullyRepaid,
+      verifyWarning,
+      dbWarning,
+    };
+  });
+}
+
+// --- WITHDRAW collateral ----------------------------------------------------
+
+export interface WithdrawCollateralParams {
+  walletAddress: string;
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  borrowPositionId: string;
+  /** Collateral to withdraw, raw base units; or "max" to withdraw to the cap. */
+  amount: bigint | "max";
+  /**
+   * OPTIONAL write-ahead durability hook forwarded to `executeAgentInstructions`,
+   * fired AFTER signing but STRICTLY BEFORE the withdraw tx is broadcast. A
+   * multi-hop deleverage orchestrator uses it to durably record the withdraw
+   * signature BEFORE broadcast so a crash mid-withdraw is reconciled by signature
+   * status (never by a stale wallet balance) and "no sig recorded" provably means
+   * "never broadcast". FATAL: throwing aborts the withdraw before it is sent.
+   */
+  onBeforeBroadcast?: (info: { signature: string; blockhash: string; lastValidBlockHeight: number }) => void | Promise<void>;
+}
+
+export interface WithdrawCollateralResult {
+  success: boolean;
+  signature?: string;
+  collateralReturned?: number;
+  observedCollateralRaw?: string;
+  verifyWarning?: string;
+  dbWarning?: string;
+  error?: string;
+}
+
+export async function executeWithdrawCollateral(params: WithdrawCollateralParams): Promise<WithdrawCollateralResult> {
+  if (params.amount !== "max" && params.amount <= 0n) {
+    return { success: false, error: "Withdraw amount must be greater than zero." };
+  }
+
+  const loaded = await loadOpenAccountPosition(params.walletAddress, params.borrowPositionId);
+  if (!loaded.ok) return { success: false, error: loaded.error };
+  const { position, nftId } = loaded;
+
+  const borrowRoute = new JupiterLendBorrowRoute();
+  const cfg = await borrowRoute.getVaultConfig(position!.collateralMint);
+  if (!cfg) return { success: false, error: "Borrow vault is unavailable right now." };
+
+  return withBorrowLock(borrowLockKey(params.walletAddress, null, cfg.vaultId), async () => {
+    // 1) LIVE position read — collateral + debt. Fail CLOSED if unreadable.
+    const live = await borrowRoute.readLivePositionHealth(position!.collateralMint, nftId);
+    if (!live) return { success: false, error: "Could not read the live position; refusing to withdraw." };
+    const preColRaw = BigInt(live.collateralRaw);
+    const liveDebtRaw = BigInt(live.debtRaw);
+    if (preColRaw <= 0n) return { success: false, error: "This position has no collateral to withdraw." };
+
+    // 2) ENFORCED collateral-withdraw gate (oracle required only when debt remains).
+    const oracle = await readBorrowOracleContext(cfg);
+    const decision = evaluateCollateralWithdraw({
+      vault: cfg,
+      liveCollateralRaw: preColRaw,
+      liveDebtRaw,
+      requestedWithdrawRaw: params.amount,
+      oracle,
+    });
+    if (!decision.allowed) {
+      const deny = decision.reasons?.find((r) => r.severity === "deny");
+      return { success: false, error: deny?.message || "This withdrawal is not allowed under the risk limits." };
+    }
+
+    // 3) Resolve the withdraw leg. With debt, a "max" MUST resolve to the gate's
+    //    EXACT maxWithdrawableRaw (never the protocol MAX_WITHDRAW sentinel, which
+    //    withdraws down to the looser collateral factor). With NO debt, the
+    //    sentinel cleanly pulls everything.
+    const isMax = params.amount === "max";
+    const fullWithdraw = isMax && liveDebtRaw <= 0n;
+    let withdrawArg: bigint | "max";
+    let intendedRaw: bigint;
+    if (isMax && liveDebtRaw > 0n) {
+      const maxRaw = decision.maxWithdrawableRaw ? BigInt(decision.maxWithdrawableRaw) : 0n;
+      if (maxRaw <= 0n) return { success: false, error: "No collateral can be safely withdrawn at the current price." };
+      withdrawArg = maxRaw;
+      intendedRaw = maxRaw;
+    } else if (isMax) {
+      withdrawArg = "max";
+      intendedRaw = preColRaw;
+    } else {
+      withdrawArg = params.amount as bigint;
+      intendedRaw = params.amount as bigint;
+    }
+
+    // 4) Gas: collateral RETURNS to the wallet -> cover first-time ATA rent + fee.
+    const gas = await ensureVaultGas({
+      payingPublicKey: params.agentPublicKey,
+      funderPublicKey: params.agentPublicKey,
+      funderSecretKey: params.agentSecretKey,
+      destMint: position!.collateralMint,
+      label: "Withdraw",
+    });
+    if (!gas.ok) return { success: false, error: gas.error || "Could not cover the network gas for this withdrawal." };
+
+    // 5) Pure plan -> SDK ix.
+    const plan = planWithdrawPartial(nftId, withdrawArg);
+    const borrow = await import("@jup-ag/lend/borrow");
+    const BN = (await import("bn.js")).default;
+    const connection = getServerConnection();
+    const signer = new PublicKey(params.agentPublicKey);
+
+    let operate;
+    try {
+      operate = await borrow.getOperateIx({
+        vaultId: cfg.vaultId,
+        positionId: plan.positionId,
+        colAmount: specToBN(BN, plan.colAmount, "col", borrow.MAX_WITHDRAW_AMOUNT, borrow.MAX_REPAY_AMOUNT),
+        debtAmount: specToBN(BN, plan.debtAmount, "debt", borrow.MAX_WITHDRAW_AMOUNT, borrow.MAX_REPAY_AMOUNT),
+        connection,
+        signer,
+      });
+    } catch (e: any) {
+      return { success: false, error: `Could not build the withdraw transaction: ${e?.message || e}` };
+    }
+    if (!operate?.ixs?.length) return { success: false, error: "Withdraw transaction had no instructions." };
+
+    const op = await storage.createBorrowOperation({
+      walletAddress: params.walletAddress,
+      borrowPositionId: position!.id,
+      operationType: "withdraw_collateral",
+      status: "pending",
+      step: "gate_passed",
+    });
+
+    // 6) THE money move: verify a POSITIVE COLLATERAL delta returns to the wallet.
+    const exec = await executeAgentInstructions({
+      agentPublicKey: params.agentPublicKey,
+      agentSecretKey: params.agentSecretKey,
+      instructions: operate.ixs,
+      verifyOutputMint: position!.collateralMint,
+      addressLookupTables: operate.addressLookupTableAccounts,
+      label: "Withdraw collateral",
+      onBeforeBroadcast: params.onBeforeBroadcast,
+    });
+
+    // 7) Decide whether money moved (mirror CLOSE: a returned signature we cannot
+    //    disprove is recorded, never finalized on an unconfirmed read).
+    let collateralDeltaRaw: bigint;
+    let preReadLive: Awaited<ReturnType<typeof borrowRoute.readLivePositionHealth>> = null;
+    const recovered = !(exec.success && exec.outputReceivedRaw);
+    if (!recovered) {
+      collateralDeltaRaw = BigInt(exec.outputReceivedRaw!);
+    } else if (!exec.signature || exec.onChainFailed) {
+      await storage.updateBorrowOperation(op.id, { status: "failed", step: "exec_failed", error: exec.error || "withdraw failed", ...(exec.signature ? { appendTxSignature: exec.signature } : {}) });
+      return { success: false, signature: exec.signature, error: exec.error || "Withdrawal failed." };
+    } else {
+      preReadLive = await borrowRoute.readLivePositionHealth(position!.collateralMint, nftId);
+      if (preReadLive && BigInt(preReadLive.collateralRaw) >= preColRaw) {
+        // Definitive read: collateral did not shrink -> nothing moved.
+        await storage.updateBorrowOperation(op.id, { status: "failed", step: "exec_failed", error: exec.error || "withdraw failed", appendTxSignature: exec.signature });
+        return { success: false, signature: exec.signature, error: exec.error || "Withdrawal failed." };
+      }
+      collateralDeltaRaw = preReadLive ? preColRaw - BigInt(preReadLive.collateralRaw) : intendedRaw;
+    }
+
+    // 8) Read AUTHORITATIVE collateral; persist reality.
+    const after = preReadLive ?? await borrowRoute.readLivePositionHealth(position!.collateralMint, nftId);
+    let observedColRaw: bigint;
+    let observedDebtRaw: bigint;
+    let oraclePriceUsd: number | null = null;
+    let healthSource: string;
+    if (after) {
+      observedColRaw = BigInt(after.collateralRaw);
+      observedDebtRaw = BigInt(after.debtRaw);
+      oraclePriceUsd = after.oraclePriceUsd;
+      healthSource = "withdraw_onchain";
+    } else {
+      // Conservative: assume the intended collateral left. Never over-report
+      // remaining collateral (a live re-read self-heals).
+      observedColRaw = preColRaw > intendedRaw ? preColRaw - intendedRaw : 0n;
+      observedDebtRaw = liveDebtRaw;
+      healthSource = "withdraw_unverified";
+    }
+
+    let verifyWarning: string | undefined;
+    if (recovered) {
+      verifyWarning = `Withdraw execution reported an error but the transaction was sent (signature ${exec.signature}); recorded the on-chain position.`;
+      console.warn("[Borrow] withdraw recovered from reported exec failure", { positionId: position!.id, nftId, hadLiveRead: !!after });
+    }
+    if (after) {
+      const v = verifyWithdrawOutcome({ preColRaw, postColRaw: observedColRaw, collateralDeltaRaw, withdrawnRaw: intendedRaw, fullWithdraw });
+      if (!v.ok) {
+        const miss = `Withdraw landed (signature ${exec.signature}) but the position read differs (${v.reason}). Recorded the on-chain collateral.`;
+        verifyWarning = verifyWarning ? `${verifyWarning} ${miss}` : miss;
+        console.warn(`[Borrow] withdraw verify miss: ${v.reason}`, { positionId: position!.id, nftId });
+      }
+    } else {
+      const unread = `Withdraw landed (signature ${exec.signature}) but the position could not be re-read; recorded a conservative estimate pending reconcile.`;
+      verifyWarning = verifyWarning ? `${verifyWarning} ${unread}` : unread;
+    }
+
+    // A full close-out (no collateral AND no debt) marks the position closed.
+    const nowEmpty = observedColRaw <= 0n && observedDebtRaw <= 0n;
+    const nextStatus = nowEmpty ? "closed" : "open";
+    const health = buildHealthSnapshot(cfg, observedColRaw, observedDebtRaw, oraclePriceUsd, nowEmpty ? "closed" : healthSource);
+    let dbWarning: string | undefined;
+    const updated = await storage.updateBorrowPosition(
+      position!.id,
+      {
+        status: nextStatus,
+        collateralAmountRaw: observedColRaw.toString(),
+        debtAmountRaw: observedDebtRaw.toString(),
+        healthSnapshot: health.snapshot,
+        healthAsOf: new Date(),
+        healthSource: nowEmpty ? "closed" : healthSource,
+      },
+      "open",
+    );
+    if (!updated) {
+      dbWarning = `Withdraw confirmed (signature ${exec.signature}) but the position record was updated by another process.`;
+      console.warn("[Borrow] withdraw CAS lost", { positionId: position!.id });
+    }
+    await storage.updateBorrowOperation(op.id, { status: "succeeded", step: nowEmpty ? "withdraw_closed" : "withdraw_confirmed", appendTxSignature: exec.signature });
+
+    return {
+      success: true,
+      signature: exec.signature,
+      collateralReturned: fromRaw(collateralDeltaRaw, cfg.collateralDecimals),
+      observedCollateralRaw: observedColRaw.toString(),
       verifyWarning,
       dbWarning,
     };
