@@ -67,6 +67,15 @@ const DEBT_VENUE = "jupiter_lend";
 /** Extra USDC headroom over the read debt to absorb interest accrued before the
  *  repay tx lands. 50 bps — purely a pre-flight guard; the operate is atomic. */
 const REPAY_BUFFER_BPS = 50;
+/**
+ * Rent a FIRST-TIME supply/open must pay to mint a new Jupiter Lend position NFT
+ * (the mint, its Metaplex metadata + master-edition, and the NFT token account).
+ * The metadata account alone is ~0.0151 SOL; the full set is ~0.022 SOL. We budget
+ * 0.03 SOL of headroom so the gas top-up clears the bar and the on-chain mint can
+ * never revert mid-instruction with "insufficient lamports". Leftover SOL stays in
+ * the agent wallet, usable for future gas. Adding to an EXISTING position does not
+ * mint an NFT and so needs none of this. (1 SOL = 1e9 lamports.) */
+const NEW_POSITION_MINT_RENT_LAMPORTS = 30_000_000;
 
 // --- Per-scope serializer (mirrors vault-service.withScopeLock) --------------
 // A borrow open/close moves on-chain funds then records debt; two concurrent
@@ -231,14 +240,17 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
       return { success: false, error: deny?.message || "This borrow is not allowed under the risk limits." };
     }
 
-    // 2) Gas: the agent wallet pays; account scope funds its own gas. Make sure it
-    //    can cover the tx fee + first-time USDC ATA rent before signing.
+    // 2) Gas: the agent wallet pays; account scope funds its own gas. A borrow OPEN
+    //    always MINTS a new position NFT, so budget its mint/metadata/edition rent
+    //    (~0.022 SOL) on top of the tx fee + first-time USDC ATA rent, or the
+    //    on-chain mint reverts "insufficient lamports".
     const gas = await ensureVaultGas({
       payingPublicKey: params.agentPublicKey,
       funderPublicKey: params.agentPublicKey,
       funderSecretKey: params.agentSecretKey,
       destMint: USDC_MINT,
       label: "Borrow",
+      extraRentLamports: NEW_POSITION_MINT_RENT_LAMPORTS,
     });
     if (!gas.ok) return { success: false, error: gas.error || "Could not cover the network gas for this borrow." };
 
@@ -718,13 +730,18 @@ export async function executeSupplyCollateral(params: SupplyCollateralParams): P
       return { success: false, error: `Not enough ${cfg.collateralSymbol} in the trading wallet to supply.` };
     }
 
-    // 3) Gas: collateral only LEAVES the wallet, so no inbound ATA rent.
+    // 3) Gas: collateral only LEAVES the wallet, so no inbound ATA rent. BUT a
+    //    first-time supply (no existing position) MINTS a new position NFT, whose
+    //    mint/metadata/edition rent (~0.022 SOL) must be budgeted or the on-chain
+    //    mint reverts "insufficient lamports". Adding to an existing position mints
+    //    nothing, so it needs none of this.
     const gas = await ensureVaultGas({
       payingPublicKey: params.agentPublicKey,
       funderPublicKey: params.agentPublicKey,
       funderSecretKey: params.agentSecretKey,
       destMint: null,
       label: "Add Collateral",
+      extraRentLamports: existing ? 0 : NEW_POSITION_MINT_RENT_LAMPORTS,
     });
     if (!gas.ok) return { success: false, error: gas.error || "Could not cover the network gas to add collateral." };
 

@@ -83,8 +83,13 @@ export async function computeRequiredGasLamports(
   connection: Connection,
   owner: PublicKey,
   destMint: string | null | undefined,
+  // Extra rent the upcoming tx itself must pay beyond the fee + dest ATA — e.g.
+  // minting a Jupiter Lend position NFT (mint + metadata + edition accounts).
+  // Without this the top-up bar is too low and the on-chain mint reverts with
+  // "insufficient lamports" mid-instruction.
+  extraRentLamports = 0,
 ): Promise<number> {
-  let lamports = GAS_FEE_BUFFER_LAMPORTS;
+  let lamports = GAS_FEE_BUFFER_LAMPORTS + Math.max(0, Math.round(extraRentLamports));
   if (destMint && destMint !== NATIVE_SOL_MINT) {
     const ata = getAssociatedTokenAddressSync(new PublicKey(destMint), owner);
     const info = await connection.getAccountInfo(ata);

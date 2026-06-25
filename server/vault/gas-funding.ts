@@ -68,6 +68,12 @@ export interface EnsureVaultGasParams {
   destMint: string | null;
   /** Short label for error messages, e.g. "Park" / "Unpark". */
   label: string;
+  /**
+   * Extra rent the upcoming tx itself pays beyond fee + dest ATA — e.g. minting a
+   * Jupiter Lend position NFT on a first-time supply/open. Raises the top-up bar so
+   * the on-chain mint can't revert mid-instruction with "insufficient lamports".
+   */
+  extraRentLamports?: number;
 }
 
 export interface EnsureVaultGasResult {
@@ -102,7 +108,7 @@ export async function ensureVaultGas(p: EnsureVaultGasParams): Promise<EnsureVau
   const payer = new PublicKey(p.payingPublicKey);
   const sameWallet = p.payingPublicKey === p.funderPublicKey;
 
-  const requiredLamports = await computeRequiredGasLamports(connection, payer, p.destMint);
+  const requiredLamports = await computeRequiredGasLamports(connection, payer, p.destMint, p.extraRentLamports ?? 0);
   const payerLamportsBefore = await connection.getBalance(payer);
   if (payerLamportsBefore >= requiredLamports) {
     return { ok: true, requiredLamports, payerLamportsBefore };
