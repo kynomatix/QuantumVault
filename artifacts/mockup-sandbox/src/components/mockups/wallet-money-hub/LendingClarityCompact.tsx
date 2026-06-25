@@ -628,7 +628,7 @@ function MoneyFlows() {
                     <p className="text-xs text-muted-foreground">{f.date}</p>
                   </div>
                 </div>
-                <span className={`font-mono text-sm tabular-nums ${tone}`}>{f.amount}</span>
+                <span className="font-mono text-sm tabular-nums text-chart-4">{f.amount}</span>
               </div>
             );
           })}
