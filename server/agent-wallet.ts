@@ -607,6 +607,95 @@ export async function transferUsdcToWallet(
 }
 
 /**
+ * Deliver an EXACT raw amount of an arbitrary SPL `mint` from the agent wallet to
+ * any Solana wallet. This is the lending-withdraw "delivery leg": once collateral
+ * has been withdrawn from the vault back into the agent wallet, it is sent on to
+ * the user's OWN wallet. Money-safe by construction:
+ *   - STRICT agent balance read (fail closed): refuses unless the agent verifiably
+ *     holds >= amountRaw of the mint, so it never moves money on an unreadable
+ *     balance and never over-sends.
+ *   - EXACT amount only: never sweeps the full balance, so any UNRELATED balance of
+ *     the same mint (e.g. a separate pending deposit awaiting supply) is untouched.
+ *   - Gas gate (fail closed): the agent pays first-time destination-ATA rent + the
+ *     tx fee; refuses if its SOL cannot cover the exact requirement.
+ *   - A returned signature alone is NOT success: the tx must confirm with no error.
+ */
+export async function transferTokenToWalletExact(params: {
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  toWalletAddress: string;
+  mint: string;
+  amountRaw: bigint;
+  /**
+   * OPTIONAL write-ahead durability hook fired AFTER signing but STRICTLY BEFORE
+   * the transfer is broadcast. A caller uses it to durably record the delivery
+   * signature so a crash mid-send is reconciled by signature status (never
+   * re-sent blindly off a balance read -> double-deliver). FATAL: if it throws,
+   * the transfer is aborted before broadcast (provably nothing moved).
+   */
+  onBeforeBroadcast?: (info: { signature: string; blockhash: string; lastValidBlockHeight: number }) => void | Promise<void>;
+}): Promise<{ success: boolean; signature?: string; error?: string }> {
+  const { agentPublicKey, agentSecretKey, toWalletAddress, mint, amountRaw, onBeforeBroadcast } = params;
+  try {
+    if (amountRaw <= 0n) return { success: false, error: 'Delivery amount must be greater than zero.' };
+    if (mint === NATIVE_SOL_MINT) return { success: false, error: 'Native SOL delivery is not supported here.' };
+
+    const connection = getConnection();
+    const agentPubkey = new PublicKey(agentPublicKey);
+    const toPubkey = new PublicKey(toWalletAddress);
+    const mintPubkey = new PublicKey(mint);
+
+    // Strict balance read -> fail closed on an unreadable balance, never over-send.
+    const held = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, mint)).amountRaw);
+    if (held < amountRaw) {
+      return { success: false, error: `Agent wallet holds ${held} ${mint} but ${amountRaw} is required to deliver.` };
+    }
+
+    // Exact gas requirement: fee buffer + destination-ATA rent only when it is missing.
+    const requiredLamports = await computeRequiredGasLamports(connection, toPubkey, mint);
+    const agentLamports = await connection.getBalance(agentPubkey);
+    if (agentLamports < requiredLamports) {
+      return { success: false, error: `Insufficient agent SOL for delivery gas (have ${agentLamports}, need ${requiredLamports}).` };
+    }
+
+    const agentAta = getAssociatedTokenAddressSync(mintPubkey, agentPubkey);
+    const toAta = getAssociatedTokenAddressSync(mintPubkey, toPubkey);
+
+    const instructions: TransactionInstruction[] = [
+      // Idempotent: a no-op if the user's ATA already exists.
+      createIdempotentAtaInstruction(agentPubkey, toAta, toPubkey, mintPubkey),
+      createTransferInstruction(agentAta, toAta, agentPubkey, amountRaw),
+    ];
+
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+    const transaction = new Transaction({ feePayer: agentPubkey, blockhash, lastValidBlockHeight });
+    for (const ix of instructions) transaction.add(ix);
+    transaction.sign(resolveAgentKeypair(agentSecretKey));
+
+    // The signed tx's signature is deterministic; surface it for the write-ahead
+    // hook BEFORE broadcast so a crash mid-send is reconcilable by signature.
+    const signature = bs58.encode(transaction.signature!);
+    if (onBeforeBroadcast) await onBeforeBroadcast({ signature, blockhash, lastValidBlockHeight });
+
+    await connection.sendRawTransaction(transaction.serialize(), {
+      skipPreflight: false,
+      preflightCommitment: 'confirmed',
+    });
+    const confirmation = await connection.confirmTransaction(
+      { signature, blockhash, lastValidBlockHeight },
+      'confirmed',
+    );
+    if (confirmation.value.err) {
+      return { success: false, error: `Delivery failed on-chain: ${JSON.stringify(confirmation.value.err)}`, signature };
+    }
+    return { success: true, signature };
+  } catch (error: any) {
+    console.error('[TransferTokenExact] Error:', error?.message);
+    return { success: false, error: error?.message || 'Delivery failed.' };
+  }
+}
+
+/**
  * Reads an agent wallet's balance of an arbitrary SPL mint (raw base units +
  * decimals). For the native SOL pseudo-mint, returns the lamport balance with
  * 9 decimals. Returns zero when the ATA does not exist (truthful "no balance",

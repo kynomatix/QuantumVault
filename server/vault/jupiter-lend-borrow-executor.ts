@@ -35,6 +35,7 @@ import {
   executeAgentInstructionsConfirmOnly,
   getServerConnection,
   getAgentTokenBalanceRawStrict,
+  transferTokenToWalletExact,
   USDC_MINT,
 } from "../agent-wallet";
 import { PublicKey } from "@solana/web3.js";
@@ -1254,6 +1255,22 @@ export interface WithdrawCollateralParams {
    * "never broadcast". FATAL: throwing aborts the withdraw before it is sent.
    */
   onBeforeBroadcast?: (info: { signature: string; blockhash: string; lastValidBlockHeight: number }) => void | Promise<void>;
+  /**
+   * OPTIONAL idempotency / resume key. When present, the withdraw becomes a
+   * two-leg resumable op: a retry with the SAME key — after the vault leg has
+   * already landed the collateral in the agent wallet — just finishes (or
+   * idempotently echoes) the delivery to the user's OWN wallet, NEVER a second
+   * withdraw. Without it, delivery is still attempted but is not resumable.
+   */
+  clientRequestId?: string;
+  /**
+   * Deliver the withdrawn collateral on to the user's OWN wallet (the LIVE
+   * Wallet-page withdraw). Default FALSE: internal callers (e.g. the deleverage
+   * repay flow) need the collateral to STAY in the agent wallet so they can swap
+   * it to USDC and repay — delivering it would break that primitive. Only the LIVE
+   * withdraw route sets this true.
+   */
+  deliverToUserWallet?: boolean;
 }
 
 export interface WithdrawCollateralResult {
@@ -1261,12 +1278,282 @@ export interface WithdrawCollateralResult {
   signature?: string;
   collateralReturned?: number;
   observedCollateralRaw?: string;
+  /**
+   * Where the withdrawn collateral ended up:
+   *  - "delivered": sent on to the user's own wallet (deliverySignature set).
+   *  - "pending":   withdraw landed but the on-send failed; funds are SAFE in the
+   *                 agent wallet and a retry (same clientRequestId) finishes it.
+   *  - "agent":     left in the agent wallet (legacy / no-delivery path).
+   */
+  deliveryStatus?: "delivered" | "pending" | "agent";
+  deliverySignature?: string;
+  requiresRetry?: boolean;
   verifyWarning?: string;
   dbWarning?: string;
   error?: string;
 }
 
+type BorrowOp = NonNullable<Awaited<ReturnType<typeof storage.getBorrowOperationById>>>;
+
+const WITHDRAW_DELIVERY_PENDING_MSG =
+  "Your collateral was withdrawn safely but could not be sent to your wallet yet. Tap Withdraw again to finish delivery.";
+
+/**
+ * Reconcile a write-ahead signature (durably recorded BEFORE broadcast) by its
+ * on-chain status. The agent wallet balance is NOT safe proof — it reads 0 while a
+ * tx is in-flight and may hold unrelated same-mint funds — so the signature is the
+ * only authority. Any read failure -> "in_flight" (wait); never assume a tx dropped.
+ *   - "landed":   confirmed/finalized — the money DID move.
+ *   - "reverted": landed but failed atomically — provably no money moved.
+ *   - "expired":  never landed AND the blockhash window passed — can never land now.
+ *   - "in_flight": not yet visible and still valid — MUST wait (re-send = double-spend).
+ */
+async function reconcileSignature(
+  signature: string,
+  lastValidBlockHeight?: number,
+): Promise<"landed" | "reverted" | "expired" | "in_flight"> {
+  const connection = getServerConnection();
+  try {
+    const statuses = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+    const st = statuses.value[0];
+    if (st) {
+      if (st.err) return "reverted";
+      if (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized") return "landed";
+      return "in_flight";
+    }
+  } catch {
+    return "in_flight";
+  }
+  if (typeof lastValidBlockHeight === "number" && Number.isFinite(lastValidBlockHeight)) {
+    try {
+      const h = await connection.getBlockHeight("confirmed");
+      if (h > lastValidBlockHeight) return "expired";
+    } catch {
+      /* fall through to in_flight */
+    }
+  }
+  return "in_flight";
+}
+
+/**
+ * Delivery leg of a collateral withdraw: send the EXACT withdrawn amount from the
+ * agent wallet on to the user's OWN wallet. The caller MUST already hold the
+ * account-vault borrow lock. Idempotent: re-reads the operation row and no-ops if
+ * an earlier/concurrent retry already delivered. Maintains the `deliveryPending`
+ * breadcrumb so a crash mid-delivery is resumable by clientRequestId.
+ */
+async function deliverWithdrawnCollateralCore(args: {
+  opId: string;
+  walletAddress: string;
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  mint: string;
+  amountRaw: bigint;
+}): Promise<{ deliveryStatus: "delivered" | "pending"; deliverySignature?: string; error?: string }> {
+  // Idempotency: an earlier/concurrent retry may have already delivered.
+  const fresh = await storage.getBorrowOperationById(args.opId);
+  const meta = (fresh?.metadata ?? {}) as Record<string, any>;
+  if (meta.deliveryPending === false && meta.deliverySignature) {
+    return { deliveryStatus: "delivered", deliverySignature: meta.deliverySignature };
+  }
+
+  // A delivery tx may have been broadcast on a prior attempt but not recorded as
+  // confirmed (crash in the window). Reconcile it by signature BEFORE sending again:
+  // the strict balance read alone CANNOT prevent a double-deliver if the agent
+  // independently holds the same mint. Only "reverted"/"expired" (provably no money
+  // moved) fall through to a re-send.
+  if (typeof meta.deliverySig === "string") {
+    const status = await reconcileSignature(
+      meta.deliverySig,
+      typeof meta.deliveryLastValidBlockHeight === "number" ? meta.deliveryLastValidBlockHeight : undefined,
+    );
+    if (status === "landed") {
+      await storage.updateBorrowOperation(args.opId, {
+        step: "delivery_confirmed",
+        mergeMetadata: { deliveryPending: false, deliverySignature: meta.deliverySig },
+      });
+      return { deliveryStatus: "delivered", deliverySignature: meta.deliverySig };
+    }
+    if (status === "in_flight") {
+      return { deliveryStatus: "pending", error: "Delivery is still settling." };
+    }
+  }
+
+  const del = await transferTokenToWalletExact({
+    agentPublicKey: args.agentPublicKey,
+    agentSecretKey: args.agentSecretKey,
+    toWalletAddress: args.walletAddress,
+    mint: args.mint,
+    amountRaw: args.amountRaw,
+    // WRITE-AHEAD: durably record the delivery signature BEFORE broadcast so a crash
+    // after the transfer lands (but before we record it) is reconciled above, never
+    // blindly re-sent.
+    onBeforeBroadcast: async ({ signature, lastValidBlockHeight }) => {
+      await storage.updateBorrowOperation(args.opId, {
+        mergeMetadata: { deliverySig: signature, deliveryLastValidBlockHeight: lastValidBlockHeight },
+      });
+    },
+  });
+
+  if (!del.success) {
+    await storage.updateBorrowOperation(args.opId, {
+      step: "delivery_failed",
+      mergeMetadata: { deliveryPending: true, lastDeliveryError: del.error || "delivery failed" },
+    });
+    return { deliveryStatus: "pending", error: del.error };
+  }
+
+  await storage.updateBorrowOperation(args.opId, {
+    step: "delivery_confirmed",
+    appendTxSignature: del.signature,
+    mergeMetadata: { deliveryPending: false, deliverySignature: del.signature },
+  });
+  return { deliveryStatus: "delivered", deliverySignature: del.signature };
+}
+
+/**
+ * Resolve a prior delivery-path withdraw op found by clientRequestId. Returns a
+ * TERMINAL result, or NULL when the prior attempt provably moved no money (so the
+ * caller may safely RE-RUN, reusing the same op row — the unique clientRequestId
+ * forbids inserting a second). `runLocked` runs the money-moving branches under the
+ * account-vault lock at the top level, or inline when the caller already holds it.
+ *
+ * Crash-resume taxonomy (all branches fail closed / never double-withdraw):
+ *   - delivered          -> idempotent echo.
+ *   - delivery owed       -> finish the on-send (reconciles any in-flight delivery sig).
+ *   - legacy succeeded    -> funds in the agent (no breadcrumb): report "agent".
+ *   - withdraw in_flight  -> wait (requiresRetry); funds safe, never re-withdraw.
+ *   - withdraw landed      -> reconstruct the EXACT delta from the write-ahead
+ *                            pre-balance + a fresh read, then deliver.
+ *   - reverted/expired/no-sig -> provably never moved money -> NULL (safe re-run).
+ */
+async function resolveWithdrawResumption(
+  params: WithdrawCollateralParams,
+  prior: BorrowOp,
+  runLocked: (fn: () => Promise<WithdrawCollateralResult>) => Promise<WithdrawCollateralResult>,
+): Promise<WithdrawCollateralResult | null> {
+  const meta = (prior.metadata ?? {}) as Record<string, any>;
+  if (meta.deliveryWallet && meta.deliveryWallet !== params.walletAddress) {
+    return { success: false, error: "This withdrawal belongs to a different wallet." };
+  }
+
+  // Already fully delivered -> idempotent echo (never a second money move).
+  if (meta.deliveryPending === false && meta.deliverySignature) {
+    return { success: true, signature: meta.withdrawSignature, deliveryStatus: "delivered", deliverySignature: meta.deliverySignature };
+  }
+
+  // Vault leg landed, delivery still owed -> finish it (deliverWithdrawnCollateralCore
+  // reconciles any in-flight delivery sig before re-sending).
+  if (meta.deliveryPending === true && typeof meta.deliveryMint === "string" && typeof meta.deliveryAmountRaw === "string") {
+    return runLocked(async () => {
+      const del = await deliverWithdrawnCollateralCore({
+        opId: prior.id,
+        walletAddress: params.walletAddress,
+        agentPublicKey: params.agentPublicKey,
+        agentSecretKey: params.agentSecretKey,
+        mint: meta.deliveryMint as string,
+        amountRaw: BigInt(meta.deliveryAmountRaw as string),
+      });
+      return {
+        success: true,
+        signature: meta.withdrawSignature,
+        deliveryStatus: del.deliveryStatus,
+        deliverySignature: del.deliverySignature,
+        requiresRetry: del.deliveryStatus === "pending",
+        verifyWarning: del.deliveryStatus === "pending" ? WITHDRAW_DELIVERY_PENDING_MSG : undefined,
+      };
+    });
+  }
+
+  // Vault leg succeeded but no delivery breadcrumb (legacy) -> funds in the agent.
+  if (prior.status === "succeeded") {
+    return { success: true, signature: meta.withdrawSignature, deliveryStatus: "agent" };
+  }
+
+  // Not succeeded: reconcile the write-ahead withdraw signature. "no sig" provably
+  // means the withdraw was NEVER broadcast.
+  const wsig = typeof meta.withdrawSig === "string" ? meta.withdrawSig : undefined;
+  if (!wsig) return null; // never broadcast -> safe to re-run
+  const status = await reconcileSignature(
+    wsig,
+    typeof meta.withdrawLastValidBlockHeight === "number" ? meta.withdrawLastValidBlockHeight : undefined,
+  );
+  if (status === "in_flight") {
+    return { success: false, requiresRetry: true, error: "Your collateral withdrawal is still settling. Your funds are safe — refresh and tap Withdraw again in a moment." };
+  }
+  if (status === "reverted" || status === "expired") return null; // no money moved -> safe to re-run
+
+  // status === "landed": collateral DID move into the agent but we crashed before the
+  // breadcrumb. Reconstruct the EXACT delta from the write-ahead pre-balance + a fresh
+  // on-chain read, then deliver. Missing breadcrumb data -> funds safe in the agent.
+  if (typeof meta.preColRaw !== "string" || meta.nftId == null || typeof meta.collateralMint !== "string") {
+    return { success: true, signature: wsig, deliveryStatus: "agent", verifyWarning: "Your collateral was withdrawn to your trading agent. Refresh to see it." };
+  }
+  return runLocked(async () => {
+    const route = new JupiterLendBorrowRoute();
+    const postLive = await route.readLivePositionHealth(meta.collateralMint as string, meta.nftId);
+    if (!postLive) {
+      // FAIL CLOSED: the withdraw provably landed (collateral IS in the agent) but we
+      // cannot read the position to compute the EXACT delivery delta. Do NOT mark the
+      // op succeeded — that would route every future retry to the legacy "agent"
+      // branch and the user would never receive their collateral. Keep the op
+      // resumable so a later retry reconstructs the delta and delivers.
+      return {
+        success: false,
+        requiresRetry: true,
+        error: "Your collateral was withdrawn but we can't confirm the exact amount yet. Your funds are safe — refresh and tap Withdraw again in a moment.",
+      };
+    }
+    const delta = BigInt(meta.preColRaw as string) - BigInt(postLive.collateralRaw);
+    if (delta <= 0n) {
+      // Authoritative read shows no collateral left the position -> nothing to
+      // deliver. Safe to finalize (this is a real read, not a null-read).
+      await storage.updateBorrowOperation(prior.id, { status: "succeeded", step: "withdraw_confirmed", mergeMetadata: { withdrawSignature: wsig } });
+      return { success: true, signature: wsig, deliveryStatus: "agent" };
+    }
+    await storage.updateBorrowOperation(prior.id, {
+      status: "succeeded",
+      step: "withdraw_confirmed",
+      mergeMetadata: { deliveryPending: true, deliveryMint: meta.collateralMint, deliveryAmountRaw: delta.toString(), deliveryWallet: params.walletAddress, withdrawSignature: wsig },
+    });
+    const del = await deliverWithdrawnCollateralCore({
+      opId: prior.id,
+      walletAddress: params.walletAddress,
+      agentPublicKey: params.agentPublicKey,
+      agentSecretKey: params.agentSecretKey,
+      mint: meta.collateralMint as string,
+      amountRaw: delta,
+    });
+    return {
+      success: true,
+      signature: wsig,
+      deliveryStatus: del.deliveryStatus,
+      deliverySignature: del.deliverySignature,
+      requiresRetry: del.deliveryStatus === "pending",
+      verifyWarning: del.deliveryStatus === "pending" ? WITHDRAW_DELIVERY_PENDING_MSG : undefined,
+    };
+  });
+}
+
 export async function executeWithdrawCollateral(params: WithdrawCollateralParams): Promise<WithdrawCollateralResult> {
+  const deliver = params.deliverToUserWallet === true;
+
+  // Resume / idempotency (DELIVERY path only): a retry with the same clientRequestId
+  // — after the vault leg already landed the collateral in the agent wallet — just
+  // finishes (or echoes) delivery, even if the position is now CLOSED and unloadable
+  // as "open". A NULL result means the prior attempt provably moved no money -> fall
+  // through and re-run, REUSING the same op row (unique clientRequestId forbids a 2nd).
+  if (deliver && params.clientRequestId) {
+    const prior = await storage.getBorrowOperationByClientRequestId(params.walletAddress, params.clientRequestId);
+    if (prior) {
+      const vid = (prior.metadata as any)?.vaultId;
+      const r = await resolveWithdrawResumption(params, prior, (fn) =>
+        withBorrowLock(borrowLockKey(params.walletAddress, null, vid), fn),
+      );
+      if (r) return r;
+    }
+  }
+
   if (params.amount !== "max" && params.amount <= 0n) {
     return { success: false, error: "Withdraw amount must be greater than zero." };
   }
@@ -1280,6 +1567,21 @@ export async function executeWithdrawCollateral(params: WithdrawCollateralParams
   if (!cfg) return { success: false, error: "Borrow vault is unavailable right now." };
 
   return withBorrowLock(borrowLockKey(params.walletAddress, null, cfg.vaultId), async () => {
+    // Concurrency: a same-clientRequestId attempt may have created the op and landed
+    // the withdraw while we waited for the lock. Re-check INSIDE the lock (we already
+    // hold it, so run resume INLINE rather than re-locking) so a racing first attempt
+    // can never double-withdraw. A NULL result means the prior attempt provably moved
+    // no money -> REUSE that op row and re-run (unique clientRequestId forbids a 2nd).
+    let existingOp: BorrowOp | null = null;
+    if (deliver && params.clientRequestId) {
+      const again = await storage.getBorrowOperationByClientRequestId(params.walletAddress, params.clientRequestId);
+      if (again) {
+        const r = await resolveWithdrawResumption(params, again, (fn) => fn());
+        if (r) return r;
+        existingOp = again;
+      }
+    }
+
     // 1) LIVE position read — collateral + debt. Fail CLOSED if unreadable.
     const live = await borrowRoute.readLivePositionHealth(position!.collateralMint, nftId);
     if (!live) return { success: false, error: "Could not read the live position; refusing to withdraw." };
@@ -1354,13 +1656,53 @@ export async function executeWithdrawCollateral(params: WithdrawCollateralParams
     }
     if (!operate?.ixs?.length) return { success: false, error: "Withdraw transaction had no instructions." };
 
-    const op = await storage.createBorrowOperation({
-      walletAddress: params.walletAddress,
-      borrowPositionId: position!.id,
-      operationType: "withdraw_collateral",
-      status: "pending",
-      step: "gate_passed",
-    });
+    // Find-or-create: a NULL resume above (provably no money moved) reuses the SAME
+    // op row — the unique clientRequestId forbids inserting a second. The delivery
+    // path stores everything resume needs to reconstruct the EXACT delta after a
+    // crash (preColRaw + nftId); the non-delivery path keeps the minimal breadcrumb.
+    const op =
+      existingOp ??
+      (await storage.createBorrowOperation({
+        walletAddress: params.walletAddress,
+        borrowPositionId: position!.id,
+        operationType: "withdraw_collateral",
+        status: "pending",
+        step: "gate_passed",
+        ...(params.clientRequestId ? { clientRequestId: params.clientRequestId } : {}),
+        // vaultId is the delivery-resume lock key when the position later closes.
+        metadata: deliver
+          ? {
+              vaultId: cfg.vaultId,
+              collateralMint: position!.collateralMint,
+              nftId,
+              preColRaw: preColRaw.toString(),
+              intendedRaw: intendedRaw.toString(),
+              fullWithdraw,
+              deliveryWallet: params.walletAddress,
+            }
+          : { vaultId: cfg.vaultId, collateralMint: position!.collateralMint },
+      }));
+
+    // Safe re-run reusing a prior op (resume returned NULL = provably no money moved):
+    // its delivery metadata is from the EARLIER attempt and may be stale (live
+    // collateral can change between attempts). Refresh it to THIS attempt's values so a
+    // later landed-without-breadcrumb resume reconstructs the correct delta. The fresh
+    // withdraw's onBeforeBroadcast overwrites the stale withdrawSig before broadcast.
+    if (existingOp && deliver) {
+      await storage.updateBorrowOperation(op.id, {
+        status: "pending",
+        step: "gate_passed",
+        mergeMetadata: {
+          vaultId: cfg.vaultId,
+          collateralMint: position!.collateralMint,
+          nftId,
+          preColRaw: preColRaw.toString(),
+          intendedRaw: intendedRaw.toString(),
+          fullWithdraw,
+          deliveryWallet: params.walletAddress,
+        },
+      });
+    }
 
     // 6) THE money move: verify a POSITIVE COLLATERAL delta returns to the wallet.
     const exec = await executeAgentInstructions({
@@ -1370,7 +1712,18 @@ export async function executeWithdrawCollateral(params: WithdrawCollateralParams
       verifyOutputMint: position!.collateralMint,
       addressLookupTables: operate.addressLookupTableAccounts,
       label: "Withdraw collateral",
-      onBeforeBroadcast: params.onBeforeBroadcast,
+      onBeforeBroadcast: async (info) => {
+        // WRITE-AHEAD (delivery path only): durably record the WITHDRAW signature
+        // BEFORE broadcast so a crash after it lands (but before the delivery
+        // breadcrumb is written) is reconciled on retry, never blindly re-withdrawn.
+        if (deliver) {
+          await storage.updateBorrowOperation(op.id, {
+            mergeMetadata: { withdrawSig: info.signature, withdrawLastValidBlockHeight: info.lastValidBlockHeight },
+          });
+        }
+        // Preserve any caller hook (deleverage multi-hop records its own breadcrumb).
+        if (params.onBeforeBroadcast) await params.onBeforeBroadcast(info);
+      },
     });
 
     // 7) Decide whether money moved (mirror CLOSE: a returned signature we cannot
@@ -1390,6 +1743,25 @@ export async function executeWithdrawCollateral(params: WithdrawCollateralParams
         await storage.updateBorrowOperation(op.id, { status: "failed", step: "exec_failed", error: exec.error || "withdraw failed", appendTxSignature: exec.signature });
         return { success: false, signature: exec.signature, error: exec.error || "Withdrawal failed." };
       }
+      if (!preReadLive && deliver) {
+        // AMBIGUOUS + UNREADABLE on the DELIVER path: exec reported failure-with-signature
+        // and we cannot read the position to confirm whether the withdraw landed. We must
+        // NOT infer the delta and deliver it — that could either (a) deliver UNRELATED
+        // same-mint funds the agent independently holds, or (b) strand the op in
+        // deliveryPending forever if the withdraw never landed. The withdrawSig was
+        // already written-ahead by onBeforeBroadcast, so bail to a resumable retry:
+        // resolveWithdrawResumption reconciles it (landed -> deliver the exact delta;
+        // reverted/expired -> safe re-run; in_flight -> wait). NEVER mark succeeded here.
+        return {
+          success: false,
+          requiresRetry: true,
+          signature: exec.signature,
+          error: "Your withdrawal is still being confirmed. Your funds are safe — refresh and tap Withdraw again in a moment.",
+        };
+      }
+      // Non-deliver (deleverage) path keeps its pre-existing behavior: it reads the
+      // agent's collateral balance itself as its resume authority, so an inferred delta
+      // here is informational only and never the source of truth for the next leg.
       collateralDeltaRaw = preReadLive ? preColRaw - BigInt(preReadLive.collateralRaw) : intendedRaw;
     }
 
@@ -1450,14 +1822,70 @@ export async function executeWithdrawCollateral(params: WithdrawCollateralParams
       dbWarning = `Withdraw confirmed (signature ${exec.signature}) but the position record was updated by another process.`;
       console.warn("[Borrow] withdraw CAS lost", { positionId: position!.id });
     }
-    await storage.updateBorrowOperation(op.id, { status: "succeeded", step: nowEmpty ? "withdraw_closed" : "withdraw_confirmed", appendTxSignature: exec.signature });
+    // 9-NON-DELIVERY) Internal caller (e.g. deleverage repay): the collateral MUST
+    //    stay in the agent wallet for the next leg (swap -> USDC -> repay). Mark the
+    //    op succeeded with NO delivery breadcrumb and return "agent" — delivering it
+    //    here would strand the next leg without its source funds.
+    if (!deliver) {
+      await storage.updateBorrowOperation(op.id, {
+        status: "succeeded",
+        step: nowEmpty ? "withdraw_closed" : "withdraw_confirmed",
+        appendTxSignature: exec.signature,
+        mergeMetadata: { withdrawSignature: exec.signature },
+      });
+      return {
+        success: true,
+        signature: exec.signature,
+        collateralReturned: fromRaw(collateralDeltaRaw, cfg.collateralDecimals),
+        observedCollateralRaw: observedColRaw.toString(),
+        deliveryStatus: "agent",
+        verifyWarning,
+        dbWarning,
+      };
+    }
+
+    // 9) Persist the pending DELIVERY breadcrumb BEFORE moving any money, so a
+    //    crash between the vault leg and the on-send is resumable by clientRequestId.
+    //    Delivers EXACTLY this op's realized delta (never sweeps the agent balance).
+    await storage.updateBorrowOperation(op.id, {
+      status: "succeeded",
+      step: nowEmpty ? "withdraw_closed" : "withdraw_confirmed",
+      appendTxSignature: exec.signature,
+      mergeMetadata: {
+        deliveryPending: true,
+        deliveryMint: position!.collateralMint,
+        deliveryAmountRaw: collateralDeltaRaw.toString(),
+        deliveryWallet: params.walletAddress,
+        withdrawSignature: exec.signature,
+      },
+    });
+
+    // 10) DELIVERY leg: send the withdrawn collateral on to the user's OWN wallet.
+    //     Non-fatal on failure — the collateral is SAFE in the agent wallet and a
+    //     retry (same clientRequestId) finishes delivery.
+    const delivery = await deliverWithdrawnCollateralCore({
+      opId: op.id,
+      walletAddress: params.walletAddress,
+      agentPublicKey: params.agentPublicKey,
+      agentSecretKey: params.agentSecretKey,
+      mint: position!.collateralMint,
+      amountRaw: collateralDeltaRaw,
+    });
+    const deliveryWarning = delivery.deliveryStatus === "pending" ? WITHDRAW_DELIVERY_PENDING_MSG : undefined;
 
     return {
       success: true,
       signature: exec.signature,
       collateralReturned: fromRaw(collateralDeltaRaw, cfg.collateralDecimals),
       observedCollateralRaw: observedColRaw.toString(),
-      verifyWarning,
+      deliveryStatus: delivery.deliveryStatus,
+      deliverySignature: delivery.deliverySignature,
+      requiresRetry: delivery.deliveryStatus === "pending",
+      verifyWarning: verifyWarning
+        ? deliveryWarning
+          ? `${verifyWarning} ${deliveryWarning}`
+          : verifyWarning
+        : deliveryWarning,
       dbWarning,
     };
   });

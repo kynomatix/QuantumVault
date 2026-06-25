@@ -9127,9 +9127,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // amountRaw, sessionId }.
   app.post("/api/vault/borrow/withdraw-collateral", requireWallet, async (req, res) => {
     try {
-      const { borrowPositionId, amountRaw, sessionId } = req.body || {};
+      const { borrowPositionId, amountRaw, clientRequestId, sessionId } = req.body || {};
       if (!borrowPositionId || typeof borrowPositionId !== "string") {
         return res.status(400).json({ error: "borrowPositionId required" });
+      }
+      // REQUIRED: delivery to the user's wallet is only crash-resumable when the client
+      // sends a stable idempotency key it reuses across retries. Without it a crash
+      // between the withdraw and the on-send is not safely recoverable.
+      if (typeof clientRequestId !== "string" || !clientRequestId) {
+        return res.status(400).json({ error: "clientRequestId is required for a resumable withdrawal" });
       }
       const amount = parseAmountOrMax(amountRaw, "amountRaw");
       if (typeof amount === "object") return res.status(400).json(amount);
@@ -9145,13 +9151,25 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           agentSecretKey: ctx.agentKeyResult.secretKey,
           borrowPositionId,
           amount,
+          // LIVE Wallet-page withdraw delivers the collateral on to the user's OWN
+          // wallet. Internal callers (deleverage repay) omit this so the collateral
+          // stays in the agent for the next leg.
+          deliverToUserWallet: true,
+          clientRequestId,
         });
       } finally {
         ctx.agentKeyResult.cleanup();
       }
 
       if (!result || !result.success) {
-        return res.status(400).json({ error: result?.error || "Withdraw failed" });
+        // A resumable outcome (withdraw still settling / unconfirmed) is NOT a hard
+        // failure: surface requiresRetry so the client keeps the SAME clientRequestId
+        // and re-taps to resume delivery instead of treating it as a dead error.
+        return res.status(400).json({
+          error: result?.error || "Withdraw failed",
+          ...(result?.requiresRetry ? { requiresRetry: true } : {}),
+          ...(result?.signature ? { signature: result.signature } : {}),
+        });
       }
       res.json(result);
     } catch (error: any) {

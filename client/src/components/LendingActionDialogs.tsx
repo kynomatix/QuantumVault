@@ -698,16 +698,25 @@ export function WithdrawCollateralDialog({
   const [amount, setAmount] = useState('');
   const [useMax, setUseMax] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // Crash-safe idempotency key: reused verbatim across retries so a crash between
+  // the on-chain withdraw and the delivery to the user's wallet resumes delivery
+  // instead of re-withdrawing. Cleared on a fully delivered success / dialog open.
+  const reqIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (open) {
       setAmount('');
       setUseMax(false);
       setSubmitting(false);
+      reqIdRef.current = null;
     }
   }, [open]);
 
   const decimals = pool?.collateralDecimals ?? cfg?.collateralDecimals ?? null;
+  const fullCollateralDisplay =
+    pool?.collateralAmountRaw && decimals != null
+      ? rawToDecimalString(pool.collateralAmountRaw, decimals)
+      : null;
   const amountRaw = useMax ? 'max' : decimals != null ? toRawBaseUnits(amount, decimals) : null;
   const valid = amountRaw === 'max' || (!!amountRaw && BigInt(amountRaw) > 0n);
   const symbol = pool?.symbol ?? cfg?.collateralSymbol ?? 'collateral';
@@ -720,13 +729,49 @@ export function WithdrawCollateralDialog({
     setSubmitting(true);
     try {
       const sessionId = await getSessionId();
+      // Reuse the SAME request id across retries (resume, never re-withdraw).
+      if (!reqIdRef.current) reqIdRef.current = newRequestId();
       const res = await fetch(
         '/api/vault/borrow/withdraw-collateral',
-        POST_JSON({ borrowPositionId: pool.id, amountRaw, sessionId }),
+        POST_JSON({ borrowPositionId: pool.id, amountRaw, clientRequestId: reqIdRef.current, sessionId }),
       );
       const data = await safeResponseJson(res);
+
+      // A resumable outcome (withdraw still settling / unconfirmed) comes back as a
+      // 400 with requiresRetry. This is NOT a dead error: KEEP the dialog open and
+      // the SAME reqId so the next tap resumes (never a second withdraw). Funds are
+      // safe meanwhile. Check this BEFORE the hard-failure throw below.
+      if (data.requiresRetry) {
+        toast({
+          title: 'Almost there',
+          description: data.error || data.verifyWarning || 'Your withdrawal is still confirming. Your funds are safe — tap Withdraw again in a moment.',
+        });
+        await onSuccess();
+        return;
+      }
+
       if (!res.ok || !data.success) throw new Error(data.error || 'Withdraw failed');
-      toast({ title: 'Collateral Withdrawn', description: data.verifyWarning || 'Your collateral was returned to your trading agent.' });
+
+      // Withdraw landed but the on-send to the wallet did not finish: keep the
+      // dialog OPEN and let the user tap Withdraw again (same id finishes
+      // delivery, never a second withdraw). Funds are SAFE in the agent meanwhile.
+      if (data.deliveryStatus === 'pending') {
+        toast({
+          title: 'Almost there',
+          description: data.verifyWarning || 'Your collateral was withdrawn safely. Tap Withdraw again to finish sending it to your wallet.',
+        });
+        await onSuccess();
+        return;
+      }
+
+      reqIdRef.current = null;
+      toast({
+        title: 'Sent to Your Wallet',
+        description:
+          data.deliveryStatus === 'agent'
+            ? (data.verifyWarning || 'Your collateral was withdrawn to your trading agent.')
+            : (data.verifyWarning || 'Your collateral was sent to your wallet.'),
+      });
       await onSuccess();
       onOpenChange(false);
     } catch (e: any) {
@@ -745,7 +790,7 @@ export function WithdrawCollateralDialog({
       <DialogContent className="sm:max-w-md" data-testid="dialog-withdraw-collateral">
         <DialogHeader>
           <DialogTitle>Withdraw Collateral</DialogTitle>
-          <DialogDescription>Return {symbol} collateral to your trading agent.</DialogDescription>
+          <DialogDescription>Send {symbol} collateral back to your wallet.</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
@@ -762,7 +807,10 @@ export function WithdrawCollateralDialog({
                 className="text-xs text-teal-300 hover:text-teal-200"
                 onClick={() => {
                   setUseMax(true);
-                  setAmount('');
+                  // No loan -> we know the exact full collateral, so SHOW it in
+                  // the field (still sent as the "max" full-sweep sentinel). With
+                  // a loan, the safe max is server-computed; leave the hint text.
+                  setAmount(!pool?.hasLoan && fullCollateralDisplay ? fullCollateralDisplay : '');
                 }}
                 disabled={submitting}
                 data-testid="button-withdraw-max"
@@ -773,7 +821,7 @@ export function WithdrawCollateralDialog({
             <Input
               inputMode="decimal"
               placeholder={useMax ? 'Maximum safe amount' : '0.00'}
-              value={useMax ? '' : amount}
+              value={amount}
               onChange={(e) => {
                 setUseMax(false);
                 setAmount(e.target.value);
@@ -796,7 +844,7 @@ export function WithdrawCollateralDialog({
             data-testid="button-submit-withdraw"
           >
             {submitting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <ArrowUpFromLine className="w-4 h-4 mr-2" />}
-            {submitting ? 'Withdrawing…' : 'Withdraw'}
+            {submitting ? 'Withdrawing…' : 'Withdraw to Wallet'}
           </Button>
         </div>
       </DialogContent>
