@@ -23,6 +23,8 @@ import {
   Info,
   Lock,
   Unlock,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -73,11 +75,15 @@ type Collateral = {
   dot: string;
 };
 const COLLATERAL: Collateral[] = [
-  { symbol: "INF", name: "Infinity (Sanctum)", supplied: "38.40 INF", suppliedUsd: 4200, borrowedUsd: 1200, maxLtv: 50, borrowApr: 6.2, weight: 49, dot: "bg-teal-400" },
-  { symbol: "JitoSOL", name: "Jito Staked SOL", supplied: "13.10 JitoSOL", suppliedUsd: 2180, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.4, weight: 25, dot: "bg-violet-400" },
-  { symbol: "cbBTC", name: "Coinbase BTC", supplied: "0.018 cbBTC", suppliedUsd: 1150, borrowedUsd: 0, maxLtv: 70, borrowApr: 4.8, weight: 13, dot: "bg-fuchsia-400" },
-  { symbol: "mSOL", name: "Marinade SOL", supplied: "2.52 mSOL", suppliedUsd: 420, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.4, weight: 5, dot: "bg-indigo-400" },
-  { symbol: "JLP", name: "Jupiter LP", supplied: "142.0 JLP", suppliedUsd: 690, borrowedUsd: 0, maxLtv: 60, borrowApr: 7.1, weight: 8, dot: "bg-emerald-400" },
+  { symbol: "INF", name: "Infinity (Sanctum)", supplied: "38.40 INF", suppliedUsd: 4200, borrowedUsd: 1200, maxLtv: 50, borrowApr: 6.2, weight: 28, dot: "bg-teal-400" },
+  { symbol: "JitoSOL", name: "Jito Staked SOL", supplied: "13.10 JitoSOL", suppliedUsd: 2180, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.4, weight: 15, dot: "bg-violet-400" },
+  { symbol: "cbBTC", name: "Coinbase BTC", supplied: "0.018 cbBTC", suppliedUsd: 1150, borrowedUsd: 0, maxLtv: 70, borrowApr: 4.8, weight: 8, dot: "bg-fuchsia-400" },
+  { symbol: "mSOL", name: "Marinade SOL", supplied: "2.52 mSOL", suppliedUsd: 420, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.4, weight: 3, dot: "bg-indigo-400" },
+  { symbol: "JLP", name: "Jupiter LP", supplied: "142.0 JLP", suppliedUsd: 690, borrowedUsd: 0, maxLtv: 60, borrowApr: 7.1, weight: 5, dot: "bg-emerald-400" },
+  { symbol: "bSOL", name: "BlazeStake SOL", supplied: "9.80 bSOL", suppliedUsd: 1620, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.6, weight: 11, dot: "bg-cyan-400" },
+  { symbol: "jupSOL", name: "Jupiter Staked SOL", supplied: "6.40 jupSOL", suppliedUsd: 1080, borrowedUsd: 520, maxLtv: 60, borrowApr: 5.9, weight: 7, dot: "bg-lime-400" },
+  { symbol: "hSOL", name: "Helius Staked SOL", supplied: "5.10 hSOL", suppliedUsd: 845, borrowedUsd: 0, maxLtv: 60, borrowApr: 5.7, weight: 6, dot: "bg-rose-400" },
+  { symbol: "vSOL", name: "The Vault SOL", supplied: "3.30 vSOL", suppliedUsd: 560, borrowedUsd: 0, maxLtv: 60, borrowApr: 6.0, weight: 4, dot: "bg-amber-400" },
 ];
 
 const TOTAL_SUPPLIED = COLLATERAL.reduce((a, c) => a + c.suppliedUsd, 0);
@@ -115,10 +121,14 @@ type MoneyFlow = { kind: "in" | "out" | "supply" | "borrow" | "repay"; label: st
 const MONEY_FLOWS: MoneyFlow[] = [
   { kind: "supply", label: "Supply INF collateral", date: "Jun 22, 2026 · 2:14 PM", amount: "+12.40 INF", sub: "Held as collateral - not swapped" },
   { kind: "borrow", label: "Borrow USDC against INF", date: "Jun 21, 2026 · 9:03 AM", amount: "+1,200.00 USDC", sub: "Loan - adds debt, not a deposit" },
+  { kind: "supply", label: "Supply jupSOL collateral", date: "Jun 21, 2026 · 8:40 AM", amount: "+6.40 jupSOL", sub: "Held as collateral - not swapped" },
+  { kind: "borrow", label: "Borrow USDC against jupSOL", date: "Jun 20, 2026 · 7:55 PM", amount: "+520.00 USDC", sub: "Loan - adds debt, not a deposit" },
   { kind: "repay", label: "Repay debt", date: "Jun 20, 2026 · 6:48 PM", amount: "−500.00 USDC", sub: "Debt paydown" },
   { kind: "in", label: "Deposit SOL → USDC (swap)", date: "Jun 19, 2026 · 11:20 AM", amount: "+318.40 USDC" },
   { kind: "out", label: "Withdraw to Your Wallet", date: "Jun 18, 2026 · 4:32 PM", amount: "−800.00 USDC" },
+  { kind: "supply", label: "Supply bSOL collateral", date: "Jun 17, 2026 · 3:22 PM", amount: "+9.80 bSOL", sub: "Held as collateral - not swapped" },
   { kind: "in", label: "Deposit to Trading Agent", date: "Jun 15, 2026 · 1:05 PM", amount: "+5,000.00 USDC" },
+  { kind: "supply", label: "Supply JitoSOL collateral", date: "Jun 14, 2026 · 10:11 AM", amount: "+13.10 JitoSOL", sub: "Held as collateral - not swapped" },
 ];
 
 function AddressRow({ address, copied, onCopy, external }: { address: string; copied: boolean; onCopy: () => void; external?: boolean }) {
@@ -554,18 +564,26 @@ function WithdrawCollateralDialog({ open, onOpenChange, sel, onSel }: { open: bo
 }
 
 function MoneyFlows() {
+  const [open, setOpen] = useState(false);
+  const PREVIEW = 2;
+  const visible = open ? MONEY_FLOWS : MONEY_FLOWS.slice(0, PREVIEW);
+  const hidden = MONEY_FLOWS.length - PREVIEW;
   return (
     <Card className="border-border bg-card">
       <CardContent className="p-6 space-y-3">
-        <div className="flex items-center justify-between">
+        <button onClick={() => setOpen((o) => !o)} className="w-full flex items-center justify-between gap-2 text-left">
           <div className="flex items-center gap-2">
             <History className="w-4 h-4 text-muted-foreground" />
             <h2 className="font-semibold leading-tight">Transaction History</h2>
+            <span className="text-xs text-muted-foreground">· {MONEY_FLOWS.length} recent</span>
           </div>
-          <Button variant="ghost" size="sm" className="text-muted-foreground"><RefreshCw className="w-4 h-4" /></Button>
-        </div>
+          <span className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
+            {open ? "Show less" : "Show all"}
+            {open ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </span>
+        </button>
         <div className="space-y-0.5">
-          {MONEY_FLOWS.map((f, i) => {
+          {visible.map((f, i) => {
             const meta = {
               in:     { Icon: ArrowDownToLine, tone: "text-green-500",        wrap: "bg-green-500/10" },
               out:    { Icon: ArrowUpFromLine, tone: "text-orange-500",       wrap: "bg-orange-500/10" },
@@ -589,6 +607,11 @@ function MoneyFlows() {
             );
           })}
         </div>
+        {!open && hidden > 0 && (
+          <button onClick={() => setOpen(true)} className="w-full text-xs text-muted-foreground hover:text-foreground py-2 rounded-lg border border-dashed border-border/60 hover:bg-muted/30 transition-colors">
+            Show {hidden} more transactions
+          </button>
+        )}
       </CardContent>
     </Card>
   );
@@ -740,8 +763,12 @@ function LendingSection() {
   const [repaySel, setRepaySel] = useState(COLLATERAL[0].symbol);
   const [wColOpen, setWColOpen] = useState(false);
   const [wColSel, setWColSel] = useState(COLLATERAL[0].symbol);
+  const [poolsOpen, setPoolsOpen] = useState(false);
 
   const repayPool = COLLATERAL.find((c) => c.symbol === repaySel)!;
+  const loanPools = COLLATERAL.filter((c) => c.borrowedUsd > 0);
+  const idleCount = COLLATERAL.length - loanPools.length;
+  const visiblePools = poolsOpen ? COLLATERAL : loanPools;
 
   return (
     <Card className="border-teal-500/20 bg-card">
@@ -759,14 +786,28 @@ function LendingSection() {
           </Button>
         </div>
 
-        <div className="flex items-center justify-between text-xs text-muted-foreground tabular-nums">
-          <span>{COLLATERAL.length} assets supplied</span>
-          <span>{fmtUsd(TOTAL_SUPPLIED)} collateral · {fmtUsd(TOTAL_BORROWED)} borrowed</span>
-        </div>
+        {/* Collapsed by default: a summary bar you expand. With many supplied
+            assets this keeps the page short - only pools that need attention
+            (active loans) stay visible until you choose to see the rest. */}
+        <button onClick={() => setPoolsOpen((o) => !o)} className="w-full flex items-center justify-between gap-3 rounded-xl border border-border bg-background/40 px-4 py-3 text-left hover:bg-muted/30 transition-colors">
+          <div className="min-w-0">
+            <div className="text-sm font-medium tabular-nums">{fmtUsd(TOTAL_SUPPLIED)} <span className="text-muted-foreground font-normal">collateral · {COLLATERAL.length} assets</span></div>
+            <div className="text-[11px] text-muted-foreground mt-0.5 tabular-nums">{fmtUsd(AVAILABLE_TO_BORROW)} available to borrow · {fmtUsd(TOTAL_BORROWED)} borrowed</div>
+          </div>
+          <span className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
+            {poolsOpen ? "Collapse" : "View all"}
+            {poolsOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </span>
+        </button>
+
+        {!poolsOpen && loanPools.length > 0 && (
+          <p className="text-[11px] text-muted-foreground -mt-1">Showing {loanPools.length} pool{loanPools.length > 1 ? "s" : ""} with an active loan - the rest are tucked away.</p>
+        )}
 
         {/* Each supplied asset = one isolated pool, with its own borrow/health. */}
+        {visiblePools.length > 0 && (
         <div className="space-y-2.5">
-          {COLLATERAL.map((c) => {
+          {visiblePools.map((c) => {
             const limit = Math.round((c.suppliedUsd * c.maxLtv) / 100);
             const avail = Math.max(0, limit - c.borrowedUsd);
             const pct = limit ? (c.borrowedUsd / limit) * 100 : 0;
@@ -825,6 +866,13 @@ function LendingSection() {
             );
           })}
         </div>
+        )}
+
+        {!poolsOpen && (
+          <button onClick={() => setPoolsOpen(true)} className="w-full text-xs text-muted-foreground hover:text-foreground py-2 rounded-lg border border-dashed border-border/60 hover:bg-muted/30 transition-colors">
+            {loanPools.length > 0 ? `Show ${idleCount} more supplied assets (no loan)` : `Show all ${COLLATERAL.length} supplied assets`}
+          </button>
+        )}
 
         <SupplyDialog open={supplyOpen} onOpenChange={setSupplyOpen} sel={supplySel} onSel={setSupplySel} />
         <BorrowDialog open={borrowOpen} onOpenChange={setBorrowOpen} sel={borrowSel} />
@@ -835,7 +883,7 @@ function LendingSection() {
   );
 }
 
-export function LendingClarityReworked() {
+export function LendingClarityCompact() {
   const [copiedWallet, setCopiedWallet] = useState(false);
   const [copiedAgent, setCopiedAgent] = useState(false);
   const copy = (which: "wallet" | "agent") => {
