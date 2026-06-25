@@ -1509,7 +1509,7 @@ import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral } from "./vault/jupiter-lend-borrow-executor";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken } from "./vault/jupiter-lend-repay-multihop";
-import { getUserFungibleTokens } from "./swap/helius-tokens.js";
+import { getUserFungibleTokens, resolveTokenLogos } from "./swap/helius-tokens.js";
 
 const SWAP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const MAX_SWAP_SLIPPAGE_BPS = 500;
@@ -8690,7 +8690,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     try {
       const borrowRoute = new JupiterLendBorrowRoute();
       const configs = await borrowRoute.getLaunchVaultConfigs(ALLOWED_BORROW_VAULT_IDS);
-      const collaterals = configs.map((c) => ({
+      const baseCollaterals = configs.map((c) => ({
         vaultId: c.vaultId,
         collateralMint: c.collateralMint,
         collateralSymbol: c.collateralSymbol,
@@ -8705,6 +8705,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         borrowableUsdcRaw: c.borrowableUsdcRaw,
         oraclePriceLiquidateUsd: c.oraclePriceLiquidateUsd,
         marketPriceUsd: c.marketPriceUsd,
+      }));
+      // Real on-chain token icons (Metaplex / Token-2022 metadata via Helius
+      // DAS), keyed by the canonical collateral mint. Cosmetic → fail open: a
+      // null icon just renders the UI's own placeholder, never blocks config.
+      const collateralLogos = await resolveTokenLogos(
+        baseCollaterals.map((c) => c.collateralMint),
+      );
+      const collaterals = baseCollaterals.map((c) => ({
+        ...c,
+        collateralLogoURI: collateralLogos.get(c.collateralMint) ?? null,
       }));
       res.json({ eligible: isBorrowOwnerWallet(req.walletAddress!), collaterals });
     } catch (error: any) {

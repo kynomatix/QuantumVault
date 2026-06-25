@@ -128,7 +128,7 @@ export function SupplyCollateralDialog({
             mint: c.collateralMint,
             symbol: c.collateralSymbol,
             name: tok.name || c.collateralSymbol,
-            logoURI: tok.logoURI,
+            logoURI: c.collateralLogoURI ?? tok.logoURI,
             decimals: c.collateralDecimals,
             amountUi: tok.amountUi,
             maxLtv: c.maxLtv,

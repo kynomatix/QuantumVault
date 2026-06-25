@@ -161,6 +161,37 @@ function Kpi({ icon: Icon, label, value, loading, tone, testId }: {
   );
 }
 
+// Real token icon resolved from on-chain metadata (Helius DAS), with a graceful
+// fallback: if the mint has no icon OR the metadata image URL is dead, render
+// the symbol's first two letters on the pool colour instead of a broken image.
+function CollateralAvatar({ logoURI, symbol, colorClass, testId }: {
+  logoURI: string | null;
+  symbol: string | null;
+  colorClass: string;
+  testId?: string;
+}) {
+  const [errored, setErrored] = useState(false);
+  if (logoURI && !errored) {
+    return (
+      <img
+        src={logoURI}
+        alt={symbol ?? 'collateral'}
+        className="w-8 h-8 rounded-full shrink-0 object-cover"
+        onError={() => setErrored(true)}
+        data-testid={testId}
+      />
+    );
+  }
+  return (
+    <span
+      className={`w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-semibold text-background shrink-0 ${colorClass}`}
+      data-testid={testId}
+    >
+      {symbol ? symbol.slice(0, 2) : '\u2014'}
+    </span>
+  );
+}
+
 export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
   const { connected, shortenedAddress, publicKeyString } = useWallet();
   const { usdcBalance, usdcLoading, fetchUsdcBalance } = useTokenBalance();
@@ -706,6 +737,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       status: p.status,
       symbol: cfg?.collateralSymbol ?? null,
       collateralMint: p.collateralMint,
+      collateralLogoURI: cfg?.collateralLogoURI ?? null,
       collateralDecimals: cfg?.collateralDecimals ?? null,
       collateralAmountRaw: p.collateralAmountRaw,
       debtAmountRaw: p.debtAmountRaw,
@@ -1045,9 +1077,12 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                     <div key={p.id} className="rounded-xl border border-border bg-background/40 p-4" data-testid={`card-loan-${p.id}`}>
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex items-center gap-2.5 min-w-0">
-                          <span className={`w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-semibold text-background shrink-0 ${dot}`}>
-                            {p.symbol ? p.symbol.slice(0, 2) : '\u2014'}
-                          </span>
+                          <CollateralAvatar
+                            logoURI={p.collateralLogoURI}
+                            symbol={p.symbol}
+                            colorClass={dot}
+                            testId={`img-loan-collateral-${p.id}`}
+                          />
                           <div className="min-w-0">
                             <p className="text-sm font-medium leading-tight">{p.symbol ?? '\u2014'}</p>
                             <p className="text-xs text-muted-foreground truncate">{p.collateralLabel ?? 'Collateral \u2014'}</p>

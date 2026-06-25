@@ -174,3 +174,116 @@ export async function getUserFungibleTokens(ownerAddress: string): Promise<UserT
   }
   return fallbackRpcTokens(ownerAddress);
 }
+
+// ---------------------------------------------------------------------------
+// Per-mint token icon resolver. Gives curated lists that AREN'T sourced from a
+// held wallet token — e.g. the eligible borrow-collateral set and already-
+// supplied positions — the SAME on-chain-metadata icon the wallet picker uses,
+// instead of a text/colour placeholder. Resolves by the EXACT canonical mint
+// via Helius DAS getAssetBatch (NEVER by symbol — matches the yield-asset mint
+// rule), then caches it. Icons are cosmetic, so every path FAILS OPEN (returns
+// null): an icon outage can never break a money-adjacent read.
+// ---------------------------------------------------------------------------
+const ICON_TTL_MS = 6 * 60 * 60 * 1000; // token icons effectively never change
+const ICON_CACHE_MAX = 500; // bounded; the curated collateral set is tiny
+const iconCache = new Map<string, { logo: string | null; ts: number }>();
+
+function readIconCache(mint: string): string | null | undefined {
+  const hit = iconCache.get(mint);
+  if (!hit) return undefined;
+  if (Date.now() - hit.ts > ICON_TTL_MS) {
+    iconCache.delete(mint);
+    return undefined;
+  }
+  return hit.logo;
+}
+
+function writeIconCache(mint: string, logo: string | null): void {
+  if (iconCache.size >= ICON_CACHE_MAX && !iconCache.has(mint)) {
+    const oldest = iconCache.keys().next().value;
+    if (oldest !== undefined) iconCache.delete(oldest);
+  }
+  iconCache.set(mint, { logo, ts: Date.now() });
+}
+
+function imageFromAsset(item: any): string | null {
+  return item?.content?.links?.image || item?.content?.files?.[0]?.uri || null;
+}
+
+async function fetchDasAssetBatch(url: string, ids: string[]): Promise<any> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'qv-icons',
+        method: 'getAssetBatch',
+        params: { ids, displayOptions: { showFungible: true } },
+      }),
+    });
+    if (!res.ok) throw new Error(`Helius DAS HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Resolve a logo URI for each mint from its on-chain token metadata (Metaplex /
+ * Token-2022), via Helius DAS. Cached + bounded. FAILS OPEN: any mint that can't
+ * be resolved (no Helius key, network error, no image in metadata) maps to null
+ * so the caller renders its own placeholder. Native SOL has no metadata account
+ * and is intentionally null.
+ */
+export async function resolveTokenLogos(mints: string[]): Promise<Map<string, string | null>> {
+  const out = new Map<string, string | null>();
+  const need: string[] = [];
+  for (const mint of mints) {
+    if (!mint || mint === NATIVE_SOL_MINT) {
+      out.set(mint, null);
+      continue;
+    }
+    const cached = readIconCache(mint);
+    if (cached !== undefined) {
+      out.set(mint, cached);
+    } else if (!need.includes(mint)) {
+      need.push(mint);
+    }
+  }
+
+  if (need.length === 0) return out;
+
+  const url = heliusUrl();
+  if (!url) {
+    // No metadata source — fail open, don't cache (a key may appear later).
+    for (const mint of need) out.set(mint, null);
+    return out;
+  }
+
+  try {
+    const json = await fetchDasAssetBatch(url, need);
+    // A JSON-RPC error or a malformed payload arrives with HTTP 200. Treat it as
+    // a failure and THROW so the catch path returns uncached nulls — otherwise
+    // we'd cache "no icon" for every mint for the full TTL on a transient blip.
+    if (json?.error || !Array.isArray(json?.result)) {
+      throw new Error(`Helius DAS getAssetBatch: ${json?.error?.message ?? 'no result array'}`);
+    }
+    const items: any[] = json.result;
+    const byId = new Map<string, any>();
+    for (const it of items) if (it?.id) byId.set(it.id, it);
+    for (const mint of need) {
+      const logo = imageFromAsset(byId.get(mint));
+      writeIconCache(mint, logo);
+      out.set(mint, logo);
+    }
+  } catch (err) {
+    console.warn('[swap/tokens] icon resolve failed (fail-open):', (err as Error).message);
+    for (const mint of need) if (!out.has(mint)) out.set(mint, null);
+  }
+
+  return out;
+}
