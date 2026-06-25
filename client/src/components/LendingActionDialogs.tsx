@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
 import { Transaction } from '@solana/web3.js';
 import { Buffer } from 'buffer';
@@ -12,6 +12,9 @@ import {
   Coins,
   Layers,
   AlertTriangle,
+  Lock,
+  RefreshCw,
+  Fuel,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -48,65 +51,215 @@ const POST_JSON = (body: unknown): RequestInit => ({
 });
 
 // ---------------------------------------------------------------------------
-// SUPPLY COLLATERAL — single-tx. Locks more collateral (or mints a supply-only
-// position). The collateral must already be held by the trading agent. When a
-// pool is passed the collateral is fixed to that pool's mint; otherwise the user
-// picks from the allowlisted collaterals. positionId:null is safe because the
+// SUPPLY COLLATERAL — pick an asset you HOLD IN YOUR WALLET that we support as
+// collateral, then lock it. Structured like the "deposit any asset" flow but
+// WITHOUT the Jupiter swap: the asset is user-sign-transferred into the trading
+// agent as itself, then supplied as collateral so it can back a USDC loan.
+//
+// The asset list is the intersection of (a) what the wallet holds — /api/wallet/
+// tokens — and (b) the hooked-up eligible collaterals — borrowConfig.collaterals.
+// If only INF is hooked up and held, only INF shows.
+//
+// Two on-chain steps. Step 1 (transfer) lands first; if step 2 (supply) fails the
+// asset is safe in the trading agent and retryable WITHOUT a second transfer —
+// same recoverable shape as the deposit→swap path. positionId:null is safe: the
 // executor prefers add-to-existing for the same wallet+vault.
 // ---------------------------------------------------------------------------
+type SupplyAsset = {
+  mint: string;
+  symbol: string;
+  name: string;
+  logoURI: string | null;
+  decimals: number;
+  amountUi: number;
+  maxLtv: number;
+  isNativeSol: boolean;
+  cfg: BorrowCollateral;
+};
+
 export function SupplyCollateralDialog({
   open,
   onOpenChange,
   collaterals,
+  userTokens,
+  tokensLoading = false,
+  onRefreshTokens,
   pool,
   onSuccess,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   collaterals: BorrowCollateral[];
+  userTokens: UserToken[];
+  tokensLoading?: boolean;
+  onRefreshTokens?: () => void;
   pool: LendingPool | null;
   onSuccess: () => void | Promise<void>;
 }) {
   const { toast } = useToast();
+  const solanaWallet = useSolanaWallet();
+  const { connection } = useConnection();
   const [selectedMint, setSelectedMint] = useState('');
   const [amount, setAmount] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [statusText, setStatusText] = useState('');
+  // Set when step 1 (transfer) lands but step 2 (supply) fails: the asset is now
+  // in the trading agent, so the user can retry just the supply step.
+  const [pendingSupply, setPendingSupply] = useState<{
+    cfg: BorrowCollateral;
+    collateralRaw: string;
+    symbol: string;
+    amount: string;
+  } | null>(null);
 
   const lockedMint = pool?.collateralMint ?? null;
+
+  // The list: eligible collaterals the user actually HOLDS in their wallet. When a
+  // pool is passed, restrict to that pool's collateral mint. Memoized so the
+  // selection effect doesn't re-run every render on a fresh array identity.
+  const assets: SupplyAsset[] = useMemo(
+    () =>
+      collaterals
+        .filter((c) => !lockedMint || c.collateralMint === lockedMint)
+        .map((c) => {
+          const tok = userTokens.find((t) => t.mint === c.collateralMint);
+          if (!tok || tok.amountUi <= 0) return null;
+          return {
+            mint: c.collateralMint,
+            symbol: c.collateralSymbol,
+            name: tok.name || c.collateralSymbol,
+            logoURI: tok.logoURI,
+            decimals: c.collateralDecimals,
+            amountUi: tok.amountUi,
+            maxLtv: c.maxLtv,
+            isNativeSol: tok.isNativeSol,
+            cfg: c,
+          } as SupplyAsset;
+        })
+        .filter((a): a is SupplyAsset => a !== null),
+    [collaterals, userTokens, lockedMint],
+  );
 
   useEffect(() => {
     if (open) {
       setAmount('');
       setSubmitting(false);
-      setSelectedMint(lockedMint ?? collaterals[0]?.collateralMint ?? '');
+      setStatusText('');
+      setPendingSupply(null);
     }
-  }, [open, lockedMint, collaterals]);
+  }, [open]);
 
-  const cfg = collaterals.find((c) => c.collateralMint === selectedMint) ?? null;
-  const collateralRaw = cfg ? toRawBaseUnits(amount, cfg.collateralDecimals) : null;
-  const valid = !!cfg && !!collateralRaw && BigInt(collateralRaw) > 0n;
-
-  const handleSupply = async () => {
-    if (!cfg || !collateralRaw) {
-      toast({ title: 'Enter a valid amount', variant: 'destructive' });
+  // Keep a valid selection as the asset list resolves (tokens load async).
+  useEffect(() => {
+    if (!open) return;
+    if (assets.length === 0) {
+      if (selectedMint) setSelectedMint('');
       return;
     }
+    if (!assets.some((a) => a.mint === selectedMint)) {
+      setSelectedMint(lockedMint && assets.some((a) => a.mint === lockedMint) ? lockedMint : assets[0].mint);
+    }
+  }, [open, assets, selectedMint, lockedMint]);
+
+  const selected = assets.find((a) => a.mint === selectedMint) ?? null;
+  const collateralRaw = selected ? toRawBaseUnits(amount, selected.decimals) : null;
+  const amt = parseFloat(amount);
+  const overBalance = !!selected && Number.isFinite(amt) && amt > selected.amountUi;
+  const valid = !!selected && !!collateralRaw && BigInt(collateralRaw) > 0n && !overBalance;
+
+  const setMax = () => {
+    if (!selected) return;
+    // Leave a little native SOL for the transfer fee if SOL is ever a collateral.
+    const max = selected.isNativeSol ? Math.max(0, selected.amountUi - 0.01) : selected.amountUi;
+    if (!(max > 0)) {
+      setAmount('');
+      return;
+    }
+    // Plain decimal string (never scientific notation) so tiny balances still
+    // parse to a valid raw amount. Trim trailing zeros only in the fraction.
+    let s = max.toFixed(selected.decimals);
+    if (s.includes('.')) s = s.replace(/0+$/, '').replace(/\.$/, '');
+    setAmount(s);
+  };
+
+  // Step 2 (or retry): lock the asset — now sitting in the trading agent — as
+  // collateral. A failure parks it for a retry that needs no second transfer.
+  const runSupply = async (cfg: BorrowCollateral, raw: string, symbol: string, amountStr: string) => {
     setSubmitting(true);
+    setStatusText('Locking as collateral…');
     try {
       const sessionId = await getSessionId();
       const res = await fetch(
         '/api/vault/borrow/supply',
-        POST_JSON({ collateralMint: cfg.collateralMint, collateralRaw, borrowPositionId: pool?.id ?? null, sessionId }),
+        POST_JSON({ collateralMint: cfg.collateralMint, collateralRaw: raw, borrowPositionId: pool?.id ?? null, sessionId }),
       );
       const data = await safeResponseJson(res);
-      if (!res.ok || !data.success) throw new Error(data.error || 'Could not add collateral');
-      toast({ title: 'Collateral Added', description: `Supplied ${amount} ${cfg.collateralSymbol} as collateral.` });
+      if (!res.ok || !data.success) {
+        setPendingSupply({ cfg, collateralRaw: raw, symbol, amount: amountStr });
+        toast({
+          title: 'Collateral Not Locked',
+          description:
+            data.error || `Your ${symbol} is safe in your trading agent — tap "Retry" to lock it as collateral.`,
+          variant: 'destructive',
+        });
+        return;
+      }
+      setPendingSupply(null);
+      toast({ title: 'Collateral Supplied', description: `Supplied ${amountStr} ${symbol} as collateral.` });
+      setAmount('');
+      onRefreshTokens?.();
       await onSuccess();
       onOpenChange(false);
     } catch (e: any) {
-      toast({ title: 'Could not add collateral', description: e.message || 'Please try again', variant: 'destructive' });
+      setPendingSupply({ cfg, collateralRaw: raw, symbol, amount: amountStr });
+      toast({ title: 'Collateral Not Locked', description: e.message || 'Please try again', variant: 'destructive' });
     } finally {
       setSubmitting(false);
+      setStatusText('');
+    }
+  };
+
+  const handleSupply = async () => {
+    if (!selected || !collateralRaw) {
+      toast({ title: 'Enter a valid amount', variant: 'destructive' });
+      return;
+    }
+    if (overBalance) {
+      toast({ title: `Insufficient ${selected.symbol} balance`, variant: 'destructive' });
+      return;
+    }
+    if (!solanaWallet.publicKey || !solanaWallet.signTransaction) {
+      toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+    setSubmitting(true);
+    try {
+      // Step 1: user-signed transfer of the asset into the trading agent (NO swap).
+      setStatusText('Building transfer…');
+      const depRes = await fetch(
+        '/api/agent/deposit-token',
+        POST_JSON({ mint: selected.mint, amountRaw: collateralRaw }),
+      );
+      const depData = await safeResponseJson(depRes);
+      if (!depRes.ok) throw new Error(depData.error || 'Could not build the transfer');
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight } = depData;
+
+      setStatusText(`Approve the ${selected.symbol} transfer in your wallet…`);
+      const tx = Transaction.from(Buffer.from(serializedTx, 'base64'));
+      const signed = await solanaWallet.signTransaction(tx);
+      const sig = await connection.sendRawTransaction(signed.serialize());
+
+      setStatusText('Confirming transfer…');
+      await confirmTransactionWithFallback(connection, { signature: sig, blockhash, lastValidBlockHeight });
+
+      // Step 2: lock as collateral. From here the asset is in the agent, so a
+      // failure is retryable without re-transferring.
+      await runSupply(selected.cfg, collateralRaw, selected.symbol, amount);
+    } catch (e: any) {
+      toast({ title: 'Could not supply collateral', description: e.message || 'Please try again', variant: 'destructive' });
+    } finally {
+      setSubmitting(false);
+      setStatusText('');
     }
   };
 
@@ -114,59 +267,170 @@ export function SupplyCollateralDialog({
     <Dialog open={open} onOpenChange={(o) => !submitting && onOpenChange(o)}>
       <DialogContent className="sm:max-w-md" data-testid="dialog-supply-collateral">
         <DialogHeader>
-          <DialogTitle>Add Collateral</DialogTitle>
-          <DialogDescription>
-            Lock an asset as collateral so you can borrow USDC against it. Your collateral keeps any yield it earns.
-          </DialogDescription>
+          <DialogTitle>Supply Collateral</DialogTitle>
+          <DialogDescription>Hold an asset as collateral so you can borrow USDC against it.</DialogDescription>
         </DialogHeader>
 
-        {!cfg ? (
-          <p className="py-6 text-sm text-muted-foreground">No collateral assets are available right now.</p>
-        ) : (
-          <div className="space-y-4">
-            {!lockedMint && collaterals.length > 1 && (
-              <div className="grid grid-cols-2 gap-2">
-                {collaterals.map((c) => (
-                  <button
-                    key={c.collateralMint}
-                    type="button"
-                    onClick={() => setSelectedMint(c.collateralMint)}
-                    className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
-                      c.collateralMint === selectedMint ? 'border-teal-500 bg-teal-500/10 text-teal-200' : 'border-border'
-                    }`}
-                    data-testid={`button-supply-asset-${c.collateralSymbol}`}
-                  >
-                    {c.collateralSymbol}
-                  </button>
-                ))}
-              </div>
-            )}
+        {/* The one thing that must be unmistakable: this is the LENDING path. */}
+        <div className="flex items-start gap-2 rounded-lg border border-teal-500/30 bg-teal-500/10 px-3 py-2.5">
+          <Lock className="w-4 h-4 text-teal-300 mt-0.5 shrink-0" />
+          <p className="text-xs text-muted-foreground">
+            This goes to the <span className="text-teal-300 font-medium">lending system</span>, not trading. Your asset
+            stays as itself — <span className="text-foreground font-medium">it is never swapped to USDC</span> — and is
+            locked as collateral you can borrow against.
+          </p>
+        </div>
 
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">Amount ({cfg.collateralSymbol})</label>
-              <Input
-                inputMode="decimal"
-                placeholder="0.00"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-                disabled={submitting}
-                data-testid="input-supply-amount"
-              />
-              <p className="text-xs text-muted-foreground">
-                The {cfg.collateralSymbol} must already be held by your trading agent. It is locked while it backs a loan.
-              </p>
+        {pendingSupply ? (
+          // Step 1 (transfer) landed but step 2 (supply) failed — the asset is now
+          // in the trading agent, so this retries ONLY the supply (no second
+          // transfer). Rendered independent of the wallet asset list because the
+          // asset may no longer appear there once it has left the wallet.
+          <div className="space-y-3">
+            <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-500/90">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>
+                Your {pendingSupply.symbol} is safe in your trading agent but isn't locked as collateral yet. Tap
+                Retry — no second transfer is needed.
+              </span>
             </div>
-
             <Button
-              className="w-full bg-teal-500 hover:bg-teal-500/90 text-background"
-              onClick={handleSupply}
-              disabled={!valid || submitting}
-              data-testid="button-submit-supply"
+              className="w-full h-11 bg-teal-500 hover:bg-teal-500/90 text-background"
+              onClick={() =>
+                runSupply(pendingSupply.cfg, pendingSupply.collateralRaw, pendingSupply.symbol, pendingSupply.amount)
+              }
+              disabled={submitting}
+              data-testid="button-retry-supply"
             >
               {submitting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Coins className="w-4 h-4 mr-2" />}
-              {submitting ? 'Adding…' : 'Add Collateral'}
+              {submitting ? statusText || 'Working…' : `Retry — Lock ${pendingSupply.symbol} as Collateral`}
             </Button>
           </div>
+        ) : (
+          <>
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">Select an asset</span>
+              <button
+                type="button"
+                onClick={() => onRefreshTokens?.()}
+                disabled={tokensLoading}
+                className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+                data-testid="button-refresh-supply-tokens"
+              >
+                <RefreshCw className={`w-3 h-3 ${tokensLoading ? 'animate-spin' : ''}`} /> Refresh
+              </button>
+            </div>
+
+            <div className="max-h-44 overflow-y-auto rounded-lg border border-border divide-y divide-border/60">
+              {tokensLoading && assets.length === 0 ? (
+                <div className="flex items-center justify-center py-6 text-muted-foreground text-sm gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin" /> Loading your assets…
+                </div>
+              ) : assets.length === 0 ? (
+                <div className="text-center py-6 px-4 text-muted-foreground text-sm" data-testid="text-supply-empty">
+                  You don't hold any assets we currently support as collateral.
+                </div>
+              ) : (
+                assets.map((a) => (
+                  <button
+                    key={a.mint}
+                    type="button"
+                    onClick={() => {
+                      setSelectedMint(a.mint);
+                      setAmount('');
+                    }}
+                    aria-pressed={a.mint === selectedMint}
+                    className={`w-full flex items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/50 ${
+                      a.mint === selectedMint ? 'bg-teal-500/10' : ''
+                    }`}
+                    data-testid={`button-supply-asset-${a.symbol}`}
+                  >
+                    {a.logoURI ? (
+                      <img src={a.logoURI} alt={a.symbol} className="w-7 h-7 rounded-full" />
+                    ) : (
+                      <span className="w-7 h-7 rounded-full bg-muted flex items-center justify-center text-[10px] font-semibold">
+                        {a.symbol.slice(0, 2)}
+                      </span>
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium truncate">{a.symbol}</p>
+                      <p className="text-xs text-muted-foreground truncate">{a.name}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm font-mono">
+                        {a.amountUi.toLocaleString(undefined, { maximumFractionDigits: 6 })}
+                      </p>
+                      <p className="text-[11px] text-muted-foreground">up to {(a.maxLtv * 100).toFixed(0)}% LTV</p>
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+
+            {selected && (
+              <>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>Amount</span>
+                    <span data-testid="text-supply-wallet-balance">
+                      Wallet {selected.amountUi.toLocaleString(undefined, { maximumFractionDigits: 6 })} {selected.symbol}
+                    </span>
+                  </div>
+                  <div className="relative">
+                    <Input
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={amount}
+                      onChange={(e) => setAmount(e.target.value)}
+                      disabled={submitting}
+                      className="h-12 pr-24 text-lg font-medium"
+                      data-testid="input-supply-amount"
+                    />
+                    <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                      <span className="text-sm font-medium text-muted-foreground">{selected.symbol}</span>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        className="h-7 px-2.5 text-xs"
+                        onClick={setMax}
+                        disabled={submitting}
+                        data-testid="button-supply-max"
+                      >
+                        Max
+                      </Button>
+                    </div>
+                  </div>
+                  {overBalance && <p className="text-[11px] text-amber-500">More than your wallet balance.</p>}
+                </div>
+
+                <div className="rounded-lg bg-muted/40 p-3 text-sm space-y-1.5">
+                  <div className="flex items-center justify-between text-muted-foreground">
+                    <span>Held as</span>
+                    <span className="font-medium text-foreground">{selected.symbol} (no swap)</span>
+                  </div>
+                  <div className="flex items-center justify-between text-muted-foreground">
+                    <span>Unlocks borrow up to</span>
+                    <span className="font-medium text-accent">{(selected.maxLtv * 100).toFixed(0)}% of value</span>
+                  </div>
+                </div>
+
+                <div className="text-xs text-amber-500/80 bg-amber-500/10 rounded-lg p-2.5 flex items-start gap-2">
+                  <Fuel className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>You'll need a little SOL in your wallet for the network fee (~0.005 SOL).</span>
+                </div>
+
+                <Button
+                  className="w-full h-11 bg-teal-500 hover:bg-teal-500/90 text-background"
+                  onClick={handleSupply}
+                  disabled={!valid || submitting}
+                  data-testid="button-submit-supply"
+                >
+                  {submitting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Coins className="w-4 h-4 mr-2" />}
+                  {submitting ? statusText || 'Working…' : `Supply ${selected.symbol} as Collateral`}
+                </Button>
+              </>
+            )}
+          </>
         )}
       </DialogContent>
     </Dialog>

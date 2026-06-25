@@ -1,6 +1,6 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { walletAuthHeaders } from "@/lib/queryClient";
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { useWallet } from '@/hooks/useWallet';
 import { useTokenBalance } from '@/hooks/useTokenBalance';
@@ -50,7 +50,7 @@ import {
   fmtUsd,
   fmtPct,
 } from '@/lib/lending-format';
-import type { BorrowCollateral, LendingPool } from '@/lib/lending-format';
+import type { BorrowCollateral, LendingPool, UserToken } from '@/lib/lending-format';
 import {
   SupplyCollateralDialog,
   BorrowMoreDialog,
@@ -208,6 +208,49 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
   const [borrowConfig, setBorrowConfig] = useState<BorrowConfigResponse | null>(null);
   const [borrowConfigLoading, setBorrowConfigLoading] = useState(false);
 
+  // The user's WALLET token holdings (for the Supply Collateral picker). The
+  // dialog intersects these with the hooked-up eligible collaterals, so only
+  // assets the wallet actually holds AND we support show up. Lazily loaded each
+  // time the Supply dialog opens; guarded against cross-wallet repaint.
+  const [userTokens, setUserTokens] = useState<UserToken[]>([]);
+  const [tokensLoading, setTokensLoading] = useState(false);
+  const prevSupplyOpenRef = useRef(false);
+  // The wallet that the currently-held userTokens belong to, so a prior wallet's
+  // holdings are never shown while the new wallet's tokens load.
+  const userTokensWalletRef = useRef<string | null>(null);
+
+  const fetchWalletTokens = useCallback(async () => {
+    const w = currentWalletRef.current;
+    // Cross-wallet honesty: drop stale holdings immediately when the wallet
+    // changed, so the dialog shows a spinner (not another wallet's assets).
+    if (userTokensWalletRef.current !== w) {
+      setUserTokens([]);
+      userTokensWalletRef.current = w;
+    }
+    setTokensLoading(true);
+    try {
+      const res = await fetch('/api/wallet/tokens', { credentials: 'include', headers: walletAuthHeaders() });
+      if (!res.ok) throw new Error('Failed to load tokens');
+      const data = await safeResponseJson(res);
+      if (currentWalletRef.current !== w) return; // cross-wallet guard
+      setUserTokens((data.tokens || []) as UserToken[]);
+      userTokensWalletRef.current = w;
+    } catch {
+      if (currentWalletRef.current !== w) return;
+      setUserTokens([]);
+    } finally {
+      if (currentWalletRef.current === w) setTokensLoading(false);
+    }
+  }, []);
+
+  // Fetch fresh wallet balances on the rising edge of the Supply dialog opening.
+  useEffect(() => {
+    if (supplyOpen && !prevSupplyOpenRef.current) {
+      fetchWalletTokens();
+    }
+    prevSupplyOpenRef.current = supplyOpen;
+  }, [supplyOpen, fetchWalletTokens]);
+
   const [copiedAgentAddress, setCopiedAgentAddress] = useState(false);
 
   const [solDepositAmount, setSolDepositAmount] = useState('');
@@ -321,6 +364,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
     // (other-wallet) loan card can never flash if the refetch is slow or fails.
     setBorrow(null);
     setBorrowConfig(null);
+    setUserTokens([]);
     setSupplyOpen(false);
     setBorrowMorePool(null);
     setRepayPool(null);
@@ -1282,6 +1326,9 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
         open={supplyOpen}
         onOpenChange={setSupplyOpen}
         collaterals={borrowConfig?.collaterals ?? []}
+        userTokens={userTokens}
+        tokensLoading={tokensLoading}
+        onRefreshTokens={fetchWalletTokens}
         pool={null}
         onSuccess={refetchLending}
       />
