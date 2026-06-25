@@ -611,10 +611,10 @@ function MoneyFlows() {
         <div className="space-y-0.5">
           {visible.map((f, i) => {
             const meta = {
-              in:     { Icon: ArrowDownToLine, tone: "text-green-500",        wrap: "bg-green-500/10" },
+              in:     { Icon: ArrowDownToLine, tone: "text-[#069881]",        wrap: "bg-[#069881]/10" },
               out:    { Icon: ArrowUpFromLine, tone: "text-orange-500",       wrap: "bg-orange-500/10" },
-              supply: { Icon: Coins,           tone: "text-teal-300",         wrap: "bg-teal-500/10" },
-              borrow: { Icon: Landmark,        tone: "text-accent",           wrap: "bg-accent/10" },
+              supply: { Icon: Coins,           tone: "text-[#069881]",        wrap: "bg-[#069881]/10" },
+              borrow: { Icon: Landmark,        tone: "text-sky-400",          wrap: "bg-sky-500/10" },
               repay:  { Icon: RotateCcw,       tone: "text-muted-foreground", wrap: "bg-muted" },
             }[f.kind];
             const { Icon, tone, wrap } = meta;
