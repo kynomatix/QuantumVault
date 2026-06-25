@@ -687,8 +687,10 @@ export async function executeSupplyCollateral(params: SupplyCollateralParams): P
   if (!cfg) return { success: false, error: "Borrow vault is unavailable right now." };
 
   return withBorrowLock(borrowLockKey(params.walletAddress, tradingBotId, cfg.vaultId), async () => {
-    // 1) Resolve the target position (prefer add-to-existing over a 2nd NFT).
+    // 1) Resolve the target position. Prefer add-to-existing over a 2nd NFT, and
+    //    prefer REUSING a fully-closed (empty) position over minting a fresh one.
     let existing: (Awaited<ReturnType<typeof storage.getBorrowPosition>> & {}) | null = null;
+    let reuseCandidate: (Awaited<ReturnType<typeof storage.getBorrowPosition>> & {}) | null = null;
     if (params.borrowPositionId) {
       const loaded = await loadOpenAccountPosition(params.walletAddress, params.borrowPositionId);
       if (!loaded.ok) return { success: false, error: loaded.error };
@@ -697,19 +699,51 @@ export async function executeSupplyCollateral(params: SupplyCollateralParams): P
       }
       existing = loaded.position!;
     } else {
-      const open = (await storage.getBorrowPositions(params.walletAddress, null)).filter(
+      const all = await storage.getBorrowPositions(params.walletAddress, null);
+      const open = all.filter(
         (p) => p.status === "open" && p.collateralMint === params.collateralMint && !p.tradingBotId,
       );
       if (open.length > 1) {
         return { success: false, error: "You have multiple open positions for this collateral; choose which one to add to." };
       }
       existing = open[0] ?? null;
+
+      // No open position for this collateral: instead of MINTING a fresh position
+      // NFT (~0.022 SOL rent), try to REUSE a previously fully-closed position. A
+      // full close leaves the position NFT alive on-chain but zeroed, so we can
+      // re-deposit into it — avoiding a new mint AND consuming the rent already
+      // locked in that empty NFT. Fail closed: only reuse when the chain proves
+      // it is empty; otherwise fall through to a fresh mint.
+      if (!existing) {
+        const closedCandidates = all.filter(
+          (p) =>
+            p.status === "closed" &&
+            p.collateralMint === params.collateralMint &&
+            !p.tradingBotId &&
+            Number.isInteger(Number(p.venuePositionId)) &&
+            Number(p.venuePositionId) > 0,
+        ); // getBorrowPositions is newest-first, so the most recent close wins
+        for (const cand of closedCandidates) {
+          if (await borrowRoute.isPositionEmptyReusable(params.collateralMint, Number(cand.venuePositionId))) {
+            reuseCandidate = cand;
+            break;
+          }
+        }
+      }
     }
 
-    const targetNftId = existing ? Number(existing.venuePositionId) : 0;
+    const reusing = !existing && !!reuseCandidate;
+    const targetNftId = existing
+      ? Number(existing.venuePositionId)
+      : reusing
+        ? Number(reuseCandidate!.venuePositionId)
+        : 0;
     if (existing && (!Number.isInteger(targetNftId) || targetNftId <= 0)) {
       return { success: false, error: "Selected position has an invalid on-chain id." };
     }
+    // We MINT a new NFT only when there is neither an open position to add to nor
+    // an empty closed one to reuse.
+    const willMint = targetNftId === 0;
 
     // 2) Strict balance: the agent wallet must actually hold the collateral.
     //    Fail CLOSED if unreadable (never sign against an unknown balance).
@@ -730,23 +764,24 @@ export async function executeSupplyCollateral(params: SupplyCollateralParams): P
       return { success: false, error: `Not enough ${cfg.collateralSymbol} in the trading wallet to supply.` };
     }
 
-    // 3) Gas: collateral only LEAVES the wallet, so no inbound ATA rent. BUT a
-    //    first-time supply (no existing position) MINTS a new position NFT, whose
-    //    mint/metadata/edition rent (~0.022 SOL) must be budgeted or the on-chain
-    //    mint reverts "insufficient lamports". Adding to an existing position mints
-    //    nothing, so it needs none of this.
+    // 3) Gas: collateral only LEAVES the wallet, so no inbound ATA rent. BUT
+    //    MINTING a new position NFT costs ~0.022 SOL of mint/metadata/edition rent
+    //    that must be budgeted or the on-chain mint reverts "insufficient
+    //    lamports". Adding to an existing position OR reusing an empty closed one
+    //    mints nothing, so it needs none of this.
     const gas = await ensureVaultGas({
       payingPublicKey: params.agentPublicKey,
       funderPublicKey: params.agentPublicKey,
       funderSecretKey: params.agentSecretKey,
       destMint: null,
       label: "Add Collateral",
-      extraRentLamports: existing ? 0 : NEW_POSITION_MINT_RENT_LAMPORTS,
+      extraRentLamports: willMint ? NEW_POSITION_MINT_RENT_LAMPORTS : 0,
     });
     if (!gas.ok) return { success: false, error: gas.error || "Could not cover the network gas to add collateral." };
 
-    // 4) Pre-read live collateral (0 for a new mint) — the supply proof baseline.
-    const preLive = existing ? await borrowRoute.readLivePositionHealth(params.collateralMint, targetNftId) : null;
+    // 4) Pre-read live collateral (0 for a new mint or a reused empty position) —
+    //    the supply proof baseline.
+    const preLive = !willMint ? await borrowRoute.readLivePositionHealth(params.collateralMint, targetNftId) : null;
     const preColRaw = preLive ? BigInt(preLive.collateralRaw) : 0n;
 
     // 5) Pure plan -> SDK ix. positionId 0 mints a new supply-only NFT.
@@ -771,26 +806,43 @@ export async function executeSupplyCollateral(params: SupplyCollateralParams): P
     }
     if (!operate?.ixs?.length) return { success: false, error: "Supply transaction had no instructions." };
 
-    const nftId = existing ? targetNftId : Number(operate.nftId);
+    const nftId = willMint ? Number(operate.nftId) : targetNftId;
 
     // 6) Resumable record BEFORE signing. A new mint gets a 'pending' position
     //    (collateral 0 — never over-report); an existing one just logs the op.
     let position = existing;
     if (!position) {
-      position = await storage.createBorrowPosition({
-        walletAddress: params.walletAddress,
-        tradingBotId,
-        debtVenue: DEBT_VENUE,
-        venueVaultId: String(cfg.vaultId),
-        venuePositionId: String(nftId),
-        collateralAssetKey: cfg.collateralSymbol.toLowerCase(),
-        collateralMint: cfg.collateralMint,
-        collateralAmountRaw: "0",
-        debtAssetKey: "usdc",
-        debtMint: cfg.debtMint,
-        debtAmountRaw: "0",
-        status: "pending",
-      });
+      if (reusing) {
+        // Reactivate the empty closed position we're reusing: claim it
+        // closed -> pending (CAS) so the rest of the flow treats it exactly like
+        // a freshly-minted pending row (final CAS pending -> open below). The
+        // per-(wallet,vault) borrow lock serializes ops, so this only loses to an
+        // out-of-band change, in which case we bail without moving funds.
+        const reclaimed = await storage.updateBorrowPosition(
+          reuseCandidate!.id,
+          { status: "pending", venuePositionId: String(nftId) },
+          "closed",
+        );
+        if (!reclaimed) {
+          return { success: false, error: "That position changed state; please try again." };
+        }
+        position = reclaimed;
+      } else {
+        position = await storage.createBorrowPosition({
+          walletAddress: params.walletAddress,
+          tradingBotId,
+          debtVenue: DEBT_VENUE,
+          venueVaultId: String(cfg.vaultId),
+          venuePositionId: String(nftId),
+          collateralAssetKey: cfg.collateralSymbol.toLowerCase(),
+          collateralMint: cfg.collateralMint,
+          collateralAmountRaw: "0",
+          debtAssetKey: "usdc",
+          debtMint: cfg.debtMint,
+          debtAmountRaw: "0",
+          status: "pending",
+        });
+      }
     }
     const op = await storage.createBorrowOperation({
       walletAddress: params.walletAddress,
@@ -810,10 +862,12 @@ export async function executeSupplyCollateral(params: SupplyCollateralParams): P
       label: "Add Collateral",
     });
 
-    // 8) Provably-nothing-moved => mark failed (safe; funds still in the wallet).
+    // 8) Provably-nothing-moved => safe; funds still in the wallet. A reused
+    //    position is still empty on-chain, so return it to 'closed' to stay
+    //    eligible for reuse; a fresh mint that never landed becomes 'failed'.
     if (exec.onChainFailed || !exec.signature) {
       await storage.updateBorrowOperation(op.id, { status: "failed", step: "exec_failed", error: exec.error || "supply failed", ...(exec.signature ? { appendTxSignature: exec.signature } : {}) });
-      if (!existing) await storage.updateBorrowPosition(position!.id, { status: "failed" }, "pending");
+      if (!existing) await storage.updateBorrowPosition(position!.id, { status: reusing ? "closed" : "failed" }, "pending");
       return { success: false, signature: exec.signature, error: exec.error || "Adding collateral failed." };
     }
 

@@ -513,4 +513,44 @@ export class JupiterLendBorrowRoute {
       return null;
     }
   }
+
+  /**
+   * Reuse check for the supply path: is `positionId` an EMPTY position we can
+   * re-deposit collateral into instead of MINTING a fresh NFT (~0.022 SOL rent)?
+   * A full close (max repay + max withdraw) leaves the position NFT alive on-chain
+   * but zeroed; this confirms it is provably empty so the caller can reuse it.
+   *
+   * Returns true ONLY when the on-chain position exists and collateral, debt, AND
+   * dust-debt are all zero. Fail closed: any unreadable read, a non-existent
+   * position, or ANY nonzero amount => false (the caller then mints fresh).
+   */
+  async isPositionEmptyReusable(
+    collateralMint: string,
+    positionId: number,
+  ): Promise<boolean> {
+    try {
+      if (!Number.isInteger(positionId) || positionId <= 0) return false;
+      const config = await this.getVaultConfig(collateralMint);
+      if (!config) return false;
+      const borrow = await import("@jup-ag/lend/borrow");
+      const connection = getServerConnection();
+      const pos = await borrow.getCurrentPosition({
+        vaultId: config.vaultId,
+        positionId,
+        connection,
+      });
+      if (!pos) return false;
+      // Money GATE: this proves the position is empty before we reuse (deposit
+      // into) it. A missing/unparseable amount field is NOT "zero" — it is
+      // unreadable, so fail CLOSED (false => caller mints fresh, always safe).
+      // Never let a `?? "0"` fallback mistake an unreadable amount for empty.
+      if (pos.colRaw == null || pos.debtRaw == null || pos.dustDebtRaw == null) return false;
+      const col = BigInt(pos.colRaw.toString());
+      const debt = BigInt(pos.debtRaw.toString());
+      const dust = BigInt(pos.dustDebtRaw.toString());
+      return col === 0n && debt === 0n && dust === 0n;
+    } catch {
+      return false;
+    }
+  }
 }
