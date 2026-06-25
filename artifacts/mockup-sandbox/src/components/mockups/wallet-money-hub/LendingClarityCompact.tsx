@@ -624,7 +624,7 @@ function MoneyFlows() {
                   <span className={`w-8 h-8 rounded-lg flex items-center justify-center ${wrap}`}><Icon className={`w-4 h-4 ${tone}`} /></span>
                   <div>
                     <p className="text-sm font-medium">{f.label}</p>
-                    {f.sub && <p className={`text-[11px] ${tone}`}>{f.sub}</p>}
+                    {f.sub && <p className="text-[11px] text-chart-4">{f.sub}</p>}
                     <p className="text-xs text-muted-foreground">{f.date}</p>
                   </div>
                 </div>
