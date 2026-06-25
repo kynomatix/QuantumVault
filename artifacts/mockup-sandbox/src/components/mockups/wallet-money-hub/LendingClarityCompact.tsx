@@ -59,28 +59,21 @@ import {
  * null/failure (never $0.00, never a fake value).
  */
 
-// ════════════════════════════════════════════════════════════════════════
-// COLOR HIERARCHY — the single source of truth for every color in this page.
-// The ONLY allowed hues are PURPLE, BLUE, PINK and TEAL. There is deliberately
-// no red, orange, amber, yellow, green, lime, emerald, rose or fuchsia
-// anywhere — pull a value from here instead of inlining a one-off color.
-// ════════════════════════════════════════════════════════════════════════
+// ── Lending-collateral color hierarchy ────────────────────────────────────
+// Single source of truth for the COLLATERAL asset colors ONLY — the lending
+// split bar, its legend, the per-pool avatars and the add-collateral picker.
+// Restricted to the owner's approved collateral hues: purple / blue / pink /
+// teal, rotated so neighbouring assets always contrast.
+// SCOPE NOTE: this governs lending collateral colors only. Gas, withdrawals,
+// per-pool health and other semantic colors keep their own meanings elsewhere.
 const PALETTE = {
-  // Categorical ramp — colors one asset at a time (split bar, token dots,
-  // pool avatars). Rotates the four families so neighbours always contrast.
   asset: [
     "bg-teal-400", "bg-violet-400", "bg-pink-400", "bg-blue-400",
     "bg-teal-300", "bg-purple-400", "bg-pink-500", "bg-sky-400",
     "bg-cyan-400", "bg-indigo-400",
   ] as const,
-  // Semantic roles — one allowed family per meaning.
-  positive: { text: "text-teal-300",   icon: "text-teal-400",   wrap: "bg-teal-500/10",   border: "border-teal-500/30" }, // money in · safe · success
-  outflow:  { text: "text-sky-300",    icon: "text-sky-400",    wrap: "bg-sky-500/10",    border: "border-sky-500/30"  }, // money out · neutral
-  caution:  { text: "text-purple-300", icon: "text-purple-400", wrap: "bg-purple-500/10", border: "border-purple-500/30" }, // locked · mid-health · heads-up
-  alert:    { text: "text-pink-400",   icon: "text-pink-500",   wrap: "bg-pink-500/15",   border: "border-pink-500/40" }, // at-risk
-  fee:      { text: "text-pink-300",   icon: "text-pink-400",   wrap: "bg-pink-500/5",    border: "border-pink-500/20", solid: "bg-pink-500 hover:bg-pink-500/90 text-white" }, // SOL network fee / gas
 };
-// Pick the on-palette color for the Nth asset in a list.
+// Pick the collateral color for the Nth asset in a list.
 const assetColor = (i: number): string => PALETTE.asset[i % PALETTE.asset.length];
 
 // ── LENDING COLLATERAL (supplied, held as-is) ─────────────────────────────
@@ -130,12 +123,12 @@ const fmtUsd = (n: number) => `$${n.toLocaleString("en-US")}`;
 
 // ── TRADING-DEPOSIT swap tokens (these DO swap to USDC) ───────────────────
 type SwapToken = { symbol: string; name: string; amount: string; usd: string; est: string; dot: string };
-const SWAP_TOKENS: SwapToken[] = ([
-  { symbol: "SOL", name: "Solana", amount: "2.10", usd: "$320.18", est: "318.40" },
-  { symbol: "wBTC", name: "Wrapped BTC", amount: "0.018", usd: "$1,150.40", est: "1,146.90" },
-  { symbol: "wETH", name: "Wrapped Ether", amount: "0.14", usd: "$420.66", est: "419.20" },
-  { symbol: "BONK", name: "Bonk", amount: "1,920,500", usd: "$48.90", est: "48.55" },
-] as Omit<SwapToken, "dot">[]).map((t, i) => ({ ...t, dot: assetColor(i) }));
+const SWAP_TOKENS: SwapToken[] = [
+  { symbol: "SOL", name: "Solana", amount: "2.10", usd: "$320.18", est: "318.40", dot: "bg-violet-400" },
+  { symbol: "wBTC", name: "Wrapped BTC", amount: "0.018", usd: "$1,150.40", est: "1,146.90", dot: "bg-fuchsia-400" },
+  { symbol: "wETH", name: "Wrapped Ether", amount: "0.14", usd: "$420.66", est: "419.20", dot: "bg-indigo-400" },
+  { symbol: "BONK", name: "Bonk", amount: "1,920,500", usd: "$48.90", est: "48.55", dot: "bg-yellow-400" },
+];
 
 // ── SUPPLY-COLLATERAL tokens (held AS-IS, no swap) ────────────────────────
 // The eligible Jupiter Lend collaterals. Held in the agent wallet as the asset
@@ -174,7 +167,7 @@ function AddressRow({ address, copied, onCopy, external }: { address: string; co
         </Button>
       )}
       <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground" onClick={onCopy}>
-        {copied ? <Check className={`w-3.5 h-3.5 ${PALETTE.positive.icon}`} /> : <Copy className="w-3.5 h-3.5" />}
+        {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
       </Button>
     </div>
   );
@@ -207,7 +200,7 @@ function AmountField({ token, balance, maxFill, capNote }: { token: string; bala
 
 function GasFeeNote() {
   return (
-    <div className={`text-xs ${PALETTE.fee.text} ${PALETTE.fee.wrap} rounded-lg p-2.5 flex items-start gap-2`}>
+    <div className="text-xs text-amber-500/80 bg-amber-500/10 rounded-lg p-2.5 flex items-start gap-2">
       <Fuel className="w-4 h-4 shrink-0 mt-0.5" />
       <span>You'll need a little SOL in your wallet for the network fee (~0.005 SOL).</span>
     </div>
@@ -576,8 +569,8 @@ function WithdrawCollateralDialog({ open, onOpenChange, sel, onSel }: { open: bo
         <AmountField token={c.symbol} balance={`Free ${fmtUsd(freeUsd)} of ${fmtUsd(c.suppliedUsd)}`} />
 
         {hasLoan ? (
-          <div className={`flex items-start gap-2 rounded-lg border ${PALETTE.caution.border} ${PALETTE.caution.wrap} px-3 py-2.5`}>
-            <Lock className={`w-4 h-4 ${PALETTE.caution.icon} mt-0.5 shrink-0`} />
+          <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5">
+            <Lock className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
             <p className="text-xs text-muted-foreground">
               {fmtUsd(lockedUsd)} of your {c.symbol} backs your {fmtUsd(c.borrowedUsd)} loan and is <span className="text-foreground font-medium">locked</span>.
               {" "}Only {fmtUsd(freeUsd)} is free now - repay the loan to unlock the rest.
@@ -618,8 +611,8 @@ function MoneyFlows() {
         <div className="space-y-0.5">
           {visible.map((f, i) => {
             const meta = {
-              in:     { Icon: ArrowDownToLine, tone: PALETTE.positive.text,   wrap: PALETTE.positive.wrap },
-              out:    { Icon: ArrowUpFromLine, tone: PALETTE.outflow.text,    wrap: PALETTE.outflow.wrap },
+              in:     { Icon: ArrowDownToLine, tone: "text-green-500",        wrap: "bg-green-500/10" },
+              out:    { Icon: ArrowUpFromLine, tone: "text-orange-500",       wrap: "bg-orange-500/10" },
               supply: { Icon: Coins,           tone: "text-teal-300",         wrap: "bg-teal-500/10" },
               borrow: { Icon: Landmark,        tone: "text-accent",           wrap: "bg-accent/10" },
               repay:  { Icon: RotateCcw,       tone: "text-muted-foreground", wrap: "bg-muted" },
@@ -710,9 +703,9 @@ function BorrowDialog({ open, onOpenChange, sel }: { open: boolean; onOpenChange
 function poolHealth(borrowedUsd: number, limit: number) {
   if (borrowedUsd <= 0) return null;
   const used = limit ? borrowedUsd / limit : 1;
-  if (used < 0.6) return { label: "Safe", cls: PALETTE.positive.text, Icon: ShieldCheck };
-  if (used < 0.85) return { label: "Caution", cls: PALETTE.caution.text, Icon: HeartPulse };
-  return { label: "At risk", cls: PALETTE.alert.text, Icon: HeartPulse };
+  if (used < 0.6) return { label: "Safe", cls: "text-emerald-300", Icon: ShieldCheck };
+  if (used < 0.85) return { label: "Caution", cls: "text-amber-300", Icon: HeartPulse };
+  return { label: "At risk", cls: "text-red-400", Icon: HeartPulse };
 }
 
 /** SOL top-up, reached from the contextual "Top up" link on the network-fee tile. */
@@ -726,10 +719,10 @@ function GasTopUpDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
         </DialogHeader>
         <AmountField token="SOL" balance="Wallet 2.10 SOL" />
         <p className="text-xs text-muted-foreground flex items-center gap-1.5">
-          <Fuel className={`w-3.5 h-3.5 ${PALETTE.fee.icon}`} />
+          <Fuel className="w-3.5 h-3.5 text-orange-400" />
           The agent keeps a small SOL reserve to cover Solana network fees.
         </p>
-        <Button className={`w-full h-11 ${PALETTE.fee.solid}`}>Top up SOL</Button>
+        <Button className="w-full h-11 bg-orange-500 hover:bg-orange-500/90 text-white">Top up SOL</Button>
       </DialogContent>
     </Dialog>
   );
@@ -759,12 +752,12 @@ function TradingAgentCard({ copied, onCopy }: { copied: boolean; onCopy: () => v
             <div className="text-xs text-primary/80">Trading USDC</div>
             <div className="text-xl font-semibold tabular-nums mt-1 text-primary">$4,820</div>
           </div>
-          <div className={`rounded-xl border ${PALETTE.fee.border} ${PALETTE.fee.wrap} p-4`}>
+          <div className="rounded-xl border border-orange-500/20 bg-orange-500/5 p-4">
             <div className="flex items-center justify-between gap-2">
-              <div className={`text-xs ${PALETTE.fee.text} flex items-center gap-1`}><Fuel className="w-3 h-3" /> Network fee (SOL)</div>
-              <button onClick={() => setGasOpen(true)} className={`text-[11px] ${PALETTE.fee.text} hover:text-pink-200 underline underline-offset-2`}>Top up</button>
+              <div className="text-xs text-orange-300/90 flex items-center gap-1"><Fuel className="w-3 h-3" /> Network fee (SOL)</div>
+              <button onClick={() => setGasOpen(true)} className="text-[11px] text-orange-300 hover:text-orange-200 underline underline-offset-2">Top up</button>
             </div>
-            <div className={`text-xl font-semibold tabular-nums mt-1 ${PALETTE.fee.text}`}>0.42</div>
+            <div className="text-xl font-semibold tabular-nums mt-1 text-orange-300">0.42</div>
           </div>
         </div>
         <div className="grid grid-cols-2 gap-3">
@@ -867,7 +860,7 @@ function LendingSection() {
 
           {loanPools.length > 0 && (
             <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground border-t border-border/50 pt-2.5">
-              <HeartPulse className={`w-3.5 h-3.5 ${PALETTE.caution.icon} shrink-0`} />
+              <HeartPulse className="w-3.5 h-3.5 text-amber-400 shrink-0" />
               <span>{loanPools.length} of {COLLATERAL.length} pool{loanPools.length > 1 ? "s have" : " has"} an active loan — open to check each one's health.</span>
             </div>
           )}
