@@ -41,6 +41,8 @@ import {
   type LendingPool,
   type UserToken,
 } from '@/lib/lending-format';
+import { useWallet } from '@/hooks/useWallet';
+import { isSessionError, showReconnectToast } from '@/lib/reconnect-toast';
 
 const USDC_DECIMALS = 6;
 const POST_JSON = (body: unknown): RequestInit => ({
@@ -97,6 +99,7 @@ export function SupplyCollateralDialog({
   onSuccess: () => void | Promise<void>;
 }) {
   const { toast } = useToast();
+  const { retryAuth } = useWallet();
   const solanaWallet = useSolanaWallet();
   const { connection } = useConnection();
   const [selectedMint, setSelectedMint] = useState('');
@@ -196,12 +199,21 @@ export function SupplyCollateralDialog({
       const data = await safeResponseJson(res);
       if (!res.ok || !data.success) {
         setPendingSupply({ cfg, collateralRaw: raw, symbol, amount: amountStr });
-        toast({
-          title: 'Collateral Not Locked',
-          description:
-            data.error || `Your ${symbol} is safe in your trading agent — tap "Retry" to lock it as collateral.`,
-          variant: 'destructive',
-        });
+        if (isSessionError(data.error)) {
+          showReconnectToast({
+            toast,
+            retryAuth,
+            title: 'Collateral Not Locked',
+            retry: () => runSupply(cfg, raw, symbol, amountStr),
+          });
+        } else {
+          toast({
+            title: 'Collateral Not Locked',
+            description:
+              data.error || `Your ${symbol} is safe in your trading agent — tap "Retry" to lock it as collateral.`,
+            variant: 'destructive',
+          });
+        }
         return;
       }
       setPendingSupply(null);
@@ -212,7 +224,16 @@ export function SupplyCollateralDialog({
       onOpenChange(false);
     } catch (e: any) {
       setPendingSupply({ cfg, collateralRaw: raw, symbol, amount: amountStr });
-      toast({ title: 'Collateral Not Locked', description: e.message || 'Please try again', variant: 'destructive' });
+      if (isSessionError(e)) {
+        showReconnectToast({
+          toast,
+          retryAuth,
+          title: 'Collateral Not Locked',
+          retry: () => runSupply(cfg, raw, symbol, amountStr),
+        });
+      } else {
+        toast({ title: 'Collateral Not Locked', description: e.message || 'Please try again', variant: 'destructive' });
+      }
     } finally {
       setSubmitting(false);
       setStatusText('');
@@ -256,7 +277,11 @@ export function SupplyCollateralDialog({
       // failure is retryable without re-transferring.
       await runSupply(selected.cfg, collateralRaw, selected.symbol, amount);
     } catch (e: any) {
-      toast({ title: 'Could not supply collateral', description: e.message || 'Please try again', variant: 'destructive' });
+      if (isSessionError(e)) {
+        showReconnectToast({ toast, retryAuth, title: 'Could not supply collateral', retry: () => handleSupply() });
+      } else {
+        toast({ title: 'Could not supply collateral', description: e.message || 'Please try again', variant: 'destructive' });
+      }
     } finally {
       setSubmitting(false);
       setStatusText('');
@@ -457,6 +482,7 @@ export function BorrowMoreDialog({
   onSuccess: () => void | Promise<void>;
 }) {
   const { toast } = useToast();
+  const { retryAuth } = useWallet();
   const [debtAmount, setDebtAmount] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [preview, setPreview] = useState<BorrowPreviewResult | null>(null);
@@ -532,7 +558,11 @@ export function BorrowMoreDialog({
       await onSuccess();
       onOpenChange(false);
     } catch (e: any) {
-      toast({ title: 'Could not borrow', description: e.message || 'Please try again', variant: 'destructive' });
+      if (isSessionError(e)) {
+        showReconnectToast({ toast, retryAuth, title: 'Could not borrow', retry: () => handleBorrowMore() });
+      } else {
+        toast({ title: 'Could not borrow', description: e.message || 'Please try again', variant: 'destructive' });
+      }
     } finally {
       setSubmitting(false);
     }
@@ -655,6 +685,7 @@ export function WithdrawCollateralDialog({
   onSuccess: () => void | Promise<void>;
 }) {
   const { toast } = useToast();
+  const { retryAuth } = useWallet();
   const [amount, setAmount] = useState('');
   const [useMax, setUseMax] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -690,7 +721,11 @@ export function WithdrawCollateralDialog({
       await onSuccess();
       onOpenChange(false);
     } catch (e: any) {
-      toast({ title: 'Could not withdraw', description: e.message || 'Please try again', variant: 'destructive' });
+      if (isSessionError(e)) {
+        showReconnectToast({ toast, retryAuth, title: 'Could not withdraw', retry: () => handleWithdraw() });
+      } else {
+        toast({ title: 'Could not withdraw', description: e.message || 'Please try again', variant: 'destructive' });
+      }
     } finally {
       setSubmitting(false);
     }
@@ -842,6 +877,7 @@ export function RepayLoanDialog({
   onSuccess: () => void | Promise<void>;
 }) {
   const { toast } = useToast();
+  const { retryAuth } = useWallet();
   const solanaWallet = useSolanaWallet();
   const { connection } = useConnection();
 
@@ -1015,7 +1051,11 @@ export function RepayLoanDialog({
     } catch (e: any) {
       setPhase('idle');
       setStatusText('');
-      toast({ title: 'Could not repay', description: e.message || 'Please try again', variant: 'destructive' });
+      if (isSessionError(e)) {
+        showReconnectToast({ toast, retryAuth, title: 'Could not repay', retry: () => repayFromAgent() });
+      } else {
+        toast({ title: 'Could not repay', description: e.message || 'Please try again', variant: 'destructive' });
+      }
     }
   };
 
