@@ -7,6 +7,7 @@ import {
   withinToleranceBps,
   absDiff,
   hasSufficientRepayBalance,
+  capPositiveCollateralDeposit,
   DEFAULT_DEBT_DUST_RAW,
 } from "../../server/vault/borrow-engine-core";
 
@@ -119,5 +120,30 @@ describe("borrow-engine-core: hasSufficientRepayBalance", () => {
     expect(hasSufficientRepayBalance(49_999_999n, 50_000_000n)).toBe(false);
     expect(hasSufficientRepayBalance(50_500_000n, 50_000_000n, 1_000_000n)).toBe(false);
     expect(hasSufficientRepayBalance(51_000_000n, 50_000_000n, 1_000_000n)).toBe(true);
+  });
+});
+
+describe("borrow-engine-core: capPositiveCollateralDeposit", () => {
+  it("caps an exact-balance deposit one raw unit below the held balance (the Fluid round-up bug)", () => {
+    // The live-reproduced boundary: 0.1 INF held = 100000000 raw -> deposit 99999999.
+    expect(capPositiveCollateralDeposit(100_000_000n, 100_000_000n)).toBe(99_999_999n);
+  });
+
+  it("never deposits more than requested when the wallet holds extra", () => {
+    // Requested < held-1 -> pass the request through untouched (no hidden buffer pull).
+    expect(capPositiveCollateralDeposit(100_000_000n, 200_000_000n)).toBe(100_000_000n);
+    expect(capPositiveCollateralDeposit(1n, 100_000_000n)).toBe(1n);
+  });
+
+  it("caps at held-1 only when the request meets or exceeds the held balance", () => {
+    expect(capPositiveCollateralDeposit(200_000_000n, 100_000_000n)).toBe(99_999_999n);
+    expect(capPositiveCollateralDeposit(99_999_999n, 100_000_000n)).toBe(99_999_999n);
+  });
+
+  it("returns 0n (caller must reject) when nothing can safely be deposited", () => {
+    expect(capPositiveCollateralDeposit(0n, 100_000_000n)).toBe(0n);
+    expect(capPositiveCollateralDeposit(-5n, 100_000_000n)).toBe(0n);
+    expect(capPositiveCollateralDeposit(100_000_000n, 1n)).toBe(0n);
+    expect(capPositiveCollateralDeposit(100_000_000n, 0n)).toBe(0n);
   });
 });

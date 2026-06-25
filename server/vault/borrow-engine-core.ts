@@ -257,6 +257,27 @@ export function hasSufficientRepayBalance(usdcBalanceRaw: bigint, debtRaw: bigin
   return usdcBalanceRaw >= debtRaw + bufferRaw;
 }
 
+/**
+ * Cap a POSITIVE collateral deposit one raw unit below the agent's held balance.
+ *
+ * Fluid / Jupiter Lend rounds a positive collateral deposit UP by up to one raw
+ * unit during the liquidity-layer supply CPI, so depositing the agent wallet's
+ * EXACT held balance reverts on-chain with SPL Token "insufficient funds" (0x1)
+ * — the protocol tries to pull one wei more than the wallet holds (live-verified:
+ * held=100000000 fails, 99999999 succeeds). Capping one raw unit below the held
+ * balance lets the round-up still fit.
+ *
+ * We NEVER deposit more than the user requested; when the request equals the held
+ * balance the spare wei stays as recoverable dust in the agent wallet (we do NOT
+ * silently transfer an extra buffer on the user's behalf). Returns 0n when nothing
+ * can safely be deposited (the caller must reject).
+ */
+export function capPositiveCollateralDeposit(requestedRaw: bigint, heldRaw: bigint): bigint {
+  if (requestedRaw <= 0n || heldRaw <= 1n) return 0n;
+  const cap = heldRaw - 1n;
+  return requestedRaw < cap ? requestedRaw : cap;
+}
+
 // --- New-op verify predicates ----------------------------------------------
 // Two classes, mirroring the open/close contract:
 //   * borrow-more / withdraw HAVE a positive output delta (USDC / collateral

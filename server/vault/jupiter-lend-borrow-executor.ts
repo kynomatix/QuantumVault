@@ -58,6 +58,7 @@ import {
   verifyBorrowMoreOutcome,
   verifyWithdrawOutcome,
   hasSufficientRepayBalance,
+  capPositiveCollateralDeposit,
   type AmountSpec,
 } from "./borrow-engine-core";
 
@@ -198,11 +199,29 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
   if (!cfg) return { success: false, error: "Borrow vault is unavailable right now." };
 
   return withBorrowLock(borrowLockKey(params.walletAddress, tradingBotId, cfg.vaultId), async () => {
-    // 1) ENFORCED risk gate, re-run immediately before signing. Refuse unless we
-    //    could fully evaluate (ok) AND it is allowed. Same gate as the preview.
+    // 0) Strict collateral balance (fail CLOSED). The collateral must already sit
+    //    in the agent wallet. Fluid rounds an exact-balance deposit UP by ~1 raw
+    //    unit, so cap the deposit one wei below the held balance (never sweep the
+    //    exact balance, or the supply CPI reverts SPL "insufficient funds").
+    let heldColRaw: bigint;
+    try {
+      heldColRaw = BigInt((await getAgentTokenBalanceRawStrict(params.agentPublicKey, params.collateralMint)).amountRaw);
+    } catch {
+      return { success: false, error: "Could not read the collateral balance; refusing to borrow." };
+    }
+    if (heldColRaw < params.collateralRaw) {
+      return { success: false, error: `Not enough ${cfg.collateralSymbol} in the trading wallet to deposit.` };
+    }
+    const effectiveCollateralRaw = capPositiveCollateralDeposit(params.collateralRaw, heldColRaw);
+    if (effectiveCollateralRaw <= 0n) {
+      return { success: false, error: `Not enough ${cfg.collateralSymbol} in the trading wallet to deposit.` };
+    }
+
+    // 1) ENFORCED risk gate, re-run immediately before signing. Use the EFFECTIVE
+    //    collateral (what will actually back the loan) so the gate stays truthful.
     const elig = await previewBorrowEligibility(
       params.walletAddress,
-      { collateralMint: params.collateralMint, collateralRaw: params.collateralRaw, requestedDebtRaw: params.requestedDebtRaw },
+      { collateralMint: params.collateralMint, collateralRaw: effectiveCollateralRaw, requestedDebtRaw: params.requestedDebtRaw },
       buildEligibilityDeps(borrowRoute),
     );
     if (!elig.ok) return { success: false, error: "Could not fully evaluate borrow risk; refusing to borrow." };
@@ -223,7 +242,7 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
     if (!gas.ok) return { success: false, error: gas.error || "Could not cover the network gas for this borrow." };
 
     // 3) Pure plan -> SDK instructions (lazy import; positionId 0 mints a new NFT).
-    const plan = planBorrowOpen({ collateralRaw: params.collateralRaw, debtRaw: params.requestedDebtRaw });
+    const plan = planBorrowOpen({ collateralRaw: effectiveCollateralRaw, debtRaw: params.requestedDebtRaw });
     const borrow = await import("@jup-ag/lend/borrow");
     const BN = (await import("bn.js")).default;
     const connection = getServerConnection();
@@ -260,7 +279,7 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
       venuePositionId: String(operate.nftId),
       collateralAssetKey: cfg.collateralSymbol.toLowerCase(),
       collateralMint: cfg.collateralMint,
-      collateralAmountRaw: params.collateralRaw.toString(),
+      collateralAmountRaw: effectiveCollateralRaw.toString(),
       debtAssetKey: "usdc",
       debtMint: cfg.debtMint,
       debtAmountRaw: params.requestedDebtRaw.toString(),
@@ -339,7 +358,7 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
     } else {
       // Position read failed post-borrow. Persist a CONSERVATIVE liability: never
       // under-report debt. Use the larger of requested debt and the received USDC.
-      observedColRaw = params.collateralRaw;
+      observedColRaw = effectiveCollateralRaw;
       observedDebtRaw = usdcDeltaRaw > params.requestedDebtRaw ? usdcDeltaRaw : params.requestedDebtRaw;
       healthSource = "open_unverified";
     }
@@ -356,7 +375,7 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
     }
     if (live) {
       const v = verifyOpenOutcome({
-        requestedCollateralRaw: params.collateralRaw,
+        requestedCollateralRaw: effectiveCollateralRaw,
         requestedDebtRaw: params.requestedDebtRaw,
         usdcDeltaRaw,
         observedColRaw,
@@ -690,6 +709,13 @@ export async function executeSupplyCollateral(params: SupplyCollateralParams): P
     if (colBal < params.collateralRaw) {
       return { success: false, error: `Not enough ${cfg.collateralSymbol} in the trading wallet to supply.` };
     }
+    // Fluid rounds an exact-balance deposit UP by ~1 raw unit (see
+    // capPositiveCollateralDeposit), so cap one wei below the held balance — a
+    // full-balance sweep reverts the supply CPI with SPL "insufficient funds".
+    const effectiveCollateralRaw = capPositiveCollateralDeposit(params.collateralRaw, colBal);
+    if (effectiveCollateralRaw <= 0n) {
+      return { success: false, error: `Not enough ${cfg.collateralSymbol} in the trading wallet to supply.` };
+    }
 
     // 3) Gas: collateral only LEAVES the wallet, so no inbound ATA rent.
     const gas = await ensureVaultGas({
@@ -706,7 +732,7 @@ export async function executeSupplyCollateral(params: SupplyCollateralParams): P
     const preColRaw = preLive ? BigInt(preLive.collateralRaw) : 0n;
 
     // 5) Pure plan -> SDK ix. positionId 0 mints a new supply-only NFT.
-    const plan = planSupplyCollateral(targetNftId, params.collateralRaw);
+    const plan = planSupplyCollateral(targetNftId, effectiveCollateralRaw);
     const borrow = await import("@jup-ag/lend/borrow");
     const BN = (await import("bn.js")).default;
     const connection = getServerConnection();
@@ -787,7 +813,7 @@ export async function executeSupplyCollateral(params: SupplyCollateralParams): P
       observedDebtRaw = BigInt(postLive.debtRaw);
       oraclePriceUsd = postLive.oraclePriceUsd;
       healthSource = "supply_onchain";
-      const v = verifySupplyOutcome({ preColRaw, postColRaw: observedColRaw, depositedRaw: params.collateralRaw });
+      const v = verifySupplyOutcome({ preColRaw, postColRaw: observedColRaw, depositedRaw: effectiveCollateralRaw });
       if (!v.ok) {
         verifyWarning = `Add Collateral sent (signature ${exec.signature}) but the position read differs (${v.reason}). Recorded the on-chain collateral.`;
         console.warn(`[Borrow] supply verify miss: ${v.reason}`, { positionId: position!.id, nftId });
