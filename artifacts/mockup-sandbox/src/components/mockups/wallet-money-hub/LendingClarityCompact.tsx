@@ -59,6 +59,30 @@ import {
  * null/failure (never $0.00, never a fake value).
  */
 
+// ════════════════════════════════════════════════════════════════════════
+// COLOR HIERARCHY — the single source of truth for every color in this page.
+// The ONLY allowed hues are PURPLE, BLUE, PINK and TEAL. There is deliberately
+// no red, orange, amber, yellow, green, lime, emerald, rose or fuchsia
+// anywhere — pull a value from here instead of inlining a one-off color.
+// ════════════════════════════════════════════════════════════════════════
+const PALETTE = {
+  // Categorical ramp — colors one asset at a time (split bar, token dots,
+  // pool avatars). Rotates the four families so neighbours always contrast.
+  asset: [
+    "bg-teal-400", "bg-violet-400", "bg-pink-400", "bg-blue-400",
+    "bg-teal-300", "bg-purple-400", "bg-pink-500", "bg-sky-400",
+    "bg-cyan-400", "bg-indigo-400",
+  ] as const,
+  // Semantic roles — one allowed family per meaning.
+  positive: { text: "text-teal-300",   icon: "text-teal-400",   wrap: "bg-teal-500/10",   border: "border-teal-500/30" }, // money in · safe · success
+  outflow:  { text: "text-sky-300",    icon: "text-sky-400",    wrap: "bg-sky-500/10",    border: "border-sky-500/30"  }, // money out · neutral
+  caution:  { text: "text-purple-300", icon: "text-purple-400", wrap: "bg-purple-500/10", border: "border-purple-500/30" }, // locked · mid-health · heads-up
+  alert:    { text: "text-pink-400",   icon: "text-pink-500",   wrap: "bg-pink-500/15",   border: "border-pink-500/40" }, // at-risk
+  fee:      { text: "text-pink-300",   icon: "text-pink-400",   wrap: "bg-pink-500/5",    border: "border-pink-500/20", solid: "bg-pink-500 hover:bg-pink-500/90 text-white" }, // SOL network fee / gas
+};
+// Pick the on-palette color for the Nth asset in a list.
+const assetColor = (i: number): string => PALETTE.asset[i % PALETTE.asset.length];
+
 // ── LENDING COLLATERAL (supplied, held as-is) ─────────────────────────────
 // Each asset is its own ISOLATED Jupiter Lend position: its own max-LTV,
 // its own borrow, its own liquidation price/health. That isolation is WHY the
@@ -74,17 +98,25 @@ type Collateral = {
   weight: number; // % of basket, for the split bar
   dot: string;
 };
-const COLLATERAL: Collateral[] = [
-  { symbol: "INF", name: "Infinity (Sanctum)", supplied: "38.40 INF", suppliedUsd: 4200, borrowedUsd: 1200, maxLtv: 50, borrowApr: 6.2, weight: 28, dot: "bg-teal-400" },
-  { symbol: "JitoSOL", name: "Jito Staked SOL", supplied: "13.10 JitoSOL", suppliedUsd: 2180, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.4, weight: 15, dot: "bg-violet-400" },
-  { symbol: "cbBTC", name: "Coinbase BTC", supplied: "0.018 cbBTC", suppliedUsd: 1150, borrowedUsd: 0, maxLtv: 70, borrowApr: 4.8, weight: 8, dot: "bg-blue-400" },
-  { symbol: "mSOL", name: "Marinade SOL", supplied: "2.52 mSOL", suppliedUsd: 420, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.4, weight: 3, dot: "bg-cyan-400" },
-  { symbol: "JLP", name: "Jupiter LP", supplied: "142.0 JLP", suppliedUsd: 690, borrowedUsd: 0, maxLtv: 60, borrowApr: 7.1, weight: 5, dot: "bg-pink-500" },
-  { symbol: "bSOL", name: "BlazeStake SOL", supplied: "9.80 bSOL", suppliedUsd: 1620, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.6, weight: 11, dot: "bg-pink-400" },
-  { symbol: "jupSOL", name: "Jupiter Staked SOL", supplied: "6.40 jupSOL", suppliedUsd: 1080, borrowedUsd: 520, maxLtv: 60, borrowApr: 5.9, weight: 7, dot: "bg-teal-300" },
-  { symbol: "hSOL", name: "Helius Staked SOL", supplied: "5.10 hSOL", suppliedUsd: 845, borrowedUsd: 0, maxLtv: 60, borrowApr: 5.7, weight: 6, dot: "bg-purple-400" },
-  { symbol: "vSOL", name: "The Vault SOL", supplied: "3.30 vSOL", suppliedUsd: 560, borrowedUsd: 0, maxLtv: 60, borrowApr: 6.0, weight: 4, dot: "bg-sky-400" },
-];
+const COLLATERAL: Collateral[] = (() => {
+  // Rows carry no color of their own — every dot is assigned below from
+  // PALETTE.asset (the hierarchy), in supplied-value order, so the split bar
+  // always rotates cleanly through the four allowed families.
+  const raw: Omit<Collateral, "dot">[] = [
+    { symbol: "INF", name: "Infinity (Sanctum)", supplied: "38.40 INF", suppliedUsd: 4200, borrowedUsd: 1200, maxLtv: 50, borrowApr: 6.2, weight: 28 },
+    { symbol: "JitoSOL", name: "Jito Staked SOL", supplied: "13.10 JitoSOL", suppliedUsd: 2180, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.4, weight: 15 },
+    { symbol: "cbBTC", name: "Coinbase BTC", supplied: "0.018 cbBTC", suppliedUsd: 1150, borrowedUsd: 0, maxLtv: 70, borrowApr: 4.8, weight: 8 },
+    { symbol: "mSOL", name: "Marinade SOL", supplied: "2.52 mSOL", suppliedUsd: 420, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.4, weight: 3 },
+    { symbol: "JLP", name: "Jupiter LP", supplied: "142.0 JLP", suppliedUsd: 690, borrowedUsd: 0, maxLtv: 60, borrowApr: 7.1, weight: 5 },
+    { symbol: "bSOL", name: "BlazeStake SOL", supplied: "9.80 bSOL", suppliedUsd: 1620, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.6, weight: 11 },
+    { symbol: "jupSOL", name: "Jupiter Staked SOL", supplied: "6.40 jupSOL", suppliedUsd: 1080, borrowedUsd: 520, maxLtv: 60, borrowApr: 5.9, weight: 7 },
+    { symbol: "hSOL", name: "Helius Staked SOL", supplied: "5.10 hSOL", suppliedUsd: 845, borrowedUsd: 0, maxLtv: 60, borrowApr: 5.7, weight: 6 },
+    { symbol: "vSOL", name: "The Vault SOL", supplied: "3.30 vSOL", suppliedUsd: 560, borrowedUsd: 0, maxLtv: 60, borrowApr: 6.0, weight: 4 },
+  ];
+  const ranked = [...raw].sort((a, b) => b.suppliedUsd - a.suppliedUsd);
+  const colorOf = new Map(ranked.map((c, i) => [c.symbol, assetColor(i)]));
+  return raw.map((c) => ({ ...c, dot: colorOf.get(c.symbol)! }));
+})();
 
 const TOTAL_SUPPLIED = COLLATERAL.reduce((a, c) => a + c.suppliedUsd, 0);
 const TOTAL_BORROWED = COLLATERAL.reduce((a, c) => a + c.borrowedUsd, 0);
@@ -98,24 +130,24 @@ const fmtUsd = (n: number) => `$${n.toLocaleString("en-US")}`;
 
 // ── TRADING-DEPOSIT swap tokens (these DO swap to USDC) ───────────────────
 type SwapToken = { symbol: string; name: string; amount: string; usd: string; est: string; dot: string };
-const SWAP_TOKENS: SwapToken[] = [
-  { symbol: "SOL", name: "Solana", amount: "2.10", usd: "$320.18", est: "318.40", dot: "bg-violet-400" },
-  { symbol: "wBTC", name: "Wrapped BTC", amount: "0.018", usd: "$1,150.40", est: "1,146.90", dot: "bg-fuchsia-400" },
-  { symbol: "wETH", name: "Wrapped Ether", amount: "0.14", usd: "$420.66", est: "419.20", dot: "bg-indigo-400" },
-  { symbol: "BONK", name: "Bonk", amount: "1,920,500", usd: "$48.90", est: "48.55", dot: "bg-yellow-400" },
-];
+const SWAP_TOKENS: SwapToken[] = ([
+  { symbol: "SOL", name: "Solana", amount: "2.10", usd: "$320.18", est: "318.40" },
+  { symbol: "wBTC", name: "Wrapped BTC", amount: "0.018", usd: "$1,150.40", est: "1,146.90" },
+  { symbol: "wETH", name: "Wrapped Ether", amount: "0.14", usd: "$420.66", est: "419.20" },
+  { symbol: "BONK", name: "Bonk", amount: "1,920,500", usd: "$48.90", est: "48.55" },
+] as Omit<SwapToken, "dot">[]).map((t, i) => ({ ...t, dot: assetColor(i) }));
 
 // ── SUPPLY-COLLATERAL tokens (held AS-IS, no swap) ────────────────────────
 // The eligible Jupiter Lend collaterals. Held in the agent wallet as the asset
 // itself - never converted.
 type SupplyToken = { symbol: string; name: string; amount: string; usd: string; maxLtv: number; dot: string };
-const SUPPLY_TOKENS: SupplyToken[] = [
-  { symbol: "INF", name: "Infinity (Sanctum)", amount: "12.40", usd: "$1,356.00", maxLtv: 50, dot: "bg-teal-400" },
-  { symbol: "JitoSOL", name: "Jito Staked SOL", amount: "4.02", usd: "$668.90", maxLtv: 65, dot: "bg-violet-400" },
-  { symbol: "cbBTC", name: "Coinbase BTC", amount: "0.006", usd: "$383.40", maxLtv: 70, dot: "bg-fuchsia-400" },
-  { symbol: "mSOL", name: "Marinade SOL", amount: "1.10", usd: "$183.20", maxLtv: 65, dot: "bg-indigo-400" },
-  { symbol: "JUP", name: "Jupiter", amount: "820.0", usd: "$402.00", maxLtv: 45, dot: "bg-lime-400" },
-];
+const SUPPLY_TOKENS: SupplyToken[] = ([
+  { symbol: "INF", name: "Infinity (Sanctum)", amount: "12.40", usd: "$1,356.00", maxLtv: 50 },
+  { symbol: "JitoSOL", name: "Jito Staked SOL", amount: "4.02", usd: "$668.90", maxLtv: 65 },
+  { symbol: "cbBTC", name: "Coinbase BTC", amount: "0.006", usd: "$383.40", maxLtv: 70 },
+  { symbol: "mSOL", name: "Marinade SOL", amount: "1.10", usd: "$183.20", maxLtv: 65 },
+  { symbol: "JUP", name: "Jupiter", amount: "820.0", usd: "$402.00", maxLtv: 45 },
+] as Omit<SupplyToken, "dot">[]).map((t, i) => ({ ...t, dot: assetColor(i) }));
 
 // ── Transaction history - liability treatment for borrow/repay ────────────
 type MoneyFlow = { kind: "in" | "out" | "supply" | "borrow" | "repay"; label: string; date: string; amount: string; sub?: string };
@@ -142,7 +174,7 @@ function AddressRow({ address, copied, onCopy, external }: { address: string; co
         </Button>
       )}
       <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground" onClick={onCopy}>
-        {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+        {copied ? <Check className={`w-3.5 h-3.5 ${PALETTE.positive.icon}`} /> : <Copy className="w-3.5 h-3.5" />}
       </Button>
     </div>
   );
@@ -175,7 +207,7 @@ function AmountField({ token, balance, maxFill, capNote }: { token: string; bala
 
 function GasFeeNote() {
   return (
-    <div className="text-xs text-amber-500/80 bg-amber-500/10 rounded-lg p-2.5 flex items-start gap-2">
+    <div className={`text-xs ${PALETTE.fee.text} ${PALETTE.fee.wrap} rounded-lg p-2.5 flex items-start gap-2`}>
       <Fuel className="w-4 h-4 shrink-0 mt-0.5" />
       <span>You'll need a little SOL in your wallet for the network fee (~0.005 SOL).</span>
     </div>
@@ -544,8 +576,8 @@ function WithdrawCollateralDialog({ open, onOpenChange, sel, onSel }: { open: bo
         <AmountField token={c.symbol} balance={`Free ${fmtUsd(freeUsd)} of ${fmtUsd(c.suppliedUsd)}`} />
 
         {hasLoan ? (
-          <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5">
-            <Lock className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
+          <div className={`flex items-start gap-2 rounded-lg border ${PALETTE.caution.border} ${PALETTE.caution.wrap} px-3 py-2.5`}>
+            <Lock className={`w-4 h-4 ${PALETTE.caution.icon} mt-0.5 shrink-0`} />
             <p className="text-xs text-muted-foreground">
               {fmtUsd(lockedUsd)} of your {c.symbol} backs your {fmtUsd(c.borrowedUsd)} loan and is <span className="text-foreground font-medium">locked</span>.
               {" "}Only {fmtUsd(freeUsd)} is free now - repay the loan to unlock the rest.
@@ -586,8 +618,8 @@ function MoneyFlows() {
         <div className="space-y-0.5">
           {visible.map((f, i) => {
             const meta = {
-              in:     { Icon: ArrowDownToLine, tone: "text-green-500",        wrap: "bg-green-500/10" },
-              out:    { Icon: ArrowUpFromLine, tone: "text-orange-500",       wrap: "bg-orange-500/10" },
+              in:     { Icon: ArrowDownToLine, tone: PALETTE.positive.text,   wrap: PALETTE.positive.wrap },
+              out:    { Icon: ArrowUpFromLine, tone: PALETTE.outflow.text,    wrap: PALETTE.outflow.wrap },
               supply: { Icon: Coins,           tone: "text-teal-300",         wrap: "bg-teal-500/10" },
               borrow: { Icon: Landmark,        tone: "text-accent",           wrap: "bg-accent/10" },
               repay:  { Icon: RotateCcw,       tone: "text-muted-foreground", wrap: "bg-muted" },
@@ -678,9 +710,9 @@ function BorrowDialog({ open, onOpenChange, sel }: { open: boolean; onOpenChange
 function poolHealth(borrowedUsd: number, limit: number) {
   if (borrowedUsd <= 0) return null;
   const used = limit ? borrowedUsd / limit : 1;
-  if (used < 0.6) return { label: "Safe", cls: "text-emerald-300", Icon: ShieldCheck };
-  if (used < 0.85) return { label: "Caution", cls: "text-amber-300", Icon: HeartPulse };
-  return { label: "At risk", cls: "text-red-400", Icon: HeartPulse };
+  if (used < 0.6) return { label: "Safe", cls: PALETTE.positive.text, Icon: ShieldCheck };
+  if (used < 0.85) return { label: "Caution", cls: PALETTE.caution.text, Icon: HeartPulse };
+  return { label: "At risk", cls: PALETTE.alert.text, Icon: HeartPulse };
 }
 
 /** SOL top-up, reached from the contextual "Top up" link on the network-fee tile. */
@@ -694,10 +726,10 @@ function GasTopUpDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
         </DialogHeader>
         <AmountField token="SOL" balance="Wallet 2.10 SOL" />
         <p className="text-xs text-muted-foreground flex items-center gap-1.5">
-          <Fuel className="w-3.5 h-3.5 text-orange-400" />
+          <Fuel className={`w-3.5 h-3.5 ${PALETTE.fee.icon}`} />
           The agent keeps a small SOL reserve to cover Solana network fees.
         </p>
-        <Button className="w-full h-11 bg-orange-500 hover:bg-orange-500/90 text-white">Top up SOL</Button>
+        <Button className={`w-full h-11 ${PALETTE.fee.solid}`}>Top up SOL</Button>
       </DialogContent>
     </Dialog>
   );
@@ -727,12 +759,12 @@ function TradingAgentCard({ copied, onCopy }: { copied: boolean; onCopy: () => v
             <div className="text-xs text-primary/80">Trading USDC</div>
             <div className="text-xl font-semibold tabular-nums mt-1 text-primary">$4,820</div>
           </div>
-          <div className="rounded-xl border border-orange-500/20 bg-orange-500/5 p-4">
+          <div className={`rounded-xl border ${PALETTE.fee.border} ${PALETTE.fee.wrap} p-4`}>
             <div className="flex items-center justify-between gap-2">
-              <div className="text-xs text-orange-300/90 flex items-center gap-1"><Fuel className="w-3 h-3" /> Network fee (SOL)</div>
-              <button onClick={() => setGasOpen(true)} className="text-[11px] text-orange-300 hover:text-orange-200 underline underline-offset-2">Top up</button>
+              <div className={`text-xs ${PALETTE.fee.text} flex items-center gap-1`}><Fuel className="w-3 h-3" /> Network fee (SOL)</div>
+              <button onClick={() => setGasOpen(true)} className={`text-[11px] ${PALETTE.fee.text} hover:text-pink-200 underline underline-offset-2`}>Top up</button>
             </div>
-            <div className="text-xl font-semibold tabular-nums mt-1 text-orange-300">0.42</div>
+            <div className={`text-xl font-semibold tabular-nums mt-1 ${PALETTE.fee.text}`}>0.42</div>
           </div>
         </div>
         <div className="grid grid-cols-2 gap-3">
@@ -835,7 +867,7 @@ function LendingSection() {
 
           {loanPools.length > 0 && (
             <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground border-t border-border/50 pt-2.5">
-              <HeartPulse className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <HeartPulse className={`w-3.5 h-3.5 ${PALETTE.caution.icon} shrink-0`} />
               <span>{loanPools.length} of {COLLATERAL.length} pool{loanPools.length > 1 ? "s have" : " has"} an active loan — open to check each one's health.</span>
             </div>
           )}
