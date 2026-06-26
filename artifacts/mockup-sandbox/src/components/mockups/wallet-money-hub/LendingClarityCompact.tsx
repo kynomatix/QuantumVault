@@ -643,6 +643,21 @@ function MoneyFlows() {
   );
 }
 
+// Per-pool health-bar fill color. Maps borrow-capacity usage (0-100) onto a
+// smooth sky-blue -> pinkish-purple ramp: a healthy, lightly-borrowed pool reads
+// sky blue; as the pool approaches its borrow limit the fill shifts toward a
+// soft pink-purple. Deliberately NOT red (too aggressive) and the brand blurple
+// never sits at the "bad" end. The ease-in keeps the fill clearly blue while
+// healthy and only ramps to pink-purple as the limit nears.
+function healthBarColor(usagePct: number): string {
+  const t = Math.min(1, Math.max(0, usagePct / 100));
+  const e = t * t;
+  const h = Math.round(199 + (300 - 199) * e); // sky 199deg -> pink-purple 300deg
+  const s = Math.round(92 + (88 - 92) * e);
+  const l = Math.round(62 + (66 - 62) * e);
+  return `hsl(${h} ${s}% ${l}%)`;
+}
+
 /** Borrow USDC against a SINGLE supplied asset. Each collateral is its own
  *  isolated Jupiter Lend pool, so borrowing is always per-asset - there is no
  *  blended, cross-collateral borrow. */
@@ -679,7 +694,7 @@ function BorrowDialog({ open, onOpenChange, sel }: { open: boolean; onOpenChange
             <span className="tabular-nums">{fmtUsd(col.borrowedUsd)} / {fmtUsd(limit)} limit</span>
           </div>
           <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-            <div className="h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
+            <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: healthBarColor(pct) }} />
           </div>
         </div>
 
@@ -909,7 +924,7 @@ function LendingSection() {
                   </div>
                   {hasLoan && (
                     <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-                      <div className="h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
+                      <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: healthBarColor(pct) }} />
                     </div>
                   )}
                 </div>
