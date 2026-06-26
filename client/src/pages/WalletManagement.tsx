@@ -59,19 +59,6 @@ import {
   WithdrawCollateralDialog,
 } from '@/components/LendingActionDialogs';
 
-interface CapitalPool {
-  mainAccountBalance: number;
-  allocatedToBot: number;
-  totalEquity: number;
-  botAllocations: Array<{
-    botId: string;
-    botName: string;
-    subaccountId: number;
-    balance: number;
-  }>;
-  warning?: string;
-}
-
 interface AgentWallet {
   agentPublicKey: string;
   balance: number;
@@ -111,56 +98,6 @@ const LENDING_ASSET_COLORS = [
   'bg-cyan-400', 'bg-indigo-400',
 ] as const;
 const lendingAssetColor = (i: number): string => LENDING_ASSET_COLORS[i % LENDING_ASSET_COLORS.length];
-
-type KpiTone = 'primary' | 'accent' | 'neutral' | 'emerald';
-
-// Headline figure in the KPI strip. Shows a spinner while its source is loading
-// and an em dash (never a fake $0.00) when the value failed to load.
-function Kpi({ icon: Icon, label, value, loading, tone, testId }: {
-  icon: typeof Wallet;
-  label: string;
-  value: number | null;
-  loading: boolean;
-  tone: KpiTone;
-  testId: string;
-}) {
-  const cardCls = {
-    primary: 'border-primary/20 bg-primary/5',
-    accent: 'border-accent/20 bg-accent/5',
-    neutral: 'border-border bg-card',
-    emerald: 'border-emerald-500/20 bg-emerald-500/5',
-  }[tone];
-  const iconCls = {
-    primary: 'text-primary',
-    accent: 'text-accent',
-    neutral: 'text-muted-foreground',
-    emerald: 'text-emerald-400',
-  }[tone];
-  const valueCls = {
-    primary: 'text-primary',
-    accent: 'text-accent',
-    neutral: '',
-    emerald: 'text-emerald-400',
-  }[tone];
-  return (
-    <Card className={cardCls}>
-      <CardContent className="p-5">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <Icon className={`w-3.5 h-3.5 ${iconCls}`} /> {label}
-        </div>
-        <div className={`text-2xl font-semibold tabular-nums mt-1.5 ${valueCls}`} data-testid={testId}>
-          {loading ? (
-            <Loader2 className="w-5 h-5 animate-spin" />
-          ) : value === null ? (
-            '\u2014'
-          ) : (
-            `$${value.toFixed(2)}`
-          )}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
 
 // Real token icon resolved from on-chain metadata (Helius DAS), with a graceful
 // fallback: if the mint has no icon OR the metadata image URL is dead, render
@@ -218,9 +155,6 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
 
   const [withdrawToWalletAmount, setWithdrawToWalletAmount] = useState('');
   const [isWithdrawingToWallet, setIsWithdrawingToWallet] = useState(false);
-
-  const [capitalPool, setCapitalPool] = useState<CapitalPool | null>(null);
-  const [capitalLoading, setCapitalLoading] = useState(false);
 
   const [agentWallet, setAgentWallet] = useState<AgentWallet | null>(null);
   const [agentLoading, setAgentLoading] = useState(false);
@@ -306,24 +240,6 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
     }
   };
 
-  const fetchCapitalPool = async () => {
-    if (!publicKeyString) return;
-
-    setCapitalLoading(true);
-    try {
-      const res = await fetch('/api/wallet/capital', {
-        credentials: 'include',
-      });
-      if (!res.ok) throw new Error('Failed to fetch capital pool');
-      const data = await safeResponseJson(res);
-      setCapitalPool(data);
-    } catch (error) {
-      console.error('Error fetching capital pool:', error);
-    } finally {
-      setCapitalLoading(false);
-    }
-  };
-
   const fetchAgentBalance = async () => {
     if (!publicKeyString) return;
     setAgentLoading(true);
@@ -404,7 +320,6 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
     setBorrowPositionsLoaded(false);
     setBorrowPositionsError(false);
     if (connected && publicKeyString) {
-      fetchCapitalPool();
       fetchAgentBalance();
       fetchUserSolBalance();
       fetchBorrowPositions();
@@ -421,7 +336,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
   }, [initialTab]);
 
   const handleRefresh = async () => {
-    await Promise.all([fetchUsdcBalance(), fetchCapitalPool(), fetchAgentBalance(), fetchUserSolBalance(), fetchBorrowPositions(), fetchBorrowConfig()]);
+    await Promise.all([fetchUsdcBalance(), fetchAgentBalance(), fetchUserSolBalance(), fetchBorrowPositions(), fetchBorrowConfig()]);
     toast({ title: 'Balances refreshed' });
   };
 
@@ -681,7 +596,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       });
 
       setWithdrawToWalletAmount('');
-      await Promise.all([fetchUsdcBalance(), fetchAgentBalance(), fetchCapitalPool()]);
+      await Promise.all([fetchUsdcBalance(), fetchAgentBalance()]);
       return true;
     } catch (error: any) {
       console.error('Withdraw to wallet error:', error);
@@ -704,14 +619,13 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       fetchBorrowConfig(),
       fetchAgentBalance(),
       fetchUsdcBalance(),
-      fetchCapitalPool(),
     ]).then(() => undefined);
 
   if (!connected) {
     return null;
   }
 
-  const isLoading = usdcLoading || capitalLoading || agentLoading || solLoading;
+  const isLoading = usdcLoading || agentLoading || solLoading;
 
   const borrowCol = borrowConfig?.collaterals?.[0] ?? null;
   // ── Lending (collateral + loans) — REAL data only ─────────────────────────
@@ -828,15 +742,6 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
           <RefreshCw className={`w-4 h-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
           Refresh
         </Button>
-      </div>
-
-      {/* KPI strip — real headline figures only. No borrow / credit-limit numbers
-          are shown because no endpoint exposes them honestly today. */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Kpi icon={TrendingUp} label="Total Equity" tone="primary" loading={capitalLoading} value={capitalPool ? capitalPool.totalEquity : null} testId="text-kpi-total-equity" />
-        <Kpi icon={Bot} label="Allocated to Bots" tone="accent" loading={capitalLoading} value={capitalPool ? capitalPool.allocatedToBot : null} testId="text-kpi-allocated" />
-        <Kpi icon={Coins} label="In Trading Agent" tone="neutral" loading={agentLoading} value={agentWallet ? agentWallet.balance : null} testId="text-kpi-agent-usdc" />
-        <Kpi icon={Wallet} label="In Your Wallet" tone="emerald" loading={usdcLoading} value={usdcBalance ?? null} testId="text-kpi-wallet-usdc" />
       </div>
 
       {/* Wallet + Trading Agent — real addresses & balances, with the money
@@ -1199,7 +1104,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
         usdcBalance={usdcBalance ?? null}
         initialTab={depositDialogTab}
         onComplete={() => {
-          Promise.all([fetchUsdcBalance(), fetchAgentBalance(), fetchCapitalPool(), fetchUserSolBalance()]);
+          Promise.all([fetchUsdcBalance(), fetchAgentBalance(), fetchUserSolBalance()]);
         }}
       />
 
