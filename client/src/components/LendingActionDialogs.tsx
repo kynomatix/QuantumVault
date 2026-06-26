@@ -1072,6 +1072,47 @@ function clearRepayResume(positionId: string) {
   }
 }
 
+// A small cushion so a "Max" repay reliably CLEARS the debt despite swap
+// slippage + price drift. Over-shooting is money-safe: the server caps every
+// repay at the true on-chain debt, and any leftover USDC stays as recoverable
+// trading-wallet USDC (deleverage) / agent USDC (wallet token) — never lost.
+const REPAY_MAX_BUFFER = 0.02;
+
+// Given the USD debt, a per-unit USD price, and the user's balance, return the
+// token amount whose USDC value clears the debt (+buffer), capped at the
+// balance, plus whether it fully clears. Returns null when the price/debt are
+// unknown so the caller falls back to a full-balance Max. Purely a CLIENT-side
+// estimate — the server stays the money authority (caps the repay at true debt).
+function debtClearingFill(
+  debtUsd: number | null,
+  priceUsd: number | null,
+  balanceUi: number,
+  decimals: number,
+  balanceRaw: string,
+): { fillStr: string; clears: boolean } | null {
+  if (debtUsd == null || !(debtUsd > 0) || priceUsd == null || !(priceUsd > 0)) return null;
+  const exactNeeded = debtUsd / priceUsd;
+  if (balanceUi < exactNeeded) {
+    // Balance can't cover the full debt → use the whole balance (partial
+    // paydown). Use the exact raw balance so it never rounds above the holding.
+    return { fillStr: rawToDecimalString(balanceRaw, decimals), clears: false };
+  }
+  const withBuffer = exactNeeded * (1 + REPAY_MAX_BUFFER);
+  if (withBuffer >= balanceUi) {
+    // The cushion would exceed the balance → use the exact full balance.
+    return { fillStr: rawToDecimalString(balanceRaw, decimals), clears: true };
+  }
+  // Convert to raw units by FLOORing (never round UP past the balance — the
+  // submit validation rejects amount > balance) and defensively cap at the raw
+  // balance in case float precision inflates the product. Flooring drops < 1
+  // base unit, far less than the 2% cushion, so it still clears the debt.
+  const balRaw = BigInt(balanceRaw);
+  let fillRaw = BigInt(Math.floor(withBuffer * 10 ** decimals));
+  if (fillRaw > balRaw) fillRaw = balRaw;
+  if (fillRaw <= 0n) return { fillStr: rawToDecimalString(balanceRaw, decimals), clears: true };
+  return { fillStr: rawToDecimalString(fillRaw.toString(), decimals), clears: true };
+}
+
 export function RepayLoanDialog({
   open,
   onOpenChange,
@@ -1225,6 +1266,34 @@ export function RepayLoanDialog({
   };
 
   const debtUi = pool?.debtAmountRaw ? rawToDecimalString(pool.debtAmountRaw, USDC_DECIMALS) : null;
+  const debtUsd = pool?.debtUsd ?? null;
+
+  // "Max" estimate for the supplied-collateral (deleverage) source: how much of
+  // the one locked collateral to sell to clear the debt. CLIENT estimate only —
+  // the server LTV-gates the withdraw and caps the repay at true debt.
+  const collateralUi =
+    pool?.collateralAmountRaw && pool?.collateralDecimals != null
+      ? Number(pool.collateralAmountRaw) / 10 ** pool.collateralDecimals
+      : null;
+  const collateralPriceUsd =
+    pool?.collateralUsd != null && collateralUi != null && collateralUi > 0
+      ? pool.collateralUsd / collateralUi
+      : null;
+  const deleverageMax =
+    pool?.collateralAmountRaw != null && pool?.collateralDecimals != null && collateralUi != null
+      ? debtClearingFill(debtUsd, collateralPriceUsd, collateralUi, pool.collateralDecimals, pool.collateralAmountRaw)
+      : null;
+
+  // "Max" estimate for the wallet-token (deposit any asset) source: how much of
+  // the SELECTED token to send so its USDC swap value clears the debt.
+  const tokenPriceUsd =
+    selectedToken && selectedToken.usdValue != null && selectedToken.amountUi > 0
+      ? selectedToken.usdValue / selectedToken.amountUi
+      : null;
+  const walletTokenMax = selectedToken
+    ? debtClearingFill(debtUsd, tokenPriceUsd, selectedToken.amountUi, selectedToken.decimals, selectedToken.amountRaw)
+    : null;
+
   const working = phase === 'working';
   const needsRetry = phase === 'needs_retry';
 
@@ -1714,15 +1783,39 @@ export function RepayLoanDialog({
             </>
           )}
 
-          {/* #3 Deleverage (supplied collateral) — server-signed sell→repay,
-              scoped to THIS pool's one collateral (no multi-asset picker). */}
+          {/* #3 Deleverage (supplied collateral) — server-signed sell→repay.
+              One collateral per position, shown as a (single-row) picker for
+              parity with the wallet-token list. Max sells just enough to clear
+              the debt (client estimate; server LTV-gates + caps at true debt). */}
           {source === 'deleverage' && (
             <>
               <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-xs text-muted-foreground">
-                  <span>Collateral to sell</span>
-                  <span>Locked {pool?.collateralLabel ?? '\u2014'}</span>
+                <span className="text-sm font-medium">Use which collateral</span>
+                <div className="rounded-lg border border-border divide-y divide-border/60">
+                  <div
+                    className="flex w-full items-center gap-3 px-3 py-2.5 bg-primary/10"
+                    data-testid={`row-repay-collateral-${symbol ?? 'asset'}`}
+                  >
+                    {pool?.collateralLogoURI ? (
+                      <img src={pool.collateralLogoURI} alt={symbol ?? 'collateral'} className="w-7 h-7 rounded-full" />
+                    ) : (
+                      <span className="w-7 h-7 rounded-full bg-muted flex items-center justify-center text-[10px] font-semibold">
+                        {(symbol ?? '?').slice(0, 2)}
+                      </span>
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium truncate">{symbol ?? 'Collateral'}</p>
+                      <p className="text-xs text-muted-foreground truncate">Locked {pool?.collateralLabel ?? '\u2014'}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm font-mono">{fmtUsd(pool?.collateralUsd ?? null)}</p>
+                      <p className="text-[11px] text-muted-foreground">supplied</p>
+                    </div>
+                  </div>
                 </div>
+              </div>
+              <div className="space-y-1.5">
+                <span className="text-xs text-muted-foreground">Collateral to sell</span>
                 <div className="relative">
                   <Input
                     inputMode="decimal"
@@ -1730,13 +1823,41 @@ export function RepayLoanDialog({
                     value={collateralAmount}
                     onChange={(e) => setCollateralAmount(e.target.value)}
                     disabled={working || needsRetry}
-                    className="h-12 pr-20 text-lg font-medium"
+                    className="h-12 pr-28 text-lg font-medium"
                     data-testid="input-repay-deleverage-amount"
                   />
-                  <div className="absolute right-2 top-1/2 -translate-y-1/2">
+                  <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-2">
                     <span className="text-sm font-medium text-muted-foreground">{symbol ?? 'collateral'}</span>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="h-7 px-2.5 text-xs"
+                      onClick={() => {
+                        if (deleverageMax) setCollateralAmount(deleverageMax.fillStr);
+                        else if (pool?.collateralAmountRaw != null && pool?.collateralDecimals != null)
+                          setCollateralAmount(rawToDecimalString(pool.collateralAmountRaw, pool.collateralDecimals));
+                      }}
+                      disabled={
+                        working ||
+                        needsRetry ||
+                        (deleverageMax == null && (pool?.collateralAmountRaw == null || pool?.collateralDecimals == null))
+                      }
+                      data-testid="button-repay-deleverage-max"
+                    >
+                      Max
+                    </Button>
                   </div>
                 </div>
+                <p className="text-[11px] text-muted-foreground flex items-start gap-1">
+                  <Info className="w-3 h-3 mt-0.5 shrink-0" />
+                  <span>
+                    {deleverageMax?.clears
+                      ? `Max sells ~${deleverageMax.fillStr} ${symbol ?? 'collateral'}, enough to clear your ${debtStr} debt.`
+                      : deleverageMax
+                      ? `Max sells your full ${pool?.collateralLabel ?? 'collateral'}, paying down part of your ${debtStr} debt.`
+                      : `Max sells your full locked ${symbol ?? 'collateral'}.`}
+                  </span>
+                </p>
               </div>
               <div className="flex items-start gap-2 rounded-lg border border-accent/20 bg-accent/10 px-3 py-2.5">
                 <Info className="w-4 h-4 text-accent mt-0.5 shrink-0" />
@@ -1809,7 +1930,10 @@ export function RepayLoanDialog({
                         size="sm"
                         variant="secondary"
                         className="h-7 px-2.5 text-xs"
-                        onClick={() => setTokenAmount(rawToDecimalString(selectedToken.amountRaw, selectedToken.decimals))}
+                        onClick={() => {
+                          if (walletTokenMax) setTokenAmount(walletTokenMax.fillStr);
+                          else setTokenAmount(rawToDecimalString(selectedToken.amountRaw, selectedToken.decimals));
+                        }}
                         disabled={working || needsRetry}
                         data-testid="button-repay-token-max"
                       >
@@ -1817,6 +1941,16 @@ export function RepayLoanDialog({
                       </Button>
                     </div>
                   </div>
+                  <p className="text-[11px] text-muted-foreground flex items-start gap-1">
+                    <Info className="w-3 h-3 mt-0.5 shrink-0" />
+                    <span>
+                      {walletTokenMax?.clears
+                        ? `Max sends ~${walletTokenMax.fillStr} ${selectedToken.symbol}, enough to clear your ${debtStr} debt.`
+                        : walletTokenMax
+                        ? `Max sends your full ${selectedToken.amountUi.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${selectedToken.symbol}, paying down part of your ${debtStr} debt.`
+                        : `Max sends your full ${selectedToken.symbol} balance.`}
+                    </span>
+                  </p>
                 </div>
               )}
               <div className="flex items-start gap-2 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2.5">
