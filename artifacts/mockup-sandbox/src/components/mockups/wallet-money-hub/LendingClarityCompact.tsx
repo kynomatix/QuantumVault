@@ -173,8 +173,13 @@ function AddressRow({ address, copied, onCopy, external }: { address: string; co
   );
 }
 
-function AmountField({ token, balance, maxFill, capNote }: { token: string; balance: string; maxFill?: string; capNote?: string }) {
-  const [val, setVal] = useState("");
+function AmountField({ token, balance, maxFill, capNote, value, onValueChange }: { token: string; balance: string; maxFill?: string; capNote?: string; value?: string; onValueChange?: (v: string) => void }) {
+  // Optionally controlled: when `value` is provided the parent owns the input so
+  // the field and any derived preview (e.g. projected borrow usage) can never
+  // diverge. Otherwise it falls back to its own internal state.
+  const [internal, setInternal] = useState("");
+  const val = value !== undefined ? value : internal;
+  const update = (v: string) => { if (value === undefined) setInternal(v); onValueChange?.(v); };
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -182,10 +187,10 @@ function AmountField({ token, balance, maxFill, capNote }: { token: string; bala
         <span>{balance}</span>
       </div>
       <div className="relative">
-        <Input value={val} onChange={(e) => setVal(e.target.value)} placeholder="0.00" className="h-12 pr-24 text-lg font-medium bg-background/50" />
+        <Input value={val} onChange={(e) => update(e.target.value)} placeholder="0.00" className="h-12 pr-24 text-lg font-medium bg-background/50" />
         <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-2">
           <span className="text-sm font-medium text-muted-foreground">{token}</span>
-          <Button size="sm" variant="secondary" className="h-7 px-2.5 text-xs" onClick={() => maxFill !== undefined && setVal(maxFill)}>Max</Button>
+          <Button size="sm" variant="secondary" className="h-7 px-2.5 text-xs" onClick={() => { if (maxFill !== undefined) update(maxFill); }}>Max</Button>
         </div>
       </div>
       {capNote && (
@@ -662,12 +667,22 @@ function healthBarColor(usagePct: number): string {
  *  isolated Jupiter Lend pool, so borrowing is always per-asset - there is no
  *  blended, cross-collateral borrow. */
 function BorrowDialog({ open, onOpenChange, sel }: { open: boolean; onOpenChange: (v: boolean) => void; sel: string }) {
+  const [amount, setAmount] = useState("");
+  // The dialog stays mounted; clear any typed amount whenever it opens/closes or
+  // the selected collateral changes, so a reopened dialog starts at CURRENT usage.
+  useEffect(() => { setAmount(""); }, [open, sel]);
   const col = COLLATERAL.find((c) => c.symbol === sel);
   if (!col) return null;
   const limit = Math.round((col.suppliedUsd * col.maxLtv) / 100);
   const avail = Math.max(0, limit - col.borrowedUsd);
-  const pct = limit ? (col.borrowedUsd / limit) * 100 : 0;
   const availFill = avail.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  // Projected borrow usage: as the user types an amount, the bar + numbers
+  // preview where THIS pool's borrow usage will land. Empty / invalid input
+  // falls back to the pool's CURRENT usage.
+  const parsed = Number(amount.replace(/,/g, "")); // Max writes grouped values e.g. "1,417.00"
+  const entered = Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+  const projectedBorrowed = col.borrowedUsd + entered;
+  const barPct = limit ? Math.min(100, (projectedBorrowed / limit) * 100) : 0;
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
@@ -685,16 +700,17 @@ function BorrowDialog({ open, onOpenChange, sel }: { open: boolean; onOpenChange
           </p>
         </div>
 
-        <AmountField token="USDC" balance={`Available to borrow ${fmtUsd(avail)}`} maxFill={availFill} capNote={`Max caps at ${fmtUsd(avail)} - the most you can safely borrow against this ${col.symbol}.`} />
+        <AmountField token="USDC" balance={`Available to borrow ${fmtUsd(avail)}`} maxFill={availFill} capNote={`Max caps at ${fmtUsd(avail)} - the most you can safely borrow against this ${col.symbol}.`} value={amount} onValueChange={setAmount} />
 
-        {/* This pool's borrow usage. */}
+        {/* This pool's borrow usage. Bar + numbers preview the PROJECTED usage
+            as the user types; they show the CURRENT usage when the field is empty. */}
         <div className="space-y-1.5">
           <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-            <span>Borrow used on {col.symbol}</span>
-            <span className="tabular-nums">{fmtUsd(col.borrowedUsd)} / {fmtUsd(limit)} limit</span>
+            <span>{entered > 0 ? `Borrow used on ${col.symbol} after this` : `Borrow used on ${col.symbol}`}</span>
+            <span className="tabular-nums">{fmtUsd(projectedBorrowed)} / {fmtUsd(limit)} limit</span>
           </div>
           <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-            <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: healthBarColor(pct) }} />
+            <div className="h-full rounded-full transition-all duration-200" style={{ width: `${barPct}%`, backgroundColor: healthBarColor(barPct) }} />
           </div>
         </div>
 
