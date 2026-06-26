@@ -39,6 +39,8 @@ import {
   fmtUsd,
   fmtPct,
   healthBarColor,
+  RECOMMENDED_MAX_LTV,
+  safeLtvMarkerPct,
   type BorrowCollateral,
   type BorrowPreviewResult,
   type LendingPool,
@@ -49,15 +51,9 @@ import { isSessionError, showReconnectToast } from '@/lib/reconnect-toast';
 import { SolGasShortfallDialog } from '@/components/SolGasShortfallDialog';
 
 const USDC_DECIMALS = 6;
-// Recommended SAFE LTV — MIRRORS the server's BORROW_RISK_POLICY.recommendedMaxLtv
-// (server/vault/borrow-risk-policy.ts). The protocol's own max LTV is higher (the
-// real ceiling, e.g. 75% for INF) and a user MAY borrow up to it; the server only
-// WARNS above this recommended level. The client targets the recommended level for
-// "Available to borrow" / usage-bar / one-tap Max so Max stays SAFE and never
-// OVERSTATES capacity. Users can still type more (up to the protocol max); the
-// server risk gate re-checks and is authoritative. Keeping this at or below the
-// server recommendation stays in the safe (under-fill) direction.
-const RECOMMENDED_MAX_LTV = 0.5;
+// RECOMMENDED_MAX_LTV (the safe borrow level) + safeLtvMarkerPct now live in
+// '@/lib/lending-format' so this dialog and the live Wallet page agree on the
+// exact safe threshold and where to mark it on the protocol-framed usage bar.
 const POST_JSON = (body: unknown): RequestInit => ({
   method: 'POST',
   headers: { 'Content-Type': 'application/json', ...walletAuthHeaders() },
@@ -675,6 +671,9 @@ export function BorrowMoreDialog({
     protocolBorrowLimitUsd != null && protocolBorrowLimitUsd > 0 && projectedDebtUsd != null
       ? Math.min(100, Math.max(0, (projectedDebtUsd / protocolBorrowLimitUsd) * 100))
       : 0;
+  // Where the SAFE limit (recommended LTV) sits on this PROTOCOL-framed bar. null
+  // when the whole bar is already within the safe zone (protocol max <= safe).
+  const safeMarkerPct = safeLtvMarkerPct(protocolMaxLtv);
 
   const setMaxBorrow = () => {
     if (availableToBorrowUsd == null || !(availableToBorrowUsd > 0)) return;
@@ -758,9 +757,27 @@ export function BorrowMoreDialog({
                 {fmtUsd(projectedDebtUsd)} / {fmtUsd(protocolBorrowLimitUsd)} protocol limit
               </span>
             </div>
-            <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-              <div className="h-full rounded-full transition-all duration-200" style={{ width: `${healthUsagePct}%`, backgroundColor: healthBarColor(healthUsagePct) }} />
+            <div className="relative">
+              <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                <div className="h-full rounded-full transition-all duration-200" style={{ width: `${healthUsagePct}%`, backgroundColor: healthBarColor(healthUsagePct) }} />
+              </div>
+              {/* Safe-limit marker. The bar is framed to the PROTOCOL max LTV, so the
+                  safe 50%-LTV point is NOT the midpoint — it sits at safeMarkerPct%. */}
+              {safeMarkerPct != null && (
+                <div
+                  className="absolute -top-0.5 -bottom-0.5 w-px bg-foreground/70"
+                  style={{ left: `${safeMarkerPct}%` }}
+                  title={`Safe limit (${Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV)`}
+                  data-testid="marker-safe-limit-borrow-more"
+                />
+              )}
             </div>
+            {safeMarkerPct != null && (
+              <div className="flex items-center gap-1 text-[10px] text-muted-foreground" data-testid="legend-safe-limit-borrow-more">
+                <span className="inline-block h-2.5 w-px bg-foreground/70 shrink-0" />
+                <span>Safe limit ({Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV) — borrowing past it raises liquidation risk</span>
+              </div>
+            )}
           </div>
 
           {/* Pool facts. */}

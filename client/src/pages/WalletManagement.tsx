@@ -51,6 +51,8 @@ import {
   fmtUsd0,
   fmtPct,
   healthBarColor,
+  RECOMMENDED_MAX_LTV,
+  safeLtvMarkerPct,
 } from '@/lib/lending-format';
 import type { BorrowCollateral, LendingPool, UserToken } from '@/lib/lending-format';
 import {
@@ -1041,6 +1043,9 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                     poolBorrowLimitUsd != null && poolBorrowLimitUsd > 0 && p.debtUsd != null
                       ? Math.min(100, Math.max(0, (p.debtUsd / poolBorrowLimitUsd) * 100))
                       : null;
+                  // Safe-limit (recommended LTV) marker position on this PROTOCOL-
+                  // framed bar; null when the whole bar is within the safe zone.
+                  const poolSafeMarkerPct = safeLtvMarkerPct(p.maxLtv);
                   return (
                     <div key={p.id} className="rounded-xl border border-border bg-background/40 p-4" data-testid={`card-loan-${p.id}`}>
                       <div className="flex items-center justify-between gap-3">
@@ -1080,13 +1085,33 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                             capacity already used. Real on-chain inputs only; hidden
                             entirely when the capacity or debt can't be read. */}
                         {poolUsagePct != null && (
-                          <div
-                            className="h-1.5 w-full rounded-full bg-muted overflow-hidden"
-                            title={`Borrow capacity used: ${Math.round(poolUsagePct)}%`}
-                            data-testid={`bar-loan-health-${p.id}`}
-                          >
-                            <div className="h-full rounded-full" style={{ width: `${poolUsagePct}%`, backgroundColor: healthBarColor(poolUsagePct) }} />
-                          </div>
+                          <>
+                            <div className="relative">
+                              <div
+                                className="h-1.5 w-full rounded-full bg-muted overflow-hidden"
+                                title={`Borrow capacity used: ${Math.round(poolUsagePct)}%`}
+                                data-testid={`bar-loan-health-${p.id}`}
+                              >
+                                <div className="h-full rounded-full" style={{ width: `${poolUsagePct}%`, backgroundColor: healthBarColor(poolUsagePct) }} />
+                              </div>
+                              {/* Safe-limit marker. Bar is framed to the PROTOCOL max
+                                  LTV, so the safe 50%-LTV point sits at poolSafeMarkerPct%. */}
+                              {poolSafeMarkerPct != null && (
+                                <div
+                                  className="absolute -top-0.5 -bottom-0.5 w-px bg-foreground/70"
+                                  style={{ left: `${poolSafeMarkerPct}%` }}
+                                  title={`Safe limit (${Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV)`}
+                                  data-testid={`marker-safe-limit-${p.id}`}
+                                />
+                              )}
+                            </div>
+                            {poolSafeMarkerPct != null && (
+                              <div className="flex items-center gap-1 text-[10px] text-muted-foreground" data-testid={`legend-safe-limit-${p.id}`}>
+                                <span className="inline-block h-2.5 w-px bg-foreground/70 shrink-0" />
+                                <span>Safe limit ({Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV)</span>
+                              </div>
+                            )}
+                          </>
                         )}
                       </div>
 

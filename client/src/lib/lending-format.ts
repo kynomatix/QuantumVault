@@ -77,6 +77,29 @@ export const healthBarColor = (usagePct: number): string => {
   return `hsl(${h} ${s}% ${l}%)`;
 };
 
+// Recommended SAFE LTV — MIRRORS the server's BORROW_RISK_POLICY.recommendedMaxLtv
+// (server/vault/borrow-risk-policy.ts). The protocol's own max LTV is higher (the
+// real ceiling, e.g. 75% for INF) and a user MAY borrow up to it; the server only
+// WARNS above this recommended level. The client targets the recommended level for
+// "Available to borrow" / usage-bar / one-tap Max so Max stays SAFE and never
+// OVERSTATES capacity. Users can still type more (up to the protocol max); the
+// server risk gate re-checks and is authoritative. Shared by the borrow dialogs
+// and the live Wallet page so both agree on the exact safe threshold.
+export const RECOMMENDED_MAX_LTV = 0.5;
+
+// Position (0-100) of the SAFE-limit (recommended-LTV) marker along a usage bar
+// that is FRAMED to the protocol/liquidation max LTV. Because the bar's 100% is
+// the PROTOCOL max (e.g. 75% LTV), the safe 50%-LTV point is NOT the visual
+// midpoint — it sits at recommendedLtv / protocolMaxLtv of the way across. Returns
+// null when there's nothing meaningful to mark: the max LTV is unknown, or the
+// protocol max is already at/below the safe level (the marker would sit at/after
+// the bar's end), in which case the whole bar is within the safe zone.
+export function safeLtvMarkerPct(protocolMaxLtv: number | null | undefined): number | null {
+  if (protocolMaxLtv == null || !Number.isFinite(protocolMaxLtv) || protocolMaxLtv <= 0) return null;
+  if (protocolMaxLtv <= RECOMMENDED_MAX_LTV) return null;
+  return (RECOMMENDED_MAX_LTV / protocolMaxLtv) * 100;
+}
+
 // A crash-safe idempotency key for the resumable multi-hop repay flows. Reused
 // verbatim across retries so the server resumes instead of double-spending.
 export function newRequestId(): string {

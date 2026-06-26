@@ -1155,6 +1155,49 @@ export async function executeBorrowMore(params: BorrowMoreParams): Promise<Borro
     }
     await storage.updateBorrowOperation(op.id, { status: "succeeded", step: "borrow_more_confirmed", appendTxSignature: exec.signature });
 
+    // History row (LIABILITY: borrowed USDC adds debt, it is NOT a deposit).
+    //    Mirrors the OPEN path so a "Borrow More" shows up in the feed exactly like
+    //    a first borrow — without this, every borrow via the dialog (which always
+    //    routes through borrow-more) was invisible in Transaction History. Non-fatal:
+    //    the money already moved and the position is persisted, so a history-write
+    //    hiccup must never fail a settled borrow. Excluded from net-deposited so it
+    //    can't inflate PnL.
+    //
+    //    MONEY-SAFETY: the user-visible amount MUST be a REALIZED on-chain figure,
+    //    never the requested estimate. It is verified two ways: the USDC actually
+    //    received (exec.outputReceivedRaw), or — on the recovered path — the real
+    //    debt growth read back from chain (observedDebtRaw - preDebtRaw, which we
+    //    have whenever `after` is non-null). When neither exists (recovered AND the
+    //    position is unreadable, i.e. healthSource "borrow_more_unverified"), record
+    //    NO history row rather than display a fabricated amount; the conservative
+    //    debt is still persisted above and reconcile will surface it.
+    const displayBorrowedRaw: bigint | null = !recovered
+      ? BigInt(exec.outputReceivedRaw!)
+      : after
+        ? (observedDebtRaw > preDebtRaw ? observedDebtRaw - preDebtRaw : null)
+        : null;
+    try {
+      if (displayBorrowedRaw != null && displayBorrowedRaw > 0n) {
+        const borrowedUsd = fromRaw(displayBorrowedRaw, cfg.debtDecimals);
+        if (borrowedUsd > 0) {
+          const collateralAmt = fromRaw(observedColRaw, cfg.collateralDecimals);
+          await storage.createEquityEvent({
+            walletAddress: params.walletAddress,
+            tradingBotId: position!.tradingBotId ?? null,
+            eventType: "borrow",
+            amount: new Decimal(borrowedUsd).toFixed(6),
+            assetType: "USDC",
+            txSignature: exec.signature ?? null,
+            notes: `Borrowed ${new Decimal(borrowedUsd).toFixed(6)} USDC against ${new Decimal(collateralAmt).toFixed(6)} ${cfg.collateralSymbol}`,
+          });
+        }
+      } else {
+        console.warn("[Borrow] borrow-more: borrowed amount unverified (recovered + position unreadable); skipping history row to avoid a fabricated amount", { positionId: position!.id, nftId });
+      }
+    } catch (e) {
+      console.warn("[Borrow] borrow-more: failed to record equity event (non-fatal)", e);
+    }
+
     return {
       success: true,
       signature: exec.signature,
