@@ -48,6 +48,7 @@ import {
   getSessionId,
   toRawBaseUnits,
   fmtUsd,
+  fmtUsd0,
   fmtPct,
 } from '@/lib/lending-format';
 import type { BorrowCollateral, LendingPool, UserToken } from '@/lib/lending-format';
@@ -775,6 +776,26 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
   // Fetch failed and we have nothing to show — honest "couldn't load", not "$0".
   const loansLoadError = borrowPositionsError && pools.length === 0;
 
+  // Borrow CAPACITY at each pool's protocol max LTV (the hard ceiling, e.g. INF
+  // 0.75). null whenever any pool's collateral or maxLtv is unreadable — fail
+  // closed, never fabricate a limit. "Available" is what remains under that cap.
+  const allLimitValued =
+    pools.length === 0 || pools.every((p) => p.collateralUsd != null && p.maxLtv != null);
+  const borrowLimitUsd =
+    pools.length === 0
+      ? (borrowPositionsLoaded ? 0 : null)
+      : allLimitValued
+        ? pools.reduce((a, p) => a + (p.collateralUsd as number) * (p.maxLtv as number), 0)
+        : null;
+  const availableToBorrowUsd =
+    borrowLimitUsd != null && totalBorrowedUsd != null
+      ? Math.max(0, borrowLimitUsd - totalBorrowedUsd)
+      : null;
+  // The per-pool detail block (split bar, health note, loan list) has content
+  // only once we have pools, a load error, or a loaded-but-empty eligible state.
+  const showLendingDetail =
+    pools.length > 0 || loansLoadError || (borrowPositionsLoaded && borrowConfig?.eligible === true);
+
   // Split bar + per-pool avatar colors keyed off collateral USD rank (only when
   // every pool is valued and the basket is non-zero).
   const splitPools =
@@ -976,28 +997,53 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
               Borrowed USDC is money you owe — a liability, not a deposit.
             </p>
 
-            {/* HEADBOARD: fixed-height summary. Per-pool rows stay hidden behind
-                the toggle so page length is constant regardless of loan count. */}
-            <div className="rounded-xl border border-border bg-background/40 p-4 space-y-3">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <p className="text-[11px] text-muted-foreground">Collateral</p>
-                  <p className="text-base font-semibold tabular-nums mt-0.5 text-sky-400" data-testid="text-lending-collateral">
-                    {loansPending ? <Loader2 className="w-4 h-4 animate-spin" /> : fmtUsd(totalCollateralUsd)}
-                  </p>
-                  <p className="text-[11px] text-muted-foreground">
-                    {loansPending ? 'loading' : pools.length === 0 ? 'none locked' : `${pools.length} pool${pools.length > 1 ? 's' : ''}`}
-                  </p>
+            {/* HEADLINE CARDS: three standalone KPI boxes — Total Collateral,
+                Available to Borrow, Borrowed — per the approved canvas design.
+                Available/limit derive from each pool's protocol max LTV; any
+                unreadable pool collapses the figure to an em-dash (fail closed). */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="rounded-xl border border-border bg-background/40 p-4" data-testid="card-total-collateral">
+                <div className="flex items-center gap-1.5 mb-2">
+                  <Coins className="w-3.5 h-3.5 text-sky-400/80" />
+                  <p className="text-[11px] text-muted-foreground">Total Collateral</p>
                 </div>
-                <div>
-                  <p className="text-[11px] text-muted-foreground">Borrowed</p>
-                  <p className="text-base font-semibold tabular-nums mt-0.5 text-accent" data-testid="text-lending-borrowed">
-                    {loansPending ? <Loader2 className="w-4 h-4 animate-spin" /> : fmtUsd(totalBorrowedUsd)}
-                  </p>
-                  <p className="text-[11px] text-muted-foreground">a liability</p>
-                </div>
+                <p className="text-2xl font-semibold tabular-nums leading-none text-sky-400" data-testid="text-lending-collateral">
+                  {loansPending ? <Loader2 className="w-5 h-5 animate-spin" /> : fmtUsd0(totalCollateralUsd)}
+                </p>
+                <p className="text-[11px] text-muted-foreground mt-1.5">
+                  {loansPending ? 'loading' : loansLoadError ? 'couldn\u2019t load' : pools.length === 0 ? 'none supplied' : `${pools.length} asset${pools.length > 1 ? 's' : ''} supplied`}
+                </p>
               </div>
 
+              <div className="rounded-xl border border-border bg-background/40 p-4" data-testid="card-available-to-borrow">
+                <div className="flex items-center gap-1.5 mb-2">
+                  <TrendingUp className="w-3.5 h-3.5 text-primary/80" />
+                  <p className="text-[11px] text-muted-foreground">Available to Borrow</p>
+                </div>
+                <p className="text-2xl font-semibold tabular-nums leading-none text-primary" data-testid="text-lending-available">
+                  {loansPending ? <Loader2 className="w-5 h-5 animate-spin" /> : fmtUsd0(availableToBorrowUsd)}
+                </p>
+                <p className="text-[11px] text-muted-foreground mt-1.5">across all pools</p>
+              </div>
+
+              <div className="rounded-xl border border-border bg-background/40 p-4" data-testid="card-borrowed">
+                <div className="flex items-center gap-1.5 mb-2">
+                  <Landmark className="w-3.5 h-3.5 text-muted-foreground" />
+                  <p className="text-[11px] text-muted-foreground">Borrowed</p>
+                </div>
+                <p className="text-2xl font-semibold tabular-nums leading-none text-foreground" data-testid="text-lending-borrowed">
+                  {loansPending ? <Loader2 className="w-5 h-5 animate-spin" /> : fmtUsd0(totalBorrowedUsd)}
+                </p>
+                <p className="text-[11px] text-muted-foreground mt-1.5">
+                  {borrowLimitUsd != null ? `of ${fmtUsd0(borrowLimitUsd)} limit \u00b7 a liability` : 'a liability'}
+                </p>
+              </div>
+            </div>
+
+            {/* Per-pool detail: supplied-collateral split, loan-health note, and
+                the collapsible loan list. Hidden entirely while still loading. */}
+            {showLendingDetail && (
+            <div className="rounded-xl border border-border bg-background/40 p-4 space-y-3">
               {/* Supplied-collateral split bar — widths from real collateral USD,
                   shown only when every pool is valued and the basket is > 0. */}
               {splitPools.length > 0 && totalCollateralUsd != null && totalCollateralUsd > 0 && (
@@ -1060,6 +1106,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                 )
               )}
             </div>
+            )}
 
             {/* Each open loan = one isolated pool with its own collateral & health.
                 Hidden until the user opens the headboard. */}

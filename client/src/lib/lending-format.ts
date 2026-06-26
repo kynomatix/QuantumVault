@@ -51,6 +51,12 @@ export function rawToDecimalString(raw: string, decimals: number): string {
 export const fmtUsd = (n: number | null | undefined): string =>
   n == null || !Number.isFinite(n) ? '\u2014' : `$${n.toFixed(2)}`;
 
+// Headline variant for big KPI figures: whole dollars, thousands-separated
+// (e.g. $12,745). Same HARD UI RULE as fmtUsd — null/non-finite -> em-dash,
+// never a fabricated 0.
+export const fmtUsd0 = (n: number | null | undefined): string =>
+  n == null || !Number.isFinite(n) ? '\u2014' : `$${Math.round(n).toLocaleString('en-US')}`;
+
 export const fmtPct = (f: number | null | undefined): string =>
   f == null || !Number.isFinite(f) ? '\u2014' : `${(f * 100).toFixed(1)}%`;
 
