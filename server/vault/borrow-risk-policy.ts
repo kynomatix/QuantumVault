@@ -29,8 +29,21 @@ import type { BorrowVaultConfig } from "./jupiter-lend-borrow-route";
 
 /** Owner-ratified enforced thresholds (Decision Wall, 2026-06-24). */
 export const BORROW_RISK_POLICY = {
-  /** Hard, non-overridable max LTV across the launch allowlist (Decision Wall #1). */
-  hardMaxLtv: 0.3,
+  /**
+   * Recommended SAFE max LTV (Decision Wall #1, revised 2026-06-26 — "encourage
+   * safety, not force it"). Borrowing above this is ALLOWED but WARNED; the user
+   * may take the loan all the way to the protocol's own ceiling if they choose
+   * ("their call, not ours"). This supersedes the original 0.30 hard force.
+   */
+  recommendedMaxLtv: 0.5,
+  /**
+   * Absolute platform BACKSTOP max LTV — defence-in-depth against a misreporting
+   * protocol config, NOT the per-asset cap. The real ceiling for each collateral
+   * is the protocol's own collateralFactor (e.g. INF = 0.75 on Jupiter Lend),
+   * applied as effectiveMaxLtv = min(hardMaxLtv, vault.maxLtv). Set well above
+   * any legitimate collateral factor so it only ever catches a garbage read.
+   */
+  hardMaxLtv: 0.9,
   /** Circuit breakers that PAUSE new borrows (Decision Wall #2). Stop + alert; never auto-liquidate. */
   circuitBreakers: {
     /** Pause new borrows when the vault's borrow APR exceeds this (fraction). */
@@ -52,9 +65,9 @@ export const BORROW_RISK_POLICY = {
   alerts: {
     /** Gentle nudge at/below this health factor. */
     healthFactorNudge: 1.6,
-    /** Urgent alert at/below this health factor. Also the floor below which an OPEN/INCREASE is denied. */
+    /** Urgent "danger zone" WARNING at/below this health factor. No longer a hard deny — borrowing toward the protocol ceiling is the user's call (see recommendedMaxLtv). */
     healthFactorUrgent: 1.3,
-    /** Liquidation reference. */
+    /** Liquidation reference — the ONLY hard health floor: an open/increase/withdraw that would land at or below it is denied (fail closed). */
     liquidation: 1.0,
   },
   /** Fee model (Decision Wall #4): a cut of POSITIVE net carry only. */
@@ -348,20 +361,43 @@ export function evaluateBorrowRequest(input: BorrowPolicyInput): BorrowPolicyDec
     });
   }
 
+  // ── Recommended-LTV guidance (encourage, don't force; Decision Wall #1) ───
+  // Above the recommended safe LTV we WARN but still allow, as long as the
+  // request stays within the protocol's own ceiling (effectiveMaxLtv). The user
+  // may borrow up to that ceiling if they choose — "their call, not ours".
+  if (
+    projectedLtv !== null &&
+    projectedLtv > BORROW_RISK_POLICY.recommendedMaxLtv + LTV_EPSILON &&
+    projectedLtv <= effectiveMaxLtv + LTV_EPSILON
+  ) {
+    warn(
+      "above_recommended_ltv",
+      `This borrow takes LTV to ${(projectedLtv * 100).toFixed(1)}%, above the recommended ${(
+        BORROW_RISK_POLICY.recommendedMaxLtv * 100
+      ).toFixed(0)}% safe level. You can proceed, but a smaller drop in ${input.collateralSymbol} could risk liquidation.`,
+      { projectedLtv, recommendedMaxLtv: BORROW_RISK_POLICY.recommendedMaxLtv },
+    );
+  }
+
   // ── Health band (Decision Wall #3) ───────────────────────────────────────
+  // Liquidation itself is the ONLY hard floor (fail closed). The urgent band
+  // WARNS instead of denying — within the protocol ceiling, a thin buffer is the
+  // user's informed choice, not a platform veto.
   if (projectedHealthFactor !== null) {
-    if (projectedHealthFactor < alerts.healthFactorUrgent) {
+    if (projectedHealthFactor <= alerts.liquidation) {
       deny(
-        "health_below_urgent",
-        `This borrow would open the loan in the danger zone (health ${projectedHealthFactor.toFixed(
+        "health_below_liquidation",
+        `This borrow would open the loan at or below the liquidation point (health ${projectedHealthFactor.toFixed(
           2,
-        )}, urgent below ${alerts.healthFactorUrgent}).`,
+        )}). Refusing.`,
         { projectedHealthFactor },
       );
-    } else if (projectedHealthFactor < alerts.healthFactorNudge) {
+    } else if (projectedHealthFactor < alerts.healthFactorUrgent) {
       warn(
-        "health_thin",
-        `Health buffer is thin (${projectedHealthFactor.toFixed(2)}); consider borrowing less.`,
+        "health_below_urgent",
+        `Health would be in the danger zone (${projectedHealthFactor.toFixed(
+          2,
+        )}, urgent below ${alerts.healthFactorUrgent}) — very close to liquidation.`,
         { projectedHealthFactor },
       );
     }
@@ -450,7 +486,10 @@ export interface CollateralWithdrawDecision {
  *   - debt == 0  → no liquidation risk; allow withdrawing ALL collateral.
  *   - debt  > 0  → the oracle must be readable + fresh + not mid-crash; the
  *                  post-withdraw LTV must stay <= min(hardMaxLtv, vault.maxLtv)
- *                  and post-withdraw health must stay above the urgent band.
+ *                  (the protocol's own ceiling) and post-withdraw health must
+ *                  stay strictly above liquidation. LTV above the recommended
+ *                  safe level, or a thin (urgent-band) health buffer, WARNS but
+ *                  is allowed — the protocol ceiling is the user's call.
  */
 export function evaluateCollateralWithdraw(input: CollateralWithdrawInput): CollateralWithdrawDecision {
   const cb = BORROW_RISK_POLICY.circuitBreakers;
@@ -459,6 +498,8 @@ export function evaluateCollateralWithdraw(input: CollateralWithdrawInput): Coll
   const reasons: BorrowPolicyReason[] = [];
   const deny = (code: string, message: string, facts?: Record<string, unknown>) =>
     reasons.push({ code, severity: "deny", message, facts });
+  const warn = (code: string, message: string, facts?: Record<string, unknown>) =>
+    reasons.push({ code, severity: "warn", message, facts });
 
   const finite = (n: number) => typeof n === "number" && Number.isFinite(n);
   const nonNegFinite = (n: number) => finite(n) && n >= 0;
@@ -584,13 +625,29 @@ export function evaluateCollateralWithdraw(input: CollateralWithdrawInput): Coll
         ).toFixed(0)}% cap.`,
         { postLtv, effectiveMaxLtv },
       );
+    } else if (postLtv > BORROW_RISK_POLICY.recommendedMaxLtv + LTV_EPSILON) {
+      warn(
+        "above_recommended_ltv",
+        `This withdrawal takes LTV to ${(postLtv * 100).toFixed(1)}%, above the recommended ${(
+          BORROW_RISK_POLICY.recommendedMaxLtv * 100
+        ).toFixed(0)}% safe level. Allowed, but it raises liquidation risk.`,
+        { postLtv, recommendedMaxLtv: BORROW_RISK_POLICY.recommendedMaxLtv },
+      );
     }
-    if (postHealthFactor < alerts.healthFactorUrgent) {
+    if (postHealthFactor <= alerts.liquidation) {
       deny(
-        "health_below_urgent",
-        `This withdrawal would push the loan into the danger zone (health ${postHealthFactor.toFixed(
+        "health_below_liquidation",
+        `This withdrawal would push the loan to or below the liquidation point (health ${postHealthFactor.toFixed(
           2,
-        )}, urgent below ${alerts.healthFactorUrgent}).`,
+        )}). Refusing.`,
+        { postHealthFactor },
+      );
+    } else if (postHealthFactor < alerts.healthFactorUrgent) {
+      warn(
+        "health_below_urgent",
+        `Health would be in the danger zone (${postHealthFactor.toFixed(
+          2,
+        )}, urgent below ${alerts.healthFactorUrgent}) — very close to liquidation.`,
         { postHealthFactor },
       );
     }

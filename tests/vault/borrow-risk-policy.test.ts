@@ -58,7 +58,8 @@ const denied = (d: ReturnType<typeof evaluateBorrowRequest>) =>
 
 describe("BORROW_RISK_POLICY ratified constants", () => {
   it("encodes the owner's Decision Wall numbers", () => {
-    expect(BORROW_RISK_POLICY.hardMaxLtv).toBe(0.3);
+    expect(BORROW_RISK_POLICY.recommendedMaxLtv).toBe(0.5);
+    expect(BORROW_RISK_POLICY.hardMaxLtv).toBe(0.9);
     expect(BORROW_RISK_POLICY.circuitBreakers.borrowAprCeiling).toBe(0.15);
     expect(BORROW_RISK_POLICY.circuitBreakers.utilizationCeiling).toBe(0.9);
     expect(BORROW_RISK_POLICY.circuitBreakers.aggregateExposureCapUsd).toBe(50_000);
@@ -77,26 +78,34 @@ describe("evaluateBorrowRequest — valid path", () => {
     expect(d.allowed).toBe(true);
     expect(denied(d)).toHaveLength(0);
     expect(d.projectedLtv).toBeCloseTo(0.1012, 3);
-    expect(d.effectiveMaxLtv).toBe(0.3); // min(0.30 hard cap, 0.75 protocol)
+    expect(d.effectiveMaxLtv).toBe(0.75); // min(0.90 backstop, 0.75 protocol) = protocol ceiling
     expect(d.projectedHealthFactor).not.toBeNull();
     expect(d.projectedHealthFactor as number).toBeGreaterThan(BORROW_RISK_POLICY.alerts.healthFactorNudge);
   });
 
-  it("reports a max-additional-debt hint bounded by the 30% cap", () => {
+  it("reports a max-additional-debt hint bounded by the protocol max LTV", () => {
     const d = evaluateBorrowRequest(validInput());
-    // 0.30 * ~$9,886 collateral ≈ $2,965 → ~2.965e9 raw (6 decimals).
+    // 0.75 * ~$9,886 collateral ≈ $7,415 → ~7.415e9 raw (6 decimals).
     const maxUsd = Number(d.maxAllowedAdditionalDebtRaw) / 1e6;
-    expect(maxUsd).toBeCloseTo(0.3 * (d.collateralValueUsd as number), 0);
+    expect(maxUsd).toBeCloseTo(0.75 * (d.collateralValueUsd as number), 0);
   });
 });
 
 describe("evaluateBorrowRequest — hard denies", () => {
-  it("denies the 30% hard cap even though the protocol allows 75%", () => {
-    const d = evaluateBorrowRequest(validInput({ requestedDebtRaw: 3_500_000_000n })); // ~35% LTV
+  it("denies borrowing above the protocol's own max LTV ceiling (75% for INF)", () => {
+    const d = evaluateBorrowRequest(validInput({ requestedDebtRaw: 7_600_000_000n })); // ~77% LTV, over INF's 75%
     expect(d.allowed).toBe(false);
     expect(denied(d)).toContain("exceeds_max_ltv");
     const r = d.reasons.find((x) => x.code === "exceeds_max_ltv");
-    expect(r?.facts?.bound).toBe("platform_hard_cap");
+    expect(r?.facts?.bound).toBe("protocol_max_ltv");
+  });
+
+  it("allows borrowing above the recommended 50% up to the protocol max, with a warning", () => {
+    // ~60% LTV: denied by the old 30% force; now allowed (under INF's 75%) but warned.
+    const d = evaluateBorrowRequest(validInput({ requestedDebtRaw: 5_900_000_000n }));
+    expect(d.allowed).toBe(true);
+    expect(denied(d)).toHaveLength(0);
+    expect(codes(d)).toContain("above_recommended_ltv");
   });
 
   it("denies a non-account scope (MVP is account-only)", () => {
@@ -165,11 +174,30 @@ describe("evaluateBorrowRequest — hard denies", () => {
     );
   });
 
-  it("denies opening a loan already in the urgent health band", () => {
-    // Low liquidation threshold so an allowed (<=30%) LTV still yields thin health.
+  it("warns (no longer denies) opening a loan in the urgent health band, but still denies past the protocol max", () => {
+    // Low liquidation threshold so an allowed (under the protocol max) LTV still yields thin health.
     const lowLiq = { ...baseConfig(), maxLtv: 0.34, liquidationThreshold: 0.35 };
-    const d = evaluateBorrowRequest(validInput({ vault: lowLiq, requestedDebtRaw: 2_900_000_000n }));
-    expect(denied(d)).toContain("health_below_urgent");
+    const warned = evaluateBorrowRequest(validInput({ vault: lowLiq, requestedDebtRaw: 2_900_000_000n }));
+    expect(warned.allowed).toBe(true); // ~29% LTV, health ~1.19 → danger-zone WARNING, not a deny
+    expect(codes(warned)).toContain("health_below_urgent");
+    expect(denied(warned)).not.toContain("health_below_urgent");
+    expect(denied(warned)).not.toContain("exceeds_max_ltv");
+
+    // Pushing past the protocol's own max LTV is still refused (the hard ceiling holds).
+    const blocked = evaluateBorrowRequest(validInput({ vault: lowLiq, requestedDebtRaw: 3_400_000_000n }));
+    expect(blocked.allowed).toBe(false);
+    expect(denied(blocked)).toContain("exceeds_max_ltv");
+  });
+
+  it("denies opening a loan at or below the liquidation health floor (the ONE hard health deny)", () => {
+    // maxLtv 0.6 keeps the request under the protocol ceiling, but a low 0.40
+    // liquidation threshold means ~50% LTV already lands health at or below 1.0.
+    const fragile = { ...baseConfig(), maxLtv: 0.6, liquidationThreshold: 0.4 };
+    const d = evaluateBorrowRequest(validInput({ vault: fragile, requestedDebtRaw: 5_000_000_000n }));
+    expect(d.allowed).toBe(false);
+    expect(d.projectedHealthFactor as number).toBeLessThanOrEqual(BORROW_RISK_POLICY.alerts.liquidation);
+    expect(denied(d)).toContain("health_below_liquidation");
+    // Under the protocol ceiling, so liquidation — not the LTV cap — is the binding floor.
     expect(denied(d)).not.toContain("exceeds_max_ltv");
   });
 });
@@ -235,7 +263,7 @@ describe("evaluateBorrowRequest — input sanity (fail closed, never throws)", (
   });
 
   it("nulls the max-additional-debt hint whenever the request is denied", () => {
-    const d = evaluateBorrowRequest(validInput({ requestedDebtRaw: 3_500_000_000n })); // over 30% cap
+    const d = evaluateBorrowRequest(validInput({ requestedDebtRaw: 7_600_000_000n })); // over the protocol max LTV
     expect(d.allowed).toBe(false);
     expect(d.maxAllowedAdditionalDebtRaw).toBeNull();
   });

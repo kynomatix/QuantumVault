@@ -144,7 +144,10 @@ describe("BORROW_PREVIEW_ASSUMPTIONS are inert, owner-pending, never a money gat
     expect(all.length).toBeGreaterThan(0);
     for (const a of all) {
       expect(a.enforcement).toBe("preview_only_not_money_gate");
-      expect(a.ownerPending).toBe(true);
+      // ownerPending may be false for values the owner has since ratified (e.g.
+      // suggestedSafeLtv now mirrors the ratified recommendedMaxLtv). The
+      // invariant that matters is that NONE of these is ever a money gate.
+      expect(typeof a.ownerPending).toBe("boolean");
       expect(typeof a.value).toBe("number");
       expect(a.note.length).toBeGreaterThan(0);
     }

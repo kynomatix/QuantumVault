@@ -48,14 +48,15 @@ import { isSessionError, showReconnectToast } from '@/lib/reconnect-toast';
 import { SolGasShortfallDialog } from '@/components/SolGasShortfallDialog';
 
 const USDC_DECIMALS = 6;
-// Platform hard LTV cap — MIRRORS the server's BORROW_RISK_POLICY.hardMaxLtv
-// (server/vault/borrow-risk-policy.ts). The protocol may allow a higher max LTV
-// per collateral, but the platform caps the effective max at this value. Used
-// ONLY for a conservative client "Available to borrow" / usage-bar / Max
-// estimate so we never OVERSTATE borrow capacity; the server risk gate re-checks
-// and is authoritative before any borrow. If the two ever drift, keeping this at
-// or below the server value stays in the safe (under-fill) direction.
-const HARD_MAX_LTV = 0.3;
+// Recommended SAFE LTV — MIRRORS the server's BORROW_RISK_POLICY.recommendedMaxLtv
+// (server/vault/borrow-risk-policy.ts). The protocol's own max LTV is higher (the
+// real ceiling, e.g. 75% for INF) and a user MAY borrow up to it; the server only
+// WARNS above this recommended level. The client targets the recommended level for
+// "Available to borrow" / usage-bar / one-tap Max so Max stays SAFE and never
+// OVERSTATES capacity. Users can still type more (up to the protocol max); the
+// server risk gate re-checks and is authoritative. Keeping this at or below the
+// server recommendation stays in the safe (under-fill) direction.
+const RECOMMENDED_MAX_LTV = 0.5;
 const POST_JSON = (body: unknown): RequestInit => ({
   method: 'POST',
   headers: { 'Content-Type': 'application/json', ...walletAuthHeaders() },
@@ -588,7 +589,12 @@ export function BorrowMoreDialog({
   }, [open, pool, cfg, debtAmount, newDebtValid, newDebtRaw]);
 
   const proj = preview?.projection ?? null;
-  const blockReasons = preview && !preview.allowed ? preview.reasons.filter((r) => r.severity !== 'info') : [];
+  // Split strictly by severity. DENY reasons gate the borrow (red callout); WARN
+  // reasons never gate (amber callout) — they encourage caution but the borrow is
+  // still allowed. Filtering by severity (not by `allowed`) ensures a warning can
+  // never land in the red "blocked" box even when a separate deny is also present.
+  const blockReasons = preview ? preview.reasons.filter((r) => r.severity === 'deny') : [];
+  const warnReasons = preview ? preview.reasons.filter((r) => r.severity === 'warn') : [];
   const canBorrow = newDebtValid && !!preview?.allowed && !previewLoading && !submitting;
 
   const handleBorrowMore = async () => {
@@ -624,14 +630,15 @@ export function BorrowMoreDialog({
 
   const symbol = pool?.symbol ?? cfg?.collateralSymbol ?? 'collateral';
 
-  // Truthful borrow-capacity math. The platform caps LTV at HARD_MAX_LTV
-  // regardless of the protocol's higher max, so "Available to borrow", the usage
-  // bar and Max are all computed against the EFFECTIVE cap (never the raw
-  // protocol maxLtv) — overstating capacity would mislead. This is a
-  // conservative DISPLAY estimate (LTV headroom only); the server risk gate
-  // re-checks every borrow and is authoritative. null inputs render as em-dash.
+  // Truthful borrow-capacity math. "Available to borrow", the usage bar and the
+  // one-tap Max all target the RECOMMENDED safe LTV (not the protocol's higher
+  // max), so Max stays safe and never overstates capacity. A user can still type
+  // a larger amount — up to the protocol max — and the server risk gate (which
+  // re-checks every borrow and is authoritative) will allow it with a warning.
+  // This is a conservative DISPLAY estimate (LTV headroom only). null inputs
+  // render as em-dash.
   const protocolMaxLtv = cfg?.maxLtv ?? pool?.maxLtv ?? null;
-  const effMaxLtv = protocolMaxLtv == null ? null : Math.min(HARD_MAX_LTV, protocolMaxLtv);
+  const effMaxLtv = protocolMaxLtv == null ? null : Math.min(RECOMMENDED_MAX_LTV, protocolMaxLtv);
   const collateralValueUsd = pool?.collateralUsd ?? proj?.collateralValueUsd ?? null;
   // A supplied-but-unborrowed pool has zero debt; only a still-loading on-chain
   // read is genuinely unknown (null → fail closed to em-dash, never fabricate).
@@ -713,7 +720,7 @@ export function BorrowMoreDialog({
             </div>
             <p className="text-[11px] text-muted-foreground flex items-start gap-1">
               <Info className="w-3 h-3 mt-0.5 shrink-0" />
-              <span>Max estimates your borrow headroom on this {symbol}. The final check before borrowing may lower it.</span>
+              <span>Max targets a safe {Math.round(RECOMMENDED_MAX_LTV * 100)}% of your {symbol} value. You can borrow more — up to the protocol's limit — but it raises liquidation risk.</span>
             </p>
           </div>
 
@@ -790,6 +797,16 @@ export function BorrowMoreDialog({
             <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 space-y-1">
               {blockReasons.map((r, i) => (
                 <p key={i} className="text-xs text-destructive flex items-start gap-1.5" data-testid={`text-borrow-more-block-${i}`}>
+                  <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" /> {r.message}
+                </p>
+              ))}
+            </div>
+          )}
+
+          {warnReasons.length > 0 && (
+            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 space-y-1" data-testid="callout-borrow-more-warnings">
+              {warnReasons.map((r, i) => (
+                <p key={i} className="text-xs text-amber-600 dark:text-amber-400 flex items-start gap-1.5" data-testid={`text-borrow-more-warn-${i}`}>
                   <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" /> {r.message}
                 </p>
               ))}

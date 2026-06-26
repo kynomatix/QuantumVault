@@ -50,9 +50,9 @@ export interface BorrowPreviewAssumptions {
  */
 export const BORROW_PREVIEW_ASSUMPTIONS: BorrowPreviewAssumptions = {
   suggestedSafeLtv: previewOnly(
-    0.25,
+    0.5,
     false,
-    "25% safe-default LTV hint — deliberately a buffer BELOW the ratified 0.30 hard max-LTV cap in borrow-risk-policy.ts (Decision Wall #1, 2026-06-24). Still a UI hint only; the enforced cap lives in the policy, never here.",
+    "50% recommended safe-default LTV hint — mirrors BORROW_RISK_POLICY.recommendedMaxLtv (Decision Wall #1, revised 2026-06-26: 'encourage safety, not force it'). UI hint only; the enforced ceiling is the protocol's own max LTV, applied in borrow-risk-policy.ts, never here.",
   ),
   borrowAprHintCeiling: previewOnly(
     0.2,
