@@ -9,6 +9,8 @@ import {
   hasSufficientRepayBalance,
   capPositiveCollateralDeposit,
   DEFAULT_DEBT_DUST_RAW,
+  positionScaleDecimals,
+  positionRawToNativeRaw,
 } from "../../server/vault/borrow-engine-core";
 
 describe("borrow-engine-core: plan builders", () => {
@@ -145,5 +147,51 @@ describe("borrow-engine-core: capPositiveCollateralDeposit", () => {
     expect(capPositiveCollateralDeposit(-5n, 100_000_000n)).toBe(0n);
     expect(capPositiveCollateralDeposit(100_000_000n, 1n)).toBe(0n);
     expect(capPositiveCollateralDeposit(100_000_000n, 0n)).toBe(0n);
+  });
+});
+
+describe("borrow-engine-core: SDK position-raw -> native scaling", () => {
+  it("positionScaleDecimals is max(decimals, 9)", () => {
+    expect(positionScaleDecimals(6)).toBe(9); // USDC -> upscaled to 9 dp
+    expect(positionScaleDecimals(9)).toBe(9); // INF -> unchanged
+    expect(positionScaleDecimals(0)).toBe(9);
+    expect(positionScaleDecimals(18)).toBe(18); // >= 9 dp left native
+  });
+
+  it("converts the real bug case: USDC debt 9dp -> native 6dp (the 1000x overstatement)", () => {
+    // The live row that read as ~$1933: 1_933_233_786 at 9 dp is $1.933233786.
+    // CEIL for a liability (never under-report what is owed).
+    expect(positionRawToNativeRaw(1_933_233_786n, 6, "ceil")).toBe(1_933_234n); // $1.933234
+    // FLOOR is the repay cap (never overshoot true debt -> VaultUserDebtTooLow).
+    expect(positionRawToNativeRaw(1_933_233_786n, 6, "floor")).toBe(1_933_233n);
+  });
+
+  it("ceil vs floor differ by at most one native unit", () => {
+    const positionRaw = 2_000_000_001n; // $2.000000001 at 9 dp
+    expect(positionRawToNativeRaw(positionRaw, 6, "ceil")).toBe(2_000_001n);
+    expect(positionRawToNativeRaw(positionRaw, 6, "floor")).toBe(2_000_000n);
+  });
+
+  it("exact multiples ceil == floor (no spurious +1)", () => {
+    expect(positionRawToNativeRaw(2_000_000_000n, 6, "ceil")).toBe(2_000_000n);
+    expect(positionRawToNativeRaw(2_000_000_000n, 6, "floor")).toBe(2_000_000n);
+  });
+
+  it("collateral at >= 9 dp passes through unscaled (divisor 1)", () => {
+    // INF (9 dp): 100_000_000 = 0.1 INF, no scaling either direction.
+    expect(positionRawToNativeRaw(100_000_000n, 9, "floor")).toBe(100_000_000n);
+    expect(positionRawToNativeRaw(100_000_000n, 9, "ceil")).toBe(100_000_000n);
+  });
+
+  it("zero stays zero in both directions", () => {
+    expect(positionRawToNativeRaw(0n, 6, "ceil")).toBe(0n);
+    expect(positionRawToNativeRaw(0n, 6, "floor")).toBe(0n);
+  });
+
+  it("fails closed on invalid decimals or a negative (unreadable) input", () => {
+    expect(() => positionRawToNativeRaw(1n, -1, "floor")).toThrow();
+    expect(() => positionRawToNativeRaw(1n, 19, "floor")).toThrow();
+    expect(() => positionRawToNativeRaw(1n, 6.5, "floor")).toThrow();
+    expect(() => positionRawToNativeRaw(-1n, 6, "floor")).toThrow();
   });
 });

@@ -9346,10 +9346,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             venuePositionId: r.venuePositionId,
             collateralAssetKey: r.collateralAssetKey,
             collateralMint: r.collateralMint,
-            collateralAmountRaw: r.collateralAmountRaw,
+            // Prefer the LIVE on-chain read (native units, the money authority)
+            // over the DB cache for what the client renders, so a stale cached
+            // row can never surface a wrong debt/collateral. Falls back to the
+            // cache when the live read is unavailable (fail soft, DISPLAY only).
+            collateralAmountRaw: liveHealth?.collateralRaw ?? r.collateralAmountRaw,
             debtAssetKey: r.debtAssetKey,
             debtMint: r.debtMint,
-            debtAmountRaw: r.debtAmountRaw,
+            debtAmountRaw: liveHealth?.debtRaw ?? r.debtAmountRaw,
             liveHealth,
             healthIsLive: liveHealth != null,
             healthSnapshot: r.healthSnapshot ?? null,

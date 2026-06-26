@@ -27,6 +27,7 @@
 import { PublicKey } from "@solana/web3.js";
 import { getServerConnection } from "../agent-wallet";
 import { BORROW_PREVIEW_ASSUMPTIONS } from "./borrow-preview-assumptions";
+import { positionRawToNativeRaw } from "./borrow-engine-core";
 
 /** Read-only signer used for on-chain account derivation in simulate/read calls. */
 const READONLY_SIGNER = new PublicKey("11111111111111111111111111111111");
@@ -130,12 +131,22 @@ export interface BorrowSimulation {
   oraclePriceUsd: number | null;
 }
 
-/** Live health of an EXISTING on-chain position. */
+/** Live health of an EXISTING on-chain position. All raw amounts are NATIVE
+ * token units (the SDK's normalized max(decimals,9) scale is converted away at
+ * the read boundary), so the whole engine speaks native consistently. */
 export interface LivePositionHealth {
   vaultId: number;
   positionId: number;
+  /** NATIVE collateral-token raw (FLOORED — never over-reports the asset). */
   collateralRaw: string;
+  /** NATIVE debt-token (USDC) raw (CEIL'd — never under-reports the liability). */
   debtRaw: string;
+  /**
+   * NATIVE debt-token raw, FLOORED — the MOST an exact partial repay may pass so
+   * it can never overshoot the true on-chain debt (VaultUserDebtTooLow). Differs
+   * from `debtRaw` by at most one native unit.
+   */
+  maxRepayNativeRaw: string;
   /** Whether the protocol marks the position as liquidatable. */
   liquidatable: boolean;
   tick: number;
@@ -457,13 +468,21 @@ export class JupiterLendBorrowRoute {
         signer: READONLY_SIGNER,
       });
       if (!finalPos) return null;
+      if (finalPos.colRaw == null || finalPos.debtRaw == null) return null;
+
+      // getFinalPosition is normalized to max(decimals, 9) dp like
+      // getCurrentPosition; convert to NATIVE so this on-chain simulate is
+      // directly comparable to the native-unit `previewBorrow` it cross-checks.
+      // Both FLOORED (an advisory cross-check, not a liability of record).
+      const collateralRaw = positionRawToNativeRaw(BigInt(finalPos.colRaw.toString()), config.collateralDecimals, "floor");
+      const debtRaw = positionRawToNativeRaw(BigInt(finalPos.debtRaw.toString()), config.debtDecimals, "floor");
 
       const oraclePriceUsd = await this.readOraclePriceUsd(collateralMint);
       return {
         vaultId: config.vaultId,
         resultTick: Number(finalPos.tick),
-        collateralRaw: finalPos.colRaw?.toString() ?? "0",
-        debtRaw: finalPos.debtRaw?.toString() ?? "0",
+        collateralRaw: collateralRaw.toString(),
+        debtRaw: debtRaw.toString(),
         oraclePriceUsd,
       };
     } catch {
@@ -498,13 +517,28 @@ export class JupiterLendBorrowRoute {
         connection,
       });
       if (!pos) return null;
+      // Money GATE: an unreadable amount is NOT zero. A `?? "0"` fallback would
+      // under-report the liability (and falsely pass the repay / empty-reuse
+      // gates downstream), so fail CLOSED on a missing colRaw/debtRaw.
+      if (pos.colRaw == null || pos.debtRaw == null) return null;
+
+      // The SDK returns position amounts normalized to max(decimals, 9) dp.
+      // Convert to NATIVE token units ONCE here so the whole engine (display,
+      // health, repay cap, verify, storage) speaks native: collateral FLOORED
+      // (asset), debt CEIL'd (liability), plus a FLOORED debt for the repay cap.
+      const colPositionRaw = BigInt(pos.colRaw.toString());
+      const debtPositionRaw = BigInt(pos.debtRaw.toString());
+      const collateralRaw = positionRawToNativeRaw(colPositionRaw, config.collateralDecimals, "floor");
+      const debtRaw = positionRawToNativeRaw(debtPositionRaw, config.debtDecimals, "ceil");
+      const maxRepayNativeRaw = positionRawToNativeRaw(debtPositionRaw, config.debtDecimals, "floor");
 
       const oraclePriceUsd = await this.readOraclePriceUsd(collateralMint);
       return {
         vaultId: config.vaultId,
         positionId,
-        collateralRaw: pos.colRaw?.toString() ?? "0",
-        debtRaw: pos.debtRaw?.toString() ?? "0",
+        collateralRaw: collateralRaw.toString(),
+        debtRaw: debtRaw.toString(),
+        maxRepayNativeRaw: maxRepayNativeRaw.toString(),
         liquidatable: Boolean(pos.userLiquidationStatus),
         tick: Number(pos.tick),
         oraclePriceUsd,

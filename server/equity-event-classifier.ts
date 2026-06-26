@@ -27,6 +27,8 @@ const INTERNAL_TRANSFER_TYPES = new Set([
   'deposit',                 // Legacy "initial deposit for marketplace subscription" (agent ATA -> bot subaccount)
   'pacifica_withdraw_fee',   // Exchange-side fee on Pacifica withdrawal
   'pacifica_dust_stranded',  // Dust left on exchange after close
+  'borrow',                  // Jupiter Lend: USDC borrowed against collateral (a LIABILITY, not a deposit)
+  'repay',                   // Jupiter Lend: paying down borrowed-USDC debt
 ]);
 
 // Asset-types that are not part of USDC trading P&L (SOL gas tops, etc.).

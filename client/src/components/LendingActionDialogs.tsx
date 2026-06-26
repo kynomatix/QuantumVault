@@ -7,6 +7,7 @@ import {
   Landmark,
   RotateCcw,
   ArrowUpFromLine,
+  ArrowLeftRight,
   Wallet,
   Bot,
   Coins,
@@ -15,6 +16,7 @@ import {
   Lock,
   RefreshCw,
   Fuel,
+  Info,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -46,6 +48,14 @@ import { isSessionError, showReconnectToast } from '@/lib/reconnect-toast';
 import { SolGasShortfallDialog } from '@/components/SolGasShortfallDialog';
 
 const USDC_DECIMALS = 6;
+// Platform hard LTV cap — MIRRORS the server's BORROW_RISK_POLICY.hardMaxLtv
+// (server/vault/borrow-risk-policy.ts). The protocol may allow a higher max LTV
+// per collateral, but the platform caps the effective max at this value. Used
+// ONLY for a conservative client "Available to borrow" / usage-bar / Max
+// estimate so we never OVERSTATE borrow capacity; the server risk gate re-checks
+// and is authoritative before any borrow. If the two ever drift, keeping this at
+// or below the server value stays in the safe (under-fill) direction.
+const HARD_MAX_LTV = 0.3;
 const POST_JSON = (body: unknown): RequestInit => ({
   method: 'POST',
   headers: { 'Content-Type': 'application/json', ...walletAuthHeaders() },
@@ -614,37 +624,131 @@ export function BorrowMoreDialog({
 
   const symbol = pool?.symbol ?? cfg?.collateralSymbol ?? 'collateral';
 
+  // Truthful borrow-capacity math. The platform caps LTV at HARD_MAX_LTV
+  // regardless of the protocol's higher max, so "Available to borrow", the usage
+  // bar and Max are all computed against the EFFECTIVE cap (never the raw
+  // protocol maxLtv) — overstating capacity would mislead. This is a
+  // conservative DISPLAY estimate (LTV headroom only); the server risk gate
+  // re-checks every borrow and is authoritative. null inputs render as em-dash.
+  const protocolMaxLtv = cfg?.maxLtv ?? pool?.maxLtv ?? null;
+  const effMaxLtv = protocolMaxLtv == null ? null : Math.min(HARD_MAX_LTV, protocolMaxLtv);
+  const collateralValueUsd = pool?.collateralUsd ?? proj?.collateralValueUsd ?? null;
+  // A supplied-but-unborrowed pool has zero debt; only a still-loading on-chain
+  // read is genuinely unknown (null → fail closed to em-dash, never fabricate).
+  const currentDebtUsd = pool?.debtUsd ?? (pool && pool.hasLoan === false ? 0 : null);
+  const borrowLimitUsd =
+    collateralValueUsd != null && effMaxLtv != null ? collateralValueUsd * effMaxLtv : null;
+  const availableToBorrowUsd =
+    borrowLimitUsd != null && currentDebtUsd != null ? Math.max(0, borrowLimitUsd - currentDebtUsd) : null;
+  const usagePct =
+    borrowLimitUsd != null && borrowLimitUsd > 0 && currentDebtUsd != null
+      ? Math.min(100, Math.max(0, (currentDebtUsd / borrowLimitUsd) * 100))
+      : 0;
+
+  const setMaxBorrow = () => {
+    if (availableToBorrowUsd == null || !(availableToBorrowUsd > 0)) return;
+    // Floor to the debt's decimals so Max can never round UP past the cap.
+    const factor = 10 ** debtDecimals;
+    const floored = Math.floor(availableToBorrowUsd * factor) / factor;
+    if (!(floored > 0)) {
+      setDebtAmount('');
+      return;
+    }
+    let s = floored.toFixed(debtDecimals);
+    if (s.includes('.')) s = s.replace(/0+$/, '').replace(/\.$/, '');
+    setDebtAmount(s);
+  };
+
+  const maxDisabled = submitting || availableToBorrowUsd == null || !(availableToBorrowUsd > 0);
+
   return (
     <Dialog open={open} onOpenChange={(o) => !submitting && onOpenChange(o)}>
       <DialogContent className="sm:max-w-md" data-testid="dialog-borrow-more">
         <DialogHeader>
-          <DialogTitle>Borrow USDC</DialogTitle>
-          <DialogDescription>Borrow USDC against your {symbol} collateral.</DialogDescription>
+          <DialogTitle>Borrow against {symbol}</DialogTitle>
+          <DialogDescription>
+            Borrow USDC against your {symbol} — it stays supplied as collateral the whole time.
+          </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-200/90">
-            Borrowed USDC is a loan you owe — a liability, not a deposit. If {symbol} falls in value, your collateral can be
-            liquidated.
+          {/* Liability callout — borrowing is a debt, never framed as income. */}
+          <div className="flex items-start gap-2 rounded-lg border border-accent/20 bg-accent/10 p-3">
+            <Info className="w-4 h-4 text-accent mt-0.5 shrink-0" />
+            <p className="text-xs text-muted-foreground">
+              Borrowed USDC is a <span className="text-accent font-medium">liability you owe</span>, not a deposit. Your{' '}
+              {symbol} stays locked while the loan is open and can be liquidated if it falls in value.
+            </p>
           </div>
 
+          {/* Amount + Max (capped at your real borrow headroom). */}
           <div className="space-y-1.5">
-            <label className="text-sm font-medium">Borrow amount (USDC)</label>
-            <Input
-              inputMode="decimal"
-              placeholder="0.00"
-              value={debtAmount}
-              onChange={(e) => setDebtAmount(e.target.value)}
-              disabled={submitting}
-              data-testid="input-borrow-more-amount"
-            />
-            {cfg && (
-              <p className="text-xs text-muted-foreground">
-                Max loan-to-value {fmtPct(cfg.maxLtv)} · Borrow APR {fmtPct(cfg.borrowApr)}
-              </p>
-            )}
+            <div className="flex items-center justify-between text-xs text-muted-foreground">
+              <span>Amount</span>
+              <span data-testid="text-borrow-more-available">Available to borrow {fmtUsd(availableToBorrowUsd)}</span>
+            </div>
+            <div className="relative">
+              <Input
+                inputMode="decimal"
+                placeholder="0.00"
+                value={debtAmount}
+                onChange={(e) => setDebtAmount(e.target.value)}
+                disabled={submitting}
+                className="h-12 pr-24 text-lg font-medium"
+                data-testid="input-borrow-more-amount"
+              />
+              <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                <span className="text-sm font-medium text-muted-foreground">USDC</span>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="h-7 px-2.5 text-xs"
+                  onClick={setMaxBorrow}
+                  disabled={maxDisabled}
+                  data-testid="button-borrow-more-max"
+                >
+                  Max
+                </Button>
+              </div>
+            </div>
+            <p className="text-[11px] text-muted-foreground flex items-start gap-1">
+              <Info className="w-3 h-3 mt-0.5 shrink-0" />
+              <span>Max estimates your borrow headroom on this {symbol}. The final check before borrowing may lower it.</span>
+            </p>
           </div>
 
+          {/* This pool's borrow usage. */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+              <span>Borrow used on {symbol}</span>
+              <span className="tabular-nums" data-testid="text-borrow-more-usage">
+                {fmtUsd(currentDebtUsd)} / {fmtUsd(borrowLimitUsd)} limit
+              </span>
+            </div>
+            <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+              <div className="h-full rounded-full bg-accent" style={{ width: `${usagePct}%` }} />
+            </div>
+          </div>
+
+          {/* Pool facts. */}
+          <div className="rounded-lg border border-border bg-background/40 p-4 space-y-2 text-sm">
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Collateral value</span>
+              <span className="tabular-nums" data-testid="text-borrow-more-collateral-value">{fmtUsd(collateralValueUsd)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Max loan-to-value</span>
+              <span className="tabular-nums" data-testid="text-borrow-more-maxltv">{fmtPct(effMaxLtv)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Borrow APR</span>
+              <span className="tabular-nums" data-testid="text-borrow-more-apr">{fmtPct(cfg?.borrowApr ?? null)}</span>
+            </div>
+          </div>
+
+          {/* Live projection (when an amount is entered) — money-safety detail kept
+              from the original dialog so the user sees the POST-borrow LTV, health
+              and liquidation price before they commit. */}
           {newDebtValid && (
             <div className="rounded-lg border border-border bg-background/40 p-3 space-y-2 text-sm">
               {previewLoading ? (
@@ -653,10 +757,6 @@ export function BorrowMoreDialog({
                 </div>
               ) : proj ? (
                 <>
-                  <div className="flex items-center justify-between">
-                    <span className="text-muted-foreground">Collateral value</span>
-                    <span className="tabular-nums" data-testid="text-borrow-more-collateral-value">{fmtUsd(proj.collateralValueUsd)}</span>
-                  </div>
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground">Projected loan-to-value</span>
                     <span className="tabular-nums" data-testid="text-borrow-more-ltv">
@@ -696,8 +796,14 @@ export function BorrowMoreDialog({
             </div>
           )}
 
+          {/* Network-fee note (same copy as the other lending dialogs). */}
+          <div className="text-xs text-amber-500/80 bg-amber-500/10 rounded-lg p-2.5 flex items-start gap-2">
+            <Fuel className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>You'll need a little SOL in your wallet for the network fee (~0.005 SOL).</span>
+          </div>
+
           <Button
-            className="w-full bg-teal-500 hover:bg-teal-500/90 text-background"
+            className="w-full h-11 bg-gradient-to-r from-accent to-primary text-white hover:opacity-90"
             onClick={handleBorrowMore}
             disabled={!canBorrow}
             data-testid="button-submit-borrow-more"
@@ -895,12 +1001,25 @@ export function WithdrawCollateralDialog({
 // re-POSTs the repay leg — it never re-transfers.
 // ---------------------------------------------------------------------------
 type RepaySource = 'agent' | 'wallet-usdc' | 'deleverage' | 'wallet-token';
+type RepayMode = 'usdc' | 'asset';
 
-const SOURCE_LABELS: Record<RepaySource, { label: string; icon: typeof Bot }> = {
-  agent: { label: 'Trading Agent USDC', icon: Bot },
-  'wallet-usdc': { label: 'Your Wallet USDC', icon: Wallet },
-  deleverage: { label: 'Sell Collateral', icon: Layers },
-  'wallet-token': { label: 'Any SPL Token', icon: Coins },
+// Each repay source belongs to a "mode" = what you pay WITH: USDC you already
+// hold, or an asset that's converted to USDC. This two-level grouping is the
+// owner-approved canvas structure (RepayDialog) — it de-confuses the old flat
+// 4-way picker WITHOUT dropping any money path (all four sources stay, each with
+// its crash-proof resume logic intact).
+const REPAY_SOURCES_BY_MODE: Record<RepayMode, RepaySource[]> = {
+  usdc: ['agent', 'wallet-usdc'],
+  asset: ['deleverage', 'wallet-token'],
+};
+const modeForSource = (s: RepaySource): RepayMode =>
+  s === 'agent' || s === 'wallet-usdc' ? 'usdc' : 'asset';
+
+const SOURCE_LABELS: Record<RepaySource, { label: string; sub: string; icon: typeof Bot }> = {
+  agent: { label: 'From Trading Agent', sub: 'Pay with your trading USDC', icon: Bot },
+  'wallet-usdc': { label: 'From Your Wallet', sub: 'Pay with wallet USDC', icon: Wallet },
+  deleverage: { label: 'Supplied collateral', sub: 'Sell some of your locked collateral', icon: Coins },
+  'wallet-token': { label: 'Your Wallet', sub: 'Swap a wallet token to USDC', icon: Wallet },
 };
 
 // ---------------------------------------------------------------------------
@@ -974,6 +1093,7 @@ export function RepayLoanDialog({
   const { connection } = useConnection();
 
   const [source, setSource] = useState<RepaySource>('agent');
+  const [mode, setMode] = useState<RepayMode>('usdc');
   const [usdcAmount, setUsdcAmount] = useState('');
   const [useMaxAgent, setUseMaxAgent] = useState(false);
   const [collateralAmount, setCollateralAmount] = useState('');
@@ -1022,9 +1142,11 @@ export function RepayLoanDialog({
     setStatusText('');
     setPhase('idle');
     setSource('agent');
+    setMode('usdc');
     const resume = pool ? loadRepayResume(pool.id) : null;
     if (resume) {
       setSource(resume.source);
+      setMode(modeForSource(resume.source));
       reqIdRef.current = resume.clientRequestId;
       if (resume.transferSignature) transferSigRef.current = resume.transferSignature;
       if (resume.collateralRaw) collateralRawRef.current = resume.collateralRaw;
@@ -1087,6 +1209,18 @@ export function RepayLoanDialog({
     if (phase !== 'idle') return;
     if (s === source) return;
     setSource(s);
+    resetFlow();
+  };
+
+  // Switching the pay-with MODE selects that mode's first source. Same
+  // money-safety gate as switchSource: blocked unless fully idle, because
+  // changing the source mid-flight would orphan the in-flight request id +
+  // transfer proof (double-spend risk) instead of resuming via Retry.
+  const switchMode = (m: RepayMode) => {
+    if (phase !== 'idle') return;
+    if (m === mode) return;
+    setMode(m);
+    setSource(REPAY_SOURCES_BY_MODE[m][0]);
     resetFlow();
   };
 
@@ -1400,121 +1534,225 @@ export function RepayLoanDialog({
     return repayFromWalletToken();
   };
 
+  const symbol = pool?.symbol ?? null;
+  const debtStr = fmtUsd(pool?.debtUsd ?? null);
+  const ctaLabel = working
+    ? 'Working…'
+    : needsRetry
+    ? 'Retry'
+    : source === 'deleverage'
+    ? `Repay with ${symbol ?? 'collateral'}`
+    : source === 'wallet-token'
+    ? 'Repay & Convert to USDC'
+    : 'Repay debt';
+  // The user only needs SOL in THEIR wallet when THEY sign a transfer (wallet
+  // USDC / wallet token). Agent USDC and deleverage are signed server-side, so a
+  // "you need SOL" note there would be misleading — gate it to the signed paths.
+  const userSignsTx = source === 'wallet-usdc' || source === 'wallet-token';
+
   return (
     <Dialog open={open} onOpenChange={(o) => !working && onOpenChange(o)}>
       <DialogContent className="sm:max-w-md" data-testid="dialog-repay-loan">
         <DialogHeader>
-          <DialogTitle>Repay Loan</DialogTitle>
+          <DialogTitle>{symbol ? `Repay ${symbol} loan` : 'Repay loan'}</DialogTitle>
           <DialogDescription>
-            You owe <span className="font-medium text-foreground tabular-nums" data-testid="text-repay-outstanding">{fmtUsd(pool?.debtUsd ?? null)}</span>. Choose where to repay from.
+            Pay down the USDC you borrowed{symbol ? ` against ${symbol}` : ''} — from wherever's easiest.
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
+          {/* Outstanding debt — accent (liability); the figure Max caps at. */}
+          <div className="flex items-center justify-between rounded-lg border border-border bg-background/40 px-3 py-2.5 text-sm">
+            <span className="text-muted-foreground">Outstanding debt</span>
+            <span className="font-semibold tabular-nums text-accent" data-testid="text-repay-outstanding">{debtStr}</span>
+          </div>
+
+          {/* Pay-with MODE: USDC you already hold, or an asset converted to USDC. */}
           <div className="grid grid-cols-2 gap-2">
-            {(Object.keys(SOURCE_LABELS) as RepaySource[]).map((s) => {
-              const Icon = SOURCE_LABELS[s].icon;
+            {(['usdc', 'asset'] as RepayMode[]).map((m) => {
+              const active = mode === m;
               return (
                 <button
-                  key={s}
+                  key={m}
                   type="button"
-                  onClick={() => switchSource(s)}
+                  onClick={() => switchMode(m)}
                   disabled={working || needsRetry}
-                  className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm font-medium transition-colors disabled:opacity-50 ${
-                    source === s ? 'border-teal-500 bg-teal-500/10 text-teal-200' : 'border-border'
+                  className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors disabled:opacity-50 ${
+                    active ? 'border-primary/50 bg-primary/10 text-foreground' : 'border-border text-muted-foreground hover:bg-muted/50'
                   }`}
-                  data-testid={`button-repay-source-${s}`}
+                  data-testid={`button-repay-mode-${m}`}
                 >
-                  <Icon className="w-4 h-4 shrink-0" />
-                  <span className="truncate">{SOURCE_LABELS[s].label}</span>
+                  {m === 'usdc' ? 'Pay with USDC' : 'Pay with an asset'}
                 </button>
               );
             })}
           </div>
 
-          {/* #1 Agent USDC */}
+          {/* SOURCE within the chosen mode (two options). */}
+          <div className="space-y-1.5">
+            <span className="text-xs text-muted-foreground">Pay from</span>
+            <div className="flex gap-2">
+              {REPAY_SOURCES_BY_MODE[mode].map((s) => {
+                const active = source === s;
+                const Icon = SOURCE_LABELS[s].icon;
+                return (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => switchSource(s)}
+                    aria-pressed={active}
+                    disabled={working || needsRetry}
+                    className={`flex-1 rounded-lg border px-3 py-2.5 text-left transition-colors disabled:opacity-50 ${
+                      active ? 'border-primary/50 bg-primary/10' : 'border-border bg-background/40 hover:bg-muted/50'
+                    }`}
+                    data-testid={`button-repay-source-${s}`}
+                  >
+                    <div className="flex items-center gap-1.5 text-sm font-medium">
+                      <Icon className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate">{SOURCE_LABELS[s].label}</span>
+                    </div>
+                    <div className="text-[11px] text-muted-foreground mt-0.5 truncate">{SOURCE_LABELS[s].sub}</div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* #1 Agent USDC — single-tx, server-signed. Max sends the 'max'
+              sentinel so the server clears the FULL on-chain debt (never more). */}
           {source === 'agent' && (
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between">
-                <label className="text-sm font-medium">Amount (USDC)</label>
-                <button
-                  type="button"
-                  className="text-xs text-teal-300 hover:text-teal-200"
-                  onClick={() => {
-                    setUseMaxAgent(true);
-                    setUsdcAmount('');
-                  }}
-                  disabled={working}
-                  data-testid="button-repay-agent-max"
-                >
-                  Max (clear all)
-                </button>
+            <>
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>Amount</span>
+                  <span>In trading agent {fmtUsd(agentUsdcBalance)}</span>
+                </div>
+                <div className="relative">
+                  <Input
+                    inputMode="decimal"
+                    placeholder={useMaxAgent ? 'All outstanding debt' : '0.00'}
+                    value={useMaxAgent ? '' : usdcAmount}
+                    onChange={(e) => {
+                      setUseMaxAgent(false);
+                      setUsdcAmount(e.target.value);
+                    }}
+                    disabled={working}
+                    className="h-12 pr-24 text-lg font-medium"
+                    data-testid="input-repay-agent-amount"
+                  />
+                  <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                    <span className="text-sm font-medium text-muted-foreground">USDC</span>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="h-7 px-2.5 text-xs"
+                      onClick={() => {
+                        setUseMaxAgent(true);
+                        setUsdcAmount('');
+                      }}
+                      disabled={working}
+                      data-testid="button-repay-agent-max"
+                    >
+                      Max
+                    </Button>
+                  </div>
+                </div>
+                <p className="text-[11px] text-muted-foreground flex items-start gap-1">
+                  <Info className="w-3 h-3 mt-0.5 shrink-0" />
+                  <span>Max caps at your {debtStr} outstanding debt, never more.</span>
+                </p>
               </div>
-              <Input
-                inputMode="decimal"
-                placeholder={useMaxAgent ? 'All outstanding debt' : '0.00'}
-                value={useMaxAgent ? '' : usdcAmount}
-                onChange={(e) => {
-                  setUseMaxAgent(false);
-                  setUsdcAmount(e.target.value);
-                }}
-                disabled={working}
-                data-testid="input-repay-agent-amount"
-              />
-              <p className="text-xs text-muted-foreground">In trading agent: {fmtUsd(agentUsdcBalance)}</p>
-            </div>
-          )}
-
-          {/* #2 Wallet USDC */}
-          {source === 'wallet-usdc' && (
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between">
-                <label className="text-sm font-medium">Amount (USDC)</label>
-                <button
-                  type="button"
-                  className="text-xs text-teal-300 hover:text-teal-200"
-                  onClick={() => debtUi && setUsdcAmount(debtUi)}
-                  disabled={working || !debtUi}
-                  data-testid="button-repay-wallet-usdc-max"
-                >
-                  Pay off ({fmtUsd(pool?.debtUsd ?? null)})
-                </button>
-              </div>
-              <Input
-                inputMode="decimal"
-                placeholder="0.00"
-                value={usdcAmount}
-                onChange={(e) => setUsdcAmount(e.target.value)}
-                disabled={working || needsRetry}
-                data-testid="input-repay-wallet-usdc-amount"
-              />
-              <p className="text-xs text-muted-foreground">In your wallet: {fmtUsd(walletUsdcBalance)} · you'll approve a transfer to your trading agent first.</p>
-            </div>
-          )}
-
-          {/* #3 Deleverage */}
-          {source === 'deleverage' && (
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">Collateral to sell ({pool?.symbol ?? 'collateral'})</label>
-              <Input
-                inputMode="decimal"
-                placeholder="0.00"
-                value={collateralAmount}
-                onChange={(e) => setCollateralAmount(e.target.value)}
-                disabled={working || needsRetry}
-                data-testid="input-repay-deleverage-amount"
-              />
-              <p className="text-xs text-muted-foreground">
-                Locked: {pool?.collateralLabel ?? '\u2014'} · we sell this collateral for USDC and repay your loan.
+              <p className="text-xs text-muted-foreground flex items-start gap-1.5">
+                <Info className="w-3.5 h-3.5 text-primary mt-0.5 shrink-0" />
+                <span>Paid straight from your trading agent's USDC — your profits clear the debt with no transfer to your wallet first.</span>
               </p>
-            </div>
+            </>
           )}
 
-          {/* #4 Any wallet token */}
+          {/* #2 Wallet USDC — user-signed transfer then repay (resumable). Max
+              fills the corrected outstanding debt (true on-chain debt, T001). */}
+          {source === 'wallet-usdc' && (
+            <>
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>Amount</span>
+                  <span>In your wallet {fmtUsd(walletUsdcBalance)}</span>
+                </div>
+                <div className="relative">
+                  <Input
+                    inputMode="decimal"
+                    placeholder="0.00"
+                    value={usdcAmount}
+                    onChange={(e) => setUsdcAmount(e.target.value)}
+                    disabled={working || needsRetry}
+                    className="h-12 pr-24 text-lg font-medium"
+                    data-testid="input-repay-wallet-usdc-amount"
+                  />
+                  <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                    <span className="text-sm font-medium text-muted-foreground">USDC</span>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="h-7 px-2.5 text-xs"
+                      onClick={() => debtUi && setUsdcAmount(debtUi)}
+                      disabled={working || needsRetry || !debtUi}
+                      data-testid="button-repay-wallet-usdc-max"
+                    >
+                      Max
+                    </Button>
+                  </div>
+                </div>
+                <p className="text-[11px] text-muted-foreground flex items-start gap-1">
+                  <Info className="w-3 h-3 mt-0.5 shrink-0" />
+                  <span>Max caps at your {debtStr} outstanding debt, never more.</span>
+                </p>
+              </div>
+              <p className="text-xs text-muted-foreground flex items-start gap-1.5">
+                <Info className="w-3.5 h-3.5 text-primary mt-0.5 shrink-0" />
+                <span>Paid from the USDC in your connected wallet — you'll approve a transfer to your trading agent first.</span>
+              </p>
+            </>
+          )}
+
+          {/* #3 Deleverage (supplied collateral) — server-signed sell→repay,
+              scoped to THIS pool's one collateral (no multi-asset picker). */}
+          {source === 'deleverage' && (
+            <>
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>Collateral to sell</span>
+                  <span>Locked {pool?.collateralLabel ?? '\u2014'}</span>
+                </div>
+                <div className="relative">
+                  <Input
+                    inputMode="decimal"
+                    placeholder="0.00"
+                    value={collateralAmount}
+                    onChange={(e) => setCollateralAmount(e.target.value)}
+                    disabled={working || needsRetry}
+                    className="h-12 pr-20 text-lg font-medium"
+                    data-testid="input-repay-deleverage-amount"
+                  />
+                  <div className="absolute right-2 top-1/2 -translate-y-1/2">
+                    <span className="text-sm font-medium text-muted-foreground">{symbol ?? 'collateral'}</span>
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-start gap-2 rounded-lg border border-accent/20 bg-accent/10 px-3 py-2.5">
+                <Info className="w-4 h-4 text-accent mt-0.5 shrink-0" />
+                <p className="text-xs text-muted-foreground">
+                  Repaying with supplied collateral <span className="text-foreground font-medium">reduces both your loan and that collateral</span> — we sell it for USDC to clear the debt.
+                </p>
+              </div>
+            </>
+          )}
+
+          {/* #4 Any wallet token — user-signed transfer → Jupiter swap → repay
+              (resumable). Active row uses primary (selection), not teal. */}
           {source === 'wallet-token' && (
             <div className="space-y-3">
               <div className="space-y-1.5">
-                <label className="text-sm font-medium">Token</label>
+                <span className="text-sm font-medium">Pay with which token</span>
                 {tokensLoading ? (
                   <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
                     <Loader2 className="w-4 h-4 animate-spin" /> Loading your tokens…
@@ -1522,7 +1760,7 @@ export function RepayLoanDialog({
                 ) : walletTokens.length === 0 ? (
                   <p className="text-sm text-muted-foreground py-2">No eligible tokens in your wallet.</p>
                 ) : (
-                  <div className="max-h-40 overflow-y-auto rounded-lg border border-border divide-y divide-border">
+                  <div className="max-h-40 overflow-y-auto rounded-lg border border-border divide-y divide-border/60">
                     {walletTokens.map((t) => (
                       <button
                         key={t.mint}
@@ -1532,8 +1770,8 @@ export function RepayLoanDialog({
                           setTokenAmount('');
                         }}
                         disabled={working || needsRetry}
-                        className={`flex w-full items-center gap-2 px-3 py-2 text-left transition-colors disabled:opacity-50 ${
-                          selectedToken?.mint === t.mint ? 'bg-teal-500/10' : ''
+                        className={`flex w-full items-center gap-2 px-3 py-2 text-left transition-colors disabled:opacity-50 hover:bg-muted/50 ${
+                          selectedToken?.mint === t.mint ? 'bg-primary/10' : ''
                         }`}
                         data-testid={`button-repay-token-${t.symbol}`}
                       >
@@ -1551,29 +1789,42 @@ export function RepayLoanDialog({
               </div>
               {selectedToken && (
                 <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <label className="text-sm font-medium">Amount ({selectedToken.symbol})</label>
-                    <button
-                      type="button"
-                      className="text-xs text-teal-300 hover:text-teal-200"
-                      onClick={() => setTokenAmount(rawToDecimalString(selectedToken.amountRaw, selectedToken.decimals))}
-                      disabled={working || needsRetry}
-                      data-testid="button-repay-token-max"
-                    >
-                      Max
-                    </button>
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>Amount</span>
+                    <span>Wallet {selectedToken.amountUi.toLocaleString(undefined, { maximumFractionDigits: 6 })} {selectedToken.symbol}</span>
                   </div>
-                  <Input
-                    inputMode="decimal"
-                    placeholder="0.00"
-                    value={tokenAmount}
-                    onChange={(e) => setTokenAmount(e.target.value)}
-                    disabled={working || needsRetry}
-                    data-testid="input-repay-token-amount"
-                  />
-                  <p className="text-xs text-muted-foreground">We swap this token to USDC and repay your loan.</p>
+                  <div className="relative">
+                    <Input
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={tokenAmount}
+                      onChange={(e) => setTokenAmount(e.target.value)}
+                      disabled={working || needsRetry}
+                      className="h-12 pr-20 text-lg font-medium"
+                      data-testid="input-repay-token-amount"
+                    />
+                    <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                      <span className="text-sm font-medium text-muted-foreground">{selectedToken.symbol}</span>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        className="h-7 px-2.5 text-xs"
+                        onClick={() => setTokenAmount(rawToDecimalString(selectedToken.amountRaw, selectedToken.decimals))}
+                        disabled={working || needsRetry}
+                        data-testid="button-repay-token-max"
+                      >
+                        Max
+                      </Button>
+                    </div>
+                  </div>
                 </div>
               )}
+              <div className="flex items-start gap-2 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2.5">
+                <ArrowLeftRight className="w-4 h-4 text-primary mt-0.5 shrink-0" />
+                <p className="text-xs text-muted-foreground">
+                  Your {selectedToken?.symbol ?? 'token'} is <span className="text-foreground font-medium">swapped to USDC</span> via Jupiter, then used to pay down the loan.
+                </p>
+              </div>
             </div>
           )}
 
@@ -1589,14 +1840,24 @@ export function RepayLoanDialog({
             </div>
           )}
 
+          {/* Gas note only when the USER signs a transfer (wallet sources), and
+              only pre-submit — during a needs_retry the transfer may already be
+              confirmed and the finish is server-side, so the note would mislead. */}
+          {userSignsTx && phase === 'idle' && (
+            <div className="text-xs text-amber-500/80 bg-amber-500/10 rounded-lg p-2.5 flex items-start gap-2">
+              <Fuel className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>You'll need a little SOL in your wallet for the network fee (~0.005 SOL).</span>
+            </div>
+          )}
+
           <Button
-            className="w-full bg-teal-500 hover:bg-teal-500/90 text-background"
+            className="w-full h-11"
             onClick={submit}
             disabled={working}
             data-testid="button-submit-repay"
           >
             {working ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <RotateCcw className="w-4 h-4 mr-2" />}
-            {working ? 'Working…' : needsRetry ? 'Retry' : 'Repay'}
+            {ctaLabel}
           </Button>
         </div>
       </DialogContent>

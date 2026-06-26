@@ -427,6 +427,30 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
     }
     await storage.updateBorrowOperation(op.id, { status: "succeeded", step: "open_confirmed", appendTxSignature: exec.signature });
 
+    // 9) History row (LIABILITY: borrowed USDC adds debt, it is NOT a deposit).
+    //    Non-fatal: the money already moved and the position is persisted, so a
+    //    history-write hiccup must never fail a settled borrow. Excluded from
+    //    net-deposited (equity-events-util) so it can't inflate PnL. Amount is the
+    //    REALIZED on-chain USDC delta; notes carry the collateral so the client
+    //    can render "Borrow USDC Against <SYMBOL>".
+    try {
+      const borrowedUsd = fromRaw(usdcDeltaRaw, cfg.debtDecimals);
+      if (borrowedUsd > 0) {
+        const collateralAmt = fromRaw(observedColRaw, cfg.collateralDecimals);
+        await storage.createEquityEvent({
+          walletAddress: params.walletAddress,
+          tradingBotId,
+          eventType: "borrow",
+          amount: new Decimal(borrowedUsd).toFixed(6),
+          assetType: "USDC",
+          txSignature: exec.signature ?? null,
+          notes: `Borrowed ${new Decimal(borrowedUsd).toFixed(6)} USDC against ${new Decimal(collateralAmt).toFixed(6)} ${cfg.collateralSymbol}`,
+        });
+      }
+    } catch (e) {
+      console.warn("[Borrow] open: failed to record equity event (non-fatal)", e);
+    }
+
     return {
       success: true,
       borrowPositionId: position.id,
@@ -1184,11 +1208,15 @@ export async function executeRepayFromAgentUsdc(params: RepayFromAgentUsdcParams
     if (!live) return { success: false, error: "Could not read the live position; refusing to repay." };
     const preDebtRaw = BigInt(live.debtRaw);
     if (preDebtRaw <= 0n) return { success: false, error: "This position has no debt to repay." };
+    // A partial repay must cap at the FLOORED native debt, never the CEIL'd
+    // `debtRaw`: passing even one native unit over the true on-chain debt reverts
+    // with Jupiter VaultUserDebtTooLow. (Full repay uses the MAX_REPAY sentinel.)
+    const maxRepayRaw = BigInt(live.maxRepayNativeRaw);
 
     // 2) Resolve the repay leg. "max" repays ALL (keep collateral); a partial is
     //    CAPPED at the live debt so we never overpay.
     const isMax = params.amount === "max";
-    const repayRaw = isMax ? preDebtRaw : (params.amount as bigint > preDebtRaw ? preDebtRaw : params.amount as bigint);
+    const repayRaw = isMax ? preDebtRaw : ((params.amount as bigint) > maxRepayRaw ? maxRepayRaw : (params.amount as bigint));
 
     // 3) Strict USDC balance (+ interest buffer). Fail CLOSED if unreadable.
     let usdcBal: bigint;
@@ -1308,6 +1336,41 @@ export async function executeRepayFromAgentUsdc(params: RepayFromAgentUsdcParams
       console.warn("[Borrow] repay CAS lost", { positionId: position!.id });
     }
     await storage.updateBorrowOperation(op.id, { status: "succeeded", step: fullyRepaid ? "repay_full_confirmed" : "repay_confirmed", appendTxSignature: exec.signature });
+
+    // 9) History row (paydown: repay reduces a liability — muted/orange, never
+    //    deposit-green). This is the single emit point for ALL repay sources: the
+    //    multi-hop deleverage/wallet-swap repays all route their final paydown
+    //    through this function. Non-fatal + excluded from net-deposited.
+    //    Amount is the REALIZED debt reduction (preDebt - observedDebt) whenever
+    //    the post-repay re-read succeeds. On a confirmed-but-unreadable repay we
+    //    fall back to the sent amount (the tx is proven on-chain, so it did move;
+    //    the figure is dust-accurate since a partial is capped at the floored true
+    //    debt and a max is the live debt) and the note marks it pending re-read —
+    //    we never SKIP the row, or a real confirmed money movement would vanish
+    //    from the history/tax feed with no path to re-emit it.
+    try {
+      const verified = after != null;
+      const realizedRepaidRaw = verified
+        ? (preDebtRaw - observedDebtRaw > 0n ? preDebtRaw - observedDebtRaw : 0n)
+        : repayRaw;
+      const repaidUsd = fromRaw(realizedRepaidRaw, cfg.debtDecimals);
+      if (repaidUsd > 0) {
+        const amtStr = new Decimal(repaidUsd).toFixed(6);
+        await storage.createEquityEvent({
+          walletAddress: params.walletAddress,
+          tradingBotId: position!.tradingBotId ?? null,
+          eventType: "repay",
+          amount: amtStr,
+          assetType: "USDC",
+          txSignature: exec.signature ?? null,
+          notes: verified
+            ? `Repaid ${amtStr} USDC of ${cfg.collateralSymbol}-backed debt`
+            : `Repaid ~${amtStr} USDC of ${cfg.collateralSymbol}-backed debt (confirmed on-chain; amount pending re-read)`,
+        });
+      }
+    } catch (e) {
+      console.warn("[Borrow] repay: failed to record equity event (non-fatal)", e);
+    }
 
     return {
       success: true,

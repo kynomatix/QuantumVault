@@ -70,6 +70,54 @@ export function withinToleranceBps(observed: bigint, expected: bigint, tolerance
   return absDiff(observed, expected) <= allowed;
 }
 
+/**
+ * SCALING — Jupiter Lend / Fluid normalize on-chain POSITION amounts.
+ *
+ * `getCurrentPosition` / `getFinalPosition` return `colRaw` / `debtRaw`
+ * normalized to max(tokenDecimals, 9) decimals: a mint with fewer than 9
+ * decimals is upscaled by 10^(9 - decimals); a mint with >= 9 decimals is left
+ * at native scale. So USDC (6 dp) comes back at 9 dp — 1e3x its native raw —
+ * while INF (9 dp) comes back unchanged. This is the OPPOSITE of the operate
+ * INPUTS, which are passed at native token decimals and upscaled by the SDK
+ * internally. These pure helpers are the single source of truth for converting a
+ * normalized position-raw back to native token raw, so no call site hardcodes a
+ * 1e3/1e9 factor. SDK-free by design (this file never imports @jup-ag/lend).
+ */
+export function positionScaleDecimals(tokenDecimals: number): number {
+  return Math.max(tokenDecimals, 9);
+}
+
+/** 10^(positionScale - tokenDecimals): divide a position-raw by this for native raw. */
+function positionToNativeDivisor(tokenDecimals: number): bigint {
+  return 10n ** BigInt(positionScaleDecimals(tokenDecimals) - tokenDecimals);
+}
+
+/**
+ * Convert a normalized SDK position-raw to NATIVE token raw with EXPLICIT
+ * rounding (the caller picks the money-safe direction):
+ *   - debt/liability -> "ceil" (never under-report what is owed),
+ *   - collateral/asset and any repay CAP -> "floor" (never over-report an asset,
+ *     and never let an exact partial repay overshoot the true on-chain debt,
+ *     which reverts with Jupiter VaultUserDebtTooLow).
+ * Throws on invalid decimals or a negative input (fail closed; the caller must
+ * never feed an unreadable amount here — convert a `null` read to a null result,
+ * not a fabricated zero).
+ */
+export function positionRawToNativeRaw(
+  positionRaw: bigint,
+  tokenDecimals: number,
+  rounding: "floor" | "ceil",
+): bigint {
+  if (!Number.isInteger(tokenDecimals) || tokenDecimals < 0 || tokenDecimals > 18) {
+    throw new Error(`positionRawToNativeRaw: invalid tokenDecimals ${tokenDecimals}`);
+  }
+  if (positionRaw < 0n) throw new Error("positionRawToNativeRaw: positionRaw must be >= 0");
+  const divisor = positionToNativeDivisor(tokenDecimals);
+  if (divisor === 1n) return positionRaw;
+  if (rounding === "ceil") return (positionRaw + divisor - 1n) / divisor;
+  return positionRaw / divisor;
+}
+
 export interface BorrowOpenRequest {
   /** Collateral to deposit, raw base units of the collateral mint. Must be > 0. */
   collateralRaw: bigint;

@@ -12,6 +12,8 @@ import {
   Coins,
   ChevronDown,
   ChevronUp,
+  Landmark,
+  RotateCcw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
@@ -46,6 +48,14 @@ function parkDestinationFromNotes(eventType: string, notes: string | null): stri
   const unparked = n.match(/^Unparked\s+(.+?)\./i);
   if (unparked) return unparked[1].trim();
   return null;
+}
+
+// Borrow events embed the collateral in `notes` via a fixed server template
+// ("Borrowed X USDC against Y <SYMBOL>"). Pull the symbol so the row can read
+// "Borrow USDC Against INF". Best-effort: returns null if it can't be parsed.
+function borrowCollateralFromNotes(notes: string | null): string | null {
+  const m = (notes ?? '').match(/against\s+[\d.]+\s+(\S+)/i);
+  return m ? m[1].trim() : null;
 }
 
 // How many rows to show before the user expands the full history.
@@ -108,6 +118,18 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
     }
   };
 
+  // Row title. Borrow/repay get explicit liability labels (borrow pulls the
+  // collateral symbol from notes so it reads "Borrow USDC Against INF"); every
+  // other type uses formatEventType.
+  const eventTitle = (event: EquityEvent) => {
+    if (event.eventType === 'borrow') {
+      const sym = borrowCollateralFromNotes(event.notes);
+      return sym ? `Borrow USDC Against ${sym}` : 'Borrow USDC';
+    }
+    if (event.eventType === 'repay') return 'Repay Debt';
+    return formatEventType(event.eventType);
+  };
+
   const getAssetLabel = (assetType: string | undefined | null) => {
     return assetType === 'SOL' ? 'SOL' : 'USDC';
   };
@@ -119,6 +141,15 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
   // park/unpark get their own icons. No fabricated styling — every figure shown
   // below is the real on-chain-recorded amount.
   const flowMeta = (event: EquityEvent) => {
+    // Liability flows get their OWN treatment regardless of cash direction: a
+    // borrow brings cash IN but is debt (sky, NEVER deposit-green); a repay is a
+    // paydown (muted/orange). Matches the approved mockup's MoneyFlows section.
+    if (event.eventType === 'borrow') {
+      return { tone: 'text-sky-400', wrap: 'bg-sky-500/10', Icon: Landmark };
+    }
+    if (event.eventType === 'repay') {
+      return { tone: 'text-orange-500', wrap: 'bg-orange-500/10', Icon: RotateCcw };
+    }
     const positive = isPositive(event.amount);
     const tone = positive ? 'text-chart-4' : 'text-orange-500';
     const wrap = positive ? 'bg-chart-4/10' : 'bg-orange-500/10';
@@ -173,6 +204,11 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
               {visible.map((event) => {
                 const destination = parkDestinationFromNotes(event.eventType, event.notes);
                 const isVaultMove = event.eventType === 'vault_park' || event.eventType === 'vault_unpark';
+                const liabilityNote = event.eventType === 'borrow'
+                  ? 'Loan — adds debt, not a deposit'
+                  : event.eventType === 'repay'
+                    ? 'Debt paydown'
+                    : null;
                 const positive = isPositive(event.amount);
                 const { tone, wrap, Icon } = flowMeta(event);
                 return (
@@ -187,7 +223,7 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
                       </span>
                       <div className="min-w-0">
                         <p className="text-sm font-medium truncate">
-                          {formatEventType(event.eventType)}
+                          {eventTitle(event)}
                           {event.botName && (
                             <span className="text-muted-foreground font-normal"> → {event.botName}</span>
                           )}
@@ -199,13 +235,21 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
                               : 'Destination not recorded'}
                           </p>
                         )}
+                        {liabilityNote && (
+                          <p className="text-[11px] text-muted-foreground" data-testid={`equity-event-note-${event.id}`}>
+                            {liabilityNote}
+                          </p>
+                        )}
                         <p className="text-xs text-muted-foreground">
                           {format(new Date(event.createdAt), 'MMM d, yyyy h:mm a')}
                         </p>
                       </div>
                     </div>
                     <span className={`font-mono text-sm tabular-nums shrink-0 ${tone}`}>
-                      {positive ? '+' : ''}{parseFloat(event.amount).toFixed(event.assetType === 'SOL' ? 4 : 2)} {getAssetLabel(event.assetType)}
+                      {event.eventType === 'repay'
+                        ? `−${Math.abs(parseFloat(event.amount)).toFixed(event.assetType === 'SOL' ? 4 : 2)}`
+                        : `${positive ? '+' : ''}${parseFloat(event.amount).toFixed(event.assetType === 'SOL' ? 4 : 2)}`}{' '}
+                      {getAssetLabel(event.assetType)}
                     </span>
                   </div>
                 );

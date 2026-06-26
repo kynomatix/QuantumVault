@@ -8,9 +8,14 @@
 // net-deposited and make a parked bot's PnL read as a false loss. They MUST be
 // excluded from every net-deposited sum, while still appearing in event history
 // and tax exports.
-// UPDATE THIS SET when adding any new vault-internal (cash<->yield) event type,
-// or it will silently be counted as a deposit.
-export const VAULT_INTERNAL_EVENT_TYPES = new Set<string>(['vault_park', 'vault_unpark']);
+// The same hazard applies to Jupiter Lend borrow/repay: a `borrow` brings USDC
+// INTO the wallet but it is a LIABILITY (not the user's own capital), and a
+// `repay` pays that liability down. Both carry a positive `amount`, so counting
+// either would inflate net-deposited and read as a false PnL swing. They belong
+// in the history feed + tax export but never in the deposit denominator.
+// UPDATE THIS SET when adding any new vault-internal (cash<->yield) or
+// liability (cash<->debt) event type, or it will silently be counted as a deposit.
+export const VAULT_INTERNAL_EVENT_TYPES = new Set<string>(['vault_park', 'vault_unpark', 'borrow', 'repay']);
 
 export function isVaultInternalEvent(eventType: string | null | undefined): boolean {
   return eventType != null && VAULT_INTERNAL_EVENT_TYPES.has(eventType);
