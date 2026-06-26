@@ -9036,7 +9036,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       if (!result || !result.success) {
-        return res.status(400).json({ error: result?.error || "Supply failed" });
+        return res.status(400).json({ error: result?.error || "Supply failed", gasShortfall: result?.gasShortfall });
       }
       res.json(result);
     } catch (error: any) {

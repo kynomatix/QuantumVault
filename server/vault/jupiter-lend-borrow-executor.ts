@@ -675,6 +675,10 @@ export interface SupplyCollateralResult {
   verifyWarning?: string;
   dbWarning?: string;
   error?: string;
+  // Populated when the supply failed purely because the agent wallet couldn't
+  // cover network gas — lets the client offer an inline "top up just the
+  // shortfall" deposit instead of a generic error.
+  gasShortfall?: { requiredLamports: number; heldLamports: number };
 }
 
 export async function executeSupplyCollateral(params: SupplyCollateralParams): Promise<SupplyCollateralResult> {
@@ -777,7 +781,16 @@ export async function executeSupplyCollateral(params: SupplyCollateralParams): P
       label: "Add Collateral",
       extraRentLamports: willMint ? NEW_POSITION_MINT_RENT_LAMPORTS : 0,
     });
-    if (!gas.ok) return { success: false, error: gas.error || "Could not cover the network gas to add collateral." };
+    if (!gas.ok) return {
+      success: false,
+      error: gas.error || "Could not cover the network gas to add collateral.",
+      // Reflect any SOL already raised by a partial server-side gas top-up so the
+      // popup doesn't overstate the remaining shortfall (no extra RPC needed).
+      gasShortfall: {
+        requiredLamports: gas.requiredLamports,
+        heldLamports: gas.payerLamportsBefore + (gas.refilledLamports ?? 0) + (gas.fundedLamports ?? 0),
+      },
+    };
 
     // 4) Pre-read live collateral (0 for a new mint or a reused empty position) —
     //    the supply proof baseline.

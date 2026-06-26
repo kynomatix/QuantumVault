@@ -43,6 +43,7 @@ import {
 } from '@/lib/lending-format';
 import { useWallet } from '@/hooks/useWallet';
 import { isSessionError, showReconnectToast } from '@/lib/reconnect-toast';
+import { SolGasShortfallDialog } from '@/components/SolGasShortfallDialog';
 
 const USDC_DECIMALS = 6;
 const POST_JSON = (body: unknown): RequestInit => ({
@@ -113,6 +114,13 @@ export function SupplyCollateralDialog({
     collateralRaw: string;
     symbol: string;
     amount: string;
+  } | null>(null);
+  // Set when the supply failed purely on SOL gas — drives the inline top-up
+  // popup, with retry rerunning the (already-transferred) lock step.
+  const [gasShortfall, setGasShortfall] = useState<{
+    requiredSol: number;
+    heldSol: number;
+    retry: () => Promise<void>;
   } | null>(null);
 
   const lockedMint = pool?.collateralMint ?? null;
@@ -199,6 +207,17 @@ export function SupplyCollateralDialog({
       const data = await safeResponseJson(res);
       if (!res.ok || !data.success) {
         setPendingSupply({ cfg, collateralRaw: raw, symbol, amount: amountStr });
+        // SOL-gas-only failure: the asset is already locked-ready in the agent,
+        // so offer an inline top-up of just the shortfall, then retry the lock.
+        const gs = data.gasShortfall;
+        if (gs && Number.isFinite(gs.requiredLamports) && Number.isFinite(gs.heldLamports)) {
+          setGasShortfall({
+            requiredSol: gs.requiredLamports / 1e9,
+            heldSol: gs.heldLamports / 1e9,
+            retry: () => runSupply(cfg, raw, symbol, amountStr),
+          });
+          return;
+        }
         if (isSessionError(data.error)) {
           showReconnectToast({
             toast,
@@ -298,6 +317,7 @@ export function SupplyCollateralDialog({
   };
 
   return (
+    <>
     <Dialog open={open} onOpenChange={(o) => !submitting && onOpenChange(o)}>
       <DialogContent className="sm:max-w-md" data-testid="dialog-supply-collateral">
         <DialogHeader>
@@ -468,6 +488,21 @@ export function SupplyCollateralDialog({
         )}
       </DialogContent>
     </Dialog>
+    {gasShortfall && (
+      <SolGasShortfallDialog
+        open={!!gasShortfall}
+        onOpenChange={(o) => { if (!o) setGasShortfall(null); }}
+        requiredSol={gasShortfall.requiredSol}
+        heldSol={gasShortfall.heldSol}
+        reason="to lock your collateral"
+        onDeposited={async () => {
+          const retry = gasShortfall.retry;
+          setGasShortfall(null);
+          await retry();
+        }}
+      />
+    )}
+    </>
   );
 }
 

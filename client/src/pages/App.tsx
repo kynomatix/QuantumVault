@@ -108,6 +108,8 @@ import { CreateBotModal } from '@/components/CreateBotModal';
 import { TradeHistoryModal } from '@/components/TradeHistoryModal';
 import { WalletContent } from '@/pages/WalletManagement';
 import { WelcomePopup } from '@/components/WelcomePopup';
+import { SolGasShortfallDialog } from '@/components/SolGasShortfallDialog';
+import { ToastAction } from '@/components/ui/toast';
 import { PublishBotModal } from '@/components/PublishBotModal';
 import { BotPerformanceBreakdown } from '@/components/BotPerformanceBreakdown';
 import { SubscribeBotModal } from '@/components/SubscribeBotModal';
@@ -266,6 +268,7 @@ export default function AppPage() {
   const [portfolioChartView, setPortfolioChartView] = useState<'dollar' | 'percent'>('dollar');
   const [portfolioChartRange, setPortfolioChartRange] = useState<string>('3m');
   const [welcomePopupOpen, setWelcomePopupOpen] = useState(false);
+  const [gasShortfallOpen, setGasShortfallOpen] = useState(false);
   const [agentPublicKey, setAgentPublicKey] = useState<string | null>(null);
   const welcomeCheckedRef = useRef(false);
   const [welcomeChecked, setWelcomeChecked] = useState(false);
@@ -1194,8 +1197,13 @@ export default function AppPage() {
               // Returning user with low/zero SOL — show a toast, never the new-user welcome popup
               toast({
                 title: data.solBalance === 0 ? 'No SOL for Gas' : 'Low Gas Balance',
-                description: 'Your agent wallet needs SOL for transaction fees. Visit the Wallet tab to deposit more.',
+                description: 'Your agent wallet needs a little SOL for network fees.',
                 duration: 8000,
+                action: (
+                  <ToastAction altText="Add SOL" onClick={() => setGasShortfallOpen(true)}>
+                    Add SOL
+                  </ToastAction>
+                ),
               });
             } else {
               // Genuinely new user who hasn't completed onboarding — show welcome popup
@@ -2219,8 +2227,7 @@ export default function AppPage() {
                         size="sm"
                         onClick={() => {
                           setNotificationDropdownOpen(false);
-                          setWalletInitialTab('gas');
-                          setActiveNav('wallet');
+                          setGasShortfallOpen(true);
                         }}
                         data-testid="button-go-to-wallet"
                       >
@@ -5599,6 +5606,25 @@ export default function AppPage() {
         open={tradeHistoryOpen}
         onOpenChange={setTradeHistoryOpen}
         trades={allTradesData || []}
+      />
+
+      <SolGasShortfallDialog
+        open={gasShortfallOpen}
+        onOpenChange={setGasShortfallOpen}
+        requiredSol={0.035}
+        heldSol={solBalance}
+        reason="to create and manage your bots"
+        onDeposited={async () => {
+          try {
+            const res = await fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders() });
+            if (res.ok) {
+              const data = await safeResponseJson(res);
+              setSolBalance(data.solBalance ?? 0);
+            }
+          } catch {
+            // Keep the previous balance on a transient refresh failure.
+          }
+        }}
       />
 
       {agentPublicKey && (
