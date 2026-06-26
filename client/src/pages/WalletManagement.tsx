@@ -1025,6 +1025,17 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                       ? { label: 'Safe', cls: 'text-emerald-300', Icon: ShieldCheck }
                       : { label: 'Health unavailable', cls: 'text-muted-foreground', Icon: HeartPulse };
                   const dot = poolColor.get(p.id) ?? lendingAssetColor(i);
+                  // Per-pool borrow capacity = collateral value × this asset's max
+                  // borrow LTV. The health bar fill = debt ÷ capacity (how much of
+                  // your borrowing room this pool has used). Both inputs are real
+                  // on-chain figures; if either is unreadable we hide the bar
+                  // (fail closed — never a fabricated fill).
+                  const poolBorrowLimitUsd =
+                    p.collateralUsd != null && p.maxLtv != null ? p.collateralUsd * p.maxLtv : null;
+                  const poolUsagePct =
+                    poolBorrowLimitUsd != null && poolBorrowLimitUsd > 0 && p.debtUsd != null
+                      ? Math.min(100, Math.max(0, (p.debtUsd / poolBorrowLimitUsd) * 100))
+                      : null;
                   return (
                     <div key={p.id} className="rounded-xl border border-border bg-background/40 p-4" data-testid={`card-loan-${p.id}`}>
                       <div className="flex items-center justify-between gap-3">
@@ -1046,14 +1057,32 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                         </div>
                       </div>
 
-                      <div className="mt-3 flex items-center justify-between text-[11px]">
-                        <span className="text-muted-foreground">Outstanding debt</span>
-                        <span className="flex items-center gap-2">
-                          <span className="tabular-nums text-accent" data-testid={`text-loan-debt-${p.id}`}>{fmtUsd(p.debtUsd)} USDC</span>
-                          <span className={`flex items-center gap-1 ${health.cls}`} data-testid={`text-loan-risk-${p.id}`}>
-                            <health.Icon className="w-3.5 h-3.5" />{health.label}
+                      <div className="mt-3 space-y-1.5">
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="text-muted-foreground">Outstanding debt</span>
+                          <span className="flex items-center gap-2">
+                            <span className="tabular-nums text-accent" data-testid={`text-loan-debt-${p.id}`}>
+                              {poolBorrowLimitUsd != null
+                                ? `${fmtUsd(p.debtUsd)} / ${fmtUsd(poolBorrowLimitUsd)}`
+                                : `${fmtUsd(p.debtUsd)} USDC`}
+                            </span>
+                            <span className={`flex items-center gap-1 ${health.cls}`} data-testid={`text-loan-risk-${p.id}`}>
+                              <health.Icon className="w-3.5 h-3.5" />{health.label}
+                            </span>
                           </span>
-                        </span>
+                        </div>
+                        {/* Per-pool health bar — fill = share of this pool's borrow
+                            capacity already used. Real on-chain inputs only; hidden
+                            entirely when the capacity or debt can't be read. */}
+                        {poolUsagePct != null && (
+                          <div
+                            className="h-1.5 w-full rounded-full bg-muted overflow-hidden"
+                            title={`Borrow capacity used: ${Math.round(poolUsagePct)}%`}
+                            data-testid={`bar-loan-health-${p.id}`}
+                          >
+                            <div className="h-full rounded-full bg-accent" style={{ width: `${poolUsagePct}%` }} />
+                          </div>
+                        )}
                       </div>
 
                       <div className="mt-3 flex flex-wrap gap-2">
