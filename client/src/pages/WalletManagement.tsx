@@ -50,6 +50,7 @@ import {
   fmtUsd,
   fmtUsd0,
   fmtPct,
+  healthBarColor,
 } from '@/lib/lending-format';
 import type { BorrowCollateral, LendingPool, UserToken } from '@/lib/lending-format';
 import {
@@ -99,20 +100,9 @@ const LENDING_ASSET_COLORS = [
 ] as const;
 const lendingAssetColor = (i: number): string => LENDING_ASSET_COLORS[i % LENDING_ASSET_COLORS.length];
 
-// Per-pool health-bar fill color. Maps borrow-capacity usage (0-100) onto a
-// smooth sky-blue -> pinkish-purple ramp: a healthy, lightly-borrowed pool reads
-// sky blue; as the pool approaches its borrow limit the fill shifts toward a
-// soft pink-purple. Deliberately NOT red (too aggressive) and the brand blurple
-// never sits at the "bad" end. The ease-in keeps the fill clearly blue while
-// healthy and only ramps to pink-purple as the limit nears.
-const healthBarColor = (usagePct: number): string => {
-  const t = Math.min(1, Math.max(0, usagePct / 100));
-  const e = t * t;
-  const h = Math.round(199 + (300 - 199) * e); // sky 199deg -> pink-purple 300deg
-  const s = Math.round(92 + (88 - 92) * e);
-  const l = Math.round(62 + (66 - 62) * e);
-  return `hsl(${h} ${s}% ${l}%)`;
-};
+// Per-pool health-bar fill color (`healthBarColor`) is shared from
+// '@/lib/lending-format' so the pool-row bar and the borrow dialog's projected
+// bar encode health identically.
 
 // Real token icon resolved from on-chain metadata (Helius DAS), with a graceful
 // fallback: if the mint has no icon OR the metadata image URL is dead, render

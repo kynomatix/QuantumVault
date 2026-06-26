@@ -60,6 +60,23 @@ export const fmtUsd0 = (n: number | null | undefined): string =>
 export const fmtPct = (f: number | null | undefined): string =>
   f == null || !Number.isFinite(f) ? '\u2014' : `${(f * 100).toFixed(1)}%`;
 
+// Health-bar fill color. Maps borrow-capacity usage (0-100, measured against the
+// PROTOCOL/liquidation limit) onto a smooth sky-blue -> pinkish-purple ramp: a
+// healthy, lightly-borrowed pool reads sky blue; as it approaches the limit the
+// fill shifts toward a soft pink-purple. Deliberately NOT red (too aggressive)
+// and the brand blurple never sits at the "bad" end. The ease-in keeps the fill
+// clearly blue while healthy and only ramps to pink-purple as the limit nears.
+// Shared by the pool-row bar (WalletManagement) and the borrow dialog's
+// projected-usage bar so both encode health identically.
+export const healthBarColor = (usagePct: number): string => {
+  const t = Math.min(1, Math.max(0, usagePct / 100));
+  const e = t * t;
+  const h = Math.round(199 + (300 - 199) * e); // sky 199deg -> pink-purple 300deg
+  const s = Math.round(92 + (88 - 92) * e);
+  const l = Math.round(62 + (66 - 62) * e);
+  return `hsl(${h} ${s}% ${l}%)`;
+};
+
 // A crash-safe idempotency key for the resumable multi-hop repay flows. Reused
 // verbatim across retries so the server resumes instead of double-spending.
 export function newRequestId(): string {

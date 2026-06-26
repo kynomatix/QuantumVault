@@ -38,6 +38,7 @@ import {
   newRequestId,
   fmtUsd,
   fmtPct,
+  healthBarColor,
   type BorrowCollateral,
   type BorrowPreviewResult,
   type LendingPool,
@@ -630,13 +631,14 @@ export function BorrowMoreDialog({
 
   const symbol = pool?.symbol ?? cfg?.collateralSymbol ?? 'collateral';
 
-  // Truthful borrow-capacity math. "Available to borrow", the usage bar and the
-  // one-tap Max all target the RECOMMENDED safe LTV (not the protocol's higher
-  // max), so Max stays safe and never overstates capacity. A user can still type
-  // a larger amount — up to the protocol max — and the server risk gate (which
-  // re-checks every borrow and is authoritative) will allow it with a warning.
-  // This is a conservative DISPLAY estimate (LTV headroom only). null inputs
-  // render as em-dash.
+  // Truthful borrow-capacity math. "Available to borrow" and the one-tap Max
+  // both target the RECOMMENDED safe LTV (not the protocol's higher max), so Max
+  // stays safe and never overstates capacity. A user can still type a larger
+  // amount — up to the protocol max — and the server risk gate (which re-checks
+  // every borrow and is authoritative) will allow it with a warning. This is a
+  // conservative DISPLAY estimate (LTV headroom only). null inputs render as
+  // em-dash. (The usage bar below intentionally uses the PROTOCOL max as its
+  // frame so its health color is honest — see the next block.)
   const protocolMaxLtv = cfg?.maxLtv ?? pool?.maxLtv ?? null;
   const effMaxLtv = protocolMaxLtv == null ? null : Math.min(RECOMMENDED_MAX_LTV, protocolMaxLtv);
   const collateralValueUsd = pool?.collateralUsd ?? proj?.collateralValueUsd ?? null;
@@ -647,9 +649,31 @@ export function BorrowMoreDialog({
     collateralValueUsd != null && effMaxLtv != null ? collateralValueUsd * effMaxLtv : null;
   const availableToBorrowUsd =
     borrowLimitUsd != null && currentDebtUsd != null ? Math.max(0, borrowLimitUsd - currentDebtUsd) : null;
-  const usagePct =
-    borrowLimitUsd != null && borrowLimitUsd > 0 && currentDebtUsd != null
-      ? Math.min(100, Math.max(0, (currentDebtUsd / borrowLimitUsd) * 100))
+
+  // PROJECTED health bar. The usage bar is measured against the PROTOCOL max
+  // borrow limit (collateral * protocol max LTV), NOT the recommended safe limit
+  // — that is the only frame in which the bar's COLOR honestly encodes risk (a
+  // full bar = at the protocol borrow ceiling = highest risk / closest to
+  // liquidation). It mirrors the pool-row health bar's frame so both surfaces
+  // read identically, and it matches the "/ {max} max" figure in the projection
+  // section below. As the user types an amount the bar PROJECTS where this pool
+  // will land (current debt + entered USDC, treated 1:1 with USD); an empty/
+  // invalid field falls back to the CURRENT debt. null inputs render as em-dash /
+  // 0-width.
+  const protocolBorrowLimitUsd =
+    collateralValueUsd != null && protocolMaxLtv != null ? collateralValueUsd * protocolMaxLtv : null;
+  // Parse exactly as toRawBaseUnits validates (plain decimal, no grouping
+  // separators), so the bar never projects an amount that cannot be submitted: a
+  // "1,000" entry stays invalid here and falls back to the current debt, matching
+  // the disabled submit/preview.
+  const enteredDebtUsd = (() => {
+    const p = Number(debtAmount);
+    return Number.isFinite(p) && p > 0 ? p : 0;
+  })();
+  const projectedDebtUsd = currentDebtUsd != null ? currentDebtUsd + enteredDebtUsd : null;
+  const healthUsagePct =
+    protocolBorrowLimitUsd != null && protocolBorrowLimitUsd > 0 && projectedDebtUsd != null
+      ? Math.min(100, Math.max(0, (projectedDebtUsd / protocolBorrowLimitUsd) * 100))
       : 0;
 
   const setMaxBorrow = () => {
@@ -724,16 +748,18 @@ export function BorrowMoreDialog({
             </p>
           </div>
 
-          {/* This pool's borrow usage. */}
+          {/* This pool's borrow usage, against the protocol/liquidation limit so
+              the bar's COLOR reads as health. As the user types it PROJECTS where
+              the pool will land; an empty field shows the CURRENT usage. */}
           <div className="space-y-1.5">
             <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-              <span>Borrow used on {symbol}</span>
+              <span>{enteredDebtUsd > 0 ? `Borrow used on ${symbol} after this` : `Borrow used on ${symbol}`}</span>
               <span className="tabular-nums" data-testid="text-borrow-more-usage">
-                {fmtUsd(currentDebtUsd)} / {fmtUsd(borrowLimitUsd)} limit
+                {fmtUsd(projectedDebtUsd)} / {fmtUsd(protocolBorrowLimitUsd)} protocol limit
               </span>
             </div>
             <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-              <div className="h-full rounded-full bg-accent" style={{ width: `${usagePct}%` }} />
+              <div className="h-full rounded-full transition-all duration-200" style={{ width: `${healthUsagePct}%`, backgroundColor: healthBarColor(healthUsagePct) }} />
             </div>
           </div>
 
