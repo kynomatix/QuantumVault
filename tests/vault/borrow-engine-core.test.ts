@@ -8,6 +8,7 @@ import {
   absDiff,
   hasSufficientRepayBalance,
   capPositiveCollateralDeposit,
+  resolveRepaidHistoryRaw,
   DEFAULT_DEBT_DUST_RAW,
   positionScaleDecimals,
   positionRawToNativeRaw,
@@ -147,6 +148,79 @@ describe("borrow-engine-core: capPositiveCollateralDeposit", () => {
     expect(capPositiveCollateralDeposit(-5n, 100_000_000n)).toBe(0n);
     expect(capPositiveCollateralDeposit(100_000_000n, 1n)).toBe(0n);
     expect(capPositiveCollateralDeposit(100_000_000n, 0n)).toBe(0n);
+  });
+});
+
+describe("borrow-engine-core: resolveRepaidHistoryRaw (repay history amount)", () => {
+  // The caller has already PROVEN the repay confirmed on-chain; this only picks the
+  // amount to record. It must ALWAYS yield a positive figure for a real repay so a
+  // confirmed repay never gets skipped from the history/tax feed (the owner's bug).
+
+  it("uses the EXACT observed reduction on a clean verified repay", () => {
+    const r = resolveRepaidHistoryRaw({
+      preDebtRaw: 4_068_061n,
+      observedDebtRaw: 0n,
+      repayRaw: 4_068_061n,
+      cleanVerified: true,
+    });
+    expect(r).toEqual({ realizedRepaidRaw: 4_068_061n, exact: true });
+  });
+
+  it("REGRESSION: a lagging re-read (delta 0) still emits the row, falling back to the sent amount", () => {
+    // The bug: post-repay re-read returned the still-old debt -> observedDelta 0 ->
+    // realized used to be 0 -> the equity-event row was SKIPPED. Now it records the
+    // proven sent amount, marked inexact ("pending re-read").
+    const r = resolveRepaidHistoryRaw({
+      preDebtRaw: 4_068_061n,
+      observedDebtRaw: 4_068_061n, // stale read shows no reduction
+      repayRaw: 4_068_061n, // max repay => sent == live preDebt
+      cleanVerified: false,
+    });
+    expect(r.realizedRepaidRaw).toBe(4_068_061n);
+    expect(r.exact).toBe(false);
+  });
+
+  it("treats an unreadable re-read (caller passes preDebt) like the lagging case", () => {
+    const r = resolveRepaidHistoryRaw({
+      preDebtRaw: 10_000_000n,
+      observedDebtRaw: 10_000_000n,
+      repayRaw: 10_000_000n,
+      cleanVerified: false,
+    });
+    expect(r).toEqual({ realizedRepaidRaw: 10_000_000n, exact: false });
+  });
+
+  it("records a real positive partial reduction, marked inexact when verify missed", () => {
+    const r = resolveRepaidHistoryRaw({
+      preDebtRaw: 10_000_000n,
+      observedDebtRaw: 6_000_000n, // 4 USDC came off
+      repayRaw: 4_000_000n,
+      cleanVerified: false,
+    });
+    expect(r.realizedRepaidRaw).toBe(4_000_000n);
+    expect(r.exact).toBe(false);
+  });
+
+  it("CAPS at the sent amount so a noisy read can never over-report principal", () => {
+    // A pathological read showing MORE reduction than we sent must not over-report.
+    const r = resolveRepaidHistoryRaw({
+      preDebtRaw: 10_000_000n,
+      observedDebtRaw: 1_000_000n, // claims 9 USDC off
+      repayRaw: 4_000_000n, // but we only sent 4
+      cleanVerified: false,
+    });
+    expect(r.realizedRepaidRaw).toBe(4_000_000n);
+  });
+
+  it("never returns a negative figure when the read shows MORE debt than before", () => {
+    const r = resolveRepaidHistoryRaw({
+      preDebtRaw: 4_000_000n,
+      observedDebtRaw: 5_000_000n, // debt read grew (stale/interest) -> delta negative
+      repayRaw: 4_000_000n,
+      cleanVerified: false,
+    });
+    expect(r.realizedRepaidRaw).toBe(4_000_000n);
+    expect(r.exact).toBe(false);
   });
 });
 

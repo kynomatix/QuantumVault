@@ -60,6 +60,7 @@ import {
   verifyWithdrawOutcome,
   hasSufficientRepayBalance,
   capPositiveCollateralDeposit,
+  resolveRepaidHistoryRaw,
   type AmountSpec,
 } from "./borrow-engine-core";
 
@@ -1384,19 +1385,30 @@ export async function executeRepayFromAgentUsdc(params: RepayFromAgentUsdcParams
     //    deposit-green). This is the single emit point for ALL repay sources: the
     //    multi-hop deleverage/wallet-swap repays all route their final paydown
     //    through this function. Non-fatal + excluded from net-deposited.
-    //    Amount is the REALIZED debt reduction (preDebt - observedDebt) whenever
-    //    the post-repay re-read succeeds. On a confirmed-but-unreadable repay we
-    //    fall back to the sent amount (the tx is proven on-chain, so it did move;
-    //    the figure is dust-accurate since a partial is capped at the floored true
-    //    debt and a max is the live debt) and the note marks it pending re-read —
-    //    we never SKIP the row, or a real confirmed money movement would vanish
-    //    from the history/tax feed with no path to re-emit it.
+    //
+    //    The repay is PROVEN on-chain here (confirmed signature, exec.onChainFailed
+    //    is false) — so money DID move; only the AMOUNT can be uncertain. Pick the
+    //    realized figure:
+    //      - EXACT observed reduction (preDebt - observedDebt) ONLY when the re-read
+    //        succeeded AND verified cleanly;
+    //      - else a positive observed reduction is still a real, conservative
+    //        on-chain figure → record it, but CAPPED at the amount we actually sent
+    //        (repayRaw) so a noisy read can NEVER over-report the principal repaid;
+    //      - else (re-read lagged the tx and shows >= the old debt, or unreadable)
+    //        fall back to the sent amount (on-chain-derived: max => live preDebt,
+    //        partial => capped at the floored true debt; dust-accurate).
+    //    We mark the note "pending re-read" whenever the figure is inexact, and we
+    //    ALWAYS emit the row. (A verify-MISS used to compute realized=0 and SKIP the
+    //    row, so a confirmed repay vanished from the history/tax feed — the bug the
+    //    owner saw: repay landed but no "Repay Debt" row appeared.)
+    const { realizedRepaidRaw, exact: trustExact } = resolveRepaidHistoryRaw({
+      preDebtRaw,
+      observedDebtRaw,
+      repayRaw,
+      cleanVerified: after != null && !verifyWarning,
+    });
+    const repaidUsd = fromRaw(realizedRepaidRaw, cfg.debtDecimals);
     try {
-      const verified = after != null;
-      const realizedRepaidRaw = verified
-        ? (preDebtRaw - observedDebtRaw > 0n ? preDebtRaw - observedDebtRaw : 0n)
-        : repayRaw;
-      const repaidUsd = fromRaw(realizedRepaidRaw, cfg.debtDecimals);
       if (repaidUsd > 0) {
         const amtStr = new Decimal(repaidUsd).toFixed(6);
         await storage.createEquityEvent({
@@ -1406,7 +1418,7 @@ export async function executeRepayFromAgentUsdc(params: RepayFromAgentUsdcParams
           amount: amtStr,
           assetType: "USDC",
           txSignature: exec.signature ?? null,
-          notes: verified
+          notes: trustExact
             ? `Repaid ${amtStr} USDC of ${cfg.collateralSymbol}-backed debt`
             : `Repaid ~${amtStr} USDC of ${cfg.collateralSymbol}-backed debt (confirmed on-chain; amount pending re-read)`,
         });
@@ -1418,7 +1430,7 @@ export async function executeRepayFromAgentUsdc(params: RepayFromAgentUsdcParams
     return {
       success: true,
       signature: exec.signature,
-      repaidUsdc: fromRaw(after ? (preDebtRaw - observedDebtRaw > 0n ? preDebtRaw - observedDebtRaw : 0n) : repayRaw, cfg.debtDecimals),
+      repaidUsdc: repaidUsd,
       observedDebtRaw: observedDebtRaw.toString(),
       fullyRepaid,
       verifyWarning,

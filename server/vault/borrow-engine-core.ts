@@ -382,6 +382,46 @@ export function verifyRepayOutcome(f: RepayVerifyFacts): VerifyResult {
   return { ok: true };
 }
 
+export interface RepaidHistoryFacts {
+  /** Live debt read BEFORE the repay (raw, native debt units). */
+  preDebtRaw: bigint;
+  /** Debt read AFTER the repay (raw). On an unreadable re-read the caller passes
+   *  `preDebtRaw` here (observed reduction => 0), which falls through to the sent amount. */
+  observedDebtRaw: bigint;
+  /** Amount actually SENT to repay (raw): max => preDebt, partial => capped at the floored true debt. */
+  repayRaw: bigint;
+  /** True ONLY when the post-repay re-read SUCCEEDED and `verifyRepayOutcome` passed. */
+  cleanVerified: boolean;
+}
+
+export interface RepaidHistory {
+  /** Principal to record in the repay history/tax row (raw). NEVER exceeds `repayRaw`. */
+  realizedRepaidRaw: bigint;
+  /** True => `realizedRepaidRaw` is the EXACT verified on-chain reduction; false => mark "pending re-read". */
+  exact: boolean;
+}
+
+/**
+ * Resolve the principal to record in the repay history row. The caller has ALREADY
+ * proven the repay confirmed on-chain (signature present, not on-chain-failed), so
+ * this only resolves the AMOUNT — it never decides whether money moved:
+ *   - EXACT observed reduction when the re-read succeeded AND verified cleanly;
+ *   - else a positive observed reduction is still a real, conservative on-chain
+ *     figure, CAPPED at the sent amount so a noisy read can never over-report principal;
+ *   - else (re-read lagged the tx -> non-positive delta, or was unreadable -> caller
+ *     passed preDebt so delta is 0) the on-chain-derived sent amount.
+ * ALWAYS yields a positive figure for a real repay, so a confirmed repay never gets
+ * skipped from the history/tax feed. Result is always `<= repayRaw`.
+ */
+export function resolveRepaidHistoryRaw(f: RepaidHistoryFacts): RepaidHistory {
+  const observedDelta = f.preDebtRaw - f.observedDebtRaw;
+  if (observedDelta > 0n) {
+    const capped = observedDelta > f.repayRaw ? f.repayRaw : observedDelta;
+    return { realizedRepaidRaw: capped, exact: f.cleanVerified };
+  }
+  return { realizedRepaidRaw: f.repayRaw, exact: false };
+}
+
 export interface BorrowMoreVerifyFacts {
   preDebtRaw: bigint;
   postDebtRaw: bigint;
