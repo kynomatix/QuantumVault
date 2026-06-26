@@ -1328,6 +1328,18 @@ export function RepayLoanDialog({
   const debtUi = pool?.debtAmountRaw ? rawToDecimalString(pool.debtAmountRaw, USDC_DECIMALS) : null;
   const debtUsd = pool?.debtUsd ?? null;
 
+  // One clean numeric view of the outstanding debt (USD value ≈ USDC owed), used
+  // by both "Max" fills below so they show whole cents instead of the raw 6-dp
+  // on-chain figure (which accrues interest and looks confusing, e.g. 4.068061).
+  // The agent path still sends the 'max' sentinel (server clears the EXACT
+  // on-chain debt), so the rounded display never under/over-pays there.
+  const debtNum =
+    debtUsd != null && Number.isFinite(debtUsd)
+      ? debtUsd
+      : debtUi != null
+      ? Number(debtUi)
+      : null;
+
   // "Max" estimate for the supplied-collateral (deleverage) source: how much of
   // the one locked collateral to sell to clear the debt. CLIENT estimate only —
   // the server LTV-gates the withdraw and caps the repay at true debt.
@@ -1759,8 +1771,8 @@ export function RepayLoanDialog({
                 <div className="relative">
                   <Input
                     inputMode="decimal"
-                    placeholder={useMaxAgent ? 'All outstanding debt' : '0.00'}
-                    value={useMaxAgent ? '' : usdcAmount}
+                    placeholder="0.00"
+                    value={usdcAmount}
                     onChange={(e) => {
                       setUseMaxAgent(false);
                       setUsdcAmount(e.target.value);
@@ -1776,8 +1788,20 @@ export function RepayLoanDialog({
                       variant="secondary"
                       className="h-7 px-2.5 text-xs"
                       onClick={() => {
-                        setUseMaxAgent(true);
-                        setUsdcAmount('');
+                        if (debtNum == null) return;
+                        if (agentUsdcBalance != null && agentUsdcBalance < debtNum) {
+                          // Trading agent can't cover the full debt → repay everything
+                          // it holds, as a clean cents amount (never the 'max' sentinel,
+                          // which would ask the server to clear more than is available).
+                          setUseMaxAgent(false);
+                          setUsdcAmount((Math.floor(agentUsdcBalance * 100) / 100).toFixed(2));
+                        } else {
+                          // Agent covers the debt → show the debt to the cent, but send
+                          // the 'max' sentinel so the server clears the EXACT on-chain
+                          // debt (never more, no leftover dust from rounding).
+                          setUseMaxAgent(true);
+                          setUsdcAmount(debtNum.toFixed(2));
+                        }
                       }}
                       disabled={working}
                       data-testid="button-repay-agent-max"
@@ -1823,8 +1847,25 @@ export function RepayLoanDialog({
                       size="sm"
                       variant="secondary"
                       className="h-7 px-2.5 text-xs"
-                      onClick={() => debtUi && setUsdcAmount(debtUi)}
-                      disabled={working || needsRetry || !debtUi}
+                      onClick={() => {
+                        if (debtNum == null) return;
+                        let amt: number;
+                        if (walletUsdcBalance != null && walletUsdcBalance < debtNum) {
+                          // Wallet is the binding cap → pay everything it holds (floored
+                          // to cents so we never exceed the real balance).
+                          amt = Math.floor(walletUsdcBalance * 100) / 100;
+                        } else {
+                          // Debt is the binding cap → clear it fully (round the cents UP
+                          // so no dust is left; any sub-cent excess lands in the agent,
+                          // still the user's funds). Clamp to the wallet just in case.
+                          amt = Math.ceil(debtNum * 100) / 100;
+                          if (walletUsdcBalance != null && amt > walletUsdcBalance) {
+                            amt = Math.floor(walletUsdcBalance * 100) / 100;
+                          }
+                        }
+                        setUsdcAmount(amt.toFixed(2));
+                      }}
+                      disabled={working || needsRetry || debtNum == null}
                       data-testid="button-repay-wallet-usdc-max"
                     >
                       Max
