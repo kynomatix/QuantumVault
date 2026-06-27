@@ -88,23 +88,32 @@ type Collateral = {
   borrowedUsd: number;
   maxLtv: number; // %
   borrowApr: number; // %
+  // The collateral's OWN staking yield. LSTs (INF, JitoSOL, …) keep earning this
+  // while they back a loan — that is the whole carry advantage over plain SOL,
+  // which earns 0%. null for non-staking collateral (cbBTC, JLP).
+  stakingApy: number | null; // %
   weight: number; // % of basket, for the split bar
   dot: string;
 };
+// MOCKUP DATA — representative CURRENT staking APYs (mid-2026). At graduation,
+// replace these with a live read: Sanctum's APY API (https://extra-api.sanctum.so/v1/apy/latest
+// — covers INF + all Sanctum-routed LSTs) or DeFiLlama Yields
+// (https://yields.llama.fi/pools, filter the LST mints). Both are public + key-free.
+// Non-LST collateral has no staking yield (stakingApy: null).
 const COLLATERAL: Collateral[] = (() => {
   // Rows carry no color of their own — every dot is assigned below from
   // PALETTE.asset (the hierarchy), in supplied-value order, so the split bar
   // always rotates cleanly through the four allowed families.
   const raw: Omit<Collateral, "dot">[] = [
-    { symbol: "INF", name: "Infinity (Sanctum)", supplied: "38.40 INF", suppliedUsd: 4200, borrowedUsd: 1200, maxLtv: 50, borrowApr: 6.2, weight: 28 },
-    { symbol: "JitoSOL", name: "Jito Staked SOL", supplied: "13.10 JitoSOL", suppliedUsd: 2180, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.4, weight: 15 },
-    { symbol: "cbBTC", name: "Coinbase BTC", supplied: "0.018 cbBTC", suppliedUsd: 1150, borrowedUsd: 0, maxLtv: 70, borrowApr: 4.8, weight: 8 },
-    { symbol: "mSOL", name: "Marinade SOL", supplied: "2.52 mSOL", suppliedUsd: 420, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.4, weight: 3 },
-    { symbol: "JLP", name: "Jupiter LP", supplied: "142.0 JLP", suppliedUsd: 690, borrowedUsd: 0, maxLtv: 60, borrowApr: 7.1, weight: 5 },
-    { symbol: "bSOL", name: "BlazeStake SOL", supplied: "9.80 bSOL", suppliedUsd: 1620, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.6, weight: 11 },
-    { symbol: "jupSOL", name: "Jupiter Staked SOL", supplied: "6.40 jupSOL", suppliedUsd: 1080, borrowedUsd: 520, maxLtv: 60, borrowApr: 5.9, weight: 7 },
-    { symbol: "hSOL", name: "Helius Staked SOL", supplied: "5.10 hSOL", suppliedUsd: 845, borrowedUsd: 0, maxLtv: 60, borrowApr: 5.7, weight: 6 },
-    { symbol: "vSOL", name: "The Vault SOL", supplied: "3.30 vSOL", suppliedUsd: 560, borrowedUsd: 0, maxLtv: 60, borrowApr: 6.0, weight: 4 },
+    { symbol: "INF", name: "Infinity (Sanctum)", supplied: "38.40 INF", suppliedUsd: 4200, borrowedUsd: 1200, maxLtv: 50, borrowApr: 6.2, stakingApy: 8.1, weight: 28 },
+    { symbol: "JitoSOL", name: "Jito Staked SOL", supplied: "13.10 JitoSOL", suppliedUsd: 2180, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.4, stakingApy: 7.9, weight: 15 },
+    { symbol: "cbBTC", name: "Coinbase BTC", supplied: "0.018 cbBTC", suppliedUsd: 1150, borrowedUsd: 0, maxLtv: 70, borrowApr: 4.8, stakingApy: null, weight: 8 },
+    { symbol: "mSOL", name: "Marinade SOL", supplied: "2.52 mSOL", suppliedUsd: 420, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.4, stakingApy: 7.2, weight: 3 },
+    { symbol: "JLP", name: "Jupiter LP", supplied: "142.0 JLP", suppliedUsd: 690, borrowedUsd: 0, maxLtv: 60, borrowApr: 7.1, stakingApy: null, weight: 5 },
+    { symbol: "bSOL", name: "BlazeStake SOL", supplied: "9.80 bSOL", suppliedUsd: 1620, borrowedUsd: 0, maxLtv: 65, borrowApr: 5.6, stakingApy: 7.3, weight: 11 },
+    { symbol: "jupSOL", name: "Jupiter Staked SOL", supplied: "6.40 jupSOL", suppliedUsd: 1080, borrowedUsd: 520, maxLtv: 60, borrowApr: 5.9, stakingApy: 7.6, weight: 7 },
+    { symbol: "hSOL", name: "Helius Staked SOL", supplied: "5.10 hSOL", suppliedUsd: 845, borrowedUsd: 0, maxLtv: 60, borrowApr: 5.7, stakingApy: 7.4, weight: 6 },
+    { symbol: "vSOL", name: "The Vault SOL", supplied: "3.30 vSOL", suppliedUsd: 560, borrowedUsd: 0, maxLtv: 60, borrowApr: 6.0, stakingApy: 7.8, weight: 4 },
   ];
   const ranked = [...raw].sort((a, b) => b.suppliedUsd - a.suppliedUsd);
   const colorOf = new Map(ranked.map((c, i) => [c.symbol, assetColor(i)]));
@@ -133,13 +142,15 @@ const SWAP_TOKENS: SwapToken[] = [
 // ── SUPPLY-COLLATERAL tokens (held AS-IS, no swap) ────────────────────────
 // The eligible Jupiter Lend collaterals. Held in the agent wallet as the asset
 // itself - never converted.
-type SupplyToken = { symbol: string; name: string; amount: string; usd: string; maxLtv: number; dot: string };
+// stakingApy mirrors the COLLATERAL source note above (Sanctum / DeFiLlama at
+// graduation). null for non-staking assets (cbBTC, JUP).
+type SupplyToken = { symbol: string; name: string; amount: string; usd: string; maxLtv: number; stakingApy: number | null; dot: string };
 const SUPPLY_TOKENS: SupplyToken[] = ([
-  { symbol: "INF", name: "Infinity (Sanctum)", amount: "12.40", usd: "$1,356.00", maxLtv: 50 },
-  { symbol: "JitoSOL", name: "Jito Staked SOL", amount: "4.02", usd: "$668.90", maxLtv: 65 },
-  { symbol: "cbBTC", name: "Coinbase BTC", amount: "0.006", usd: "$383.40", maxLtv: 70 },
-  { symbol: "mSOL", name: "Marinade SOL", amount: "1.10", usd: "$183.20", maxLtv: 65 },
-  { symbol: "JUP", name: "Jupiter", amount: "820.0", usd: "$402.00", maxLtv: 45 },
+  { symbol: "INF", name: "Infinity (Sanctum)", amount: "12.40", usd: "$1,356.00", maxLtv: 50, stakingApy: 8.1 },
+  { symbol: "JitoSOL", name: "Jito Staked SOL", amount: "4.02", usd: "$668.90", maxLtv: 65, stakingApy: 7.9 },
+  { symbol: "cbBTC", name: "Coinbase BTC", amount: "0.006", usd: "$383.40", maxLtv: 70, stakingApy: null },
+  { symbol: "mSOL", name: "Marinade SOL", amount: "1.10", usd: "$183.20", maxLtv: 65, stakingApy: 7.2 },
+  { symbol: "JUP", name: "Jupiter", amount: "820.0", usd: "$402.00", maxLtv: 45, stakingApy: null },
 ] as Omit<SupplyToken, "dot">[]).map((t, i) => ({ ...t, dot: assetColor(i) }));
 
 // ── Transaction history - liability treatment for borrow/repay ────────────
@@ -368,6 +379,9 @@ function SupplyDialog({ open, onOpenChange, sel, onSel }: { open: boolean; onOpe
               <div className="text-right">
                 <p className="text-sm font-mono">{t.amount}</p>
                 <p className="text-[11px] text-muted-foreground">up to {t.maxLtv}% LTV</p>
+                {t.stakingApy != null && (
+                  <p className="text-[11px] text-emerald-300">earns {t.stakingApy}% staking</p>
+                )}
               </div>
             </button>
           ))}
@@ -383,6 +397,12 @@ function SupplyDialog({ open, onOpenChange, sel, onSel }: { open: boolean; onOpe
             <span>Unlocks borrow up to</span>
             <span className="font-medium text-accent">{token.maxLtv}% of value</span>
           </div>
+          {token.stakingApy != null && (
+            <div className="flex items-center justify-between text-muted-foreground">
+              <span>Keeps earning staking</span>
+              <span className="font-medium text-emerald-300">~{token.stakingApy}% APY</span>
+            </div>
+          )}
         </div>
         <GasFeeNote />
         <Button className="w-full h-11 bg-teal-500 hover:bg-teal-500/90 text-background">Supply {token.symbol} as collateral</Button>
@@ -719,7 +739,25 @@ function BorrowDialog({ open, onOpenChange, sel }: { open: boolean; onOpenChange
           <div className="flex justify-between"><span className="text-muted-foreground">Collateral value</span><span className="tabular-nums">{fmtUsd(col.suppliedUsd)}</span></div>
           <div className="flex justify-between"><span className="text-muted-foreground">Max loan-to-value</span><span className="tabular-nums">{col.maxLtv}%</span></div>
           <div className="flex justify-between"><span className="text-muted-foreground">Borrow APR</span><span className="tabular-nums">{col.borrowApr}%</span></div>
+          {col.stakingApy != null && (
+            <div className="flex justify-between"><span className="text-muted-foreground">Staking APY (you keep earning)</span><span className="tabular-nums text-emerald-300">+{col.stakingApy}%</span></div>
+          )}
         </div>
+
+        {/* Carry framing — the LST keeps earning its staking yield while it backs
+            the loan, which plain SOL never does. Bases differ (yield on full
+            collateral vs APR on the borrowed USDC), so this stays qualitative,
+            never a single misleading "net APY" number. */}
+        {col.stakingApy != null && (
+          <div className="flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2.5">
+            <TrendingUp className="w-4 h-4 text-emerald-300 mt-0.5 shrink-0" />
+            <p className="text-xs text-muted-foreground">
+              Your {col.symbol} keeps earning <span className="text-emerald-300 font-medium">~{col.stakingApy}% staking yield</span> the
+              whole time it backs this loan — offsetting much of the {col.borrowApr}% borrow cost. Plain SOL would earn{" "}
+              <span className="text-foreground font-medium">0%</span>.
+            </p>
+          </div>
+        )}
 
         <GasFeeNote />
         <Button className="w-full h-11 bg-gradient-to-r from-accent to-primary text-white"><Landmark className="w-4 h-4 mr-2" />Borrow USDC</Button>
@@ -920,6 +958,11 @@ function LendingSection() {
                     <div className="min-w-0">
                       <p className="text-sm font-medium leading-tight">{c.symbol}</p>
                       <p className="text-xs text-muted-foreground truncate">{c.supplied}</p>
+                      {c.stakingApy != null && (
+                        <p className="text-[11px] text-emerald-300 flex items-center gap-1">
+                          <TrendingUp className="w-3 h-3 shrink-0" /> Earns {c.stakingApy}% staking
+                        </p>
+                      )}
                     </div>
                   </div>
                   <div className="text-right shrink-0">
