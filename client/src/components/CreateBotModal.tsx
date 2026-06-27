@@ -111,6 +111,8 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [agentBalance, setAgentBalance] = useState<string | null>(null);
   const [agentSolBalance, setAgentSolBalance] = useState<number | null>(null);
+  // Task 216: account-scope Vault value that Create can auto-unpark to fund the bot.
+  const [vaultValue, setVaultValue] = useState<number | null>(null);
   const [solRequirement, setSolRequirement] = useState<{
     required: number;
     current: number;
@@ -202,13 +204,29 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   // USDC capital top-up: mirror SubscribeBotModal so entering more than the
   // agent wallet has surfaces a one-click deposit instead of a hard-block toast.
   const availableUsdcBalance = agentBalance !== null ? parseFloat(agentBalance) : null;
-  const usdcDeficit = investmentValue > 0 && availableUsdcBalance !== null
-    ? Math.max(0, investmentValue - availableUsdcBalance)
+  // Task 216: a new bot can be funded from loose wallet USDC AND account-scope Vault
+  // value (auto-unparked on Create). "Available to fund" is the sum; the deposit
+  // prompt only appears when even that combined total can't cover the bot.
+  const vaultUsdcValue = vaultValue ?? 0;
+  const availableToFund = availableUsdcBalance !== null ? availableUsdcBalance + vaultUsdcValue : null;
+  const usdcDeficit = investmentValue > 0 && availableToFund !== null
+    ? Math.max(0, investmentValue - availableToFund)
     : 0;
   // Same guards as Subscribe Bot: only prompt when deficit >= $0.01 AND user
   // entered at least the $10 minimum, so floating-point dust never triggers a
   // "$0.00" warning.
   const needsUsdcDeposit = usdcDeficit >= 0.01 && investmentValue >= 10;
+  // When wallet USDC alone can't cover the bot but the Vault makes up the rest, show
+  // the split BEFORE Create so the user sees that creating it would tap their carry
+  // trade. fundFromVault is what the all-out unpark will mobilize toward this bot.
+  const willTapVault =
+    investmentValue > 0 &&
+    availableUsdcBalance !== null &&
+    availableUsdcBalance < investmentValue &&
+    vaultUsdcValue > 0 &&
+    !needsUsdcDeposit;
+  const fundFromWallet = availableUsdcBalance !== null ? Math.min(investmentValue, availableUsdcBalance) : 0;
+  const fundFromVault = Math.max(0, investmentValue - fundFromWallet);
 
   // Per-exchange minimum funding. Pacifica enforces a $10 floor server-side; below
   // that the atomic provision throws a raw 500. Block the Create button (and show a
@@ -233,13 +251,14 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
     const reqId = ++balanceRequestId.current;
     setIsLoadingBalance(true);
     try {
-      const res = await fetch(`/api/agent/balance?wallet=${walletAddress}&protocol=${newBot.activeProtocol}`, { credentials: 'include' });
+      const res = await fetch(`/api/agent/balance?wallet=${walletAddress}&protocol=${newBot.activeProtocol}&includeVault=1`, { credentials: 'include' });
       if (reqId !== balanceRequestId.current) return; // superseded by a newer request
       if (res.ok) {
         const data = await safeResponseJson(res);
         if (reqId !== balanceRequestId.current) return;
         setAgentBalance(data.balance?.toString() || '0');
         setAgentSolBalance(data.solBalance ?? null);
+        setVaultValue(typeof data.vaultValueUsdc === 'number' ? data.vaultValueUsdc : 0);
         if (data.botCreationSolRequirement) {
           setSolRequirement(data.botCreationSolRequirement);
         }
@@ -262,6 +281,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
     setCopiedField(null);
     setAgentBalance(null);
     setAgentSolBalance(null);
+    setVaultValue(null);
     setSolRequirement(null);
     setUserWebhookUrl(null);
     setInfoOpen(false);
@@ -573,11 +593,13 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
                 Insufficient USDC for Capital
               </p>
               <p className="text-xs text-muted-foreground">
-                This bot needs ${investmentValue.toFixed(2)} USDC.
-                Your agent wallet has ${(availableUsdcBalance ?? 0).toFixed(2)} USDC.
+                This bot needs ${investmentValue.toFixed(2)} USDC. You have ${(availableToFund ?? 0).toFixed(2)} available
+                {vaultUsdcValue > 0 && (
+                  <> (${(availableUsdcBalance ?? 0).toFixed(2)} wallet + ${vaultUsdcValue.toFixed(2)} Vault)</>
+                )}.
               </p>
               <p className="text-xs text-yellow-400/80" data-testid="text-usdc-deficit-create-bot">
-                Please deposit at least <span className="font-semibold">${usdcDeficit.toFixed(2)} USDC</span> to your agent wallet.
+                Please deposit at least <span className="font-semibold">${usdcDeficit.toFixed(2)} USDC</span> more to your agent wallet.
               </p>
             </div>
           </div>
@@ -813,12 +835,29 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
           <p className="text-xs text-muted-foreground">
             {isLoadingBalance ? (
               'Loading balance...'
-            ) : agentBalance && parseFloat(agentBalance) > 0 ? (
-              <>Available in agent wallet: <span className="font-medium">${parseFloat(agentBalance).toFixed(2)}</span></>
+            ) : (availableToFund ?? 0) > 0 ? (
+              <>
+                Available to fund: <span className="font-medium" data-testid="text-available-to-fund">${(availableToFund ?? 0).toFixed(2)}</span>
+                {vaultUsdcValue > 0 && (
+                  <span className="text-muted-foreground"> (${(availableUsdcBalance ?? 0).toFixed(2)} wallet + ${vaultUsdcValue.toFixed(2)} Vault, est.)</span>
+                )}
+              </>
             ) : (
-              <span className="text-yellow-600">No USDC in agent wallet. Fund it from Wallet Management first.</span>
+              <span className="text-yellow-600">No USDC available. Fund your agent wallet from Wallet Management first.</span>
             )}
           </p>
+          {willTapVault && (
+            <div
+              className="flex items-start gap-2 p-2 rounded-lg bg-primary/10 border border-primary/20 text-xs"
+              data-testid="note-vault-funding-split"
+            >
+              <Info className="w-3.5 h-3.5 text-primary mt-0.5 flex-shrink-0" />
+              <span className="text-muted-foreground">
+                Funded with <span className="font-medium text-foreground">${fundFromWallet.toFixed(2)}</span> from your wallet
+                and <span className="font-medium text-foreground">${fundFromVault.toFixed(2)}</span> unparked from your Vault.
+              </span>
+            </div>
+          )}
           {belowMinimum && (
             <div
               className="flex items-start gap-2 p-2 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-xs"

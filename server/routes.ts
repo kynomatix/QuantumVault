@@ -1762,8 +1762,16 @@ async function autoUnparkAccountVaultForUsdc(args: {
   agentSecretKey: Uint8Array;
   neededUsdc: number;
   logPrefix: string;
+  /**
+   * All-in/all-out mode (bot creation): unpark the FULL on-chain balance of every
+   * routable account-scope position, not just enough to cover `neededUsdc`. Parking
+   * is all-in/all-out, so funding a new bot from the Vault empties it and leaves any
+   * remainder as loose wallet USDC. When false (default), unparks just enough to
+   * cover `neededUsdc` (the live-trade water top-up behavior).
+   */
+  all?: boolean;
 }): Promise<number> {
-  const { walletAddress, agentPublicKey, agentSecretKey, neededUsdc, logPrefix } = args;
+  const { walletAddress, agentPublicKey, agentSecretKey, neededUsdc, logPrefix, all } = args;
   if (!(neededUsdc > 0)) return 0;
   try {
     const views = await getVaultPositionViews(walletAddress, agentPublicKey, null);
@@ -1786,25 +1794,41 @@ async function autoUnparkAccountVaultForUsdc(args: {
     let remaining = neededUsdc;
     let realizedTotal = 0;
     for (const v of routable) {
-      if (remaining <= 0) break;
-      const pricePerToken = v.currentValueUsdc! / v.onChainAmount; // USDC per token
-      if (!(pricePerToken > 0)) continue;
-      let tokenAmount = (remaining * BUFFER) / pricePerToken;
-      if (!(tokenAmount > 0)) continue;
-      if (tokenAmount > v.onChainAmount) tokenAmount = v.onChainAmount; // cap to held
-      const res = await unparkToUsdc({
-        walletAddress,
-        tradingBotId: null, // account scope: agent is its own gas funder
-        agentPublicKey,
-        agentSecretKey,
-        assetKey: v.assetKey,
-        amountToken: tokenAmount,
-      });
+      // All-out mode keeps going until every position is drained; just-enough mode
+      // stops as soon as the shortfall is covered.
+      if (!all && remaining <= 0) break;
+      let res;
+      if (all) {
+        // Sell the FULL on-chain balance of this asset (all-out). unparkToUsdc reads
+        // the live on-chain balance itself, so this can never sell more than is held.
+        res = await unparkToUsdc({
+          walletAddress,
+          tradingBotId: null, // account scope: agent is its own gas funder
+          agentPublicKey,
+          agentSecretKey,
+          assetKey: v.assetKey,
+          all: true,
+        });
+      } else {
+        const pricePerToken = v.currentValueUsdc! / v.onChainAmount; // USDC per token
+        if (!(pricePerToken > 0)) continue;
+        let tokenAmount = (remaining * BUFFER) / pricePerToken;
+        if (!(tokenAmount > 0)) continue;
+        if (tokenAmount > v.onChainAmount) tokenAmount = v.onChainAmount; // cap to held
+        res = await unparkToUsdc({
+          walletAddress,
+          tradingBotId: null, // account scope: agent is its own gas funder
+          agentPublicKey,
+          agentSecretKey,
+          assetKey: v.assetKey,
+          amountToken: tokenAmount,
+        });
+      }
       if (res.success && res.usdcReceived && res.usdcReceived > 0) {
         realizedTotal += res.usdcReceived;
         remaining -= res.usdcReceived;
         console.log(
-          `${logPrefix} Vault auto-unpark: ${tokenAmount.toFixed(6)} ${v.assetKey} → $${res.usdcReceived.toFixed(2)} (need $${neededUsdc.toFixed(2)}, still short $${Math.max(0, remaining).toFixed(2)})`,
+          `${logPrefix} Vault auto-unpark${all ? ' (all-out)' : ''}: ${v.assetKey} → $${res.usdcReceived.toFixed(2)} (need $${neededUsdc.toFixed(2)}, still short $${Math.max(0, remaining).toFixed(2)})`,
         );
       } else {
         console.log(`${logPrefix} Vault auto-unpark of ${v.assetKey} failed: ${res.error || 'no USDC received'}`);
@@ -1813,6 +1837,39 @@ async function autoUnparkAccountVaultForUsdc(args: {
     return realizedTotal;
   } catch (e: any) {
     console.log(`${logPrefix} Vault auto-unpark error: ${e.message}`);
+    return 0;
+  }
+}
+
+/**
+ * Read-only: the total USDC value of ACCOUNT-scope parked Vault positions that the
+ * create flow can actually mobilize (the same routable filter as
+ * autoUnparkAccountVaultForUsdc, so what the UI shows == what a create will unpark).
+ *
+ * Fail-closed for "available to fund": this only ever UNDERSTATES. It excludes any
+ * held-but-unpriceable position and returns 0 on any error, so the Create-Bot screen
+ * can never claim more fundable Vault value than really exists.
+ */
+async function accountVaultRoutableValueUsdc(
+  walletAddress: string,
+  agentPublicKey: string,
+): Promise<number> {
+  try {
+    const views = await getVaultPositionViews(walletAddress, agentPublicKey, null);
+    let total = 0;
+    for (const v of views) {
+      if (
+        v.onChainAmount > 0 &&
+        v.currentValueUsdc != null &&
+        v.currentValueUsdc > 0 &&
+        getYieldAssetByKey(v.assetKey) != null
+      ) {
+        total += v.currentValueUsdc;
+      }
+    }
+    return total;
+  } catch (e: any) {
+    console.log(`[AgentBalance] account Vault value read failed (treating as $0): ${e.message}`);
     return 0;
   }
 }
@@ -6143,11 +6200,19 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
-      const [balance, solBalance, bots, exchangeAccountExists] = await Promise.all([
+      // Task 216: the Create-Bot screen passes ?includeVault=1 so it can show total
+      // available to fund = wallet USDC + account-scope Vault value. Only that caller
+      // pays the extra on-chain reads; every other poller of this endpoint is
+      // unchanged. Fail-closed: the value only ever understates (see helper).
+      const includeVault = req.query.includeVault === "1" || req.query.includeVault === "true";
+      const [balance, solBalance, bots, exchangeAccountExists, vaultValueUsdc] = await Promise.all([
         getAgentUsdcBalance(wallet.agentPublicKey),
         getAgentSolBalance(wallet.agentPublicKey),
         storage.getTradingBots(req.walletAddress!),
         subaccountExists(wallet.agentPublicKey, 0),
+        includeVault
+          ? accountVaultRoutableValueUsdc(req.walletAddress!, wallet.agentPublicKey)
+          : Promise.resolve(0),
       ]);
       
       // Existing user = has completed onboarding at some point.
@@ -6177,6 +6242,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         agentPublicKey: wallet.agentPublicKey,
         balance,
         solBalance,
+        // Account-scope Vault value the create flow can unpark to fund a bot.
+        // 0 when not requested (?includeVault) or when nothing is routable.
+        vaultValueUsdc,
         isExistingUser,
         exchangeAccountExists,
         botCreationSolRequirement: {
@@ -10414,6 +10482,51 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           fundingAmountNum > 0;
 
         console.log(`[Bot Creation] Creating ${adapter.protocolName} subaccount under agent ${agentKeypair.publicKey.toString()}${botKeypair ? ` with pre-generated sub key ${botKeypair.publicKey.toString()}` : ''}${usePacificaAtomicProvision ? ` (atomic provision, fundingAmount=$${fundingAmountNum})` : ''}${useFlashAtomicProvision ? ` (flash per-bot wallet, fundingAmount=$${fundingAmountNum})` : ''}`);
+
+        // Task 216 — Fund new bots from the Vault. If the agent wallet's loose USDC
+        // is short of the funding amount AND the ACCOUNT-level Vault holds idle value,
+        // unpark ALL account-scope parked positions to USDC (all-in/all-out) before
+        // provisioning. Account scope ONLY — a bot's own per-bot parked collateral is
+        // never swept to fund a new bot. Money-safety: the helper credits only the
+        // realized on-chain USDC delta and fails closed (returns 0 on any failure),
+        // and provisioning below reads the live on-chain agent balance as truth — so a
+        // failed/empty unpark just leaves the agent wallet as it was (nothing
+        // stranded), and a successful one leaves any remainder as loose wallet USDC.
+        // ensureVaultGas (inside unparkToUsdc) self-funds the swap gas.
+        if (fundingAmountNum > 0) {
+          const agentPubForUnpark = agentKeypair.publicKey.toString();
+          const walletUsdcBeforeUnpark = await getAgentUsdcBalance(agentPubForUnpark);
+          if (walletUsdcBeforeUnpark < fundingAmountNum) {
+            // Per-protocol SOL preflight BEFORE moving any Vault money. Flash seeds a
+            // per-bot wallet and needs ~0.025 SOL (seed + overhead); Pacifica/Drift
+            // only need ~0.005 gas. If the agent wallet can't cover the create's SOL
+            // cost, provisioning will deterministically fail — so don't empty the
+            // Vault for a create that can't succeed (funds would be safe either way,
+            // this just avoids needless money movement). Mirrors the requirement the
+            // /api/agent/balance gate reports so server + UI agree.
+            const FLASH_SOL_OVERHEAD = 0.005; // ATA rent (~0.002) + fee headroom
+            const requiredSolForCreate = adapter.protocolName === 'flash'
+              ? FLASH_BOT_WALLET_SOL_SEED + FLASH_SOL_OVERHEAD
+              : 0.005;
+            const agentSolForCreate = await getAgentSolBalance(agentPubForUnpark);
+            if (agentSolForCreate < requiredSolForCreate) {
+              console.log(`[Bot Creation] Skipping Vault auto-unpark: agent SOL ${agentSolForCreate.toFixed(4)} < required ${requiredSolForCreate.toFixed(4)} for ${adapter.protocolName} create (provisioning would fail anyway; leaving Vault untouched)`);
+            } else {
+              const shortfall = fundingAmountNum - walletUsdcBeforeUnpark;
+              const realized = await autoUnparkAccountVaultForUsdc({
+                walletAddress: req.walletAddress!,
+                agentPublicKey: agentPubForUnpark,
+                agentSecretKey: agentKeypair.secretKey,
+                neededUsdc: shortfall,
+                all: true,
+                logPrefix: '[Bot Creation]',
+              });
+              if (realized > 0) {
+                console.log(`[Bot Creation] Vault auto-unpark (all-out) realized $${realized.toFixed(2)} toward $${shortfall.toFixed(2)} shortfall before provisioning ${adapter.protocolName} bot`);
+              }
+            }
+          }
+        }
 
         // Subaccount Recycling Plan §8 (Phase E) — reuse on create. Behind the
         // REUSE_ON_CREATE kill switch (default OFF) AND the adapter's `recyclable`
