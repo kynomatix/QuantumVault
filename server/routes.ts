@@ -16524,11 +16524,22 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const wallet = await storage.getWallet(req.walletAddress!);
       const bots = await storage.getTradingBots(req.walletAddress!);
       const agentAddress = wallet?.agentPublicKey;
-      
-      const [agentBalance, solBalance, aggregateAccountInfo] = await Promise.all([
+
+      // The dashboard passes ?includeVault=1 so "Available" can show idle wallet
+      // USDC + account-scope Vault savings — the Vault is spendable on demand
+      // (auto-unparks to fund trades / repay / new bots), so it IS available
+      // balance. Only that caller pays the extra on-chain Vault reads; other
+      // pollers (e.g. Subscribe modal) are unchanged. Fail-closed: the helper
+      // only ever understates (returns $0 on read failure), never overstates.
+      const includeVault = req.query.includeVault === "1" || req.query.includeVault === "true";
+
+      const [agentBalance, solBalance, aggregateAccountInfo, vaultBalance] = await Promise.all([
         agentAddress ? getAgentUsdcBalance(agentAddress) : Promise.resolve(0),
         agentAddress ? getAgentSolBalance(agentAddress) : Promise.resolve(0),
         agentAddress ? getExchangeAccountInfo(agentAddress, 0) : Promise.resolve({ totalCollateral: 0, freeCollateral: 0 }),
+        includeVault && agentAddress
+          ? accountVaultRoutableValueUsdc(req.walletAddress!, agentAddress)
+          : Promise.resolve(0),
       ]);
       
       const aggregateExchangeEquity = aggregateAccountInfo.totalCollateral;
@@ -16586,12 +16597,17 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const mainAccountFreeCollateral = aggregateAccountInfo.freeCollateral ?? 0;
       
       const inTrading = mainAccountEquity + totalBotBalances;
-      const totalEquity = agentBalance + inTrading;
+      // Vault savings are spendable on demand, so they count toward equity. 0 unless
+      // ?includeVault=1 (only the dashboard pays the read); keeps Available + In
+      // Trading = Total Equity consistent once Available folds in the Vault too.
+      const totalEquity = agentBalance + vaultBalance + inTrading;
       
-      console.log(`[total-equity] agent=$${agentBalance.toFixed(2)} mainAcct=$${mainAccountEquity.toFixed(2)} bots=$${totalBotBalances.toFixed(2)} inTrading=$${inTrading.toFixed(2)} mainFree=$${mainAccountFreeCollateral.toFixed(2)} total=$${totalEquity.toFixed(2)}`);
+      console.log(`[total-equity] agent=$${agentBalance.toFixed(2)} vault=$${vaultBalance.toFixed(2)} mainAcct=$${mainAccountEquity.toFixed(2)} bots=$${totalBotBalances.toFixed(2)} inTrading=$${inTrading.toFixed(2)} mainFree=$${mainAccountFreeCollateral.toFixed(2)} total=$${totalEquity.toFixed(2)}`);
       
       res.json({ 
         agentBalance,
+        // Account-scope Vault value foldable into "Available". 0 unless ?includeVault=1.
+        vaultBalance,
         exchangeBalance: inTrading,
         mainAccountBalance: mainAccountEquity,
         mainAccountFreeCollateral,

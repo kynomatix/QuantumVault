@@ -424,15 +424,23 @@ export default function AppPage() {
   const [exchangeBalance, setExchangeBalance] = useState<number | null>(null);
   const [mainAccountFreeCollateral, setMainAccountFreeCollateral] = useState<number>(0);
   const [agentBalance, setAgentBalance] = useState<number | null>(null);
+  // Account-scope Vault savings (idle funds parked in a yield stablecoin). Spendable
+  // on demand, so it's folded into the "Available" balance shown on the dashboard.
+  const [vaultBalance, setVaultBalance] = useState<number | null>(null);
   const [solBalance, setSolBalance] = useState<number | null>(null);
   const [equityLoading, setEquityLoading] = useState(false);
   const equityInitialLoadDone = useRef(false);
+
+  // "Available" = idle wallet USDC + Vault savings (both spendable on demand).
+  // null until the first equity load so we can show the loading placeholder.
+  const availableBalance = agentBalance === null ? null : agentBalance + (vaultBalance ?? 0);
 
   // Fetch total equity, agent balance, and exchange balance together
   useEffect(() => {
     if (!connected) {
       setTotalEquity(null);
       setAgentBalance(null);
+      setVaultBalance(null);
       setExchangeBalance(null);
       setSolBalance(null);
       setOrphanSlots(0);
@@ -445,11 +453,12 @@ export default function AppPage() {
         setEquityLoading(true);
       }
       try {
-        const res = await fetch('/api/total-equity', { credentials: 'include', headers: walletAuthHeaders() });
+        const res = await fetch('/api/total-equity?includeVault=1', { credentials: 'include', headers: walletAuthHeaders() });
         if (res.ok) {
           const data = await safeResponseJson(res);
           setTotalEquity(data.totalEquity ?? 0);
           setAgentBalance(data.agentBalance ?? 0);
+          setVaultBalance(data.vaultBalance ?? 0);
           setExchangeBalance(data.exchangeBalance ?? 0);
           setMainAccountFreeCollateral(data.mainAccountFreeCollateral ?? 0);
           setSolBalance(data.solBalance ?? 0);
@@ -793,11 +802,12 @@ export default function AppPage() {
       ].filter(Boolean);
       
       // Refresh equity data
-      const equityPromise = safeFetchJson('/api/total-equity')
+      const equityPromise = safeFetchJson('/api/total-equity?includeVault=1')
         .then(data => {
           if (data) {
             setTotalEquity(data.totalEquity ?? 0);
             setAgentBalance(data.agentBalance ?? 0);
+            setVaultBalance(data.vaultBalance ?? 0);
             setExchangeBalance(data.exchangeBalance ?? 0);
             setMainAccountFreeCollateral(data.mainAccountFreeCollateral ?? 0);
             setSolBalance(data.solBalance ?? 0);
@@ -1582,11 +1592,12 @@ export default function AppPage() {
 
       await new Promise(r => setTimeout(r, 5000));
       try {
-        const eqRes = await fetch('/api/total-equity', { credentials: 'include', headers: walletAuthHeaders() });
+        const eqRes = await fetch('/api/total-equity?includeVault=1', { credentials: 'include', headers: walletAuthHeaders() });
         if (eqRes.ok) {
           const eqData = await safeResponseJson(eqRes);
           setTotalEquity(eqData.totalEquity ?? 0);
           setAgentBalance(eqData.agentBalance ?? 0);
+          setVaultBalance(eqData.vaultBalance ?? 0);
           setExchangeBalance(eqData.exchangeBalance ?? 0);
           setMainAccountFreeCollateral(eqData.mainAccountFreeCollateral ?? 0);
         }
@@ -1628,11 +1639,12 @@ export default function AppPage() {
           const orphanData = await safeResponseJson(orphanRes);
           setOrphanSlots(orphanData.orphanSlots ?? 0);
         }
-        const eqRes = await fetch('/api/total-equity', { credentials: 'include', headers: walletAuthHeaders() });
+        const eqRes = await fetch('/api/total-equity?includeVault=1', { credentials: 'include', headers: walletAuthHeaders() });
         if (eqRes.ok) {
           const eqData = await safeResponseJson(eqRes);
           setTotalEquity(eqData.totalEquity ?? 0);
           setAgentBalance(eqData.agentBalance ?? 0);
+          setVaultBalance(eqData.vaultBalance ?? 0);
         }
       } catch {}
     } catch (error: any) {
@@ -1995,7 +2007,11 @@ export default function AppPage() {
                   <div className="px-3 py-2 space-y-2 border-t border-border/30 mt-2">
                     <div className="flex justify-between text-xs">
                       <span className="text-muted-foreground">Available</span>
-                      <span className="font-mono text-primary" data-testid="text-main-account">${agentBalance?.toFixed(2) ?? '0.00'}</span>
+                      <span
+                        className="font-mono text-primary"
+                        data-testid="text-main-account"
+                        title={vaultBalance && vaultBalance >= 0.01 ? `$${(agentBalance ?? 0).toFixed(2)} wallet + $${vaultBalance.toFixed(2)} Vault savings` : undefined}
+                      >${availableBalance !== null ? availableBalance.toFixed(2) : '0.00'}</span>
                     </div>
                     <div className="flex justify-between text-xs items-center">
                       <span className="text-muted-foreground">In Trading</span>
@@ -2061,7 +2077,11 @@ export default function AppPage() {
                   <div className="px-3 py-2 space-y-2 border-t border-border/30 mt-2">
                     <div className="flex justify-between text-xs">
                       <span className="text-muted-foreground">Available</span>
-                      <span className="font-mono text-primary" data-testid="text-main-account-mobile">${agentBalance?.toFixed(2) ?? '0.00'}</span>
+                      <span
+                        className="font-mono text-primary"
+                        data-testid="text-main-account-mobile"
+                        title={vaultBalance && vaultBalance >= 0.01 ? `$${(agentBalance ?? 0).toFixed(2)} wallet + $${vaultBalance.toFixed(2)} Vault savings` : undefined}
+                      >${availableBalance !== null ? availableBalance.toFixed(2) : '0.00'}</span>
                     </div>
                     <div className="flex justify-between text-xs items-center">
                       <span className="text-muted-foreground">In Trading</span>
@@ -2374,9 +2394,13 @@ export default function AppPage() {
                   <div className="gradient-border p-4 noise">
                     <p className="text-xs text-muted-foreground mb-1">Available Balance</p>
                     <p className="text-2xl font-bold font-mono" data-testid="text-portfolio-value">
-                      {agentBalance !== null ? `$${agentBalance.toFixed(2)}` : '--'}
+                      {availableBalance !== null ? `$${availableBalance.toFixed(2)}` : '--'}
                     </p>
-                    <p className="text-xs text-muted-foreground mt-1">Agent wallet USDC</p>
+                    <p className="text-xs text-muted-foreground mt-1" data-testid="text-available-breakdown">
+                      {vaultBalance && vaultBalance >= 0.01
+                        ? `$${(agentBalance ?? 0).toFixed(2)} wallet + $${vaultBalance.toFixed(2)} Vault`
+                        : 'Agent wallet USDC'}
+                    </p>
                   </div>
                   <div className="gradient-border p-4 noise">
                     <p className="text-xs text-muted-foreground mb-1">SOL Price</p>
