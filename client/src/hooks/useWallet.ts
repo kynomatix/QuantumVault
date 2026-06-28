@@ -238,28 +238,59 @@ export function useWallet() {
             if (statusRes.ok) {
               const statusData = await safeResponseJson(statusRes);
               if (statusData.authenticated) {
-                // Session already exists - skip signature, just connect
-                const referredByCode = getReferralCodeFromUrl();
-                const connectRes = await fetch('/api/wallet/connect', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  credentials: 'include',
-                  body: JSON.stringify({ 
-                    walletAddress: walletToAuth,
-                    referredByCode: referredByCode || undefined,
-                  }),
-                });
-                
-                if (connectRes.ok) {
-                  const data = await safeResponseJson(connectRes);
-                  setReferralCode(data.referralCode || null);
+                // The 7-day express-session cookie is still valid — but that only
+                // proves identity, NOT that the in-memory SECURITY session (the
+                // decrypted UMK every money op needs to sign with the agent key)
+                // still exists. That UMK session lives only in server memory, is
+                // wiped on every deploy/restart, and expires after a 4h TTL. So a
+                // returning user — especially on mobile, where a reconnect is a
+                // fresh tap after the in-memory key is long gone — routinely has a
+                // live cookie + a DEAD UMK. If we trusted the cookie alone we'd
+                // mark the wallet "connected", then fail deep inside a repay/borrow
+                // with "No active session". Confirm the UMK session here; if it's
+                // gone, re-sign ONCE now (a single signature) so the key is ready
+                // BEFORE any money action instead of mid-flow.
+                let hasUmkSession = false;
+                try {
+                  const sessRes = await fetch('/api/auth/session', { credentials: 'include' });
+                  if (sessRes.ok) {
+                    const sessData = await safeResponseJson(sessRes);
+                    hasUmkSession = !!sessData.hasSession;
+                  }
+                } catch {
+                  // Inconclusive check → treat as no UMK and re-sign. Failing toward
+                  // a usable session is safer (one extra signature at worst) than
+                  // fabricating "connected" and stranding the next money op.
+                  hasUmkSession = false;
                 }
-                
-                return true;
+
+                if (hasUmkSession) {
+                  // Both tiers alive — skip the signature, just (re)bind the wallet.
+                  const referredByCode = getReferralCodeFromUrl();
+                  const connectRes = await fetch('/api/wallet/connect', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ 
+                      walletAddress: walletToAuth,
+                      referredByCode: referredByCode || undefined,
+                    }),
+                  });
+                  
+                  if (connectRes.ok) {
+                    const data = await safeResponseJson(connectRes);
+                    setReferralCode(data.referralCode || null);
+                  }
+                  
+                  return true;
+                }
+                // Cookie alive but UMK gone → fall through to re-sign below.
+                // authenticateWallet also re-binds the wallet (/api/wallet/connect)
+                // on success, so no separate connect call is needed here.
               }
             }
             
-            // No existing session - need to authenticate with signature
+            // No usable security session — authenticate with one signature.
             return await authenticateWallet(walletToAuth);
           } catch (error) {
             console.error('Failed to register wallet with session:', error);
