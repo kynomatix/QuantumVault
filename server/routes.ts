@@ -1508,7 +1508,7 @@ import { previewBorrowEligibility } from "./vault/borrow-eligibility";
 import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral } from "./vault/jupiter-lend-borrow-executor";
-import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings } from "./vault/jupiter-lend-repay-multihop";
+import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
 import { getUserFungibleTokens, resolveTokenLogos } from "./swap/helius-tokens.js";
 
 const SWAP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -9419,6 +9419,67 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       sendMultiHopResult(res, result);
     } catch (error: any) {
       console.error("[Vault] repay vault-savings error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // UNIFIED "Pay with USDC" repay (loose trading USDC FIRST, top up from Vault
+  // savings on a full "max" clear). The owner frames the Vault as "USDC that earns
+  // yield", so the dialog has ONE USDC source whose pool = idle agent USDC + parked
+  // savings. PARTIAL (amountRaw is a number string) is idle-only and rejects with
+  // needsMaxForVault when it can't be covered; "max" can draw savings. Idempotent
+  // via clientRequestId (the savings-draw path is a resumable multi-hop op). Body:
+  // { borrowPositionId, amountRaw: "max" | "<rawUsdc>", clientRequestId, slippageBps?, sessionId }.
+  app.post("/api/vault/borrow/repay/usdc-pool", requireWallet, async (req, res) => {
+    try {
+      const { borrowPositionId, amountRaw, clientRequestId, slippageBps, sessionId } = req.body || {};
+      if (!borrowPositionId || typeof borrowPositionId !== "string") {
+        return res.status(400).json({ error: "borrowPositionId required" });
+      }
+      if (!clientRequestId || typeof clientRequestId !== "string") {
+        return res.status(400).json({ error: "clientRequestId required" });
+      }
+      if (slippageBps != null && (typeof slippageBps !== "number" || !Number.isFinite(slippageBps))) {
+        return res.status(400).json({ error: "slippageBps must be a number" });
+      }
+
+      // amountRaw is either the "max" sentinel (full clear, may draw savings) or a
+      // positive integer string of raw USDC base units (partial, idle-only).
+      let amount: bigint | "max";
+      if (amountRaw === "max") {
+        amount = "max";
+      } else {
+        const parsed = parsePositiveRaw(amountRaw, "amountRaw");
+        if (typeof parsed === "object") return res.status(400).json(parsed);
+        amount = parsed;
+      }
+
+      const ctx = await prepareBorrowOpContext(req, res, sessionId);
+      if (!ctx) return;
+
+      let result;
+      try {
+        result = await executeRepayFromUsdcPool({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: ctx.scope.agentPublicKey,
+          agentSecretKey: ctx.agentKeyResult.secretKey,
+          borrowPositionId,
+          clientRequestId,
+          amount,
+          slippageBps,
+        });
+      } finally {
+        ctx.agentKeyResult.cleanup();
+      }
+
+      // needsMaxForVault is a benign "nothing moved, tap Max" guide — surface the
+      // flag (sendMultiHopResult would strip it on a 400), otherwise mirror it.
+      if (result && !result.success && result.needsMaxForVault) {
+        return res.status(400).json({ error: result.error || "Tap Max to use your Vault savings.", needsMaxForVault: true });
+      }
+      sendMultiHopResult(res, result);
+    } catch (error: any) {
+      console.error("[Vault] repay usdc-pool error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
     }
   });

@@ -1065,19 +1065,21 @@ type RepaySource = 'agent' | 'wallet-usdc' | 'deleverage' | 'wallet-token' | 'va
 type RepayMode = 'usdc' | 'asset';
 
 // Each repay source belongs to a "mode" = what you pay WITH: USDC you already
-// hold, or an asset that's converted to USDC. This two-level grouping is the
-// owner-approved canvas structure (RepayDialog) — it de-confuses the old flat
-// 4-way picker WITHOUT dropping any money path (all four sources stay, each with
-// its crash-proof resume logic intact).
+// hold, or an asset that's converted to USDC. The owner frames the Vault as
+// "USDC that earns yield", so parked Vault savings is NOT its own picker option
+// — it's folded into the unified "Pay with USDC" / trading-agent source, which
+// spends trading USDC FIRST and draws savings for any remainder on a Max clear.
+// The legacy 'vault-savings' source + handler stay defined (off the picker) so
+// any in-flight crash-proof resume from before this change can still finish.
 const REPAY_SOURCES_BY_MODE: Record<RepayMode, RepaySource[]> = {
   usdc: ['agent', 'wallet-usdc'],
-  asset: ['deleverage', 'wallet-token', 'vault-savings'],
+  asset: ['deleverage', 'wallet-token'],
 };
 const modeForSource = (s: RepaySource): RepayMode =>
   s === 'agent' || s === 'wallet-usdc' ? 'usdc' : 'asset';
 
 const SOURCE_LABELS: Record<RepaySource, { label: string; sub: string; icon: typeof Bot }> = {
-  agent: { label: 'From Trading Agent', sub: 'Pay with your trading USDC', icon: Bot },
+  agent: { label: 'From Trading Agent', sub: 'Trading USDC + Vault savings', icon: Bot },
   'wallet-usdc': { label: 'From Your Wallet', sub: 'Pay with wallet USDC', icon: Wallet },
   deleverage: { label: 'Supplied collateral', sub: 'Sell some of your locked collateral', icon: Coins },
   'wallet-token': { label: 'Your Wallet', sub: 'Swap a wallet token to USDC', icon: Wallet },
@@ -1206,6 +1208,14 @@ export function RepayLoanDialog({
   const [selectedToken, setSelectedToken] = useState<UserToken | null>(null);
   const [phase, setPhase] = useState<'idle' | 'working' | 'needs_retry'>('idle');
   const [statusText, setStatusText] = useState('');
+  // Drawable Vault savings for ONE Max clear (account scope), lazily loaded when
+  // the unified "Pay with USDC" source is active. This is the LARGEST single
+  // enabled yield holding's value — NOT the sum — because the server's Max draw
+  // unparks only the largest-value holding (see executeMaxClearWithVaultDraw).
+  // Summing every holding would overstate what a single clear can reach. Powers
+  // the combined available balance + the trading-vs-savings breakdown. null =
+  // not loaded / unreadable.
+  const [vaultSavingsUsd, setVaultSavingsUsd] = useState<number | null>(null);
 
   const reqIdRef = useRef<string | null>(null);
   const transferSigRef = useRef<string | null>(null); // #2
@@ -1234,6 +1244,7 @@ export function RepayLoanDialog({
     setCollateralAmount('');
     setTokenAmount('');
     setSelectedToken(null);
+    setVaultSavingsUsd(null);
     // Default to a clean idle flow, then rehydrate a crash-proof resume if one
     // exists for this exact position (e.g. the tab was refreshed after a
     // wallet transfer confirmed but before the repay leg completed).
@@ -1253,6 +1264,12 @@ export function RepayLoanDialog({
       reqIdRef.current = resume.clientRequestId;
       if (resume.transferSignature) transferSigRef.current = resume.transferSignature;
       if (resume.collateralRaw) collateralRawRef.current = resume.collateralRaw;
+      if (resume.source === 'agent') {
+        // The unified USDC pool only persists a Max clear (the savings-draw
+        // path). Rehydrate Max so Retry re-POSTs 'max' with the same request id
+        // and the server resumes the draw/repay op idempotently.
+        setUseMaxAgent(true);
+      }
       if (resume.tokenTransferred) {
         tokenTransferredRef.current = true;
         tokenMintRef.current = resume.tokenMint ?? null;
@@ -1302,6 +1319,39 @@ export function RepayLoanDialog({
     };
   }, [open, source]);
 
+  // Load the user's DRAWABLE Vault savings lazily when the unified "Pay with
+  // USDC" (agent) source is active, so the available balance + breakdown reflect
+  // "trading USDC + savings". We take the LARGEST single holding's value, not the
+  // sum: the server's Max draw unparks only the largest-value enabled holding, so
+  // summing would overstate what a single clear can reach and could show enough
+  // to clear a loan the draw can't actually cover. Read-only; the server stays
+  // the money authority and returns the realized split after the repay.
+  useEffect(() => {
+    if (!open || source !== 'agent') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/vault/positions', { credentials: 'include', headers: walletAuthHeaders() });
+        const data = await safeResponseJson(res);
+        if (cancelled) return;
+        const positions: Array<{ currentValueUsdc: number | null }> = data?.positions || [];
+        const largest = positions.reduce(
+          (max, p) => {
+            const v = typeof p.currentValueUsdc === 'number' && Number.isFinite(p.currentValueUsdc) ? p.currentValueUsdc : 0;
+            return v > max ? v : max;
+          },
+          0,
+        );
+        setVaultSavingsUsd(largest);
+      } catch {
+        if (!cancelled) setVaultSavingsUsd(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, source]);
+
   const switchSource = (s: RepaySource) => {
     // Block switching unless fully idle. While 'working' the op is in flight;
     // while 'needs_retry' a transfer/sell has already moved funds and switching
@@ -1342,6 +1392,17 @@ export function RepayLoanDialog({
       ? Number(debtUi)
       : null;
 
+  // Unified "Pay with USDC" pool: trading-agent USDC + parked Vault savings.
+  // Loose trading USDC is spent FIRST; savings cover any remainder on a Max
+  // clear. These drive the available-balance display and the idle-first preview
+  // (CLIENT estimate only — the server returns the realized split).
+  const agentUsdcAvail = agentUsdcBalance ?? 0;
+  const vaultSavingsAvail = vaultSavingsUsd ?? 0;
+  const poolUsdcAvail = agentUsdcAvail + vaultSavingsAvail;
+  const poolTarget = debtNum != null ? Math.min(debtNum, poolUsdcAvail) : poolUsdcAvail;
+  const poolFromAgentEst = Math.min(agentUsdcAvail, poolTarget);
+  const poolFromVaultEst = Math.max(0, poolTarget - poolFromAgentEst);
+
   // "Max" estimate for the supplied-collateral (deleverage) source: how much of
   // the one locked collateral to sell to clear the debt. CLIENT estimate only —
   // the server LTV-gates the withdraw and caps the repay at true debt.
@@ -1375,7 +1436,15 @@ export function RepayLoanDialog({
   // reached the agent (a hard failure is then retryable, not lost).
   const handleResult = async (res: Response, data: any, movedFunds: boolean, fundsNote: string) => {
     if (res.ok && data.success) {
-      toast({ title: 'Repayment Complete', description: data.verifyWarning || data.dbWarning || 'Your loan balance was reduced.' });
+      // Show the realized trading-vs-savings split when the unified pool drew
+      // from Vault savings to clear the loan (server returns the actual amounts).
+      const fromVault = typeof data.fromVaultUsdc === 'number' ? data.fromVaultUsdc : 0;
+      const fromAgent = typeof data.fromAgentUsdc === 'number' ? data.fromAgentUsdc : 0;
+      const desc =
+        fromVault > 0
+          ? `Paid ${fmtUsd(fromAgent)} from trading USDC + ${fmtUsd(fromVault)} from Vault savings.`
+          : data.verifyWarning || data.dbWarning || 'Your loan balance was reduced.';
+      toast({ title: 'Repayment Complete', description: desc });
       await onSuccess();
       resetFlow(true); // success — safe to drop the crash-proof resume record
       onOpenChange(false);
@@ -1402,28 +1471,63 @@ export function RepayLoanDialog({
     }
   };
 
-  // #1 — Trading Agent USDC (single-tx).
-  const repayFromAgent = async () => {
+  // #1 — Unified "Pay with USDC" pool: trading-agent USDC FIRST, then draw
+  // (unpark) Vault savings for any remainder on a Max clear. A partial is
+  // idle-only (single tx); if it exceeds trading USDC the server replies
+  // needsMaxForVault (nothing moved) and we guide the user to tap Max. The Max
+  // path can become a resumable server op (the savings draw), so we persist its
+  // request id BEFORE acting and rehydrate Max on a crash-proof resume.
+  const repayFromUsdcPool = async () => {
     if (!pool) return;
-    const amountRaw = useMaxAgent ? 'max' : toRawBaseUnits(usdcAmount, USDC_DECIMALS);
+    const isMax = useMaxAgent;
+    const amountRaw = isMax ? 'max' : toRawBaseUnits(usdcAmount, USDC_DECIMALS);
     if (amountRaw !== 'max' && (!amountRaw || BigInt(amountRaw) <= 0n)) {
       toast({ title: 'Enter a valid amount', variant: 'destructive' });
       return;
     }
+    if (!reqIdRef.current) reqIdRef.current = newRequestId();
+    // Persist a resume record ONLY for the Max path — the one that can draw Vault
+    // savings into a resumable, idempotent server op. A partial is a single-tx
+    // idle-only repay, so it needs no crash-proof resume (matches the old direct
+    // agent repay).
+    if (isMax) saveRepayResume(pool.id, { source: 'agent', clientRequestId: reqIdRef.current });
     setPhase('working');
-    setStatusText('Repaying from your trading agent…');
+    setStatusText(isMax ? 'Clearing your loan…' : 'Repaying from your USDC…');
     try {
       const sessionId = await getSessionId();
-      const res = await fetch('/api/vault/borrow/repay', POST_JSON({ borrowPositionId: pool.id, amountRaw, sessionId }));
+      const res = await fetch(
+        '/api/vault/borrow/repay/usdc-pool',
+        POST_JSON({ borrowPositionId: pool.id, amountRaw, clientRequestId: reqIdRef.current, sessionId }),
+      );
       const data = await safeResponseJson(res);
+      // The amount exceeds trading USDC and a partial can't draw savings — guide
+      // the user to Max. Nothing moved, so reset cleanly (drop the request id).
+      if (!res.ok && data?.needsMaxForVault) {
+        resetFlow(true);
+        toast({
+          title: 'Tap Max to use your savings',
+          description:
+            data.error ||
+            "Your trading USDC doesn't cover that amount. Tap Max to draw the rest from your Vault savings.",
+        });
+        return;
+      }
       await handleResult(res, data, false, '');
     } catch (e: any) {
-      setPhase('idle');
-      setStatusText('');
-      if (isSessionError(e)) {
-        showReconnectToast({ toast, retryAuth, title: 'Could not repay', retry: () => repayFromAgent() });
+      if (isMax) {
+        // The draw/repay may be mid-flight — the server is the resume authority
+        // (idempotent on the same request id), so finish via Retry.
+        setPhase('needs_retry');
+        setStatusText('The repayment may be mid-flight. Tap Retry to finish safely.');
+        toast({ title: "Repayment didn't finish", description: e.message || 'Tap Retry to finish.', variant: 'destructive' });
       } else {
-        toast({ title: 'Could not repay', description: e.message || 'Please try again', variant: 'destructive' });
+        setPhase('idle');
+        setStatusText('');
+        if (isSessionError(e)) {
+          showReconnectToast({ toast, retryAuth, title: 'Could not repay', retry: () => repayFromUsdcPool() });
+        } else {
+          toast({ title: 'Could not repay', description: e.message || 'Please try again', variant: 'destructive' });
+        }
       }
     }
   };
@@ -1701,7 +1805,7 @@ export function RepayLoanDialog({
   };
 
   const submit = () => {
-    if (source === 'agent') return repayFromAgent();
+    if (source === 'agent') return repayFromUsdcPool();
     if (source === 'wallet-usdc') return repayFromWalletUsdc();
     if (source === 'deleverage') return repayFromDeleverage();
     if (source === 'vault-savings') return repayFromVaultSavings();
@@ -1794,14 +1898,16 @@ export function RepayLoanDialog({
             </div>
           </div>
 
-          {/* #1 Agent USDC — single-tx, server-signed. Max sends the 'max'
-              sentinel so the server clears the FULL on-chain debt (never more). */}
+          {/* #1 Unified "Pay with USDC" pool — server-signed. Spends loose
+              trading-agent USDC FIRST, then draws (unparks) Vault savings for any
+              remainder on a Max clear. Max sends the 'max' sentinel so the server
+              clears the FULL on-chain debt (never more); a partial is idle-only. */}
           {source === 'agent' && (
             <>
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
                   <span>Amount</span>
-                  <span>In trading agent {fmtUsd(agentUsdcBalance)}</span>
+                  <span data-testid="text-repay-pool-available">Available {fmtUsd(poolUsdcAvail)}</span>
                 </div>
                 <div className="relative">
                   <Input
@@ -1824,19 +1930,13 @@ export function RepayLoanDialog({
                       className="h-7 px-2.5 text-xs"
                       onClick={() => {
                         if (debtNum == null) return;
-                        if (agentUsdcBalance != null && agentUsdcBalance < debtNum) {
-                          // Trading agent can't cover the full debt → repay everything
-                          // it holds, as a clean cents amount (never the 'max' sentinel,
-                          // which would ask the server to clear more than is available).
-                          setUseMaxAgent(false);
-                          setUsdcAmount((Math.floor(agentUsdcBalance * 100) / 100).toFixed(2));
-                        } else {
-                          // Agent covers the debt → show the debt to the cent, but send
-                          // the 'max' sentinel so the server clears the EXACT on-chain
-                          // debt (never more, no leftover dust from rounding).
-                          setUseMaxAgent(true);
-                          setUsdcAmount(debtNum.toFixed(2));
-                        }
+                        // Unified USDC pool: Max ALWAYS sends the 'max' sentinel so
+                        // the server clears as much as possible — trading USDC first,
+                        // then drawing Vault savings for any remainder — capped at the
+                        // EXACT on-chain debt (never more, no leftover dust). Display
+                        // the debt to the cent (the cap).
+                        setUseMaxAgent(true);
+                        setUsdcAmount(debtNum.toFixed(2));
                       }}
                       disabled={working}
                       data-testid="button-repay-agent-max"
@@ -1845,6 +1945,27 @@ export function RepayLoanDialog({
                     </Button>
                   </div>
                 </div>
+                {/* Where the pool's USDC comes from (loose trading USDC is spent first). */}
+                {vaultSavingsAvail > 0 && (
+                  <p
+                    className="text-[11px] text-muted-foreground tabular-nums"
+                    data-testid="text-repay-pool-breakdown"
+                  >
+                    Trading USDC {fmtUsd(agentUsdcAvail)} · Vault savings {fmtUsd(vaultSavingsAvail)}
+                  </p>
+                )}
+                {/* Idle-first split estimate for a Max clear that taps savings. */}
+                {useMaxAgent && poolFromVaultEst > 0 && phase === 'idle' && (
+                  <p
+                    className="text-[11px] text-primary flex items-start gap-1"
+                    data-testid="text-repay-pool-preview"
+                  >
+                    <Info className="w-3 h-3 mt-0.5 shrink-0" />
+                    <span>
+                      ≈ {fmtUsd(poolFromAgentEst)} from trading USDC + {fmtUsd(poolFromVaultEst)} from Vault savings.
+                    </span>
+                  </p>
+                )}
                 <p className="text-[11px] text-muted-foreground flex items-start gap-1">
                   <Info className="w-3 h-3 mt-0.5 shrink-0" />
                   <span>Max caps at your {debtStr} outstanding debt, never more.</span>
@@ -1852,7 +1973,7 @@ export function RepayLoanDialog({
               </div>
               <p className="text-xs text-muted-foreground flex items-start gap-1.5">
                 <Info className="w-3.5 h-3.5 text-primary mt-0.5 shrink-0" />
-                <span>Paid straight from your trading agent's USDC — your profits clear the debt with no transfer to your wallet first.</span>
+                <span>Paid from your USDC inside QuantumVault — your trading USDC first, then your Vault savings if more is needed. No transfer from your wallet.</span>
               </p>
             </>
           )}
@@ -2098,11 +2219,12 @@ export function RepayLoanDialog({
             </div>
           )}
 
-          {/* #5 Vault savings — ONE-TAP, fully server-side. No amount input: the
-              server reads the on-chain balance, unparks JUST ENOUGH of the
-              largest holding to USDC, then repays (capped at debt). Leftover stays
-              parked. This is the carry-trade unwind (savings locked in a yield
-              token) made into a single safe action. */}
+          {/* #5 Vault savings — RESUME-ONLY. No longer its own picker option
+              (folded into the unified "Pay with USDC" source above). This body +
+              handler stay only so an in-flight crash-proof resume saved before the
+              unification can still finish via Retry. ONE-TAP, fully server-side:
+              unparks JUST ENOUGH of the largest holding to USDC, then repays
+              (capped at debt). Leftover stays parked. */}
           {source === 'vault-savings' && (
             <div className="flex items-start gap-2 rounded-lg border border-accent/20 bg-accent/10 px-3 py-2.5">
               <PiggyBank className="w-4 h-4 text-accent mt-0.5 shrink-0" />

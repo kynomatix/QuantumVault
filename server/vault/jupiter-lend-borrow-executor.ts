@@ -66,8 +66,10 @@ import {
 
 const DEBT_VENUE = "jupiter_lend";
 /** Extra USDC headroom over the read debt to absorb interest accrued before the
- *  repay tx lands. 50 bps — purely a pre-flight guard; the operate is atomic. */
-const REPAY_BUFFER_BPS = 50;
+ *  repay tx lands. 50 bps — purely a pre-flight guard; the operate is atomic.
+ *  Exported so the unified USDC-pool repay can size a Vault top-up to land the
+ *  agent wallet at/above the executor's "max" balance bar (debt + this buffer). */
+export const REPAY_BUFFER_BPS = 50;
 /**
  * Rent a FIRST-TIME supply/open must pay to mint a new Jupiter Lend position NFT
  * (the mint, its Metaplex metadata + master-edition, and the NFT token account).
