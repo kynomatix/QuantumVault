@@ -5,7 +5,11 @@ import {
   readBorrowOracleContext,
   type OraclePoint,
 } from "../../server/vault/borrow-oracle-freshness";
-import { getBorrowOracleSource } from "../../server/vault/borrow-oracle-registry";
+import {
+  getBorrowOracleSource,
+  getRegisteredCollateralMint,
+} from "../../server/vault/borrow-oracle-registry";
+import { ALLOWED_BORROW_VAULT_IDS } from "../../server/vault/borrow-allowlist";
 import type { BorrowVaultConfig } from "../../server/vault/jupiter-lend-borrow-route";
 
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -255,7 +259,21 @@ describe("borrow oracle registry", () => {
   });
 
   it("returns null for an unmapped vault or a mismatched mint", () => {
-    expect(getBorrowOracleSource(1, INF_MINT)).toBeNull();
-    expect(getBorrowOracleSource(43, USDC)).toBeNull();
+    expect(getBorrowOracleSource(999, INF_MINT)).toBeNull(); // unmapped vault id
+    expect(getBorrowOracleSource(1, INF_MINT)).toBeNull(); // vault 1 maps to WSOL, not INF (mint mismatch)
+    expect(getBorrowOracleSource(43, USDC)).toBeNull(); // mapped vault, wrong mint
+  });
+
+  // Money-safety lockstep guard: every launch-allowlisted borrow vault MUST have a
+  // verified oracle source. Without this, a future allowlist addition with no feed
+  // would silently fail closed (deny all borrows) — caught here at test time.
+  it("every allowlisted borrow vault resolves to a verified oracle source (lockstep)", () => {
+    for (const vaultId of ALLOWED_BORROW_VAULT_IDS) {
+      const mint = getRegisteredCollateralMint(vaultId);
+      expect(mint, `allowlisted vault ${vaultId} has NO registry entry`).not.toBeNull();
+      const src = getBorrowOracleSource(vaultId, mint!);
+      expect(src, `allowlisted vault ${vaultId} does not resolve to an oracle source`).not.toBeNull();
+      expect(src!.feedId.length, `allowlisted vault ${vaultId} has a blank feedId`).toBeGreaterThan(0);
+    }
   });
 });

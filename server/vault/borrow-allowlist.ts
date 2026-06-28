@@ -14,11 +14,28 @@
  */
 
 /**
- * Launch collateral allowlist (Decision Wall #5), by Jupiter Lend vault id.
- *   - 43 = INF → USDC (verified Phase A/B on mainnet, 2026-06-24).
+ * Launch collateral allowlist (Decision Wall #5), by Jupiter Lend vault id. Every
+ * id here has a verified direct-Pyth-feed entry in `borrow-oracle-registry.ts`
+ * (kept in lockstep: an allowlisted vault with no registry entry fails closed at
+ * the oracle gate). Each feed was cross-checked against the vault's on-chain
+ * liquidation price before being added.
+ *   - 43 = INF (verified 2026-06-24).
+ *   - 1/15/49 = SOL/JitoSOL/mSOL, 8 = JLP, 41/9/11/25 = LBTC/xBTC/cbBTC/WBTC,
+ *     7 = syrupUSDC, 40 = JUP (all verified 2026-06-28).
+ *   - 77/80/78/79 = TSLAx/NVDAx/SPYx/QQQx (tokenized equities — their Pyth feeds
+ *     go stale outside US market hours, so the oracle gate denies new borrows
+ *     off-hours by design; safe, but limited availability).
  * Owner adds vault ids here to widen the launch collateral set.
  */
-export const ALLOWED_BORROW_VAULT_IDS: ReadonlySet<number> = new Set<number>([43]);
+export const ALLOWED_BORROW_VAULT_IDS: ReadonlySet<number> = new Set<number>([
+  43, // INF
+  1, 15, 49, // SOL (WSOL), JitoSOL, mSOL
+  8, // JLP
+  41, 9, 11, 25, // LBTC, xBTC, cbBTC, WBTC
+  7, // syrupUSDC
+  40, // JUP
+  77, 80, 78, 79, // TSLAx, NVDAx, SPYx, QQQx (tokenized equities; off-hours stale by design)
+]);
 
 export function isCollateralVaultAllowlisted(vaultId: number): boolean {
   return Number.isInteger(vaultId) && ALLOWED_BORROW_VAULT_IDS.has(vaultId);
