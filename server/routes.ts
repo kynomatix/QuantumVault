@@ -1506,7 +1506,7 @@ import { detectParkedYieldTokens as detectParkedYieldTokensPure } from "./vault/
 import { JupiterLendBorrowRoute } from "./vault/jupiter-lend-borrow-route";
 import { previewBorrowEligibility } from "./vault/borrow-eligibility";
 import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
-import { isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
+import { isBorrowEligibleWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral } from "./vault/jupiter-lend-borrow-executor";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
 import { getUserFungibleTokens, resolveTokenLogos } from "./swap/helius-tokens.js";
@@ -8752,7 +8752,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // renders the Borrow form from (collateral symbol/decimals, max LTV, live
   // borrowable, oracle price). Server-derived from ALLOWED_BORROW_VAULT_IDS —
   // the client never supplies a vault id or mint. `eligible` tells the UI
-  // whether the owner-gated money path is open for this wallet. No money path,
+  // whether the borrow money path is open for this wallet (owner/beta in prod;
+  // open in dev via the dev bypass). No money path,
   // no UMK/session; reads only public protocol config + the caller's wallet.
   app.get("/api/vault/borrow/config", requireWallet, async (req, res) => {
     try {
@@ -8784,7 +8785,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         ...c,
         collateralLogoURI: collateralLogos.get(c.collateralMint) ?? null,
       }));
-      res.json({ eligible: isBorrowOwnerWallet(req.walletAddress!), collaterals });
+      res.json({ eligible: isBorrowEligibleWallet(req.walletAddress!), collaterals });
     } catch (error: any) {
       console.error("[Vault] borrow config read error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
@@ -8836,14 +8837,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   });
 
   // OPEN a borrow: deposit collateral + borrow USDC against it. THE money path.
-  // MVP: account scope only, owner-wallet gated, allowlisted collateral vault
+  // MVP: account scope only, owner/beta gated in prod (open in dev), allowlisted collateral vault
   // only. The executor re-runs the enforced risk gate immediately before signing
   // and records borrowed USDC as a LIABILITY. Body: { collateralMint,
   // collateralRaw, requestedDebtRaw, sessionId } (raw = base-unit integer strings).
   app.post("/api/vault/borrow/open", requireWallet, async (req, res) => {
     try {
-      // Owner-wallet gate (fail closed: BORROW_OWNER_WALLET must be set and match).
-      if (!isBorrowOwnerWallet(req.walletAddress!)) {
+      // Borrow eligibility gate (fail closed in prod: owner/beta only; dev: open).
+      if (!isBorrowEligibleWallet(req.walletAddress!)) {
         return res.status(403).json({ error: "Borrowing is not available for this wallet yet." });
       }
 
@@ -8924,11 +8925,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   });
 
   // CLOSE a borrow in full: repay ALL debt + withdraw ALL collateral. THE money
-  // path. MVP: account scope only, owner-wallet gated. The wallet must hold
+  // path. MVP: account scope only, owner/beta gated in prod (open in dev). The wallet must hold
   // enough USDC to repay. Body: { borrowPositionId, sessionId }.
   app.post("/api/vault/borrow/close", requireWallet, async (req, res) => {
     try {
-      if (!isBorrowOwnerWallet(req.walletAddress!)) {
+      if (!isBorrowEligibleWallet(req.walletAddress!)) {
         return res.status(403).json({ error: "Borrowing is not available for this wallet yet." });
       }
 
@@ -8982,7 +8983,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   });
 
   // ----------------------------------------------------------------------------
-  // PER-OP borrow money paths (T004). Each mirrors open/close: owner-gated,
+  // PER-OP borrow money paths (T004). Each mirrors open/close: owner/beta gated in prod (open in dev),
   // session/UMK verified, account scope only, agent key decrypted just-in-time and
   // ALWAYS wiped in a finally. Executors own the money-safety (re-run the risk
   // gate, realized on-chain delta = truth, fail closed). Routes stay thin:
@@ -9014,7 +9015,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     res: any,
     sessionId: unknown,
   ): Promise<{ wallet: any; scope: any; agentKeyResult: { secretKey: Uint8Array; cleanup: () => void } } | null> => {
-    if (!isBorrowOwnerWallet(req.walletAddress!)) {
+    if (!isBorrowEligibleWallet(req.walletAddress!)) {
       res.status(403).json({ error: "Borrowing is not available for this wallet yet." });
       return null;
     }
@@ -9483,7 +9484,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // READ a wallet's active borrow position(s) + best-effort LIVE health for the
   // standing "Your loan" card. Read-only: no money, no UMK/session (it only reads
   // public on-chain state + DB rows scoped to the caller's wallet). `eligible`
-  // tells the UI whether to surface the Borrow action (owner-gated MVP). Live
+  // tells the UI whether to surface the Borrow action (owner/beta in prod; open in dev). Live
   // health is best-effort and fails SOFT to the stored snapshot (readLivePosition
   // Health returns null for both "no position" and an RPC error, so a null here is
   // never treated as "loan repaid" — terminal status comes only from the executor).
@@ -9528,7 +9529,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }),
       );
 
-      res.json({ eligible: isBorrowOwnerWallet(req.walletAddress!), positions });
+      res.json({ eligible: isBorrowEligibleWallet(req.walletAddress!), positions });
     } catch (error: any) {
       console.error("[Vault] borrow positions read error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });

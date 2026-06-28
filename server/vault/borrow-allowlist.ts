@@ -48,7 +48,26 @@ export function isCollateralVaultAllowlisted(vaultId: number): boolean {
  */
 export const BORROW_BETA_ALLOWLIST: ReadonlySet<string> = new Set<string>([]);
 
+/**
+ * DEV-ONLY borrow gate bypass. We are actively building the borrow flow in the
+ * development environment and do NOT want to whitelist a wallet just to test, so
+ * in dev any connected wallet may borrow. Active ONLY when NODE_ENV is exactly
+ * "development" (what `npm run dev` sets) AND there is no Replit deployment
+ * domain. It fails closed to false in production (NODE_ENV=production) and under
+ * tests (NODE_ENV=test/unset → deterministic gate behavior preserved), so the
+ * LIVE site (myquantumvault.com) stays fully owner/beta gated.
+ *
+ * IMPORTANT: this bypasses ONLY the wallet whitelist. Every other money-safety
+ * breaker (oracle freshness, LTV cap, health factor, platform exposure caps, the
+ * collateral-vault allowlist) still runs unchanged in dev.
+ */
+export function isBorrowGateBypassedForDev(): boolean {
+  return process.env.NODE_ENV === "development" && !process.env.REPLIT_DEPLOYMENT_DOMAIN;
+}
+
 export function isBorrowAllowlisted(walletAddress: string): boolean {
+  // Dev: treat every wallet as beta-allowlisted (no whitelisting needed locally).
+  if (isBorrowGateBypassedForDev()) return true;
   return typeof walletAddress === "string" && BORROW_BETA_ALLOWLIST.has(walletAddress);
 }
 
@@ -66,4 +85,15 @@ export function getBorrowOwnerWallet(): string | null {
 export function isBorrowOwnerWallet(walletAddress: string): boolean {
   const owner = getBorrowOwnerWallet();
   return !!owner && typeof walletAddress === "string" && walletAddress === owner;
+}
+
+/**
+ * The single "may this wallet use the borrow money path?" check the routes gate
+ * on. True for the owner wallet, any beta-allowlisted wallet, OR (in dev) any
+ * wallet — via the dev bypass folded into isBorrowAllowlisted. In production this
+ * reduces to owner-or-beta, matching the prior owner-only route behavior until
+ * the owner populates the beta list.
+ */
+export function isBorrowEligibleWallet(walletAddress: string): boolean {
+  return isBorrowOwnerWallet(walletAddress) || isBorrowAllowlisted(walletAddress);
 }
