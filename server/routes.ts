@@ -1508,7 +1508,7 @@ import { previewBorrowEligibility } from "./vault/borrow-eligibility";
 import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral } from "./vault/jupiter-lend-borrow-executor";
-import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken } from "./vault/jupiter-lend-repay-multihop";
+import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings } from "./vault/jupiter-lend-repay-multihop";
 import { getUserFungibleTokens, resolveTokenLogos } from "./swap/helius-tokens.js";
 
 const SWAP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -9378,6 +9378,47 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       sendMultiHopResult(res, result);
     } catch (error: any) {
       console.error("[Vault] repay wallet-token error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // REPAY from parked VAULT SAVINGS (Earn) (source #5, multi-hop): unpark JUST
+  // ENOUGH of the user's largest-value yield holding to USDC -> repay (capped at
+  // live debt). One-tap (no amount). Fully server-side (it reads the on-chain
+  // balance itself). Idempotent via clientRequestId. Body:
+  // { borrowPositionId, clientRequestId, slippageBps?, sessionId }.
+  app.post("/api/vault/borrow/repay/vault-savings", requireWallet, async (req, res) => {
+    try {
+      const { borrowPositionId, clientRequestId, slippageBps, sessionId } = req.body || {};
+      if (!borrowPositionId || typeof borrowPositionId !== "string") {
+        return res.status(400).json({ error: "borrowPositionId required" });
+      }
+      if (!clientRequestId || typeof clientRequestId !== "string") {
+        return res.status(400).json({ error: "clientRequestId required" });
+      }
+      if (slippageBps != null && (typeof slippageBps !== "number" || !Number.isFinite(slippageBps))) {
+        return res.status(400).json({ error: "slippageBps must be a number" });
+      }
+
+      const ctx = await prepareBorrowOpContext(req, res, sessionId);
+      if (!ctx) return;
+
+      let result;
+      try {
+        result = await executeRepayFromVaultSavings({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: ctx.scope.agentPublicKey,
+          agentSecretKey: ctx.agentKeyResult.secretKey,
+          borrowPositionId,
+          clientRequestId,
+          slippageBps,
+        });
+      } finally {
+        ctx.agentKeyResult.cleanup();
+      }
+      sendMultiHopResult(res, result);
+    } catch (error: any) {
+      console.error("[Vault] repay vault-savings error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
     }
   });

@@ -58,7 +58,9 @@ import {
   withBorrowLock,
 } from "./jupiter-lend-borrow-executor";
 import { JupiterLendBorrowRoute } from "./jupiter-lend-borrow-route";
-import { getDetectableYieldAssets } from "./yield-assets";
+import { getDetectableYieldAssets, getEnabledYieldAssets } from "./yield-assets";
+import { getYieldRoute } from "./yield-routes";
+import { unparkToUsdc } from "./vault-service";
 
 const DEFAULT_SWAP_SLIPPAGE_BPS = 100;
 const MAX_SWAP_SLIPPAGE_BPS = 500;
@@ -623,6 +625,179 @@ export async function executeRepayFromWalletToken(params: RepayFromWalletTokenPa
       borrowPositionId: params.borrowPositionId,
       inputMint: params.tokenMint,
       slippageBps,
+    });
+  });
+}
+
+// ===========================================================================
+// #5  Repay from parked Vault savings (Earn) — multi-hop
+// ===========================================================================
+
+export interface RepayFromVaultSavingsParams {
+  walletAddress: string;
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  borrowPositionId: string;
+  clientRequestId: string;
+  slippageBps?: number;
+}
+
+// A small cushion so the unpark proceeds reliably CLEAR the debt despite swap
+// slippage / price drift. Over-shooting is money-safe: the repay leg caps every
+// repay at the true on-chain debt, and any excess USDC stays recoverable in the
+// trading wallet. Integer math keeps the sizing float-safe.
+const VAULT_SAVINGS_REPAY_BUFFER_NUM = 102n; // +2%
+const VAULT_SAVINGS_REPAY_BUFFER_DEN = 100n;
+
+/**
+ * #5: repay using funds the user PARKED in the Vault (Earn). This is the exact
+ * bind a carry trader hits when their borrowed USDC is locked in a yield token
+ * (e.g. ONyc) and source #1 (loose trading USDC) is empty. Fully server-side,
+ * ACCOUNT scope:
+ *   pick the user's largest-VALUE enabled yield holding -> unpark JUST ENOUGH of
+ *   it to cover the live debt (+buffer) into USDC -> repay (capped at debt).
+ *
+ * Money-safety / resume model. unparkToUsdc has no write-ahead-signature hook, so
+ * (unlike the deleverage withdraw) we cannot reconcile an in-flight swap by
+ * signature. We lean on RECORDED PROCEEDS plus a conservative ambiguous case:
+ *   - Once an unpark CONFIRMS we record its realized USDC (`unparkUsdcRaw`). Any
+ *     resume that sees recorded proceeds drives ONLY the idempotent repay leg —
+ *     it never unparks again (no double-liquidation of savings).
+ *   - A CLEAN unpark failure (no USDC received) lands at "unpark_failed": the
+ *     yield token never left the wallet, so a retry safely re-unparks.
+ *   - The "unparking" marker (intent persisted, NO confirmed proceeds) means a
+ *     crash hit between the on-chain swap and our DB write — unprovable either
+ *     way. We FAIL CLOSED (funds are safe: still parked, or already USDC in the
+ *     trading wallet) and never auto re-unpark.
+ */
+export async function executeRepayFromVaultSavings(params: RepayFromVaultSavingsParams): Promise<MultiHopRepayResult> {
+  return withBorrowLock(`multihop:${params.walletAddress}:${params.clientRequestId}`, async () => {
+    const slippageBps = clampSlippage(params.slippageBps);
+    let op = await resolveOrCreateOp({
+      walletAddress: params.walletAddress,
+      borrowPositionId: params.borrowPositionId,
+      clientRequestId: params.clientRequestId,
+      operationType: "repay_vault_savings",
+      metadata: { source: "vault_savings", positionId: params.borrowPositionId, slippageBps },
+    });
+    if (op.status === "succeeded") return replaySucceeded(op);
+
+    // RESUME (confirmed proceeds): a prior run already converted savings to USDC.
+    // Never unpark again — just (re)drive the idempotent, debt-capped repay leg.
+    const recorded = readMeta(op).unparkUsdcRaw;
+    if (recorded && BigInt(recorded) > 0n) {
+      return repayProceeds(op, {
+        walletAddress: params.walletAddress,
+        agentPublicKey: params.agentPublicKey,
+        agentSecretKey: params.agentSecretKey,
+        borrowPositionId: params.borrowPositionId,
+        proceedsRaw: BigInt(recorded),
+      });
+    }
+
+    // RESUME (ambiguous in-flight unpark): intent persisted, no confirmed
+    // proceeds. A crash landed between the on-chain swap and our DB write; we
+    // cannot prove which side. Fail closed — funds are safe and we never auto
+    // re-unpark (which would double-liquidate the savings).
+    if ((op.step ?? "") === "unparking") {
+      return failClosed(
+        op,
+        "unparking",
+        "Your savings withdrawal is being verified. Your funds are safe — check your trading wallet for USDC and repay from there, or start a new repayment.",
+        true,
+      );
+    }
+
+    // Live debt is the authority for sizing.
+    const live = await readLiveDebtRaw(params.walletAddress, params.borrowPositionId);
+    if (!live) return failClosed(op, "initialized", "Could not read your live loan balance; nothing was changed.", false);
+    if (live.debtRaw <= 0n) {
+      return finalize(op, { repaidUsdc: 0, observedDebtRaw: "0", fullyRepaid: true });
+    }
+
+    // Pick the largest-VALUE enabled yield asset the agent actually holds.
+    // On-chain STRICT reads are the truth (this also catches a yield token bought
+    // via a manual swap that has no vault_positions DB row). Any unreadable
+    // balance or missing price fails closed — no guessing on a money path.
+    type Candidate = { assetKey: string; displayName: string; balanceRaw: bigint; valueUsdcRaw: bigint };
+    let best: Candidate | null = null;
+    for (const asset of getEnabledYieldAssets()) {
+      let balanceRaw: bigint;
+      try {
+        balanceRaw = await strictBalanceRaw(params.agentPublicKey, asset.mint);
+      } catch {
+        return failClosed(op, "initialized", `Could not read your ${asset.displayName} savings balance; nothing was changed.`, true);
+      }
+      if (balanceRaw <= 0n) continue;
+      const val = await getYieldRoute(asset).valueInUsdc(balanceRaw);
+      if (!val.valueUsdcRaw) {
+        return failClosed(op, "initialized", `Could not price your ${asset.displayName} savings right now; nothing was changed. Try again shortly.`, true);
+      }
+      const valueUsdcRaw = BigInt(val.valueUsdcRaw);
+      if (valueUsdcRaw <= 0n) continue;
+      if (!best || valueUsdcRaw > best.valueUsdcRaw) {
+        best = { assetKey: asset.key, displayName: asset.displayName, balanceRaw, valueUsdcRaw };
+      }
+    }
+    if (!best) {
+      return failClosed(op, "initialized", "You have no Vault savings to repay from. Park some funds first, or use another source.", false);
+    }
+
+    // Size: unpark JUST ENOUGH to cover the debt (+buffer), capped at the holding.
+    // All integer math (float-safe). If the asset can't cover the full debt, sell
+    // all of it for a partial paydown.
+    const neededUsdcRaw = (live.debtRaw * VAULT_SAVINGS_REPAY_BUFFER_NUM) / VAULT_SAVINGS_REPAY_BUFFER_DEN;
+    let sellRaw: bigint;
+    if (best.valueUsdcRaw <= neededUsdcRaw) {
+      sellRaw = best.balanceRaw;
+    } else {
+      // CEIL division: never let integer truncation shave a raw unit off the
+      // +buffer target (that would slightly underpay). Still clamped to holding.
+      sellRaw = (best.balanceRaw * neededUsdcRaw + best.valueUsdcRaw - 1n) / best.valueUsdcRaw;
+      if (sellRaw <= 0n) sellRaw = best.balanceRaw; // never round down to nothing
+      if (sellRaw > best.balanceRaw) sellRaw = best.balanceRaw;
+    }
+
+    // UNPARK leg. Persist the INTENT before acting so a crash lands at "unparking"
+    // (handled conservatively above) and never silently re-unparks.
+    await storage.updateBorrowOperation(op.id, {
+      step: "unparking",
+      mergeMetadata: { unparkAssetKey: best.assetKey, unparkSellRaw: sellRaw.toString() },
+    });
+
+    const unpark = await unparkToUsdc({
+      walletAddress: params.walletAddress,
+      tradingBotId: null, // ACCOUNT scope: the borrow engine + parked savings are account-level
+      agentPublicKey: params.agentPublicKey,
+      agentSecretKey: params.agentSecretKey,
+      assetKey: best.assetKey,
+      amountTokenRaw: sellRaw,
+      slippageBps,
+    });
+    if (!unpark.success || !unpark.usdcReceivedRaw || BigInt(unpark.usdcReceivedRaw) <= 0n) {
+      // The yield token never left the wallet -> recoverable. Restartable failure.
+      return failClosed(op, "unpark_failed", unpark.error || "Could not convert your Vault savings to USDC. Your funds are safe.", true);
+    }
+    const proceedsRaw = BigInt(unpark.usdcReceivedRaw);
+    await storage.updateBorrowOperation(op.id, {
+      step: "unpark_confirmed",
+      // `swapUsdcRaw` is what finalize() surfaces as swappedUsdcRaw to the client.
+      mergeMetadata: {
+        unparkSig: unpark.signature,
+        unparkUsdcRaw: proceedsRaw.toString(),
+        swapUsdcRaw: proceedsRaw.toString(),
+        unparkAssetKey: best.assetKey,
+      },
+      ...(unpark.signature ? { appendTxSignature: unpark.signature } : {}),
+    });
+    op = (await storage.getBorrowOperationById(op.id)) ?? op;
+
+    return repayProceeds(op, {
+      walletAddress: params.walletAddress,
+      agentPublicKey: params.agentPublicKey,
+      agentSecretKey: params.agentSecretKey,
+      borrowPositionId: params.borrowPositionId,
+      proceedsRaw,
     });
   });
 }

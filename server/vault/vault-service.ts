@@ -266,6 +266,10 @@ export interface UnparkResult {
   success: boolean;
   signature?: string;
   usdcReceived?: number;
+  /** Realized USDC received, raw base units (exact on-chain delta). For callers
+   *  that must feed the proceeds into another money leg (e.g. repay) as an exact
+   *  bigint — never re-derive from the UI float, which loses precision. */
+  usdcReceivedRaw?: string;
   tokensSold?: number;
   costBasisRemoved?: number;
   realizedPnl?: number;
@@ -282,7 +286,11 @@ export async function unparkToUsdc(params: {
   agentPublicKey: string;
   agentSecretKey: Uint8Array;
   assetKey: string;
-  amountToken?: number; // ignored when `all` is true
+  amountToken?: number; // ignored when `all` is true OR amountTokenRaw is set
+  /** Exact token amount to sell, raw base units. Takes precedence over
+   *  amountToken (no float round-trip) and is clamped to the on-chain balance.
+   *  Ignored when `all` is true. */
+  amountTokenRaw?: bigint;
   all?: boolean;
   slippageBps?: number;
   /** Account agent that backstops gas. For a per-bot wallet this is the main agent. */
@@ -311,9 +319,26 @@ export async function unparkToUsdc(params: {
     });
     if (!gas.ok) return { success: false, error: gas.error || "Could not cover the network gas for this unpark." };
 
-  // On-chain token balance is the truth for how much can be sold.
-  const onChain = await getAgentTokenBalanceRaw(params.agentPublicKey, asset.mint);
-  const onChainRaw = BigInt(onChain.amountRaw);
+  // On-chain token balance is the truth for how much can be sold. Money-leg
+  // callers pass an exact `amountTokenRaw`; for them read with the STRICT reader
+  // so an UNREADABLE balance is DETECTED rather than silently treated as 0 (which
+  // would surface a misleading "no balance"). We CATCH the throw and return a
+  // restartable failure instead of letting it bubble: the multi-hop repay
+  // orchestrator inspects the returned result, and an uncaught throw here would
+  // wedge its op at the "unparking" step before any money moved. The fail-open
+  // reader stays fine for the float/all-out paths (a 0 there means "nothing to do").
+  let onChainRaw: bigint;
+  if (params.amountTokenRaw != null) {
+    try {
+      const strict = await getAgentTokenBalanceRawStrict(params.agentPublicKey, asset.mint);
+      onChainRaw = BigInt(strict.amountRaw);
+    } catch {
+      return { success: false, error: `Could not read your ${asset.displayName} balance. Your funds are safe — please try again.` };
+    }
+  } else {
+    const onChain = await getAgentTokenBalanceRaw(params.agentPublicKey, asset.mint);
+    onChainRaw = BigInt(onChain.amountRaw);
+  }
   if (onChainRaw <= BigInt(0)) {
     return { success: false, error: `No ${asset.displayName} balance to unpark.` };
   }
@@ -321,6 +346,11 @@ export async function unparkToUsdc(params: {
   let sellRaw: bigint;
   if (params.all) {
     sellRaw = onChainRaw;
+  } else if (params.amountTokenRaw != null) {
+    // Exact raw amount (no float round-trip) — preferred by money-leg callers.
+    sellRaw = params.amountTokenRaw;
+    if (sellRaw <= BigInt(0)) return { success: false, error: "Amount is too small" };
+    if (sellRaw > onChainRaw) sellRaw = onChainRaw; // clamp to available
   } else {
     if (!(params.amountToken && params.amountToken > 0)) {
       return { success: false, error: "Amount must be greater than zero" };
@@ -370,6 +400,7 @@ export async function unparkToUsdc(params: {
     success: true,
     signature: exec.signature,
     usdcReceived,
+    usdcReceivedRaw: BigInt(exec.outputReceivedRaw).toString(),
     tokensSold: fromRaw(sellRaw, asset.decimals),
     costBasisRemoved,
     realizedPnl,

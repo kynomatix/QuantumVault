@@ -17,6 +17,7 @@ import {
   RefreshCw,
   Fuel,
   Info,
+  PiggyBank,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -1060,7 +1061,7 @@ export function WithdrawCollateralDialog({
 // have moved into the agent (#2/#4 transfer confirmed), the flow only ever
 // re-POSTs the repay leg — it never re-transfers.
 // ---------------------------------------------------------------------------
-type RepaySource = 'agent' | 'wallet-usdc' | 'deleverage' | 'wallet-token';
+type RepaySource = 'agent' | 'wallet-usdc' | 'deleverage' | 'wallet-token' | 'vault-savings';
 type RepayMode = 'usdc' | 'asset';
 
 // Each repay source belongs to a "mode" = what you pay WITH: USDC you already
@@ -1070,7 +1071,7 @@ type RepayMode = 'usdc' | 'asset';
 // its crash-proof resume logic intact).
 const REPAY_SOURCES_BY_MODE: Record<RepayMode, RepaySource[]> = {
   usdc: ['agent', 'wallet-usdc'],
-  asset: ['deleverage', 'wallet-token'],
+  asset: ['deleverage', 'wallet-token', 'vault-savings'],
 };
 const modeForSource = (s: RepaySource): RepayMode =>
   s === 'agent' || s === 'wallet-usdc' ? 'usdc' : 'asset';
@@ -1080,6 +1081,7 @@ const SOURCE_LABELS: Record<RepaySource, { label: string; sub: string; icon: typ
   'wallet-usdc': { label: 'From Your Wallet', sub: 'Pay with wallet USDC', icon: Wallet },
   deleverage: { label: 'Supplied collateral', sub: 'Sell some of your locked collateral', icon: Coins },
   'wallet-token': { label: 'Your Wallet', sub: 'Swap a wallet token to USDC', icon: Wallet },
+  'vault-savings': { label: 'From Vault Savings', sub: 'Unpark your Earn savings to repay', icon: PiggyBank },
 };
 
 // ---------------------------------------------------------------------------
@@ -1668,10 +1670,41 @@ export function RepayLoanDialog({
     }
   };
 
+  // #5 — From parked Vault savings (Earn). ONE-TAP: the server reads the on-chain
+  // balance itself, unparks JUST ENOUGH of the largest holding to USDC, then
+  // repays (capped at debt). No amount input. Resumable via the persisted request
+  // id — the server is the resume authority (recorded unpark proceeds), so a crash
+  // mid-flow re-POSTs the SAME id and never double-unparks.
+  const repayFromVaultSavings = async () => {
+    if (!pool) return;
+    if (!reqIdRef.current) reqIdRef.current = newRequestId();
+    // Persist BEFORE acting so a crash mid-flow resumes the same request id.
+    saveRepayResume(pool.id, {
+      source: 'vault-savings',
+      clientRequestId: reqIdRef.current,
+    });
+    setPhase('working');
+    setStatusText('Unparking your savings and repaying…');
+    try {
+      const sessionId = await getSessionId();
+      const res = await fetch(
+        '/api/vault/borrow/repay/vault-savings',
+        POST_JSON({ borrowPositionId: pool.id, clientRequestId: reqIdRef.current, sessionId }),
+      );
+      const data = await safeResponseJson(res);
+      await handleResult(res, data, false, '');
+    } catch (e: any) {
+      setPhase('needs_retry');
+      setStatusText('The repayment may be mid-flight. Tap Retry to finish safely.');
+      toast({ title: "Repayment didn't finish", description: e.message || 'Tap Retry to finish.', variant: 'destructive' });
+    }
+  };
+
   const submit = () => {
     if (source === 'agent') return repayFromAgent();
     if (source === 'wallet-usdc') return repayFromWalletUsdc();
     if (source === 'deleverage') return repayFromDeleverage();
+    if (source === 'vault-savings') return repayFromVaultSavings();
     return repayFromWalletToken();
   };
 
@@ -1685,6 +1718,8 @@ export function RepayLoanDialog({
     ? `Repay with ${symbol ?? 'collateral'}`
     : source === 'wallet-token'
     ? 'Repay & Convert to USDC'
+    : source === 'vault-savings'
+    ? 'Repay from Savings'
     : 'Repay debt';
   // The user only needs SOL in THEIR wallet when THEY sign a transfer (wallet
   // USDC / wallet token). Agent USDC and deleverage are signed server-side, so a
@@ -2060,6 +2095,20 @@ export function RepayLoanDialog({
                   Your {selectedToken?.symbol ?? 'token'} is <span className="text-foreground font-medium">swapped to USDC</span> via Jupiter, then used to pay down the loan.
                 </p>
               </div>
+            </div>
+          )}
+
+          {/* #5 Vault savings — ONE-TAP, fully server-side. No amount input: the
+              server reads the on-chain balance, unparks JUST ENOUGH of the
+              largest holding to USDC, then repays (capped at debt). Leftover stays
+              parked. This is the carry-trade unwind (savings locked in a yield
+              token) made into a single safe action. */}
+          {source === 'vault-savings' && (
+            <div className="flex items-start gap-2 rounded-lg border border-accent/20 bg-accent/10 px-3 py-2.5">
+              <PiggyBank className="w-4 h-4 text-accent mt-0.5 shrink-0" />
+              <p className="text-xs text-muted-foreground">
+                One tap: we unpark <span className="text-foreground font-medium">just enough of your Vault savings</span>, swap it to USDC, and clear your {debtStr} debt. Anything left over stays in your savings.
+              </p>
             </div>
           )}
 
