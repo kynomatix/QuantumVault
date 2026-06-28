@@ -49,25 +49,29 @@ export function isCollateralVaultAllowlisted(vaultId: number): boolean {
 export const BORROW_BETA_ALLOWLIST: ReadonlySet<string> = new Set<string>([]);
 
 /**
- * DEV-ONLY borrow gate bypass. We are actively building the borrow flow in the
- * development environment and do NOT want to whitelist a wallet just to test, so
- * in dev any connected wallet may borrow. Active ONLY when NODE_ENV is exactly
- * "development" (what `npm run dev` sets) AND there is no Replit deployment
- * domain. It fails closed to false in production (NODE_ENV=production) and under
- * tests (NODE_ENV=test/unset → deterministic gate behavior preserved), so the
- * LIVE site (myquantumvault.com) stays fully owner/beta gated.
+ * BORROW OPEN TO ALL — the owner has launched borrowing publicly. Any connected
+ * wallet may use the borrow money path, in EVERY environment (development AND the
+ * live production site, myquantumvault.com). The owner made this call deliberately
+ * after being shown that the production site is public, so this opens borrowing to
+ * any visitor who connects a wallet — not just the owner.
  *
- * IMPORTANT: this bypasses ONLY the wallet whitelist. Every other money-safety
- * breaker (oracle freshness, LTV cap, health factor, platform exposure caps, the
- * collateral-vault allowlist) still runs unchanged in dev.
+ * IMPORTANT: this removes ONLY the per-WALLET whitelist. Every other money-safety
+ * breaker still runs unchanged — oracle freshness, max-LTV cap, health factor,
+ * platform exposure caps, and the collateral-VAULT allowlist (ALLOWED_BORROW_VAULT_IDS).
+ *
+ * To re-close borrowing to a private beta (owner + named wallets only), flip this
+ * to false and populate BORROW_BETA_ALLOWLIST and/or the BORROW_OWNER_WALLET env var.
  */
-export function isBorrowGateBypassedForDev(): boolean {
-  return process.env.NODE_ENV === "development" && !process.env.REPLIT_DEPLOYMENT_DOMAIN;
+export const BORROW_OPEN_TO_ALL = true;
+
+export function isBorrowOpenToAll(): boolean {
+  return BORROW_OPEN_TO_ALL;
 }
 
 export function isBorrowAllowlisted(walletAddress: string): boolean {
-  // Dev: treat every wallet as beta-allowlisted (no whitelisting needed locally).
-  if (isBorrowGateBypassedForDev()) return true;
+  // Borrowing is open to every wallet (owner launch decision). When re-closed,
+  // this falls back to the explicit beta allowlist.
+  if (isBorrowOpenToAll()) return true;
   return typeof walletAddress === "string" && BORROW_BETA_ALLOWLIST.has(walletAddress);
 }
 
@@ -89,11 +93,10 @@ export function isBorrowOwnerWallet(walletAddress: string): boolean {
 
 /**
  * The single "may this wallet use the borrow money path?" check the routes gate
- * on. True for the owner wallet, any beta-allowlisted wallet, OR (in dev) any
- * wallet — via the dev bypass folded into isBorrowAllowlisted. In production this
- * reduces to owner-or-beta, matching the prior owner-only route behavior until
- * the owner populates the beta list.
+ * on. While BORROW_OPEN_TO_ALL is true this returns true for every wallet (owner
+ * launch decision). If borrowing is re-closed to a private beta, it reduces to
+ * "owner wallet OR beta-allowlisted wallet".
  */
 export function isBorrowEligibleWallet(walletAddress: string): boolean {
-  return isBorrowOwnerWallet(walletAddress) || isBorrowAllowlisted(walletAddress);
+  return isBorrowOpenToAll() || isBorrowOwnerWallet(walletAddress) || isBorrowAllowlisted(walletAddress);
 }

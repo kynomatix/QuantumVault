@@ -1,14 +1,17 @@
 import { describe, it, expect, afterEach } from "vitest";
 import {
-  isBorrowGateBypassedForDev,
+  isBorrowOpenToAll,
   isBorrowAllowlisted,
   isBorrowEligibleWallet,
   isBorrowOwnerWallet,
+  BORROW_OPEN_TO_ALL,
 } from "../../server/vault/borrow-allowlist";
 
-// These gate the borrow MONEY path. The dev bypass must open borrowing for any
-// connected wallet ONLY in the development environment, and must stay fully
-// closed in production (the live site) and under tests.
+// Borrowing is launched PUBLICLY: any connected wallet may use the borrow money
+// path in EVERY environment (development AND the live production site). These
+// tests pin that the wallet whitelist is fully open while BORROW_OPEN_TO_ALL is
+// true, and that the owner-wallet predicate still resolves (used when borrowing
+// is re-closed to a private beta).
 
 const SAVED = {
   NODE_ENV: process.env.NODE_ENV,
@@ -28,71 +31,56 @@ function setEnv(node: string | undefined, deployDomain?: string, owner?: string)
 const RANDOM_WALLET = "9aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890abcdEF";
 const OTHER_WALLET = "SomeOtherWalletAddress1111111111111111111";
 
-describe("borrow dev-bypass gate (money-safety)", () => {
+describe("borrow eligibility gate (open to all)", () => {
   afterEach(() => {
     setEnv(SAVED.NODE_ENV, SAVED.REPLIT_DEPLOYMENT_DOMAIN, SAVED.BORROW_OWNER_WALLET);
   });
 
-  describe("isBorrowGateBypassedForDev", () => {
-    it("is true ONLY in development with no deployment domain", () => {
-      setEnv("development");
-      expect(isBorrowGateBypassedForDev()).toBe(true);
-    });
-
-    it("is false in development when a Replit deployment domain is present", () => {
-      setEnv("development", "quantumvault.replit.app");
-      expect(isBorrowGateBypassedForDev()).toBe(false);
-    });
-
-    it("is false in production (the live site stays gated)", () => {
-      setEnv("production");
-      expect(isBorrowGateBypassedForDev()).toBe(false);
-    });
-
-    it("is false in production even without a deployment domain", () => {
-      setEnv("production", undefined);
-      expect(isBorrowGateBypassedForDev()).toBe(false);
-    });
-
-    it("is false under tests (NODE_ENV=test) — deterministic gating preserved", () => {
-      setEnv("test");
-      expect(isBorrowGateBypassedForDev()).toBe(false);
-    });
-
-    it("is false when NODE_ENV is unset (fail closed)", () => {
-      setEnv(undefined);
-      expect(isBorrowGateBypassedForDev()).toBe(false);
-    });
+  it("is launched open to all wallets", () => {
+    expect(BORROW_OPEN_TO_ALL).toBe(true);
+    expect(isBorrowOpenToAll()).toBe(true);
   });
 
-  describe("isBorrowAllowlisted", () => {
-    it("treats any wallet as allowlisted in dev", () => {
+  describe("isBorrowAllowlisted — any wallet, any environment", () => {
+    it("allows any wallet in development", () => {
       setEnv("development");
       expect(isBorrowAllowlisted(RANDOM_WALLET)).toBe(true);
     });
 
-    it("denies an un-allowlisted wallet in production (beta list empty)", () => {
-      setEnv("production");
-      expect(isBorrowAllowlisted(RANDOM_WALLET)).toBe(false);
+    it("allows any wallet on the live production site", () => {
+      setEnv("production", "quantumvault.replit.app");
+      expect(isBorrowAllowlisted(RANDOM_WALLET)).toBe(true);
+    });
+
+    it("allows any wallet under tests / unset env", () => {
+      setEnv(undefined);
+      expect(isBorrowAllowlisted(OTHER_WALLET)).toBe(true);
     });
   });
 
-  describe("isBorrowEligibleWallet", () => {
-    it("allows any wallet in dev", () => {
+  describe("isBorrowEligibleWallet — any wallet, any environment", () => {
+    it("allows any wallet in development", () => {
       setEnv("development");
       expect(isBorrowEligibleWallet(RANDOM_WALLET)).toBe(true);
     });
 
-    it("denies a non-owner wallet in production with no owner configured", () => {
-      setEnv("production");
-      expect(isBorrowEligibleWallet(RANDOM_WALLET)).toBe(false);
+    it("allows any wallet on the live production site", () => {
+      setEnv("production", "quantumvault.replit.app");
+      expect(isBorrowEligibleWallet(RANDOM_WALLET)).toBe(true);
+      expect(isBorrowEligibleWallet(OTHER_WALLET)).toBe(true);
     });
+  });
 
-    it("allows the owner wallet in production, denies others", () => {
+  describe("isBorrowOwnerWallet — still resolves (used when re-closed to a beta)", () => {
+    it("recognizes the configured owner wallet and rejects others", () => {
       setEnv("production", undefined, RANDOM_WALLET);
       expect(isBorrowOwnerWallet(RANDOM_WALLET)).toBe(true);
-      expect(isBorrowEligibleWallet(RANDOM_WALLET)).toBe(true);
-      expect(isBorrowEligibleWallet(OTHER_WALLET)).toBe(false);
+      expect(isBorrowOwnerWallet(OTHER_WALLET)).toBe(false);
+    });
+
+    it("treats no wallet as owner when BORROW_OWNER_WALLET is unset", () => {
+      setEnv("production");
+      expect(isBorrowOwnerWallet(RANDOM_WALLET)).toBe(false);
     });
   });
 });

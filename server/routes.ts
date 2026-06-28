@@ -8752,8 +8752,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // renders the Borrow form from (collateral symbol/decimals, max LTV, live
   // borrowable, oracle price). Server-derived from ALLOWED_BORROW_VAULT_IDS —
   // the client never supplies a vault id or mint. `eligible` tells the UI
-  // whether the borrow money path is open for this wallet (owner/beta in prod;
-  // open in dev via the dev bypass). No money path,
+  // whether the borrow money path is open for this wallet (open to all wallets
+  // while borrowing is launched publicly). No money path,
   // no UMK/session; reads only public protocol config + the caller's wallet.
   app.get("/api/vault/borrow/config", requireWallet, async (req, res) => {
     try {
@@ -8837,13 +8837,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   });
 
   // OPEN a borrow: deposit collateral + borrow USDC against it. THE money path.
-  // MVP: account scope only, owner/beta gated in prod (open in dev), allowlisted collateral vault
+  // MVP: account scope only, open to all wallets (launched publicly), allowlisted collateral vault
   // only. The executor re-runs the enforced risk gate immediately before signing
   // and records borrowed USDC as a LIABILITY. Body: { collateralMint,
   // collateralRaw, requestedDebtRaw, sessionId } (raw = base-unit integer strings).
   app.post("/api/vault/borrow/open", requireWallet, async (req, res) => {
     try {
-      // Borrow eligibility gate (fail closed in prod: owner/beta only; dev: open).
+      // Borrow eligibility gate (open to all wallets while launched publicly;
+      // flip BORROW_OPEN_TO_ALL=false to re-close to owner/beta).
       if (!isBorrowEligibleWallet(req.walletAddress!)) {
         return res.status(403).json({ error: "Borrowing is not available for this wallet yet." });
       }
@@ -8925,7 +8926,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   });
 
   // CLOSE a borrow in full: repay ALL debt + withdraw ALL collateral. THE money
-  // path. MVP: account scope only, owner/beta gated in prod (open in dev). The wallet must hold
+  // path. MVP: account scope only, open to all wallets (launched publicly). The wallet must hold
   // enough USDC to repay. Body: { borrowPositionId, sessionId }.
   app.post("/api/vault/borrow/close", requireWallet, async (req, res) => {
     try {
@@ -8983,7 +8984,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   });
 
   // ----------------------------------------------------------------------------
-  // PER-OP borrow money paths (T004). Each mirrors open/close: owner/beta gated in prod (open in dev),
+  // PER-OP borrow money paths (T004). Each mirrors open/close: open to all wallets (launched publicly),
   // session/UMK verified, account scope only, agent key decrypted just-in-time and
   // ALWAYS wiped in a finally. Executors own the money-safety (re-run the risk
   // gate, realized on-chain delta = truth, fail closed). Routes stay thin:
@@ -9484,7 +9485,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // READ a wallet's active borrow position(s) + best-effort LIVE health for the
   // standing "Your loan" card. Read-only: no money, no UMK/session (it only reads
   // public on-chain state + DB rows scoped to the caller's wallet). `eligible`
-  // tells the UI whether to surface the Borrow action (owner/beta in prod; open in dev). Live
+  // tells the UI whether to surface the Borrow action (open to all wallets). Live
   // health is best-effort and fails SOFT to the stored snapshot (readLivePosition
   // Health returns null for both "no position" and an RPC error, so a null here is
   // never treated as "loan repaid" — terminal status comes only from the executor).
