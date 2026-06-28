@@ -44,6 +44,7 @@
  */
 
 import { PublicKey } from "@solana/web3.js";
+import Decimal from "decimal.js";
 import { storage } from "../storage";
 import type { BorrowOperation } from "@shared/schema";
 import {
@@ -88,10 +89,6 @@ export interface MultiHopRepayResult {
   /** USDC-pool repay only: realized USDC that came from drawing (unparking) Vault
    *  savings to cover the remainder after trading USDC was exhausted. */
   fromVaultUsdc?: number;
-  /** USDC-pool PARTIAL repay only: the requested amount exceeds loose trading
-   *  USDC. Drawing savings for a partial isn't supported (only a "max" full clear
-   *  is), so the client guides the user to tap Max. Nothing moved. */
-  needsMaxForVault?: boolean;
   warning?: string;
   error?: string;
 }
@@ -826,21 +823,25 @@ export async function executeRepayFromVaultSavings(params: RepayFromVaultSavings
 // is loose trading (agent) USDC PLUS parked Vault savings. This orchestrator is
 // that pool's money authority. Two shapes:
 //
-//   PARTIAL (a bigint amount)  — ALWAYS idle-only. If loose trading USDC covers
-//     the amount we repay it in a single tx (no op, no resume needed). If it does
-//     NOT, we REJECT with `needsMaxForVault` rather than draw savings: a partial
-//     savings draw can't be made intent-idempotent on resume without a write-ahead
-//     repay signature (the agent balance reads the same whether the repay landed
-//     or not), so we only ever draw savings on a full "max" clear, whose repay leg
-//     re-reads the FRESH balance and is therefore safe to resume.
+//   PARTIAL (a bigint amount) — repay the typed amount (capped at live debt).
+//     When loose trading USDC already covers it the repay leg simply skips the
+//     unpark; otherwise we draw (unpark) JUST the shortfall from the largest-value
+//     Vault holding and repay EXACTLY the target — never the whole cushioned
+//     balance, so the +2% over-unpark cushion is not swept into the loan. ALWAYS
+//     operation-backed and resumable: the repay signature is recorded BEFORE
+//     broadcast, so a crash is reconciled by on-chain status (a partial can't lean
+//     on the fresh-balance re-read alone — re-reading the lower balance and repaying
+//     the target again would over-pay the cushion).
 //
-//   MAX (the "max" sentinel) — full clear. If loose trading USDC already covers
-//     debt + the executor's interest buffer, idle-only "max". Otherwise we draw
-//     (unpark) JUST the shortfall from the largest-value Vault holding, then repay
+//   MAX (the "max" sentinel) — full clear. When loose trading USDC already covers
+//     debt + the executor's interest buffer the repay leg skips the unpark.
+//     Otherwise we draw (unpark) JUST the shortfall from the largest-value Vault
+//     holding, then repay
 //     the combined balance. Resumable via the same DB-backed state machine the
 //     other multi-hop sources use (records realized unpark proceeds; an ambiguous
-//     in-flight unpark fails closed; the repay leg re-reads the live debt + fresh
-//     balance so a lost-response retry can never double-spend).
+//     in-flight unpark fails closed; the repay leg also records its signature
+//     pre-broadcast and re-reads the live debt + fresh balance so a lost-response
+//     retry can never double-spend).
 //
 // Per-bot park/unpark is forward-fit: `tradingBotId` threads to unparkToUsdc's
 // scope (null = today's only caller, ACCOUNT scope).
@@ -852,7 +853,8 @@ export interface RepayFromUsdcPoolParams {
   borrowPositionId: string;
   clientRequestId: string;
   /** USDC to repay (raw base units) for a partial, or "max" to clear the FULL
-   *  debt. A partial is ALWAYS idle-only; only "max" can draw Vault savings. */
+   *  debt. Both shapes spend loose trading USDC first and draw (unpark) Vault
+   *  savings for any shortfall (a partial repays EXACTLY the typed amount). */
   amount: bigint | "max";
   /** Forward-fit per-bot scope for the Vault draw; null = ACCOUNT scope. */
   tradingBotId?: string | null;
@@ -868,58 +870,40 @@ function poolBreakdown(repaidUsdc: number | undefined, idleStartRaw: bigint): { 
   return { fromAgentUsdc, fromVaultUsdc };
 }
 
-/** Map a single-tx agent-USDC RepayResult into the multi-hop result shape, with
- *  an all-from-trading breakdown. A lost-response retry that finds the debt
- *  already cleared is normalized to success (idempotent). */
-async function repayPoolIdleOnly(params: RepayFromUsdcPoolParams, amount: bigint | "max"): Promise<MultiHopRepayResult> {
-  const repay = await executeRepayFromAgentUsdc({
-    walletAddress: params.walletAddress,
-    agentPublicKey: params.agentPublicKey,
-    agentSecretKey: params.agentSecretKey,
-    borrowPositionId: params.borrowPositionId,
-    amount,
-  });
-  if (!repay.success) {
-    // "no debt to repay" => a prior attempt already cleared it. Treat as success.
-    if (/no debt to repay/i.test(repay.error || "")) {
-      return { success: true, repaidUsdc: 0, observedDebtRaw: "0", fullyRepaid: true, fromAgentUsdc: 0, fromVaultUsdc: 0, signatures: [], step: "final_read" };
-    }
-    return { success: false, error: repay.error || "The repay did not complete.", signatures: repay.signature ? [repay.signature] : [] };
-  }
-  const repaid = repay.repaidUsdc ?? 0;
-  return {
-    success: true,
-    repaidUsdc: repaid,
-    observedDebtRaw: repay.observedDebtRaw,
-    fullyRepaid: !!repay.fullyRepaid,
-    signatures: repay.signature ? [repay.signature] : [],
-    step: "final_read",
-    fromAgentUsdc: repaid,
-    fromVaultUsdc: 0,
-  };
-}
-
 /**
- * REPAY tail for the USDC-pool MAX clear. Repays from the agent wallet's CURRENT
+ * REPAY tail for the USDC-pool clear. Repays from the agent wallet's CURRENT
  * strict USDC balance (idle + any unparked proceeds), capped at live debt by the
- * executor. Always a "clear as much as possible" (Max) intent, so re-reading the
- * FRESH balance on every (re)entry is intent-idempotent: a crash between the
- * repay confirm and our DB write resumes by re-reading the now-lower balance and
- * at worst repays leftover dust — it can NEVER double-spend already-spent USDC
- * (the executor caps at the strict balance + the true on-chain debt).
+ * executor. Honors the op's persisted `mode`:
+ *   - "max"     : clear as much as possible. A clean full clear ("max" sentinel)
+ *                 when the balance covers debt + the interest buffer, else repay
+ *                 the whole balance.
+ *   - "partial" : repay EXACTLY `repayTargetRaw` (capped at balance and live debt) —
+ *                 never the whole cushioned balance, so the +2% over-unpark cushion
+ *                 is NOT swept into the loan.
+ *
+ * Resume-safety. Before broadcasting, the repay signature is durably recorded via
+ * `onBeforeBroadcast` (step "repaying"). A crash between broadcast and our DB write
+ * is reconciled by `reconcileRepaySignature` at the op's entry point — by ON-CHAIN
+ * STATUS, never by the wallet balance. For "max" the balance re-read alone is also
+ * intent-idempotent (re-entry repays at worst leftover dust, never double-spends);
+ * for "partial" the signature reconcile is REQUIRED, because re-reading the lower
+ * balance and repaying the exact target again would over-pay by the leftover cushion.
  */
 async function repayPoolFromBalance(op: BorrowOperation, params: RepayFromUsdcPoolParams): Promise<MultiHopRepayResult> {
-  const idleStartRaw = BigInt(readMeta(op).idleUsdcAtStartRaw ?? "0");
+  const meta = readMeta(op);
+  const idleStartRaw = BigInt(meta.idleUsdcAtStartRaw ?? "0");
+  const mode: "max" | "partial" = meta.mode === "partial" ? "partial" : "max";
+  const repayTargetRaw = meta.repayTargetRaw ? BigInt(meta.repayTargetRaw) : null;
 
   // Idempotent short-circuit: debt already cleared on a prior run.
   const live = await readLiveDebtRaw(params.walletAddress, params.borrowPositionId);
   if (live && live.debtRaw <= 0n) {
     return finalize(op, {
-      repaidUsdc: readMeta(op).repaidUsdc,
+      repaidUsdc: meta.repaidUsdc,
       observedDebtRaw: "0",
       fullyRepaid: true,
-      swappedUsdcRaw: readMeta(op).swapUsdcRaw,
-      ...poolBreakdown(readMeta(op).repaidUsdc, idleStartRaw),
+      swappedUsdcRaw: meta.swapUsdcRaw,
+      ...poolBreakdown(meta.repaidUsdc, idleStartRaw),
     });
   }
   if (!live) return failClosed(op, "unpark_confirmed", "Could not read your live loan balance; your funds are safe in your trading wallet.", true);
@@ -936,31 +920,71 @@ async function repayPoolFromBalance(op: BorrowOperation, params: RepayFromUsdcPo
     // Nothing to repay with. On a resume this means the repay already landed but
     // couldn't fully clear the debt (a partial paydown the savings couldn't cover).
     return finalize(op, {
-      repaidUsdc: readMeta(op).repaidUsdc,
+      repaidUsdc: meta.repaidUsdc,
       observedDebtRaw: live.debtRaw.toString(),
       fullyRepaid: false,
-      swappedUsdcRaw: readMeta(op).swapUsdcRaw,
-      ...poolBreakdown(readMeta(op).repaidUsdc, idleStartRaw),
+      swappedUsdcRaw: meta.swapUsdcRaw,
+      ...poolBreakdown(meta.repaidUsdc, idleStartRaw),
     });
   }
 
-  // Clean full clear when the balance covers debt + the interest buffer ("max"
-  // sentinel); otherwise clear as much as the balance allows (still Max intent).
-  const amount: bigint | "max" = balanceRaw >= live.debtRaw + buffer ? "max" : balanceRaw;
+  // Resolve the repay leg by mode.
+  let amount: bigint | "max";
+  if (mode === "max") {
+    // Clean full clear when the balance covers debt + the interest buffer ("max"
+    // sentinel); otherwise clear as much as the balance allows (still Max intent).
+    amount = balanceRaw >= live.debtRaw + buffer ? "max" : balanceRaw;
+  } else {
+    // Partial: repay EXACTLY the target, capped at what's available and at live
+    // debt. Never the whole balance (that would sweep the over-unpark cushion).
+    let amt = repayTargetRaw ?? 0n;
+    if (amt > balanceRaw) amt = balanceRaw;
+    if (amt > live.debtRaw) amt = live.debtRaw;
+    if (amt <= 0n) {
+      // Target already met (or nothing meaningful left). Nothing to do.
+      return finalize(op, {
+        repaidUsdc: meta.repaidUsdc,
+        observedDebtRaw: live.debtRaw.toString(),
+        fullyRepaid: false,
+        swappedUsdcRaw: meta.swapUsdcRaw,
+        ...poolBreakdown(meta.repaidUsdc, idleStartRaw),
+      });
+    }
+    amount = amt;
+  }
+
+  const preDebtRaw = live.debtRaw;
   const repay = await executeRepayFromAgentUsdc({
     walletAddress: params.walletAddress,
     agentPublicKey: params.agentPublicKey,
     agentSecretKey: params.agentSecretKey,
     borrowPositionId: params.borrowPositionId,
     amount,
+    // WRITE-AHEAD: durably record the repay signature + its blockhash window
+    // STRICTLY BEFORE the irreversible broadcast, so a crash after the tx lands
+    // (but before we record a terminal step) is reconciled by on-chain status
+    // (reconcileRepaySignature), never blindly re-sent.
+    onBeforeBroadcast: async ({ signature, lastValidBlockHeight }) => {
+      await storage.updateBorrowOperation(op.id, {
+        step: "repaying",
+        mergeMetadata: {
+          repaySig: signature,
+          repayLastValidBlockHeight: lastValidBlockHeight,
+          repayAmountRaw: amount === "max" ? "max" : amount.toString(),
+          repayPreDebtRaw: preDebtRaw.toString(),
+        },
+        appendTxSignature: signature,
+      });
+    },
   });
   if (!repay.success) {
     return failClosed(op, "repay_failed", repay.error || "The repay did not complete. The funds are safe in your trading wallet.", true);
   }
   await storage.updateBorrowOperation(op.id, {
     step: "repay_confirmed",
-    mergeMetadata: { repaySig: repay.signature, observedDebtRaw: repay.observedDebtRaw, repaidUsdc: repay.repaidUsdc },
-    ...(repay.signature ? { appendTxSignature: repay.signature } : {}),
+    // The signature was already appended pre-broadcast; record only the realized
+    // figures here (no double-append).
+    mergeMetadata: { observedDebtRaw: repay.observedDebtRaw, repaidUsdc: repay.repaidUsdc },
   });
   op = (await storage.getBorrowOperationById(op.id)) ?? op;
   return finalize(op, {
@@ -972,23 +996,157 @@ async function repayPoolFromBalance(op: BorrowOperation, params: RepayFromUsdcPo
   });
 }
 
+/**
+ * RESUME reconciliation for the USDC-pool repay leg. If a prior pass recorded a
+ * repay signature pre-broadcast (step "repaying") but crashed before writing a
+ * terminal step, the wallet balance is NOT safe proof (it reads lower after the
+ * repay whether or not we already counted it). The signature's on-chain status is
+ * the only authority:
+ *   - "landed"    : the repay committed — ENSURE the equity event exists ONCE
+ *                   (dedup by tx signature) and finalize. Never repay again.
+ *   - "reverted"  : provably failed — clear the recorded sig so the caller can
+ *                   safely (re)drive a fresh repay from the current balance.
+ *   - "expired"   : never landed and the blockhash window passed — same as reverted.
+ *   - "in_flight" : still settling / unreadable — FAIL CLOSED (funds are safe in
+ *                   the trading wallet) and wait; never re-send.
+ * Returns a terminal result for landed/in_flight, the sentinel "cleared" after
+ * clearing a reverted/expired sig (caller must re-fetch the op + continue), or
+ * null when there is no recorded repay sig (fresh run — nothing to reconcile).
+ */
+async function reconcileRepaySignature(
+  op: BorrowOperation,
+  params: RepayFromUsdcPoolParams,
+): Promise<MultiHopRepayResult | "cleared" | null> {
+  const meta = readMeta(op);
+  const repaySig = meta.repaySig;
+  if (!repaySig || typeof repaySig !== "string") return null;
+  const lvbh = typeof meta.repayLastValidBlockHeight === "number" ? meta.repayLastValidBlockHeight : undefined;
+  const status = await reconcileWithdrawSignature(repaySig, lvbh);
+
+  if (status === "in_flight") {
+    return failClosed(
+      op,
+      "repaying",
+      "Your repayment is being confirmed on-chain. Your funds are safe — please wait a moment and check again.",
+      true,
+    );
+  }
+
+  if (status === "reverted" || status === "expired") {
+    // The recorded repay can never have committed — clear it so the resume can
+    // safely (re)drive a fresh repay from the CURRENT balance.
+    await storage.updateBorrowOperation(op.id, {
+      mergeMetadata: { repaySig: null, repayLastValidBlockHeight: null, repayAmountRaw: null, repayPreDebtRaw: null },
+    });
+    return "cleared";
+  }
+
+  // landed: the repay committed. The executor normally emits the "repay" equity
+  // event itself (same tx signature); a crash before that step would leave the
+  // history/tax feed missing the row, so ensure it exists exactly ONCE here.
+  const idleStartRaw = BigInt(meta.idleUsdcAtStartRaw ?? "0");
+  const preDebtRaw = meta.repayPreDebtRaw ? BigInt(meta.repayPreDebtRaw) : null;
+  const sentRawStr: string | undefined = meta.repayAmountRaw;
+
+  // Realized repaid (conservative, on-chain-derived): prefer the observed debt
+  // reduction (preDebt - liveDebt now), clamped >= 0 and capped at the amount we
+  // sent; fall back to the sent amount, then to preDebt for a "max" clear.
+  const liveNow = await readLiveDebtRaw(params.walletAddress, params.borrowPositionId);
+  let repaidRaw = 0n;
+  if (preDebtRaw !== null && liveNow) {
+    const delta = preDebtRaw - liveNow.debtRaw;
+    repaidRaw = delta > 0n ? delta : 0n;
+    if (sentRawStr && sentRawStr !== "max") {
+      const sent = BigInt(sentRawStr);
+      if (repaidRaw > sent) repaidRaw = sent;
+    }
+  } else if (sentRawStr && sentRawStr !== "max") {
+    repaidRaw = BigInt(sentRawStr);
+  } else if (preDebtRaw !== null) {
+    repaidRaw = preDebtRaw;
+  }
+
+  const repaidUsd = repaidRaw > 0n ? new Decimal(repaidRaw.toString()).div(1e6).toNumber() : 0;
+  try {
+    const existing = await storage.getEquityEventByTxSignature(repaySig);
+    if (!existing && repaidUsd > 0) {
+      const amtStr = new Decimal(repaidUsd).toFixed(6);
+      // Title Case label is applied by the UI from eventType "repay" ("Repay
+      // Debt"); the note is a freeform sentence mirroring the executor's wording.
+      let symbol = "borrowed";
+      try {
+        const position = await storage.getBorrowPosition(params.walletAddress, params.borrowPositionId);
+        if (position) {
+          const cfg = await new JupiterLendBorrowRoute().getVaultConfig(position.collateralMint);
+          if (cfg?.collateralSymbol) symbol = `${cfg.collateralSymbol}-backed`;
+        }
+      } catch { /* note degrades to "borrowed debt" — non-fatal */ }
+      await storage.createEquityEvent({
+        walletAddress: params.walletAddress,
+        tradingBotId: null, // ACCOUNT scope: the borrow engine + parked savings are account-level
+        eventType: "repay",
+        amount: amtStr,
+        assetType: "USDC",
+        txSignature: repaySig,
+        notes: `Repaid ${amtStr} USDC of ${symbol} debt (recovered on resume)`,
+      });
+    }
+  } catch (e) {
+    console.warn("[Borrow] usdc-pool repay reconcile: failed to ensure equity event (non-fatal)", e);
+  }
+
+  const observedDebtRaw = liveNow ? liveNow.debtRaw.toString() : (meta.observedDebtRaw ?? undefined);
+  return finalize(op, {
+    repaidUsdc: repaidUsd,
+    observedDebtRaw,
+    fullyRepaid: liveNow ? liveNow.debtRaw <= 0n : false,
+    swappedUsdcRaw: meta.swapUsdcRaw,
+    ...poolBreakdown(repaidUsd, idleStartRaw),
+  });
+}
+
 /** MAX full-clear that may DRAW (unpark) the shortfall from Vault savings.
  *  Resumable multi-hop op (`repay_usdc_pool`), modeled on the vault-savings flow
  *  but idle-aware: it spends loose trading USDC first and only unparks the gap. */
-async function executeMaxClearWithVaultDraw(
+async function executeClearWithVaultDraw(
   params: RepayFromUsdcPoolParams,
   slippageBps: number,
   tradingBotId: string | null,
 ): Promise<MultiHopRepayResult> {
+  const requestedIsMax = params.amount === "max";
   return withBorrowLock(`multihop:${params.walletAddress}:${params.clientRequestId}`, async () => {
     let op = await resolveOrCreateOp({
       walletAddress: params.walletAddress,
       borrowPositionId: params.borrowPositionId,
       clientRequestId: params.clientRequestId,
       operationType: "repay_usdc_pool",
-      metadata: { source: "usdc_pool", positionId: params.borrowPositionId, slippageBps, tradingBotId },
+      // `mode` + (partial) `requestedRaw` steer the resume on every re-entry; the
+      // op's PERSISTED mode — not params — is authoritative once created.
+      metadata: {
+        source: "usdc_pool",
+        positionId: params.borrowPositionId,
+        slippageBps,
+        tradingBotId,
+        mode: requestedIsMax ? "max" : "partial",
+        ...(requestedIsMax ? {} : { requestedRaw: (params.amount as bigint).toString() }),
+      },
     });
     if (op.status === "succeeded") return replaySucceeded(op);
+
+    // The op's PERSISTED mode is authoritative once created. A mismatched retry
+    // (stale client / a direct API call that flips amount<->"max") must NEVER
+    // reshape an existing op's intent — size everything below off op.metadata, not
+    // the incoming params. Falls back to the request only for the very first pass
+    // of a legacy op with no persisted mode.
+    const isMax = (readMeta(op).mode ?? (requestedIsMax ? "max" : "partial")) === "max";
+
+    // RESUME (write-ahead repay): a prior pass broadcast the repay and recorded its
+    // signature BEFORE crashing. Reconcile by ON-CHAIN STATUS before any further
+    // money move — landed -> finalize (never re-repay), reverted/expired -> clear &
+    // fall through to re-drive, in_flight -> fail closed.
+    const reconciled = await reconcileRepaySignature(op, params);
+    if (reconciled && reconciled !== "cleared") return reconciled;
+    if (reconciled === "cleared") op = (await storage.getBorrowOperationById(op.id)) ?? op;
 
     // RESUME (confirmed proceeds): savings already converted -> only (re)drive the
     // idempotent, debt-capped repay leg. Never unpark again.
@@ -1017,6 +1175,28 @@ async function executeMaxClearWithVaultDraw(
     }
     const buffer = (live.debtRaw * BigInt(REPAY_BUFFER_BPS)) / 10_000n;
 
+    // The repay TARGET + the balance BAR to reach by unparking:
+    //   max     -> repay as much as possible; bar = debt + interest buffer.
+    //   partial -> repay EXACTLY min(requested, debt); bar = that target.
+    let repayTargetRaw: bigint | null;
+    let barRaw: bigint;
+    if (isMax) {
+      repayTargetRaw = null;
+      barRaw = live.debtRaw + buffer;
+    } else {
+      // Read the requested amount ONLY from the persisted op (set at creation) —
+      // never from the incoming params — so a mismatched retry can't resize a
+      // partial. Fail closed if a partial op somehow lacks it.
+      const requestedRawMeta = readMeta(op).requestedRaw;
+      if (!requestedRawMeta) return failClosed(op, "initialized", "Repay amount missing; nothing was changed.", false);
+      const requested = BigInt(requestedRawMeta);
+      if (requested <= 0n) return failClosed(op, "initialized", "Repay amount must be greater than zero.", false);
+      repayTargetRaw = requested > live.debtRaw ? live.debtRaw : requested; // never exceed debt
+      barRaw = repayTargetRaw;
+      // Persist the exact target so repayPoolFromBalance sizes the partial leg.
+      await storage.updateBorrowOperation(op.id, { mergeMetadata: { repayTargetRaw: repayTargetRaw.toString() } });
+    }
+
     // Loose trading USDC is spent FIRST — record it for the breakdown.
     let idleRaw: bigint;
     try {
@@ -1026,15 +1206,15 @@ async function executeMaxClearWithVaultDraw(
     }
     await storage.updateBorrowOperation(op.id, { mergeMetadata: { idleUsdcAtStartRaw: idleRaw.toString() } });
 
-    // If loose USDC now clean-clears the debt (balance grew since the pre-check),
-    // skip the unpark entirely.
-    if (idleRaw >= live.debtRaw + buffer) {
+    // If loose USDC already reaches the bar (balance grew since the pre-check, or a
+    // partial that idle can now cover on a resume), skip the unpark entirely.
+    if (idleRaw >= barRaw) {
       op = (await storage.getBorrowOperationById(op.id)) ?? op;
       return repayPoolFromBalance(op, params);
     }
 
-    // Need to top up from savings to reach the executor's "max" bar (debt+buffer).
-    const shortfallRaw = live.debtRaw + buffer - idleRaw; // > 0 here
+    // Need to top up from savings to reach the bar.
+    const shortfallRaw = barRaw - idleRaw; // > 0 here
 
     // Pick the largest-VALUE enabled yield holding (strict on-chain reads). Any
     // unreadable balance / missing price fails closed — no guessing on money.
@@ -1060,14 +1240,15 @@ async function executeMaxClearWithVaultDraw(
     }
 
     if (!best) {
-      // No savings to draw from. If loose USDC alone covers the TRUE debt (it sits
-      // in the thin [debt, debt+buffer) band), clear as much as possible from it;
-      // otherwise there genuinely isn't enough to clear this loan.
-      if (idleRaw >= live.debtRaw) {
+      // No savings to draw from. Make whatever progress the loose USDC allows:
+      //   max     -> if idle covers the TRUE debt (thin [debt, debt+buffer) band), clear it.
+      //   partial -> if idle > 0, repay what it can toward the target (honest partial paydown).
+      // Otherwise there genuinely isn't enough to honor this repayment.
+      if (isMax ? idleRaw >= live.debtRaw : idleRaw > 0n) {
         op = (await storage.getBorrowOperationById(op.id)) ?? op;
         return repayPoolFromBalance(op, params);
       }
-      return failClosed(op, "initialized", "You don't have enough trading USDC or Vault savings to clear this loan.", false);
+      return failClosed(op, "initialized", "You don't have enough trading USDC or Vault savings to repay this loan.", false);
     }
 
     // Size: unpark JUST ENOUGH to yield the shortfall (+2% swap cushion), capped
@@ -1121,54 +1302,43 @@ async function executeMaxClearWithVaultDraw(
 }
 
 /**
- * UNIFIED "Pay with USDC" repay. Loose trading USDC FIRST; a "max" full clear
- * tops up from Vault savings when trading USDC can't cover debt + the interest
- * buffer. See the section header for the full money-safety / resume contract.
+ * UNIFIED "Pay with USDC" repay. Loose trading USDC FIRST; both a "max" full clear
+ * and a PARTIAL top up from Vault savings when trading USDC can't cover the target
+ * (debt + the interest buffer for max; the typed amount for partial). See the
+ * section header for the full money-safety / resume contract.
  */
 export async function executeRepayFromUsdcPool(params: RepayFromUsdcPoolParams): Promise<MultiHopRepayResult> {
   const slippageBps = clampSlippage(params.slippageBps);
   const tradingBotId = params.tradingBotId ?? null;
 
-  // Authority reads: live debt + strict loose USDC. The money legs below re-read
-  // under their own locks; these just steer idle-only vs vault-draw.
+  // DETERMINISTIC RESUME: if an op already exists for this clientRequestId, drive
+  // the SAME state machine off its persisted mode/target — never re-evaluate
+  // idle-only vs draw against a balance that may have shifted since the first try.
+  const existing = await storage.getBorrowOperationByClientRequestId(params.walletAddress, params.clientRequestId);
+  if (existing && existing.operationType === "repay_usdc_pool") {
+    return executeClearWithVaultDraw(params, slippageBps, tradingBotId);
+  }
+
+  // Validate the partial amount BEFORE any op is created.
+  if (params.amount !== "max" && (params.amount as bigint) <= 0n) {
+    return { success: false, error: "Repay amount must be greater than zero." };
+  }
+
+  // Idempotent no-op for a FRESH request: nothing owed. (A resume with an existing
+  // op is handled above so its reconcile can still backfill a missing equity event.)
   const live = await readLiveDebtRaw(params.walletAddress, params.borrowPositionId);
   if (!live) return { success: false, error: "Could not read your live loan balance; nothing was changed." };
   if (live.debtRaw <= 0n) {
     return { success: true, repaidUsdc: 0, observedDebtRaw: "0", fullyRepaid: true, fromAgentUsdc: 0, fromVaultUsdc: 0, signatures: [], step: "final_read" };
   }
 
-  let idleRaw: bigint;
-  try {
-    idleRaw = await strictBalanceRaw(params.agentPublicKey, USDC_MINT);
-  } catch {
-    return { success: false, error: "Could not read your trading USDC balance; nothing was changed." };
-  }
-
-  const buffer = (live.debtRaw * BigInt(REPAY_BUFFER_BPS)) / 10_000n;
-  const isMax = params.amount === "max";
-
-  // PARTIAL (bigint) — ALWAYS idle-only.
-  if (!isMax) {
-    const requested = params.amount as bigint;
-    if (requested <= 0n) return { success: false, error: "Repay amount must be greater than zero." };
-    const target = requested > live.debtRaw ? live.debtRaw : requested; // never exceed debt
-    if (idleRaw < target) {
-      return {
-        success: false,
-        needsMaxForVault: true,
-        error: "Your trading USDC doesn't cover that amount. Tap Max to use your Vault savings and clear the whole loan.",
-      };
-    }
-    return repayPoolIdleOnly(params, target);
-  }
-
-  // MAX — idle alone covers debt + buffer => clean idle-only clear, no vault draw.
-  if (idleRaw >= live.debtRaw + buffer) {
-    return repayPoolIdleOnly(params, "max");
-  }
-
-  // MAX — draw the shortfall from Vault savings (resumable).
-  return executeMaxClearWithVaultDraw(params, slippageBps, tradingBotId);
+  // ALL repays — idle-only AND savings-draw alike — run through the SAME
+  // operation-backed, write-ahead state machine, so a lost-response retry on the
+  // same clientRequestId is reconciled by on-chain signature status and NEVER
+  // double-repaid. The machine does its own STRICT idle read and only unparks when
+  // idle can't reach the bar (debt+buffer for max, the typed target for partial);
+  // an idle-covered repay simply skips the unpark and repays from the balance.
+  return executeClearWithVaultDraw(params, slippageBps, tradingBotId);
 }
 
 // ===========================================================================

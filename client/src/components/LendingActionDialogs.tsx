@@ -1102,6 +1102,7 @@ type RepayResumeState = {
   tokenTransferred?: boolean; // #4
   tokenMint?: string; // #4
   collateralRaw?: string; // #3 — re-sent verbatim so the server resumes the same sell
+  amountRaw?: string; // #1 USDC pool — 'max' or raw base units, re-sent so resume drives the SAME mode/target
   at: number;
 };
 const REPAY_RESUME_TTL_MS = 2 * 60 * 60 * 1000; // 2h
@@ -1208,10 +1209,10 @@ export function RepayLoanDialog({
   const [selectedToken, setSelectedToken] = useState<UserToken | null>(null);
   const [phase, setPhase] = useState<'idle' | 'working' | 'needs_retry'>('idle');
   const [statusText, setStatusText] = useState('');
-  // Drawable Vault savings for ONE Max clear (account scope), lazily loaded when
+  // Drawable Vault savings for ONE clear (account scope), lazily loaded when
   // the unified "Pay with USDC" source is active. This is the LARGEST single
-  // enabled yield holding's value — NOT the sum — because the server's Max draw
-  // unparks only the largest-value holding (see executeMaxClearWithVaultDraw).
+  // enabled yield holding's value — NOT the sum — because the server's draw
+  // unparks only the largest-value holding (see executeClearWithVaultDraw).
   // Summing every holding would overstate what a single clear can reach. Powers
   // the combined available balance + the trading-vs-savings breakdown. null =
   // not loaded / unreadable.
@@ -1265,10 +1266,16 @@ export function RepayLoanDialog({
       if (resume.transferSignature) transferSigRef.current = resume.transferSignature;
       if (resume.collateralRaw) collateralRawRef.current = resume.collateralRaw;
       if (resume.source === 'agent') {
-        // The unified USDC pool only persists a Max clear (the savings-draw
-        // path). Rehydrate Max so Retry re-POSTs 'max' with the same request id
-        // and the server resumes the draw/repay op idempotently.
-        setUseMaxAgent(true);
+        // The unified USDC pool persists any savings-draw repay (a Max clear OR a
+        // partial that exceeds idle trading USDC). Rehydrate the EXACT amount so
+        // Retry re-POSTs the same shape with the same request id and the server
+        // resumes the draw/repay op idempotently (mode/target are server-pinned).
+        if (resume.amountRaw && resume.amountRaw !== 'max') {
+          setUseMaxAgent(false);
+          setUsdcAmount(rawToDecimalString(resume.amountRaw, USDC_DECIMALS));
+        } else {
+          setUseMaxAgent(true);
+        }
       }
       if (resume.tokenTransferred) {
         tokenTransferredRef.current = true;
@@ -1393,13 +1400,20 @@ export function RepayLoanDialog({
       : null;
 
   // Unified "Pay with USDC" pool: trading-agent USDC + parked Vault savings.
-  // Loose trading USDC is spent FIRST; savings cover any remainder on a Max
-  // clear. These drive the available-balance display and the idle-first preview
-  // (CLIENT estimate only — the server returns the realized split).
+  // Loose trading USDC is spent FIRST; savings cover any remainder — on a Max
+  // clear OR on a partial whose typed amount exceeds idle trading USDC. These
+  // drive the available-balance display and the idle-first preview (CLIENT
+  // estimate only — the server returns the realized split).
   const agentUsdcAvail = agentUsdcBalance ?? 0;
   const vaultSavingsAvail = vaultSavingsUsd ?? 0;
   const poolUsdcAvail = agentUsdcAvail + vaultSavingsAvail;
-  const poolTarget = debtNum != null ? Math.min(debtNum, poolUsdcAvail) : poolUsdcAvail;
+  // What this repay aims to pay: Max => full debt; partial => the typed amount.
+  // Always capped at live debt and the available pool (mirrors the server).
+  const poolTypedNum = Number(usdcAmount);
+  const poolDesired = useMaxAgent
+    ? (debtNum != null ? debtNum : poolUsdcAvail)
+    : (Number.isFinite(poolTypedNum) && poolTypedNum > 0 ? poolTypedNum : 0);
+  const poolTarget = Math.min(poolDesired, poolUsdcAvail, debtNum != null ? debtNum : poolDesired);
   const poolFromAgentEst = Math.min(agentUsdcAvail, poolTarget);
   const poolFromVaultEst = Math.max(0, poolTarget - poolFromAgentEst);
 
@@ -1472,11 +1486,11 @@ export function RepayLoanDialog({
   };
 
   // #1 — Unified "Pay with USDC" pool: trading-agent USDC FIRST, then draw
-  // (unpark) Vault savings for any remainder on a Max clear. A partial is
-  // idle-only (single tx); if it exceeds trading USDC the server replies
-  // needsMaxForVault (nothing moved) and we guide the user to tap Max. The Max
-  // path can become a resumable server op (the savings draw), so we persist its
-  // request id BEFORE acting and rehydrate Max on a crash-proof resume.
+  // (unpark) Vault savings for any remainder. A Max clear always tops up from
+  // savings; a partial does too once the typed amount exceeds idle trading USDC.
+  // EVERY repay here is a resumable, idempotent server op (idle-covered repays just
+  // skip the unpark), so we persist the EXACT amount + request id BEFORE acting and
+  // rehydrate it on a crash-proof resume.
   const repayFromUsdcPool = async () => {
     if (!pool) return;
     const isMax = useMaxAgent;
@@ -1485,12 +1499,19 @@ export function RepayLoanDialog({
       toast({ title: 'Enter a valid amount', variant: 'destructive' });
       return;
     }
+    // Does the client EXPECT this to draw from savings? A Max clear always can; a
+    // partial does when the typed amount exceeds loose trading USDC. This is only a
+    // display-float guess — the SERVER (strict on-chain read) is the authority on
+    // whether it actually unparks. We use it only for the catch-branch UX below.
+    const drawsSavings = isMax || (Number(usdcAmount) > agentUsdcAvail);
     if (!reqIdRef.current) reqIdRef.current = newRequestId();
-    // Persist a resume record ONLY for the Max path — the one that can draw Vault
-    // savings into a resumable, idempotent server op. A partial is a single-tx
-    // idle-only repay, so it needs no crash-proof resume (matches the old direct
-    // agent repay).
-    if (isMax) saveRepayResume(pool.id, { source: 'agent', clientRequestId: reqIdRef.current });
+    // Persist the resume handle (request id + EXACT amount) UNCONDITIONALLY before
+    // acting. Our idle-vs-savings guess can disagree with the server's strict read,
+    // so even a repay we think is idle-only may become a resumable Vault-draw op on
+    // the server. Persisting always guarantees a refresh can resume the SAME op on
+    // the same request id (no double-repay / double-unpark). Harmless + cleared on
+    // success for a true single-tx repay.
+    saveRepayResume(pool.id, { source: 'agent', clientRequestId: reqIdRef.current, amountRaw });
     setPhase('working');
     setStatusText(isMax ? 'Clearing your loan…' : 'Repaying from your USDC…');
     try {
@@ -1500,21 +1521,9 @@ export function RepayLoanDialog({
         POST_JSON({ borrowPositionId: pool.id, amountRaw, clientRequestId: reqIdRef.current, sessionId }),
       );
       const data = await safeResponseJson(res);
-      // The amount exceeds trading USDC and a partial can't draw savings — guide
-      // the user to Max. Nothing moved, so reset cleanly (drop the request id).
-      if (!res.ok && data?.needsMaxForVault) {
-        resetFlow(true);
-        toast({
-          title: 'Tap Max to use your savings',
-          description:
-            data.error ||
-            "Your trading USDC doesn't cover that amount. Tap Max to draw the rest from your Vault savings.",
-        });
-        return;
-      }
       await handleResult(res, data, false, '');
     } catch (e: any) {
-      if (isMax) {
+      if (drawsSavings) {
         // The draw/repay may be mid-flight — the server is the resume authority
         // (idempotent on the same request id), so finish via Retry.
         setPhase('needs_retry');
@@ -1954,8 +1963,9 @@ export function RepayLoanDialog({
                     Trading USDC {fmtUsd(agentUsdcAvail)} · Vault savings {fmtUsd(vaultSavingsAvail)}
                   </p>
                 )}
-                {/* Idle-first split estimate for a Max clear that taps savings. */}
-                {useMaxAgent && poolFromVaultEst > 0 && phase === 'idle' && (
+                {/* Idle-first split estimate for any repay that taps savings (Max
+                    clear OR a partial whose amount exceeds idle trading USDC). */}
+                {poolFromVaultEst > 0 && phase === 'idle' && (
                   <p
                     className="text-[11px] text-primary flex items-start gap-1"
                     data-testid="text-repay-pool-preview"

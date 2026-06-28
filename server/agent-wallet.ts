@@ -1213,6 +1213,14 @@ export interface AgentInstructionsConfirmParams {
   minSolGas?: number;
   addressLookupTables?: AddressLookupTableAccount[];
   label?: string;
+  /**
+   * OPTIONAL write-ahead durability hook. Fires STRICTLY BEFORE the irreversible
+   * broadcast with the precomputed signature + its blockhash window. FATAL: if it
+   * throws we abort WITHOUT broadcasting (nothing moved). Lets a caller durably
+   * record the signature so a crash after the tx lands (but before the caller
+   * recorded it) is reconciled by on-chain status, never blindly re-sent.
+   */
+  onBeforeBroadcast?: (info: { signature: string; blockhash: string; lastValidBlockHeight: number }) => void | Promise<void>;
 }
 
 export interface AgentInstructionsConfirmResult {
@@ -1277,7 +1285,7 @@ export async function executeAgentInstructionsConfirmOnly(
     }
 
     // 2) Build, sign, and send a v0 transaction.
-    const { blockhash } = await connection.getLatestBlockhash('confirmed');
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
     const message = new TransactionMessage({
       payerKey: agentPubkey,
       recentBlockhash: blockhash,
@@ -1286,11 +1294,30 @@ export async function executeAgentInstructionsConfirmOnly(
     const tx = new VersionedTransaction(message);
     tx.sign([agentKeypair]);
 
-    const signature = await connection.sendRawTransaction(tx.serialize(), {
+    // The signature is deterministic once the tx is signed — it is the first
+    // signature of the signed tx, identical to what sendRawTransaction returns.
+    const signature = bs58.encode(tx.signatures[0]);
+
+    // 2b) WRITE-AHEAD durability hook: record the signature + its blockhash window
+    //     STRICTLY BEFORE the irreversible broadcast. FATAL — a throw here aborts
+    //     WITHOUT broadcasting (propagates to the outer catch -> {success:false}
+    //     with NO signature, so nothing moved and a retry is safe). Persisting
+    //     after broadcast would leave a window where the tx is on the wire but
+    //     unrecorded -> a resume mistakes "no sig" for "never broadcast" -> double-send.
+    if (params.onBeforeBroadcast) {
+      await params.onBeforeBroadcast({ signature, blockhash, lastValidBlockHeight });
+    }
+
+    const sentSignature = await connection.sendRawTransaction(tx.serialize(), {
       skipPreflight: false,
       preflightCommitment: 'confirmed',
       maxRetries: 3,
     });
+    if (sentSignature !== signature) {
+      // Should be impossible (same signed tx); guard so the recorded sig and the
+      // broadcast sig can never silently diverge.
+      console.error(`[executeAgentInstructionsConfirmOnly] ${label}: broadcast signature ${sentSignature} != precomputed ${signature}`);
+    }
 
     // 3) Confirm by polling signature status.
     let confirmed = false;

@@ -9424,11 +9424,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   });
 
   // UNIFIED "Pay with USDC" repay (loose trading USDC FIRST, top up from Vault
-  // savings on a full "max" clear). The owner frames the Vault as "USDC that earns
+  // savings for any shortfall). The owner frames the Vault as "USDC that earns
   // yield", so the dialog has ONE USDC source whose pool = idle agent USDC + parked
-  // savings. PARTIAL (amountRaw is a number string) is idle-only and rejects with
-  // needsMaxForVault when it can't be covered; "max" can draw savings. Idempotent
-  // via clientRequestId (the savings-draw path is a resumable multi-hop op). Body:
+  // savings. BOTH a PARTIAL (amountRaw is a number string — repaid EXACTLY) and a
+  // "max" full clear draw savings when trading USDC can't cover the target.
+  // Idempotent via clientRequestId (the savings-draw path is a resumable multi-hop
+  // op, reconciled by on-chain repay signature). Body:
   // { borrowPositionId, amountRaw: "max" | "<rawUsdc>", clientRequestId, slippageBps?, sessionId }.
   app.post("/api/vault/borrow/repay/usdc-pool", requireWallet, async (req, res) => {
     try {
@@ -9472,11 +9473,6 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         ctx.agentKeyResult.cleanup();
       }
 
-      // needsMaxForVault is a benign "nothing moved, tap Max" guide — surface the
-      // flag (sendMultiHopResult would strip it on a 400), otherwise mirror it.
-      if (result && !result.success && result.needsMaxForVault) {
-        return res.status(400).json({ error: result.error || "Tap Max to use your Vault savings.", needsMaxForVault: true });
-      }
       sendMultiHopResult(res, result);
     } catch (error: any) {
       console.error("[Vault] repay usdc-pool error:", error);

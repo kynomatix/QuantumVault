@@ -1221,6 +1221,13 @@ export interface RepayFromAgentUsdcParams {
   borrowPositionId: string;
   /** USDC to repay, raw base units; or "max" to repay ALL debt (keep collateral). */
   amount: bigint | "max";
+  /**
+   * OPTIONAL write-ahead hook fired with the repay signature STRICTLY BEFORE the
+   * irreversible broadcast. A multi-hop caller uses this to durably record the
+   * repay sig on its OWN op so a crash after the repay lands (but before the
+   * caller recorded it) is reconciled by on-chain status, never blindly re-sent.
+   */
+  onBeforeBroadcast?: (info: { signature: string; blockhash: string; lastValidBlockHeight: number }) => void | Promise<void>;
 }
 
 export interface RepayResult {
@@ -1324,6 +1331,7 @@ export async function executeRepayFromAgentUsdc(params: RepayFromAgentUsdcParams
       gasDestMint: null,
       addressLookupTables: operate.addressLookupTableAccounts,
       label: "Repay",
+      onBeforeBroadcast: params.onBeforeBroadcast,
     });
 
     // 7) Provably-nothing-moved => mark failed (safe; USDC still in the wallet).
