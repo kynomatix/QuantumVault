@@ -1446,6 +1446,23 @@ export function RepayLoanDialog({
   const working = phase === 'working';
   const needsRetry = phase === 'needs_retry';
 
+  // A repay leg failed because the wallet session/UMK expired. Every leg calls
+  // getSessionId() first, so this usually fires BEFORE anything is sent — and the
+  // crash-proof resume record is already persisted, so resuming is idempotent on
+  // the request id. Surface a one-tap Reconnect that re-signs (retryAuth) and then
+  // resumes the SAME op, instead of a dead-end "reconnect your wallet" toast whose
+  // only path (the in-dialog Retry) loops straight back into the same session
+  // error. Keeps phase=needs_retry so the resume handle + in-dialog Retry persist
+  // and a still-dead session re-surfaces this toast rather than dead-ending.
+  // Returns true when it handled a session error (caller should stop).
+  const handleRepaySessionError = (e: unknown, retry: () => void): boolean => {
+    if (!isSessionError(e)) return false;
+    setPhase('needs_retry');
+    setStatusText('Your wallet session expired. Reconnect to finish your repayment.');
+    showReconnectToast({ toast, retryAuth, title: "Repayment didn't finish", retry });
+    return true;
+  };
+
   // Shared result interpreter. movedFunds=true means the user's funds already
   // reached the agent (a hard failure is then retryable, not lost).
   const handleResult = async (res: Response, data: any, movedFunds: boolean, fundsNote: string) => {
@@ -1523,6 +1540,7 @@ export function RepayLoanDialog({
       const data = await safeResponseJson(res);
       await handleResult(res, data, false, '');
     } catch (e: any) {
+      if (handleRepaySessionError(e, () => repayFromUsdcPool())) return;
       if (drawsSavings) {
         // The draw/repay may be mid-flight — the server is the resume authority
         // (idempotent on the same request id), so finish via Retry.
@@ -1532,11 +1550,7 @@ export function RepayLoanDialog({
       } else {
         setPhase('idle');
         setStatusText('');
-        if (isSessionError(e)) {
-          showReconnectToast({ toast, retryAuth, title: 'Could not repay', retry: () => repayFromUsdcPool() });
-        } else {
-          toast({ title: 'Could not repay', description: e.message || 'Please try again', variant: 'destructive' });
-        }
+        toast({ title: 'Could not repay', description: e.message || 'Please try again', variant: 'destructive' });
       }
     }
   };
@@ -1604,7 +1618,7 @@ export function RepayLoanDialog({
           setPhase('needs_retry');
           setStatusText('Your USDC transfer was sent. Tap Retry to finish the repayment.');
           toast({ title: "Repayment didn't finish", description: 'Your USDC transfer was sent. Tap Retry to complete it.', variant: 'destructive' });
-        } else {
+        } else if (!handleRepaySessionError(e, () => repayFromWalletUsdc())) {
           // Build/sign failed before broadcast -> nothing moved -> safe to reset.
           setPhase('idle');
           setStatusText('');
@@ -1633,6 +1647,7 @@ export function RepayLoanDialog({
       const data = await safeResponseJson(res);
       await handleResult(res, data, true, "Your USDC reached your trading agent but the repay didn't finish. Tap Retry to complete it.");
     } catch (e: any) {
+      if (handleRepaySessionError(e, () => repayFromWalletUsdc())) return;
       setPhase('needs_retry');
       setStatusText('Your USDC reached your trading agent. Tap Retry to finish the repayment.');
       toast({ title: "Repayment didn't finish", description: e.message || 'Tap Retry to complete it.', variant: 'destructive' });
@@ -1678,6 +1693,7 @@ export function RepayLoanDialog({
       const data = await safeResponseJson(res);
       await handleResult(res, data, false, '');
     } catch (e: any) {
+      if (handleRepaySessionError(e, () => repayFromDeleverage())) return;
       setPhase('needs_retry');
       setStatusText('The deleverage may be mid-flight. Tap Retry to finish safely.');
       toast({ title: "Repayment didn't finish", description: e.message || 'Tap Retry to finish.', variant: 'destructive' });
@@ -1752,7 +1768,7 @@ export function RepayLoanDialog({
           setPhase('needs_retry');
           setStatusText('Your token was sent. Tap Retry to finish the swap & repay.');
           toast({ title: "Repayment didn't finish", description: 'Your token was sent. Tap Retry to complete it.', variant: 'destructive' });
-        } else {
+        } else if (!handleRepaySessionError(e, () => repayFromWalletToken())) {
           // Build/sign failed before broadcast -> nothing moved -> safe to reset.
           setPhase('idle');
           setStatusText('');
@@ -1777,6 +1793,7 @@ export function RepayLoanDialog({
       const data = await safeResponseJson(res);
       await handleResult(res, data, true, `Your ${symbol} reached your trading agent. Tap Retry to finish the swap & repay.`);
     } catch (e: any) {
+      if (handleRepaySessionError(e, () => repayFromWalletToken())) return;
       setPhase('needs_retry');
       setStatusText('Your token reached your trading agent. Tap Retry to finish.');
       toast({ title: "Repayment didn't finish", description: e.message || 'Tap Retry to finish.', variant: 'destructive' });
@@ -1807,6 +1824,7 @@ export function RepayLoanDialog({
       const data = await safeResponseJson(res);
       await handleResult(res, data, false, '');
     } catch (e: any) {
+      if (handleRepaySessionError(e, () => repayFromVaultSavings())) return;
       setPhase('needs_retry');
       setStatusText('The repayment may be mid-flight. Tap Retry to finish safely.');
       toast({ title: "Repayment didn't finish", description: e.message || 'Tap Retry to finish.', variant: 'destructive' });
