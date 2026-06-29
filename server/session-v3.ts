@@ -416,8 +416,98 @@ export function deriveSubkeyFromSession(
 ): Buffer | null {
   const umk = getUMK(sessionId);
   if (!umk) return null;
-  
+
   return deriveSubkey(umk, purpose);
+}
+
+/**
+ * Restore a wallet's security session from at-rest storage (encrypted DB row),
+ * without requiring a new user signature. Used on return visits when the
+ * in-memory UMK session has expired or been wiped by a server restart, but
+ * the Express session cookie (proven via prior signature) is still valid.
+ *
+ * The signature is AUTH-ONLY (proves identity); the UMK is decrypted using
+ * only server-side secrets (UMK_STORAGE_SECRET). So a valid, verified cookie
+ * is sufficient evidence that this wallet already proved ownership.
+ *
+ * Fail-closed: returns null for missing/corrupt rows, v1 wallets (unrecoverable),
+ * or decrypt failures.
+ */
+export async function restoreWalletSecurityFromStorage(
+  walletAddress: string
+): Promise<{ sessionId: string } | null> {
+  try {
+    const wallet = await storage.getWallet(walletAddress);
+    if (!wallet?.userSalt || !wallet.encryptedUserMasterKey) {
+      return null;
+    }
+
+    const umkVersion = wallet.umkVersion || 1;
+    // v1 UMKs are not recoverable from storage (broken signature-derived key).
+    if (umkVersion === 1) {
+      return null;
+    }
+
+    const userSalt = Buffer.from(wallet.userSalt, 'hex');
+    const aad = buildAAD(walletAddress, 'UMK');
+    const storageKey = umkVersion === 3
+      ? getStorageKeyV3(walletAddress, userSalt)
+      : getStorageKeyV2(walletAddress, userSalt);
+
+    let umk: Buffer;
+    try {
+      umk = decryptFromBase64(wallet.encryptedUserMasterKey, storageKey, aad);
+    } catch (err) {
+      zeroizeBuffer(storageKey);
+      console.error(`[Security v3] restoreWalletSecurityFromStorage: UMK decrypt failed for ${walletAddress.slice(0, 8)}... version=${umkVersion} (check UMK_STORAGE_SECRET)`);
+      return null;
+    }
+    zeroizeBuffer(storageKey);
+
+    const sessionId = generateSessionId();
+    const now = Date.now();
+    sessions.set(sessionId, {
+      walletAddress,
+      umk,
+      createdAt: now,
+      expiresAt: now + SESSION_TTL_MS,
+    });
+
+    // Opportunistic background tasks (same as login path, non-blocking):
+    if (wallet.agentPrivateKeyEncrypted && !wallet.agentPrivateKeyEncryptedV3) {
+      migrateAgentKeyToV3(walletAddress, umk, wallet.agentPrivateKeyEncrypted)
+        .catch(e => console.error('[Security] Restore-time agent key migration failed (non-blocking):', e));
+    }
+    if (wallet.agentPrivateKeyEncrypted && wallet.agentPrivateKeyEncryptedV3) {
+      try {
+        const probe = decryptAgentKeyV3(umk, wallet.agentPrivateKeyEncryptedV3, walletAddress);
+        zeroizeBuffer(probe);
+      } catch {
+        console.warn(`[Security v3] restoreWalletSecurityFromStorage: stale V3 key for ${walletAddress.slice(0, 8)}...`);
+        migrateAgentKeyToV3(walletAddress, umk, wallet.agentPrivateKeyEncrypted)
+          .catch(e => console.error('[Security] Restore-time re-migration failed (non-blocking):', e));
+      }
+    }
+
+    // Heal execution-wrapped UMK copy so background/webhook paths stay consistent.
+    try {
+      await resyncExecutionUmkIfStale(walletAddress, umk);
+    } catch (e) {
+      // resync is fail-safe internally; log only.
+      console.error(`[Security v3] restoreWalletSecurityFromStorage: execution resync failed for ${walletAddress.slice(0, 8)}... (non-blocking):`, e);
+    }
+
+    // Phase 4b: opportunistically backfill any bot subaccount keys that are
+    // still legacy-only. Same background non-blocking path as login.
+    backfillBotSubaccountKeysToV3(walletAddress, umk)
+      .catch(e => console.error('[Security] Restore-time bot subaccount backfill failed (non-blocking):', e));
+
+    console.log(`[Security v3] Restored UMK session from storage for ${walletAddress.slice(0, 8)}... (ttl=4h)`);
+    return { sessionId };
+  } catch (err) {
+    console.error(`[Security v3] restoreWalletSecurityFromStorage failed for ${walletAddress.slice(0, 8)}... (non-fatal):`, err);
+    return null;
+  }
 }
 
 export async function createSigningNonce(

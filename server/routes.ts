@@ -1520,7 +1520,7 @@ import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable
 import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification, type TradeNotification, buildDefaultInlineKeyboard } from "./notification-service";
 import { classifySignal } from "./trading/signal-classifier";
 import { registerTelegramMiniAppRoutes } from "./telegram-mini-app";
-import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, healExecutionUmkFromStorage, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, decryptBotSubaccountKey, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3, rebindRetainedKeyToBotUuidV3, decryptMnemonic, deriveBotKeypairFromAgentSeed, BOT_DERIVATION_PATH_VERSION } from "./session-v3";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, healExecutionUmkFromStorage, restoreWalletSecurityFromStorage, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, decryptBotSubaccountKey, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3, rebindRetainedKeyToBotUuidV3, decryptMnemonic, deriveBotKeypairFromAgentSeed, BOT_DERIVATION_PATH_VERSION } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback, cancelRetryJobsForBot } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { DOCS_MARKDOWN } from "./docs-markdown";
@@ -4824,7 +4824,19 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
   app.get("/api/auth/session", requireWallet, async (req, res) => {
     try {
-      const result = getSessionByWalletAddress(req.walletAddress!);
+      let result = getSessionByWalletAddress(req.walletAddress!);
+      let restored = false;
+
+      // Auto-restore: in-memory UMK gone (server restart / 4h TTL) but the
+      // express-session cookie (proven via prior signature) is still valid.
+      if (!result) {
+        const restoredSession = await restoreWalletSecurityFromStorage(req.walletAddress!);
+        if (restoredSession) {
+          result = getSessionByWalletAddress(req.walletAddress!);
+          restored = true;
+        }
+      }
+
       if (!result) {
         return res.json({
           hasSession: false,
@@ -4839,6 +4851,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         sessionMissing: false,
         sessionId: result.sessionId,
         walletAddress: result.session.walletAddress,
+        restored,
       });
     } catch (error) {
       console.error("Session check error:", error);
@@ -5214,7 +5227,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
       
-      req.session.walletAddress = walletAddress;
+      // Security: only bind the session if the caller has already proven ownership
+      // via /api/auth/verify (which writes req.session.walletAddress). This closes
+      // an impersonation path where a fresh cookie + a guessed wallet address could
+      // claim any wallet's session. The express-session cookie is proof of nothing
+      // on its own; the walletAddress binding requires prior signature verification.
+      const sessionWallet = req.session?.walletAddress;
+      if (sessionWallet !== walletAddress) {
+        return res.status(401).json({ error: "Wallet not authenticated. Please sign in first." });
+      }
 
       res.json({
         address: wallet.address,
