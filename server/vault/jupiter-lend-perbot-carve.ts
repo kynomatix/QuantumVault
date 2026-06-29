@@ -1068,6 +1068,48 @@ export async function runPerbotUnwindClose(params: PerbotUnwindCloseParams): Pro
       if (returnedRaw <= 0n) {
         return failClosed(op, "bot_closed", "Bot position closed but no collateral returned to the bot wallet; reconcile before re-pledging.", true);
       }
+      // History: a Title-Case internal "Repay Debt" event so the bot's user-facing
+      // feed never shows a dangling "Borrow ..." (the P0-4 known item). The repay
+      // type is in VAULT_INTERNAL_EVENT_TYPES => excluded from net-deposited PnL.
+      // Amount = the borrow principal (resolvePrincipalRaw = the at-open debt). For
+      // Jupiter Lend the debt incurred equals the USDC delivered, so this matches
+      // the open's `borrow` row up to interest/rounding (a repay legitimately
+      // clears principal+interest). Recorded EXACTLY-ONCE across crash-resume via
+      // the close-tx existence check + repayEventRecorded flag. Non-fatal.
+      if (!readMeta(op).repayEventRecorded) {
+        try {
+          const closeSig = (readMeta(op).closeSig as string | undefined) ?? null;
+          // Idempotent insert: if a prior attempt recorded this repay but crashed
+          // before persisting the flag, the close-tx-keyed row already exists — do
+          // NOT duplicate it. closeSig is unique to THIS repay row (the close leg
+          // emits no other equity event), so a hit is unambiguously our own row.
+          // When closeSig is absent the meta flag is the only guard; that residual
+          // window is sub-second and the row is purely cosmetic (non-fatal).
+          const already = closeSig ? await storage.getEquityEventByTxSignature(closeSig) : undefined;
+          if (!already) {
+            const repaidRaw = await resolvePrincipalRaw(params);
+            if (repaidRaw > 0n) {
+              const ucfg = await route.getVaultConfig(collateralMint);
+              const amtStr = (Number(repaidRaw) / 10 ** (ucfg?.debtDecimals ?? 6)).toFixed(6);
+              const sym = ucfg?.collateralSymbol ?? "collateral";
+              await storage.createEquityEvent({
+                walletAddress: params.walletAddress,
+                tradingBotId: params.tradingBotId,
+                eventType: "repay",
+                amount: amtStr,
+                assetType: "USDC",
+                txSignature: closeSig,
+                notes: `Repaid ${amtStr} USDC of ${sym}-backed debt`,
+              });
+            }
+          }
+          // Flag set unconditionally (a zero principal => nothing to pair; never retry).
+          await storage.updateBorrowOperation(op.id, { mergeMetadata: { repayEventRecorded: "1" } });
+          op = (await storage.getBorrowOperationById(op.id)) ?? op;
+        } catch (e) {
+          console.warn("[Perbot unwind] failed to record repay equity event (non-fatal)", e);
+        }
+      }
       await storage.updateBorrowOperation(op.id, { step: "bot_closed", mergeMetadata: { returnedRaw: returnedRaw.toString() } });
       op = (await storage.getBorrowOperationById(op.id)) ?? op;
     }

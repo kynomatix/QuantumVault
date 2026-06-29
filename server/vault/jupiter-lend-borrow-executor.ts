@@ -289,10 +289,43 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
       return { success: false, error: deny?.message || "This borrow is not allowed under the risk limits." };
     }
 
-    // 2) Gas: the agent wallet pays; account scope funds its own gas. A borrow OPEN
-    //    always MINTS a new position NFT, so budget its mint/metadata/edition rent
-    //    (~0.022 SOL) on top of the tx fee + first-time USDC ATA rent, or the
-    //    on-chain mint reverts "insufficient lamports".
+    // 1b) NFT REUSE: instead of MINTING a fresh position NFT (~0.022 SOL rent),
+    //     prefer re-depositing into a previously fully-closed (empty but on-chain-
+    //     alive) position of THIS SAME scope. A full close zeroes the position yet
+    //     leaves the NFT alive, so a reopen deposits+borrows into it and reclaims
+    //     the rent already locked there. Fail CLOSED: reuse only when the chain
+    //     PROVES the NFT empty; otherwise mint fresh (always safe). Applies to BOTH
+    //     account (tradingBotId null) and per-bot scope — getBorrowPositions is
+    //     already scoped by tradingBotId. The (wallet,vault,bot) borrow lock
+    //     serializes opens, so a candidate can't be claimed by a concurrent open.
+    let reuseCandidate: (Awaited<ReturnType<typeof storage.getBorrowPosition>> & {}) | null = null;
+    {
+      const scopeRows = await storage.getBorrowPositions(params.walletAddress, tradingBotId);
+      const closedCandidates = scopeRows.filter(
+        (p) =>
+          p.status === "closed" &&
+          p.collateralMint === params.collateralMint &&
+          (p.tradingBotId ?? null) === tradingBotId &&
+          Number.isInteger(Number(p.venuePositionId)) &&
+          Number(p.venuePositionId) > 0,
+      ); // getBorrowPositions is newest-first, so the most recent close wins
+      for (const cand of closedCandidates) {
+        if (await borrowRoute.isPositionEmptyReusable(params.collateralMint, Number(cand.venuePositionId))) {
+          reuseCandidate = cand;
+          break;
+        }
+      }
+    }
+    const reusing = !!reuseCandidate;
+    // The SDK mints a fresh NFT for positionId 0; a real id reuses that position.
+    const targetNftId = reusing ? Number(reuseCandidate!.venuePositionId) : 0;
+    const willMint = !reusing;
+
+    // 2) Gas: the agent wallet pays; account scope funds its own gas. MINTING a new
+    //    position NFT costs ~0.022 SOL of mint/metadata/edition rent that must be
+    //    budgeted on top of the tx fee + first-time USDC ATA rent, or the on-chain
+    //    mint reverts "insufficient lamports". Reusing an empty closed position
+    //    mints nothing, so it needs none of that extra rent.
     const gas = await ensureVaultGas({
       payingPublicKey: params.agentPublicKey,
       // Per-bot: the account agent funds the bot wallet's gas (the bot must not
@@ -302,12 +335,13 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
       funderSecretKey: params.funderSecretKey ?? params.agentSecretKey,
       destMint: USDC_MINT,
       label: "Borrow",
-      extraRentLamports: NEW_POSITION_MINT_RENT_LAMPORTS,
+      extraRentLamports: willMint ? NEW_POSITION_MINT_RENT_LAMPORTS : 0,
     });
     if (!gas.ok) return { success: false, error: gas.error || "Could not cover the network gas for this borrow." };
 
-    // 3) Pure plan -> SDK instructions (lazy import; positionId 0 mints a new NFT).
-    const plan = planBorrowOpen({ collateralRaw: effectiveCollateralRaw, debtRaw: params.requestedDebtRaw });
+    // 3) Pure plan -> SDK instructions (lazy import; positionId 0 mints a new NFT,
+    //    a real targetNftId reuses an empty closed position).
+    const plan = planBorrowOpen({ collateralRaw: effectiveCollateralRaw, debtRaw: params.requestedDebtRaw, positionId: targetNftId });
     const borrow = await import("@jup-ag/lend/borrow");
     const BN = (await import("bn.js")).default;
     const connection = getServerConnection();
@@ -328,6 +362,10 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
     }
     if (!operate?.ixs?.length) return { success: false, error: "Borrow transaction had no instructions." };
 
+    // A fresh mint returns its new nftId on `operate`; a reuse targets the empty
+    // closed position we resolved above.
+    const nftId = willMint ? Number(operate.nftId) : targetNftId;
+
     // 4) Resumable record: a 'pending' position + an op log row, written BEFORE
     //    signing. We persist the predicted nftId and a CONSERVATIVE liability (the
     //    requested debt) up front so a crash between send and the post-confirm
@@ -335,21 +373,42 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
     //    (sumOpenBorrowDebtUsdc counts every non-closed/non-failed row, so a
     //    pending row already shows as a liability). The authoritative on-chain
     //    amounts overwrite these after confirmation; a pre-send failure marks the
-    //    row failed (excluded again) before any money moves.
-    const position = await storage.createBorrowPosition({
-      walletAddress: params.walletAddress,
-      tradingBotId,
-      debtVenue: DEBT_VENUE,
-      venueVaultId: String(cfg.vaultId),
-      venuePositionId: String(operate.nftId),
-      collateralAssetKey: cfg.collateralSymbol.toLowerCase(),
-      collateralMint: cfg.collateralMint,
-      collateralAmountRaw: effectiveCollateralRaw.toString(),
-      debtAssetKey: "usdc",
-      debtMint: cfg.debtMint,
-      debtAmountRaw: params.requestedDebtRaw.toString(),
-      status: "pending",
-    });
+    //    row failed (excluded again) before any money moves. When REUSING an empty
+    //    closed position we reactivate that row (CAS closed -> pending) instead of
+    //    creating a new one, so the rest of the flow treats it exactly like a fresh
+    //    pending row (the final CAS pending -> open below is identical).
+    let position: Awaited<ReturnType<typeof storage.createBorrowPosition>>;
+    if (reusing) {
+      const reclaimed = await storage.updateBorrowPosition(
+        reuseCandidate!.id,
+        {
+          status: "pending",
+          venuePositionId: String(nftId),
+          collateralAmountRaw: effectiveCollateralRaw.toString(),
+          debtAmountRaw: params.requestedDebtRaw.toString(),
+        },
+        "closed",
+      );
+      if (!reclaimed) {
+        return { success: false, error: "That position changed state; please try again." };
+      }
+      position = reclaimed;
+    } else {
+      position = await storage.createBorrowPosition({
+        walletAddress: params.walletAddress,
+        tradingBotId,
+        debtVenue: DEBT_VENUE,
+        venueVaultId: String(cfg.vaultId),
+        venuePositionId: String(nftId),
+        collateralAssetKey: cfg.collateralSymbol.toLowerCase(),
+        collateralMint: cfg.collateralMint,
+        collateralAmountRaw: effectiveCollateralRaw.toString(),
+        debtAssetKey: "usdc",
+        debtMint: cfg.debtMint,
+        debtAmountRaw: params.requestedDebtRaw.toString(),
+        status: "pending",
+      });
+    }
     const op = await storage.createBorrowOperation({
       walletAddress: params.walletAddress,
       borrowPositionId: position.id,
@@ -374,8 +433,6 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
       label: "Borrow open",
     });
 
-    const nftId = operate.nftId;
-
     // 5b) Decide whether money moved — DO NOT blindly trust `!exec.success`.
     //     executeAgentInstructions verifies the USDC delta with a fail-OPEN reader,
     //     so a post-confirm RPC hiccup can report failure for a borrow that DID
@@ -396,7 +453,9 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
       //                       one where a null position-read would otherwise be
       //                       mistaken for "unreadable" and recorded as false debt.
       await storage.updateBorrowOperation(op.id, { status: "failed", step: "exec_failed", error: exec.error || "borrow open failed", ...(exec.signature ? { appendTxSignature: exec.signature } : {}) });
-      await storage.updateBorrowPosition(position.id, { status: "failed" }, "pending");
+      // A reused position is still empty on-chain (nothing moved), so return it to
+      // 'closed' to stay reuse-eligible; a fresh mint that never landed -> 'failed'.
+      await storage.updateBorrowPosition(position.id, { status: reusing ? "closed" : "failed" }, "pending");
       return { success: false, signature: exec.signature, error: exec.error || "Borrow failed." };
     } else {
       // Signature exists, tx was NOT reported as an on-chain failure, but the USDC
@@ -406,7 +465,9 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
       if (preReadLive && BigInt(preReadLive.debtRaw) <= 0n && BigInt(preReadLive.collateralRaw) <= 0n) {
         // Definitive read: nothing on-chain -> no money moved.
         await storage.updateBorrowOperation(op.id, { status: "failed", step: "exec_failed", error: exec.error || "borrow open failed", appendTxSignature: exec.signature });
-        await storage.updateBorrowPosition(position.id, { status: "failed" }, "pending");
+        // Reused NFT proven still empty -> back to 'closed' (reuse-eligible); a
+        // fresh mint that never landed -> 'failed'.
+        await storage.updateBorrowPosition(position.id, { status: reusing ? "closed" : "failed" }, "pending");
         return { success: false, signature: exec.signature, error: exec.error || "Borrow failed." };
       }
       // A real position exists, OR the probe itself failed (null). Fail CLOSED:

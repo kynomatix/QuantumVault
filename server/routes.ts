@@ -9499,6 +9499,539 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     }
   });
 
+  // ============================================================================
+  // PER-BOT BORROW (Carry Trade) — real money routes (P1). Flash/independent_trader
+  // bots ONLY, OWNER-ONLY rollout (gated on isBorrowOwnerWallet, a one-line flip to
+  // open later). These wrap the PROVEN P0 orchestrators (runPerbotCarveOpen /
+  // runPerbotUnwindClose); park/unpark reuse the EXISTING per-bot vault endpoints
+  // (the client orchestrates the 2-step Carry/Repay sequence). GENERIC across every
+  // allowlisted lending market (NOT hardwired to INF) — the carve source is any
+  // ACCOUNT borrow position whose collateral is allowlisted, kept in sync with the
+  // lending section via the same isCollateralVaultAllowlisted gate. Each money op is
+  // independently resumable by its clientRequestId; partial states are recoverable
+  // by re-POSTing the same id. Mirrors the proof's invariants: distinct route-level
+  // lock key, in-lock clean-bot re-check, strict raw parse, keys wiped in finally.
+  // ----------------------------------------------------------------------------
+
+  // Conservative LTV the SUGGESTED carry borrow is sized at (the bot opens well
+  // under the vault maxLtv; the executor still re-runs the enforced risk gate
+  // pre-sign, so this only sizes the friendly "max borrow" hint, never the safety).
+  const PERBOT_CARRY_SUGGEST_LTV = 0.5;
+
+  // Strict base-unit integer string (no 0x, +, whitespace, decimals); > 0.
+  const parsePerbotRaw = (v: unknown, name: string): bigint | { error: string } => {
+    if (typeof v !== "string" || !/^\d+$/.test(v)) return { error: `${name} must be a base-unit integer string` };
+    try {
+      const b = BigInt(v);
+      if (b <= BigInt(0)) return { error: `${name} must be greater than zero` };
+      return b;
+    } catch {
+      return { error: `${name} must be a base-unit integer string` };
+    }
+  };
+
+  // GET per-bot borrow positions + live health + owner-eligibility + carry sources
+  // (one preview per allowlisted ACCOUNT borrow market: max carve / max suggested
+  // borrow / oracle price), so the equity-tab card needs a SINGLE read. Read-only;
+  // never moves money. Non-owner / non-Flash -> empty + carrySources:[] (UI hides).
+  app.get("/api/vault/borrow/perbot/positions", requireWallet, async (req, res) => {
+    try {
+      const botId = typeof req.query.botId === "string" ? req.query.botId : "";
+      if (!botId) return res.status(400).json({ error: "botId required" });
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+
+      const eligible = isBorrowOwnerWallet(req.walletAddress!);
+
+      // Resolve bot scope: bot ∈ this wallet (404 otherwise) + Flash-only.
+      const botResolved = await resolveVaultScope(req.walletAddress!, wallet, botId);
+      if (!botResolved.ok) return res.status(botResolved.status).json({ error: botResolved.error });
+      const botScope = botResolved.scope;
+      if (botScope.scope !== "bot" || !botScope.agentPublicKey) {
+        // Not a per-bot (Flash) wallet bot -> the feature does not apply.
+        return res.json({ eligible, applicable: false, positions: [], carrySources: [] });
+      }
+      const tradingBotId = botScope.tradingBotId!;
+
+      const borrowRoute = new JupiterLendBorrowRoute();
+      const rows = (await storage.getBorrowPositions(req.walletAddress!, tradingBotId))
+        .filter((r) => r.status !== "closed" && r.status !== "failed");
+      const positions = await Promise.all(
+        rows.map(async (r) => {
+          let liveHealth: Awaited<ReturnType<typeof borrowRoute.readLivePositionHealth>> = null;
+          const posIdNum = r.venuePositionId != null ? Number(r.venuePositionId) : NaN;
+          if (Number.isFinite(posIdNum) && posIdNum > 0 && r.collateralMint) {
+            try {
+              liveHealth = await borrowRoute.readLivePositionHealth(r.collateralMint, posIdNum);
+            } catch {
+              // fail SOFT to the stored snapshot; never infer a close from a read miss.
+            }
+          }
+          return {
+            id: r.id,
+            status: r.status,
+            debtVenue: r.debtVenue,
+            venuePositionId: r.venuePositionId,
+            collateralAssetKey: r.collateralAssetKey,
+            collateralMint: r.collateralMint,
+            collateralAmountRaw: liveHealth?.collateralRaw ?? r.collateralAmountRaw,
+            debtAssetKey: r.debtAssetKey,
+            debtMint: r.debtMint,
+            debtAmountRaw: liveHealth?.debtRaw ?? r.debtAmountRaw,
+            liveHealth,
+            healthIsLive: liveHealth != null,
+            healthAsOf: r.healthAsOf ?? null,
+          };
+        }),
+      );
+
+      // Carry sources: owner-only. One preview per ACCOUNT borrow position whose
+      // collateral is allowlisted (GENERIC — every lending market, kept in sync via
+      // isCollateralVaultAllowlisted, NOT just INF). Best-effort; never fails the read.
+      const carrySources: any[] = [];
+      if (eligible) {
+        try {
+          const acctRows = (await storage.getBorrowPositions(req.walletAddress!, null))
+            .filter((p) => p.status === "open" && !p.tradingBotId && p.collateralMint);
+          for (const acctPos of acctRows) {
+            try {
+              const cfg = await borrowRoute.getVaultConfig(acctPos.collateralMint!);
+              if (!cfg || !isCollateralVaultAllowlisted(cfg.vaultId)) continue;
+              const plan = await planPerbotCarve({
+                walletAddress: req.walletAddress!,
+                vault: cfg,
+                carveRaw: BigInt(1), // dummy: maxCarveRaw is independent of the requested carve.
+              });
+              const venueId = plan.accountVenuePositionId ?? null;
+              const live = venueId ? await borrowRoute.readLivePositionHealth(acctPos.collateralMint!, venueId) : null;
+              const price = live?.oraclePriceUsd ?? null;
+              const maxCarveRaw = plan.maxCarveRaw ? BigInt(plan.maxCarveRaw) : BigInt(0);
+              let maxBorrowRaw = BigInt(0);
+              if (price && price > 0 && maxCarveRaw > BigInt(0)) {
+                const maxCarveUsd = (Number(maxCarveRaw) / 10 ** cfg.collateralDecimals) * price;
+                const maxBorrowUsd = maxCarveUsd * PERBOT_CARRY_SUGGEST_LTV;
+                maxBorrowRaw = BigInt(Math.floor(maxBorrowUsd * 10 ** cfg.debtDecimals));
+              }
+              carrySources.push({
+                available: plan.ok && maxCarveRaw > BigInt(0) && maxBorrowRaw > BigInt(0),
+                accountBorrowPositionId: acctPos.id,
+                collateralMint: acctPos.collateralMint,
+                collateralAssetKey: acctPos.collateralAssetKey ?? null,
+                collateralDecimals: cfg.collateralDecimals,
+                debtDecimals: cfg.debtDecimals,
+                vaultId: cfg.vaultId,
+                oraclePriceUsd: price,
+                accountLtvBefore: plan.accountLtvBefore ?? null,
+                targetLtv: plan.targetLtv ?? null,
+                suggestLtv: PERBOT_CARRY_SUGGEST_LTV,
+                maxCarveRaw: maxCarveRaw.toString(),
+                maxBorrowRaw: maxBorrowRaw.toString(),
+              });
+            } catch {
+              // skip this market on a preview miss; keep the others.
+            }
+          }
+        } catch {
+          // best-effort; leave carrySources empty.
+        }
+      }
+
+      res.json({ eligible, applicable: true, positions, carrySources });
+    } catch (error: any) {
+      console.error("[Vault] per-bot borrow positions read error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // POST open a per-bot Carry Trade borrow: carve a collateral slice OUT of the
+  // ACCOUNT position (capped @ target LTV) -> pass it account->bot -> open the
+  // bot's borrow position. The borrowed USDC lands in the bot wallet; the CLIENT
+  // then parks it (existing /api/vault/park, the EXACT borrowedUsdcRaw, never
+  // `all`). GENERIC across allowlisted collateral. Owner-only. Resumable: re-POST
+  // the same clientRequestId to FINISH a partial run.
+  app.post("/api/vault/borrow/perbot/open", requireWallet, async (req, res) => {
+    try {
+      if (!isBorrowOwnerWallet(req.walletAddress!)) {
+        return res.status(403).json({ error: "Per-bot borrowing is not available for this wallet yet." });
+      }
+      const { botId, collateralMint, carveRaw, requestedDebtRaw, sessionId, requestedTargetLtv, clientRequestId } = req.body || {};
+      if (!botId || typeof botId !== "string") return res.status(400).json({ error: "botId required" });
+      if (!collateralMint || typeof collateralMint !== "string") return res.status(400).json({ error: "collateralMint required" });
+      if (typeof clientRequestId !== "string" || clientRequestId.length < 8 || clientRequestId.length > 200) {
+        return res.status(400).json({ error: "clientRequestId required (client-generated, persisted until completion)" });
+      }
+      const carveParsed = parsePerbotRaw(carveRaw, "carveRaw");
+      if (typeof carveParsed === "object") return res.status(400).json(carveParsed);
+      const debtParsed = parsePerbotRaw(requestedDebtRaw, "requestedDebtRaw");
+      if (typeof debtParsed === "object") return res.status(400).json(debtParsed);
+      if (requestedTargetLtv !== undefined && (typeof requestedTargetLtv !== "number" || !Number.isFinite(requestedTargetLtv) || requestedTargetLtv <= 0 || requestedTargetLtv > 1)) {
+        return res.status(400).json({ error: "requestedTargetLtv must be a number in (0, 1] when provided." });
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+      if (!sessionId) return res.status(400).json({ error: "Session ID required for security verification" });
+      const session = getSession(sessionId);
+      if (!session || session.walletAddress !== req.walletAddress) {
+        return res.status(401).json({ error: "Invalid or expired session. Please reconnect your wallet." });
+      }
+      if (!session.umk) {
+        return res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
+      }
+
+      // Collateral allowlist by RESOLVED on-chain vault id (never a client mint).
+      const borrowRoute = new JupiterLendBorrowRoute();
+      const cfg = await borrowRoute.getVaultConfig(collateralMint);
+      if (!cfg) return res.status(400).json({ error: "Borrow vault is unavailable right now." });
+      if (!isCollateralVaultAllowlisted(cfg.vaultId)) {
+        return res.status(403).json({ error: "This collateral is not available for borrowing yet." });
+      }
+
+      // AUTHZ: resolve BOT scope (bot ∈ wallet + Flash-only) BEFORE any signing.
+      const botResolved = await resolveVaultScope(req.walletAddress!, wallet, botId);
+      if (!botResolved.ok) return res.status(botResolved.status).json({ error: botResolved.error });
+      const botScope = botResolved.scope;
+      if (botScope.scope !== "bot" || !botScope.agentPublicKey) {
+        return res.status(400).json({ error: "This bot is not a per-bot (Flash) wallet bot; per-bot borrow does not apply." });
+      }
+      const botWalletPubkey = botScope.agentPublicKey;
+      const tradingBotId = botScope.tradingBotId!;
+
+      // CLEAN-BOT GUARD (resume-aware): v1 is ONE open borrow per bot. A fresh run
+      // refuses any non-terminal position; a re-POST of an existing clientRequestId
+      // (its carve op exists) tolerates THIS run's own position, refuses foreign.
+      const carveReqId = `${clientRequestId}:carve`;
+      const priorCarveOp = await storage.getBorrowOperationByClientRequestId(req.walletAddress!, carveReqId);
+      const isResume = !!priorCarveOp;
+      const offending = selectBlockingBotPositions({
+        rows: await storage.getBorrowPositions(req.walletAddress!, tradingBotId),
+        isResume,
+        ownedBotPositionId: (priorCarveOp?.metadata as { borrowPositionId?: string } | null)?.borrowPositionId ?? null,
+      });
+      if (offending.length > 0) {
+        return res.status(409).json({
+          error: isResume
+            ? `This bot has ${offending.length} borrow position(s) that do not belong to this request. Reconcile before resuming.`
+            : `This bot already has an open borrow. Repay it before starting a new Carry Trade.`,
+        });
+      }
+
+      // Resolve the ACCOUNT scope (carve source + gas funder).
+      const acctResolved = await resolveVaultScope(req.walletAddress!, wallet, null);
+      if (!acctResolved.ok) return res.status(acctResolved.status).json({ error: acctResolved.error });
+      const acctScope = acctResolved.scope;
+      if (acctScope.scope !== "account" || !acctScope.agentPublicKey) {
+        return res.status(400).json({ error: "Account wallet not initialized" });
+      }
+      const accountPubkey = acctScope.agentPublicKey;
+
+      // Pre-lock carve sizing (re-validated inside the lock immediately pre-sign).
+      const carvePlan = await planPerbotCarve({
+        walletAddress: req.walletAddress!,
+        vault: cfg,
+        carveRaw: carveParsed,
+        requestedTargetLtv,
+      });
+      if ((!isResume && (!carvePlan.ok || carvePlan.maxCarveRaw == null)) || !carvePlan.accountBorrowPositionId || carvePlan.accountVenuePositionId == null || carvePlan.targetLtv == null) {
+        return res.status(400).json({ error: carvePlan.error || "Cannot size the carve under the target LTV (no readable account position?)." });
+      }
+      if (!isResume && (!carvePlan.carveWithinCap || !carvePlan.carveAllowed)) {
+        return res.status(400).json({
+          error: `That borrow is larger than your account can safely back. Reduce the amount and try again.`,
+        });
+      }
+
+      // Read-only risk gate for the BOT scope (counts only this bot's debt = 0 on a
+      // fresh open). The executor re-runs the ENFORCED gate pre-sign; skip the
+      // pre-lock projection rejection on resume (the open may already have landed).
+      const elig: any = await previewBorrowEligibility(
+        req.walletAddress!,
+        { collateralMint, collateralRaw: carveParsed, requestedDebtRaw: debtParsed, scope: "bot", existingDebtRawOverride: BigInt(0) },
+        {
+          getVaultConfig: (mint) => borrowRoute.getVaultConfig(mint),
+          getActiveBorrowPositionsAllWallets: () => storage.getActiveBorrowPositionsAllWallets(),
+          readBorrowOracleContext: (vault) => readBorrowOracleContext(vault),
+        },
+      );
+      if (!isResume && (!elig?.ok || !elig?.allowed)) {
+        const deny = elig?.reasons?.find((r: any) => r.severity === "deny");
+        return res.status(400).json({ error: deny?.message || "This per-bot borrow is not allowed under the risk limits." });
+      }
+
+      // ---- LIVE: route-level lock keyed on bot+vault (distinct from the executor
+      //      lock -> no re-entrant deadlock). Decrypt BOTH keys; wipe in finally.
+      const openLockKey = JSON.stringify(["perbot-open", req.walletAddress!, tradingBotId, cfg.vaultId]);
+      const result: { status: number; body: any } = await withBorrowLock(openLockKey, async () => {
+        let botKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+        let acctKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+        try {
+          // Atomic in-lock clean-bot re-check (a concurrent run may have opened one).
+          const lockedCarveOp = await storage.getBorrowOperationByClientRequestId(req.walletAddress!, carveReqId);
+          const lockedIsResume = isResume || !!lockedCarveOp;
+          const liveNow = selectBlockingBotPositions({
+            rows: await storage.getBorrowPositions(req.walletAddress!, tradingBotId),
+            isResume: lockedIsResume,
+            ownedBotPositionId: (lockedCarveOp?.metadata as { borrowPositionId?: string } | null)?.borrowPositionId ?? null,
+          });
+          if (liveNow.length > 0) {
+            return { status: 409, body: { error: "This bot now has an open borrow; aborting." } };
+          }
+
+          botKey = await decryptVaultScopeKey(botScope, req.walletAddress!, wallet, session.umk);
+          if (!botKey) return { status: 400, body: { error: "Bot wallet needs re-keying. Sign out and back in." } };
+          acctKey = await decryptVaultScopeKey(acctScope, req.walletAddress!, wallet, session.umk);
+          if (!acctKey) return { status: 400, body: { error: "Account wallet needs re-keying. Sign out and back in." } };
+
+          // Re-resolve the plan inside the lock for freshness.
+          const livePlan = await planPerbotCarve({
+            walletAddress: req.walletAddress!,
+            vault: cfg,
+            carveRaw: carveParsed,
+            requestedTargetLtv,
+          });
+          if (
+            (!lockedIsResume && !livePlan.ok) ||
+            !livePlan.accountBorrowPositionId ||
+            livePlan.accountVenuePositionId == null ||
+            livePlan.targetLtv == null ||
+            (!lockedIsResume && (!livePlan.carveWithinCap || !livePlan.carveAllowed))
+          ) {
+            return { status: 400, body: { error: livePlan.error || "Carve no longer fits under the target LTV (account state changed)." } };
+          }
+
+          const carveOpen = await runPerbotCarveOpen({
+            walletAddress: req.walletAddress!,
+            vault: cfg,
+            accountPublicKey: accountPubkey,
+            accountSecretKey: acctKey.secretKey,
+            botPublicKey: botWalletPubkey,
+            botSecretKey: botKey.secretKey,
+            tradingBotId,
+            accountBorrowPositionId: livePlan.accountBorrowPositionId,
+            accountVenuePositionId: livePlan.accountVenuePositionId,
+            carveRaw: carveParsed,
+            requestedDebtRaw: debtParsed,
+            targetLtv: livePlan.targetLtv,
+            clientRequestId: carveReqId,
+          });
+          if (!carveOpen.success || !carveOpen.borrowPositionId) {
+            const code = carveOpen.needsAttention ? 202 : 400;
+            return { status: code, body: { error: carveOpen.error || "Carry Trade open did not complete.", needsAttention: !!carveOpen.needsAttention, step: carveOpen.step, operationId: carveOpen.operationId, clientRequestId } };
+          }
+          if (carveOpen.accountPostLtv != null && livePlan.targetLtv != null && carveOpen.accountPostLtv > livePlan.targetLtv + 0.01) {
+            return { status: 500, body: { error: `Open succeeded but the account LTV (${carveOpen.accountPostLtv}) exceeds the target. Stopping for reconcile.`, borrowPositionId: carveOpen.borrowPositionId } };
+          }
+
+          const borrowedUsdcRaw = carveOpen.borrowedUsdcRaw ? BigInt(carveOpen.borrowedUsdcRaw) : BigInt(0);
+          const suggestedParkAmountUsdc = borrowedUsdcRaw > BigInt(0)
+            ? Number(borrowedUsdcRaw) / 10 ** cfg.debtDecimals
+            : 0;
+          return {
+            status: 200,
+            body: {
+              ok: true,
+              borrowPositionId: carveOpen.borrowPositionId,
+              borrowedUsdcRaw: carveOpen.borrowedUsdcRaw ?? "0",
+              accountPostLtv: carveOpen.accountPostLtv ?? null,
+              carvedRaw: carveOpen.carvedRaw ?? null,
+              suggestedParkAmountUsdc,
+              parkAssetKey: "perena_usd_star",
+              clientRequestId,
+            },
+          };
+        } finally {
+          if (botKey) botKey.cleanup();
+          if (acctKey) acctKey.cleanup();
+        }
+      });
+      return res.status(result.status).json(result.body);
+    } catch (error: any) {
+      console.error("[Vault] per-bot borrow open error:", error);
+      return res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // POST close (Repay Debt): unwind the bot's borrow -> repay-all + withdraw-all,
+  // return the collateral to the account wallet, and re-pledge it into the ACCOUNT
+  // position. The CLIENT unparks the borrowed USDC (existing /api/vault/unpark)
+  // BEFORE calling this so the bot holds USDC to repay. Owner-only. The unwind
+  // already does the repay top-up + capped sweep, so it does NOT require the
+  // unpark to deliver >= debt; it fails closed (202 needsAttention, retryable)
+  // until the chain + DB show the bot debt/collateral zeroed and account restored.
+  app.post("/api/vault/borrow/perbot/close", requireWallet, async (req, res) => {
+    try {
+      if (!isBorrowOwnerWallet(req.walletAddress!)) {
+        return res.status(403).json({ error: "Per-bot borrowing is not available for this wallet yet." });
+      }
+      const { botId, botBorrowPositionId, sessionId, clientRequestId } = req.body || {};
+      if (!botId || typeof botId !== "string") return res.status(400).json({ error: "botId required" });
+      if (botBorrowPositionId != null && typeof botBorrowPositionId !== "string") {
+        return res.status(400).json({ error: "botBorrowPositionId must be a string" });
+      }
+      if (typeof clientRequestId !== "string" || clientRequestId.length < 8 || clientRequestId.length > 200) {
+        return res.status(400).json({ error: "clientRequestId required (client-generated, persisted until completion)" });
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+      if (!sessionId) return res.status(400).json({ error: "Session ID required for security verification" });
+      const session = getSession(sessionId);
+      if (!session || session.walletAddress !== req.walletAddress) {
+        return res.status(401).json({ error: "Invalid or expired session. Please reconnect your wallet." });
+      }
+      if (!session.umk) {
+        return res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
+      }
+
+      // AUTHZ: resolve BOT scope (bot ∈ wallet + Flash-only).
+      const botResolved = await resolveVaultScope(req.walletAddress!, wallet, botId);
+      if (!botResolved.ok) return res.status(botResolved.status).json({ error: botResolved.error });
+      const botScope = botResolved.scope;
+      if (botScope.scope !== "bot" || !botScope.agentPublicKey) {
+        return res.status(400).json({ error: "This bot is not a per-bot (Flash) wallet bot; per-bot borrow does not apply." });
+      }
+      const botWalletPubkey = botScope.agentPublicKey;
+      const tradingBotId = botScope.tradingBotId!;
+
+      // RESUME / REPLAY SAFE position resolution.
+      // Once the unwind's close leg lands, the bot borrow row becomes terminal
+      // ('closed') while the op may STILL owe the collateral return + account
+      // re-pledge (+ sweep). A retry with the SAME clientRequestId MUST re-enter
+      // the SAME resumable unwind op to finish re-pledging — or replay its cached
+      // success — and must NOT 404 just because the bot position is no longer open.
+      // So if an unwind op for this request already exists, drive the (idempotent,
+      // identity-validated) orchestrator straight from its persisted metadata.
+      const borrowRoute = new JupiterLendBorrowRoute();
+      const unwindReqId = `${clientRequestId}:unwind`;
+      const existingUnwind = await storage.getBorrowOperationByClientRequestId(req.walletAddress!, unwindReqId);
+
+      let collateralMint: string;
+      let botBorrowPosId: string;
+      let accountBorrowPosId: string;
+      let accountVenuePositionId: number;
+
+      if (existingUnwind) {
+        // The op metadata is the source of truth (set at creation, re-validated by
+        // validateOpIdentity inside the orchestrator). The positions may be terminal
+        // now — that's expected mid-unwind; do NOT require an OPEN bot position.
+        const m = (existingUnwind.metadata as Record<string, any> | null) ?? {};
+        if (String(m.tradingBotId ?? "") !== tradingBotId) {
+          return res.status(409).json({ error: "This request id is already in use by a different bot's unwind." });
+        }
+        collateralMint = String(m.collateralMint ?? "");
+        botBorrowPosId = String(m.botBorrowPositionId ?? "");
+        accountBorrowPosId = String(m.accountBorrowPositionId ?? "");
+        accountVenuePositionId = Number(m.accountVenuePositionId);
+        if (!collateralMint || !botBorrowPosId || !accountBorrowPosId || !Number.isInteger(accountVenuePositionId) || accountVenuePositionId <= 0) {
+          return res.status(409).json({ error: "An unwind is already in progress for this request but its record is incomplete; reconcile before retrying." });
+        }
+        // A supplied botBorrowPositionId must match the in-flight unwind.
+        if (botBorrowPositionId && botBorrowPositionId !== botBorrowPosId) {
+          return res.status(409).json({ error: "A different unwind is already in progress for this request id." });
+        }
+      } else {
+        // FRESH close: resolve EXACTLY ONE active bot borrow position (or the supplied id).
+        const active = (await storage.getBorrowPositions(req.walletAddress!, tradingBotId))
+          .filter((p) => p.status !== "closed" && p.status !== "failed");
+        let botPos = active[0];
+        if (botBorrowPositionId) {
+          const match = active.find((p) => p.id === botBorrowPositionId);
+          if (!match) return res.status(404).json({ error: "No matching open borrow position for this bot." });
+          botPos = match;
+        } else if (active.length === 0) {
+          return res.status(404).json({ error: "This bot has no open borrow to repay." });
+        } else if (active.length > 1) {
+          return res.status(409).json({ error: "This bot has multiple open borrow positions; specify botBorrowPositionId." });
+        }
+        if (!botPos.collateralMint) return res.status(400).json({ error: "Borrow position has no collateral mint." });
+        collateralMint = botPos.collateralMint;
+        botBorrowPosId = botPos.id;
+
+        // Resolve the ACCOUNT borrow position (re-pledge target) for this collateral.
+        const acctRows = (await storage.getBorrowPositions(req.walletAddress!, null))
+          .filter((p) => p.status === "open" && !p.tradingBotId && p.collateralMint === collateralMint);
+        if (acctRows.length !== 1) {
+          return res.status(409).json({ error: `Expected exactly one account borrow position for this collateral to re-pledge into (found ${acctRows.length}).` });
+        }
+        accountBorrowPosId = acctRows[0].id;
+        const avp = acctRows[0].venuePositionId ? Number(acctRows[0].venuePositionId) : NaN;
+        if (!Number.isInteger(avp) || avp <= 0) {
+          return res.status(400).json({ error: "Account borrow position has no valid on-chain id." });
+        }
+        accountVenuePositionId = avp;
+      }
+
+      const cfg = await borrowRoute.getVaultConfig(collateralMint);
+      if (!cfg) return res.status(400).json({ error: "Borrow vault is unavailable right now." });
+
+      // Resolve the ACCOUNT scope (re-pledge signer + sweep recipient).
+      const acctResolved = await resolveVaultScope(req.walletAddress!, wallet, null);
+      if (!acctResolved.ok) return res.status(acctResolved.status).json({ error: acctResolved.error });
+      const acctScope = acctResolved.scope;
+      if (acctScope.scope !== "account" || !acctScope.agentPublicKey) {
+        return res.status(400).json({ error: "Account wallet not initialized" });
+      }
+      const accountPubkey = acctScope.agentPublicKey;
+
+      const closeLockKey = JSON.stringify(["perbot-close", req.walletAddress!, tradingBotId, cfg.vaultId]);
+      const result: { status: number; body: any } = await withBorrowLock(closeLockKey, async () => {
+        let botKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+        let acctKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+        try {
+          botKey = await decryptVaultScopeKey(botScope, req.walletAddress!, wallet, session.umk);
+          if (!botKey) return { status: 400, body: { error: "Bot wallet needs re-keying. Sign out and back in." } };
+          acctKey = await decryptVaultScopeKey(acctScope, req.walletAddress!, wallet, session.umk);
+          if (!acctKey) return { status: 400, body: { error: "Account wallet needs re-keying. Sign out and back in." } };
+
+          const unwind = await runPerbotUnwindClose({
+            walletAddress: req.walletAddress!,
+            vault: cfg,
+            accountPublicKey: accountPubkey,
+            accountSecretKey: acctKey.secretKey,
+            botPublicKey: botWalletPubkey,
+            botSecretKey: botKey.secretKey,
+            tradingBotId,
+            botBorrowPositionId: botBorrowPosId,
+            accountBorrowPositionId: accountBorrowPosId,
+            accountVenuePositionId,
+            clientRequestId: unwindReqId,
+          });
+          if (!unwind.success) {
+            const code = unwind.needsAttention ? 202 : 400;
+            return { status: code, body: { error: unwind.error || "Repay did not complete.", needsAttention: !!unwind.needsAttention, step: unwind.step, operationId: unwind.operationId, clientRequestId } };
+          }
+
+          // Final all-bot scan: the just-closed position is terminal, so the bot
+          // must have ZERO non-terminal borrow positions.
+          const stragglers = (await storage.getBorrowPositions(req.walletAddress!, tradingBotId))
+            .filter((p) => p.status !== "closed" && p.status !== "failed");
+          if (stragglers.length > 0) {
+            return { status: 202, body: { error: `Repaid, but the bot still has ${stragglers.length} non-terminal borrow position(s). Retry to reconcile.`, needsAttention: true, clientRequestId } };
+          }
+
+          return {
+            status: 200,
+            body: {
+              ok: true,
+              borrowPositionId: botBorrowPosId,
+              restoredRaw: unwind.restoredRaw ?? null,
+              sweptRaw: unwind.sweptRaw ?? null,
+              clientRequestId,
+            },
+          };
+        } finally {
+          if (botKey) botKey.cleanup();
+          if (acctKey) acctKey.cleanup();
+        }
+      });
+      return res.status(result.status).json(result.body);
+    } catch (error: any) {
+      console.error("[Vault] per-bot borrow close error:", error);
+      return res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
   // ----------------------------------------------------------------------------
   // PER-OP borrow money paths (T004). Each mirrors open/close: open to all wallets (launched publicly),
   // session/UMK verified, account scope only, agent key decrypted just-in-time and

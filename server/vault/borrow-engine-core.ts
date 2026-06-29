@@ -123,18 +123,31 @@ export interface BorrowOpenRequest {
   collateralRaw: bigint;
   /** USDC to borrow, raw base units (6 dp). Must be > 0. */
   debtRaw: bigint;
+  /**
+   * OPTIONAL position NFT to REUSE instead of minting. 0 (default) tells the SDK
+   * to mint a fresh position; a real (minted) positionId deposits+borrows into an
+   * existing EMPTY (fully-closed but on-chain-alive) position, reclaiming the rent
+   * already locked in that NFT. The executor proves the position is empty before
+   * passing it here, so reuse only ever lands on a verified-empty NFT.
+   */
+  positionId?: number;
 }
 
 /**
  * Plan a NEW borrow: deposit `collateralRaw` collateral and borrow `debtRaw`
- * USDC in one atomic operate. positionId 0 tells the SDK to mint a fresh
- * position and return its nftId (which the executor must persist).
+ * USDC in one atomic operate. positionId 0 (default) tells the SDK to mint a
+ * fresh position and return its nftId (which the executor must persist); a real
+ * positionId reuses an existing empty position instead of minting.
  */
 export function planBorrowOpen(req: BorrowOpenRequest): OperatePlan {
   if (req.collateralRaw <= 0n) throw new Error("planBorrowOpen: collateralRaw must be > 0");
   if (req.debtRaw <= 0n) throw new Error("planBorrowOpen: debtRaw must be > 0");
+  const positionId = req.positionId ?? 0;
+  if (!Number.isInteger(positionId) || positionId < 0) {
+    throw new Error("planBorrowOpen: positionId must be a non-negative integer (0 = mint)");
+  }
   return {
-    positionId: 0,
+    positionId,
     colAmount: { kind: "exact", raw: req.collateralRaw },
     debtAmount: { kind: "exact", raw: req.debtRaw },
   };
