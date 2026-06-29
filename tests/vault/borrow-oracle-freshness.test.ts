@@ -260,7 +260,7 @@ describe("borrow oracle registry", () => {
 
   it("returns null for an unmapped vault or a mismatched mint", () => {
     expect(getBorrowOracleSource(999, INF_MINT)).toBeNull(); // unmapped vault id
-    expect(getBorrowOracleSource(1, INF_MINT)).toBeNull(); // vault 1 maps to WSOL, not INF (mint mismatch)
+    expect(getBorrowOracleSource(1, INF_MINT)).toBeNull(); // vault 1 maps to SOL, not INF (mint mismatch)
     expect(getBorrowOracleSource(43, USDC)).toBeNull(); // mapped vault, wrong mint
   });
 

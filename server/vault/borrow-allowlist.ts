@@ -29,7 +29,7 @@
  */
 export const ALLOWED_BORROW_VAULT_IDS: ReadonlySet<number> = new Set<number>([
   43, // INF
-  1, 15, 49, // SOL (WSOL), JitoSOL, mSOL
+  1, 15, 49, // SOL, JitoSOL, mSOL
   8, // JLP
   41, 9, 11, 25, // LBTC, xBTC, cbBTC, WBTC
   7, // syrupUSDC

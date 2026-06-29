@@ -57,13 +57,14 @@ const REGISTRY: Record<number, BorrowOracleSource> = {
   // wrong-map guard, so a drifted feed still fails closed.
   // ───────────────────────────────────────────────────────────────────────────
 
-  // SOL (Wrapped SOL) -> USDC, vault 1. Priced by the canonical "Crypto.SOL/USD"
-  // feed (WSOL is 1:1 SOL). VERIFIED: Hermes $71.51 vs vault liq $71.12 (0.55%).
+  // SOL -> USDC, vault 1. Priced by the canonical "Crypto.SOL/USD" feed.
+  // The mint is the wrapped-SOL token address (1:1 SOL) and the backend
+  // transparently wraps native SOL into it. The user only ever sees "SOL".
   1: {
     kind: "pyth_direct",
     vaultId: 1,
     collateralMint: "So11111111111111111111111111111111111111112",
-    collateralSymbol: "WSOL",
+    collateralSymbol: "SOL",
     feedId: "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
   },
 
