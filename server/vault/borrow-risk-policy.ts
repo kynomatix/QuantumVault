@@ -77,6 +77,22 @@ export const BORROW_RISK_POLICY = {
   },
 } as const;
 
+/**
+ * PER-BOT CARVE target LTV (owner pivot 2026-06-29). The per-bot carve withdraws
+ * collateral OUT of the ACCOUNT borrow position (un-pledge) down to a target LTV,
+ * passes it through the agent, and re-pledges it into the bot's own position. The
+ * account is left at <= this LTV. These are SEPARATE from `hardMaxLtv` (a
+ * garbage-read backstop at 0.9): they are a deliberate, conservative custody cap.
+ */
+export const PERBOT_CARVE_DEFAULT_TARGET_LTV = 0.5;
+/**
+ * Hard platform ceiling for the per-bot carve target — must stay strictly BELOW
+ * any real collateralFactor (e.g. INF = 0.75 on Jupiter Lend). At 0.6 the INF
+ * account lands at health ≈ liqThreshold(0.80)/0.60 ≈ 1.33, just above the 1.3
+ * urgent band. A global setting may raise the target up to (never past) this.
+ */
+export const PERBOT_CARVE_HARD_CEILING_LTV = 0.6;
+
 /** Borrow scope. The MVP enforces "account"; "bot" is reserved for a later caller. */
 export type BorrowScope = "account" | "bot";
 
@@ -459,6 +475,15 @@ export interface CollateralWithdrawInput {
   requestedWithdrawRaw: bigint | "max";
   /** Oracle freshness. Required (fail closed) only when debt remains. */
   oracle: BorrowOracleContext;
+  /**
+   * Optional TIGHTER LTV ceiling for this withdraw (per-bot carve). When set, the
+   * decision caps `maxWithdrawableRaw` and the post-LTV deny at
+   * min(effectiveMaxLtv, targetMaxLtv) instead of the looser protocol ceiling, so
+   * a carve leaves the account at <= this LTV. Invalid (NaN / <=0 / >1) → hard
+   * deny (fail closed). Omitted → unchanged behaviour (caps at the protocol
+   * ceiling). Resolve it with `evaluateMaxCarveForTargetLtv` for the carve path.
+   */
+  targetMaxLtv?: number;
 }
 
 export interface CollateralWithdrawDecision {
@@ -546,6 +571,21 @@ export function evaluateCollateralWithdraw(input: CollateralWithdrawInput): Coll
     return fail();
   }
 
+  // ── Optional TIGHTER ceiling for a per-bot CARVE (owner pivot 2026-06-29). ──
+  // When the caller supplies a target LTV, cap the withdraw at min(protocol
+  // ceiling, target) instead of the looser protocol ceiling, so the account is
+  // left at <= the target after the carve. Fail closed on a bad value.
+  let capLtv = effectiveMaxLtv;
+  if (input.targetMaxLtv !== undefined) {
+    if (!unitRange(input.targetMaxLtv)) {
+      deny("invalid_target_ltv", "Requested target LTV is missing or out of range; refusing to withdraw.", {
+        targetMaxLtv: input.targetMaxLtv,
+      });
+      return fail();
+    }
+    capLtv = Math.min(effectiveMaxLtv, input.targetMaxLtv);
+  }
+
   const price = vault.oraclePriceLiquidateUsd;
   const colDiv = 10 ** vault.collateralDecimals;
   const debtDiv = 10 ** vault.debtDecimals;
@@ -577,16 +617,22 @@ export function evaluateCollateralWithdraw(input: CollateralWithdrawInput): Coll
   }
 
   // ── Debt remains → oracle must be readable, fresh, and not mid-crash. ─────
-  if (input.oracle.publishAgeSec === null) {
+  // Fail CLOSED on any non-readable oracle fact: null, NaN, Infinity, or a
+  // negative (physically-impossible) age/move all count as "unreadable", never
+  // as "fresh / calm". `nonNegFinite` is the readability test; the magnitude
+  // comparison only runs once the value is known-good. (A bare `x > ceiling`
+  // silently lets NaN/negative through, and `nonNegFinite(x) && x > ceiling`
+  // even let an Infinity move through — both are fail-OPEN holes.)
+  if (input.oracle.publishAgeSec === null || !nonNegFinite(input.oracle.publishAgeSec)) {
     deny("oracle_unreadable", "Could not read the oracle's publish time; refusing to withdraw collateral.");
   } else if (input.oracle.publishAgeSec > cb.oracleMaxAgeSec) {
     deny("oracle_stale", "Oracle price is stale; refusing to withdraw collateral until it refreshes.", {
       publishAgeSec: input.oracle.publishAgeSec,
     });
   }
-  if (input.oracle.priceMove1hAbs === null) {
+  if (input.oracle.priceMove1hAbs === null || !nonNegFinite(input.oracle.priceMove1hAbs)) {
     deny("price_move_unreadable", "Could not read recent price volatility; refusing to withdraw collateral.");
-  } else if (nonNegFinite(input.oracle.priceMove1hAbs) && input.oracle.priceMove1hAbs > cb.priceMove1hCeiling) {
+  } else if (input.oracle.priceMove1hAbs > cb.priceMove1hCeiling) {
     deny("price_volatility_freeze", "Collateral price is moving too fast right now; withdrawals are paused.", {
       priceMove1hAbs: input.oracle.priceMove1hAbs,
     });
@@ -595,7 +641,7 @@ export function evaluateCollateralWithdraw(input: CollateralWithdrawInput): Coll
   // Largest withdraw that keeps LTV <= effectiveMaxLtv (round the kept collateral
   // UP, so the withdraw is rounded DOWN — conservative). minColValueUsd is the
   // collateral USD needed to keep debt at exactly the cap.
-  const minColValueUsd = debtUsd / effectiveMaxLtv;
+  const minColValueUsd = debtUsd / capLtv;
   const minColTokens = minColValueUsd / price;
   const minColRaw = BigInt(Math.ceil(minColTokens * colDiv));
   const maxWithdrawableRaw = input.liveCollateralRaw > minColRaw ? input.liveCollateralRaw - minColRaw : 0n;
@@ -623,13 +669,13 @@ export function evaluateCollateralWithdraw(input: CollateralWithdrawInput): Coll
   } else {
     postLtv = debtUsd / postColValueUsd;
     postHealthFactor = (postColValueUsd * vault.liquidationThreshold) / debtUsd;
-    if (postLtv > effectiveMaxLtv + LTV_EPSILON) {
+    if (postLtv > capLtv + LTV_EPSILON) {
       deny(
         "exceeds_max_ltv",
         `This withdrawal would push LTV to ${(postLtv * 100).toFixed(1)}%, above the ${(
-          effectiveMaxLtv * 100
+          capLtv * 100
         ).toFixed(0)}% cap.`,
-        { postLtv, effectiveMaxLtv },
+        { postLtv, capLtv, effectiveMaxLtv },
       );
     } else if (postLtv > BORROW_RISK_POLICY.recommendedMaxLtv + LTV_EPSILON) {
       warn(
@@ -668,6 +714,87 @@ export function evaluateCollateralWithdraw(input: CollateralWithdrawInput): Coll
     effectiveMaxLtv,
     maxWithdrawableRaw: maxWithdrawableRaw.toString(),
     reasons,
+  };
+}
+
+/** Facts for sizing a per-bot CARVE (owner pivot 2026-06-29). All on-chain-authoritative. */
+export interface PerBotCarveTargetInput {
+  /** Decoded, on-chain-authoritative vault config. */
+  vault: BorrowVaultConfig;
+  /** Current on-chain collateral backing the ACCOUNT position, raw base units. */
+  liveCollateralRaw: bigint;
+  /** Current on-chain ACCOUNT debt, raw base units (6 dp USDC). */
+  liveDebtRaw: bigint;
+  /** Oracle freshness. Required (fail closed) when debt remains. */
+  oracle: BorrowOracleContext;
+  /** Requested target LTV for this carve (per-call). Omitted → globalTargetLtv → default. */
+  requestedTargetLtv?: number;
+  /** Platform GLOBAL target-LTV setting, if configured. */
+  globalTargetLtv?: number;
+}
+
+export interface PerBotCarveTargetDecision {
+  /** True only when NO reason has severity "deny". */
+  allowed: boolean;
+  /** Resolved + clamped target LTV the carve was evaluated against; null if it could not be resolved. */
+  targetLtv: number | null;
+  /** Max collateral (raw) the account can give up so it lands at <= targetLtv. NON-null ONLY when `allowed`; null on ANY deny (unreadable, stale oracle, volatility freeze, already at/above target). Always gate on `allowed`. */
+  maxCarveRaw: string | null;
+  /** Account LTV after withdrawing maxCarveRaw; null if unreadable. */
+  postLtvAtMax: number | null;
+  reasons: BorrowPolicyReason[];
+}
+
+/**
+ * Per-bot CARVE sizing (owner pivot 2026-06-29). PURE. Resolves the carve target
+ * LTV from (requested → global → default 0.50), clamps it to the platform hard
+ * ceiling, and returns the MAX collateral the account can give up so it stays at
+ * or below that LTV. Delegates the actual risk math + EVERY fail-closed gate
+ * (oracle freshness, volatility freeze, health floor, conservative rounding) to
+ * `evaluateCollateralWithdraw` so there is ONE money gate, never a divergent copy.
+ *
+ * This is a SIZING helper. The money path must still re-run
+ * `evaluateCollateralWithdraw` with the EXACT chosen carve amount + this
+ * `targetLtv` immediately before signing (the existing pre-sign contract).
+ */
+export function evaluateMaxCarveForTargetLtv(input: PerBotCarveTargetInput): PerBotCarveTargetDecision {
+  const reasons: BorrowPolicyReason[] = [];
+  const candidate = input.requestedTargetLtv ?? input.globalTargetLtv ?? PERBOT_CARVE_DEFAULT_TARGET_LTV;
+  // Fail closed on a malformed target: non-finite, non-positive, or > 100% LTV.
+  // A unit target like 0.9 is valid-but-aggressive and gets clamped to the hard
+  // ceiling below; a value > 1 is nonsensical (>100% LTV) and is rejected so the
+  // wrapper matches evaluateCollateralWithdraw's unit-range contract exactly
+  // (rather than silently coercing a malformed input down to the ceiling).
+  if (typeof candidate !== "number" || !Number.isFinite(candidate) || candidate <= 0 || candidate > 1) {
+    reasons.push({
+      code: "invalid_carve_target_ltv",
+      severity: "deny",
+      message: "Carve target LTV is missing or invalid; refusing to size the carve.",
+      facts: { requestedTargetLtv: input.requestedTargetLtv, globalTargetLtv: input.globalTargetLtv },
+    });
+    return { allowed: false, targetLtv: null, maxCarveRaw: null, postLtvAtMax: null, reasons };
+  }
+  const targetLtv = Math.min(candidate, PERBOT_CARVE_HARD_CEILING_LTV);
+
+  const decision = evaluateCollateralWithdraw({
+    vault: input.vault,
+    liveCollateralRaw: input.liveCollateralRaw,
+    liveDebtRaw: input.liveDebtRaw,
+    requestedWithdrawRaw: "max",
+    oracle: input.oracle,
+    targetMaxLtv: targetLtv,
+  });
+
+  return {
+    allowed: decision.allowed,
+    targetLtv,
+    // Defensive: only hand back a usable carve size when the gate ALLOWS it. On
+    // any deny (unreadable inputs, stale oracle, volatility freeze, already at/
+    // above target) this is null, so a caller that forgets to check `allowed`
+    // cannot accidentally carve.
+    maxCarveRaw: decision.allowed ? decision.maxWithdrawableRaw : null,
+    postLtvAtMax: decision.postLtv,
+    reasons: [...reasons, ...decision.reasons],
   };
 }
 

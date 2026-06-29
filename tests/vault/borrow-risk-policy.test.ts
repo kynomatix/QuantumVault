@@ -108,8 +108,17 @@ describe("evaluateBorrowRequest — hard denies", () => {
     expect(codes(d)).toContain("above_recommended_ltv");
   });
 
-  it("denies a non-account scope (MVP is account-only)", () => {
-    const d = evaluateBorrowRequest(validInput({ scope: "bot" }));
+  it("structurally allows scope 'bot' for the OWNER wallet (Phase 0 per-bot proving)", () => {
+    // P0-2: owner-only per-bot proving. Owner + scope 'bot' is structurally
+    // allowed; every LTV / oracle / exposure gate below still applies unchanged.
+    const d = evaluateBorrowRequest(validInput({ scope: "bot", isOwnerWallet: true }));
+    expect(denied(d)).not.toContain("scope_not_supported");
+  });
+
+  it("denies scope 'bot' for a NON-owner wallet (still gated until rollout)", () => {
+    const d = evaluateBorrowRequest(
+      validInput({ scope: "bot", isOwnerWallet: false, isBorrowAllowlisted: true }),
+    );
     expect(denied(d)).toContain("scope_not_supported");
   });
 

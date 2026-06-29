@@ -205,6 +205,16 @@ export interface BorrowOpenParams {
    * projection counts only THIS bot's debt, never sibling bots'.
    */
   existingDebtRawOverride?: bigint;
+  /**
+   * OPTIONAL write-ahead hook. Invoked with the freshly-created position row id
+   * AFTER the row is persisted but BEFORE the open transaction is broadcast. A
+   * resumable orchestrator (per-bot carve) uses this to durably link the bot
+   * position id onto its own operation BEFORE any money moves, so a crash in the
+   * broadcast window can always recognise this run's own position on resume
+   * (never adopt a foreign one). Awaited; if it throws, the open aborts before
+   * broadcast (fail-closed — no money moves). Account scope omits it (no-op).
+   */
+  onPositionCreated?: (positionId: string) => Promise<void>;
 }
 
 export interface BorrowOpenResult {
@@ -347,6 +357,12 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
       status: "pending",
       step: "gate_passed",
     });
+
+    // 4b) WRITE-AHEAD link (resumable orchestrators): durably record this row's id
+    //     on the caller's operation BEFORE the broadcast, so a crash in the send
+    //     window can recognise this run's own position on resume. Awaited and
+    //     fail-closed: a throw here aborts BEFORE money moves.
+    if (params.onPositionCreated) await params.onPositionCreated(position.id);
 
     // 5) THE money move: sign/send/confirm + verify a POSITIVE USDC delta.
     const exec = await executeAgentInstructions({

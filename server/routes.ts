@@ -1509,6 +1509,7 @@ import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { isBorrowEligibleWallet, isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
+import { planPerbotCarve, runPerbotCarveOpen, runPerbotUnwindClose, selectBlockingBotPositions } from "./vault/jupiter-lend-perbot-carve";
 import { getUserFungibleTokens, resolveTokenLogos } from "./swap/helius-tokens.js";
 
 const SWAP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -9054,13 +9055,25 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(403).json({ error: "Not available." });
       }
 
-      const { botId, collateralMint, carveRaw, requestedDebtRaw, sessionId, execute } = req.body || {};
+      const { botId, collateralMint, carveRaw, requestedDebtRaw, sessionId, execute, requestedTargetLtv, proofRunId: proofRunIdRaw } = req.body || {};
       if (!botId || typeof botId !== "string") return res.status(400).json({ error: "botId required" });
       if (!collateralMint || typeof collateralMint !== "string") return res.status(400).json({ error: "collateralMint required" });
       const carveParsed = parseRawPositive(carveRaw, "carveRaw");
       if (typeof carveParsed === "object") return res.status(400).json(carveParsed);
       const debtParsed = parseRawPositive(requestedDebtRaw, "requestedDebtRaw");
       if (typeof debtParsed === "object") return res.status(400).json(debtParsed);
+      // Optional target LTV for the carve cap; when omitted the planner applies
+      // PERBOT_CARVE_DEFAULT_TARGET_LTV. Reject obviously-bad input (the helper
+      // also clamps to the hard ceiling, but a >1 / non-finite value is a caller bug).
+      if (requestedTargetLtv !== undefined && (typeof requestedTargetLtv !== "number" || !Number.isFinite(requestedTargetLtv) || requestedTargetLtv <= 0 || requestedTargetLtv > 1)) {
+        return res.status(400).json({ error: "requestedTargetLtv must be a number in (0, 1] when provided." });
+      }
+      if (proofRunIdRaw !== undefined && typeof proofRunIdRaw !== "string") {
+        return res.status(400).json({ error: "proofRunId must be a string when provided." });
+      }
+      // Stable run id => the carve/unwind ops are resumable: re-POST the SAME
+      // proofRunId to FINISH a partially-completed run; a fresh id starts clean.
+      const proofRunId = (typeof proofRunIdRaw === "string" && proofRunIdRaw.length > 0) ? proofRunIdRaw : crypto.randomUUID();
       const doExecute = execute === true;
 
       const wallet = await storage.getWallet(req.walletAddress!);
@@ -9099,22 +9112,40 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const tradingBotId = botScope.tradingBotId!;
       log("authz_bot_scope", true, { tradingBotId, botWallet: botWalletPubkey });
 
-      // 3b) CLEAN-BOT GUARD: the proof uses existingDebtRawOverride:0, which is
-      //     only correct when this bot has NO live borrow. If a prior proof hard-
-      //     stopped (left a position open) or this is a double-run, refuse — else
-      //     we'd undercount the existing debt and stack a SECOND position. Runs
-      //     for BOTH preflight and execute.
-      const existingForBot = await storage.getBorrowPositions(req.walletAddress!, tradingBotId);
-      const liveForBot = existingForBot.filter((p) => p.status !== "closed" && p.status !== "failed");
-      if (liveForBot.length > 0) {
-        log("clean_bot_guard", false, { count: liveForBot.length, statuses: liveForBot.map((p) => p.status), ids: liveForBot.map((p) => p.id) });
+      // 3b) CLEAN-BOT GUARD (resume-aware). The proof uses existingDebtRawOverride:0,
+      //     which is only correct on a bot with NO pre-existing borrow, so a FRESH
+      //     run must refuse any non-terminal position (else it undercounts existing
+      //     debt and stacks a SECOND position). BUT the route contract is "re-POST
+      //     the SAME proofRunId to FINISH a partial run", and after a successful open
+      //     this bot legitimately holds THIS run's OWN position. So a re-POST of an
+      //     existing proofRunId (its carve op already exists) is a RESUME: tolerate
+      //     this run's own position id; still refuse any FOREIGN non-terminal row (a
+      //     concurrent run, or a prior hard-stop on a different position). The OWN
+      //     position id is the BOT position id the carve op write-aheads into its
+      //     metadata BEFORE the open broadcast (NOT the op.borrowPositionId column,
+      //     which holds the ACCOUNT position id until finalize) — so once a row of
+      //     ours exists, this is set. When it is still null (no open begun) any
+      //     non-terminal row is FOREIGN and blocks (fail-safe).
+      const carveReqId = `${proofRunId}:carve`;
+      const priorCarveOp = await storage.getBorrowOperationByClientRequestId(req.walletAddress!, carveReqId);
+      const isResume = !!priorCarveOp;
+
+      const offending3b = selectBlockingBotPositions({
+        rows: await storage.getBorrowPositions(req.walletAddress!, tradingBotId),
+        isResume,
+        ownedBotPositionId: (priorCarveOp?.metadata as { borrowPositionId?: string } | null)?.borrowPositionId ?? null,
+      });
+      if (offending3b.length > 0) {
+        log("clean_bot_guard", false, { resume: isResume, count: offending3b.length, statuses: offending3b.map((p) => p.status), ids: offending3b.map((p) => p.id) });
         return res.status(409).json({
           ok: false,
-          error: `This bot already has ${liveForBot.length} non-terminal borrow position(s) (status: ${liveForBot.map((p) => p.status).join(", ")}). The proof runs only on a clean bot (it assumes zero existing debt). Close/reconcile that position first.`,
+          error: isResume
+            ? `This bot has ${offending3b.length} non-terminal borrow position(s) that do not belong to this proof run (id: ${offending3b.map((p) => p.id).join(", ")}). Reconcile before resuming this proofRunId.`
+            : `This bot already has ${offending3b.length} non-terminal borrow position(s) (status: ${offending3b.map((p) => p.status).join(", ")}). The proof runs only on a clean bot (it assumes zero existing debt). Close/reconcile that position first.`,
           steps,
         });
       }
-      log("clean_bot_guard", true, {});
+      log("clean_bot_guard", true, { resume: isResume });
 
       // 4) Resolve the ACCOUNT scope (carve source + gas funder).
       const acctResolved = await resolveVaultScope(req.walletAddress!, wallet, null);
@@ -9130,19 +9161,56 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const readRaw = async (pubkey: string, mint: string): Promise<bigint> =>
         BigInt((await getAgentTokenBalanceRawStrict(pubkey, mint)).amountRaw);
 
-      // 5) DOUBLE-PLEDGE GUARD: only FREE (unpledged) collateral in the ACCOUNT
-      //    wallet may be carved. Pledged collateral lives inside the account
-      //    position NFT, not the wallet, so a sufficient FREE wallet balance
-      //    proves the carve slice is unpledged.
-      const accountFreeColl = await readRaw(accountPubkey, collateralMint);
-      if (accountFreeColl < carveParsed) {
-        log("unpledged_carve_source", false, { accountFreeColl: accountFreeColl.toString(), required: carveParsed.toString() });
+      // 5) CARVE SOURCE = the ACCOUNT borrow position (PIVOT 2026-06-29). The carve
+      //    WITHDRAWS a collateral slice OUT of the account position (un-pledge),
+      //    capped so the account lands at <= the target LTV — it does NOT assume
+      //    free INF resting in the agent wallet (the agent is pass-through only).
+      //    planPerbotCarve resolves the account position, reads its LIVE health,
+      //    and sizes the cap. PURE money-wise (reads only); the execute path
+      //    re-resolves + re-gates inside the lock immediately before signing.
+      const carvePlan = await planPerbotCarve({
+        walletAddress: req.walletAddress!,
+        vault: cfg,
+        carveRaw: carveParsed,
+        requestedTargetLtv,
+      });
+      // Structural fields (account position id, venue id, target) are required even on
+      // resume. The SIZING signals (ok = allowed && maxCarveRaw!==null, and maxCarveRaw
+      // itself) encode the money-cap, which legitimately flips to "no room" once the
+      // withdraw has landed and the account sits at target — so they are skipped on a
+      // resume (the orchestrator re-gates the withdraw pre-sign if it has not run).
+      if ((!isResume && (!carvePlan.ok || carvePlan.maxCarveRaw == null)) || !carvePlan.accountBorrowPositionId || carvePlan.accountVenuePositionId == null || carvePlan.targetLtv == null) {
+        log("carve_cap", false, { error: carvePlan.error, reasons: carvePlan.reasons, targetLtv: carvePlan.targetLtv, maxCarveRaw: carvePlan.maxCarveRaw });
+        return res.status(400).json({ error: carvePlan.error || "Cannot size the carve under the target LTV (no readable account position?).", steps });
+      }
+      // On a RESUME (this proofRunId's carve op already exists) the WITHDRAW may
+      // have already landed, so the account is now at/under the target LTV and
+      // re-gating the SAME carve against the reduced account would wrongly reject
+      // it (carveWithinCap=false) and 400 BEFORE the orchestrator can resume the
+      // remaining legs. Skip the cap REJECTION on resume; the orchestrator re-gates
+      // the withdraw leg itself immediately pre-sign if it has not yet run.
+      if (!isResume && (!carvePlan.carveWithinCap || !carvePlan.carveAllowed)) {
+        log("carve_cap", false, {
+          carve: carveParsed.toString(),
+          maxCarveRaw: carvePlan.maxCarveRaw,
+          targetLtv: carvePlan.targetLtv,
+          accountLtvBefore: carvePlan.accountLtvBefore,
+          projectedPostLtvAtCarve: carvePlan.projectedPostLtvAtCarve,
+        });
         return res.status(400).json({
-          error: `Account wallet holds ${accountFreeColl} free collateral (raw) but ${carveParsed} is required. If it is pledged to the account borrow position, withdraw it back to the wallet first.`,
+          error: `Requested carve (${carveParsed} raw) exceeds the max carve (${carvePlan.maxCarveRaw} raw) that keeps the account at <= ${carvePlan.targetLtv} LTV, or is not allowed by the withdraw gate.`,
           steps,
         });
       }
-      log("unpledged_carve_source", true, { accountFreeColl: accountFreeColl.toString(), carve: carveParsed.toString() });
+      log("carve_cap", true, {
+        carve: carveParsed.toString(),
+        maxCarveRaw: carvePlan.maxCarveRaw,
+        targetLtv: carvePlan.targetLtv,
+        accountLtvBefore: carvePlan.accountLtvBefore,
+        projectedPostLtvAtCarve: carvePlan.projectedPostLtvAtCarve,
+        postLtvAtMax: carvePlan.postLtvAtMax,
+        accountBorrowPositionId: carvePlan.accountBorrowPositionId,
+      });
 
       // 6) Baseline bot balances (strict). Coexistence: the bot may already hold
       //    parked-vault funds + spare USDC; the carve/open touch ONLY the carved
@@ -9174,7 +9242,17 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           readBorrowOracleContext: (vault) => readBorrowOracleContext(vault),
         },
       );
-      if (!elig?.ok || !elig?.allowed) {
+      // This is a FRESH-OPEN risk PREVIEW (existingDebtRawOverride=0). The REAL
+      // money-safety enforcement lives inside executeBorrowOpen, which re-runs the
+      // ENFORCED risk gate immediately pre-sign on the actual open broadcast. So on a
+      // RESUME we must NOT 400 on this fresh-open projection: the open already landed
+      // (resume-forward, no broadcast) or, if it has not, the executor re-gates it
+      // pre-sign. Blocking here would stop resume-forward AND the UNWIND, stranding an
+      // open bot loan whenever oracle/exposure state shifted since the original open.
+      // Same liveness rule as the carve-cap pre-lock gate above. The carve op is
+      // write-ahead'd BEFORE the open broadcasts, so any request that could have
+      // opened the loan makes every later retry a resume here -> no stranding window.
+      if (!isResume && (!elig?.ok || !elig?.allowed)) {
         const deny = elig?.reasons?.find((r: any) => r.severity === "deny");
         log("risk_gate", false, { ok: elig?.ok, allowed: elig?.allowed, reason: deny?.message, projection: elig?.projection });
         return res.status(400).json({ error: deny?.message || "This per-bot borrow is not allowed under the risk limits.", steps });
@@ -9195,6 +9273,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             vaultId: cfg.vaultId,
             carveRaw: carveParsed.toString(),
             requestedDebtRaw: debtParsed.toString(),
+            carveSource: "account_position_withdraw",
+            accountBorrowPositionId: carvePlan.accountBorrowPositionId,
+            targetLtv: carvePlan.targetLtv,
+            maxCarveRaw: carvePlan.maxCarveRaw,
+            accountLtvBefore: carvePlan.accountLtvBefore,
+            projectedPostLtvAtCarve: carvePlan.projectedPostLtvAtCarve,
           },
           steps,
         });
@@ -9212,15 +9296,29 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         let botKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
         let acctKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
         try {
-          // 7b) ATOMIC clean-bot re-check INSIDE the lock. The step-3b guard ran
-          //     BEFORE the lock; a concurrent run could have opened a position since.
-          //     Carving against a bot that already has a non-terminal position would
-          //     undercount existing debt (override:0n) and risk a double-open.
-          const liveNow = (await storage.getBorrowPositions(req.walletAddress!, tradingBotId))
-            .filter((p) => p.status !== "closed" && p.status !== "failed");
+          // 7b) ATOMIC clean-bot re-check INSIDE the lock (resume-aware, same rule
+          //     as 3b). The step-3b guard ran BEFORE the lock; a concurrent run could
+          //     have opened a position since. For a FRESH run this catches a position
+          //     opened between the pre-lock guard and the lock; for a RESUME it
+          //     tolerates ONLY this proofRunId's own position (re-reading the carve
+          //     op inside the lock so a just-linked borrowPositionId is honored) and
+          //     still aborts on any FOREIGN non-terminal row.
+          //     Recompute resume INSIDE the lock: a second same-proofRunId request
+          //     can have computed isResume=false at 3b (its carve op did not exist
+          //     yet), waited on the lock, and entered after the first request created
+          //     the op — so trust the live lock-time op, not the stale pre-lock flag.
+          const lockedCarveOp = await storage.getBorrowOperationByClientRequestId(req.walletAddress!, carveReqId);
+          const lockedIsResume = isResume || !!lockedCarveOp;
+          const liveNow = selectBlockingBotPositions({
+            rows: await storage.getBorrowPositions(req.walletAddress!, tradingBotId),
+            isResume: lockedIsResume,
+            ownedBotPositionId: (lockedCarveOp?.metadata as { borrowPositionId?: string } | null)?.borrowPositionId ?? null,
+          });
           if (liveNow.length > 0) {
-            log("clean_bot_guard_locked", false, { count: liveNow.length, statuses: liveNow.map((p) => p.status) });
-            return { status: 409, body: { ok: false, error: `This bot now has ${liveNow.length} non-terminal borrow position(s); another proof run may be in progress. Aborting.`, steps } };
+            log("clean_bot_guard_locked", false, { resume: lockedIsResume, count: liveNow.length, statuses: liveNow.map((p) => p.status), ids: liveNow.map((p) => p.id) });
+            return { status: 409, body: { ok: false, error: lockedIsResume
+              ? `This bot has ${liveNow.length} non-terminal borrow position(s) not owned by this proof run; aborting.`
+              : `This bot now has ${liveNow.length} non-terminal borrow position(s); another proof run may be in progress. Aborting.`, steps } };
           }
 
           botKey = await decryptVaultScopeKey(botScope, req.walletAddress!, wallet, session.umk);
@@ -9230,101 +9328,120 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           const botSecret = botKey.secretKey;
           const acctSecret = acctKey.secretKey;
 
-          // 8) CARVE EXACTLY the collateral slice account -> bot wallet.
-          //    transferTokenToWalletExact = strict read + write-ahead sig + confirm.
-          const carve = await transferTokenToWalletExact({
-            agentPublicKey: accountPubkey,
-            agentSecretKey: acctSecret,
-            toWalletAddress: botWalletPubkey,
-            mint: collateralMint,
-            amountRaw: carveParsed,
-          });
-          if (!carve.success) {
-            log("carve", false, { error: carve.error, signature: carve.signature });
-            return { status: 400, body: { ok: false, error: `Carve failed: ${carve.error}`, steps } };
-          }
-          const botCollAfterCarve = await readRaw(botWalletPubkey, collateralMint);
-          if (botCollAfterCarve - botCollBefore < carveParsed) {
-            log("carve", false, { signature: carve.signature, delta: (botCollAfterCarve - botCollBefore).toString(), expected: carveParsed.toString() });
-            return { status: 500, body: { ok: false, error: "Carve confirmed but bot collateral did not increase as expected.", steps } };
-          }
-          log("carve", true, { signature: carve.signature, delta: (botCollAfterCarve - botCollBefore).toString() });
-
-          // 9) OPEN: bot signs; account funds gas (incl. NFT-mint rent). tradingBotId
-          //    set -> the risk policy enforces owner-only 'bot' scope before signing.
-          const open: any = await executeBorrowOpen({
+          // 8) CARVE/OPEN op (perbot_carve_open): withdraw a collateral slice OUT
+          //    of the ACCOUNT position (capped @ target LTV, deliver=false), pass it
+          //    account->bot, then bot supply+open. Resumable + fail-closed; it
+          //    re-runs the target-LTV withdraw gate immediately pre-sign and asserts
+          //    the account lands at <= target on an on-chain RE-READ. Re-resolve the
+          //    plan INSIDE the lock for freshness (account state may have shifted
+          //    since the pre-lock step-5 sizing).
+          const livePlan = await planPerbotCarve({
             walletAddress: req.walletAddress!,
-            agentPublicKey: botWalletPubkey,
-            agentSecretKey: botSecret,
-            collateralMint,
-            collateralRaw: carveParsed,
-            requestedDebtRaw: debtParsed,
-            tradingBotId,
-            funderPublicKey: accountPubkey,
-            funderSecretKey: acctSecret,
-            existingDebtRawOverride: BigInt(0),
+            vault: cfg,
+            carveRaw: carveParsed,
+            requestedTargetLtv,
           });
-          if (!open?.success || !open?.borrowPositionId) {
-            log("open", false, { error: open?.error });
-            return { status: 400, body: { ok: false, error: `Open failed: ${open?.error || "unknown"}. NOTE: carved collateral remains in the bot wallet.`, steps } };
+          // Structural fields are ALWAYS required (we need the account position id,
+          // venue id, target, and live collateral downstream). But the carve CAP
+          // (carveWithinCap/carveAllowed) is relaxed on a RESUME for the same reason
+          // as the pre-lock gate: a landed withdraw leaves the account at target, so
+          // re-gating the original carve would 400 before the orchestrator resumes.
+          if (
+            (!lockedIsResume && !livePlan.ok) ||
+            !livePlan.accountBorrowPositionId ||
+            livePlan.accountVenuePositionId == null ||
+            livePlan.targetLtv == null ||
+            livePlan.liveCollateralRaw == null ||
+            (!lockedIsResume && (!livePlan.carveWithinCap || !livePlan.carveAllowed))
+          ) {
+            log("carve_cap_locked", false, { error: livePlan.error, reasons: livePlan.reasons, maxCarveRaw: livePlan.maxCarveRaw, targetLtv: livePlan.targetLtv });
+            return { status: 400, body: { ok: false, error: livePlan.error || "Carve no longer fits under the target LTV (account state changed).", steps } };
           }
-          const borrowPositionId: string = open.borrowPositionId;
-          const botCollAfterOpen = await readRaw(botWalletPubkey, collateralMint);
+          const acctCollBeforeCarve = BigInt(livePlan.liveCollateralRaw);
+
+          const carveOpen = await runPerbotCarveOpen({
+            walletAddress: req.walletAddress!,
+            vault: cfg,
+            accountPublicKey: accountPubkey,
+            accountSecretKey: acctSecret,
+            botPublicKey: botWalletPubkey,
+            botSecretKey: botSecret,
+            tradingBotId,
+            accountBorrowPositionId: livePlan.accountBorrowPositionId,
+            accountVenuePositionId: livePlan.accountVenuePositionId,
+            carveRaw: carveParsed,
+            requestedDebtRaw: debtParsed,
+            targetLtv: livePlan.targetLtv,
+            clientRequestId: `${proofRunId}:carve`,
+          });
+          if (!carveOpen.success || !carveOpen.borrowPositionId) {
+            log("carve_open", false, { error: carveOpen.error, step: carveOpen.step, needsAttention: carveOpen.needsAttention, operationId: carveOpen.operationId, signatures: carveOpen.signatures });
+            return { status: 400, body: { ok: false, error: `Carve/open failed: ${carveOpen.error || "unknown"} (step ${carveOpen.step ?? "?"}). The orchestrator either resumed-forward or REVERTED the carve back into the account position — re-POST the same proofRunId to finish/reconcile.`, operationId: carveOpen.operationId, steps } };
+          }
+          const borrowPositionId: string = carveOpen.borrowPositionId;
+
+          // 8b) ASSERT the account landed at <= target after the carve. The
+          //     orchestrator already asserted this on an on-chain re-read; surface
+          //     and re-check the value here (tiny float tolerance for rounding).
+          if (carveOpen.accountPostLtv == null || carveOpen.accountPostLtv > livePlan.targetLtv + 0.01) {
+            log("account_post_ltv", false, { accountPostLtv: carveOpen.accountPostLtv, targetLtv: livePlan.targetLtv });
+            return { status: 500, body: { ok: false, error: `Carve/open succeeded but the account post-carve LTV (${carveOpen.accountPostLtv}) exceeds the target (${livePlan.targetLtv}). STOP and reconcile.`, borrowPositionId, steps } };
+          }
+          log("account_post_ltv", true, { accountPostLtv: carveOpen.accountPostLtv, targetLtv: livePlan.targetLtv });
+
+          // 9) ASSERT borrowed USDC landed in the bot wallet (coexistence-safe: the
+          //    delta is USDC only; parked Perena / spare funds are different mints).
           const botUsdcAfterOpen = await readRaw(botWalletPubkey, SWAP_USDC_MINT);
           const usdcDelta = botUsdcAfterOpen - botUsdcBefore;
-          if (usdcDelta <= BigInt(0)) {
-            log("open", false, { borrowPositionId, usdcDelta: usdcDelta.toString() });
-            return { status: 500, body: { ok: false, error: "Open reported success but no borrowed USDC landed in the bot wallet. STOPPING — position left open.", steps } };
+          // On a RESUME the open landed in a PRIOR request, so botUsdcBefore (read
+          // THIS request) already includes the borrowed USDC -> a same-request delta
+          // of 0 is EXPECTED, not a failure. Accept the orchestrator's on-chain
+          // observed borrowedUsdcRaw (live position debt) as proof instead. Only
+          // fail when BOTH are non-positive (no borrow anywhere).
+          const reportedBorrowedRaw = carveOpen.borrowedUsdcRaw ? BigInt(carveOpen.borrowedUsdcRaw) : BigInt(0);
+          if (usdcDelta <= BigInt(0) && reportedBorrowedRaw <= BigInt(0)) {
+            log("open", false, { borrowPositionId, usdcDelta: usdcDelta.toString(), borrowedUsdcRaw: carveOpen.borrowedUsdcRaw });
+            return { status: 500, body: { ok: false, error: "Open reported success but no borrowed USDC landed in the bot wallet. STOPPING — position left open.", borrowPositionId, steps } };
           }
           log("open", true, {
             borrowPositionId,
-            signature: open.signature,
-            requestedDebtRaw: debtParsed.toString(),
+            operationId: carveOpen.operationId,
+            carvedRaw: carveOpen.carvedRaw,
+            borrowedUsdcRaw: carveOpen.borrowedUsdcRaw,
             usdcDelta: usdcDelta.toString(),
             matchesRequested: usdcDelta === debtParsed,
+            signatures: carveOpen.signatures,
           });
 
-          // 10) CLOSE: repay ALL + withdraw ALL. funderPublicKey present -> the
-          //     executor treats this as the per-bot close path (else it rejects a
-          //     per-bot position). Bot signs; account funds gas.
-          const close: any = await executeBorrowClose({
+          // 10) UNWIND/CLOSE op (perbot_unwind_close): bot close (repay-all +
+          //     withdraw-all) -> SPL bot->account -> RE-PLEDGE the returned
+          //     collateral into the ACCOUNT position. Resumable; a partial stops at
+          //     needs_attention and a retry FINISHES (never reports success early).
+          const unwind = await runPerbotUnwindClose({
             walletAddress: req.walletAddress!,
-            agentPublicKey: botWalletPubkey,
-            agentSecretKey: botSecret,
-            borrowPositionId,
-            funderPublicKey: accountPubkey,
-            funderSecretKey: acctSecret,
+            vault: cfg,
+            accountPublicKey: accountPubkey,
+            accountSecretKey: acctSecret,
+            botPublicKey: botWalletPubkey,
+            botSecretKey: botSecret,
+            tradingBotId,
+            botBorrowPositionId: borrowPositionId,
+            accountBorrowPositionId: livePlan.accountBorrowPositionId,
+            accountVenuePositionId: livePlan.accountVenuePositionId,
+            clientRequestId: `${proofRunId}:unwind`,
           });
-          if (!close?.success || !close?.finalized) {
-            log("close", false, { error: close?.error });
-            return { status: 400, body: { ok: false, error: `Close failed: ${close?.error || "unknown"}. HARD GATE: position ${borrowPositionId} may still be OPEN — STOP and reassess.`, borrowPositionId, steps } };
+          if (!unwind.success) {
+            log("unwind_close", false, { error: unwind.error, step: unwind.step, needsAttention: unwind.needsAttention, operationId: unwind.operationId, signatures: unwind.signatures });
+            return { status: 400, body: { ok: false, error: `Unwind/close failed: ${unwind.error || "unknown"} (step ${unwind.step ?? "?"}). HARD GATE: position ${borrowPositionId} or its returned collateral may need reconcile — re-POST the same proofRunId, then STOP before P1.`, borrowPositionId, operationId: unwind.operationId, steps } };
           }
-          const botUsdcAfterClose = await readRaw(botWalletPubkey, SWAP_USDC_MINT);
-          const botCollAfterClose = await readRaw(botWalletPubkey, collateralMint);
-          const collateralReturned = botCollAfterClose - botCollAfterOpen;
-          log("close", true, {
-            signature: close.signature,
-            usdcSpentOnRepay: (botUsdcAfterOpen - botUsdcAfterClose).toString(),
-            collateralReturned: collateralReturned.toString(),
-            observedDebtRaw: close.observedDebtRaw ?? null,
-          });
+          log("unwind_close", true, { operationId: unwind.operationId, restoredRaw: unwind.restoredRaw, signatures: unwind.signatures });
 
-          // 11) ON-CHAIN ZEROED ASSERTION — COLLATERAL (P0 acceptance "collateral
-          //     zeroed"). After repay-all + withdraw-all, the carved slice must have
-          //     returned to the bot wallet; otherwise it is stranded in the position.
-          //     Tolerance is a FIXED tiny raw-unit bound for protocol rounding, NOT a
-          //     percentage (a % bound could mask a meaningful stranded slice).
           const COLL_DUST = 10n; // raw units (~1e-8 INF @ 9 decimals)
-          if (collateralReturned < carveParsed - COLL_DUST) {
-            log("collateral_returned", false, { collateralReturned: collateralReturned.toString(), carve: carveParsed.toString() });
-            return { status: 500, body: { ok: false, error: `Close confirmed but only ${collateralReturned} raw collateral returned to the bot wallet (carved ${carveParsed}). Collateral may be stranded in the position — STOP and reconcile before P1.`, borrowPositionId, steps } };
-          }
-          log("collateral_returned", true, { collateralReturned: collateralReturned.toString() });
 
-          // 12) RECONCILE (HARD): the DB ledger must match the chain. The executor
-          //     writes the on-chain RE-READ debt/collateral onto the position when it
-          //     finalizes, so a closed position with ~0 debt AND ~0 collateral is the
-          //     authoritative "debt+collateral zeroed" proof. Anything else = FAIL.
+          // 11) RECONCILE (HARD): the BOT position DB ledger must match the chain.
+          //     The executor writes the on-chain RE-READ debt/collateral onto the
+          //     position when it finalizes, so a closed position with ~0 debt AND
+          //     ~0 collateral is the authoritative "debt+collateral zeroed" proof.
           const dbPos = await storage.getBorrowPosition(req.walletAddress!, borrowPositionId);
           const dbStatus = (dbPos as any)?.status ?? null;
           const dbDebtRaw = dbPos ? BigInt((dbPos as any).debtAmountRaw ?? "0") : null;
@@ -9340,8 +9457,20 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             dbCollRaw: dbCollRaw?.toString() ?? null,
           });
           if (!reconciled) {
-            return { status: 500, body: { ok: false, error: `On-chain loop completed but the ledger is not fully zeroed (status=${dbStatus}, debtRaw=${dbDebtRaw}, collateralRaw=${dbCollRaw}). STOP and reconcile before P1.`, borrowPositionId, steps } };
+            return { status: 500, body: { ok: false, error: `On-chain loop completed but the bot ledger is not fully zeroed (status=${dbStatus}, debtRaw=${dbDebtRaw}, collateralRaw=${dbCollRaw}). STOP and reconcile before P1.`, borrowPositionId, steps } };
           }
+
+          // 12) ASSERT the ACCOUNT collateral was RESTORED (re-pledged) by the
+          //     unwind — the carved slice must be back inside the account position
+          //     (otherwise system debt is left under-collateralized). Compare the
+          //     LIVE account collateral to its pre-carve baseline (fixed dust bound).
+          const acctLiveAfter = await borrowRoute.readLivePositionHealth(collateralMint, livePlan.accountVenuePositionId);
+          const acctCollAfter = acctLiveAfter ? BigInt(acctLiveAfter.collateralRaw) : null;
+          if (acctCollAfter == null || acctCollAfter < acctCollBeforeCarve - COLL_DUST) {
+            log("account_restored", false, { before: acctCollBeforeCarve.toString(), after: acctCollAfter?.toString() ?? null });
+            return { status: 500, body: { ok: false, error: `Unwind completed but the account position collateral was not restored (before ${acctCollBeforeCarve}, after ${acctCollAfter}). STOP and reconcile before P1.`, borrowPositionId, steps } };
+          }
+          log("account_restored", true, { before: acctCollBeforeCarve.toString(), after: acctCollAfter.toString(), restoredRaw: unwind.restoredRaw });
 
           // 13) FINAL ALL-BOT SCAN: the just-closed position is terminal, so the bot
           //     must now have ZERO non-terminal borrow positions. If a concurrent run
@@ -9354,7 +9483,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           }
           log("final_bot_scan", true, {});
 
-          return { status: 200, body: { ok: true, mode: "execute", message: "Per-bot borrow loop PROVED: carve -> open -> USDC landed -> repay/close -> collateral+debt zeroed -> DB closed.", borrowPositionId, steps } };
+          return { status: 200, body: { ok: true, mode: "execute", message: "Per-bot borrow loop PROVED: carve (account-withdraw @ target LTV) -> open -> USDC landed -> close -> re-pledge to account -> bot zeroed + account restored + DB closed.", borrowPositionId, operations: { carveOpen: carveOpen.operationId, unwind: unwind.operationId }, steps } };
         } finally {
           if (botKey) botKey.cleanup();
           if (acctKey) acctKey.cleanup();
