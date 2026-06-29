@@ -28,6 +28,13 @@ import {
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import { safeResponseJson } from '@/lib/safe-fetch';
 import { walletAuthHeaders } from '@/lib/queryClient';
@@ -384,51 +391,79 @@ export function SupplyCollateralDialog({
               </button>
             </div>
 
-            <div className="max-h-44 overflow-y-auto rounded-lg border border-border divide-y divide-border/60">
-              {tokensLoading && assets.length === 0 ? (
-                <div className="flex items-center justify-center py-6 text-muted-foreground text-sm gap-2">
-                  <Loader2 className="w-4 h-4 animate-spin" /> Loading your assets…
-                </div>
-              ) : assets.length === 0 ? (
-                <div className="text-center py-6 px-4 text-muted-foreground text-sm" data-testid="text-supply-empty">
-                  You don't hold any assets we currently support as collateral.
-                </div>
-              ) : (
-                assets.map((a) => (
-                  <button
-                    key={a.mint}
-                    type="button"
-                    onClick={() => {
-                      setSelectedMint(a.mint);
-                      setAmount('');
-                    }}
-                    aria-pressed={a.mint === selectedMint}
-                    className={`w-full flex items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/50 ${
-                      a.mint === selectedMint ? 'bg-teal-500/10' : ''
-                    }`}
-                    data-testid={`button-supply-asset-${a.symbol}`}
-                  >
-                    {a.logoURI ? (
-                      <img src={a.logoURI} alt={a.symbol} className="w-7 h-7 rounded-full" />
-                    ) : (
-                      <span className="w-7 h-7 rounded-full bg-muted flex items-center justify-center text-[10px] font-semibold">
-                        {a.symbol.slice(0, 2)}
+            {tokensLoading && assets.length === 0 ? (
+              <div className="flex items-center justify-center gap-2 rounded-md border border-input bg-transparent px-3 py-2.5 text-sm text-muted-foreground">
+                <Loader2 className="w-4 h-4 animate-spin" /> Loading your assets…
+              </div>
+            ) : assets.length === 0 ? (
+              <div
+                className="text-center py-6 px-4 rounded-lg border border-border text-muted-foreground text-sm"
+                data-testid="text-supply-empty"
+              >
+                You don't hold any assets we currently support as collateral.
+              </div>
+            ) : (
+              <Select
+                value={selectedMint}
+                onValueChange={(v) => {
+                  setSelectedMint(v);
+                  setAmount('');
+                }}
+              >
+                <SelectTrigger className="h-auto py-2" data-testid="select-supply-asset">
+                  {selected ? (
+                    <span className="flex items-center gap-3 text-left">
+                      {selected.logoURI ? (
+                        <img src={selected.logoURI} alt={selected.symbol} className="w-7 h-7 rounded-full" />
+                      ) : (
+                        <span className="w-7 h-7 rounded-full bg-muted flex items-center justify-center text-[10px] font-semibold">
+                          {selected.symbol.slice(0, 2)}
+                        </span>
+                      )}
+                      <span className="block min-w-0">
+                        <span className="block text-sm font-medium truncate">{selected.symbol}</span>
+                        <span className="block text-xs text-muted-foreground truncate">
+                          {selected.amountUi.toLocaleString(undefined, { maximumFractionDigits: 6 })} · up to{' '}
+                          {(selected.maxLtv * 100).toFixed(0)}% LTV
+                        </span>
                       </span>
-                    )}
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium truncate">{a.symbol}</p>
-                      <p className="text-xs text-muted-foreground truncate">{a.name}</p>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-sm font-mono">
-                        {a.amountUi.toLocaleString(undefined, { maximumFractionDigits: 6 })}
-                      </p>
-                      <p className="text-[11px] text-muted-foreground">up to {(a.maxLtv * 100).toFixed(0)}% LTV</p>
-                    </div>
-                  </button>
-                ))
-              )}
-            </div>
+                    </span>
+                  ) : (
+                    <SelectValue placeholder="Select an asset" />
+                  )}
+                </SelectTrigger>
+                <SelectContent>
+                  {assets.map((a) => (
+                    <SelectItem
+                      key={a.mint}
+                      value={a.mint}
+                      className="py-2"
+                      data-testid={`option-supply-asset-${a.symbol}`}
+                    >
+                      <span className="flex items-center gap-3 w-full">
+                        {a.logoURI ? (
+                          <img src={a.logoURI} alt={a.symbol} className="w-7 h-7 rounded-full" />
+                        ) : (
+                          <span className="w-7 h-7 rounded-full bg-muted flex items-center justify-center text-[10px] font-semibold">
+                            {a.symbol.slice(0, 2)}
+                          </span>
+                        )}
+                        <span className="block flex-1 min-w-0">
+                          <span className="block text-sm font-medium truncate">{a.symbol}</span>
+                          <span className="block text-xs text-muted-foreground truncate">{a.name}</span>
+                        </span>
+                        <span className="block text-right">
+                          <span className="block text-sm font-mono">
+                            {a.amountUi.toLocaleString(undefined, { maximumFractionDigits: 6 })}
+                          </span>
+                          <span className="block text-[11px] text-muted-foreground">up to {(a.maxLtv * 100).toFixed(0)}% LTV</span>
+                        </span>
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
 
             {selected && (
               <>
