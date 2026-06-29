@@ -9346,7 +9346,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // { borrowPositionId, clientRequestId, tokenMint, slippageBps?, sessionId }.
   app.post("/api/vault/borrow/repay/wallet-token", requireWallet, async (req, res) => {
     try {
-      const { borrowPositionId, clientRequestId, tokenMint, slippageBps, sessionId } = req.body || {};
+      const { borrowPositionId, clientRequestId, tokenMint, transferSignature, slippageBps, sessionId } = req.body || {};
       if (!borrowPositionId || typeof borrowPositionId !== "string") {
         return res.status(400).json({ error: "borrowPositionId required" });
       }
@@ -9355,6 +9355,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       if (!tokenMint || typeof tokenMint !== "string") {
         return res.status(400).json({ error: "tokenMint required" });
+      }
+      if (transferSignature != null && typeof transferSignature !== "string") {
+        return res.status(400).json({ error: "transferSignature must be a string" });
       }
       if (slippageBps != null && (typeof slippageBps !== "number" || !Number.isFinite(slippageBps))) {
         return res.status(400).json({ error: "slippageBps must be a number" });
@@ -9372,6 +9375,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           borrowPositionId,
           clientRequestId,
           tokenMint,
+          transferSignature,
           slippageBps,
         });
       } finally {

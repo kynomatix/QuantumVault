@@ -1347,8 +1347,12 @@ export async function executeAgentInstructionsConfirmOnly(
 }
 
 /**
- * SERVER-SIGNED swap of the agent wallet's FULL balance of `inputMint` into USDC.
+ * SERVER-SIGNED swap of the agent wallet's balance of `inputMint` into USDC.
  * Thin wrapper over executeAgentSwap. Native SOL input retains a gas reserve.
+ * Optional `maxInputRaw` caps the amount swapped (applied AFTER the SOL gas
+ * reserve is subtracted) — callers use it to bind the swap to a specific
+ * just-credited amount (e.g. native-SOL repay) so it can't sweep pre-existing
+ * balance; undefined => swap the full (post-reserve) balance.
  * Returns the actual USDC received (delta) and the swap signature on success.
  */
 export async function executeAgentSwapToUsdc(
@@ -1356,17 +1360,24 @@ export async function executeAgentSwapToUsdc(
   agentSecretKey: Uint8Array,
   inputMint: string,
   slippageBps: number = 100,
+  maxInputRaw?: bigint,
 ): Promise<{ success: boolean; signature?: string; usdcReceived?: number; usdcReceivedRaw?: string; inAmountRaw?: string; error?: string }> {
   if (inputMint === USDC_MINT) {
     return { success: false, error: 'Input token is already USDC, no swap needed' };
   }
 
-  // Swap the full input balance, retaining a SOL gas reserve when selling native SOL.
+  // Swap the input balance, retaining a SOL gas reserve when selling native SOL.
+  // An optional `maxInputRaw` caps the amount so a credit-bound caller (e.g. a
+  // repay tied to a verified inbound transfer) converts ONLY the just-transferred
+  // funds and never touches pre-existing wallet balance.
   const tokenBal = await getAgentTokenBalanceRaw(agentPublicKey, inputMint);
   let amountToSwap = BigInt(tokenBal.amountRaw);
   if (inputMint === NATIVE_SOL_MINT) {
     const reserveLamports = BigInt(Math.round(SWAP_SOL_GAS_RESERVE * LAMPORTS_PER_SOL));
     amountToSwap = amountToSwap > reserveLamports ? amountToSwap - reserveLamports : BigInt(0);
+  }
+  if (maxInputRaw != null && amountToSwap > maxInputRaw) {
+    amountToSwap = maxInputRaw;
   }
   if (amountToSwap <= BigInt(0)) {
     return { success: false, error: 'No balance available to swap' };

@@ -52,6 +52,7 @@ import {
   getAgentTokenBalanceRawStrict,
   getServerConnection,
   USDC_MINT,
+  NATIVE_SOL_MINT,
 } from "../agent-wallet";
 import {
   executeWithdrawCollateral,
@@ -263,6 +264,10 @@ async function swapThenRepay(
     borrowPositionId: string;
     inputMint: string;
     slippageBps: number;
+    /** Optional cap on lamports/base units to swap. Set by a credit-bound caller
+     *  (native SOL #4) so only the verified just-transferred amount converts —
+     *  never the agent's pre-existing balance. Undefined => swap full balance. */
+    maxInputRaw?: bigint;
   },
 ): Promise<MultiHopRepayResult> {
   // ---- SWAP leg ------------------------------------------------------------
@@ -276,7 +281,7 @@ async function swapThenRepay(
 
     let proceedsRaw: bigint;
     if (inputBal > 0n) {
-      const swap = await executeAgentSwapToUsdc(args.agentPublicKey, args.agentSecretKey, args.inputMint, args.slippageBps);
+      const swap = await executeAgentSwapToUsdc(args.agentPublicKey, args.agentSecretKey, args.inputMint, args.slippageBps, args.maxInputRaw);
       if (!swap.success || !swap.usdcReceivedRaw || BigInt(swap.usdcReceivedRaw) <= 0n) {
         // The input token is still in the agent wallet -> recoverable. Stop.
         return failClosed(op, "swap_failed", swap.error || "The swap to USDC did not complete. Your funds are safe in the trading wallet.", true);
@@ -600,25 +605,41 @@ export interface RepayFromWalletTokenParams {
   clientRequestId: string;
   /** The token the user transferred into the agent wallet (not USDC). */
   tokenMint: string;
+  /** Signature of the user's inbound transfer. REQUIRED for native SOL (the
+   *  agent always holds pre-existing gas SOL, so the full-balance-is-proof model
+   *  used for SPL does not hold — we bind the swap to the lamports this exact
+   *  signature credited). Ignored for SPL tokens (their agent balance starts at
+   *  0, so the balance itself proves the transfer). */
+  transferSignature?: string;
   slippageBps?: number;
 }
 
 /**
  * #4: the client first sends a user-signed transfer of `tokenMint` into the
- * agent wallet and waits for confirmation, then calls this. We swap the FULL
- * agent balance of that token to USDC and repay the proceeds (capped at debt).
- * Resume authority is the agent's token balance.
+ * agent wallet and waits for confirmation, then calls this. We swap that token
+ * to USDC and repay the proceeds (capped at debt).
+ *
+ * Two safety models, by asset:
+ *  - SPL token: the agent's balance of an arbitrary SPL starts at 0, so the
+ *    full agent balance IS the just-transferred amount and a never-landed
+ *    transfer simply leaves 0 to swap. Resume authority is that balance.
+ *  - Native SOL: the agent ALWAYS holds pre-existing gas SOL, so "swap the full
+ *    balance" would sweep the agent's own SOL (and could convert it even if the
+ *    user's transfer never landed). We mirror the wallet-USDC path: read the
+ *    lamports CREDITED by `transferSignature` (the source of truth) and cap the
+ *    swap at that amount, so only the just-transferred SOL ever converts.
  */
 export async function executeRepayFromWalletToken(params: RepayFromWalletTokenParams): Promise<MultiHopRepayResult> {
   if (params.tokenMint === USDC_MINT) {
     return { success: false, error: "Use the wallet-USDC repay for USDC (no swap needed)." };
   }
-  // Never liquidate PARKED savings: this leg swaps the FULL agent balance of the
-  // token, so reject any registered yield/vault asset (enabled OR disabled) the
-  // user may have parked. Arbitrary wallet tokens are fine.
+  // Never liquidate PARKED savings: reject any registered yield/vault asset
+  // (enabled OR disabled) the user may have parked. Arbitrary wallet tokens are
+  // fine. (Native SOL is not a yield asset, so it is never caught here.)
   if (getDetectableYieldAssets().some((a) => a.mint === params.tokenMint)) {
     return { success: false, error: "That token is a parked savings asset and can't be used to repay. Unpark it first." };
   }
+  const isNativeSol = params.tokenMint === NATIVE_SOL_MINT;
   return withBorrowLock(`multihop:${params.walletAddress}:${params.clientRequestId}`, async () => {
     const slippageBps = clampSlippage(params.slippageBps);
     let op = await resolveOrCreateOp({
@@ -630,6 +651,46 @@ export async function executeRepayFromWalletToken(params: RepayFromWalletTokenPa
     });
     if (op.status === "succeeded") return replaySucceeded(op);
 
+    // ---- Native SOL: confirm the inbound transfer & bind the swap to it ----
+    // Mirrors executeRepayFromWalletUsdc's transfer-confirmation gate. Until the
+    // credit is read & recorded the op rests at "initialized"/"transfer_unconfirmed";
+    // BOTH re-read on-chain so a transfer that confirms slightly after the first
+    // POST (RPC lag, or a resume that POSTs before its own confirm wait) recovers.
+    let maxInputRaw: bigint | undefined;
+    if (isNativeSol) {
+      const stepNow = op.step ?? "";
+      let creditedRaw: bigint;
+      if (stepNow === "initialized" || stepNow === "transfer_unconfirmed") {
+        if (!params.transferSignature) {
+          return failClosed(op, "transfer_unconfirmed", "Missing the SOL transfer signature; nothing was changed.", false);
+        }
+        const credited = await readInboundSolCredit(params.transferSignature, params.agentPublicKey);
+        if (credited === null) {
+          // Not visible on-chain yet -> soft retry: funds are safe, the SAME
+          // clientRequestId resumes once the transfer confirms.
+          return failClosed(op, "transfer_unconfirmed", "Your SOL transfer has not confirmed yet. Wait a moment and tap Retry.", true);
+        }
+        if (credited <= 0n) {
+          return failClosed(op, "transfer_unconfirmed", "No SOL from that transfer reached the trading wallet.", false);
+        }
+        creditedRaw = credited;
+        await storage.updateBorrowOperation(op.id, {
+          step: "transfer_confirmed",
+          mergeMetadata: { solCreditedRaw: creditedRaw.toString(), transferSig: params.transferSignature },
+          appendTxSignature: params.transferSignature,
+        });
+        op = (await storage.getBorrowOperationById(op.id)) ?? op;
+      } else {
+        // Resuming past the transfer confirmation: replay the recorded credit
+        // (the swap leg is bounded by it; no need to re-send the signature).
+        creditedRaw = BigInt(readMeta(op).solCreditedRaw || "0");
+        if (creditedRaw <= 0n) {
+          return failClosed(op, "transfer_unconfirmed", "No SOL from that transfer reached the trading wallet.", false);
+        }
+      }
+      maxInputRaw = creditedRaw;
+    }
+
     return swapThenRepay(op, {
       walletAddress: params.walletAddress,
       agentPublicKey: params.agentPublicKey,
@@ -637,6 +698,7 @@ export async function executeRepayFromWalletToken(params: RepayFromWalletTokenPa
       borrowPositionId: params.borrowPositionId,
       inputMint: params.tokenMint,
       slippageBps,
+      maxInputRaw,
     });
   });
 }
@@ -1370,5 +1432,39 @@ async function readInboundUsdcCredit(signature: string, agentPublicKey: string):
   const preAmt = (() => { const b = pre.find(match); return b ? BigInt(b.uiTokenAmount.amount) : 0n; })();
   const postAmt = (() => { const b = post.find(match); return b ? BigInt(b.uiTokenAmount.amount) : 0n; })();
   const delta = postAmt - preAmt;
+  return delta > 0n ? delta : 0n;
+}
+
+/**
+ * Native-SOL analogue of readInboundUsdcCredit: the REALIZED lamports credited to
+ * the agent wallet IN a specific (already user-signed) transfer tx, computed from
+ * the agent's lamport delta (postBalances - preBalances at its account index).
+ * The USER signs and pays the fee, so the agent (the recipient) is never the fee
+ * payer and its delta is exactly the transferred amount. Returns the positive
+ * lamport delta, 0 if no SOL reached the agent, or null if the tx is not yet
+ * confirmed / failed / unreadable (the caller must NOT proceed in that case).
+ */
+async function readInboundSolCredit(signature: string, agentPublicKey: string): Promise<bigint | null> {
+  const connection = getServerConnection();
+  let tx;
+  try {
+    tx = await connection.getParsedTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 });
+  } catch {
+    return null;
+  }
+  if (!tx || tx.meta?.err) return null;
+  let agentPk: PublicKey;
+  try { agentPk = new PublicKey(agentPublicKey); } catch { return null; }
+
+  const keys = tx.transaction.message.accountKeys;
+  const idx = keys.findIndex((k) => {
+    const pk = (k as { pubkey?: PublicKey }).pubkey;
+    return !!pk && pk.equals(agentPk);
+  });
+  if (idx < 0) return null;
+  const pre = tx.meta?.preBalances ?? [];
+  const post = tx.meta?.postBalances ?? [];
+  if (idx >= pre.length || idx >= post.length) return null;
+  const delta = BigInt(post[idx]) - BigInt(pre[idx]);
   return delta > 0n ? delta : 0n;
 }

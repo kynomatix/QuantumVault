@@ -1178,6 +1178,12 @@ function clearRepayResume(positionId: string) {
 // trading-wallet USDC (deleverage) / agent USDC (wallet token) — never lost.
 const REPAY_MAX_BUFFER = 0.02;
 
+// Native SOL must keep a small gas reserve. The user signs the transfer of SOL
+// into the agent (and pays its network fee), and needs SOL left for future
+// operations — so "Max" must never try to send 100% of their SOL (which would
+// fail the transfer or strand them without gas). Mirrors the Supply form's 0.01.
+const SOL_GAS_RESERVE_UI = 0.01;
+
 // Given the USD debt, a per-unit USD price, and the user's balance, return the
 // token amount whose USDC value clears the debt (+buffer), capped at the
 // balance, plus whether it fully clears. Returns null when the price/debt are
@@ -1348,7 +1354,10 @@ export function RepayLoanDialog({
         const res = await fetch('/api/wallet/tokens', { credentials: 'include', headers: walletAuthHeaders() });
         const data = await safeResponseJson(res);
         if (cancelled) return;
-        const list: UserToken[] = (data.tokens || []).filter((t: UserToken) => !t.isUsdc && !t.isNativeSol && t.amountUi > 0);
+        // Include native SOL: it's swappable to USDC, and both legs support it —
+        // the deposit-token route builds a SOL system transfer, and the server
+        // swap retains a gas reserve when selling native SOL.
+        const list: UserToken[] = (data.tokens || []).filter((t: UserToken) => !t.isUsdc && t.amountUi > 0);
         setWalletTokens(list);
       } catch {
         if (!cancelled) setWalletTokens([]);
@@ -1474,8 +1483,25 @@ export function RepayLoanDialog({
     selectedToken && selectedToken.usdValue != null && selectedToken.amountUi > 0
       ? selectedToken.usdValue / selectedToken.amountUi
       : null;
+  // Native SOL spends its balance MINUS a gas reserve; every other token can
+  // spend its full balance. Used for the Max fill and the amount validation so
+  // the user-signed SOL transfer never tries to send their entire SOL.
+  const tokenSpendableUi = selectedToken
+    ? selectedToken.isNativeSol
+      ? Math.max(0, selectedToken.amountUi - SOL_GAS_RESERVE_UI)
+      : selectedToken.amountUi
+    : 0;
+  const tokenSpendableRaw = selectedToken
+    ? selectedToken.isNativeSol
+      ? (() => {
+          const bal = BigInt(selectedToken.amountRaw);
+          const reserve = BigInt(Math.round(SOL_GAS_RESERVE_UI * 1e9));
+          return (bal > reserve ? bal - reserve : 0n).toString();
+        })()
+      : selectedToken.amountRaw
+    : '0';
   const walletTokenMax = selectedToken
-    ? debtClearingFill(debtUsd, tokenPriceUsd, selectedToken.amountUi, selectedToken.decimals, selectedToken.amountRaw)
+    ? debtClearingFill(debtUsd, tokenPriceUsd, tokenSpendableUi, selectedToken.decimals, tokenSpendableRaw)
     : null;
 
   const working = phase === 'working';
@@ -1758,8 +1784,14 @@ export function RepayLoanDialog({
         toast({ title: 'Enter a valid amount', variant: 'destructive' });
         return;
       }
-      if (amt > selectedToken.amountUi) {
-        toast({ title: `Insufficient ${selectedToken.symbol}`, variant: 'destructive' });
+      if (amt > tokenSpendableUi) {
+        toast({
+          title: `Insufficient ${selectedToken.symbol}`,
+          description: selectedToken.isNativeSol
+            ? `Keep at least ${SOL_GAS_RESERVE_UI} SOL for network fees.`
+            : undefined,
+          variant: 'destructive',
+        });
         return;
       }
       const amountRaw = toRawBaseUnits(tokenAmount, selectedToken.decimals);
@@ -1784,14 +1816,19 @@ export function RepayLoanDialog({
         const sig = await connection.sendRawTransaction(signed.serialize());
         // Persist the INSTANT the tx is broadcast — BEFORE awaiting confirmation.
         // Broadcast is the irreversible point; a refresh during the confirm wait
-        // must resume (re-POST swap+repay), never re-transfer.
+        // must resume (re-POST swap+repay), never re-transfer. The signature is
+        // recorded too: for native SOL the server binds the swap to the lamports
+        // THIS signature credited (it can't tell the transfer apart from the
+        // agent's pre-existing gas SOL otherwise). Harmless for SPL tokens.
         tokenTransferredRef.current = true;
         tokenMintRef.current = selectedToken.mint;
+        transferSigRef.current = sig;
         saveRepayResume(pool.id, {
           source: 'wallet-token',
           clientRequestId: reqIdRef.current!,
           tokenTransferred: true,
           tokenMint: selectedToken.mint,
+          transferSignature: sig,
         });
         setStatusText('Confirming transfer…');
         await confirmTransactionWithFallback(connection, { signature: sig, blockhash, lastValidBlockHeight });
@@ -1823,7 +1860,15 @@ export function RepayLoanDialog({
       setStatusText(`Swapping ${symbol} → USDC and repaying…`);
       const res = await fetch(
         '/api/vault/borrow/repay/wallet-token',
-        POST_JSON({ borrowPositionId: pool.id, clientRequestId: reqIdRef.current, tokenMint: mint, sessionId }),
+        POST_JSON({
+          borrowPositionId: pool.id,
+          clientRequestId: reqIdRef.current,
+          tokenMint: mint,
+          // REQUIRED for native SOL (the server binds the swap to the lamports
+          // this signature credited); ignored for SPL tokens.
+          transferSignature: transferSigRef.current,
+          sessionId,
+        }),
       );
       const data = await safeResponseJson(res);
       await handleResult(res, data, true, `Your ${symbol} reached your trading agent. Tap Retry to finish the swap & repay.`);
@@ -2252,7 +2297,7 @@ export function RepayLoanDialog({
                         className="h-7 px-2.5 text-xs"
                         onClick={() => {
                           if (walletTokenMax) setTokenAmount(walletTokenMax.fillStr);
-                          else setTokenAmount(rawToDecimalString(selectedToken.amountRaw, selectedToken.decimals));
+                          else setTokenAmount(rawToDecimalString(tokenSpendableRaw, selectedToken.decimals));
                         }}
                         disabled={working || needsRetry}
                         data-testid="button-repay-token-max"
@@ -2267,8 +2312,9 @@ export function RepayLoanDialog({
                       {walletTokenMax?.clears
                         ? `Max sends ~${walletTokenMax.fillStr} ${selectedToken.symbol}, enough to clear your ${debtStr} debt.`
                         : walletTokenMax
-                        ? `Max sends your full ${selectedToken.amountUi.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${selectedToken.symbol}, paying down part of your ${debtStr} debt.`
-                        : `Max sends your full ${selectedToken.symbol} balance.`}
+                        ? `Max sends ${walletTokenMax.fillStr} ${selectedToken.symbol}, paying down part of your ${debtStr} debt.`
+                        : `Max sends your available ${selectedToken.symbol} balance.`}
+                      {selectedToken.isNativeSol ? ` Keeps ${SOL_GAS_RESERVE_UI} SOL for network fees.` : ''}
                     </span>
                   </p>
                 </div>
