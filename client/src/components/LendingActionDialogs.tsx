@@ -2246,31 +2246,73 @@ export function RepayLoanDialog({
                 ) : walletTokens.length === 0 ? (
                   <p className="text-sm text-muted-foreground py-2">No eligible tokens in your wallet.</p>
                 ) : (
-                  <div className="max-h-40 overflow-y-auto rounded-lg border border-border divide-y divide-border/60">
-                    {walletTokens.map((t) => (
-                      <button
-                        key={t.mint}
-                        type="button"
-                        onClick={() => {
-                          setSelectedToken(t);
-                          setTokenAmount('');
-                        }}
-                        disabled={working || needsRetry}
-                        className={`flex w-full items-center gap-2 px-3 py-2 text-left transition-colors disabled:opacity-50 hover:bg-muted/50 ${
-                          selectedToken?.mint === t.mint ? 'bg-primary/10' : ''
-                        }`}
-                        data-testid={`button-repay-token-${t.symbol}`}
-                      >
-                        {t.logoURI ? (
-                          <img src={t.logoURI} alt={t.symbol} className="w-6 h-6 rounded-full" />
-                        ) : (
-                          <span className="w-6 h-6 rounded-full bg-muted flex items-center justify-center text-[10px]">{t.symbol.slice(0, 2)}</span>
-                        )}
-                        <span className="flex-1 text-sm font-medium truncate">{t.symbol}</span>
-                        <span className="text-xs font-mono text-muted-foreground">{t.amountUi.toLocaleString(undefined, { maximumFractionDigits: 6 })}</span>
-                      </button>
-                    ))}
-                  </div>
+                  <Select
+                    value={selectedToken?.mint ?? ''}
+                    onValueChange={(v) => {
+                      const t = walletTokens.find((w) => w.mint === v);
+                      if (t) setSelectedToken(t);
+                      setTokenAmount('');
+                    }}
+                    disabled={working || needsRetry}
+                  >
+                    <SelectTrigger className="h-auto py-2" data-testid="select-repay-token">
+                      {selectedToken ? (
+                        <span className="flex items-center gap-3 text-left">
+                          {selectedToken.logoURI ? (
+                            <img src={selectedToken.logoURI} alt={selectedToken.symbol} className="w-7 h-7 rounded-full" />
+                          ) : (
+                            <span className="w-7 h-7 rounded-full bg-muted flex items-center justify-center text-[10px] font-semibold">
+                              {selectedToken.symbol.slice(0, 2)}
+                            </span>
+                          )}
+                          <span className="block min-w-0">
+                            <span className="block text-sm font-medium truncate">{selectedToken.symbol}</span>
+                            <span className="block text-xs text-muted-foreground truncate">
+                              {selectedToken.amountUi.toLocaleString(undefined, { maximumFractionDigits: 6 })} available
+                            </span>
+                          </span>
+                        </span>
+                      ) : (
+                        <SelectValue placeholder="Select a token" />
+                      )}
+                    </SelectTrigger>
+                    <SelectContent>
+                      {walletTokens.map((t) => (
+                        <SelectItem
+                          key={t.mint}
+                          value={t.mint}
+                          className="py-2"
+                          data-testid={`option-repay-token-${t.symbol}`}
+                        >
+                          <span className="flex items-center gap-3 w-full">
+                            {t.logoURI ? (
+                              <img src={t.logoURI} alt={t.symbol} className="w-7 h-7 rounded-full" />
+                            ) : (
+                              <span className="w-7 h-7 rounded-full bg-muted flex items-center justify-center text-[10px] font-semibold">
+                                {t.symbol.slice(0, 2)}
+                              </span>
+                            )}
+                            <span className="block flex-1 min-w-0">
+                              <span className="block text-sm font-medium truncate">{t.symbol}</span>
+                              {t.name && t.name !== t.symbol ? (
+                                <span className="block text-xs text-muted-foreground truncate">{t.name}</span>
+                              ) : null}
+                            </span>
+                            <span className="block text-right">
+                              <span className="block text-sm font-mono">
+                                {t.amountUi.toLocaleString(undefined, { maximumFractionDigits: 6 })}
+                              </span>
+                              {t.usdValue != null ? (
+                                <span className="block text-[11px] text-muted-foreground">
+                                  ${t.usdValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                                </span>
+                              ) : null}
+                            </span>
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 )}
               </div>
               {selectedToken && (
