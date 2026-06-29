@@ -172,6 +172,11 @@ function buildEligibilityDeps(borrowRoute: JupiterLendBorrowRoute) {
 
 export interface BorrowOpenParams {
   walletAddress: string;
+  /**
+   * The SIGNING wallet that holds the collateral, mints the position NFT, and
+   * receives the borrowed USDC. Account scope = the main agent wallet; per-bot
+   * (Flash) scope = the bot's OWN isolated wallet.
+   */
   agentPublicKey: string;
   agentSecretKey: Uint8Array;
   /** Collateral mint that resolves the Jupiter Lend vault (e.g. INF -> vault 43). */
@@ -180,8 +185,26 @@ export interface BorrowOpenParams {
   collateralRaw: bigint;
   /** USDC to borrow, raw base units (6 dp). */
   requestedDebtRaw: bigint;
-  /** MVP: account scope only (null). A bot id is reserved for later. */
+  /**
+   * Per-bot (Flash) borrow: the bot id this position belongs to. Account scope =
+   * null. When set, the signer (agentPublicKey) is the bot's OWN wallet and a
+   * separate account funder backstops its gas; the risk gate allows "bot" scope
+   * only for the owner wallet (owner-only proving).
+   */
   tradingBotId?: string | null;
+  /**
+   * OPTIONAL gas funder. A per-bot signer should not be forced to hold SOL for
+   * rent/fees, so the account agent funds the gas. Omit for account scope (the
+   * signer funds its own gas, byte-identical to before).
+   */
+  funderPublicKey?: string;
+  funderSecretKey?: Uint8Array;
+  /**
+   * Per-bot scope: the bot's LIVE existing debt for this collateral (0 for a
+   * fresh open). Bypasses the wallet-wide cache sum so the per-position LTV
+   * projection counts only THIS bot's debt, never sibling bots'.
+   */
+  existingDebtRawOverride?: bigint;
 }
 
 export interface BorrowOpenResult {
@@ -201,9 +224,11 @@ export interface BorrowOpenResult {
 
 export async function executeBorrowOpen(params: BorrowOpenParams): Promise<BorrowOpenResult> {
   const tradingBotId = params.tradingBotId ?? null;
-  if (tradingBotId) {
-    return { success: false, error: "Per-bot borrow scope is not supported yet (account scope only)." };
-  }
+  // Per-bot (Flash) borrowing is in owner-only proving (Phase 0). The risk gate
+  // (re-run below, immediately before signing) is the authoritative scope guard:
+  // it ALLOWS "bot" scope ONLY for the owner wallet and denies it otherwise, so a
+  // stray bot id can never open a borrow for a non-owner. The public open route
+  // always passes tradingBotId=null, so account scope stays byte-identical.
   if (params.collateralRaw <= 0n) return { success: false, error: "Collateral must be greater than zero." };
   if (params.requestedDebtRaw <= 0n) return { success: false, error: "Borrow amount must be greater than zero." };
 
@@ -234,7 +259,18 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
     //    collateral (what will actually back the loan) so the gate stays truthful.
     const elig = await previewBorrowEligibility(
       params.walletAddress,
-      { collateralMint: params.collateralMint, collateralRaw: effectiveCollateralRaw, requestedDebtRaw: params.requestedDebtRaw },
+      {
+        collateralMint: params.collateralMint,
+        collateralRaw: effectiveCollateralRaw,
+        requestedDebtRaw: params.requestedDebtRaw,
+        // Per-bot (Flash) scope is gated to the owner in the risk policy; the
+        // public open route always passes tradingBotId=null (account scope).
+        scope: tradingBotId ? "bot" : "account",
+        // Per-bot: count ONLY this bot's existing debt for this collateral (a
+        // fresh open = 0), bypassing the wallet-wide cache sum that would fold
+        // in sibling bots' borrows and mis-state the per-position LTV.
+        ...(tradingBotId ? { existingDebtRawOverride: params.existingDebtRawOverride ?? 0n } : {}),
+      },
       buildEligibilityDeps(borrowRoute),
     );
     if (!elig.ok) return { success: false, error: "Could not fully evaluate borrow risk; refusing to borrow." };
@@ -249,8 +285,11 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
     //    on-chain mint reverts "insufficient lamports".
     const gas = await ensureVaultGas({
       payingPublicKey: params.agentPublicKey,
-      funderPublicKey: params.agentPublicKey,
-      funderSecretKey: params.agentSecretKey,
+      // Per-bot: the account agent funds the bot wallet's gas (the bot must not
+      // be forced to hold SOL for rent/fees). Account scope: signer self-funds,
+      // byte-identical to before (funder defaults to the signer).
+      funderPublicKey: params.funderPublicKey ?? params.agentPublicKey,
+      funderSecretKey: params.funderSecretKey ?? params.agentSecretKey,
       destMint: USDC_MINT,
       label: "Borrow",
       extraRentLamports: NEW_POSITION_MINT_RENT_LAMPORTS,
@@ -473,10 +512,19 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
 
 export interface BorrowCloseParams {
   walletAddress: string;
+  /** The SIGNING wallet that repays the debt + receives the returned collateral. */
   agentPublicKey: string;
   agentSecretKey: Uint8Array;
   /** Our DB borrow_positions row id. */
   borrowPositionId: string;
+  /**
+   * OPTIONAL gas funder for a per-bot close: the account agent backstops the bot
+   * wallet's gas. Its PRESENCE also marks the caller as per-bot-aware — the
+   * account-scope (public) close path passes no funder, so a per-bot position
+   * reached via that path is rejected rather than repaid from the wrong wallet.
+   */
+  funderPublicKey?: string;
+  funderSecretKey?: Uint8Array;
 }
 
 export interface BorrowCloseResult {
@@ -500,8 +548,13 @@ export async function executeBorrowClose(params: BorrowCloseParams): Promise<Bor
   if (!position.venuePositionId) {
     return { success: false, finalized: false, error: "Borrow position has no on-chain id; cannot close." };
   }
-  if (position.tradingBotId) {
-    return { success: false, finalized: false, error: "Per-bot borrow scope is not supported yet." };
+  // The signer must own the on-chain position. A per-bot (Flash) position lives
+  // on the bot's OWN wallet, so it can only be closed by the per-bot caller that
+  // passes the bot wallet as the signer + an account gas funder. The account-
+  // scope (public) close path provides NO funder -> reject a per-bot position
+  // here so it can never be repaid/withdrawn from the wrong (account) wallet.
+  if (position.tradingBotId && !params.funderPublicKey) {
+    return { success: false, finalized: false, error: "This is a per-bot loan; close it from the bot's own borrow path." };
   }
 
   const nftId = Number(position.venuePositionId);
@@ -513,7 +566,7 @@ export async function executeBorrowClose(params: BorrowCloseParams): Promise<Bor
   const cfg = await borrowRoute.getVaultConfig(position.collateralMint);
   if (!cfg) return { success: false, finalized: false, error: "Borrow vault is unavailable right now." };
 
-  return withBorrowLock(borrowLockKey(params.walletAddress, null, cfg.vaultId), async () => {
+  return withBorrowLock(borrowLockKey(params.walletAddress, position.tradingBotId ?? null, cfg.vaultId), async () => {
     // 1) Read the live debt — we must know it to confirm the wallet can repay ALL.
     //    Fail closed if unreadable (never close blindly).
     const live = await borrowRoute.readLivePositionHealth(position.collateralMint, nftId);
@@ -535,8 +588,10 @@ export async function executeBorrowClose(params: BorrowCloseParams): Promise<Bor
     // 3) Gas: cover the tx fee + first-time collateral ATA rent (we receive it back).
     const gas = await ensureVaultGas({
       payingPublicKey: params.agentPublicKey,
-      funderPublicKey: params.agentPublicKey,
-      funderSecretKey: params.agentSecretKey,
+      // Per-bot: the account agent funds the bot wallet's gas. Account scope:
+      // signer self-funds (funder defaults to the signer), byte-identical.
+      funderPublicKey: params.funderPublicKey ?? params.agentPublicKey,
+      funderSecretKey: params.funderSecretKey ?? params.agentSecretKey,
       destMint: position.collateralMint,
       label: "Repay",
     });

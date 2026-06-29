@@ -1497,7 +1497,7 @@ async function settleAllPnl(
 }
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
-import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
+import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
 import { getBestQuote } from "./swap/index.js";
 import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, valueVaultRowsForWallet, sumVaultPositionValueUsdc, type VaultPositionView, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
 import { getEnabledYieldAssets, getYieldAssetByKey } from "./vault/yield-assets";
@@ -1506,8 +1506,8 @@ import { detectParkedYieldTokens as detectParkedYieldTokensPure } from "./vault/
 import { JupiterLendBorrowRoute } from "./vault/jupiter-lend-borrow-route";
 import { previewBorrowEligibility } from "./vault/borrow-eligibility";
 import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
-import { isBorrowEligibleWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
-import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral } from "./vault/jupiter-lend-borrow-executor";
+import { isBorrowEligibleWallet, isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
+import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
 import { getUserFungibleTokens, resolveTokenLogos } from "./swap/helius-tokens.js";
 
@@ -9002,6 +9002,368 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     } catch (error: any) {
       console.error("[Vault] borrow close error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // ==========================================================================
+  // PER-BOT BORROW — Phase 0 OWNER-ONLY on-chain proof (NO UI, internal).
+  //
+  // Proves the FULL per-bot (Flash isolated-wallet) borrow loop end to end on a
+  // tiny disposable position, WITHOUT shipping any user-facing per-bot path. The
+  // account-level borrow engine is already live; this drives the SAME engine
+  // with scope='bot': the BOT's own wallet signs, the ACCOUNT wallet carves the
+  // collateral slice + backstops gas.
+  //
+  // Modes (body.execute):
+  //   - false (default) = PREFLIGHT/DRY: resolve scope, prove the carve source is
+  //     UNPLEDGED + sufficient, read balances, run the read-only risk gate. Moves
+  //     NO money and broadcasts NOTHING — shows amounts + assertions BEFORE any
+  //     broadcast (P0-3 acceptance).
+  //   - true = LIVE loop (owner-triggered): carve -> open (bot signer / account
+  //     funder) -> assert borrowed USDC landed -> close (repay all + withdraw
+  //     all) -> reconcile DB.
+  //
+  // Money-safety: strict balance reads (THROW -> fail closed), realized on-chain
+  // deltas (never assumed), the executors own onChainFailed + write-ahead, debt
+  // is a LIABILITY (never an equity_events net-deposit). Double-pledge guard:
+  // only FREE (unpledged) account-wallet collateral is carved.
+  //
+  // Authz (P0-5): owner wallet ONLY; resolveVaultScope enforces bot ∈ session
+  // wallet (404) + Flash/independent_trader + a provisioned bot wallet, and we
+  // decrypt ONLY that bot's key (signer) + the account key (carve/funder), each
+  // wiped in a finally. A non-Flash bot resolves to 'account' scope and is
+  // rejected here BEFORE any signing/transfer.
+  // ==========================================================================
+  app.post("/api/vault/borrow/_perbot-proof", requireWallet, async (req, res) => {
+    const steps: Array<{ step: string; ok: boolean; detail?: unknown }> = [];
+    const log = (step: string, ok: boolean, detail?: unknown) => { steps.push({ step, ok, detail }); };
+    // Strict base-unit integer string (no 0x, +, whitespace, decimals); >0.
+    const parseRawPositive = (v: unknown, name: string): bigint | { error: string } => {
+      if (typeof v !== "string" || !/^\d+$/.test(v)) return { error: `${name} must be a base-unit integer string` };
+      try {
+        const b = BigInt(v);
+        if (b <= BigInt(0)) return { error: `${name} must be greater than zero` };
+        return b;
+      } catch {
+        return { error: `${name} must be a base-unit integer string` };
+      }
+    };
+    try {
+      // 1) OWNER-ONLY. Internal proving endpoint, not a user feature.
+      if (!isBorrowOwnerWallet(req.walletAddress!)) {
+        return res.status(403).json({ error: "Not available." });
+      }
+
+      const { botId, collateralMint, carveRaw, requestedDebtRaw, sessionId, execute } = req.body || {};
+      if (!botId || typeof botId !== "string") return res.status(400).json({ error: "botId required" });
+      if (!collateralMint || typeof collateralMint !== "string") return res.status(400).json({ error: "collateralMint required" });
+      const carveParsed = parseRawPositive(carveRaw, "carveRaw");
+      if (typeof carveParsed === "object") return res.status(400).json(carveParsed);
+      const debtParsed = parseRawPositive(requestedDebtRaw, "requestedDebtRaw");
+      if (typeof debtParsed === "object") return res.status(400).json(debtParsed);
+      const doExecute = execute === true;
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+
+      // Session/UMK required even for preflight (we resolve scope + may decrypt).
+      if (!sessionId) return res.status(400).json({ error: "Session ID required for security verification" });
+      const session = getSession(sessionId);
+      if (!session || session.walletAddress !== req.walletAddress) {
+        return res.status(401).json({ error: "Invalid or expired session. Please reconnect your wallet." });
+      }
+      if (!session.umk) {
+        return res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
+      }
+
+      // 2) Collateral allowlist by RESOLVED on-chain vault id (never a client mint).
+      const borrowRoute = new JupiterLendBorrowRoute();
+      const cfg = await borrowRoute.getVaultConfig(collateralMint);
+      if (!cfg) return res.status(400).json({ error: "Borrow vault is unavailable right now." });
+      if (!isCollateralVaultAllowlisted(cfg.vaultId)) {
+        return res.status(403).json({ error: "This collateral is not available for borrowing yet." });
+      }
+      log("collateral_allowlisted", true, { vaultId: cfg.vaultId, collateralMint });
+
+      // 3) AUTHZ (P0-5): resolve the BOT scope. resolveVaultScope enforces bot ∈
+      //    this wallet (404 otherwise) and returns scope='bot' ONLY for a Flash
+      //    independent_trader bot with a provisioned wallet. A non-Flash bot
+      //    falls through to 'account' scope -> reject here, BEFORE any signing.
+      const botResolved = await resolveVaultScope(req.walletAddress!, wallet, botId);
+      if (!botResolved.ok) return res.status(botResolved.status).json({ error: botResolved.error });
+      const botScope = botResolved.scope;
+      if (botScope.scope !== "bot" || !botScope.agentPublicKey) {
+        return res.status(400).json({ error: "This bot is not a per-bot (Flash) wallet bot; per-bot borrow does not apply." });
+      }
+      const botWalletPubkey = botScope.agentPublicKey;
+      const tradingBotId = botScope.tradingBotId!;
+      log("authz_bot_scope", true, { tradingBotId, botWallet: botWalletPubkey });
+
+      // 3b) CLEAN-BOT GUARD: the proof uses existingDebtRawOverride:0, which is
+      //     only correct when this bot has NO live borrow. If a prior proof hard-
+      //     stopped (left a position open) or this is a double-run, refuse — else
+      //     we'd undercount the existing debt and stack a SECOND position. Runs
+      //     for BOTH preflight and execute.
+      const existingForBot = await storage.getBorrowPositions(req.walletAddress!, tradingBotId);
+      const liveForBot = existingForBot.filter((p) => p.status !== "closed" && p.status !== "failed");
+      if (liveForBot.length > 0) {
+        log("clean_bot_guard", false, { count: liveForBot.length, statuses: liveForBot.map((p) => p.status), ids: liveForBot.map((p) => p.id) });
+        return res.status(409).json({
+          ok: false,
+          error: `This bot already has ${liveForBot.length} non-terminal borrow position(s) (status: ${liveForBot.map((p) => p.status).join(", ")}). The proof runs only on a clean bot (it assumes zero existing debt). Close/reconcile that position first.`,
+          steps,
+        });
+      }
+      log("clean_bot_guard", true, {});
+
+      // 4) Resolve the ACCOUNT scope (carve source + gas funder).
+      const acctResolved = await resolveVaultScope(req.walletAddress!, wallet, null);
+      if (!acctResolved.ok) return res.status(acctResolved.status).json({ error: acctResolved.error });
+      const acctScope = acctResolved.scope;
+      if (acctScope.scope !== "account" || !acctScope.agentPublicKey) {
+        return res.status(400).json({ error: "Account wallet not initialized" });
+      }
+      const accountPubkey = acctScope.agentPublicKey;
+      log("account_scope", true, { accountWallet: accountPubkey });
+
+      // strict raw reader -> THROWS on an unreadable balance (fail closed).
+      const readRaw = async (pubkey: string, mint: string): Promise<bigint> =>
+        BigInt((await getAgentTokenBalanceRawStrict(pubkey, mint)).amountRaw);
+
+      // 5) DOUBLE-PLEDGE GUARD: only FREE (unpledged) collateral in the ACCOUNT
+      //    wallet may be carved. Pledged collateral lives inside the account
+      //    position NFT, not the wallet, so a sufficient FREE wallet balance
+      //    proves the carve slice is unpledged.
+      const accountFreeColl = await readRaw(accountPubkey, collateralMint);
+      if (accountFreeColl < carveParsed) {
+        log("unpledged_carve_source", false, { accountFreeColl: accountFreeColl.toString(), required: carveParsed.toString() });
+        return res.status(400).json({
+          error: `Account wallet holds ${accountFreeColl} free collateral (raw) but ${carveParsed} is required. If it is pledged to the account borrow position, withdraw it back to the wallet first.`,
+          steps,
+        });
+      }
+      log("unpledged_carve_source", true, { accountFreeColl: accountFreeColl.toString(), carve: carveParsed.toString() });
+
+      // 6) Baseline bot balances (strict). Coexistence: the bot may already hold
+      //    parked-vault funds + spare USDC; the carve/open touch ONLY the carved
+      //    collateral slice + the borrowed USDC, never the bot's other funds.
+      const botCollBefore = await readRaw(botWalletPubkey, collateralMint);
+      const botUsdcBefore = await readRaw(botWalletPubkey, SWAP_USDC_MINT);
+      const accountSol = await getAgentSolBalance(accountPubkey);
+      const botSol = await getAgentSolBalance(botWalletPubkey);
+      log("baseline_balances", true, {
+        botCollBefore: botCollBefore.toString(),
+        botUsdcBefore: botUsdcBefore.toString(),
+        accountSol, botSol,
+      });
+
+      // 7) Read-only risk gate for the BOT scope (counts ONLY this bot's debt =
+      //    0 for a fresh open). Shows the gate decision BEFORE any broadcast.
+      const elig: any = await previewBorrowEligibility(
+        req.walletAddress!,
+        {
+          collateralMint,
+          collateralRaw: carveParsed,
+          requestedDebtRaw: debtParsed,
+          scope: "bot",
+          existingDebtRawOverride: BigInt(0),
+        },
+        {
+          getVaultConfig: (mint) => borrowRoute.getVaultConfig(mint),
+          getActiveBorrowPositionsAllWallets: () => storage.getActiveBorrowPositionsAllWallets(),
+          readBorrowOracleContext: (vault) => readBorrowOracleContext(vault),
+        },
+      );
+      if (!elig?.ok || !elig?.allowed) {
+        const deny = elig?.reasons?.find((r: any) => r.severity === "deny");
+        log("risk_gate", false, { ok: elig?.ok, allowed: elig?.allowed, reason: deny?.message, projection: elig?.projection });
+        return res.status(400).json({ error: deny?.message || "This per-bot borrow is not allowed under the risk limits.", steps });
+      }
+      log("risk_gate", true, { projection: elig?.projection });
+
+      // ---- PREFLIGHT ONLY: stop here unless explicitly told to execute. -------
+      if (!doExecute) {
+        return res.json({
+          ok: true,
+          mode: "preflight",
+          message: "Preflight passed. No money moved. Re-POST with execute:true to run the live loop.",
+          plan: {
+            tradingBotId,
+            botWallet: botWalletPubkey,
+            accountWallet: accountPubkey,
+            collateralMint,
+            vaultId: cfg.vaultId,
+            carveRaw: carveParsed.toString(),
+            requestedDebtRaw: debtParsed.toString(),
+          },
+          steps,
+        });
+      }
+
+      // ---- LIVE LOOP (owner-triggered) ---------------------------------------
+      // Decrypt BOTH keys just-in-time; ALWAYS wipe in a finally. The entire money
+      // sequence runs under a PROOF-LEVEL lock keyed on bot+vault so two concurrent
+      // owner runs can't both pass the clean-bot guard and double-open. This key is
+      // DISTINCT from the executor's borrowLockKey (which the inner open/close
+      // acquire), so there is no re-entrant deadlock.
+      const proofLockKey = JSON.stringify(["perbot-proof", req.walletAddress!, tradingBotId, cfg.vaultId]);
+      const result: { status: number; body: any } = await withBorrowLock(proofLockKey, async () => {
+        // Decrypt BOTH keys just-in-time; ALWAYS wipe in this lambda's finally.
+        let botKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+        let acctKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+        try {
+          // 7b) ATOMIC clean-bot re-check INSIDE the lock. The step-3b guard ran
+          //     BEFORE the lock; a concurrent run could have opened a position since.
+          //     Carving against a bot that already has a non-terminal position would
+          //     undercount existing debt (override:0n) and risk a double-open.
+          const liveNow = (await storage.getBorrowPositions(req.walletAddress!, tradingBotId))
+            .filter((p) => p.status !== "closed" && p.status !== "failed");
+          if (liveNow.length > 0) {
+            log("clean_bot_guard_locked", false, { count: liveNow.length, statuses: liveNow.map((p) => p.status) });
+            return { status: 409, body: { ok: false, error: `This bot now has ${liveNow.length} non-terminal borrow position(s); another proof run may be in progress. Aborting.`, steps } };
+          }
+
+          botKey = await decryptVaultScopeKey(botScope, req.walletAddress!, wallet, session.umk);
+          if (!botKey) return { status: 400, body: { ok: false, error: "Bot wallet needs re-keying. Sign out and back in.", steps } };
+          acctKey = await decryptVaultScopeKey(acctScope, req.walletAddress!, wallet, session.umk);
+          if (!acctKey) return { status: 400, body: { ok: false, error: "Account wallet needs re-keying. Sign out and back in.", steps } };
+          const botSecret = botKey.secretKey;
+          const acctSecret = acctKey.secretKey;
+
+          // 8) CARVE EXACTLY the collateral slice account -> bot wallet.
+          //    transferTokenToWalletExact = strict read + write-ahead sig + confirm.
+          const carve = await transferTokenToWalletExact({
+            agentPublicKey: accountPubkey,
+            agentSecretKey: acctSecret,
+            toWalletAddress: botWalletPubkey,
+            mint: collateralMint,
+            amountRaw: carveParsed,
+          });
+          if (!carve.success) {
+            log("carve", false, { error: carve.error, signature: carve.signature });
+            return { status: 400, body: { ok: false, error: `Carve failed: ${carve.error}`, steps } };
+          }
+          const botCollAfterCarve = await readRaw(botWalletPubkey, collateralMint);
+          if (botCollAfterCarve - botCollBefore < carveParsed) {
+            log("carve", false, { signature: carve.signature, delta: (botCollAfterCarve - botCollBefore).toString(), expected: carveParsed.toString() });
+            return { status: 500, body: { ok: false, error: "Carve confirmed but bot collateral did not increase as expected.", steps } };
+          }
+          log("carve", true, { signature: carve.signature, delta: (botCollAfterCarve - botCollBefore).toString() });
+
+          // 9) OPEN: bot signs; account funds gas (incl. NFT-mint rent). tradingBotId
+          //    set -> the risk policy enforces owner-only 'bot' scope before signing.
+          const open: any = await executeBorrowOpen({
+            walletAddress: req.walletAddress!,
+            agentPublicKey: botWalletPubkey,
+            agentSecretKey: botSecret,
+            collateralMint,
+            collateralRaw: carveParsed,
+            requestedDebtRaw: debtParsed,
+            tradingBotId,
+            funderPublicKey: accountPubkey,
+            funderSecretKey: acctSecret,
+            existingDebtRawOverride: BigInt(0),
+          });
+          if (!open?.success || !open?.borrowPositionId) {
+            log("open", false, { error: open?.error });
+            return { status: 400, body: { ok: false, error: `Open failed: ${open?.error || "unknown"}. NOTE: carved collateral remains in the bot wallet.`, steps } };
+          }
+          const borrowPositionId: string = open.borrowPositionId;
+          const botCollAfterOpen = await readRaw(botWalletPubkey, collateralMint);
+          const botUsdcAfterOpen = await readRaw(botWalletPubkey, SWAP_USDC_MINT);
+          const usdcDelta = botUsdcAfterOpen - botUsdcBefore;
+          if (usdcDelta <= BigInt(0)) {
+            log("open", false, { borrowPositionId, usdcDelta: usdcDelta.toString() });
+            return { status: 500, body: { ok: false, error: "Open reported success but no borrowed USDC landed in the bot wallet. STOPPING — position left open.", steps } };
+          }
+          log("open", true, {
+            borrowPositionId,
+            signature: open.signature,
+            requestedDebtRaw: debtParsed.toString(),
+            usdcDelta: usdcDelta.toString(),
+            matchesRequested: usdcDelta === debtParsed,
+          });
+
+          // 10) CLOSE: repay ALL + withdraw ALL. funderPublicKey present -> the
+          //     executor treats this as the per-bot close path (else it rejects a
+          //     per-bot position). Bot signs; account funds gas.
+          const close: any = await executeBorrowClose({
+            walletAddress: req.walletAddress!,
+            agentPublicKey: botWalletPubkey,
+            agentSecretKey: botSecret,
+            borrowPositionId,
+            funderPublicKey: accountPubkey,
+            funderSecretKey: acctSecret,
+          });
+          if (!close?.success || !close?.finalized) {
+            log("close", false, { error: close?.error });
+            return { status: 400, body: { ok: false, error: `Close failed: ${close?.error || "unknown"}. HARD GATE: position ${borrowPositionId} may still be OPEN — STOP and reassess.`, borrowPositionId, steps } };
+          }
+          const botUsdcAfterClose = await readRaw(botWalletPubkey, SWAP_USDC_MINT);
+          const botCollAfterClose = await readRaw(botWalletPubkey, collateralMint);
+          const collateralReturned = botCollAfterClose - botCollAfterOpen;
+          log("close", true, {
+            signature: close.signature,
+            usdcSpentOnRepay: (botUsdcAfterOpen - botUsdcAfterClose).toString(),
+            collateralReturned: collateralReturned.toString(),
+            observedDebtRaw: close.observedDebtRaw ?? null,
+          });
+
+          // 11) ON-CHAIN ZEROED ASSERTION — COLLATERAL (P0 acceptance "collateral
+          //     zeroed"). After repay-all + withdraw-all, the carved slice must have
+          //     returned to the bot wallet; otherwise it is stranded in the position.
+          //     Tolerance is a FIXED tiny raw-unit bound for protocol rounding, NOT a
+          //     percentage (a % bound could mask a meaningful stranded slice).
+          const COLL_DUST = 10n; // raw units (~1e-8 INF @ 9 decimals)
+          if (collateralReturned < carveParsed - COLL_DUST) {
+            log("collateral_returned", false, { collateralReturned: collateralReturned.toString(), carve: carveParsed.toString() });
+            return { status: 500, body: { ok: false, error: `Close confirmed but only ${collateralReturned} raw collateral returned to the bot wallet (carved ${carveParsed}). Collateral may be stranded in the position — STOP and reconcile before P1.`, borrowPositionId, steps } };
+          }
+          log("collateral_returned", true, { collateralReturned: collateralReturned.toString() });
+
+          // 12) RECONCILE (HARD): the DB ledger must match the chain. The executor
+          //     writes the on-chain RE-READ debt/collateral onto the position when it
+          //     finalizes, so a closed position with ~0 debt AND ~0 collateral is the
+          //     authoritative "debt+collateral zeroed" proof. Anything else = FAIL.
+          const dbPos = await storage.getBorrowPosition(req.walletAddress!, borrowPositionId);
+          const dbStatus = (dbPos as any)?.status ?? null;
+          const dbDebtRaw = dbPos ? BigInt((dbPos as any).debtAmountRaw ?? "0") : null;
+          const dbCollRaw = dbPos ? BigInt((dbPos as any).collateralAmountRaw ?? "0") : null;
+          const DEBT_DUST = 10_000n; // 0.01 USDC (6 decimals)
+          const reconciled =
+            dbStatus === "closed" &&
+            dbDebtRaw !== null && dbDebtRaw <= DEBT_DUST &&
+            dbCollRaw !== null && dbCollRaw <= COLL_DUST;
+          log("db_reconcile", reconciled, {
+            status: dbStatus,
+            dbDebtRaw: dbDebtRaw?.toString() ?? null,
+            dbCollRaw: dbCollRaw?.toString() ?? null,
+          });
+          if (!reconciled) {
+            return { status: 500, body: { ok: false, error: `On-chain loop completed but the ledger is not fully zeroed (status=${dbStatus}, debtRaw=${dbDebtRaw}, collateralRaw=${dbCollRaw}). STOP and reconcile before P1.`, borrowPositionId, steps } };
+          }
+
+          // 13) FINAL ALL-BOT SCAN: the just-closed position is terminal, so the bot
+          //     must now have ZERO non-terminal borrow positions. If a concurrent run
+          //     (or a prior hard-stop) left one open, do NOT report success.
+          const stragglers = (await storage.getBorrowPositions(req.walletAddress!, tradingBotId))
+            .filter((p) => p.status !== "closed" && p.status !== "failed");
+          if (stragglers.length > 0) {
+            log("final_bot_scan", false, { count: stragglers.length, statuses: stragglers.map((p) => p.status), ids: stragglers.map((p) => p.id) });
+            return { status: 500, body: { ok: false, error: `Loop closed ${borrowPositionId} but the bot still has ${stragglers.length} non-terminal borrow position(s) (status: ${stragglers.map((p) => p.status).join(", ")}). STOP and reconcile before P1.`, borrowPositionId, steps } };
+          }
+          log("final_bot_scan", true, {});
+
+          return { status: 200, body: { ok: true, mode: "execute", message: "Per-bot borrow loop PROVED: carve -> open -> USDC landed -> repay/close -> collateral+debt zeroed -> DB closed.", borrowPositionId, steps } };
+        } finally {
+          if (botKey) botKey.cleanup();
+          if (acctKey) acctKey.cleanup();
+        }
+      });
+      return res.status(result.status).json(result.body);
+    } catch (error: any) {
+      console.error("[Vault] per-bot borrow proof error:", error);
+      return res.status(500).json({ error: error?.message || "Internal server error", steps });
     }
   });
 

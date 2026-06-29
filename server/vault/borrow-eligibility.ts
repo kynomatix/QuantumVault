@@ -29,6 +29,7 @@ import {
   type BorrowPolicyDecision,
   type BorrowExposureContext,
   type BorrowOracleContext,
+  type BorrowScope,
 } from "./borrow-risk-policy";
 import {
   buildBorrowExposureContext,
@@ -64,6 +65,8 @@ export interface BorrowPreviewFacts {
   existingDebtRaw: bigint;
   requestedDebtRaw: bigint;
   oracle: BorrowOracleContext;
+  /** Borrow scope. Defaults to "account"; "bot" = Flash per-bot (owner-only proving). */
+  scope?: BorrowScope;
 }
 
 export interface BorrowPreviewResponse {
@@ -139,7 +142,7 @@ export function evaluateBorrowPreview(f: BorrowPreviewFacts): BorrowPreviewRespo
   const exposure: BorrowExposureContext = f.exposureResult.exposure;
 
   const input: BorrowPolicyInput = {
-    scope: "account",
+    scope: f.scope ?? "account",
     walletAddress: f.walletAddress,
     isOwnerWallet: isBorrowOwnerWallet(f.walletAddress),
     isBorrowAllowlisted: isBorrowAllowlisted(f.walletAddress),
@@ -178,6 +181,12 @@ export interface PreviewBorrowParams {
   collateralMint: string;
   collateralRaw: bigint;
   requestedDebtRaw: bigint;
+  /**
+   * Borrow scope for the per-position projection + structural gate. Defaults to
+   * "account"; "bot" routes a Flash per-bot borrow (owner-only proving). The
+   * platform exposure book (aggregate/concentration breakers) is scope-agnostic.
+   */
+  scope?: BorrowScope;
   /**
    * OVERRIDE the wallet's current debt for this collateral with a LIVE on-chain
    * read instead of summing the cache. The money path (borrow-more) reads the
@@ -285,5 +294,6 @@ export async function previewBorrowEligibility(
     existingDebtRaw,
     requestedDebtRaw: params.requestedDebtRaw,
     oracle,
+    scope: params.scope,
   });
 }
