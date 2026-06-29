@@ -53,6 +53,7 @@ import {
   getAgentTokenBalanceRawStrict,
   getServerConnection,
   transferTokenToWalletExact,
+  USDC_MINT,
 } from "../agent-wallet";
 import {
   executeWithdrawCollateral,
@@ -78,6 +79,23 @@ const COLL_DUST = 10n; // ~1e-8 INF @ 9 decimals
 /** Debt a position may still show and still count as fully repaid, raw. Used by
  *  the unwind close-resume to detect a position that is already empty on-chain. */
 const DEBT_DUST = 10_000n; // 0.01 USDC @ 6 decimals
+
+/** Per-bot repay TOP-UP sizing (see the UNWIND/CLOSE top-up leg). The bot close
+ *  repays via the MAX_REPAY sentinel — the only primitive that fully clears the
+ *  true debt (getCurrentPosition UNDER-reads it, so an exact repay sized from it
+ *  leaves dust and the withdraw-all is health-rejected). MAX_REPAY pulls slightly
+ *  MORE USDC than the live debt, so a bot funded with ~exactly its borrow has no
+ *  headroom and the SPL transfer 0x1s. The ACCOUNT close never hits this (its
+ *  wallet carries ample spare USDC). So before the close we lend the bot a small,
+ *  capped USDC headroom from the account (the funder), keep MAX_REPAY, then sweep
+ *  the headroom back. Sized from the borrowed PRINCIPAL (a reliable debt upper
+ *  bound), NEVER from the under-reading getCurrentPosition. */
+const TOPUP_HEADROOM_BPS = 300n; // 3% of the borrowed principal...
+const TOPUP_MIN_HEADROOM_RAW = 50_000n; // ...but at least 0.05 USDC (6 decimals).
+
+function bmax(a: bigint, b: bigint): bigint {
+  return a > b ? a : b;
+}
 
 type Meta = Record<string, any>;
 
@@ -243,6 +261,8 @@ export interface PerbotCarveResult {
   borrowedUsdcRaw?: string;
   /** unwind/close: realised collateral returned to + re-pledged into the account, raw. */
   restoredRaw?: string;
+  /** unwind/close: USDC repay top-up swept back from the bot to the account, raw. */
+  sweptRaw?: string;
   /** Every on-chain signature this op produced, oldest first. */
   signatures?: string[];
   error?: string;
@@ -782,6 +802,12 @@ export interface PerbotUnwindCloseParams {
   /** The account borrow position to re-pledge the returned collateral into. */
   accountBorrowPositionId: string;
   accountVenuePositionId: number;
+  /** USDC the bot RECEIVED at open (the open's realised borrow delta) — a stable
+   *  sizing BASELINE for the pre-close repay top-up. True debt = this principal +
+   *  accrued interest, so principal sits just BELOW true debt; the headroom added
+   *  on top is what covers the interest. The live getCurrentPosition debt
+   *  UNDER-reads, so it is NOT used for sizing. */
+  borrowedPrincipalRaw?: bigint;
   clientRequestId: string;
 }
 
@@ -792,6 +818,39 @@ export interface PerbotUnwindCloseParams {
  * account wallet, re-supply not yet done) stops at needs_attention and a retry
  * FINISHES the remaining legs — it never reports success early.
  */
+/** A stable sizing BASELINE for the bot loan's repayable debt, raw (USDC, 6dp).
+ *  The borrowed PRINCIPAL (USDC the bot received at open) sits just BELOW true
+ *  debt (true debt = principal + accrued interest); the caller adds a headroom on
+ *  top to cover that interest. Principal is NOT subject to the getCurrentPosition
+ *  under-read that breaks exact-repay sizing, which is why it is the baseline.
+ *  Prefer the caller-supplied value (the open's realised borrow delta), then the
+ *  recorded open op, then the bot position's recorded debt. Returns 0n only when
+ *  nothing is knowable (the top-up then degrades to a small fixed headroom over
+ *  the bot's live USDC). */
+async function resolvePrincipalRaw(params: PerbotUnwindCloseParams): Promise<bigint> {
+  if (params.borrowedPrincipalRaw && params.borrowedPrincipalRaw > 0n) return params.borrowedPrincipalRaw;
+  try {
+    const ops = await storage.getBorrowOperations(params.walletAddress, params.botBorrowPositionId);
+    const open = ops.find((o) => o.operationType === "perbot_carve_open");
+    if (open) {
+      const r = (open.result as Meta | null) ?? {};
+      const m = readMeta(open);
+      const cand = BigInt(r.borrowedUsdcRaw || m.requestedDebtRaw || "0");
+      if (cand > 0n) return cand;
+    }
+  } catch {
+    /* fall through to the next source */
+  }
+  try {
+    const dbPos = await storage.getBorrowPosition(params.walletAddress, params.botBorrowPositionId);
+    const cand = dbPos ? BigInt((dbPos as any).debtAmountRaw ?? "0") : 0n;
+    if (cand > 0n) return cand;
+  } catch {
+    /* fall through */
+  }
+  return 0n;
+}
+
 export async function runPerbotUnwindClose(params: PerbotUnwindCloseParams): Promise<PerbotCarveResult> {
   const collateralMint = params.vault.collateralMint;
   const route = new JupiterLendBorrowRoute();
@@ -823,7 +882,7 @@ export async function runPerbotUnwindClose(params: PerbotUnwindCloseParams): Pro
     if (idMismatch) return { success: false, operationId: op.id, step: op.step ?? undefined, error: idMismatch, needsAttention: false };
     if (op.status === "succeeded") {
       const r = (op.result as Meta | null) ?? {};
-      return { success: true, operationId: op.id, step: op.step ?? "final_read", restoredRaw: r.restoredRaw, signatures: (op.txSignatures as string[] | null) ?? [] };
+      return { success: true, operationId: op.id, step: op.step ?? "final_read", restoredRaw: r.restoredRaw, sweptRaw: r.sweptRaw, signatures: (op.txSignatures as string[] | null) ?? [] };
     }
 
     // Persist baselines BEFORE any move (bot collateral pre-close; account
@@ -852,10 +911,101 @@ export async function runPerbotUnwindClose(params: PerbotUnwindCloseParams): Pro
       op = (await storage.getBorrowOperationById(op.id)) ?? op;
     }
 
+    // ---- TOP-UP (account -> bot USDC) leg --------------------------------
+    // Lend the bot a small, capped USDC headroom so the MAX_REPAY close fully
+    // clears the debt without 0x1-ing a razor-thin bot wallet. Swept back after
+    // (see the SWEEP leg). Sized from the borrowed PRINCIPAL (a stable baseline)
+    // plus a headroom that covers accrued interest, never from the under-reading
+    // live position.
+    const upStep = op.step ?? "";
+    // Legacy-resume bridge: an unwind op started by the PRE-FIX code (no TOP-UP
+    // leg) is parked at "close_failed" (the close reverted -> never landed -> the
+    // bot still owes the debt) with NO recorded top-up. A same-proofRunId re-POST
+    // must still top up BEFORE retrying the close, or it repeats the original SPL
+    // 0x1. A "closing" crash is deliberately NOT bridged: it is ambiguous (the
+    // close may have landed), so the close leg's on-chain detection handles it; a
+    // close that truly did not land self-heals to "close_failed" on the next round
+    // (which this bridge then tops up). This also avoids fail-closing an unwind
+    // whose close already landed just because the account is thin on USDC.
+    const topupRecorded = readMeta(op).topupRaw !== undefined && readMeta(op).topupRaw !== null;
+    const legacyPreTopup = upStep === "close_failed" && !topupRecorded;
+    if (upStep === "initialized" || upStep === "topping_up" || upStep === "topup_failed" || legacyPreTopup) {
+      let recovered = false;
+      if (upStep === "topping_up") {
+        const meta = readMeta(op);
+        if (meta.topupSig) {
+          const status = await reconcileSignature(meta.topupSig, meta.topupLvbh);
+          if (status === "landed") recovered = true;
+          else if (status === "in_flight") return failClosed(op, "topping_up", "The repay top-up to the bot is still settling. Funds are safe in the account wallet — retry in a moment.", true);
+          // reverted | expired -> dead tx; recompute + re-send below.
+        }
+      }
+      if (!recovered) {
+        const principalRaw = await resolvePrincipalRaw(params);
+        let botUsdcBefore: bigint;
+        let acctUsdc: bigint;
+        try {
+          botUsdcBefore = await strictBalanceRaw(params.botPublicKey, USDC_MINT);
+          acctUsdc = await strictBalanceRaw(params.accountPublicKey, USDC_MINT);
+        } catch {
+          return failClosed(op, "topup_failed", "Could not read the USDC balances to size the repay top-up; nothing was changed.", false);
+        }
+        // base = principal when known (baseline just below true debt; headroom
+        // below covers the interest); else fall back to the bot's live USDC.
+        const base = principalRaw > 0n ? principalRaw : botUsdcBefore;
+        const headroom = bmax((base * TOPUP_HEADROOM_BPS) / 10_000n, TOPUP_MIN_HEADROOM_RAW);
+        const target = base + headroom;
+        const needRaw = target > botUsdcBefore ? target - botUsdcBefore : 0n;
+        // Anomaly ceiling: a top-up bigger than ~1.5x the base means a misread
+        // somewhere -> refuse rather than move a large amount of account USDC.
+        const topupCeiling = base + bmax(base / 2n, TOPUP_MIN_HEADROOM_RAW * 4n);
+        if (needRaw > topupCeiling) {
+          return failClosed(op, "topup_failed", "The computed repay top-up exceeds the safety ceiling (read anomaly); refusing. Reconcile before retrying.", true);
+        }
+        if (needRaw > 0n && needRaw > acctUsdc) {
+          return failClosed(op, "topup_failed", `The account wallet holds too little USDC to fund the repay top-up (needs ~${(Number(needRaw) / 1e6).toFixed(4)} USDC). Add a small USDC buffer to the account, then retry.`, true);
+        }
+        // Persist the protected baseline + planned top-up BEFORE moving money so a
+        // mid-flight crash resumes with the right sweep cap (never sweeps the bot's
+        // own pre-existing USDC).
+        await storage.updateBorrowOperation(op.id, {
+          step: "topping_up",
+          mergeMetadata: { preTopupBotUsdcRaw: botUsdcBefore.toString(), topupRaw: needRaw.toString() },
+        });
+        if (needRaw > 0n) {
+          const up = await transferTokenToWalletExact({
+            agentPublicKey: params.accountPublicKey,
+            agentSecretKey: params.accountSecretKey,
+            toWalletAddress: params.botPublicKey,
+            mint: USDC_MINT,
+            amountRaw: needRaw,
+            onBeforeBroadcast: async ({ signature, lastValidBlockHeight }) => {
+              await storage.updateBorrowOperation(op.id, {
+                mergeMetadata: { topupSig: signature, topupLvbh: lastValidBlockHeight },
+                appendTxSignature: signature,
+              });
+            },
+          });
+          if (!up.success) {
+            op = (await storage.getBorrowOperationById(op.id)) ?? op;
+            const meta = readMeta(op);
+            const sig = meta.topupSig as string | undefined;
+            if (!sig) return failClosed(op, "topup_failed", up.error || "The repay top-up did not complete. Funds are safe in the account wallet.", true);
+            const status = await reconcileSignature(sig, meta.topupLvbh);
+            if (status === "in_flight") return failClosed(op, "topping_up", "The repay top-up to the bot is still settling. Funds are safe in the account wallet — retry in a moment.", true);
+            if (status !== "landed") return failClosed(op, "topup_failed", up.error || "The repay top-up did not complete. Funds are safe in the account wallet.", true);
+            // false-negative: it actually landed -> fall through.
+          }
+        }
+      }
+      await storage.updateBorrowOperation(op.id, { step: "topped_up" });
+      op = (await storage.getBorrowOperationById(op.id)) ?? op;
+    }
+
     // ---- CLOSE (bot position) leg ----------------------------------------
     let returnedRaw = BigInt(readMeta(op).returnedRaw || "0");
     const cStep = op.step ?? "";
-    if (cStep === "initialized" || cStep === "closing" || cStep === "close_failed") {
+    if (cStep === "topped_up" || cStep === "closing" || cStep === "close_failed") {
       const dbPos = await storage.getBorrowPosition(params.walletAddress, params.botBorrowPositionId);
       let closeLanded = !dbPos || dbPos.status === "closed";
 
@@ -969,39 +1119,113 @@ export async function runPerbotUnwindClose(params: PerbotUnwindCloseParams): Pro
     const sStep = op.step ?? "";
     if (sStep === "returned_to_account" || sStep === "resupplying" || sStep === "resupply_failed") {
       // Idempotency: if the account position collateral already grew by ~returnedRaw
-      // vs the persisted baseline, a prior run supplied it -> finalise.
+      // vs the persisted baseline, a prior run supplied it -> skip the re-supply.
       const acctPosCollBefore = BigInt(readMeta(op).acctPosCollBeforeRaw || "0");
       const liveAcct = await route.readLivePositionHealth(collateralMint, params.accountVenuePositionId);
-      if (liveAcct && BigInt(liveAcct.collateralRaw) >= acctPosCollBefore + returnedRaw - COLL_DUST) {
-        return finalizeUnwind(op, returnedRaw);
+      const alreadySupplied = !!liveAcct && BigInt(liveAcct.collateralRaw) >= acctPosCollBefore + returnedRaw - COLL_DUST;
+      if (!alreadySupplied) {
+        await storage.updateBorrowOperation(op.id, { step: "resupplying" });
+        const supply = await executeSupplyCollateral({
+          walletAddress: params.walletAddress,
+          agentPublicKey: params.accountPublicKey,
+          agentSecretKey: params.accountSecretKey,
+          collateralMint,
+          collateralRaw: returnedRaw,
+          borrowPositionId: params.accountBorrowPositionId,
+          tradingBotId: null, // re-pledge into the ACCOUNT position (executor rejects a bot id).
+        });
+        if (!supply.success) {
+          return failClosed(op, "resupply_failed", `${supply.error || "Re-pledge failed"}. Returned collateral is safe in the account wallet — retry to finish.`, true);
+        }
+        if (supply.signature) {
+          await storage.updateBorrowOperation(op.id, { appendTxSignature: supply.signature, mergeMetadata: { resupplySig: supply.signature } });
+        }
       }
-
-      await storage.updateBorrowOperation(op.id, { step: "resupplying" });
-      const supply = await executeSupplyCollateral({
-        walletAddress: params.walletAddress,
-        agentPublicKey: params.accountPublicKey,
-        agentSecretKey: params.accountSecretKey,
-        collateralMint,
-        collateralRaw: returnedRaw,
-        borrowPositionId: params.accountBorrowPositionId,
-        tradingBotId: null, // re-pledge into the ACCOUNT position (executor rejects a bot id).
-      });
-      if (!supply.success) {
-        return failClosed(op, "resupply_failed", `${supply.error || "Re-pledge failed"}. Returned collateral is safe in the account wallet — retry to finish.`, true);
-      }
-      if (supply.signature) {
-        await storage.updateBorrowOperation(op.id, { appendTxSignature: supply.signature, mergeMetadata: { resupplySig: supply.signature } });
-      }
+      // Re-collateralisation done (the money-safety priority); advance to the
+      // top-up SWEEP, which only returns account-owned USDC and never blocks the
+      // re-pledge above.
+      await storage.updateBorrowOperation(op.id, { step: "resupplied" });
       op = (await storage.getBorrowOperationById(op.id)) ?? op;
-      return finalizeUnwind(op, returnedRaw);
     }
 
-    return finalizeUnwind(op, returnedRaw);
+    // ---- SWEEP (bot -> account USDC) leg: return the repay top-up ----------
+    // Money-safety: NEVER sweep all the bot's USDC (it may hold trade proceeds or
+    // spare funds). Cap the sweep at the recorded top-up; the bot keeps the rest.
+    // The close consumed the true debt from the bot's OWN funds, so the cap also
+    // protects any pre-existing bot USDC. A zero top-up (bot self-funded the
+    // close) skips this leg.
+    let sweptRaw = BigInt(readMeta(op).sweptRaw || "0");
+    const swStep = op.step ?? "";
+    if (swStep === "resupplied" || swStep === "sweeping" || swStep === "sweep_failed") {
+      const topupRaw = BigInt(readMeta(op).topupRaw || "0");
+      let recovered = false;
+      if (swStep === "sweeping") {
+        const meta = readMeta(op);
+        if (meta.sweepSig) {
+          const status = await reconcileSignature(meta.sweepSig, meta.sweepLvbh);
+          if (status === "landed") {
+            recovered = true;
+            sweptRaw = BigInt(meta.sweepPlannedRaw || "0");
+          } else if (status === "in_flight") {
+            return failClosed(op, "sweeping", "The repay top-up sweep back to the account is still settling. Funds are safe in the bot wallet — retry in a moment.", true);
+          }
+          // reverted | expired -> dead tx; recompute + re-send below.
+        }
+      }
+      if (!recovered) {
+        if (topupRaw <= 0n) {
+          sweptRaw = 0n; // bot self-funded the close; nothing to return.
+        } else {
+          let botUsdcNow: bigint;
+          try {
+            botUsdcNow = await strictBalanceRaw(params.botPublicKey, USDC_MINT);
+          } catch {
+            return failClosed(op, "sweep_failed", "Could not read the bot USDC balance to size the top-up sweep; the top-up is safe in the bot wallet — retry.", true);
+          }
+          // Return AT MOST the top-up (cap protects any pre-existing bot USDC).
+          const sweep = botUsdcNow < topupRaw ? botUsdcNow : topupRaw;
+          if (sweep > 0n) {
+            await storage.updateBorrowOperation(op.id, { step: "sweeping", mergeMetadata: { sweepPlannedRaw: sweep.toString() } });
+            const sw = await transferTokenToWalletExact({
+              agentPublicKey: params.botPublicKey,
+              agentSecretKey: params.botSecretKey,
+              toWalletAddress: params.accountPublicKey,
+              mint: USDC_MINT,
+              amountRaw: sweep,
+              onBeforeBroadcast: async ({ signature, lastValidBlockHeight }) => {
+                await storage.updateBorrowOperation(op.id, {
+                  mergeMetadata: { sweepSig: signature, sweepLvbh: lastValidBlockHeight },
+                  appendTxSignature: signature,
+                });
+              },
+            });
+            if (!sw.success) {
+              op = (await storage.getBorrowOperationById(op.id)) ?? op;
+              const meta = readMeta(op);
+              const sig = meta.sweepSig as string | undefined;
+              if (!sig) return failClosed(op, "sweep_failed", sw.error || "The top-up sweep did not complete. Funds are safe in the bot wallet.", true);
+              const status = await reconcileSignature(sig, meta.sweepLvbh);
+              if (status === "in_flight") return failClosed(op, "sweeping", "The repay top-up sweep back to the account is still settling. Funds are safe in the bot wallet — retry in a moment.", true);
+              if (status !== "landed") return failClosed(op, "sweep_failed", sw.error || "The top-up sweep did not complete. Funds are safe in the bot wallet.", true);
+              // false-negative: it actually landed -> fall through.
+            }
+            sweptRaw = sweep;
+          } else {
+            sweptRaw = 0n;
+          }
+        }
+      }
+      await storage.updateBorrowOperation(op.id, { step: "swept", mergeMetadata: { sweptRaw: sweptRaw.toString() } });
+      op = (await storage.getBorrowOperationById(op.id)) ?? op;
+    }
+    if (sweptRaw <= 0n) sweptRaw = BigInt(readMeta(op).sweptRaw || "0");
+
+    return finalizeUnwind(op, returnedRaw, sweptRaw);
   });
 }
 
-async function finalizeUnwind(op: BorrowOperation, returnedRaw: bigint): Promise<PerbotCarveResult> {
-  const result: Meta = { restoredRaw: returnedRaw.toString() };
+async function finalizeUnwind(op: BorrowOperation, returnedRaw: bigint, sweptRaw: bigint = 0n): Promise<PerbotCarveResult> {
+  const result: Meta = { restoredRaw: returnedRaw.toString(), sweptRaw: sweptRaw.toString() };
   await storage.updateBorrowOperation(op.id, { status: "succeeded", step: "final_read", result });
   const fresh = await storage.getBorrowOperationById(op.id);
   return {
@@ -1009,6 +1233,7 @@ async function finalizeUnwind(op: BorrowOperation, returnedRaw: bigint): Promise
     operationId: op.id,
     step: "final_read",
     restoredRaw: returnedRaw.toString(),
+    sweptRaw: sweptRaw.toString(),
     signatures: ((fresh?.txSignatures ?? op.txSignatures) as string[] | null) ?? [],
   };
 }

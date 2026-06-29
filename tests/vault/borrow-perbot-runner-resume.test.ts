@@ -44,6 +44,7 @@ const h = vi.hoisted(() => {
     liveAcctHealth: undefined as any, // readLivePositionHealth(555)
     botCollBalance: 0n, // strict INF balance of the bot wallet
     botUsdcBalance: 0n, // strict USDC balance of the bot wallet
+    acctUsdcBalance: 0n, // strict USDC balance of the ACCOUNT wallet (funds top-up)
   };
   const updatePositionMock = vi.fn(async (id: string, patch: any, ifStatus?: string) => {
     const row = state.positionRow;
@@ -99,9 +100,16 @@ vi.mock("../../server/storage", () => ({
 
 vi.mock("../../server/agent-wallet", () => ({
   getServerConnection: () => ({}),
-  getAgentTokenBalanceRawStrict: vi.fn(async (_pk: string, mint: string) => ({
-    amountRaw: (mint === INF_MINT ? h.state.botCollBalance : h.state.botUsdcBalance).toString(),
-  })),
+  // Real USDC mint literal (inlined: a hoisted vi.mock factory evaluates this
+  // eagerly, so it cannot reference a top-level const — that would TDZ-throw).
+  USDC_MINT: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  getAgentTokenBalanceRawStrict: vi.fn(async (pk: string, mint: string) => {
+    if (mint === INF_MINT) return { amountRaw: h.state.botCollBalance.toString() };
+    // USDC: the top-up leg reads BOTH the bot wallet and the account wallet, so
+    // distinguish them by pubkey (account pubkeys start with "Acct").
+    const isAcct = pk.startsWith("Acct");
+    return { amountRaw: (isAcct ? h.state.acctUsdcBalance : h.state.botUsdcBalance).toString() };
+  }),
   transferTokenToWalletExact: h.transferExactMock,
 }));
 
@@ -179,6 +187,7 @@ beforeEach(() => {
   state.liveAcctHealth = undefined;
   state.botCollBalance = 0n;
   state.botUsdcBalance = 0n;
+  state.acctUsdcBalance = 0n;
   executeBorrowCloseMock.mockReset();
   executeSupplyCollateralMock.mockReset();
   executeBorrowOpenMock.mockReset();
@@ -300,6 +309,109 @@ describe("runPerbotUnwindClose — BLOCKER 2: crash-after-close resumes forward"
     expect(res.restoredRaw).toBe("200000000");
     expect(executeSupplyCollateralMock).not.toHaveBeenCalled();
     expect(executeBorrowCloseMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("runPerbotUnwindClose — TOP-UP/SWEEP fix (architect 2026-06-29): close 0x1", () => {
+  // The MAX_REPAY close OVER-PULLS USDC slightly beyond the bot's borrowed
+  // principal (accrued interest), so a razor-thin bot wallet SPL-0x1'd. The fix
+  // lends a small CAPPED USDC headroom (account->bot) BEFORE the close and sweeps
+  // back AT MOST that amount (account-owned) AFTER re-pledging.
+  const ACCT_PK = "AcctPubkey11111111111111111111111111111111";
+  const BOT_PK = "BotPubkey111111111111111111111111111111111";
+
+  const seedCloseFailedOp = () => {
+    // The REAL failed P0-4 op: started by the PRE-FIX code (no top-up leg) and
+    // parked at "close_failed" (the close reverted via SPL 0x1 -> never landed)
+    // with NO recorded top-up. A same-proofRunId re-POST must still top up first.
+    opStore.set("op-cf", {
+      id: "op-cf",
+      clientRequestId: "proof-1:unwind",
+      operationType: "perbot_unwind_close",
+      status: "processing",
+      step: "close_failed",
+      txSignatures: [],
+      metadata: {
+        tradingBotId: TRADING_BOT_ID,
+        collateralMint: INF_MINT,
+        botBorrowPositionId: BOT_POS_ID,
+        accountBorrowPositionId: ACCT_POS_ID,
+        accountVenuePositionId: ACCT_VENUE_ID,
+        botCollBeforeRaw: "0",
+        acctPosCollBeforeRaw: "1000000000",
+      },
+    });
+    // The reverted close left the bot loan recoverable/open on-chain.
+    state.positionRow = { id: BOT_POS_ID, status: "open", venuePositionId: String(BOT_VENUE_ID), collateralMint: INF_MINT };
+    state.liveBotHealth = { debtRaw: "11000000", collateralRaw: "200000000", oraclePriceUsd: 98.86 }; // still owes
+    state.liveAcctHealth = { debtRaw: "20000000", collateralRaw: "1000000000", oraclePriceUsd: 98.86 }; // not regrown -> re-supply runs
+    state.botCollBalance = 200_000_000n; // 0.2 INF returned to the bot by the (now-succeeding) close
+    executeBorrowCloseMock.mockResolvedValue({ success: true, finalized: true, signature: "sig-close" });
+  };
+
+  it("legacy resume tops up account->bot BEFORE retrying the close, then sweeps back ONLY the top-up (never the bot's own USDC)", async () => {
+    seedCloseFailedOp();
+    state.botUsdcBalance = 11_000_000n; // ~borrowed principal: short the interest headroom + holds spare the sweep must NOT take
+    state.acctUsdcBalance = 5_000_000n; // account funds the small top-up
+
+    const res = await runPerbotUnwindClose({ ...unwindParams(), borrowedPrincipalRaw: 11_000_000n });
+
+    expect(res.success).toBe(true);
+    expect(res.restoredRaw).toBe("200000000");
+    expect(res.sweptRaw).toBe("330000");
+    // The top-up unblocked the close -> it ran exactly once (no repeat 0x1).
+    expect(executeBorrowCloseMock).toHaveBeenCalledTimes(1);
+    // 3 transfers: (1) top-up account->bot, (2) collateral return bot->account, (3) sweep bot->account.
+    expect(transferExactMock).toHaveBeenCalledTimes(3);
+    const topup = transferExactMock.mock.calls[0][0];
+    expect(topup.agentPublicKey).toBe(ACCT_PK);
+    expect(topup.toWalletAddress).toBe(BOT_PK);
+    expect(topup.amountRaw).toBe(330_000n); // 3% of 11 USDC headroom
+    const sweep = transferExactMock.mock.calls[2][0];
+    expect(sweep.agentPublicKey).toBe(BOT_PK);
+    expect(sweep.toWalletAddress).toBe(ACCT_PK);
+    // MONEY-SAFETY CAP: returns ONLY the 0.33 USDC top-up, NEVER the bot's 11 USDC.
+    expect(sweep.amountRaw).toBe(330_000n);
+    const op = opStore.get("op-cf");
+    expect(op.metadata.topupRaw).toBe("330000");
+    expect(op.metadata.sweptRaw).toBe("330000");
+    expect(op.status).toBe("succeeded");
+  });
+
+  it("computes a ZERO top-up (no account move) and skips the sweep when the bot is already flush", async () => {
+    seedCloseFailedOp();
+    state.botUsdcBalance = 50_000_000n; // far more than debt + headroom -> no top-up needed
+    state.acctUsdcBalance = 5_000_000n;
+
+    const res = await runPerbotUnwindClose({ ...unwindParams(), borrowedPrincipalRaw: 11_000_000n });
+
+    expect(res.success).toBe(true);
+    expect(res.restoredRaw).toBe("200000000");
+    expect(res.sweptRaw).toBe("0");
+    expect(executeBorrowCloseMock).toHaveBeenCalledTimes(1);
+    // ONLY the collateral return ran: NO top-up, NO sweep.
+    expect(transferExactMock).toHaveBeenCalledTimes(1);
+    const ret = transferExactMock.mock.calls[0][0];
+    expect(ret.agentPublicKey).toBe(BOT_PK);
+    expect(ret.toWalletAddress).toBe(ACCT_PK);
+    expect(ret.amountRaw).toBe(200_000_000n); // the collateral (INF), not a USDC top-up
+    expect(opStore.get("op-cf").metadata.topupRaw).toBe("0");
+  });
+
+  it("FAILS CLOSED (no money moved, close not attempted) when the account cannot fund the required top-up", async () => {
+    seedCloseFailedOp();
+    state.botUsdcBalance = 11_000_000n; // short the headroom -> top-up required
+    state.acctUsdcBalance = 100n; // account too thin to fund it
+
+    const res = await runPerbotUnwindClose({ ...unwindParams(), borrowedPrincipalRaw: 11_000_000n });
+
+    expect(res.success).toBe(false);
+    expect(res.needsAttention).toBe(true);
+    expect(res.step).toBe("topup_failed");
+    expect(transferExactMock).not.toHaveBeenCalled();
+    expect(executeBorrowCloseMock).not.toHaveBeenCalled();
+    // No top-up was persisted (the gate fails BEFORE the write-ahead).
+    expect(opStore.get("op-cf").metadata.topupRaw).toBeUndefined();
   });
 });
 

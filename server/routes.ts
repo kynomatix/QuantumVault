@@ -9428,13 +9428,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             botBorrowPositionId: borrowPositionId,
             accountBorrowPositionId: livePlan.accountBorrowPositionId,
             accountVenuePositionId: livePlan.accountVenuePositionId,
+            // The open's realised borrow delta is a reliable UPPER BOUND on the
+            // true debt -> sizes the pre-close repay top-up (live debt under-reads).
+            borrowedPrincipalRaw: carveOpen.borrowedUsdcRaw ? BigInt(carveOpen.borrowedUsdcRaw) : undefined,
             clientRequestId: `${proofRunId}:unwind`,
           });
           if (!unwind.success) {
             log("unwind_close", false, { error: unwind.error, step: unwind.step, needsAttention: unwind.needsAttention, operationId: unwind.operationId, signatures: unwind.signatures });
             return { status: 400, body: { ok: false, error: `Unwind/close failed: ${unwind.error || "unknown"} (step ${unwind.step ?? "?"}). HARD GATE: position ${borrowPositionId} or its returned collateral may need reconcile — re-POST the same proofRunId, then STOP before P1.`, borrowPositionId, operationId: unwind.operationId, steps } };
           }
-          log("unwind_close", true, { operationId: unwind.operationId, restoredRaw: unwind.restoredRaw, signatures: unwind.signatures });
+          log("unwind_close", true, { operationId: unwind.operationId, restoredRaw: unwind.restoredRaw, sweptRaw: unwind.sweptRaw, signatures: unwind.signatures });
 
           const COLL_DUST = 10n; // raw units (~1e-8 INF @ 9 decimals)
 
