@@ -72,31 +72,38 @@ async function fetchDasAssets(url: string, ownerAddress: string): Promise<any> {
 function mapDasResult(result: any): UserToken[] {
   const out: UserToken[] = [];
 
-  // Native SOL.
+  // Accumulate SOL from BOTH native lamports AND any held wrapped-SOL (wSOL)
+  // token account into ONE unified "SOL" row. wSOL is the same asset (1:1, 9
+  // decimals) and the deposit path unwraps it transparently, so the user never
+  // sees or manages "wSOL" — to them it is all just SOL.
   const native = result?.nativeBalance;
-  if (native && Number(native.lamports) > 0) {
-    const lamports = Number(native.lamports);
-    out.push({
-      mint: NATIVE_SOL_MINT,
-      symbol: 'SOL',
-      name: 'Solana',
-      logoURI: null,
-      decimals: 9,
-      amountRaw: String(native.lamports),
-      amountUi: lamports / 1e9,
-      usdValue: typeof native.total_price === 'number' ? native.total_price : null,
-      isNativeSol: true,
-      isUsdc: false,
-    });
+  const nativeLamports = native && Number(native.lamports) > 0 ? BigInt(native.lamports) : 0n;
+  let solRaw = nativeLamports;
+  // Sum USD across every contributing balance (native lamports + folded wSOL).
+  // If ANY contributor lacks a numeric USD value, the combined total is unknown
+  // (null) rather than a misleading partial sum that understates the row.
+  let solUsd = 0;
+  let solUsdKnown = true;
+  if (nativeLamports > 0n) {
+    if (typeof native.total_price === 'number') solUsd += native.total_price;
+    else solUsdKnown = false;
   }
 
   for (const item of result?.items ?? []) {
     const ti = item?.token_info;
     if (!ti || !ti.balance || Number(ti.balance) <= 0) continue;
+    const mint = item.id;
+    if (mint === NATIVE_SOL_MINT) {
+      // Fold wSOL into the unified SOL row instead of listing it separately.
+      solRaw += BigInt(ti.balance);
+      const wUsd = ti.price_info?.total_price;
+      if (typeof wUsd === 'number') solUsd += wUsd;
+      else solUsdKnown = false;
+      continue;
+    }
     const decimals = ti.decimals ?? 0;
     const amountRaw = String(ti.balance);
     const amountUi = Number(ti.balance) / Math.pow(10, decimals);
-    const mint = item.id;
     out.push({
       mint,
       symbol: ti.symbol || item?.content?.metadata?.symbol || shortMint(mint),
@@ -108,6 +115,21 @@ function mapDasResult(result: any): UserToken[] {
       usdValue: ti.price_info?.total_price ?? null,
       isNativeSol: false,
       isUsdc: mint === USDC_MINT,
+    });
+  }
+
+  if (solRaw > 0n) {
+    out.push({
+      mint: NATIVE_SOL_MINT,
+      symbol: 'SOL',
+      name: 'Solana',
+      logoURI: null,
+      decimals: 9,
+      amountRaw: solRaw.toString(),
+      amountUi: Number(solRaw) / 1e9,
+      usdValue: solUsdKnown ? solUsd : null,
+      isNativeSol: true,
+      isUsdc: false,
     });
   }
 
@@ -126,26 +148,19 @@ async function fallbackRpcTokens(ownerAddress: string): Promise<UserToken[]> {
   ]);
 
   const out: UserToken[] = [];
-  if (lamports > 0) {
-    out.push({
-      mint: NATIVE_SOL_MINT,
-      symbol: 'SOL',
-      name: 'Solana',
-      logoURI: null,
-      decimals: 9,
-      amountRaw: String(lamports),
-      amountUi: lamports / 1e9,
-      usdValue: null,
-      isNativeSol: true,
-      isUsdc: false,
-    });
-  }
+  // Fold native lamports + any held wSOL into one unified "SOL" row (see
+  // mapDasResult) so the wrapped nature stays abstracted from the user.
+  let solRaw = lamports > 0 ? BigInt(lamports) : 0n;
 
   for (const { account } of parsed.value) {
     const info = account.data.parsed?.info;
     const tokenAmount = info?.tokenAmount;
     if (!tokenAmount || !tokenAmount.amount || Number(tokenAmount.amount) <= 0) continue;
     const mint = info.mint as string;
+    if (mint === NATIVE_SOL_MINT) {
+      solRaw += BigInt(tokenAmount.amount);
+      continue;
+    }
     out.push({
       mint,
       symbol: shortMint(mint),
@@ -157,6 +172,21 @@ async function fallbackRpcTokens(ownerAddress: string): Promise<UserToken[]> {
       usdValue: null,
       isNativeSol: false,
       isUsdc: mint === USDC_MINT,
+    });
+  }
+
+  if (solRaw > 0n) {
+    out.unshift({
+      mint: NATIVE_SOL_MINT,
+      symbol: 'SOL',
+      name: 'Solana',
+      logoURI: null,
+      decimals: 9,
+      amountRaw: solRaw.toString(),
+      amountUi: Number(solRaw) / 1e9,
+      usdValue: null,
+      isNativeSol: true,
+      isUsdc: false,
     });
   }
   return out;

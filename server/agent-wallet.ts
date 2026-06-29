@@ -198,6 +198,83 @@ export async function buildSolTransferToAgentTransaction(
   };
 }
 
+/**
+ * Builds a USER-SIGNED transaction depositing exactly `lamports` of SOL into the
+ * agent wallet, ABSTRACTING wrapped SOL. If the user's NATIVE balance alone can't
+ * cover the amount (+ tx fee) but they hold wrapped SOL (wSOL — same mint as
+ * NATIVE_SOL_MINT), this prepends a CloseAccount that unwraps their wSOL back into
+ * native SOL in the SAME transaction, then does a plain system transfer. The user
+ * never sees or manages "wSOL"; to them it is all just SOL.
+ *
+ * Because the agent only ever RECEIVES native SOL on this path, the downstream
+ * credit-binding (readInboundSolCredit reads the agent's lamport delta) and the
+ * capped agent swap are UNCHANGED.
+ *
+ * Money-safety: amounts are raw lamports (BigInt) end-to-end — no float round-trip.
+ * Fails closed (throws) when native + wSOL can't cover the amount, or when the user
+ * holds too little native SOL to pay the tx fee — the unwrap credit only lands
+ * DURING execution, after the fee is charged against the fee payer up front.
+ */
+export async function buildSolDepositToAgentTransaction(
+  userWalletAddress: string,
+  agentPublicKey: string,
+  lamports: bigint,
+): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
+  if (lamports <= 0n) {
+    throw new Error('Invalid transfer amount');
+  }
+  const connection = getConnection();
+  const userPubkey = new PublicKey(userWalletAddress);
+  const agentPubkey = new PublicKey(agentPublicKey);
+
+  // Base fee for one user signature; no priority ix is added on this tx. The fee
+  // payer must already hold at least this in NATIVE SOL — an unwrap can't fund its
+  // own fee (the fee is charged before the instructions run).
+  const TX_FEE_BUFFER = 5_000n;
+
+  const nativeLamports = BigInt(await connection.getBalance(userPubkey));
+  const instructions: TransactionInstruction[] = [];
+
+  // Unwrap wSOL only when native SOL alone can't cover the amount + fee.
+  if (nativeLamports < lamports + TX_FEE_BUFFER) {
+    const wsolAta = getAssociatedTokenAddressSync(new PublicKey(NATIVE_SOL_MINT), userPubkey);
+    const wsolInfo = await connection.getAccountInfo(wsolAta);
+    // Closing a wSOL account credits ALL its lamports (rent + the wrapped amount)
+    // to the owner as native SOL.
+    const wsolLamports = wsolInfo ? BigInt(wsolInfo.lamports) : 0n;
+    if (nativeLamports + wsolLamports < lamports + TX_FEE_BUFFER) {
+      throw new Error('Not enough SOL for that amount.');
+    }
+    if (nativeLamports < TX_FEE_BUFFER) {
+      throw new Error('You need a little SOL for the network fee. Add about 0.001 SOL and try again.');
+    }
+    instructions.push(buildCloseAccountIx(wsolAta, userPubkey, userPubkey));
+  }
+
+  instructions.push(
+    SystemProgram.transfer({
+      fromPubkey: userPubkey,
+      toPubkey: agentPubkey,
+      lamports,
+    }),
+  );
+
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+  const transaction = new Transaction({ feePayer: userPubkey, blockhash, lastValidBlockHeight });
+  for (const ix of instructions) transaction.add(ix);
+
+  const serializedTx = transaction
+    .serialize({ requireAllSignatures: false, verifySignatures: false })
+    .toString('base64');
+
+  return {
+    transaction: serializedTx,
+    blockhash,
+    lastValidBlockHeight,
+    message: 'Deposit SOL to trading agent',
+  };
+}
+
 export async function buildTransferToAgentTransaction(
   userWalletAddress: string,
   agentPublicKey: string,

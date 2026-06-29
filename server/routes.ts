@@ -1497,7 +1497,7 @@ async function settleAllPnl(
 }
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
-import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
+import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
 import { getBestQuote } from "./swap/index.js";
 import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, valueVaultRowsForWallet, sumVaultPositionValueUsdc, type VaultPositionView, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
 import { getEnabledYieldAssets, getYieldAssetByKey } from "./vault/yield-assets";
@@ -8331,11 +8331,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       if (mint === NATIVE_SOL_MINT) {
-        const amountSol = Number(amountRaw) / 1_000_000_000;
-        const txData = await buildSolTransferToAgentTransaction(
+        // Raw lamports end-to-end (no float round-trip); also transparently
+        // unwraps any held wSOL into native SOL so the user sees only "SOL".
+        const txData = await buildSolDepositToAgentTransaction(
           req.walletAddress!,
           wallet.agentPublicKey,
-          amountSol,
+          BigInt(amountRaw),
         );
         return res.json(txData);
       }
