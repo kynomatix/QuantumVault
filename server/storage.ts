@@ -379,6 +379,7 @@ export interface IStorage {
   getBorrowOperationById(id: string): Promise<BorrowOperation | undefined>;
   getBorrowOperationByClientRequestId(walletAddress: string, clientRequestId: string): Promise<BorrowOperation | undefined>;
   sumOpenBorrowDebtUsdc(walletAddress: string): Promise<number>;
+  sumOpenBorrowDebtUsdcForBot(walletAddress: string, tradingBotId: string): Promise<number>;
 
   // Phase 1 Vaults yield oracle: display-only realized-APY price snapshots.
   insertYieldPriceSnapshot(s: InsertYieldPriceSnapshot): Promise<YieldPriceSnapshot>;
@@ -2329,6 +2330,33 @@ export class DatabaseStorage implements IStorage {
     }).from(borrowPositions)
       .where(and(
         eq(borrowPositions.walletAddress, walletAddress),
+        ne(borrowPositions.status, 'closed'),
+        ne(borrowPositions.status, 'failed'),
+      ));
+    let totalRaw = BigInt(0);
+    for (const r of rows) {
+      if (String(r.debtAssetKey).toLowerCase() !== 'usdc') continue;
+      try {
+        const v = BigInt(r.debtAmountRaw);
+        if (v > BigInt(0)) totalRaw += v;
+      } catch { /* writes are always valid integer strings; unreachable */ }
+    }
+    return new Decimal(totalRaw.toString()).div(1_000_000).toNumber();
+  }
+
+  // Same as sumOpenBorrowDebtUsdc but scoped to a SINGLE bot's per-bot borrow
+  // positions (trading_bot_id = botId). Used to subtract a bot's OWN open borrow
+  // liability from its DISPLAYED net equity / net PnL so borrowed USDC sitting in
+  // the bot wallet is not counted as the bot's own gains. Terminal rows excluded;
+  // USDC-denominated debt only (MVP is USDC-only).
+  async sumOpenBorrowDebtUsdcForBot(walletAddress: string, tradingBotId: string): Promise<number> {
+    const rows = await db.select({
+      debtAmountRaw: borrowPositions.debtAmountRaw,
+      debtAssetKey: borrowPositions.debtAssetKey,
+    }).from(borrowPositions)
+      .where(and(
+        eq(borrowPositions.walletAddress, walletAddress),
+        eq(borrowPositions.tradingBotId, tradingBotId),
         ne(borrowPositions.status, 'closed'),
         ne(borrowPositions.status, 'failed'),
       ));

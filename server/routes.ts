@@ -10530,6 +10530,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           const hasOpen = livePositions.some((p: any) => Math.abs(p.baseAssetAmount) > 0.0001);
           const balVaultRows = await storage.getVaultPositions(bot.walletAddress, bot.id);
           const balAdj = await addParkedValueForBotDisplayEquity(bot, balAdapter, liveInfo.totalCollateral, { hasVaultRows: balVaultRows.length > 0 });
+          const balBorrowDebtUsdc = await storage.sumOpenBorrowDebtUsdcForBot(bot.walletAddress, bot.id);
           // Tradable/margin fields stay RAW (exchange collateral only). Parked Vault value
           // is OFF-exchange and NOT tradable — surfaced separately for display-equity/PnL only.
           return res.json({
@@ -10544,6 +10545,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             parkedValueUsdc: balAdj.parkedValueUsdc,
             parkedValueIncluded: balAdj.parkedValueIncluded,
             parkedValueUnavailable: balAdj.parkedValueUnavailable,
+            borrowDebtUsdc: balBorrowDebtUsdc,
             source: 'protocol',
           });
         } catch (err: any) {
@@ -10753,6 +10755,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const webhookUrl = wallet.userWebhookSecret 
         ? `${baseUrl}/api/webhook/user/${req.walletAddress}?secret=${wallet.userWebhookSecret}`
         : null;
+
+      const overviewBorrowDebtUsdc = await storage.sumOpenBorrowDebtUsdcForBot(bot.walletAddress, bot.id);
       
       res.json({
         // Bot status (for auto-pause detection)
@@ -10773,6 +10777,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         parkedValueUsdc: overviewParked.parkedValueUsdc,
         parkedValueIncluded: overviewParked.parkedValueIncluded,
         parkedValueUnavailable: overviewParked.parkedValueUnavailable,
+        // Per-bot (Flash) open borrow liability, surfaced SEPARATELY like parked value
+        // so the client subtracts it from DISPLAY-only net equity/PnL (raw tradable
+        // fields above stay safe for sizing/margin). 0 for bots with no per-bot borrow.
+        borrowDebtUsdc: overviewBorrowDebtUsdc,
         
         // From getAgentUsdcBalance
         mainAccountBalance,
@@ -10823,6 +10831,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         let botBalance = 0;
         let netPnl = 0;
         let netPnlPercent = 0;
+        let botBorrowDebtUsdc = 0;
         
         try {
           const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
@@ -10837,7 +10846,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             const listAdapter = getAdapterForBot(bot);
             const liveInfo = await getExchangeAccountInfoForBot(wallet.agentPublicKey, 0, botCtx, listAdapter);
             const listAdj = await addParkedValueForBotDisplayEquity(bot, listAdapter, liveInfo.totalCollateral, { hasVaultRows: listParkedBotIds.has(bot.id) });
-            botBalance = listAdj.equityUsdc;
+            // Subtract this bot's OWN open per-bot borrow debt (Flash-only) so borrowed
+            // USDC sitting in the bot wallet is not counted as the bot's equity/PnL.
+            botBorrowDebtUsdc = await storage.sumOpenBorrowDebtUsdcForBot(req.walletAddress!, bot.id);
+            botBalance = listAdj.equityUsdc - botBorrowDebtUsdc;
             netPnl = botBalance - netDeposited;
             netPnlPercent = totalDeposits > 0 ? (netPnl / totalDeposits) * 100 : 0;
           } else {
@@ -10870,6 +10882,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           realizedPnl: position?.realizedPnl || "0",
           totalFees: position?.totalFees || "0",
           exchangeBalance: botBalance,
+          borrowDebtUsdc: botBorrowDebtUsdc,
           netDeposited,
           netPnl,
           netPnlPercent,

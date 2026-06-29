@@ -314,6 +314,10 @@ export function BotManagementDrawer({
   // Per-bot Vault-parked value (Flash/independent_trader). OFF-exchange, NOT tradable —
   // folded into the displayed Bot Balance / PnL only, never into sizing or margin math.
   const [parkedValueUsdc, setParkedValueUsdc] = useState<number>(0);
+  // Per-bot open borrow liability (Flash/independent_trader). Subtracted from the
+  // DISPLAYED Bot Balance / PnL only (borrowed USDC sits in the bot wallet and would
+  // otherwise count as equity). Never folded into sizing/margin math. 0 when no borrow.
+  const [borrowDebtUsdc, setBorrowDebtUsdc] = useState<number>(0);
   const [mainAccountBalance, setMainAccountBalance] = useState<number>(0);
   const [exchangeBalance, setExchangeBalance] = useState<number>(0);
   const [exchangeFreeCollateral, setExchangeFreeCollateral] = useState<number>(0);
@@ -502,6 +506,7 @@ export function BotManagementDrawer({
         // Balance data
         setBotBalance(data.usdcBalance ?? 0);
         setParkedValueUsdc(data.parkedValueUsdc ?? 0);
+        setBorrowDebtUsdc(data.borrowDebtUsdc ?? 0);
         setMainAccountBalance(data.mainAccountBalance ?? 0);
         setExchangeBalance(data.totalCollateral ?? 0);
         setExchangeFreeCollateral(data.freeCollateral ?? 0);
@@ -604,6 +609,7 @@ export function BotManagementDrawer({
         setExchangeFreeCollateral(data.freeCollateral ?? 0);
         setHasOpenPositions(data.hasOpenPositions ?? false);
         setParkedValueUsdc(data.parkedValueUsdc ?? 0);
+        setBorrowDebtUsdc(data.borrowDebtUsdc ?? 0);
       }
 
       if (netDepositedRes?.ok) {
@@ -1499,7 +1505,7 @@ export function BotManagementDrawer({
                   {balanceLoading && !hasBalanceLoaded ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : (
-                    `$${(exchangeBalance + parkedValueUsdc).toFixed(2)}`
+                    `$${(exchangeBalance + parkedValueUsdc - borrowDebtUsdc).toFixed(2)}`
                   )}
                 </p>
               </div>
@@ -1520,14 +1526,14 @@ export function BotManagementDrawer({
                 </div>
                 <p
                   className={`text-2xl font-bold mt-1 ${
-                    ((exchangeBalance + parkedValueUsdc) - netDeposited) >= 0 ? 'text-emerald-500' : 'text-red-500'
+                    ((exchangeBalance + parkedValueUsdc - borrowDebtUsdc) - netDeposited) >= 0 ? 'text-emerald-500' : 'text-red-500'
                   }`}
                   data-testid="text-net-pnl"
                 >
                   {balanceLoading && !hasBalanceLoaded ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : (
-                    `${((exchangeBalance + parkedValueUsdc) - netDeposited) >= 0 ? '+' : ''}$${((exchangeBalance + parkedValueUsdc) - netDeposited).toFixed(2)}`
+                    `${((exchangeBalance + parkedValueUsdc - borrowDebtUsdc) - netDeposited) >= 0 ? '+' : ''}$${((exchangeBalance + parkedValueUsdc - borrowDebtUsdc) - netDeposited).toFixed(2)}`
                   )}
                 </p>
               </div>
@@ -1547,14 +1553,14 @@ export function BotManagementDrawer({
                 </div>
                 <p
                   className={`text-2xl font-bold mt-1 ${
-                    ((exchangeBalance + parkedValueUsdc) - netDeposited) >= 0 ? 'text-emerald-500' : 'text-red-500'
+                    ((exchangeBalance + parkedValueUsdc - borrowDebtUsdc) - netDeposited) >= 0 ? 'text-emerald-500' : 'text-red-500'
                   }`}
                   data-testid="text-return-pct"
                 >
                   {balanceLoading && !hasBalanceLoaded ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : netDeposited > 0 ? (
-                    `${((((exchangeBalance + parkedValueUsdc) - netDeposited) / netDeposited) * 100).toFixed(2)}%`
+                    `${((((exchangeBalance + parkedValueUsdc - borrowDebtUsdc) - netDeposited) / netDeposited) * 100).toFixed(2)}%`
                   ) : (
                     '0%'
                   )}
@@ -2105,7 +2111,7 @@ export function BotManagementDrawer({
                       {balanceLoading && !hasBalanceLoaded ? (
                         <Loader2 className="w-5 h-5 animate-spin" />
                       ) : (
-                        `$${(botBalance + parkedValueUsdc).toFixed(2)}`
+                        `$${(botBalance + parkedValueUsdc - borrowDebtUsdc).toFixed(2)}`
                       )}
                     </p>
                   </div>
@@ -3073,8 +3079,8 @@ export function BotManagementDrawer({
           onClose={() => setShareCardOpen(false)}
           botName={displayBot.name}
           market={displayBot.market}
-          pnl={(exchangeBalance + parkedValueUsdc) - netDeposited}
-          pnlPercent={netDeposited > 0 ? (((exchangeBalance + parkedValueUsdc) - netDeposited) / netDeposited) * 100 : 0}
+          pnl={(exchangeBalance + parkedValueUsdc - borrowDebtUsdc) - netDeposited}
+          pnlPercent={netDeposited > 0 ? (((exchangeBalance + parkedValueUsdc - borrowDebtUsdc) - netDeposited) / netDeposited) * 100 : 0}
           timeframe={performanceTimeframe}
           tradeCount={performanceTradeCount}
           winRate={getWinRate()}
