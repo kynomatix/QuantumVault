@@ -1510,6 +1510,9 @@ import { isBorrowEligibleWallet, isBorrowOwnerWallet, isCollateralVaultAllowlist
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
 import { planPerbotCarve, runPerbotCarveOpen, runPerbotUnwindClose, selectBlockingBotPositions } from "./vault/jupiter-lend-perbot-carve";
+import { computePerBotPositionHealth, summarizeBotBorrowHealth } from "./vault/borrow-health";
+import { rankMeasuredYieldDestinations } from "./vault/carry-yield-ranker";
+import { decideCarryTrade } from "./vault/carry-trade-advisor";
 import { getUserFungibleTokens, resolveTokenLogos } from "./swap/helius-tokens.js";
 
 const SWAP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -9550,24 +9553,56 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const botScope = botResolved.scope;
       if (botScope.scope !== "bot" || !botScope.agentPublicKey) {
         // Not a per-bot (Flash) wallet bot -> the feature does not apply.
-        return res.json({ eligible, applicable: false, positions: [], carrySources: [] });
+        return res.json({
+          eligible,
+          applicable: false,
+          positions: [],
+          carrySources: [],
+          healthSummary: summarizeBotBorrowHealth([]),
+        });
       }
       const tradingBotId = botScope.tradingBotId!;
 
       const borrowRoute = new JupiterLendBorrowRoute();
       const rows = (await storage.getBorrowPositions(req.walletAddress!, tradingBotId))
         .filter((r) => r.status !== "closed" && r.status !== "failed");
+
+      // Pre-fetch one vault config per distinct collateral mint (fail-closed to
+      // null), so the live HF/LTV band can be computed WITHOUT a second live read.
+      const distinctMints = Array.from(
+        new Set(rows.map((r) => r.collateralMint).filter((m): m is string => !!m)),
+      );
+      const cfgByMint = new Map<string, Awaited<ReturnType<typeof borrowRoute.getVaultConfig>>>();
+      await Promise.all(
+        distinctMints.map(async (m) => {
+          try {
+            cfgByMint.set(m, await borrowRoute.getVaultConfig(m));
+          } catch {
+            cfgByMint.set(m, null);
+          }
+        }),
+      );
+
       const positions = await Promise.all(
         rows.map(async (r) => {
           let liveHealth: Awaited<ReturnType<typeof borrowRoute.readLivePositionHealth>> = null;
           const posIdNum = r.venuePositionId != null ? Number(r.venuePositionId) : NaN;
-          if (Number.isFinite(posIdNum) && posIdNum > 0 && r.collateralMint) {
+          if (Number.isInteger(posIdNum) && posIdNum > 0 && r.collateralMint) {
             try {
               liveHealth = await borrowRoute.readLivePositionHealth(r.collateralMint, posIdNum);
             } catch {
               // fail SOFT to the stored snapshot; never infer a close from a read miss.
             }
           }
+          const vault = r.collateralMint ? (cfgByMint.get(r.collateralMint) ?? null) : null;
+          const health = computePerBotPositionHealth({
+            borrowPositionId: r.id,
+            venuePositionId: Number.isInteger(posIdNum) && posIdNum > 0 ? posIdNum : null,
+            collateralAssetKey: r.collateralAssetKey ?? null,
+            collateralMint: r.collateralMint ?? null,
+            live: liveHealth,
+            vault,
+          });
           return {
             id: r.id,
             status: r.status,
@@ -9582,9 +9617,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             liveHealth,
             healthIsLive: liveHealth != null,
             healthAsOf: r.healthAsOf ?? null,
+            health,
           };
         }),
       );
+
+      // Headline = the WORST per-bot position (the always-on monitoring read the
+      // Carry-Trade Advisor leans on). Fail-closed: any unreadable position ⇒
+      // headline unavailable + actionBlocked.
+      const healthSummary = summarizeBotBorrowHealth(positions.map((p) => p.health));
 
       // Carry sources: owner-only. One preview per ACCOUNT borrow position whose
       // collateral is allowlisted (GENERIC — every lending market, kept in sync via
@@ -9637,9 +9678,132 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
 
-      res.json({ eligible, applicable: true, positions, carrySources });
+      res.json({ eligible, applicable: true, positions, carrySources, healthSummary });
     } catch (error: any) {
       console.error("[Vault] per-bot borrow positions read error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // GET the Carry-Trade Advisor recommendation for ONE per-bot (Flash) borrow
+  // position set. LAZY (no poller): the client refetches on bot open/close + when
+  // the Equity tab opens. Pure-decision: assembles (1) the live per-bot HEALTH
+  // summary (the authoritative safety gate — health ALWAYS overrides carry), (2)
+  // the debt-weighted borrow APR + total debt across the bot's OPEN positions, and
+  // (3) the MEASURED-APY ranking of every enabled vault yield destination, then
+  // delegates to the pure `decideCarryTrade`. The recommendation carries NO
+  // executable amount — park/repay are separate, all-in/all-out endpoints that
+  // compute their own amounts on-chain. READ-only: never decrypts a key.
+  app.get("/api/vault/borrow/perbot/advisor", requireWallet, async (req, res) => {
+    try {
+      const botId = typeof req.query.botId === "string" ? req.query.botId : "";
+      if (!botId) return res.status(400).json({ error: "botId required" });
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+
+      const eligible = isBorrowOwnerWallet(req.walletAddress!);
+
+      // Authz: bot ∈ this wallet (404 otherwise) + Flash/independent_trader only.
+      const botResolved = await resolveVaultScope(req.walletAddress!, wallet, botId);
+      if (!botResolved.ok) return res.status(botResolved.status).json({ error: botResolved.error });
+      const botScope = botResolved.scope;
+      if (botScope.scope !== "bot" || !botScope.agentPublicKey) {
+        return res.json({ eligible, applicable: false, recommendation: null });
+      }
+      const tradingBotId = botScope.tradingBotId!;
+
+      const borrowRoute = new JupiterLendBorrowRoute();
+      const rows = (await storage.getBorrowPositions(req.walletAddress!, tradingBotId))
+        .filter((r) => r.status !== "closed" && r.status !== "failed");
+
+      // One vault config per distinct collateral mint (fail-closed to null). The
+      // config carries the per-market borrow APR (a FRACTION) the advisor weights.
+      const distinctMints = Array.from(
+        new Set(rows.map((r) => r.collateralMint).filter((m): m is string => !!m)),
+      );
+      const cfgByMint = new Map<string, Awaited<ReturnType<typeof borrowRoute.getVaultConfig>>>();
+      await Promise.all(
+        distinctMints.map(async (m) => {
+          try {
+            cfgByMint.set(m, await borrowRoute.getVaultConfig(m));
+          } catch {
+            cfgByMint.set(m, null);
+          }
+        }),
+      );
+
+      // Per-position health (reuses the live read; never infers a close from a miss)
+      // + accumulate total debt and a debt-weighted borrow APR. Fail-closed: if ANY
+      // debt-bearing position has an unreadable config/APR, the weighted APR is null
+      // (the decision engine then returns `unavailable` unless health demands repay).
+      let totalDebtUsd = 0;
+      let weightedAprNumer = 0; // Σ debtUsd_i * borrowApr_i
+      let aprReadable = true;
+      const positionHealths = await Promise.all(
+        rows.map(async (r) => {
+          let liveHealth: Awaited<ReturnType<typeof borrowRoute.readLivePositionHealth>> = null;
+          const posIdNum = r.venuePositionId != null ? Number(r.venuePositionId) : NaN;
+          if (Number.isInteger(posIdNum) && posIdNum > 0 && r.collateralMint) {
+            try {
+              liveHealth = await borrowRoute.readLivePositionHealth(r.collateralMint, posIdNum);
+            } catch {
+              // fail SOFT to the stored snapshot; never infer a close from a read miss.
+            }
+          }
+          const vault = r.collateralMint ? (cfgByMint.get(r.collateralMint) ?? null) : null;
+          const health = computePerBotPositionHealth({
+            borrowPositionId: r.id,
+            venuePositionId: Number.isInteger(posIdNum) && posIdNum > 0 ? posIdNum : null,
+            collateralAssetKey: r.collateralAssetKey ?? null,
+            collateralMint: r.collateralMint ?? null,
+            live: liveHealth,
+            vault,
+          });
+          const debtUsd = health.debtUsd;
+          if (typeof debtUsd === "number" && Number.isFinite(debtUsd) && debtUsd > 0) {
+            totalDebtUsd += debtUsd;
+            const apr = vault?.borrowApr;
+            if (typeof apr === "number" && Number.isFinite(apr) && apr >= 0) {
+              weightedAprNumer += debtUsd * apr;
+            } else {
+              aprReadable = false; // a debt-bearing leg with no readable APR -> fail closed.
+            }
+          }
+          return health;
+        }),
+      );
+
+      const healthSummary = summarizeBotBorrowHealth(positionHealths);
+      const borrowApr =
+        aprReadable && totalDebtUsd > 0 ? weightedAprNumer / totalDebtUsd : null;
+
+      // Rank every enabled yield destination by MEASURED APY (never the apyLabel).
+      const { ranked, excluded } = rankMeasuredYieldDestinations(
+        getYieldTableCached(),
+        getEnabledYieldAssets(),
+      );
+
+      const recommendation = decideCarryTrade({
+        rankedYields: ranked,
+        borrowApr,
+        healthSummary,
+        debtUsd: totalDebtUsd,
+      });
+
+      res.json({
+        eligible,
+        applicable: true,
+        recommendation,
+        rankedYields: ranked,
+        excludedYields: excluded,
+        healthSummary,
+        debtUsd: totalDebtUsd,
+        borrowAprPct: borrowApr != null ? borrowApr * 100 : null,
+        generatedAt: Date.now(),
+      });
+    } catch (error: any) {
+      console.error("[Vault] per-bot carry advisor read error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
     }
   });

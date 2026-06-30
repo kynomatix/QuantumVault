@@ -75,6 +75,28 @@ export const BORROW_RISK_POLICY = {
     /** Share of positive net carry taken as the platform fee (basis points). */
     carryProfitShareBps: 1000,
   },
+  /**
+   * CARRY-TRADE ADVISOR (P2) thresholds. The advisor is RECOMMEND-ONLY (it never
+   * moves money), but it must apply the same conservative discipline: the spread
+   * it acts on is GROSS + floating, never risk-free. One source of truth here so
+   * the recommendation and any future "Auto" policy can never disagree.
+   */
+  carryAdvisor: {
+    /**
+     * Flat haircut (in PERCENT, APY terms) subtracted from the gross spread
+     * (best vault APY − borrow APR) before deciding. Covers swap/exit fees, rate
+     * staleness, and the yield leg's own depeg/NAV/exit risk that rides ON TOP of
+     * collateral liquidation risk. Conservative launch default; a policy change.
+     */
+    spreadHaircutPct: 1.0,
+    /**
+     * Minimum NET spread (gross − haircut, in PERCENT) required before the advisor
+     * recommends parking borrowed USDC into a vault. Below this (but still
+     * positive) the recommendation is HOLD — the thin edge does not justify the
+     * round-trip + risk. At/below zero net it recommends repaying the loan.
+     */
+    minParkNetSpreadPct: 1.0,
+  },
 } as const;
 
 /**
