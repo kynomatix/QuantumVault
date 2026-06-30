@@ -1,5 +1,5 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
-import { useState, useEffect, type ReactNode, type ElementType } from 'react';
+import { useState, useEffect, useRef, type ReactNode, type ElementType } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import bs58 from 'bs58';
 import { useToast } from '@/hooks/use-toast';
@@ -60,6 +60,7 @@ import {
   AlertTriangle,
   Vault,
   ChevronDown,
+  Scale,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -84,6 +85,135 @@ function formatPrice(price: number | undefined): string {
   if (price < 1) return price.toFixed(4);
   if (price < 10) return price.toFixed(3);
   return price.toFixed(2);
+}
+
+// ---- Carry Trade Advisor (per-bot borrow, Flash only) ----------------------
+// Read-only view over GET /api/vault/borrow/perbot/advisor. RECOMMEND-ONLY:
+// the advisor never returns an executable amount; this card surfaces the single
+// recommendation + plain-language reasoning. It renders only when the bot has an
+// open per-bot borrow (gated by the caller on borrowDebtUsdc > 0).
+type CarryAdvisorAction = 'park' | 'repay' | 'hold' | 'unavailable';
+
+interface CarryAdvisorRecommendation {
+  action: CarryAdvisorAction;
+  bestAsset: { assetKey: string; displayName: string; apyPct: number } | null;
+  grossSpreadPct: number | null;
+  haircutPct: number;
+  netSpreadPct: number | null;
+  reason: string;
+  message: string;
+  blockedBy: 'health' | 'borrow_apr' | null;
+}
+
+interface CarryAdvisorResponse {
+  eligible?: boolean;
+  applicable: boolean;
+  recommendation: CarryAdvisorRecommendation | null;
+  healthSummary?: { headline?: { band?: string; actionBlocked?: boolean } };
+  debtUsd?: number;
+  borrowAprPct?: number | null;
+}
+
+const CARRY_ACTION_STYLE: Record<
+  CarryAdvisorAction,
+  { ring: string; bg: string; text: string; Icon: ElementType; label: string }
+> = {
+  park: { ring: 'border-emerald-500/30', bg: 'bg-emerald-500/5', text: 'text-emerald-500', Icon: TrendingUp, label: 'Park for Yield' },
+  repay: { ring: 'border-orange-500/30', bg: 'bg-orange-500/5', text: 'text-orange-500', Icon: ArrowDown, label: 'Repay Loan' },
+  hold: { ring: 'border-blue-500/30', bg: 'bg-blue-500/5', text: 'text-blue-500', Icon: Info, label: 'Hold' },
+  unavailable: { ring: 'border-border', bg: 'bg-muted/30', text: 'text-muted-foreground', Icon: AlertTriangle, label: 'No Call Yet' },
+};
+
+const CARRY_HEALTH_CHIP: Record<string, { label: string; cls: string }> = {
+  healthy: { label: 'Healthy', cls: 'text-emerald-500' },
+  nudge: { label: 'Watch', cls: 'text-yellow-500' },
+  urgent: { label: 'At Risk', cls: 'text-orange-500' },
+  liquidation: { label: 'Critical', cls: 'text-red-500' },
+};
+
+function CarryAdvisorCard({
+  advisor,
+  loading,
+}: {
+  advisor: CarryAdvisorResponse | null;
+  loading: boolean;
+}) {
+  if (loading && !advisor) {
+    return (
+      <div
+        className="p-4 rounded-xl border bg-muted/30 flex items-center gap-2 text-sm text-muted-foreground"
+        data-testid="card-carry-advisor-loading"
+      >
+        <Loader2 className="w-4 h-4 animate-spin" />
+        Checking the best move for this loan…
+      </div>
+    );
+  }
+
+  const rec = advisor?.recommendation;
+  if (!advisor?.applicable || !rec) return null;
+
+  const style = CARRY_ACTION_STYLE[rec.action];
+  const ActionIcon = style.Icon;
+  const band = advisor.healthSummary?.headline?.band;
+  const healthChip = band && band !== 'unavailable' ? CARRY_HEALTH_CHIP[band] : null;
+  const showSpread = rec.netSpreadPct != null && rec.bestAsset != null;
+
+  return (
+    <div className={`p-4 rounded-xl border ${style.ring} ${style.bg} space-y-3`} data-testid="card-carry-advisor">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Scale className="w-4 h-4 text-muted-foreground" />
+          <h3 className="font-semibold text-sm">Carry Trade Advisor</h3>
+        </div>
+        <Badge variant="outline" className={`gap-1 ${style.text}`} data-testid="badge-carry-action">
+          <ActionIcon className="w-3 h-3" />
+          {style.label}
+        </Badge>
+      </div>
+
+      <p className="text-sm text-muted-foreground" data-testid="text-carry-advisor-message">
+        {rec.message}
+      </p>
+
+      {showSpread && (
+        <div className="grid grid-cols-3 gap-2">
+          <div className="rounded-lg bg-background/40 border px-2.5 py-2">
+            <p className="text-[11px] text-muted-foreground">Best Vault</p>
+            <p className="text-sm font-semibold" data-testid="text-carry-best-apy">
+              {rec.bestAsset!.apyPct.toFixed(1)}%
+            </p>
+            <p className="text-[11px] text-muted-foreground truncate" title={rec.bestAsset!.displayName}>
+              {rec.bestAsset!.displayName}
+            </p>
+          </div>
+          <div className="rounded-lg bg-background/40 border px-2.5 py-2">
+            <p className="text-[11px] text-muted-foreground">Borrow Rate</p>
+            <p className="text-sm font-semibold" data-testid="text-carry-borrow-apr">
+              {advisor.borrowAprPct != null ? `${advisor.borrowAprPct.toFixed(1)}%` : '--'}
+            </p>
+          </div>
+          <div className="rounded-lg bg-background/40 border px-2.5 py-2">
+            <p className="text-[11px] text-muted-foreground">Net Edge</p>
+            <p
+              className={`text-sm font-semibold ${rec.netSpreadPct! > 0 ? 'text-emerald-500' : 'text-orange-500'}`}
+              data-testid="text-carry-net-edge"
+            >
+              {rec.netSpreadPct! >= 0 ? '+' : ''}{rec.netSpreadPct!.toFixed(1)}%
+            </p>
+            <p className="text-[11px] text-muted-foreground">after costs</p>
+          </div>
+        </div>
+      )}
+
+      {healthChip && (
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground" data-testid="text-carry-loan-health">
+          <span>Loan health:</span>
+          <span className={`font-medium ${healthChip.cls}`}>{healthChip.label}</span>
+        </div>
+      )}
+    </div>
+  );
 }
 
 interface TradingBot {
@@ -318,6 +448,13 @@ export function BotManagementDrawer({
   // DISPLAYED Bot Balance / PnL only (borrowed USDC sits in the bot wallet and would
   // otherwise count as equity). Never folded into sizing/margin math. 0 when no borrow.
   const [borrowDebtUsdc, setBorrowDebtUsdc] = useState<number>(0);
+  // Carry Trade Advisor (Flash only) — lazy read; only fetched when this bot has
+  // an open per-bot borrow and the Equity tab is in view (NO poller, by design).
+  const [carryAdvisor, setCarryAdvisor] = useState<CarryAdvisorResponse | null>(null);
+  const [carryAdvisorLoading, setCarryAdvisorLoading] = useState(false);
+  // Monotonic request id: the drawer is a single reused instance, so a slow
+  // response for a previous bot/wallet must never overwrite the current one.
+  const carryAdvisorReqRef = useRef(0);
   const [mainAccountBalance, setMainAccountBalance] = useState<number>(0);
   const [exchangeBalance, setExchangeBalance] = useState<number>(0);
   const [exchangeFreeCollateral, setExchangeFreeCollateral] = useState<number>(0);
@@ -547,6 +684,37 @@ export function BotManagementDrawer({
     }
   };
 
+  // Carry Trade Advisor — lazy read (no poller). Returns applicable:false for
+  // non-Flash bots; we only call it when this bot has an open per-bot borrow.
+  const fetchCarryAdvisor = async () => {
+    if (!bot) return;
+    // Claim this request id and drop any prior advisor data immediately so a
+    // bot/wallet switch never flashes the previous bot's recommendation.
+    const reqId = ++carryAdvisorReqRef.current;
+    setCarryAdvisor(null);
+    setCarryAdvisorLoading(true);
+    try {
+      const res = await fetchWithTimeout(
+        `/api/vault/borrow/perbot/advisor?botId=${bot.id}&wallet=${walletAddress}&_=${Date.now()}`,
+        { credentials: 'include', cache: 'no-store' },
+      );
+      // Superseded by a newer request (different bot/wallet) — discard.
+      if (reqId !== carryAdvisorReqRef.current) return;
+      if (res?.ok) {
+        const data = await safeResponseJson(res);
+        if (reqId !== carryAdvisorReqRef.current) return;
+        setCarryAdvisor(data);
+      } else {
+        setCarryAdvisor(null);
+      }
+    } catch (error) {
+      console.error('Failed to fetch carry advisor:', error);
+      if (reqId === carryAdvisorReqRef.current) setCarryAdvisor(null);
+    } finally {
+      if (reqId === carryAdvisorReqRef.current) setCarryAdvisorLoading(false);
+    }
+  };
+
   // Legacy individual fetches kept for backwards compatibility and specific use cases
   const fetchUserWebhookUrl = async () => {
     setWebhookUrlLoading(true);
@@ -655,6 +823,20 @@ export function BotManagementDrawer({
       fetchEquityEvents();
     }
   }, [isOpen, bot?.id, activeTab]);
+
+  // Carry Trade Advisor: lazy fetch only when the Equity tab is in view AND this
+  // bot carries an open per-bot borrow (borrowDebtUsdc > 0, Flash-only). Re-runs
+  // when the debt changes (e.g. after a park/close elsewhere). No background poll.
+  useEffect(() => {
+    if (isOpen && bot && activeTab === 'equity' && borrowDebtUsdc > 0) {
+      fetchCarryAdvisor();
+    } else if (borrowDebtUsdc <= 0) {
+      // No open borrow → invalidate any in-flight fetch and clear stale data.
+      carryAdvisorReqRef.current++;
+      if (carryAdvisor) setCarryAdvisor(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, bot?.id, walletAddress, activeTab, borrowDebtUsdc]);
 
   const [addEquityStatus, setAddEquityStatus] = useState('');
 
@@ -2119,6 +2301,10 @@ export function BotManagementDrawer({
                 </div>
               </div>
             </div>
+
+            {borrowDebtUsdc > 0 && (
+              <CarryAdvisorCard advisor={carryAdvisor} loading={carryAdvisorLoading} />
+            )}
 
             <div className="p-4 rounded-xl border bg-muted/30 space-y-3">
               <div className="flex items-center gap-2">
