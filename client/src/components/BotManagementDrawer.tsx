@@ -33,6 +33,7 @@ import { Input } from '@/components/ui/input';
 import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import VaultIdleFunds from '@/components/VaultIdleFunds';
+import PerbotBorrowControls from '@/components/PerbotBorrowControls';
 import {
   Bot,
   Copy,
@@ -2305,6 +2306,13 @@ export function BotManagementDrawer({
             {borrowDebtUsdc > 0 && (
               <CarryAdvisorCard advisor={carryAdvisor} loading={carryAdvisorLoading} />
             )}
+
+            <PerbotBorrowControls
+              bot={bot}
+              walletAddress={walletAddress}
+              active={activeTab === 'equity'}
+              onChanged={fetchBotOverview}
+            />
 
             <div className="p-4 rounded-xl border bg-muted/30 space-y-3">
               <div className="flex items-center gap-2">
