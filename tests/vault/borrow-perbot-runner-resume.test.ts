@@ -675,6 +675,110 @@ describe("runPerbotCarveOpen — resume after a landed open does NOT re-open", (
   });
 });
 
+describe("runPerbotCarveOpen — carve_failed recovery uses metadata.carveRaw capped by held (NOT a stale remaining-collateral reading)", () => {
+  // REGRESSION (the real stuck-loop bug, 2026-06-30): the AMOUNT-EXACT withdraw
+  // un-pledges exactly the requested carve into the ACCOUNT agent wallet, but the
+  // orchestrator was sizing the account->bot transfer from the withdraw's
+  // observedCollateralRaw — which is the POST-withdraw REMAINING account-position
+  // collateral, NOT the withdrawn delta. So a $5 carve persisted
+  // carvedRawObserved = the whole remaining stake (0.3065 INF) and the transfer
+  // leg then tried to move 0.3065 INF while the wallet only held the ~0.0935 INF
+  // that was actually un-pledged -> permanent carve_failed loop.
+  //
+  // The fix: re-derive the transfer as min(metadata.carveRaw, strict live wallet
+  // balance) and persist the TRUE carved amount BEFORE the broadcast. These tests
+  // pin both directions of the min().
+  const openSucceeds = () => {
+    executeBorrowOpenMock.mockImplementation(async (args: any) => {
+      if (args.onPositionCreated) await args.onPositionCreated("bot-pos-new");
+      return { success: true, borrowPositionId: "bot-pos-new", observedDebtRaw: "5000000", signature: "sig-open" };
+    });
+  };
+
+  const seedCarveFailedOp = (staleObservedRaw: string) => {
+    // The REAL stuck op: the withdraw landed, then carve_failed at the transfer
+    // leg with a stale carvedRawObserved (the remaining-collateral value).
+    opStore.set("op-cf", {
+      id: "op-cf",
+      clientRequestId: "proof-1:carve",
+      operationType: "perbot_carve_open",
+      status: "processing",
+      step: "carve_failed",
+      txSignatures: [],
+      metadata: {
+        tradingBotId: TRADING_BOT_ID,
+        collateralMint: INF_MINT,
+        accountBorrowPositionId: ACCT_POS_ID,
+        accountVenuePositionId: ACCT_VENUE_ID,
+        carveRaw: "93503712", // the TRUE intended carve (immutable original)
+        requestedDebtRaw: "5000000",
+        targetLtv: 0.5,
+        accountPostLtv: 0.29,
+        carvedRawObserved: staleObservedRaw, // <- the bad value that wedged the loop
+      },
+    });
+    // Resume sends the SAME carveRaw it was created with (validateOpIdentity).
+    state.botPositions = [];
+  };
+
+  it("transfers the intended carve (held >= intended) and ignores the stale remaining-collateral value", async () => {
+    seedCarveFailedOp("306496280"); // stale = whole remaining 0.3065 INF stake
+    // The account wallet actually holds only the ~0.0935 INF that was un-pledged
+    // (plus 2 dust units). INF strict-balance reads return botCollBalance.
+    state.botCollBalance = 93_503_714n;
+    openSucceeds();
+
+    const res = await runPerbotCarveOpen({ ...carveParams(), carveRaw: 93_503_712n });
+
+    expect(res.success).toBe(true);
+    // The transfer moved min(intended 93503712, held 93503714) = 93503712 —
+    // NEVER the stale 306496280 that caused the "holds X but Y required" loop.
+    expect(transferExactMock).toHaveBeenCalledTimes(1);
+    const xfer = transferExactMock.mock.calls[0][0];
+    expect(xfer.agentPublicKey).toBe("AcctPubkey11111111111111111111111111111111");
+    expect(xfer.toWalletAddress).toBe("BotPubkey111111111111111111111111111111111");
+    expect(xfer.amountRaw).toBe(93_503_712n);
+    // The corrected amount was persisted BEFORE the broadcast.
+    expect(opStore.get("op-cf").metadata.carvedRawObserved).toBe("93503712");
+    // The open leg supplies exactly the corrected carve.
+    expect(executeBorrowOpenMock).toHaveBeenCalledTimes(1);
+    expect(executeBorrowOpenMock.mock.calls[0][0].collateralRaw).toBe(93_503_712n);
+    expect(res.carvedRaw).toBe("93503712");
+  });
+
+  it("caps the transfer at the live held balance when it is LESS than the intended carve (never moves more than is in the wallet)", async () => {
+    seedCarveFailedOp("306496280");
+    state.botCollBalance = 50_000_000n; // wallet holds LESS than the intended 93503712
+    openSucceeds();
+
+    const res = await runPerbotCarveOpen({ ...carveParams(), carveRaw: 93_503_712n });
+
+    expect(res.success).toBe(true);
+    expect(transferExactMock).toHaveBeenCalledTimes(1);
+    expect(transferExactMock.mock.calls[0][0].amountRaw).toBe(50_000_000n); // capped at held
+    expect(opStore.get("op-cf").metadata.carvedRawObserved).toBe("50000000");
+    expect(executeBorrowOpenMock.mock.calls[0][0].collateralRaw).toBe(50_000_000n);
+  });
+
+  it("FAILS CLOSED (no transfer, no open) when the carved collateral cannot be read", async () => {
+    seedCarveFailedOp("306496280");
+    // Force the strict INF balance read to throw (unreadable) -> must fail closed,
+    // never fall back to the stale value or a fail-open read.
+    const { getAgentTokenBalanceRawStrict } = await import("../../server/agent-wallet");
+    (getAgentTokenBalanceRawStrict as any).mockImplementationOnce(async () => {
+      throw new Error("rpc unreadable");
+    });
+    openSucceeds();
+
+    const res = await runPerbotCarveOpen({ ...carveParams(), carveRaw: 93_503_712n });
+
+    expect(res.success).toBe(false);
+    expect(res.needsAttention).toBe(true);
+    expect(transferExactMock).not.toHaveBeenCalled();
+    expect(executeBorrowOpenMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("runPerbotCarveOpen — refuses to resume a same-reqId op under changed inputs", () => {
   it("rejects (no mutation) when the existing op was started with a different carve amount", async () => {
     opStore.set("op-carve-x", {

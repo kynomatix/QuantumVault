@@ -549,11 +549,15 @@ export async function runPerbotCarveOpen(params: PerbotCarveOpenParams): Promise
           // false-negative: it actually landed -> fall through and record.
         }
         // The realised withdrawn amount is the EXACT carve (the withdraw is
-        // amount-exact). Prefer the executor's observed delta when present.
-        carvedRaw = w.observedCollateralRaw ? BigInt(w.observedCollateralRaw) : params.carveRaw;
+        // amount-exact). Do NOT use w.observedCollateralRaw — that is the
+        // post-withdraw REMAINING position collateral (the leftover stake), NOT the
+        // withdrawn delta. Trusting it recorded the whole remaining stake as the carve
+        // and the transfer leg then tried to move far more than was un-pledged.
+        carvedRaw = params.carveRaw;
       } else {
-        // Recovered on resume; the withdraw already landed.
-        carvedRaw = BigInt(readMeta(op).carvedRawObserved || params.carveRaw.toString());
+        // Recovered on resume; the withdraw already landed at the ORIGINAL amount-exact
+        // carve (persisted at op creation as metadata.carveRaw), not a re-measured balance.
+        carvedRaw = BigInt(readMeta(op).carveRaw || params.carveRaw.toString());
       }
 
       // POST-WITHDRAW on-chain assertion: the account must now sit at <= target.
@@ -592,7 +596,28 @@ export async function runPerbotCarveOpen(params: PerbotCarveOpenParams): Promise
         }
       }
       if (!recovered) {
-        await storage.updateBorrowOperation(op.id, { step: "carving" });
+        // AMOUNT-EXACT carve: the withdraw un-pledged exactly the ORIGINAL requested
+        // carve (persisted at op creation as metadata.carveRaw, immutable) into the
+        // account agent wallet. Re-derive the transfer amount here from that original
+        // value CAPPED at the live strict wallet balance — never from a re-measured
+        // position "remaining" reading, and never from params.carveRaw (a resume may
+        // re-size it). Capping at the live balance means a stuck op can never try to
+        // move more collateral than is actually in the wallet, and we never sweep
+        // unrelated funds (cap is the requested amount, floor is what is held).
+        const intendedCarveRaw = BigInt(readMeta(op).carveRaw || params.carveRaw.toString());
+        let heldRaw: bigint;
+        try {
+          heldRaw = await strictBalanceRaw(params.accountPublicKey, collateralMint);
+        } catch (e: any) {
+          return failClosed(op, "carve_failed", `Could not read the carved collateral in the account wallet (${e?.message || e}). Funds are safe in the account wallet — retry in a moment.`, true);
+        }
+        carvedRaw = heldRaw < intendedCarveRaw ? heldRaw : intendedCarveRaw;
+        if (carvedRaw <= 0n) {
+          return failClosed(op, "carve_failed", "No carved collateral is in the account wallet to move to the bot. Funds are safe in the account position — retry in a moment.", true);
+        }
+        // Persist the TRUE carved amount BEFORE the broadcast so a crash mid-transfer
+        // resumes with the right number (the open leg supplies exactly this).
+        await storage.updateBorrowOperation(op.id, { step: "carving", mergeMetadata: { carvedRawObserved: carvedRaw.toString() } });
         const xfer = await transferTokenToWalletExact({
           agentPublicKey: params.accountPublicKey,
           agentSecretKey: params.accountSecretKey,
