@@ -78,6 +78,20 @@ export interface YieldAsset {
    * feed (project + symbol + chain) before pasting — never guess.
    */
   defiLlamaPoolId?: string;
+  /**
+   * Switchboard On-Demand price-oracle feed (Solana mainnet pubkey) that reports
+   * this asset's EXACT USDC NAV from on-chain account parsing — the protocol's OWN
+   * authoritative price, not a swap-quote proxy. When set, the self-measured yield
+   * oracle samples price from THIS feed (an exact, clean single-source accrual
+   * series, stdev 0) instead of a market swap quote, so a real realized APY can be
+   * measured over a SHORT trailing window. Takes precedence over the `valuation`
+   * sampling method; `valuation` still governs how money actually moves/is valued.
+   * Only meaningful for assets DeFiLlama does NOT cover (a `defiLlamaPoolId` wins).
+   * VERIFY the pubkey against the protocol's own developer docs before pasting —
+   * never guess, and prefer the single-source feed (the multi-source aggregate can
+   * be manipulable).
+   */
+  navOracleFeed?: string;
 }
 
 /**
@@ -138,6 +152,16 @@ const YIELD_ASSETS: YieldAsset[] = [
     riskNote:
       "A yield-bearing stablecoin backed by a pool of stablecoins. Trades near $1; value accrues from the pool's yield.",
     enabled: true,
+    // DeFiLlama does not carry a usable USD* pool (only a junk $46K row with a
+    // ~0.3% APY), so USD* uses the self-measured path. Perena's "Build with USD*"
+    // developer docs publish official on-chain USD* price oracles; this is the
+    // SINGLE-SOURCE Switchboard On-Demand feed (from on-chain account parsing = the
+    // exact NAV). Verified live via Switchboard Crossbar /simulate (returns the
+    // exact NAV ~$1.0757 with stdev 0). The docs also list a triple-source aggregate
+    // they warn can be manipulated — deliberately NOT used here. Sampling the exact
+    // NAV (instead of the noisy market swap quote) lets the oracle measure a real
+    // realized APY over a short window. See switchboard-oracle.ts.
+    navOracleFeed: "BmxVZFzucJEgqjcWrp4T5TE62NvgHQrWtxHiZUeNjpBB",
   },
   {
     key: "jupusd",

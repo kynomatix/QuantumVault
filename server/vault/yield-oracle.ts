@@ -17,9 +17,12 @@
  *      regresses to an estimate during a transient outage.
  *   3. Self-measured trailing series (FALLBACK + sole source for assets DeFiLlama
  *      does not cover, e.g. Perena USD*): the oracle samples the asset's own on-chain
- *      USDC price over time and annualizes the realized movement. redemption_rate
- *      assets (clean monotonic accrual) need only a SHORT window (~12h); market_quote
- *      assets (spread/impact noise) need a LONG window (>=14d) before a number shows.
+ *      USDC price over time and annualizes the realized movement. The price source is
+ *      a published single-source NAV oracle when the asset carries a `navOracleFeed`
+ *      (the protocol's EXACT NAV, e.g. Perena USD* via Switchboard — clean series, so
+ *      a ~3d window), else the money-path valuation: a redemption_rate (clean accrual)
+ *      needs ~12h, a market_quote (spread/impact noise) needs >=14d before a number
+ *      shows. The APY is annualized over the full retained span (oldest→newest).
  *
  * MONEY-SAFETY CONTRACT (display-only, but the same discipline):
  *   - Measured numbers only. DeFiLlama reports realized pool APY; the self-measured
@@ -51,6 +54,7 @@
 import { getEnabledYieldAssets, type YieldAsset } from "./yield-assets";
 import { getYieldRoute, VAULT_MAX_PRICE_IMPACT } from "./yield-routes";
 import { fetchDefiLlamaApy, type LlamaApy } from "./defillama-apy";
+import { fetchSwitchboardFeedPrice } from "./switchboard-oracle";
 import { getBestQuote } from "../swap/index.js";
 import { USDC_MINT } from "../agent-wallet";
 import { storage } from "../storage";
@@ -94,6 +98,15 @@ const REDEMPTION_REFERENCE_WHOLE_TOKENS = 1_000_000;
 const MIN_WINDOW_MS_REDEMPTION = 12 * 60 * 60 * 1000; // 12h
 /** Min trailing window for a noisy market-quote series before a number is shown. */
 const MIN_WINDOW_MS_MARKET = 14 * 24 * 60 * 60 * 1000; // 14d
+/**
+ * Min trailing window for an asset priced by a published single-source NAV oracle
+ * (navOracleFeed). The feed reports the exact NAV (stdev 0), so the series is clean
+ * like a redemption rate, but the actual APY is annualized over the FULL retained
+ * span (oldest→newest, up to RETENTION_MS), so this is only the gate before any
+ * number is shown. 3 days smooths any intraday strategy-NAV wobble while staying
+ * far more responsive than the 14d market-quote gate.
+ */
+const MIN_WINDOW_MS_NAV_ORACLE = 3 * 24 * 60 * 60 * 1000; // 3d
 /** If even the freshest sample is older than this, the series is stale -> unavailable. */
 const STALE_MS = 48 * 60 * 60 * 1000; // 48h
 /** Retention: prune samples older than this on each build. */
@@ -129,6 +142,15 @@ const accruing = (asOf: number | null = null): YieldApyEntry => ({
  */
 async function samplePrice(asset: YieldAsset): Promise<number | null> {
   try {
+    // Published single-source NAV oracle (exact protocol NAV) takes precedence over
+    // the valuation-based sampling. This is the asset's OWN authoritative USDC price
+    // (e.g. Perena USD* via Switchboard), not a swap-quote proxy, so the series is
+    // clean enough to annualize over a short window. fetchSwitchboardFeedPrice fails
+    // soft (null) on any error / implausible value, so a bad read persists nothing.
+    if (asset.navOracleFeed) {
+      return await fetchSwitchboardFeedPrice(asset.navOracleFeed);
+    }
+
     if (asset.valuation === "market_quote") {
       // Fixed-notional buy quote: $1,000 USDC -> token. price = 1000 / tokensOut.
       const q = await getBestQuote({
@@ -252,8 +274,14 @@ async function computeEntry(
   }
 
   // --- Self-measured path (assets DeFiLlama does not cover, e.g. Perena USD*). ---
-  const minWindowMs =
-    asset.valuation === "market_quote" ? MIN_WINDOW_MS_MARKET : MIN_WINDOW_MS_REDEMPTION;
+  // A published single-source NAV oracle yields a clean series (exact NAV), so it
+  // uses the short NAV-oracle gate regardless of the asset's money-path `valuation`.
+  // Otherwise: a clean redemption rate needs only ~12h; a noisy market quote ~14d.
+  const minWindowMs = asset.navOracleFeed
+    ? MIN_WINDOW_MS_NAV_ORACLE
+    : asset.valuation === "market_quote"
+      ? MIN_WINDOW_MS_MARKET
+      : MIN_WINDOW_MS_REDEMPTION;
 
   // Persist a fresh sample (best-effort) so the series keeps growing on each build.
   const now = Date.now();
