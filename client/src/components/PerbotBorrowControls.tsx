@@ -170,7 +170,7 @@ export default function PerbotBorrowControls({
   advisor,
   advisorLoading,
 }: {
-  bot: { id: string } | null;
+  bot: { id: string; autoParkIdle?: boolean } | null;
   walletAddress: string;
   active: boolean;
   onChanged: () => void;
@@ -192,6 +192,22 @@ export default function PerbotBorrowControls({
   // The drawer is a single reused instance: a slow response for a previous
   // bot/wallet must never overwrite the current one.
   const reqRef = useRef(0);
+
+  // Durable loan INTENT (Carry vs Repay). Carry = keep the loan and earn yield on the
+  // borrowed cash → persisted as autoParkIdle=true (which also makes future borrows
+  // auto-join the park). Repay = plan to clear it → autoParkIdle=false. Optimistic;
+  // reverts on failure; re-syncs to the server value whenever the parent refetches the
+  // bot. Intent only — selecting a plan NEVER moves money.
+  const [selectedIntent, setSelectedIntent] = useState<"carry" | "repay">(
+    bot?.autoParkIdle ? "carry" : "repay",
+  );
+  const [savingIntent, setSavingIntent] = useState(false);
+  useEffect(() => {
+    setSelectedIntent(bot?.autoParkIdle ? "carry" : "repay");
+    // A bot/wallet switch must also clear any in-flight saving state so the new bot
+    // never inherits a stuck spinner (a slow PATCH for the old bot is guarded below).
+    setSavingIntent(false);
+  }, [bot?.id, bot?.autoParkIdle]);
 
   // Idempotency keys. OPEN has no position id yet, so it's keyed by bot — but it is
   // CLEARED the moment an open position becomes visible (see fetchPositions) so a
@@ -482,6 +498,41 @@ export default function PerbotBorrowControls({
     }
   };
 
+  // Persist the durable loan PLAN (Carry vs Repay). Optimistic with revert-on-fail.
+  // Intent only — it never moves money. Selecting Carry turns auto-park ON (borrowed +
+  // future idle cash joins the vault); Repay turns it OFF. The actual repay stays the
+  // dedicated "Repay Loan" button.
+  const handleSelectIntent = async (intent: "carry" | "repay") => {
+    if (!bot || savingIntent || intent === selectedIntent) return;
+    // Capture the request generation: a bot/wallet switch bumps reqRef (via
+    // fetchPositions), so a slow PATCH that resolves AFTER a switch must not revert
+    // or clear state that now belongs to a different bot.
+    const reqAtStart = reqRef.current;
+    const prev = selectedIntent;
+    setSelectedIntent(intent);
+    setSavingIntent(true);
+    try {
+      const res = await fetch(`/api/trading-bots/${bot.id}?wallet=${walletAddress}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+        credentials: "include",
+        body: JSON.stringify({ autoParkIdle: intent === "carry" }),
+      });
+      const d = await safeResponseJson(res);
+      if (!res.ok) throw new Error(d.error || "Could not update the loan plan.");
+      onChanged();
+    } catch (e: any) {
+      if (reqRef.current === reqAtStart) setSelectedIntent(prev);
+      if (isSessionError(e)) {
+        showReconnectToast({ toast, retryAuth, title: "Couldn't update loan plan", retry: () => handleSelectIntent(intent) });
+      } else {
+        toast({ title: "Couldn't update loan plan", description: e.message || "Something went wrong.", variant: "destructive" });
+      }
+    } finally {
+      if (reqRef.current === reqAtStart) setSavingIntent(false);
+    }
+  };
+
   // Owner-gated + Flash-only. Nothing to show otherwise.
   if (!bot || !data || !data.eligible || !data.applicable) return null;
   if (!openPos && !carrySrc) return null;
@@ -519,6 +570,9 @@ export default function PerbotBorrowControls({
   const advisorRec = advisor?.applicable && advisor.recommendation ? advisor.recommendation : null;
   const recCarry = advisorRec != null && (advisorRec.action === "park" || advisorRec.action === "hold");
   const recRepay = advisorRec != null && advisorRec.action === "repay";
+  // Which card the user has CHOSEN as the durable plan (separate from the advisor hint).
+  const carrySelected = selectedIntent === "carry";
+  const repaySelected = selectedIntent === "repay";
   const fmtPct1 = (n: number | null | undefined): string =>
     n == null || !Number.isFinite(n) ? "\u2014" : `${n.toFixed(1)}%`;
   // Net edge: positive stays neutral (green is reserved for the Bot Balance number);
@@ -622,77 +676,127 @@ export default function PerbotBorrowControls({
             )}
           </div>
 
-          {/* TWO action cards (Vault park-card styling). The advisor HIGHLIGHTS one. */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {/* Carry Trade — keep the loan, earn yield. Advisor stats, not prose. */}
-            <div
-              className={`relative rounded-lg border p-3 space-y-2.5 ${recCarry ? "ring-1 ring-primary/40 border-primary/40 bg-primary/5" : "border-border bg-muted/30"}`}
-              data-testid="card-perbot-carry"
-            >
-              {recCarry && (
-                <span className="absolute -top-2 left-3 inline-flex items-center rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground shadow-sm" data-testid="pill-perbot-recommended-carry">
-                  Recommended
-                </span>
+          {/* Loan plan: pick the durable intent. Each card is a selectable button; the
+              advisor still HIGHLIGHTS the recommended one as a separate hint. */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium text-muted-foreground">Loan Plan</p>
+              {savingIntent && (
+                <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" data-testid="spinner-perbot-intent-saving" />
               )}
-              <div className="flex items-center gap-2">
-                <TrendingUp className="w-4 h-4 text-muted-foreground" />
-                <h4 className="text-sm font-semibold">Carry Trade</h4>
-              </div>
-              {advisorLoading && !advisorRec ? (
-                <div className="flex items-center gap-2 text-xs text-muted-foreground py-2" data-testid="text-carry-advisor-loading">
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                  Checking the best move…
-                </div>
-              ) : (
-                <div className="grid grid-cols-3 gap-1.5 text-center">
-                  <div className="p-1.5 rounded-md bg-background/50">
-                    <p className="text-sm font-bold tabular-nums" data-testid="stat-carry-yield">{fmtPct1(advisorRec?.bestAsset?.apyPct ?? null)}</p>
-                    <p className="text-[10px] text-muted-foreground leading-tight">Vault Yield</p>
-                  </div>
-                  <div className="p-1.5 rounded-md bg-background/50">
-                    <p className="text-sm font-bold tabular-nums" data-testid="stat-carry-apr">{fmtPct1(advisor?.borrowAprPct ?? null)}</p>
-                    <p className="text-[10px] text-muted-foreground leading-tight">Borrow APR</p>
-                  </div>
-                  <div className="p-1.5 rounded-md bg-background/50">
-                    <p className={`text-sm font-bold tabular-nums ${netEdgeCls}`} data-testid="stat-carry-net-edge">{netEdgeStr}</p>
-                    <p className="text-[10px] text-muted-foreground leading-tight">Net Edge</p>
-                  </div>
-                </div>
-              )}
-              <p className="text-[11px] text-muted-foreground">
-                Keep the loan and earn yield on the borrowed cash.
-                {advisorRec?.bestAsset ? ` Best vault: ${advisorRec.bestAsset.displayName}.` : ""}
-              </p>
             </div>
-
-            {/* Repay — clear the loan, return collateral. */}
-            <div
-              className={`relative rounded-lg border p-3 space-y-2.5 ${recRepay ? "ring-1 ring-primary/40 border-primary/40 bg-primary/5" : "border-border bg-muted/30"}`}
-              data-testid="card-perbot-repay"
-            >
-              {recRepay && (
-                <span className="absolute -top-2 left-3 inline-flex items-center rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground shadow-sm" data-testid="pill-perbot-recommended-repay">
-                  Recommended
-                </span>
-              )}
-              <div className="flex items-center gap-2">
-                <RotateCcw className="w-4 h-4 text-muted-foreground" />
-                <h4 className="text-sm font-semibold">Repay</h4>
-              </div>
-              <p className="text-[11px] text-muted-foreground">
-                Brings any parked funds back to cash, clears the loan, and returns your {collSym ?? "collateral"} to your account.
-              </p>
-              <Button
-                variant="outline"
-                size="sm"
-                className="w-full h-8 px-3 text-xs border-accent/40 text-accent hover:bg-accent/10"
-                onClick={() => setConfirm("repay")}
-                disabled={busy !== null}
-                data-testid="button-perbot-repay"
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* Carry Trade — keep the loan, earn yield. Advisor stats, not prose. */}
+              <div
+                role="button"
+                tabIndex={0}
+                aria-pressed={carrySelected}
+                onClick={() => handleSelectIntent("carry")}
+                onKeyDown={(e) => {
+                  if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
+                    e.preventDefault();
+                    handleSelectIntent("carry");
+                  }
+                }}
+                className={`relative rounded-lg border p-3 space-y-2.5 cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary ${
+                  carrySelected
+                    ? "ring-2 ring-primary border-primary bg-primary/10"
+                    : "border-border bg-muted/30 hover:border-primary/40"
+                }`}
+                data-testid="button-perbot-select-carry"
               >
-                {busy === "repay" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5 mr-1.5" />}
-                Repay Loan
-              </Button>
+                {recCarry && (
+                  <span className="absolute -top-2 left-3 inline-flex items-center rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground shadow-sm" data-testid="pill-perbot-recommended-carry">
+                    Recommended
+                  </span>
+                )}
+                {carrySelected && (
+                  <span className="absolute -top-2 right-3 inline-flex items-center gap-1 rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground shadow-sm" data-testid="badge-perbot-selected-carry">
+                    <Check className="w-3 h-3" /> Selected
+                  </span>
+                )}
+                <div className="flex items-center gap-2">
+                  <TrendingUp className="w-4 h-4 text-muted-foreground" />
+                  <h4 className="text-sm font-semibold">Carry Trade</h4>
+                </div>
+                {advisorLoading && !advisorRec ? (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground py-2" data-testid="text-carry-advisor-loading">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    Checking the best move…
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-3 gap-1.5 text-center">
+                    <div className="p-1.5 rounded-md bg-background/50">
+                      <p className="text-sm font-bold tabular-nums" data-testid="stat-carry-yield">{fmtPct1(advisorRec?.bestAsset?.apyPct ?? null)}</p>
+                      <p className="text-[10px] text-muted-foreground leading-tight">Vault Yield</p>
+                    </div>
+                    <div className="p-1.5 rounded-md bg-background/50">
+                      <p className="text-sm font-bold tabular-nums" data-testid="stat-carry-apr">{fmtPct1(advisor?.borrowAprPct ?? null)}</p>
+                      <p className="text-[10px] text-muted-foreground leading-tight">Borrow APR</p>
+                    </div>
+                    <div className="p-1.5 rounded-md bg-background/50">
+                      <p className={`text-sm font-bold tabular-nums ${netEdgeCls}`} data-testid="stat-carry-net-edge">{netEdgeStr}</p>
+                      <p className="text-[10px] text-muted-foreground leading-tight">Net Edge</p>
+                    </div>
+                  </div>
+                )}
+                <p className="text-[11px] text-muted-foreground">
+                  Keep the loan and earn yield on the borrowed cash.
+                  {advisorRec?.bestAsset ? ` Best vault: ${advisorRec.bestAsset.displayName}.` : ""}
+                </p>
+              </div>
+
+              {/* Repay — clear the loan, return collateral. */}
+              <div
+                role="button"
+                tabIndex={0}
+                aria-pressed={repaySelected}
+                onClick={() => handleSelectIntent("repay")}
+                onKeyDown={(e) => {
+                  if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
+                    e.preventDefault();
+                    handleSelectIntent("repay");
+                  }
+                }}
+                className={`relative rounded-lg border p-3 space-y-2.5 cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary ${
+                  repaySelected
+                    ? "ring-2 ring-primary border-primary bg-primary/10"
+                    : "border-border bg-muted/30 hover:border-primary/40"
+                }`}
+                data-testid="button-perbot-select-repay"
+              >
+                {recRepay && (
+                  <span className="absolute -top-2 left-3 inline-flex items-center rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground shadow-sm" data-testid="pill-perbot-recommended-repay">
+                    Recommended
+                  </span>
+                )}
+                {repaySelected && (
+                  <span className="absolute -top-2 right-3 inline-flex items-center gap-1 rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground shadow-sm" data-testid="badge-perbot-selected-repay">
+                    <Check className="w-3 h-3" /> Selected
+                  </span>
+                )}
+                <div className="flex items-center gap-2">
+                  <RotateCcw className="w-4 h-4 text-muted-foreground" />
+                  <h4 className="text-sm font-semibold">Repay</h4>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Brings any parked funds back to cash, clears the loan, and returns your {collSym ?? "collateral"} to your account.
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full h-8 px-3 text-xs border-accent/40 text-accent hover:bg-accent/10"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setConfirm("repay");
+                  }}
+                  disabled={busy !== null}
+                  data-testid="button-perbot-repay"
+                >
+                  {busy === "repay" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5 mr-1.5" />}
+                  Repay Loan
+                </Button>
+              </div>
             </div>
           </div>
         </div>

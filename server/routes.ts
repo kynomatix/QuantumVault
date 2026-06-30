@@ -1997,17 +1997,37 @@ const AUTO_REPARK_MIN_USDC = 5;
  * otherwise); reads spare USDC with the STRICT reader and only parks above a floor.
  * Best-effort: on any failure it logs and returns. The deadline was already cleared
  * by the atomic claim, so it simply won't retry until the bot's next full close.
+ *
+ * `opts.authorizePostBorrow` switches on the ONE-TIME post-borrow join path: after a
+ * successful per-bot borrow, freshly-borrowed USDC should join an existing park (or the
+ * bot's chosen destination) instead of sitting idle. That path is AUTHORIZED by the
+ * post-borrow trigger itself — it does NOT require autoParkIdle or a parkDestinationAsset
+ * — but it still only parks when a clear per-bot destination exists (an existing park to
+ * JOIN, an explicit destination, or — if autoParkIdle is on — the account default). It
+ * NEVER falls back to the account default for a bot that neither parks already nor opted
+ * in, so it can't sweep borrowed cash into a vault the user never chose. And when auto-park
+ * is OFF, the join parks ONLY the freshly-borrowed amount (`opts.borrowedUsdc`, plus any
+ * just-migrated USDC) — never the bot's unparked trading capital, which the user opted out
+ * of auto-parking. With auto-park ON it is the usual full bank-sweep the user opted into.
  */
-async function parkBotIdleFundsAutonomously(bot: TradingBot): Promise<void> {
+async function parkBotIdleFundsAutonomously(
+  bot: TradingBot,
+  opts?: { authorizePostBorrow?: boolean; borrowedUsdc?: number },
+): Promise<void> {
+  const postBorrow = opts?.authorizePostBorrow === true;
+  // On a post-borrow join with auto-park OFF, the bounded park moves ONLY this much
+  // (the freshly-borrowed USDC). It is ignored on the auto-park bank-sweep branch.
+  const borrowedUsdc = postBorrow ? Math.max(0, opts?.borrowedUsdc ?? 0) : 0;
   const logPrefix = `[AutoRepark ${bot.id.slice(0, 8)}]`;
 
   // Re-check venue + work-to-do (claimed atomically, but guard anyway). A bot
   // qualifies when it is on Flash AND it either opted into auto-repark OR has a
   // persisted park destination (which may need a migration). Either alone is
   // enough — a destination-only bot still migrates parked funds even with
-  // auto-park off.
+  // auto-park off. The one-time post-borrow join bypasses this gate (it is
+  // authorized by the trigger, with destination resolution below as the guard).
   if (bot.activeProtocol !== 'flash') return;
-  if (!bot.autoParkIdle && !bot.parkDestinationAsset) return;
+  if (!postBorrow && !bot.autoParkIdle && !bot.parkDestinationAsset) return;
 
   const botCtx = getBotSubaccountContext(bot);
   if (!botCtx) {
@@ -2086,10 +2106,16 @@ async function parkBotIdleFundsAutonomously(bot: TradingBot): Promise<void> {
       bot.parkDestinationAsset && getYieldAssetByKey(bot.parkDestinationAsset)
         ? bot.parkDestinationAsset
         : null;
+    // The account default is only an acceptable fallback for the normal repark path or
+    // a post-borrow join on a bot that OPTED IN to auto-park. For a post-borrow join on
+    // a bot that neither parks already (held[0]) nor set an explicit destination nor
+    // opted in, there is no per-bot park intent — fail closed (skip) rather than sweep
+    // borrowed cash into a vault the user never chose.
+    const allowDefaultFallback = !postBorrow || bot.autoParkIdle;
     const destAsset: string | undefined =
-      explicitDest ?? held[0]?.assetKey ?? wallet.vaultDefaultAsset ?? undefined;
+      explicitDest ?? held[0]?.assetKey ?? (allowDefaultFallback ? (wallet.vaultDefaultAsset ?? undefined) : undefined);
     if (!destAsset || !getYieldAssetByKey(destAsset)) {
-      console.log(`${logPrefix} no parked asset and no enabled destination/default — skip`);
+      console.log(`${logPrefix} no parked asset and no enabled destination/default — skip${postBorrow ? ' (post-borrow)' : ''}`);
       return;
     }
 
@@ -2124,8 +2150,9 @@ async function parkBotIdleFundsAutonomously(bot: TradingBot): Promise<void> {
 
     // 5. PARK into the destination. We park when EITHER auto-park is on (normal
     //    bank-sweep repark) OR we just migrated funds out (so the migrated USDC
-    //    lands in the new destination instead of sitting idle).
-    const shouldPark = migrated || bot.autoParkIdle;
+    //    lands in the new destination instead of sitting idle) OR this is the
+    //    one-time post-borrow join (bank-sweep the freshly-borrowed cash in).
+    const shouldPark = postBorrow || migrated || bot.autoParkIdle;
     if (!shouldPark) {
       console.log(`${logPrefix} destination set, nothing to migrate, auto-park off — done`);
       return;
@@ -2143,8 +2170,11 @@ async function parkBotIdleFundsAutonomously(bot: TradingBot): Promise<void> {
     }
 
     if (bot.autoParkIdle) {
-      // Auto-park ON: bank-sweep ALL spare USDC into the destination, above the
-      // gas/swap-churn floor (a tiny park would just be undone by the next open).
+      // Auto-park ON — the user opted into the bank-sweep: park ALL spare USDC into
+      // the destination, above the gas/swap-churn floor (a tiny park would just be
+      // undone by the next open). The scope lock inside parkUsdc + its STRICT all-in
+      // read make a scanner-vs-post-borrow race benign: whichever runs second reads
+      // ~0 spare → "No spare USDC" → no double park.
       if (spareUsdc < AUTO_REPARK_MIN_USDC) {
         console.log(`${logPrefix} only $${spareUsdc.toFixed(2)} spare USDC (< $${AUTO_REPARK_MIN_USDC} floor) — skip park`);
         return;
@@ -2160,18 +2190,21 @@ async function parkBotIdleFundsAutonomously(bot: TradingBot): Promise<void> {
         funderSecretKey: funder.secretKey,
       });
       if (res.success) {
-        console.log(`${logPrefix} parked $${(res.usdcSpent ?? 0).toFixed(2)} → ${destAsset}${migrated ? ' (incl. migration)' : ' after full close'}`);
+        console.log(`${logPrefix} parked $${(res.usdcSpent ?? 0).toFixed(2)} → ${destAsset}${migrated ? ' (incl. migration)' : postBorrow ? ' (post-borrow join)' : ' after full close'}`);
       } else {
         console.warn(`${logPrefix} park failed: ${res.error ?? 'unknown error'}`);
       }
     } else {
-      // Auto-park OFF, migration only: move ONLY the just-migrated USDC into the
-      // destination. Parking all spare USDC here would sweep the bot's unparked
-      // trading capital — exactly the auto behavior the user opted out of. Truncate
-      // to 6dp so the amount can never exceed the realized on-chain balance.
-      const moveUsdc = Math.min(spareUsdc, Math.floor(migratedUsdc * 1e6) / 1e6);
+      // Auto-park OFF — park ONLY a BOUNDED amount, never the bot's unparked trading
+      // capital (that is exactly the auto behavior the user opted out of). The bound is
+      // any just-migrated USDC PLUS, on a one-time post-borrow join, the freshly-
+      // borrowed USDC — so a carry borrow joins its new cash to the existing park
+      // without sweeping the bot's trading balance. Truncate to 6dp so the amount can
+      // never exceed the realized on-chain balance.
+      const boundedCap = (postBorrow ? borrowedUsdc : 0) + migratedUsdc;
+      const moveUsdc = Math.min(spareUsdc, Math.floor(boundedCap * 1e6) / 1e6);
       if (!(moveUsdc > 0)) {
-        console.log(`${logPrefix} migration produced no spendable USDC — skip park`);
+        console.log(`${logPrefix} no bounded USDC to park (post-borrow $${(postBorrow ? borrowedUsdc : 0).toFixed(2)} + migrated $${migratedUsdc.toFixed(2)}, spare $${spareUsdc.toFixed(2)}) — skip`);
         return;
       }
       const res = await parkUsdc({
@@ -2185,15 +2218,56 @@ async function parkBotIdleFundsAutonomously(bot: TradingBot): Promise<void> {
         funderSecretKey: funder.secretKey,
       });
       if (res.success) {
-        console.log(`${logPrefix} migrated $${(res.usdcSpent ?? 0).toFixed(2)} → ${destAsset} (auto-park off)`);
+        console.log(`${logPrefix} parked $${(res.usdcSpent ?? 0).toFixed(2)} → ${destAsset}${postBorrow ? ' (post-borrow join, bounded)' : ' (migration, auto-park off)'}`);
       } else {
-        console.warn(`${logPrefix} migration park failed: ${res.error ?? 'unknown error'}`);
+        console.warn(`${logPrefix} bounded park failed: ${res.error ?? 'unknown error'}`);
       }
     }
   } finally {
     botKey.cleanup();
     funder.cleanup();
   }
+}
+
+// Short settle delay before the one-time post-borrow idle park. Gives the borrow's
+// on-chain state a moment to land and opens a small window where, if the bot
+// immediately opens a trade, the executor's FLAT re-check cancels the park
+// (cancel-on-open). Best-effort: the borrow response never waits on or fails for this.
+const POST_BORROW_IDLE_PARK_DELAY_MS = 5000;
+
+/**
+ * Fire-and-forget the ONE-TIME post-borrow idle park. After a successful per-bot
+ * (Flash) borrow, a bot that ALREADY parks idle funds (or opted into auto-park)
+ * should JOIN the freshly-borrowed USDC to its existing park instead of leaving it
+ * sitting idle. Detached + debounced — NEVER blocks or breaks the borrow response.
+ *
+ * Authorized by THIS post-borrow trigger (not by parkDestinationAsset). Re-loads the
+ * bot fresh and lets parkBotIdleFundsAutonomously re-decrypt keys autonomously (the
+ * in-lock borrow keys are already wiped). The executor keeps EVERY money-safety guard
+ * (Flash gate, FLAT on-chain re-check, separate account funder, STRICT spare read,
+ * $5 floor, per-bot scope lock) and parks only when a clear per-bot destination
+ * exists. Confirming the per-bot debt is still open ties the action to a real loan.
+ */
+function dispatchPostBorrowIdlePark(tradingBotId: string, borrowedUsdc: number): void {
+  setTimeout(() => {
+    void (async () => {
+      const tag = `[PostBorrowPark ${tradingBotId.slice(0, 8)}]`;
+      try {
+        const bot = await storage.getTradingBotById(tradingBotId);
+        if (!bot || bot.activeProtocol !== 'flash') return;
+        // Authorize from "post-borrow + open debt": a still-open per-bot debt confirms
+        // the loan landed. If it's already been repaid there's nothing to park for.
+        const openDebt = await storage.sumOpenBorrowDebtUsdcForBot(bot.walletAddress, bot.id);
+        if (!(openDebt > 0)) {
+          console.log(`${tag} no open per-bot debt — skip post-borrow park`);
+          return;
+        }
+        await parkBotIdleFundsAutonomously(bot, { authorizePostBorrow: true, borrowedUsdc });
+      } catch (e: any) {
+        console.warn(`${tag} post-borrow park failed (best-effort): ${e?.message ?? e}`);
+      }
+    })();
+  }, POST_BORROW_IDLE_PARK_DELAY_MS);
 }
 
 /**
@@ -10080,6 +10154,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           if (acctKey) acctKey.cleanup();
         }
       });
+      // Best-effort: after a successful borrow, JOIN the freshly-borrowed USDC to the
+      // bot's existing park (or chosen destination). Detached + debounced; never blocks
+      // or fails the borrow response. No-ops unless the bot already parks / opted in.
+      if (result.status === 200 && result.body?.ok === true) {
+        // Park ONLY the freshly-borrowed USDC when auto-park is off (the bounded join);
+        // the executor sweeps all spare only when the user opted into auto-park.
+        dispatchPostBorrowIdlePark(tradingBotId, Number(result.body?.suggestedParkAmountUsdc) || 0);
+      }
       return res.status(result.status).json(result.body);
     } catch (error: any) {
       console.error("[Vault] per-bot borrow open error:", error);
