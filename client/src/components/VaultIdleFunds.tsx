@@ -300,6 +300,7 @@ export default function VaultIdleFunds({
   botId,
   selectedAssetKey,
   onSelectedAssetKeyChange,
+  onChanged,
 }: {
   active?: boolean;
   botId?: string;
@@ -310,6 +311,12 @@ export default function VaultIdleFunds({
    */
   selectedAssetKey?: string | null;
   onSelectedAssetKeyChange?: (key: string) => void;
+  /**
+   * Fired after a successful park/unpark so an embedding surface (e.g. the bot
+   * drawer's Equity tab) can refresh its own balance/composition view — our
+   * internal query cache is refetched separately via `refetchAll`.
+   */
+  onChanged?: () => void;
 }) {
   const { publicKeyString, sessionConnected, retryAuth } = useWallet();
   const { toast } = useToast();
@@ -511,6 +518,7 @@ export default function VaultIdleFunds({
       });
       setDetailAsset(null);
       refetchAll();
+      onChanged?.();
     } catch (e: any) {
       if (isSessionError(e)) {
         showReconnectToast({ toast, retryAuth, title: "Park failed", retry: () => handleParkAll(asset) });
@@ -544,6 +552,7 @@ export default function VaultIdleFunds({
       });
       setDetailAsset(null);
       refetchAll();
+      onChanged?.();
     } catch (e: any) {
       if (isSessionError(e)) {
         showReconnectToast({ toast, retryAuth, title: "Unpark failed", retry: () => handleUnparkAll(assetKey, displayName) });

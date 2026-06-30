@@ -2304,6 +2304,80 @@ export function BotManagementDrawer({
               </div>
             </div>
 
+            {(parkedValueUsdc > 0 || borrowDebtUsdc > 0) && (
+              <div className="p-4 rounded-xl border bg-muted/30 space-y-2.5" data-testid="card-balance-breakdown">
+                <p className="text-xs font-medium text-muted-foreground">Balance Breakdown</p>
+                <div className="flex items-center justify-between text-sm">
+                  <div className="flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                    <span>Trading</span>
+                  </div>
+                  <span className="tabular-nums font-medium" data-testid="text-breakdown-trading">
+                    {`$${botBalance.toFixed(2)}`}
+                  </span>
+                </div>
+                {parkedValueUsdc > 0 && (
+                  <div className="flex items-center justify-between text-sm">
+                    <div className="flex items-center gap-2">
+                      <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
+                      <span>Parked <span className="text-muted-foreground">· earning yield</span></span>
+                    </div>
+                    <span className="tabular-nums font-medium" data-testid="text-breakdown-parked">
+                      {`$${parkedValueUsdc.toFixed(2)}`}
+                    </span>
+                  </div>
+                )}
+                {borrowDebtUsdc > 0 && (
+                  <div className="flex items-center justify-between text-sm">
+                    <div className="flex items-center gap-2">
+                      <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
+                      <span>Borrowed <span className="text-muted-foreground">· loan to repay</span></span>
+                    </div>
+                    <span className="tabular-nums font-medium text-orange-500" data-testid="text-breakdown-borrowed">
+                      {`-$${borrowDebtUsdc.toFixed(2)}`}
+                    </span>
+                  </div>
+                )}
+                <div className="flex items-center justify-between text-sm pt-2 border-t border-border/50">
+                  <span className="font-semibold">Bot Balance</span>
+                  <span className="tabular-nums font-bold" data-testid="text-breakdown-net">
+                    {`$${(botBalance + parkedValueUsdc - borrowDebtUsdc).toFixed(2)}`}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {borrowDebtUsdc > 0 && (
+              <CarryAdvisorCard advisor={carryAdvisor} loading={carryAdvisorLoading} />
+            )}
+
+            <PerbotBorrowControls
+              bot={bot}
+              walletAddress={walletAddress}
+              active={activeTab === 'equity'}
+              onChanged={fetchBotOverview}
+            />
+
+            {displayBot?.activeProtocol === 'flash' && displayBot?.id && (
+              <div className="p-4 rounded-xl border bg-muted/30 space-y-3" data-testid="card-equity-park">
+                <div className="flex items-center gap-2">
+                  <Vault className="w-4 h-4 text-purple-400" />
+                  <h3 className="font-semibold text-sm">Earn on Idle Funds</h3>
+                </div>
+                <p className="text-xs text-muted-foreground -mt-1">
+                  Move this bot's spare USDC into yield, or pull it back, anytime.
+                </p>
+                <VaultIdleFunds
+                  key={`equity-${displayBot.id}`}
+                  botId={displayBot.id}
+                  active={activeTab === 'equity'}
+                  selectedAssetKey={editParkDestinationAsset}
+                  onSelectedAssetKeyChange={setEditParkDestinationAsset}
+                  onChanged={fetchBotOverview}
+                />
+              </div>
+            )}
+
             <div className="p-4 rounded-xl border bg-muted/30 space-y-3">
               <div className="flex items-center gap-2">
                 <ArrowUp className="w-4 h-4 text-emerald-500" />
@@ -2444,16 +2518,6 @@ export function BotManagementDrawer({
               )}
             </div>
 
-            {borrowDebtUsdc > 0 && (
-              <CarryAdvisorCard advisor={carryAdvisor} loading={carryAdvisorLoading} />
-            )}
-
-            <PerbotBorrowControls
-              bot={bot}
-              walletAddress={walletAddress}
-              active={activeTab === 'equity'}
-              onChanged={fetchBotOverview}
-            />
           </TabsContent>
 
           <TabsContent value="webhook" className="space-y-4 mt-4">
@@ -3088,6 +3152,7 @@ export function BotManagementDrawer({
                       <VaultIdleFunds
                         key={displayBot.id}
                         botId={displayBot.id}
+                        onChanged={fetchBotOverview}
                         {...(displayBot.activeProtocol === 'flash'
                           ? {
                               selectedAssetKey: editParkDestinationAsset,
