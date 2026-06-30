@@ -243,13 +243,14 @@ export function evaluateBorrowRequest(input: BorrowPolicyInput): BorrowPolicyDec
       : null;
 
   // ── Structural gates (no math needed) ────────────────────────────────────
-  // Per-bot (Flash isolated-wallet) borrowing is in OWNER-ONLY proving (Phase 0).
-  // Structurally allow scope "bot" for the owner wallet; every LTV / oracle /
-  // exposure gate below still applies UNCHANGED. All other non-account scopes,
-  // and "bot" for any non-owner wallet, stay denied until the per-bot rollout.
+  // Per-bot (Flash isolated-wallet) borrowing is OPEN to every borrow-eligible
+  // wallet — same eligibility as the account engine (BORROW_OPEN_TO_ALL). Allow
+  // scope "bot" for owner OR allowlisted/eligible wallets; every LTV / oracle /
+  // exposure gate below still applies UNCHANGED. All other non-account scopes
+  // stay denied.
   if (input.scope !== "account") {
-    if (!(input.scope === "bot" && input.isOwnerWallet)) {
-      deny("scope_not_supported", "Per-bot borrowing is in owner-only proving right now.", { scope: input.scope });
+    if (!(input.scope === "bot" && (input.isOwnerWallet || input.isBorrowAllowlisted))) {
+      deny("scope_not_supported", "Per-bot borrowing is not available for this wallet yet.", { scope: input.scope });
     }
   }
   if (!(input.isOwnerWallet || input.isBorrowAllowlisted)) {

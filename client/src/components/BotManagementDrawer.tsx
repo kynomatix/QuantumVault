@@ -165,7 +165,7 @@ function CarryAdvisorCard({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <Scale className="w-4 h-4 text-muted-foreground" />
-          <h3 className="font-semibold text-sm">Carry Trade Advisor</h3>
+          <h3 className="font-semibold text-sm">Borrow Advisor</h3>
         </div>
         <Badge variant="outline" className={`gap-1 ${style.text}`} data-testid="badge-carry-action">
           <ActionIcon className="w-3 h-3" />
@@ -453,6 +453,7 @@ export function BotManagementDrawer({
   // an open per-bot borrow and the Equity tab is in view (NO poller, by design).
   const [carryAdvisor, setCarryAdvisor] = useState<CarryAdvisorResponse | null>(null);
   const [carryAdvisorLoading, setCarryAdvisorLoading] = useState(false);
+  const [howItWorksOpen, setHowItWorksOpen] = useState(false);
   // Monotonic request id: the drawer is a single reused instance, so a slow
   // response for a previous bot/wallet must never overwrite the current one.
   const carryAdvisorReqRef = useRef(0);
@@ -2303,17 +2304,6 @@ export function BotManagementDrawer({
               </div>
             </div>
 
-            {borrowDebtUsdc > 0 && (
-              <CarryAdvisorCard advisor={carryAdvisor} loading={carryAdvisorLoading} />
-            )}
-
-            <PerbotBorrowControls
-              bot={bot}
-              walletAddress={walletAddress}
-              active={activeTab === 'equity'}
-              onChanged={fetchBotOverview}
-            />
-
             <div className="p-4 rounded-xl border bg-muted/30 space-y-3">
               <div className="flex items-center gap-2">
                 <ArrowUp className="w-4 h-4 text-emerald-500" />
@@ -2433,17 +2423,37 @@ export function BotManagementDrawer({
               )}
             </div>
 
-            <div className="p-4 rounded-xl border border-blue-500/30 bg-blue-500/5">
-              <div className="flex items-start gap-3">
-                <Info className="w-5 h-5 text-blue-500 mt-0.5 flex-shrink-0" />
-                <div className="space-y-1">
-                  <h3 className="font-semibold text-sm">How It Works</h3>
-                  <p className="text-sm text-muted-foreground">
-                    Funds in the bot are used for trading. Transfer from your wallet to the bot to enable trading, or withdraw profits back to your wallet.
-                  </p>
-                </div>
-              </div>
+            <div className="rounded-xl border border-blue-500/30 bg-blue-500/5">
+              <button
+                type="button"
+                onClick={() => setHowItWorksOpen((v) => !v)}
+                className="w-full flex items-center gap-3 p-4 text-left"
+                aria-expanded={howItWorksOpen}
+                data-testid="button-how-it-works-toggle"
+              >
+                <Info className="w-5 h-5 text-blue-500 flex-shrink-0" />
+                <h3 className="font-semibold text-sm flex-1">How It Works</h3>
+                <ChevronDown
+                  className={`w-4 h-4 text-muted-foreground transition-transform shrink-0 ${howItWorksOpen ? 'rotate-180' : ''}`}
+                />
+              </button>
+              {howItWorksOpen && (
+                <p className="text-sm text-muted-foreground px-4 pb-4 pl-12" data-testid="text-how-it-works">
+                  Funds in the bot are used for trading. Transfer from your wallet to the bot to enable trading, or withdraw profits back to your wallet.
+                </p>
+              )}
             </div>
+
+            {borrowDebtUsdc > 0 && (
+              <CarryAdvisorCard advisor={carryAdvisor} loading={carryAdvisorLoading} />
+            )}
+
+            <PerbotBorrowControls
+              bot={bot}
+              walletAddress={walletAddress}
+              active={activeTab === 'equity'}
+              onChanged={fetchBotOverview}
+            />
           </TabsContent>
 
           <TabsContent value="webhook" className="space-y-4 mt-4">

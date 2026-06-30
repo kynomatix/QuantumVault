@@ -9503,9 +9503,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   });
 
   // ============================================================================
-  // PER-BOT BORROW (Carry Trade) — real money routes (P1). Flash/independent_trader
-  // bots ONLY, OWNER-ONLY rollout (gated on isBorrowOwnerWallet, a one-line flip to
-  // open later). These wrap the PROVEN P0 orchestrators (runPerbotCarveOpen /
+  // PER-BOT BORROW — real money routes (P1). Flash/independent_trader bots ONLY,
+  // OPEN to every borrow-eligible wallet (gated on isBorrowEligibleWallet,
+  // BORROW_OPEN_TO_ALL — same eligibility as the account engine). These wrap the PROVEN P0 orchestrators (runPerbotCarveOpen /
   // runPerbotUnwindClose); park/unpark reuse the EXISTING per-bot vault endpoints
   // (the client orchestrates the 2-step Carry/Repay sequence). GENERIC across every
   // allowlisted lending market (NOT hardwired to INF) — the carve source is any
@@ -9545,7 +9545,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet) return res.status(404).json({ error: "Wallet not found" });
 
-      const eligible = isBorrowOwnerWallet(req.walletAddress!);
+      const eligible = isBorrowEligibleWallet(req.walletAddress!);
 
       // Resolve bot scope: bot ∈ this wallet (404 otherwise) + Flash-only.
       const botResolved = await resolveVaultScope(req.walletAddress!, wallet, botId);
@@ -9702,7 +9702,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet) return res.status(404).json({ error: "Wallet not found" });
 
-      const eligible = isBorrowOwnerWallet(req.walletAddress!);
+      const eligible = isBorrowEligibleWallet(req.walletAddress!);
 
       // Authz: bot ∈ this wallet (404 otherwise) + Flash/independent_trader only.
       const botResolved = await resolveVaultScope(req.walletAddress!, wallet, botId);
@@ -9816,7 +9816,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // the same clientRequestId to FINISH a partial run.
   app.post("/api/vault/borrow/perbot/open", requireWallet, async (req, res) => {
     try {
-      if (!isBorrowOwnerWallet(req.walletAddress!)) {
+      if (!isBorrowEligibleWallet(req.walletAddress!)) {
         return res.status(403).json({ error: "Per-bot borrowing is not available for this wallet yet." });
       }
       const { botId, collateralMint, carveRaw, requestedDebtRaw, sessionId, requestedTargetLtv, clientRequestId } = req.body || {};
@@ -9877,7 +9877,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(409).json({
           error: isResume
             ? `This bot has ${offending.length} borrow position(s) that do not belong to this request. Reconcile before resuming.`
-            : `This bot already has an open borrow. Repay it before starting a new Carry Trade.`,
+            : `This bot already has an open borrow. Repay it before borrowing again.`,
         });
       }
 
@@ -9981,7 +9981,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           });
           if (!carveOpen.success || !carveOpen.borrowPositionId) {
             const code = carveOpen.needsAttention ? 202 : 400;
-            return { status: code, body: { error: carveOpen.error || "Carry Trade open did not complete.", needsAttention: !!carveOpen.needsAttention, step: carveOpen.step, operationId: carveOpen.operationId, clientRequestId } };
+            return { status: code, body: { error: carveOpen.error || "Borrow did not complete.", needsAttention: !!carveOpen.needsAttention, step: carveOpen.step, operationId: carveOpen.operationId, clientRequestId } };
           }
           if (carveOpen.accountPostLtv != null && livePlan.targetLtv != null && carveOpen.accountPostLtv > livePlan.targetLtv + 0.01) {
             return { status: 500, body: { error: `Open succeeded but the account LTV (${carveOpen.accountPostLtv}) exceeds the target. Stopping for reconcile.`, borrowPositionId: carveOpen.borrowPositionId } };
@@ -10025,7 +10025,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // until the chain + DB show the bot debt/collateral zeroed and account restored.
   app.post("/api/vault/borrow/perbot/close", requireWallet, async (req, res) => {
     try {
-      if (!isBorrowOwnerWallet(req.walletAddress!)) {
+      if (!isBorrowEligibleWallet(req.walletAddress!)) {
         return res.status(403).json({ error: "Per-bot borrowing is not available for this wallet yet." });
       }
       const { botId, botBorrowPositionId, sessionId, clientRequestId } = req.body || {};
