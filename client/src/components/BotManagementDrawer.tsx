@@ -61,7 +61,6 @@ import {
   AlertTriangle,
   Vault,
   ChevronDown,
-  Scale,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -113,108 +112,6 @@ interface CarryAdvisorResponse {
   healthSummary?: { headline?: { band?: string; actionBlocked?: boolean } };
   debtUsd?: number;
   borrowAprPct?: number | null;
-}
-
-const CARRY_ACTION_STYLE: Record<
-  CarryAdvisorAction,
-  { ring: string; bg: string; text: string; Icon: ElementType; label: string }
-> = {
-  park: { ring: 'border-emerald-500/30', bg: 'bg-emerald-500/5', text: 'text-emerald-500', Icon: TrendingUp, label: 'Park for Yield' },
-  repay: { ring: 'border-orange-500/30', bg: 'bg-orange-500/5', text: 'text-orange-500', Icon: ArrowDown, label: 'Repay Loan' },
-  hold: { ring: 'border-blue-500/30', bg: 'bg-blue-500/5', text: 'text-blue-500', Icon: Info, label: 'Hold' },
-  unavailable: { ring: 'border-border', bg: 'bg-muted/30', text: 'text-muted-foreground', Icon: AlertTriangle, label: 'No Call Yet' },
-};
-
-const CARRY_HEALTH_CHIP: Record<string, { label: string; cls: string }> = {
-  healthy: { label: 'Healthy', cls: 'text-emerald-500' },
-  nudge: { label: 'Watch', cls: 'text-yellow-500' },
-  urgent: { label: 'At Risk', cls: 'text-orange-500' },
-  liquidation: { label: 'Critical', cls: 'text-red-500' },
-};
-
-function CarryAdvisorCard({
-  advisor,
-  loading,
-}: {
-  advisor: CarryAdvisorResponse | null;
-  loading: boolean;
-}) {
-  if (loading && !advisor) {
-    return (
-      <div
-        className="p-4 rounded-xl border bg-muted/30 flex items-center gap-2 text-sm text-muted-foreground"
-        data-testid="card-carry-advisor-loading"
-      >
-        <Loader2 className="w-4 h-4 animate-spin" />
-        Checking the best move for this loan…
-      </div>
-    );
-  }
-
-  const rec = advisor?.recommendation;
-  if (!advisor?.applicable || !rec) return null;
-
-  const style = CARRY_ACTION_STYLE[rec.action];
-  const ActionIcon = style.Icon;
-  const band = advisor.healthSummary?.headline?.band;
-  const healthChip = band && band !== 'unavailable' ? CARRY_HEALTH_CHIP[band] : null;
-  const showSpread = rec.netSpreadPct != null && rec.bestAsset != null;
-
-  return (
-    <div className={`p-4 rounded-xl border ${style.ring} ${style.bg} space-y-3`} data-testid="card-carry-advisor">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <Scale className="w-4 h-4 text-muted-foreground" />
-          <h3 className="font-semibold text-sm">Borrow Advisor</h3>
-        </div>
-        <Badge variant="outline" className={`gap-1 ${style.text}`} data-testid="badge-carry-action">
-          <ActionIcon className="w-3 h-3" />
-          {style.label}
-        </Badge>
-      </div>
-
-      <p className="text-sm text-muted-foreground" data-testid="text-carry-advisor-message">
-        {rec.message}
-      </p>
-
-      {showSpread && (
-        <div className="grid grid-cols-3 gap-2">
-          <div className="rounded-lg bg-background/40 border px-2.5 py-2">
-            <p className="text-[11px] text-muted-foreground">Best Vault</p>
-            <p className="text-sm font-semibold" data-testid="text-carry-best-apy">
-              {rec.bestAsset!.apyPct.toFixed(1)}%
-            </p>
-            <p className="text-[11px] text-muted-foreground truncate" title={rec.bestAsset!.displayName}>
-              {rec.bestAsset!.displayName}
-            </p>
-          </div>
-          <div className="rounded-lg bg-background/40 border px-2.5 py-2">
-            <p className="text-[11px] text-muted-foreground">Borrow Rate</p>
-            <p className="text-sm font-semibold" data-testid="text-carry-borrow-apr">
-              {advisor.borrowAprPct != null ? `${advisor.borrowAprPct.toFixed(1)}%` : '--'}
-            </p>
-          </div>
-          <div className="rounded-lg bg-background/40 border px-2.5 py-2">
-            <p className="text-[11px] text-muted-foreground">Net Edge</p>
-            <p
-              className={`text-sm font-semibold ${rec.netSpreadPct! > 0 ? 'text-emerald-500' : 'text-orange-500'}`}
-              data-testid="text-carry-net-edge"
-            >
-              {rec.netSpreadPct! >= 0 ? '+' : ''}{rec.netSpreadPct!.toFixed(1)}%
-            </p>
-            <p className="text-[11px] text-muted-foreground">after costs</p>
-          </div>
-        </div>
-      )}
-
-      {healthChip && (
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground" data-testid="text-carry-loan-health">
-          <span>Loan health:</span>
-          <span className={`font-medium ${healthChip.cls}`}>{healthChip.label}</span>
-        </div>
-      )}
-    </div>
-  );
 }
 
 interface TradingBot {
@@ -2273,7 +2170,7 @@ export function BotManagementDrawer({
                   <Wallet className="w-8 h-8 text-primary/50" />
                 </div>
               </div>
-              <div className="p-4 rounded-xl bg-gradient-to-br from-emerald-500/10 to-primary/10 border">
+              <div className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/10 border">
                 <div className="flex items-center justify-between">
                   <div>
                     <div className="flex items-center gap-1">
@@ -2291,7 +2188,7 @@ export function BotManagementDrawer({
                         </TooltipProvider>
                       )}
                     </div>
-                    <p className="text-2xl font-bold mt-1" data-testid="text-trading-balance">
+                    <p className="text-2xl font-bold mt-1 text-emerald-500" data-testid="text-trading-balance">
                       {balanceLoading && !hasBalanceLoaded ? (
                         <Loader2 className="w-5 h-5 animate-spin" />
                       ) : (
@@ -2299,88 +2196,14 @@ export function BotManagementDrawer({
                       )}
                     </p>
                   </div>
-                  <BarChart3 className="w-8 h-8 text-emerald-500/50" />
+                  <BarChart3 className="w-8 h-8 text-primary/50" />
                 </div>
               </div>
             </div>
 
-            {(parkedValueUsdc > 0 || borrowDebtUsdc > 0) && (
-              <div className="p-4 rounded-xl border bg-muted/30 space-y-2.5" data-testid="card-balance-breakdown">
-                <p className="text-xs font-medium text-muted-foreground">Balance Breakdown</p>
-                <div className="flex items-center justify-between text-sm">
-                  <div className="flex items-center gap-2">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                    <span>Trading</span>
-                  </div>
-                  <span className="tabular-nums font-medium" data-testid="text-breakdown-trading">
-                    {`$${botBalance.toFixed(2)}`}
-                  </span>
-                </div>
-                {parkedValueUsdc > 0 && (
-                  <div className="flex items-center justify-between text-sm">
-                    <div className="flex items-center gap-2">
-                      <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
-                      <span>Parked <span className="text-muted-foreground">· earning yield</span></span>
-                    </div>
-                    <span className="tabular-nums font-medium" data-testid="text-breakdown-parked">
-                      {`$${parkedValueUsdc.toFixed(2)}`}
-                    </span>
-                  </div>
-                )}
-                {borrowDebtUsdc > 0 && (
-                  <div className="flex items-center justify-between text-sm">
-                    <div className="flex items-center gap-2">
-                      <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
-                      <span>Borrowed <span className="text-muted-foreground">· loan to repay</span></span>
-                    </div>
-                    <span className="tabular-nums font-medium text-orange-500" data-testid="text-breakdown-borrowed">
-                      {`-$${borrowDebtUsdc.toFixed(2)}`}
-                    </span>
-                  </div>
-                )}
-                <div className="flex items-center justify-between text-sm pt-2 border-t border-border/50">
-                  <span className="font-semibold">Bot Balance</span>
-                  <span className="tabular-nums font-bold" data-testid="text-breakdown-net">
-                    {`$${(botBalance + parkedValueUsdc - borrowDebtUsdc).toFixed(2)}`}
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {borrowDebtUsdc > 0 && (
-              <CarryAdvisorCard advisor={carryAdvisor} loading={carryAdvisorLoading} />
-            )}
-
-            <PerbotBorrowControls
-              bot={bot}
-              walletAddress={walletAddress}
-              active={activeTab === 'equity'}
-              onChanged={fetchBotOverview}
-            />
-
-            {displayBot?.activeProtocol === 'flash' && displayBot?.id && (
-              <div className="p-4 rounded-xl border bg-muted/30 space-y-3" data-testid="card-equity-park">
-                <div className="flex items-center gap-2">
-                  <Vault className="w-4 h-4 text-purple-400" />
-                  <h3 className="font-semibold text-sm">Earn on Idle Funds</h3>
-                </div>
-                <p className="text-xs text-muted-foreground -mt-1">
-                  Move this bot's spare USDC into yield, or pull it back, anytime.
-                </p>
-                <VaultIdleFunds
-                  key={`equity-${displayBot.id}`}
-                  botId={displayBot.id}
-                  active={activeTab === 'equity'}
-                  selectedAssetKey={editParkDestinationAsset}
-                  onSelectedAssetKeyChange={setEditParkDestinationAsset}
-                  onChanged={fetchBotOverview}
-                />
-              </div>
-            )}
-
             <div className="p-4 rounded-xl border bg-muted/30 space-y-3">
               <div className="flex items-center gap-2">
-                <ArrowUp className="w-4 h-4 text-emerald-500" />
+                <ArrowUp className="w-4 h-4 text-primary" />
                 <h3 className="font-semibold text-sm">Add to Bot</h3>
               </div>
               <div className="flex gap-2">
@@ -2425,7 +2248,7 @@ export function BotManagementDrawer({
 
             <div className="p-4 rounded-xl border bg-muted/30 space-y-3">
               <div className="flex items-center gap-2">
-                <ArrowDown className="w-4 h-4 text-orange-500" />
+                <ArrowDown className="w-4 h-4 text-primary" />
                 <h3 className="font-semibold text-sm">Remove from Bot</h3>
               </div>
               <div className="flex gap-2">
@@ -2496,6 +2319,15 @@ export function BotManagementDrawer({
                 </p>
               )}
             </div>
+
+            <PerbotBorrowControls
+              bot={bot}
+              walletAddress={walletAddress}
+              active={activeTab === 'equity'}
+              onChanged={fetchBotOverview}
+              advisor={carryAdvisor}
+              advisorLoading={carryAdvisorLoading}
+            />
 
             <div className="rounded-xl border border-blue-500/30 bg-blue-500/5">
               <button

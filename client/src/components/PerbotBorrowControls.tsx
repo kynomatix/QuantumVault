@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { Loader2, ArrowDownCircle, Landmark, ShieldCheck } from "lucide-react";
+import { useEffect, useRef, useState, type ElementType } from "react";
+import { Loader2, ArrowDownCircle, Landmark, ShieldCheck, Check, AlertCircle, AlertTriangle, Info } from "lucide-react";
 import { useWallet } from "@/hooks/useWallet";
 import { useToast } from "@/hooks/use-toast";
 import { isSessionError, showReconnectToast } from "@/lib/reconnect-toast";
@@ -87,11 +87,30 @@ interface ParkedPositionView {
   onChainAmountRaw?: string;
 }
 
-const HEALTH_CHIP: Record<string, { label: string; cls: string }> = {
-  healthy: { label: "Healthy", cls: "text-emerald-500" },
-  nudge: { label: "Watch", cls: "text-yellow-500" },
-  urgent: { label: "At Risk", cls: "text-orange-500" },
-  liquidation: { label: "Critical", cls: "text-red-500" },
+// A trimmed view of the carry-trade advisor response, folded INTO the loan card
+// (one card, not two). The drawer owns the fetch; we only render.
+interface CarryAdvisorView {
+  applicable?: boolean;
+  recommendation: {
+    action: "park" | "repay" | "hold" | "unavailable";
+    message: string;
+    netSpreadPct: number | null;
+    bestAsset: { displayName: string; apyPct: number } | null;
+  } | null;
+  borrowAprPct?: number | null;
+}
+
+// Loan-health chip. Brand rule: green is reserved for the Bot Balance number, so
+// "Healthy" is a quiet neutral with a check (nothing to do); risk escalates amber
+// → red. No orange anywhere. Liquidatable is always red.
+const HEALTH_CHIP: Record<
+  string,
+  { label: string; cls: string; Icon: ElementType }
+> = {
+  healthy: { label: "Healthy", cls: "border-border bg-muted/50 text-muted-foreground", Icon: Check },
+  nudge: { label: "Watch", cls: "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-500", Icon: AlertCircle },
+  urgent: { label: "At Risk", cls: "border-amber-500/40 bg-amber-500/15 text-amber-600 dark:text-amber-500", Icon: AlertTriangle },
+  liquidation: { label: "Critical", cls: "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-500", Icon: AlertTriangle },
 };
 
 export default function PerbotBorrowControls({
@@ -99,11 +118,15 @@ export default function PerbotBorrowControls({
   walletAddress,
   active,
   onChanged,
+  advisor,
+  advisorLoading,
 }: {
   bot: { id: string } | null;
   walletAddress: string;
   active: boolean;
   onChanged: () => void;
+  advisor?: CarryAdvisorView | null;
+  advisorLoading?: boolean;
 }) {
   const { retryAuth } = useWallet();
   const { toast } = useToast();
@@ -420,6 +443,20 @@ export default function PerbotBorrowControls({
     : 0;
   const band = openPos?.health?.band;
   const chip = band && band !== "unavailable" ? HEALTH_CHIP[band] : null;
+  const ChipIcon = chip?.Icon;
+  // Advisor folded into the loan card (consolidated to ONE card). Only when the
+  // server says the recommendation applies AND a loan is open (this branch).
+  const advisorRec = advisor?.applicable && advisor.recommendation ? advisor.recommendation : null;
+  const showSpread = advisorRec != null && advisorRec.netSpreadPct != null;
+  // Accent the recommendation ICON only (never the card chrome). A repay nudge is
+  // amber (allowed for warnings); everything else stays muted. No orange/green.
+  const adviceAccent = advisorRec?.action === "repay" ? "text-amber-500" : "text-muted-foreground";
+  // Net edge: positive is neutral foreground (green is reserved for Bot Balance);
+  // negative is amber.
+  const netEdgeCls =
+    advisorRec?.netSpreadPct != null && advisorRec.netSpreadPct < 0
+      ? "text-amber-600 dark:text-amber-500"
+      : "text-foreground";
   // Which collateral asset the system carved for this loan (e.g. INF). Prefer the
   // canonical cased symbol from the server (honors native ticker casing like jupSOL);
   // fall back to the asset key uppercased.
@@ -441,16 +478,19 @@ export default function PerbotBorrowControls({
   return (
     <>
       {openPos ? (
-        <div className="p-4 rounded-xl border border-orange-500/30 bg-orange-500/5 space-y-3" data-testid="card-perbot-loan">
+        <div className="p-4 rounded-xl border bg-muted/30 space-y-3" data-testid="card-perbot-loan">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <Landmark className="w-4 h-4 text-muted-foreground" />
               <h3 className="font-semibold text-sm">Collateral Loan</h3>
             </div>
-            {chip && (
-              <span className="text-xs" data-testid="text-perbot-loan-health">
-                <span className="text-muted-foreground">Health: </span>
-                <span className={`font-medium ${chip.cls}`}>{chip.label}</span>
+            {chip && ChipIcon && (
+              <span
+                className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${chip.cls}`}
+                data-testid="text-perbot-loan-health"
+              >
+                <ChipIcon className="w-3 h-3" />
+                {chip.label}
               </span>
             )}
           </div>
@@ -476,13 +516,38 @@ export default function PerbotBorrowControls({
               Repay Loan
             </Button>
           </div>
+          {advisorLoading && !advisorRec ? (
+            <div className="border-t pt-3 flex items-center gap-2 text-xs text-muted-foreground" data-testid="text-carry-advisor-loading">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              Checking the best move for this loan…
+            </div>
+          ) : advisorRec ? (
+            <div className="border-t pt-3 space-y-1.5">
+              <div className="flex items-start gap-2 text-sm">
+                <Info className={`w-4 h-4 shrink-0 mt-0.5 ${adviceAccent}`} />
+                <p data-testid="text-carry-advisor-message">{advisorRec.message}</p>
+              </div>
+              {showSpread && (
+                <p className="text-xs text-muted-foreground pl-6" data-testid="text-carry-net-edge">
+                  Net edge{" "}
+                  <span className={`tabular-nums ${netEdgeCls}`}>
+                    {advisorRec.netSpreadPct! >= 0 ? "+" : ""}{advisorRec.netSpreadPct!.toFixed(1)}%
+                  </span>
+                  {advisor?.borrowAprPct != null && <> after {advisor.borrowAprPct.toFixed(1)}% borrow</>}
+                  {advisorRec.bestAsset && (
+                    <> · best vault {advisorRec.bestAsset.apyPct.toFixed(1)}% {advisorRec.bestAsset.displayName}</>
+                  )}
+                </p>
+              )}
+            </div>
+          ) : null}
           <p className="text-xs text-muted-foreground">
             Repaying brings any parked funds in this bot back to cash, clears the loan, and returns your collateral to your account.
           </p>
         </div>
       ) : (
         carrySrc && (
-          <div className="p-4 rounded-xl border border-primary/30 bg-primary/5 space-y-3" data-testid="card-perbot-borrow">
+          <div className="p-4 rounded-xl border bg-muted/30 space-y-3" data-testid="card-perbot-borrow">
             <div className="flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-primary" />
               <h3 className="font-semibold text-sm">Borrow Against Collateral</h3>
