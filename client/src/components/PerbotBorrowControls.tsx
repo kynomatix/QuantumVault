@@ -55,6 +55,7 @@ interface PerbotBorrowPosition {
   status: string;
   collateralAssetKey: string | null;
   collateralMint: string | null;
+  collateralSymbol: string | null;
   debtAmountRaw: string | null;
   health: PerbotPositionHealth;
 }
@@ -63,6 +64,7 @@ interface PerbotCarrySource {
   available: boolean;
   collateralMint: string;
   collateralAssetKey: string | null;
+  collateralSymbol: string | null;
   collateralDecimals: number;
   debtDecimals: number;
   maxCarveRaw: string;
@@ -306,9 +308,13 @@ export default function PerbotBorrowControls({
         clearOpenOp();
         setAmount("");
         const usd = typeof d.suggestedParkAmountUsdc === "number" ? d.suggestedParkAmountUsdc : null;
+        const sym = carrySrc.collateralSymbol ?? (carrySrc.collateralAssetKey ? carrySrc.collateralAssetKey.toUpperCase() : null);
+        const against = sym ? ` against your ${sym}` : "";
         toast({
           title: "USDC Borrowed",
-          description: usd != null ? `Borrowed ${fmtUsd(usd)} into this bot.` : "Borrowed USDC into this bot.",
+          description: usd != null
+            ? `Borrowed ${fmtUsd(usd)} into this bot${against}.`
+            : `Borrowed USDC into this bot${against}.`,
         });
         await refreshAll();
       } else if (res.status === 202 || d.needsAttention) {
@@ -414,6 +420,12 @@ export default function PerbotBorrowControls({
     : 0;
   const band = openPos?.health?.band;
   const chip = band && band !== "unavailable" ? HEALTH_CHIP[band] : null;
+  // Which collateral asset the system carved for this loan (e.g. INF). Prefer the
+  // canonical cased symbol from the server (honors native ticker casing like jupSOL);
+  // fall back to the asset key uppercased.
+  const collSym = openPos
+    ? (openPos.collateralSymbol ?? (openPos.collateralAssetKey ? openPos.collateralAssetKey.toUpperCase() : null))
+    : (carrySrc?.collateralSymbol ?? (carrySrc?.collateralAssetKey ? carrySrc.collateralAssetKey.toUpperCase() : null));
 
   // Max borrowable in friendly dollars (floored to the cent so it can never round
   // ABOVE the true on-chain max). Entering it lands in the ~1-cent verbatim path.
@@ -442,6 +454,11 @@ export default function PerbotBorrowControls({
               </span>
             )}
           </div>
+          {collSym && (
+            <p className="text-xs text-muted-foreground -mt-1" data-testid="text-perbot-loan-collateral">
+              Backed by your {collSym}
+            </p>
+          )}
           <div className="flex items-end justify-between gap-3">
             <div>
               <p className="text-xs text-muted-foreground">Amount Borrowed</p>
@@ -471,7 +488,7 @@ export default function PerbotBorrowControls({
               <h3 className="font-semibold text-sm">Borrow Against Collateral</h3>
             </div>
             <p className="text-sm text-muted-foreground">
-              Borrow extra USDC against your account collateral and add it to this bot's trading balance. Choose how much, up to a safe limit. Your account stays at a safe level, and you can repay anytime.
+              Borrow extra USDC against your {collSym ? `${collSym} ` : "account "}collateral and add it to this bot's trading balance. Choose how much, up to a safe limit. Your account stays at a safe level, and you can repay anytime.
             </p>
             <div className="space-y-1.5">
               <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -539,7 +556,7 @@ export default function PerbotBorrowControls({
                 <AlertDialogDescription>
                   {amtValid ? (
                     <>
-                      This borrows about {fmtUsd(enteredUsd)} in USDC against your account collateral and adds it to this bot's
+                      This borrows about {fmtUsd(enteredUsd)} in USDC against your {collSym ? `${collSym} ` : "account "}collateral and adds it to this bot's
                       trading balance. Your account stays at a safe level. You can repay it at any time.
                     </>
                   ) : (
