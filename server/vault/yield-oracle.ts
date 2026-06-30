@@ -332,6 +332,22 @@ async function computeEntry(
   }
 
   const rounded = Math.round(apyPct * 10) / 10;
+  // Persist last-good (best-effort) so a (re)start can warm this self-measured
+  // number INSTANTLY instead of blanking to the estimate while the first async
+  // build runs. Mirrors the DeFiLlama branch; warmed back via source "trailing".
+  try {
+    await storage.upsertYieldApyCache({
+      assetKey: asset.key,
+      apy: rounded.toFixed(4),
+      apyBase: rounded.toFixed(4),
+      apyReward: null,
+      apyMean30d: null,
+      source: "trailing",
+      poolId: null,
+    });
+  } catch {
+    // persistence is best-effort
+  }
   return { apy: rounded, apyBase: rounded, apyReward: null, method: "trailing", asOf: newest.t };
 }
 
@@ -429,11 +445,11 @@ export async function refreshYieldTableNow(): Promise<YieldTable> {
  * refresh runs. Best-effort and idempotent (no-op once the cache is populated).
  *
  * `builtAt` is left at 0 so the cache reads as already-stale: the first
- * getYieldTableCached() still kicks off a live DeFiLlama refresh to upgrade these
- * warmed `defillama_cached` values to fresh `defillama` numbers. Only seeds
- * entries whose persisted row is still fresh (< STALE_MS); anything older or
- * uncovered stays absent so the UI shows the estimate until a real number lands.
- * Call once at server startup.
+ * getYieldTableCached() still kicks off a live refresh to upgrade these warmed
+ * values (`defillama_cached`, or last-good `trailing` for self-measured assets
+ * like Perena USD*) to fresh numbers. Only seeds entries whose persisted row is
+ * still fresh (< STALE_MS); anything older or never-measured stays absent so the
+ * UI shows the estimate until a real number lands. Call once at server startup.
  */
 export async function warmYieldTableFromCache(): Promise<void> {
   if (cache) return; // already warmed/built this process
@@ -447,17 +463,23 @@ export async function warmYieldTableFromCache(): Promise<void> {
   const now = Date.now();
   const table: YieldTable = {};
   for (const a of getEnabledYieldAssets()) {
-    if (!a.defiLlamaPoolId) continue; // self-measured assets are never cached here
     const cached = byKey.get(a.key);
     if (!cached || cached.apy == null) continue;
     const asOfMs = new Date(cached.asOf).getTime();
     const apyNum = Number(cached.apy);
     if (!Number.isFinite(asOfMs) || !Number.isFinite(apyNum) || now - asOfMs >= STALE_MS) continue;
+    // Self-measured assets persist their last-good number with source "trailing"
+    // (see computeEntry's trailing branch); warm it back as the real measured
+    // number it is, not a DeFiLlama one, so the estimate never reappears on boot.
+    // NOTE: if an asset's APY SOURCE ever migrates (gains/loses defiLlamaPoolId),
+    // clear its yield_apy_cache row — an old row could be mislabeled here for up to
+    // STALE_MS until the next successful build self-heals it.
+    const method = cached.source === "trailing" ? "trailing" : "defillama_cached";
     table[a.key] = {
       apy: round1(apyNum),
       apyBase: cached.apyBase != null ? round1(Number(cached.apyBase)) : null,
       apyReward: cached.apyReward != null ? round1(Number(cached.apyReward)) : null,
-      method: "defillama_cached",
+      method,
       asOf: asOfMs,
     };
   }
