@@ -131,6 +131,10 @@ export interface BorrowCollateral {
   // Real token icon resolved from on-chain metadata (Helius DAS). null when the
   // mint has no metadata image or the resolver failed → UI renders a fallback.
   collateralLogoURI: string | null;
+  // The collateral's OWN native staking APY (PERCENT), e.g. INF/JitoSOL/mSOL earn
+  // SOL staking yield just by being held. Display-only "yield bracket" badge;
+  // null for non-yield collateral or when the source is unavailable.
+  stakingApyPct?: number | null;
 }
 
 // Read-only projection from the server risk gate. `allowed` reflects the FULL

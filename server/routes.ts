@@ -1500,6 +1500,7 @@ import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
 import { getBestQuote } from "./swap/index.js";
 import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, valueVaultRowsForWallet, sumVaultPositionValueUsdc, type VaultPositionView, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
+import { getCollateralStakingApyMap } from "./vault/collateral-apy";
 import { getEnabledYieldAssets, getYieldAssetByKey } from "./vault/yield-assets";
 import { getYieldTableCached } from "./vault/yield-oracle";
 import { detectParkedYieldTokens as detectParkedYieldTokensPure } from "./vault/parked-tokens";
@@ -8898,9 +8899,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const collateralLogos = await resolveTokenLogos(
         baseCollaterals.map((c) => c.collateralMint),
       );
+      // Each yield-bearing collateral's OWN native staking APY (e.g. INF's SOL
+      // staking yield), keyed by mint. Display-only "yield bracket" badge; null for
+      // non-yield collateral. Non-blocking (stale-while-revalidate), never a gate.
+      const stakingApyByMint = getCollateralStakingApyMap(
+        baseCollaterals.map((c) => c.collateralMint),
+      );
       const collaterals = baseCollaterals.map((c) => ({
         ...c,
         collateralLogoURI: collateralLogos.get(c.collateralMint) ?? null,
+        stakingApyPct: stakingApyByMint.get(c.collateralMint) ?? null,
       }));
       res.json({ eligible: isBorrowEligibleWallet(req.walletAddress!), collaterals });
     } catch (error: any) {
@@ -9831,13 +9839,27 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       } catch {
         /* cosmetic; leave logos empty */
       }
+      // Each yield-bearing collateral's OWN native staking APY (display-only badge,
+      // keyed by mint). Non-blocking (stale-while-revalidate); null for non-yield.
+      const stakingApyByMint = getCollateralStakingApyMap(
+        Array.from(
+          new Set(
+            [
+              ...positions.map((p) => p.collateralMint),
+              ...carrySources.map((c) => c.collateralMint),
+            ].filter((m): m is string => !!m),
+          ),
+        ),
+      );
       const positionsOut = positions.map((p) => ({
         ...p,
         collateralLogoURI: p.collateralMint ? (logoByMint.get(p.collateralMint) ?? null) : null,
+        stakingApyPct: p.collateralMint ? (stakingApyByMint.get(p.collateralMint) ?? null) : null,
       }));
       const carrySourcesOut = carrySources.map((c) => ({
         ...c,
         collateralLogoURI: c.collateralMint ? (logoByMint.get(c.collateralMint) ?? null) : null,
+        stakingApyPct: c.collateralMint ? (stakingApyByMint.get(c.collateralMint) ?? null) : null,
       }));
 
       res.json({ eligible, applicable: true, positions: positionsOut, carrySources: carrySourcesOut, healthSummary });
@@ -9946,8 +9968,44 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         getEnabledYieldAssets(),
       );
 
+      // Where is THIS bot's borrowed USDC ALREADY parked? The carry must be judged
+      // on the vault the funds actually sit in, not on the best-ranked vault they
+      // are not in. Read-only; the advisor never moves money, so a failed read just
+      // degrades to the not-parked (best-vault) view rather than blocking.
+      let currentParked: { assetKey: string; displayName: string } | null = null;
+      try {
+        // Detectable (enabled OR disabled) so a bot parked in a since-disabled
+        // vault is still seen: it won't be in the enabled-only rankedYields, so
+        // the advisor fails closed to `hold_parked_yield_unavailable` instead of
+        // wrongly recommending "park to best" while funds sit unmeasured.
+        const parkedViews = await getVaultPositionViews(
+          req.walletAddress!,
+          botScope.agentPublicKey,
+          tradingBotId,
+          { includeDisabled: true },
+        );
+        const held = parkedViews.filter((v) => v.onChainAmount > 0);
+        if (held.length > 0) {
+          // A bot parks into ONE destination, so this is normally a single row.
+          // For the rare multi-asset case, pick the dominant holding by measured
+          // USDC value (unmeasured → ranked last); raw token amount is only a
+          // deterministic tie-break, never cross-token USD math.
+          held.sort((a, b) => {
+            const av = a.currentValueUsdc ?? Number.NEGATIVE_INFINITY;
+            const bv = b.currentValueUsdc ?? Number.NEGATIVE_INFINITY;
+            if (bv !== av) return bv - av;
+            return b.onChainAmount - a.onChainAmount;
+          });
+          const dom = held[0];
+          currentParked = { assetKey: dom.assetKey, displayName: dom.displayName };
+        }
+      } catch (e) {
+        console.warn("[Vault] advisor parked-position read failed; treating as not parked:", e);
+      }
+
       const recommendation = decideCarryTrade({
         rankedYields: ranked,
+        currentParked,
         borrowApr,
         healthSummary,
         debtUsd: totalDebtUsd,

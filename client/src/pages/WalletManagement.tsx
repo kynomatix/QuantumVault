@@ -137,6 +137,24 @@ function CollateralAvatar({ logoURI, symbol, colorClass, testId }: {
   );
 }
 
+// "Yield bracket" badge — a small chip showing a yield-bearing collateral's OWN
+// native staking APY (e.g. INF/JitoSOL/mSOL earn SOL staking yield just by being
+// held). Pure info; renders nothing for non-yield collateral (null APY). Quiet
+// neutral styling (green is reserved for balance numbers per the brand rule).
+function StakingApyBadge({ apyPct, testId }: { apyPct?: number | null; testId?: string }) {
+  if (apyPct == null || !Number.isFinite(apyPct) || apyPct <= 0) return null;
+  return (
+    <span
+      className="inline-flex items-center gap-0.5 rounded-full border border-border bg-muted/60 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+      title={`This collateral earns about ${apyPct.toFixed(1)}% staking yield on its own`}
+      data-testid={testId}
+    >
+      <TrendingUp className="w-2.5 h-2.5" />
+      {apyPct.toFixed(1)}%
+    </span>
+  );
+}
+
 export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
   const { connected, shortenedAddress, publicKeyString } = useWallet();
   const { usdcBalance, usdcLoading, fetchUsdcBalance } = useTokenBalance();
@@ -674,7 +692,9 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       oraclePriceLiquidateUsd: cfg?.oraclePriceLiquidateUsd ?? null,
       liquidatable: p.liveHealth?.liquidatable === true,
       healthIsLive: p.healthIsLive,
-    } satisfies LendingPool & { liquidatable: boolean; healthIsLive: boolean };
+      // The collateral's OWN native staking APY (display-only yield bracket badge).
+      stakingApyPct: cfg?.stakingApyPct ?? null,
+    } satisfies LendingPool & { liquidatable: boolean; healthIsLive: boolean; stakingApyPct: number | null };
   });
 
   const loanPools = pools.filter((p) => (p.debtUsd ?? 0) > 0);
@@ -1057,7 +1077,10 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                             testId={`img-loan-collateral-${p.id}`}
                           />
                           <div className="min-w-0">
-                            <p className="text-sm font-medium leading-tight">{p.symbol ?? '\u2014'}</p>
+                            <div className="flex items-center gap-1.5">
+                              <p className="text-sm font-medium leading-tight">{p.symbol ?? '\u2014'}</p>
+                              <StakingApyBadge apyPct={p.stakingApyPct} testId={`badge-loan-staking-apy-${p.id}`} />
+                            </div>
                             <p className="text-xs text-muted-foreground truncate">{p.collateralLabel ?? 'Collateral \u2014'}</p>
                           </div>
                         </div>

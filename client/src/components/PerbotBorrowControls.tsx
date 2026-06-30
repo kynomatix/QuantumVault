@@ -72,6 +72,9 @@ interface PerbotBorrowPosition {
   principalUsdcRaw: string | null;
   maxLtv: number | null;
   collateralLogoURI: string | null;
+  // The collateral's OWN native staking APY (PERCENT), e.g. INF's SOL staking
+  // yield. Display-only "yield bracket" badge; null for non-yield collateral.
+  stakingApyPct?: number | null;
   health: PerbotPositionHealth;
 }
 
@@ -85,6 +88,8 @@ interface PerbotCarrySource {
   maxCarveRaw: string;
   maxBorrowRaw: string;
   collateralLogoURI: string | null;
+  // The collateral's OWN native staking APY (PERCENT); null for non-yield.
+  stakingApyPct?: number | null;
   oraclePriceUsd?: number | null;
   targetLtv?: number | null;
   suggestLtv?: number | null;
@@ -115,6 +120,10 @@ interface CarryAdvisorView {
     message: string;
     netSpreadPct: number | null;
     bestAsset: { displayName: string; apyPct: number } | null;
+    // The vault the carry is JUDGED on: the bot's actual parked vault when it has
+    // funds parked, otherwise the best-ranked destination. `apyPct` is null when
+    // the active vault's yield could not be measured.
+    activeAsset: { assetKey: string; displayName: string; apyPct: number | null; isParked: boolean } | null;
   } | null;
   borrowAprPct?: number | null;
 }
@@ -158,6 +167,24 @@ function CollateralAvatar({ logoURI, symbol, testId }: {
       data-testid={testId}
     >
       {symbol ? symbol.slice(0, 2) : "\u2014"}
+    </span>
+  );
+}
+
+// "Yield bracket" badge — a small chip showing a yield-bearing collateral's OWN
+// native staking APY (e.g. INF earns SOL staking yield just by being held). Pure
+// info; renders nothing for non-yield collateral (null APY). Quiet neutral styling
+// (green is reserved for the Bot Balance number per the brand rule).
+function StakingApyBadge({ apyPct, testId }: { apyPct?: number | null; testId?: string }) {
+  if (apyPct == null || !Number.isFinite(apyPct) || apyPct <= 0) return null;
+  return (
+    <span
+      className="inline-flex items-center gap-0.5 rounded-full border border-border bg-muted/60 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+      title={`This collateral earns about ${apyPct.toFixed(1)}% staking yield on its own`}
+      data-testid={testId}
+    >
+      <TrendingUp className="w-2.5 h-2.5" />
+      {apyPct.toFixed(1)}%
     </span>
   );
 }
@@ -581,6 +608,18 @@ export default function PerbotBorrowControls({
   const netEdgeCls = netEdge != null && netEdge < 0 ? "text-amber-600 dark:text-amber-500" : "text-foreground";
   const netEdgeStr =
     netEdge == null || !Number.isFinite(netEdge) ? "\u2014" : `${netEdge >= 0 ? "+" : ""}${netEdge.toFixed(1)}%`;
+  // The carry stats describe the vault the advisor JUDGED on: the bot's actual
+  // parked vault when it has funds parked, else the best-ranked destination. This
+  // is why a parked bot's "Vault Yield" can differ from the best vault on offer.
+  const activeAsset = advisorRec?.activeAsset ?? null;
+  const activeVaultApyPct = activeAsset?.apyPct ?? advisorRec?.bestAsset?.apyPct ?? null;
+  const activeVaultLabel = activeAsset
+    ? activeAsset.isParked
+      ? ` Your vault: ${activeAsset.displayName}.`
+      : ` Best vault: ${activeAsset.displayName}.`
+    : advisorRec?.bestAsset
+      ? ` Best vault: ${advisorRec.bestAsset.displayName}.`
+      : "";
 
   // Which collateral asset the system carved for this loan (e.g. INF). Prefer the
   // canonical cased symbol from the server (honors native ticker casing like jupSOL);
@@ -589,6 +628,9 @@ export default function PerbotBorrowControls({
     ? (openPos.collateralSymbol ?? (openPos.collateralAssetKey ? openPos.collateralAssetKey.toUpperCase() : null))
     : (carrySrc?.collateralSymbol ?? (carrySrc?.collateralAssetKey ? carrySrc.collateralAssetKey.toUpperCase() : null));
   const collLogoURI = openPos?.collateralLogoURI ?? carrySrc?.collateralLogoURI ?? null;
+  // The collateral's OWN native staking APY (e.g. INF earns SOL staking yield just
+  // by being held). Display-only "yield bracket" badge; null → no badge.
+  const collStakingApyPct = openPos?.stakingApyPct ?? carrySrc?.stakingApyPct ?? null;
   // Safe target LTV for the borrow card's info block (the ratio the bot opens at).
   const targetLtvPct =
     carrySrc?.suggestLtv != null
@@ -617,7 +659,10 @@ export default function PerbotBorrowControls({
             <div className="flex items-center gap-2.5 min-w-0">
               <CollateralAvatar logoURI={collLogoURI} symbol={collSym} testId="img-perbot-loan-collateral" />
               <div className="min-w-0">
-                <p className="text-sm font-medium leading-tight">{collSym ?? "\u2014"}</p>
+                <div className="flex items-center gap-1.5">
+                  <p className="text-sm font-medium leading-tight">{collSym ?? "\u2014"}</p>
+                  <StakingApyBadge apyPct={collStakingApyPct} testId="badge-perbot-loan-staking-apy" />
+                </div>
                 <p className="text-xs text-muted-foreground truncate">Carry Trade Loan</p>
               </div>
             </div>
@@ -727,7 +772,7 @@ export default function PerbotBorrowControls({
                 ) : (
                   <div className="grid grid-cols-3 gap-1.5 text-center">
                     <div className="p-1.5 rounded-md bg-background/50">
-                      <p className="text-sm font-bold tabular-nums" data-testid="stat-carry-yield">{fmtPct1(advisorRec?.bestAsset?.apyPct ?? null)}</p>
+                      <p className="text-sm font-bold tabular-nums" data-testid="stat-carry-yield">{fmtPct1(activeVaultApyPct)}</p>
                       <p className="text-[10px] text-muted-foreground leading-tight">Vault Yield</p>
                     </div>
                     <div className="p-1.5 rounded-md bg-background/50">
@@ -742,7 +787,7 @@ export default function PerbotBorrowControls({
                 )}
                 <p className="text-[11px] text-muted-foreground">
                   Keep the loan and earn yield on the borrowed cash.
-                  {advisorRec?.bestAsset ? ` Best vault: ${advisorRec.bestAsset.displayName}.` : ""}
+                  {activeVaultLabel}
                 </p>
               </div>
 
@@ -817,7 +862,10 @@ export default function PerbotBorrowControls({
             {/* What you're borrowing against — small sectioned info blocks. */}
             <div className="grid grid-cols-3 gap-2 text-center">
               <div className="p-2.5 rounded-lg bg-muted/30">
-                <p className="text-sm font-bold tabular-nums" data-testid="stat-borrow-collateral">{collSym ?? "\u2014"}</p>
+                <div className="flex items-center justify-center gap-1">
+                  <p className="text-sm font-bold tabular-nums" data-testid="stat-borrow-collateral">{collSym ?? "\u2014"}</p>
+                  <StakingApyBadge apyPct={collStakingApyPct} testId="badge-perbot-borrow-staking-apy" />
+                </div>
                 <p className="text-[10px] text-muted-foreground leading-tight">Collateral</p>
               </div>
               <div className="p-2.5 rounded-lg bg-muted/30">

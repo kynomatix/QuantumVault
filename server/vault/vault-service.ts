@@ -443,13 +443,18 @@ export async function getVaultPositionViews(
   walletAddress: string,
   agentPublicKey: string,
   tradingBotId?: string | null,
+  // When true, also enumerate DISABLED (but real-mint) yield assets, so funds that
+  // were parked while an asset was enabled and later disabled are still surfaced.
+  // Default false keeps the original enabled-only view for existing callers; only
+  // the carry advisor needs the detectable set (to fail closed on a disabled park).
+  opts?: { includeDisabled?: boolean },
 ): Promise<VaultPositionView[]> {
-  const enabled = getEnabledYieldAssets();
+  const assetSet = opts?.includeDisabled ? getDetectableYieldAssets() : getEnabledYieldAssets();
   const dbRows = await storage.getVaultPositions(walletAddress, tradingBotId ?? null);
   const dbByKey = new Map(dbRows.map((r) => [r.assetKey, r] as const));
 
   const views: VaultPositionView[] = [];
-  for (const asset of enabled) {
+  for (const asset of assetSet) {
     let onChainRaw = BigInt(0);
     let onChainAmount = 0;
     try {

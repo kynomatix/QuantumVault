@@ -97,6 +97,10 @@ type CarryAdvisorAction = 'park' | 'repay' | 'hold' | 'unavailable';
 interface CarryAdvisorRecommendation {
   action: CarryAdvisorAction;
   bestAsset: { assetKey: string; displayName: string; apyPct: number } | null;
+  // The vault the carry math is actually computed off: the bot's CURRENT parked
+  // vault when parked (isParked), else the best-ranked vault. apyPct is null when
+  // the parked vault's yield is unmeasured (advisor fails closed to a hold).
+  activeAsset: { assetKey: string; displayName: string; apyPct: number | null; isParked: boolean } | null;
   grossSpreadPct: number | null;
   haircutPct: number;
   netSpreadPct: number | null;

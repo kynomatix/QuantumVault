@@ -209,6 +209,7 @@ describe("decideCarryTrade", () => {
       [
         "action",
         "bestAsset",
+        "activeAsset",
         "blockedBy",
         "grossSpreadPct",
         "haircutPct",
@@ -217,5 +218,135 @@ describe("decideCarryTrade", () => {
         "reason",
       ].sort(),
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // Parked-vault awareness: when the bot is ALREADY parked somewhere, the carry
+  // is judged on THAT vault, not on a better one it is not in.
+  // -------------------------------------------------------------------------
+  describe("when the bot is already parked", () => {
+    it("regression: carry uses the PARKED vault's APY, not the best ranked vault", () => {
+      // Best vault shows 50% but the bot is parked in a 6% vault. apy 6% − borrow
+      // 5% = 1% gross − 1% haircut = 0% net <= 0 → repay. (If it wrongly used the
+      // 50% best, it would say park.)
+      const rec = decideCarryTrade({
+        rankedYields: [yld(50, "onyc"), yld(6, "perena_usd")],
+        currentParked: { assetKey: "perena_usd", displayName: "Perena USD*" },
+        borrowApr: 0.05,
+        healthSummary: health("healthy"),
+        debtUsd: 100,
+      });
+      expect(rec.activeAsset?.assetKey).toBe("perena_usd");
+      expect(rec.activeAsset?.isParked).toBe(true);
+      expect(rec.activeAsset?.apyPct).toBeCloseTo(6, 9);
+      // bestAsset is still reported for context, but the math used the parked vault.
+      expect(rec.bestAsset?.assetKey).toBe("onyc");
+      expect(rec.grossSpreadPct).toBeCloseTo(1, 9);
+      expect(rec.netSpreadPct).toBeCloseTo(0, 9);
+      expect(rec.action).toBe("repay");
+      expect(rec.reason).toBe("repay_negative_carry");
+    });
+
+    it("parked with a healthy edge → HOLD (keep funds where they are), not park", () => {
+      // Parked in a 10% vault, borrow 5% → 5% gross − 1% = 4% net >= 1% → hold.
+      const rec = decideCarryTrade({
+        rankedYields: [yld(50, "onyc"), yld(10, "perena_usd")],
+        currentParked: { assetKey: "perena_usd", displayName: "Perena USD*" },
+        borrowApr: 0.05,
+        healthSummary: health("healthy"),
+        debtUsd: 100,
+      });
+      expect(rec.action).toBe("hold");
+      expect(rec.reason).toBe("hold_positive_carry");
+      expect(rec.activeAsset?.isParked).toBe(true);
+      expect(rec.activeAsset?.assetKey).toBe("perena_usd");
+      expect(rec.netSpreadPct).toBeCloseTo(4, 9);
+    });
+
+    it("parked with a thin edge → hold (thin spread)", () => {
+      // Parked 6.5% vault, borrow 5% → 1.5% gross − 1% = 0.5% net in (0,1) → hold.
+      const rec = decideCarryTrade({
+        rankedYields: [yld(50, "onyc"), yld(6.5, "perena_usd")],
+        currentParked: { assetKey: "perena_usd", displayName: "Perena USD*" },
+        borrowApr: 0.05,
+        healthSummary: health("healthy"),
+        debtUsd: 100,
+      });
+      expect(rec.action).toBe("hold");
+      expect(rec.reason).toBe("hold_thin_spread");
+      expect(rec.activeAsset?.isParked).toBe(true);
+      expect(rec.netSpreadPct).toBeCloseTo(0.5, 9);
+    });
+
+    it("parked but the parked vault's yield is unmeasured → hold (fail closed)", () => {
+      // Bot parked in an asset that is NOT in rankedYields → can't measure → hold.
+      const rec = decideCarryTrade({
+        rankedYields: [yld(50, "onyc")],
+        currentParked: { assetKey: "perena_usd", displayName: "Perena USD*" },
+        borrowApr: 0.05,
+        healthSummary: health("healthy"),
+        debtUsd: 100,
+      });
+      expect(rec.action).toBe("hold");
+      expect(rec.reason).toBe("hold_parked_yield_unavailable");
+      expect(rec.activeAsset?.assetKey).toBe("perena_usd");
+      expect(rec.activeAsset?.isParked).toBe(true);
+      expect(rec.activeAsset?.apyPct).toBeNull();
+      expect(rec.grossSpreadPct).toBeNull();
+      expect(rec.netSpreadPct).toBeNull();
+    });
+
+    it("parked but NO debt → hold_no_debt (debt gate fires before parked logic)", () => {
+      const rec = decideCarryTrade({
+        rankedYields: [yld(50, "onyc"), yld(6, "perena_usd")],
+        currentParked: { assetKey: "perena_usd", displayName: "Perena USD*" },
+        borrowApr: 0.05,
+        healthSummary: health("healthy"),
+        debtUsd: 0,
+      });
+      expect(rec.action).toBe("hold");
+      expect(rec.reason).toBe("hold_no_debt");
+    });
+
+    it("parked but health is below healthy → repay (health overrides parked logic)", () => {
+      const rec = decideCarryTrade({
+        rankedYields: [yld(6, "perena_usd")],
+        currentParked: { assetKey: "perena_usd", displayName: "Perena USD*" },
+        borrowApr: 0.05,
+        healthSummary: health("urgent"),
+        debtUsd: 100,
+      });
+      expect(rec.action).toBe("repay");
+      expect(rec.reason).toBe("repay_health_urgent");
+    });
+
+    it("parked in the SAME asset that is also the best vault → uses it, holds", () => {
+      // Only one vault, the bot is parked in it. 8% − 5% = 3% − 1% = 2% net → hold.
+      const rec = decideCarryTrade({
+        rankedYields: [yld(8, "onyc")],
+        currentParked: { assetKey: "onyc", displayName: "OnRe ONyc" },
+        borrowApr: 0.05,
+        healthSummary: health("healthy"),
+        debtUsd: 100,
+      });
+      expect(rec.action).toBe("hold");
+      expect(rec.reason).toBe("hold_positive_carry");
+      expect(rec.activeAsset?.assetKey).toBe("onyc");
+      expect(rec.activeAsset?.isParked).toBe(true);
+    });
+  });
+
+  it("not parked (currentParked null) behaves exactly as before → park to best", () => {
+    const rec = decideCarryTrade({
+      rankedYields: [yld(8, "kamino_usdc")],
+      currentParked: null,
+      borrowApr: 0.05,
+      healthSummary: health("healthy"),
+      debtUsd: 100,
+    });
+    expect(rec.action).toBe("park");
+    expect(rec.reason).toBe("park_positive_carry");
+    expect(rec.activeAsset?.assetKey).toBe("kamino_usdc");
+    expect(rec.activeAsset?.isParked).toBe(false);
   });
 });
