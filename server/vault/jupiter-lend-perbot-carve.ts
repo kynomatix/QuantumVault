@@ -876,6 +876,45 @@ async function resolvePrincipalRaw(params: PerbotUnwindCloseParams): Promise<big
   return 0n;
 }
 
+/**
+ * DISPLAY-only principal floor for a per-bot loan, raw (USDC, 6dp). READ-ONLY —
+ * never used for money sizing (the repay path keeps using `resolvePrincipalRaw`
+ * + MAX_REPAY).
+ *
+ * The live `getCurrentPosition` debt UNDER-reads (a $5.00 borrow reads back
+ * ~$4.83), so a freshly-opened loan looks smaller than the user actually owes.
+ * For DISPLAY we floor the shown debt at the realised principal recorded by the
+ * open op = max(requestedDebtRaw, borrowedUsdcRaw) across the op metadata and
+ * result. `requestedDebtRaw` is the user's intended borrow (the true principal);
+ * `borrowedUsdcRaw` is also under-read but kept in the max as a safety net.
+ * Returns 0n when there's no open op / nothing knowable (caller then falls back
+ * to the live/stored debt).
+ */
+export async function resolveDisplayPrincipalRaw(
+  walletAddress: string,
+  botBorrowPositionId: string,
+): Promise<bigint> {
+  try {
+    const ops = await storage.getBorrowOperations(walletAddress, botBorrowPositionId);
+    const open = ops.find((o) => o.operationType === "perbot_carve_open");
+    if (!open) return 0n;
+    const r = (open.result as Meta | null) ?? {};
+    const m = readMeta(open);
+    let best = 0n;
+    for (const v of [r.borrowedUsdcRaw, m.borrowedUsdcRaw, m.requestedDebtRaw]) {
+      try {
+        const cand = BigInt(v ?? "0");
+        if (cand > best) best = cand;
+      } catch {
+        /* skip unparseable */
+      }
+    }
+    return best;
+  } catch {
+    return 0n;
+  }
+}
+
 export async function runPerbotUnwindClose(params: PerbotUnwindCloseParams): Promise<PerbotCarveResult> {
   const collateralMint = params.vault.collateralMint;
   const route = new JupiterLendBorrowRoute();

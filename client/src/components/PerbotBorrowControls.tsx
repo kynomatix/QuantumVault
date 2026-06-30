@@ -1,11 +1,18 @@
 import { useEffect, useRef, useState, type ElementType } from "react";
-import { Loader2, ArrowDownCircle, Landmark, ShieldCheck, Check, AlertCircle, AlertTriangle, Info } from "lucide-react";
+import { Loader2, Landmark, Check, AlertCircle, AlertTriangle, RotateCcw, TrendingUp } from "lucide-react";
 import { useWallet } from "@/hooks/useWallet";
 import { useToast } from "@/hooks/use-toast";
 import { isSessionError, showReconnectToast } from "@/lib/reconnect-toast";
 import { walletAuthHeaders } from "@/lib/queryClient";
 import { safeResponseJson } from "@/lib/safe-fetch";
-import { getSessionId, newRequestId, fmtUsd } from "@/lib/lending-format";
+import {
+  getSessionId,
+  newRequestId,
+  fmtUsd,
+  healthBarColor,
+  safeLtvMarkerPct,
+  RECOMMENDED_MAX_LTV,
+} from "@/lib/lending-format";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -44,6 +51,7 @@ import {
 type HealthBand = "healthy" | "nudge" | "urgent" | "liquidation" | "unavailable";
 
 interface PerbotPositionHealth {
+  collateralValueUsd: number | null;
   debtUsd: number | null;
   ltv: number | null;
   healthFactor: number | null;
@@ -56,7 +64,14 @@ interface PerbotBorrowPosition {
   collateralAssetKey: string | null;
   collateralMint: string | null;
   collateralSymbol: string | null;
+  collateralDecimals: number | null;
+  // Conservative (never-under-read) debt for DISPLAY — see server seam.
   debtAmountRaw: string | null;
+  // Raw components surfaced for transparency (not used for the headline).
+  liveDebtRaw: string | null;
+  principalUsdcRaw: string | null;
+  maxLtv: number | null;
+  collateralLogoURI: string | null;
   health: PerbotPositionHealth;
 }
 
@@ -69,6 +84,10 @@ interface PerbotCarrySource {
   debtDecimals: number;
   maxCarveRaw: string;
   maxBorrowRaw: string;
+  collateralLogoURI: string | null;
+  oraclePriceUsd?: number | null;
+  targetLtv?: number | null;
+  suggestLtv?: number | null;
 }
 
 interface PerbotPositionsResponse {
@@ -112,6 +131,36 @@ const HEALTH_CHIP: Record<
   urgent: { label: "At Risk", cls: "border-amber-500/40 bg-amber-500/15 text-amber-600 dark:text-amber-500", Icon: AlertTriangle },
   liquidation: { label: "Critical", cls: "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-500", Icon: AlertTriangle },
 };
+
+// Real collateral icon (Helius DAS metadata), with a graceful fallback to the
+// symbol's first two letters when the mint has no icon or the image URL is dead.
+// Mirrors the Wallet-tab CollateralAvatar so both lending surfaces look identical.
+function CollateralAvatar({ logoURI, symbol, testId }: {
+  logoURI: string | null;
+  symbol: string | null;
+  testId?: string;
+}) {
+  const [errored, setErrored] = useState(false);
+  if (logoURI && !errored) {
+    return (
+      <img
+        src={logoURI}
+        alt={symbol ?? "collateral"}
+        className="w-8 h-8 rounded-full shrink-0 object-cover"
+        onError={() => setErrored(true)}
+        data-testid={testId}
+      />
+    );
+  }
+  return (
+    <span
+      className="w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-semibold text-background shrink-0 bg-primary"
+      data-testid={testId}
+    >
+      {symbol ? symbol.slice(0, 2) : "\u2014"}
+    </span>
+  );
+}
 
 export default function PerbotBorrowControls({
   bot,
@@ -438,31 +487,61 @@ export default function PerbotBorrowControls({
   if (!openPos && !carrySrc) return null;
 
   const borrowUsd = carrySrc ? Number(carrySrc.maxBorrowRaw) / 10 ** carrySrc.debtDecimals : 0;
-  const debtUsd = openPos
-    ? openPos.health?.debtUsd ?? Number(openPos.debtAmountRaw ?? 0) / 1e6
-    : 0;
+  // Headline debt = the CONSERVATIVE (never-under-read) figure from the server, so a
+  // $5.00 borrow reads $5.00 — not the protocol's slightly-smaller live debt (which
+  // can settle a cent or two lower). Health/LTV below stay on the LIVE on-chain debt.
+  const debtUsd = openPos ? Number(openPos.debtAmountRaw ?? 0) / 1e6 : 0;
   const band = openPos?.health?.band;
   const chip = band && band !== "unavailable" ? HEALTH_CHIP[band] : null;
   const ChipIcon = chip?.Icon;
-  // Advisor folded into the loan card (consolidated to ONE card). Only when the
-  // server says the recommendation applies AND a loan is open (this branch).
+  // The Wallet-tab health label is a plain colored text+icon (no pill), so pull just
+  // the text-color classes out of the chip's pill styling.
+  const chipTextCls = chip ? chip.cls.split(" ").filter((c) => c.includes("text-")).join(" ") : "text-muted-foreground";
+
+  // LIVE health bar — inherits the Wallet-tab pool-row hierarchy. Fill = share of
+  // this position's borrow capacity used (LIVE debt ÷ collateral value × max LTV).
+  // Real on-chain inputs only; hidden when either is unreadable (never a fabricated
+  // fill). The brand color ramp (sky → pink-purple, deliberately not red/green) is
+  // shared with the Wallet page so both encode health identically.
+  const collValueUsd = openPos?.health?.collateralValueUsd ?? null;
+  const liveDebtUsd = openPos?.health?.debtUsd ?? null;
+  const posMaxLtv = openPos?.maxLtv ?? null;
+  const borrowLimitUsd = collValueUsd != null && posMaxLtv != null ? collValueUsd * posMaxLtv : null;
+  const usagePct =
+    borrowLimitUsd != null && borrowLimitUsd > 0 && liveDebtUsd != null
+      ? Math.min(100, Math.max(0, (liveDebtUsd / borrowLimitUsd) * 100))
+      : null;
+  const safeMarkerPct = safeLtvMarkerPct(posMaxLtv);
+
+  // Advisor → which of the two action cards to HIGHLIGHT as recommended. park/hold ⇒
+  // Carry Trade (keep the loan, earn yield); repay ⇒ Repay. Rendered as clean STATS
+  // (vault yield vs borrow APR → net edge), never prose.
   const advisorRec = advisor?.applicable && advisor.recommendation ? advisor.recommendation : null;
-  const showSpread = advisorRec != null && advisorRec.netSpreadPct != null;
-  // Accent the recommendation ICON only (never the card chrome). A repay nudge is
-  // amber (allowed for warnings); everything else stays muted. No orange/green.
-  const adviceAccent = advisorRec?.action === "repay" ? "text-amber-500" : "text-muted-foreground";
-  // Net edge: positive is neutral foreground (green is reserved for Bot Balance);
-  // negative is amber.
-  const netEdgeCls =
-    advisorRec?.netSpreadPct != null && advisorRec.netSpreadPct < 0
-      ? "text-amber-600 dark:text-amber-500"
-      : "text-foreground";
+  const recCarry = advisorRec != null && (advisorRec.action === "park" || advisorRec.action === "hold");
+  const recRepay = advisorRec != null && advisorRec.action === "repay";
+  const fmtPct1 = (n: number | null | undefined): string =>
+    n == null || !Number.isFinite(n) ? "\u2014" : `${n.toFixed(1)}%`;
+  // Net edge: positive stays neutral (green is reserved for the Bot Balance number);
+  // negative is amber (a warning — never green/orange).
+  const netEdge = advisorRec?.netSpreadPct ?? null;
+  const netEdgeCls = netEdge != null && netEdge < 0 ? "text-amber-600 dark:text-amber-500" : "text-foreground";
+  const netEdgeStr =
+    netEdge == null || !Number.isFinite(netEdge) ? "\u2014" : `${netEdge >= 0 ? "+" : ""}${netEdge.toFixed(1)}%`;
+
   // Which collateral asset the system carved for this loan (e.g. INF). Prefer the
   // canonical cased symbol from the server (honors native ticker casing like jupSOL);
   // fall back to the asset key uppercased.
   const collSym = openPos
     ? (openPos.collateralSymbol ?? (openPos.collateralAssetKey ? openPos.collateralAssetKey.toUpperCase() : null))
     : (carrySrc?.collateralSymbol ?? (carrySrc?.collateralAssetKey ? carrySrc.collateralAssetKey.toUpperCase() : null));
+  const collLogoURI = openPos?.collateralLogoURI ?? carrySrc?.collateralLogoURI ?? null;
+  // Safe target LTV for the borrow card's info block (the ratio the bot opens at).
+  const targetLtvPct =
+    carrySrc?.suggestLtv != null
+      ? Math.round(carrySrc.suggestLtv * 100)
+      : carrySrc?.targetLtv != null
+        ? Math.round(carrySrc.targetLtv * 100)
+        : null;
 
   // Max borrowable in friendly dollars (floored to the cent so it can never round
   // ABOVE the true on-chain max). Entering it lands in the ~1-cent verbatim path.
@@ -478,83 +557,174 @@ export default function PerbotBorrowControls({
   return (
     <>
       {openPos ? (
-        <div className="p-4 rounded-xl border bg-muted/30 space-y-3" data-testid="card-perbot-loan">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <Landmark className="w-4 h-4 text-muted-foreground" />
-              <h3 className="font-semibold text-sm">Collateral Loan</h3>
-            </div>
-            {chip && ChipIcon && (
-              <span
-                className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${chip.cls}`}
-                data-testid="text-perbot-loan-health"
-              >
-                <ChipIcon className="w-3 h-3" />
-                {chip.label}
-              </span>
-            )}
-          </div>
-          {collSym && (
-            <p className="text-xs text-muted-foreground -mt-1" data-testid="text-perbot-loan-collateral">
-              Backed by your {collSym}
-            </p>
-          )}
-          <div className="flex items-end justify-between gap-3">
-            <div>
-              <p className="text-xs text-muted-foreground">Amount Borrowed</p>
-              <p className="text-2xl font-bold tabular-nums" data-testid="text-perbot-debt">
-                {fmtUsd(debtUsd)}
-              </p>
-            </div>
-            <Button
-              variant="outline"
-              onClick={() => setConfirm("repay")}
-              disabled={busy !== null}
-              data-testid="button-perbot-repay"
-            >
-              {busy === "repay" ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowDownCircle className="w-4 h-4 mr-1.5" />}
-              Repay Loan
-            </Button>
-          </div>
-          {advisorLoading && !advisorRec ? (
-            <div className="border-t pt-3 flex items-center gap-2 text-xs text-muted-foreground" data-testid="text-carry-advisor-loading">
-              <Loader2 className="w-3 h-3 animate-spin" />
-              Checking the best move for this loan…
-            </div>
-          ) : advisorRec ? (
-            <div className="border-t pt-3 space-y-1.5">
-              <div className="flex items-start gap-2 text-sm">
-                <Info className={`w-4 h-4 shrink-0 mt-0.5 ${adviceAccent}`} />
-                <p data-testid="text-carry-advisor-message">{advisorRec.message}</p>
+        <div className="rounded-xl border border-border bg-background/40 p-4 space-y-4" data-testid="card-perbot-loan">
+          {/* Loan header — collateral avatar + conservative debt headline (Wallet-tab row styling). */}
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <CollateralAvatar logoURI={collLogoURI} symbol={collSym} testId="img-perbot-loan-collateral" />
+              <div className="min-w-0">
+                <p className="text-sm font-medium leading-tight">{collSym ?? "\u2014"}</p>
+                <p className="text-xs text-muted-foreground truncate">Carry Trade Loan</p>
               </div>
-              {showSpread && (
-                <p className="text-xs text-muted-foreground pl-6" data-testid="text-carry-net-edge">
-                  Net edge{" "}
-                  <span className={`tabular-nums ${netEdgeCls}`}>
-                    {advisorRec.netSpreadPct! >= 0 ? "+" : ""}{advisorRec.netSpreadPct!.toFixed(1)}%
-                  </span>
-                  {advisor?.borrowAprPct != null && <> after {advisor.borrowAprPct.toFixed(1)}% borrow</>}
-                  {advisorRec.bestAsset && (
-                    <> · best vault {advisorRec.bestAsset.apyPct.toFixed(1)}% {advisorRec.bestAsset.displayName}</>
-                  )}
-                </p>
+            </div>
+            <div className="text-right shrink-0">
+              <p className="text-2xl font-bold tabular-nums" data-testid="text-perbot-debt">{fmtUsd(debtUsd)}</p>
+              <p className="text-[11px] text-muted-foreground">borrowed</p>
+            </div>
+          </div>
+
+          {/* (g) Why the figure can differ from the live protocol read. */}
+          <p className="text-[11px] text-muted-foreground -mt-2" data-testid="text-perbot-debt-note">
+            This is the full amount you borrowed. The lender may show a cent or two less as the position settles.
+          </p>
+
+          {/* Health — colored bar inherits the Wallet-tab hierarchy (real on-chain inputs only). */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="text-muted-foreground">Loan Health</span>
+              {chip && ChipIcon && (
+                <span className={`inline-flex items-center gap-1 ${chipTextCls}`} data-testid="text-perbot-loan-health">
+                  <ChipIcon className="w-3.5 h-3.5" />
+                  {chip.label}
+                </span>
               )}
             </div>
-          ) : null}
-          <p className="text-xs text-muted-foreground">
-            Repaying brings any parked funds in this bot back to cash, clears the loan, and returns your collateral to your account.
-          </p>
+            {usagePct != null ? (
+              <>
+                <div className="relative">
+                  <div
+                    className="h-1.5 w-full rounded-full bg-muted overflow-hidden"
+                    title={`Borrow capacity used: ${Math.round(usagePct)}%`}
+                    data-testid="bar-perbot-health"
+                  >
+                    <div className="h-full rounded-full" style={{ width: `${usagePct}%`, backgroundColor: healthBarColor(usagePct) }} />
+                  </div>
+                  {safeMarkerPct != null && (
+                    <div
+                      className="absolute -top-0.5 -bottom-0.5 w-px bg-foreground/70"
+                      style={{ left: `${safeMarkerPct}%` }}
+                      title={`Safe limit (${Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV)`}
+                      data-testid="marker-perbot-safe-limit"
+                    />
+                  )}
+                </div>
+                {safeMarkerPct != null && (
+                  <div className="flex items-center gap-1 text-[10px] text-muted-foreground" data-testid="legend-perbot-safe-limit">
+                    <span className="inline-block h-2.5 w-px bg-foreground/70 shrink-0" />
+                    <span>Safe limit ({Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV)</span>
+                  </div>
+                )}
+              </>
+            ) : (
+              <p className="text-[11px] text-muted-foreground" data-testid="text-perbot-health-unavailable">
+                Health unavailable right now.
+              </p>
+            )}
+          </div>
+
+          {/* TWO action cards (Vault park-card styling). The advisor HIGHLIGHTS one. */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* Carry Trade — keep the loan, earn yield. Advisor stats, not prose. */}
+            <div
+              className={`relative rounded-lg border p-3 space-y-2.5 ${recCarry ? "ring-1 ring-primary/40 border-primary/40 bg-primary/5" : "border-border bg-muted/30"}`}
+              data-testid="card-perbot-carry"
+            >
+              {recCarry && (
+                <span className="absolute -top-2 left-3 inline-flex items-center rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground shadow-sm" data-testid="pill-perbot-recommended-carry">
+                  Recommended
+                </span>
+              )}
+              <div className="flex items-center gap-2">
+                <TrendingUp className="w-4 h-4 text-muted-foreground" />
+                <h4 className="text-sm font-semibold">Carry Trade</h4>
+              </div>
+              {advisorLoading && !advisorRec ? (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground py-2" data-testid="text-carry-advisor-loading">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Checking the best move…
+                </div>
+              ) : (
+                <div className="grid grid-cols-3 gap-1.5 text-center">
+                  <div className="p-1.5 rounded-md bg-background/50">
+                    <p className="text-sm font-bold tabular-nums" data-testid="stat-carry-yield">{fmtPct1(advisorRec?.bestAsset?.apyPct ?? null)}</p>
+                    <p className="text-[10px] text-muted-foreground leading-tight">Vault Yield</p>
+                  </div>
+                  <div className="p-1.5 rounded-md bg-background/50">
+                    <p className="text-sm font-bold tabular-nums" data-testid="stat-carry-apr">{fmtPct1(advisor?.borrowAprPct ?? null)}</p>
+                    <p className="text-[10px] text-muted-foreground leading-tight">Borrow APR</p>
+                  </div>
+                  <div className="p-1.5 rounded-md bg-background/50">
+                    <p className={`text-sm font-bold tabular-nums ${netEdgeCls}`} data-testid="stat-carry-net-edge">{netEdgeStr}</p>
+                    <p className="text-[10px] text-muted-foreground leading-tight">Net Edge</p>
+                  </div>
+                </div>
+              )}
+              <p className="text-[11px] text-muted-foreground">
+                Keep the loan and earn yield on the borrowed cash.
+                {advisorRec?.bestAsset ? ` Best vault: ${advisorRec.bestAsset.displayName}.` : ""}
+              </p>
+            </div>
+
+            {/* Repay — clear the loan, return collateral. */}
+            <div
+              className={`relative rounded-lg border p-3 space-y-2.5 ${recRepay ? "ring-1 ring-primary/40 border-primary/40 bg-primary/5" : "border-border bg-muted/30"}`}
+              data-testid="card-perbot-repay"
+            >
+              {recRepay && (
+                <span className="absolute -top-2 left-3 inline-flex items-center rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground shadow-sm" data-testid="pill-perbot-recommended-repay">
+                  Recommended
+                </span>
+              )}
+              <div className="flex items-center gap-2">
+                <RotateCcw className="w-4 h-4 text-muted-foreground" />
+                <h4 className="text-sm font-semibold">Repay</h4>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Brings any parked funds back to cash, clears the loan, and returns your {collSym ?? "collateral"} to your account.
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full h-8 px-3 text-xs border-accent/40 text-accent hover:bg-accent/10"
+                onClick={() => setConfirm("repay")}
+                disabled={busy !== null}
+                data-testid="button-perbot-repay"
+              >
+                {busy === "repay" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5 mr-1.5" />}
+                Repay Loan
+              </Button>
+            </div>
+          </div>
         </div>
       ) : (
         carrySrc && (
-          <div className="p-4 rounded-xl border bg-muted/30 space-y-3" data-testid="card-perbot-borrow">
-            <div className="flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 text-primary" />
-              <h3 className="font-semibold text-sm">Borrow Against Collateral</h3>
+          <div className="rounded-xl border border-border bg-background/40 p-4 space-y-3" data-testid="card-perbot-borrow">
+            {/* Borrow header — collateral avatar + symbol (Wallet-tab borrow styling). */}
+            <div className="flex items-center gap-2.5">
+              <CollateralAvatar logoURI={collLogoURI} symbol={collSym} testId="img-perbot-borrow-collateral" />
+              <div className="min-w-0">
+                <h3 className="text-sm font-semibold leading-tight">Borrow Against Collateral</h3>
+                <p className="text-xs text-muted-foreground truncate">Backed by your {collSym ?? "account"} collateral</p>
+              </div>
             </div>
             <p className="text-sm text-muted-foreground">
               Borrow extra USDC against your {collSym ? `${collSym} ` : "account "}collateral and add it to this bot's trading balance. Choose how much, up to a safe limit. Your account stays at a safe level, and you can repay anytime.
             </p>
+            {/* What you're borrowing against — small sectioned info blocks. */}
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div className="p-2.5 rounded-lg bg-muted/30">
+                <p className="text-sm font-bold tabular-nums" data-testid="stat-borrow-collateral">{collSym ?? "\u2014"}</p>
+                <p className="text-[10px] text-muted-foreground leading-tight">Collateral</p>
+              </div>
+              <div className="p-2.5 rounded-lg bg-muted/30">
+                <p className="text-sm font-bold tabular-nums" data-testid="stat-borrow-max">{fmtUsd(borrowUsd)}</p>
+                <p className="text-[10px] text-muted-foreground leading-tight">Max Borrow</p>
+              </div>
+              <div className="p-2.5 rounded-lg bg-muted/30">
+                <p className="text-sm font-bold tabular-nums" data-testid="stat-borrow-ltv">{targetLtvPct != null ? `${targetLtvPct}%` : "\u2014"}</p>
+                <p className="text-[10px] text-muted-foreground leading-tight">Target LTV</p>
+              </div>
+            </div>
             <div className="space-y-1.5">
               <div className="flex items-center justify-between text-xs text-muted-foreground">
                 <span>Amount to Borrow (USDC)</span>
@@ -595,7 +765,7 @@ export default function PerbotBorrowControls({
               )}
             </div>
             <Button
-              className="w-full"
+              className="w-full bg-gradient-to-r from-accent to-primary text-white"
               onClick={() => setConfirm("borrow")}
               disabled={busy !== null || !canBorrow}
               data-testid="button-perbot-borrow"
@@ -603,9 +773,9 @@ export default function PerbotBorrowControls({
               {busy === "borrow" ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
               ) : hasInflightBorrow && !amtValid ? (
-                <>Finish Borrow</>
+                <><Landmark className="w-4 h-4 mr-1.5" /> Finish Borrow</>
               ) : (
-                <>Borrow {amtValid ? fmtUsd(enteredUsd) : "USDC"}</>
+                <><Landmark className="w-4 h-4 mr-1.5" /> Borrow {amtValid ? fmtUsd(enteredUsd) : "USDC"}</>
               )}
             </Button>
           </div>

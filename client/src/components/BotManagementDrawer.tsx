@@ -2344,9 +2344,17 @@ export function BotManagementDrawer({
                 />
               </button>
               {howItWorksOpen && (
-                <p className="text-sm text-muted-foreground px-4 pb-4 pl-12" data-testid="text-how-it-works">
-                  Funds in the bot are used for trading. Transfer from your wallet to the bot to enable trading, or withdraw profits back to your wallet.
-                </p>
+                <div className="text-sm text-muted-foreground px-4 pb-4 pl-12 space-y-2" data-testid="text-how-it-works">
+                  <p>
+                    Funds in the bot are used for trading. Transfer from your wallet to the bot to enable trading, or withdraw profits back to your wallet.
+                  </p>
+                  <p>
+                    <strong className="text-foreground">Borrow Against Collateral.</strong> If you hold lending collateral (like INF), you can borrow extra USDC against it and add it straight to this bot — without selling anything. You choose how much, up to a safe limit. The borrowed cash lands in the bot, so the <strong className="text-foreground">Bot Balance above grows by the new amount</strong>. Repay anytime to clear the loan and return your collateral.
+                  </p>
+                  <p>
+                    A borrow may read a cent or two below the amount you asked for (e.g. a $5.00 borrow can show about $4.83) because the lender settles the position and takes its small share as it opens. The loan card always shows the full amount you borrowed.
+                  </p>
+                </div>
               )}
             </div>
 

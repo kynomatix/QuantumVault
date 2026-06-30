@@ -1509,7 +1509,7 @@ import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { isBorrowEligibleWallet, isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
-import { planPerbotCarve, runPerbotCarveOpen, runPerbotUnwindClose, selectBlockingBotPositions } from "./vault/jupiter-lend-perbot-carve";
+import { planPerbotCarve, runPerbotCarveOpen, runPerbotUnwindClose, selectBlockingBotPositions, resolveDisplayPrincipalRaw } from "./vault/jupiter-lend-perbot-carve";
 import { computePerBotPositionHealth, summarizeBotBorrowHealth } from "./vault/borrow-health";
 import { rankMeasuredYieldDestinations } from "./vault/carry-yield-ranker";
 import { decideCarryTrade } from "./vault/carry-trade-advisor";
@@ -9603,6 +9603,42 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             live: liveHealth,
             vault,
           });
+
+          // CONSERVATIVE DISPLAY DEBT (display-only; money paths untouched).
+          // The live getCurrentPosition debt UNDER-reads (a $5.00 borrow reads
+          // back ~$4.83), so a freshly-opened loan looks smaller than the user
+          // actually owes. For DISPLAY we floor the shown debt at the realised
+          // principal recorded by the open op. Final shown debt = the MAX of the
+          // live read, the stored snapshot, and the principal floor — never an
+          // under-read. Health/LTV/band stay LIVE (liquidatable dominates).
+          const liveDebtRaw: string | null = liveHealth?.debtRaw ?? null;
+          const storedDebtRaw: string = r.debtAmountRaw ?? "0";
+          let principalRaw = 0n;
+          try {
+            principalRaw = await resolveDisplayPrincipalRaw(req.walletAddress!, r.id);
+          } catch {
+            principalRaw = 0n;
+          }
+          const toBig = (v: string | null | undefined): bigint => {
+            try { return BigInt(v ?? "0"); } catch { return 0n; }
+          };
+          const conservativeDebt = [toBig(liveDebtRaw), toBig(storedDebtRaw), principalRaw]
+            .reduce((a, b) => (b > a ? b : a), 0n);
+          const conservativeDebtStr = conservativeDebt.toString();
+
+          // Best-effort MONOTONIC write-back so the cached snapshot (and the
+          // sum-of-debt that feeds net-equity) self-heal toward the conservative
+          // floor. Per-bot loans are all-in/all-out (no partial repay), so debt
+          // only grows until close → monotonic-up is safe. CAS on the current
+          // status; never resurrects a closed/failed row. Never fails the read.
+          if (conservativeDebt > toBig(storedDebtRaw) && r.status) {
+            try {
+              await storage.updateBorrowPosition(r.id, { debtAmountRaw: conservativeDebtStr }, r.status);
+            } catch {
+              /* cosmetic self-heal; ignore */
+            }
+          }
+
           return {
             id: r.id,
             status: r.status,
@@ -9611,10 +9647,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             collateralAssetKey: r.collateralAssetKey,
             collateralMint: r.collateralMint,
             collateralSymbol: vault?.collateralSymbol ?? null,
+            collateralDecimals: vault?.collateralDecimals ?? null,
             collateralAmountRaw: liveHealth?.collateralRaw ?? r.collateralAmountRaw,
             debtAssetKey: r.debtAssetKey,
             debtMint: r.debtMint,
-            debtAmountRaw: liveHealth?.debtRaw ?? r.debtAmountRaw,
+            // Conservative (never-under-read) debt for DISPLAY.
+            debtAmountRaw: conservativeDebtStr,
+            // Raw components exposed for transparency / advanced display.
+            liveDebtRaw,
+            principalUsdcRaw: principalRaw > 0n ? principalRaw.toString() : null,
+            maxLtv: vault?.maxLtv ?? null,
             liveHealth,
             healthIsLive: liveHealth != null,
             healthAsOf: r.healthAsOf ?? null,
@@ -9680,7 +9722,34 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
 
-      res.json({ eligible, applicable: true, positions, carrySources, healthSummary });
+      // Real on-chain token icons (Helius DAS), keyed by the collateral mint —
+      // the same source the Wallet-tab lending rows use, so the per-bot loan
+      // cards show the matching collateral logo. Cosmetic → fail open: a null
+      // icon just renders the UI's lettered placeholder, never blocks the read.
+      let logoByMint = new Map<string, string | null>();
+      try {
+        const logoMints = Array.from(
+          new Set(
+            [
+              ...positions.map((p) => p.collateralMint),
+              ...carrySources.map((c) => c.collateralMint),
+            ].filter((m): m is string => !!m),
+          ),
+        );
+        if (logoMints.length > 0) logoByMint = await resolveTokenLogos(logoMints);
+      } catch {
+        /* cosmetic; leave logos empty */
+      }
+      const positionsOut = positions.map((p) => ({
+        ...p,
+        collateralLogoURI: p.collateralMint ? (logoByMint.get(p.collateralMint) ?? null) : null,
+      }));
+      const carrySourcesOut = carrySources.map((c) => ({
+        ...c,
+        collateralLogoURI: c.collateralMint ? (logoByMint.get(c.collateralMint) ?? null) : null,
+      }));
+
+      res.json({ eligible, applicable: true, positions: positionsOut, carrySources: carrySourcesOut, healthSummary });
     } catch (error: any) {
       console.error("[Vault] per-bot borrow positions read error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
