@@ -373,7 +373,7 @@ export interface IStorage {
   getActiveBorrowPositionsAllWallets(): Promise<BorrowPosition[]>;
   getBorrowOperations(walletAddress: string, borrowPositionId?: string | null): Promise<BorrowOperation[]>;
   createBorrowPosition(p: { walletAddress: string; tradingBotId?: string | null; debtVenue: string; venueVaultId?: string | null; venuePositionId?: string | null; collateralAssetKey: string; collateralMint: string; collateralAmountRaw?: string; debtAssetKey?: string; debtMint: string; debtAmountRaw?: string; attributedBotId?: string | null; status?: string; }): Promise<BorrowPosition>;
-  updateBorrowPosition(id: string, patch: { venuePositionId?: string | null; venueVaultId?: string | null; collateralAmountRaw?: string; debtAmountRaw?: string; status?: string; attributedBotId?: string | null; healthSnapshot?: BorrowPosition['healthSnapshot']; healthAsOf?: Date | null; healthSource?: string | null; }, ifStatus?: string): Promise<BorrowPosition | undefined>;
+  updateBorrowPosition(id: string, patch: { venuePositionId?: string | null; venueVaultId?: string | null; collateralAmountRaw?: string; debtAmountRaw?: string; status?: string; attributedBotId?: string | null; healthSnapshot?: BorrowPosition['healthSnapshot']; healthAsOf?: Date | null; healthSource?: string | null; lastObservedHealthBand?: string | null; healthBandChangedAt?: Date | null; lastHealthAlertBand?: string | null; lastHealthAlertAt?: Date | null; }, ifStatus?: string): Promise<BorrowPosition | undefined>;
   createBorrowOperation(p: { walletAddress: string; borrowPositionId?: string | null; operationType: string; status?: string; step?: string | null; clientRequestId?: string | null; metadata?: Record<string, unknown> | null; }): Promise<BorrowOperation>;
   updateBorrowOperation(id: string, patch: { status?: string; step?: string | null; error?: string | null; borrowPositionId?: string | null; appendTxSignature?: string; metadata?: Record<string, unknown> | null; mergeMetadata?: Record<string, unknown>; result?: Record<string, unknown> | null; }): Promise<BorrowOperation | undefined>;
   getBorrowOperationById(id: string): Promise<BorrowOperation | undefined>;
@@ -2233,6 +2233,10 @@ export class DatabaseStorage implements IStorage {
       healthSnapshot?: BorrowPosition['healthSnapshot'];
       healthAsOf?: Date | null;
       healthSource?: string | null;
+      lastObservedHealthBand?: string | null;
+      healthBandChangedAt?: Date | null;
+      lastHealthAlertBand?: string | null;
+      lastHealthAlertAt?: Date | null;
     },
     ifStatus?: string,
   ): Promise<BorrowPosition | undefined> {

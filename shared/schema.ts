@@ -479,6 +479,14 @@ export const borrowPositions = pgTable("borrow_positions", {
   } | null>(),
   healthAsOf: timestamp("health_as_of"),
   healthSource: text("health_source"),
+  // Borrow-health alert state machine (FC-2 monitor). Durable so band-crossing
+  // Telegram alerts survive restarts and never repeat for the same band.
+  // lastHealthAlertBand = the worst band we have NOTIFIED on; lastObservedHealthBand
+  // + healthBandChangedAt drive anti-flap hysteresis before the baseline lowers.
+  lastObservedHealthBand: text("last_observed_health_band"),
+  healthBandChangedAt: timestamp("health_band_changed_at"),
+  lastHealthAlertBand: text("last_health_alert_band"),
+  lastHealthAlertAt: timestamp("last_health_alert_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({

@@ -38,7 +38,7 @@ export type BorrowHealthBand =
   | "healthy";
 
 /** Worst-first severity ranking for picking the headline (higher = worse). */
-const BAND_SEVERITY: Record<BorrowHealthBand, number> = {
+export const BAND_SEVERITY: Record<BorrowHealthBand, number> = {
   unavailable: 4,
   liquidation: 3,
   urgent: 2,
@@ -291,6 +291,86 @@ function defaultDeps(): BotBorrowHealthDeps {
 }
 
 /**
+ * Just the chain/REST I/O a SINGLE row's health read needs — a narrower slice of
+ * BotBorrowHealthDeps so the account-level monitor (FC-2) can share the EXACT
+ * per-row read without dragging in the per-bot `getBorrowPositions` enumerator.
+ */
+export interface RowHealthDeps {
+  getVaultConfig(collateralMint: string): Promise<BorrowVaultConfig | null>;
+  readLivePositionHealth(
+    collateralMint: string,
+    positionId: number,
+  ): Promise<LivePositionHealth | null>;
+}
+
+export function defaultRowHealthDeps(): RowHealthDeps {
+  const route = new JupiterLendBorrowRoute();
+  return {
+    getVaultConfig: (m) => route.getVaultConfig(m),
+    readLivePositionHealth: (m, p) => route.readLivePositionHealth(m, p),
+  };
+}
+
+/**
+ * Read ONE borrow position's live health (vault config + on-chain position) and
+ * reduce to a PerBotPositionHealth. SCOPE-AGNOSTIC: account-level (tradingBotId
+ * null) and per-bot rows go through the identical path — the pure
+ * computePerBotPositionHealth only takes facts. Fail-closed per failure mode
+ * (unreadable config/position ⇒ `unavailable`, never a guessed "healthy"); never
+ * throws. Pass a shared `cfgCache` to read each distinct mint's config once.
+ */
+export async function computeRowHealth(
+  row: {
+    id: string;
+    venuePositionId: string | number | null;
+    collateralMint: string | null;
+    collateralAssetKey: string | null;
+  },
+  deps: RowHealthDeps = defaultRowHealthDeps(),
+  cfgCache?: Map<string, BorrowVaultConfig | null>,
+): Promise<PerBotPositionHealth> {
+  const mint = row.collateralMint ?? null;
+  const venueId = row.venuePositionId != null ? Number(row.venuePositionId) : NaN;
+  let vault: BorrowVaultConfig | null = null;
+  let live: LivePositionHealth | null = null;
+
+  if (mint) {
+    if (cfgCache) {
+      if (!cfgCache.has(mint)) {
+        try {
+          cfgCache.set(mint, await deps.getVaultConfig(mint));
+        } catch {
+          cfgCache.set(mint, null);
+        }
+      }
+      vault = cfgCache.get(mint) ?? null;
+    } else {
+      try {
+        vault = await deps.getVaultConfig(mint);
+      } catch {
+        vault = null;
+      }
+    }
+    if (Number.isInteger(venueId) && venueId > 0) {
+      try {
+        live = await deps.readLivePositionHealth(mint, venueId);
+      } catch {
+        live = null;
+      }
+    }
+  }
+
+  return computePerBotPositionHealth({
+    borrowPositionId: row.id,
+    venuePositionId: Number.isInteger(venueId) ? venueId : null,
+    collateralAssetKey: row.collateralAssetKey ?? null,
+    collateralMint: mint,
+    live,
+    vault,
+  });
+}
+
+/**
  * Enumerate live health for every non-terminal per-bot borrow position of one
  * bot. Lazy / event-driven by design (called on Equity-tab open + after
  * open/close mutations) — NOT a poller. Fail-closed per position; never throws on
@@ -312,38 +392,17 @@ export async function enumerateBotBorrowHealth(
   const out: PerBotPositionHealth[] = [];
 
   for (const r of rows) {
-    const mint = r.collateralMint ?? null;
-    const venueId = r.venuePositionId != null ? Number(r.venuePositionId) : NaN;
-    let vault: BorrowVaultConfig | null = null;
-    let live: LivePositionHealth | null = null;
-
-    if (mint) {
-      if (!cfgCache.has(mint)) {
-        try {
-          cfgCache.set(mint, await deps.getVaultConfig(mint));
-        } catch {
-          cfgCache.set(mint, null);
-        }
-      }
-      vault = cfgCache.get(mint) ?? null;
-      if (Number.isInteger(venueId) && venueId > 0) {
-        try {
-          live = await deps.readLivePositionHealth(mint, venueId);
-        } catch {
-          live = null;
-        }
-      }
-    }
-
     out.push(
-      computePerBotPositionHealth({
-        borrowPositionId: r.id,
-        venuePositionId: Number.isInteger(venueId) ? venueId : null,
-        collateralAssetKey: r.collateralAssetKey ?? null,
-        collateralMint: mint,
-        live,
-        vault,
-      }),
+      await computeRowHealth(
+        {
+          id: r.id,
+          venuePositionId: r.venuePositionId,
+          collateralMint: r.collateralMint ?? null,
+          collateralAssetKey: r.collateralAssetKey ?? null,
+        },
+        deps,
+        cfgCache,
+      ),
     );
   }
 

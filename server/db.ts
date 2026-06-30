@@ -517,6 +517,13 @@ export async function ensureSchema() {
       // Additive: persist the venue's position id (Jupiter Lend NFT) for repay/
       // close/monitor. Idempotent for DBs created before this column existed.
       `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS venue_position_id text`,
+      // Additive (FC-2): durable borrow-health alert state so band-crossing
+      // Telegram alerts survive restarts, never repeat for the same band, and
+      // only reset downward after anti-flap hysteresis. Mirrors schema.ts.
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS last_observed_health_band text`,
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS health_band_changed_at timestamp`,
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS last_health_alert_band text`,
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS last_health_alert_at timestamp`,
 
       // --- Vaults borrow engine (Phase A scaffold): money-op AUDIT log. ---
       // Append-only record of every multi-hop borrow/repay/carry operation, so

@@ -2201,6 +2201,46 @@ export function BotManagementDrawer({
               </div>
             </div>
 
+            {hasBalanceLoaded && borrowDebtUsdc > 0 && (() => {
+              const lev = localBot?.leverage ?? displayBot?.leverage ?? 0;
+              const tradingCapital = botBalance + parkedValueUsdc;
+              const yours = tradingCapital - borrowDebtUsdc;
+              return (
+                <div className="p-4 rounded-xl border bg-muted/30 space-y-2" data-testid="panel-borrow-split">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1">
+                      <p className="text-sm text-muted-foreground">Trading Capital</p>
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger>
+                            <Info className="w-3 h-3 text-muted-foreground" />
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            <p className="max-w-[220px]">What this bot trades with — your own equity plus borrowed USDC. Borrowing grows position size, not your net worth.</p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
+                    <p className="text-lg font-bold" data-testid="text-trading-capital">${tradingCapital.toFixed(2)}</p>
+                  </div>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">Yours</span>
+                    <span className="font-medium" data-testid="text-capital-yours">${yours.toFixed(2)}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">Borrowed</span>
+                    <span className="font-medium" data-testid="text-capital-borrowed">${borrowDebtUsdc.toFixed(2)}</span>
+                  </div>
+                  {lev > 0 && (
+                    <div className="flex items-center justify-between text-xs text-muted-foreground pt-2 border-t">
+                      <span>Max position at {lev}x</span>
+                      <span data-testid="text-capital-position">${(tradingCapital * lev).toFixed(2)}</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
             <div className="p-4 rounded-xl border bg-muted/30 space-y-3">
               <div className="flex items-center gap-2">
                 <ArrowUp className="w-4 h-4 text-primary" />

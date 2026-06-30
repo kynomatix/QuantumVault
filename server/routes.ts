@@ -1509,6 +1509,7 @@ import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { isBorrowEligibleWallet, isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
+import { runBorrowHealthScan } from "./vault/borrow-health-monitor";
 import { planPerbotCarve, runPerbotCarveOpen, runPerbotUnwindClose, selectBlockingBotPositions, resolveDisplayPrincipalRaw } from "./vault/jupiter-lend-perbot-carve";
 import { computePerBotPositionHealth, summarizeBotBorrowHealth } from "./vault/borrow-health";
 import { rankMeasuredYieldDestinations } from "./vault/carry-yield-ranker";
@@ -5133,6 +5134,22 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // matching the debounce window. Venue-gated to Flash + opt-in inside the scan.
   setInterval(() => {
     runAutoReparkScan().catch((e) => console.error('[AutoRepark] scan error:', e));
+  }, 60 * 1000);
+
+  // Borrow-health monitor (FC-2): scan every active borrow position (account +
+  // per-bot, all wallets) once a minute and send band-crossing Telegram alerts.
+  // Read-only + notification only; fail-closed per row, never throws out.
+  // In-flight guard: a slow scan must never overlap the next tick (an overlap
+  // could read a stale baseline and double-fire the same band).
+  let borrowHealthScanInFlight = false;
+  setInterval(() => {
+    if (borrowHealthScanInFlight) return;
+    borrowHealthScanInFlight = true;
+    runBorrowHealthScan()
+      .catch((e) => console.error('[BorrowHealthMonitor] scan error:', e))
+      .finally(() => {
+        borrowHealthScanInFlight = false;
+      });
   }, 60 * 1000);
 
   // Emergency admin stop - immediately disables all execution for a wallet

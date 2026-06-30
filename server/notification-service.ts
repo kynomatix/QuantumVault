@@ -174,6 +174,113 @@ export async function sendTradeNotification(
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Borrow-health alerts (FC-2). A SEPARATE send path from trade notifications:
+// gating is the master switch + a configured chat only (no per-type opt-out),
+// because these are loan-safety / liquidation-risk warnings a user should not be
+// able to silently mute. Reuses the same Telegram transport + mini-app button.
+// ─────────────────────────────────────────────────────────────────────────────
+export type BorrowHealthAlertBand = 'nudge' | 'urgent' | 'liquidation' | 'unavailable';
+
+export interface BorrowHealthNotification {
+  /** "Account" or the bot's display name (escaped before send). */
+  scopeLabel: string;
+  /** Collateral asset label, e.g. "INF" (escaped before send). */
+  collateralLabel: string;
+  band: BorrowHealthAlertBand;
+  healthFactor: number | null;
+  ltv: number | null;
+}
+
+function formatBorrowHealthMessage(n: BorrowHealthNotification): { title: string; body: string } {
+  const scope = escapeTelegramHtml(n.scopeLabel);
+  const collateral = escapeTelegramHtml(n.collateralLabel);
+  const hf =
+    typeof n.healthFactor === 'number' && Number.isFinite(n.healthFactor)
+      ? n.healthFactor.toFixed(2)
+      : null;
+  const ltvPct =
+    typeof n.ltv === 'number' && Number.isFinite(n.ltv)
+      ? `${(n.ltv * 100).toFixed(1)}%`
+      : null;
+
+  // Title-Case labels per owner preference.
+  let title: string;
+  let lead: string;
+  switch (n.band) {
+    case 'liquidation':
+      title = '🔴 Loan At Risk Of Liquidation';
+      lead = `Your ${scope} loan (${collateral}) is at or past the liquidation line. Repay debt or add collateral now to avoid losing the collateral.`;
+      break;
+    case 'urgent':
+      title = '🟠 Loan Health Warning';
+      lead = `Your ${scope} loan (${collateral}) has entered the danger zone. Consider repaying some debt or adding collateral.`;
+      break;
+    case 'nudge':
+      title = '🟡 Loan Health Reminder';
+      lead = `Your ${scope} loan (${collateral}) health is slipping. No action is needed yet, but keep an eye on it.`;
+      break;
+    case 'unavailable':
+    default:
+      title = '⚪ Loan Health Unreadable';
+      lead = `We could not read the health of your ${scope} loan (${collateral}) this cycle. We will keep checking — please review it when you can.`;
+      break;
+  }
+
+  const metrics: string[] = [];
+  if (hf) metrics.push(`Health Factor: ${hf}`);
+  if (ltvPct) metrics.push(`Loan-To-Value: ${ltvPct}`);
+  const body = metrics.length ? `${lead}\n${metrics.join(' · ')}` : lead;
+  return { title, body };
+}
+
+/**
+ * Tri-state outcome so the borrow-health monitor can tell apart:
+ *   - `sent`    delivered → advance the alert baseline (don't repeat).
+ *   - `skipped` no recipient / notifications off / no chat → nothing to deliver;
+ *     advance the baseline too (there is nothing to retry).
+ *   - `failed`  transient delivery error (Telegram/API/DB) → DO NOT advance the
+ *     baseline so the next scan retries (fail closed — never lose a safety alert).
+ */
+export type BorrowHealthNotifyResult = "sent" | "skipped" | "failed";
+
+export async function sendBorrowHealthNotification(
+  walletAddress: string | undefined | null,
+  notification: BorrowHealthNotification,
+): Promise<BorrowHealthNotifyResult> {
+  try {
+    if (!walletAddress) return "skipped";
+
+    const [wallet] = await db
+      .select()
+      .from(wallets)
+      .where(eq(wallets.address, walletAddress))
+      .limit(1);
+
+    if (!wallet) return "skipped";
+    if (!wallet.notificationsEnabled) return "skipped";
+    if (!wallet.telegramChatId) return "skipped";
+
+    const { title, body } = formatBorrowHealthMessage(notification);
+    const message = `<b>${title}</b>\n${body}`;
+
+    const success = await sendTelegramMessage(
+      wallet.telegramChatId,
+      message,
+      buildDefaultInlineKeyboard(),
+    );
+    if (success) {
+      console.log(`[Notifications] Sent borrow-health (${notification.band}) alert to ${walletAddress}`);
+      return "sent";
+    }
+    // Telegram reported a non-delivery → transient, retry next scan.
+    return "failed";
+  } catch (error) {
+    console.error('[Notifications] Error sending borrow-health notification:', error);
+    return "failed";
+  }
+}
+
 function formatNotificationMessage(notification: TradeNotification): { title: string; body: string } {
   const { type, size, price, pnl } = notification;
   // Escape user/creator-derived values (bot names, symbols, error text) before
