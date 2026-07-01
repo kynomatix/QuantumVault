@@ -1295,7 +1295,19 @@ export function BotManagementDrawer({
     
     // Calculate leveraged max position size (investment × leverage) for backend
     const calculatedMaxPosition = investmentValue * editLeverage;
-    
+
+    // Money-safety: ONLY send parkDestinationAsset when the user actually changed
+    // the picker in THIS drawer session (relative to last-known server truth in
+    // localBot). Sending it unconditionally lets a STALE drawer value re-drive the
+    // server's migrate-on-change: if funds were parked elsewhere via another surface
+    // (server destination is now B) while the drawer still shows A, an unrelated
+    // Save (e.g. leverage) would PATCH A and migrate B→A that the user never
+    // intended. Omitting it when unchanged makes Save a no-op for routing and fails
+    // closed (no fund movement). A genuine re-pick is still sent and honored.
+    const parkDestinationChanged =
+      localBot.activeProtocol === 'flash' &&
+      editParkDestinationAsset !== (localBot.parkDestinationAsset ?? null);
+
     setSaveSettingsLoading(true);
     try {
       const res = await fetch(`/api/trading-bots/${localBot.id}?wallet=${walletAddress}`, {
@@ -1311,7 +1323,7 @@ export function BotManagementDrawer({
           autoTopUp: editAutoTopUp,
           autoParkIdle: editAutoParkIdle,
           ...(localBot.activeProtocol === 'flash' && { vaultAllOut: editVaultAllOut }),
-          ...(localBot.activeProtocol === 'flash' && { parkDestinationAsset: editParkDestinationAsset }),
+          ...(parkDestinationChanged && { parkDestinationAsset: editParkDestinationAsset }),
         }),
       });
 
