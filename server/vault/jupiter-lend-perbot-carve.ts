@@ -50,6 +50,7 @@
 import { storage } from "../storage";
 import type { BorrowOperation } from "@shared/schema";
 import {
+  executeAgentSwap,
   getAgentTokenBalanceRawStrict,
   getServerConnection,
   transferTokenToWalletExact,
@@ -60,11 +61,13 @@ import {
   executeSupplyCollateral,
   executeBorrowOpen,
   executeBorrowClose,
+  supplyToExistingBotPosition,
   withBorrowLock,
 } from "./jupiter-lend-borrow-executor";
 import { JupiterLendBorrowRoute, type BorrowVaultConfig } from "./jupiter-lend-borrow-route";
 import { readBorrowOracleContext } from "./borrow-oracle-freshness";
 import { evaluateCollateralWithdraw, evaluateMaxCarveForTargetLtv } from "./borrow-risk-policy";
+import { decideSwapResume } from "./borrow-engine-core";
 
 const SWAP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
@@ -1342,4 +1345,398 @@ async function finalizeUnwind(op: BorrowOperation, returnedRaw: bigint, sweptRaw
     sweptRaw: sweptRaw.toString(),
     signatures: ((fresh?.txSignatures ?? op.txSignatures) as string[] | null) ?? [],
   };
+}
+
+// ===========================================================================
+// PER-BOT COLLATERAL TOP-UP op ("defend the loan")
+// ===========================================================================
+//
+// Add collateral to an EXISTING per-bot borrow position, funded from the ACCOUNT
+// agent wallet (server-signed, no Phantom). Unlike carve/open it borrows nothing
+// and MINTS nothing — it only strengthens a live loan's health. Legs mirror the
+// carve/open shape (a source money leg -> transfer account->bot -> supply into
+// the bot position), swapping the account-position WITHDRAW for a SWAP when the
+// chosen source asset is not the collateral mint:
+//
+//   perbot_collateral_topup:
+//     [SWAP source -> collateral in the account wallet]  (skipped if source==collateral)
+//       -> [SPL transfer account -> bot]
+//       -> [supply into the bot's EXISTING position]
+//
+// Same money-safety contract as the carve/unwind orchestrators (see the file
+// header): a DB-backed, idempotent, RESUMABLE state machine; every leg persists
+// its step BEFORE it acts and its realised amount + signature AFTER; the SWAP and
+// the SPL transfer are reconciled by their WRITE-AHEAD signature (never a bare
+// balance, which reads stale in-flight); no active compensating revert — a leg
+// failure stops at needs_attention with the funds in a RECOVERABLE wallet, and a
+// retry FINISHES forward. The SWAP is ExactIn (spend the source, supply the
+// realised collateral delta) — landing the loan APPROXIMATELY at the target is
+// fine (radical simplicity; we only ever IMPROVE health). Serialises on a
+// `perbot-topup:<wallet>:<reqId>` lock, distinct from the executor borrowLockKey
+// taken by the supply leg (no re-entrant deadlock).
+
+const TOPUP_DEFAULT_SLIPPAGE_BPS = 100;
+const TOPUP_MAX_SLIPPAGE_BPS = 500;
+
+function clampTopupSlippage(bps?: number): number {
+  if (typeof bps !== "number" || !Number.isFinite(bps) || bps <= 0) return TOPUP_DEFAULT_SLIPPAGE_BPS;
+  return Math.min(Math.round(bps), TOPUP_MAX_SLIPPAGE_BPS);
+}
+
+export interface PerbotCollateralTopUpParams {
+  walletAddress: string;
+  vault: BorrowVaultConfig;
+  /** Account agent: signs the swap + the account->bot transfer + funds bot gas. */
+  accountPublicKey: string;
+  accountSecretKey: Uint8Array;
+  /** Bot agent: signs the supply into its OWN position. */
+  botPublicKey: string;
+  botSecretKey: Uint8Array;
+  tradingBotId: string;
+  /** The bot's EXISTING borrow position to add collateral to (DB id + nft id). */
+  botBorrowPositionId: string;
+  botVenuePositionId: number;
+  /** The account-wallet asset to fund from (== collateral mint => no swap). */
+  sourceMint: string;
+  /** How much of the source asset to spend, raw. Capped at the live held balance. */
+  sourceAmountRaw: bigint;
+  /** Swap slippage (only used when sourceMint != collateral mint). */
+  slippageBps?: number;
+  clientRequestId: string;
+  /**
+   * TRUE only when the autonomous scanner created this op (never the manual Add
+   * Collateral route). Stamped into op metadata so the resume selector can prove
+   * an unfinished op is safe for the auto path to finish — see
+   * `selectResumableTopUpOp`. Server-set only; not client-forwardable.
+   */
+  autoTopup?: boolean;
+}
+
+export interface PerbotTopUpResult {
+  success: boolean;
+  operationId?: string;
+  step?: string;
+  needsAttention?: boolean;
+  borrowPositionId?: string;
+  /** Collateral supplied into the bot position, raw (the transferred amount). */
+  suppliedRaw?: string;
+  /** Authoritative on-chain collateral total after the supply, raw. */
+  observedCollateralRaw?: string;
+  collateralValueUsd?: number | null;
+  /** Every on-chain signature this op produced, oldest first. */
+  signatures?: string[];
+  error?: string;
+}
+
+async function failTopup(
+  op: BorrowOperation,
+  step: string,
+  error: string,
+  needsAttention: boolean,
+): Promise<PerbotTopUpResult> {
+  await storage.updateBorrowOperation(op.id, { status: needsAttention ? "needs_attention" : "failed", step, error });
+  return { success: false, operationId: op.id, step, error, needsAttention };
+}
+
+async function finalizeTopup(
+  op: BorrowOperation,
+  r: { borrowPositionId: string; suppliedRaw?: string; observedCollateralRaw?: string; collateralValueUsd?: number | null },
+): Promise<PerbotTopUpResult> {
+  const result: Meta = {
+    borrowPositionId: r.borrowPositionId,
+    suppliedRaw: r.suppliedRaw,
+    observedCollateralRaw: r.observedCollateralRaw,
+    collateralValueUsd: r.collateralValueUsd ?? null,
+  };
+  await storage.updateBorrowOperation(op.id, { status: "succeeded", step: "final_read", borrowPositionId: r.borrowPositionId, result });
+  const fresh = await storage.getBorrowOperationById(op.id);
+  return {
+    success: true,
+    operationId: op.id,
+    step: "final_read",
+    borrowPositionId: r.borrowPositionId,
+    suppliedRaw: r.suppliedRaw,
+    observedCollateralRaw: r.observedCollateralRaw,
+    collateralValueUsd: r.collateralValueUsd ?? null,
+    signatures: ((fresh?.txSignatures ?? op.txSignatures) as string[] | null) ?? [],
+  };
+}
+
+export async function runPerbotCollateralTopUp(params: PerbotCollateralTopUpParams): Promise<PerbotTopUpResult> {
+  if (params.sourceAmountRaw <= 0n) return { success: false, error: "Top-up amount must be greater than zero." };
+
+  const collateralMint = params.vault.collateralMint;
+  const slippageBps = clampTopupSlippage(params.slippageBps);
+  const isSwap = params.sourceMint !== collateralMint;
+  const route = new JupiterLendBorrowRoute();
+
+  return withBorrowLock(`perbot-topup:${params.walletAddress}:${params.clientRequestId}`, async () => {
+    let op = await resolveOrCreateOp({
+      walletAddress: params.walletAddress,
+      borrowPositionId: params.botBorrowPositionId,
+      clientRequestId: params.clientRequestId,
+      operationType: "perbot_collateral_topup",
+      metadata: {
+        tradingBotId: params.tradingBotId,
+        collateralMint,
+        botBorrowPositionId: params.botBorrowPositionId,
+        botVenuePositionId: params.botVenuePositionId,
+        sourceMint: params.sourceMint,
+        sourceAmountRaw: params.sourceAmountRaw.toString(),
+        botPublicKey: params.botPublicKey,
+        accountPublicKey: params.accountPublicKey,
+        autoTopup: params.autoTopup === true,
+      },
+    });
+    // Refuse to resume a same-reqId op that was started with different inputs.
+    const idMismatch = validateOpIdentity(op, "perbot_collateral_topup", {
+      tradingBotId: params.tradingBotId,
+      collateralMint,
+      botBorrowPositionId: params.botBorrowPositionId,
+      botVenuePositionId: params.botVenuePositionId,
+      sourceMint: params.sourceMint,
+      sourceAmountRaw: params.sourceAmountRaw.toString(),
+    });
+    if (idMismatch) return { success: false, operationId: op.id, step: op.step ?? undefined, error: idMismatch, needsAttention: false };
+    if (op.status === "succeeded") {
+      const r = (op.result as Meta | null) ?? {};
+      return {
+        success: true,
+        operationId: op.id,
+        step: op.step ?? "final_read",
+        borrowPositionId: r.borrowPositionId ?? params.botBorrowPositionId,
+        suppliedRaw: r.suppliedRaw,
+        observedCollateralRaw: r.observedCollateralRaw,
+        collateralValueUsd: r.collateralValueUsd ?? null,
+        signatures: (op.txSignatures as string[] | null) ?? [],
+      };
+    }
+
+    // collateralInAccountRaw = the collateral now sitting in the ACCOUNT wallet,
+    // ready to transfer to the bot (the realised swap output, or — when the source
+    // IS the collateral — the capped held amount). Loaded from the breadcrumb on
+    // a resume that is already at/after the swap step.
+    let collateralInAccountRaw = BigInt(readMeta(op).collateralInAccountRaw || "0");
+
+    // ---- SWAP leg (account wallet; only when source != collateral) ----------
+    // The swap OUTPUT is not amount-exact, so it can NEVER be blindly re-broadcast
+    // (a double-swap spends the source twice). Resume authority is the write-ahead
+    // signature reconciled by status + the realised delta vs a persisted baseline.
+    const sStep = op.step ?? "";
+    if (isSwap && (sStep === "initialized" || sStep === "swap_failed" || sStep === "swapping")) {
+      const meta = readMeta(op);
+      const recordedSig = meta.swapSig as string | undefined;
+      const status = recordedSig ? await reconcileSignature(recordedSig, meta.swapLvbh) : null;
+      let currentOutBalanceRaw: bigint | null = null;
+      if (recordedSig) {
+        try { currentOutBalanceRaw = await strictBalanceRaw(params.accountPublicKey, collateralMint); }
+        catch { currentOutBalanceRaw = null; }
+      }
+      const decision = decideSwapResume({
+        recordedSig,
+        status,
+        swapOutBeforeRaw: meta.swapOutBeforeRaw ?? null,
+        currentOutBalanceRaw,
+      });
+
+      if (decision.action === "stop_in_flight") {
+        return failTopup(op, "swapping", "The swap to the collateral asset is still settling. Your funds are safe in the account wallet — retry in a moment.", true);
+      }
+      if (decision.action === "stop_needs_attention") {
+        return failTopup(op, "swap_failed", decision.reason, true);
+      }
+      if (decision.action === "use_realized") {
+        collateralInAccountRaw = decision.realizedRaw;
+        await storage.updateBorrowOperation(op.id, { step: "swapped", mergeMetadata: { collateralInAccountRaw: collateralInAccountRaw.toString() } });
+        op = (await storage.getBorrowOperationById(op.id)) ?? op;
+      } else {
+        // execute_swap | retry_swap: provably nothing is live, a fresh swap is safe.
+        // Cap the swap input at the live held source balance (never sweep more).
+        let heldSource: bigint;
+        try { heldSource = await strictBalanceRaw(params.accountPublicKey, params.sourceMint); }
+        catch { return failTopup(op, "swap_failed", "Could not read the source balance to swap; nothing was changed.", true); }
+        const inputRaw = heldSource < params.sourceAmountRaw ? heldSource : params.sourceAmountRaw;
+        if (inputRaw <= 0n) return failTopup(op, "swap_failed", "Not enough of the selected asset in the account wallet to fund the top-up.", true);
+
+        // Persist the pre-swap collateral BASELINE before broadcasting so a crash
+        // reconciles the realised delta (decideSwapResume), never a bare balance.
+        let outBefore: bigint;
+        try { outBefore = await strictBalanceRaw(params.accountPublicKey, collateralMint); }
+        catch { return failTopup(op, "swap_failed", "Could not read the account collateral balance; nothing was changed.", true); }
+        await storage.updateBorrowOperation(op.id, { step: "swapping", mergeMetadata: { swapOutBeforeRaw: outBefore.toString() } });
+
+        const swap = await executeAgentSwap({
+          agentPublicKey: params.accountPublicKey,
+          agentSecretKey: params.accountSecretKey,
+          inputMint: params.sourceMint,
+          outputMint: collateralMint,
+          amountRaw: inputRaw.toString(),
+          slippageBps,
+          onBeforeBroadcast: async ({ signature, lastValidBlockHeight }) => {
+            await storage.updateBorrowOperation(op.id, {
+              // lvbh 0 == "unknown" (provider-built tx): omit it so a reconcile
+              // never falsely expires an in-flight swap (=> double-swap).
+              mergeMetadata: { swapSig: signature, ...(lastValidBlockHeight > 0 ? { swapLvbh: lastValidBlockHeight } : {}) },
+              appendTxSignature: signature,
+            });
+          },
+        });
+        if (!swap.success || !swap.outputReceivedRaw || BigInt(swap.outputReceivedRaw) <= 0n) {
+          // The write-ahead sig may have actually landed (false negative).
+          op = (await storage.getBorrowOperationById(op.id)) ?? op;
+          const m2 = readMeta(op);
+          const sig2 = m2.swapSig as string | undefined;
+          if (sig2) {
+            const st2 = await reconcileSignature(sig2, m2.swapLvbh);
+            if (st2 === "in_flight") return failTopup(op, "swapping", "The swap is still settling. Your funds are safe in the account wallet — retry in a moment.", true);
+            if (st2 === "landed") {
+              let nowOut: bigint | null;
+              try { nowOut = await strictBalanceRaw(params.accountPublicKey, collateralMint); } catch { nowOut = null; }
+              const d2 = decideSwapResume({ recordedSig: sig2, status: "landed", swapOutBeforeRaw: m2.swapOutBeforeRaw ?? null, currentOutBalanceRaw: nowOut });
+              if (d2.action !== "use_realized") {
+                return failTopup(op, "swap_failed", d2.action === "stop_needs_attention" ? d2.reason : "The swap could not be reconciled. Your funds are safe in the account wallet.", true);
+              }
+              collateralInAccountRaw = d2.realizedRaw;
+              await storage.updateBorrowOperation(op.id, { step: "swapped", mergeMetadata: { collateralInAccountRaw: collateralInAccountRaw.toString() } });
+              op = (await storage.getBorrowOperationById(op.id)) ?? op;
+            } else {
+              return failTopup(op, "swap_failed", swap.error || "The swap to the collateral asset did not complete. Your funds are safe in the account wallet.", true);
+            }
+          } else {
+            return failTopup(op, "swap_failed", swap.error || "The swap to the collateral asset did not complete. Your funds are safe in the account wallet.", true);
+          }
+        } else {
+          collateralInAccountRaw = BigInt(swap.outputReceivedRaw);
+          await storage.updateBorrowOperation(op.id, { step: "swapped", mergeMetadata: { collateralInAccountRaw: collateralInAccountRaw.toString() } });
+          op = (await storage.getBorrowOperationById(op.id)) ?? op;
+        }
+      }
+    } else if (!isSwap && sStep === "initialized") {
+      // Source IS the collateral: no swap. The collateral to move is the requested
+      // amount, capped at the live held balance (never sweep more than intended).
+      let heldCol: bigint;
+      try { heldCol = await strictBalanceRaw(params.accountPublicKey, collateralMint); }
+      catch { return failTopup(op, "swap_failed", "Could not read the account collateral balance; nothing was changed.", true); }
+      collateralInAccountRaw = heldCol < params.sourceAmountRaw ? heldCol : params.sourceAmountRaw;
+      if (collateralInAccountRaw <= 0n) return failTopup(op, "swap_failed", "Not enough collateral in the account wallet to fund the top-up.", true);
+      await storage.updateBorrowOperation(op.id, { step: "swapped", mergeMetadata: { collateralInAccountRaw: collateralInAccountRaw.toString() } });
+      op = (await storage.getBorrowOperationById(op.id)) ?? op;
+    }
+
+    // ---- TRANSFER (account -> bot) leg ------------------------------------
+    // AMOUNT-EXACT: move EXACTLY the intended collateral (persisted at the swap
+    // step), CAPPED at the live strict wallet balance — so a stuck op can never
+    // move more than is held, and we never sweep unrelated funds. Reconciled by
+    // the write-ahead transfer signature (balance reads 0 while in-flight).
+    const tStep = op.step ?? "";
+    if (tStep === "swapped" || tStep === "transferring" || tStep === "transfer_failed") {
+      let recovered = false;
+      if (tStep === "transferring") {
+        const meta = readMeta(op);
+        if (meta.transferSig) {
+          const s = await reconcileSignature(meta.transferSig, meta.transferLvbh);
+          if (s === "landed") recovered = true;
+          else if (s === "in_flight") return failTopup(op, "transferring", "The transfer to the bot is still settling. Your funds are safe in the account wallet — retry in a moment.", true);
+        }
+      }
+      if (!recovered) {
+        const intended = BigInt(readMeta(op).collateralInAccountRaw || collateralInAccountRaw.toString());
+        let held: bigint;
+        try { held = await strictBalanceRaw(params.accountPublicKey, collateralMint); }
+        catch (e: any) { return failTopup(op, "transfer_failed", `Could not read the collateral in the account wallet (${e?.message || e}). Funds are safe in the account wallet — retry in a moment.`, true); }
+        const moveRaw = held < intended ? held : intended;
+        if (moveRaw <= 0n) return failTopup(op, "transfer_failed", "No collateral is in the account wallet to move to the bot. Retry in a moment.", true);
+        await storage.updateBorrowOperation(op.id, { step: "transferring", mergeMetadata: { transferRaw: moveRaw.toString() } });
+        const xfer = await transferTokenToWalletExact({
+          agentPublicKey: params.accountPublicKey,
+          agentSecretKey: params.accountSecretKey,
+          toWalletAddress: params.botPublicKey,
+          mint: collateralMint,
+          amountRaw: moveRaw,
+          onBeforeBroadcast: async ({ signature, lastValidBlockHeight }) => {
+            await storage.updateBorrowOperation(op.id, {
+              mergeMetadata: { transferSig: signature, transferLvbh: lastValidBlockHeight },
+              appendTxSignature: signature,
+            });
+          },
+        });
+        if (!xfer.success) {
+          op = (await storage.getBorrowOperationById(op.id)) ?? op;
+          const meta = readMeta(op);
+          const sig = meta.transferSig as string | undefined;
+          if (!sig) return failTopup(op, "transfer_failed", xfer.error || "The transfer to the bot did not complete. Funds are safe in the account wallet.", true);
+          const s = await reconcileSignature(sig, meta.transferLvbh);
+          if (s === "in_flight") return failTopup(op, "transferring", "The transfer to the bot is still settling. Funds are safe in the account wallet — retry in a moment.", true);
+          if (s !== "landed") return failTopup(op, "transfer_failed", xfer.error || "The transfer to the bot did not complete. Funds are safe in the account wallet.", true);
+        }
+      }
+      await storage.updateBorrowOperation(op.id, { step: "transferred_to_bot" });
+      op = (await storage.getBorrowOperationById(op.id)) ?? op;
+    }
+
+    // ---- SUPPLY (into the bot's EXISTING position) leg --------------------
+    // Terminal leg. supplyToExistingBotPosition is bot-signed, confirm-only (no
+    // positive delta), proves itself from an AUTHORITATIVE position re-read, and
+    // fails CLOSED on the dangerous direction. It never mints. On resume the
+    // write-ahead supply signature is the authority: landed => finalise (the
+    // collateral is IN the position); in_flight => wait; reverted/expired => the
+    // collateral is still in the BOT wallet, re-supply forward.
+    const supStep = op.step ?? "";
+    if (supStep === "transferred_to_bot" || supStep === "supplying" || supStep === "supply_failed") {
+      const meta = readMeta(op);
+      const supplySig = meta.supplySig as string | undefined;
+      if (supplySig) {
+        const s = await reconcileSignature(supplySig, meta.supplyLvbh);
+        if (s === "in_flight") return failTopup(op, "supplying", "Adding the collateral is still settling. Your funds are safe in the bot wallet — retry in a moment.", true);
+        if (s === "landed") {
+          const live = await route.readLivePositionHealth(collateralMint, params.botVenuePositionId);
+          return finalizeTopup(op, { borrowPositionId: params.botBorrowPositionId, suppliedRaw: meta.transferRaw, observedCollateralRaw: live?.collateralRaw });
+        }
+        // reverted | expired: nothing committed -> re-supply below.
+      }
+      await storage.updateBorrowOperation(op.id, { step: "supplying" });
+      const supply = await supplyToExistingBotPosition({
+        walletAddress: params.walletAddress,
+        tradingBotId: params.tradingBotId,
+        botPublicKey: params.botPublicKey,
+        botSecretKey: params.botSecretKey,
+        accountPublicKey: params.accountPublicKey,
+        accountSecretKey: params.accountSecretKey,
+        collateralMint,
+        borrowPositionId: params.botBorrowPositionId,
+        collateralRaw: BigInt(readMeta(op).transferRaw || collateralInAccountRaw.toString()),
+        onBeforeBroadcast: async ({ signature, lastValidBlockHeight }) => {
+          await storage.updateBorrowOperation(op.id, {
+            mergeMetadata: { supplySig: signature, supplyLvbh: lastValidBlockHeight },
+            appendTxSignature: signature,
+          });
+        },
+      });
+      if (!supply.success) {
+        // The supply sig may have actually landed (false negative).
+        op = (await storage.getBorrowOperationById(op.id)) ?? op;
+        const m3 = readMeta(op);
+        const sig3 = m3.supplySig as string | undefined;
+        if (sig3) {
+          const st3 = await reconcileSignature(sig3, m3.supplyLvbh);
+          if (st3 === "in_flight") return failTopup(op, "supplying", "Adding the collateral is still settling. Your funds are safe in the bot wallet — retry in a moment.", true);
+          if (st3 === "landed") {
+            const live = await route.readLivePositionHealth(collateralMint, params.botVenuePositionId);
+            return finalizeTopup(op, { borrowPositionId: params.botBorrowPositionId, suppliedRaw: m3.transferRaw, observedCollateralRaw: live?.collateralRaw });
+          }
+        }
+        // Nothing committed: the collateral is safe in the BOT wallet; retry re-supplies.
+        return failTopup(op, "supply_failed", `${supply.error || "Adding the collateral failed"}. Your funds are safe in the bot wallet.`, true);
+      }
+      return finalizeTopup(op, {
+        borrowPositionId: params.botBorrowPositionId,
+        suppliedRaw: readMeta(op).transferRaw,
+        observedCollateralRaw: supply.observedCollateralRaw,
+        collateralValueUsd: supply.collateralValueUsd,
+      });
+    }
+
+    // Unexpected/stale step -> fail closed for inspection (funds are recoverable).
+    return failTopup(op, op.step ?? "unknown", "The top-up is in an unexpected state; your funds are safe — please retry.", true);
+  });
 }

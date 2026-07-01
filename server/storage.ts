@@ -371,6 +371,9 @@ export interface IStorage {
   getBorrowPositions(walletAddress: string, tradingBotId?: string | null): Promise<BorrowPosition[]>;
   getBorrowPositionsAllScopes(walletAddress: string): Promise<BorrowPosition[]>;
   getActiveBorrowPositionsAllWallets(): Promise<BorrowPosition[]>;
+  // Autonomous auto-collateral-top-up scanner support (opt-in "defend the loan").
+  getAutoTopUpCandidatePositions(): Promise<{ position: BorrowPosition; bot: TradingBot }[]>;
+  claimBorrowPositionAutoTopupAttempt(id: string, cooldownMs: number): Promise<BorrowPosition | null>;
   getBorrowOperations(walletAddress: string, borrowPositionId?: string | null): Promise<BorrowOperation[]>;
   createBorrowPosition(p: { walletAddress: string; tradingBotId?: string | null; debtVenue: string; venueVaultId?: string | null; venuePositionId?: string | null; collateralAssetKey: string; collateralMint: string; collateralAmountRaw?: string; debtAssetKey?: string; debtMint: string; debtAmountRaw?: string; attributedBotId?: string | null; status?: string; }): Promise<BorrowPosition>;
   updateBorrowPosition(id: string, patch: { venuePositionId?: string | null; venueVaultId?: string | null; collateralAmountRaw?: string; debtAmountRaw?: string; status?: string; attributedBotId?: string | null; healthSnapshot?: BorrowPosition['healthSnapshot']; healthAsOf?: Date | null; healthSource?: string | null; lastObservedHealthBand?: string | null; healthBandChangedAt?: Date | null; lastHealthAlertBand?: string | null; lastHealthAlertAt?: Date | null; }, ifStatus?: string): Promise<BorrowPosition | undefined>;
@@ -2168,6 +2171,47 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(borrowPositions)
       .where(and(ne(borrowPositions.status, 'closed'), ne(borrowPositions.status, 'failed')))
       .orderBy(desc(borrowPositions.updatedAt));
+  }
+
+  async getAutoTopUpCandidatePositions(): Promise<{ position: BorrowPosition; bot: TradingBot }[]> {
+    // Cheap prefilter for the autonomous "defend the loan" scanner: only OPEN,
+    // per-bot (Flash) positions whose owner bot OPTED IN, and whose LAST monitored
+    // band the borrow-health monitor recorded as urgent-or-worse. The scanner does
+    // a FRESH live read before spending anything — this join just bounds the RPC to
+    // genuinely at-risk opted-in loans. (Depends on the monitor having populated
+    // lastObservedHealthBand; a cold start yields no candidates until it runs once.)
+    const rows = await db.select({ position: borrowPositions, bot: tradingBots })
+      .from(borrowPositions)
+      .innerJoin(tradingBots, eq(tradingBots.id, borrowPositions.tradingBotId))
+      .where(and(
+        eq(borrowPositions.status, 'open'),
+        isNotNull(borrowPositions.tradingBotId),
+        isNotNull(borrowPositions.venuePositionId),
+        eq(tradingBots.autoCollateralTopUp, true),
+        eq(tradingBots.activeProtocol, 'flash'),
+        inArray(borrowPositions.lastObservedHealthBand, ['urgent', 'liquidation']),
+      ));
+    return rows;
+  }
+
+  async claimBorrowPositionAutoTopupAttempt(id: string, cooldownMs: number): Promise<BorrowPosition | null> {
+    // Atomic re-fire throttle: stamp the attempt time and return the row in ONE
+    // statement, but ONLY when the position is still open AND the cooldown window
+    // has elapsed. Overlapping ticks race to this UPDATE; exactly one wins, so a
+    // still-urgent loan is handed to the executor at most once per window. Does NOT
+    // bump updatedAt (internal scheduling state, not a user-visible edit).
+    const [row] = await db.update(borrowPositions)
+      .set({ lastAutoTopupAttemptAt: sql`NOW()` })
+      .where(and(
+        eq(borrowPositions.id, id),
+        eq(borrowPositions.status, 'open'),
+        or(
+          isNull(borrowPositions.lastAutoTopupAttemptAt),
+          lte(borrowPositions.lastAutoTopupAttemptAt, sql`NOW() - make_interval(secs => ${cooldownMs} / 1000.0)`),
+        ),
+      ))
+      .returning();
+    return row ?? null;
   }
 
   async getBorrowOperations(walletAddress: string, borrowPositionId: string | null = null): Promise<BorrowOperation[]> {

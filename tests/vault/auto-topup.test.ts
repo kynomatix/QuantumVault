@@ -1,0 +1,427 @@
+import { describe, it, expect } from "vitest";
+import {
+  decideAutoTopUp,
+  selectResumableTopUpOp,
+  buildAutoTopUpClientRequestId,
+  AUTO_TOPUP_CLIENT_REQUEST_PREFIX,
+  AUTO_TOPUP_MIN_USD,
+  AUTO_TOPUP_COOLDOWN_MS,
+} from "../../server/vault/auto-topup";
+import type {
+  TopUpOpRow,
+} from "../../server/vault/auto-topup";
+import type {
+  PerBotPositionHealth,
+  TopUpSuggestion,
+} from "../../server/vault/borrow-health";
+
+// ---------------------------------------------------------------------------
+// PURE decision tests for the autonomous "defend the loan" auto top-up.
+//
+// Fixtures: collateral priced at $1 with 6 decimals. A suggestion of 10_000_000
+// raw = 10 tokens = $10. The decision layer is DIRECT-collateral-only (v1):
+//   - fires ONLY on an available, not-yet-liquidatable, urgent-or-worse loan
+//     that has a positive suggested top-up;
+//   - CAPS the add at the account wallet's held balance (no swaps);
+//   - refuses a dust add below the economic floor (alert instead);
+//   - fails closed (skip) on unreadable health / suggestion / price / decimals.
+// ---------------------------------------------------------------------------
+function health(overrides: Partial<PerBotPositionHealth> = {}): PerBotPositionHealth {
+  return {
+    borrowPositionId: "p1",
+    venuePositionId: 1,
+    collateralAssetKey: "INF",
+    collateralMint: "InfMint",
+    status: "available",
+    collateralValueUsd: 100,
+    debtUsd: 80,
+    ltv: 0.8,
+    healthFactor: 1.1,
+    liquidatable: false,
+    band: "urgent",
+    ...overrides,
+  };
+}
+
+function suggestion(raw: bigint): TopUpSuggestion {
+  return {
+    suggestedCollateralRaw: raw,
+    suggestedCollateralTokens: Number(raw) / 1e6,
+    suggestedCollateralUsd: (Number(raw) / 1e6) * 1,
+    targetLtv: 0.5,
+  };
+}
+
+const base = {
+  collateralPriceUsd: 1,
+  collateralDecimals: 6,
+};
+
+describe("decideAutoTopUp — skip (not actionable / fail closed)", () => {
+  it("skips when health is unavailable (fail closed, monitor covers)", () => {
+    const d = decideAutoTopUp({
+      health: health({ status: "unavailable", band: "unavailable" }),
+      suggestion: suggestion(10_000_000n),
+      heldCollateralRaw: 10_000_000n,
+      ...base,
+    });
+    expect(d.action).toBe("skip");
+  });
+
+  it("skips when already liquidatable (do not throw more collateral at it)", () => {
+    const d = decideAutoTopUp({
+      health: health({ liquidatable: true, band: "liquidation", healthFactor: 0.95 }),
+      suggestion: suggestion(10_000_000n),
+      heldCollateralRaw: 10_000_000n,
+      ...base,
+    });
+    expect(d.action).toBe("skip");
+  });
+
+  it("skips when the band is below urgent (nudge)", () => {
+    const d = decideAutoTopUp({
+      health: health({ band: "nudge", healthFactor: 1.6 }),
+      suggestion: suggestion(10_000_000n),
+      heldCollateralRaw: 10_000_000n,
+      ...base,
+    });
+    expect(d.action).toBe("skip");
+  });
+
+  it("skips when the band is healthy", () => {
+    const d = decideAutoTopUp({
+      health: health({ band: "healthy", healthFactor: 3 }),
+      suggestion: suggestion(10_000_000n),
+      heldCollateralRaw: 10_000_000n,
+      ...base,
+    });
+    expect(d.action).toBe("skip");
+  });
+
+  it("skips when the suggestion is null (unreadable facts)", () => {
+    const d = decideAutoTopUp({
+      health: health(),
+      suggestion: null,
+      heldCollateralRaw: 10_000_000n,
+      ...base,
+    });
+    expect(d.action).toBe("skip");
+  });
+
+  it("skips when the suggested top-up is zero (already at/above target)", () => {
+    const d = decideAutoTopUp({
+      health: health(),
+      suggestion: suggestion(0n),
+      heldCollateralRaw: 10_000_000n,
+      ...base,
+    });
+    expect(d.action).toBe("skip");
+  });
+
+  it("skips on an invalid collateral price", () => {
+    const d = decideAutoTopUp({
+      health: health(),
+      suggestion: suggestion(10_000_000n),
+      heldCollateralRaw: 10_000_000n,
+      collateralPriceUsd: 0,
+      collateralDecimals: 6,
+    });
+    expect(d.action).toBe("skip");
+  });
+
+  it("skips on invalid collateral decimals", () => {
+    const d = decideAutoTopUp({
+      health: health(),
+      suggestion: suggestion(10_000_000n),
+      heldCollateralRaw: 10_000_000n,
+      collateralPriceUsd: 1,
+      collateralDecimals: -1,
+    });
+    expect(d.action).toBe("skip");
+  });
+});
+
+describe("decideAutoTopUp — alert (urgent but not auto-defendable)", () => {
+  it("alerts when the account wallet holds no collateral", () => {
+    const d = decideAutoTopUp({
+      health: health(),
+      suggestion: suggestion(10_000_000n),
+      heldCollateralRaw: 0n,
+      ...base,
+    });
+    expect(d.action).toBe("alert");
+  });
+
+  it("alerts when the affordable add is below the economic floor (dust)", () => {
+    // Holds only $3 of collateral, floor is $5 → not worth the gas.
+    const d = decideAutoTopUp({
+      health: health(),
+      suggestion: suggestion(10_000_000n),
+      heldCollateralRaw: 3_000_000n,
+      ...base,
+    });
+    expect(d.action).toBe("alert");
+  });
+});
+
+describe("decideAutoTopUp — topup (spend held collateral, no swap)", () => {
+  it("tops up the full suggested amount when the wallet holds enough", () => {
+    const d = decideAutoTopUp({
+      health: health(),
+      suggestion: suggestion(10_000_000n),
+      heldCollateralRaw: 25_000_000n,
+      ...base,
+    });
+    expect(d.action).toBe("topup");
+    if (d.action === "topup") {
+      expect(d.sourceAmountRaw).toBe(10_000_000n);
+      expect(d.addUsd).toBeCloseTo(10, 6);
+    }
+  });
+
+  it("caps the add at the held balance when the wallet holds less than suggested", () => {
+    const d = decideAutoTopUp({
+      health: health(),
+      suggestion: suggestion(10_000_000n),
+      heldCollateralRaw: 7_000_000n, // $7 held, still >= $5 floor
+      ...base,
+    });
+    expect(d.action).toBe("topup");
+    if (d.action === "topup") {
+      expect(d.sourceAmountRaw).toBe(7_000_000n);
+      expect(d.addUsd).toBeCloseTo(7, 6);
+    }
+  });
+
+  it("fires on the liquidation band too (before the venue marks it liquidatable)", () => {
+    const d = decideAutoTopUp({
+      health: health({ band: "liquidation", healthFactor: 0.98, liquidatable: false }),
+      suggestion: suggestion(10_000_000n),
+      heldCollateralRaw: 10_000_000n,
+      ...base,
+    });
+    expect(d.action).toBe("topup");
+  });
+
+  it("honors a custom minUsd floor", () => {
+    // $7 held would pass the default $5 floor, but a $10 floor forces an alert.
+    const d = decideAutoTopUp({
+      health: health(),
+      suggestion: suggestion(10_000_000n),
+      heldCollateralRaw: 7_000_000n,
+      minUsd: 10,
+      ...base,
+    });
+    expect(d.action).toBe("alert");
+  });
+});
+
+describe("auto-topup constants", () => {
+  it("exposes a sane cooldown and floor", () => {
+    expect(AUTO_TOPUP_COOLDOWN_MS).toBe(10 * 60 * 1000);
+    expect(AUTO_TOPUP_MIN_USD).toBe(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RESUME selection — money-safety. A partial top-up (collateral moved to the bot,
+// supply not yet done) parks a non-terminal `perbot_collateral_topup` op. The
+// scanner MUST finish it under its ORIGINAL clientRequestId before ever minting a
+// new id — otherwise a later tick starts a SECOND spend and strands the first
+// tranche in the bot wallet. selectResumableTopUpOp encodes that decision.
+// ---------------------------------------------------------------------------
+const COLLATERAL_MINT = "InfMint";
+
+// Default fixture = an AUTO-ORIGIN, DIRECT-collateral op (autoTopup flag + source
+// mint == collateral mint). Only such an op is safe for the scanner to resume.
+function op(overrides: Partial<TopUpOpRow> = {}): TopUpOpRow {
+  return {
+    id: "op1",
+    operationType: "perbot_collateral_topup",
+    status: "needs_attention",
+    clientRequestId: "auto-topup:p1:2026-01-01T00:00:00.000Z",
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    metadata: { sourceMint: "InfMint", sourceAmountRaw: "7000000", autoTopup: true },
+    ...overrides,
+  };
+}
+
+describe("selectResumableTopUpOp — resume before a fresh spend", () => {
+  it("returns 'none' when there are no ops at all", () => {
+    expect(selectResumableTopUpOp([], COLLATERAL_MINT)).toEqual({ kind: "none" });
+  });
+
+  it("returns 'none' when the only top-up op already succeeded", () => {
+    const sel = selectResumableTopUpOp([op({ status: "succeeded" })], COLLATERAL_MINT);
+    expect(sel.kind).toBe("none");
+  });
+
+  it("ignores ops of other types (e.g. a repay op is not a top-up)", () => {
+    const sel = selectResumableTopUpOp(
+      [op({ operationType: "perbot_repay", status: "needs_attention" })],
+      COLLATERAL_MINT,
+    );
+    expect(sel.kind).toBe("none");
+  });
+
+  it("RESUMES a needs_attention partial under its ORIGINAL id + stored amount (crash after transfer)", () => {
+    const sel = selectResumableTopUpOp([op({ status: "needs_attention" })], COLLATERAL_MINT);
+    expect(sel).toEqual({
+      kind: "resume",
+      opId: "op1",
+      clientRequestId: "auto-topup:p1:2026-01-01T00:00:00.000Z",
+      sourceMint: "InfMint",
+      sourceAmountRaw: 7_000_000n,
+    });
+  });
+
+  it("RESUMES a still-pending/failed op (any non-succeeded status is re-enterable)", () => {
+    for (const status of ["pending", "in_progress", "failed", "needs_attention"]) {
+      const sel = selectResumableTopUpOp([op({ status })], COLLATERAL_MINT);
+      expect(sel.kind).toBe("resume");
+    }
+  });
+
+  it("picks the NEWEST unfinished op when several exist (never an older tranche)", () => {
+    const older = op({
+      id: "old",
+      clientRequestId: "auto-topup:p1:old",
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      metadata: { sourceMint: "InfMint", sourceAmountRaw: "1000000", autoTopup: true },
+    });
+    const newer = op({
+      id: "new",
+      clientRequestId: "auto-topup:p1:new",
+      createdAt: new Date("2026-02-01T00:00:00.000Z"),
+      metadata: { sourceMint: "InfMint", sourceAmountRaw: "9000000", autoTopup: true },
+    });
+    const sel = selectResumableTopUpOp([older, newer], COLLATERAL_MINT);
+    expect(sel.kind).toBe("resume");
+    if (sel.kind === "resume") {
+      expect(sel.opId).toBe("new");
+      expect(sel.sourceAmountRaw).toBe(9_000_000n);
+    }
+  });
+
+  it("resumes on the metadata autoTopup flag ALONE even without the id prefix", () => {
+    const sel = selectResumableTopUpOp(
+      [op({ clientRequestId: "internal-id-no-prefix" })],
+      COLLATERAL_MINT,
+    );
+    expect(sel.kind).toBe("resume");
+  });
+
+  it("does NOT resume on the id prefix alone — a missing autoTopup flag means manual (unresumable)", () => {
+    // The default fixture id carries the "auto-topup:" prefix, but the metadata
+    // drops the server-set flag. The prefix is client-spoofable, so origin is
+    // proven ONLY by the flag: this is treated as a manual op and left alone.
+    const sel = selectResumableTopUpOp(
+      [op({ metadata: { sourceMint: "InfMint", sourceAmountRaw: "7000000" } })],
+      COLLATERAL_MINT,
+    );
+    expect(sel).toEqual({ kind: "unresumable", opId: "op1" });
+  });
+
+  it("marks 'unresumable' (NOT a fresh spend) when the op has no clientRequestId", () => {
+    const sel = selectResumableTopUpOp([op({ clientRequestId: null })], COLLATERAL_MINT);
+    expect(sel).toEqual({ kind: "unresumable", opId: "op1" });
+  });
+
+  it("marks 'unresumable' when the recorded amount is missing or zero", () => {
+    expect(selectResumableTopUpOp([op({ metadata: null })], COLLATERAL_MINT).kind).toBe("unresumable");
+    expect(
+      selectResumableTopUpOp([op({ metadata: { sourceMint: "InfMint", sourceAmountRaw: "0", autoTopup: true } })], COLLATERAL_MINT).kind,
+    ).toBe("unresumable");
+    expect(
+      selectResumableTopUpOp([op({ metadata: { sourceMint: "InfMint", sourceAmountRaw: "not-a-number", autoTopup: true } })], COLLATERAL_MINT).kind,
+    ).toBe("unresumable");
+  });
+
+  it("marks 'unresumable' when the op recorded NO source mint (can't prove it's direct)", () => {
+    const sel = selectResumableTopUpOp(
+      [op({ metadata: { sourceAmountRaw: "5000000", autoTopup: true } })],
+      COLLATERAL_MINT,
+    );
+    expect(sel).toEqual({ kind: "unresumable", opId: "op1" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MONEY-SAFETY BOUNDARY — the auto path must NEVER autonomously swap, and must
+// NEVER finish a user's manual Add Collateral op. Both callers create the SAME
+// `perbot_collateral_topup` op type via the SAME executor (which swaps whenever
+// source mint != collateral mint), so the selector alone enforces the boundary.
+// ---------------------------------------------------------------------------
+describe("selectResumableTopUpOp — auto path must not swap or finish manual ops", () => {
+  it("BLOCKS a manual swap-backed op (different source mint, no auto flag/prefix) — never resumes a swap", () => {
+    const manualSwap = op({
+      id: "manual-swap",
+      clientRequestId: "client-uuid-1234", // client-generated, not the auto prefix
+      metadata: { sourceMint: "UsdcMint", sourceAmountRaw: "10000000" }, // USDC->INF swap
+    });
+    const sel = selectResumableTopUpOp([manualSwap], COLLATERAL_MINT);
+    expect(sel).toEqual({ kind: "unresumable", opId: "manual-swap" });
+  });
+
+  it("BLOCKS a manual DIRECT op (same mint) that is NOT auto-origin — leave it for the user", () => {
+    const manualDirect = op({
+      id: "manual-direct",
+      clientRequestId: "client-uuid-5678", // no auto prefix
+      metadata: { sourceMint: "InfMint", sourceAmountRaw: "7000000" }, // no autoTopup flag
+    });
+    const sel = selectResumableTopUpOp([manualDirect], COLLATERAL_MINT);
+    expect(sel).toEqual({ kind: "unresumable", opId: "manual-direct" });
+  });
+
+  it("BLOCKS even an AUTO-ORIGIN op if it is swap-backed (defense-in-depth: never autonomously swap)", () => {
+    const autoSwap = op({
+      id: "auto-swap",
+      clientRequestId: "auto-topup:p1:x",
+      metadata: { sourceMint: "UsdcMint", sourceAmountRaw: "10000000", autoTopup: true },
+    });
+    const sel = selectResumableTopUpOp([autoSwap], COLLATERAL_MINT);
+    expect(sel).toEqual({ kind: "unresumable", opId: "auto-swap" });
+  });
+
+  it("does not let a spoofed auto-prefix on a SWAP op cause a resume (both gates hold)", () => {
+    const spoofed = op({
+      id: "spoofed",
+      clientRequestId: "auto-topup:evil", // client spoofed the prefix...
+      metadata: { sourceMint: "UsdcMint", sourceAmountRaw: "10000000" }, // ...but it's a swap
+    });
+    const sel = selectResumableTopUpOp([spoofed], COLLATERAL_MINT);
+    expect(sel).toEqual({ kind: "unresumable", opId: "spoofed" });
+  });
+
+  it("BLOCKS a manual DIRECT op that spoofed the auto-topup: id prefix (flag is the only authority)", () => {
+    // The most subtle attack: a manual op that is DIRECT (would pass the swap gate)
+    // AND carries the auto id prefix, but has NO server-set flag. Must be left alone.
+    const spoofedDirect = op({
+      id: "spoofed-direct",
+      clientRequestId: "auto-topup:evil-but-manual",
+      metadata: { sourceMint: "InfMint", sourceAmountRaw: "7000000" }, // direct, but no flag
+    });
+    const sel = selectResumableTopUpOp([spoofedDirect], COLLATERAL_MINT);
+    expect(sel).toEqual({ kind: "unresumable", opId: "spoofed-direct" });
+  });
+});
+
+describe("buildAutoTopUpClientRequestId", () => {
+  it("mints an id under the shared auto prefix", () => {
+    const id = buildAutoTopUpClientRequestId("p1", "2026-01-01T00:00:00.000Z");
+    expect(id.startsWith(AUTO_TOPUP_CLIENT_REQUEST_PREFIX)).toBe(true);
+  });
+
+  it("an auto op (server-set flag) resumes — the id format is not what authorizes it", () => {
+    const sel = selectResumableTopUpOp(
+      [
+        op({
+          clientRequestId: buildAutoTopUpClientRequestId("p1", "s"),
+          metadata: { sourceMint: "InfMint", sourceAmountRaw: "7000000", autoTopup: true },
+        }),
+      ],
+      COLLATERAL_MINT,
+    );
+    expect(sel.kind).toBe("resume");
+  });
+});

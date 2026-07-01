@@ -246,6 +246,11 @@ export async function ensureSchema() {
       // auto-park bots become full-buffer-on-open automatically. Additive + idempotent.
       `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS vault_all_out boolean NOT NULL DEFAULT true`,
 
+      // Defend-the-loan auto collateral top-up (Task: opt-in per-bot setting). Additive +
+      // idempotent. Defaults OFF → the scanner never tops up a loan the user didn't opt in.
+      // See server/vault/jupiter-lend-perbot-carve.ts (runPerbotCollateralTopUp).
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS auto_collateral_top_up boolean NOT NULL DEFAULT false`,
+
       // --- Phase 4b (Flash agent-HD wallets): recoverable per-bot wallet indices. ---
       // Additive + idempotent. The allocator lives on `wallets` (burn-on-allocate,
       // never reused). Each agent_hd bot stores its non-secret HD index + path version;
@@ -524,6 +529,10 @@ export async function ensureSchema() {
       `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS health_band_changed_at timestamp`,
       `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS last_health_alert_band text`,
       `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS last_health_alert_at timestamp`,
+      // Additive: auto collateral top-up ("defend the loan") throttle timestamp.
+      // The autonomous scanner claims a position by stamping this, so a loan that
+      // stays urgent can't re-fire (top-up OR alert) within the cooldown window.
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS last_auto_topup_attempt_at timestamp`,
 
       // --- Vaults borrow engine (Phase A scaffold): money-op AUDIT log. ---
       // Append-only record of every multi-hop borrow/repay/carry operation, so

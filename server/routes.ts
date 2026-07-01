@@ -11,7 +11,7 @@ import { Keypair } from "@solana/web3.js";
 import { storage, DatabaseStorage } from "./storage";
 import { sumNetDepositedFromEvents, isVaultInternalEvent } from "./equity-events-util";
 import { recordCriticalError } from "./error-log";
-import { insertUserSchema, insertTradingBotSchema, type TradingBot, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents, marketplaceEquitySnapshots, userApiTokens, labOptimizationRuns } from "@shared/schema";
+import { insertUserSchema, insertTradingBotSchema, type TradingBot, type BorrowPosition, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents, marketplaceEquitySnapshots, userApiTokens, labOptimizationRuns } from "@shared/schema";
 import type { Request as ExpressRequest, Response as ExpressResponse, NextFunction } from "express";
 import { db } from "./db";
 import { desc, eq, sql, asc, and } from "drizzle-orm";
@@ -1511,8 +1511,9 @@ import { isBorrowEligibleWallet, isBorrowOwnerWallet, isCollateralVaultAllowlist
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
 import { runBorrowHealthScan } from "./vault/borrow-health-monitor";
-import { planPerbotCarve, runPerbotCarveOpen, runPerbotUnwindClose, selectBlockingBotPositions, resolveDisplayPrincipalRaw } from "./vault/jupiter-lend-perbot-carve";
-import { computePerBotPositionHealth, summarizeBotBorrowHealth } from "./vault/borrow-health";
+import { planPerbotCarve, runPerbotCarveOpen, runPerbotUnwindClose, selectBlockingBotPositions, resolveDisplayPrincipalRaw, runPerbotCollateralTopUp } from "./vault/jupiter-lend-perbot-carve";
+import { computePerBotPositionHealth, summarizeBotBorrowHealth, derivePerbotTopUpSuggestion, defaultRowHealthDeps, BAND_SEVERITY } from "./vault/borrow-health";
+import { decideAutoTopUp, selectResumableTopUpOp, buildAutoTopUpClientRequestId, AUTO_TOPUP_COOLDOWN_MS } from "./vault/auto-topup";
 import { rankMeasuredYieldDestinations } from "./vault/carry-yield-ranker";
 import { decideCarryTrade } from "./vault/carry-trade-advisor";
 import { getUserFungibleTokens, resolveTokenLogos } from "./swap/helius-tokens.js";
@@ -1523,7 +1524,7 @@ const DEFAULT_SWAP_SLIPPAGE_BPS = 100;
 import { getAllPerpMarkets, getAllPerpMarketsForExchange, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMinOrderSizeUsd, getMarketMaxLeverage } from "./market-liquidity-service";
 import { evaluateNotionalFloor } from "./trade-sizing-math";
 import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable } from "./leverage-cache-service";
-import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification, type TradeNotification, buildDefaultInlineKeyboard } from "./notification-service";
+import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification, type TradeNotification, buildDefaultInlineKeyboard, sendAutoTopUpNotification } from "./notification-service";
 import { classifySignal } from "./trading/signal-classifier";
 import { registerTelegramMiniAppRoutes } from "./telegram-mini-app";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, healExecutionUmkFromStorage, restoreWalletSecurityFromStorage, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, decryptBotSubaccountKey, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3, rebindRetainedKeyToBotUuidV3, decryptMnemonic, deriveBotKeypairFromAgentSeed, BOT_DERIVATION_PATH_VERSION } from "./session-v3";
@@ -2290,6 +2291,309 @@ async function runAutoReparkScan(): Promise<void> {
       await parkBotIdleFundsAutonomously(bot);
     } catch (e: any) {
       console.error(`[AutoRepark ${bot.id.slice(0, 8)}] repark threw: ${e?.message ?? e}`);
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// AUTONOMOUS "DEFEND THE LOAN" — auto collateral top-up scanner.
+//
+// Opt-in (bot.autoCollateralTopUp), Flash-only. Once a minute we look at every
+// urgent-or-worse per-bot loan whose owner turned this on, take a FRESH live
+// health read, and — for a genuinely at-risk loan the ACCOUNT wallet can defend
+// with collateral it ALREADY holds — add just enough collateral to restore a
+// safe LTV. v1 is DIRECT collateral only: NO autonomous swaps, NO repay
+// fallback (both stay manual, where the user picks source + amount). Anything we
+// can't safely auto-defend becomes a "needs attention" Telegram alert so the
+// opted-in user still knows to act.
+//
+// Money-safety mirrors the manual top-up + auto-repark paths:
+//   - FRESH on-chain read before spending (the DB band is only a prefilter).
+//   - STRICT held-balance read (fail closed on an unreadable balance).
+//   - Atomic per-position claim throttles re-fire (top-up AND alert) to once per
+//     cooldown window, so a loan that stays urgent can't churn gas every tick.
+//   - The executor re-caps the add at the LIVE balance and is idempotent on the
+//     clientRequestId, so an overlap can never double-spend.
+//   - Keys are decrypted per attempt and wiped in a finally.
+// Non-null vault config as returned by the row-health deps (executor input).
+type PerbotVaultConfig = NonNullable<Awaited<ReturnType<ReturnType<typeof defaultRowHealthDeps>["getVaultConfig"]>>>;
+
+// Shared SPEND leg for the autonomous defender. Decrypts the account funder + the
+// bot signing key, runs the (idempotent, resumable) collateral top-up executor
+// under the GIVEN clientRequestId, notifies the owner, and wipes both keys in a
+// finally. Used for BOTH a fresh top-up and the RESUME of a stranded partial op —
+// the only difference is the clientRequestId + source amount passed in.
+async function performAutoTopUpSpend(args: {
+  bot: TradingBot;
+  wallet: NonNullable<Awaited<ReturnType<typeof storage.getWallet>>>;
+  agentPublicKey: string;
+  vault: PerbotVaultConfig;
+  position: BorrowPosition;
+  venueId: number;
+  clientRequestId: string;
+  sourceMint: string;
+  sourceAmountRaw: bigint;
+  scopeLabel: string;
+  collateralLabel: string;
+  logPrefix: string;
+}): Promise<void> {
+  const {
+    bot, wallet, agentPublicKey, vault, position, venueId,
+    clientRequestId, sourceMint, sourceAmountRaw, scopeLabel, collateralLabel, logPrefix,
+  } = args;
+
+  const umkResult = await getUmkForWebhook(bot.walletAddress);
+  if (!umkResult) {
+    console.warn(`${logPrefix} no execution authorization — cannot auto-defend`);
+    await sendAutoTopUpNotification(bot.walletAddress, {
+      scopeLabel, collateralLabel, ok: false, reason: "we couldn't access execution authorization",
+    }).catch(() => {});
+    return;
+  }
+  let funder: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+  try {
+    funder = await decryptAgentKeyStrict(bot.walletAddress, umkResult.umk, wallet, agentPublicKey);
+  } catch (e: any) {
+    console.warn(`${logPrefix} account agent decrypt failed: ${e?.message ?? e}`);
+  } finally {
+    umkResult.cleanup();
+  }
+  if (!funder) {
+    await sendAutoTopUpNotification(bot.walletAddress, {
+      scopeLabel, collateralLabel, ok: false, reason: "the account wallet needs re-keying",
+    }).catch(() => {});
+    return;
+  }
+
+  const botCtx = getBotSubaccountContext(bot);
+  if (!botCtx) {
+    funder.cleanup();
+    console.warn(`${logPrefix} no per-bot subaccount context — skip`);
+    return;
+  }
+  let botKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+  try {
+    botKey = await _resolveBotSubaccountSecretKey(botCtx);
+  } catch (e: any) {
+    funder.cleanup();
+    console.warn(`${logPrefix} cannot unlock bot signing key: ${e?.message ?? e}`);
+    await sendAutoTopUpNotification(bot.walletAddress, {
+      scopeLabel, collateralLabel, ok: false, reason: "the bot wallet needs re-keying",
+    }).catch(() => {});
+    return;
+  }
+
+  try {
+    const topup = await runPerbotCollateralTopUp({
+      walletAddress: bot.walletAddress,
+      vault,
+      accountPublicKey: agentPublicKey,
+      accountSecretKey: funder.secretKey,
+      botPublicKey: botCtx.botPublicKey,
+      botSecretKey: botKey.secretKey,
+      tradingBotId: bot.id,
+      botBorrowPositionId: position.id,
+      botVenuePositionId: venueId,
+      sourceMint, // DIRECT collateral only — same mint, no swap leg.
+      sourceAmountRaw,
+      clientRequestId,
+      autoTopup: true, // server-set origin stamp; gates safe auto-resume (never manual/swap ops).
+    });
+
+    if (topup.success) {
+      const suppliedRaw = topup.suppliedRaw != null ? BigInt(topup.suppliedRaw) : sourceAmountRaw;
+      const addedUsd = (Number(suppliedRaw) / 10 ** vault.collateralDecimals) * vault.oraclePriceLiquidateUsd;
+      console.log(`${logPrefix} defended loan — supplied ${suppliedRaw} raw (~$${addedUsd.toFixed(2)}) collateral`);
+      await sendAutoTopUpNotification(bot.walletAddress, {
+        scopeLabel, collateralLabel, ok: true, addedUsd,
+      }).catch((e) => console.warn(`${logPrefix} success alert failed: ${e?.message ?? e}`));
+    } else {
+      console.warn(`${logPrefix} top-up did not complete: ${topup.error ?? "unknown"} (step ${topup.step ?? "?"})`);
+      await sendAutoTopUpNotification(bot.walletAddress, {
+        scopeLabel, collateralLabel, ok: false, reason: "the collateral top-up did not complete",
+      }).catch(() => {});
+    }
+  } catch (e: any) {
+    console.error(`${logPrefix} top-up threw: ${e?.message ?? e}`);
+    await sendAutoTopUpNotification(bot.walletAddress, {
+      scopeLabel, collateralLabel, ok: false, reason: "the collateral top-up hit an unexpected error",
+    }).catch(() => {});
+  } finally {
+    funder.cleanup();
+    botKey.cleanup();
+  }
+}
+
+async function defendOneLoanAutonomously(
+  position: BorrowPosition,
+  bot: TradingBot,
+  deps: ReturnType<typeof defaultRowHealthDeps>,
+): Promise<void> {
+  const logPrefix = `[AutoTopUp ${bot.id.slice(0, 8)}]`;
+  const mint = position.collateralMint;
+  const venueId = position.venuePositionId != null ? Number(position.venuePositionId) : NaN;
+  if (!mint || !Number.isInteger(venueId) || venueId <= 0) return;
+
+  // Account agent wallet — the server-signed funder for every auto-defend leg.
+  const wallet = await storage.getWallet(bot.walletAddress);
+  if (!wallet?.agentPublicKey) {
+    console.warn(`${logPrefix} owner has no account agent wallet — skip`);
+    return;
+  }
+  const agentPublicKey = wallet.agentPublicKey;
+  const collateralLabel = (position.collateralAssetKey ?? "").trim().toUpperCase() || "Collateral";
+  const scopeLabel = bot.name?.trim() || "Bot";
+
+  // 1. FRESH live read (vault config + on-chain position). The DB band the claim
+  //    query filtered on is only a prefilter — we never spend on a stale band.
+  let vault: Awaited<ReturnType<typeof deps.getVaultConfig>> = null;
+  let live: Awaited<ReturnType<typeof deps.readLivePositionHealth>> = null;
+  try { vault = await deps.getVaultConfig(mint); } catch { vault = null; }
+  try { live = await deps.readLivePositionHealth(mint, venueId); } catch { live = null; }
+
+  // 2. RESUME FIRST (money-safety). A prior attempt that already moved collateral
+  //    to the bot but did not finish supplying it is parked as a non-terminal
+  //    `perbot_collateral_topup` op. It can ONLY be finished by re-running the
+  //    executor under its ORIGINAL clientRequestId (the executor is idempotent per
+  //    id). Minting a fresh id here would start a SECOND spend and strand the first
+  //    tranche in the bot wallet. So finish any in-flight op — with its own id +
+  //    recorded params — before we ever consider a NEW top-up. Fail closed if we
+  //    can't read the op history (an unseen partial must not be re-spent under a
+  //    new id).
+  let ops: Awaited<ReturnType<typeof storage.getBorrowOperations>>;
+  try {
+    ops = await storage.getBorrowOperations(bot.walletAddress, position.id);
+  } catch (e: any) {
+    console.warn(`${logPrefix} could not read op history — skip (fail closed): ${e?.message ?? e}`);
+    return;
+  }
+  const selection = selectResumableTopUpOp(ops, mint);
+  if (selection.kind === "unresumable") {
+    // An unfinished top-up op exists that the auto path must NOT touch — a manual
+    // Add Collateral op, or a swap-backed op (finishing it would autonomously
+    // swap, violating the v1 direct-only invariant). STOP: never fall through to a
+    // fresh spend on top of the stranded op. Tell the owner once (throttled by the
+    // same claim) so auto-defend isn't silently disabled while the op sits pending.
+    console.warn(`${logPrefix} unfinished op ${selection.opId} is not auto-resumable (manual or swap-backed) — leaving for manual review`);
+    const claimed = await storage.claimBorrowPositionAutoTopupAttempt(position.id, AUTO_TOPUP_COOLDOWN_MS);
+    if (claimed) {
+      await sendAutoTopUpNotification(bot.walletAddress, {
+        scopeLabel, collateralLabel, ok: false,
+        reason: "a pending collateral top-up needs your attention before auto-defend can run",
+      }).catch(() => {});
+    }
+    return;
+  }
+  if (selection.kind === "resume") {
+    if (!vault) {
+      // Need the vault config to run the executor; retry on a later tick.
+      console.warn(`${logPrefix} in-flight top-up op ${selection.opId} but vault config unreadable — retry later`);
+      return;
+    }
+    // Throttle the resume the same as a fresh attempt (a stuck op can't churn gas).
+    const claimed = await storage.claimBorrowPositionAutoTopupAttempt(position.id, AUTO_TOPUP_COOLDOWN_MS);
+    if (!claimed) return;
+    console.log(`${logPrefix} resuming in-flight top-up op ${selection.opId} (${selection.clientRequestId})`);
+    await performAutoTopUpSpend({
+      bot, wallet, agentPublicKey, vault, position, venueId,
+      clientRequestId: selection.clientRequestId,
+      sourceMint: selection.sourceMint,
+      sourceAmountRaw: selection.sourceAmountRaw,
+      scopeLabel, collateralLabel, logPrefix,
+    });
+    return;
+  }
+
+  // 3. FRESH decision (only reached when NO unfinished op exists for this loan).
+  const health = computePerBotPositionHealth({
+    borrowPositionId: position.id,
+    venuePositionId: venueId,
+    collateralAssetKey: position.collateralAssetKey ?? null,
+    collateralMint: mint,
+    live,
+    vault,
+  });
+  const suggestion = derivePerbotTopUpSuggestion(live, vault);
+
+  // CHEAP gate BEFORE any account read: only an available, not-yet-liquidatable,
+  // urgent-or-worse loan that actually needs collateral is worth a balance read.
+  // (The borrow-health monitor separately alerts on unavailable/liquidation
+  // crossings, so this path stays silent on those.)
+  if (
+    !vault ||
+    health.status !== "available" ||
+    health.liquidatable === true ||
+    BAND_SEVERITY[health.band] < BAND_SEVERITY.urgent ||
+    !suggestion ||
+    suggestion.suggestedCollateralRaw <= 0n
+  ) {
+    return;
+  }
+
+  // STRICT read of the ACCOUNT agent wallet's held collateral (fail closed).
+  let heldRaw: bigint;
+  try {
+    heldRaw = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, mint)).amountRaw);
+  } catch (e: any) {
+    console.warn(`${logPrefix} strict collateral read failed — skip (fail closed): ${e?.message ?? e}`);
+    return;
+  }
+
+  // Decide (PURE). skip -> do nothing; alert -> needs-attention; topup -> spend.
+  const decision = decideAutoTopUp({
+    health,
+    suggestion,
+    heldCollateralRaw: heldRaw,
+    collateralPriceUsd: vault.oraclePriceLiquidateUsd,
+    collateralDecimals: vault.collateralDecimals,
+  });
+  if (decision.action === "skip") return;
+
+  // Atomic claim — throttle re-fire (top-up AND alert) to once per cooldown
+  // window. Lost race / still-in-cooldown -> do nothing this tick.
+  const claimed = await storage.claimBorrowPositionAutoTopupAttempt(position.id, AUTO_TOPUP_COOLDOWN_MS);
+  if (!claimed) return;
+
+  if (decision.action === "alert") {
+    console.log(`${logPrefix} urgent but not auto-defendable (${decision.reason}) — alerting owner`);
+    await sendAutoTopUpNotification(bot.walletAddress, {
+      scopeLabel,
+      collateralLabel,
+      ok: false,
+      reason: "the account wallet doesn't hold enough of that collateral",
+    }).catch((e) => console.warn(`${logPrefix} attention alert failed: ${e?.message ?? e}`));
+    return;
+  }
+
+  // TOP-UP: fresh idempotency key for a brand-new logical top-up (no in-flight op
+  // exists — verified above). The executor resumes/replays on this key, so a
+  // mid-flight retry within THIS logical op never double-spends.
+  const stamp = (claimed.lastAutoTopupAttemptAt ?? new Date()).toISOString();
+  const clientRequestId = buildAutoTopUpClientRequestId(position.id, stamp);
+  await performAutoTopUpSpend({
+    bot, wallet, agentPublicKey, vault, position, venueId,
+    clientRequestId,
+    sourceMint: mint,
+    sourceAmountRaw: decision.sourceAmountRaw,
+    scopeLabel, collateralLabel, logPrefix,
+  });
+}
+
+async function runAutoTopUpScan(): Promise<void> {
+  let candidates: Awaited<ReturnType<typeof storage.getAutoTopUpCandidatePositions>>;
+  try {
+    candidates = await storage.getAutoTopUpCandidatePositions();
+  } catch (e: any) {
+    console.error(`[AutoTopUp] failed to list candidates: ${e?.message ?? e}`);
+    return;
+  }
+  if (candidates.length === 0) return;
+  const deps = defaultRowHealthDeps();
+  for (const { position, bot } of candidates) {
+    try {
+      await defendOneLoanAutonomously(position, bot, deps);
+    } catch (e: any) {
+      console.error(`[AutoTopUp ${bot.id.slice(0, 8)}] defend threw: ${e?.message ?? e}`);
     }
   }
 }
@@ -5135,6 +5439,24 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // matching the debounce window. Venue-gated to Flash + opt-in inside the scan.
   setInterval(() => {
     runAutoReparkScan().catch((e) => console.error('[AutoRepark] scan error:', e));
+  }, 60 * 1000);
+
+  // Auto collateral top-up ("defend the loan"): once a minute, defend every
+  // opted-in per-bot loan that has slipped into the danger zone by adding
+  // collateral the account wallet already holds. Opt-in + Flash-only + fail
+  // closed inside the scan. In-flight guard: a slow scan (live reads + swaps-free
+  // supplies) must never overlap the next tick — the atomic per-position claim
+  // already throttles re-fire, but skipping an overlapping tick avoids piling up
+  // RPC work on a run that is still finishing.
+  let autoTopUpScanInFlight = false;
+  setInterval(() => {
+    if (autoTopUpScanInFlight) return;
+    autoTopUpScanInFlight = true;
+    runAutoTopUpScan()
+      .catch((e) => console.error('[AutoTopUp] scan error:', e))
+      .finally(() => {
+        autoTopUpScanInFlight = false;
+      });
   }, 60 * 1000);
 
   // Borrow-health monitor (FC-2): scan every active borrow position (account +
@@ -9760,6 +10082,20 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             healthIsLive: liveHealth != null,
             healthAsOf: r.healthAsOf ?? null,
             health,
+            // "Defend this loan" default: how much collateral to add (from the SAME
+            // liquidation-oracle facts as `health`, so they never disagree) to restore
+            // a safe LTV. null = unreadable (fail closed) or already safe = 0n.
+            topUpSuggestion: (() => {
+              const s = derivePerbotTopUpSuggestion(liveHealth, vault);
+              return s
+                ? {
+                    suggestedCollateralRaw: s.suggestedCollateralRaw.toString(),
+                    suggestedCollateralTokens: s.suggestedCollateralTokens,
+                    suggestedCollateralUsd: s.suggestedCollateralUsd,
+                    targetLtv: s.targetLtv,
+                  }
+                : null;
+            })(),
           };
         }),
       );
@@ -9862,7 +10198,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         stakingApyPct: c.collateralMint ? (stakingApyByMint.get(c.collateralMint) ?? null) : null,
       }));
 
-      res.json({ eligible, applicable: true, positions: positionsOut, carrySources: carrySourcesOut, healthSummary });
+      // The bot's opt-in auto-defend flag (Flash per-bot only) so the "Defend this
+      // loan" modal can render the Auto toggle in its current state.
+      const botRow = await storage.getTradingBotById(tradingBotId);
+      res.json({ eligible, applicable: true, positions: positionsOut, carrySources: carrySourcesOut, healthSummary, autoCollateralTopUp: botRow?.autoCollateralTopUp ?? false });
     } catch (error: any) {
       console.error("[Vault] per-bot borrow positions read error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
@@ -10241,6 +10580,169 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     } catch (error: any) {
       console.error("[Vault] per-bot borrow open error:", error);
       return res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // POST "Defend this loan": ADD collateral to a bot's EXISTING per-bot borrow
+  // position to restore a safe LTV. Source = the ACCOUNT agent wallet (server-signed,
+  // no Phantom): swap-if-needed (source asset -> collateral mint) -> transfer
+  // account->bot -> supply into the bot's OWN position. GENERIC across allowlisted
+  // collateral. Resumable: re-POST the same clientRequestId to FINISH a partial run.
+  app.post("/api/vault/borrow/perbot/topup", requireWallet, async (req, res) => {
+    try {
+      if (!isBorrowEligibleWallet(req.walletAddress!)) {
+        return res.status(403).json({ error: "Per-bot borrowing is not available for this wallet yet." });
+      }
+      const { botId, borrowPositionId, sourceMint, sourceAmountRaw, slippageBps, sessionId, clientRequestId } = req.body || {};
+      if (!botId || typeof botId !== "string") return res.status(400).json({ error: "botId required" });
+      if (!borrowPositionId || typeof borrowPositionId !== "string") return res.status(400).json({ error: "borrowPositionId required" });
+      if (!sourceMint || typeof sourceMint !== "string") return res.status(400).json({ error: "sourceMint required" });
+      if (typeof clientRequestId !== "string" || clientRequestId.length < 8 || clientRequestId.length > 200) {
+        return res.status(400).json({ error: "clientRequestId required (client-generated, persisted until completion)" });
+      }
+      const amountParsed = parsePerbotRaw(sourceAmountRaw, "sourceAmountRaw");
+      if (typeof amountParsed === "object") return res.status(400).json(amountParsed);
+      if (amountParsed <= BigInt(0)) return res.status(400).json({ error: "sourceAmountRaw must be greater than zero" });
+      let slippage: number | undefined = undefined;
+      if (slippageBps !== undefined) {
+        if (typeof slippageBps !== "number" || !Number.isFinite(slippageBps) || slippageBps < 0 || slippageBps > 5000) {
+          return res.status(400).json({ error: "slippageBps must be a number in [0, 5000] when provided." });
+        }
+        slippage = slippageBps;
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+      if (!sessionId) return res.status(400).json({ error: "Session ID required for security verification" });
+      const session = getSession(sessionId);
+      if (!session || session.walletAddress !== req.walletAddress) {
+        return res.status(401).json({ error: "Invalid or expired session. Please reconnect your wallet." });
+      }
+      if (!session.umk) {
+        return res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
+      }
+
+      // AUTHZ: resolve BOT scope (bot ∈ wallet + Flash-only) BEFORE any signing.
+      const botResolved = await resolveVaultScope(req.walletAddress!, wallet, botId);
+      if (!botResolved.ok) return res.status(botResolved.status).json({ error: botResolved.error });
+      const botScope = botResolved.scope;
+      if (botScope.scope !== "bot" || !botScope.agentPublicKey) {
+        return res.status(400).json({ error: "This bot is not a per-bot (Flash) wallet bot; per-bot borrow does not apply." });
+      }
+      const botWalletPubkey = botScope.agentPublicKey;
+      const tradingBotId = botScope.tradingBotId!;
+
+      // The target borrow position must belong to THIS bot AND be open. Resolve its
+      // venue (nft) id + collateral mint from the DB row — NEVER client-supplied.
+      const rows = await storage.getBorrowPositions(req.walletAddress!, tradingBotId);
+      const target = rows.find((r) => r.id === borrowPositionId);
+      if (!target) return res.status(404).json({ error: "Borrow position not found for this bot." });
+      if (target.status !== "open") return res.status(409).json({ error: "This borrow position is not open." });
+      if (!target.collateralMint || target.venuePositionId == null) {
+        return res.status(400).json({ error: "This borrow position has no on-chain collateral vault to add to." });
+      }
+      const venuePositionId = Number(target.venuePositionId);
+      if (!Number.isInteger(venuePositionId) || venuePositionId <= 0) {
+        return res.status(400).json({ error: "This borrow position has no valid venue id." });
+      }
+
+      // Collateral allowlist by RESOLVED on-chain vault id (never a client mint).
+      const borrowRoute = new JupiterLendBorrowRoute();
+      const cfg = await borrowRoute.getVaultConfig(target.collateralMint);
+      if (!cfg) return res.status(400).json({ error: "Borrow vault is unavailable right now." });
+      if (!isCollateralVaultAllowlisted(cfg.vaultId)) {
+        return res.status(403).json({ error: "This collateral is not available for borrowing yet." });
+      }
+
+      // Resolve the ACCOUNT scope (swap + transfer source + gas funder).
+      const acctResolved = await resolveVaultScope(req.walletAddress!, wallet, null);
+      if (!acctResolved.ok) return res.status(acctResolved.status).json({ error: acctResolved.error });
+      const acctScope = acctResolved.scope;
+      if (acctScope.scope !== "account" || !acctScope.agentPublicKey) {
+        return res.status(400).json({ error: "Account wallet not initialized" });
+      }
+      const accountPubkey = acctScope.agentPublicKey;
+
+      // ---- LIVE: route-level lock keyed on bot+position (distinct from the executor
+      //      lock -> no re-entrant deadlock). Decrypt BOTH keys; wipe in finally.
+      const topupLockKey = JSON.stringify(["perbot-topup", req.walletAddress!, tradingBotId, borrowPositionId]);
+      const result: { status: number; body: any } = await withBorrowLock(topupLockKey, async () => {
+        let botKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+        let acctKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+        try {
+          botKey = await decryptVaultScopeKey(botScope, req.walletAddress!, wallet, session.umk);
+          if (!botKey) return { status: 400, body: { error: "Bot wallet needs re-keying. Sign out and back in." } };
+          acctKey = await decryptVaultScopeKey(acctScope, req.walletAddress!, wallet, session.umk);
+          if (!acctKey) return { status: 400, body: { error: "Account wallet needs re-keying. Sign out and back in." } };
+
+          const topup = await runPerbotCollateralTopUp({
+            walletAddress: req.walletAddress!,
+            vault: cfg,
+            accountPublicKey: accountPubkey,
+            accountSecretKey: acctKey.secretKey,
+            botPublicKey: botWalletPubkey,
+            botSecretKey: botKey.secretKey,
+            tradingBotId,
+            botBorrowPositionId: target.id,
+            botVenuePositionId: venuePositionId,
+            sourceMint,
+            sourceAmountRaw: amountParsed,
+            slippageBps: slippage,
+            clientRequestId,
+          });
+          if (!topup.success) {
+            const code = topup.needsAttention ? 202 : 400;
+            return {
+              status: code,
+              body: { error: topup.error || "Collateral top-up did not complete.", needsAttention: !!topup.needsAttention, step: topup.step, operationId: topup.operationId, clientRequestId },
+            };
+          }
+          return {
+            status: 200,
+            body: {
+              ok: true,
+              borrowPositionId: topup.borrowPositionId ?? target.id,
+              suppliedRaw: topup.suppliedRaw ?? null,
+              observedCollateralRaw: topup.observedCollateralRaw ?? null,
+              collateralValueUsd: topup.collateralValueUsd ?? null,
+              signatures: topup.signatures ?? [],
+              clientRequestId,
+            },
+          };
+        } finally {
+          if (botKey) botKey.cleanup();
+          if (acctKey) acctKey.cleanup();
+        }
+      });
+      return res.status(result.status).json(result.body);
+    } catch (error: any) {
+      console.error("[Vault] per-bot collateral top-up error:", error);
+      return res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // Lazy source list for the "Defend this loan" modal: the ACCOUNT AGENT wallet's
+  // held fungible tokens — the money that funds a manual collateral top-up. The
+  // top-up route swaps the picked source to the collateral asset when it isn't the
+  // collateral mint. Native SOL is excluded (it is the agent's gas, never spend it).
+  // Read-only + best-effort; the top-up route re-caps every amount at the LIVE
+  // on-chain balance, so a slightly-stale list can never over-spend.
+  app.get("/api/vault/borrow/perbot/topup-sources", requireWallet, async (req, res) => {
+    try {
+      if (!isBorrowEligibleWallet(req.walletAddress!)) {
+        return res.status(403).json({ error: "Per-bot borrowing is not available for this wallet yet." });
+      }
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+      if (!wallet.agentPublicKey) return res.status(400).json({ error: "Account wallet not initialized" });
+      const all = await getUserFungibleTokens(wallet.agentPublicKey);
+      const sources = all.filter(
+        (t) => !t.isNativeSol && Number.isFinite(t.amountUi) && t.amountUi > 0,
+      );
+      res.json({ sources });
+    } catch (error: any) {
+      console.error("[Vault] per-bot top-up sources read error:", error);
+      res.status(500).json({ error: error?.message || "Failed to list top-up sources" });
     }
   });
 
@@ -12806,7 +13308,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
 
-      const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive, profitReinvest, autoWithdrawThreshold, autoTopUp, autoParkIdle, parkDestinationAsset, vaultAllOut } = req.body;
+      const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive, profitReinvest, autoWithdrawThreshold, autoTopUp, autoParkIdle, parkDestinationAsset, vaultAllOut, autoCollateralTopUp } = req.body;
       
       // Per-bot park DESTINATION. Only meaningful on Flash (isolated per-bot wallet);
       // Pacifica's picker stays a local manual selector. Accept null (clear) or an
@@ -13052,6 +13554,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         ...(autoParkIdle !== undefined && { autoParkIdle: !!autoParkIdle }),
         ...(vaultAllOut !== undefined && { vaultAllOut: !!vaultAllOut }),
         ...(parkDestinationUpdate !== undefined && { parkDestinationAsset: parkDestinationUpdate }),
+        ...(autoCollateralTopUp !== undefined && { autoCollateralTopUp: !!autoCollateralTopUp }),
       });
 
       // If the park destination CHANGED on a Flash bot, arm the auto-repark

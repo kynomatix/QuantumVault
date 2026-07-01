@@ -1106,6 +1106,217 @@ export async function executeSupplyCollateral(params: SupplyCollateralParams): P
   });
 }
 
+// --- SUPPLY collateral to an EXISTING per-bot position (defend the loan) -----
+// A NARROW sibling of executeSupplyCollateral for the per-bot collateral top-up
+// orchestrator. Unlike the account-scope supply it:
+//   * REQUIRES an already-open per-bot position (NO find/mint/reuse path — you
+//     cannot "defend" a loan that does not exist), targeting its exact nftId;
+//   * signs the supply with the BOT key (the bot wallet owns its position NFT)
+//     and funds the bot's network gas from the ACCOUNT (funder) wallet;
+//   * exposes a write-ahead `onBeforeBroadcast` so the multi-leg orchestrator can
+//     reconcile a crash by signature status. The confirm-only money move has no
+//     positive inbound delta, so the AUTHORITATIVE position re-read is the proof
+//     and we fail CLOSED on the dangerous direction — never record MORE
+//     collateral than the chain proves. `failed` (no money moved) leaves the
+//     collateral safe in the bot wallet for a forward retry.
+export interface SupplyToExistingBotPositionParams {
+  walletAddress: string;
+  tradingBotId: string;
+  /** The bot wallet that OWNS the position NFT and SIGNS the supply. */
+  botPublicKey: string;
+  botSecretKey: Uint8Array;
+  /** The account wallet that FUNDS the bot's network gas (server-signed). */
+  accountPublicKey: string;
+  accountSecretKey: Uint8Array;
+  collateralMint: string;
+  /** The exact per-bot borrow position row to add to (must be open on-chain). */
+  borrowPositionId: string;
+  /** Collateral to deposit, raw base units. Must already sit in the BOT wallet. */
+  collateralRaw: bigint;
+  onBeforeBroadcast?: (info: { signature: string; blockhash: string; lastValidBlockHeight: number }) => void | Promise<void>;
+}
+
+export interface SupplyToExistingBotPositionResult {
+  success: boolean;
+  signature?: string;
+  observedCollateralRaw?: string;
+  collateralValueUsd?: number | null;
+  verifyWarning?: string;
+  dbWarning?: string;
+  /** TRUE when the tx landed but FAILED atomically (nothing committed). */
+  onChainFailed?: boolean;
+  error?: string;
+  gasShortfall?: { requiredLamports: number; heldLamports: number };
+}
+
+export async function supplyToExistingBotPosition(
+  params: SupplyToExistingBotPositionParams,
+): Promise<SupplyToExistingBotPositionResult> {
+  if (!params.tradingBotId) return { success: false, error: "A trading bot id is required." };
+  if (params.collateralRaw <= 0n) return { success: false, error: "Collateral must be greater than zero." };
+
+  const borrowRoute = new JupiterLendBorrowRoute();
+  const cfg = await borrowRoute.getVaultConfig(params.collateralMint);
+  if (!cfg) return { success: false, error: "Borrow vault is unavailable right now." };
+
+  return withBorrowLock(borrowLockKey(params.walletAddress, params.tradingBotId, cfg.vaultId), async () => {
+    // 1) Load + validate the EXISTING open per-bot position (no mint path).
+    const position = await storage.getBorrowPosition(params.walletAddress, params.borrowPositionId);
+    if (!position) return { success: false, error: "Borrow position not found." };
+    if (position.tradingBotId !== params.tradingBotId) {
+      return { success: false, error: "Borrow position does not belong to this bot." };
+    }
+    if (position.status !== "open") return { success: false, error: `Borrow position is not open (status: ${position.status}).` };
+    if (position.collateralMint !== params.collateralMint) {
+      return { success: false, error: "Collateral mint does not match the position." };
+    }
+    const nftId = Number(position.venuePositionId);
+    if (!Number.isInteger(nftId) || nftId <= 0) return { success: false, error: "Borrow position has no valid on-chain id." };
+
+    // 2) Strict balance: the BOT wallet must actually hold the collateral. Fail
+    //    CLOSED if unreadable (never sign against an unknown balance).
+    let colBal: bigint;
+    try {
+      colBal = BigInt((await getAgentTokenBalanceRawStrict(params.botPublicKey, params.collateralMint)).amountRaw);
+    } catch {
+      return { success: false, error: "Could not read the bot collateral balance; refusing to supply." };
+    }
+    if (colBal < params.collateralRaw) {
+      return { success: false, error: `Not enough ${cfg.collateralSymbol} in the bot wallet to supply.` };
+    }
+    // Fluid rounds an exact-balance deposit UP by ~1 raw unit (see
+    // capPositiveCollateralDeposit), so cap one wei below the held balance.
+    const effectiveCollateralRaw = capPositiveCollateralDeposit(params.collateralRaw, colBal);
+    if (effectiveCollateralRaw <= 0n) {
+      return { success: false, error: `Not enough ${cfg.collateralSymbol} in the bot wallet to supply.` };
+    }
+
+    // 3) Gas: collateral only LEAVES the wallet and we add to an EXISTING NFT (no
+    //    mint), so no inbound ATA rent and no mint rent. The BOT pays; the ACCOUNT
+    //    funds any shortfall.
+    const gas = await ensureVaultGas({
+      payingPublicKey: params.botPublicKey,
+      funderPublicKey: params.accountPublicKey,
+      funderSecretKey: params.accountSecretKey,
+      destMint: null,
+      label: "Add Collateral",
+      extraRentLamports: 0,
+    });
+    if (!gas.ok) return {
+      success: false,
+      error: gas.error || "Could not cover the network gas to add collateral.",
+      gasShortfall: {
+        requiredLamports: gas.requiredLamports,
+        heldLamports: gas.payerLamportsBefore + (gas.refilledLamports ?? 0) + (gas.fundedLamports ?? 0),
+      },
+    };
+
+    // 4) Pre-read live collateral — the supply proof baseline.
+    const preLive = await borrowRoute.readLivePositionHealth(params.collateralMint, nftId);
+    const preColRaw = preLive ? BigInt(preLive.collateralRaw) : BigInt(position.collateralAmountRaw || "0");
+
+    // 5) Pure plan -> SDK ix. positionId = the existing nft (NEVER 0 -> no mint).
+    const plan = planSupplyCollateral(nftId, effectiveCollateralRaw);
+    const borrow = await import("@jup-ag/lend/borrow");
+    const BN = (await import("bn.js")).default;
+    const connection = getServerConnection();
+    const signer = new PublicKey(params.botPublicKey);
+
+    let operate;
+    try {
+      operate = await borrow.getOperateIx({
+        vaultId: cfg.vaultId,
+        positionId: plan.positionId,
+        colAmount: specToBN(BN, plan.colAmount, "col", borrow.MAX_WITHDRAW_AMOUNT, borrow.MAX_REPAY_AMOUNT),
+        debtAmount: specToBN(BN, plan.debtAmount, "debt", borrow.MAX_WITHDRAW_AMOUNT, borrow.MAX_REPAY_AMOUNT),
+        connection,
+        signer,
+      });
+    } catch (e: any) {
+      return { success: false, error: `Could not build the supply transaction: ${e?.message || e}` };
+    }
+    if (!operate?.ixs?.length) return { success: false, error: "Supply transaction had no instructions." };
+
+    // 6) THE money move (confirm-only: funds leave, no positive delta to verify).
+    //    BOT-signed; the write-ahead hook lets the orchestrator reconcile a crash.
+    const exec = await executeAgentInstructionsConfirmOnly({
+      agentPublicKey: params.botPublicKey,
+      agentSecretKey: params.botSecretKey,
+      instructions: operate.ixs,
+      gasDestMint: null,
+      addressLookupTables: operate.addressLookupTableAccounts,
+      label: "Add Collateral",
+      onBeforeBroadcast: params.onBeforeBroadcast,
+    });
+
+    // 7) Provably-nothing-moved => safe; collateral still in the bot wallet.
+    if (exec.onChainFailed || !exec.signature) {
+      return {
+        success: false,
+        signature: exec.signature,
+        onChainFailed: exec.onChainFailed,
+        error: exec.error || "Adding collateral failed.",
+      };
+    }
+
+    // 8) AUTHORITATIVE re-read is the proof. Record on-chain truth; fail CLOSED on
+    //    the dangerous direction (never record MORE collateral than proven).
+    const postLive = await borrowRoute.readLivePositionHealth(params.collateralMint, nftId);
+    let observedColRaw: bigint;
+    let observedDebtRaw: bigint;
+    let oraclePriceUsd: number | null = null;
+    let healthSource: string;
+    let verifyWarning: string | undefined;
+
+    if (postLive) {
+      observedColRaw = BigInt(postLive.collateralRaw);
+      observedDebtRaw = BigInt(postLive.debtRaw);
+      oraclePriceUsd = postLive.oraclePriceUsd;
+      healthSource = "supply_onchain";
+      const v = verifySupplyOutcome({ preColRaw, postColRaw: observedColRaw, depositedRaw: effectiveCollateralRaw });
+      if (!v.ok) {
+        verifyWarning = `Add Collateral sent (signature ${exec.signature}) but the position read differs (${v.reason}). Recorded the on-chain collateral.`;
+        console.warn(`[Borrow] per-bot supply verify miss: ${v.reason}`, { positionId: position.id, nftId });
+      }
+    } else {
+      // Confirmed (or ambiguous) but unreadable: keep the PRE collateral so we
+      // never over-report. A live re-read self-heals the increase later.
+      observedColRaw = preColRaw;
+      observedDebtRaw = BigInt(position.debtAmountRaw || "0");
+      healthSource = position.healthSource ?? "supply_unverified";
+      verifyWarning = `Add Collateral confirmed (signature ${exec.signature}) but the position could not be re-read; kept the prior collateral pending reconcile.`;
+      console.warn("[Borrow] per-bot supply could not re-read position", { positionId: position.id, nftId });
+    }
+
+    const health = buildHealthSnapshot(cfg, observedColRaw, observedDebtRaw, oraclePriceUsd, healthSource);
+    let dbWarning: string | undefined;
+    const updated = await storage.updateBorrowPosition(
+      position.id,
+      {
+        collateralAmountRaw: observedColRaw.toString(),
+        debtAmountRaw: observedDebtRaw.toString(),
+        healthSnapshot: health.snapshot,
+        healthAsOf: new Date(),
+        healthSource,
+      },
+      "open",
+    );
+    if (!updated) {
+      dbWarning = `Collateral added (signature ${exec.signature}) but the position record was updated by another process.`;
+      console.warn("[Borrow] per-bot supply CAS lost", { positionId: position.id });
+    }
+
+    return {
+      success: true,
+      signature: exec.signature,
+      observedCollateralRaw: observedColRaw.toString(),
+      collateralValueUsd: health.collateralValueUsd,
+      verifyWarning,
+      dbWarning,
+    };
+  });
+}
+
 // --- BORROW MORE ------------------------------------------------------------
 
 export interface BorrowMoreParams {

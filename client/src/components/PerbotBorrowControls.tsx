@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ElementType } from "react";
-import { Loader2, Landmark, Check, AlertCircle, AlertTriangle, RotateCcw, TrendingUp } from "lucide-react";
+import { Loader2, Landmark, Check, AlertCircle, AlertTriangle, RotateCcw, TrendingUp, Shield } from "lucide-react";
 import { useWallet } from "@/hooks/useWallet";
 import { useToast } from "@/hooks/use-toast";
 import { isSessionError, showReconnectToast } from "@/lib/reconnect-toast";
@@ -11,10 +11,27 @@ import {
   fmtUsd,
   healthBarColor,
   safeLtvMarkerPct,
+  toRawBaseUnits,
   RECOMMENDED_MAX_LTV,
+  type UserToken,
 } from "@/lib/lending-format";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -75,6 +92,15 @@ interface PerbotBorrowPosition {
   // The collateral's OWN native staking APY (PERCENT), e.g. INF's SOL staking
   // yield. Display-only "yield bracket" badge; null for non-yield collateral.
   stakingApyPct?: number | null;
+  // "Defend this loan" default: how much collateral to add to restore a safe LTV,
+  // from the SAME liquidation-oracle facts as `health`. null = unreadable (fail
+  // closed) or already safe. Amounts are in COLLATERAL units/USD.
+  topUpSuggestion?: {
+    suggestedCollateralRaw: string;
+    suggestedCollateralTokens: number;
+    suggestedCollateralUsd: number;
+    targetLtv: number;
+  } | null;
   health: PerbotPositionHealth;
 }
 
@@ -100,6 +126,8 @@ interface PerbotPositionsResponse {
   applicable: boolean;
   positions: PerbotBorrowPosition[];
   carrySources: PerbotCarrySource[];
+  // The bot's opt-in auto-defend flag (Flash per-bot). Drives the modal's Auto toggle.
+  autoCollateralTopUp?: boolean;
 }
 
 interface ParkedPositionView {
@@ -189,6 +217,474 @@ function StakingApyBadge({ apyPct, testId }: { apyPct?: number | null; testId?: 
   );
 }
 
+// Format a token amount as a plain decimal string (no scientific notation),
+// trimmed of trailing zeros, capped at the asset's decimals (and a readable 6-dp
+// max). Empty for non-positive.
+function fmtTokenAmount(n: number, decimals: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "";
+  const d = Math.min(Math.max(0, decimals), 6);
+  let s = n.toFixed(d);
+  if (s.includes(".")) s = s.replace(/0+$/, "").replace(/\.$/, "");
+  return s;
+}
+
+/**
+ * "Defend this loan" modal (per-bot Flash loans). Two tools in one place:
+ *   - Add Collateral — funded from the ACCOUNT AGENT wallet (server-signed, no
+ *     Phantom). The server swaps the picked source to the collateral asset when it
+ *     isn't already the collateral mint. Defaults to the suggested amount that
+ *     restores a safe LTV; the user can override or tap Max.
+ *   - Auto top-up — opt-in flag: the server tops the loan up automatically if it
+ *     drifts toward liquidation.
+ *
+ * Money-safety: the amount is sent as raw base units of the SOURCE asset and the
+ * server re-caps it at the live on-chain balance; the op is resumable (a persisted
+ * clientRequestId + the exact source raws finish the SAME op after a partial run).
+ */
+function DefendLoanDialog({
+  open,
+  onOpenChange,
+  bot,
+  walletAddress,
+  position,
+  initialAuto,
+  collSym,
+  onChanged,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  bot: { id: string };
+  walletAddress: string;
+  position: PerbotBorrowPosition;
+  initialAuto: boolean;
+  collSym: string | null;
+  onChanged: () => Promise<void> | void;
+}) {
+  const { retryAuth } = useWallet();
+  const { toast } = useToast();
+
+  const [sources, setSources] = useState<UserToken[]>([]);
+  const [loadingSrc, setLoadingSrc] = useState(false);
+  const [srcErr, setSrcErr] = useState<string | null>(null);
+  const [sourceMint, setSourceMint] = useState("");
+  const [amount, setAmount] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [auto, setAuto] = useState(initialAuto);
+  const [savingAuto, setSavingAuto] = useState(false);
+  const [hasInflight, setHasInflight] = useState(false);
+
+  const topupKey = `qv:perbot-topup:${bot.id}:${position.id}`;
+  const topupRawsKey = `qv:perbot-topup-raws:${bot.id}:${position.id}`;
+
+  // Keep the toggle synced to the server value whenever the modal (re)opens.
+  useEffect(() => {
+    if (open) setAuto(initialAuto);
+  }, [open, initialAuto]);
+
+  // Lazily load the ACCOUNT AGENT wallet's spendable assets when the modal opens.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    (async () => {
+      setLoadingSrc(true);
+      setSrcErr(null);
+      try {
+        const res = await fetch(
+          `/api/vault/borrow/perbot/topup-sources?wallet=${walletAddress}&_=${Date.now()}`,
+          { credentials: "include", cache: "no-store", headers: walletAuthHeaders() },
+        );
+        const d = await safeResponseJson(res);
+        if (cancelled) return;
+        if (!res.ok) throw new Error(d.error || "Could not load your account funds.");
+        const list: UserToken[] = Array.isArray(d.sources) ? d.sources : [];
+        setSources(list);
+        // Default source (defaults-over-choices): the collateral asset if held (no
+        // swap), else USDC, else the first holding. The user can change it.
+        const coll = list.find((t) => t.mint === position.collateralMint);
+        const usdc = list.find((t) => t.isUsdc);
+        setSourceMint((coll ?? usdc ?? list[0])?.mint ?? "");
+      } catch (e: any) {
+        if (!cancelled) {
+          setSources([]);
+          setSrcErr(e?.message || "Could not load your account funds.");
+        }
+      } finally {
+        if (!cancelled) setLoadingSrc(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, walletAddress, position.collateralMint]);
+
+  // Surface an in-flight top-up (persisted clientRequestId) so the user can RESUME it.
+  useEffect(() => {
+    if (!open) return;
+    try {
+      setHasInflight(!!localStorage.getItem(topupKey));
+    } catch {
+      setHasInflight(false);
+    }
+  }, [open, topupKey]);
+
+  const src = sources.find((s) => s.mint === sourceMint) ?? null;
+  const isSwap = !!src && src.mint !== position.collateralMint;
+  const sug = position.topUpSuggestion ?? null;
+
+  const srcPriceUsd = (t: UserToken): number | null => {
+    if (t.isUsdc) return 1;
+    if (t.usdValue != null && t.amountUi > 0) return t.usdValue / t.amountUi;
+    return null;
+  };
+
+  // The suggested amount to fund, in the SELECTED source's units, capped at the held
+  // balance. Collateral source → the exact suggested collateral tokens. Other source
+  // → the source amount whose USD ≈ the suggested collateral USD.
+  const suggestedSourceStr = (): string | null => {
+    if (!sug || !src) return null;
+    let tokens: number;
+    if (src.mint === position.collateralMint) {
+      tokens = sug.suggestedCollateralTokens;
+    } else {
+      const p = srcPriceUsd(src);
+      if (!p || p <= 0) return null;
+      tokens = sug.suggestedCollateralUsd / p;
+    }
+    if (!Number.isFinite(tokens) || tokens <= 0) return null;
+    return fmtTokenAmount(Math.min(tokens, src.amountUi), src.decimals);
+  };
+
+  // Prefill the suggested amount whenever the source changes (default over choice).
+  // Only fills when a suggestion exists; the user can freely overwrite it.
+  useEffect(() => {
+    if (!open || !src) return;
+    const s = suggestedSourceStr();
+    setAmount(s ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceMint, sources, open]);
+
+  const enteredNum = parseFloat(amount);
+  const heldUi = src?.amountUi ?? 0;
+  const amtTooHigh = src != null && Number.isFinite(enteredNum) && enteredNum > heldUi + 1e-9;
+  const amtValid = src != null && Number.isFinite(enteredNum) && enteredNum > 0 && !amtTooHigh;
+  const estCollateralUsd = (() => {
+    if (!amtValid || !src) return null;
+    const p = srcPriceUsd(src);
+    return p != null ? enteredNum * p : null;
+  })();
+  const canAdd = (amtValid || hasInflight) && !busy;
+
+  const setSuggested = () => {
+    const s = suggestedSourceStr();
+    if (s) setAmount(s);
+  };
+  const setMax = () => {
+    if (src) setAmount(fmtTokenAmount(src.amountUi, src.decimals));
+  };
+
+  const handleAdd = async () => {
+    if (!bot) return;
+    setBusy(true);
+    try {
+      const sessionId = await getSessionId();
+      let clientRequestId: string | null = null;
+      let raws: { sourceMint: string; sourceAmountRaw: string } | null = null;
+      try {
+        clientRequestId = localStorage.getItem(topupKey);
+      } catch {
+        clientRequestId = null;
+      }
+
+      if (clientRequestId) {
+        // RESUME: re-send the EXACT source/amount the op was created with (never the
+        // live input, which the user could have changed). Fail closed if it's gone.
+        try {
+          const stored = localStorage.getItem(topupRawsKey);
+          if (stored) raws = JSON.parse(stored);
+        } catch {
+          raws = null;
+        }
+        if (!raws || !raws.sourceMint || !raws.sourceAmountRaw) {
+          toast({
+            title: "Finishing your last top-up",
+            description: "Your previous top-up is still settling. Give it a moment — this view will update on its own.",
+          });
+          await onChanged();
+          return;
+        }
+      } else {
+        // FRESH: compute the raw source amount, persist raws BEFORE the id so an id can
+        // never exist without amounts to resume from.
+        if (!src) {
+          toast({ title: "Pick a source", description: "Choose which asset to add from.", variant: "destructive" });
+          return;
+        }
+        const rawAmt = toRawBaseUnits(amount, src.decimals);
+        if (!rawAmt || BigInt(rawAmt) <= 0n) {
+          toast({ title: "Enter an amount", description: "Enter how much collateral to add.", variant: "destructive" });
+          return;
+        }
+        raws = { sourceMint: src.mint, sourceAmountRaw: rawAmt };
+        clientRequestId = newRequestId();
+        try {
+          localStorage.setItem(topupRawsKey, JSON.stringify(raws));
+          localStorage.setItem(topupKey, clientRequestId);
+        } catch {
+          /* ignore */
+        }
+        setHasInflight(true);
+      }
+
+      const res = await fetch("/api/vault/borrow/perbot/topup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+        credentials: "include",
+        body: JSON.stringify({
+          botId: bot.id,
+          borrowPositionId: position.id,
+          sourceMint: raws.sourceMint,
+          sourceAmountRaw: raws.sourceAmountRaw,
+          sessionId,
+          clientRequestId,
+        }),
+      });
+      const d = await safeResponseJson(res);
+      if (res.ok && d.ok) {
+        try {
+          localStorage.removeItem(topupKey);
+          localStorage.removeItem(topupRawsKey);
+        } catch {
+          /* ignore */
+        }
+        setHasInflight(false);
+        const backedUsd = typeof d.collateralValueUsd === "number" ? d.collateralValueUsd : null;
+        toast({
+          title: "Collateral Added",
+          description: backedUsd != null
+            ? `Your ${collSym ?? "collateral"} backing is now about ${fmtUsd(backedUsd)}.`
+            : `Added ${collSym ?? "collateral"} to defend this loan.`,
+        });
+        await onChanged();
+        onOpenChange(false);
+      } else if (res.status === 202 || d.needsAttention) {
+        setHasInflight(true);
+        toast({ title: "Still Finishing", description: "The top-up is still settling. Tap Add Collateral again in a moment to finish it." });
+        await onChanged();
+      } else {
+        throw new Error(d.error || "Could not add collateral.");
+      }
+    } catch (e: any) {
+      if (isSessionError(e)) {
+        showReconnectToast({ toast, retryAuth, title: "Add collateral failed", retry: () => handleAdd() });
+      } else {
+        toast({ title: "Add collateral failed", description: e?.message || "Something went wrong.", variant: "destructive" });
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleToggleAuto = async (next: boolean) => {
+    if (savingAuto) return;
+    const prev = auto;
+    setAuto(next);
+    setSavingAuto(true);
+    try {
+      const res = await fetch(`/api/trading-bots/${bot.id}?wallet=${walletAddress}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+        credentials: "include",
+        body: JSON.stringify({ autoCollateralTopUp: next }),
+      });
+      const d = await safeResponseJson(res);
+      if (!res.ok) throw new Error(d.error || "Could not update auto top-up.");
+      toast({
+        title: next ? "Auto Top-Up On" : "Auto Top-Up Off",
+        description: next
+          ? "This loan will be topped up automatically if it drifts toward liquidation."
+          : "Automatic top-ups are off for this loan.",
+      });
+      await onChanged();
+    } catch (e: any) {
+      setAuto(prev);
+      if (isSessionError(e)) {
+        showReconnectToast({ toast, retryAuth, title: "Update failed", retry: () => handleToggleAuto(next) });
+      } else {
+        toast({ title: "Update failed", description: e?.message || "Something went wrong.", variant: "destructive" });
+      }
+    } finally {
+      setSavingAuto(false);
+    }
+  };
+
+  // LIVE health header — same inputs/ramp as the loan card so they never disagree.
+  const h = position.health;
+  const collValueUsd = h.collateralValueUsd;
+  const liveDebtUsd = h.debtUsd;
+  const posMaxLtv = position.maxLtv;
+  const borrowLimitUsd = collValueUsd != null && posMaxLtv != null ? collValueUsd * posMaxLtv : null;
+  const usagePct =
+    borrowLimitUsd != null && borrowLimitUsd > 0 && liveDebtUsd != null
+      ? Math.min(100, Math.max(0, (liveDebtUsd / borrowLimitUsd) * 100))
+      : null;
+  const safeMarkerPct = safeLtvMarkerPct(posMaxLtv);
+  const band = h.band;
+  const chip = band && band !== "unavailable" ? HEALTH_CHIP[band] : null;
+  const ChipIcon = chip?.Icon;
+  const chipTextCls = chip ? chip.cls.split(" ").filter((c) => c.includes("text-")).join(" ") : "text-muted-foreground";
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { if (!busy) onOpenChange(v); }}>
+      <DialogContent className="sm:max-w-md" data-testid="dialog-defend-loan">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Shield className="w-4 h-4 text-primary" />
+            Defend This Loan
+          </DialogTitle>
+          <DialogDescription>
+            Add {collSym ?? "collateral"} to lower your loan's risk, or turn on automatic top-ups.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-5">
+          {/* Health header — mirrors the loan card's live bar. */}
+          <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-1.5">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="text-muted-foreground">Loan Health</span>
+              {chip && ChipIcon && (
+                <span className={`inline-flex items-center gap-1 ${chipTextCls}`} data-testid="text-defend-health">
+                  <ChipIcon className="w-3.5 h-3.5" />
+                  {chip.label}
+                </span>
+              )}
+            </div>
+            {usagePct != null ? (
+              <div className="relative">
+                <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden" data-testid="bar-defend-health">
+                  <div className="h-full rounded-full" style={{ width: `${usagePct}%`, backgroundColor: healthBarColor(usagePct) }} />
+                </div>
+                {safeMarkerPct != null && (
+                  <div
+                    className="absolute -top-0.5 -bottom-0.5 w-px bg-foreground/70"
+                    style={{ left: `${safeMarkerPct}%` }}
+                    title={`Safe limit (${Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV)`}
+                  />
+                )}
+              </div>
+            ) : (
+              <p className="text-[11px] text-muted-foreground">Health unavailable right now.</p>
+            )}
+            <div className="flex items-center justify-between text-[11px] text-muted-foreground pt-0.5">
+              <span data-testid="text-defend-debt">Borrowed {fmtUsd(liveDebtUsd)}</span>
+              <span data-testid="text-defend-collateral">Backed by {fmtUsd(collValueUsd)}</span>
+            </div>
+          </div>
+
+          {/* Add collateral */}
+          <div className="space-y-2.5">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium">Add Collateral</label>
+              {sug && (
+                <span className="text-[11px] text-muted-foreground" data-testid="text-defend-suggested">
+                  Suggested {fmtUsd(sug.suggestedCollateralUsd)} → {Math.round(sug.targetLtv * 100)}% LTV
+                </span>
+              )}
+            </div>
+
+            {loadingSrc ? (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground py-2">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading your funds…
+              </div>
+            ) : srcErr ? (
+              <p className="text-xs text-amber-600 dark:text-amber-500" data-testid="text-defend-src-error">{srcErr}</p>
+            ) : sources.length === 0 ? (
+              <p className="text-xs text-muted-foreground" data-testid="text-defend-no-sources">
+                No spendable funds in your account wallet. Add USDC to your account first, then defend this loan.
+              </p>
+            ) : (
+              <>
+                {/* Source picker */}
+                <Select value={sourceMint} onValueChange={setSourceMint}>
+                  <SelectTrigger className="h-auto py-2" data-testid="select-defend-source">
+                    <SelectValue placeholder="Choose a source" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {sources.map((t) => (
+                      <SelectItem key={t.mint} value={t.mint} data-testid={`option-defend-source-${t.mint}`}>
+                        <span className="flex items-center gap-2">
+                          <span className="font-medium">{t.symbol || "?"}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {fmtTokenAmount(t.amountUi, t.decimals) || t.amountUi}
+                            {t.usdValue != null ? ` · ${fmtUsd(t.usdValue)}` : ""}
+                          </span>
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+
+                {/* Amount + quick-fills */}
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="text"
+                    inputMode="decimal"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    placeholder="0.0"
+                    className="flex-1"
+                    data-testid="input-defend-amount"
+                  />
+                  <Button type="button" variant="outline" size="sm" className="h-9 px-2 text-xs" onClick={setSuggested} disabled={!suggestedSourceStr()} data-testid="button-defend-suggested">
+                    Suggested
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" className="h-9 px-2 text-xs" onClick={setMax} data-testid="button-defend-max">
+                    Max
+                  </Button>
+                </div>
+
+                {amtTooHigh ? (
+                  <p className="text-[11px] text-amber-600 dark:text-amber-500" data-testid="text-defend-amount-hint">
+                    You only have {fmtTokenAmount(heldUi, src?.decimals ?? 6) || heldUi} {src?.symbol}.
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground" data-testid="text-defend-amount-hint">
+                    {isSwap && src ? `Swapped to ${collSym ?? "collateral"} first. ` : ""}
+                    {estCollateralUsd != null ? `≈ ${fmtUsd(estCollateralUsd)} added as collateral.` : "From your account wallet."}
+                  </p>
+                )}
+
+                <Button
+                  className="w-full"
+                  onClick={handleAdd}
+                  disabled={!canAdd}
+                  data-testid="button-defend-add"
+                >
+                  {busy ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Shield className="w-4 h-4 mr-1.5" />}
+                  {hasInflight && !amtValid ? "Finish Top-Up" : "Add Collateral"}
+                </Button>
+              </>
+            )}
+          </div>
+
+          {/* Auto top-up */}
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 p-3">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Auto Top-Up</p>
+              <p className="text-[11px] text-muted-foreground">
+                Automatically add collateral if this loan drifts toward liquidation.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {savingAuto && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
+              <Switch checked={auto} onCheckedChange={handleToggleAuto} disabled={savingAuto} data-testid="switch-defend-auto" />
+            </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function PerbotBorrowControls({
   bot,
   walletAddress,
@@ -216,6 +712,8 @@ export default function PerbotBorrowControls({
   // but no open position is visible yet, e.g. after a 202). Lets the user RESUME the
   // exact same op — with the exact same persisted amounts — even if the input is blank.
   const [hasInflightBorrow, setHasInflightBorrow] = useState(false);
+  // "Defend this loan" modal (Add Collateral + Auto top-up toggle).
+  const [defendOpen, setDefendOpen] = useState(false);
   // The drawer is a single reused instance: a slow response for a previous
   // bot/wallet must never overwrite the current one.
   const reqRef = useRef(0);
@@ -721,6 +1219,18 @@ export default function PerbotBorrowControls({
             )}
           </div>
 
+          {/* Defend this loan — add collateral (lower the risk) or turn on auto top-ups. */}
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full h-9"
+            onClick={() => setDefendOpen(true)}
+            data-testid="button-perbot-manage-loan"
+          >
+            <Shield className="w-3.5 h-3.5 mr-1.5" />
+            Manage
+          </Button>
+
           {/* Loan plan: pick the durable intent. Each card is a selectable button; the
               advisor still HIGHLIGHTS the recommended one as a separate hint. */}
           <div className="space-y-2">
@@ -980,6 +1490,19 @@ export default function PerbotBorrowControls({
           )}
         </AlertDialogContent>
       </AlertDialog>
+
+      {openPos && bot && (
+        <DefendLoanDialog
+          open={defendOpen}
+          onOpenChange={setDefendOpen}
+          bot={bot}
+          walletAddress={walletAddress}
+          position={openPos}
+          initialAuto={data.autoCollateralTopUp ?? false}
+          collSym={collSym}
+          onChanged={onChanged}
+        />
+      )}
     </>
   );
 }

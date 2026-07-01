@@ -281,6 +281,87 @@ export async function sendBorrowHealthNotification(
   }
 }
 
+/** Autonomous "defend the loan" auto collateral top-up outcome notification. */
+export interface AutoTopUpNotification {
+  /** The bot's display name (escaped before send). */
+  scopeLabel: string;
+  /** Collateral asset label, e.g. "INF" (escaped before send). */
+  collateralLabel: string;
+  /** True when collateral was added; false = the user needs to act. */
+  ok: boolean;
+  /** Collateral USD added (success path) — best effort. */
+  addedUsd?: number | null;
+  /** Health factor after the top-up (success path) — best effort. */
+  healthFactor?: number | null;
+  /** Why we could not auto-defend (failure path). */
+  reason?: string | null;
+}
+
+function formatAutoTopUpMessage(n: AutoTopUpNotification): { title: string; body: string } {
+  const scope = escapeTelegramHtml(n.scopeLabel);
+  const collateral = escapeTelegramHtml(n.collateralLabel);
+  // Title-Case labels per owner preference.
+  if (n.ok) {
+    const usd =
+      typeof n.addedUsd === 'number' && Number.isFinite(n.addedUsd) && n.addedUsd > 0
+        ? `$${n.addedUsd.toFixed(2)} of `
+        : '';
+    const hf =
+      typeof n.healthFactor === 'number' && Number.isFinite(n.healthFactor)
+        ? `\nHealth Factor: ${n.healthFactor.toFixed(2)}`
+        : '';
+    return {
+      title: '🛡️ Auto Collateral Top-Up Completed',
+      body: `We added ${usd}${collateral} collateral to your ${scope} loan to defend it automatically.${hf}`,
+    };
+  }
+  const reason = n.reason ? escapeTelegramHtml(n.reason) : 'we could not auto-defend it';
+  return {
+    title: '⚠️ Auto Top-Up Needs Attention',
+    body: `Your ${scope} loan (${collateral}) needs defending, but ${reason}. Add collateral or repay some debt to protect it.`,
+  };
+}
+
+/**
+ * Send an auto-collateral-top-up outcome to the owner's Telegram. Same recipient
+ * gating + tri-state result as the borrow-health alerts. Best-effort; never throws.
+ */
+export async function sendAutoTopUpNotification(
+  walletAddress: string | undefined | null,
+  notification: AutoTopUpNotification,
+): Promise<BorrowHealthNotifyResult> {
+  try {
+    if (!walletAddress) return "skipped";
+
+    const [wallet] = await db
+      .select()
+      .from(wallets)
+      .where(eq(wallets.address, walletAddress))
+      .limit(1);
+
+    if (!wallet) return "skipped";
+    if (!wallet.notificationsEnabled) return "skipped";
+    if (!wallet.telegramChatId) return "skipped";
+
+    const { title, body } = formatAutoTopUpMessage(notification);
+    const message = `<b>${title}</b>\n${body}`;
+
+    const success = await sendTelegramMessage(
+      wallet.telegramChatId,
+      message,
+      buildDefaultInlineKeyboard(),
+    );
+    if (success) {
+      console.log(`[Notifications] Sent auto-topup (${notification.ok ? 'ok' : 'attention'}) alert to ${walletAddress}`);
+      return "sent";
+    }
+    return "failed";
+  } catch (error) {
+    console.error('[Notifications] Error sending auto-topup notification:', error);
+    return "failed";
+  }
+}
+
 function formatNotificationMessage(notification: TradeNotification): { title: string; body: string } {
   const { type, size, price, pnl } = notification;
   // Escape user/creator-derived values (bot names, symbols, error text) before

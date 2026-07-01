@@ -21,7 +21,10 @@
  *     per-bot borrow normally carries debt, but a mid-unwind row may be zeroed.)
  */
 
-import { BORROW_RISK_POLICY } from "./borrow-risk-policy";
+import {
+  BORROW_RISK_POLICY,
+  PERBOT_CARVE_DEFAULT_TARGET_LTV,
+} from "./borrow-risk-policy";
 import {
   JupiterLendBorrowRoute,
   type BorrowVaultConfig,
@@ -407,4 +410,121 @@ export async function enumerateBotBorrowHealth(
   }
 
   return summarizeBotBorrowHealth(out);
+}
+
+// --- DEFEND-THE-LOAN: suggested collateral top-up -----------------------------
+
+/** Facts a top-up suggestion needs. All USD on the LIQUIDATION oracle price. */
+export interface TopUpSuggestionFacts {
+  /** Debt in USD (debtRaw / 10^debtDecimals). */
+  debtUsd: number;
+  /** Collateral USD value at the liquidation oracle price. */
+  collateralValueUsd: number;
+  /** Liquidation oracle price, USD per collateral token (> 0). */
+  collateralPriceUsd: number;
+  collateralDecimals: number;
+  /** LTV to restore to; defaults to PERBOT_CARVE_DEFAULT_TARGET_LTV (0.5). */
+  targetLtv?: number;
+}
+
+export interface TopUpSuggestion {
+  /** Additional collateral to add, raw base units (rounded UP). 0n when already safe. */
+  suggestedCollateralRaw: bigint;
+  /** Same amount in whole tokens (display). */
+  suggestedCollateralTokens: number;
+  /** USD value of the suggested top-up at the liquidation oracle price. */
+  suggestedCollateralUsd: number;
+  /** The LTV the suggestion restores to. */
+  targetLtv: number;
+}
+
+/**
+ * SUGGESTED per-bot collateral top-up to restore `targetLtv` (default 0.5). PURE.
+ *
+ * "Defend the loan" math: how much MORE collateral (raw base units) to add so the
+ * position's LTV (debt / collateral value) returns to the target. Uses the SAME
+ * honest LIQUIDATION oracle price as the health read, so the suggestion and the
+ * displayed health never disagree. Rounds the raw amount UP so adding it reaches
+ * (never just-misses) the target.
+ *
+ * Returns a 0n suggestion when the position is already at/above target or carries
+ * no debt. Returns null (fail closed) when any fact is unreadable — the caller
+ * must NOT fabricate a suggestion from a bad read.
+ */
+export function computePerbotTopUpSuggestion(
+  f: TopUpSuggestionFacts,
+): TopUpSuggestion | null {
+  const targetLtv = f.targetLtv ?? PERBOT_CARVE_DEFAULT_TARGET_LTV;
+  if (!inUnitRange(targetLtv)) return null;
+  if (!isFiniteNum(f.debtUsd) || f.debtUsd < 0) return null;
+  if (!isFiniteNum(f.collateralValueUsd) || f.collateralValueUsd < 0) return null;
+  if (!isFiniteNum(f.collateralPriceUsd) || f.collateralPriceUsd <= 0) return null;
+  if (!isDecimals(f.collateralDecimals)) return null;
+
+  const zero: TopUpSuggestion = {
+    suggestedCollateralRaw: 0n,
+    suggestedCollateralTokens: 0,
+    suggestedCollateralUsd: 0,
+    targetLtv,
+  };
+
+  // No debt → no liquidation risk → nothing to defend.
+  if (f.debtUsd === 0) return zero;
+
+  const requiredCollateralUsd = f.debtUsd / targetLtv;
+  const additionalUsd = requiredCollateralUsd - f.collateralValueUsd;
+  if (additionalUsd <= 0) return zero; // already at/above target
+
+  const additionalTokens = additionalUsd / f.collateralPriceUsd;
+  if (!isFiniteNum(additionalTokens) || additionalTokens <= 0) return null;
+
+  // Round UP to the next raw unit so the top-up reaches (not just-misses) target.
+  const scale = 10 ** f.collateralDecimals;
+  const rawCeil = BigInt(Math.ceil(additionalTokens * scale));
+  if (rawCeil <= 0n) return zero;
+
+  return {
+    suggestedCollateralRaw: rawCeil,
+    suggestedCollateralTokens: Number(rawCeil) / scale,
+    suggestedCollateralUsd: (Number(rawCeil) / scale) * f.collateralPriceUsd,
+    targetLtv,
+  };
+}
+
+/**
+ * Derive the top-up suggestion from the SAME raw facts the health read uses (a
+ * LivePositionHealth + BorrowVaultConfig). Mirrors computePerBotPositionHealth's
+ * extraction (liquidation oracle price, decimals) so suggestion and health agree.
+ * Null (fail closed) on any unreadable fact.
+ */
+export function derivePerbotTopUpSuggestion(
+  live: LivePositionHealth | null,
+  vault: BorrowVaultConfig | null,
+  targetLtv?: number,
+): TopUpSuggestion | null {
+  if (!vault || !live) return null;
+  if (!isDecimals(vault.collateralDecimals) || !isDecimals(vault.debtDecimals)) {
+    return null;
+  }
+  let collateralRaw: bigint;
+  let debtRaw: bigint;
+  try {
+    collateralRaw = BigInt(live.collateralRaw);
+    debtRaw = BigInt(live.debtRaw);
+  } catch {
+    return null;
+  }
+  const price = vault.oraclePriceLiquidateUsd;
+  if (!isFiniteNum(price) || price <= 0) return null;
+  if (!inUnitRange(vault.liquidationThreshold)) return null;
+  const debtUsd = Number(debtRaw) / 10 ** vault.debtDecimals;
+  const colTokens = Number(collateralRaw) / 10 ** vault.collateralDecimals;
+  const collateralValueUsd = colTokens * price;
+  return computePerbotTopUpSuggestion({
+    debtUsd,
+    collateralValueUsd,
+    collateralPriceUsd: price,
+    collateralDecimals: vault.collateralDecimals,
+    targetLtv,
+  });
 }

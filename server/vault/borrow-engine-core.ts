@@ -339,6 +339,70 @@ export function capPositiveCollateralDeposit(requestedRaw: bigint, heldRaw: bigi
   return requestedRaw < cap ? requestedRaw : cap;
 }
 
+/**
+ * PURE crash/resume decision for a SINGLE server-signed SWAP leg inside the
+ * collateral top-up orchestrator (NO I/O). The swap is the one money leg whose
+ * OUTPUT is not amount-exact, so it can NEVER be blindly re-broadcast (a
+ * double-swap spends the source asset twice). Resume authority is the WRITE-AHEAD
+ * signature reconciled by on-chain STATUS, plus the realized output delta measured
+ * against a baseline persisted BEFORE the broadcast — never a bare wallet balance
+ * (which reads stale while a swap is in-flight).
+ *
+ * Inputs (the executor gathers these on resume):
+ *  - `recordedSig`: the write-ahead swap signature, or null/undefined when the
+ *    swap never recorded one (=> nothing was broadcast).
+ *  - `status`: `reconcileSignature(recordedSig, swapLvbh)` when a sig exists.
+ *  - `swapOutBeforeRaw`: the output(collateral)-mint balance persisted BEFORE the
+ *    broadcast (the reconciliation baseline).
+ *  - `currentOutBalanceRaw`: a STRICT output-mint balance read NOW (null = unreadable).
+ */
+export type SwapResumeDecision =
+  | { action: "execute_swap" }
+  | { action: "use_realized"; realizedRaw: bigint }
+  | { action: "retry_swap" }
+  | { action: "stop_in_flight" }
+  | { action: "stop_needs_attention"; reason: string };
+
+export function decideSwapResume(input: {
+  recordedSig?: string | null;
+  status?: "landed" | "reverted" | "expired" | "in_flight" | null;
+  swapOutBeforeRaw?: string | bigint | null;
+  currentOutBalanceRaw?: bigint | null;
+}): SwapResumeDecision {
+  // No write-ahead sig => the broadcast never happened. Safe to swap now.
+  if (!input.recordedSig) return { action: "execute_swap" };
+  // A recorded sig with no resolvable status yet: never assume it was dropped.
+  if (!input.status || input.status === "in_flight") return { action: "stop_in_flight" };
+  // Dead tx (atomically reverted, or the blockhash window passed without landing):
+  // provably nothing moved, so a fresh swap is safe.
+  if (input.status === "reverted" || input.status === "expired") return { action: "retry_swap" };
+  // status === "landed": the swap committed. We must NEVER re-swap; credit only the
+  // PROVEN realized output delta vs the pre-broadcast baseline.
+  if (input.swapOutBeforeRaw == null || input.currentOutBalanceRaw == null) {
+    return {
+      action: "stop_needs_attention",
+      reason: "Swap landed but the output balance is unreadable; cannot prove the realized amount. The swapped funds are safe in the account wallet.",
+    };
+  }
+  let before: bigint;
+  try {
+    before = typeof input.swapOutBeforeRaw === "bigint" ? input.swapOutBeforeRaw : BigInt(input.swapOutBeforeRaw);
+  } catch {
+    return {
+      action: "stop_needs_attention",
+      reason: "Swap landed but its pre-swap baseline is unparseable; cannot prove the realized amount. The swapped funds are safe in the account wallet.",
+    };
+  }
+  const realized = input.currentOutBalanceRaw - before;
+  if (realized <= 0n) {
+    return {
+      action: "stop_needs_attention",
+      reason: "Swap landed but no output increase was detected; cannot credit a realized amount. The swapped funds are safe in the account wallet.",
+    };
+  }
+  return { action: "use_realized", realizedRaw: realized };
+}
+
 // --- New-op verify predicates ----------------------------------------------
 // Two classes, mirroring the open/close contract:
 //   * borrow-more / withdraw HAVE a positive output delta (USDC / collateral

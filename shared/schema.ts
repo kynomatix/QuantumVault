@@ -221,7 +221,15 @@ export const tradingBots = pgTable("trading_bots", {
   // earning, leaving a thinner buffer. Flat-parking is identical in both modes — this
   // only governs the on-open unpark AMOUNT. See computeTradeSizingAndTopUp.
   vaultAllOut: boolean("vault_all_out").default(true).notNull(),
-  
+
+  // Defend-the-loan auto collateral top-up (Flash per-bot borrow positions only).
+  // When ON (opt-in, default OFF), a periodic scanner tops up the bot's borrow
+  // collateral from the ACCOUNT agent wallet (swapping if needed) to restore a
+  // safe LTV whenever the position drifts into the alert band — the same "Add
+  // Collateral" action the user can trigger manually from the loan card. OFF =
+  // fully manual. See server/vault/jupiter-lend-perbot-carve.ts (runPerbotCollateralTopUp).
+  autoCollateralTopUp: boolean("auto_collateral_top_up").default(false).notNull(),
+
   protocolSubaccountId: text("protocol_subaccount_id"),
   // Group D item 18 (April 17, 2026): which protocol adapter created/owns this bot.
   // Allowed values are constrained at the DB level by `trading_bots_active_protocol_check`
@@ -487,6 +495,11 @@ export const borrowPositions = pgTable("borrow_positions", {
   healthBandChangedAt: timestamp("health_band_changed_at"),
   lastHealthAlertBand: text("last_health_alert_band"),
   lastHealthAlertAt: timestamp("last_health_alert_at"),
+  // Autonomous "defend the loan" auto top-up throttle. Set to NOW() each time the
+  // scanner claims this position for an auto-defense attempt; the atomic claim only
+  // succeeds once per cooldown window, so a still-urgent loan can't re-fire every
+  // scan tick. NULL = never auto-attempted.
+  lastAutoTopupAttemptAt: timestamp("last_auto_topup_attempt_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({

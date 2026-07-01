@@ -926,6 +926,24 @@ export interface AgentSwapParams {
    * leave it unset.
    */
   minSolGas?: number;
+  /**
+   * OPTIONAL write-ahead durability hook, called EXACTLY ONCE AFTER the swap tx
+   * is signed but STRICTLY BEFORE it is broadcast — same contract as
+   * `executeAgentInstructions.onBeforeBroadcast`. A multi-hop orchestrator uses
+   * it to durably record the swap signature + its blockhash window BEFORE the
+   * irreversible broadcast, so a crash mid-swap is reconciled by SIGNATURE STATUS
+   * (never by the wallet balance, which reads stale while a swap is in-flight and
+   * would otherwise trigger a DOUBLE-SWAP). FATAL: if it throws, the tx is NOT
+   * broadcast and the swap fails closed with no signature (nothing moved).
+   *
+   * NOTE on `lastValidBlockHeight`: the swap tx is PROVIDER-built so it carries
+   * its OWN recentBlockhash; we derive a SAFE (over-estimated) height from the
+   * current block height so a reconcile NEVER declares "expired" before the tx
+   * truly can't land. `0` means "unknown" — a consumer MUST treat 0 as "no expiry
+   * hint" (omit it from the reconcile) and never as a real height (height 0 would
+   * falsely expire every in-flight swap → double-swap).
+   */
+  onBeforeBroadcast?: (info: { signature: string; blockhash: string; lastValidBlockHeight: number }) => void | Promise<void>;
 }
 
 export interface AgentSwapResult {
@@ -1027,11 +1045,36 @@ export async function executeAgentSwap(params: AgentSwapParams): Promise<AgentSw
     const swapTx = VersionedTransaction.deserialize(Buffer.from(swapTxB64, 'base64'));
     swapTx.sign([agentKeypair]);
 
-    const signature = await connection.sendRawTransaction(swapTx.serialize(), {
+    // 5b) WRITE-AHEAD durability hook (see AgentSwapParams.onBeforeBroadcast).
+    //     The signature is deterministic once signed — it equals what
+    //     sendRawTransaction returns — so an orchestrator can record it BEFORE the
+    //     irreversible broadcast. FATAL: a throw here propagates to the outer catch
+    //     (returns {success:false} with NO signature, so nothing moved, retry safe).
+    const signature = bs58.encode(swapTx.signatures[0]);
+    if (params.onBeforeBroadcast) {
+      const blockhash = swapTx.message.recentBlockhash;
+      let lastValidBlockHeight = 0; // 0 = unknown (see param doc): consumer omits the expiry hint.
+      try {
+        // SAFE over-estimate: current height + ~150 (the provider blockhash was
+        // built at or before `now`, so its true window ends at or below this).
+        lastValidBlockHeight = (await connection.getBlockHeight('confirmed')) + 150;
+      } catch {
+        // Leave 0 rather than risk an UNDER-estimate that could declare a live swap
+        // "expired" -> double-swap. Reconcile then stays in_flight (fail-closed).
+      }
+      await params.onBeforeBroadcast({ signature, blockhash, lastValidBlockHeight });
+    }
+
+    const sentSignature = await connection.sendRawTransaction(swapTx.serialize(), {
       skipPreflight: false,
       preflightCommitment: 'confirmed',
       maxRetries: 3,
     });
+    if (sentSignature !== signature) {
+      // Should be impossible (same signed tx); guard so the recorded sig and the
+      // broadcast sig can never silently diverge.
+      console.error(`[executeAgentSwap] broadcast signature ${sentSignature} != precomputed ${signature}`);
+    }
 
     // 6) Confirm by polling signature status (avoids the blockhash /
     //    lastValidBlockHeight mismatch of confirmTransaction, which can falsely
