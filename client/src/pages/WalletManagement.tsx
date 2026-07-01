@@ -50,11 +50,10 @@ import {
   fmtUsd,
   fmtUsd0,
   fmtPct,
-  healthBarColor,
-  RECOMMENDED_MAX_LTV,
-  safeLtvMarkerPct,
+  getLtvBarModel,
 } from '@/lib/lending-format';
 import type { BorrowCollateral, LendingPool, UserToken } from '@/lib/lending-format';
+import { LtvBar } from '@/components/LtvBar';
 import {
   SupplyCollateralDialog,
   BorrowMoreDialog,
@@ -689,6 +688,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       debtUsd,
       hasLoan: (debtUsd ?? 0) > 0,
       maxLtv: cfg?.maxLtv ?? null,
+      liquidationThreshold: cfg?.liquidationThreshold ?? null,
       oraclePriceLiquidateUsd: cfg?.oraclePriceLiquidateUsd ?? null,
       liquidatable: p.liveHealth?.liquidatable === true,
       healthIsLive: p.healthIsLive,
@@ -1059,20 +1059,19 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                   // (fail closed — never a fabricated fill).
                   const poolBorrowLimitUsd =
                     p.collateralUsd != null && p.maxLtv != null ? p.collateralUsd * p.maxLtv : null;
-                  const poolUsagePct =
-                    poolBorrowLimitUsd != null && poolBorrowLimitUsd > 0 && p.debtUsd != null
-                      ? Math.min(100, Math.max(0, (p.debtUsd / poolBorrowLimitUsd) * 100))
-                      : null;
-                  // Safe-limit (recommended LTV) marker position on this PROTOCOL-
-                  // framed bar; null when the whole bar is within the safe zone.
-                  const poolSafeMarkerPct = safeLtvMarkerPct(p.maxLtv);
-                  // Current LTV = debt ÷ collateral value, shown to the LEFT of the
-                  // safe-limit pipe in the legend for consistency with the per-bot
-                  // loan card. Null when either input is unreadable.
+                  // Current LTV = debt ÷ collateral value. Null when either input is
+                  // unreadable → the bar hides (fail closed, never a fabricated fill).
                   const poolCurrentLtvPct =
                     p.collateralUsd != null && p.collateralUsd > 0 && p.debtUsd != null
                       ? (p.debtUsd / p.collateralUsd) * 100
                       : null;
+                  // Bar geometry (frame to liquidation, Safe / Max Borrow / Liquidation
+                  // markers) — shared math so every loan row matches the per-bot card.
+                  const poolBarModel = getLtvBarModel({
+                    currentLtv: poolCurrentLtvPct != null ? poolCurrentLtvPct / 100 : null,
+                    maxLtv: p.maxLtv,
+                    liquidationThreshold: p.liquidationThreshold ?? null,
+                  });
                   return (
                     <div key={p.id} className="rounded-xl border border-border bg-background/40 p-4" data-testid={`card-loan-${p.id}`}>
                       <div className="flex items-center justify-between gap-3">
@@ -1114,40 +1113,13 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                         {/* Per-pool health bar — fill = share of this pool's borrow
                             capacity already used. Real on-chain inputs only; hidden
                             entirely when the capacity or debt can't be read. */}
-                        {poolUsagePct != null && (
-                          <>
-                            <div className="relative">
-                              <div
-                                className="h-1.5 w-full rounded-full bg-muted overflow-hidden"
-                                title={`Borrow capacity used: ${Math.round(poolUsagePct)}%`}
-                                data-testid={`bar-loan-health-${p.id}`}
-                              >
-                                <div className="h-full rounded-full" style={{ width: `${poolUsagePct}%`, backgroundColor: healthBarColor(poolUsagePct) }} />
-                              </div>
-                              {/* Safe-limit marker. Bar is framed to the PROTOCOL max
-                                  LTV, so the safe 50%-LTV point sits at poolSafeMarkerPct%. */}
-                              {poolSafeMarkerPct != null && (
-                                <div
-                                  className="absolute -top-0.5 -bottom-0.5 w-px bg-foreground/70"
-                                  style={{ left: `${poolSafeMarkerPct}%` }}
-                                  title={`Safe limit (${Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV)`}
-                                  data-testid={`marker-safe-limit-${p.id}`}
-                                />
-                              )}
-                            </div>
-                            {poolSafeMarkerPct != null && (
-                              <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground" data-testid={`legend-safe-limit-${p.id}`}>
-                                {poolCurrentLtvPct != null && (
-                                  <>
-                                    <span className="tabular-nums text-foreground" data-testid={`text-loan-current-ltv-${p.id}`}>{Math.round(poolCurrentLtvPct)}% LTV</span>
-                                    <span aria-hidden="true" className="text-muted-foreground/60">|</span>
-                                  </>
-                                )}
-                                <span className="inline-block h-2.5 w-px bg-foreground/70 shrink-0" />
-                                <span>Safe limit ({Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV)</span>
-                              </div>
-                            )}
-                          </>
+                        {poolBarModel.fillPct != null && (
+                          <LtvBar
+                            model={poolBarModel}
+                            currentLtvLabel={poolCurrentLtvPct != null ? `${Math.round(poolCurrentLtvPct)}% LTV` : null}
+                            testId={`loan-${p.id}`}
+                            barTitle={`Borrow capacity used: ${Math.round(poolBarModel.colorUsagePct ?? 0)}%`}
+                          />
                         )}
                       </div>
 

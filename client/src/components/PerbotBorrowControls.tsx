@@ -9,12 +9,11 @@ import {
   getSessionId,
   newRequestId,
   fmtUsd,
-  healthBarColor,
-  safeLtvMarkerPct,
+  getLtvBarModel,
   toRawBaseUnits,
-  RECOMMENDED_MAX_LTV,
   type UserToken,
 } from "@/lib/lending-format";
+import { LtvBar } from "@/components/LtvBar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -88,6 +87,9 @@ interface PerbotBorrowPosition {
   liveDebtRaw: string | null;
   principalUsdcRaw: string | null;
   maxLtv: number | null;
+  // Liquidation-threshold LTV (fraction, e.g. 0.80) — the danger line on the loan
+  // bar. Sits above maxLtv (the borrow cap). null when the vault is unreadable.
+  liquidationThreshold: number | null;
   collateralLogoURI: string | null;
   // The collateral's OWN native staking APY (PERCENT), e.g. INF's SOL staking
   // yield. Display-only "yield bracket" badge; null for non-yield collateral.
@@ -526,12 +528,15 @@ function DefendLoanDialog({
   const collValueUsd = h.collateralValueUsd;
   const liveDebtUsd = h.debtUsd;
   const posMaxLtv = position.maxLtv;
-  const borrowLimitUsd = collValueUsd != null && posMaxLtv != null ? collValueUsd * posMaxLtv : null;
-  const usagePct =
-    borrowLimitUsd != null && borrowLimitUsd > 0 && liveDebtUsd != null
-      ? Math.min(100, Math.max(0, (liveDebtUsd / borrowLimitUsd) * 100))
-      : null;
-  const safeMarkerPct = safeLtvMarkerPct(posMaxLtv);
+  const currentLtv =
+    collValueUsd != null && collValueUsd > 0 && liveDebtUsd != null ? liveDebtUsd / collValueUsd : null;
+  // Bar geometry (frame to liquidation, Safe / Max Borrow / Liquidation markers) —
+  // shared math so this header matches the loan card exactly.
+  const barModel = getLtvBarModel({
+    currentLtv,
+    maxLtv: posMaxLtv,
+    liquidationThreshold: position.liquidationThreshold ?? null,
+  });
   const band = h.band;
   const chip = band && band !== "unavailable" ? HEALTH_CHIP[band] : null;
   const ChipIcon = chip?.Icon;
@@ -562,19 +567,12 @@ function DefendLoanDialog({
                 </span>
               )}
             </div>
-            {usagePct != null ? (
-              <div className="relative">
-                <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden" data-testid="bar-defend-health">
-                  <div className="h-full rounded-full" style={{ width: `${usagePct}%`, backgroundColor: healthBarColor(usagePct) }} />
-                </div>
-                {safeMarkerPct != null && (
-                  <div
-                    className="absolute -top-0.5 -bottom-0.5 w-px bg-foreground/70"
-                    style={{ left: `${safeMarkerPct}%` }}
-                    title={`Safe limit (${Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV)`}
-                  />
-                )}
-              </div>
+            {barModel.fillPct != null ? (
+              <LtvBar
+                model={barModel}
+                currentLtvLabel={currentLtv != null ? `${Math.round(currentLtv * 100)}% LTV` : null}
+                testId="defend-health"
+              />
             ) : (
               <p className="text-[11px] text-muted-foreground">Health unavailable right now.</p>
             )}
@@ -713,7 +711,7 @@ export default function PerbotBorrowControls({
   const { toast } = useToast();
 
   const [data, setData] = useState<PerbotPositionsResponse | null>(null);
-  const [busy, setBusy] = useState<"borrow" | "repay" | null>(null);
+  const [busy, setBusy] = useState<"borrow" | "repay" | "move" | null>(null);
   const [confirm, setConfirm] = useState<"borrow" | "repay" | null>(null);
   // How much USDC the user wants to borrow (free text → parsed). Empty = nothing yet.
   const [amount, setAmount] = useState("");
@@ -1116,6 +1114,86 @@ export default function PerbotBorrowControls({
     }
   };
 
+  // Move the parked carry funds to a higher-yield vault. There is NO direct
+  // vault-to-vault transfer, so this is a two-leg round-trip: unpark every current
+  // vault back to USDC, then park all that USDC into the target vault (park also
+  // persists it as the bot's new auto-park destination). This is a one-tap ACTION,
+  // not automation — the user still decides when to move.
+  //
+  // Money-safety: each leg is fail-closed on the server. If the unpark succeeds but
+  // the park is rejected (e.g. a 409 because the bot isn't flat), the funds simply
+  // rest as USDC — nothing is stranded — and tapping Move again finishes the job.
+  const handleMoveVault = async () => {
+    const moveTo = advisorRec?.moveTo;
+    if (!bot || !moveTo) return;
+    setBusy("move");
+    // Tracks whether the FIRST leg turned the old vault into USDC. If the second
+    // (park) leg then fails, the funds rest safely as cash — the message + refresh
+    // below tell the user exactly that instead of implying nothing happened.
+    let movedToCash = false;
+    try {
+      const sessionId = await getSessionId();
+      // 1. Read what's parked now and unpark every vault that ISN'T already the
+      //    target, fully back to USDC. Detect by RAW on-chain balance so a held-but-
+      //    unquotable balance is still moved, never skipped.
+      const pres = await fetch(
+        `/api/vault/positions?botId=${bot.id}&wallet=${walletAddress}&_=${Date.now()}`,
+        { credentials: "include", cache: "no-store", headers: walletAuthHeaders() },
+      );
+      const pdata = await safeResponseJson(pres);
+      if (!pres.ok) throw new Error(pdata.error || "Could not read parked funds.");
+      const parked: ParkedPositionView[] = (pdata.positions ?? []).filter((p: ParkedPositionView) => {
+        if (p.assetKey === moveTo.assetKey) return false; // already in the target vault
+        try {
+          return BigInt(p.onChainAmountRaw ?? "0") > 0n;
+        } catch {
+          return false;
+        }
+      });
+      for (const p of parked) {
+        const ures = await fetch("/api/vault/unpark", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+          credentials: "include",
+          body: JSON.stringify({ assetKey: p.assetKey, all: true, sessionId, botId: bot.id }),
+        });
+        const udata = await safeResponseJson(ures);
+        if (!ures.ok) throw new Error(udata.error || `Could not bring back ${p.displayName || p.assetKey}.`);
+        movedToCash = true;
+      }
+
+      // 2. Park all idle USDC into the higher-yield target vault. A server 409 is
+      //    authoritative (e.g. the bot isn't flat) — surface it, don't hide the button.
+      const res = await fetch("/api/vault/park", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+        credentials: "include",
+        body: JSON.stringify({ assetKey: moveTo.assetKey, all: true, sessionId, botId: bot.id }),
+      });
+      const d = await safeResponseJson(res);
+      if (!res.ok) throw new Error(d.error || "Could not move to the new vault.");
+      toast({ title: "Vault Moved", description: `Your parked funds now earn in ${moveTo.displayName}.` });
+      await refreshAll();
+    } catch (e: any) {
+      if (isSessionError(e)) {
+        showReconnectToast({ toast, retryAuth, title: "Move failed", retry: () => handleMoveVault() });
+      } else {
+        // An interrupted move may have already turned the old vault into USDC — refresh
+        // so the card never shows funds in a vault they've left, then explain the state.
+        refreshAll();
+        toast({
+          title: "Couldn't finish the move",
+          description: movedToCash
+            ? "Your funds are safe as cash (USDC). Tap Move again to finish moving them into the new vault."
+            : e.message || "Something went wrong — your funds were not moved.",
+          variant: "destructive",
+        });
+      }
+    } finally {
+      setBusy(null);
+    }
+  };
+
   // Persist the durable loan PLAN (Carry vs Repay). Optimistic with revert-on-fail.
   // Intent only — it never moves money. Selecting Carry turns auto-park ON (borrowed +
   // future idle cash joins the vault); Repay turns it OFF. The actual repay stays the
@@ -1175,19 +1253,19 @@ export default function PerbotBorrowControls({
   const collValueUsd = openPos?.health?.collateralValueUsd ?? null;
   const liveDebtUsd = openPos?.health?.debtUsd ?? null;
   const posMaxLtv = openPos?.maxLtv ?? null;
-  const borrowLimitUsd = collValueUsd != null && posMaxLtv != null ? collValueUsd * posMaxLtv : null;
-  const usagePct =
-    borrowLimitUsd != null && borrowLimitUsd > 0 && liveDebtUsd != null
-      ? Math.min(100, Math.max(0, (liveDebtUsd / borrowLimitUsd) * 100))
-      : null;
-  const safeMarkerPct = safeLtvMarkerPct(posMaxLtv);
-  // Current LTV = live on-chain debt ÷ collateral value, shown to the LEFT of the
-  // safe-limit pipe in the legend (e.g. "32% LTV | Safe limit (50% LTV)"). Null when
-  // either input is unreadable → the legend omits it (health is already hidden then).
+  // Current LTV = live on-chain debt ÷ collateral value. Null when either input is
+  // unreadable → the bar hides (fail closed, never a fabricated fill).
   const currentLtvPct =
     collValueUsd != null && collValueUsd > 0 && liveDebtUsd != null
       ? (liveDebtUsd / collValueUsd) * 100
       : null;
+  // Bar geometry (frame to liquidation, Safe / Max Borrow / Liquidation markers) —
+  // shared math (getLtvBarModel) so all borrow surfaces agree.
+  const barModel = getLtvBarModel({
+    currentLtv: currentLtvPct != null ? currentLtvPct / 100 : null,
+    maxLtv: posMaxLtv,
+    liquidationThreshold: openPos?.liquidationThreshold ?? null,
+  });
 
   // Advisor → which of the two action cards to HIGHLIGHT as recommended. park/hold ⇒
   // Carry Trade (keep the loan, earn yield); repay ⇒ Repay. Rendered as clean STATS
@@ -1286,38 +1364,13 @@ export default function PerbotBorrowControls({
                 </span>
               )}
             </div>
-            {usagePct != null ? (
-              <>
-                <div className="relative">
-                  <div
-                    className="h-1.5 w-full rounded-full bg-muted overflow-hidden"
-                    title={`Borrow capacity used: ${Math.round(usagePct)}%`}
-                    data-testid="bar-perbot-health"
-                  >
-                    <div className="h-full rounded-full" style={{ width: `${usagePct}%`, backgroundColor: healthBarColor(usagePct) }} />
-                  </div>
-                  {safeMarkerPct != null && (
-                    <div
-                      className="absolute -top-0.5 -bottom-0.5 w-px bg-foreground/70"
-                      style={{ left: `${safeMarkerPct}%` }}
-                      title={`Safe limit (${Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV)`}
-                      data-testid="marker-perbot-safe-limit"
-                    />
-                  )}
-                </div>
-                {safeMarkerPct != null && (
-                  <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground" data-testid="legend-perbot-safe-limit">
-                    {currentLtvPct != null && (
-                      <>
-                        <span className="tabular-nums text-foreground" data-testid="text-perbot-current-ltv">{Math.round(currentLtvPct)}% LTV</span>
-                        <span aria-hidden="true" className="text-muted-foreground/60">|</span>
-                      </>
-                    )}
-                    <span className="inline-block h-2.5 w-px bg-foreground/70 shrink-0" />
-                    <span>Safe limit ({Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV)</span>
-                  </div>
-                )}
-              </>
+            {barModel.fillPct != null ? (
+              <LtvBar
+                model={barModel}
+                currentLtvLabel={currentLtvPct != null ? `${Math.round(currentLtvPct)}% LTV` : null}
+                testId="perbot-loan"
+                barTitle={`Borrow capacity used: ${Math.round(barModel.colorUsagePct ?? 0)}%`}
+              />
             ) : (
               <p className="text-[11px] text-muted-foreground" data-testid="text-perbot-health-unavailable">
                 Health unavailable right now.
@@ -1401,10 +1454,32 @@ export default function PerbotBorrowControls({
                     </div>
                   </div>
                 )}
-                {advisorRec?.action === "move_vault" && advisorRec.message ? (
-                  <p className="text-[11px] text-amber-600 dark:text-amber-500" data-testid="text-carry-move-hint">
-                    {advisorRec.message}
-                  </p>
+                {advisorRec?.action === "move_vault" && advisorRec.moveTo ? (
+                  <div className="space-y-2" data-testid="carry-move-vault">
+                    <p className="text-[11px] text-muted-foreground" data-testid="text-carry-move-hint">
+                      A higher-yield vault is available. Move your parked funds to{" "}
+                      <span className="font-medium text-foreground">{advisorRec.moveTo.displayName}</span> to earn{" "}
+                      <span className="font-medium text-foreground tabular-nums">{fmtPct1(advisorRec.moveTo.apyPct)}</span>.
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full h-8 px-3 text-xs border-primary/40 text-primary hover:bg-primary/10"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleMoveVault();
+                      }}
+                      disabled={busy !== null}
+                      data-testid="button-perbot-move-vault"
+                    >
+                      {busy === "move" ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <TrendingUp className="w-3.5 h-3.5 mr-1.5" />
+                      )}
+                      Move to {advisorRec.moveTo.displayName}
+                    </Button>
+                  </div>
                 ) : (
                   <p className="text-[11px] text-muted-foreground">
                     Keep the loan and earn yield on the borrowed cash.

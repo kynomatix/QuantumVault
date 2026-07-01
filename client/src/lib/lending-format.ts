@@ -100,6 +100,90 @@ export function safeLtvMarkerPct(protocolMaxLtv: number | null | undefined): num
   return (RECOMMENDED_MAX_LTV / protocolMaxLtv) * 100;
 }
 
+// A finite-positive number or null.
+const finiteOrNull = (v: number | null | undefined): number | null =>
+  typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null;
+
+// The complete geometry for ONE LTV / loan-health bar, so every borrow surface
+// (per-bot loan card, Defend dialog, Borrow-More dialog, Wallet loan rows) draws
+// the SAME markers from the SAME math. The bar is FRAMED to the liquidation
+// threshold when it is known (100% of the bar = the point the position is
+// LIQUIDATED), so the distance the fill travels is the true distance to
+// liquidation — that is the "danger line" the user wants to see at a glance.
+//
+// When the liquidation threshold is unknown we fall back to the legacy max-LTV
+// frame (no danger marker) so nothing regresses.
+//
+// COLOR vs WIDTH: the fill WIDTH is liquidation-relative (distance to liq), while
+// the color RAMP stays borrow-capacity-relative (currentLtv / maxLtv) — so the bar
+// still "heats up" as you consume borrowing power, and simultaneously shows a small
+// remaining gap to the red liquidation line once you hit the borrow cap. Both facts
+// are true and useful.
+export interface LtvBarModel {
+  /** Fraction the bar's 100% represents (liq threshold when known, else max LTV). */
+  frameLtv: number;
+  /** True when framed to the liquidation threshold (danger marker is meaningful). */
+  framedToLiquidation: boolean;
+  /** Current-LTV fill width, 0-100 within the frame. null when there is no debt. */
+  fillPct: number | null;
+  /** 0-100 input for healthBarColor: borrow-capacity usage (currentLtv / maxLtv). */
+  colorUsagePct: number | null;
+  /** Safe-limit (recommended LTV) marker position, 0-100. null = nothing to mark. */
+  safeMarkerPct: number | null;
+  /** Max-borrow (protocol cap) marker position, 0-100. null unless a real gap exists. */
+  maxBorrowMarkerPct: number | null;
+  /** Danger/liquidation marker position, 0-100 (the frame's right edge). null = unknown. */
+  dangerMarkerPct: number | null;
+  /** Liquidation LTV as a whole-number percent for labels (e.g. 80). null = unknown. */
+  liquidationPct: number | null;
+  /** Max-borrow LTV as a whole-number percent for labels (e.g. 75). null = unknown. */
+  maxBorrowPct: number | null;
+}
+
+export function getLtvBarModel(args: {
+  /** Current loan-to-value as a FRACTION (debt / collateral value); null = no debt. */
+  currentLtv?: number | null;
+  /** Protocol max-borrow LTV as a FRACTION (e.g. 0.75). */
+  maxLtv?: number | null;
+  /** Liquidation-threshold LTV as a FRACTION (e.g. 0.80). */
+  liquidationThreshold?: number | null;
+}): LtvBarModel {
+  const maxLtv = finiteOrNull(args.maxLtv);
+  const liq = finiteOrNull(args.liquidationThreshold);
+  const cur = typeof args.currentLtv === "number" && Number.isFinite(args.currentLtv) && args.currentLtv >= 0
+    ? args.currentLtv
+    : null;
+
+  // Frame to liquidation when it is valid and at/above the borrow cap (a real bar
+  // to show). Otherwise use the legacy max-LTV frame with no danger marker.
+  const hasLiqFrame = liq != null && (maxLtv == null || liq >= maxLtv);
+  const frameLtv = hasLiqFrame ? (liq as number) : (maxLtv ?? 0);
+  const framedToLiquidation = hasLiqFrame && frameLtv > 0;
+
+  const pctOf = (v: number | null): number | null =>
+    v == null || frameLtv <= 0 ? null : Math.min(100, Math.max(0, (v / frameLtv) * 100));
+
+  const fillPct = pctOf(cur);
+  const colorUsagePct =
+    cur == null || maxLtv == null ? fillPct : Math.min(100, Math.max(0, (cur / maxLtv) * 100));
+  const safeMarkerPct = RECOMMENDED_MAX_LTV < frameLtv ? pctOf(RECOMMENDED_MAX_LTV) : null;
+  const maxBorrowMarkerPct =
+    framedToLiquidation && maxLtv != null && maxLtv < frameLtv ? pctOf(maxLtv) : null;
+  const dangerMarkerPct = framedToLiquidation ? 100 : null;
+
+  return {
+    frameLtv,
+    framedToLiquidation,
+    fillPct,
+    colorUsagePct,
+    safeMarkerPct,
+    maxBorrowMarkerPct,
+    dangerMarkerPct,
+    liquidationPct: liq != null ? Math.round(liq * 100) : null,
+    maxBorrowPct: maxLtv != null ? Math.round(maxLtv * 100) : null,
+  };
+}
+
 // A crash-safe idempotency key for the resumable multi-hop repay flows. Reused
 // verbatim across retries so the server resumes instead of double-spending.
 export function newRequestId(): string {
@@ -170,6 +254,9 @@ export interface LendingPool {
   collateralLabel: string | null;
   hasLoan: boolean;
   maxLtv: number | null;
+  // Liquidation-threshold LTV (fraction, e.g. 0.80). Drives the danger line on the
+  // loan-health bar. null when the vault config is unreadable.
+  liquidationThreshold: number | null;
   oraclePriceLiquidateUsd: number | null;
 }
 

@@ -10078,6 +10078,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             liveDebtRaw,
             principalUsdcRaw: principalRaw > 0n ? principalRaw.toString() : null,
             maxLtv: vault?.maxLtv ?? null,
+            // The LTV at which this collateral is LIQUIDATED (fraction, e.g. INF 0.80).
+            // Sits ABOVE maxLtv (the borrow cap, e.g. 0.75). Drives the "danger line"
+            // marker on the loan-health bar so the user can see, at a glance, how far
+            // the position is from liquidation (not just from the borrow cap).
+            liquidationThreshold: vault?.liquidationThreshold ?? null,
             liveHealth,
             healthIsLive: liveHealth != null,
             healthAsOf: r.healthAsOf ?? null,
@@ -10772,9 +10777,26 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
 
+      // DUST GUARD: supplying a yield/collateral asset (e.g. INF) leaves a ~1 raw-unit
+      // remainder in the account wallet — Jupiter Lend / Fluid caps the collateral
+      // deposit at (held − 1n) to dodge a round-up revert (see fluid-collateral-deposit
+      // -roundup). That speck is > 0 but rounds to "0" on screen, so it used to surface
+      // as a bogus "0 INF" funding option in Defend This Loan. Offer only MEANINGFUL
+      // balances: a known USD value of at least a cent, or (USD unknown) an amount above
+      // a tiny floor. The top-up route still re-caps at the live balance, so this only
+      // trims what is OFFERED, never what can be spent.
+      const isMeaningfulSource = (t: { amountUi: number; usdValue: number | null }) =>
+        typeof t.usdValue === "number" && Number.isFinite(t.usdValue)
+          ? t.usdValue >= 0.01
+          : t.amountUi >= 1e-4;
       const sources = all
         .filter(
-          (t) => !t.isNativeSol && Number.isFinite(t.amountUi) && t.amountUi > 0 && allowed.has(t.mint),
+          (t) =>
+            !t.isNativeSol &&
+            Number.isFinite(t.amountUi) &&
+            t.amountUi > 0 &&
+            allowed.has(t.mint) &&
+            isMeaningfulSource(t),
         )
         .map((t) => ({
           ...t,

@@ -46,14 +46,14 @@ import {
   newRequestId,
   fmtUsd,
   fmtPct,
-  healthBarColor,
+  getLtvBarModel,
   RECOMMENDED_MAX_LTV,
-  safeLtvMarkerPct,
   type BorrowCollateral,
   type BorrowPreviewResult,
   type LendingPool,
   type UserToken,
 } from '@/lib/lending-format';
+import { LtvBar } from '@/components/LtvBar';
 import { useWallet } from '@/hooks/useWallet';
 import { isSessionError, showReconnectToast } from '@/lib/reconnect-toast';
 import { SolGasShortfallDialog } from '@/components/SolGasShortfallDialog';
@@ -703,20 +703,21 @@ export function BorrowMoreDialog({
     return Number.isFinite(p) && p > 0 ? p : 0;
   })();
   const projectedDebtUsd = currentDebtUsd != null ? currentDebtUsd + enteredDebtUsd : null;
-  const healthUsagePct =
-    protocolBorrowLimitUsd != null && protocolBorrowLimitUsd > 0 && projectedDebtUsd != null
-      ? Math.min(100, Math.max(0, (projectedDebtUsd / protocolBorrowLimitUsd) * 100))
-      : 0;
-  // Where the SAFE limit (recommended LTV) sits on this PROTOCOL-framed bar. null
-  // when the whole bar is already within the safe zone (protocol max <= safe).
-  const safeMarkerPct = safeLtvMarkerPct(protocolMaxLtv);
-  // PROJECTED LTV after this borrow = projected debt ÷ collateral value, shown to
-  // the LEFT of the safe-limit pipe in the legend (labeled "Projected" since this
-  // dialog is a forward-looking action). Null when either input is unreadable.
+  // PROJECTED LTV after this borrow = projected debt ÷ collateral value. As the user
+  // types it PROJECTS where this pool will land; null when either input is unreadable.
   const projectedLtvPct =
     collateralValueUsd != null && collateralValueUsd > 0 && projectedDebtUsd != null
       ? (projectedDebtUsd / collateralValueUsd) * 100
       : null;
+  // Bar geometry — framed to the liquidation threshold with Safe / Max Borrow /
+  // Liquidation markers; the fill COLOR stays borrow-capacity-relative so it still
+  // reads as health. Shared math (getLtvBarModel) so every borrow surface agrees.
+  const liqThreshold = cfg?.liquidationThreshold ?? pool?.liquidationThreshold ?? null;
+  const barModel = getLtvBarModel({
+    currentLtv: projectedLtvPct != null ? projectedLtvPct / 100 : null,
+    maxLtv: protocolMaxLtv,
+    liquidationThreshold: liqThreshold,
+  });
 
   const setMaxBorrow = () => {
     if (availableToBorrowUsd == null || !(availableToBorrowUsd > 0)) return;
@@ -800,33 +801,11 @@ export function BorrowMoreDialog({
                 {fmtUsd(projectedDebtUsd)} / {fmtUsd(protocolBorrowLimitUsd)} protocol limit
               </span>
             </div>
-            <div className="relative">
-              <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-                <div className="h-full rounded-full transition-all duration-200" style={{ width: `${healthUsagePct}%`, backgroundColor: healthBarColor(healthUsagePct) }} />
-              </div>
-              {/* Safe-limit marker. The bar is framed to the PROTOCOL max LTV, so the
-                  safe 50%-LTV point is NOT the midpoint — it sits at safeMarkerPct%. */}
-              {safeMarkerPct != null && (
-                <div
-                  className="absolute -top-0.5 -bottom-0.5 w-px bg-foreground/70"
-                  style={{ left: `${safeMarkerPct}%` }}
-                  title={`Safe limit (${Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV)`}
-                  data-testid="marker-safe-limit-borrow-more"
-                />
-              )}
-            </div>
-            {safeMarkerPct != null && (
-              <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground" data-testid="legend-safe-limit-borrow-more">
-                {projectedLtvPct != null && (
-                  <>
-                    <span className="tabular-nums text-foreground" data-testid="text-borrow-more-projected-ltv">Projected {Math.round(projectedLtvPct)}% LTV</span>
-                    <span aria-hidden="true" className="text-muted-foreground/60">|</span>
-                  </>
-                )}
-                <span className="inline-block h-2.5 w-px bg-foreground/70 shrink-0" />
-                <span>Safe limit ({Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV) — borrowing past it raises liquidation risk</span>
-              </div>
-            )}
+            <LtvBar
+              model={barModel}
+              currentLtvLabel={projectedLtvPct != null ? `Projected ${Math.round(projectedLtvPct)}% LTV` : null}
+              testId="borrow-more"
+            />
           </div>
 
           {/* Pool facts. */}
