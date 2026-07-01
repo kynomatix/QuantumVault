@@ -1317,6 +1317,263 @@ export async function supplyToExistingBotPosition(
   });
 }
 
+// --- BORROW MORE on an EXISTING per-bot position ----------------------------
+// The per-bot sibling of executeBorrowMore (the "grow loan" borrow leg). Borrows
+// ADDITIONAL USDC into a Flash bot's already-open position. Composed by the
+// per-bot GROW orchestrator, so — like supplyToExistingBotPosition — it does NOT
+// own a borrow_operation: the orchestrator write-aheads the borrow signature (via
+// onBeforeBroadcast) and reconciles a crash. Borrow-more RECEIVES a positive USDC
+// delta, so executeAgentInstructions (verifyOutputMint=USDC) is the money-moved
+// proof; a returned-but-unverifiable signature is RECORDED, never dropped.
+//   * bot-scoped load/validate (never loadOpenAccountPosition, which rejects bot rows)
+//   * ENFORCED risk gate scope:"bot" + LIVE existing-debt override (count ONLY this
+//     bot's debt), fail CLOSED if the live position is unreadable
+//   * gas: the BOT pays, the ACCOUNT funds the shortfall; USDC lands -> destMint USDC
+export interface BorrowMoreOnExistingBotPositionParams {
+  walletAddress: string;
+  tradingBotId: string;
+  /** The bot wallet that OWNS the position NFT and SIGNS the borrow. */
+  botPublicKey: string;
+  botSecretKey: Uint8Array;
+  /** The account wallet that FUNDS the bot's network gas (server-signed). */
+  accountPublicKey: string;
+  accountSecretKey: Uint8Array;
+  collateralMint: string;
+  /** The exact per-bot borrow position row to borrow against (must be open on-chain). */
+  borrowPositionId: string;
+  /** ADDITIONAL USDC to borrow, raw base units (6 dp). */
+  requestedDebtRaw: bigint;
+  onBeforeBroadcast?: (info: { signature: string; blockhash: string; lastValidBlockHeight: number }) => void | Promise<void>;
+}
+
+export interface BorrowMoreOnExistingBotPositionResult {
+  success: boolean;
+  signature?: string;
+  /** Realised ADDITIONAL USDC debt delta, raw (never under-reported). */
+  borrowedDeltaRaw?: string;
+  observedDebtRaw?: string;
+  verifyWarning?: string;
+  dbWarning?: string;
+  /** TRUE when the tx landed but FAILED atomically (nothing committed). */
+  onChainFailed?: boolean;
+  error?: string;
+  gasShortfall?: { requiredLamports: number; heldLamports: number };
+}
+
+export async function borrowMoreOnExistingBotPosition(
+  params: BorrowMoreOnExistingBotPositionParams,
+): Promise<BorrowMoreOnExistingBotPositionResult> {
+  if (!params.tradingBotId) return { success: false, error: "A trading bot id is required." };
+  if (params.requestedDebtRaw <= 0n) return { success: false, error: "Borrow amount must be greater than zero." };
+
+  const borrowRoute = new JupiterLendBorrowRoute();
+  const cfg = await borrowRoute.getVaultConfig(params.collateralMint);
+  if (!cfg) return { success: false, error: "Borrow vault is unavailable right now." };
+
+  return withBorrowLock(borrowLockKey(params.walletAddress, params.tradingBotId, cfg.vaultId), async () => {
+    // 1) Load + validate the EXISTING open per-bot position (never
+    //    loadOpenAccountPosition, which rejects bot-scoped rows).
+    const position = await storage.getBorrowPosition(params.walletAddress, params.borrowPositionId);
+    if (!position) return { success: false, error: "Borrow position not found." };
+    if (position.tradingBotId !== params.tradingBotId) {
+      return { success: false, error: "Borrow position does not belong to this bot." };
+    }
+    if (position.status !== "open") return { success: false, error: `Borrow position is not open (status: ${position.status}).` };
+    if (position.collateralMint !== params.collateralMint) {
+      return { success: false, error: "Collateral mint does not match the position." };
+    }
+    const nftId = Number(position.venuePositionId);
+    if (!Number.isInteger(nftId) || nftId <= 0) return { success: false, error: "Borrow position has no valid on-chain id." };
+
+    // 2) LIVE position read — the authority for the per-position risk projection.
+    //    Fail CLOSED if unreadable (never borrow more against an unknown debt).
+    const live = await borrowRoute.readLivePositionHealth(params.collateralMint, nftId);
+    if (!live) return { success: false, error: "Could not read the live position; refusing to borrow more." };
+    const liveColRaw = BigInt(live.collateralRaw);
+    const preDebtRaw = BigInt(live.debtRaw);
+
+    // 3) ENFORCED risk gate: per-bot scope, LIVE total collateral + LIVE existing
+    //    debt (count ONLY this bot's debt, never the wallet-wide cache sum).
+    const elig = await previewBorrowEligibility(
+      params.walletAddress,
+      {
+        collateralMint: params.collateralMint,
+        collateralRaw: liveColRaw,
+        requestedDebtRaw: params.requestedDebtRaw,
+        scope: "bot",
+        existingDebtRawOverride: preDebtRaw,
+      },
+      buildEligibilityDeps(borrowRoute),
+    );
+    if (!elig.ok) return { success: false, error: "Could not fully evaluate borrow risk; refusing to borrow." };
+    if (!elig.allowed) {
+      const deny = elig.reasons?.find((r) => r.severity === "deny");
+      return { success: false, error: deny?.message || "This borrow is not allowed under the risk limits." };
+    }
+
+    // 4) Gas: borrowed USDC lands -> cover first-time USDC ATA rent + fee. The BOT
+    //    pays; the ACCOUNT funds any shortfall.
+    const gas = await ensureVaultGas({
+      payingPublicKey: params.botPublicKey,
+      funderPublicKey: params.accountPublicKey,
+      funderSecretKey: params.accountSecretKey,
+      destMint: USDC_MINT,
+      label: "Borrow",
+    });
+    if (!gas.ok) return {
+      success: false,
+      error: gas.error || "Could not cover the network gas for this borrow.",
+      gasShortfall: {
+        requiredLamports: gas.requiredLamports,
+        heldLamports: gas.payerLamportsBefore + (gas.refilledLamports ?? 0) + (gas.fundedLamports ?? 0),
+      },
+    };
+
+    // 5) Pure plan -> SDK ix against the EXACT minted position.
+    const plan = planBorrowMore(nftId, params.requestedDebtRaw);
+    const borrow = await import("@jup-ag/lend/borrow");
+    const BN = (await import("bn.js")).default;
+    const connection = getServerConnection();
+    const signer = new PublicKey(params.botPublicKey);
+
+    let operate;
+    try {
+      operate = await borrow.getOperateIx({
+        vaultId: cfg.vaultId,
+        positionId: plan.positionId,
+        colAmount: specToBN(BN, plan.colAmount, "col", borrow.MAX_WITHDRAW_AMOUNT, borrow.MAX_REPAY_AMOUNT),
+        debtAmount: specToBN(BN, plan.debtAmount, "debt", borrow.MAX_WITHDRAW_AMOUNT, borrow.MAX_REPAY_AMOUNT),
+        connection,
+        signer,
+      });
+    } catch (e: any) {
+      return { success: false, error: `Could not build the borrow transaction: ${e?.message || e}` };
+    }
+    if (!operate?.ixs?.length) return { success: false, error: "Borrow transaction had no instructions." };
+
+    // 6) THE money move: BOT-signed; verify a POSITIVE USDC delta lands. The
+    //    write-ahead hook lets the orchestrator reconcile a crash by signature.
+    const exec = await executeAgentInstructions({
+      agentPublicKey: params.botPublicKey,
+      agentSecretKey: params.botSecretKey,
+      instructions: operate.ixs,
+      verifyOutputMint: USDC_MINT,
+      addressLookupTables: operate.addressLookupTableAccounts,
+      label: "Borrow more",
+      onBeforeBroadcast: params.onBeforeBroadcast,
+    });
+
+    // 7) Decide whether money moved (mirror OPEN/account borrow-more: a returned
+    //    signature we cannot disprove must be RECORDED — never drop the new debt).
+    let usdcDeltaRaw: bigint;
+    let preReadLive: Awaited<ReturnType<typeof borrowRoute.readLivePositionHealth>> = null;
+    const recovered = !(exec.success && exec.outputReceivedRaw);
+    if (!recovered) {
+      usdcDeltaRaw = BigInt(exec.outputReceivedRaw!);
+    } else if (!exec.signature || exec.onChainFailed) {
+      // Provably nothing moved -> safe. The orchestrator retries (re-borrows).
+      return { success: false, signature: exec.signature, onChainFailed: exec.onChainFailed, error: exec.error || "Borrow failed." };
+    } else {
+      preReadLive = await borrowRoute.readLivePositionHealth(params.collateralMint, nftId);
+      if (preReadLive && BigInt(preReadLive.debtRaw) <= preDebtRaw) {
+        // Definitive read: debt did not grow -> nothing moved.
+        return { success: false, signature: exec.signature, error: exec.error || "Borrow failed." };
+      }
+      usdcDeltaRaw = preReadLive ? BigInt(preReadLive.debtRaw) - preDebtRaw : params.requestedDebtRaw;
+    }
+
+    // 8) Read AUTHORITATIVE debt; from here we persist reality (never under-report).
+    const after = preReadLive ?? await borrowRoute.readLivePositionHealth(params.collateralMint, nftId);
+    let observedColRaw: bigint;
+    let observedDebtRaw: bigint;
+    let oraclePriceUsd: number | null = null;
+    let healthSource: string;
+    if (after) {
+      observedColRaw = BigInt(after.collateralRaw);
+      observedDebtRaw = BigInt(after.debtRaw);
+      oraclePriceUsd = after.oraclePriceUsd;
+      healthSource = "borrow_more_onchain";
+    } else {
+      observedColRaw = liveColRaw;
+      observedDebtRaw = preDebtRaw + (usdcDeltaRaw > params.requestedDebtRaw ? usdcDeltaRaw : params.requestedDebtRaw);
+      healthSource = "borrow_more_unverified";
+    }
+
+    let verifyWarning: string | undefined;
+    if (recovered) {
+      verifyWarning = `Borrow execution reported an error but the transaction was sent (signature ${exec.signature}); recorded the on-chain debt to avoid losing it.`;
+      console.warn("[Borrow] per-bot borrow-more recovered from reported exec failure", { positionId: position.id, nftId, hadLiveRead: !!after });
+    }
+    if (after) {
+      const v = verifyBorrowMoreOutcome({ preDebtRaw, postDebtRaw: observedDebtRaw, usdcDeltaRaw, borrowedRaw: params.requestedDebtRaw });
+      if (!v.ok) {
+        const miss = `Borrow landed (signature ${exec.signature}) but the position read differs (${v.reason}). Recorded the on-chain debt.`;
+        verifyWarning = verifyWarning ? `${verifyWarning} ${miss}` : miss;
+        console.warn(`[Borrow] per-bot borrow-more verify miss: ${v.reason}`, { positionId: position.id, nftId });
+      }
+    } else {
+      const unread = `Borrow landed (signature ${exec.signature}) but the position could not be re-read; recorded a conservative debt estimate pending reconcile.`;
+      verifyWarning = verifyWarning ? `${verifyWarning} ${unread}` : unread;
+    }
+
+    const health = buildHealthSnapshot(cfg, observedColRaw, observedDebtRaw, oraclePriceUsd, healthSource);
+    let dbWarning: string | undefined;
+    const updated = await storage.updateBorrowPosition(
+      position.id,
+      {
+        collateralAmountRaw: observedColRaw.toString(),
+        debtAmountRaw: observedDebtRaw.toString(),
+        healthSnapshot: health.snapshot,
+        healthAsOf: new Date(),
+        healthSource,
+      },
+      "open",
+    );
+    if (!updated) {
+      dbWarning = `Borrow succeeded (signature ${exec.signature}) but the position record was updated by another process.`;
+      console.warn("[Borrow] per-bot borrow-more CAS lost", { positionId: position.id });
+    }
+
+    // 9) History row (LIABILITY: borrowed USDC adds debt, NOT a deposit). Excluded
+    //    from net-deposited so it can't inflate PnL. Realised amount only.
+    const displayBorrowedRaw: bigint | null = !recovered
+      ? BigInt(exec.outputReceivedRaw!)
+      : after
+        ? (observedDebtRaw > preDebtRaw ? observedDebtRaw - preDebtRaw : null)
+        : null;
+    try {
+      if (displayBorrowedRaw != null && displayBorrowedRaw > 0n) {
+        const borrowedUsd = fromRaw(displayBorrowedRaw, cfg.debtDecimals);
+        if (borrowedUsd > 0) {
+          const collateralAmt = fromRaw(observedColRaw, cfg.collateralDecimals);
+          await storage.createEquityEvent({
+            walletAddress: params.walletAddress,
+            tradingBotId: position.tradingBotId ?? null,
+            eventType: "borrow",
+            amount: new Decimal(borrowedUsd).toFixed(6),
+            assetType: "USDC",
+            txSignature: exec.signature ?? null,
+            notes: `Borrowed ${new Decimal(borrowedUsd).toFixed(6)} USDC against ${new Decimal(collateralAmt).toFixed(6)} ${cfg.collateralSymbol}`,
+          });
+        }
+      } else {
+        console.warn("[Borrow] per-bot borrow-more: borrowed amount unverified; skipping history row", { positionId: position.id, nftId });
+      }
+    } catch (e) {
+      console.warn("[Borrow] per-bot borrow-more: failed to record equity event (non-fatal)", e);
+    }
+
+    return {
+      success: true,
+      signature: exec.signature,
+      borrowedDeltaRaw: usdcDeltaRaw.toString(),
+      observedDebtRaw: observedDebtRaw.toString(),
+      verifyWarning,
+      dbWarning,
+    };
+  });
+}
+
 // --- BORROW MORE ------------------------------------------------------------
 
 export interface BorrowMoreParams {

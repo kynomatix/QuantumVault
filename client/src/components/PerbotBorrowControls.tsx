@@ -256,6 +256,12 @@ function DefendLoanDialog({
   initialAuto,
   collSym,
   onChanged,
+  growMaxUsd,
+  growAllowed,
+  targetLtvPct,
+  hasInflightGrow,
+  growBusy,
+  onGrow,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -265,6 +271,16 @@ function DefendLoanDialog({
   initialAuto: boolean;
   collSym: string | null;
   onChanged: () => Promise<void> | void;
+  // Grow ("borrow more") — sized + executed by the parent. growMaxUsd is the most
+  // extra USDC this loan can safely take on; growAllowed is false when the loan is
+  // above its safe ratio (the user must Defend first). onGrow resolves true only on a
+  // fully-confirmed grow.
+  growMaxUsd: number;
+  growAllowed: boolean;
+  targetLtvPct: number | null;
+  hasInflightGrow: boolean;
+  growBusy: boolean;
+  onGrow: (amountUsd: number) => Promise<boolean>;
 }) {
   const { retryAuth } = useWallet();
   const { toast } = useToast();
@@ -278,6 +294,9 @@ function DefendLoanDialog({
   const [auto, setAuto] = useState(initialAuto);
   const [savingAuto, setSavingAuto] = useState(false);
   const [hasInflight, setHasInflight] = useState(false);
+  // How much extra USDC to borrow (free text → parsed). Prefilled to the safe max on
+  // open (default-over-choice: the primary path is "grow to the max").
+  const [growAmount, setGrowAmount] = useState("");
 
   const topupKey = `qv:perbot-topup:${bot.id}:${position.id}`;
   const topupRawsKey = `qv:perbot-topup-raws:${bot.id}:${position.id}`;
@@ -286,6 +305,19 @@ function DefendLoanDialog({
   useEffect(() => {
     if (open) setAuto(initialAuto);
   }, [open, initialAuto]);
+
+  // Prefill the Grow amount to the safe max whenever the modal opens (default over
+  // choice). Cleared when growing isn't currently allowed so a stale figure can't sit
+  // in a disabled field. An in-flight grow resumes from storage, so a blank input is
+  // fine there.
+  useEffect(() => {
+    if (!open) return;
+    if (growAllowed && growMaxUsd > 0) {
+      setGrowAmount((Math.floor(growMaxUsd * 100) / 100).toFixed(2));
+    } else {
+      setGrowAmount("");
+    }
+  }, [open, growAllowed, growMaxUsd]);
 
   // Lazily load the ACCOUNT AGENT wallet's spendable assets when the modal opens.
   useEffect(() => {
@@ -379,6 +411,23 @@ function DefendLoanDialog({
     return p != null ? enteredNum * p : null;
   })();
   const canAdd = (amtValid || hasInflight) && !busy;
+
+  // Grow ("borrow more") derived values. Max is floored to the cent so it can never
+  // round ABOVE the true on-chain headroom. The Grow button is live with a valid
+  // amount (and growing allowed), OR whenever an op is mid-flight to resume.
+  const growMaxStr = growMaxUsd > 0 ? (Math.floor(growMaxUsd * 100) / 100).toFixed(2) : "0";
+  const growEntered = parseFloat(growAmount);
+  const growTooHigh = Number.isFinite(growEntered) && growEntered > growMaxUsd + 0.0001;
+  const growAmtValid = Number.isFinite(growEntered) && growEntered > 0 && !growTooHigh;
+  const canGrow = ((growAmtValid && growAllowed) || hasInflightGrow) && !growBusy && !busy;
+
+  const handleGrowClick = async () => {
+    const ok = await onGrow(growEntered);
+    if (ok) {
+      setGrowAmount("");
+      onOpenChange(false);
+    }
+  };
 
   const setSuggested = () => {
     const s = suggestedSourceStr();
@@ -543,15 +592,15 @@ function DefendLoanDialog({
   const chipTextCls = chip ? chip.cls.split(" ").filter((c) => c.includes("text-")).join(" ") : "text-muted-foreground";
 
   return (
-    <Dialog open={open} onOpenChange={(v) => { if (!busy) onOpenChange(v); }}>
+    <Dialog open={open} onOpenChange={(v) => { if (!busy && !growBusy) onOpenChange(v); }}>
       <DialogContent className="sm:max-w-md" data-testid="dialog-defend-loan">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Shield className="w-4 h-4 text-primary" />
-            Defend This Loan
+            <Landmark className="w-4 h-4 text-primary" />
+            Manage Loan
           </DialogTitle>
           <DialogDescription>
-            Add {collSym ?? "collateral"} to lower your loan's risk, or turn on automatic top-ups.
+            Grow this loan by borrowing more, or add {collSym ?? "collateral"} to lower its risk.
           </DialogDescription>
         </DialogHeader>
 
@@ -580,6 +629,82 @@ function DefendLoanDialog({
               <span data-testid="text-defend-debt">Borrowed {fmtUsd(liveDebtUsd)}</span>
               <span data-testid="text-defend-collateral">Backed by {fmtUsd(collValueUsd)}</span>
             </div>
+          </div>
+
+          {/* Grow this loan (primary) — borrow MORE USDC, backed by freshly-carved
+              collateral. Sized + executed by the parent; here we only collect the amount. */}
+          <div className="space-y-2.5">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium">Grow Loan</label>
+              {targetLtvPct != null && (
+                <span className="text-[11px] text-muted-foreground" data-testid="text-grow-target-ltv">
+                  Stays at {targetLtvPct}% LTV
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-muted-foreground" data-testid="text-grow-note">
+              Borrow more USDC into this bot. We carve more {collSym ?? "collateral"} from your vault
+              to back it, keeping the loan at a safe ratio.
+            </p>
+
+            {!growAllowed && !hasInflightGrow ? (
+              growMaxUsd > 0 ? (
+                <p className="text-[11px] text-amber-600 dark:text-amber-500" data-testid="text-grow-blocked">
+                  This loan is above its safe ratio. Add {collSym ?? "collateral"} below first, then you can grow it.
+                </p>
+              ) : (
+                <p className="text-[11px] text-muted-foreground" data-testid="text-grow-unavailable">
+                  No spare {collSym ?? "collateral"} in your vault to grow this loan right now.
+                </p>
+              )
+            ) : (
+              <>
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="text"
+                    inputMode="decimal"
+                    value={growAmount}
+                    onChange={(e) => setGrowAmount(e.target.value)}
+                    placeholder="0.00"
+                    className="flex-1"
+                    data-testid="input-grow-amount"
+                  />
+                  <Button type="button" variant="outline" size="sm" className="h-9 px-2 text-xs" onClick={() => setGrowAmount(growMaxStr)} disabled={growMaxUsd <= 0} data-testid="button-grow-max">
+                    Max
+                  </Button>
+                </div>
+                {growTooHigh ? (
+                  <p className="text-[11px] text-amber-600 dark:text-amber-500" data-testid="text-grow-amount-hint">
+                    Most you can safely add now is {fmtUsd(growMaxUsd)}.
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground" data-testid="text-grow-amount-hint">
+                    Up to {fmtUsd(growMaxUsd)} more, backed by fresh {collSym ?? "collateral"}.
+                  </p>
+                )}
+                <Button
+                  className="w-full"
+                  onClick={handleGrowClick}
+                  disabled={!canGrow}
+                  data-testid="button-grow-loan"
+                >
+                  {growBusy ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <TrendingUp className="w-4 h-4 mr-1.5" />}
+                  {hasInflightGrow && !growAmtValid ? "Finish Grow" : "Grow Loan"}
+                </Button>
+              </>
+            )}
+          </div>
+
+          {/* Defend this loan (secondary) — lower the risk by adding collateral or
+              turning on automatic top-ups. */}
+          <div className="space-y-1 border-t border-border pt-4">
+            <div className="flex items-center gap-2">
+              <Shield className="w-3.5 h-3.5 text-muted-foreground" />
+              <p className="text-sm font-medium">Defend This Loan</p>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              Lower this loan's risk by adding {collSym ?? "collateral"}, or turn on automatic top-ups.
+            </p>
           </div>
 
           {/* Add collateral */}
@@ -711,7 +836,7 @@ export default function PerbotBorrowControls({
   const { toast } = useToast();
 
   const [data, setData] = useState<PerbotPositionsResponse | null>(null);
-  const [busy, setBusy] = useState<"borrow" | "repay" | "move" | null>(null);
+  const [busy, setBusy] = useState<"borrow" | "repay" | "move" | "grow" | null>(null);
   const [confirm, setConfirm] = useState<"borrow" | "repay" | null>(null);
   // How much USDC the user wants to borrow (free text → parsed). Empty = nothing yet.
   const [amount, setAmount] = useState("");
@@ -724,7 +849,11 @@ export default function PerbotBorrowControls({
   // but no open position is visible yet, e.g. after a 202). Lets the user RESUME the
   // exact same op — with the exact same persisted amounts — even if the input is blank.
   const [hasInflightBorrow, setHasInflightBorrow] = useState(false);
-  // "Defend this loan" modal (Add Collateral + Auto top-up toggle).
+  // True when a GROW op (borrow MORE against fresh collateral) for THIS bot's open
+  // position is mid-flight — same resume semantics as hasInflightBorrow, but keyed by
+  // the position id so it can never leak across loans.
+  const [hasInflightGrow, setHasInflightGrow] = useState(false);
+  // "Manage Loan" modal (Grow the loan + Defend it: Add Collateral / Auto top-up).
   const [defendOpen, setDefendOpen] = useState(false);
   // The drawer is a single reused instance: a slow response for a previous
   // bot/wallet must never overwrite the current one.
@@ -756,6 +885,10 @@ export default function PerbotBorrowControls({
   // which the user could have changed between a partial failure and the retry).
   const openRawsKey = () => `qv:perbot-borrow:open-raws:${bot?.id}`;
   const closeKey = (positionId: string) => `qv:perbot-borrow:close:${bot?.id}:${positionId}`;
+  // GROW is keyed by the exact open-position id (borrow-more against fresh collateral
+  // on an EXISTING loan), so an in-flight grow can never leak into a different loan.
+  const growKey = (positionId: string) => `qv:perbot-borrow:grow:${bot?.id}:${positionId}`;
+  const growRawsKey = (positionId: string) => `qv:perbot-borrow:grow-raws:${bot?.id}:${positionId}`;
 
   const clearOpenOp = () => {
     try {
@@ -788,9 +921,20 @@ export default function PerbotBorrowControls({
       // loan (the dangerous lost-response window the architect flagged).
       if (next?.positions?.[0]) {
         clearOpenOp();
+        // Surface whether a GROW op for THIS open position is still mid-flight so it
+        // stays resumable after a reload or bot switch (a 202 may have landed while the
+        // tab was closed). Keyed by the position id so it can never leak across loans.
+        let growInflight = false;
+        try {
+          growInflight = !!localStorage.getItem(growKey(next.positions[0].id));
+        } catch {
+          /* ignore */
+        }
+        setHasInflightGrow(growInflight);
       } else {
         // No open position yet — surface whether a borrow op is still mid-flight so
-        // the user can RESUME it (the input may be blank, e.g. after a switch).
+        // the user can RESUME it (the input may be blank, e.g. after a switch). With
+        // no open position there can be no grow, so clear that flag.
         let inflight = false;
         try {
           inflight = !!localStorage.getItem(openKey());
@@ -798,6 +942,7 @@ export default function PerbotBorrowControls({
           /* ignore */
         }
         setHasInflightBorrow(inflight);
+        setHasInflightGrow(false);
       }
     } catch {
       if (reqId === reqRef.current) setData(null);
@@ -1017,6 +1162,134 @@ export default function PerbotBorrowControls({
       } else {
         toast({ title: "Borrow failed", description: e.message || "Something went wrong.", variant: "destructive" });
       }
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // Grow an EXISTING loan: carve MORE collateral from the account vault and borrow
+  // MORE USDC into this bot's open position. Mirrors handleBorrow's resume model but
+  // is keyed by the position id (growKey/growRawsKey) and hits /perbot/grow. Returns
+  // true only on a fully-confirmed grow (so the modal can close + clear its input).
+  const handleGrow = async (amountUsd: number): Promise<boolean> => {
+    // openPos is required (grow acts on an existing loan); carrySrc is required only
+    // for a FRESH grow (to size the carve). A RESUME re-sends the persisted raws, so a
+    // consumed/hidden carve source must NOT block finishing an in-flight grow.
+    if (!bot || !openPos) return false;
+    const positionId = openPos.id;
+    setBusy("grow");
+    try {
+      const sessionId = await getSessionId();
+      const storeKey = growKey(positionId);
+      const rawsKey = growRawsKey(positionId);
+      let clientRequestId = localStorage.getItem(storeKey);
+      let raws: { carveRaw: string; requestedDebtRaw: string; collateralMint?: string } | null = null;
+      let postCollateralMint = carrySrc?.collateralMint;
+
+      if (clientRequestId) {
+        // RESUME: re-send the EXACT amounts the in-flight grow was created with — never
+        // recompute from the live input under an existing id. If the persisted amounts
+        // are gone, FAIL CLOSED: let the server settle and refresh rather than bind a
+        // guessed amount to an in-flight op.
+        try {
+          const stored = localStorage.getItem(rawsKey);
+          if (stored) raws = JSON.parse(stored);
+        } catch {
+          raws = null;
+        }
+        if (!raws || !raws.carveRaw || !raws.requestedDebtRaw) {
+          toast({
+            title: "Finishing your last grow",
+            description: "Your previous grow is still settling. Give it a moment — this view will update on its own.",
+          });
+          fetchPositions();
+          return false;
+        }
+        if (raws.collateralMint) postCollateralMint = raws.collateralMint;
+      } else {
+        // FRESH: size from the input at the account's proven carve/borrow ratio, then
+        // persist the raws (with the collateral mint) BEFORE the id so we can never end
+        // up with an id that has no amounts to resume from.
+        const fresh = computeBorrowRaws(amountUsd);
+        if (!fresh) {
+          toast({ title: "Enter an amount", description: "Enter how much more USDC you'd like to borrow.", variant: "destructive" });
+          return false;
+        }
+        raws = { ...fresh, collateralMint: postCollateralMint };
+        clientRequestId = newRequestId();
+        try {
+          localStorage.setItem(rawsKey, JSON.stringify(raws));
+          localStorage.setItem(storeKey, clientRequestId);
+        } catch {
+          /* ignore */
+        }
+        setHasInflightGrow(true);
+      }
+
+      const res = await fetch("/api/vault/borrow/perbot/grow", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+        credentials: "include",
+        body: JSON.stringify({
+          botId: bot.id,
+          botBorrowPositionId: positionId,
+          collateralMint: postCollateralMint,
+          carveRaw: raws.carveRaw,
+          requestedDebtRaw: raws.requestedDebtRaw,
+          sessionId,
+          clientRequestId,
+        }),
+      });
+      const d = await safeResponseJson(res);
+      if (res.ok && d.ok) {
+        try {
+          localStorage.removeItem(storeKey);
+          localStorage.removeItem(rawsKey);
+        } catch {
+          /* ignore */
+        }
+        setHasInflightGrow(false);
+        // Confirm the EXACT amount asked for (the debt raws we sent), not the server's
+        // post-settle figure (which can trail the on-chain debt as it settles).
+        let requestedUsd: number | null = null;
+        try {
+          if (raws?.requestedDebtRaw) {
+            const dec = carrySrc?.debtDecimals ?? 6;
+            requestedUsd = Number(BigInt(raws.requestedDebtRaw)) / 10 ** dec;
+          }
+        } catch {
+          requestedUsd = null;
+        }
+        const usd =
+          requestedUsd != null && Number.isFinite(requestedUsd) && requestedUsd > 0
+            ? requestedUsd
+            : typeof d.suggestedParkAmountUsdc === "number"
+              ? d.suggestedParkAmountUsdc
+              : null;
+        toast({
+          title: "Loan Grown",
+          description: usd != null
+            ? `Borrowed another ${fmtUsd(usd)} into this bot.`
+            : `Borrowed more USDC into this bot.`,
+        });
+        await refreshAll();
+        return true;
+      } else if (res.status === 202 || d.needsAttention) {
+        // Keep the id + amounts so the next tap resumes this exact op.
+        setHasInflightGrow(true);
+        toast({ title: "Still Finishing", description: "The grow is still settling. Tap Grow Loan again in a moment to finish it." });
+        fetchPositions();
+        return false;
+      } else {
+        throw new Error(d.error || "Grow failed");
+      }
+    } catch (e: any) {
+      if (isSessionError(e)) {
+        showReconnectToast({ toast, retryAuth, title: "Grow failed", retry: () => handleGrow(amountUsd) });
+      } else {
+        toast({ title: "Grow failed", description: e?.message || "Something went wrong.", variant: "destructive" });
+      }
+      return false;
     } finally {
       setBusy(null);
     }
@@ -1325,6 +1598,21 @@ export default function PerbotBorrowControls({
   // resume (its amounts come from storage, so a blank input is fine), OR — as a final
   // safety net for a resume whose stored amounts vanished — the input holds a value.
   const canBorrow = amtValid || hasInflightBorrow;
+
+  // GROW sizing. The most extra USDC this loan can safely take on = the account's
+  // remaining carve headroom (same figure as a fresh borrow's max), since the bot
+  // borrows against freshly-carved account collateral. Grow is ALLOWED only when the
+  // bot's current LTV is at/under the safe target: we always carve at the target
+  // ratio, so the added leg is at target and the loan's TOTAL LTV can only stay at or
+  // fall toward target when it already sits there — if it's above target the user must
+  // Defend (add collateral) first, so we route them there instead. Null/unreadable
+  // health → fail closed (grow disabled). An in-flight grow is always resumable.
+  const growMaxUsd = borrowUsd;
+  const growTargetLtv = carrySrc?.suggestLtv ?? carrySrc?.targetLtv ?? 0.5;
+  const botCurrentLtv =
+    collValueUsd != null && collValueUsd > 0 && liveDebtUsd != null ? liveDebtUsd / collValueUsd : null;
+  const growAllowed =
+    !!carrySrc && growMaxUsd > 0 && botCurrentLtv != null && botCurrentLtv <= growTargetLtv + 0.01;
 
   return (
     <>
@@ -1718,6 +2006,12 @@ export default function PerbotBorrowControls({
           initialAuto={data.autoCollateralTopUp ?? false}
           collSym={collSym}
           onChanged={onChanged}
+          growMaxUsd={growMaxUsd}
+          growAllowed={growAllowed}
+          targetLtvPct={targetLtvPct}
+          hasInflightGrow={hasInflightGrow}
+          growBusy={busy === "grow"}
+          onGrow={handleGrow}
         />
       )}
     </>

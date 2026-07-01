@@ -62,6 +62,7 @@ import {
   executeBorrowOpen,
   executeBorrowClose,
   supplyToExistingBotPosition,
+  borrowMoreOnExistingBotPosition,
   withBorrowLock,
 } from "./jupiter-lend-borrow-executor";
 import { JupiterLendBorrowRoute, type BorrowVaultConfig } from "./jupiter-lend-borrow-route";
@@ -1739,4 +1740,415 @@ export async function runPerbotCollateralTopUp(params: PerbotCollateralTopUpPara
     // Unexpected/stale step -> fail closed for inspection (funds are recoverable).
     return failTopup(op, op.step ?? "unknown", "The top-up is in an unexpected state; your funds are safe — please retry.", true);
   });
+}
+
+// ===========================================================================
+// GROW LOAN op (carve MORE collateral + borrow MORE USDC into an EXISTING bot
+// position). Symmetric to CARVE/OPEN, but the terminal legs target the bot's
+// ALREADY-OPEN position instead of minting a fresh one: withdraw `carveRaw` MORE
+// out of the account position (re-gated at `targetLtv` pre-sign, post-withdraw
+// on-chain LTV assertion) -> transfer it to the bot wallet -> SUPPLY it into the
+// bot's own position -> BORROW MORE USDC against it. Fully resumable: no confirmed
+// leg is ever re-run (write-ahead signatures reconciled by on-chain status).
+// ===========================================================================
+
+export interface PerbotGrowLoanParams {
+  walletAddress: string;
+  vault: BorrowVaultConfig;
+  /** Account agent: signs the withdraw + the carve transfer + funds the bot's gas. */
+  accountPublicKey: string;
+  accountSecretKey: Uint8Array;
+  /** Bot agent: signs the supply + the borrow; receives the carved collateral + borrowed USDC. */
+  botPublicKey: string;
+  botSecretKey: Uint8Array;
+  tradingBotId: string;
+  /** Account borrow position to carve MORE FROM (DB id + on-chain nft id). */
+  accountBorrowPositionId: string;
+  accountVenuePositionId: number;
+  /** EXISTING open bot borrow position to grow (DB id + on-chain nft id). */
+  botBorrowPositionId: string;
+  botVenuePositionId: number;
+  /** ADDITIONAL collateral to carve, raw (already validated <= cap by the planner). */
+  carveRaw: bigint;
+  /** ADDITIONAL USDC to borrow into the bot position, raw. */
+  requestedDebtRaw: bigint;
+  /** Resolved + clamped target LTV (drives the ACCOUNT-side pre-sign re-gate). */
+  targetLtv: number;
+  clientRequestId: string;
+}
+
+export async function runPerbotGrowLoan(params: PerbotGrowLoanParams): Promise<PerbotCarveResult> {
+  if (params.carveRaw <= 0n) return { success: false, error: "Carve amount must be greater than zero." };
+  if (params.requestedDebtRaw <= 0n) return { success: false, error: "Borrow amount must be greater than zero." };
+
+  const collateralMint = params.vault.collateralMint;
+  const route = new JupiterLendBorrowRoute();
+
+  return withBorrowLock(`perbot-grow:${params.walletAddress}:${params.clientRequestId}`, async () => {
+    let op = await resolveOrCreateOp({
+      walletAddress: params.walletAddress,
+      borrowPositionId: params.botBorrowPositionId,
+      clientRequestId: params.clientRequestId,
+      operationType: "perbot_grow_loan",
+      metadata: {
+        tradingBotId: params.tradingBotId,
+        collateralMint,
+        accountBorrowPositionId: params.accountBorrowPositionId,
+        accountVenuePositionId: params.accountVenuePositionId,
+        botBorrowPositionId: params.botBorrowPositionId,
+        botVenuePositionId: params.botVenuePositionId,
+        carveRaw: params.carveRaw.toString(),
+        requestedDebtRaw: params.requestedDebtRaw.toString(),
+        targetLtv: params.targetLtv,
+        botPublicKey: params.botPublicKey,
+        accountPublicKey: params.accountPublicKey,
+      },
+    });
+    // Refuse to resume a same-reqId op that was started with different inputs.
+    const idMismatch = validateOpIdentity(op, "perbot_grow_loan", {
+      tradingBotId: params.tradingBotId,
+      collateralMint,
+      accountBorrowPositionId: params.accountBorrowPositionId,
+      accountVenuePositionId: params.accountVenuePositionId,
+      botBorrowPositionId: params.botBorrowPositionId,
+      botVenuePositionId: params.botVenuePositionId,
+      carveRaw: params.carveRaw.toString(),
+      requestedDebtRaw: params.requestedDebtRaw.toString(),
+      targetLtv: params.targetLtv,
+    });
+    if (idMismatch) return { success: false, operationId: op.id, step: op.step ?? undefined, error: idMismatch, needsAttention: false };
+    if (op.status === "succeeded") {
+      const r = (op.result as Meta | null) ?? {};
+      return {
+        success: true,
+        operationId: op.id,
+        step: op.step ?? "final_read",
+        borrowPositionId: r.borrowPositionId ?? params.botBorrowPositionId,
+        carvedRaw: r.carvedRaw,
+        accountPostLtv: r.accountPostLtv ?? null,
+        borrowedUsdcRaw: r.borrowedUsdcRaw,
+        signatures: (op.txSignatures as string[] | null) ?? [],
+      };
+    }
+
+    // ---- WITHDRAW (carve MORE) leg ---------------------------------------
+    // Account-position withdraw is AMOUNT-EXACT and pulls from the position
+    // (which keeps the collateral until the tx lands), so a blind re-broadcast
+    // double-withdraws. Resume authority is the write-ahead signature reconciled
+    // by status — never the agent balance (reads 0 while in-flight).
+    let carvedRaw = BigInt(readMeta(op).carvedRawObserved || "0");
+    const wStep = op.step ?? "";
+    if (wStep === "initialized" || wStep === "withdraw_failed" || wStep === "withdrawing") {
+      let recovered = false;
+      if (wStep === "withdrawing") {
+        const meta = readMeta(op);
+        if (meta.withdrawSig) {
+          const status = await reconcileSignature(meta.withdrawSig, meta.withdrawLvbh);
+          if (status === "landed") recovered = true;
+          else if (status === "in_flight") return failClosed(op, "withdrawing", "The collateral carve is still settling. Funds are safe in the account position — retry in a moment.", true);
+          // reverted | expired -> dead tx, re-withdraw safely below.
+        }
+      }
+      if (!recovered) {
+        // PRE-SIGN RE-GATE: re-read live account health + oracle and re-run the
+        // EXACT-amount target-LTV gate immediately before signing. Nothing has
+        // moved yet, so a deny here is RESTARTABLE.
+        const oracle = await readBorrowOracleContext(params.vault);
+        const liveBefore = await route.readLivePositionHealth(collateralMint, params.accountVenuePositionId);
+        if (!liveBefore) return failClosed(op, "withdraw_failed", "Could not read the live account position; refusing to carve.", false);
+        const gate = evaluateCollateralWithdraw({
+          vault: params.vault,
+          liveCollateralRaw: BigInt(liveBefore.collateralRaw),
+          liveDebtRaw: BigInt(liveBefore.debtRaw),
+          requestedWithdrawRaw: params.carveRaw,
+          oracle,
+          targetMaxLtv: params.targetLtv,
+        });
+        if (!gate.allowed) {
+          const deny = gate.reasons.find((r) => r.severity === "deny");
+          return failClosed(op, "withdraw_failed", deny?.message || "Carve is not allowed under the target LTV.", false);
+        }
+
+        await storage.updateBorrowOperation(op.id, { step: "withdrawing" });
+        const w = await executeWithdrawCollateral({
+          walletAddress: params.walletAddress,
+          agentPublicKey: params.accountPublicKey,
+          agentSecretKey: params.accountSecretKey,
+          borrowPositionId: params.accountBorrowPositionId,
+          amount: params.carveRaw,
+          deliverToUserWallet: false, // STAY in the account agent wallet for the carve transfer.
+          onBeforeBroadcast: async ({ signature, lastValidBlockHeight }) => {
+            await storage.updateBorrowOperation(op.id, {
+              mergeMetadata: { withdrawSig: signature, withdrawLvbh: lastValidBlockHeight },
+              appendTxSignature: signature,
+            });
+          },
+        });
+        if (!w.success) {
+          op = (await storage.getBorrowOperationById(op.id)) ?? op;
+          const meta = readMeta(op);
+          const sig = meta.withdrawSig as string | undefined;
+          if (!sig) return failClosed(op, "withdraw_failed", w.error || "The collateral carve did not complete.", false);
+          const status = await reconcileSignature(sig, meta.withdrawLvbh);
+          if (status === "in_flight") return failClosed(op, "withdrawing", "The collateral carve is still settling. Funds are safe in the account position — retry in a moment.", true);
+          if (status !== "landed") return failClosed(op, "withdraw_failed", w.error || "The collateral carve did not complete.", false);
+          // false-negative: it actually landed -> fall through and record.
+        }
+        // The realised withdrawn amount is the EXACT carve (amount-exact withdraw);
+        // NEVER w.observedCollateralRaw (that is the post-withdraw REMAINING stake).
+        carvedRaw = params.carveRaw;
+      } else {
+        // Recovered on resume; the withdraw already landed at the ORIGINAL amount-exact
+        // carve (persisted at op creation as metadata.carveRaw), not a re-measured balance.
+        carvedRaw = BigInt(readMeta(op).carveRaw || params.carveRaw.toString());
+      }
+
+      // POST-WITHDRAW on-chain assertion: the account must now sit at <= target.
+      const liveAfter = await route.readLivePositionHealth(collateralMint, params.accountVenuePositionId);
+      if (!liveAfter) return failClosed(op, "account_withdrawn", "Carve landed but the account position is unreadable; funds are in the account wallet — reconcile before continuing.", true);
+      const postLtv = computeLtv(
+        BigInt(liveAfter.collateralRaw),
+        BigInt(liveAfter.debtRaw),
+        params.vault.collateralDecimals,
+        params.vault.debtDecimals,
+        liveAfter.oraclePriceUsd,
+      );
+      if (postLtv === null || postLtv > params.targetLtv + LTV_ASSERT_EPSILON) {
+        return failClosed(op, "account_withdrawn", `Account post-carve LTV (${postLtv === null ? "unreadable" : postLtv.toFixed(4)}) exceeds the target (${params.targetLtv}). Carved collateral is in the account wallet — re-supply it before continuing.`, true);
+      }
+      await storage.updateBorrowOperation(op.id, {
+        step: "account_withdrawn",
+        mergeMetadata: { carvedRawObserved: carvedRaw.toString(), accountPostLtv: postLtv },
+      });
+      op = (await storage.getBorrowOperationById(op.id)) ?? op;
+    }
+
+    if (carvedRaw <= 0n) carvedRaw = BigInt(readMeta(op).carvedRawObserved || "0");
+    if (carvedRaw <= 0n) return failClosed(op, "account_withdrawn", "Carved amount is zero after the withdraw; nothing to carve.", true);
+
+    // ---- TRANSFER (account -> bot) leg -----------------------------------
+    const tStep = op.step ?? "";
+    if (tStep === "account_withdrawn" || tStep === "carving" || tStep === "carve_failed") {
+      let recovered = false;
+      if (tStep === "carving") {
+        const meta = readMeta(op);
+        if (meta.carveSig) {
+          const status = await reconcileSignature(meta.carveSig, meta.carveLvbh);
+          if (status === "landed") recovered = true;
+          else if (status === "in_flight") return failClosed(op, "carving", "The carve transfer to the bot is still settling. Funds are safe in the account wallet — retry in a moment.", true);
+        }
+      }
+      if (!recovered) {
+        // AMOUNT-EXACT: the withdraw un-pledged exactly the ORIGINAL requested carve
+        // (metadata.carveRaw, immutable). Re-derive here from that value CAPPED at the
+        // live strict wallet balance — never the position "remaining" reading, never
+        // params.carveRaw (a resume may re-size it). Cap = requested, floor = held.
+        const intendedCarveRaw = BigInt(readMeta(op).carveRaw || params.carveRaw.toString());
+        let heldRaw: bigint;
+        try {
+          heldRaw = await strictBalanceRaw(params.accountPublicKey, collateralMint);
+        } catch (e: any) {
+          return failClosed(op, "carve_failed", `Could not read the carved collateral in the account wallet (${e?.message || e}). Funds are safe in the account wallet — retry in a moment.`, true);
+        }
+        carvedRaw = heldRaw < intendedCarveRaw ? heldRaw : intendedCarveRaw;
+        if (carvedRaw <= 0n) {
+          return failClosed(op, "carve_failed", "No carved collateral is in the account wallet to move to the bot. Funds are safe in the account position — retry in a moment.", true);
+        }
+        // Persist the TRUE carved amount BEFORE the broadcast so a crash mid-transfer
+        // resumes with the right number (the supply leg supplies exactly this).
+        await storage.updateBorrowOperation(op.id, { step: "carving", mergeMetadata: { carvedRawObserved: carvedRaw.toString() } });
+        const xfer = await transferTokenToWalletExact({
+          agentPublicKey: params.accountPublicKey,
+          agentSecretKey: params.accountSecretKey,
+          toWalletAddress: params.botPublicKey,
+          mint: collateralMint,
+          amountRaw: carvedRaw,
+          onBeforeBroadcast: async ({ signature, lastValidBlockHeight }) => {
+            await storage.updateBorrowOperation(op.id, {
+              mergeMetadata: { carveSig: signature, carveLvbh: lastValidBlockHeight },
+              appendTxSignature: signature,
+            });
+          },
+        });
+        if (!xfer.success) {
+          op = (await storage.getBorrowOperationById(op.id)) ?? op;
+          const meta = readMeta(op);
+          const sig = meta.carveSig as string | undefined;
+          if (!sig) return failClosed(op, "carve_failed", xfer.error || "The carve transfer to the bot did not complete. Funds are safe in the account wallet.", true);
+          const status = await reconcileSignature(sig, meta.carveLvbh);
+          if (status === "in_flight") return failClosed(op, "carving", "The carve transfer to the bot is still settling. Funds are safe in the account wallet — retry in a moment.", true);
+          if (status !== "landed") return failClosed(op, "carve_failed", xfer.error || "The carve transfer to the bot did not complete. Funds are safe in the account wallet.", true);
+        }
+      }
+      await storage.updateBorrowOperation(op.id, { step: "carved_to_bot" });
+      op = (await storage.getBorrowOperationById(op.id)) ?? op;
+    }
+
+    // ---- SUPPLY (into the bot's EXISTING position) leg --------------------
+    // NON-terminal (borrow-more follows). supplyToExistingBotPosition is bot-signed,
+    // confirm-only, proves itself from an AUTHORITATIVE position re-read, fails
+    // CLOSED on the dangerous direction, and never mints. On resume the write-ahead
+    // supply signature is the authority: landed => advance (collateral is IN the
+    // position); in_flight => wait; reverted/expired => collateral is still in the
+    // BOT wallet, re-supply forward.
+    const supStep = op.step ?? "";
+    if (supStep === "carved_to_bot" || supStep === "supplying" || supStep === "supply_failed") {
+      const meta = readMeta(op);
+      const supplySig = meta.supplySig as string | undefined;
+      let recovered = false;
+      if (supplySig) {
+        const s = await reconcileSignature(supplySig, meta.supplyLvbh);
+        if (s === "in_flight") return failClosed(op, "supplying", "Adding the carved collateral is still settling. Your funds are safe in the bot wallet — retry in a moment.", true);
+        if (s === "landed") recovered = true;
+        // reverted | expired: nothing committed -> re-supply below.
+      }
+      if (!recovered) {
+        const supplyRaw = BigInt(readMeta(op).carvedRawObserved || carvedRaw.toString());
+        if (supplyRaw <= 0n) return failClosed(op, "supply_failed", "No carved collateral recorded to supply into the bot position; your funds are safe in the bot wallet — retry in a moment.", true);
+        await storage.updateBorrowOperation(op.id, { step: "supplying" });
+        const supply = await supplyToExistingBotPosition({
+          walletAddress: params.walletAddress,
+          tradingBotId: params.tradingBotId,
+          botPublicKey: params.botPublicKey,
+          botSecretKey: params.botSecretKey,
+          accountPublicKey: params.accountPublicKey,
+          accountSecretKey: params.accountSecretKey,
+          collateralMint,
+          borrowPositionId: params.botBorrowPositionId,
+          collateralRaw: supplyRaw,
+          onBeforeBroadcast: async ({ signature, lastValidBlockHeight }) => {
+            await storage.updateBorrowOperation(op.id, {
+              mergeMetadata: { supplySig: signature, supplyLvbh: lastValidBlockHeight },
+              appendTxSignature: signature,
+            });
+          },
+        });
+        if (!supply.success) {
+          // The supply sig may have actually landed (false negative).
+          op = (await storage.getBorrowOperationById(op.id)) ?? op;
+          const m3 = readMeta(op);
+          const sig3 = m3.supplySig as string | undefined;
+          if (sig3) {
+            const st3 = await reconcileSignature(sig3, m3.supplyLvbh);
+            if (st3 === "in_flight") return failClosed(op, "supplying", "Adding the carved collateral is still settling. Your funds are safe in the bot wallet — retry in a moment.", true);
+            if (st3 !== "landed") return failClosed(op, "supply_failed", `${supply.error || "Adding the collateral failed"}. Your funds are safe in the bot wallet.`, true);
+            // false-negative: it actually landed -> advance.
+          } else {
+            return failClosed(op, "supply_failed", `${supply.error || "Adding the collateral failed"}. Your funds are safe in the bot wallet.`, true);
+          }
+        }
+      }
+      await storage.updateBorrowOperation(op.id, { step: "supplied_to_bot" });
+      op = (await storage.getBorrowOperationById(op.id)) ?? op;
+    }
+
+    // ---- BORROW MORE (against the bot's grown position) leg ---------------
+    // Terminal leg. borrowMoreOnExistingBotPosition is bot-signed and RECEIVES a
+    // positive USDC delta (verifyOutputMint=USDC), so a returned signature we
+    // cannot disprove is RECORDED (never lose the new debt). Store the pre-borrow
+    // debt BASELINE BEFORE broadcasting so a crash reconciles the realised delta by
+    // signature status. On resume: landed => finalise (debt grew); in_flight => wait;
+    // reverted/expired => the carved collateral is already SUPPLIED (safe, backing
+    // the loan), a retry re-borrows.
+    const bStep = op.step ?? "";
+    if (bStep === "supplied_to_bot" || bStep === "borrowing_more" || bStep === "borrow_more_failed") {
+      const meta = readMeta(op);
+      const borrowSig = meta.borrowMoreSig as string | undefined;
+      if (borrowSig) {
+        const s = await reconcileSignature(borrowSig, meta.borrowMoreLvbh);
+        if (s === "in_flight") return failClosed(op, "borrowing_more", "The additional borrow is still settling. Your funds are safe — retry in a moment.", true);
+        if (s === "landed") {
+          const preDebtRaw = BigInt(meta.borrowPreDebtRaw || "0");
+          const live = await route.readLivePositionHealth(collateralMint, params.botVenuePositionId);
+          const delta = live && BigInt(live.debtRaw) > preDebtRaw ? (BigInt(live.debtRaw) - preDebtRaw).toString() : (meta.borrowedUsdcRaw ?? undefined);
+          return finalizeGrow(op, { borrowPositionId: params.botBorrowPositionId, carvedRaw, accountPostLtv: meta.accountPostLtv ?? null, borrowedUsdcRaw: delta });
+        }
+        // reverted | expired: nothing committed -> re-borrow below.
+      }
+      // Persist the pre-borrow debt BASELINE before broadcasting so a crash reconciles the delta.
+      const preLive = await route.readLivePositionHealth(collateralMint, params.botVenuePositionId);
+      if (!preLive) return failClosed(op, "borrow_more_failed", "Could not read the bot position before borrowing; your added collateral is safe in the position — retry in a moment.", true);
+      await storage.updateBorrowOperation(op.id, { step: "borrowing_more", mergeMetadata: { borrowPreDebtRaw: preLive.debtRaw } });
+      const borrowMore = await borrowMoreOnExistingBotPosition({
+        walletAddress: params.walletAddress,
+        tradingBotId: params.tradingBotId,
+        botPublicKey: params.botPublicKey,
+        botSecretKey: params.botSecretKey,
+        accountPublicKey: params.accountPublicKey,
+        accountSecretKey: params.accountSecretKey,
+        collateralMint,
+        borrowPositionId: params.botBorrowPositionId,
+        requestedDebtRaw: params.requestedDebtRaw,
+        onBeforeBroadcast: async ({ signature, lastValidBlockHeight }) => {
+          await storage.updateBorrowOperation(op.id, {
+            mergeMetadata: { borrowMoreSig: signature, borrowMoreLvbh: lastValidBlockHeight },
+            appendTxSignature: signature,
+          });
+        },
+      });
+      if (!borrowMore.success) {
+        // The borrow sig may have actually landed (false negative).
+        op = (await storage.getBorrowOperationById(op.id)) ?? op;
+        const m3 = readMeta(op);
+        const sig3 = m3.borrowMoreSig as string | undefined;
+        if (sig3) {
+          const st3 = await reconcileSignature(sig3, m3.borrowMoreLvbh);
+          if (st3 === "in_flight") return failClosed(op, "borrowing_more", "The additional borrow is still settling. Your funds are safe — retry in a moment.", true);
+          if (st3 === "landed") {
+            const preDebtRaw = BigInt(m3.borrowPreDebtRaw || "0");
+            const live = await route.readLivePositionHealth(collateralMint, params.botVenuePositionId);
+            const delta = live && BigInt(live.debtRaw) > preDebtRaw ? (BigInt(live.debtRaw) - preDebtRaw).toString() : undefined;
+            return finalizeGrow(op, { borrowPositionId: params.botBorrowPositionId, carvedRaw, accountPostLtv: m3.accountPostLtv ?? null, borrowedUsdcRaw: delta });
+          }
+        }
+        // Nothing committed: the carved collateral is SUPPLIED into the bot position
+        // (safe, backing the loan). A retry re-borrows.
+        return failClosed(op, "borrow_more_failed", `${borrowMore.error || "The additional borrow failed"}. Your added collateral is safe in the bot position.`, true);
+      }
+      await storage.updateBorrowOperation(op.id, {
+        step: "bot_borrowed",
+        mergeMetadata: { borrowedUsdcRaw: borrowMore.borrowedDeltaRaw },
+      });
+      op = (await storage.getBorrowOperationById(op.id)) ?? op;
+      return finalizeGrow(op, {
+        borrowPositionId: params.botBorrowPositionId,
+        carvedRaw,
+        accountPostLtv: readMeta(op).accountPostLtv ?? null,
+        borrowedUsdcRaw: borrowMore.borrowedDeltaRaw,
+      });
+    }
+
+    // Resuming at/after bot_borrowed -> finalise from the breadcrumb.
+    const meta = readMeta(op);
+    return finalizeGrow(op, {
+      borrowPositionId: params.botBorrowPositionId,
+      carvedRaw,
+      accountPostLtv: meta.accountPostLtv ?? null,
+      borrowedUsdcRaw: meta.borrowedUsdcRaw,
+    });
+  });
+}
+
+async function finalizeGrow(
+  op: BorrowOperation,
+  r: { borrowPositionId: string; carvedRaw: bigint; accountPostLtv: number | null; borrowedUsdcRaw?: string },
+): Promise<PerbotCarveResult> {
+  const result: Meta = {
+    borrowPositionId: r.borrowPositionId,
+    carvedRaw: r.carvedRaw.toString(),
+    accountPostLtv: r.accountPostLtv,
+    borrowedUsdcRaw: r.borrowedUsdcRaw,
+  };
+  await storage.updateBorrowOperation(op.id, { status: "succeeded", step: "final_read", borrowPositionId: r.borrowPositionId, result });
+  const fresh = await storage.getBorrowOperationById(op.id);
+  return {
+    success: true,
+    operationId: op.id,
+    step: "final_read",
+    borrowPositionId: r.borrowPositionId,
+    carvedRaw: r.carvedRaw.toString(),
+    accountPostLtv: r.accountPostLtv,
+    borrowedUsdcRaw: r.borrowedUsdcRaw,
+    signatures: ((fresh?.txSignatures ?? op.txSignatures) as string[] | null) ?? [],
+  };
 }
