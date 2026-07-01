@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ElementType } from "react";
-import { Loader2, Landmark, Check, AlertCircle, AlertTriangle, RotateCcw, TrendingUp, Shield } from "lucide-react";
+import { Loader2, Landmark, Check, AlertCircle, AlertTriangle, RotateCcw, TrendingUp, TrendingDown, Shield } from "lucide-react";
 import { useWallet } from "@/hooks/useWallet";
 import { useToast } from "@/hooks/use-toast";
 import { isSessionError, showReconnectToast } from "@/lib/reconnect-toast";
@@ -10,8 +10,6 @@ import {
   newRequestId,
   fmtUsd,
   getLtvBarModel,
-  toRawBaseUnits,
-  type UserToken,
 } from "@/lib/lending-format";
 import { LtvBar } from "@/components/LtvBar";
 import { Button } from "@/components/ui/button";
@@ -132,6 +130,9 @@ interface PerbotPositionsResponse {
   carrySources: PerbotCarrySource[];
   // The bot's opt-in auto-defend flag (Flash per-bot). Drives the modal's Auto toggle.
   autoCollateralTopUp?: boolean;
+  // Free USDC (raw, 6dp) in the bot wallet — a read-only sizing hint for the modal's
+  // partial pay-DOWN waterfall (bot cash first). null when the read failed.
+  botWalletUsdcRaw?: string | null;
 }
 
 interface ParkedPositionView {
@@ -223,29 +224,18 @@ function StakingApyBadge({ apyPct, testId }: { apyPct?: number | null; testId?: 
   );
 }
 
-// Format a token amount as a plain decimal string (no scientific notation),
-// trimmed of trailing zeros, capped at the asset's decimals (and a readable 6-dp
-// max). Empty for non-positive.
-function fmtTokenAmount(n: number, decimals: number): string {
-  if (!Number.isFinite(n) || n <= 0) return "";
-  const d = Math.min(Math.max(0, decimals), 6);
-  let s = n.toFixed(d);
-  if (s.includes(".")) s = s.replace(/0+$/, "").replace(/\.$/, "");
-  return s;
-}
-
 /**
- * "Defend this loan" modal (per-bot Flash loans). Two tools in one place:
- *   - Add Collateral — funded from the ACCOUNT AGENT wallet (server-signed, no
- *     Phantom). The server swaps the picked source to the collateral asset when it
- *     isn't already the collateral mint. Defaults to the suggested amount that
- *     restores a safe LTV; the user can override or tap Max.
- *   - Auto top-up — opt-in flag: the server tops the loan up automatically if it
- *     drifts toward liquidation.
+ * "Manage Loan" modal (per-bot Flash loans). Three tools in one compact place, with
+ * a live health bar that previews where the amounts being typed will land:
+ *   - Borrow More — borrow additional USDC, backed by freshly-carved collateral so
+ *     the loan stays at its safe target ratio (sized + executed by the parent).
+ *   - Repay — pay the loan DOWN (it stays open). The parent runs a waterfall: the
+ *     bot's own USDC first, then this bot's parked savings.
+ *   - Defend This Loan — the Auto top-up flag: the server automatically adds
+ *     collateral if the loan drifts toward liquidation.
  *
- * Money-safety: the amount is sent as raw base units of the SOURCE asset and the
- * server re-caps it at the live on-chain balance; the op is resumable (a persisted
- * clientRequestId + the exact source raws finish the SAME op after a partial run).
+ * Money-safety: amounts are re-read/re-capped on-chain by the parent handlers; the
+ * Borrow More and Repay ops are resumable (a persisted key finishes the SAME op).
  */
 function DefendLoanDialog({
   open,
@@ -262,6 +252,10 @@ function DefendLoanDialog({
   hasInflightGrow,
   growBusy,
   onGrow,
+  growTargetLtv,
+  onRepayPartial,
+  repayBusy,
+  hasInflightRepay,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -281,25 +275,22 @@ function DefendLoanDialog({
   hasInflightGrow: boolean;
   growBusy: boolean;
   onGrow: (amountUsd: number) => Promise<boolean>;
+  // Repay ("pay down") — the parent runs the bot-cash → parked-savings waterfall.
+  growTargetLtv: number;
+  onRepayPartial: (target: "max" | { usd: number }) => Promise<boolean>;
+  repayBusy: boolean;
+  hasInflightRepay: boolean;
 }) {
   const { retryAuth } = useWallet();
   const { toast } = useToast();
 
-  const [sources, setSources] = useState<UserToken[]>([]);
-  const [loadingSrc, setLoadingSrc] = useState(false);
-  const [srcErr, setSrcErr] = useState<string | null>(null);
-  const [sourceMint, setSourceMint] = useState("");
-  const [amount, setAmount] = useState("");
-  const [busy, setBusy] = useState(false);
   const [auto, setAuto] = useState(initialAuto);
   const [savingAuto, setSavingAuto] = useState(false);
-  const [hasInflight, setHasInflight] = useState(false);
+  // How much of the loan to pay DOWN (free text → parsed). Empty = nothing yet.
+  const [repayAmount, setRepayAmount] = useState("");
   // How much extra USDC to borrow (free text → parsed). Prefilled to the safe max on
   // open (default-over-choice: the primary path is "grow to the max").
   const [growAmount, setGrowAmount] = useState("");
-
-  const topupKey = `qv:perbot-topup:${bot.id}:${position.id}`;
-  const topupRawsKey = `qv:perbot-topup-raws:${bot.id}:${position.id}`;
 
   // Keep the toggle synced to the server value whenever the modal (re)opens.
   useEffect(() => {
@@ -319,99 +310,6 @@ function DefendLoanDialog({
     }
   }, [open, growAllowed, growMaxUsd]);
 
-  // Lazily load the ACCOUNT AGENT wallet's spendable assets when the modal opens.
-  useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
-    (async () => {
-      setLoadingSrc(true);
-      setSrcErr(null);
-      try {
-        const res = await fetch(
-          `/api/vault/borrow/perbot/topup-sources?wallet=${walletAddress}&_=${Date.now()}`,
-          { credentials: "include", cache: "no-store", headers: walletAuthHeaders() },
-        );
-        const d = await safeResponseJson(res);
-        if (cancelled) return;
-        if (!res.ok) throw new Error(d.error || "Could not load your account funds.");
-        const list: UserToken[] = Array.isArray(d.sources) ? d.sources : [];
-        setSources(list);
-        // Default source (defaults-over-choices): the collateral asset if held (no
-        // swap), else USDC, else the first holding. The user can change it.
-        const coll = list.find((t) => t.mint === position.collateralMint);
-        const usdc = list.find((t) => t.isUsdc);
-        setSourceMint((coll ?? usdc ?? list[0])?.mint ?? "");
-      } catch (e: any) {
-        if (!cancelled) {
-          setSources([]);
-          setSrcErr(e?.message || "Could not load your account funds.");
-        }
-      } finally {
-        if (!cancelled) setLoadingSrc(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [open, walletAddress, position.collateralMint]);
-
-  // Surface an in-flight top-up (persisted clientRequestId) so the user can RESUME it.
-  useEffect(() => {
-    if (!open) return;
-    try {
-      setHasInflight(!!localStorage.getItem(topupKey));
-    } catch {
-      setHasInflight(false);
-    }
-  }, [open, topupKey]);
-
-  const src = sources.find((s) => s.mint === sourceMint) ?? null;
-  const isSwap = !!src && src.mint !== position.collateralMint;
-  const sug = position.topUpSuggestion ?? null;
-
-  const srcPriceUsd = (t: UserToken): number | null => {
-    if (t.isUsdc) return 1;
-    if (t.usdValue != null && t.amountUi > 0) return t.usdValue / t.amountUi;
-    return null;
-  };
-
-  // The suggested amount to fund, in the SELECTED source's units, capped at the held
-  // balance. Collateral source → the exact suggested collateral tokens. Other source
-  // → the source amount whose USD ≈ the suggested collateral USD.
-  const suggestedSourceStr = (): string | null => {
-    if (!sug || !src) return null;
-    let tokens: number;
-    if (src.mint === position.collateralMint) {
-      tokens = sug.suggestedCollateralTokens;
-    } else {
-      const p = srcPriceUsd(src);
-      if (!p || p <= 0) return null;
-      tokens = sug.suggestedCollateralUsd / p;
-    }
-    if (!Number.isFinite(tokens) || tokens <= 0) return null;
-    return fmtTokenAmount(Math.min(tokens, src.amountUi), src.decimals);
-  };
-
-  // Prefill the suggested amount whenever the source changes (default over choice).
-  // Only fills when a suggestion exists; the user can freely overwrite it.
-  useEffect(() => {
-    if (!open || !src) return;
-    const s = suggestedSourceStr();
-    setAmount(s ?? "");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceMint, sources, open]);
-
-  const enteredNum = parseFloat(amount);
-  const heldUi = src?.amountUi ?? 0;
-  const amtTooHigh = src != null && Number.isFinite(enteredNum) && enteredNum > heldUi + 1e-9;
-  const amtValid = src != null && Number.isFinite(enteredNum) && enteredNum > 0 && !amtTooHigh;
-  const estCollateralUsd = (() => {
-    if (!amtValid || !src) return null;
-    const p = srcPriceUsd(src);
-    return p != null ? enteredNum * p : null;
-  })();
-  const canAdd = (amtValid || hasInflight) && !busy;
-
   // Grow ("borrow more") derived values. Max is floored to the cent so it can never
   // round ABOVE the true on-chain headroom. The Grow button is live with a valid
   // amount (and growing allowed), OR whenever an op is mid-flight to resume.
@@ -419,123 +317,13 @@ function DefendLoanDialog({
   const growEntered = parseFloat(growAmount);
   const growTooHigh = Number.isFinite(growEntered) && growEntered > growMaxUsd + 0.0001;
   const growAmtValid = Number.isFinite(growEntered) && growEntered > 0 && !growTooHigh;
-  const canGrow = ((growAmtValid && growAllowed) || hasInflightGrow) && !growBusy && !busy;
+  const canGrow = ((growAmtValid && growAllowed) || hasInflightGrow) && !growBusy && !repayBusy;
 
   const handleGrowClick = async () => {
     const ok = await onGrow(growEntered);
     if (ok) {
       setGrowAmount("");
       onOpenChange(false);
-    }
-  };
-
-  const setSuggested = () => {
-    const s = suggestedSourceStr();
-    if (s) setAmount(s);
-  };
-  const setMax = () => {
-    if (src) setAmount(fmtTokenAmount(src.amountUi, src.decimals));
-  };
-
-  const handleAdd = async () => {
-    if (!bot) return;
-    setBusy(true);
-    try {
-      const sessionId = await getSessionId();
-      let clientRequestId: string | null = null;
-      let raws: { sourceMint: string; sourceAmountRaw: string } | null = null;
-      try {
-        clientRequestId = localStorage.getItem(topupKey);
-      } catch {
-        clientRequestId = null;
-      }
-
-      if (clientRequestId) {
-        // RESUME: re-send the EXACT source/amount the op was created with (never the
-        // live input, which the user could have changed). Fail closed if it's gone.
-        try {
-          const stored = localStorage.getItem(topupRawsKey);
-          if (stored) raws = JSON.parse(stored);
-        } catch {
-          raws = null;
-        }
-        if (!raws || !raws.sourceMint || !raws.sourceAmountRaw) {
-          toast({
-            title: "Finishing your last top-up",
-            description: "Your previous top-up is still settling. Give it a moment — this view will update on its own.",
-          });
-          await onChanged();
-          return;
-        }
-      } else {
-        // FRESH: compute the raw source amount, persist raws BEFORE the id so an id can
-        // never exist without amounts to resume from.
-        if (!src) {
-          toast({ title: "Pick a source", description: "Choose which asset to add from.", variant: "destructive" });
-          return;
-        }
-        const rawAmt = toRawBaseUnits(amount, src.decimals);
-        if (!rawAmt || BigInt(rawAmt) <= 0n) {
-          toast({ title: "Enter an amount", description: "Enter how much collateral to add.", variant: "destructive" });
-          return;
-        }
-        raws = { sourceMint: src.mint, sourceAmountRaw: rawAmt };
-        clientRequestId = newRequestId();
-        try {
-          localStorage.setItem(topupRawsKey, JSON.stringify(raws));
-          localStorage.setItem(topupKey, clientRequestId);
-        } catch {
-          /* ignore */
-        }
-        setHasInflight(true);
-      }
-
-      const res = await fetch("/api/vault/borrow/perbot/topup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
-        credentials: "include",
-        body: JSON.stringify({
-          botId: bot.id,
-          borrowPositionId: position.id,
-          sourceMint: raws.sourceMint,
-          sourceAmountRaw: raws.sourceAmountRaw,
-          sessionId,
-          clientRequestId,
-        }),
-      });
-      const d = await safeResponseJson(res);
-      if (res.ok && d.ok) {
-        try {
-          localStorage.removeItem(topupKey);
-          localStorage.removeItem(topupRawsKey);
-        } catch {
-          /* ignore */
-        }
-        setHasInflight(false);
-        const backedUsd = typeof d.collateralValueUsd === "number" ? d.collateralValueUsd : null;
-        toast({
-          title: "Collateral Added",
-          description: backedUsd != null
-            ? `Your ${collSym ?? "collateral"} backing is now about ${fmtUsd(backedUsd)}.`
-            : `Added ${collSym ?? "collateral"} to defend this loan.`,
-        });
-        await onChanged();
-        onOpenChange(false);
-      } else if (res.status === 202 || d.needsAttention) {
-        setHasInflight(true);
-        toast({ title: "Still Finishing", description: "The top-up is still settling. Tap Add Collateral again in a moment to finish it." });
-        await onChanged();
-      } else {
-        throw new Error(d.error || "Could not add collateral.");
-      }
-    } catch (e: any) {
-      if (isSessionError(e)) {
-        showReconnectToast({ toast, retryAuth, title: "Add collateral failed", retry: () => handleAdd() });
-      } else {
-        toast({ title: "Add collateral failed", description: e?.message || "Something went wrong.", variant: "destructive" });
-      }
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -591,21 +379,70 @@ function DefendLoanDialog({
   const ChipIcon = chip?.Icon;
   const chipTextCls = chip ? chip.cls.split(" ").filter((c) => c.includes("text-")).join(" ") : "text-muted-foreground";
 
+  // REPAY ("pay down") derived. Max = the full live debt (floored to the cent so it
+  // can never round ABOVE it). Repaying is the safe direction, so an over-typed amount
+  // just clears the balance. The button is live with a valid amount, OR to FINISH an
+  // unfinished pay-down (which resumes toward its persisted target).
+  const repayMaxStr = liveDebtUsd != null && liveDebtUsd > 0 ? (Math.floor(liveDebtUsd * 100) / 100).toFixed(2) : "0";
+  const repayEntered = parseFloat(repayAmount);
+  const repayValid = liveDebtUsd != null && Number.isFinite(repayEntered) && repayEntered > 0;
+  const repayTooHigh = liveDebtUsd != null && Number.isFinite(repayEntered) && repayEntered > liveDebtUsd + 0.005;
+  const canRepay = (repayValid || hasInflightRepay) && !repayBusy;
+
+  const handleRepayClick = async () => {
+    let ok: boolean;
+    if (hasInflightRepay && !repayValid) {
+      // Resume an unfinished pay-down — the parent drives to its persisted target, so
+      // the argument here is ignored on a resume.
+      ok = await onRepayPartial("max");
+    } else {
+      // Typing at/above the full balance clears it outright; otherwise pay that much down.
+      const full = liveDebtUsd != null && repayEntered >= liveDebtUsd - 0.005;
+      ok = await onRepayPartial(full ? "max" : { usd: repayEntered });
+    }
+    if (ok) {
+      setRepayAmount("");
+      onOpenChange(false);
+    }
+  };
+
+  // LIVE PREVIEW — reflect the amounts being typed so the user SEES where this change
+  // lands before committing. Borrowing more raises debt AND adds fresh collateral
+  // (carved at the target ratio); repaying lowers debt only. Fail-closed: no preview
+  // when the base inputs are unreadable.
+  const previewBorrowUsd = growAllowed && growAmtValid ? growEntered : 0;
+  const previewRepayUsd = liveDebtUsd != null && repayValid ? Math.min(repayEntered, liveDebtUsd) : 0;
+  const previewActive =
+    collValueUsd != null && liveDebtUsd != null && (previewBorrowUsd > 0 || previewRepayUsd > 0);
+  const projDebtUsd = liveDebtUsd != null ? Math.max(0, liveDebtUsd + previewBorrowUsd - previewRepayUsd) : null;
+  const addedCollUsd = growTargetLtv > 0 ? previewBorrowUsd / growTargetLtv : 0;
+  const projCollUsd = collValueUsd != null ? collValueUsd + addedCollUsd : null;
+  const projLtv =
+    projCollUsd != null && projCollUsd > 0 && projDebtUsd != null ? projDebtUsd / projCollUsd : null;
+  const previewBarModel = getLtvBarModel({
+    currentLtv: projLtv,
+    maxLtv: posMaxLtv,
+    liquidationThreshold: position.liquidationThreshold ?? null,
+  });
+  const showPreview = previewActive && previewBarModel.fillPct != null;
+  const shownModel = showPreview ? previewBarModel : barModel;
+
   return (
-    <Dialog open={open} onOpenChange={(v) => { if (!busy && !growBusy) onOpenChange(v); }}>
-      <DialogContent className="sm:max-w-md" data-testid="dialog-defend-loan">
+    <Dialog open={open} onOpenChange={(v) => { if (!repayBusy && !growBusy) onOpenChange(v); }}>
+      <DialogContent className="sm:max-w-md max-h-[85vh] overflow-y-auto" data-testid="dialog-defend-loan">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Landmark className="w-4 h-4 text-primary" />
             Manage Loan
           </DialogTitle>
           <DialogDescription>
-            Grow this loan by borrowing more, or add {collSym ?? "collateral"} to lower its risk.
+            Borrow more against this loan, pay it down, or set it to defend itself.
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-5">
-          {/* Health header — mirrors the loan card's live bar. */}
+          {/* Health header — mirrors the loan card's live bar, and previews where the
+              amounts being typed will land BEFORE the user commits. */}
           <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-1.5">
             <div className="flex items-center justify-between text-[11px]">
               <span className="text-muted-foreground">Loan Health</span>
@@ -616,26 +453,41 @@ function DefendLoanDialog({
                 </span>
               )}
             </div>
-            {barModel.fillPct != null ? (
+            {shownModel.fillPct != null ? (
               <LtvBar
-                model={barModel}
-                currentLtvLabel={currentLtv != null ? `${Math.round(currentLtv * 100)}% LTV` : null}
+                model={shownModel}
+                currentLtvLabel={
+                  showPreview
+                    ? (projLtv != null ? `${Math.round(projLtv * 100)}% LTV projected` : null)
+                    : (currentLtv != null ? `${Math.round(currentLtv * 100)}% LTV` : null)
+                }
                 testId="defend-health"
               />
             ) : (
               <p className="text-[11px] text-muted-foreground">Health unavailable right now.</p>
             )}
+            {showPreview && currentLtv != null && projLtv != null && (
+              <p className="text-[11px] text-primary" data-testid="text-defend-ltv-preview">
+                Now {Math.round(currentLtv * 100)}% → {Math.round(projLtv * 100)}% after this change.
+              </p>
+            )}
             <div className="flex items-center justify-between text-[11px] text-muted-foreground pt-0.5">
-              <span data-testid="text-defend-debt">Borrowed {fmtUsd(liveDebtUsd)}</span>
-              <span data-testid="text-defend-collateral">Backed by {fmtUsd(collValueUsd)}</span>
+              <span data-testid="text-defend-debt">
+                Borrowed {fmtUsd(liveDebtUsd)}
+                {showPreview && projDebtUsd != null && Math.abs(projDebtUsd - (liveDebtUsd ?? 0)) > 0.005 ? ` → ${fmtUsd(projDebtUsd)}` : ""}
+              </span>
+              <span data-testid="text-defend-collateral">
+                Backed by {fmtUsd(collValueUsd)}
+                {showPreview && projCollUsd != null && Math.abs(projCollUsd - (collValueUsd ?? 0)) > 0.005 ? ` → ${fmtUsd(projCollUsd)}` : ""}
+              </span>
             </div>
           </div>
 
-          {/* Grow this loan (primary) — borrow MORE USDC, backed by freshly-carved
-              collateral. Sized + executed by the parent; here we only collect the amount. */}
+          {/* Borrow More — borrow additional USDC, backed by freshly-carved collateral.
+              Sized + executed by the parent; here we only collect the amount. */}
           <div className="space-y-2.5">
             <div className="flex items-center justify-between">
-              <label className="text-sm font-medium">Grow Loan</label>
+              <label className="text-sm font-medium">Borrow More</label>
               {targetLtvPct != null && (
                 <span className="text-[11px] text-muted-foreground" data-testid="text-grow-target-ltv">
                   Stays at {targetLtvPct}% LTV
@@ -650,11 +502,11 @@ function DefendLoanDialog({
             {!growAllowed && !hasInflightGrow ? (
               growMaxUsd > 0 ? (
                 <p className="text-[11px] text-amber-600 dark:text-amber-500" data-testid="text-grow-blocked">
-                  This loan is above its safe ratio. Add {collSym ?? "collateral"} below first, then you can grow it.
+                  This loan is above its safe ratio. Pay some of it down below first, then you can borrow more.
                 </p>
               ) : (
                 <p className="text-[11px] text-muted-foreground" data-testid="text-grow-unavailable">
-                  No spare {collSym ?? "collateral"} in your vault to grow this loan right now.
+                  No spare {collSym ?? "collateral"} in your vault to borrow more right now.
                 </p>
               )
             ) : (
@@ -689,113 +541,84 @@ function DefendLoanDialog({
                   data-testid="button-grow-loan"
                 >
                   {growBusy ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <TrendingUp className="w-4 h-4 mr-1.5" />}
-                  {hasInflightGrow && !growAmtValid ? "Finish Grow" : "Grow Loan"}
+                  {hasInflightGrow && !growAmtValid ? "Finish Borrow" : "Borrow More"}
                 </Button>
               </>
             )}
           </div>
 
-          {/* Defend this loan (secondary) — lower the risk by adding collateral or
-              turning on automatic top-ups. */}
+          {/* Repay — pay this loan DOWN (it stays open). The parent runs the waterfall:
+              the bot's own USDC first, then this bot's parked savings. */}
+          <div className="space-y-2.5 border-t border-border pt-4">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium">Repay</label>
+              {liveDebtUsd != null && (
+                <span className="text-[11px] text-muted-foreground" data-testid="text-repay-owed">
+                  {fmtUsd(liveDebtUsd)} owed
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-muted-foreground" data-testid="text-repay-note">
+              Pay this loan down. We use the bot's own cash first, then its parked savings —
+              your collateral stays put and the loan stays open.
+            </p>
+
+            {hasInflightRepay && (
+              <p className="text-[11px] text-amber-600 dark:text-amber-500" data-testid="text-repay-inflight">
+                You have an unfinished repay — tap Finish Repay to complete it.
+              </p>
+            )}
+
+            <div className="flex items-center gap-2">
+              <Input
+                type="text"
+                inputMode="decimal"
+                value={repayAmount}
+                onChange={(e) => setRepayAmount(e.target.value)}
+                placeholder="0.00"
+                className="flex-1"
+                data-testid="input-repay-amount"
+              />
+              <Button type="button" variant="outline" size="sm" className="h-9 px-2 text-xs" onClick={() => setRepayAmount(repayMaxStr)} disabled={liveDebtUsd == null || liveDebtUsd <= 0} data-testid="button-repay-max">
+                Max
+              </Button>
+            </div>
+            {repayTooHigh ? (
+              <p className="text-[11px] text-muted-foreground" data-testid="text-repay-amount-hint">
+                That's more than you owe — we'll just clear the balance.
+              </p>
+            ) : (
+              <p className="text-[11px] text-muted-foreground" data-testid="text-repay-amount-hint">
+                Uses the bot's cash first, then its parked savings.
+              </p>
+            )}
+            <Button
+              variant="outline"
+              className="w-full"
+              onClick={handleRepayClick}
+              disabled={!canRepay}
+              data-testid="button-repay-loan"
+            >
+              {repayBusy ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <TrendingDown className="w-4 h-4 mr-1.5" />}
+              {hasInflightRepay && !repayValid
+                ? "Finish Repay"
+                : repayValid
+                  ? `Repay ${fmtUsd(Math.min(repayEntered, liveDebtUsd ?? repayEntered))}`
+                  : "Repay"}
+            </Button>
+          </div>
+
+          {/* Defend this loan — hands-off protection. This IS just the Auto toggle now
+              (manual add-collateral was removed for simplicity). */}
           <div className="space-y-1 border-t border-border pt-4">
             <div className="flex items-center gap-2">
               <Shield className="w-3.5 h-3.5 text-muted-foreground" />
               <p className="text-sm font-medium">Defend This Loan</p>
             </div>
             <p className="text-[11px] text-muted-foreground">
-              Lower this loan's risk by adding {collSym ?? "collateral"}, or turn on automatic top-ups.
+              Let this loan defend itself: if it drifts toward liquidation, we automatically
+              add {collSym ?? "collateral"} from your account to keep it safe.
             </p>
-          </div>
-
-          {/* Add collateral */}
-          <div className="space-y-2.5">
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-medium">Add Collateral</label>
-              {sug && (
-                <span className="text-[11px] text-muted-foreground" data-testid="text-defend-suggested">
-                  Suggested {fmtUsd(sug.suggestedCollateralUsd)} → {Math.round(sug.targetLtv * 100)}% LTV
-                </span>
-              )}
-            </div>
-
-            {loadingSrc ? (
-              <div className="flex items-center gap-2 text-xs text-muted-foreground py-2">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading your funds…
-              </div>
-            ) : srcErr ? (
-              <p className="text-xs text-amber-600 dark:text-amber-500" data-testid="text-defend-src-error">{srcErr}</p>
-            ) : sources.length === 0 ? (
-              <p className="text-xs text-muted-foreground" data-testid="text-defend-no-sources">
-                No free (unpledged) funds in your account wallet to add. Any {collSym ?? "collateral"} already
-                backing this loan isn't spendable here — add USDC to your account first, then defend this loan.
-              </p>
-            ) : (
-              <>
-                <p className="text-[11px] text-muted-foreground" data-testid="text-defend-sources-note">
-                  Your free (unpledged) account funds. {collSym ?? "Collateral"} already backing this loan isn't
-                  listed — it's locked as collateral, not spendable here.
-                </p>
-                {/* Source picker */}
-                <Select value={sourceMint} onValueChange={setSourceMint}>
-                  <SelectTrigger className="h-auto py-2" data-testid="select-defend-source">
-                    <SelectValue placeholder="Choose a source" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {sources.map((t) => (
-                      <SelectItem key={t.mint} value={t.mint} data-testid={`option-defend-source-${t.mint}`}>
-                        <span className="flex items-center gap-2">
-                          <span className="font-medium">{t.symbol || "?"}</span>
-                          <span className="text-xs text-muted-foreground">
-                            {fmtTokenAmount(t.amountUi, t.decimals) || t.amountUi}
-                            {t.usdValue != null ? ` · ${fmtUsd(t.usdValue)}` : ""}
-                          </span>
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-
-                {/* Amount + quick-fills */}
-                <div className="flex items-center gap-2">
-                  <Input
-                    type="text"
-                    inputMode="decimal"
-                    value={amount}
-                    onChange={(e) => setAmount(e.target.value)}
-                    placeholder="0.0"
-                    className="flex-1"
-                    data-testid="input-defend-amount"
-                  />
-                  <Button type="button" variant="outline" size="sm" className="h-9 px-2 text-xs" onClick={setSuggested} disabled={!suggestedSourceStr()} data-testid="button-defend-suggested">
-                    Suggested
-                  </Button>
-                  <Button type="button" variant="outline" size="sm" className="h-9 px-2 text-xs" onClick={setMax} data-testid="button-defend-max">
-                    Max
-                  </Button>
-                </div>
-
-                {amtTooHigh ? (
-                  <p className="text-[11px] text-amber-600 dark:text-amber-500" data-testid="text-defend-amount-hint">
-                    You only have {fmtTokenAmount(heldUi, src?.decimals ?? 6) || heldUi} {src?.symbol}.
-                  </p>
-                ) : (
-                  <p className="text-[11px] text-muted-foreground" data-testid="text-defend-amount-hint">
-                    {isSwap && src ? `Swapped to ${collSym ?? "collateral"} first. ` : ""}
-                    {estCollateralUsd != null ? `≈ ${fmtUsd(estCollateralUsd)} added as collateral.` : "From your account wallet."}
-                  </p>
-                )}
-
-                <Button
-                  className="w-full"
-                  onClick={handleAdd}
-                  disabled={!canAdd}
-                  data-testid="button-defend-add"
-                >
-                  {busy ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Shield className="w-4 h-4 mr-1.5" />}
-                  {hasInflight && !amtValid ? "Finish Top-Up" : "Add Collateral"}
-                </Button>
-              </>
-            )}
           </div>
 
           {/* Auto top-up */}
@@ -853,7 +676,11 @@ export default function PerbotBorrowControls({
   // position is mid-flight — same resume semantics as hasInflightBorrow, but keyed by
   // the position id so it can never leak across loans.
   const [hasInflightGrow, setHasInflightGrow] = useState(false);
-  // "Manage Loan" modal (Grow the loan + Defend it: Add Collateral / Auto top-up).
+  // True when a partial pay-DOWN for THIS bot's open position is unfinished — the
+  // fixed target final-debt is persisted, so a re-tap / crash-resume converges to the
+  // SAME target instead of stacking repays. Keyed by the position id.
+  const [hasInflightRepay, setHasInflightRepay] = useState(false);
+  // "Manage Loan" modal (Borrow More + Repay + Defend it: Auto top-up).
   const [defendOpen, setDefendOpen] = useState(false);
   // The drawer is a single reused instance: a slow response for a previous
   // bot/wallet must never overwrite the current one.
@@ -889,6 +716,10 @@ export default function PerbotBorrowControls({
   // on an EXISTING loan), so an in-flight grow can never leak into a different loan.
   const growKey = (positionId: string) => `qv:perbot-borrow:grow:${bot?.id}:${positionId}`;
   const growRawsKey = (positionId: string) => `qv:perbot-borrow:grow-raws:${bot?.id}:${positionId}`;
+  // REPAY (partial pay-DOWN) stores only a FIXED target final-debt (raw), keyed by the
+  // exact position id. Re-tapping / resuming drives to this same target, so a double-
+  // submit can never repay past the user's intended amount.
+  const repayTargetKey = (positionId: string) => `qv:perbot-borrow:repay-target:${bot?.id}:${positionId}`;
 
   const clearOpenOp = () => {
     try {
@@ -931,6 +762,15 @@ export default function PerbotBorrowControls({
           /* ignore */
         }
         setHasInflightGrow(growInflight);
+        // Same for a mid-flight REPAY (pay-down) op on this loan — resumable after a
+        // reload or switch. Keyed by position id so it can't leak across loans.
+        let repayInflight = false;
+        try {
+          repayInflight = !!localStorage.getItem(repayTargetKey(next.positions[0].id));
+        } catch {
+          /* ignore */
+        }
+        setHasInflightRepay(repayInflight);
       } else {
         // No open position yet — surface whether a borrow op is still mid-flight so
         // the user can RESUME it (the input may be blank, e.g. after a switch). With
@@ -943,6 +783,7 @@ export default function PerbotBorrowControls({
         }
         setHasInflightBorrow(inflight);
         setHasInflightGrow(false);
+        setHasInflightRepay(false);
       }
     } catch {
       if (reqId === reqRef.current) setData(null);
@@ -1368,6 +1209,9 @@ export default function PerbotBorrowControls({
       const d = await safeResponseJson(res);
       if (res.ok && d.ok) {
         localStorage.removeItem(storeKey);
+        // A full close clears the whole loan, so any lingering partial pay-DOWN target
+        // for this position is moot — drop it so it can't resume against a closed loan.
+        try { localStorage.removeItem(repayTargetKey(openPos.id)); } catch { /* ignore */ }
         toast({ title: "Loan Repaid", description: "The borrowed USDC was repaid and your collateral returned." });
         await refreshAll();
       } else if (res.status === 202 || d.needsAttention) {
@@ -1382,6 +1226,219 @@ export default function PerbotBorrowControls({
       } else {
         toast({ title: "Repay failed", description: e.message || "Something went wrong.", variant: "destructive" });
       }
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // Partial pay-DOWN (keep the loan OPEN, just lower the debt). WATERFALL:
+  //   1. the bot's OWN idle USDC first, then
+  //   2. this bot's PARKED vault cash (unpark just enough → repay).
+  // Account-vault cash and selling the collateral are DEFERRED (each needs its own
+  // resumable server op) and surfaced to the owner as follow-ups.
+  //
+  // Money-safety:
+  //  - A FIXED target final-debt is computed ONCE per run and persisted, so a re-tap
+  //    or crash-resume drives to the SAME target — never stacking repays past intent.
+  //  - We only ever send an EXACT raw amount ≤ a proven lower bound of the bot's USDC
+  //    (fresh read + tracked unpark receipts), never "max", so the executor's strict
+  //    re-read can't trip the interest-buffer check and fail a leg mid-waterfall.
+  //  - The server caps every repay at the LIVE debt (never over-repays) and fails
+  //    closed if the bot's USDC is short, and unpark lands funds as bot USDC first —
+  //    so an interrupted run always leaves funds safe, never stranded.
+  // target: "max" clears the whole balance; { usd } pays that much down.
+  const handleRepayPartial = async (target: "max" | { usd: number }): Promise<boolean> => {
+    if (!bot || !openPos) return false;
+    const positionId = openPos.id;
+    setBusy("repay");
+    const tKey = repayTargetKey(positionId);
+    const DEBT_DEC = 6; // USDC
+    const toBig = (v: string | null | undefined): bigint => {
+      try { return BigInt(v ?? "0"); } catch { return 0n; }
+    };
+    try {
+      const sessionId = await getSessionId();
+
+      // FRESH authoritative read: this loan's live debt + the bot wallet's free USDC.
+      // Fresh (not the cached `data`) so leg sizing is accurate and a retry picks up a
+      // changed balance instead of looping on a stale figure.
+      const pres0 = await fetch(
+        `/api/vault/borrow/perbot/positions?botId=${bot.id}&wallet=${walletAddress}&_=${Date.now()}`,
+        { credentials: "include", cache: "no-store", headers: walletAuthHeaders() },
+      );
+      const pd0: PerbotPositionsResponse & { botWalletUsdcRaw?: string | null } = await safeResponseJson(pres0);
+      if (!pres0.ok) throw new Error((pd0 as any)?.error || "Could not read this loan.");
+      const row = (pd0.positions ?? []).find((p) => p.id === positionId) ?? null;
+      // Money-path sizing REQUIRES a real LIVE debt read. The route returns
+      // liveDebtRaw:null on a live-read miss and falls the DISPLAY debt
+      // (row.debtAmountRaw) back to a conservative, monotonic-UP figure that can be
+      // STALE right after a confirmed-but-unverified leg. Sizing `need` off that
+      // stale figure would re-inflate it and over-repay past the fixed target from
+      // parked savings. So NEVER size off debtAmountRaw — require liveDebtRaw; if
+      // it's missing, keep the target and ask the user to retry in a moment.
+      const liveDebtStr = row?.liveDebtRaw ?? null;
+      if (liveDebtStr == null) {
+        await refreshAll();
+        toast({
+          title: "Couldn't Read This Loan",
+          description: "We couldn't get a live balance just now. Your target is saved — tap Repay again in a moment.",
+        });
+        return false;
+      }
+      const liveDebtRaw0 = toBig(liveDebtStr);
+      // Bot USDC: an accurate read → used for leg 1 sizing. null (read failed) → treat
+      // as 0 so we fall through to unparking (never sends more than we can prove held).
+      let botUsdcRaw = toBig(pd0.botWalletUsdcRaw);
+
+      if (liveDebtRaw0 <= 0n) {
+        try { localStorage.removeItem(tKey); } catch { /* ignore */ }
+        setHasInflightRepay(false);
+        toast({ title: "Nothing to repay", description: "This loan has no balance left." });
+        await refreshAll();
+        return true;
+      }
+
+      // Fixed FINAL-debt target for this run. RESUME an unfinished run VERBATIM (never
+      // recompute from the live input under an existing target); else compute + persist.
+      let targetFinalDebtRaw: bigint;
+      const persisted = (() => { try { return localStorage.getItem(tKey); } catch { return null; } })();
+      if (persisted != null) {
+        targetFinalDebtRaw = toBig(persisted);
+      } else {
+        if (target === "max") {
+          targetFinalDebtRaw = 0n;
+        } else {
+          const reqRaw = BigInt(Math.max(0, Math.floor(target.usd * 10 ** DEBT_DEC)));
+          targetFinalDebtRaw = liveDebtRaw0 > reqRaw ? liveDebtRaw0 - reqRaw : 0n;
+        }
+        try { localStorage.setItem(tKey, targetFinalDebtRaw.toString()); } catch { /* ignore */ }
+        setHasInflightRepay(true);
+      }
+
+      let liveDebtRaw = liveDebtRaw0;
+      let need = liveDebtRaw > targetFinalDebtRaw ? liveDebtRaw - targetFinalDebtRaw : 0n;
+
+      // One repay leg from the bot's USDC — EXACT raw only. Updates liveDebtRaw from the
+      // server's authoritative post-read so the next leg sizes against real remaining
+      // debt. Returns { verified }: false means the tx CONFIRMED on-chain but the server
+      // could not re-read the position, so `observedDebtRaw` is the stale PRE-repay debt
+      // and the caller MUST stop (never size/send another leg off it → double-pay).
+      const repayLeg = async (sendRaw: bigint): Promise<{ verified: boolean }> => {
+        const res = await fetch("/api/vault/borrow/perbot/repay", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+          credentials: "include",
+          body: JSON.stringify({ botId: bot.id, botBorrowPositionId: positionId, amountRaw: sendRaw.toString(), targetFinalDebtRaw: targetFinalDebtRaw.toString(), sessionId }),
+        });
+        const d = await safeResponseJson(res);
+        if (!(res.ok && d.ok)) throw new Error(d?.error || "Repay failed");
+        const verified = d.debtRead !== false;
+        if (verified && typeof d.observedDebtRaw === "string") liveDebtRaw = toBig(d.observedDebtRaw);
+        return { verified };
+      };
+
+      // A leg CONFIRMED on-chain but the post-read failed, so we can't size the next leg
+      // safely. Keep the FIXED target persisted (do NOT clear it) — a later tap re-reads
+      // the true (lower) debt and resumes toward the SAME amount. Repaying again now
+      // would over-pay from parked savings.
+      const bailUnverified = async (): Promise<boolean> => {
+        await refreshAll();
+        toast({
+          title: "Repay Sent",
+          description: "Your payment went through but is still settling. Tap Repay again in a moment to finish.",
+        });
+        return false;
+      };
+
+      // LEG 1 — the bot's own idle USDC.
+      if (need > 0n && botUsdcRaw > 0n) {
+        const send = botUsdcRaw < need ? botUsdcRaw : need;
+        if (send > 0n) {
+          const { verified } = await repayLeg(send);
+          if (!verified) return bailUnverified();
+          botUsdcRaw = botUsdcRaw > send ? botUsdcRaw - send : 0n;
+          need = liveDebtRaw > targetFinalDebtRaw ? liveDebtRaw - targetFinalDebtRaw : 0n;
+        }
+      }
+
+      // LEG 2 — this bot's PARKED vault cash. Unpark ~need (all parked yield assets are
+      // USD stablecoins ~$1; the server clamps each amount to the live balance), which
+      // lands as bot USDC, then repay from the proven amount actually brought back.
+      if (need > 0n) {
+        const pres = await fetch(
+          `/api/vault/positions?botId=${bot.id}&wallet=${walletAddress}&_=${Date.now()}`,
+          { credentials: "include", cache: "no-store", headers: walletAuthHeaders() },
+        );
+        const pdata = await safeResponseJson(pres);
+        if (!pres.ok) throw new Error(pdata?.error || "Could not read parked funds.");
+        const parked: ParkedPositionView[] = (pdata.positions ?? []).filter((p: ParkedPositionView) => {
+          try { return BigInt(p.onChainAmountRaw ?? "0") > 0n; } catch { return false; }
+        });
+        const BUFFER_MULT = 1.05; // +5% for swap slippage
+        const BUFFER_FLAT = 0.25; // +$0.25 for rounding / price drift
+        const needUsd = Number(need) / 10 ** DEBT_DEC;
+        const targetUsd = needUsd * BUFFER_MULT + BUFFER_FLAT;
+        let unparkedRaw = 0n;
+        for (const p of parked) {
+          if (Number(unparkedRaw) / 10 ** DEBT_DEC >= targetUsd) break; // enough cash — leave the rest earning
+          const remainingUsd = targetUsd - Number(unparkedRaw) / 10 ** DEBT_DEC;
+          const ures = await fetch("/api/vault/unpark", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+            credentials: "include",
+            body: JSON.stringify({ assetKey: p.assetKey, amountToken: remainingUsd, sessionId, botId: bot.id }),
+          });
+          const udata = await safeResponseJson(ures);
+          if (!ures.ok) throw new Error(udata?.error || `Could not bring back ${p.displayName || p.assetKey}.`);
+          const got = Number(udata.usdcReceived ?? 0);
+          if (Number.isFinite(got) && got > 0) unparkedRaw += BigInt(Math.floor(got * 10 ** DEBT_DEC));
+        }
+        // Proven upper bound of spendable bot USDC = leftover from leg 1 (accurate read)
+        // + what we just unparked (receipt-based). Sending ≤ this can never trip the
+        // executor's fail-closed short-balance check.
+        const avail = botUsdcRaw + unparkedRaw;
+        const send = avail < need ? avail : need;
+        if (send > 0n) {
+          const { verified } = await repayLeg(send);
+          if (!verified) return bailUnverified();
+          botUsdcRaw = avail > send ? avail - send : 0n;
+          need = liveDebtRaw > targetFinalDebtRaw ? liveDebtRaw - targetFinalDebtRaw : 0n;
+        }
+      }
+
+      // Terminal disposition. Dust tolerance ~1 cent (interest can tick the live debt a
+      // hair between the size and the repay).
+      const oneCent = BigInt(Math.round(10 ** DEBT_DEC / 100));
+      if (need <= oneCent) {
+        try { localStorage.removeItem(tKey); } catch { /* ignore */ }
+        setHasInflightRepay(false);
+        const cleared = targetFinalDebtRaw === 0n;
+        toast({
+          title: cleared ? "Loan Repaid" : "Loan Paid Down",
+          description: cleared
+            ? "The borrowed USDC was fully repaid. Your collateral stays pledged — use Repay Loan to return it."
+            : "Paid this loan down with the bot's cash and its parked savings.",
+        });
+        await refreshAll();
+        return true;
+      }
+
+      // Couldn't fully reach the target with the bot's cash + its parked savings (the
+      // account vault and selling collateral aren't wired here yet). Keep the target so
+      // a later tap resumes toward the SAME amount.
+      toast({
+        title: "Partly Repaid",
+        description: "Used the bot's cash and its parked savings. There wasn't enough to reach your full amount — add funds or tap Repay again.",
+      });
+      await refreshAll();
+      return false;
+    } catch (e: any) {
+      if (isSessionError(e)) {
+        showReconnectToast({ toast, retryAuth, title: "Repay failed", retry: () => handleRepayPartial(target) });
+      } else {
+        toast({ title: "Repay failed", description: e?.message || "Something went wrong.", variant: "destructive" });
+      }
+      return false;
     } finally {
       setBusy(null);
     }
@@ -2012,6 +2069,10 @@ export default function PerbotBorrowControls({
           hasInflightGrow={hasInflightGrow}
           growBusy={busy === "grow"}
           onGrow={handleGrow}
+          growTargetLtv={growTargetLtv}
+          onRepayPartial={handleRepayPartial}
+          repayBusy={busy === "repay"}
+          hasInflightRepay={hasInflightRepay}
         />
       )}
     </>

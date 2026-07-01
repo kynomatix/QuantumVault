@@ -1837,6 +1837,14 @@ export interface RepayResult {
   observedDebtRaw?: string;
   /** true when the debt is fully cleared (collateral may remain). */
   fullyRepaid?: boolean;
+  /**
+   * true when the position was re-read AFTER the repay, so `observedDebtRaw` reflects
+   * the real on-chain debt. false when the tx confirmed but the post-read FAILED —
+   * `observedDebtRaw` is then the conservative PRE-repay debt and MUST NOT be trusted
+   * as progress. A caller that chains repays (multi-source waterfall) must STOP and
+   * reconcile instead of sizing/sending another leg (else it double-pays).
+   */
+  debtRead?: boolean;
   verifyWarning?: string;
   dbWarning?: string;
   error?: string;
@@ -2043,6 +2051,275 @@ export async function executeRepayFromAgentUsdc(params: RepayFromAgentUsdcParams
       repaidUsdc: repaidUsd,
       observedDebtRaw: observedDebtRaw.toString(),
       fullyRepaid,
+      verifyWarning,
+      dbWarning,
+    };
+  });
+}
+
+// --- PER-BOT partial repay --------------------------------------------------
+
+export interface RepayPartialOnBotPositionParams {
+  walletAddress: string;
+  tradingBotId: string;
+  /** The bot wallet that OWNS the position NFT and SIGNS + PAYS the repay. */
+  botPublicKey: string;
+  botSecretKey: Uint8Array;
+  /** The account wallet that FUNDS any bot network-gas shortfall (server-signed). */
+  accountPublicKey: string;
+  accountSecretKey: Uint8Array;
+  collateralMint: string;
+  /** The exact per-bot borrow position row to repay against (must be open on-chain). */
+  borrowPositionId: string;
+  /** USDC to repay, raw base units; or "max" to clear ALL of this bot's debt (keep collateral). */
+  amount: bigint | "max";
+  /**
+   * OPTIONAL server-enforced hard FLOOR on the resulting debt (raw base units).
+   * Caps this leg so it can NEVER pay the debt below the caller's fixed final-debt
+   * target — even if `amount` was sized off a stale (pre-unverified-leg) debt or a
+   * concurrent duplicate submit would overshoot. Absent = no ceiling (legacy).
+   * Ignored for "max" (the target is 0 by definition).
+   */
+  targetFinalDebtRaw?: bigint;
+  onBeforeBroadcast?: (info: { signature: string; blockhash: string; lastValidBlockHeight: number }) => void | Promise<void>;
+}
+
+export interface RepayPartialOnBotPositionResult extends RepayResult {
+  gasShortfall?: { requiredLamports: number; heldLamports: number };
+}
+
+/**
+ * BOT-scoped twin of `executeRepayFromAgentUsdc`: pay a per-bot Flash loan's debt
+ * DOWN (partial) or clear it ("max") from the BOT wallet's own USDC, keeping the
+ * position OPEN (collateral untouched — return/re-supply of collateral stays
+ * full-close-only, per the money-safety contract). Bot-signed; the account funds
+ * any gas shortfall. Same contract as the account path:
+ *   - LIVE debt read is the authority; a partial is CAPPED at the FLOORED native
+ *     debt (`maxRepayNativeRaw`) — one unit over reverts VaultUserDebtTooLow.
+ *   - Strict BOT USDC read (fail CLOSED if unreadable).
+ *   - confirm-only (USDC only LEAVES — no positive delta to verify); the
+ *     AUTHORITATIVE post-read is the proof and we NEVER record less debt than the
+ *     chain proves.
+ * ALL multi-hop per-bot repay sources (parked vault cash, deleverage) funnel their
+ * final paydown through THIS function — the single per-bot repay emit point.
+ */
+export async function repayPartialOnExistingBotPosition(
+  params: RepayPartialOnBotPositionParams,
+): Promise<RepayPartialOnBotPositionResult> {
+  if (!params.tradingBotId) return { success: false, error: "A trading bot id is required." };
+  if (params.amount !== "max" && params.amount <= 0n) {
+    return { success: false, error: "Repay amount must be greater than zero." };
+  }
+
+  const borrowRoute = new JupiterLendBorrowRoute();
+  const cfg = await borrowRoute.getVaultConfig(params.collateralMint);
+  if (!cfg) return { success: false, error: "Borrow vault is unavailable right now." };
+
+  return withBorrowLock(borrowLockKey(params.walletAddress, params.tradingBotId, cfg.vaultId), async () => {
+    // 1) Load + validate the EXISTING open per-bot position (never
+    //    loadOpenAccountPosition, which rejects bot-scoped rows).
+    const position = await storage.getBorrowPosition(params.walletAddress, params.borrowPositionId);
+    if (!position) return { success: false, error: "Borrow position not found." };
+    if (position.tradingBotId !== params.tradingBotId) {
+      return { success: false, error: "Borrow position does not belong to this bot." };
+    }
+    if (position.status !== "open") return { success: false, error: `Borrow position is not open (status: ${position.status}).` };
+    if (position.collateralMint !== params.collateralMint) {
+      return { success: false, error: "Collateral mint does not match the position." };
+    }
+    const nftId = Number(position.venuePositionId);
+    if (!Number.isInteger(nftId) || nftId <= 0) return { success: false, error: "Borrow position has no valid on-chain id." };
+
+    // 2) LIVE debt — required to cap the repay and prove it later. Fail CLOSED.
+    const live = await borrowRoute.readLivePositionHealth(params.collateralMint, nftId);
+    if (!live) return { success: false, error: "Could not read the live position; refusing to repay." };
+    const preDebtRaw = BigInt(live.debtRaw);
+    if (preDebtRaw <= 0n) return { success: false, error: "This position has no debt to repay." };
+    const maxRepayRaw = BigInt(live.maxRepayNativeRaw);
+    const isMax = params.amount === "max";
+    let repayRaw = isMax ? preDebtRaw : ((params.amount as bigint) > maxRepayRaw ? maxRepayRaw : (params.amount as bigint));
+
+    // SERVER-ENFORCED TARGET CEILING: never pay this position BELOW the caller's
+    // fixed final-debt target. Defends against a client that sized `amount` off a
+    // STALE debt (e.g. a re-tap after a confirmed-but-unread leg, when the live
+    // read momentarily missed) or a concurrent duplicate submit — either could
+    // otherwise overshoot the target and spend parked savings past the user's
+    // intent. Skipped for "max" (target is 0). Fail-safe: if already at/below the
+    // target, no-op success so the caller's waterfall sees "done" and stops.
+    if (!isMax && params.targetFinalDebtRaw != null && params.targetFinalDebtRaw >= 0n) {
+      const maxToTarget = preDebtRaw > params.targetFinalDebtRaw ? preDebtRaw - params.targetFinalDebtRaw : 0n;
+      if (repayRaw > maxToTarget) repayRaw = maxToTarget;
+      if (repayRaw <= 0n) {
+        return { success: true, repaidUsdc: 0, observedDebtRaw: preDebtRaw.toString(), fullyRepaid: false, debtRead: true };
+      }
+    }
+
+    // 3) Strict BOT USDC balance (+ interest buffer on max). Fail CLOSED.
+    let usdcBal: bigint;
+    try {
+      usdcBal = BigInt((await getAgentTokenBalanceRawStrict(params.botPublicKey, USDC_MINT)).amountRaw);
+    } catch {
+      return { success: false, error: "Could not read the bot USDC balance; refusing to repay." };
+    }
+    const buffer = isMax ? (preDebtRaw * BigInt(REPAY_BUFFER_BPS)) / 10_000n : 0n;
+    if (!hasSufficientRepayBalance(usdcBal, repayRaw, buffer)) {
+      return { success: false, error: `Not enough USDC in the bot wallet to repay (need ~${fromRaw(repayRaw + buffer, cfg.debtDecimals).toFixed(2)} USDC).` };
+    }
+
+    // 4) Gas: USDC only LEAVES the bot wallet -> no inbound ATA rent. The BOT pays;
+    //    the ACCOUNT funds any shortfall (server-signed).
+    const gas = await ensureVaultGas({
+      payingPublicKey: params.botPublicKey,
+      funderPublicKey: params.accountPublicKey,
+      funderSecretKey: params.accountSecretKey,
+      destMint: null,
+      label: "Repay",
+    });
+    if (!gas.ok) return {
+      success: false,
+      error: gas.error || "Could not cover the network gas for this repay.",
+      gasShortfall: {
+        requiredLamports: gas.requiredLamports,
+        heldLamports: gas.payerLamportsBefore + (gas.refilledLamports ?? 0) + (gas.fundedLamports ?? 0),
+      },
+    };
+
+    // 5) Pure plan -> SDK ix against the EXACT minted position, BOT signer.
+    const plan = planRepayPartial(nftId, isMax ? "max" : repayRaw);
+    const borrow = await import("@jup-ag/lend/borrow");
+    const BN = (await import("bn.js")).default;
+    const connection = getServerConnection();
+    const signer = new PublicKey(params.botPublicKey);
+
+    let operate;
+    try {
+      operate = await borrow.getOperateIx({
+        vaultId: cfg.vaultId,
+        positionId: plan.positionId,
+        colAmount: specToBN(BN, plan.colAmount, "col", borrow.MAX_WITHDRAW_AMOUNT, borrow.MAX_REPAY_AMOUNT),
+        debtAmount: specToBN(BN, plan.debtAmount, "debt", borrow.MAX_WITHDRAW_AMOUNT, borrow.MAX_REPAY_AMOUNT),
+        connection,
+        signer,
+      });
+    } catch (e: any) {
+      return { success: false, error: `Could not build the repay transaction: ${e?.message || e}` };
+    }
+    if (!operate?.ixs?.length) return { success: false, error: "Repay transaction had no instructions." };
+
+    const op = await storage.createBorrowOperation({
+      walletAddress: params.walletAddress,
+      borrowPositionId: position.id,
+      operationType: "repay_bot_usdc",
+      status: "pending",
+      step: "gate_passed",
+    });
+
+    // 6) THE money move (confirm-only: USDC leaves, no positive delta to verify).
+    //    BOT-signed. The write-ahead hook lets a multi-hop caller reconcile a crash
+    //    by signature.
+    const exec = await executeAgentInstructionsConfirmOnly({
+      agentPublicKey: params.botPublicKey,
+      agentSecretKey: params.botSecretKey,
+      instructions: operate.ixs,
+      gasDestMint: null,
+      addressLookupTables: operate.addressLookupTableAccounts,
+      label: "Repay",
+      onBeforeBroadcast: params.onBeforeBroadcast,
+    });
+
+    // 7) Provably-nothing-moved => mark failed (safe; USDC still in the bot wallet).
+    if (exec.onChainFailed || !exec.signature) {
+      await storage.updateBorrowOperation(op.id, { status: "failed", step: "exec_failed", error: exec.error || "repay failed", ...(exec.signature ? { appendTxSignature: exec.signature } : {}) });
+      return { success: false, signature: exec.signature, error: exec.error || "Repay failed." };
+    }
+
+    // 8) AUTHORITATIVE re-read is the proof. Fail CLOSED on the dangerous direction:
+    //    never record LESS debt than the chain proves.
+    const after = await borrowRoute.readLivePositionHealth(params.collateralMint, nftId);
+    let observedColRaw: bigint;
+    let observedDebtRaw: bigint;
+    let oraclePriceUsd: number | null = null;
+    let healthSource: string;
+    let verifyWarning: string | undefined;
+    let fullyRepaid = false;
+
+    if (after) {
+      observedColRaw = BigInt(after.collateralRaw);
+      observedDebtRaw = BigInt(after.debtRaw);
+      oraclePriceUsd = after.oraclePriceUsd;
+      healthSource = "repay_onchain";
+      const v = verifyRepayOutcome({ preDebtRaw, postDebtRaw: observedDebtRaw, repaidRaw: repayRaw, fullRepay: isMax });
+      if (v.ok) {
+        fullyRepaid = isMax || observedDebtRaw <= 0n;
+      } else {
+        verifyWarning = `Repay sent (signature ${exec.signature}) but the position read differs (${v.reason}). Recorded the on-chain debt.`;
+        console.warn(`[Borrow] per-bot repay verify miss: ${v.reason}`, { positionId: position.id, nftId });
+      }
+    } else {
+      observedColRaw = BigInt(position.collateralAmountRaw);
+      observedDebtRaw = preDebtRaw;
+      healthSource = "repay_unverified";
+      verifyWarning = `Repay confirmed (signature ${exec.signature}) but the position could not be re-read; kept the prior debt pending reconcile.`;
+      console.warn("[Borrow] per-bot repay could not re-read position", { positionId: position.id, nftId });
+    }
+
+    const health = buildHealthSnapshot(cfg, observedColRaw, observedDebtRaw, oraclePriceUsd, healthSource);
+    let dbWarning: string | undefined;
+    const updated = await storage.updateBorrowPosition(
+      position.id,
+      {
+        status: "open",
+        collateralAmountRaw: observedColRaw.toString(),
+        debtAmountRaw: observedDebtRaw.toString(),
+        healthSnapshot: health.snapshot,
+        healthAsOf: new Date(),
+        healthSource,
+      },
+      "open",
+    );
+    if (!updated) {
+      dbWarning = `Repay confirmed (signature ${exec.signature}) but the position record was updated by another process.`;
+      console.warn("[Borrow] per-bot repay CAS lost", { positionId: position.id });
+    }
+    await storage.updateBorrowOperation(op.id, { status: "succeeded", step: fullyRepaid ? "repay_full_confirmed" : "repay_confirmed", appendTxSignature: exec.signature });
+
+    // 9) History row (paydown). Single per-bot repay emit point; excluded from
+    //    net-deposited (eventType "repay"). Realized figure resolved exactly like
+    //    the account path (exact observed reduction when verified; else the sent
+    //    amount, capped, marked pending re-read).
+    const { realizedRepaidRaw, exact: trustExact } = resolveRepaidHistoryRaw({
+      preDebtRaw,
+      observedDebtRaw,
+      repayRaw,
+      cleanVerified: after != null && !verifyWarning,
+    });
+    const repaidUsd = fromRaw(realizedRepaidRaw, cfg.debtDecimals);
+    try {
+      if (repaidUsd > 0) {
+        const amtStr = new Decimal(repaidUsd).toFixed(6);
+        await storage.createEquityEvent({
+          walletAddress: params.walletAddress,
+          tradingBotId: position.tradingBotId ?? null,
+          eventType: "repay",
+          amount: amtStr,
+          assetType: "USDC",
+          txSignature: exec.signature ?? null,
+          notes: trustExact
+            ? `Repaid ${amtStr} USDC of ${cfg.collateralSymbol}-backed debt`
+            : `Repaid ~${amtStr} USDC of ${cfg.collateralSymbol}-backed debt (confirmed on-chain; amount pending re-read)`,
+        });
+      }
+    } catch (e) {
+      console.warn("[Borrow] per-bot repay: failed to record equity event (non-fatal)", e);
+    }
+
+    return {
+      success: true,
+      signature: exec.signature,
+      repaidUsdc: repaidUsd,
+      observedDebtRaw: observedDebtRaw.toString(),
+      fullyRepaid,
+      debtRead: after != null,
       verifyWarning,
       dbWarning,
     };

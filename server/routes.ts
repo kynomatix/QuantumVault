@@ -1508,7 +1508,7 @@ import { JupiterLendBorrowRoute } from "./vault/jupiter-lend-borrow-route";
 import { previewBorrowEligibility } from "./vault/borrow-eligibility";
 import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { isBorrowEligibleWallet, isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
-import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
+import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, repayPartialOnExistingBotPosition, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
 import { runBorrowHealthScan } from "./vault/borrow-health-monitor";
 import { planPerbotCarve, runPerbotCarveOpen, runPerbotUnwindClose, selectBlockingBotPositions, resolveDisplayPrincipalRaw, runPerbotCollateralTopUp, runPerbotGrowLoan } from "./vault/jupiter-lend-perbot-carve";
@@ -10207,7 +10207,18 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // The bot's opt-in auto-defend flag (Flash per-bot only) so the "Defend this
       // loan" modal can render the Auto toggle in its current state.
       const botRow = await storage.getTradingBotById(tradingBotId);
-      res.json({ eligible, applicable: true, positions: positionsOut, carrySources: carrySourcesOut, healthSummary, autoCollateralTopUp: botRow?.autoCollateralTopUp ?? false });
+      // READ-ONLY: the bot wallet's free USDC, so the Manage Loan modal can size a
+      // partial pay-DOWN "bot cash first, then parked savings" waterfall. Best-effort:
+      // a failed read returns null and the client falls back to unparking. This is a
+      // display/sizing hint ONLY — the repay executor re-reads strictly and fails
+      // closed, so a stale/absent value here can never cause an over-repay.
+      let botWalletUsdcRaw: string | null = null;
+      try {
+        botWalletUsdcRaw = (await getAgentTokenBalanceRawStrict(botScope.agentPublicKey, SWAP_USDC_MINT)).amountRaw;
+      } catch {
+        botWalletUsdcRaw = null;
+      }
+      res.json({ eligible, applicable: true, positions: positionsOut, carrySources: carrySourcesOut, healthSummary, autoCollateralTopUp: botRow?.autoCollateralTopUp ?? false, botWalletUsdcRaw });
     } catch (error: any) {
       console.error("[Vault] per-bot borrow positions read error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
@@ -10801,6 +10812,120 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       return res.status(result.status).json(result.body);
     } catch (error: any) {
       console.error("[Vault] per-bot grow loan error:", error);
+      return res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // POST per-bot REPAY (source #1: the bot's OWN USDC). Pay a per-bot Flash loan's
+  // debt DOWN (partial) or clear it ("max"); the position stays OPEN (collateral
+  // untouched). BOT-signed; the account funds any gas shortfall. Single-tx +
+  // confirm-only (mirrors the account /repay path). Body:
+  // { botId, botBorrowPositionId, amountRaw, sessionId }. amountRaw = base-unit
+  // string OR "max".
+  app.post("/api/vault/borrow/perbot/repay", requireWallet, async (req, res) => {
+    try {
+      if (!isBorrowEligibleWallet(req.walletAddress!)) {
+        return res.status(403).json({ error: "Per-bot borrowing is not available for this wallet yet." });
+      }
+      const { botId, botBorrowPositionId, amountRaw, targetFinalDebtRaw: targetFinalDebtRawIn, sessionId } = req.body || {};
+      if (!botId || typeof botId !== "string") return res.status(400).json({ error: "botId required" });
+      if (!botBorrowPositionId || typeof botBorrowPositionId !== "string") return res.status(400).json({ error: "botBorrowPositionId required" });
+      const amount = parseAmountOrMax(amountRaw, "amountRaw");
+      if (typeof amount === "object") return res.status(400).json(amount);
+      // OPTIONAL fixed final-debt target (raw base-unit string). The executor uses
+      // it as a hard ceiling so no leg can ever repay BELOW the user's target, even
+      // if the client sized off a stale debt or a duplicate submit races.
+      let targetFinalDebtRaw: bigint | undefined;
+      if (targetFinalDebtRawIn != null) {
+        try {
+          const t = BigInt(String(targetFinalDebtRawIn));
+          if (t < 0n) return res.status(400).json({ error: "targetFinalDebtRaw must be >= 0" });
+          targetFinalDebtRaw = t;
+        } catch {
+          return res.status(400).json({ error: "targetFinalDebtRaw must be an integer base-unit string" });
+        }
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+      if (!sessionId) return res.status(400).json({ error: "Session ID required for security verification" });
+      const session = getSession(sessionId);
+      if (!session || session.walletAddress !== req.walletAddress) {
+        return res.status(401).json({ error: "Invalid or expired session. Please reconnect your wallet." });
+      }
+      if (!session.umk) {
+        return res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
+      }
+
+      // AUTHZ: resolve BOT scope (signer + payer) + ACCOUNT scope (gas funder).
+      const botResolved = await resolveVaultScope(req.walletAddress!, wallet, botId);
+      if (!botResolved.ok) return res.status(botResolved.status).json({ error: botResolved.error });
+      const botScope = botResolved.scope;
+      if (botScope.scope !== "bot" || !botScope.agentPublicKey) {
+        return res.status(400).json({ error: "This bot is not a per-bot (Flash) wallet bot; per-bot repay does not apply." });
+      }
+      const botWalletPubkey = botScope.agentPublicKey;
+      const tradingBotId = botScope.tradingBotId!;
+
+      // Target position must belong to THIS bot AND be open. Resolve collateral mint
+      // from the DB row — NEVER client-supplied.
+      const rows = await storage.getBorrowPositions(req.walletAddress!, tradingBotId);
+      const target = rows.find((r) => r.id === botBorrowPositionId);
+      if (!target) return res.status(404).json({ error: "Borrow position not found for this bot." });
+      if (target.status !== "open") return res.status(409).json({ error: "This borrow position is not open." });
+      if (!target.collateralMint || target.venuePositionId == null) {
+        return res.status(400).json({ error: "This borrow position has no on-chain collateral vault." });
+      }
+
+      const acctResolved = await resolveVaultScope(req.walletAddress!, wallet, null);
+      if (!acctResolved.ok) return res.status(acctResolved.status).json({ error: acctResolved.error });
+      const acctScope = acctResolved.scope;
+      if (acctScope.scope !== "account" || !acctScope.agentPublicKey) {
+        return res.status(400).json({ error: "Account wallet not initialized" });
+      }
+      const accountPubkey = acctScope.agentPublicKey;
+
+      const repayLockKey = JSON.stringify(["perbot-repay", req.walletAddress!, tradingBotId, target.id]);
+      const result: { status: number; body: any } = await withBorrowLock(repayLockKey, async () => {
+        let botKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+        let acctKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+        try {
+          botKey = await decryptVaultScopeKey(botScope, req.walletAddress!, wallet, session.umk);
+          if (!botKey) return { status: 400, body: { error: "Bot wallet needs re-keying. Sign out and back in." } };
+          acctKey = await decryptVaultScopeKey(acctScope, req.walletAddress!, wallet, session.umk);
+          if (!acctKey) return { status: 400, body: { error: "Account wallet needs re-keying. Sign out and back in." } };
+
+          const repay = await repayPartialOnExistingBotPosition({
+            walletAddress: req.walletAddress!,
+            tradingBotId,
+            botPublicKey: botWalletPubkey,
+            botSecretKey: botKey.secretKey,
+            accountPublicKey: accountPubkey,
+            accountSecretKey: acctKey.secretKey,
+            collateralMint: target.collateralMint,
+            borrowPositionId: target.id,
+            amount,
+            targetFinalDebtRaw,
+          });
+          if (!repay.success) {
+            return {
+              status: 400,
+              body: {
+                error: repay.error || "Repay failed",
+                ...(repay.gasShortfall ? { gasShortfall: repay.gasShortfall } : {}),
+                ...(repay.signature ? { signature: repay.signature } : {}),
+              },
+            };
+          }
+          return { status: 200, body: { ok: true, ...repay } };
+        } finally {
+          if (botKey) botKey.cleanup();
+          if (acctKey) acctKey.cleanup();
+        }
+      });
+      return res.status(result.status).json(result.body);
+    } catch (error: any) {
+      console.error("[Vault] per-bot repay error:", error);
       return res.status(500).json({ error: error?.message || "Internal server error" });
     }
   });
