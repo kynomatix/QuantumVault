@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type ElementType } from "react";
-import { Loader2, Landmark, Check, AlertCircle, AlertTriangle, RotateCcw, TrendingUp, TrendingDown, Shield } from "lucide-react";
+import { useEffect, useRef, useState, type ElementType, type ReactNode } from "react";
+import { Loader2, Landmark, Check, AlertCircle, AlertTriangle, RotateCcw, TrendingUp, TrendingDown, Info } from "lucide-react";
 import { useWallet } from "@/hooks/useWallet";
 import { useToast } from "@/hooks/use-toast";
 import { isSessionError, showReconnectToast } from "@/lib/reconnect-toast";
@@ -22,6 +22,11 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import {
   Select,
   SelectContent,
@@ -237,6 +242,27 @@ function StakingApyBadge({ apyPct, testId }: { apyPct?: number | null; testId?: 
  * Money-safety: amounts are re-read/re-capped on-chain by the parent handlers; the
  * Borrow More and Repay ops are resumable (a persisted key finishes the SAME op).
  */
+/** Small tap-to-open info icon — keeps explanatory copy out of the dialog body. */
+function InfoTip({ children, testId }: { children: ReactNode; testId?: string }) {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label="More info"
+          className="text-muted-foreground/60 hover:text-muted-foreground transition-colors shrink-0"
+          data-testid={testId}
+        >
+          <Info className="w-3.5 h-3.5" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent side="top" align="start" className="w-72 p-3 text-[11px] leading-relaxed text-muted-foreground">
+        {children}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function DefendLoanDialog({
   open,
   onOpenChange,
@@ -483,11 +509,11 @@ function DefendLoanDialog({
             Manage Loan
           </DialogTitle>
           <DialogDescription>
-            Borrow more against this loan, pay it down, add collateral, or set it to defend itself.
+            Borrow more, repay, or add collateral.
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-5">
+        <div className="space-y-4">
           {/* Health header — mirrors the loan card's live bar, and previews where the
               amounts being typed will land BEFORE the user commits. */}
           <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-1.5">
@@ -532,28 +558,30 @@ function DefendLoanDialog({
 
           {/* Borrow More — borrow additional USDC, backed by freshly-carved collateral.
               Sized + executed by the parent; here we only collect the amount. */}
-          <div className="space-y-2.5">
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-medium">Borrow More</label>
-              {targetLtvPct != null && (
-                <span className="text-[11px] text-muted-foreground" data-testid="text-grow-target-ltv">
-                  Stays at {targetLtvPct}% LTV
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5">
+                <label className="text-sm font-medium">Borrow More</label>
+                <InfoTip testId="info-grow">
+                  Borrows more USDC into this bot, backed by extra {collSym ?? "collateral"} carved
+                  from your vault{targetLtvPct != null ? ` — the loan stays at its ${targetLtvPct}% safe ratio` : ""}.
+                </InfoTip>
+              </div>
+              {growAllowed && growMaxUsd > 0 && (
+                <span className="text-[11px] text-muted-foreground" data-testid="text-grow-max">
+                  up to {fmtUsd(growMaxUsd)}
                 </span>
               )}
             </div>
-            <p className="text-[11px] text-muted-foreground" data-testid="text-grow-note">
-              Borrow more USDC into this bot. We carve more {collSym ?? "collateral"} from your vault
-              to back it, keeping the loan at a safe ratio.
-            </p>
 
             {!growAllowed && !hasInflightGrow ? (
               growMaxUsd > 0 ? (
                 <p className="text-[11px] text-amber-600 dark:text-amber-500" data-testid="text-grow-blocked">
-                  This loan is above its safe ratio. Pay some of it down below first, then you can borrow more.
+                  Above its safe ratio — repay a little first.
                 </p>
               ) : (
                 <p className="text-[11px] text-muted-foreground" data-testid="text-grow-unavailable">
-                  No spare {collSym ?? "collateral"} in your vault to borrow more right now.
+                  No spare {collSym ?? "collateral"} in your vault right now.
                 </p>
               )
             ) : (
@@ -565,55 +593,52 @@ function DefendLoanDialog({
                     value={growAmount}
                     onChange={(e) => setGrowAmount(e.target.value)}
                     placeholder="0.00"
-                    className="flex-1"
+                    className="flex-1 min-w-0"
                     data-testid="input-grow-amount"
                   />
                   <Button type="button" variant="outline" size="sm" className="h-9 px-2 text-xs" onClick={() => setGrowAmount(growMaxStr)} disabled={growMaxUsd <= 0} data-testid="button-grow-max">
                     Max
                   </Button>
+                  <Button
+                    className="h-9 px-3"
+                    onClick={handleGrowClick}
+                    disabled={!canGrow}
+                    data-testid="button-grow-loan"
+                  >
+                    {growBusy && <Loader2 className="w-4 h-4 animate-spin mr-1.5" />}
+                    {hasInflightGrow && !growAmtValid ? "Finish" : "Borrow"}
+                  </Button>
                 </div>
-                {growTooHigh ? (
+                {growTooHigh && (
                   <p className="text-[11px] text-amber-600 dark:text-amber-500" data-testid="text-grow-amount-hint">
-                    Most you can safely add now is {fmtUsd(growMaxUsd)} of USDC.
-                  </p>
-                ) : (
-                  <p className="text-[11px] text-muted-foreground" data-testid="text-grow-amount-hint">
-                    Up to {fmtUsd(growMaxUsd)} more USDC — that's all the spare {collSym ?? "collateral"} your
-                    account loan can release while staying at its safe limit.
+                    Most you can safely borrow now is {fmtUsd(growMaxUsd)}.
                   </p>
                 )}
-                <Button
-                  className="w-full"
-                  onClick={handleGrowClick}
-                  disabled={!canGrow}
-                  data-testid="button-grow-loan"
-                >
-                  {growBusy ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <TrendingUp className="w-4 h-4 mr-1.5" />}
-                  {hasInflightGrow && !growAmtValid ? "Finish Borrow" : "Borrow More"}
-                </Button>
               </>
             )}
           </div>
 
           {/* Repay — pay this loan DOWN (it stays open). The parent runs the waterfall:
               the bot's own USDC first, then this bot's parked savings. */}
-          <div className="space-y-2.5 border-t border-border pt-4">
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-medium">Repay</label>
+          <div className="space-y-2 border-t border-border pt-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5">
+                <label className="text-sm font-medium">Repay</label>
+                <InfoTip testId="info-repay">
+                  Pays this loan down using the bot's own cash first, then its parked savings.
+                  Your collateral stays put and the loan stays open.
+                </InfoTip>
+              </div>
               {liveDebtUsd != null && (
                 <span className="text-[11px] text-muted-foreground" data-testid="text-repay-owed">
                   {fmtUsd(liveDebtUsd)} owed
                 </span>
               )}
             </div>
-            <p className="text-[11px] text-muted-foreground" data-testid="text-repay-note">
-              Pay this loan down. We use the bot's own cash first, then its parked savings —
-              your collateral stays put and the loan stays open.
-            </p>
 
             {hasInflightRepay && (
               <p className="text-[11px] text-amber-600 dark:text-amber-500" data-testid="text-repay-inflight">
-                You have an unfinished repay — tap Finish Repay to complete it.
+                Unfinished repay — tap Finish to complete it.
               </p>
             )}
 
@@ -624,66 +649,61 @@ function DefendLoanDialog({
                 value={repayAmount}
                 onChange={(e) => setRepayAmount(e.target.value)}
                 placeholder="0.00"
-                className="flex-1"
+                className="flex-1 min-w-0"
                 data-testid="input-repay-amount"
               />
               <Button type="button" variant="outline" size="sm" className="h-9 px-2 text-xs" onClick={() => setRepayAmount(repayMaxStr)} disabled={liveDebtUsd == null || liveDebtUsd <= 0} data-testid="button-repay-max">
                 Max
               </Button>
+              <Button
+                variant="outline"
+                className="h-9 px-3"
+                onClick={handleRepayClick}
+                disabled={!canRepay}
+                data-testid="button-repay-loan"
+              >
+                {repayBusy && <Loader2 className="w-4 h-4 animate-spin mr-1.5" />}
+                {hasInflightRepay && !repayValid ? "Finish" : "Repay"}
+              </Button>
             </div>
-            {repayTooHigh ? (
+            {repayTooHigh && (
               <p className="text-[11px] text-muted-foreground" data-testid="text-repay-amount-hint">
                 That's more than you owe — we'll just clear the balance.
               </p>
-            ) : (
-              <p className="text-[11px] text-muted-foreground" data-testid="text-repay-amount-hint">
-                Uses the bot's cash first, then its parked savings.
-              </p>
             )}
-            <Button
-              variant="outline"
-              className="w-full"
-              onClick={handleRepayClick}
-              disabled={!canRepay}
-              data-testid="button-repay-loan"
-            >
-              {repayBusy ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <TrendingDown className="w-4 h-4 mr-1.5" />}
-              {hasInflightRepay && !repayValid
-                ? "Finish Repay"
-                : repayValid
-                  ? `Repay ${fmtUsd(Math.min(repayEntered, liveDebtUsd ?? repayEntered))}`
-                  : "Repay"}
-            </Button>
           </div>
 
           {/* Add Collateral — move spare collateral from the ACCOUNT loan into THIS
-              loan (no new borrowing). Available even ABOVE the safe ratio: it's the
-              manual fix-it lever when Borrow More is blocked. */}
-          <div className="space-y-2.5 border-t border-border pt-4">
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-medium">Add Collateral</label>
-              {addCollMaxUsd > 0 && (
+              loan (no new borrowing). Neutral lever: lowers the ratio, which both
+              protects the loan AND unlocks room to borrow more — user's call.
+              Available even ABOVE the safe ratio. */}
+          <div className="space-y-2 border-t border-border pt-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5">
+                <label className="text-sm font-medium">Add Collateral</label>
+                <InfoTip testId="info-addcoll">
+                  Moves spare {collSym ?? "collateral"} from your account loan into this bot's loan —
+                  nothing new is borrowed. More collateral lowers this loan's ratio, which you can
+                  use as extra safety or as room to borrow more against it. If none is spare,
+                  repaying your account loan frees some (every $1 repaid frees about $2 of {collSym ?? "collateral"}).
+                </InfoTip>
+              </div>
+              {addCollMaxTokens > 0 && (
                 <span className="text-[11px] text-muted-foreground" data-testid="text-addcoll-max">
-                  up to {fmtUsd(addCollMaxUsd)}
+                  up to {addCollMaxStr} {collSym ?? ""}{addCollMaxUsd > 0 ? ` (~${fmtUsd(addCollMaxUsd)})` : ""}
                 </span>
               )}
             </div>
-            <p className="text-[11px] text-muted-foreground" data-testid="text-addcoll-note">
-              Move spare {collSym ?? "collateral"} from your account loan into this bot's loan.
-              Nothing new is borrowed — this only makes the loan safer.
-            </p>
 
             {hasInflightAddColl && (
               <p className="text-[11px] text-amber-600 dark:text-amber-500" data-testid="text-addcoll-inflight">
-                You have an unfinished add — tap Finish Adding to complete it.
+                Unfinished add — tap Finish to complete it.
               </p>
             )}
 
             {addCollMaxTokens <= 0 && !hasInflightAddColl ? (
               <p className="text-[11px] text-muted-foreground" data-testid="text-addcoll-unavailable">
-                Your account loan has no spare {collSym ?? "collateral"} to release right now — it's
-                already at its safe limit. Pay down your account loan to free some: every $1 paid
-                down frees about $2 of {collSym ?? "collateral"}.
+                None spare right now — your account loan is at its safe limit.
               </p>
             ) : (
               <>
@@ -694,58 +714,40 @@ function DefendLoanDialog({
                     value={addCollAmount}
                     onChange={(e) => setAddCollAmount(e.target.value)}
                     placeholder="0.0000"
-                    className="flex-1"
+                    className="flex-1 min-w-0"
                     data-testid="input-addcoll-amount"
                   />
                   <Button type="button" variant="outline" size="sm" className="h-9 px-2 text-xs" onClick={() => setAddCollAmount(addCollMaxStr)} disabled={addCollMaxTokens <= 0} data-testid="button-addcoll-max">
                     Max
                   </Button>
+                  <Button
+                    variant="outline"
+                    className="h-9 px-3"
+                    onClick={handleAddCollClick}
+                    disabled={!canAddColl}
+                    data-testid="button-add-collateral"
+                  >
+                    {addCollBusy && <Loader2 className="w-4 h-4 animate-spin mr-1.5" />}
+                    {hasInflightAddColl && !addCollValid ? "Finish" : "Add"}
+                  </Button>
                 </div>
-                {addCollTooHigh ? (
+                {addCollTooHigh && (
                   <p className="text-[11px] text-destructive" data-testid="text-addcoll-amount-hint">
-                    That's more than your account loan can safely release — up to {addCollMaxStr} {collSym ?? ""} right now.
-                  </p>
-                ) : (
-                  <p className="text-[11px] text-muted-foreground" data-testid="text-addcoll-amount-hint">
-                    Up to {addCollMaxStr} {collSym ?? "collateral"}
-                    {addCollMaxUsd > 0 ? ` (~${fmtUsd(addCollMaxUsd)})` : ""} — all your account loan can release while
-                    staying at its safe limit.
+                    More than your account loan can safely release — up to {addCollMaxStr} {collSym ?? ""} right now.
                   </p>
                 )}
-                <Button
-                  variant="outline"
-                  className="w-full"
-                  onClick={handleAddCollClick}
-                  disabled={!canAddColl}
-                  data-testid="button-add-collateral"
-                >
-                  {addCollBusy ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Shield className="w-4 h-4 mr-1.5" />}
-                  {hasInflightAddColl && !addCollValid ? "Finish Adding" : "Add Collateral"}
-                </Button>
               </>
             )}
           </div>
 
-          {/* Defend this loan — hands-off protection. This IS just the Auto toggle now
-              (manual add-collateral was removed for simplicity). */}
-          <div className="space-y-1 border-t border-border pt-4">
-            <div className="flex items-center gap-2">
-              <Shield className="w-3.5 h-3.5 text-muted-foreground" />
-              <p className="text-sm font-medium">Defend This Loan</p>
-            </div>
-            <p className="text-[11px] text-muted-foreground">
-              Let this loan defend itself: if it drifts toward liquidation, we automatically
-              add {collSym ?? "collateral"} from your account to keep it safe.
-            </p>
-          </div>
-
-          {/* Auto top-up */}
-          <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 p-3">
-            <div className="min-w-0">
+          {/* Auto top-up — single compact row (old "Defend This Loan" header merged in). */}
+          <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
+            <div className="flex items-center gap-1.5 min-w-0">
               <p className="text-sm font-medium">Auto Top-Up</p>
-              <p className="text-[11px] text-muted-foreground">
-                Automatically add collateral if this loan drifts toward liquidation.
-              </p>
+              <InfoTip testId="info-auto-topup">
+                If this loan drifts toward liquidation, we automatically add {collSym ?? "collateral"} from
+                your account to keep it safe.
+              </InfoTip>
             </div>
             <div className="flex items-center gap-2 shrink-0">
               {savingAuto && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
@@ -2004,7 +2006,7 @@ export default function PerbotBorrowControls({
             )}
           </div>
 
-          {/* Defend this loan — add collateral (lower the risk) or turn on auto top-ups. */}
+          {/* Manage this loan — borrow more, repay, add collateral, auto top-up. */}
           <Button
             variant="outline"
             size="sm"
@@ -2012,7 +2014,7 @@ export default function PerbotBorrowControls({
             onClick={() => setDefendOpen(true)}
             data-testid="button-perbot-manage-loan"
           >
-            <Shield className="w-3.5 h-3.5 mr-1.5" />
+            <Landmark className="w-3.5 h-3.5 mr-1.5" />
             Manage
           </Button>
 
