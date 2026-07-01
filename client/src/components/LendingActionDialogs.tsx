@@ -397,10 +397,19 @@ export function SupplyCollateralDialog({
               </div>
             ) : assets.length === 0 ? (
               <div
-                className="text-center py-6 px-4 rounded-lg border border-border text-muted-foreground text-sm"
+                className="py-5 px-4 rounded-lg border border-border text-muted-foreground text-sm space-y-2"
                 data-testid="text-supply-empty"
               >
-                You don't hold any assets we currently support as collateral.
+                <p>
+                  This only lists assets sitting{' '}
+                  <span className="text-foreground font-medium">free in your connected wallet</span>. Anything you've
+                  already supplied is locked as collateral, so it won't show up here.
+                </p>
+                <p>
+                  Already have collateral (like INF) and want to draw more USDC against it? Close this, tap{' '}
+                  <span className="text-foreground font-medium">Borrow More</span> on that loan, then hit{' '}
+                  <span className="text-foreground font-medium">Max</span> to fill up to the 50% safe mark and confirm.
+                </p>
               </div>
             ) : (
               <Select
