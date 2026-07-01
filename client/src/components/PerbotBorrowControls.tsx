@@ -527,11 +527,12 @@ function DefendLoanDialog({
                 </div>
                 {growTooHigh ? (
                   <p className="text-[11px] text-amber-600 dark:text-amber-500" data-testid="text-grow-amount-hint">
-                    Most you can safely add now is {fmtUsd(growMaxUsd)}.
+                    Most you can safely add now is {fmtUsd(growMaxUsd)} of USDC.
                   </p>
                 ) : (
                   <p className="text-[11px] text-muted-foreground" data-testid="text-grow-amount-hint">
-                    Up to {fmtUsd(growMaxUsd)} more, backed by fresh {collSym ?? "collateral"}.
+                    Up to {fmtUsd(growMaxUsd)} more USDC — that's all the spare {collSym ?? "collateral"} your
+                    account loan can release while staying at its safe limit.
                   </p>
                 )}
                 <Button
