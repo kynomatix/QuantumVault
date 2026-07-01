@@ -1775,21 +1775,39 @@ export interface PerbotGrowLoanParams {
   /** Resolved + clamped target LTV (drives the ACCOUNT-side pre-sign re-gate). */
   targetLtv: number;
   clientRequestId: string;
+  /**
+   * "grow" (default): carve → transfer → supply → BORROW more USDC.
+   * "add_collateral": same carve/transfer/supply legs but NO borrow leg —
+   * requestedDebtRaw MUST be 0n. Runs under a DISTINCT operationType
+   * ("perbot_carve_topup") + lock prefix so a same-reqId replay can never
+   * mutate between modes (validateOpIdentity refuses cross-type resume).
+   */
+  mode?: "grow" | "add_collateral";
 }
 
 export async function runPerbotGrowLoan(params: PerbotGrowLoanParams): Promise<PerbotCarveResult> {
+  const mode = params.mode ?? "grow";
   if (params.carveRaw <= 0n) return { success: false, error: "Carve amount must be greater than zero." };
-  if (params.requestedDebtRaw <= 0n) return { success: false, error: "Borrow amount must be greater than zero." };
+  if (mode === "grow" && params.requestedDebtRaw <= 0n) return { success: false, error: "Borrow amount must be greater than zero." };
+  // Add-collateral NEVER borrows: pin the debt to exactly 0 so the identity check
+  // (requestedDebtRaw "0") + the skipped borrow leg can't disagree.
+  if (mode === "add_collateral" && params.requestedDebtRaw !== 0n) {
+    return { success: false, error: "Add-collateral must not borrow (requestedDebtRaw must be zero)." };
+  }
+  // NOTE: NOT "perbot_collateral_topup" — auto-topup's selectResumableTopUpOp
+  // filters on that exact type; this manual carve top-up must stay invisible to it.
+  const operationType = mode === "add_collateral" ? "perbot_carve_topup" : "perbot_grow_loan";
+  const lockPrefix = mode === "add_collateral" ? "perbot-carve-topup" : "perbot-grow";
 
   const collateralMint = params.vault.collateralMint;
   const route = new JupiterLendBorrowRoute();
 
-  return withBorrowLock(`perbot-grow:${params.walletAddress}:${params.clientRequestId}`, async () => {
+  return withBorrowLock(`${lockPrefix}:${params.walletAddress}:${params.clientRequestId}`, async () => {
     let op = await resolveOrCreateOp({
       walletAddress: params.walletAddress,
       borrowPositionId: params.botBorrowPositionId,
       clientRequestId: params.clientRequestId,
-      operationType: "perbot_grow_loan",
+      operationType,
       metadata: {
         tradingBotId: params.tradingBotId,
         collateralMint,
@@ -1805,7 +1823,7 @@ export async function runPerbotGrowLoan(params: PerbotGrowLoanParams): Promise<P
       },
     });
     // Refuse to resume a same-reqId op that was started with different inputs.
-    const idMismatch = validateOpIdentity(op, "perbot_grow_loan", {
+    const idMismatch = validateOpIdentity(op, operationType, {
       tradingBotId: params.tradingBotId,
       collateralMint,
       accountBorrowPositionId: params.accountBorrowPositionId,
@@ -2040,6 +2058,18 @@ export async function runPerbotGrowLoan(params: PerbotGrowLoanParams): Promise<P
       }
       await storage.updateBorrowOperation(op.id, { step: "supplied_to_bot" });
       op = (await storage.getBorrowOperationById(op.id)) ?? op;
+    }
+
+    // ---- ADD-COLLATERAL mode ends HERE: no borrow leg. The carved collateral
+    // is supplied into the bot position (strictly LOWERS its LTV), so finalize
+    // with no borrowedUsdcRaw. A resume that lands at/after supplied_to_bot
+    // falls through the skipped legs above and finalizes idempotently here.
+    if (mode === "add_collateral") {
+      return finalizeGrow(op, {
+        borrowPositionId: params.botBorrowPositionId,
+        carvedRaw,
+        accountPostLtv: readMeta(op).accountPostLtv ?? null,
+      });
     }
 
     // ---- BORROW MORE (against the bot's grown position) leg ---------------

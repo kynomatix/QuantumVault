@@ -256,6 +256,12 @@ function DefendLoanDialog({
   onRepayPartial,
   repayBusy,
   hasInflightRepay,
+  addCollMaxTokens,
+  addCollMaxUsd,
+  addCollOraclePriceUsd,
+  hasInflightAddColl,
+  addCollBusy,
+  onAddCollateral,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -280,6 +286,16 @@ function DefendLoanDialog({
   onRepayPartial: (target: "max" | { usd: number }) => Promise<boolean>;
   repayBusy: boolean;
   hasInflightRepay: boolean;
+  // Add Collateral (manual carve top-up, NO new debt) — sized + executed by the
+  // parent. addCollMaxTokens is the most collateral the ACCOUNT loan can release
+  // while staying at its safe limit; NO bot-LTV gate (adding collateral only makes
+  // this loan safer). onAddCollateral resolves true only on confirmed success.
+  addCollMaxTokens: number;
+  addCollMaxUsd: number;
+  addCollOraclePriceUsd: number | null;
+  hasInflightAddColl: boolean;
+  addCollBusy: boolean;
+  onAddCollateral: (amountTokens: number) => Promise<boolean>;
 }) {
   const { retryAuth } = useWallet();
   const { toast } = useToast();
@@ -291,6 +307,8 @@ function DefendLoanDialog({
   // How much extra USDC to borrow (free text → parsed). Prefilled to the safe max on
   // open (default-over-choice: the primary path is "grow to the max").
   const [growAmount, setGrowAmount] = useState("");
+  // How much collateral (tokens) to move into this loan (free text → parsed).
+  const [addCollAmount, setAddCollAmount] = useState("");
 
   // Keep the toggle synced to the server value whenever the modal (re)opens.
   useEffect(() => {
@@ -310,6 +328,12 @@ function DefendLoanDialog({
     }
   }, [open, growAllowed, growMaxUsd]);
 
+  // Start the Add Collateral input blank on every open (it's the corrective lever,
+  // not the headline action — Grow keeps the prefilled default).
+  useEffect(() => {
+    if (open) setAddCollAmount("");
+  }, [open]);
+
   // Grow ("borrow more") derived values. Max is floored to the cent so it can never
   // round ABOVE the true on-chain headroom. The Grow button is live with a valid
   // amount (and growing allowed), OR whenever an op is mid-flight to resume.
@@ -317,12 +341,30 @@ function DefendLoanDialog({
   const growEntered = parseFloat(growAmount);
   const growTooHigh = Number.isFinite(growEntered) && growEntered > growMaxUsd + 0.0001;
   const growAmtValid = Number.isFinite(growEntered) && growEntered > 0 && !growTooHigh;
-  const canGrow = ((growAmtValid && growAllowed) || hasInflightGrow) && !growBusy && !repayBusy;
+  const canGrow = ((growAmtValid && growAllowed) || hasInflightGrow) && !growBusy && !repayBusy && !addCollBusy;
 
   const handleGrowClick = async () => {
     const ok = await onGrow(growEntered);
     if (ok) {
       setGrowAmount("");
+      onOpenChange(false);
+    }
+  };
+
+  // ADD COLLATERAL derived values. Max is floored (4 dp) so the display can never
+  // round ABOVE the true carve headroom; typing at/near the max snaps to the exact
+  // raw max in the parent. Available even when the loan sits ABOVE its safe ratio —
+  // this is the fix-it direction.
+  const addCollMaxStr = addCollMaxTokens > 0 ? (Math.floor(addCollMaxTokens * 10000) / 10000).toFixed(4) : "0";
+  const addCollEntered = parseFloat(addCollAmount);
+  const addCollTooHigh = Number.isFinite(addCollEntered) && addCollEntered > addCollMaxTokens + addCollMaxTokens * 1e-6 + 1e-9;
+  const addCollValid = Number.isFinite(addCollEntered) && addCollEntered > 0 && !addCollTooHigh;
+  const canAddColl = (addCollValid || hasInflightAddColl) && !addCollBusy && !growBusy && !repayBusy;
+
+  const handleAddCollClick = async () => {
+    const ok = await onAddCollateral(addCollEntered);
+    if (ok) {
+      setAddCollAmount("");
       onOpenChange(false);
     }
   };
@@ -387,7 +429,7 @@ function DefendLoanDialog({
   const repayEntered = parseFloat(repayAmount);
   const repayValid = liveDebtUsd != null && Number.isFinite(repayEntered) && repayEntered > 0;
   const repayTooHigh = liveDebtUsd != null && Number.isFinite(repayEntered) && repayEntered > liveDebtUsd + 0.005;
-  const canRepay = (repayValid || hasInflightRepay) && !repayBusy;
+  const canRepay = (repayValid || hasInflightRepay) && !repayBusy && !growBusy && !addCollBusy;
 
   const handleRepayClick = async () => {
     let ok: boolean;
@@ -408,14 +450,19 @@ function DefendLoanDialog({
 
   // LIVE PREVIEW — reflect the amounts being typed so the user SEES where this change
   // lands before committing. Borrowing more raises debt AND adds fresh collateral
-  // (carved at the target ratio); repaying lowers debt only. Fail-closed: no preview
-  // when the base inputs are unreadable.
+  // (carved at the target ratio); repaying lowers debt only; adding collateral raises
+  // collateral only (debt unchanged → ratio falls). Fail-closed: no preview when the
+  // base inputs are unreadable.
   const previewBorrowUsd = growAllowed && growAmtValid ? growEntered : 0;
   const previewRepayUsd = liveDebtUsd != null && repayValid ? Math.min(repayEntered, liveDebtUsd) : 0;
+  const previewAddCollUsd =
+    addCollValid && addCollOraclePriceUsd != null && addCollOraclePriceUsd > 0
+      ? addCollEntered * addCollOraclePriceUsd
+      : 0;
   const previewActive =
-    collValueUsd != null && liveDebtUsd != null && (previewBorrowUsd > 0 || previewRepayUsd > 0);
+    collValueUsd != null && liveDebtUsd != null && (previewBorrowUsd > 0 || previewRepayUsd > 0 || previewAddCollUsd > 0);
   const projDebtUsd = liveDebtUsd != null ? Math.max(0, liveDebtUsd + previewBorrowUsd - previewRepayUsd) : null;
-  const addedCollUsd = growTargetLtv > 0 ? previewBorrowUsd / growTargetLtv : 0;
+  const addedCollUsd = (growTargetLtv > 0 ? previewBorrowUsd / growTargetLtv : 0) + previewAddCollUsd;
   const projCollUsd = collValueUsd != null ? collValueUsd + addedCollUsd : null;
   const projLtv =
     projCollUsd != null && projCollUsd > 0 && projDebtUsd != null ? projDebtUsd / projCollUsd : null;
@@ -428,7 +475,7 @@ function DefendLoanDialog({
   const shownModel = showPreview ? previewBarModel : barModel;
 
   return (
-    <Dialog open={open} onOpenChange={(v) => { if (!repayBusy && !growBusy) onOpenChange(v); }}>
+    <Dialog open={open} onOpenChange={(v) => { if (!repayBusy && !growBusy && !addCollBusy) onOpenChange(v); }}>
       <DialogContent className="sm:max-w-md max-h-[85vh] overflow-y-auto" data-testid="dialog-defend-loan">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -436,7 +483,7 @@ function DefendLoanDialog({
             Manage Loan
           </DialogTitle>
           <DialogDescription>
-            Borrow more against this loan, pay it down, or set it to defend itself.
+            Borrow more against this loan, pay it down, add collateral, or set it to defend itself.
           </DialogDescription>
         </DialogHeader>
 
@@ -609,6 +656,76 @@ function DefendLoanDialog({
             </Button>
           </div>
 
+          {/* Add Collateral — move spare collateral from the ACCOUNT loan into THIS
+              loan (no new borrowing). Available even ABOVE the safe ratio: it's the
+              manual fix-it lever when Borrow More is blocked. */}
+          <div className="space-y-2.5 border-t border-border pt-4">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium">Add Collateral</label>
+              {addCollMaxUsd > 0 && (
+                <span className="text-[11px] text-muted-foreground" data-testid="text-addcoll-max">
+                  up to {fmtUsd(addCollMaxUsd)}
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-muted-foreground" data-testid="text-addcoll-note">
+              Move spare {collSym ?? "collateral"} from your account loan into this bot's loan.
+              Nothing new is borrowed — this only makes the loan safer.
+            </p>
+
+            {hasInflightAddColl && (
+              <p className="text-[11px] text-amber-600 dark:text-amber-500" data-testid="text-addcoll-inflight">
+                You have an unfinished add — tap Finish Adding to complete it.
+              </p>
+            )}
+
+            {addCollMaxTokens <= 0 && !hasInflightAddColl ? (
+              <p className="text-[11px] text-muted-foreground" data-testid="text-addcoll-unavailable">
+                Your account loan has no spare {collSym ?? "collateral"} to release right now — it's
+                already at its safe limit. Pay down your account loan to free some: every $1 paid
+                down frees about $2 of {collSym ?? "collateral"}.
+              </p>
+            ) : (
+              <>
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="text"
+                    inputMode="decimal"
+                    value={addCollAmount}
+                    onChange={(e) => setAddCollAmount(e.target.value)}
+                    placeholder="0.0000"
+                    className="flex-1"
+                    data-testid="input-addcoll-amount"
+                  />
+                  <Button type="button" variant="outline" size="sm" className="h-9 px-2 text-xs" onClick={() => setAddCollAmount(addCollMaxStr)} disabled={addCollMaxTokens <= 0} data-testid="button-addcoll-max">
+                    Max
+                  </Button>
+                </div>
+                {addCollTooHigh ? (
+                  <p className="text-[11px] text-destructive" data-testid="text-addcoll-amount-hint">
+                    That's more than your account loan can safely release — up to {addCollMaxStr} {collSym ?? ""} right now.
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground" data-testid="text-addcoll-amount-hint">
+                    Up to {addCollMaxStr} {collSym ?? "collateral"}
+                    {addCollMaxUsd > 0 ? ` (~${fmtUsd(addCollMaxUsd)})` : ""} — all your account loan can release while
+                    staying at its safe limit.
+                  </p>
+                )}
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  onClick={handleAddCollClick}
+                  disabled={!canAddColl}
+                  data-testid="button-add-collateral"
+                >
+                  {addCollBusy ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Shield className="w-4 h-4 mr-1.5" />}
+                  {hasInflightAddColl && !addCollValid ? "Finish Adding" : "Add Collateral"}
+                </Button>
+              </>
+            )}
+          </div>
+
           {/* Defend this loan — hands-off protection. This IS just the Auto toggle now
               (manual add-collateral was removed for simplicity). */}
           <div className="space-y-1 border-t border-border pt-4">
@@ -660,7 +777,7 @@ export default function PerbotBorrowControls({
   const { toast } = useToast();
 
   const [data, setData] = useState<PerbotPositionsResponse | null>(null);
-  const [busy, setBusy] = useState<"borrow" | "repay" | "move" | "grow" | null>(null);
+  const [busy, setBusy] = useState<"borrow" | "repay" | "move" | "grow" | "addcoll" | null>(null);
   const [confirm, setConfirm] = useState<"borrow" | "repay" | null>(null);
   // How much USDC the user wants to borrow (free text → parsed). Empty = nothing yet.
   const [amount, setAmount] = useState("");
@@ -681,6 +798,10 @@ export default function PerbotBorrowControls({
   // fixed target final-debt is persisted, so a re-tap / crash-resume converges to the
   // SAME target instead of stacking repays. Keyed by the position id.
   const [hasInflightRepay, setHasInflightRepay] = useState(false);
+  // True when a manual ADD-COLLATERAL (carve from the account loan, NO new debt)
+  // for THIS bot's open position is mid-flight — same resume semantics as
+  // hasInflightGrow, keyed by the position id so it can never leak across loans.
+  const [hasInflightAddColl, setHasInflightAddColl] = useState(false);
   // "Manage Loan" modal (Borrow More + Repay + Defend it: Auto top-up).
   const [defendOpen, setDefendOpen] = useState(false);
   // The drawer is a single reused instance: a slow response for a previous
@@ -717,6 +838,10 @@ export default function PerbotBorrowControls({
   // on an EXISTING loan), so an in-flight grow can never leak into a different loan.
   const growKey = (positionId: string) => `qv:perbot-borrow:grow:${bot?.id}:${positionId}`;
   const growRawsKey = (positionId: string) => `qv:perbot-borrow:grow-raws:${bot?.id}:${positionId}`;
+  // ADD COLLATERAL (manual carve top-up, NO new debt) is keyed by the exact open-
+  // position id, same as grow, so an in-flight add can never leak into another loan.
+  const addCollKey = (positionId: string) => `qv:perbot-borrow:addcoll:${bot?.id}:${positionId}`;
+  const addCollRawsKey = (positionId: string) => `qv:perbot-borrow:addcoll-raws:${bot?.id}:${positionId}`;
   // REPAY (partial pay-DOWN) stores only a FIXED target final-debt (raw), keyed by the
   // exact position id. Re-tapping / resuming drives to this same target, so a double-
   // submit can never repay past the user's intended amount.
@@ -772,6 +897,14 @@ export default function PerbotBorrowControls({
           /* ignore */
         }
         setHasInflightRepay(repayInflight);
+        // Same for a mid-flight manual ADD-COLLATERAL on this loan.
+        let addCollInflight = false;
+        try {
+          addCollInflight = !!localStorage.getItem(addCollKey(next.positions[0].id));
+        } catch {
+          /* ignore */
+        }
+        setHasInflightAddColl(addCollInflight);
       } else {
         // No open position yet — surface whether a borrow op is still mid-flight so
         // the user can RESUME it (the input may be blank, e.g. after a switch). With
@@ -785,6 +918,7 @@ export default function PerbotBorrowControls({
         setHasInflightBorrow(inflight);
         setHasInflightGrow(false);
         setHasInflightRepay(false);
+        setHasInflightAddColl(false);
       }
     } catch {
       if (reqId === reqRef.current) setData(null);
@@ -1130,6 +1264,138 @@ export default function PerbotBorrowControls({
         showReconnectToast({ toast, retryAuth, title: "Grow failed", retry: () => handleGrow(amountUsd) });
       } else {
         toast({ title: "Grow failed", description: e?.message || "Something went wrong.", variant: "destructive" });
+      }
+      return false;
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // Size a manual ADD-COLLATERAL carve from a token amount. Floored to raw so it can
+  // never round ABOVE what was typed; within a hair of the max (or above) → use the
+  // server's proven maxCarveRaw verbatim (mirrors computeBorrowRaws' ~1-cent path).
+  const computeAddCollRaw = (amountTokens: number): string | null => {
+    if (!carrySrc) return null;
+    let maxCarveRaw: bigint;
+    try {
+      maxCarveRaw = BigInt(carrySrc.maxCarveRaw);
+    } catch {
+      return null;
+    }
+    if (maxCarveRaw <= 0n) return null;
+    if (!Number.isFinite(amountTokens) || amountTokens <= 0) return null;
+    const dec = carrySrc.collateralDecimals;
+    const raw = BigInt(Math.floor(amountTokens * 10 ** dec));
+    if (raw <= 0n) return null;
+    const eps = BigInt(Math.max(1, Math.round(10 ** dec / 1000)));
+    if (raw + eps >= maxCarveRaw) return maxCarveRaw.toString();
+    return raw.toString();
+  };
+
+  // Manual ADD COLLATERAL: carve collateral OUT of the ACCOUNT loan (gated so the
+  // account stays at its safe ratio) and supply it into THIS bot's open loan. NO new
+  // debt — this only makes the bot's loan safer. Mirrors handleGrow's resume model
+  // (persisted id + exact raw amount until confirmed success), keyed by position id.
+  const handleAddCollateral = async (amountTokens: number): Promise<boolean> => {
+    if (!bot || !openPos) return false;
+    const positionId = openPos.id;
+    setBusy("addcoll");
+    try {
+      const sessionId = await getSessionId();
+      const storeKey = addCollKey(positionId);
+      const rawsKey = addCollRawsKey(positionId);
+      let clientRequestId = localStorage.getItem(storeKey);
+      let raws: { carveRaw: string } | null = null;
+
+      if (clientRequestId) {
+        // RESUME: re-send the EXACT amount the in-flight op was created with — never
+        // recompute from the live input under an existing id. Missing amounts → fail
+        // closed and let the server settle.
+        try {
+          const stored = localStorage.getItem(rawsKey);
+          if (stored) raws = JSON.parse(stored);
+        } catch {
+          raws = null;
+        }
+        if (!raws || !raws.carveRaw) {
+          toast({
+            title: "Finishing your last add",
+            description: "Your previous add-collateral is still settling. Give it a moment — this view will update on its own.",
+          });
+          fetchPositions();
+          return false;
+        }
+      } else {
+        // FRESH: size from the input, persist the raw BEFORE the id so we can never
+        // end up with an id that has no amount to resume from.
+        const fresh = computeAddCollRaw(amountTokens);
+        if (!fresh) {
+          toast({ title: "Enter an amount", description: `Enter how much ${collSym ?? "collateral"} to move into this loan.`, variant: "destructive" });
+          return false;
+        }
+        raws = { carveRaw: fresh };
+        clientRequestId = newRequestId();
+        try {
+          localStorage.setItem(rawsKey, JSON.stringify(raws));
+          localStorage.setItem(storeKey, clientRequestId);
+        } catch {
+          /* ignore */
+        }
+        setHasInflightAddColl(true);
+      }
+
+      const res = await fetch("/api/vault/borrow/perbot/add-collateral", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+        credentials: "include",
+        body: JSON.stringify({
+          botId: bot.id,
+          botBorrowPositionId: positionId,
+          carveRaw: raws.carveRaw,
+          sessionId,
+          clientRequestId,
+        }),
+      });
+      const d = await safeResponseJson(res);
+      if (res.ok && d.ok) {
+        try {
+          localStorage.removeItem(storeKey);
+          localStorage.removeItem(rawsKey);
+        } catch {
+          /* ignore */
+        }
+        setHasInflightAddColl(false);
+        // Confirm the EXACT amount asked for (the raw we sent), in tokens.
+        let tokens: number | null = null;
+        try {
+          const dec = carrySrc?.collateralDecimals ?? 9;
+          tokens = Number(BigInt(raws.carveRaw)) / 10 ** dec;
+        } catch {
+          tokens = null;
+        }
+        toast({
+          title: "Collateral Added",
+          description:
+            tokens != null && Number.isFinite(tokens) && tokens > 0
+              ? `Moved ${tokens.toLocaleString(undefined, { maximumFractionDigits: 4 })} ${collSym ?? "collateral"} from your account loan into this bot's loan.`
+              : `Moved ${collSym ?? "collateral"} from your account loan into this bot's loan.`,
+        });
+        await refreshAll();
+        return true;
+      } else if (res.status === 202 || d.needsAttention) {
+        // Keep the id + amount so the next tap resumes this exact op.
+        setHasInflightAddColl(true);
+        toast({ title: "Still Finishing", description: "The add is still settling. Tap Add Collateral again in a moment to finish it." });
+        fetchPositions();
+        return false;
+      } else {
+        throw new Error(d.error || "Add collateral failed");
+      }
+    } catch (e: any) {
+      if (isSessionError(e)) {
+        showReconnectToast({ toast, retryAuth, title: "Add collateral failed", retry: () => handleAddCollateral(amountTokens) });
+      } else {
+        toast({ title: "Add collateral failed", description: e?.message || "Something went wrong.", variant: "destructive" });
       }
       return false;
     } finally {
@@ -1672,6 +1938,20 @@ export default function PerbotBorrowControls({
   const growAllowed =
     !!carrySrc && growMaxUsd > 0 && botCurrentLtv != null && botCurrentLtv <= growTargetLtv + 0.01;
 
+  // ADD-COLLATERAL sizing: the most collateral (tokens/USD) the account loan can
+  // release while staying at its safe limit — the same carve headroom as grow, but
+  // with NO bot-LTV gate: adding collateral is always the safe direction (it can
+  // only lower this loan's ratio), so it stays available even above target.
+  const addCollDecimals = carrySrc?.collateralDecimals ?? 9;
+  let addCollMaxTokens = 0;
+  try {
+    addCollMaxTokens = carrySrc ? Number(BigInt(carrySrc.maxCarveRaw)) / 10 ** addCollDecimals : 0;
+  } catch {
+    addCollMaxTokens = 0;
+  }
+  const addCollOraclePriceUsd = carrySrc?.oraclePriceUsd ?? null;
+  const addCollMaxUsd = addCollOraclePriceUsd != null ? addCollMaxTokens * addCollOraclePriceUsd : 0;
+
   return (
     <>
       {openPos ? (
@@ -2074,6 +2354,12 @@ export default function PerbotBorrowControls({
           onRepayPartial={handleRepayPartial}
           repayBusy={busy === "repay"}
           hasInflightRepay={hasInflightRepay}
+          addCollMaxTokens={addCollMaxTokens}
+          addCollMaxUsd={addCollMaxUsd}
+          addCollOraclePriceUsd={addCollOraclePriceUsd}
+          hasInflightAddColl={hasInflightAddColl}
+          addCollBusy={busy === "addcoll"}
+          onAddCollateral={handleAddCollateral}
         />
       )}
     </>

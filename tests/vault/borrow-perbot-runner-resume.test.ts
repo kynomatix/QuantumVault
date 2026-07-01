@@ -62,6 +62,8 @@ const h = vi.hoisted(() => {
     executeBorrowOpenMock: vi.fn(),
     executeWithdrawCollateralMock: vi.fn(),
     transferExactMock: vi.fn(),
+    supplyToExistingBotPositionMock: vi.fn(),
+    borrowMoreOnExistingBotPositionMock: vi.fn(),
   };
 });
 
@@ -119,23 +121,33 @@ vi.mock("../../server/vault/jupiter-lend-borrow-executor", () => ({
   executeSupplyCollateral: h.executeSupplyCollateralMock,
   executeWithdrawCollateral: h.executeWithdrawCollateralMock,
   executeBorrowOpen: h.executeBorrowOpenMock,
+  supplyToExistingBotPosition: h.supplyToExistingBotPositionMock,
+  borrowMoreOnExistingBotPosition: h.borrowMoreOnExistingBotPositionMock,
 }));
 
-vi.mock("../../server/vault/jupiter-lend-borrow-route", () => ({
-  JupiterLendBorrowRoute: class {
-    async readLivePositionHealth(_mint: string, posId: number) {
-      if (posId === 555) return h.state.liveAcctHealth;
-      if (posId === 777) return h.state.liveBotHealth;
-      return null;
-    }
-  },
-}));
+vi.mock("../../server/vault/jupiter-lend-borrow-route", async (importOriginal) => {
+  // Keep the REAL decodeVaultConfig (the grow path's pre-sign gate + post-withdraw
+  // LTV assertion do real math against a decoded vault snapshot); only the live
+  // position reads are faked.
+  const actual: any = await importOriginal();
+  return {
+    ...actual,
+    JupiterLendBorrowRoute: class {
+      async readLivePositionHealth(_mint: string, posId: number) {
+        if (posId === 555) return h.state.liveAcctHealth;
+        if (posId === 777) return h.state.liveBotHealth;
+        return null;
+      }
+    },
+  };
+});
 
 vi.mock("../../server/vault/borrow-oracle-freshness", () => ({
   readBorrowOracleContext: vi.fn(async () => ({ publishAgeSec: 30, priceMove1hAbs: 0.02 })),
 }));
 
-import { runPerbotUnwindClose, runPerbotCarveOpen } from "../../server/vault/jupiter-lend-perbot-carve";
+import { runPerbotUnwindClose, runPerbotCarveOpen, runPerbotGrowLoan } from "../../server/vault/jupiter-lend-perbot-carve";
+import { decodeVaultConfig } from "../../server/vault/jupiter-lend-borrow-route";
 
 const {
   opStore,
@@ -146,7 +158,37 @@ const {
   executeBorrowOpenMock,
   executeWithdrawCollateralMock,
   transferExactMock,
+  supplyToExistingBotPositionMock,
+  borrowMoreOnExistingBotPositionMock,
 } = h;
+
+// Live INF→USDC vault snapshot (id 43), same fixture as borrow-perbot-carve.test.ts:
+// price ≈ $98.87/INF, maxLtv 0.75, liqThreshold 0.80. The grow path runs the REAL
+// pre-sign withdraw gate + post-withdraw LTV assertion against this config.
+const RAW_INF = {
+  id: 43,
+  address: "VaultAddrPlaceholder1111111111111111111111",
+  oracle: "OracleAddrPlaceholder111111111111111111111",
+  supplyToken: { address: INF_MINT, symbol: "INF", decimals: 9, price: "99.249552485649" },
+  borrowToken: { address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", symbol: "USDC", decimals: 6, price: "1" },
+  collateralFactor: "750",
+  liquidationThreshold: "800",
+  liquidationPenalty: "500",
+  borrowRate: "466",
+  supplyRate: "0",
+  borrowFee: "0",
+  borrowLimitUtilization: "405783379446790",
+  minimumBorrowing: "1034775",
+  borrowable: "5838249171951",
+  withdrawable: "11610714005191",
+  oraclePriceLiquidate: "98865597964440443",
+  oraclePriceOperate: "98865597964440443",
+};
+const infVault = () => {
+  const c = decodeVaultConfig(RAW_INF);
+  if (!c) throw new Error("INF vault fixture failed to decode");
+  return c;
+};
 
 const unwindParams = () => ({
   walletAddress: WALLET,
@@ -193,6 +235,8 @@ beforeEach(() => {
   executeBorrowOpenMock.mockReset();
   executeWithdrawCollateralMock.mockReset();
   transferExactMock.mockReset();
+  supplyToExistingBotPositionMock.mockReset();
+  borrowMoreOnExistingBotPositionMock.mockReset();
   updatePositionMock.mockClear();
   transferExactMock.mockImplementation(async (args: any) => {
     if (args.onBeforeBroadcast) await args.onBeforeBroadcast({ signature: "sig-return", lastValidBlockHeight: 123 });
@@ -806,5 +850,212 @@ describe("runPerbotCarveOpen — refuses to resume a same-reqId op under changed
     expect(executeWithdrawCollateralMock).not.toHaveBeenCalled();
     expect(executeBorrowOpenMock).not.toHaveBeenCalled();
     expect(opStore.get("op-carve-x").status).toBe("processing");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADD-COLLATERAL mode on runPerbotGrowLoan (manual "Add Collateral" on the
+// Manage Loan dialog): same carve → transfer → supply legs as grow, but NO
+// borrow leg, a DISTINCT operationType ("perbot_carve_topup"), and a hard
+// requestedDebtRaw === 0 pin so a replay can never mutate between modes.
+// ---------------------------------------------------------------------------
+
+const addCollParams = () => ({
+  walletAddress: WALLET,
+  vault: infVault(),
+  accountPublicKey: "AcctPubkey11111111111111111111111111111111",
+  accountSecretKey: new Uint8Array(64),
+  botPublicKey: "BotPubkey111111111111111111111111111111111",
+  botSecretKey: new Uint8Array(64),
+  tradingBotId: TRADING_BOT_ID,
+  accountBorrowPositionId: ACCT_POS_ID,
+  accountVenuePositionId: ACCT_VENUE_ID,
+  botBorrowPositionId: BOT_POS_ID,
+  botVenuePositionId: BOT_VENUE_ID,
+  carveRaw: 200_000_000n, // 0.2 INF @ 9dp
+  requestedDebtRaw: 0n,
+  targetLtv: 0.5,
+  clientRequestId: "proof-1:addcoll",
+  mode: "add_collateral" as const,
+});
+
+/** Identity metadata matching addCollParams(), for pre-seeded resume ops. */
+const addCollMeta = () => ({
+  tradingBotId: TRADING_BOT_ID,
+  collateralMint: INF_MINT,
+  accountBorrowPositionId: ACCT_POS_ID,
+  accountVenuePositionId: ACCT_VENUE_ID,
+  botBorrowPositionId: BOT_POS_ID,
+  botVenuePositionId: BOT_VENUE_ID,
+  carveRaw: "200000000",
+  requestedDebtRaw: "0",
+  targetLtv: 0.5,
+});
+
+describe("runPerbotGrowLoan mode=add_collateral — happy path has NO borrow leg", () => {
+  beforeEach(() => {
+    // Account: 1 INF collateral, 20 USDC debt @ ~$98.87 → LTV ≈ 0.202. A 0.2 INF
+    // carve leaves LTV ≈ 0.253 — both the pre-sign gate (target 0.5) and the
+    // post-withdraw assertion pass on this same static reading.
+    state.liveAcctHealth = { debtRaw: "20000000", collateralRaw: "1000000000", oraclePriceUsd: 98.8656 };
+    state.botCollBalance = 200_000_000n; // carved INF sitting in the account wallet
+    executeWithdrawCollateralMock.mockImplementation(async (args: any) => {
+      if (args.onBeforeBroadcast) await args.onBeforeBroadcast({ signature: "sig-withdraw", lastValidBlockHeight: 100 });
+      return { success: true, signature: "sig-withdraw" };
+    });
+    supplyToExistingBotPositionMock.mockImplementation(async (args: any) => {
+      if (args.onBeforeBroadcast) await args.onBeforeBroadcast({ signature: "sig-supply-bot", lastValidBlockHeight: 101 });
+      return { success: true, signature: "sig-supply-bot" };
+    });
+  });
+
+  it("carves, transfers, supplies, finalizes — and NEVER borrows", async () => {
+    const res = await runPerbotGrowLoan(addCollParams());
+
+    expect(res.success).toBe(true);
+    expect(res.step).toBe("final_read");
+    expect(res.carvedRaw).toBe("200000000");
+    expect(res.borrowPositionId).toBe(BOT_POS_ID);
+    expect(res.borrowedUsdcRaw).toBeUndefined(); // no debt was created
+    expect(res.accountPostLtv).not.toBeNull();
+    expect(res.accountPostLtv!).toBeLessThanOrEqual(0.5 + 0.01);
+
+    // The three money legs ran exactly once…
+    expect(executeWithdrawCollateralMock).toHaveBeenCalledTimes(1);
+    expect(transferExactMock).toHaveBeenCalledTimes(1);
+    expect(supplyToExistingBotPositionMock).toHaveBeenCalledTimes(1);
+    // …and NOTHING borrow-shaped ever ran.
+    expect(borrowMoreOnExistingBotPositionMock).not.toHaveBeenCalled();
+    expect(executeBorrowOpenMock).not.toHaveBeenCalled();
+
+    // The op is the DISTINCT manual type (invisible to auto-topup's
+    // selectResumableTopUpOp filter on "perbot_collateral_topup").
+    const op = [...opStore.values()].find((o) => o.clientRequestId === "proof-1:addcoll");
+    expect(op.operationType).toBe("perbot_carve_topup");
+    expect(op.status).toBe("succeeded");
+    expect(op.step).toBe("final_read");
+
+    // Supply went into the bot's EXISTING position with the exact carved amount.
+    const supplyArgs = supplyToExistingBotPositionMock.mock.calls[0][0];
+    expect(supplyArgs.borrowPositionId).toBe(BOT_POS_ID);
+    expect(supplyArgs.collateralRaw).toBe(200_000_000n);
+  });
+
+  it("a replay of a SUCCEEDED op returns the stored result without touching money again", async () => {
+    const first = await runPerbotGrowLoan(addCollParams());
+    expect(first.success).toBe(true);
+
+    executeWithdrawCollateralMock.mockClear();
+    transferExactMock.mockClear();
+    supplyToExistingBotPositionMock.mockClear();
+
+    const again = await runPerbotGrowLoan(addCollParams());
+    expect(again.success).toBe(true);
+    expect(again.carvedRaw).toBe("200000000");
+    expect(again.borrowedUsdcRaw).toBeUndefined();
+    expect(executeWithdrawCollateralMock).not.toHaveBeenCalled();
+    expect(transferExactMock).not.toHaveBeenCalled();
+    expect(supplyToExistingBotPositionMock).not.toHaveBeenCalled();
+    expect(borrowMoreOnExistingBotPositionMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("runPerbotGrowLoan — mode guards (no op created, no money touched)", () => {
+  it("REJECTS add_collateral with a non-zero requestedDebtRaw", async () => {
+    const res = await runPerbotGrowLoan({ ...addCollParams(), requestedDebtRaw: 5_000_000n });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/must not borrow/i);
+    expect(opStore.size).toBe(0);
+    expect(executeWithdrawCollateralMock).not.toHaveBeenCalled();
+  });
+
+  it("REJECTS plain grow with a ZERO requestedDebtRaw (grow must borrow)", async () => {
+    const res = await runPerbotGrowLoan({ ...addCollParams(), mode: "grow" as const });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/greater than zero/i);
+    expect(opStore.size).toBe(0);
+    expect(executeWithdrawCollateralMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("runPerbotGrowLoan — cross-MODE same-reqId replay is REFUSED (no mutation)", () => {
+  it("an existing GROW op cannot be resumed as add_collateral", async () => {
+    opStore.set("op-grow-x", {
+      id: "op-grow-x",
+      clientRequestId: "proof-1:addcoll",
+      operationType: "perbot_grow_loan", // <- started as a GROW (borrowing) op
+      status: "processing",
+      step: "initialized",
+      txSignatures: [],
+      metadata: { ...addCollMeta(), requestedDebtRaw: "5000000" },
+    });
+
+    const res = await runPerbotGrowLoan(addCollParams());
+
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/different type|refusing to resume/i);
+    expect(executeWithdrawCollateralMock).not.toHaveBeenCalled();
+    expect(transferExactMock).not.toHaveBeenCalled();
+    expect(supplyToExistingBotPositionMock).not.toHaveBeenCalled();
+    expect(borrowMoreOnExistingBotPositionMock).not.toHaveBeenCalled();
+    // The existing op was NOT mutated.
+    const op = opStore.get("op-grow-x");
+    expect(op.status).toBe("processing");
+    expect(op.step).toBe("initialized");
+  });
+
+  it("an existing ADD-COLLATERAL op cannot be resumed as grow", async () => {
+    opStore.set("op-addcoll-x", {
+      id: "op-addcoll-x",
+      clientRequestId: "proof-1:addcoll",
+      operationType: "perbot_carve_topup",
+      status: "processing",
+      step: "initialized",
+      txSignatures: [],
+      metadata: addCollMeta(),
+    });
+
+    const res = await runPerbotGrowLoan({ ...addCollParams(), mode: "grow" as const, requestedDebtRaw: 5_000_000n });
+
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/different type|refusing to resume/i);
+    expect(executeWithdrawCollateralMock).not.toHaveBeenCalled();
+    expect(opStore.get("op-addcoll-x").status).toBe("processing");
+  });
+});
+
+describe("runPerbotGrowLoan mode=add_collateral — resume at supplied_to_bot finalizes idempotently", () => {
+  it("skips every money leg and finalizes from the persisted carvedRawObserved", async () => {
+    opStore.set("op-addcoll-r", {
+      id: "op-addcoll-r",
+      clientRequestId: "proof-1:addcoll",
+      operationType: "perbot_carve_topup",
+      status: "processing",
+      step: "supplied_to_bot", // crashed AFTER the supply landed, BEFORE finalize
+      txSignatures: ["sig-withdraw", "sig-return", "sig-supply-bot"],
+      metadata: {
+        ...addCollMeta(),
+        carvedRawObserved: "200000000",
+        accountPostLtv: 0.2529,
+      },
+    });
+
+    const res = await runPerbotGrowLoan(addCollParams());
+
+    expect(res.success).toBe(true);
+    expect(res.step).toBe("final_read");
+    expect(res.carvedRaw).toBe("200000000");
+    expect(res.accountPostLtv).toBe(0.2529);
+    expect(res.borrowedUsdcRaw).toBeUndefined();
+
+    // NO leg re-ran: no withdraw, no transfer, no supply, no borrow.
+    expect(executeWithdrawCollateralMock).not.toHaveBeenCalled();
+    expect(transferExactMock).not.toHaveBeenCalled();
+    expect(supplyToExistingBotPositionMock).not.toHaveBeenCalled();
+    expect(borrowMoreOnExistingBotPositionMock).not.toHaveBeenCalled();
+
+    const op = opStore.get("op-addcoll-r");
+    expect(op.status).toBe("succeeded");
+    expect(op.step).toBe("final_read");
   });
 });
