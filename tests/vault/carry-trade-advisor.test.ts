@@ -204,7 +204,8 @@ describe("decideCarryTrade", () => {
       healthSummary: health("healthy"),
       debtUsd: 100,
     });
-    // The recommendation surface has no amount/raw field the UI could submit blindly.
+    // The recommendation surface has no amount/raw field the UI could submit
+    // blindly. moveTo is advisory metadata (a vault name/apy), not an amount.
     expect(Object.keys(rec).sort()).toEqual(
       [
         "action",
@@ -214,6 +215,7 @@ describe("decideCarryTrade", () => {
         "grossSpreadPct",
         "haircutPct",
         "message",
+        "moveTo",
         "netSpreadPct",
         "reason",
       ].sort(),
@@ -226,9 +228,11 @@ describe("decideCarryTrade", () => {
   // -------------------------------------------------------------------------
   describe("when the bot is already parked", () => {
     it("regression: carry uses the PARKED vault's APY, not the best ranked vault", () => {
-      // Best vault shows 50% but the bot is parked in a 6% vault. apy 6% − borrow
-      // 5% = 1% gross − 1% haircut = 0% net <= 0 → repay. (If it wrongly used the
-      // 50% best, it would say park.)
+      // Best vault shows 50% but the bot is parked in a 6% vault. The VERDICT is
+      // judged on the PARKED 6%: 6% − borrow 5% = 1% gross − 1% haircut = 0% net
+      // <= 0. (If it wrongly used the 50% best it would say park/hold.) Because a
+      // far better MEASURED vault (onyc 50%) still clears the park bar, the advice
+      // is to MOVE the parked funds there rather than repay.
       const rec = decideCarryTrade({
         rankedYields: [yld(50, "onyc"), yld(6, "perena_usd")],
         currentParked: { assetKey: "perena_usd", displayName: "Perena USD*" },
@@ -243,8 +247,28 @@ describe("decideCarryTrade", () => {
       expect(rec.bestAsset?.assetKey).toBe("onyc");
       expect(rec.grossSpreadPct).toBeCloseTo(1, 9);
       expect(rec.netSpreadPct).toBeCloseTo(0, 9);
+      // Parked carry died, but a materially better vault is still positive → move.
+      expect(rec.action).toBe("move_vault");
+      expect(rec.reason).toBe("move_better_positive_carry");
+      expect(rec.moveTo?.assetKey).toBe("onyc");
+      expect(rec.moveTo?.apyPct).toBeCloseTo(50, 9);
+    });
+
+    it("parked, negative carry, NO materially better vault → repay", () => {
+      // Parked 6% (net 0 <= 0). Best is onyc 6.5%: its net edge = 6.5 − 5 − 1 =
+      // 0.5% < the 1% park minimum, so it does NOT clear the bar to justify a move.
+      // With nowhere better to go, paying the loan down wins.
+      const rec = decideCarryTrade({
+        rankedYields: [yld(6.5, "onyc"), yld(6, "perena_usd")],
+        currentParked: { assetKey: "perena_usd", displayName: "Perena USD*" },
+        borrowApr: 0.05,
+        healthSummary: health("healthy"),
+        debtUsd: 100,
+      });
       expect(rec.action).toBe("repay");
       expect(rec.reason).toBe("repay_negative_carry");
+      expect(rec.moveTo).toBeNull();
+      expect(rec.netSpreadPct).toBeCloseTo(0, 9);
     });
 
     it("parked with a healthy edge → HOLD (keep funds where they are), not park", () => {

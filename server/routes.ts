@@ -1501,7 +1501,7 @@ import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransactio
 import { getBestQuote } from "./swap/index.js";
 import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, valueVaultRowsForWallet, sumVaultPositionValueUsdc, type VaultPositionView, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
 import { getCollateralStakingApyMap } from "./vault/collateral-apy";
-import { getEnabledYieldAssets, getYieldAssetByKey } from "./vault/yield-assets";
+import { getEnabledYieldAssets, getYieldAssetByKey, getDetectableYieldAssets } from "./vault/yield-assets";
 import { getYieldTableCached } from "./vault/yield-oracle";
 import { detectParkedYieldTokens as detectParkedYieldTokensPure } from "./vault/parked-tokens";
 import { JupiterLendBorrowRoute } from "./vault/jupiter-lend-borrow-route";
@@ -10145,6 +10145,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 accountLtvBefore: plan.accountLtvBefore ?? null,
                 targetLtv: plan.targetLtv ?? null,
                 suggestLtv: PERBOT_CARRY_SUGGEST_LTV,
+                borrowAprPct: typeof cfg.borrowApr === "number" && Number.isFinite(cfg.borrowApr) ? cfg.borrowApr * 100 : null,
                 maxCarveRaw: maxCarveRaw.toString(),
                 maxBorrowRaw: maxBorrowRaw.toString(),
               });
@@ -10736,9 +10737,50 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!wallet) return res.status(404).json({ error: "Wallet not found" });
       if (!wallet.agentPublicKey) return res.status(400).json({ error: "Account wallet not initialized" });
       const all = await getUserFungibleTokens(wallet.agentPublicKey);
-      const sources = all.filter(
-        (t) => !t.isNativeSol && Number.isFinite(t.amountUi) && t.amountUi > 0,
-      );
+
+      // POSITIVE allowlist of SPENDABLE top-up sources. getUserFungibleTokens
+      // returns EVERY SPL the account wallet holds — including the Jupiter Lend
+      // borrow position receipt/NFT (shown as a truncated mint like "jv43…") and
+      // Kamino / Jupiter-Lend park receipts, none of which are DEX-swappable and
+      // must never be offered as a funding source. We offer only:
+      //   1. USDC (the common deposit),
+      //   2. the wallet's own borrow COLLATERAL mints (add more of the same asset),
+      //   3. DEX-tradeable parked yield stablecoins (route "jupiter" — the top-up
+      //      swap can convert these to collateral). This is what makes parked Vault
+      //      funds usable as collateral. Redeem-only receipts (route "kamino" /
+      //      "jupiter_lend") and anything unrecognized are excluded.
+      // The top-up route re-caps every amount at the LIVE on-chain balance, so this
+      // list only governs what is OFFERED, never what can be spent.
+      const allowed = new Set<string>([SWAP_USDC_MINT]);
+      const symbolByMint = new Map<string, string>([[SWAP_USDC_MINT, "USDC"]]);
+      try {
+        const positions = await storage.getBorrowPositionsAllScopes(req.walletAddress!);
+        for (const p of positions) {
+          if (p.status === "open" && p.collateralMint) {
+            allowed.add(p.collateralMint);
+            const key = (p.collateralAssetKey ?? "").trim();
+            if (key) symbolByMint.set(p.collateralMint, key.toUpperCase());
+          }
+        }
+      } catch {
+        // best-effort; USDC + tradeable stablecoins are still offered.
+      }
+      for (const a of getDetectableYieldAssets()) {
+        if (a.route === "jupiter" && a.mint) {
+          allowed.add(a.mint);
+          if (!symbolByMint.has(a.mint)) symbolByMint.set(a.mint, a.displayName);
+        }
+      }
+
+      const sources = all
+        .filter(
+          (t) => !t.isNativeSol && Number.isFinite(t.amountUi) && t.amountUi > 0 && allowed.has(t.mint),
+        )
+        .map((t) => ({
+          ...t,
+          symbol: symbolByMint.get(t.mint) ?? t.symbol,
+          isUsdc: t.isUsdc || t.mint === SWAP_USDC_MINT,
+        }));
       res.json({ sources });
     } catch (error: any) {
       console.error("[Vault] per-bot top-up sources read error:", error);

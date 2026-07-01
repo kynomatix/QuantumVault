@@ -119,6 +119,8 @@ interface PerbotCarrySource {
   oraclePriceUsd?: number | null;
   targetLtv?: number | null;
   suggestLtv?: number | null;
+  // The vault's current borrow rate (PERCENT), shown before reopening a loan.
+  borrowAprPct?: number | null;
 }
 
 interface PerbotPositionsResponse {
@@ -144,10 +146,12 @@ interface ParkedPositionView {
 interface CarryAdvisorView {
   applicable?: boolean;
   recommendation: {
-    action: "park" | "repay" | "hold" | "unavailable";
+    action: "park" | "repay" | "hold" | "move_vault" | "unavailable";
     message: string;
     netSpreadPct: number | null;
     bestAsset: { displayName: string; apyPct: number } | null;
+    // Set only when action is "move_vault": the higher-yield vault to relocate to.
+    moveTo?: { assetKey: string; displayName: string; apyPct: number } | null;
     // The vault the carry is JUDGED on: the bot's actual parked vault when it has
     // funds parked, otherwise the best-ranked destination. `apyPct` is null when
     // the active vault's yield could not be measured.
@@ -955,9 +959,15 @@ export default function PerbotBorrowControls({
     try {
       const sessionId = await getSessionId();
 
-      // 1. Bring any parked funds in this bot back to cash FIRST. The close repays
-      //    the debt from the bot's USDC, so borrowed funds parked for yield must be
-      //    unparked or the repay can't cover the principal. All-out per asset.
+      // 1. Bring back ONLY enough parked funds to cover the debt, leaving the surplus
+      //    earning yield. The close repays the debt from the bot's USDC, so we must
+      //    unpark at least the principal — but not the whole vault. All parked yield
+      //    assets are USD stablecoins (~$1), and any that appreciate (USD*, ONyc) sell
+      //    for >=$1, so sizing the token amount ~= the USDC still needed is safe: the
+      //    server clamps every amount to the live balance, and the close route is
+      //    fail-closed + retryable if a sale under-delivers, so we can never strand the
+      //    loan half-repaid. (Old behavior unparked EVERYTHING, needlessly pulling
+      //    funds out of yield to clear a small debt.)
       const pres = await fetch(
         `/api/vault/positions?botId=${bot.id}&wallet=${walletAddress}&_=${Date.now()}`,
         { credentials: "include", cache: "no-store", headers: walletAuthHeaders() },
@@ -967,7 +977,7 @@ export default function PerbotBorrowControls({
       const parked: ParkedPositionView[] = (pdata.positions ?? []).filter(
         (p: ParkedPositionView) => {
           // Detect by RAW on-chain balance, not the valued USDC — a held-but-
-          // unquotable balance must still be brought back, not silently skipped.
+          // unquotable balance must still be considered as a source, not skipped.
           try {
             return BigInt(p.onChainAmountRaw ?? "0") > 0n;
           } catch {
@@ -975,15 +985,27 @@ export default function PerbotBorrowControls({
           }
         },
       );
+      // Conservative (never-under-read) debt + a small buffer for swap slippage and
+      // stablecoin price drift, so one pass covers the principal in the common case.
+      const debtForRepay = Number(openPos.debtAmountRaw ?? 0) / 1e6;
+      const REPAY_UNPARK_BUFFER_MULT = 1.05; // +5% for swap slippage
+      const REPAY_UNPARK_BUFFER_FLAT = 0.25; // +$0.25 for rounding / price drift
+      const targetUsdc = debtForRepay > 0 ? debtForRepay * REPAY_UNPARK_BUFFER_MULT + REPAY_UNPARK_BUFFER_FLAT : 0;
+      let unparkedUsdc = 0;
       for (const p of parked) {
+        if (unparkedUsdc >= targetUsdc) break; // enough cash to repay — leave the rest earning
+        const remainingUsdc = targetUsdc - unparkedUsdc;
         const ures = await fetch("/api/vault/unpark", {
           method: "POST",
           headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
           credentials: "include",
-          body: JSON.stringify({ assetKey: p.assetKey, all: true, sessionId, botId: bot.id }),
+          // amountToken ~= USDC still needed (stablecoin ~1:1); server clamps to the
+          // live balance, so asking for more than is parked just sells all of it.
+          body: JSON.stringify({ assetKey: p.assetKey, amountToken: remainingUsdc, sessionId, botId: bot.id }),
         });
         const udata = await safeResponseJson(ures);
         if (!ures.ok) throw new Error(udata.error || `Could not bring back ${p.displayName || p.assetKey}.`);
+        unparkedUsdc += Number(udata.usdcReceived ?? 0);
       }
 
       // 2. Close: repay the debt + return the collateral to the account position.
@@ -1093,7 +1115,7 @@ export default function PerbotBorrowControls({
   // Carry Trade (keep the loan, earn yield); repay ⇒ Repay. Rendered as clean STATS
   // (vault yield vs borrow APR → net edge), never prose.
   const advisorRec = advisor?.applicable && advisor.recommendation ? advisor.recommendation : null;
-  const recCarry = advisorRec != null && (advisorRec.action === "park" || advisorRec.action === "hold");
+  const recCarry = advisorRec != null && (advisorRec.action === "park" || advisorRec.action === "hold" || advisorRec.action === "move_vault");
   const recRepay = advisorRec != null && advisorRec.action === "repay";
   // Which card the user has CHOSEN as the durable plan (separate from the advisor hint).
   const carrySelected = selectedIntent === "carry";
@@ -1295,10 +1317,16 @@ export default function PerbotBorrowControls({
                     </div>
                   </div>
                 )}
-                <p className="text-[11px] text-muted-foreground">
-                  Keep the loan and earn yield on the borrowed cash.
-                  {activeVaultLabel}
-                </p>
+                {advisorRec?.action === "move_vault" && advisorRec.message ? (
+                  <p className="text-[11px] text-amber-600 dark:text-amber-500" data-testid="text-carry-move-hint">
+                    {advisorRec.message}
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground">
+                    Keep the loan and earn yield on the borrowed cash.
+                    {activeVaultLabel}
+                  </p>
+                )}
               </div>
 
               {/* Repay — clear the loan, return collateral. */}
@@ -1387,6 +1415,11 @@ export default function PerbotBorrowControls({
                 <p className="text-[10px] text-muted-foreground leading-tight">Target LTV</p>
               </div>
             </div>
+            {carrySrc?.borrowAprPct != null && (
+              <p className="text-[11px] text-muted-foreground" data-testid="text-perbot-reopen-borrow-apr">
+                Current borrow rate: <span className="font-semibold text-foreground tabular-nums">{fmtPct1(carrySrc.borrowAprPct)}</span> APR
+              </p>
+            )}
             <div className="space-y-1.5">
               <div className="flex items-center justify-between text-xs text-muted-foreground">
                 <span>Amount to Borrow (USDC)</span>

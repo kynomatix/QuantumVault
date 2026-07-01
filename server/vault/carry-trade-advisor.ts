@@ -25,7 +25,7 @@ import { BORROW_RISK_POLICY } from "./borrow-risk-policy";
 import type { BotBorrowHealthSummary } from "./borrow-health";
 import type { RankedYieldDestination } from "./carry-yield-ranker";
 
-export type CarryTradeAction = "park" | "repay" | "hold" | "unavailable";
+export type CarryTradeAction = "park" | "repay" | "hold" | "move_vault" | "unavailable";
 
 /** Machine-readable reason for the recommendation (drives UI copy). */
 export type CarryTradeReason =
@@ -36,6 +36,7 @@ export type CarryTradeReason =
   | "repay_health_urgent"
   | "repay_health_liquidation"
   | "hold_thin_spread" // positive but under the minimum → not worth the round-trip
+  | "move_better_positive_carry" // parked vault's carry went non-positive but a different measured vault is still a real positive carry → move, don't repay
   | "hold_no_debt" // no open per-bot debt → nothing to carry
   | "hold_yield_unavailable" // not parked + no MEASURED vault yield → can't size a park safely
   | "hold_parked_yield_unavailable" // parked but the parked vault's yield is unmeasured → fail closed
@@ -92,6 +93,9 @@ export interface CarryTradeRecommendation {
   reason: CarryTradeReason;
   /** Plain-language summary for the UI. */
   message: string;
+  /** Set only when action is "move_vault": the better measured vault to relocate
+   *  the parked funds to. Advisory only — the UI names it; nothing moves money. */
+  moveTo: { assetKey: string; displayName: string; apyPct: number } | null;
   /** Set when action is "unavailable": what we could not read. */
   blockedBy: "health" | "borrow_apr" | null;
 }
@@ -129,6 +133,7 @@ export function decideCarryTrade(input: CarryTradeInput): CarryTradeRecommendati
     haircutPct,
     grossSpreadPct: null as number | null,
     netSpreadPct: null as number | null,
+    moveTo: null as { assetKey: string; displayName: string; apyPct: number } | null,
   };
 
   // 1. Health unreadable → cannot advise. (actionBlocked is set only when a
@@ -252,8 +257,35 @@ export function decideCarryTrade(input: CarryTradeInput): CarryTradeRecommendati
   const netSpreadPct = grossSpreadPct - haircutPct;
   const withSpread = { ...base, activeAsset: active, grossSpreadPct, netSpreadPct };
 
-  // 6. Negative (or zero) net carry → repaying beats paying interest for nothing.
+  // A materially better MEASURED vault than the one this bot is parked in. Only
+  // meaningful when ALREADY parked (when not parked, the best vault IS the active
+  // one and step 7 routes a fresh park there). The candidate must clear the SAME
+  // bar as a fresh park (minParkNetSpreadPct) — we only ever suggest moving toward
+  // a vault we would independently recommend parking into. This lets a bot whose
+  // current vault's carry has gone thin/negative RELOCATE its yield rather than
+  // unwind the loan. Advisory only.
+  let betterVault: { assetKey: string; displayName: string; apyPct: number; netSpreadPct: number } | null = null;
+  if (active.isParked && best && best.assetKey !== active.assetKey && isFiniteNum(best.apyPct)) {
+    const candNetPct = (best.apyPct as number) - borrowAprPct - haircutPct;
+    if (candNetPct >= cfg.minParkNetSpreadPct) {
+      betterVault = { assetKey: best.assetKey, displayName: best.displayName, apyPct: best.apyPct as number, netSpreadPct: candNetPct };
+    }
+  }
+
+  // 6. Negative (or zero) net carry. If a DIFFERENT measured vault is still a real
+  //    positive carry, moving the parked funds there beats unwinding the loan;
+  //    otherwise repaying beats paying interest for nothing.
   if (netSpreadPct <= 0) {
+    if (betterVault) {
+      return {
+        ...withSpread,
+        action: "move_vault",
+        reason: "move_better_positive_carry",
+        moveTo: { assetKey: betterVault.assetKey, displayName: betterVault.displayName, apyPct: betterVault.apyPct },
+        message: `Your funds parked in ${active.displayName} earn ${activeApyPct.toFixed(1)}%, below this loan's ${borrowAprPct.toFixed(1)}% cost — but ${betterVault.displayName} earns ${betterVault.apyPct.toFixed(1)}% (about a ${betterVault.netSpreadPct.toFixed(1)}% net edge after costs). Moving your parked funds there beats repaying.`,
+        blockedBy: null,
+      };
+    }
     return {
       ...withSpread,
       action: "repay",
