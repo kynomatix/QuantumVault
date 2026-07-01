@@ -53,19 +53,21 @@ export function LtvBar({
             style={{ width: `${fillPct}%`, backgroundColor: healthBarColor(colorUsagePct ?? fillPct) }}
           />
         </div>
-        {/* Safe limit (recommended LTV). */}
+        {/* Safe limit (recommended LTV) — faintest guide line. */}
         {safeMarkerPct != null && (
           <div
-            className="absolute -top-0.5 -bottom-0.5 w-px bg-foreground/70"
+            className="absolute -top-0.5 -bottom-0.5 w-px bg-foreground/40"
             style={{ left: `${safeMarkerPct}%` }}
             title={`Safe limit (${Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV)`}
             data-testid={`marker-safe-${testId}`}
           />
         )}
-        {/* Max borrow (protocol cap) — only shown when it sits below liquidation. */}
+        {/* Max borrow (protocol cap) — only shown when it sits below liquidation.
+            Bold NEUTRAL line (no amber): the firm borrow ceiling just short of the
+            red liquidation edge. Red is reserved for the danger line alone. */}
         {maxBorrowMarkerPct != null && maxBorrowPct != null && (
           <div
-            className="absolute -top-0.5 -bottom-0.5 w-px bg-amber-500"
+            className="absolute -top-0.5 -bottom-0.5 w-px bg-foreground/90"
             style={{ left: `${maxBorrowMarkerPct}%` }}
             title={`Max Borrow (${maxBorrowPct}% LTV)`}
             data-testid={`marker-maxborrow-${testId}`}
@@ -93,13 +95,13 @@ export function LtvBar({
           )}
           {safeMarkerPct != null && (
             <span className="inline-flex items-center gap-1">
-              <span className="inline-block h-2.5 w-px shrink-0 bg-foreground/70" />
+              <span className="inline-block h-2.5 w-px shrink-0 bg-foreground/40" />
               Safe {Math.round(RECOMMENDED_MAX_LTV * 100)}%
             </span>
           )}
           {maxBorrowMarkerPct != null && maxBorrowPct != null && (
             <span className="inline-flex items-center gap-1">
-              <span className="inline-block h-2.5 w-px shrink-0 bg-amber-500" />
+              <span className="inline-block h-2.5 w-px shrink-0 bg-foreground/90" />
               Max Borrow {maxBorrowPct}%
             </span>
           )}
