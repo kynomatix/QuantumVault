@@ -9239,6 +9239,33 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     }
   });
 
+  // READ-ONLY: eligible collateral (e.g. INF) already sitting FREE in the user's
+  // trading agent wallet. Add Collateral used to read ONLY the external (Phantom)
+  // wallet via /api/wallet/tokens, so free collateral parked in the agent — from a
+  // collateral withdrawal delivered "to your trading agent", a supply-lock that
+  // failed after the transfer, or a leftover dust remainder — was invisible and the
+  // dialog wrongly said "none available". This surfaces that agent-held collateral
+  // so the dialog can lock it directly (no second Phantom transfer needed). Only
+  // allowlisted collateral mints are returned, and only the caller's OWN agent
+  // wallet is read; the supply executor re-caps at the LIVE on-chain balance, so a
+  // slightly-stale list can never over-supply.
+  app.get("/api/vault/borrow/agent-collateral", requireWallet, async (req, res) => {
+    try {
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet?.agentPublicKey) return res.json({ tokens: [] });
+      const borrowRoute = new JupiterLendBorrowRoute();
+      const configs = await borrowRoute.getLaunchVaultConfigs(ALLOWED_BORROW_VAULT_IDS);
+      const allowed = new Set(configs.map((c) => c.collateralMint));
+      if (allowed.size === 0) return res.json({ tokens: [] });
+      const all = await getUserFungibleTokens(wallet.agentPublicKey);
+      const tokens = all.filter((t) => allowed.has(t.mint) && t.amountUi > 0);
+      res.json({ tokens });
+    } catch (error: any) {
+      console.error("[Vault] agent-collateral read error:", error);
+      res.status(500).json({ error: "Failed to list agent collateral" });
+    }
+  });
+
   // READ-ONLY borrow eligibility + projection (Phase C, brick #4). NEVER moves
   // money: it reads the live vault config + platform exposure cache, runs the
   // enforced risk gate, and returns the projection (LTV/health) plus an honest

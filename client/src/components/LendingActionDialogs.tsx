@@ -90,17 +90,34 @@ type SupplyAsset = {
   name: string;
   logoURI: string | null;
   decimals: number;
+  /** Combined available = free in the connected wallet PLUS free in the agent. */
   amountUi: number;
+  /** Free balance in the connected (Phantom) wallet, in raw base units. */
+  walletRaw: bigint;
+  /** Free (un-locked) balance already in the trading agent, in raw base units. */
+  agentRaw: bigint;
   maxLtv: number;
   isNativeSol: boolean;
   cfg: BorrowCollateral;
 };
+
+// Token balances arrive as raw base-unit STRINGS; parse defensively so a
+// malformed value degrades to 0 (never throws mid-render).
+function safeBigInt(v: string | null | undefined): bigint {
+  if (!v) return 0n;
+  try {
+    return BigInt(v);
+  } catch {
+    return 0n;
+  }
+}
 
 export function SupplyCollateralDialog({
   open,
   onOpenChange,
   collaterals,
   userTokens,
+  agentTokens = [],
   tokensLoading = false,
   onRefreshTokens,
   pool,
@@ -110,6 +127,8 @@ export function SupplyCollateralDialog({
   onOpenChange: (o: boolean) => void;
   collaterals: BorrowCollateral[];
   userTokens: UserToken[];
+  /** Eligible collateral already sitting free in the trading agent wallet. */
+  agentTokens?: UserToken[];
   tokensLoading?: boolean;
   onRefreshTokens?: () => void;
   pool: LendingPool | null;
@@ -149,22 +168,32 @@ export function SupplyCollateralDialog({
       collaterals
         .filter((c) => !lockedMint || c.collateralMint === lockedMint)
         .map((c) => {
-          const tok = userTokens.find((t) => t.mint === c.collateralMint);
-          if (!tok || tok.amountUi <= 0) return null;
+          // Free-to-supply balance can live in EITHER the connected (Phantom)
+          // wallet OR the trading agent (e.g. collateral withdrawn to the agent,
+          // a supply-lock that failed after the transfer, or a leftover remainder).
+          // Combine both so the picker never wrongly says "none available".
+          const walletTok = userTokens.find((t) => t.mint === c.collateralMint);
+          const agentTok = agentTokens.find((t) => t.mint === c.collateralMint);
+          const walletRaw = walletTok ? safeBigInt(walletTok.amountRaw) : 0n;
+          const agentRaw = agentTok ? safeBigInt(agentTok.amountRaw) : 0n;
+          if (walletRaw <= 0n && agentRaw <= 0n) return null;
+          const src = walletTok ?? agentTok!;
           return {
             mint: c.collateralMint,
             symbol: c.collateralSymbol,
-            name: tok.name || c.collateralSymbol,
-            logoURI: c.collateralLogoURI ?? tok.logoURI,
+            name: src.name || c.collateralSymbol,
+            logoURI: c.collateralLogoURI ?? src.logoURI,
             decimals: c.collateralDecimals,
-            amountUi: tok.amountUi,
+            amountUi: (walletTok?.amountUi ?? 0) + (agentTok?.amountUi ?? 0),
+            walletRaw,
+            agentRaw,
             maxLtv: c.maxLtv,
-            isNativeSol: tok.isNativeSol,
+            isNativeSol: src.isNativeSol,
             cfg: c,
           } as SupplyAsset;
         })
         .filter((a): a is SupplyAsset => a !== null),
-    [collaterals, userTokens, lockedMint],
+    [collaterals, userTokens, agentTokens, lockedMint],
   );
 
   useEffect(() => {
@@ -190,8 +219,10 @@ export function SupplyCollateralDialog({
 
   const selected = assets.find((a) => a.mint === selectedMint) ?? null;
   const collateralRaw = selected ? toRawBaseUnits(amount, selected.decimals) : null;
-  const amt = parseFloat(amount);
-  const overBalance = !!selected && Number.isFinite(amt) && amt > selected.amountUi;
+  // Exact, raw-based ceiling = free-in-wallet PLUS free-in-agent. (Float compares
+  // would mis-judge dust-sized edges.)
+  const combinedRaw = selected ? selected.walletRaw + selected.agentRaw : 0n;
+  const overBalance = !!selected && !!collateralRaw && BigInt(collateralRaw) > combinedRaw;
   const valid = !!selected && !!collateralRaw && BigInt(collateralRaw) > 0n && !overBalance;
 
   const setMax = () => {
@@ -222,6 +253,21 @@ export function SupplyCollateralDialog({
       );
       const data = await safeResponseJson(res);
       if (!res.ok || !data.success) {
+        // The agent didn't hold enough to lock (e.g. a stale-high balance read, or
+        // the free balance moved between fetch and lock). A lock-only retry can't
+        // fix a shortfall, so DON'T park it as pendingSupply — re-sync balances and
+        // send the user back to the picker with the true available amount. Any
+        // amount already transferred stays safe in the agent and re-appears there.
+        if (typeof data.error === 'string' && /not enough .* in the trading wallet/i.test(data.error)) {
+          setPendingSupply(null);
+          onRefreshTokens?.();
+          toast({
+            title: 'Balance Changed',
+            description: `Your available ${symbol} changed — we refreshed it. Re-enter the amount and try again.`,
+            variant: 'destructive',
+          });
+          return;
+        }
         setPendingSupply({ cfg, collateralRaw: raw, symbol, amount: amountStr });
         // SOL-gas-only failure: the asset is already locked-ready in the agent,
         // so offer an inline top-up of just the shortfall, then retry the lock.
@@ -284,7 +330,13 @@ export function SupplyCollateralDialog({
       toast({ title: `Insufficient ${selected.symbol} balance`, variant: 'destructive' });
       return;
     }
-    if (!solanaWallet.publicKey || !solanaWallet.signTransaction) {
+    // The lock (Step 2) draws from the trading agent. Whatever the agent ALREADY
+    // holds free needs no transfer; only the shortfall comes from the connected
+    // wallet. If the agent already covers the full amount, Step 1 is skipped
+    // entirely — no Phantom popup, straight to locking.
+    const lockRaw = BigInt(collateralRaw);
+    const transferNeeded = lockRaw > selected.agentRaw ? lockRaw - selected.agentRaw : 0n;
+    if (transferNeeded > 0n && (!solanaWallet.publicKey || !solanaWallet.signTransaction)) {
       toast({ title: 'Wallet not connected', variant: 'destructive' });
       return;
     }
@@ -299,26 +351,30 @@ export function SupplyCollateralDialog({
       setStatusText('Checking your session…');
       await getSessionId();
 
-      // Step 1: user-signed transfer of the asset into the trading agent (NO swap).
-      setStatusText('Building transfer…');
-      const depRes = await fetch(
-        '/api/agent/deposit-token',
-        POST_JSON({ mint: selected.mint, amountRaw: collateralRaw }),
-      );
-      const depData = await safeResponseJson(depRes);
-      if (!depRes.ok) throw new Error(depData.error || 'Could not build the transfer');
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight } = depData;
+      if (transferNeeded > 0n) {
+        // Step 1: user-signed transfer of ONLY the shortfall into the trading
+        // agent (NO swap). The rest is already free in the agent.
+        setStatusText('Building transfer…');
+        const depRes = await fetch(
+          '/api/agent/deposit-token',
+          POST_JSON({ mint: selected.mint, amountRaw: transferNeeded.toString() }),
+        );
+        const depData = await safeResponseJson(depRes);
+        if (!depRes.ok) throw new Error(depData.error || 'Could not build the transfer');
+        const { transaction: serializedTx, blockhash, lastValidBlockHeight } = depData;
 
-      setStatusText(`Approve the ${selected.symbol} transfer in your wallet…`);
-      const tx = Transaction.from(Buffer.from(serializedTx, 'base64'));
-      const signed = await solanaWallet.signTransaction(tx);
-      const sig = await connection.sendRawTransaction(signed.serialize());
+        setStatusText(`Approve the ${selected.symbol} transfer in your wallet…`);
+        const tx = Transaction.from(Buffer.from(serializedTx, 'base64'));
+        const signed = await solanaWallet.signTransaction!(tx);
+        const sig = await connection.sendRawTransaction(signed.serialize());
 
-      setStatusText('Confirming transfer…');
-      await confirmTransactionWithFallback(connection, { signature: sig, blockhash, lastValidBlockHeight });
+        setStatusText('Confirming transfer…');
+        await confirmTransactionWithFallback(connection, { signature: sig, blockhash, lastValidBlockHeight });
+      }
 
-      // Step 2: lock as collateral. From here the asset is in the agent, so a
-      // failure is retryable without re-transferring.
+      // Step 2: lock the FULL amount as collateral. Everything is now in the agent
+      // (pre-existing free balance + any shortfall just transferred), so a failure
+      // from here is retryable without re-transferring.
       await runSupply(selected.cfg, collateralRaw, selected.symbol, amount);
     } catch (e: any) {
       if (isSessionError(e)) {
@@ -401,9 +457,9 @@ export function SupplyCollateralDialog({
                 data-testid="text-supply-empty"
               >
                 <p>
-                  This only lists assets sitting{' '}
-                  <span className="text-foreground font-medium">free in your connected wallet</span>. Anything you've
-                  already supplied is locked as collateral, so it won't show up here.
+                  This lists eligible collateral sitting{' '}
+                  <span className="text-foreground font-medium">free in your connected wallet or your trading agent</span>.
+                  Anything you've already supplied is locked as collateral, so it won't show up here.
                 </p>
                 <p>
                   Already have collateral (like INF) and want to draw more USDC against it? Close this, tap{' '}
@@ -480,9 +536,17 @@ export function SupplyCollateralDialog({
                   <div className="flex items-center justify-between text-xs text-muted-foreground">
                     <span>Amount</span>
                     <span data-testid="text-supply-wallet-balance">
-                      Wallet {selected.amountUi.toLocaleString(undefined, { maximumFractionDigits: 6 })} {selected.symbol}
+                      Available {selected.amountUi.toLocaleString(undefined, { maximumFractionDigits: 6 })} {selected.symbol}
                     </span>
                   </div>
+                  {selected.agentRaw > 0n && (
+                    <p className="text-[11px] text-muted-foreground" data-testid="text-supply-agent-held">
+                      {(Number(selected.agentRaw) / 10 ** selected.decimals).toLocaleString(undefined, {
+                        maximumFractionDigits: 6,
+                      })}{' '}
+                      {selected.symbol} is already in your trading agent — that part needs no transfer.
+                    </p>
+                  )}
                   <div className="relative">
                     <Input
                       inputMode="decimal"

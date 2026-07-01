@@ -204,10 +204,16 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
   // time the Supply dialog opens; guarded against cross-wallet repaint.
   const [userTokens, setUserTokens] = useState<UserToken[]>([]);
   const [tokensLoading, setTokensLoading] = useState(false);
+  // Eligible collateral (e.g. INF) already sitting FREE in the trading agent
+  // wallet — free collateral parked there (from a withdrawal delivered to the
+  // agent, a failed supply-lock, or a leftover remainder) that Add Collateral
+  // used to miss because it read only the external (Phantom) wallet.
+  const [agentTokens, setAgentTokens] = useState<UserToken[]>([]);
   const prevSupplyOpenRef = useRef(false);
   // The wallet that the currently-held userTokens belong to, so a prior wallet's
   // holdings are never shown while the new wallet's tokens load.
   const userTokensWalletRef = useRef<string | null>(null);
+  const agentTokensWalletRef = useRef<string | null>(null);
 
   const fetchWalletTokens = useCallback(async () => {
     const w = currentWalletRef.current;
@@ -217,14 +223,29 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       setUserTokens([]);
       userTokensWalletRef.current = w;
     }
+    if (agentTokensWalletRef.current !== w) {
+      setAgentTokens([]);
+      agentTokensWalletRef.current = w;
+    }
     setTokensLoading(true);
     try {
-      const res = await fetch('/api/wallet/tokens', { credentials: 'include', headers: walletAuthHeaders() });
-      if (!res.ok) throw new Error('Failed to load tokens');
-      const data = await safeResponseJson(res);
+      const [walletRes, agentRes] = await Promise.all([
+        fetch('/api/wallet/tokens', { credentials: 'include', headers: walletAuthHeaders() }),
+        fetch('/api/vault/borrow/agent-collateral', { credentials: 'include', headers: walletAuthHeaders() }),
+      ]);
+      if (!walletRes.ok) throw new Error('Failed to load tokens');
+      const data = await safeResponseJson(walletRes);
       if (currentWalletRef.current !== w) return; // cross-wallet guard
       setUserTokens((data.tokens || []) as UserToken[]);
       userTokensWalletRef.current = w;
+      // Agent collateral is best-effort: a failure here just means Add Collateral
+      // falls back to external-wallet-only (its prior behavior), never a hard error.
+      if (agentRes.ok) {
+        const agentData = await safeResponseJson(agentRes);
+        if (currentWalletRef.current !== w) return;
+        setAgentTokens((agentData.tokens || []) as UserToken[]);
+        agentTokensWalletRef.current = w;
+      }
     } catch {
       if (currentWalletRef.current !== w) return;
       setUserTokens([]);
@@ -337,6 +358,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
     setBorrow(null);
     setBorrowConfig(null);
     setUserTokens([]);
+    setAgentTokens([]);
     setSupplyOpen(false);
     setBorrowMorePool(null);
     setRepayPool(null);
@@ -1381,6 +1403,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
         onOpenChange={setSupplyOpen}
         collaterals={borrowConfig?.collaterals ?? []}
         userTokens={userTokens}
+        agentTokens={agentTokens}
         tokensLoading={tokensLoading}
         onRefreshTokens={fetchWalletTokens}
         pool={null}
