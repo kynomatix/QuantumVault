@@ -2419,6 +2419,26 @@ export class DatabaseStorage implements IStorage {
     return new Decimal(totalRaw.toString()).div(1_000_000).toNumber();
   }
 
+  // Bounded retry for the brief cost-basis DB write that follows a SUCCESSFUL
+  // on-chain park/unpark swap. The money already moved on-chain; a transient DB
+  // hiccup (pool exhaustion, lock wait, connection blip) must not lose the
+  // bookkeeping. We only retry when an idempotency key (the swap signature) is
+  // present: the transaction body dedupes on that signature so a lost commit-ack
+  // can't double-apply, and a fully rolled-back attempt retries cleanly.
+  private async withVaultWriteRetry<T>(fn: (attempt: number) => Promise<T>, idempotent: boolean): Promise<T> {
+    const maxAttempts = idempotent ? 4 : 1;
+    let lastErr: any;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await fn(attempt);
+      } catch (e) {
+        lastErr = e;
+        if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, 150 * attempt));
+      }
+    }
+    throw lastErr;
+  }
+
   // Atomic: add parked tokens + add USDC cost basis (average cost) and record the
   // swap as a taxable equity event, all in one transaction. The realized on-chain
   // token delta and the exact USDC spent are computed by the caller before this.
@@ -2434,9 +2454,24 @@ export class DatabaseStorage implements IStorage {
     notes?: string;
   }): Promise<VaultPosition> {
     const tradingBotId = p.tradingBotId ?? null;
-    return await db.transaction(async (tx) => {
+    const run = (attempt: number) => db.transaction(async (tx) => {
       const lockKey = this.vaultLockKey(p.walletAddress, tradingBotId, p.assetKey);
       await tx.execute(sql`SELECT pg_advisory_xact_lock(${778811}, ${lockKey})`);
+
+      // Idempotency: on a retry, if this exact swap was already recorded, don't
+      // double-apply (which would double the cost basis and duplicate the history
+      // event) — return the current position unchanged.
+      if (attempt > 1 && p.txSignature) {
+        const already = (await tx.select({ id: equityEvents.id }).from(equityEvents)
+          .where(and(eq(equityEvents.walletAddress, p.walletAddress), eq(equityEvents.eventType, 'vault_park'), eq(equityEvents.txSignature, p.txSignature)))
+          .limit(1))[0];
+        if (already) {
+          const current = (await tx.select().from(vaultPositions)
+            .where(and(eq(vaultPositions.walletAddress, p.walletAddress), this.vaultScopeCond(tradingBotId), eq(vaultPositions.assetKey, p.assetKey)))
+            .limit(1))[0];
+          if (current) return current;
+        }
+      }
 
       const existing = (await tx.select().from(vaultPositions)
         .where(and(eq(vaultPositions.walletAddress, p.walletAddress), this.vaultScopeCond(tradingBotId), eq(vaultPositions.assetKey, p.assetKey)))
@@ -2470,6 +2505,7 @@ export class DatabaseStorage implements IStorage {
 
       return row;
     });
+    return await this.withVaultWriteRetry(run, !!p.txSignature);
   }
 
   // Atomic: reduce parked tokens by the exact sold amount, remove a proportional
@@ -2487,9 +2523,25 @@ export class DatabaseStorage implements IStorage {
     notesPrefix?: string;
   }): Promise<{ position: VaultPosition; costBasisRemoved: number; realizedPnl: number }> {
     const tradingBotId = p.tradingBotId ?? null;
-    return await db.transaction(async (tx) => {
+    const run = (attempt: number) => db.transaction(async (tx) => {
       const lockKey = this.vaultLockKey(p.walletAddress, tradingBotId, p.assetKey);
       await tx.execute(sql`SELECT pg_advisory_xact_lock(${778811}, ${lockKey})`);
+
+      // Idempotency (see applyVaultPark + withVaultWriteRetry): a retry after a
+      // lost commit-ack must not re-apply. If this swap was already recorded,
+      // return the current position unchanged — the realized figures are already
+      // persisted on the recorded event.
+      if (attempt > 1 && p.txSignature) {
+        const already = (await tx.select({ id: equityEvents.id }).from(equityEvents)
+          .where(and(eq(equityEvents.walletAddress, p.walletAddress), eq(equityEvents.eventType, 'vault_unpark'), eq(equityEvents.txSignature, p.txSignature)))
+          .limit(1))[0];
+        if (already) {
+          const current = (await tx.select().from(vaultPositions)
+            .where(and(eq(vaultPositions.walletAddress, p.walletAddress), this.vaultScopeCond(tradingBotId), eq(vaultPositions.assetKey, p.assetKey)))
+            .limit(1))[0];
+          if (current) return { position: current, costBasisRemoved: 0, realizedPnl: 0 };
+        }
+      }
 
       const existing = (await tx.select().from(vaultPositions)
         .where(and(eq(vaultPositions.walletAddress, p.walletAddress), this.vaultScopeCond(tradingBotId), eq(vaultPositions.assetKey, p.assetKey)))
@@ -2564,6 +2616,7 @@ export class DatabaseStorage implements IStorage {
 
       return { position: row, costBasisRemoved: costBasisRemoved.toNumber(), realizedPnl: realizedPnl.toNumber() };
     });
+    return await this.withVaultWriteRetry(run, !!p.txSignature);
   }
 
   // --- Phase 1 Vaults yield oracle (display-only price snapshots). ---

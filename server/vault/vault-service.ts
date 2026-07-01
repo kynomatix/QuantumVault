@@ -244,8 +244,28 @@ export async function parkUsdc(params: {
       notes: `Parked ${usdcSpent.toFixed(6)} USDC into ${asset.displayName}`,
     });
   } catch (e: any) {
-    dbWarning = `Park succeeded on-chain (signature ${exec.signature}) but recording your cost basis failed. Your funds are safe in the bot wallet.`;
+    // The money is already parked and earning on-chain, and the Earn view reads
+    // balances straight from the chain, so the user sees their funds regardless.
+    // Only the cost-basis figure + the "Park" history line failed to save (rare,
+    // now that applyVaultPark retries with idempotency). Don't alarm the user
+    // with internal-bookkeeping jargon — record it to the admin error log so the
+    // owner can see it, and leave any legitimate swap warning (exec.warning) intact.
     console.error("[Vault] applyVaultPark failed after a successful park", e);
+    await storage.recordError({
+      fingerprint: `vault-park-bookkeeping:${params.tradingBotId ? 'bot' : 'account'}:${asset.key}`,
+      category: 'fund_safety',
+      severity: 'error',
+      source: '[Vault] applyVaultPark',
+      message: `Cost-basis write failed after a successful on-chain park into ${asset.displayName}`,
+      detail: e?.stack || String(e?.message ?? e),
+      context: {
+        walletAddress: params.walletAddress,
+        tradingBotId: params.tradingBotId ?? null,
+        assetKey: asset.key,
+        txSignature: exec.signature,
+        usdcSpent,
+      },
+    }).catch((logErr) => console.error("[Vault] recordError (park) failed", logErr));
   }
 
   return {
@@ -392,8 +412,27 @@ export async function unparkToUsdc(params: {
     costBasisRemoved = r.costBasisRemoved;
     realizedPnl = r.realizedPnl;
   } catch (e: any) {
-    dbWarning = `Unpark succeeded on-chain (signature ${exec.signature}) but updating your cost basis failed. Your USDC is safe in the bot wallet.`;
+    // The USDC is already back in the wallet on-chain; only the cost-basis update
+    // + the "Unpark" history line failed to save (rare, now that applyVaultUnpark
+    // retries with idempotency). Don't alarm the user with internal-bookkeeping
+    // jargon — record it to the admin error log and keep any legitimate swap
+    // warning (exec.warning) intact.
     console.error("[Vault] applyVaultUnpark failed after a successful unpark", e);
+    await storage.recordError({
+      fingerprint: `vault-unpark-bookkeeping:${params.tradingBotId ? 'bot' : 'account'}:${asset.key}`,
+      category: 'fund_safety',
+      severity: 'error',
+      source: '[Vault] applyVaultUnpark',
+      message: `Cost-basis update failed after a successful on-chain unpark from ${asset.displayName}`,
+      detail: e?.stack || String(e?.message ?? e),
+      context: {
+        walletAddress: params.walletAddress,
+        tradingBotId: params.tradingBotId ?? null,
+        assetKey: asset.key,
+        txSignature: exec.signature,
+        usdcReceived,
+      },
+    }).catch((logErr) => console.error("[Vault] recordError (unpark) failed", logErr));
   }
 
   return {
