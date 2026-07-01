@@ -603,10 +603,15 @@ function DefendLoanDialog({
               <p className="text-xs text-amber-600 dark:text-amber-500" data-testid="text-defend-src-error">{srcErr}</p>
             ) : sources.length === 0 ? (
               <p className="text-xs text-muted-foreground" data-testid="text-defend-no-sources">
-                No spendable funds in your account wallet. Add USDC to your account first, then defend this loan.
+                No free (unpledged) funds in your account wallet to add. Any {collSym ?? "collateral"} already
+                backing this loan isn't spendable here — add USDC to your account first, then defend this loan.
               </p>
             ) : (
               <>
+                <p className="text-[11px] text-muted-foreground" data-testid="text-defend-sources-note">
+                  Your free (unpledged) account funds. {collSym ?? "Collateral"} already backing this loan isn't
+                  listed — it's locked as collateral, not spendable here.
+                </p>
                 {/* Source picker */}
                 <Select value={sourceMint} onValueChange={setSourceMint}>
                   <SelectTrigger className="h-auto py-2" data-testid="select-defend-source">
@@ -712,6 +717,11 @@ export default function PerbotBorrowControls({
   const [confirm, setConfirm] = useState<"borrow" | "repay" | null>(null);
   // How much USDC the user wants to borrow (free text → parsed). Empty = nothing yet.
   const [amount, setAmount] = useState("");
+  // Which collateral to borrow against, by mint. null = use the safest-ranked
+  // default. Only surfaced as a picker when the account has 2+ borrowable
+  // collaterals; today only INF is live so this stays invisible until a second one
+  // lands. Reset on bot/wallet switch so a pick never carries across bots.
+  const [selectedCarryMint, setSelectedCarryMint] = useState<string | null>(null);
   // True when a borrow op for THIS bot is mid-flight (a clientRequestId is persisted
   // but no open position is visible yet, e.g. after a 202). Lets the user RESUME the
   // exact same op — with the exact same persisted amounts — even if the input is blank.
@@ -804,6 +814,7 @@ export default function PerbotBorrowControls({
     // and clears the typed amount so it can't carry over to a different bot.
     setConfirm(null);
     setAmount("");
+    setSelectedCarryMint(null);
     if (active && bot && walletAddress) {
       fetchPositions();
     } else {
@@ -814,7 +825,34 @@ export default function PerbotBorrowControls({
   }, [active, bot?.id, walletAddress]);
 
   const openPos = data?.positions?.[0] ?? null;
-  const carrySrc = (data?.carrySources ?? []).find((s) => s.available) ?? null;
+
+  // All collateral sources this bot's account could borrow against right now.
+  const availableSources = (data?.carrySources ?? []).filter((s) => s.available);
+  // Rank "safest to borrow against" first: stablecoin-type collateral (no native
+  // staking yield → no underlying price volatility against the USDC debt) before
+  // yield-bearing LSTs, then the one that lets you borrow the most (largest
+  // headroom) as a tie-break. This is the DEFAULT the picker lands on, so a
+  // hands-off user always borrows against the least-risky collateral without ever
+  // touching a knob. (Ranking confirmed with the owner — see task-220.)
+  const rankedSources = [...availableSources].sort((a, b) => {
+    const aStable = !(a.stakingApyPct != null && a.stakingApyPct > 0);
+    const bStable = !(b.stakingApyPct != null && b.stakingApyPct > 0);
+    if (aStable !== bStable) return aStable ? -1 : 1;
+    let aMax = 0;
+    let bMax = 0;
+    try { aMax = Number(BigInt(a.maxBorrowRaw)); } catch { aMax = 0; }
+    try { bMax = Number(BigInt(b.maxBorrowRaw)); } catch { bMax = 0; }
+    return bMax - aMax;
+  });
+  // The source actually in play: the user's explicit pick (by collateral mint) when
+  // more than one exists, else the safest-ranked default. Never a stale mint — falls
+  // back to the default if the chosen collateral is no longer borrowable.
+  const carrySrc =
+    rankedSources.length === 0
+      ? null
+      : (selectedCarryMint
+          ? rankedSources.find((s) => s.collateralMint === selectedCarryMint) ?? rankedSources[0]
+          : rankedSources[0]);
 
   // Refresh both the drawer balances/advisor and this card's own state.
   const refreshAll = async () => {
@@ -867,7 +905,14 @@ export default function PerbotBorrowControls({
       const storeKey = openKey();
       const rawsKey = openRawsKey();
       let clientRequestId = localStorage.getItem(storeKey);
-      let raws: { carveRaw: string; requestedDebtRaw: string } | null = null;
+      let raws: { carveRaw: string; requestedDebtRaw: string; collateralMint?: string } | null = null;
+      // The collateral the borrow is actually opened against. On a FRESH borrow this is
+      // the currently-selected source. On a RESUME it MUST be the mint the persisted
+      // amounts were computed for — the carve raws are denominated in that collateral —
+      // NOT whatever the picker happens to show now. Persisting it makes the mint part
+      // of the op identity so a resume can never route stale amounts at a different
+      // collateral (e.g. user switches the picker after a failed-but-persisted attempt).
+      let postCollateralMint = carrySrc.collateralMint;
 
       if (clientRequestId) {
         // RESUME: an op is already in flight → re-send the EXACT amounts it was created
@@ -889,14 +934,19 @@ export default function PerbotBorrowControls({
           fetchPositions();
           return;
         }
+        // Prefer the mint the amounts were computed for. (Legacy in-flight ops persisted
+        // before this field existed fall back to the current source; today that is always
+        // the sole collateral, so it stays correct.)
+        if (raws.collateralMint) postCollateralMint = raws.collateralMint;
       } else {
-        // FRESH: compute from the input, then persist the raws BEFORE the id so we can
-        // never end up with an id that has no amounts to resume from.
-        raws = computeBorrowRaws(parseFloat(amount));
-        if (!raws) {
+        // FRESH: compute from the input, then persist the raws (with the collateral mint)
+        // BEFORE the id so we can never end up with an id that has no amounts to resume from.
+        const fresh = computeBorrowRaws(parseFloat(amount));
+        if (!fresh) {
           toast({ title: "Enter an amount", description: "Enter how much USDC you'd like to borrow.", variant: "destructive" });
           return;
         }
+        raws = { ...fresh, collateralMint: postCollateralMint };
         clientRequestId = newRequestId();
         try {
           localStorage.setItem(rawsKey, JSON.stringify(raws));
@@ -913,7 +963,7 @@ export default function PerbotBorrowControls({
         credentials: "include",
         body: JSON.stringify({
           botId: bot.id,
-          collateralMint: carrySrc.collateralMint,
+          collateralMint: postCollateralMint,
           carveRaw: raws.carveRaw,
           requestedDebtRaw: raws.requestedDebtRaw,
           sessionId,
@@ -924,7 +974,28 @@ export default function PerbotBorrowControls({
       if (res.ok && d.ok) {
         clearOpenOp();
         setAmount("");
-        const usd = typeof d.suggestedParkAmountUsdc === "number" ? d.suggestedParkAmountUsdc : null;
+        // Confirm the EXACT amount the user asked for (the debt raws we sent),
+        // not the server's post-settle `suggestedParkAmountUsdc` — that figure can
+        // trail the on-chain debt as it settles and would flash a partial (e.g.
+        // "$8" then "$10") on the confirmation. `raws.requestedDebtRaw` is the
+        // amount actually requested and is present on both the fresh and resume
+        // paths. USDC debt = 6 decimals. Falls back to the server figure only if
+        // the raws are somehow unreadable.
+        let requestedUsd: number | null = null;
+        try {
+          if (raws?.requestedDebtRaw) {
+            const dec = carrySrc.debtDecimals ?? 6;
+            requestedUsd = Number(BigInt(raws.requestedDebtRaw)) / 10 ** dec;
+          }
+        } catch {
+          requestedUsd = null;
+        }
+        const usd =
+          requestedUsd != null && Number.isFinite(requestedUsd) && requestedUsd > 0
+            ? requestedUsd
+            : typeof d.suggestedParkAmountUsdc === "number"
+              ? d.suggestedParkAmountUsdc
+              : null;
         const sym = carrySrc.collateralSymbol ?? (carrySrc.collateralAssetKey ? carrySrc.collateralAssetKey.toUpperCase() : null);
         const against = sym ? ` against your ${sym}` : "";
         toast({
@@ -1110,6 +1181,13 @@ export default function PerbotBorrowControls({
       ? Math.min(100, Math.max(0, (liveDebtUsd / borrowLimitUsd) * 100))
       : null;
   const safeMarkerPct = safeLtvMarkerPct(posMaxLtv);
+  // Current LTV = live on-chain debt ÷ collateral value, shown to the LEFT of the
+  // safe-limit pipe in the legend (e.g. "32% LTV | Safe limit (50% LTV)"). Null when
+  // either input is unreadable → the legend omits it (health is already hidden then).
+  const currentLtvPct =
+    collValueUsd != null && collValueUsd > 0 && liveDebtUsd != null
+      ? (liveDebtUsd / collValueUsd) * 100
+      : null;
 
   // Advisor → which of the two action cards to HIGHLIGHT as recommended. park/hold ⇒
   // Carry Trade (keep the loan, earn yield); repay ⇒ Repay. Rendered as clean STATS
@@ -1228,7 +1306,13 @@ export default function PerbotBorrowControls({
                   )}
                 </div>
                 {safeMarkerPct != null && (
-                  <div className="flex items-center gap-1 text-[10px] text-muted-foreground" data-testid="legend-perbot-safe-limit">
+                  <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground" data-testid="legend-perbot-safe-limit">
+                    {currentLtvPct != null && (
+                      <>
+                        <span className="tabular-nums text-foreground" data-testid="text-perbot-current-ltv">{Math.round(currentLtvPct)}% LTV</span>
+                        <span aria-hidden="true" className="text-muted-foreground/60">|</span>
+                      </>
+                    )}
                     <span className="inline-block h-2.5 w-px bg-foreground/70 shrink-0" />
                     <span>Safe limit ({Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV)</span>
                   </div>
@@ -1397,6 +1481,31 @@ export default function PerbotBorrowControls({
             <p className="text-sm text-muted-foreground">
               Borrow extra USDC against your {collSym ? `${collSym} ` : "account "}collateral and add it to this bot's trading balance. Choose how much, up to a safe limit. Your account stays at a safe level, and you can repay anytime.
             </p>
+            {/* Collateral picker — only when the account has 2+ borrowable collaterals.
+                Defaults to the safest-ranked source; invisible while only one exists. */}
+            {rankedSources.length >= 2 && (
+              <div className="space-y-1">
+                <span className="text-[11px] text-muted-foreground">Borrow against</span>
+                <Select value={carrySrc?.collateralMint ?? ""} onValueChange={setSelectedCarryMint}>
+                  <SelectTrigger className="h-9" data-testid="select-perbot-carry-source">
+                    <SelectValue placeholder="Choose collateral" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {rankedSources.map((s, i) => {
+                      const sym = s.collateralSymbol ?? (s.collateralAssetKey ? s.collateralAssetKey.toUpperCase() : "Collateral");
+                      return (
+                        <SelectItem key={s.collateralMint} value={s.collateralMint} data-testid={`option-perbot-carry-${s.collateralMint}`}>
+                          <span className="flex items-center gap-2">
+                            <span className="font-medium">{sym}</span>
+                            {i === 0 && <span className="text-[10px] text-muted-foreground">Safest</span>}
+                          </span>
+                        </SelectItem>
+                      );
+                    })}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             {/* What you're borrowing against — small sectioned info blocks. */}
             <div className="grid grid-cols-3 gap-2 text-center">
               <div className="p-2.5 rounded-lg bg-muted/30">

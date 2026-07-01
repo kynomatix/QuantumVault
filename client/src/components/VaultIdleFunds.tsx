@@ -443,6 +443,14 @@ export default function VaultIdleFunds({
   );
   const embPosition = embAsset ? positionByKey.get(embAsset.key) ?? null : null;
   const embHeld = embPosition?.onChainAmount ?? 0;
+  // Where funds ACTUALLY sit right now (any asset with an on-chain balance),
+  // independent of the picker's selection. Surfacing this next to the destination
+  // picker keeps the two from ever looking contradictory (e.g. picker shows Perena
+  // but funds are really in OnRe).
+  const heldParked = useMemo(
+    () => positions.filter((p) => p.onChainAmount > 0),
+    [positions],
+  );
 
   const parkPreview = usePreview({
     open: !!detailAsset,
@@ -856,7 +864,9 @@ export default function VaultIdleFunds({
         ) : (
           <div className="space-y-3">
             <div>
-              <Label className="text-xs text-muted-foreground mb-1 block">Token</Label>
+              <Label className="text-xs text-muted-foreground mb-1 block">
+                {controlledDestination ? "Auto-park destination" : "Token"}
+              </Label>
               <Select value={embAsset?.key ?? ""} onValueChange={handleEmbSelect}>
                 <SelectTrigger className="h-9" data-testid="select-park-asset">
                   <SelectValue placeholder="Choose a token" />
@@ -873,6 +883,11 @@ export default function VaultIdleFunds({
                   ))}
                 </SelectContent>
               </Select>
+              {heldParked.length > 0 && (
+                <p className="text-[11px] text-muted-foreground mt-1.5" data-testid="text-current-parked-location">
+                  Currently earning in {heldParked.map((p) => p.displayName).join(", ")}.
+                </p>
+              )}
             </div>
 
             {embAsset && (

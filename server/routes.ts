@@ -11618,6 +11618,43 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!result || !result.success) {
         return res.status(400).json({ error: result?.error || "Park failed", priceImpactPct: result?.priceImpactPct ?? null });
       }
+
+      // Truth-in-UI + money-safety: when a per-bot (Flash) manual park succeeds,
+      // keep the bot's persisted auto-park DESTINATION in sync with the asset the
+      // funds actually now sit in. Otherwise the Settings picker keeps showing a
+      // stale destination AND — worse — the auto-repark migration (and the
+      // migrate-on-save in the bot PATCH) would move these very funds BACK to the
+      // stale asset on the next close. Syncing makes that migration a no-op
+      // (funds already at the destination).
+      //
+      // Conservative on purpose: only correct a destination that already exists
+      // (stale) or one that auto-park is actively using. We never SET a
+      // destination on a fully-manual bot (autoParkIdle off + no destination),
+      // because that would newly arm the auto-repark scanner on a bot the user
+      // deliberately left hands-off. Best-effort: a failed write must never fail
+      // the park — the funds are already safely in `assetKey` and the next park
+      // retries.
+      if (scope.scope === "bot" && scope.tradingBotId) {
+        try {
+          const parkedBot = await storage.getTradingBotById(scope.tradingBotId);
+          const destAlreadySet =
+            parkedBot?.parkDestinationAsset != null && parkedBot.parkDestinationAsset !== "";
+          if (
+            parkedBot &&
+            parkedBot.activeProtocol === "flash" &&
+            (parkedBot.autoParkIdle || destAlreadySet) &&
+            (parkedBot.parkDestinationAsset ?? null) !== assetKey
+          ) {
+            await storage.updateTradingBot(scope.tradingBotId, { parkDestinationAsset: assetKey });
+          }
+        } catch (e) {
+          console.warn(
+            `[Vault] park-destination sync failed for bot ${String(scope.tradingBotId).slice(0, 8)}:`,
+            e,
+          );
+        }
+      }
+
       res.json({ ...result, scope: scope.scope, tradingBotId: scope.tradingBotId });
     } catch (error: any) {
       console.error("[Vault] park error:", error);

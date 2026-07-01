@@ -1066,6 +1066,13 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                   // Safe-limit (recommended LTV) marker position on this PROTOCOL-
                   // framed bar; null when the whole bar is within the safe zone.
                   const poolSafeMarkerPct = safeLtvMarkerPct(p.maxLtv);
+                  // Current LTV = debt ÷ collateral value, shown to the LEFT of the
+                  // safe-limit pipe in the legend for consistency with the per-bot
+                  // loan card. Null when either input is unreadable.
+                  const poolCurrentLtvPct =
+                    p.collateralUsd != null && p.collateralUsd > 0 && p.debtUsd != null
+                      ? (p.debtUsd / p.collateralUsd) * 100
+                      : null;
                   return (
                     <div key={p.id} className="rounded-xl border border-border bg-background/40 p-4" data-testid={`card-loan-${p.id}`}>
                       <div className="flex items-center justify-between gap-3">
@@ -1129,7 +1136,13 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                               )}
                             </div>
                             {poolSafeMarkerPct != null && (
-                              <div className="flex items-center gap-1 text-[10px] text-muted-foreground" data-testid={`legend-safe-limit-${p.id}`}>
+                              <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground" data-testid={`legend-safe-limit-${p.id}`}>
+                                {poolCurrentLtvPct != null && (
+                                  <>
+                                    <span className="tabular-nums text-foreground" data-testid={`text-loan-current-ltv-${p.id}`}>{Math.round(poolCurrentLtvPct)}% LTV</span>
+                                    <span aria-hidden="true" className="text-muted-foreground/60">|</span>
+                                  </>
+                                )}
                                 <span className="inline-block h-2.5 w-px bg-foreground/70 shrink-0" />
                                 <span>Safe limit ({Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV)</span>
                               </div>

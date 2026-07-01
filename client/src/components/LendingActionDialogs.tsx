@@ -710,6 +710,13 @@ export function BorrowMoreDialog({
   // Where the SAFE limit (recommended LTV) sits on this PROTOCOL-framed bar. null
   // when the whole bar is already within the safe zone (protocol max <= safe).
   const safeMarkerPct = safeLtvMarkerPct(protocolMaxLtv);
+  // PROJECTED LTV after this borrow = projected debt ÷ collateral value, shown to
+  // the LEFT of the safe-limit pipe in the legend (labeled "Projected" since this
+  // dialog is a forward-looking action). Null when either input is unreadable.
+  const projectedLtvPct =
+    collateralValueUsd != null && collateralValueUsd > 0 && projectedDebtUsd != null
+      ? (projectedDebtUsd / collateralValueUsd) * 100
+      : null;
 
   const setMaxBorrow = () => {
     if (availableToBorrowUsd == null || !(availableToBorrowUsd > 0)) return;
@@ -809,7 +816,13 @@ export function BorrowMoreDialog({
               )}
             </div>
             {safeMarkerPct != null && (
-              <div className="flex items-center gap-1 text-[10px] text-muted-foreground" data-testid="legend-safe-limit-borrow-more">
+              <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground" data-testid="legend-safe-limit-borrow-more">
+                {projectedLtvPct != null && (
+                  <>
+                    <span className="tabular-nums text-foreground" data-testid="text-borrow-more-projected-ltv">Projected {Math.round(projectedLtvPct)}% LTV</span>
+                    <span aria-hidden="true" className="text-muted-foreground/60">|</span>
+                  </>
+                )}
                 <span className="inline-block h-2.5 w-px bg-foreground/70 shrink-0" />
                 <span>Safe limit ({Math.round(RECOMMENDED_MAX_LTV * 100)}% LTV) — borrowing past it raises liquidation risk</span>
               </div>
