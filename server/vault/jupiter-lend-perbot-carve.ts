@@ -63,6 +63,7 @@ import {
   executeBorrowClose,
   supplyToExistingBotPosition,
   borrowMoreOnExistingBotPosition,
+  withdrawFromExistingBotPosition,
   withBorrowLock,
 } from "./jupiter-lend-borrow-executor";
 import { JupiterLendBorrowRoute, type BorrowVaultConfig } from "./jupiter-lend-borrow-route";
@@ -267,6 +268,13 @@ export interface PerbotCarveResult {
   restoredRaw?: string;
   /** unwind/close: USDC repay top-up swept back from the bot to the account, raw. */
   sweptRaw?: string;
+  /** remove-collateral: realised collateral withdrawn from the BOT position, raw. */
+  removedRaw?: string;
+  /** remove-collateral: portion re-pledged into the ACCOUNT position, raw ("0" when
+   *  no open account position on the same collateral existed at op creation). */
+  resuppliedRaw?: string;
+  /** remove-collateral: where the released collateral ended up. */
+  destination?: "account_position" | "account_wallet";
   /** Every on-chain signature this op produced, oldest first. */
   signatures?: string[];
   error?: string;
@@ -2214,6 +2222,324 @@ async function finalizeGrow(
     carvedRaw: r.carvedRaw.toString(),
     accountPostLtv: r.accountPostLtv,
     borrowedUsdcRaw: r.borrowedUsdcRaw,
+    signatures: ((fresh?.txSignatures ?? op.txSignatures) as string[] | null) ?? [],
+  };
+}
+
+// ============================================================================
+// PER-BOT REMOVE COLLATERAL (release spare back to the account)
+// ============================================================================
+// The OPPOSITE direction of runPerbotGrowLoan's carve: withdraw SPARE collateral
+// from a Flash bot's over-collateralised loan (debt must already be 0 against
+// the removed slice — the ROUTE gates on removableSpare) and return it to the
+// account, re-pledging it into the account's open position on the same
+// collateral when one exists (else it stops safely in the account wallet).
+//
+// Money-safety identical to the grow/unwind machines:
+//   * one borrow_operation row ("perbot_carve_release") is the crash journal;
+//     every leg write-aheads its signature BEFORE broadcast and reconciles a
+//     resume by on-chain status (landed/reverted/expired/in_flight) — NEVER by
+//     a balance read (an in-flight leg reads 0 and would double-run);
+//   * the withdraw leg is AMOUNT-EXACT (meta.removeRaw). The recorded removal
+//     is the intent, never the position's "remaining" read (see the carve
+//     transfer-sizing lesson: observedCollateralRaw is what's LEFT, not moved);
+//   * the withdraw primitive enforces evaluateCollateralWithdraw against the
+//     LIVE position + fresh oracle at sign time, capped at the SAME friendly
+//     target the carve sizing used, and fails CLOSED on any unreadable input;
+//   * the resupply leg is idempotent via the account position's collateral
+//     baseline captured at op creation (BEFORE any money moved), mirroring the
+//     unwind's resupply guard;
+//   * every fail path is failClosed with an explicit resumable step; funds are
+//     never left untracked (position -> bot wallet -> account wallet -> account
+//     position, each hop journaled).
+//
+// Steps: initialized -> withdrawing -> bot_withdrawn -> releasing ->
+//        released_to_account -> [resupplying -> resupplied] -> final_read
+// (+ withdraw_failed / release_failed / resupply_failed resume points).
+
+export interface PerbotRemoveCollateralParams {
+  walletAddress: string;
+  vault: BorrowVaultConfig;
+  /** The account (main agent) wallet — receives the released collateral, funds gas. */
+  accountPublicKey: string;
+  accountSecretKey: Uint8Array;
+  /** The bot wallet that owns the borrow position NFT and signs the withdraw. */
+  botPublicKey: string;
+  botSecretKey: Uint8Array;
+  tradingBotId: string;
+  /** The bot's OPEN borrow position row the spare is removed from. */
+  botBorrowPositionId: string;
+  /** Resupply destination: the wallet's OPEN account-scope position on the SAME
+   *  collateral, or null -> the released collateral stops in the account wallet.
+   *  Read ONLY at op creation; a resume replays the persisted destination. */
+  accountBorrowPositionId: string | null;
+  /** Spare collateral to remove, raw. The route has already gated this against
+   *  removableSpare; the withdraw primitive re-gates at sign time regardless. */
+  removeRaw: bigint;
+  /** The friendly LTV cap the removal must respect (same bar as the carve). */
+  targetLtv: number;
+  /** Idempotency key: re-POST the SAME id to RESUME a partial release. */
+  clientRequestId: string;
+}
+
+export async function runPerbotRemoveCollateral(params: PerbotRemoveCollateralParams): Promise<PerbotCarveResult> {
+  const collateralMint = params.vault.collateralMint;
+  const lockKey = `perbot-release:${params.walletAddress}:${params.clientRequestId}`;
+
+  return withBorrowLock(lockKey, async () => {
+    let op = await resolveOrCreateOp({
+      walletAddress: params.walletAddress,
+      borrowPositionId: params.botBorrowPositionId,
+      clientRequestId: params.clientRequestId,
+      operationType: "perbot_carve_release",
+      metadata: {
+        tradingBotId: params.tradingBotId,
+        collateralMint,
+        botBorrowPositionId: params.botBorrowPositionId,
+        accountBorrowPositionId: params.accountBorrowPositionId,
+        removeRaw: params.removeRaw.toString(),
+        targetLtv: params.targetLtv,
+        botPublicKey: params.botPublicKey,
+        accountPublicKey: params.accountPublicKey,
+      },
+    });
+
+    // Same-id-different-inputs guard: never resume a breadcrumb under new inputs.
+    // The resupply destination is deliberately NOT pinned — it is read from the
+    // op's own metadata below, so a caller-side re-derivation can't redirect a
+    // half-done release.
+    const identityError = validateOpIdentity(op, "perbot_carve_release", {
+      tradingBotId: params.tradingBotId,
+      collateralMint,
+      botBorrowPositionId: params.botBorrowPositionId,
+      removeRaw: params.removeRaw.toString(),
+    });
+    if (identityError) return { success: false, error: identityError };
+
+    if (op.status === "succeeded") {
+      const r = (op.result as Meta | null) ?? {};
+      return {
+        success: true,
+        operationId: op.id,
+        step: op.step ?? "final_read",
+        removedRaw: r.removedRaw,
+        resuppliedRaw: r.resuppliedRaw,
+        destination: r.destination,
+        signatures: (op.txSignatures as string[] | null) ?? [],
+      };
+    }
+
+    const removeRaw = BigInt(readMeta(op).removeRaw || params.removeRaw.toString());
+    if (removeRaw <= 0n) return failClosed(op, op.step ?? "initialized", "No removal amount recorded for this operation.", false);
+    const destinationPositionId = (readMeta(op).accountBorrowPositionId as string | null) ?? null;
+
+    // ---- Baseline (BEFORE any money moves) --------------------------------
+    // The resupply idempotency guard needs the account position's collateral as
+    // it stood before this op. Captured exactly once, at step "initialized";
+    // unreadable => fail closed restartable (nothing has moved yet).
+    if ((op.step ?? "initialized") === "initialized" && destinationPositionId && readMeta(op).acctPosCollBeforeRaw === undefined) {
+      const acctPos = await storage.getBorrowPosition(params.walletAddress, destinationPositionId);
+      if (!acctPos || acctPos.status !== "open" || acctPos.collateralMint !== collateralMint) {
+        return failClosed(op, "initialized", "The account loan this release would top up is no longer open. Nothing has moved — start again.", false);
+      }
+      const acctNftId = Number(acctPos.venuePositionId);
+      if (!Number.isInteger(acctNftId) || acctNftId <= 0) {
+        return failClosed(op, "initialized", "The account loan has no valid on-chain id. Nothing has moved.", false);
+      }
+      const borrowRoute = new JupiterLendBorrowRoute();
+      const liveAcct = await borrowRoute.readLivePositionHealth(collateralMint, acctNftId);
+      if (!liveAcct) {
+        return failClosed(op, "initialized", "Could not read the account position to prepare the release. Nothing has moved — retry in a moment.", false);
+      }
+      await storage.updateBorrowOperation(op.id, {
+        mergeMetadata: { acctPosCollBeforeRaw: liveAcct.collateralRaw, acctVenuePositionId: acctNftId },
+      });
+      op = (await storage.getBorrowOperationById(op.id)) ?? op;
+    }
+
+    // ---- WITHDRAW (spare out of the bot position) leg ---------------------
+    // Amount-exact, bot-signed, risk-gated inside the primitive. On resume the
+    // write-ahead signature is the ONLY authority: landed => the collateral is
+    // in the bot wallet, advance; in_flight => wait; reverted/expired => nothing
+    // committed, re-run forward.
+    const wStep = op.step ?? "initialized";
+    if (wStep === "initialized" || wStep === "withdrawing" || wStep === "withdraw_failed") {
+      const meta = readMeta(op);
+      const removeSig = meta.removeSig as string | undefined;
+      let recovered = false;
+      if (removeSig) {
+        const s = await reconcileSignature(removeSig, meta.removeLvbh);
+        if (s === "in_flight") return failClosed(op, "withdrawing", "The collateral removal is still settling on-chain. Funds are safe — retry in a moment.", true);
+        if (s === "landed") recovered = true;
+        // reverted | expired: nothing committed -> re-run the withdraw below.
+      }
+      if (!recovered) {
+        await storage.updateBorrowOperation(op.id, { step: "withdrawing" });
+        const w = await withdrawFromExistingBotPosition({
+          walletAddress: params.walletAddress,
+          tradingBotId: params.tradingBotId,
+          botPublicKey: params.botPublicKey,
+          botSecretKey: params.botSecretKey,
+          accountPublicKey: params.accountPublicKey,
+          accountSecretKey: params.accountSecretKey,
+          collateralMint,
+          borrowPositionId: params.botBorrowPositionId,
+          collateralRaw: removeRaw,
+          targetMaxLtv: Number(readMeta(op).targetLtv ?? params.targetLtv),
+          onBeforeBroadcast: async ({ signature, lastValidBlockHeight }) => {
+            await storage.updateBorrowOperation(op.id, {
+              mergeMetadata: { removeSig: signature, removeLvbh: lastValidBlockHeight },
+              appendTxSignature: signature,
+            });
+          },
+        });
+        if (!w.success) {
+          // The withdraw sig may have actually landed (false negative from an
+          // unreadable post-read) — reconcile before failing.
+          op = (await storage.getBorrowOperationById(op.id)) ?? op;
+          const m = readMeta(op);
+          const sig = m.removeSig as string | undefined;
+          if (sig) {
+            const st = await reconcileSignature(sig, m.removeLvbh);
+            if (st === "in_flight") return failClosed(op, "withdrawing", "The collateral removal is still settling on-chain. Funds are safe — retry in a moment.", true);
+            if (st !== "landed") {
+              return failClosed(op, "withdraw_failed", `${w.error || "Removing the collateral failed"}. Your loan is unchanged — retry in a moment.`, false);
+            }
+            // landed: fall through as recovered.
+          } else {
+            // Nothing was ever broadcast (gate deny / gas shortfall / build
+            // error): fully restartable, the loan is untouched.
+            return failClosed(op, "withdraw_failed", `${w.error || "Removing the collateral failed"}. Your loan is unchanged.`, false);
+          }
+        }
+      }
+      await storage.updateBorrowOperation(op.id, { step: "bot_withdrawn" });
+      op = (await storage.getBorrowOperationById(op.id)) ?? op;
+    }
+
+    // ---- RELEASE (bot wallet -> account wallet) transfer leg --------------
+    // Sized as min(intended removal, strict live bot balance) — the removal is
+    // amount-exact so these normally match; the strict floor only protects
+    // against on-chain rounding. NEVER sized from a position read.
+    const rStep = op.step ?? "";
+    if (rStep === "bot_withdrawn" || rStep === "releasing" || rStep === "release_failed") {
+      const meta = readMeta(op);
+      const releaseSig = meta.releaseSig as string | undefined;
+      let recovered = false;
+      if (releaseSig) {
+        const s = await reconcileSignature(releaseSig, meta.releaseLvbh);
+        if (s === "in_flight") return failClosed(op, "releasing", "The transfer back to your account is still settling. Funds are safe in the bot wallet — retry in a moment.", true);
+        if (s === "landed") recovered = true;
+      }
+      if (!recovered) {
+        let botBal: bigint;
+        try {
+          botBal = await strictBalanceRaw(params.botPublicKey, collateralMint);
+        } catch {
+          return failClosed(op, "release_failed", "Could not read the bot wallet balance to return the collateral. Funds are safe — retry in a moment.", true);
+        }
+        const moveRaw = removeRaw < botBal ? removeRaw : botBal;
+        if (moveRaw <= 0n) {
+          return failClosed(op, "release_failed", "No withdrawn collateral found in the bot wallet to return. Retry in a moment.", true);
+        }
+        await storage.updateBorrowOperation(op.id, {
+          step: "releasing",
+          mergeMetadata: { releasedRawObserved: moveRaw.toString() },
+        });
+        const xfer = await transferTokenToWalletExact({
+          agentPublicKey: params.botPublicKey,
+          agentSecretKey: params.botSecretKey,
+          toWalletAddress: params.accountPublicKey,
+          mint: collateralMint,
+          amountRaw: moveRaw,
+          onBeforeBroadcast: async ({ signature, lastValidBlockHeight }) => {
+            await storage.updateBorrowOperation(op.id, {
+              mergeMetadata: { releaseSig: signature, releaseLvbh: lastValidBlockHeight },
+              appendTxSignature: signature,
+            });
+          },
+        });
+        if (!xfer.success) {
+          op = (await storage.getBorrowOperationById(op.id)) ?? op;
+          const m2 = readMeta(op);
+          const sig2 = m2.releaseSig as string | undefined;
+          if (!sig2) return failClosed(op, "release_failed", `${xfer.error || "The transfer back to your account did not complete"}. Funds are safe in the bot wallet — retry in a moment.`, true);
+          const st2 = await reconcileSignature(sig2, m2.releaseLvbh);
+          if (st2 === "in_flight") return failClosed(op, "releasing", "The transfer back to your account is still settling. Funds are safe in the bot wallet — retry in a moment.", true);
+          if (st2 !== "landed") return failClosed(op, "release_failed", `${xfer.error || "The transfer back to your account did not complete"}. Funds are safe in the bot wallet — retry in a moment.`, true);
+        }
+      }
+      await storage.updateBorrowOperation(op.id, { step: "released_to_account" });
+      op = (await storage.getBorrowOperationById(op.id)) ?? op;
+    }
+
+    const releasedRaw = BigInt(readMeta(op).releasedRawObserved || removeRaw.toString());
+
+    // ---- RESUPPLY (into the account's open position) leg ------------------
+    // Only when a destination position was pinned at creation. Idempotent via
+    // the pre-op collateral baseline (a landed-but-unjournaled resupply shows
+    // as live collateral >= baseline + released - dust => skip, don't double).
+    const sStep = op.step ?? "";
+    if (destinationPositionId && (sStep === "released_to_account" || sStep === "resupplying" || sStep === "resupply_failed")) {
+      const meta = readMeta(op);
+      const acctNftId = Number(meta.acctVenuePositionId);
+      const baselineRaw = BigInt(meta.acctPosCollBeforeRaw || "0");
+      let alreadySupplied = false;
+      if (Number.isInteger(acctNftId) && acctNftId > 0) {
+        const borrowRoute = new JupiterLendBorrowRoute();
+        const liveAcct = await borrowRoute.readLivePositionHealth(collateralMint, acctNftId);
+        if (liveAcct && BigInt(liveAcct.collateralRaw) >= baselineRaw + releasedRaw - COLL_DUST) {
+          alreadySupplied = true;
+        }
+      }
+      if (!alreadySupplied) {
+        await storage.updateBorrowOperation(op.id, { step: "resupplying" });
+        const resupply = await executeSupplyCollateral({
+          walletAddress: params.walletAddress,
+          agentPublicKey: params.accountPublicKey,
+          agentSecretKey: params.accountSecretKey,
+          collateralMint,
+          collateralRaw: releasedRaw,
+          borrowPositionId: destinationPositionId,
+          tradingBotId: null,
+        });
+        if (!resupply.success) {
+          return failClosed(op, "resupply_failed", `${resupply.error || "Re-pledging the released collateral into your account loan failed"}. The collateral is safe in your account wallet — retry in a moment.`, true);
+        }
+        if (resupply.signature) {
+          await storage.updateBorrowOperation(op.id, { appendTxSignature: resupply.signature });
+        }
+      }
+      await storage.updateBorrowOperation(op.id, { step: "resupplied" });
+      op = (await storage.getBorrowOperationById(op.id)) ?? op;
+    }
+
+    return finalizeRemoveCollateral(op, {
+      removedRaw: removeRaw,
+      resuppliedRaw: destinationPositionId ? releasedRaw : 0n,
+      destination: destinationPositionId ? "account_position" : "account_wallet",
+    });
+  });
+}
+
+async function finalizeRemoveCollateral(
+  op: BorrowOperation,
+  r: { removedRaw: bigint; resuppliedRaw: bigint; destination: "account_position" | "account_wallet" },
+): Promise<PerbotCarveResult> {
+  const result: Meta = {
+    removedRaw: r.removedRaw.toString(),
+    resuppliedRaw: r.resuppliedRaw.toString(),
+    destination: r.destination,
+  };
+  await storage.updateBorrowOperation(op.id, { status: "succeeded", step: "final_read", result });
+  const fresh = await storage.getBorrowOperationById(op.id);
+  return {
+    success: true,
+    operationId: op.id,
+    step: "final_read",
+    removedRaw: r.removedRaw.toString(),
+    resuppliedRaw: r.resuppliedRaw.toString(),
+    destination: r.destination,
     signatures: ((fresh?.txSignatures ?? op.txSignatures) as string[] | null) ?? [],
   };
 }

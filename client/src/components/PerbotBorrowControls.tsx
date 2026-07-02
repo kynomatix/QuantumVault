@@ -115,6 +115,16 @@ interface PerbotBorrowPosition {
     headroomRaw: string;
     suggestLtv: number;
   } | null;
+  // "Remove Collateral" ceiling: how much SPARE collateral can leave this loan
+  // while the remainder keeps a safe ratio — the exact mirror of topUpSuggestion
+  // (same liquidation-oracle facts, rounded DOWN). null = unreadable (fail
+  // closed: don't offer removal); removableRaw "0" = nothing spare.
+  removableSpare?: {
+    removableRaw: string;
+    removableTokens: number;
+    removableUsd: number;
+    targetLtv: number;
+  } | null;
   health: PerbotPositionHealth;
 }
 
@@ -299,6 +309,12 @@ function DefendLoanDialog({
   hasInflightAddColl,
   addCollBusy,
   onAddCollateral,
+  removeCollMaxTokens,
+  removeCollMaxUsd,
+  removeCollSpareReadable,
+  hasInflightRemoveColl,
+  removeCollBusy,
+  onRemoveCollateral,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -334,6 +350,16 @@ function DefendLoanDialog({
   hasInflightAddColl: boolean;
   addCollBusy: boolean;
   onAddCollateral: (amountTokens: number) => Promise<boolean>;
+  // Remove Collateral (release SPARE back to the account, NO debt change) — sized +
+  // executed by the parent. removeCollMaxTokens is the most collateral THIS loan can
+  // release while its remainder keeps the safe ratio; removeCollSpareReadable=false
+  // means the spare couldn't be priced right now (fail closed: hide the input).
+  removeCollMaxTokens: number;
+  removeCollMaxUsd: number;
+  removeCollSpareReadable: boolean;
+  hasInflightRemoveColl: boolean;
+  removeCollBusy: boolean;
+  onRemoveCollateral: (amountTokens: number) => Promise<boolean>;
 }) {
   const { retryAuth } = useWallet();
   const { toast } = useToast();
@@ -349,6 +375,8 @@ function DefendLoanDialog({
   const [growAmount, setGrowAmount] = useState("");
   // How much collateral (tokens) to move into this loan (free text → parsed).
   const [addCollAmount, setAddCollAmount] = useState("");
+  // How much collateral (tokens) to remove from this loan (free text → parsed).
+  const [removeCollAmount, setRemoveCollAmount] = useState("");
 
   // Keep the toggles synced to the server values whenever the modal (re)opens.
   useEffect(() => {
@@ -371,10 +399,13 @@ function DefendLoanDialog({
     }
   }, [open, growAllowed, growMaxUsd]);
 
-  // Start the Add Collateral input blank on every open (it's the corrective lever,
-  // not the headline action — Grow keeps the prefilled default).
+  // Start the Add Collateral + Remove Collateral inputs blank on every open (they're
+  // corrective levers, not the headline action — Grow keeps the prefilled default).
   useEffect(() => {
-    if (open) setAddCollAmount("");
+    if (open) {
+      setAddCollAmount("");
+      setRemoveCollAmount("");
+    }
   }, [open]);
 
   // Grow ("borrow more") derived values. Max is floored to the cent so it can never
@@ -384,7 +415,7 @@ function DefendLoanDialog({
   const growEntered = parseFloat(growAmount);
   const growTooHigh = Number.isFinite(growEntered) && growEntered > growMaxUsd + 0.0001;
   const growAmtValid = Number.isFinite(growEntered) && growEntered > 0 && !growTooHigh;
-  const canGrow = ((growAmtValid && growAllowed) || hasInflightGrow) && !growBusy && !repayBusy && !addCollBusy;
+  const canGrow = ((growAmtValid && growAllowed) || hasInflightGrow) && !growBusy && !repayBusy && !addCollBusy && !removeCollBusy;
 
   const handleGrowClick = async () => {
     const ok = await onGrow(growEntered);
@@ -402,12 +433,30 @@ function DefendLoanDialog({
   const addCollEntered = parseFloat(addCollAmount);
   const addCollTooHigh = Number.isFinite(addCollEntered) && addCollEntered > addCollMaxTokens + addCollMaxTokens * 1e-6 + 1e-9;
   const addCollValid = Number.isFinite(addCollEntered) && addCollEntered > 0 && !addCollTooHigh;
-  const canAddColl = (addCollValid || hasInflightAddColl) && !addCollBusy && !growBusy && !repayBusy;
+  const canAddColl = (addCollValid || hasInflightAddColl) && !addCollBusy && !growBusy && !repayBusy && !removeCollBusy;
 
   const handleAddCollClick = async () => {
     const ok = await onAddCollateral(addCollEntered);
     if (ok) {
       setAddCollAmount("");
+      onOpenChange(false);
+    }
+  };
+
+  // REMOVE COLLATERAL derived values. Max is floored (4 dp) so the display can never
+  // round ABOVE the true releasable spare; typing at/near the max snaps to the exact
+  // raw max in the parent. Only offered while the loan has readable, positive spare —
+  // an unreadable spare fails closed to an explainer line.
+  const removeCollMaxStr = removeCollMaxTokens > 0 ? (Math.floor(removeCollMaxTokens * 10000) / 10000).toFixed(4) : "0";
+  const removeCollEntered = parseFloat(removeCollAmount);
+  const removeCollTooHigh = Number.isFinite(removeCollEntered) && removeCollEntered > removeCollMaxTokens + removeCollMaxTokens * 1e-6 + 1e-9;
+  const removeCollValid = Number.isFinite(removeCollEntered) && removeCollEntered > 0 && !removeCollTooHigh;
+  const canRemoveColl = (removeCollValid || hasInflightRemoveColl) && !removeCollBusy && !addCollBusy && !growBusy && !repayBusy;
+
+  const handleRemoveCollClick = async () => {
+    const ok = await onRemoveCollateral(removeCollEntered);
+    if (ok) {
+      setRemoveCollAmount("");
       onOpenChange(false);
     }
   };
@@ -505,7 +554,7 @@ function DefendLoanDialog({
   const repayEntered = parseFloat(repayAmount);
   const repayValid = liveDebtUsd != null && Number.isFinite(repayEntered) && repayEntered > 0;
   const repayTooHigh = liveDebtUsd != null && Number.isFinite(repayEntered) && repayEntered > liveDebtUsd + 0.005;
-  const canRepay = (repayValid || hasInflightRepay) && !repayBusy && !growBusy && !addCollBusy;
+  const canRepay = (repayValid || hasInflightRepay) && !repayBusy && !growBusy && !addCollBusy && !removeCollBusy;
 
   const handleRepayClick = async () => {
     let ok: boolean;
@@ -551,7 +600,7 @@ function DefendLoanDialog({
   const shownModel = showPreview ? previewBarModel : barModel;
 
   return (
-    <Dialog open={open} onOpenChange={(v) => { if (!repayBusy && !growBusy && !addCollBusy) onOpenChange(v); }}>
+    <Dialog open={open} onOpenChange={(v) => { if (!repayBusy && !growBusy && !addCollBusy && !removeCollBusy) onOpenChange(v); }}>
       <DialogContent className="sm:max-w-md max-h-[85vh] overflow-y-auto" data-testid="dialog-defend-loan">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -790,6 +839,75 @@ function DefendLoanDialog({
             )}
           </div>
 
+          {/* Remove Collateral — pull SPARE collateral OUT of this loan and return it
+              to the account (re-pledged into the account loan when one is open on the
+              same collateral). NO debt change; the remainder keeps the safe ratio, so
+              the ceiling is the server-computed spare. */}
+          <div className="space-y-2 border-t border-border pt-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5">
+                <label className="text-sm font-medium">Remove Collateral</label>
+                <InfoTip testId="info-removecoll">
+                  Takes spare {collSym ?? "collateral"} out of this bot's loan and returns it to your
+                  account — the loan itself doesn't change. Only the spare above the safe ratio can
+                  leave, so this can never push the loan toward liquidation. If you have an account
+                  loan on the same collateral, it goes back in there; otherwise it sits in your account.
+                </InfoTip>
+              </div>
+              <span className="text-[11px] text-muted-foreground" data-testid="text-removecoll-max">
+                {removeCollMaxStr} {collSym ?? ""}{removeCollMaxUsd > 0 ? ` (~${fmtUsd(removeCollMaxUsd)})` : ""} spare
+              </span>
+            </div>
+
+            {hasInflightRemoveColl && (
+              <p className="text-[11px] text-amber-600 dark:text-amber-500" data-testid="text-removecoll-inflight">
+                Unfinished removal — tap Finish to complete it.
+              </p>
+            )}
+
+            {!removeCollSpareReadable && !hasInflightRemoveColl ? (
+              <p className="text-[11px] text-muted-foreground" data-testid="text-removecoll-unavailable">
+                Can't size the spare right now — try again in a moment.
+              </p>
+            ) : removeCollMaxTokens <= 0 && !hasInflightRemoveColl ? (
+              <p className="text-[11px] text-muted-foreground" data-testid="text-removecoll-unavailable">
+                No spare {collSym ?? "collateral"} right now — this loan is at its safe limit.
+              </p>
+            ) : (
+              <>
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="text"
+                    inputMode="decimal"
+                    value={removeCollAmount}
+                    onChange={(e) => setRemoveCollAmount(e.target.value)}
+                    placeholder="0.0000"
+                    className="flex-1 min-w-0"
+                    data-testid="input-removecoll-amount"
+                  />
+                  <Button type="button" variant="outline" size="sm" className="h-9 px-2 text-xs" onClick={() => setRemoveCollAmount(removeCollMaxStr)} disabled={removeCollMaxTokens <= 0} data-testid="button-removecoll-max">
+                    Max
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="h-9 px-3"
+                    onClick={handleRemoveCollClick}
+                    disabled={!canRemoveColl}
+                    data-testid="button-remove-collateral"
+                  >
+                    {removeCollBusy && <Loader2 className="w-4 h-4 animate-spin mr-1.5" />}
+                    {hasInflightRemoveColl && !removeCollValid ? "Finish" : "Remove"}
+                  </Button>
+                </div>
+                {removeCollTooHigh && (
+                  <p className="text-[11px] text-destructive" data-testid="text-removecoll-amount-hint">
+                    More than this loan can safely release — up to {removeCollMaxStr} {collSym ?? ""} right now.
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+
           {/* Auto top-up — single compact row (old "Defend This Loan" header merged in). */}
           <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
             <div className="flex items-center gap-1.5 min-w-0">
@@ -845,7 +963,7 @@ export default function PerbotBorrowControls({
   const { toast } = useToast();
 
   const [data, setData] = useState<PerbotPositionsResponse | null>(null);
-  const [busy, setBusy] = useState<"borrow" | "repay" | "move" | "grow" | "addcoll" | null>(null);
+  const [busy, setBusy] = useState<"borrow" | "repay" | "move" | "grow" | "addcoll" | "removecoll" | null>(null);
   const [confirm, setConfirm] = useState<"borrow" | "repay" | null>(null);
   // How much USDC the user wants to borrow (free text → parsed). Empty = nothing yet.
   const [amount, setAmount] = useState("");
@@ -870,6 +988,10 @@ export default function PerbotBorrowControls({
   // for THIS bot's open position is mid-flight — same resume semantics as
   // hasInflightGrow, keyed by the position id so it can never leak across loans.
   const [hasInflightAddColl, setHasInflightAddColl] = useState(false);
+  // True when a manual REMOVE-COLLATERAL (release spare back to the account) for
+  // THIS bot's open position is mid-flight — same resume semantics, keyed by the
+  // position id so it can never leak across loans.
+  const [hasInflightRemoveColl, setHasInflightRemoveColl] = useState(false);
   // "Manage Loan" modal (Borrow More + Repay + Defend it: Auto top-up).
   const [defendOpen, setDefendOpen] = useState(false);
   // The drawer is a single reused instance: a slow response for a previous
@@ -910,6 +1032,11 @@ export default function PerbotBorrowControls({
   // position id, same as grow, so an in-flight add can never leak into another loan.
   const addCollKey = (positionId: string) => `qv:perbot-borrow:addcoll:${bot?.id}:${positionId}`;
   const addCollRawsKey = (positionId: string) => `qv:perbot-borrow:addcoll-raws:${bot?.id}:${positionId}`;
+  // REMOVE COLLATERAL (release spare back to the account, NO debt change) is keyed
+  // by the exact open-position id, same as add, so an in-flight removal can never
+  // leak into another loan.
+  const removeCollKey = (positionId: string) => `qv:perbot-borrow:removecoll:${bot?.id}:${positionId}`;
+  const removeCollRawsKey = (positionId: string) => `qv:perbot-borrow:removecoll-raws:${bot?.id}:${positionId}`;
   // REPAY (partial pay-DOWN) stores only a FIXED target final-debt (raw), keyed by the
   // exact position id. Re-tapping / resuming drives to this same target, so a double-
   // submit can never repay past the user's intended amount.
@@ -973,6 +1100,14 @@ export default function PerbotBorrowControls({
           /* ignore */
         }
         setHasInflightAddColl(addCollInflight);
+        // Same for a mid-flight manual REMOVE-COLLATERAL on this loan.
+        let removeCollInflight = false;
+        try {
+          removeCollInflight = !!localStorage.getItem(removeCollKey(next.positions[0].id));
+        } catch {
+          /* ignore */
+        }
+        setHasInflightRemoveColl(removeCollInflight);
       } else {
         // No open position yet — surface whether a borrow op is still mid-flight so
         // the user can RESUME it (the input may be blank, e.g. after a switch). With
@@ -987,6 +1122,7 @@ export default function PerbotBorrowControls({
         setHasInflightGrow(false);
         setHasInflightRepay(false);
         setHasInflightAddColl(false);
+        setHasInflightRemoveColl(false);
       }
     } catch {
       if (reqId === reqRef.current) setData(null);
@@ -1527,6 +1663,160 @@ export default function PerbotBorrowControls({
         showReconnectToast({ toast, retryAuth, title: "Add collateral failed", retry: () => handleAddCollateral(amountTokens) });
       } else {
         toast({ title: "Add collateral failed", description: e?.message || "Something went wrong.", variant: "destructive" });
+      }
+      return false;
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // Size a REMOVE-COLLATERAL from a token amount. Floored to raw so it can never
+  // round ABOVE what was typed; within a hair of the spare max (or above) → use the
+  // server's proven removableRaw verbatim (mirrors computeAddCollRaw's snap path).
+  const computeRemoveCollRaw = (amountTokens: number): string | null => {
+    const spare = openPos?.removableSpare ?? null;
+    if (!spare) return null;
+    let maxRaw: bigint;
+    try {
+      maxRaw = BigInt(spare.removableRaw);
+    } catch {
+      return null;
+    }
+    if (maxRaw <= 0n) return null;
+    if (!Number.isFinite(amountTokens) || amountTokens <= 0) return null;
+    const dec = openPos?.collateralDecimals ?? 9;
+    const raw = BigInt(Math.floor(amountTokens * 10 ** dec));
+    if (raw <= 0n) return null;
+    const eps = BigInt(Math.max(1, Math.round(10 ** dec / 1000)));
+    if (raw + eps >= maxRaw) return maxRaw.toString();
+    return raw.toString();
+  };
+
+  // Manual REMOVE COLLATERAL: withdraw SPARE collateral from THIS bot's loan (the
+  // remainder keeps the safe ratio — server re-gates at sign time) and return it to
+  // the account, re-pledging into the account loan when one is open on the same
+  // collateral. NO debt change. Mirrors handleAddCollateral's resume model
+  // (persisted id + exact raw amount until confirmed success), keyed by position id.
+  const handleRemoveCollateral = async (amountTokens: number): Promise<boolean> => {
+    if (!bot || !openPos) return false;
+    const positionId = openPos.id;
+    setBusy("removecoll");
+    try {
+      const sessionId = await getSessionId();
+      const storeKey = removeCollKey(positionId);
+      const rawsKey = removeCollRawsKey(positionId);
+      let clientRequestId = localStorage.getItem(storeKey);
+      let raws: { removeRaw: string } | null = null;
+      let wasFresh = false;
+
+      if (clientRequestId) {
+        // RESUME: re-send the EXACT amount the in-flight op was created with — never
+        // recompute from the live input under an existing id. Missing amounts → fail
+        // closed and let the server settle.
+        try {
+          const stored = localStorage.getItem(rawsKey);
+          if (stored) raws = JSON.parse(stored);
+        } catch {
+          raws = null;
+        }
+        if (!raws || !raws.removeRaw) {
+          toast({
+            title: "Finishing your last removal",
+            description: "Your previous remove-collateral is still settling. Give it a moment — this view will update on its own.",
+          });
+          fetchPositions();
+          return false;
+        }
+      } else {
+        // FRESH: size from the input, persist the raw BEFORE the id so we can never
+        // end up with an id that has no amount to resume from.
+        const fresh = computeRemoveCollRaw(amountTokens);
+        if (!fresh) {
+          toast({ title: "Enter an amount", description: `Enter how much ${collSym ?? "collateral"} to remove from this loan.`, variant: "destructive" });
+          return false;
+        }
+        raws = { removeRaw: fresh };
+        clientRequestId = newRequestId();
+        wasFresh = true;
+        try {
+          localStorage.setItem(rawsKey, JSON.stringify(raws));
+          localStorage.setItem(storeKey, clientRequestId);
+        } catch {
+          /* ignore */
+        }
+        setHasInflightRemoveColl(true);
+      }
+
+      const res = await fetch("/api/vault/borrow/perbot/remove-collateral", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+        credentials: "include",
+        body: JSON.stringify({
+          botId: bot.id,
+          botBorrowPositionId: positionId,
+          removeRaw: raws.removeRaw,
+          sessionId,
+          clientRequestId,
+        }),
+      });
+      const d = await safeResponseJson(res);
+      if (res.ok && d.ok) {
+        try {
+          localStorage.removeItem(storeKey);
+          localStorage.removeItem(rawsKey);
+        } catch {
+          /* ignore */
+        }
+        setHasInflightRemoveColl(false);
+        // Confirm the EXACT amount asked for (the raw we sent), in tokens.
+        let tokens: number | null = null;
+        try {
+          const dec = openPos.collateralDecimals ?? 9;
+          tokens = Number(BigInt(raws.removeRaw)) / 10 ** dec;
+        } catch {
+          tokens = null;
+        }
+        const dest = d.destination === "account_position"
+          ? "moved into your account loan"
+          : "returned to your account";
+        toast({
+          title: "Collateral Removed",
+          description:
+            tokens != null && Number.isFinite(tokens) && tokens > 0
+              ? `Removed ${tokens.toLocaleString(undefined, { maximumFractionDigits: 4 })} ${collSym ?? "collateral"} from this bot's loan — ${dest}.`
+              : `Removed ${collSym ?? "collateral"} from this bot's loan — ${dest}.`,
+        });
+        await refreshAll();
+        return true;
+      } else if (res.status === 202 || d.needsAttention) {
+        // Keep the id + amount so the next tap resumes this exact op.
+        setHasInflightRemoveColl(true);
+        toast({ title: "Still Finishing", description: "The removal is still settling. Tap Remove again in a moment to finish it." });
+        fetchPositions();
+        return false;
+      } else {
+        // FRESH run rejected by a definitive server response with NO operationId:
+        // no op row was created (pre-op gates — e.g. dust guard, spare shrunk since
+        // fetch), so the breadcrumb we just wrote would wedge every later tap into
+        // resuming the same doomed amount. Clear it so the next tap re-sizes fresh.
+        // NEVER clear when operationId is present (an op row exists and owns resume
+        // authority), on a resume attempt, or on a network throw (the op MAY exist).
+        if (wasFresh && !d.operationId) {
+          try {
+            localStorage.removeItem(storeKey);
+            localStorage.removeItem(rawsKey);
+          } catch {
+            /* ignore */
+          }
+          setHasInflightRemoveColl(false);
+        }
+        throw new Error(d.error || "Remove collateral failed");
+      }
+    } catch (e: any) {
+      if (isSessionError(e)) {
+        showReconnectToast({ toast, retryAuth, title: "Remove collateral failed", retry: () => handleRemoveCollateral(amountTokens) });
+      } else {
+        toast({ title: "Remove collateral failed", description: e?.message || "Something went wrong.", variant: "destructive" });
       }
       return false;
     } finally {
@@ -2086,6 +2376,20 @@ export default function PerbotBorrowControls({
   const addCollOraclePriceUsd = carrySrc?.oraclePriceUsd ?? null;
   const addCollMaxUsd = addCollOraclePriceUsd != null ? addCollMaxTokens * addCollOraclePriceUsd : 0;
 
+  // REMOVE-COLLATERAL sizing: the SPARE this bot's own loan can release while its
+  // remainder keeps the safe ratio — server-computed (fail closed: null spare ⇒ 0,
+  // the row explains it can't size the spare right now).
+  const removeCollSpare = openPos?.removableSpare ?? null;
+  const removeCollDecimals = openPos?.collateralDecimals ?? 9;
+  let removeCollMaxTokens = 0;
+  try {
+    removeCollMaxTokens = removeCollSpare ? Number(BigInt(removeCollSpare.removableRaw)) / 10 ** removeCollDecimals : 0;
+  } catch {
+    removeCollMaxTokens = 0;
+  }
+  const removeCollMaxUsd = removeCollSpare?.removableUsd ?? 0;
+  const removeCollSpareReadable = removeCollSpare != null;
+
   return (
     <>
       {openPos ? (
@@ -2495,6 +2799,12 @@ export default function PerbotBorrowControls({
           hasInflightAddColl={hasInflightAddColl}
           addCollBusy={busy === "addcoll"}
           onAddCollateral={handleAddCollateral}
+          removeCollMaxTokens={removeCollMaxTokens}
+          removeCollMaxUsd={removeCollMaxUsd}
+          removeCollSpareReadable={removeCollSpareReadable}
+          hasInflightRemoveColl={hasInflightRemoveColl}
+          removeCollBusy={busy === "removecoll"}
+          onRemoveCollateral={handleRemoveCollateral}
         />
       )}
     </>

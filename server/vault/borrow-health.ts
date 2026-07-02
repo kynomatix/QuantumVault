@@ -528,3 +528,118 @@ export function derivePerbotTopUpSuggestion(
     targetLtv,
   });
 }
+
+// --- REMOVE-COLLATERAL: removable spare -----------------------------------
+
+/** Facts the removable-spare read needs. All USD on the LIQUIDATION oracle price. */
+export interface RemovableSpareFacts {
+  /** Debt in USD (debtRaw / 10^debtDecimals). */
+  debtUsd: number;
+  /** Collateral USD value at the liquidation oracle price. */
+  collateralValueUsd: number;
+  /** Liquidation oracle price, USD per collateral token (> 0). */
+  collateralPriceUsd: number;
+  collateralDecimals: number;
+  /** The position's exact live collateral, raw. Caps the spare (never float-derive
+   *  more than the position holds) and IS the spare when the debt is zero. */
+  collateralRaw: bigint;
+  /** LTV ceiling the remainder must respect; defaults to PERBOT_CARVE_DEFAULT_TARGET_LTV (0.5). */
+  targetLtv?: number;
+}
+
+export interface RemovableSpare {
+  /** Collateral safe to remove, raw base units (rounded DOWN). 0n when none. */
+  removableRaw: bigint;
+  /** Same amount in whole tokens (display). */
+  removableTokens: number;
+  /** USD value of the removable spare at the liquidation oracle price. */
+  removableUsd: number;
+  /** The LTV ceiling the remainder respects. */
+  targetLtv: number;
+}
+
+/**
+ * REMOVABLE spare collateral: the exact MIRROR of computePerbotTopUpSuggestion in
+ * the opposite direction. PURE. How much collateral (raw base units) can leave the
+ * position while the REMAINDER still keeps LTV <= target. Uses the SAME honest
+ * LIQUIDATION oracle price as the health read.
+ *
+ * Rounds the raw amount DOWN so removing it never pushes the loan past target
+ * (the top-up mirror rounds UP for the same reason in its direction). A zero
+ * debt makes the ENTIRE live collateral spare — returned as the exact raw amount,
+ * never a float round-trip. Returns null (fail closed) when any fact is
+ * unreadable — the caller must NOT fabricate a spare from a bad read.
+ */
+export function computePerbotRemovableSpare(f: RemovableSpareFacts): RemovableSpare | null {
+  const targetLtv = f.targetLtv ?? PERBOT_CARVE_DEFAULT_TARGET_LTV;
+  if (!inUnitRange(targetLtv)) return null;
+  if (!isFiniteNum(f.debtUsd) || f.debtUsd < 0) return null;
+  if (!isFiniteNum(f.collateralValueUsd) || f.collateralValueUsd < 0) return null;
+  if (!isFiniteNum(f.collateralPriceUsd) || f.collateralPriceUsd <= 0) return null;
+  if (!isDecimals(f.collateralDecimals)) return null;
+  if (f.collateralRaw < 0n) return null;
+
+  const scale = 10 ** f.collateralDecimals;
+  const toView = (raw: bigint): RemovableSpare => ({
+    removableRaw: raw,
+    removableTokens: Number(raw) / scale,
+    removableUsd: (Number(raw) / scale) * f.collateralPriceUsd,
+    targetLtv,
+  });
+
+  // No debt -> the whole position is spare (exact raw, no float round-trip).
+  if (f.debtUsd === 0) return toView(f.collateralRaw);
+
+  const requiredCollateralUsd = f.debtUsd / targetLtv;
+  const spareUsd = f.collateralValueUsd - requiredCollateralUsd;
+  if (spareUsd <= 0) return toView(0n);
+
+  const spareTokens = spareUsd / f.collateralPriceUsd;
+  if (!isFiniteNum(spareTokens)) return null;
+  if (spareTokens <= 0) return toView(0n);
+
+  // Round DOWN so the remainder can never land past the target LTV.
+  let rawFloor = BigInt(Math.floor(spareTokens * scale));
+  if (rawFloor <= 0n) return toView(0n);
+  if (rawFloor > f.collateralRaw) rawFloor = f.collateralRaw; // never more than held
+  return toView(rawFloor);
+}
+
+/**
+ * Derive the removable spare from the SAME raw facts the health read uses (a
+ * LivePositionHealth + BorrowVaultConfig). Mirrors derivePerbotTopUpSuggestion's
+ * extraction (liquidation oracle price, decimals) so spare and health agree.
+ * Null (fail closed) on any unreadable fact.
+ */
+export function derivePerbotRemovableSpare(
+  live: LivePositionHealth | null,
+  vault: BorrowVaultConfig | null,
+  targetLtv?: number,
+): RemovableSpare | null {
+  if (!vault || !live) return null;
+  if (!isDecimals(vault.collateralDecimals) || !isDecimals(vault.debtDecimals)) {
+    return null;
+  }
+  let collateralRaw: bigint;
+  let debtRaw: bigint;
+  try {
+    collateralRaw = BigInt(live.collateralRaw);
+    debtRaw = BigInt(live.debtRaw);
+  } catch {
+    return null;
+  }
+  const price = vault.oraclePriceLiquidateUsd;
+  if (!isFiniteNum(price) || price <= 0) return null;
+  if (!inUnitRange(vault.liquidationThreshold)) return null;
+  const debtUsd = Number(debtRaw) / 10 ** vault.debtDecimals;
+  const colTokens = Number(collateralRaw) / 10 ** vault.collateralDecimals;
+  const collateralValueUsd = colTokens * price;
+  return computePerbotRemovableSpare({
+    debtUsd,
+    collateralValueUsd,
+    collateralPriceUsd: price,
+    collateralDecimals: vault.collateralDecimals,
+    collateralRaw,
+    targetLtv,
+  });
+}

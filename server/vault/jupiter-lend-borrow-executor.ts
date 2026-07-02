@@ -1317,6 +1317,251 @@ export async function supplyToExistingBotPosition(
   });
 }
 
+// --- WITHDRAW collateral from an EXISTING per-bot position (release spare) ---
+// The exact mirror of supplyToExistingBotPosition in the OPPOSITE direction: the
+// "remove spare collateral" leg of the per-bot RELEASE orchestrator. Unlike the
+// account-scope executeWithdrawCollateral (whose loadOpenAccountPosition REJECTS
+// bot rows), it:
+//   * REQUIRES an already-open per-bot position, targeting its exact nftId;
+//   * ENFORCES the collateral-withdraw risk gate (evaluateCollateralWithdraw)
+//     against the LIVE position + fresh oracle context IMMEDIATELY pre-sign —
+//     an unreadable position or oracle fails CLOSED (never sign blind);
+//   * signs the withdraw with the BOT key (the bot wallet owns its position NFT)
+//     and funds the bot's network gas from the ACCOUNT (funder) wallet; the
+//     collateral RETURNS to the bot wallet, so gas must budget inbound ATA rent;
+//   * exposes a write-ahead `onBeforeBroadcast` so the multi-leg orchestrator can
+//     reconcile a crash by signature status. Withdraw is AMOUNT-EXACT and pulls
+//     from the position (which keeps the collateral until the tx lands), so a
+//     blind re-broadcast double-withdraws — the orchestrator's persisted
+//     signature is the only resume authority, never a balance read.
+//   * on an unreadable post-read it records collateral NO HIGHER than
+//     preCol - intended (the conservative direction for a withdraw: never
+//     over-report remaining collateral; a live re-read self-heals upward).
+export interface WithdrawFromExistingBotPositionParams {
+  walletAddress: string;
+  tradingBotId: string;
+  /** The bot wallet that OWNS the position NFT and SIGNS the withdraw. */
+  botPublicKey: string;
+  botSecretKey: Uint8Array;
+  /** The account wallet that FUNDS the bot's network gas (server-signed). */
+  accountPublicKey: string;
+  accountSecretKey: Uint8Array;
+  collateralMint: string;
+  /** The exact per-bot borrow position row to withdraw from (must be open). */
+  borrowPositionId: string;
+  /** Collateral to withdraw, raw base units (amount-exact; never "max"). */
+  collateralRaw: bigint;
+  /** Cap the post-withdraw LTV at min(protocol cap, this). The release flow
+   *  passes the friendly carve target (0.5) so a removal can never push the
+   *  loan past the same bar the carve sizing used. */
+  targetMaxLtv?: number;
+  onBeforeBroadcast?: (info: { signature: string; blockhash: string; lastValidBlockHeight: number }) => void | Promise<void>;
+}
+
+export interface WithdrawFromExistingBotPositionResult {
+  success: boolean;
+  signature?: string;
+  observedCollateralRaw?: string;
+  collateralValueUsd?: number | null;
+  verifyWarning?: string;
+  dbWarning?: string;
+  /** TRUE when the tx landed but FAILED atomically (nothing committed). */
+  onChainFailed?: boolean;
+  /** TRUE when the gate denied the withdraw (nothing signed; safe restart). */
+  gateDenied?: boolean;
+  error?: string;
+  gasShortfall?: { requiredLamports: number; heldLamports: number };
+}
+
+export async function withdrawFromExistingBotPosition(
+  params: WithdrawFromExistingBotPositionParams,
+): Promise<WithdrawFromExistingBotPositionResult> {
+  if (!params.tradingBotId) return { success: false, error: "A trading bot id is required." };
+  if (params.collateralRaw <= 0n) return { success: false, error: "Withdraw amount must be greater than zero." };
+
+  const borrowRoute = new JupiterLendBorrowRoute();
+  const cfg = await borrowRoute.getVaultConfig(params.collateralMint);
+  if (!cfg) return { success: false, error: "Borrow vault is unavailable right now." };
+
+  return withBorrowLock(borrowLockKey(params.walletAddress, params.tradingBotId, cfg.vaultId), async () => {
+    // 1) Load + validate the EXISTING open per-bot position.
+    const position = await storage.getBorrowPosition(params.walletAddress, params.borrowPositionId);
+    if (!position) return { success: false, error: "Borrow position not found." };
+    if (position.tradingBotId !== params.tradingBotId) {
+      return { success: false, error: "Borrow position does not belong to this bot." };
+    }
+    if (position.status !== "open") return { success: false, error: `Borrow position is not open (status: ${position.status}).` };
+    if (position.collateralMint !== params.collateralMint) {
+      return { success: false, error: "Collateral mint does not match the position." };
+    }
+    const nftId = Number(position.venuePositionId);
+    if (!Number.isInteger(nftId) || nftId <= 0) return { success: false, error: "Borrow position has no valid on-chain id." };
+
+    // 2) LIVE pre-read — REQUIRED. Removing collateral against a stale/unreadable
+    //    position could push the loan toward liquidation; fail CLOSED.
+    const preLive = await borrowRoute.readLivePositionHealth(params.collateralMint, nftId);
+    if (!preLive) return { success: false, gateDenied: true, error: "Could not read the live bot position; refusing to remove collateral." };
+    const preColRaw = BigInt(preLive.collateralRaw);
+    const liveDebtRaw = BigInt(preLive.debtRaw);
+    if (preColRaw < params.collateralRaw) {
+      return { success: false, gateDenied: true, error: "The position holds less collateral than the requested removal." };
+    }
+
+    // 3) ENFORCED risk gate, fresh oracle, immediately pre-sign. Nothing has
+    //    moved yet, so a deny here is fully restartable.
+    const oracle = await readBorrowOracleContext(cfg);
+    const gate = evaluateCollateralWithdraw({
+      vault: cfg,
+      liveCollateralRaw: preColRaw,
+      liveDebtRaw,
+      requestedWithdrawRaw: params.collateralRaw,
+      oracle,
+      targetMaxLtv: params.targetMaxLtv,
+    });
+    if (!gate.allowed) {
+      const deny = gate.reasons.find((r) => r.severity === "deny");
+      return { success: false, gateDenied: true, error: deny?.message || "Removing that much collateral is not allowed right now." };
+    }
+
+    // 4) Gas: the collateral RETURNS to the bot wallet, so budget the inbound
+    //    ATA rent (destMint). The BOT pays; the ACCOUNT funds any shortfall.
+    const gas = await ensureVaultGas({
+      payingPublicKey: params.botPublicKey,
+      funderPublicKey: params.accountPublicKey,
+      funderSecretKey: params.accountSecretKey,
+      destMint: params.collateralMint,
+      label: "Remove Collateral",
+      extraRentLamports: 0,
+    });
+    if (!gas.ok) return {
+      success: false,
+      error: gas.error || "Could not cover the network gas to remove collateral.",
+      gasShortfall: {
+        requiredLamports: gas.requiredLamports,
+        heldLamports: gas.payerLamportsBefore + (gas.refilledLamports ?? 0) + (gas.fundedLamports ?? 0),
+      },
+    };
+
+    // 5) Pure plan -> SDK ix. positionId = the existing nft; AMOUNT-EXACT.
+    const plan = planWithdrawPartial(nftId, params.collateralRaw);
+    const borrow = await import("@jup-ag/lend/borrow");
+    const BN = (await import("bn.js")).default;
+    const connection = getServerConnection();
+    const signer = new PublicKey(params.botPublicKey);
+
+    let operate;
+    try {
+      operate = await borrow.getOperateIx({
+        vaultId: cfg.vaultId,
+        positionId: plan.positionId,
+        colAmount: specToBN(BN, plan.colAmount, "col", borrow.MAX_WITHDRAW_AMOUNT, borrow.MAX_REPAY_AMOUNT),
+        debtAmount: specToBN(BN, plan.debtAmount, "debt", borrow.MAX_WITHDRAW_AMOUNT, borrow.MAX_REPAY_AMOUNT),
+        connection,
+        signer,
+      });
+    } catch (e: any) {
+      return { success: false, error: `Could not build the withdraw transaction: ${e?.message || e}` };
+    }
+    if (!operate?.ixs?.length) return { success: false, error: "Withdraw transaction had no instructions." };
+
+    // 6) THE money move: a withdraw RECEIVES a positive collateral delta at the
+    //    bot wallet, so executeAgentInstructions (verifyOutputMint) is the proof.
+    //    BOT-signed; the write-ahead hook lets the orchestrator reconcile a crash.
+    const exec = await executeAgentInstructions({
+      agentPublicKey: params.botPublicKey,
+      agentSecretKey: params.botSecretKey,
+      instructions: operate.ixs,
+      verifyOutputMint: params.collateralMint,
+      addressLookupTables: operate.addressLookupTableAccounts,
+      label: "Remove Collateral",
+      onBeforeBroadcast: params.onBeforeBroadcast,
+    });
+
+    // 7) Decide whether money moved. Provably-nothing-moved => safe restart;
+    //    ambiguous + unreadable => bail WITHOUT success (the orchestrator's
+    //    write-ahead signature is the resume authority — never re-sign here).
+    let collateralDeltaRaw: bigint;
+    let preReadLive: Awaited<ReturnType<typeof borrowRoute.readLivePositionHealth>> = null;
+    const recovered = !(exec.success && exec.outputReceivedRaw);
+    if (!recovered) {
+      collateralDeltaRaw = BigInt(exec.outputReceivedRaw!);
+    } else if (!exec.signature || exec.onChainFailed) {
+      return { success: false, signature: exec.signature, onChainFailed: exec.onChainFailed, error: exec.error || "Removing collateral failed." };
+    } else {
+      preReadLive = await borrowRoute.readLivePositionHealth(params.collateralMint, nftId);
+      if (preReadLive && BigInt(preReadLive.collateralRaw) >= preColRaw) {
+        // Definitive read: collateral did not shrink -> nothing moved.
+        return { success: false, signature: exec.signature, error: exec.error || "Removing collateral failed." };
+      }
+      if (!preReadLive) {
+        // Ambiguous signature + unreadable position: the tx may still land. The
+        // orchestrator persisted the signature pre-broadcast; let IT reconcile.
+        return {
+          success: false,
+          signature: exec.signature,
+          error: "The collateral removal is still being confirmed. Funds are safe — retry in a moment.",
+        };
+      }
+      collateralDeltaRaw = preColRaw - BigInt(preReadLive.collateralRaw);
+    }
+
+    // 8) AUTHORITATIVE re-read is the proof. On an unreadable post-read record
+    //    collateral NO HIGHER than preCol - intended (never over-report what is
+    //    left backing the debt; a live re-read self-heals upward).
+    const postLive = preReadLive ?? await borrowRoute.readLivePositionHealth(params.collateralMint, nftId);
+    let observedColRaw: bigint;
+    let observedDebtRaw: bigint;
+    let oraclePriceUsd: number | null = null;
+    let healthSource: string;
+    let verifyWarning: string | undefined;
+
+    if (postLive) {
+      observedColRaw = BigInt(postLive.collateralRaw);
+      observedDebtRaw = BigInt(postLive.debtRaw);
+      oraclePriceUsd = postLive.oraclePriceUsd;
+      healthSource = "withdraw_onchain";
+      const v = verifyWithdrawOutcome({ preColRaw, postColRaw: observedColRaw, collateralDeltaRaw, withdrawnRaw: params.collateralRaw });
+      if (!v.ok) {
+        verifyWarning = `Remove Collateral sent (signature ${exec.signature}) but the position read differs (${v.reason}). Recorded the on-chain collateral.`;
+        console.warn(`[Borrow] per-bot withdraw verify miss: ${v.reason}`, { positionId: position.id, nftId });
+      }
+    } else {
+      observedColRaw = preColRaw > params.collateralRaw ? preColRaw - params.collateralRaw : 0n;
+      observedDebtRaw = liveDebtRaw;
+      healthSource = "withdraw_unverified";
+      verifyWarning = `Remove Collateral confirmed (signature ${exec.signature}) but the position could not be re-read; recorded the intended remainder pending reconcile.`;
+      console.warn("[Borrow] per-bot withdraw could not re-read position", { positionId: position.id, nftId });
+    }
+
+    const health = buildHealthSnapshot(cfg, observedColRaw, observedDebtRaw, oraclePriceUsd, healthSource);
+    let dbWarning: string | undefined;
+    const updated = await storage.updateBorrowPosition(
+      position.id,
+      {
+        collateralAmountRaw: observedColRaw.toString(),
+        debtAmountRaw: observedDebtRaw.toString(),
+        healthSnapshot: health.snapshot,
+        healthAsOf: new Date(),
+        healthSource,
+      },
+      "open",
+    );
+    if (!updated) {
+      dbWarning = `Collateral removed (signature ${exec.signature}) but the position record was updated by another process.`;
+      console.warn("[Borrow] per-bot withdraw CAS lost", { positionId: position.id });
+    }
+
+    return {
+      success: true,
+      signature: exec.signature,
+      observedCollateralRaw: observedColRaw.toString(),
+      collateralValueUsd: health.collateralValueUsd,
+      verifyWarning,
+      dbWarning,
+    };
+  });
+}
+
 // --- BORROW MORE on an EXISTING per-bot position ----------------------------
 // The per-bot sibling of executeBorrowMore (the "grow loan" borrow leg). Borrows
 // ADDITIONAL USDC into a Flash bot's already-open position. Composed by the

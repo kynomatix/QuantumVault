@@ -1512,8 +1512,9 @@ import { isBorrowEligibleWallet, isBorrowOwnerWallet, isCollateralVaultAllowlist
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, repayPartialOnExistingBotPosition, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
 import { runBorrowHealthScan } from "./vault/borrow-health-monitor";
-import { planPerbotCarve, runPerbotCarveOpen, runPerbotUnwindClose, selectBlockingBotPositions, resolveDisplayPrincipalRaw, runPerbotCollateralTopUp, runPerbotGrowLoan } from "./vault/jupiter-lend-perbot-carve";
-import { computePerBotPositionHealth, summarizeBotBorrowHealth, derivePerbotTopUpSuggestion, defaultRowHealthDeps, BAND_SEVERITY } from "./vault/borrow-health";
+import { planPerbotCarve, runPerbotCarveOpen, runPerbotUnwindClose, selectBlockingBotPositions, resolveDisplayPrincipalRaw, runPerbotCollateralTopUp, runPerbotGrowLoan, runPerbotRemoveCollateral } from "./vault/jupiter-lend-perbot-carve";
+import { computePerBotPositionHealth, summarizeBotBorrowHealth, derivePerbotTopUpSuggestion, derivePerbotRemovableSpare, defaultRowHealthDeps, BAND_SEVERITY } from "./vault/borrow-health";
+import { PERBOT_CARVE_DEFAULT_TARGET_LTV } from "./vault/borrow-risk-policy";
 import { decideAutoTopUp, decideAutoRepay, selectResumableTopUpOp, buildAutoTopUpClientRequestId, AUTO_TOPUP_COOLDOWN_MS } from "./vault/auto-topup";
 import { rankMeasuredYieldDestinations } from "./vault/carry-yield-ranker";
 import { decideCarryTrade } from "./vault/carry-trade-advisor";
@@ -10421,6 +10422,22 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                   }
                 : null;
             })(),
+            // "Remove Collateral" ceiling: how much SPARE collateral can leave the
+            // loan while the remainder keeps LTV <= the friendly 50% bar. The exact
+            // MIRROR of topUpSuggestion (same liquidation-oracle facts, rounded DOWN
+            // instead of UP). null = unreadable (fail closed: the client must not
+            // offer removal); 0n = nothing spare.
+            removableSpare: (() => {
+              const s = derivePerbotRemovableSpare(liveHealth, vault);
+              return s
+                ? {
+                    removableRaw: s.removableRaw.toString(),
+                    removableTokens: s.removableTokens,
+                    removableUsd: s.removableUsd,
+                    targetLtv: s.targetLtv,
+                  }
+                : null;
+            })(),
             // How much MORE USDC this loan can borrow against its OWN collateral
             // before hitting the friendly 50% suggest LTV (no account carve needed).
             // Uses the CONSERVATIVE (never-under-read) debt so the headroom can only
@@ -11380,6 +11397,188 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       return res.status(result.status).json(result.body);
     } catch (error: any) {
       console.error("[Vault] per-bot add-collateral error:", error);
+      return res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // POST per-bot REMOVE COLLATERAL (release spare). The MIRROR of add-collateral:
+  // withdraw SPARE collateral from a Flash bot's over-collateralised loan (the
+  // remainder must keep LTV <= the friendly 50% bar) and return it to the account,
+  // re-pledging it into the account's open position on the same collateral when
+  // one exists (else it stops safely in the account wallet). BOT-signed withdraw;
+  // the account funds gas. Multi-leg via runPerbotRemoveCollateral (write-ahead
+  // journal; re-POST the SAME clientRequestId to FINISH a partial run). Body:
+  // { botId, botBorrowPositionId, removeRaw, sessionId, clientRequestId }.
+  app.post("/api/vault/borrow/perbot/remove-collateral", requireWallet, async (req, res) => {
+    try {
+      if (!isBorrowEligibleWallet(req.walletAddress!)) {
+        return res.status(403).json({ error: "Per-bot borrowing is not available for this wallet yet." });
+      }
+      const { botId, botBorrowPositionId, removeRaw, sessionId, clientRequestId } = req.body || {};
+      if (!botId || typeof botId !== "string") return res.status(400).json({ error: "botId required" });
+      if (!botBorrowPositionId || typeof botBorrowPositionId !== "string") return res.status(400).json({ error: "botBorrowPositionId required" });
+      if (typeof clientRequestId !== "string" || clientRequestId.length < 8 || clientRequestId.length > 200) {
+        return res.status(400).json({ error: "clientRequestId required (client-generated, persisted until completion)" });
+      }
+      const removeParsed = parsePerbotRaw(removeRaw, "removeRaw");
+      if (typeof removeParsed === "object") return res.status(400).json(removeParsed);
+      if (removeParsed <= BigInt(0)) return res.status(400).json({ error: "removeRaw must be greater than zero" });
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+      if (!sessionId) return res.status(400).json({ error: "Session ID required for security verification" });
+      const session = getSession(sessionId);
+      if (!session || session.walletAddress !== req.walletAddress) {
+        return res.status(401).json({ error: "Invalid or expired session. Please reconnect your wallet." });
+      }
+      if (!session.umk) {
+        return res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
+      }
+
+      // AUTHZ: resolve BOT scope (bot ∈ wallet + Flash-only) BEFORE any signing.
+      const botResolved = await resolveVaultScope(req.walletAddress!, wallet, botId);
+      if (!botResolved.ok) return res.status(botResolved.status).json({ error: botResolved.error });
+      const botScope = botResolved.scope;
+      if (botScope.scope !== "bot" || !botScope.agentPublicKey) {
+        return res.status(400).json({ error: "This bot is not a per-bot (Flash) wallet bot; per-bot borrow does not apply." });
+      }
+      const botWalletPubkey = botScope.agentPublicKey;
+      const tradingBotId = botScope.tradingBotId!;
+
+      // The target borrow position must belong to THIS bot AND be open. Resolve its
+      // venue (nft) id + collateral mint from the DB row — NEVER client-supplied.
+      const rows = await storage.getBorrowPositions(req.walletAddress!, tradingBotId);
+      const target = rows.find((r) => r.id === botBorrowPositionId);
+      if (!target) return res.status(404).json({ error: "Borrow position not found for this bot." });
+      if (target.status !== "open") return res.status(409).json({ error: "This borrow position is not open." });
+      if (!target.collateralMint || target.venuePositionId == null) {
+        return res.status(400).json({ error: "This borrow position has no on-chain collateral to remove." });
+      }
+      const botVenuePositionId = Number(target.venuePositionId);
+      if (!Number.isInteger(botVenuePositionId) || botVenuePositionId <= 0) {
+        return res.status(400).json({ error: "This borrow position has no valid venue id." });
+      }
+
+      // Collateral allowlist by RESOLVED on-chain vault id (never a client mint).
+      const borrowRoute = new JupiterLendBorrowRoute();
+      const cfg = await borrowRoute.getVaultConfig(target.collateralMint);
+      if (!cfg) return res.status(400).json({ error: "Borrow vault is unavailable right now." });
+      if (!isCollateralVaultAllowlisted(cfg.vaultId)) {
+        return res.status(403).json({ error: "This collateral is not available for borrowing yet." });
+      }
+
+      // Resolve the ACCOUNT scope (release destination + gas funder).
+      const acctResolved = await resolveVaultScope(req.walletAddress!, wallet, null);
+      if (!acctResolved.ok) return res.status(acctResolved.status).json({ error: acctResolved.error });
+      const acctScope = acctResolved.scope;
+      if (acctScope.scope !== "account" || !acctScope.agentPublicKey) {
+        return res.status(400).json({ error: "Account wallet not initialized" });
+      }
+      const accountPubkey = acctScope.agentPublicKey;
+
+      // Resume-aware: a re-POST of an existing remove-collateral clientRequestId
+      // FINISHES a partial run (skip the pre-lock sizing gates — the withdraw may
+      // already have landed, which legitimately changes the live spare). The
+      // ":removecoll" suffix keeps it disjoint from other op types.
+      const removeCollReqId = `${clientRequestId}:removecoll`;
+      const priorOp = await storage.getBorrowOperationByClientRequestId(req.walletAddress!, removeCollReqId);
+      const isResume = !!priorOp;
+
+      // One release at a time per position: refuse while a DIFFERENT non-terminal
+      // op holds this position (its breadcrumb owns the resume authority).
+      const posOps = await storage.getBorrowOperations(req.walletAddress!, target.id);
+      const blocking = posOps.find(
+        (o) => o.status !== "succeeded" && o.status !== "failed" && o.clientRequestId !== removeCollReqId,
+      );
+      if (blocking) {
+        return res.status(409).json({ error: "Another operation on this loan is still in progress. Finish or retry that one first." });
+      }
+
+      // Pre-lock sizing gates (fresh run only; re-validated at sign time by the
+      // withdraw primitive's enforced risk gate regardless).
+      if (!isResume) {
+        const liveBot = await borrowRoute.readLivePositionHealth(target.collateralMint, botVenuePositionId);
+        if (!liveBot) {
+          return res.status(400).json({ error: "Could not read the live loan right now. Nothing was moved — try again in a moment." });
+        }
+        const spare = derivePerbotRemovableSpare(liveBot, cfg);
+        if (!spare) {
+          return res.status(400).json({ error: "Could not price the collateral right now. Nothing was moved — try again in a moment." });
+        }
+        if (spare.removableRaw <= BigInt(0)) {
+          return res.status(400).json({ error: "This loan has no spare collateral to remove right now." });
+        }
+        if (removeParsed > spare.removableRaw) {
+          return res.status(400).json({ error: "That's more than this loan can safely release. Reduce the amount and try again." });
+        }
+        // Dust guard: skip micro-removals (fees + three legs for cents) UNLESS the
+        // user is taking the FULL spare (a legitimate small remainder). Priced on
+        // the SAME liquidation-oracle price the spare read used.
+        const price = cfg.oraclePriceLiquidateUsd;
+        if (typeof price === "number" && Number.isFinite(price) && price > 0) {
+          const removeUsd = (Number(removeParsed) / 10 ** cfg.collateralDecimals) * price;
+          if (removeParsed < spare.removableRaw && removeUsd < 5) {
+            return res.status(400).json({ error: "Removals under $5 aren't worth the network fees. Remove more, or take the full spare amount." });
+          }
+        }
+      }
+
+      // Destination: the wallet's OPEN account-scope position on the SAME
+      // collateral (re-pledge), else the account wallet. Pinned at op creation;
+      // a resume replays the op's own persisted destination.
+      const acctRows = (await storage.getBorrowPositions(req.walletAddress!, null))
+        .filter((r) => !r.tradingBotId && r.status === "open" && r.collateralMint === target.collateralMint);
+      const acctTarget = acctRows.length > 0 ? acctRows[0] : null;
+
+      // ---- LIVE: route-level lock keyed on bot+vault (distinct from the executor
+      //      lock -> no re-entrant deadlock). Decrypt BOTH keys; wipe in finally.
+      const removeCollLockKey = JSON.stringify(["perbot-removecoll", req.walletAddress!, tradingBotId, cfg.vaultId]);
+      const result: { status: number; body: any } = await withBorrowLock(removeCollLockKey, async () => {
+        let botKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+        let acctKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+        try {
+          botKey = await decryptVaultScopeKey(botScope, req.walletAddress!, wallet, session.umk);
+          if (!botKey) return { status: 400, body: { error: "Bot wallet needs re-keying. Sign out and back in." } };
+          acctKey = await decryptVaultScopeKey(acctScope, req.walletAddress!, wallet, session.umk);
+          if (!acctKey) return { status: 400, body: { error: "Account wallet needs re-keying. Sign out and back in." } };
+
+          const remove = await runPerbotRemoveCollateral({
+            walletAddress: req.walletAddress!,
+            vault: cfg,
+            accountPublicKey: accountPubkey,
+            accountSecretKey: acctKey.secretKey,
+            botPublicKey: botWalletPubkey,
+            botSecretKey: botKey.secretKey,
+            tradingBotId,
+            botBorrowPositionId: target.id,
+            accountBorrowPositionId: acctTarget?.id ?? null,
+            removeRaw: removeParsed,
+            targetLtv: PERBOT_CARVE_DEFAULT_TARGET_LTV,
+            clientRequestId: removeCollReqId,
+          });
+          if (!remove.success) {
+            const code = remove.needsAttention ? 202 : 400;
+            return { status: code, body: { error: remove.error || "Remove collateral did not complete.", needsAttention: !!remove.needsAttention, step: remove.step, operationId: remove.operationId, clientRequestId } };
+          }
+
+          return {
+            status: 200,
+            body: {
+              ok: true,
+              removedRaw: remove.removedRaw ?? null,
+              resuppliedRaw: remove.resuppliedRaw ?? null,
+              destination: remove.destination ?? null,
+              clientRequestId,
+            },
+          };
+        } finally {
+          if (botKey) botKey.cleanup();
+          if (acctKey) acctKey.cleanup();
+        }
+      });
+      return res.status(result.status).json(result.body);
+    } catch (error: any) {
+      console.error("[Vault] per-bot remove-collateral error:", error);
       return res.status(500).json({ error: error?.message || "Internal server error" });
     }
   });
