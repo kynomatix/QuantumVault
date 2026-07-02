@@ -187,6 +187,8 @@ function health(
     healthFactor,
     liquidatable: band === "liquidation" ? true : false,
     band,
+    liveCollateralRaw: band === "unavailable" ? null : "1000000000",
+    liveDebtRaw: band === "unavailable" ? null : "64000000",
   };
 }
 

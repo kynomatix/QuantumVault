@@ -10162,8 +10162,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             botBorrowPositionId: borrowPositionId,
             accountBorrowPositionId: livePlan.accountBorrowPositionId,
             accountVenuePositionId: livePlan.accountVenuePositionId,
-            // The open's realised borrow delta is a reliable UPPER BOUND on the
-            // true debt -> sizes the pre-close repay top-up (live debt under-reads).
+            // The open's realised borrow delta (principal) sits just BELOW true
+            // debt (= principal + accrued interest) -> stable baseline for the
+            // pre-close repay top-up; the headroom on top covers the interest.
             borrowedPrincipalRaw: carveOpen.borrowedUsdcRaw ? BigInt(carveOpen.borrowedUsdcRaw) : undefined,
             clientRequestId: `${proofRunId}:unwind`,
           });
@@ -10347,12 +10348,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           });
 
           // CONSERVATIVE DISPLAY DEBT (display-only; money paths untouched).
-          // The live getCurrentPosition debt UNDER-reads (a $5.00 borrow reads
-          // back ~$4.83), so a freshly-opened loan looks smaller than the user
-          // actually owes. For DISPLAY we floor the shown debt at the realised
-          // principal recorded by the open op. Final shown debt = the MAX of the
-          // live read, the stored snapshot, and the principal floor — never an
-          // under-read. Health/LTV/band stay LIVE (liquidatable dominates).
+          // The live read now returns TRUE owed (exchange-price scaled; the old
+          // raw-ledger under-read is fixed at the read boundary), so normally
+          // live >= principal and the max() is a no-op. Kept as a safety net:
+          // shown debt = MAX of the live read, the stored snapshot, and the
+          // principal floor — never below what the user verifiably owes, even
+          // when the live read is transiently unavailable and the snapshot lags.
+          // Health/LTV/band stay LIVE (liquidatable dominates).
           const liveDebtRaw: string | null = liveHealth?.debtRaw ?? null;
           const storedDebtRaw: string = r.debtAmountRaw ?? "0";
           let principalRaw = 0n;

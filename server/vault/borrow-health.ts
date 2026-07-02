@@ -64,6 +64,14 @@ export interface PerBotPositionHealth {
   healthFactor: number | null;
   liquidatable: boolean | null;
   band: BorrowHealthBand;
+  /**
+   * Live on-chain NATIVE amounts (TRUE owed / held; exchange-price scaled at the
+   * read boundary), surfaced so the health monitor can self-heal stale DB rows.
+   * null when the live read is unavailable — the monitor must then leave the
+   * stored amounts untouched, never write a guess.
+   */
+  liveCollateralRaw: string | null;
+  liveDebtRaw: string | null;
   /** Present only when status === "unavailable". */
   reason?: string;
 }
@@ -137,6 +145,8 @@ export function computePerBotPositionHealth(input: {
     healthFactor: null,
     liquidatable: null,
     band: "unavailable",
+    liveCollateralRaw: null,
+    liveDebtRaw: null,
     reason,
   });
 
@@ -183,6 +193,8 @@ export function computePerBotPositionHealth(input: {
       healthFactor: null,
       liquidatable: live.liquidatable ?? false,
       band: "healthy",
+      liveCollateralRaw: live.collateralRaw,
+      liveDebtRaw: live.debtRaw,
     };
   }
 
@@ -219,6 +231,8 @@ export function computePerBotPositionHealth(input: {
     healthFactor,
     liquidatable: live.liquidatable ?? null,
     band,
+    liveCollateralRaw: live.collateralRaw,
+    liveDebtRaw: live.debtRaw,
   };
 }
 

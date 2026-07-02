@@ -12,6 +12,10 @@ import {
   DEFAULT_DEBT_DUST_RAW,
   positionScaleDecimals,
   positionRawToNativeRaw,
+  EXCHANGE_PRICE_PRECISION,
+  isSaneVaultExchangePrice,
+  scaleByExchangePrice,
+  parseExchangePricesReturn,
 } from "../../server/vault/borrow-engine-core";
 
 describe("borrow-engine-core: plan builders", () => {
@@ -267,5 +271,135 @@ describe("borrow-engine-core: SDK position-raw -> native scaling", () => {
     expect(() => positionRawToNativeRaw(1n, 19, "floor")).toThrow();
     expect(() => positionRawToNativeRaw(1n, 6.5, "floor")).toThrow();
     expect(() => positionRawToNativeRaw(-1n, 6, "floor")).toThrow();
+  });
+});
+
+describe("borrow-engine-core: vault exchange-price scaling (raw ledger -> true owed)", () => {
+  const E1 = EXCHANGE_PRICE_PRECISION; // exactly 1.0
+  // Vault 43's live borrow exchange price at diagnosis time: 1.036035169894
+  const E_VAULT43 = 1_036_035_169_894n;
+
+  it("sanity bounds: [1.0, 10.0) accepted, outside rejected", () => {
+    expect(isSaneVaultExchangePrice(E1)).toBe(true);
+    expect(isSaneVaultExchangePrice(E_VAULT43)).toBe(true);
+    expect(isSaneVaultExchangePrice(E1 * 10n - 1n)).toBe(true);
+    expect(isSaneVaultExchangePrice(E1 - 1n)).toBe(false); // < 1.0: accrual never shrinks
+    expect(isSaneVaultExchangePrice(E1 * 10n)).toBe(false); // >= 10x: parse/venue is broken
+    expect(isSaneVaultExchangePrice(0n)).toBe(false);
+    expect(isSaneVaultExchangePrice(-E1)).toBe(false);
+  });
+
+  it("reproduces the real bug: vault 43 ledger debt x 1.036 = true owed (~3.6% more)", () => {
+    // The test position: ledger read 1_933_233_786 (9dp) was treated as owed.
+    const ledger = 1_933_233_786n;
+    const trueOwed = scaleByExchangePrice(ledger, E_VAULT43, "ceil");
+    // 1_933_233_786 * 1.036035169894 = 2_002_898_193.4... -> ceil
+    expect(trueOwed).toBe(2_002_898_194n);
+    // The understatement was the accrued interest: ~3.6% of the debt.
+    expect(Number(trueOwed - ledger) / Number(ledger)).toBeCloseTo(0.036035, 4);
+  });
+
+  it("exchange price exactly 1.0 is the identity (fresh vault, no accrual)", () => {
+    expect(scaleByExchangePrice(123_456_789n, E1, "floor")).toBe(123_456_789n);
+    expect(scaleByExchangePrice(123_456_789n, E1, "ceil")).toBe(123_456_789n);
+  });
+
+  it("ceil never under-reports, floor never over-reports; differ by at most 1", () => {
+    for (const raw of [1n, 999n, 1_000_000n, 1_933_233_786n, 10n ** 15n]) {
+      const fl = scaleByExchangePrice(raw, E_VAULT43, "floor");
+      const ce = scaleByExchangePrice(raw, E_VAULT43, "ceil");
+      expect(ce - fl === 0n || ce - fl === 1n).toBe(true);
+      // Both are >= the raw ledger amount (E >= 1.0 always).
+      expect(fl >= raw).toBe(true);
+    }
+  });
+
+  it("zero stays zero (no phantom debt)", () => {
+    expect(scaleByExchangePrice(0n, E_VAULT43, "floor")).toBe(0n);
+    expect(scaleByExchangePrice(0n, E_VAULT43, "ceil")).toBe(0n);
+  });
+
+  it("fails closed on a negative raw or an insane exchange price", () => {
+    expect(() => scaleByExchangePrice(-1n, E_VAULT43, "floor")).toThrow();
+    expect(() => scaleByExchangePrice(1n, 0n, "floor")).toThrow();
+    expect(() => scaleByExchangePrice(1n, E1 - 1n, "floor")).toThrow();
+    expect(() => scaleByExchangePrice(1n, E1 * 10n, "ceil")).toThrow();
+  });
+
+  it("repay-cap safety property: floor((ledger-1) x E_read) repay never burns more ledger units than exist", () => {
+    // Repaying amount X burns ceil-ish ~X/E_exec + 1 ledger units. E is monotone
+    // non-decreasing, so E_exec >= E_read (the cache only lowers E_read).
+    // Property: burnUnits = floor(X / E_exec) + 1 <= ledger for X = maxRepay.
+    const ledgers = [2n, 100n, 1_933_233_786n, 10n ** 12n];
+    const eReads = [E1, E_VAULT43, 9_999_999_999_999n];
+    for (const ledger of ledgers) {
+      for (const eRead of eReads) {
+        const maxRepay = scaleByExchangePrice(ledger - 1n, eRead, "floor");
+        for (const eExec of [eRead, eRead + 1n, eRead + 10n ** 9n]) {
+          if (!isSaneVaultExchangePrice(eExec)) continue;
+          const burned = (maxRepay * EXCHANGE_PRICE_PRECISION) / eExec + 1n;
+          expect(burned <= ledger).toBe(true);
+        }
+      }
+    }
+  });
+});
+
+describe("borrow-engine-core: parseExchangePricesReturn (simulate return data)", () => {
+  function encodeU128LE(v: bigint): Uint8Array {
+    const out = new Uint8Array(16);
+    for (let i = 0; i < 16; i++) {
+      out[i] = Number(v & 0xffn);
+      v >>= 8n;
+    }
+    return out;
+  }
+  function encodeReturn(prices: [bigint, bigint, bigint, bigint]): Uint8Array {
+    const out = new Uint8Array(64);
+    prices.forEach((p, i) => out.set(encodeU128LE(p), i * 16));
+    return out;
+  }
+
+  it("parses the real vault 43 fixture (4 LE u128s at 1e12 precision)", () => {
+    // Observed via on-chain simulate on 2026-07-02: liquidity supply/borrow,
+    // vault supply, vault borrow.
+    const data = encodeReturn([
+      1_000_000_000_000n,
+      1_054_321_000_000n,
+      1_000_000_000_000n,
+      1_036_035_169_894n,
+    ]);
+    const parsed = parseExchangePricesReturn(data);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.liquiditySupplyExchangePrice).toBe(1_000_000_000_000n);
+    expect(parsed!.liquidityBorrowExchangePrice).toBe(1_054_321_000_000n);
+    expect(parsed!.vaultSupplyExchangePrice).toBe(1_000_000_000_000n);
+    expect(parsed!.vaultBorrowExchangePrice).toBe(1_036_035_169_894n);
+  });
+
+  it("round-trips large u128 values without precision loss", () => {
+    const big = (1n << 100n) + 12345n;
+    const data = encodeReturn([big, big + 1n, 2_000_000_000_000n, 3_000_000_000_000n]);
+    const parsed = parseExchangePricesReturn(data);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.liquiditySupplyExchangePrice).toBe(big);
+    expect(parsed!.liquidityBorrowExchangePrice).toBe(big + 1n);
+  });
+
+  it("fails closed on wrong length", () => {
+    expect(parseExchangePricesReturn(new Uint8Array(0))).toBeNull();
+    expect(parseExchangePricesReturn(new Uint8Array(63))).toBeNull();
+    expect(parseExchangePricesReturn(new Uint8Array(65))).toBeNull();
+  });
+
+  it("fails closed when the VAULT prices are out of sane bounds", () => {
+    // vault supply below 1.0 -> reject (a garbage price must never scale money)
+    const low = encodeReturn([10n ** 12n, 10n ** 12n, 999_999_999_999n, 10n ** 12n]);
+    expect(parseExchangePricesReturn(low)).toBeNull();
+    // vault borrow at 10x -> reject
+    const high = encodeReturn([10n ** 12n, 10n ** 12n, 10n ** 12n, 10n ** 13n]);
+    expect(parseExchangePricesReturn(high)).toBeNull();
+    // all-zero buffer (defaulted/failed simulate) -> reject
+    expect(parseExchangePricesReturn(new Uint8Array(64))).toBeNull();
   });
 });

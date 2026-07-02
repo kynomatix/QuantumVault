@@ -24,13 +24,33 @@
  *   (÷10000), borrowLimitUtilization + oraclePrice* scaled ÷1e15.
  */
 
-import { PublicKey } from "@solana/web3.js";
+import { PublicKey, Transaction } from "@solana/web3.js";
 import { getServerConnection } from "../agent-wallet";
 import { BORROW_PREVIEW_ASSUMPTIONS } from "./borrow-preview-assumptions";
-import { positionRawToNativeRaw } from "./borrow-engine-core";
+import {
+  positionRawToNativeRaw,
+  scaleByExchangePrice,
+  parseExchangePricesReturn,
+  type VaultExchangePrices,
+} from "./borrow-engine-core";
 
 /** Read-only signer used for on-chain account derivation in simulate/read calls. */
 const READONLY_SIGNER = new PublicKey("11111111111111111111111111111111");
+
+/**
+ * Program addresses for the getExchangePrices simulate (pinned; the vaults id is
+ * ALSO asserted against the SDK's own program at runtime, so an SDK upgrade that
+ * moves programs fails closed instead of deriving wrong PDAs).
+ */
+const VAULTS_PROGRAM_ID = new PublicKey("jupr81YtYssSyPt8jbnGuiWon5f6x9TcDEFxYe3Bdzi");
+const LIQUIDITY_PROGRAM_ID = new PublicKey("jupeiUmn818Jg1ekPURTpr4mFo29p46vygyykFJ3wZC");
+/** Funded fee payer for read-only simulates (same fallback the SDK itself uses). */
+const SIMULATE_FEE_PAYER = new PublicKey("HEyJLdMfZhhQ7FHCtjD5DWDFNFQhaeAVAsHeWqoY6dSD");
+
+/** Exchange prices move only with interest accrual — a short cache is safe and
+ * saves one simulate per read. E only GROWS, so a cached (slightly older, thus
+ * slightly smaller) E makes the repay cap MORE conservative, never less. */
+const EXCHANGE_PRICE_CACHE_MS = 30_000;
 
 /** Scaled-fixed-point decoders (confirmed on the live INF vault). */
 const SCALE_FACTOR = 1000; // collateralFactor / liquidationThreshold
@@ -132,19 +152,25 @@ export interface BorrowSimulation {
 }
 
 /** Live health of an EXISTING on-chain position. All raw amounts are NATIVE
- * token units (the SDK's normalized max(decimals,9) scale is converted away at
- * the read boundary), so the whole engine speaks native consistently. */
+ * token units representing TRUE amounts: the SDK's normalized max(decimals,9)
+ * scale AND the vault exchange prices (interest accrual index) are both
+ * converted away at the read boundary, so the whole engine speaks
+ * native-units-of-what-is-actually-owed/held consistently. */
 export interface LivePositionHealth {
   vaultId: number;
   positionId: number;
-  /** NATIVE collateral-token raw (FLOORED — never over-reports the asset). */
+  /** NATIVE collateral-token raw, TRUE amount = colRaw × supply exchange price
+   * (FLOORED — never over-reports the asset). */
   collateralRaw: string;
-  /** NATIVE debt-token (USDC) raw (CEIL'd — never under-reports the liability). */
+  /** NATIVE debt-token (USDC) raw, TRUE owed = debtRaw × borrow exchange price
+   * (CEIL'd — never under-reports the liability). */
   debtRaw: string;
   /**
-   * NATIVE debt-token raw, FLOORED — the MOST an exact partial repay may pass so
-   * it can never overshoot the true on-chain debt (VaultUserDebtTooLow). Differs
-   * from `debtRaw` by at most one native unit.
+   * NATIVE debt-token raw, FLOORED from (ledgerRaw − 1) × borrow exchange price
+   * — the MOST an exact partial repay may pass so it can never overshoot the
+   * true on-chain debt (VaultUserDebtTooLow): repaying X burns ~X/E + 1 ledger
+   * units and E only grows after this read, so the burn stays ≤ the ledger
+   * balance.
    */
   maxRepayNativeRaw: string;
   /** Whether the protocol marks the position as liquidatable. */
@@ -427,6 +453,74 @@ export class JupiterLendBorrowRoute {
     }
   }
 
+  /** Per-vault exchange-price cache (tiny + bounded: one entry per borrow vault). */
+  private exchangePriceCache = new Map<number, { at: number; prices: VaultExchangePrices }>();
+
+  /**
+   * Live vault exchange prices — the interest accrual index that converts the
+   * venue's RAW ledger units into TRUE amounts (owed = debtRaw × borrow price;
+   * collateral = colRaw × supply price; both ÷1e12). The SDK does not export its
+   * internal getExchangePrices, so this replicates it: simulate the program's
+   * read-only `getExchangePrices` instruction and parse the return data
+   * (4 LE u128s). Fail closed (null) on ANY failure, wrong program id, missing
+   * return log, or out-of-bounds price — a garbage price must never scale debt.
+   */
+  async getVaultExchangePrices(config: BorrowVaultConfig): Promise<VaultExchangePrices | null> {
+    try {
+      const cached = this.exchangePriceCache.get(config.vaultId);
+      if (cached && Date.now() - cached.at < EXCHANGE_PRICE_CACHE_MS) return cached.prices;
+
+      const borrow = await import("@jup-ag/lend/borrow");
+      const BN = (await import("bn.js")).default;
+      const connection = getServerConnection();
+      const program = borrow.getVaultsProgram({ connection, signer: READONLY_SIGNER });
+      // The PDA seeds below are derived against the PINNED vaults program id; if
+      // the SDK ever moves to a different program, our derivation would be wrong
+      // — fail closed instead.
+      if (!program.programId.equals(VAULTS_PROGRAM_ID)) return null;
+
+      const vaultIdLe = new BN(config.vaultId).toArrayLike(Buffer, "le", 2);
+      const [vaultState] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault_state"), vaultIdLe],
+        VAULTS_PROGRAM_ID,
+      );
+      const [vaultConfig] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault_config"), vaultIdLe],
+        VAULTS_PROGRAM_ID,
+      );
+      const [supplyTokenReserves] = PublicKey.findProgramAddressSync(
+        [Buffer.from("reserve"), new PublicKey(config.collateralMint).toBuffer()],
+        LIQUIDITY_PROGRAM_ID,
+      );
+      const [borrowTokenReserves] = PublicKey.findProgramAddressSync(
+        [Buffer.from("reserve"), new PublicKey(config.debtMint).toBuffer()],
+        LIQUIDITY_PROGRAM_ID,
+      );
+
+      const ix = await (program.methods as any)
+        .getExchangePrices()
+        .accounts({ vaultState, vaultConfig, supplyTokenReserves, borrowTokenReserves })
+        .instruction();
+      const tx = new Transaction().add(ix);
+      tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+      tx.feePayer = SIMULATE_FEE_PAYER;
+      const sim = await connection.simulateTransaction(tx);
+      if (sim.value.err) return null;
+      const retLog = sim.value.logs?.find((l) => l.startsWith("Program return:"));
+      if (!retLog) return null;
+      const parts = retLog.split(" ");
+      const b64 = parts[3];
+      if (!b64) return null;
+      const prices = parseExchangePricesReturn(Buffer.from(b64, "base64"));
+      if (!prices) return null;
+
+      this.exchangePriceCache.set(config.vaultId, { at: Date.now(), prices });
+      return prices;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * On-chain simulate of a hypothetical borrow against a fresh (empty) position
    * via getFinalPosition. This is the on-chain authority that cross-checks the
@@ -470,12 +564,23 @@ export class JupiterLendBorrowRoute {
       if (!finalPos) return null;
       if (finalPos.colRaw == null || finalPos.debtRaw == null) return null;
 
-      // getFinalPosition is normalized to max(decimals, 9) dp like
-      // getCurrentPosition; convert to NATIVE so this on-chain simulate is
-      // directly comparable to the native-unit `previewBorrow` it cross-checks.
+      // getFinalPosition returns RAW LEDGER units normalized to max(decimals, 9)
+      // dp like getCurrentPosition; scale by the vault exchange prices (TRUE
+      // amounts) then convert to NATIVE so this on-chain simulate is directly
+      // comparable to the native-unit `previewBorrow` it cross-checks.
       // Both FLOORED (an advisory cross-check, not a liability of record).
-      const collateralRaw = positionRawToNativeRaw(BigInt(finalPos.colRaw.toString()), config.collateralDecimals, "floor");
-      const debtRaw = positionRawToNativeRaw(BigInt(finalPos.debtRaw.toString()), config.debtDecimals, "floor");
+      const exPrices = await this.getVaultExchangePrices(config);
+      if (!exPrices) return null;
+      const collateralRaw = positionRawToNativeRaw(
+        scaleByExchangePrice(BigInt(finalPos.colRaw.toString()), exPrices.vaultSupplyExchangePrice, "floor"),
+        config.collateralDecimals,
+        "floor",
+      );
+      const debtRaw = positionRawToNativeRaw(
+        scaleByExchangePrice(BigInt(finalPos.debtRaw.toString()), exPrices.vaultBorrowExchangePrice, "floor"),
+        config.debtDecimals,
+        "floor",
+      );
 
       const oraclePriceUsd = await this.readOraclePriceUsd(collateralMint);
       return {
@@ -522,15 +627,42 @@ export class JupiterLendBorrowRoute {
       // gates downstream), so fail CLOSED on a missing colRaw/debtRaw.
       if (pos.colRaw == null || pos.debtRaw == null) return null;
 
-      // The SDK returns position amounts normalized to max(decimals, 9) dp.
-      // Convert to NATIVE token units ONCE here so the whole engine (display,
-      // health, repay cap, verify, storage) speaks native: collateral FLOORED
-      // (asset), debt CEIL'd (liability), plus a FLOORED debt for the repay cap.
+      // The SDK returns RAW LEDGER units (not amounts!) normalized to
+      // max(decimals, 9) dp. True owed = raw × vaultBorrowExchangePrice; true
+      // collateral = raw × vaultSupplyExchangePrice (the accrual index; verified
+      // on-chain — treating raw as an amount understates debt by the accrued
+      // interest, ~3.6% on vault 43). Scale by the live exchange prices, then
+      // convert to NATIVE token units, ONCE here, so the whole engine (display,
+      // health, repay cap, verify, storage) speaks true native amounts:
+      // collateral FLOORED (asset), debt CEIL'd (liability).
+      const exPrices = await this.getVaultExchangePrices(config);
+      if (!exPrices) return null; // unreadable accrual index ⇒ amounts unknowable ⇒ fail closed
       const colPositionRaw = BigInt(pos.colRaw.toString());
       const debtPositionRaw = BigInt(pos.debtRaw.toString());
-      const collateralRaw = positionRawToNativeRaw(colPositionRaw, config.collateralDecimals, "floor");
-      const debtRaw = positionRawToNativeRaw(debtPositionRaw, config.debtDecimals, "ceil");
-      const maxRepayNativeRaw = positionRawToNativeRaw(debtPositionRaw, config.debtDecimals, "floor");
+      const collateralRaw = positionRawToNativeRaw(
+        scaleByExchangePrice(colPositionRaw, exPrices.vaultSupplyExchangePrice, "floor"),
+        config.collateralDecimals,
+        "floor",
+      );
+      const debtRaw = positionRawToNativeRaw(
+        scaleByExchangePrice(debtPositionRaw, exPrices.vaultBorrowExchangePrice, "ceil"),
+        config.debtDecimals,
+        "ceil",
+      );
+      // Repay CAP: scale (ledger − 1 unit) and FLOOR. Repaying amount X burns
+      // ~X/E_exec + 1 ledger units; E_exec ≥ E_read (E is monotone
+      // non-decreasing, and the 30s cache only makes E_read smaller/safer), so
+      // the burn ≤ (ledger − 1) + 1 = ledger — an exact cap-sized repay can
+      // never trip VaultUserDebtTooLow.
+      const maxRepayNativeRaw = positionRawToNativeRaw(
+        scaleByExchangePrice(
+          debtPositionRaw > 0n ? debtPositionRaw - 1n : 0n,
+          exPrices.vaultBorrowExchangePrice,
+          "floor",
+        ),
+        config.debtDecimals,
+        "floor",
+      );
 
       const oraclePriceUsd = await this.readOraclePriceUsd(collateralMint);
       return {

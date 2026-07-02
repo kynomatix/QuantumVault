@@ -87,14 +87,16 @@ const DEBT_DUST = 10_000n; // 0.01 USDC @ 6 decimals
 
 /** Per-bot repay TOP-UP sizing (see the UNWIND/CLOSE top-up leg). The bot close
  *  repays via the MAX_REPAY sentinel — the only primitive that fully clears the
- *  true debt (getCurrentPosition UNDER-reads it, so an exact repay sized from it
- *  leaves dust and the withdraw-all is health-rejected). MAX_REPAY pulls slightly
- *  MORE USDC than the live debt, so a bot funded with ~exactly its borrow has no
- *  headroom and the SPL transfer 0x1s. The ACCOUNT close never hits this (its
- *  wallet carries ample spare USDC). So before the close we lend the bot a small,
- *  capped USDC headroom from the account (the funder), keep MAX_REPAY, then sweep
- *  the headroom back. Sized from the borrowed PRINCIPAL (a reliable debt upper
- *  bound), NEVER from the under-reading getCurrentPosition. */
+ *  true debt in one tx (interest accrues continuously, so an exact repay sized
+ *  from any point-in-time read leaves dust and the withdraw-all is
+ *  health-rejected). MAX_REPAY pulls slightly MORE USDC than the live debt, so a
+ *  bot funded with ~exactly its borrow has no headroom and the SPL transfer
+ *  0x1s. The ACCOUNT close never hits this (its wallet carries ample spare
+ *  USDC). So before the close we lend the bot a small, capped USDC headroom from
+ *  the account (the funder), keep MAX_REPAY, then sweep the headroom back. Sized
+ *  from the borrowed PRINCIPAL: true owed = principal + accrued interest, so
+ *  principal is a floor just below true debt and the headroom on top covers the
+ *  interest — a stable baseline that needs no live read at sizing time. */
 const TOPUP_HEADROOM_BPS = 300n; // 3% of the borrowed principal...
 const TOPUP_MIN_HEADROOM_RAW = 50_000n; // ...but at least 0.05 USDC (6 decimals).
 
@@ -684,7 +686,8 @@ export async function runPerbotCarveOpen(params: PerbotCarveOpenParams): Promise
           // The executor finalized this row to 'open' with the OBSERVED debt
           // (executor line ~467-473). If the crash landed BETWEEN that finalize and
           // the op-metadata write of borrowedUsdcRaw (~685), metadata lacks it; fall
-          // back to the row's debtAmountRaw (Jupiter Lend debt == borrowed USDC 1:1)
+          // back to the row's debtAmountRaw (true owed USDC — principal plus any
+          // accrued interest, so ≥ the borrowed amount; a safe positive stand-in)
           // so the route's "borrowed USDC landed" check has a positive value on
           // resume (delta is 0 then) instead of false-500'ing with the loan OPEN.
           return finalizeCarveOpen(op, {
@@ -703,7 +706,8 @@ export async function runPerbotCarveOpen(params: PerbotCarveOpenParams): Promise
           // the row pending->open with the OBSERVED on-chain amounts FIRST — the
           // downstream unwind (executeBorrowClose requires status 'open') cannot
           // close a 'pending' row — then finalise. borrowedUsdcRaw falls back to
-          // the live position debt (Jupiter Lend debt is USDC-denominated 1:1).
+          // the live position debt (true owed USDC ≥ borrowed principal — a safe
+          // positive stand-in for the resume check).
           if (ownLive.status !== "open") {
             const reconciled = await storage.updateBorrowPosition(
               ownLive.id,
@@ -842,8 +846,9 @@ export interface PerbotUnwindCloseParams {
   /** USDC the bot RECEIVED at open (the open's realised borrow delta) — a stable
    *  sizing BASELINE for the pre-close repay top-up. True debt = this principal +
    *  accrued interest, so principal sits just BELOW true debt; the headroom added
-   *  on top is what covers the interest. The live getCurrentPosition debt
-   *  UNDER-reads, so it is NOT used for sizing. */
+   *  on top is what covers the interest. (readLivePositionHealth now reports TRUE
+   *  owed, but principal+headroom needs no live read at sizing time, so it stays
+   *  the sizing source.) */
   borrowedPrincipalRaw?: bigint;
   clientRequestId: string;
 }
@@ -858,8 +863,10 @@ export interface PerbotUnwindCloseParams {
 /** A stable sizing BASELINE for the bot loan's repayable debt, raw (USDC, 6dp).
  *  The borrowed PRINCIPAL (USDC the bot received at open) sits just BELOW true
  *  debt (true debt = principal + accrued interest); the caller adds a headroom on
- *  top to cover that interest. Principal is NOT subject to the getCurrentPosition
- *  under-read that breaks exact-repay sizing, which is why it is the baseline.
+ *  top to cover that interest. Principal needs no live read at all (it is a
+ *  recorded, realised transfer), which is why it is the baseline — the live debt
+ *  read now returns TRUE owed (exchange-price scaled), but it can be transiently
+ *  unreadable, and principal never is.
  *  Prefer the caller-supplied value (the open's realised borrow delta), then the
  *  recorded open op, then the bot position's recorded debt. Returns 0n only when
  *  nothing is knowable (the top-up then degrades to a small fixed headroom over
@@ -893,12 +900,12 @@ async function resolvePrincipalRaw(params: PerbotUnwindCloseParams): Promise<big
  * never used for money sizing (the repay path keeps using `resolvePrincipalRaw`
  * + MAX_REPAY).
  *
- * The live `getCurrentPosition` debt UNDER-reads (a $5.00 borrow reads back
- * ~$4.83), so a freshly-opened loan looks smaller than the user actually owes.
- * For DISPLAY we floor the shown debt at the realised principal recorded by the
- * open op = max(requestedDebtRaw, borrowedUsdcRaw) across the op metadata and
- * result. `requestedDebtRaw` is the user's intended borrow (the true principal);
- * `borrowedUsdcRaw` is also under-read but kept in the max as a safety net.
+ * The live debt read is now TRUE owed (exchange-price scaled — the historical
+ * "under-read" was raw ledger units mistaken for USDC, since fixed at the read
+ * boundary). This floor remains as a display safety net: debt can never show
+ * BELOW the realised principal recorded by the open op = max(requestedDebtRaw,
+ * borrowedUsdcRaw) across the op metadata and result, e.g. while a live read is
+ * transiently unavailable and the stored snapshot lags.
  * Returns 0n when there's no open op / nothing knowable (caller then falls back
  * to the live/stored debt).
  */
@@ -990,9 +997,8 @@ export async function runPerbotUnwindClose(params: PerbotUnwindCloseParams): Pro
     // ---- TOP-UP (account -> bot USDC) leg --------------------------------
     // Lend the bot a small, capped USDC headroom so the MAX_REPAY close fully
     // clears the debt without 0x1-ing a razor-thin bot wallet. Swept back after
-    // (see the SWEEP leg). Sized from the borrowed PRINCIPAL (a stable baseline)
-    // plus a headroom that covers accrued interest, never from the under-reading
-    // live position.
+    // (see the SWEEP leg). Sized from the borrowed PRINCIPAL (a stable baseline
+    // that needs no live read) plus a headroom that covers accrued interest.
     const upStep = op.step ?? "";
     // Legacy-resume bridge: an unwind op started by the PRE-FIX code (no TOP-UP
     // leg) is parked at "close_failed" (the close reverted -> never landed -> the

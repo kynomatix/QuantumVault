@@ -118,6 +118,86 @@ export function positionRawToNativeRaw(
   return positionRaw / divisor;
 }
 
+/**
+ * EXCHANGE PRICES — the vault's interest accrual index.
+ *
+ * `getCurrentPosition().debtRaw` / `colRaw` are RAW LEDGER units, NOT amounts:
+ * the venue records debt as `amount ÷ vaultBorrowExchangePrice` at borrow time
+ * and the exchange price grows continuously with interest (verified on-chain,
+ * vault 43: borrowing 1.0 USDC raised debtRaw by only ~0.9652 — E ≈ 1.036).
+ * True owed = debtRaw × vaultBorrowExchangePrice; true collateral =
+ * colRaw × vaultSupplyExchangePrice. Treating raw as an amount UNDERSTATES the
+ * liability by the accrued-interest factor (the bug that showed fake profit).
+ *
+ * Prices come from simulating the program's `getExchangePrices` instruction
+ * (return data = 4 little-endian u128s: liquiditySupply, liquidityBorrow,
+ * vaultSupply, vaultBorrow), all scaled by 1e12.
+ */
+export const EXCHANGE_PRICE_PRECISION = 10n ** 12n; // 1.0
+
+/**
+ * Sanity bounds for a vault exchange price: at least 1.0 (interest only accrues
+ * upward from par) and below 10.0 (a 10x accrual index would mean the parse or
+ * the account set is wrong — fail closed rather than scale debt by garbage).
+ */
+export function isSaneVaultExchangePrice(price: bigint): boolean {
+  return price >= EXCHANGE_PRICE_PRECISION && price < EXCHANGE_PRICE_PRECISION * 10n;
+}
+
+/**
+ * Scale a position RAW ledger amount into a TRUE amount (still at position
+ * scale) by an exchange price, with EXPLICIT money-safe rounding:
+ *   - debt/liability -> "ceil" (never under-report what is owed),
+ *   - collateral/asset and repay caps -> "floor".
+ * Throws on a negative input or an out-of-bounds price (fail closed — the
+ * caller must convert an unreadable price to a null read, never a guess).
+ */
+export function scaleByExchangePrice(
+  positionRaw: bigint,
+  exchangePrice: bigint,
+  rounding: "floor" | "ceil",
+): bigint {
+  if (positionRaw < 0n) throw new Error("scaleByExchangePrice: positionRaw must be >= 0");
+  if (!isSaneVaultExchangePrice(exchangePrice)) {
+    throw new Error(`scaleByExchangePrice: exchange price ${exchangePrice} out of sane bounds`);
+  }
+  const product = positionRaw * exchangePrice;
+  if (rounding === "ceil") return (product + EXCHANGE_PRICE_PRECISION - 1n) / EXCHANGE_PRICE_PRECISION;
+  return product / EXCHANGE_PRICE_PRECISION;
+}
+
+/** The four 1e12-scaled prices returned by the program's getExchangePrices. */
+export interface VaultExchangePrices {
+  liquiditySupplyExchangePrice: bigint;
+  liquidityBorrowExchangePrice: bigint;
+  vaultSupplyExchangePrice: bigint;
+  vaultBorrowExchangePrice: bigint;
+}
+
+/**
+ * Parse the `getExchangePrices` simulate return data (64 bytes = 4 LE u128s).
+ * Returns null on any wrong length or out-of-bounds VAULT price (fail closed —
+ * a misparse here would scale every debt read by garbage). The two liquidity
+ * prices are parsed but not bounds-gated (we never scale by them).
+ */
+export function parseExchangePricesReturn(data: Uint8Array): VaultExchangePrices | null {
+  if (data.length !== 64) return null;
+  const readU128LE = (off: number): bigint => {
+    let v = 0n;
+    for (let i = 15; i >= 0; i--) v = (v << 8n) | BigInt(data[off + i]);
+    return v;
+  };
+  const prices: VaultExchangePrices = {
+    liquiditySupplyExchangePrice: readU128LE(0),
+    liquidityBorrowExchangePrice: readU128LE(16),
+    vaultSupplyExchangePrice: readU128LE(32),
+    vaultBorrowExchangePrice: readU128LE(48),
+  };
+  if (!isSaneVaultExchangePrice(prices.vaultSupplyExchangePrice)) return null;
+  if (!isSaneVaultExchangePrice(prices.vaultBorrowExchangePrice)) return null;
+  return prices;
+}
+
 export interface BorrowOpenRequest {
   /** Collateral to deposit, raw base units of the collateral mint. Must be > 0. */
   collateralRaw: bigint;
@@ -489,6 +569,8 @@ export interface RepaidHistory {
  *     passed preDebt so delta is 0) the on-chain-derived sent amount.
  * ALWAYS yields a positive figure for a real repay, so a confirmed repay never gets
  * skipped from the history/tax feed. Result is always `<= repayRaw`.
+ * NOTE: all raws here are TRUE owed native units (exchange-price scaled at the
+ * read boundary) — history rows written going forward are in owed USDC.
  */
 export function resolveRepaidHistoryRaw(f: RepaidHistoryFacts): RepaidHistory {
   const observedDelta = f.preDebtRaw - f.observedDebtRaw;

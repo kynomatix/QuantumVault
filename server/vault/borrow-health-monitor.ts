@@ -171,6 +171,9 @@ export interface BorrowHealthScanDeps {
     next: HealthAlertNextState,
     health: PerBotPositionHealth,
     asOf: Date,
+    /** The row's status at scan time — CAS guard so a concurrent executor
+     * transition (e.g. open→closing) is never clobbered by this refresh. */
+    ifStatus?: string,
   ): Promise<void>;
   resolveScopeLabel(row: BorrowPosition): Promise<string>;
   notify(
@@ -203,7 +206,7 @@ function defaultDeps(): BorrowHealthScanDeps {
         rowDeps,
         cfgCache,
       ),
-    persistAlertState: async (id, next, health, asOf) => {
+    persistAlertState: async (id, next, health, asOf, ifStatus) => {
       await storage.updateBorrowPosition(id, {
         lastObservedHealthBand: next.lastObservedHealthBand,
         healthBandChangedAt: next.healthBandChangedAt,
@@ -218,7 +221,20 @@ function defaultDeps(): BorrowHealthScanDeps {
         },
         healthAsOf: asOf,
         healthSource: HEALTH_SOURCE,
-      });
+        // Self-heal the stored amounts from the live read (TRUE owed/held,
+        // exchange-price scaled). Interest accrues continuously, so the stored
+        // debt is stale the moment it is written; this 60s refresh keeps
+        // PnL/exposure/eligibility reads honest. ONLY when the live read
+        // succeeded — an unavailable read must never overwrite known amounts.
+        ...(health.status === "available" &&
+        health.liveDebtRaw !== null &&
+        health.liveCollateralRaw !== null
+          ? {
+              debtAmountRaw: health.liveDebtRaw,
+              collateralAmountRaw: health.liveCollateralRaw,
+            }
+          : {}),
+      }, ifStatus);
     },
     resolveScopeLabel: async (row) => {
       if (!row.tradingBotId) return "Account";
@@ -296,7 +312,7 @@ export async function runBorrowHealthScan(
         // "skipped": advance the baseline (nothing to deliver, nothing to retry).
       }
 
-      await deps.persistAlertState(row.id, persistNext, health, now);
+      await deps.persistAlertState(row.id, persistNext, health, now, row.status ?? undefined);
     } catch (err) {
       failed++;
       console.error(`[BorrowHealthMonitor] row ${row.id} failed:`, err);
