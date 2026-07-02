@@ -2236,9 +2236,33 @@ function BorrowOverviewSection() {
 
       <Alert type="info">
         Borrow is built on Jupiter Lend (Fluid), a lending protocol with high capital efficiency. It runs in isolated
-        vaults — one collateral asset paired with one debt asset (USDC) per position. Supported collateral includes SOL
-        and staked-SOL tokens (INF, JitoSOL, mSOL), Bitcoin tokens (WBTC, cbBTC, xBTC, LBTC), JLP, JUP, and syrupUSDC.
-        Tokenized stocks (TSLAx, NVDAx, SPYx, QQQx) are also supported, but only during US market hours.
+        vaults — one collateral asset paired with one debt asset (USDC) per position.
+      </Alert>
+
+      <SubHeading>Supported Collateral</SubHeading>
+      <Paragraph>You can borrow USDC against any of these assets:</Paragraph>
+      <div className="grid gap-3 mb-4 sm:grid-cols-2">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">SOL &amp; Staked SOL</h4>
+          <p className="text-white/60 text-sm">SOL, INF, JitoSOL, mSOL</p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Bitcoin</h4>
+          <p className="text-white/60 text-sm">WBTC, cbBTC, xBTC, LBTC</p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Other Tokens</h4>
+          <p className="text-white/60 text-sm">JLP, JUP, syrupUSDC</p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-1">Tokenized Stocks</h4>
+          <p className="text-white/60 text-sm">TSLAx, NVDAx, SPYx, QQQx <span className="text-white/40">(US market hours only)</span></p>
+        </div>
+      </div>
+      <Alert type="info">
+        The Lending section only shows the collaterals you already hold in your wallet — by design, so the list stays
+        focused on what you can actually supply. If you hold a supported asset but do not see it, make sure it is in
+        your account wallet.
       </Alert>
 
       <SubHeading>What Makes It Different</SubHeading>
@@ -2289,8 +2313,8 @@ function BorrowOverviewSection() {
       <SubHeading>Where to Find It</SubHeading>
       <Paragraph>
         Open the <strong className="text-white/90">Wallet</strong> page and look for the <strong className="text-white/90">Lending</strong> section.
-        It shows your open borrow positions, pledged collateral, live health factor, and a list of eligible collaterals
-        you can supply.
+        It shows your open borrow positions, pledged collateral, live health factor, and the eligible collaterals you
+        currently hold — ready to supply.
       </Paragraph>
 
       <SubHeading>How It Works</SubHeading>

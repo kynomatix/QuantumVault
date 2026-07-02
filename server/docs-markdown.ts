@@ -897,7 +897,18 @@ Borrow lets you use lending collateral you already hold — such as SOL, a stake
 
 This is different from a loan from a bank. You never hand your collateral to QuantumVault. The collateral token stays in your own agent wallet; the platform only signs the on-chain borrow instruction. You can repay the debt anytime to release your collateral.
 
-> **Note:** Borrow is built on Jupiter Lend (Fluid), a lending protocol with high capital efficiency. It runs in isolated vaults — one collateral asset paired with one debt asset (USDC) per position. Supported collateral includes SOL and staked-SOL tokens (INF, JitoSOL, mSOL), Bitcoin tokens (WBTC, cbBTC, xBTC, LBTC), JLP, JUP, and syrupUSDC. Tokenized stocks (TSLAx, NVDAx, SPYx, QQQx) are also supported, but only during US market hours.
+> **Note:** Borrow is built on Jupiter Lend (Fluid), a lending protocol with high capital efficiency. It runs in isolated vaults — one collateral asset paired with one debt asset (USDC) per position.
+
+### Supported Collateral
+
+You can borrow USDC against any of these assets:
+
+- **SOL & staked SOL** — SOL, INF, JitoSOL, mSOL
+- **Bitcoin** — WBTC, cbBTC, xBTC, LBTC
+- **Other tokens** — JLP, JUP, syrupUSDC
+- **Tokenized stocks** — TSLAx, NVDAx, SPYx, QQQx (available only during US market hours; their price feeds go stale off-hours by design)
+
+The Lending section only shows the collaterals you already hold in your wallet — by design, so the list stays focused on what you can actually supply. If you hold a supported asset but do not see it, make sure it is in your account wallet.
 
 ### What Makes It Different
 
@@ -908,7 +919,7 @@ This is different from a loan from a bank. You never hand your collateral to Qua
 
 ### Where to Find It
 
-Open the **Wallet** page and look for the **Lending** section. It shows your open borrow positions, pledged collateral, live health factor, and a list of eligible collaterals you can supply.
+Open the **Wallet** page and look for the **Lending** section. It shows your open borrow positions, pledged collateral, live health factor, and the eligible collaterals you currently hold — ready to supply.
 
 ### How It Works
 
