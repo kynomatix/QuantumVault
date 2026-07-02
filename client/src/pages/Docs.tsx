@@ -2229,15 +2229,16 @@ function BorrowOverviewSection() {
         Borrow Overview
       </SectionHeading>
       <Paragraph>
-        Borrow lets you use lending collateral you already hold — like INF (Sanctum Infinity) — as security to borrow
-        extra USDC without selling anything. The borrowed cash lands in your account wallet, so your trading capital
-        grows while your collateral stays intact.
+        Borrow lets you use lending collateral you already hold — such as SOL, a staked-SOL token, or BTC — as security
+        to borrow extra USDC without selling anything. The borrowed cash lands in your account wallet, so your trading
+        capital grows while your collateral stays intact.
       </Paragraph>
 
       <Alert type="info">
         Borrow is built on Jupiter Lend (Fluid), a lending protocol with high capital efficiency. It runs in isolated
-        vaults — one collateral asset paired with one debt asset (USDC) per position. Currently, INF is the supported
-        collateral.
+        vaults — one collateral asset paired with one debt asset (USDC) per position. Supported collateral includes SOL
+        and staked-SOL tokens (INF, JitoSOL, mSOL), Bitcoin tokens (WBTC, cbBTC, xBTC, LBTC), JLP, JUP, and syrupUSDC.
+        Tokenized stocks (TSLAx, NVDAx, SPYx, QQQx) are also supported, but only during US market hours.
       </Alert>
 
       <SubHeading>What Makes It Different</SubHeading>
@@ -2248,8 +2249,9 @@ function BorrowOverviewSection() {
             <h4 className="font-medium text-white">Keep Your Collateral</h4>
           </div>
           <p className="text-white/60 text-sm">
-            You borrow USDC against INF without selling it. Your INF stays in your wallet, earning staking yield on its
-            own, while the borrowed USDC funds your trades.
+            You borrow USDC against your collateral without selling it. It stays in your wallet — and if it is a
+            staked-SOL token like INF or JitoSOL, it keeps earning staking yield — while the borrowed USDC funds your
+            trades.
           </p>
         </div>
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
@@ -2363,9 +2365,9 @@ function BorrowPerbotSection() {
         Per-Bot Borrow
       </SectionHeading>
       <Paragraph>
-        Per-bot borrow is the same idea as account-level borrow, but scoped to a single bot. You pledge INF from the
-        bot's own wallet, borrow USDC against it, and the cash lands directly in that bot's balance. When the bot closes,
-        the system automatically repays the debt and returns the collateral to your account.
+        Per-bot borrow is the same idea as account-level borrow, but scoped to a single bot. You pledge the bot's own
+        eligible collateral, borrow USDC against it, and the cash lands directly in that bot's balance. When the bot
+        closes, the system automatically repays the debt and returns the collateral to your account.
       </Paragraph>
 
       <Alert type="info">
@@ -2376,17 +2378,17 @@ function BorrowPerbotSection() {
       <SubHeading>Where to Find It</SubHeading>
       <Paragraph>
         Open a bot's <strong className="text-white/90">Bot Management Drawer</strong> and go to the{" "}
-        <strong className="text-white/90">Equity</strong> tab. If the bot holds INF collateral, you will see a
+        <strong className="text-white/90">Equity</strong> tab. If the bot holds eligible collateral, you will see a
         "Borrow Against Collateral" card. Tap it to open the borrow flow.
       </Paragraph>
 
       <SubHeading>How It Works</SubHeading>
       <StepList steps={[
-        'Open the Equity tab on a Flash bot that holds INF.',
-        'Tap "Borrow Against Collateral" — the system shows your pledged INF, current debt, and a safe borrow limit.',
+        'Open the Equity tab on a Flash bot that holds eligible collateral.',
+        'Tap "Borrow Against Collateral" — the system shows your pledged collateral, current debt, and a safe borrow limit.',
         'Choose an amount and confirm. The USDC lands in the bot\'s wallet immediately.',
         'The bot\'s displayed balance grows by the borrowed amount, but the debt is subtracted from its net PnL so the numbers stay honest.',
-        'When you close or delete the bot, the system automatically repays the debt and moves the released INF back to your account.',
+        'When you close or delete the bot, the system automatically repays the debt and moves the released collateral back to your account.',
       ]} />
 
       <SubHeading>Automatic Close &amp; Repay</SubHeading>
@@ -3600,7 +3602,7 @@ const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet:
   { id: 'vaults-overview', label: 'Vaults Overview', snippet: 'Vaults put idle USDC to work earning yield. One tap to park all spare USDC, one tap to unpark it back.', keywords: ['vault', 'vaults', 'earn', 'yield', 'idle', 'spare', 'park', 'unpark', 'interest', 'apy', 'save', 'savings', 'passive', 'stablecoin'] },
   { id: 'vaults-destinations', label: 'Yield Destinations', snippet: 'The yield options available in Vaults: Kamino USDC, Perena USD*, Jupiter Lend USDC, Ondo USDY, and OnRe ONyc.', keywords: ['destination', 'destinations', 'yield', 'apy', 'kamino', 'perena', 'jupiter lend', 'ondo', 'usdy', 'onre', 'onyc', 'stablecoin', 'stable', 'floating', 'reinsurance', 'treasury'] },
   { id: 'vaults-safety', label: 'Safety & Funding', snippet: 'How Vaults stay money-safe (on-chain truth, realized amounts, price-impact cap), auto-unpark to fund trades, and auto-park idle funds back into yield after a position closes (Flash).', keywords: ['safety', 'safe', 'money', 'on-chain', 'realized', 'price impact', 'fail closed', 'equity', 'balance', 'auto unpark', 'fund trade', 'top up', 'collateral', 'per bot', 'per-bot', 'auto park', 'auto-park', 'repark', 'idle funds', 'after close', 'earn between trades', 'flash'] },
-  { id: 'borrow-overview', label: 'Borrow Overview', snippet: 'Borrow USDC against collateral like INF without selling it. Built on Jupiter Lend (Fluid). Live health factor, borrow rate APR, and carry-trade guidance.', keywords: ['borrow', 'debt', 'loan', 'lend', 'collateral', 'inf', 'jupiter lend', 'fluid', 'health factor', 'liquidation', 'ltv', 'borrow rate', 'apr', 'carry trade', 'carry', 'usdc', 'liability', 'repay', 'supply collateral', 'pledge', 'position'] },
+  { id: 'borrow-overview', label: 'Borrow Overview', snippet: 'Borrow USDC against collateral like SOL, INF, or BTC without selling it. Built on Jupiter Lend (Fluid). Live health factor, borrow rate APR, and carry-trade guidance.', keywords: ['borrow', 'debt', 'loan', 'lend', 'collateral', 'inf', 'sol', 'jitosol', 'msol', 'wbtc', 'cbbtc', 'xbtc', 'lbtc', 'btc', 'jlp', 'jup', 'syrupusdc', 'tslax', 'nvdax', 'spyx', 'qqqx', 'jupiter lend', 'fluid', 'health factor', 'liquidation', 'ltv', 'borrow rate', 'apr', 'carry trade', 'carry', 'usdc', 'liability', 'repay', 'supply collateral', 'pledge', 'position'] },
   { id: 'borrow-perbot', label: 'Per-Bot Borrow', snippet: 'Borrow USDC against a single bot\'s collateral. Available on Flash bots. Automatic repay and collateral return when the bot closes.', keywords: ['per bot', 'per-bot', 'bot borrow', 'borrow against bot', 'flash borrow', 'bot collateral', 'auto repay', 'automatic close', 'equity tab', 'carry advisor', 'bot debt', 'bot liability'] },
   { id: 'quantumlab-overview', label: 'QuantumLab Overview', snippet: 'QuantumLab is the built-in backtesting and strategy optimization engine. Test strategies before deploying them live.', keywords: ['quantumlab', 'quantum lab', 'backtest', 'backtesting', 'lab', 'test', 'simulation', 'historical', 'strategy', 'candle', 'ohlc'] },
   { id: 'quantumlab-strategies', label: 'Strategy Library', snippet: 'Write and save Pine Script strategies in QuantumLab. Load from the library to backtest or optimize.', keywords: ['strategy', 'library', 'pine script', 'pine', 'script', 'code', 'write', 'save', 'load', 'indicator', 'signal', 'entry', 'exit'] },

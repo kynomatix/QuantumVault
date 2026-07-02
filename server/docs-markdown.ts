@@ -893,15 +893,15 @@ Put together with the auto-funding above, a Flash bot runs a fully automatic loo
 
 ## Borrow Overview
 
-Borrow lets you use lending collateral you already hold — like INF (Sanctum Infinity) — as security to borrow extra USDC without selling anything. The borrowed cash lands in your account wallet (or straight into a bot), so your trading capital grows while your collateral stays intact.
+Borrow lets you use lending collateral you already hold — such as SOL, a staked-SOL token, or BTC — as security to borrow extra USDC without selling anything. The borrowed cash lands in your account wallet (or straight into a bot), so your trading capital grows while your collateral stays intact.
 
 This is different from a loan from a bank. You never hand your collateral to QuantumVault. The collateral token stays in your own agent wallet; the platform only signs the on-chain borrow instruction. You can repay the debt anytime to release your collateral.
 
-> **Note:** Borrow is built on Jupiter Lend (Fluid), a lending protocol with high capital efficiency. It runs in isolated vaults — one collateral asset paired with one debt asset (USDC) per position. Currently, INF is the supported collateral.
+> **Note:** Borrow is built on Jupiter Lend (Fluid), a lending protocol with high capital efficiency. It runs in isolated vaults — one collateral asset paired with one debt asset (USDC) per position. Supported collateral includes SOL and staked-SOL tokens (INF, JitoSOL, mSOL), Bitcoin tokens (WBTC, cbBTC, xBTC, LBTC), JLP, JUP, and syrupUSDC. Tokenized stocks (TSLAx, NVDAx, SPYx, QQQx) are also supported, but only during US market hours.
 
 ### What Makes It Different
 
-- **Keep your collateral** — You borrow USDC against INF without selling it. Your INF stays in your wallet, earning staking yield on its own, while the borrowed USDC funds your trades.
+- **Keep your collateral** — You borrow USDC against your collateral without selling it. It stays in your wallet — and if it is a staked-SOL token like INF or JitoSOL, it keeps earning staking yield — while the borrowed USDC funds your trades.
 - **One position per collateral** — You can open one borrow position per collateral type. The position tracks your pledged collateral, your owed USDC, and your health factor in real time.
 - **Borrowed cash is real trading capital** — The USDC you borrow lands directly in your account wallet (or bot wallet for per-bot borrowing) and can be used for trades immediately. It is treated as a liability, not a deposit, so your profit/loss stays honest.
 - **Repay anytime** — Tap "Repay Debt" to clear all or part of the loan. Partial repayments lower your debt; full repayments close the position and return your collateral.
@@ -948,21 +948,21 @@ The Equity tab on a bot with an open per-bot borrow shows a "Carry Advisor" that
 
 ## Per-Bot Borrow
 
-Per-bot borrow is the same idea as account-level borrow, but scoped to a single bot. You pledge INF from the bot's own wallet, borrow USDC against it, and the cash lands directly in that bot's balance. When the bot closes, the system automatically repays the debt and returns the collateral to your account.
+Per-bot borrow is the same idea as account-level borrow, but scoped to a single bot. You pledge the bot's own eligible collateral, borrow USDC against it, and the cash lands directly in that bot's balance. When the bot closes, the system automatically repays the debt and returns the collateral to your account.
 
 This is available on Flash bots, where each bot has its own isolated wallet.
 
 ### Where to Find It
 
-Open a bot's **Bot Management Drawer** and go to the **Equity** tab. If the bot holds INF collateral, you will see a "Borrow Against Collateral" card. Tap it to open the borrow flow.
+Open a bot's **Bot Management Drawer** and go to the **Equity** tab. If the bot holds eligible collateral, you will see a "Borrow Against Collateral" card. Tap it to open the borrow flow.
 
 ### How It Works
 
-1. Open the Equity tab on a Flash bot that holds INF.
-2. Tap "Borrow Against Collateral" — the system shows your pledged INF, current debt, and a safe borrow limit.
+1. Open the Equity tab on a Flash bot that holds eligible collateral.
+2. Tap "Borrow Against Collateral" — the system shows your pledged collateral, current debt, and a safe borrow limit.
 3. Choose an amount and confirm. The USDC lands in the bot's wallet immediately.
 4. The bot's displayed balance grows by the borrowed amount, but the debt is subtracted from its net PnL so the numbers stay honest.
-5. When you close or delete the bot, the system automatically repays the debt and moves the released INF back to your account.
+5. When you close or delete the bot, the system automatically repays the debt and moves the released collateral back to your account.
 
 ### Automatic Close & Repay
 
