@@ -61,6 +61,8 @@ import {
   AlertTriangle,
   Vault,
   ChevronDown,
+  Landmark,
+  RotateCcw,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -867,7 +869,7 @@ export function BotManagementDrawer({
     if (!bot) return;
     setEquityEventsLoading(true);
     try {
-      const res = await fetch(`/api/equity-events?limit=50&botId=${bot.id}`, {
+      const res = await fetch(`/api/equity-events?limit=50&botId=${bot.id}&wallet=${walletAddress}`, {
         credentials: 'include',
       });
       if (res.ok) {
@@ -2700,6 +2702,14 @@ export function BotManagementDrawer({
                     const isPositive = parseFloat(event.amount) > 0;
                     const destination = parkDestinationFromNotes(event.eventType, event.notes);
                     const isVaultMove = event.eventType === 'vault_park' || event.eventType === 'vault_unpark';
+                    // Liability flows get their OWN treatment regardless of cash
+                    // direction (mirrors the account Equity history): a borrow
+                    // brings cash IN but is DEBT (sky, never deposit-green); a
+                    // repay is a paydown (orange, shown as an outflow).
+                    const isBorrow = event.eventType === 'borrow';
+                    const isRepay = event.eventType === 'repay';
+                    const borrowSym = isBorrow ? ((event.notes ?? '').match(/against\s+[\d.]+\s+(\S+)/i)?.[1] ?? null) : null;
+                    const liabilityNote = isBorrow ? 'Loan — adds debt, not a deposit' : isRepay ? 'Debt paydown' : null;
                     const formatEventType = (type: string) => {
                       switch (type) {
                         case 'agent_deposit': return 'Deposit to Bot Wallet';
@@ -2708,9 +2718,12 @@ export function BotManagementDrawer({
                         case 'drift_withdraw': return 'Withdraw from Bot';
                         case 'auto_topup': return 'Auto Top-Up';
                         case 'auto_withdraw': return 'Auto Withdraw';
+                        case 'borrow': return borrowSym ? `Borrow USDC Against ${borrowSym}` : 'Borrow USDC';
+                        case 'repay': return 'Repay Debt';
                         default: return type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
                       }
                     };
+                    const amountTone = isBorrow ? 'text-sky-400' : isRepay ? 'text-orange-500' : isPositive ? 'text-emerald-500' : 'text-orange-500';
                     return (
                       <div 
                         key={event.id} 
@@ -2718,8 +2731,12 @@ export function BotManagementDrawer({
                         data-testid={`equity-event-${event.id}`}
                       >
                         <div className="flex items-center gap-3">
-                          <div className={`p-2 rounded-full ${isPositive ? 'bg-emerald-500/10' : 'bg-orange-500/10'}`}>
-                            {isPositive ? (
+                          <div className={`p-2 rounded-full ${isBorrow ? 'bg-sky-500/10' : isRepay ? 'bg-orange-500/10' : isPositive ? 'bg-emerald-500/10' : 'bg-orange-500/10'}`}>
+                            {isBorrow ? (
+                              <Landmark className="h-4 w-4 text-sky-400" />
+                            ) : isRepay ? (
+                              <RotateCcw className="h-4 w-4 text-orange-500" />
+                            ) : isPositive ? (
                               <ArrowDown className="h-4 w-4 text-emerald-500" />
                             ) : (
                               <ArrowUp className="h-4 w-4 text-orange-500" />
@@ -2734,13 +2751,20 @@ export function BotManagementDrawer({
                                   : 'Destination not recorded'}
                               </p>
                             )}
+                            {liabilityNote && (
+                              <p className="text-xs text-muted-foreground" data-testid={`equity-event-liability-${event.id}`}>
+                                {liabilityNote}
+                              </p>
+                            )}
                             <p className="text-xs text-muted-foreground">
                               {formatDate(event.createdAt)}
                             </p>
                           </div>
                         </div>
-                        <span className={`font-mono text-sm font-medium ${isPositive ? 'text-emerald-500' : 'text-orange-500'}`}>
-                          {isPositive ? '+' : ''}{parseFloat(event.amount).toFixed(2)} USDC
+                        <span className={`font-mono text-sm font-medium ${amountTone}`}>
+                          {isRepay
+                            ? `−${Math.abs(parseFloat(event.amount)).toFixed(2)}`
+                            : `${isPositive ? '+' : ''}${parseFloat(event.amount).toFixed(2)}`} USDC
                         </span>
                       </div>
                     );

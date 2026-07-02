@@ -19715,6 +19715,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       
       const aggregateExchangeEquity = aggregateAccountInfo.totalCollateral;
 
+      // Cheap DB hint so bots with no Vault rows skip the parked-value chain read.
+      const teParkedBotIds = await getParkedBotIdSet(req.walletAddress!);
+
       const subaccountBalances: { botId: string; botName: string; subaccountId: number; balance: number }[] = [];
       
       for (const bot of bots) {
@@ -19726,8 +19729,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             // here would double-count the agent balance (already in agentBalance).
             botBalance = 0;
           } else if (eqBotCtx) {
-            const liveInfo = await getExchangeAccountInfoForBot('', 0, eqBotCtx, getAdapterForBot(bot));
-            botBalance = liveInfo.totalCollateral;
+            const teAdapter = getAdapterForBot(bot);
+            const liveInfo = await getExchangeAccountInfoForBot('', 0, eqBotCtx, teAdapter);
+            // Match /api/trading-bots: the bot's parked Vault value IS its equity,
+            // and its OWN open per-bot borrow debt is a liability — subtract it so
+            // borrowed USDC sitting in the bot wallet never reads as equity/profit.
+            const teAdj = await addParkedValueForBotDisplayEquity(bot, teAdapter, liveInfo.totalCollateral, { hasVaultRows: teParkedBotIds.has(bot.id) });
+            const teDebt = await storage.sumOpenBorrowDebtUsdcForBot(req.walletAddress!, bot.id);
+            botBalance = teAdj.equityUsdc - teDebt;
           } else {
             let prices: Record<string, number> = {};
             try { prices = await getAllPrices(); } catch (e) { /* prices unavailable */ }

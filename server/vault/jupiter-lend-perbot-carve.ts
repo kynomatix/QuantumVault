@@ -2133,6 +2133,17 @@ export async function runPerbotGrowLoan(params: PerbotGrowLoanParams): Promise<P
         if (s === "landed") {
           const preDebtRaw = BigInt(meta.borrowPreDebtRaw || "0");
           const live = await route.readLivePositionHealth(collateralMint, params.botVenuePositionId);
+          // Same accounting path as a normal borrow: record the new debt on the
+          // position row + write the "borrow" history row (idempotent).
+          await reconcileGrowBorrowBookkeeping({
+            walletAddress: params.walletAddress,
+            tradingBotId: params.tradingBotId,
+            botBorrowPositionId: params.botBorrowPositionId,
+            vault: params.vault,
+            borrowSig,
+            preDebtRaw,
+            live,
+          });
           const delta = live && BigInt(live.debtRaw) > preDebtRaw ? (BigInt(live.debtRaw) - preDebtRaw).toString() : (meta.borrowedUsdcRaw ?? undefined);
           return finalizeGrow(op, { borrowPositionId: params.botBorrowPositionId, carvedRaw, accountPostLtv: meta.accountPostLtv ?? null, borrowedUsdcRaw: delta });
         }
@@ -2170,6 +2181,17 @@ export async function runPerbotGrowLoan(params: PerbotGrowLoanParams): Promise<P
           if (st3 === "landed") {
             const preDebtRaw = BigInt(m3.borrowPreDebtRaw || "0");
             const live = await route.readLivePositionHealth(collateralMint, params.botVenuePositionId);
+            // False-negative recovery: the exec reported failure but the borrow
+            // landed — run the SAME bookkeeping the executor would have done.
+            await reconcileGrowBorrowBookkeeping({
+              walletAddress: params.walletAddress,
+              tradingBotId: params.tradingBotId,
+              botBorrowPositionId: params.botBorrowPositionId,
+              vault: params.vault,
+              borrowSig: sig3,
+              preDebtRaw,
+              live,
+            });
             const delta = live && BigInt(live.debtRaw) > preDebtRaw ? (BigInt(live.debtRaw) - preDebtRaw).toString() : undefined;
             return finalizeGrow(op, { borrowPositionId: params.botBorrowPositionId, carvedRaw, accountPostLtv: m3.accountPostLtv ?? null, borrowedUsdcRaw: delta });
           }
@@ -2200,6 +2222,74 @@ export async function runPerbotGrowLoan(params: PerbotGrowLoanParams): Promise<P
       borrowedUsdcRaw: meta.borrowedUsdcRaw,
     });
   });
+}
+
+// Resume-path bookkeeping for a LANDED borrow-more signature. On the normal
+// path borrowMoreOnExistingBotPosition records the new debt on the position row
+// AND writes the "borrow" history row itself; but when a crash/restart resumes
+// the op AFTER the signature already landed, the executor never ran to
+// completion — without this reconcile the borrowed USDC would sit in the bot
+// wallet with NO recorded liability (reads as fake bot PROFIT) and the grow
+// would be invisible in the History tab. Idempotent: the history row dedupes on
+// the borrow signature (only one event ever carries it) and the debt-row update
+// writes the LIVE on-chain reads, so a double-resume is safe to repeat.
+async function reconcileGrowBorrowBookkeeping(args: {
+  walletAddress: string;
+  tradingBotId: string;
+  botBorrowPositionId: string;
+  vault: BorrowVaultConfig;
+  borrowSig: string;
+  preDebtRaw: bigint;
+  live: { collateralRaw: string; debtRaw: string } | null;
+}): Promise<void> {
+  const { live } = args;
+  if (!live) {
+    // Fail closed on bookkeeping: without a live read we cannot size the debt.
+    // The op stays finalizable (the money is safe), the health monitor + a later
+    // resume reconcile the row; we just log loudly instead of guessing.
+    console.warn("[PerbotGrow] resume: borrow landed but position unreadable; debt row/history deferred to health monitor", { positionId: args.botBorrowPositionId });
+    return;
+  }
+  const liveDebtRaw = BigInt(live.debtRaw);
+  // 1) Liability FIRST: never leave a landed borrow without its debt on record.
+  //    Amounts only — health snapshot/source are left to the 60s health monitor
+  //    so we never persist a snapshot inconsistent with its inputs.
+  try {
+    const updated = await storage.updateBorrowPosition(
+      args.botBorrowPositionId,
+      {
+        collateralAmountRaw: live.collateralRaw,
+        debtAmountRaw: liveDebtRaw.toString(),
+      },
+      "open",
+    );
+    if (!updated) console.warn("[PerbotGrow] resume: debt-row CAS lost (another writer updated it)", { positionId: args.botBorrowPositionId });
+  } catch (e) {
+    console.warn("[PerbotGrow] resume: failed to update debt row (health monitor will reconcile)", e);
+  }
+  // 2) History row — same shape as the executor's, deduped on the signature.
+  try {
+    const deltaRaw = liveDebtRaw > args.preDebtRaw ? liveDebtRaw - args.preDebtRaw : 0n;
+    if (deltaRaw <= 0n) {
+      console.warn("[PerbotGrow] resume: landed borrow has no verifiable debt delta; skipping history row", { positionId: args.botBorrowPositionId });
+      return;
+    }
+    const existing = await storage.getEquityEventByTxSignature(args.borrowSig);
+    if (existing) return;
+    const borrowedUsd = Number(deltaRaw) / 10 ** args.vault.debtDecimals;
+    const collateralAmt = Number(live.collateralRaw) / 10 ** args.vault.collateralDecimals;
+    await storage.createEquityEvent({
+      walletAddress: args.walletAddress,
+      tradingBotId: args.tradingBotId,
+      eventType: "borrow",
+      amount: borrowedUsd.toFixed(6),
+      assetType: "USDC",
+      txSignature: args.borrowSig,
+      notes: `Borrowed ${borrowedUsd.toFixed(6)} USDC against ${collateralAmt.toFixed(6)} ${args.vault.collateralSymbol}`,
+    });
+  } catch (e) {
+    console.warn("[PerbotGrow] resume: failed to record borrow history row (non-fatal)", e);
+  }
 }
 
 async function finalizeGrow(
