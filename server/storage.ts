@@ -2175,11 +2175,13 @@ export class DatabaseStorage implements IStorage {
 
   async getAutoTopUpCandidatePositions(): Promise<{ position: BorrowPosition; bot: TradingBot }[]> {
     // Cheap prefilter for the autonomous "defend the loan" scanner: only OPEN,
-    // per-bot (Flash) positions whose owner bot OPTED IN, and whose LAST monitored
-    // band the borrow-health monitor recorded as urgent-or-worse. The scanner does
-    // a FRESH live read before spending anything — this join just bounds the RPC to
-    // genuinely at-risk opted-in loans. (Depends on the monitor having populated
-    // lastObservedHealthBand; a cold start yields no candidates until it runs once.)
+    // per-bot (Flash) positions whose owner bot OPTED IN to EITHER defense (auto
+    // collateral top-up OR auto repay), and whose LAST monitored band the
+    // borrow-health monitor recorded as urgent-or-worse. The scanner does a FRESH
+    // live read AND re-checks each per-action flag before spending anything — this
+    // join just bounds the RPC to genuinely at-risk opted-in loans. (Depends on
+    // the monitor having populated lastObservedHealthBand; a cold start yields no
+    // candidates until it runs once.)
     const rows = await db.select({ position: borrowPositions, bot: tradingBots })
       .from(borrowPositions)
       .innerJoin(tradingBots, eq(tradingBots.id, borrowPositions.tradingBotId))
@@ -2187,7 +2189,10 @@ export class DatabaseStorage implements IStorage {
         eq(borrowPositions.status, 'open'),
         isNotNull(borrowPositions.tradingBotId),
         isNotNull(borrowPositions.venuePositionId),
-        eq(tradingBots.autoCollateralTopUp, true),
+        or(
+          eq(tradingBots.autoCollateralTopUp, true),
+          eq(tradingBots.autoRepayEnabled, true),
+        ),
         eq(tradingBots.activeProtocol, 'flash'),
         inArray(borrowPositions.lastObservedHealthBand, ['urgent', 'liquidation']),
       ));

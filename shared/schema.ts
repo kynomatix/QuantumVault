@@ -230,6 +230,15 @@ export const tradingBots = pgTable("trading_bots", {
   // fully manual. See server/vault/jupiter-lend-perbot-carve.ts (runPerbotCollateralTopUp).
   autoCollateralTopUp: boolean("auto_collateral_top_up").default(false).notNull(),
 
+  // Defend-the-loan auto repay (Flash per-bot borrow positions only). When ON
+  // (opt-in, default OFF), the same scanner may pay a bot loan's debt DOWN from
+  // the BOT wallet's own idle USDC (never trading collateral in the venue) to
+  // restore a safe LTV — used when a collateral top-up is not possible (the
+  // account wallet holds no spare collateral). OFF = fully manual. See
+  // server/vault/auto-topup.ts (decideAutoRepay) and
+  // server/vault/jupiter-lend-borrow-executor.ts (repayPartialOnExistingBotPosition).
+  autoRepayEnabled: boolean("auto_repay_enabled").default(false).notNull(),
+
   protocolSubaccountId: text("protocol_subaccount_id"),
   // Group D item 18 (April 17, 2026): which protocol adapter created/owns this bot.
   // Allowed values are constrained at the DB level by `trading_bots_active_protocol_check`

@@ -98,6 +98,127 @@ export function decideAutoTopUp(input: {
   return { action: "topup", sourceAmountRaw: addRaw, addUsd };
 }
 
+// ---------------------------------------------------------------------------
+// AUTO REPAY — the second defense (opt-in via bot.autoRepayEnabled). When a
+// collateral top-up is NOT possible (top-up disabled, or the account wallet
+// holds no spare collateral → decideAutoTopUp said "alert"), pay the loan's
+// debt DOWN from the BOT wallet's own idle USDC instead. v1 is bot idle USDC
+// ONLY: no autonomous swaps, no unparking, never touches trading collateral
+// inside the venue — only USDC already sitting in the bot's Solana wallet.
+//
+// NOTE on idempotency: unlike the top-up (two money legs — transfer then
+// supply — resumable by clientRequestId), the repay executor
+// (repayPartialOnExistingBotPosition) is a SINGLE atomic on-chain leg: the
+// USDC leaves the bot wallet and the debt drops in the same transaction, and
+// it takes a server-enforced `targetFinalDebtRaw` floor so a duplicate submit
+// sized off a stale debt can never overshoot the target. Combined with the
+// atomic cooldown claim (one attempt per window) and the per-loan borrow lock,
+// no clientRequestId resume machinery is needed here.
+// ---------------------------------------------------------------------------
+
+/**
+ * Economic floor for an auto repay. Never burn gas to pay down less than this
+ * much USD of debt — dust wouldn't move the health factor.
+ */
+export const AUTO_REPAY_MIN_USD = 5;
+
+export type AutoRepayDecision =
+  | { action: "repay"; repayRaw: bigint; repayUsd: number; targetFinalDebtRaw: bigint }
+  | { action: "alert"; reason: string }
+  | { action: "skip"; reason: string };
+
+/**
+ * Decide whether to auto-repay ONE per-bot loan from already-read facts. PURE.
+ *
+ * Same gate ladder as decideAutoTopUp (fail closed on unreadable health, never
+ * act on a liquidatable loan, only defend urgent-or-worse), then:
+ * - Compute the debt that would put the loan AT the target LTV (default 0.5,
+ *   the same "safe" target the manual Repay path restores to).
+ * - Repay the shortfall, capped at the bot wallet's idle USDC (strict read).
+ * - `alert` when the loan needs defending but the bot wallet lacks enough idle
+ *   USDC to make a worthwhile paydown (the user opted in — tell them to act).
+ *
+ * The returned `targetFinalDebtRaw` MUST be passed to the executor: it is the
+ * server-enforced floor that makes a duplicate/stale-sized submit safe.
+ */
+export function decideAutoRepay(input: {
+  health: PerBotPositionHealth;
+  /** LIVE on-chain debt, raw base units (fail closed upstream if unreadable). */
+  debtRaw: bigint;
+  /** LIVE on-chain collateral, raw base units. */
+  collateralRaw: bigint;
+  /** Liquidation oracle price used by the health read — keeps USD math consistent. */
+  collateralPriceUsd: number;
+  collateralDecimals: number;
+  debtDecimals: number;
+  /** BOT wallet's live idle USDC balance (strict read). */
+  botIdleUsdcRaw: bigint;
+  /** LTV to restore to; defaults to 0.5 (same as the manual repay target). */
+  targetLtv?: number;
+  minUsd?: number;
+}): AutoRepayDecision {
+  const { health } = input;
+  const targetLtv = input.targetLtv ?? 0.5;
+  const minUsd = input.minUsd ?? AUTO_REPAY_MIN_USD;
+
+  // Fail closed on an unreadable health read — never act on a bad read.
+  if (health.status !== "available") {
+    return { action: "skip", reason: "health unavailable" };
+  }
+  // Already mid-liquidation per the venue: the venue is seizing collateral —
+  // do NOT race it with a paydown. (The monitor alerts on that band crossing.)
+  if (health.liquidatable === true) {
+    return { action: "skip", reason: "liquidatable" };
+  }
+  // Only defend once the loan has crossed INTO the urgent band (HF <= 1.3) or worse.
+  if (BAND_SEVERITY[health.band] < BAND_SEVERITY.urgent) {
+    return { action: "skip", reason: `band ${health.band}` };
+  }
+  // Guard the USD math inputs.
+  if (
+    !(input.collateralPriceUsd > 0) ||
+    !Number.isInteger(input.collateralDecimals) ||
+    input.collateralDecimals < 0 ||
+    !Number.isInteger(input.debtDecimals) ||
+    input.debtDecimals < 0 ||
+    !(targetLtv > 0 && targetLtv < 1)
+  ) {
+    return { action: "skip", reason: "invalid price/decimals/target" };
+  }
+  if (input.debtRaw <= 0n) {
+    return { action: "skip", reason: "no debt" };
+  }
+  if (input.collateralRaw < 0n) {
+    return { action: "skip", reason: "invalid collateral" };
+  }
+
+  // Debt that puts the loan AT the target LTV. Floor → the target debt is
+  // rounded DOWN, so the computed shortfall repays slightly MORE (safer side);
+  // the executor's targetFinalDebtRaw floor stops any overshoot past it.
+  const collateralUsd =
+    (Number(input.collateralRaw) / 10 ** input.collateralDecimals) * input.collateralPriceUsd;
+  const targetDebtUsd = collateralUsd * targetLtv;
+  if (!Number.isFinite(targetDebtUsd) || targetDebtUsd < 0) {
+    return { action: "skip", reason: "invalid target debt" };
+  }
+  const targetFinalDebtRaw = BigInt(Math.floor(targetDebtUsd * 10 ** input.debtDecimals));
+  const neededRaw = input.debtRaw - targetFinalDebtRaw;
+  if (neededRaw <= 0n) {
+    return { action: "skip", reason: "already at/below target LTV" };
+  }
+
+  // Cap at the bot wallet's idle USDC (the executor re-caps at its own strict
+  // live read too). A partial paydown still improves health — proceed as long
+  // as it clears the dust floor.
+  const repayRaw = input.botIdleUsdcRaw < neededRaw ? input.botIdleUsdcRaw : neededRaw;
+  const repayUsd = Number(repayRaw) / 10 ** input.debtDecimals;
+  if (repayRaw <= 0n || repayUsd < minUsd) {
+    return { action: "alert", reason: "insufficient idle USDC in bot wallet" };
+  }
+
+  return { action: "repay", repayRaw, repayUsd, targetFinalDebtRaw };
+}
+
 /** A `borrow_operations` row narrowed to the fields the resume selector reads. */
 export interface TopUpOpRow {
   id: string;

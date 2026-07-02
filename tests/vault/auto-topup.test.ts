@@ -1,11 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
   decideAutoTopUp,
+  decideAutoRepay,
   selectResumableTopUpOp,
   buildAutoTopUpClientRequestId,
   AUTO_TOPUP_CLIENT_REQUEST_PREFIX,
   AUTO_TOPUP_MIN_USD,
   AUTO_TOPUP_COOLDOWN_MS,
+  AUTO_REPAY_MIN_USD,
 } from "../../server/vault/auto-topup";
 import type {
   TopUpOpRow,
@@ -403,6 +405,195 @@ describe("selectResumableTopUpOp — auto path must not swap or finish manual op
     });
     const sel = selectResumableTopUpOp([spoofedDirect], COLLATERAL_MINT);
     expect(sel).toEqual({ kind: "unresumable", opId: "spoofed-direct" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PURE decision tests for the AUTO REPAY fallback (bot idle USDC → pay debt
+// down to the target LTV). Fixtures: collateral $1 / 6 decimals, debt = USDC /
+// 6 decimals. Base loan: $100 collateral, $80 debt (LTV 0.8, urgent). Target
+// LTV 0.5 → target debt $50 → need $30 of repay.
+// ---------------------------------------------------------------------------
+const repayBase = {
+  debtRaw: 80_000_000n,
+  collateralRaw: 100_000_000n,
+  collateralPriceUsd: 1,
+  collateralDecimals: 6,
+  debtDecimals: 6,
+};
+
+describe("decideAutoRepay — skip (not actionable / fail closed)", () => {
+  it("skips when health is unavailable (fail closed, monitor covers)", () => {
+    const d = decideAutoRepay({
+      health: health({ status: "unavailable", band: "unavailable" }),
+      ...repayBase,
+      botIdleUsdcRaw: 50_000_000n,
+    });
+    expect(d.action).toBe("skip");
+  });
+
+  it("skips when already liquidatable (never race the venue's liquidation)", () => {
+    const d = decideAutoRepay({
+      health: health({ liquidatable: true, band: "liquidation", healthFactor: 0.95 }),
+      ...repayBase,
+      botIdleUsdcRaw: 50_000_000n,
+    });
+    expect(d.action).toBe("skip");
+  });
+
+  it("skips when the band is below urgent (nudge / healthy)", () => {
+    for (const band of ["nudge", "healthy"] as const) {
+      const d = decideAutoRepay({
+        health: health({ band, healthFactor: 2 }),
+        ...repayBase,
+        botIdleUsdcRaw: 50_000_000n,
+      });
+      expect(d.action).toBe("skip");
+    }
+  });
+
+  it("skips on an invalid collateral price", () => {
+    const d = decideAutoRepay({
+      health: health(),
+      ...repayBase,
+      collateralPriceUsd: 0,
+      botIdleUsdcRaw: 50_000_000n,
+    });
+    expect(d.action).toBe("skip");
+  });
+
+  it("skips on invalid decimals", () => {
+    expect(
+      decideAutoRepay({ health: health(), ...repayBase, collateralDecimals: -1, botIdleUsdcRaw: 50_000_000n }).action,
+    ).toBe("skip");
+    expect(
+      decideAutoRepay({ health: health(), ...repayBase, debtDecimals: 1.5, botIdleUsdcRaw: 50_000_000n }).action,
+    ).toBe("skip");
+  });
+
+  it("skips on an out-of-range target LTV", () => {
+    for (const targetLtv of [0, 1, -0.5, 1.5]) {
+      const d = decideAutoRepay({
+        health: health(),
+        ...repayBase,
+        botIdleUsdcRaw: 50_000_000n,
+        targetLtv,
+      });
+      expect(d.action).toBe("skip");
+    }
+  });
+
+  it("skips when there is no debt", () => {
+    const d = decideAutoRepay({
+      health: health(),
+      ...repayBase,
+      debtRaw: 0n,
+      botIdleUsdcRaw: 50_000_000n,
+    });
+    expect(d.action).toBe("skip");
+  });
+
+  it("skips when the loan already sits at/below the target LTV (nothing to defend)", () => {
+    // $100 collateral, $40 debt → LTV 0.4, below the 0.5 target.
+    const d = decideAutoRepay({
+      health: health(),
+      ...repayBase,
+      debtRaw: 40_000_000n,
+      botIdleUsdcRaw: 50_000_000n,
+    });
+    expect(d.action).toBe("skip");
+  });
+});
+
+describe("decideAutoRepay — alert (urgent but the bot wallet can't cover it)", () => {
+  it("alerts when the bot wallet holds no idle USDC", () => {
+    const d = decideAutoRepay({
+      health: health(),
+      ...repayBase,
+      botIdleUsdcRaw: 0n,
+    });
+    expect(d.action).toBe("alert");
+  });
+
+  it("alerts when the affordable paydown is below the economic floor (dust)", () => {
+    // Holds only $3 of idle USDC, floor is $5 → not worth the gas.
+    const d = decideAutoRepay({
+      health: health(),
+      ...repayBase,
+      botIdleUsdcRaw: 3_000_000n,
+    });
+    expect(d.action).toBe("alert");
+  });
+});
+
+describe("decideAutoRepay — repay (pay bot idle USDC toward the target LTV)", () => {
+  it("repays exactly the shortfall to the target when the bot holds enough", () => {
+    const d = decideAutoRepay({
+      health: health(),
+      ...repayBase,
+      botIdleUsdcRaw: 50_000_000n, // more than the $30 needed
+    });
+    expect(d.action).toBe("repay");
+    if (d.action === "repay") {
+      expect(d.repayRaw).toBe(30_000_000n); // $80 debt → $50 target
+      expect(d.repayUsd).toBeCloseTo(30, 6);
+      expect(d.targetFinalDebtRaw).toBe(50_000_000n);
+    }
+  });
+
+  it("caps the paydown at the bot's idle USDC (a partial defense still helps)", () => {
+    const d = decideAutoRepay({
+      health: health(),
+      ...repayBase,
+      botIdleUsdcRaw: 10_000_000n, // only $10 of the $30 needed
+    });
+    expect(d.action).toBe("repay");
+    if (d.action === "repay") {
+      expect(d.repayRaw).toBe(10_000_000n);
+      expect(d.repayUsd).toBeCloseTo(10, 6);
+      // The target floor is unchanged — the executor stops AT the target even
+      // if a stale-sized duplicate lands.
+      expect(d.targetFinalDebtRaw).toBe(50_000_000n);
+    }
+  });
+
+  it("fires on the liquidation band too (before the venue marks it liquidatable)", () => {
+    const d = decideAutoRepay({
+      health: health({ band: "liquidation", healthFactor: 0.98, liquidatable: false }),
+      ...repayBase,
+      botIdleUsdcRaw: 50_000_000n,
+    });
+    expect(d.action).toBe("repay");
+  });
+
+  it("honors a custom target LTV", () => {
+    // Target 0.6 → target debt $60 → need $20.
+    const d = decideAutoRepay({
+      health: health(),
+      ...repayBase,
+      botIdleUsdcRaw: 50_000_000n,
+      targetLtv: 0.6,
+    });
+    expect(d.action).toBe("repay");
+    if (d.action === "repay") {
+      expect(d.repayRaw).toBe(20_000_000n);
+      expect(d.targetFinalDebtRaw).toBe(60_000_000n);
+    }
+  });
+
+  it("honors a custom minUsd floor", () => {
+    // $7 idle would pass the default $5 floor, but a $10 floor forces an alert.
+    const d = decideAutoRepay({
+      health: health(),
+      ...repayBase,
+      botIdleUsdcRaw: 7_000_000n,
+      minUsd: 10,
+    });
+    expect(d.action).toBe("alert");
+  });
+
+  it("exposes a sane economic floor", () => {
+    expect(AUTO_REPAY_MIN_USD).toBe(5);
   });
 });
 

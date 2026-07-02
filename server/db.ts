@@ -251,6 +251,11 @@ export async function ensureSchema() {
       // See server/vault/jupiter-lend-perbot-carve.ts (runPerbotCollateralTopUp).
       `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS auto_collateral_top_up boolean NOT NULL DEFAULT false`,
 
+      // Defend-the-loan auto repay (opt-in per-bot setting). Additive + idempotent.
+      // Defaults OFF → the scanner never repays a loan the user didn't opt in.
+      // See server/vault/auto-topup.ts (decideAutoRepay).
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS auto_repay_enabled boolean NOT NULL DEFAULT false`,
+
       // --- Phase 4b (Flash agent-HD wallets): recoverable per-bot wallet indices. ---
       // Additive + idempotent. The allocator lives on `wallets` (burn-on-allocate,
       // never reused). Each agent_hd bot stores its non-secret HD index + path version;

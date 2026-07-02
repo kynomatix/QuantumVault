@@ -281,17 +281,21 @@ export async function sendBorrowHealthNotification(
   }
 }
 
-/** Autonomous "defend the loan" auto collateral top-up outcome notification. */
+/** Autonomous "defend the loan" outcome notification (top-up OR repay). */
 export interface AutoTopUpNotification {
   /** The bot's display name (escaped before send). */
   scopeLabel: string;
   /** Collateral asset label, e.g. "INF" (escaped before send). */
   collateralLabel: string;
-  /** True when collateral was added; false = the user needs to act. */
+  /** Which defense produced this outcome. Default "topup"; "repay" = debt pay-down. */
+  kind?: "topup" | "repay";
+  /** True when the defense acted; false = the user needs to act. */
   ok: boolean;
-  /** Collateral USD added (success path) — best effort. */
+  /** Collateral USD added (top-up success path) — best effort. */
   addedUsd?: number | null;
-  /** Health factor after the top-up (success path) — best effort. */
+  /** Debt USD paid down (repay success path) — best effort. */
+  repaidUsd?: number | null;
+  /** Health factor after the defense (success path) — best effort. */
   healthFactor?: number | null;
   /** Why we could not auto-defend (failure path). */
   reason?: string | null;
@@ -302,13 +306,23 @@ function formatAutoTopUpMessage(n: AutoTopUpNotification): { title: string; body
   const collateral = escapeTelegramHtml(n.collateralLabel);
   // Title-Case labels per owner preference.
   if (n.ok) {
-    const usd =
-      typeof n.addedUsd === 'number' && Number.isFinite(n.addedUsd) && n.addedUsd > 0
-        ? `$${n.addedUsd.toFixed(2)} of `
-        : '';
     const hf =
       typeof n.healthFactor === 'number' && Number.isFinite(n.healthFactor)
         ? `\nHealth Factor: ${n.healthFactor.toFixed(2)}`
+        : '';
+    if (n.kind === 'repay') {
+      const usd =
+        typeof n.repaidUsd === 'number' && Number.isFinite(n.repaidUsd) && n.repaidUsd > 0
+          ? `$${n.repaidUsd.toFixed(2)} of `
+          : '';
+      return {
+        title: '🛡️ Auto Repay Completed',
+        body: `We paid down ${usd}the debt on your ${scope} loan (${collateral}) using the bot's spare USDC to defend it automatically.${hf}`,
+      };
+    }
+    const usd =
+      typeof n.addedUsd === 'number' && Number.isFinite(n.addedUsd) && n.addedUsd > 0
+        ? `$${n.addedUsd.toFixed(2)} of `
         : '';
     return {
       title: '🛡️ Auto Collateral Top-Up Completed',
@@ -317,7 +331,7 @@ function formatAutoTopUpMessage(n: AutoTopUpNotification): { title: string; body
   }
   const reason = n.reason ? escapeTelegramHtml(n.reason) : 'we could not auto-defend it';
   return {
-    title: '⚠️ Auto Top-Up Needs Attention',
+    title: '⚠️ Auto-Defend Needs Attention',
     body: `Your ${scope} loan (${collateral}) needs defending, but ${reason}. Add collateral or repay some debt to protect it.`,
   };
 }

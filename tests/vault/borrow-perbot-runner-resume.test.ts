@@ -976,6 +976,36 @@ describe("runPerbotGrowLoan — mode guards (no op created, no money touched)", 
     expect(opStore.size).toBe(0);
     expect(executeWithdrawCollateralMock).not.toHaveBeenCalled();
   });
+
+  it("REJECTS add_collateral with a ZERO carveRaw (add-collateral must carve)", async () => {
+    const res = await runPerbotGrowLoan({ ...addCollParams(), carveRaw: 0n });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/greater than zero/i);
+    expect(opStore.size).toBe(0);
+    expect(executeWithdrawCollateralMock).not.toHaveBeenCalled();
+    expect(supplyToExistingBotPositionMock).not.toHaveBeenCalled();
+  });
+
+  it("REJECTS a NEGATIVE carveRaw in any mode", async () => {
+    const res = await runPerbotGrowLoan({ ...addCollParams(), mode: "grow" as const, carveRaw: -1n, requestedDebtRaw: 5_000_000n });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/negative/i);
+    expect(opStore.size).toBe(0);
+  });
+
+  it("REJECTS a carve-backed grow (carveRaw > 0) whose account position ids are NULL", async () => {
+    const res = await runPerbotGrowLoan({
+      ...addCollParams(),
+      mode: "grow" as const,
+      requestedDebtRaw: 5_000_000n,
+      accountBorrowPositionId: null as any,
+      accountVenuePositionId: null as any,
+    });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/account borrow position required/i);
+    expect(opStore.size).toBe(0);
+    expect(executeWithdrawCollateralMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("runPerbotGrowLoan — cross-MODE same-reqId replay is REFUSED (no mutation)", () => {
@@ -1057,5 +1087,156 @@ describe("runPerbotGrowLoan mode=add_collateral — resume at supplied_to_bot fi
     const op = opStore.get("op-addcoll-r");
     expect(op.status).toBe("succeeded");
     expect(op.step).toBe("final_read");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ZERO-CARVE grow ("Borrow More" against the bot loan's OWN 50%-headroom): the
+// owner's canonical case is a loan at 33% LTV with NO spare account collateral
+// to carve — the loan's existing collateral already backs more borrowing.
+// carveRaw = 0n (mode "grow" only) skips withdraw/transfer/supply entirely and
+// runs BORROW-ONLY, with NO account position ids at all (they're null).
+// ---------------------------------------------------------------------------
+
+const zeroCarveGrowParams = () => ({
+  walletAddress: WALLET,
+  vault: infVault(),
+  accountPublicKey: "AcctPubkey11111111111111111111111111111111",
+  accountSecretKey: new Uint8Array(64),
+  botPublicKey: "BotPubkey111111111111111111111111111111111",
+  botSecretKey: new Uint8Array(64),
+  tradingBotId: TRADING_BOT_ID,
+  accountBorrowPositionId: null,
+  accountVenuePositionId: null,
+  botBorrowPositionId: BOT_POS_ID,
+  botVenuePositionId: BOT_VENUE_ID,
+  carveRaw: 0n,
+  requestedDebtRaw: 5_770_000n, // ~$5.77 — the owner's 33% → 50% headroom figure
+  targetLtv: 0.5,
+  clientRequestId: "proof-1:zerogrow",
+  mode: "grow" as const,
+});
+
+/** Identity metadata matching zeroCarveGrowParams() — NO account keys at all. */
+const zeroCarveMeta = () => ({
+  tradingBotId: TRADING_BOT_ID,
+  collateralMint: INF_MINT,
+  botBorrowPositionId: BOT_POS_ID,
+  botVenuePositionId: BOT_VENUE_ID,
+  carveRaw: "0",
+  requestedDebtRaw: "5770000",
+  targetLtv: 0.5,
+  botPublicKey: "BotPubkey111111111111111111111111111111111",
+  accountPublicKey: "AcctPubkey11111111111111111111111111111111",
+});
+
+describe("runPerbotGrowLoan — ZERO-CARVE grow is borrow-only (no carve legs, no account position)", () => {
+  beforeEach(() => {
+    // Bot loan: 0.3515 INF @ ~$98.87 ≈ $34.75 collateral, $11.60 debt → LTV ≈ 0.334
+    // (the owner's exact case). +$5.77 debt → LTV ≈ 0.50: inside the safe target.
+    state.liveBotHealth = { debtRaw: "11600000", collateralRaw: "351500000", oraclePriceUsd: 98.8656 };
+    borrowMoreOnExistingBotPositionMock.mockImplementation(async (args: any) => {
+      if (args.onBeforeBroadcast) await args.onBeforeBroadcast({ signature: "sig-borrow-more", lastValidBlockHeight: 200 });
+      return { success: true, signature: "sig-borrow-more", borrowedDeltaRaw: "5770000" };
+    });
+  });
+
+  it("borrows against the loan's own headroom — NEVER touches the account (no withdraw/transfer/supply)", async () => {
+    const res = await runPerbotGrowLoan(zeroCarveGrowParams());
+
+    expect(res.success).toBe(true);
+    expect(res.step).toBe("final_read");
+    expect(res.carvedRaw).toBe("0");
+    expect(res.borrowedUsdcRaw).toBe("5770000");
+    expect(res.borrowPositionId).toBe(BOT_POS_ID);
+
+    // The ONLY money leg that ran is the borrow.
+    expect(borrowMoreOnExistingBotPositionMock).toHaveBeenCalledTimes(1);
+    expect(executeWithdrawCollateralMock).not.toHaveBeenCalled();
+    expect(transferExactMock).not.toHaveBeenCalled();
+    expect(supplyToExistingBotPositionMock).not.toHaveBeenCalled();
+    expect(executeBorrowOpenMock).not.toHaveBeenCalled();
+
+    // The borrow targeted the bot's EXISTING position with the exact requested raw.
+    const borrowArgs = borrowMoreOnExistingBotPositionMock.mock.calls[0][0];
+    expect(borrowArgs.borrowPositionId).toBe(BOT_POS_ID);
+    expect(borrowArgs.requestedDebtRaw).toBe(5_770_000n);
+
+    // The op is a normal grow op whose metadata has NO account keys at all.
+    const op = [...opStore.values()].find((o) => o.clientRequestId === "proof-1:zerogrow");
+    expect(op.operationType).toBe("perbot_grow_loan");
+    expect(op.status).toBe("succeeded");
+    expect(op.metadata.carveRaw).toBe("0");
+    expect("accountBorrowPositionId" in op.metadata).toBe(false);
+    expect("accountVenuePositionId" in op.metadata).toBe(false);
+  });
+
+  it("a replay of a SUCCEEDED zero-carve op returns the stored result without borrowing again", async () => {
+    const first = await runPerbotGrowLoan(zeroCarveGrowParams());
+    expect(first.success).toBe(true);
+
+    borrowMoreOnExistingBotPositionMock.mockClear();
+
+    const again = await runPerbotGrowLoan(zeroCarveGrowParams());
+    expect(again.success).toBe(true);
+    expect(again.carvedRaw).toBe("0");
+    expect(again.borrowedUsdcRaw).toBe("5770000");
+    expect(borrowMoreOnExistingBotPositionMock).not.toHaveBeenCalled();
+    expect(executeWithdrawCollateralMock).not.toHaveBeenCalled();
+  });
+
+  it("RESUMES a crashed zero-carve op (step supplied_to_bot) straight into the borrow leg — carve legs stay skipped", async () => {
+    opStore.set("op-zerogrow-r", {
+      id: "op-zerogrow-r",
+      clientRequestId: "proof-1:zerogrow",
+      operationType: "perbot_grow_loan",
+      status: "processing",
+      step: "supplied_to_bot", // the step a fresh zero-carve op advances to before borrowing
+      txSignatures: [],
+      metadata: zeroCarveMeta(),
+    });
+
+    const res = await runPerbotGrowLoan(zeroCarveGrowParams());
+
+    expect(res.success).toBe(true);
+    expect(res.step).toBe("final_read");
+    expect(res.borrowedUsdcRaw).toBe("5770000");
+    expect(borrowMoreOnExistingBotPositionMock).toHaveBeenCalledTimes(1);
+    expect(executeWithdrawCollateralMock).not.toHaveBeenCalled();
+    expect(transferExactMock).not.toHaveBeenCalled();
+    expect(supplyToExistingBotPositionMock).not.toHaveBeenCalled();
+
+    const op = opStore.get("op-zerogrow-r");
+    expect(op.status).toBe("succeeded");
+    expect(op.step).toBe("final_read");
+  });
+
+  it("REFUSES a same-reqId replay that re-sizes the zero carve into a REAL carve (identity pin on carveRaw)", async () => {
+    opStore.set("op-zerogrow-x", {
+      id: "op-zerogrow-x",
+      clientRequestId: "proof-1:zerogrow",
+      operationType: "perbot_grow_loan",
+      status: "processing",
+      step: "initialized",
+      txSignatures: [],
+      metadata: zeroCarveMeta(),
+    });
+
+    const res = await runPerbotGrowLoan({
+      ...zeroCarveGrowParams(),
+      carveRaw: 200_000_000n,
+      accountBorrowPositionId: ACCT_POS_ID,
+      accountVenuePositionId: ACCT_VENUE_ID,
+    });
+
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/different|refusing to resume/i);
+    expect(borrowMoreOnExistingBotPositionMock).not.toHaveBeenCalled();
+    expect(executeWithdrawCollateralMock).not.toHaveBeenCalled();
+    // The existing zero-carve op was NOT mutated.
+    const op = opStore.get("op-zerogrow-x");
+    expect(op.status).toBe("processing");
+    expect(op.step).toBe("initialized");
+    expect(op.metadata.carveRaw).toBe("0");
   });
 });

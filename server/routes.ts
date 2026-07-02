@@ -1513,7 +1513,7 @@ import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWal
 import { runBorrowHealthScan } from "./vault/borrow-health-monitor";
 import { planPerbotCarve, runPerbotCarveOpen, runPerbotUnwindClose, selectBlockingBotPositions, resolveDisplayPrincipalRaw, runPerbotCollateralTopUp, runPerbotGrowLoan } from "./vault/jupiter-lend-perbot-carve";
 import { computePerBotPositionHealth, summarizeBotBorrowHealth, derivePerbotTopUpSuggestion, defaultRowHealthDeps, BAND_SEVERITY } from "./vault/borrow-health";
-import { decideAutoTopUp, selectResumableTopUpOp, buildAutoTopUpClientRequestId, AUTO_TOPUP_COOLDOWN_MS } from "./vault/auto-topup";
+import { decideAutoTopUp, decideAutoRepay, selectResumableTopUpOp, buildAutoTopUpClientRequestId, AUTO_TOPUP_COOLDOWN_MS } from "./vault/auto-topup";
 import { rankMeasuredYieldDestinations } from "./vault/carry-yield-ranker";
 import { decideCarryTrade } from "./vault/carry-trade-advisor";
 import { getUserFungibleTokens, resolveTokenLogos } from "./swap/helius-tokens.js";
@@ -2296,16 +2296,19 @@ async function runAutoReparkScan(): Promise<void> {
 }
 
 // -----------------------------------------------------------------------------
-// AUTONOMOUS "DEFEND THE LOAN" — auto collateral top-up scanner.
+// AUTONOMOUS "DEFEND THE LOAN" — auto collateral top-up + auto repay scanner.
 //
-// Opt-in (bot.autoCollateralTopUp), Flash-only. Once a minute we look at every
-// urgent-or-worse per-bot loan whose owner turned this on, take a FRESH live
-// health read, and — for a genuinely at-risk loan the ACCOUNT wallet can defend
-// with collateral it ALREADY holds — add just enough collateral to restore a
-// safe LTV. v1 is DIRECT collateral only: NO autonomous swaps, NO repay
-// fallback (both stay manual, where the user picks source + amount). Anything we
-// can't safely auto-defend becomes a "needs attention" Telegram alert so the
-// opted-in user still knows to act.
+// Opt-in per action (bot.autoCollateralTopUp / bot.autoRepayEnabled), Flash-only.
+// Once a minute we look at every urgent-or-worse per-bot loan whose owner turned
+// EITHER defense on, take a FRESH live health read, and defend it:
+//   1. TOP-UP first (bot.autoCollateralTopUp): add collateral the ACCOUNT wallet
+//      ALREADY holds — DIRECT collateral only, NO autonomous swaps.
+//   2. REPAY fallback (bot.autoRepayEnabled): when a top-up can't act (disabled,
+//      or the account wallet lacks the collateral), pay the debt DOWN to the safe
+//      target LTV from the BOT wallet's own idle USDC — never trading collateral
+//      inside the venue, no swaps, no unparking.
+// Anything we can't safely auto-defend becomes a "needs attention" Telegram
+// alert so the opted-in user still knows to act.
 //
 // Money-safety mirrors the manual top-up + auto-repark paths:
 //   - FRESH on-chain read before spending (the DB band is only a prefilter).
@@ -2424,6 +2427,113 @@ async function performAutoTopUpSpend(args: {
   }
 }
 
+// Shared SPEND leg for the auto-repay fallback. Decrypts the account funder (it
+// covers any bot gas shortfall) + the bot signing key, runs the SINGLE-LEG
+// atomic repay executor under the server-enforced `targetFinalDebtRaw` floor
+// (a duplicate/stale-sized submit can never overshoot the target), notifies the
+// owner, and wipes both keys in a finally. No clientRequestId resume machinery —
+// unlike the two-leg top-up, the repay's money move is one transaction; see the
+// AUTO REPAY note in server/vault/auto-topup.ts.
+async function performAutoRepaySpend(args: {
+  bot: TradingBot;
+  wallet: NonNullable<Awaited<ReturnType<typeof storage.getWallet>>>;
+  agentPublicKey: string;
+  position: BorrowPosition;
+  repayRaw: bigint;
+  targetFinalDebtRaw: bigint;
+  scopeLabel: string;
+  collateralLabel: string;
+  logPrefix: string;
+}): Promise<void> {
+  const {
+    bot, wallet, agentPublicKey, position,
+    repayRaw, targetFinalDebtRaw, scopeLabel, collateralLabel, logPrefix,
+  } = args;
+  const mint = position.collateralMint;
+  if (!mint) return;
+
+  const umkResult = await getUmkForWebhook(bot.walletAddress);
+  if (!umkResult) {
+    console.warn(`${logPrefix} no execution authorization — cannot auto-repay`);
+    await sendAutoTopUpNotification(bot.walletAddress, {
+      scopeLabel, collateralLabel, kind: "repay", ok: false, reason: "we couldn't access execution authorization",
+    }).catch(() => {});
+    return;
+  }
+  let funder: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+  try {
+    funder = await decryptAgentKeyStrict(bot.walletAddress, umkResult.umk, wallet, agentPublicKey);
+  } catch (e: any) {
+    console.warn(`${logPrefix} account agent decrypt failed: ${e?.message ?? e}`);
+  } finally {
+    umkResult.cleanup();
+  }
+  if (!funder) {
+    await sendAutoTopUpNotification(bot.walletAddress, {
+      scopeLabel, collateralLabel, kind: "repay", ok: false, reason: "the account wallet needs re-keying",
+    }).catch(() => {});
+    return;
+  }
+
+  const botCtx = getBotSubaccountContext(bot);
+  if (!botCtx) {
+    funder.cleanup();
+    console.warn(`${logPrefix} no per-bot subaccount context — skip`);
+    return;
+  }
+  let botKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+  try {
+    botKey = await _resolveBotSubaccountSecretKey(botCtx);
+  } catch (e: any) {
+    funder.cleanup();
+    console.warn(`${logPrefix} cannot unlock bot signing key: ${e?.message ?? e}`);
+    await sendAutoTopUpNotification(bot.walletAddress, {
+      scopeLabel, collateralLabel, kind: "repay", ok: false, reason: "the bot wallet needs re-keying",
+    }).catch(() => {});
+    return;
+  }
+
+  try {
+    const result = await repayPartialOnExistingBotPosition({
+      walletAddress: bot.walletAddress,
+      tradingBotId: bot.id,
+      botPublicKey: botCtx.botPublicKey,
+      botSecretKey: botKey.secretKey,
+      accountPublicKey: agentPublicKey,
+      accountSecretKey: funder.secretKey,
+      collateralMint: mint,
+      borrowPositionId: position.id,
+      amount: repayRaw,
+      targetFinalDebtRaw,
+    });
+    if (result.success) {
+      const repaidUsd = typeof result.repaidUsdc === "number" ? result.repaidUsdc : 0;
+      if (repaidUsd > 0) {
+        console.log(`${logPrefix} defended loan — repaid ~$${repaidUsd.toFixed(2)} of debt from bot idle USDC`);
+        await sendAutoTopUpNotification(bot.walletAddress, {
+          scopeLabel, collateralLabel, kind: "repay", ok: true, repaidUsd,
+        }).catch((e) => console.warn(`${logPrefix} success alert failed: ${e?.message ?? e}`));
+      } else {
+        // No-op success (the executor's target floor found nothing left to pay).
+        console.log(`${logPrefix} auto-repay was a no-op (already at/below target)`);
+      }
+    } else {
+      console.warn(`${logPrefix} auto-repay did not complete: ${result.error ?? "unknown"}`);
+      await sendAutoTopUpNotification(bot.walletAddress, {
+        scopeLabel, collateralLabel, kind: "repay", ok: false, reason: "the debt pay-down did not complete",
+      }).catch(() => {});
+    }
+  } catch (e: any) {
+    console.error(`${logPrefix} auto-repay threw: ${e?.message ?? e}`);
+    await sendAutoTopUpNotification(bot.walletAddress, {
+      scopeLabel, collateralLabel, kind: "repay", ok: false, reason: "the debt pay-down hit an unexpected error",
+    }).catch(() => {});
+  } finally {
+    funder.cleanup();
+    botKey.cleanup();
+  }
+}
+
 async function defendOneLoanAutonomously(
   position: BorrowPosition,
   bot: TradingBot,
@@ -2515,12 +2625,16 @@ async function defendOneLoanAutonomously(
   });
   const suggestion = derivePerbotTopUpSuggestion(live, vault);
 
-  // CHEAP gate BEFORE any account read: only an available, not-yet-liquidatable,
-  // urgent-or-worse loan that actually needs collateral is worth a balance read.
+  // CHEAP shared gate BEFORE any balance read: only an available, not-yet-
+  // liquidatable, urgent-or-worse loan that is genuinely above the safe target
+  // is worth defending. `suggestion` is null on any unreadable fact (fail closed
+  // for BOTH actions — the repay decision reads the SAME live facts) and 0n when
+  // the loan already sits at/below the target LTV (nothing to defend either way).
   // (The borrow-health monitor separately alerts on unavailable/liquidation
   // crossings, so this path stays silent on those.)
   if (
     !vault ||
+    !live ||
     health.status !== "available" ||
     health.liquidatable === true ||
     BAND_SEVERITY[health.band] < BAND_SEVERITY.urgent ||
@@ -2530,53 +2644,114 @@ async function defendOneLoanAutonomously(
     return;
   }
 
-  // STRICT read of the ACCOUNT agent wallet's held collateral (fail closed).
-  let heldRaw: bigint;
-  try {
-    heldRaw = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, mint)).amountRaw);
-  } catch (e: any) {
-    console.warn(`${logPrefix} strict collateral read failed — skip (fail closed): ${e?.message ?? e}`);
-    return;
+  // TOP-UP decision (PURE) — first line of defense, only when the bot opted in.
+  // Adding collateral keeps the loan's borrowing power; repaying shrinks it, so
+  // top-up always wins when both could act.
+  let topUpDecision: ReturnType<typeof decideAutoTopUp> | null = null;
+  if (bot.autoCollateralTopUp) {
+    // STRICT read of the ACCOUNT agent wallet's held collateral (fail closed —
+    // no claim burned, the whole tick retries later).
+    let heldRaw: bigint;
+    try {
+      heldRaw = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, mint)).amountRaw);
+    } catch (e: any) {
+      console.warn(`${logPrefix} strict collateral read failed — skip (fail closed): ${e?.message ?? e}`);
+      return;
+    }
+    topUpDecision = decideAutoTopUp({
+      health,
+      suggestion,
+      heldCollateralRaw: heldRaw,
+      collateralPriceUsd: vault.oraclePriceLiquidateUsd,
+      collateralDecimals: vault.collateralDecimals,
+    });
+    if (topUpDecision.action === "skip") return;
   }
 
-  // Decide (PURE). skip -> do nothing; alert -> needs-attention; topup -> spend.
-  const decision = decideAutoTopUp({
-    health,
-    suggestion,
-    heldCollateralRaw: heldRaw,
-    collateralPriceUsd: vault.oraclePriceLiquidateUsd,
-    collateralDecimals: vault.collateralDecimals,
-  });
-  if (decision.action === "skip") return;
+  // REPAY decision (PURE) — the fallback, only when the bot opted in AND the
+  // top-up cannot act this tick (disabled, or the account wallet lacks the
+  // collateral). Pays debt down from the BOT wallet's own idle USDC.
+  let repayDecision: ReturnType<typeof decideAutoRepay> | null = null;
+  if (bot.autoRepayEnabled && (topUpDecision == null || topUpDecision.action === "alert")) {
+    const botCtx = getBotSubaccountContext(bot);
+    if (!botCtx) {
+      console.warn(`${logPrefix} no per-bot subaccount context — repay unavailable`);
+    } else {
+      // STRICT read of the BOT wallet's idle USDC (fail closed → repay simply
+      // cannot act this tick; a pending top-up alert still goes out below).
+      let botIdleUsdcRaw: bigint | null = null;
+      try {
+        botIdleUsdcRaw = BigInt((await getAgentTokenBalanceRawStrict(botCtx.botPublicKey, SWAP_USDC_MINT)).amountRaw);
+      } catch (e: any) {
+        console.warn(`${logPrefix} strict bot USDC read failed — repay unavailable this tick: ${e?.message ?? e}`);
+      }
+      if (botIdleUsdcRaw != null) {
+        repayDecision = decideAutoRepay({
+          health,
+          debtRaw: BigInt(live.debtRaw),
+          collateralRaw: BigInt(live.collateralRaw),
+          collateralPriceUsd: vault.oraclePriceLiquidateUsd,
+          collateralDecimals: vault.collateralDecimals,
+          debtDecimals: vault.debtDecimals,
+          botIdleUsdcRaw,
+        });
+      }
+    }
+  }
 
-  // Atomic claim — throttle re-fire (top-up AND alert) to once per cooldown
-  // window. Lost race / still-in-cooldown -> do nothing this tick.
+  // Resolve THIS tick's single action. Nothing actionable and nothing to warn
+  // about (e.g. a repay-only bot already at/below target) -> stay silent.
+  const hasSpend = topUpDecision?.action === "topup" || repayDecision?.action === "repay";
+  const hasAlert = topUpDecision?.action === "alert" || repayDecision?.action === "alert";
+  if (!hasSpend && !hasAlert) return;
+
+  // ONE atomic claim for whichever action fires (top-up, repay, or alert) —
+  // throttles re-fire to once per cooldown window. Lost race / still-in-cooldown
+  // -> do nothing this tick.
   const claimed = await storage.claimBorrowPositionAutoTopupAttempt(position.id, AUTO_TOPUP_COOLDOWN_MS);
   if (!claimed) return;
 
-  if (decision.action === "alert") {
-    console.log(`${logPrefix} urgent but not auto-defendable (${decision.reason}) — alerting owner`);
-    await sendAutoTopUpNotification(bot.walletAddress, {
-      scopeLabel,
-      collateralLabel,
-      ok: false,
-      reason: "the account wallet doesn't hold enough of that collateral",
-    }).catch((e) => console.warn(`${logPrefix} attention alert failed: ${e?.message ?? e}`));
+  if (topUpDecision?.action === "topup") {
+    // TOP-UP: fresh idempotency key for a brand-new logical top-up (no in-flight
+    // op exists — verified above). The executor resumes/replays on this key, so a
+    // mid-flight retry within THIS logical op never double-spends.
+    const stamp = (claimed.lastAutoTopupAttemptAt ?? new Date()).toISOString();
+    const clientRequestId = buildAutoTopUpClientRequestId(position.id, stamp);
+    await performAutoTopUpSpend({
+      bot, wallet, agentPublicKey, vault, position, venueId,
+      clientRequestId,
+      sourceMint: mint,
+      sourceAmountRaw: topUpDecision.sourceAmountRaw,
+      scopeLabel, collateralLabel, logPrefix,
+    });
     return;
   }
 
-  // TOP-UP: fresh idempotency key for a brand-new logical top-up (no in-flight op
-  // exists — verified above). The executor resumes/replays on this key, so a
-  // mid-flight retry within THIS logical op never double-spends.
-  const stamp = (claimed.lastAutoTopupAttemptAt ?? new Date()).toISOString();
-  const clientRequestId = buildAutoTopUpClientRequestId(position.id, stamp);
-  await performAutoTopUpSpend({
-    bot, wallet, agentPublicKey, vault, position, venueId,
-    clientRequestId,
-    sourceMint: mint,
-    sourceAmountRaw: decision.sourceAmountRaw,
-    scopeLabel, collateralLabel, logPrefix,
-  });
+  if (repayDecision?.action === "repay") {
+    console.log(`${logPrefix} auto-repay ~$${repayDecision.repayUsd.toFixed(2)} from bot idle USDC (top-up ${bot.autoCollateralTopUp ? "couldn't act" : "disabled"})`);
+    await performAutoRepaySpend({
+      bot, wallet, agentPublicKey, position,
+      repayRaw: repayDecision.repayRaw,
+      targetFinalDebtRaw: repayDecision.targetFinalDebtRaw,
+      scopeLabel, collateralLabel, logPrefix,
+    });
+    return;
+  }
+
+  // ALERT: opted-in but nothing we can safely spend — tell the owner to act.
+  const alertReason =
+    topUpDecision?.action === "alert" && repayDecision?.action === "alert"
+      ? "neither the account wallet's collateral nor the bot wallet's spare USDC is enough"
+      : topUpDecision?.action === "alert"
+        ? "the account wallet doesn't hold enough of that collateral"
+        : "the bot wallet doesn't hold enough spare USDC";
+  console.log(`${logPrefix} urgent but not auto-defendable — alerting owner (${alertReason})`);
+  await sendAutoTopUpNotification(bot.walletAddress, {
+    scopeLabel,
+    collateralLabel,
+    ok: false,
+    reason: alertReason,
+  }).catch((e) => console.warn(`${logPrefix} attention alert failed: ${e?.message ?? e}`));
 }
 
 async function runAutoTopUpScan(): Promise<void> {
@@ -9981,6 +10156,17 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     }
   };
 
+  // Same strict parse but ZERO-ALLOWED: grow's carveRaw = "0" means "borrow purely
+  // against the bot loan's OWN headroom" (no account carve legs run at all).
+  const parsePerbotRawZeroOk = (v: unknown, name: string): bigint | { error: string } => {
+    if (typeof v !== "string" || !/^\d+$/.test(v)) return { error: `${name} must be a base-unit integer string` };
+    try {
+      return BigInt(v);
+    } catch {
+      return { error: `${name} must be a base-unit integer string` };
+    }
+  };
+
   // GET per-bot borrow positions + live health + owner-eligibility + carry sources
   // (one preview per allowlisted ACCOUNT borrow market: max carve / max suggested
   // borrow / oracle price), so the equity-tab card needs a SINGLE read. Read-only;
@@ -10128,6 +10314,32 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                   }
                 : null;
             })(),
+            // How much MORE USDC this loan can borrow against its OWN collateral
+            // before hitting the friendly 50% suggest LTV (no account carve needed).
+            // Uses the CONSERVATIVE (never-under-read) debt so the headroom can only
+            // be understated, never overstated. null = live health or price
+            // unreadable (fail closed: the client must not offer own-headroom grow).
+            ownGrowHeadroom: (() => {
+              const price = liveHealth?.oraclePriceUsd ?? null;
+              const collDec = vault?.collateralDecimals;
+              const debtDec = vault?.debtDecimals;
+              if (!liveHealth || typeof price !== "number" || !Number.isFinite(price) || price <= 0) return null;
+              if (typeof collDec !== "number" || typeof debtDec !== "number") return null;
+              let collRaw: bigint;
+              try {
+                collRaw = BigInt(liveHealth.collateralRaw);
+              } catch {
+                return null;
+              }
+              const collUsd = (Number(collRaw) / 10 ** collDec) * price;
+              const debtUsd = Number(conservativeDebt) / 10 ** debtDec;
+              const headroomUsd = collUsd * PERBOT_CARRY_SUGGEST_LTV - debtUsd;
+              if (!Number.isFinite(headroomUsd) || headroomUsd <= 0) {
+                return { headroomUsd: 0, headroomRaw: "0", suggestLtv: PERBOT_CARRY_SUGGEST_LTV };
+              }
+              const headroomRaw = BigInt(Math.floor(headroomUsd * 10 ** debtDec));
+              return { headroomUsd, headroomRaw: headroomRaw.toString(), suggestLtv: PERBOT_CARRY_SUGGEST_LTV };
+            })(),
           };
         }),
       );
@@ -10245,7 +10457,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       } catch {
         botWalletUsdcRaw = null;
       }
-      res.json({ eligible, applicable: true, positions: positionsOut, carrySources: carrySourcesOut, healthSummary, autoCollateralTopUp: botRow?.autoCollateralTopUp ?? false, botWalletUsdcRaw });
+      res.json({ eligible, applicable: true, positions: positionsOut, carrySources: carrySourcesOut, healthSummary, autoCollateralTopUp: botRow?.autoCollateralTopUp ?? false, autoRepayEnabled: botRow?.autoRepayEnabled ?? false, botWalletUsdcRaw });
     } catch (error: any) {
       console.error("[Vault] per-bot borrow positions read error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
@@ -10646,9 +10858,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (typeof clientRequestId !== "string" || clientRequestId.length < 8 || clientRequestId.length > 200) {
         return res.status(400).json({ error: "clientRequestId required (client-generated, persisted until completion)" });
       }
-      const carveParsed = parsePerbotRaw(carveRaw, "carveRaw");
+      // carveRaw = "0" is a ZERO-CARVE grow: the extra borrow rides the bot loan's
+      // OWN headroom (collateral already in the position), so no account carve is
+      // needed — and the owner may not even have an account position.
+      const carveParsed = parsePerbotRawZeroOk(carveRaw, "carveRaw");
       if (typeof carveParsed === "object") return res.status(400).json(carveParsed);
-      if (carveParsed <= BigInt(0)) return res.status(400).json({ error: "carveRaw must be greater than zero" });
+      const zeroCarve = carveParsed === BigInt(0);
       const debtParsed = parsePerbotRaw(requestedDebtRaw, "requestedDebtRaw");
       if (typeof debtParsed === "object") return res.status(400).json(debtParsed);
       if (debtParsed <= BigInt(0)) return res.status(400).json({ error: "requestedDebtRaw must be greater than zero" });
@@ -10716,19 +10931,22 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const isResume = !!priorGrowOp;
 
       // Pre-lock carve sizing (re-validated inside the lock immediately pre-sign).
-      const carvePlan = await planPerbotCarve({
-        walletAddress: req.walletAddress!,
-        vault: cfg,
-        carveRaw: carveParsed,
-        requestedTargetLtv,
-      });
-      if ((!isResume && (!carvePlan.ok || carvePlan.maxCarveRaw == null)) || !carvePlan.accountBorrowPositionId || carvePlan.accountVenuePositionId == null || carvePlan.targetLtv == null) {
-        return res.status(400).json({ error: carvePlan.error || "Cannot size the carve under the target LTV (no readable account position?)." });
-      }
-      if (!isResume && (!carvePlan.carveWithinCap || !carvePlan.carveAllowed)) {
-        return res.status(400).json({
-          error: `That borrow is larger than your account can safely back. Reduce the amount and try again.`,
+      // SKIPPED entirely on a zero-carve grow: no account position is involved.
+      if (!zeroCarve) {
+        const carvePlan = await planPerbotCarve({
+          walletAddress: req.walletAddress!,
+          vault: cfg,
+          carveRaw: carveParsed,
+          requestedTargetLtv,
         });
+        if ((!isResume && (!carvePlan.ok || carvePlan.maxCarveRaw == null)) || !carvePlan.accountBorrowPositionId || carvePlan.accountVenuePositionId == null || carvePlan.targetLtv == null) {
+          return res.status(400).json({ error: carvePlan.error || "Cannot size the carve under the target LTV (no readable account position?)." });
+        }
+        if (!isResume && (!carvePlan.carveWithinCap || !carvePlan.carveAllowed)) {
+          return res.status(400).json({
+            error: `That borrow is larger than your account can safely back. Reduce the amount and try again.`,
+          });
+        }
       }
 
       // Read-only risk gate for the BOT scope, counting ONLY this bot's LIVE debt +
@@ -10755,6 +10973,28 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(400).json({ error: deny?.message || "This per-bot borrow is not allowed under the risk limits." });
       }
 
+      // Fresh-op sizing cap: the requested borrow must fit inside (a) the bot
+      // loan's OWN headroom up to the 50% suggest LTV plus (b) the newly carved
+      // collateral at that same LTV. The executor still re-runs the ENFORCED
+      // policy gate pre-sign (its ceiling is higher); this cap keeps the friendly
+      // 50% sizing honest so a hand-crafted request can't jump straight to the
+      // policy ceiling. Skipped on resume (the borrow may already have landed).
+      if (!isResume) {
+        const priceUsd = liveBot?.oraclePriceUsd ?? null;
+        if (!liveBot || typeof priceUsd !== "number" || !Number.isFinite(priceUsd) || priceUsd <= 0) {
+          return res.status(400).json({ error: "Could not price the bot's collateral; refusing to grow the loan." });
+        }
+        const collUsd = (Number(BigInt(liveBot.collateralRaw)) / 10 ** cfg.collateralDecimals) * priceUsd;
+        const debtUsd = Number(existingBotDebtRaw) / 10 ** cfg.debtDecimals;
+        const headroomUsd = Math.max(0, collUsd * PERBOT_CARRY_SUGGEST_LTV - debtUsd);
+        const carveUsd = (Number(carveParsed) / 10 ** cfg.collateralDecimals) * priceUsd;
+        const requestedUsd = Number(debtParsed) / 10 ** cfg.debtDecimals;
+        const capUsd = headroomUsd + carveUsd * PERBOT_CARRY_SUGGEST_LTV + 0.02;
+        if (!Number.isFinite(capUsd) || !Number.isFinite(requestedUsd) || requestedUsd > capUsd) {
+          return res.status(400).json({ error: "That borrow is larger than this loan's safe headroom. Reduce the amount and try again." });
+        }
+      }
+
       // ---- LIVE: route-level lock keyed on bot+vault (distinct from the executor
       //      lock -> no re-entrant deadlock). Decrypt BOTH keys; wipe in finally.
       const growLockKey = JSON.stringify(["perbot-grow", req.walletAddress!, tradingBotId, cfg.vaultId]);
@@ -10767,21 +11007,32 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           acctKey = await decryptVaultScopeKey(acctScope, req.walletAddress!, wallet, session.umk);
           if (!acctKey) return { status: 400, body: { error: "Account wallet needs re-keying. Sign out and back in." } };
 
-          // Re-resolve the plan inside the lock for freshness.
-          const livePlan = await planPerbotCarve({
-            walletAddress: req.walletAddress!,
-            vault: cfg,
-            carveRaw: carveParsed,
-            requestedTargetLtv,
-          });
-          if (
-            (!isResume && !livePlan.ok) ||
-            !livePlan.accountBorrowPositionId ||
-            livePlan.accountVenuePositionId == null ||
-            livePlan.targetLtv == null ||
-            (!isResume && (!livePlan.carveWithinCap || !livePlan.carveAllowed))
-          ) {
-            return { status: 400, body: { error: livePlan.error || "Carve no longer fits under the target LTV (account state changed)." } };
+          // Re-resolve the plan inside the lock for freshness. Zero-carve grows
+          // have no account leg at all: no account position ids, and the target
+          // LTV is the deterministic 50% suggest constant (identity-pinned in the
+          // op metadata, so a resume always re-derives the same value).
+          let acctBorrowPosId: string | null = null;
+          let acctVenuePosId: number | null = null;
+          let growTargetLtv: number = PERBOT_CARRY_SUGGEST_LTV;
+          if (!zeroCarve) {
+            const livePlan = await planPerbotCarve({
+              walletAddress: req.walletAddress!,
+              vault: cfg,
+              carveRaw: carveParsed,
+              requestedTargetLtv,
+            });
+            if (
+              (!isResume && !livePlan.ok) ||
+              !livePlan.accountBorrowPositionId ||
+              livePlan.accountVenuePositionId == null ||
+              livePlan.targetLtv == null ||
+              (!isResume && (!livePlan.carveWithinCap || !livePlan.carveAllowed))
+            ) {
+              return { status: 400, body: { error: livePlan.error || "Carve no longer fits under the target LTV (account state changed)." } };
+            }
+            acctBorrowPosId = livePlan.accountBorrowPositionId;
+            acctVenuePosId = livePlan.accountVenuePositionId;
+            growTargetLtv = livePlan.targetLtv;
           }
 
           const grow = await runPerbotGrowLoan({
@@ -10792,20 +11043,20 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             botPublicKey: botWalletPubkey,
             botSecretKey: botKey.secretKey,
             tradingBotId,
-            accountBorrowPositionId: livePlan.accountBorrowPositionId,
-            accountVenuePositionId: livePlan.accountVenuePositionId,
+            accountBorrowPositionId: acctBorrowPosId,
+            accountVenuePositionId: acctVenuePosId,
             botBorrowPositionId: target.id,
             botVenuePositionId,
             carveRaw: carveParsed,
             requestedDebtRaw: debtParsed,
-            targetLtv: livePlan.targetLtv,
+            targetLtv: growTargetLtv,
             clientRequestId: growReqId,
           });
           if (!grow.success || !grow.borrowPositionId) {
             const code = grow.needsAttention ? 202 : 400;
             return { status: code, body: { error: grow.error || "Grow did not complete.", needsAttention: !!grow.needsAttention, step: grow.step, operationId: grow.operationId, clientRequestId } };
           }
-          if (grow.accountPostLtv != null && livePlan.targetLtv != null && grow.accountPostLtv > livePlan.targetLtv + 0.01) {
+          if (grow.accountPostLtv != null && grow.accountPostLtv > growTargetLtv + 0.01) {
             return { status: 500, body: { error: `Grow succeeded but the account LTV (${grow.accountPostLtv}) exceeds the target. Stopping for reconcile.`, borrowPositionId: grow.borrowPositionId } };
           }
 
@@ -13960,7 +14211,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
 
-      const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive, profitReinvest, autoWithdrawThreshold, autoTopUp, autoParkIdle, parkDestinationAsset, vaultAllOut, autoCollateralTopUp } = req.body;
+      const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive, profitReinvest, autoWithdrawThreshold, autoTopUp, autoParkIdle, parkDestinationAsset, vaultAllOut, autoCollateralTopUp, autoRepayEnabled } = req.body;
       
       // Per-bot park DESTINATION. Only meaningful on Flash (isolated per-bot wallet);
       // Pacifica's picker stays a local manual selector. Accept null (clear) or an
@@ -14207,6 +14458,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         ...(vaultAllOut !== undefined && { vaultAllOut: !!vaultAllOut }),
         ...(parkDestinationUpdate !== undefined && { parkDestinationAsset: parkDestinationUpdate }),
         ...(autoCollateralTopUp !== undefined && { autoCollateralTopUp: !!autoCollateralTopUp }),
+        ...(autoRepayEnabled !== undefined && { autoRepayEnabled: !!autoRepayEnabled }),
       });
 
       // If the park destination CHANGED on a Flash bot, arm the auto-repark

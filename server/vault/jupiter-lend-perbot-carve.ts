@@ -1762,13 +1762,19 @@ export interface PerbotGrowLoanParams {
   botPublicKey: string;
   botSecretKey: Uint8Array;
   tradingBotId: string;
-  /** Account borrow position to carve MORE FROM (DB id + on-chain nft id). */
-  accountBorrowPositionId: string;
-  accountVenuePositionId: number;
+  /**
+   * Account borrow position to carve MORE FROM (DB id + on-chain nft id).
+   * null ⇔ zero-carve grow (carveRaw=0n, mode "grow" only): the borrow rides the
+   * bot loan's OWN headroom, no account carve legs run, so no account position
+   * is required (the owner may not even have one).
+   */
+  accountBorrowPositionId: string | null;
+  accountVenuePositionId: number | null;
   /** EXISTING open bot borrow position to grow (DB id + on-chain nft id). */
   botBorrowPositionId: string;
   botVenuePositionId: number;
-  /** ADDITIONAL collateral to carve, raw (already validated <= cap by the planner). */
+  /** ADDITIONAL collateral to carve, raw (already validated <= cap by the planner).
+   *  0n is allowed in mode "grow" ONLY: skip carve/transfer/supply, borrow-only. */
   carveRaw: bigint;
   /** ADDITIONAL USDC to borrow into the bot position, raw. */
   requestedDebtRaw: bigint;
@@ -1787,7 +1793,15 @@ export interface PerbotGrowLoanParams {
 
 export async function runPerbotGrowLoan(params: PerbotGrowLoanParams): Promise<PerbotCarveResult> {
   const mode = params.mode ?? "grow";
-  if (params.carveRaw <= 0n) return { success: false, error: "Carve amount must be greater than zero." };
+  // carveRaw = 0 is allowed in mode "grow" ONLY: "borrow purely against the bot
+  // loan's own headroom" — the carve/transfer/supply legs are skipped and the op
+  // starts directly at the borrow leg. add_collateral MUST still carve (> 0).
+  if (params.carveRaw < 0n) return { success: false, error: "Carve amount must not be negative." };
+  if (mode === "add_collateral" && params.carveRaw <= 0n) return { success: false, error: "Carve amount must be greater than zero." };
+  const zeroCarve = mode === "grow" && params.carveRaw === 0n;
+  if (!zeroCarve && (params.accountBorrowPositionId == null || params.accountVenuePositionId == null)) {
+    return { success: false, error: "Account borrow position required for a carve-backed grow." };
+  }
   if (mode === "grow" && params.requestedDebtRaw <= 0n) return { success: false, error: "Borrow amount must be greater than zero." };
   // Add-collateral NEVER borrows: pin the debt to exactly 0 so the identity check
   // (requestedDebtRaw "0") + the skipped borrow leg can't disagree.
@@ -1811,8 +1825,14 @@ export async function runPerbotGrowLoan(params: PerbotGrowLoanParams): Promise<P
       metadata: {
         tradingBotId: params.tradingBotId,
         collateralMint,
-        accountBorrowPositionId: params.accountBorrowPositionId,
-        accountVenuePositionId: params.accountVenuePositionId,
+        // Zero-carve ops have NO account position; omit the keys entirely (a
+        // cross-shape replay under the same reqId still fails identity on carveRaw).
+        ...(zeroCarve
+          ? {}
+          : {
+              accountBorrowPositionId: params.accountBorrowPositionId!,
+              accountVenuePositionId: params.accountVenuePositionId!,
+            }),
         botBorrowPositionId: params.botBorrowPositionId,
         botVenuePositionId: params.botVenuePositionId,
         carveRaw: params.carveRaw.toString(),
@@ -1826,8 +1846,12 @@ export async function runPerbotGrowLoan(params: PerbotGrowLoanParams): Promise<P
     const idMismatch = validateOpIdentity(op, operationType, {
       tradingBotId: params.tradingBotId,
       collateralMint,
-      accountBorrowPositionId: params.accountBorrowPositionId,
-      accountVenuePositionId: params.accountVenuePositionId,
+      ...(zeroCarve
+        ? {}
+        : {
+            accountBorrowPositionId: params.accountBorrowPositionId!,
+            accountVenuePositionId: params.accountVenuePositionId!,
+          }),
       botBorrowPositionId: params.botBorrowPositionId,
       botVenuePositionId: params.botVenuePositionId,
       carveRaw: params.carveRaw.toString(),
@@ -1847,6 +1871,16 @@ export async function runPerbotGrowLoan(params: PerbotGrowLoanParams): Promise<P
         borrowedUsdcRaw: r.borrowedUsdcRaw,
         signatures: (op.txSignatures as string[] | null) ?? [],
       };
+    }
+
+    // ---- ZERO-CARVE grow: nothing to withdraw/transfer/supply — the bot's
+    // existing collateral already backs the extra borrow. Advance a FRESH op
+    // straight to the borrow leg (idempotent: a resume already at/after
+    // supplied_to_bot passes through untouched; the identity check above pins
+    // carveRaw "0" so a same-reqId replay can never re-size it into a carve).
+    if (zeroCarve && (op.step ?? "initialized") === "initialized") {
+      await storage.updateBorrowOperation(op.id, { step: "supplied_to_bot" });
+      op = (await storage.getBorrowOperationById(op.id)) ?? op;
     }
 
     // ---- WITHDRAW (carve MORE) leg ---------------------------------------
@@ -1872,7 +1906,7 @@ export async function runPerbotGrowLoan(params: PerbotGrowLoanParams): Promise<P
         // EXACT-amount target-LTV gate immediately before signing. Nothing has
         // moved yet, so a deny here is RESTARTABLE.
         const oracle = await readBorrowOracleContext(params.vault);
-        const liveBefore = await route.readLivePositionHealth(collateralMint, params.accountVenuePositionId);
+        const liveBefore = await route.readLivePositionHealth(collateralMint, params.accountVenuePositionId!);
         if (!liveBefore) return failClosed(op, "withdraw_failed", "Could not read the live account position; refusing to carve.", false);
         const gate = evaluateCollateralWithdraw({
           vault: params.vault,
@@ -1892,7 +1926,7 @@ export async function runPerbotGrowLoan(params: PerbotGrowLoanParams): Promise<P
           walletAddress: params.walletAddress,
           agentPublicKey: params.accountPublicKey,
           agentSecretKey: params.accountSecretKey,
-          borrowPositionId: params.accountBorrowPositionId,
+          borrowPositionId: params.accountBorrowPositionId!,
           amount: params.carveRaw,
           deliverToUserWallet: false, // STAY in the account agent wallet for the carve transfer.
           onBeforeBroadcast: async ({ signature, lastValidBlockHeight }) => {
@@ -1922,7 +1956,7 @@ export async function runPerbotGrowLoan(params: PerbotGrowLoanParams): Promise<P
       }
 
       // POST-WITHDRAW on-chain assertion: the account must now sit at <= target.
-      const liveAfter = await route.readLivePositionHealth(collateralMint, params.accountVenuePositionId);
+      const liveAfter = await route.readLivePositionHealth(collateralMint, params.accountVenuePositionId!);
       if (!liveAfter) return failClosed(op, "account_withdrawn", "Carve landed but the account position is unreadable; funds are in the account wallet — reconcile before continuing.", true);
       const postLtv = computeLtv(
         BigInt(liveAfter.collateralRaw),
@@ -1942,7 +1976,8 @@ export async function runPerbotGrowLoan(params: PerbotGrowLoanParams): Promise<P
     }
 
     if (carvedRaw <= 0n) carvedRaw = BigInt(readMeta(op).carvedRawObserved || "0");
-    if (carvedRaw <= 0n) return failClosed(op, "account_withdrawn", "Carved amount is zero after the withdraw; nothing to carve.", true);
+    // Zero-carve grows legitimately have carvedRaw = 0 (no withdraw ever ran).
+    if (!zeroCarve && carvedRaw <= 0n) return failClosed(op, "account_withdrawn", "Carved amount is zero after the withdraw; nothing to carve.", true);
 
     // ---- TRANSFER (account -> bot) leg -----------------------------------
     const tStep = op.step ?? "";

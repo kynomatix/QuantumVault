@@ -106,6 +106,15 @@ interface PerbotBorrowPosition {
     suggestedCollateralUsd: number;
     targetLtv: number;
   } | null;
+  // How much MORE USDC this loan can borrow against its OWN collateral before
+  // hitting the 50% safe ratio — no account carve needed. Server-computed from
+  // the conservative debt (can only be understated). null = unreadable (fail
+  // closed: don't offer own-headroom grow).
+  ownGrowHeadroom?: {
+    headroomUsd: number;
+    headroomRaw: string;
+    suggestLtv: number;
+  } | null;
   health: PerbotPositionHealth;
 }
 
@@ -133,8 +142,9 @@ interface PerbotPositionsResponse {
   applicable: boolean;
   positions: PerbotBorrowPosition[];
   carrySources: PerbotCarrySource[];
-  // The bot's opt-in auto-defend flag (Flash per-bot). Drives the modal's Auto toggle.
+  // The bot's opt-in auto-defend flags (Flash per-bot). Drive the modal's toggles.
   autoCollateralTopUp?: boolean;
+  autoRepayEnabled?: boolean;
   // Free USDC (raw, 6dp) in the bot wallet — a read-only sizing hint for the modal's
   // partial pay-DOWN waterfall (bot cash first). null when the read failed.
   botWalletUsdcRaw?: string | null;
@@ -270,6 +280,7 @@ function DefendLoanDialog({
   walletAddress,
   position,
   initialAuto,
+  initialAutoRepay,
   collSym,
   onChanged,
   growMaxUsd,
@@ -295,6 +306,7 @@ function DefendLoanDialog({
   walletAddress: string;
   position: PerbotBorrowPosition;
   initialAuto: boolean;
+  initialAutoRepay: boolean;
   collSym: string | null;
   onChanged: () => Promise<void> | void;
   // Grow ("borrow more") — sized + executed by the parent. growMaxUsd is the most
@@ -328,6 +340,8 @@ function DefendLoanDialog({
 
   const [auto, setAuto] = useState(initialAuto);
   const [savingAuto, setSavingAuto] = useState(false);
+  const [autoRepay, setAutoRepay] = useState(initialAutoRepay);
+  const [savingAutoRepay, setSavingAutoRepay] = useState(false);
   // How much of the loan to pay DOWN (free text → parsed). Empty = nothing yet.
   const [repayAmount, setRepayAmount] = useState("");
   // How much extra USDC to borrow (free text → parsed). Prefilled to the safe max on
@@ -336,10 +350,13 @@ function DefendLoanDialog({
   // How much collateral (tokens) to move into this loan (free text → parsed).
   const [addCollAmount, setAddCollAmount] = useState("");
 
-  // Keep the toggle synced to the server value whenever the modal (re)opens.
+  // Keep the toggles synced to the server values whenever the modal (re)opens.
   useEffect(() => {
-    if (open) setAuto(initialAuto);
-  }, [open, initialAuto]);
+    if (open) {
+      setAuto(initialAuto);
+      setAutoRepay(initialAutoRepay);
+    }
+  }, [open, initialAuto, initialAutoRepay]);
 
   // Prefill the Grow amount to the safe max whenever the modal opens (default over
   // choice). Cleared when growing isn't currently allowed so a stale figure can't sit
@@ -425,6 +442,39 @@ function DefendLoanDialog({
       }
     } finally {
       setSavingAuto(false);
+    }
+  };
+
+  const handleToggleAutoRepay = async (next: boolean) => {
+    if (savingAutoRepay) return;
+    const prev = autoRepay;
+    setAutoRepay(next);
+    setSavingAutoRepay(true);
+    try {
+      const res = await fetch(`/api/trading-bots/${bot.id}?wallet=${walletAddress}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+        credentials: "include",
+        body: JSON.stringify({ autoRepayEnabled: next }),
+      });
+      const d = await safeResponseJson(res);
+      if (!res.ok) throw new Error(d.error || "Could not update auto repay.");
+      toast({
+        title: next ? "Auto Repay On" : "Auto Repay Off",
+        description: next
+          ? "If a top-up isn't possible, we'll pay down debt from the bot's spare USDC automatically."
+          : "Automatic debt pay-downs are off for this loan.",
+      });
+      await onChanged();
+    } catch (e: any) {
+      setAutoRepay(prev);
+      if (isSessionError(e)) {
+        showReconnectToast({ toast, retryAuth, title: "Update failed", retry: () => handleToggleAutoRepay(next) });
+      } else {
+        toast({ title: "Update failed", description: e?.message || "Something went wrong.", variant: "destructive" });
+      }
+    } finally {
+      setSavingAutoRepay(false);
     }
   };
 
@@ -563,8 +613,9 @@ function DefendLoanDialog({
               <div className="flex items-center gap-1.5">
                 <label className="text-sm font-medium">Borrow More</label>
                 <InfoTip testId="info-grow">
-                  Borrows more USDC into this bot, backed by extra {collSym ?? "collateral"} carved
-                  from your vault{targetLtvPct != null ? ` — the loan stays at its ${targetLtvPct}% safe ratio` : ""}.
+                  Borrows more USDC into this bot — first using this loan's own spare borrowing
+                  room, then backed by extra {collSym ?? "collateral"} carved from your vault if
+                  needed{targetLtvPct != null ? `. The loan stays at or under its ${targetLtvPct}% safe ratio` : ""}.
                 </InfoTip>
               </div>
               {growAllowed && growMaxUsd > 0 && (
@@ -581,7 +632,8 @@ function DefendLoanDialog({
                 </p>
               ) : (
                 <p className="text-[11px] text-muted-foreground" data-testid="text-grow-unavailable">
-                  No spare {collSym ?? "collateral"} in your vault right now.
+                  This loan is at its safe borrowing limit, and there's no spare{" "}
+                  {collSym ?? "collateral"} in your vault right now.
                 </p>
               )
             ) : (
@@ -752,6 +804,21 @@ function DefendLoanDialog({
             <div className="flex items-center gap-2 shrink-0">
               {savingAuto && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
               <Switch checked={auto} onCheckedChange={handleToggleAuto} disabled={savingAuto} data-testid="switch-defend-auto" />
+            </div>
+          </div>
+
+          {/* Auto repay — the fallback defense when a top-up can't act. */}
+          <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <p className="text-sm font-medium">Auto Repay</p>
+              <InfoTip testId="info-auto-repay">
+                If this loan drifts toward liquidation and a top-up isn't possible, we automatically
+                pay down some debt using spare USDC sitting in the bot's wallet.
+              </InfoTip>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {savingAutoRepay && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
+              <Switch checked={autoRepay} onCheckedChange={handleToggleAutoRepay} disabled={savingAutoRepay} data-testid="switch-defend-auto-repay" />
             </div>
           </div>
         </div>
@@ -1145,14 +1212,76 @@ export default function PerbotBorrowControls({
     }
   };
 
-  // Grow an EXISTING loan: carve MORE collateral from the account vault and borrow
-  // MORE USDC into this bot's open position. Mirrors handleBorrow's resume model but
-  // is keyed by the position id (growKey/growRawsKey) and hits /perbot/grow. Returns
-  // true only on a fully-confirmed grow (so the modal can close + clear its input).
+  // Size a GROW request: the loan's OWN 50%-headroom is consumed FIRST (no carve —
+  // its existing collateral already backs that much), and only the excess beyond it
+  // carves fresh account collateral. carveRaw "0" = pure own-headroom grow (the
+  // server runs borrow-only, skipping the carve legs entirely). Near/at the combined
+  // max → the server's proven raws verbatim; otherwise the carve scales to the
+  // EXCESS at the account's proven ratio, rounded UP (more backing = safer).
+  const computeGrowRaws = (
+    amountUsd: number,
+  ): { carveRaw: string; requestedDebtRaw: string } | null => {
+    if (!Number.isFinite(amountUsd) || amountUsd <= 0) return null;
+    const debtDec = carrySrc?.debtDecimals ?? 6;
+    let headroomRaw = 0n;
+    try {
+      headroomRaw = BigInt(openPos?.ownGrowHeadroom?.headroomRaw ?? "0");
+    } catch {
+      headroomRaw = 0n;
+    }
+    if (headroomRaw < 0n) headroomRaw = 0n;
+    const debtRaw = BigInt(Math.floor(amountUsd * 10 ** debtDec));
+    if (debtRaw <= 0n) return null;
+    const oneCent = BigInt(Math.max(1, Math.round(10 ** debtDec / 100)));
+
+    // Fits inside the loan's own headroom → borrow-only, no carve.
+    if (headroomRaw > 0n && debtRaw <= headroomRaw) {
+      return { carveRaw: "0", requestedDebtRaw: debtRaw.toString() };
+    }
+
+    // Resolve the carve source (may be absent or exhausted).
+    let maxBorrowRaw = 0n;
+    let maxCarveRaw = 0n;
+    if (carrySrc) {
+      try {
+        maxBorrowRaw = BigInt(carrySrc.maxBorrowRaw);
+        maxCarveRaw = BigInt(carrySrc.maxCarveRaw);
+      } catch {
+        maxBorrowRaw = 0n;
+        maxCarveRaw = 0n;
+      }
+    }
+    if (maxBorrowRaw <= 0n || maxCarveRaw <= 0n) {
+      // No carve available: cap at the proven headroom when the input is within
+      // ~1 cent of it (the Max button lands here); anything further is unsizable.
+      if (headroomRaw > 0n && debtRaw <= headroomRaw + oneCent) {
+        return { carveRaw: "0", requestedDebtRaw: headroomRaw.toString() };
+      }
+      return null;
+    }
+
+    const excessRaw = debtRaw > headroomRaw ? debtRaw - headroomRaw : debtRaw;
+    // At/near the combined max → the proven all-in raws verbatim.
+    if (excessRaw + oneCent >= maxBorrowRaw) {
+      return { carveRaw: maxCarveRaw.toString(), requestedDebtRaw: (headroomRaw + maxBorrowRaw).toString() };
+    }
+    const fraction = Number(excessRaw) / Number(maxBorrowRaw);
+    let carveRaw = BigInt(Math.ceil(Number(maxCarveRaw) * fraction));
+    if (carveRaw > maxCarveRaw) carveRaw = maxCarveRaw;
+    if (carveRaw <= 0n) carveRaw = 1n;
+    return { carveRaw: carveRaw.toString(), requestedDebtRaw: debtRaw.toString() };
+  };
+
+  // Grow an EXISTING loan: use the loan's OWN headroom first, then carve MORE
+  // collateral from the account vault for any excess, borrowing MORE USDC into this
+  // bot's open position. Mirrors handleBorrow's resume model but is keyed by the
+  // position id (growKey/growRawsKey) and hits /perbot/grow. Returns true only on a
+  // fully-confirmed grow (so the modal can close + clear its input).
   const handleGrow = async (amountUsd: number): Promise<boolean> => {
     // openPos is required (grow acts on an existing loan); carrySrc is required only
-    // for a FRESH grow (to size the carve). A RESUME re-sends the persisted raws, so a
-    // consumed/hidden carve source must NOT block finishing an in-flight grow.
+    // when a FRESH grow needs a carve (own-headroom grows send carveRaw "0" with no
+    // source). A RESUME re-sends the persisted raws, so a consumed/hidden carve
+    // source must NOT block finishing an in-flight grow.
     if (!bot || !openPos) return false;
     const positionId = openPos.id;
     setBusy("grow");
@@ -1185,10 +1314,11 @@ export default function PerbotBorrowControls({
         }
         if (raws.collateralMint) postCollateralMint = raws.collateralMint;
       } else {
-        // FRESH: size from the input at the account's proven carve/borrow ratio, then
-        // persist the raws (with the collateral mint) BEFORE the id so we can never end
-        // up with an id that has no amounts to resume from.
-        const fresh = computeBorrowRaws(amountUsd);
+        // FRESH: size from the input — own headroom first (carveRaw "0"), account
+        // carve for the excess — then persist the raws (with the collateral mint)
+        // BEFORE the id so we can never end up with an id that has no amounts to
+        // resume from. carveRaw "0" round-trips storage fine (non-empty string).
+        const fresh = computeGrowRaws(amountUsd);
         if (!fresh) {
           toast({ title: "Enter an amount", description: "Enter how much more USDC you'd like to borrow.", variant: "destructive" });
           return false;
@@ -1925,20 +2055,23 @@ export default function PerbotBorrowControls({
   // safety net for a resume whose stored amounts vanished — the input holds a value.
   const canBorrow = amtValid || hasInflightBorrow;
 
-  // GROW sizing. The most extra USDC this loan can safely take on = the account's
-  // remaining carve headroom (same figure as a fresh borrow's max), since the bot
-  // borrows against freshly-carved account collateral. Grow is ALLOWED only when the
-  // bot's current LTV is at/under the safe target: we always carve at the target
-  // ratio, so the added leg is at target and the loan's TOTAL LTV can only stay at or
-  // fall toward target when it already sits there — if it's above target the user must
+  // GROW sizing. The most extra USDC this loan can safely take on = the loan's
+  // OWN headroom up to the 50% safe ratio (its existing collateral already backs
+  // that much — no carve needed) PLUS the account's remaining carve headroom
+  // (extra borrowing backed by freshly-carved account collateral). The owner's
+  // canonical case: a loan at 33% LTV has real borrowing room even when the
+  // account vault has nothing spare to carve. Grow is ALLOWED only when the
+  // bot's current LTV is at/under the safe target — above it the user must
   // Defend (add collateral) first, so we route them there instead. Null/unreadable
-  // health → fail closed (grow disabled). An in-flight grow is always resumable.
-  const growMaxUsd = borrowUsd;
-  const growTargetLtv = carrySrc?.suggestLtv ?? carrySrc?.targetLtv ?? 0.5;
+  // health → fail closed (own headroom reads 0). An in-flight grow is always resumable.
+  const ownHeadroomUsd = openPos?.ownGrowHeadroom?.headroomUsd ?? 0;
+  const growMaxUsd = ownHeadroomUsd + (carrySrc ? borrowUsd : 0);
+  const growTargetLtv =
+    openPos?.ownGrowHeadroom?.suggestLtv ?? carrySrc?.suggestLtv ?? carrySrc?.targetLtv ?? 0.5;
   const botCurrentLtv =
     collValueUsd != null && collValueUsd > 0 && liveDebtUsd != null ? liveDebtUsd / collValueUsd : null;
   const growAllowed =
-    !!carrySrc && growMaxUsd > 0 && botCurrentLtv != null && botCurrentLtv <= growTargetLtv + 0.01;
+    growMaxUsd > 0 && botCurrentLtv != null && botCurrentLtv <= growTargetLtv + 0.01;
 
   // ADD-COLLATERAL sizing: the most collateral (tokens/USD) the account loan can
   // release while staying at its safe limit — the same carve headroom as grow, but
@@ -2344,6 +2477,7 @@ export default function PerbotBorrowControls({
           walletAddress={walletAddress}
           position={openPos}
           initialAuto={data.autoCollateralTopUp ?? false}
+          initialAutoRepay={data.autoRepayEnabled ?? false}
           collSym={collSym}
           onChanged={onChanged}
           growMaxUsd={growMaxUsd}
