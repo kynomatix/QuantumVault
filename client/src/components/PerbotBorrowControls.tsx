@@ -740,11 +740,9 @@ function DefendLoanDialog({
                   repaying your account loan frees some (every $1 repaid frees about $2 of {collSym ?? "collateral"}).
                 </InfoTip>
               </div>
-              {addCollMaxTokens > 0 && (
-                <span className="text-[11px] text-muted-foreground" data-testid="text-addcoll-max">
-                  up to {addCollMaxStr} {collSym ?? ""}{addCollMaxUsd > 0 ? ` (~${fmtUsd(addCollMaxUsd)})` : ""}
-                </span>
-              )}
+              <span className="text-[11px] text-muted-foreground" data-testid="text-addcoll-max">
+                {addCollMaxStr} {collSym ?? ""}{addCollMaxUsd > 0 ? ` (~${fmtUsd(addCollMaxUsd)})` : ""} spare
+              </span>
             </div>
 
             {hasInflightAddColl && (
@@ -755,7 +753,7 @@ function DefendLoanDialog({
 
             {addCollMaxTokens <= 0 && !hasInflightAddColl ? (
               <p className="text-[11px] text-muted-foreground" data-testid="text-addcoll-unavailable">
-                None spare right now — your account loan is at its safe limit.
+                {addCollMaxStr} {collSym ?? ""} spare right now — your account loan is at its safe limit.
               </p>
             ) : (
               <>
@@ -2139,11 +2137,11 @@ export default function PerbotBorrowControls({
             )}
           </div>
 
-          {/* Manage this loan — borrow more, repay, add collateral, auto top-up. */}
+          {/* Manage this loan — borrow more, repay, add collateral, auto top-up.
+              Styled like the Wallet tab's Borrow More button so it pops. */}
           <Button
-            variant="outline"
             size="sm"
-            className="w-full h-9"
+            className="w-full h-9 bg-gradient-to-r from-accent to-primary text-white"
             onClick={() => setDefendOpen(true)}
             data-testid="button-perbot-manage-loan"
           >
