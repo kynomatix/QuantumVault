@@ -28,14 +28,16 @@ export const DOCS_MARKDOWN = `# QuantumVault Documentation
 12. [Vaults Overview](#vaults-overview)
 13. [Yield Destinations](#yield-destinations)
 14. [Safety & Funding](#safety--funding)
-15. [QuantumLab Overview](#quantumlab-overview)
-16. [Strategy Library](#strategy-library)
-17. [Optimizer](#optimizer)
+15. [Borrow Overview](#borrow-overview)
+16. [Per-Bot Borrow](#per-bot-borrow)
+17. [QuantumLab Overview](#quantumlab-overview)
+18. [Strategy Library](#strategy-library)
+19. [Optimizer](#optimizer)
    - [Out-of-Sample Validation & Robustness Score](#out-of-sample-validation--robustness-score)
-18. [Backtesting Engine](#backtesting-engine)
-19. [Results & Heatmap](#results--heatmap)
-20. [Insights & Guided Mode](#insights--guided-mode)
-21. [Lab Assistant](#lab-assistant)
+20. [Backtesting Engine](#backtesting-engine)
+21. [Results & Heatmap](#results--heatmap)
+22. [Insights & Guided Mode](#insights--guided-mode)
+23. [Lab Assistant](#lab-assistant)
 
 ---
 
@@ -886,6 +888,103 @@ Put together with the auto-funding above, a Flash bot runs a fully automatic loo
 6. About a minute later, the leftover USDC is parked again — back to earning.
 
 > **Note:** Auto-park idle funds is available on Flash bots, where each bot has its own isolated wallet. It's a persistent per-bot setting — turn it on once and it keeps working after every trade. All the same money-safety rules apply: on-chain truth, realized amounts only, price-impact cap, and fail-closed.
+
+---
+
+## Borrow Overview
+
+Borrow lets you use lending collateral you already hold — like INF (Sanctum Infinity) — as security to borrow extra USDC without selling anything. The borrowed cash lands in your account wallet (or straight into a bot), so your trading capital grows while your collateral stays intact.
+
+This is different from a loan from a bank. You never hand your collateral to QuantumVault. The collateral token stays in your own agent wallet; the platform only signs the on-chain borrow instruction. You can repay the debt anytime to release your collateral.
+
+> **Note:** Borrow is built on Jupiter Lend (Fluid), a lending protocol with high capital efficiency. It runs in isolated vaults — one collateral asset paired with one debt asset (USDC) per position. Currently, INF is the supported collateral.
+
+### What Makes It Different
+
+- **Keep your collateral** — You borrow USDC against INF without selling it. Your INF stays in your wallet, earning staking yield on its own, while the borrowed USDC funds your trades.
+- **One position per collateral** — You can open one borrow position per collateral type. The position tracks your pledged collateral, your owed USDC, and your health factor in real time.
+- **Borrowed cash is real trading capital** — The USDC you borrow lands directly in your account wallet (or bot wallet for per-bot borrowing) and can be used for trades immediately. It is treated as a liability, not a deposit, so your profit/loss stays honest.
+- **Repay anytime** — Tap "Repay Debt" to clear all or part of the loan. Partial repayments lower your debt; full repayments close the position and return your collateral.
+
+### Where to Find It
+
+Open the **Wallet** page and look for the **Lending** section. It shows your open borrow positions, pledged collateral, live health factor, and a list of eligible collaterals you can supply.
+
+### How It Works
+
+1. Supply collateral — Pick an eligible collateral (e.g. INF) from the list and add it to the lending pool. The tokens stay in your wallet but are now pledged.
+2. Borrow USDC — Choose how much USDC to borrow, up to a safe limit computed from your collateral value and the vault's maximum LTV. The cash arrives in your wallet immediately.
+3. Trade or park — Use the borrowed USDC for bots, or park it into a Vault for yield (a "carry trade" — see below).
+4. Repay or close — Repay the debt in full or in part. A full repayment closes the position and releases your collateral.
+
+> **Important:** Borrowed USDC is a liability. It is subtracted from your displayed net worth so your profit/loss is not inflated. The cash itself is real — you can trade with it — but the debt is tracked separately and must be repaid.
+
+### Borrow Rate (APR)
+
+The interest you pay is called the borrow rate and is shown as an APR on your position. It is the cost of keeping the loan open. The rate changes with market demand for USDC in the lending pool. Your position card shows the live rate; it is updated from the blockchain each time you open the page.
+
+### Health Factor & Liquidation
+
+Your position has a health factor that measures how close you are to liquidation:
+
+- **Healthy** — Your collateral value is well above the minimum required. You can borrow more or withdraw collateral safely.
+- **Caution** — Your collateral value is getting close to the minimum. Consider repaying part of the debt or adding more collateral.
+- **Critical** — Your position is at risk of liquidation. If the collateral value drops further, the protocol may sell part of your collateral to cover the debt. You will receive a Telegram alert before this happens.
+
+The liquidation threshold is the collateral price at which your position becomes at risk. It is shown on your position card. If the price approaches this level, act promptly.
+
+### Carry Trade
+
+A carry trade is when you borrow USDC at one rate and park it into a Vault destination that earns a higher rate. The difference is your net edge:
+
+- Positive edge (Vault APY > borrow APR) — The Vault earns more than the loan costs. Net gain.
+- Negative edge (Vault APY < borrow APR) — The loan costs more than the Vault earns. Net loss.
+
+The Equity tab on a bot with an open per-bot borrow shows a "Carry Advisor" that recommends whether to park, repay, or hold based on the current edge. It is read-only — you tap to act, the advisor does not act on its own.
+
+> **Warning:** A carry trade is not risk-free. The collateral price can drop (liquidation risk), the Vault yield can change, and the borrow rate can rise. The advisor only compares rates; it does not protect you from price moves.
+
+---
+
+## Per-Bot Borrow
+
+Per-bot borrow is the same idea as account-level borrow, but scoped to a single bot. You pledge INF from the bot's own wallet, borrow USDC against it, and the cash lands directly in that bot's balance. When the bot closes, the system automatically repays the debt and returns the collateral to your account.
+
+This is available on Flash bots, where each bot has its own isolated wallet.
+
+### Where to Find It
+
+Open a bot's **Bot Management Drawer** and go to the **Equity** tab. If the bot holds INF collateral, you will see a "Borrow Against Collateral" card. Tap it to open the borrow flow.
+
+### How It Works
+
+1. Open the Equity tab on a Flash bot that holds INF.
+2. Tap "Borrow Against Collateral" — the system shows your pledged INF, current debt, and a safe borrow limit.
+3. Choose an amount and confirm. The USDC lands in the bot's wallet immediately.
+4. The bot's displayed balance grows by the borrowed amount, but the debt is subtracted from its net PnL so the numbers stay honest.
+5. When you close or delete the bot, the system automatically repays the debt and moves the released INF back to your account.
+
+### Automatic Close & Repay
+
+When you unsubscribe or delete a bot with an open per-bot borrow:
+
+1. The system checks if the bot still owes USDC.
+2. If yes, it funds a small USDC top-up from your account wallet (to cover accrued interest), then repays the full debt.
+3. Once the debt is cleared, it withdraws the collateral and transfers it back to your account wallet.
+4. The position is closed and the collateral is yours again.
+
+This is fully automatic. You do not need to manually repay before closing a bot.
+
+> **Note:** The auto-repay step uses your account's spare USDC to cover any interest that accrued since the last display update. If your account wallet has no spare USDC, the close may pause at "needs attention" and ask you to fund a small top-up. Once funded, the close resumes automatically on retry.
+
+### Debt & Your Bot's Displayed PnL
+
+The bot's displayed balance includes the borrowed USDC (it is real cash the bot can trade with), but its net profit/loss subtracts the debt. This keeps the PnL honest: borrowing does not look like instant profit.
+
+- Bot Balance = exchange balance + parked value − borrow debt
+- PnL = Bot Balance − total deposited − borrow debt
+
+The debt is shown separately on the Equity tab so you always know what you owe.
 
 ---
 

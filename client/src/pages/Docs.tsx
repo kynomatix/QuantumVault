@@ -14,7 +14,7 @@ import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
 
-type DocSection = 
+type DocSection =
   | 'getting-started'
   | 'wallet-setup'
   | 'funding'
@@ -29,6 +29,8 @@ type DocSection =
   | 'vaults-overview'
   | 'vaults-destinations'
   | 'vaults-safety'
+  | 'borrow-overview'
+  | 'borrow-perbot'
   | 'quantumlab-overview'
   | 'quantumlab-strategies'
   | 'quantumlab-optimizer'
@@ -59,6 +61,8 @@ const navItems: NavItem[] = [
   { id: 'vaults-overview', label: 'Vaults Overview', icon: Landmark },
   { id: 'vaults-destinations', label: 'Yield Destinations', icon: Coins },
   { id: 'vaults-safety', label: 'Safety & Funding', icon: ShieldCheck },
+  { id: 'borrow-overview', label: 'Borrow Overview', icon: Landmark },
+  { id: 'borrow-perbot', label: 'Per-Bot Borrow', icon: Landmark },
   { id: 'quantumlab-overview', label: 'QuantumLab Overview', icon: FlaskConical },
   { id: 'quantumlab-strategies', label: 'Strategy Library', icon: Layers },
   { id: 'quantumlab-optimizer', label: 'Optimizer', icon: SlidersHorizontal },
@@ -2217,6 +2221,230 @@ function VaultsSafetySection() {
   );
 }
 
+function BorrowOverviewSection() {
+  return (
+    <div>
+      <SectionHeading>
+        <Landmark className="w-6 h-6 text-sky-400" />
+        Borrow Overview
+      </SectionHeading>
+      <Paragraph>
+        Borrow lets you use lending collateral you already hold — like INF (Sanctum Infinity) — as security to borrow
+        extra USDC without selling anything. The borrowed cash lands in your account wallet, so your trading capital
+        grows while your collateral stays intact.
+      </Paragraph>
+
+      <Alert type="info">
+        Borrow is built on Jupiter Lend (Fluid), a lending protocol with high capital efficiency. It runs in isolated
+        vaults — one collateral asset paired with one debt asset (USDC) per position. Currently, INF is the supported
+        collateral.
+      </Alert>
+
+      <SubHeading>What Makes It Different</SubHeading>
+      <div className="grid gap-4 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Lock className="w-5 h-5 text-sky-400" />
+            <h4 className="font-medium text-white">Keep Your Collateral</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            You borrow USDC against INF without selling it. Your INF stays in your wallet, earning staking yield on its
+            own, while the borrowed USDC funds your trades.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Coins className="w-5 h-5 text-sky-400" />
+            <h4 className="font-medium text-white">One Position Per Collateral</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            You can open one borrow position per collateral type. The position tracks your pledged collateral, your owed
+            USDC, and your health factor in real time.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <TrendingUp className="w-5 h-5 text-sky-400" />
+            <h4 className="font-medium text-white">Real Trading Capital</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            The USDC you borrow lands directly in your account wallet and can be used for trades immediately. It is
+            treated as a liability, not a deposit, so your profit/loss stays honest.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <RefreshCw className="w-5 h-5 text-sky-400" />
+            <h4 className="font-medium text-white">Repay Anytime</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Tap "Repay Debt" to clear all or part of the loan. Partial repayments lower your debt; full repayments
+            close the position and return your collateral.
+          </p>
+        </div>
+      </div>
+
+      <SubHeading>Where to Find It</SubHeading>
+      <Paragraph>
+        Open the <strong className="text-white/90">Wallet</strong> page and look for the <strong className="text-white/90">Lending</strong> section.
+        It shows your open borrow positions, pledged collateral, live health factor, and a list of eligible collaterals
+        you can supply.
+      </Paragraph>
+
+      <SubHeading>How It Works</SubHeading>
+      <StepList steps={[
+        'Supply collateral — Pick an eligible collateral (e.g. INF) and add it to the lending pool. The tokens stay in your wallet but are now pledged.',
+        'Borrow USDC — Choose how much USDC to borrow, up to a safe limit computed from your collateral value. The cash arrives in your wallet immediately.',
+        'Trade or park — Use the borrowed USDC for bots, or park it into a Vault for yield (a "carry trade").',
+        'Repay or close — Repay the debt in full or in part. A full repayment closes the position and releases your collateral.',
+      ]} />
+
+      <Alert type="warning">
+        Borrowed USDC is a <strong>liability</strong>. It is subtracted from your displayed net worth so your profit/loss
+        is not inflated. The cash itself is real — you can trade with it — but the debt is tracked separately and must be
+        repaid.
+      </Alert>
+
+      <SubHeading>Borrow Rate (APR)</SubHeading>
+      <Paragraph>
+        The interest you pay is shown as an APR on your position. It is the cost of keeping the loan open. The rate
+        changes with market demand for USDC in the lending pool. Your position card shows the live rate, updated from
+        the blockchain each time you open the page.
+      </Paragraph>
+
+      <SubHeading>Health Factor &amp; Liquidation</SubHeading>
+      <Paragraph>
+        Your position has a health factor that measures how close you are to liquidation:
+      </Paragraph>
+      <div className="grid gap-4 mb-6 sm:grid-cols-3">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-2 mb-2">
+            <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+            <h4 className="font-medium text-white">Healthy</h4>
+          </div>
+          <p className="text-white/60 text-sm">Your collateral value is well above the minimum required. You can borrow more or withdraw collateral safely.</p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-2 mb-2">
+            <AlertTriangle className="w-5 h-5 text-amber-400" />
+            <h4 className="font-medium text-white">Caution</h4>
+          </div>
+          <p className="text-white/60 text-sm">Your collateral value is getting close to the minimum. Consider repaying part of the debt or adding more collateral.</p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-2 mb-2">
+            <Activity className="w-5 h-5 text-red-400" />
+            <h4 className="font-medium text-white">Critical</h4>
+          </div>
+          <p className="text-white/60 text-sm">Your position is at risk of liquidation. You will receive a Telegram alert before this happens.</p>
+        </div>
+      </div>
+
+      <SubHeading>Carry Trade</SubHeading>
+      <Paragraph>
+        A carry trade is when you borrow USDC at one rate and park it into a Vault destination that earns a higher rate.
+        The difference is your net edge. The Equity tab on a bot with an open per-bot borrow shows a "Carry Advisor"
+        that recommends whether to park, repay, or hold based on the current edge. It is read-only — you tap to act; the
+        advisor does not act on its own.
+      </Paragraph>
+      <Alert type="warning">
+        A carry trade is not risk-free. The collateral price can drop (liquidation risk), the Vault yield can change, and
+        the borrow rate can rise. The advisor only compares rates; it does not protect you from price moves.
+      </Alert>
+    </div>
+  );
+}
+
+function BorrowPerbotSection() {
+  return (
+    <div>
+      <SectionHeading>
+        <Landmark className="w-6 h-6 text-sky-400" />
+        Per-Bot Borrow
+      </SectionHeading>
+      <Paragraph>
+        Per-bot borrow is the same idea as account-level borrow, but scoped to a single bot. You pledge INF from the
+        bot's own wallet, borrow USDC against it, and the cash lands directly in that bot's balance. When the bot closes,
+        the system automatically repays the debt and returns the collateral to your account.
+      </Paragraph>
+
+      <Alert type="info">
+        This is available on Flash bots, where each bot has its own isolated wallet. The bot's Equity tab shows the
+        borrow controls when it holds eligible collateral.
+      </Alert>
+
+      <SubHeading>Where to Find It</SubHeading>
+      <Paragraph>
+        Open a bot's <strong className="text-white/90">Bot Management Drawer</strong> and go to the{" "}
+        <strong className="text-white/90">Equity</strong> tab. If the bot holds INF collateral, you will see a
+        "Borrow Against Collateral" card. Tap it to open the borrow flow.
+      </Paragraph>
+
+      <SubHeading>How It Works</SubHeading>
+      <StepList steps={[
+        'Open the Equity tab on a Flash bot that holds INF.',
+        'Tap "Borrow Against Collateral" — the system shows your pledged INF, current debt, and a safe borrow limit.',
+        'Choose an amount and confirm. The USDC lands in the bot\'s wallet immediately.',
+        'The bot\'s displayed balance grows by the borrowed amount, but the debt is subtracted from its net PnL so the numbers stay honest.',
+        'When you close or delete the bot, the system automatically repays the debt and moves the released INF back to your account.',
+      ]} />
+
+      <SubHeading>Automatic Close &amp; Repay</SubHeading>
+      <Paragraph>
+        When you unsubscribe or delete a bot with an open per-bot borrow, the system handles the cleanup automatically:
+      </Paragraph>
+      <div className="grid gap-4 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary/20 text-primary text-sm font-medium flex items-center justify-center">1</span>
+            <h4 className="font-medium text-white">Check Debt</h4>
+          </div>
+          <p className="text-white/60 text-sm ml-9">The system checks if the bot still owes USDC.</p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary/20 text-primary text-sm font-medium flex items-center justify-center">2</span>
+            <h4 className="font-medium text-white">Fund Top-Up</h4>
+          </div>
+          <p className="text-white/60 text-sm ml-9">If needed, a small USDC top-up from your account wallet covers accrued interest.</p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary/20 text-primary text-sm font-medium flex items-center justify-center">3</span>
+            <h4 className="font-medium text-white">Repay &amp; Release</h4>
+          </div>
+          <p className="text-white/60 text-sm ml-9">The full debt is repaid, then the collateral is withdrawn and transferred back to your account wallet.</p>
+        </div>
+      </div>
+
+      <Alert type="info">
+        This is fully automatic. You do not need to manually repay before closing a bot. If your account wallet has no
+        spare USDC for the top-up, the close may pause at "needs attention." Fund the small top-up and retry; the close
+        then resumes automatically.
+      </Alert>
+
+      <SubHeading>Debt &amp; Your Bot's Displayed PnL</SubHeading>
+      <Paragraph>
+        The bot's displayed balance includes the borrowed USDC (it is real cash the bot can trade with), but its net
+        profit/loss subtracts the debt. This keeps the PnL honest: borrowing does not look like instant profit.
+      </Paragraph>
+      <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-4">
+        <div className="flex items-center justify-between">
+          <span className="text-white/60">Bot Balance</span>
+          <span className="text-white font-medium">exchange balance + parked value − borrow debt</span>
+        </div>
+        <div className="flex items-center justify-between mt-2">
+          <span className="text-white/60">PnL</span>
+          <span className="text-white font-medium">Bot Balance − total deposited − borrow debt</span>
+        </div>
+      </div>
+      <Paragraph>
+        The debt is shown separately on the Equity tab so you always know what you owe.
+      </Paragraph>
+    </div>
+  );
+}
+
 function QuantumLabOverviewSection() {
   return (
     <div>
@@ -3372,6 +3600,8 @@ const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet:
   { id: 'vaults-overview', label: 'Vaults Overview', snippet: 'Vaults put idle USDC to work earning yield. One tap to park all spare USDC, one tap to unpark it back.', keywords: ['vault', 'vaults', 'earn', 'yield', 'idle', 'spare', 'park', 'unpark', 'interest', 'apy', 'save', 'savings', 'passive', 'stablecoin'] },
   { id: 'vaults-destinations', label: 'Yield Destinations', snippet: 'The yield options available in Vaults: Kamino USDC, Perena USD*, Jupiter Lend USDC, Ondo USDY, and OnRe ONyc.', keywords: ['destination', 'destinations', 'yield', 'apy', 'kamino', 'perena', 'jupiter lend', 'ondo', 'usdy', 'onre', 'onyc', 'stablecoin', 'stable', 'floating', 'reinsurance', 'treasury'] },
   { id: 'vaults-safety', label: 'Safety & Funding', snippet: 'How Vaults stay money-safe (on-chain truth, realized amounts, price-impact cap), auto-unpark to fund trades, and auto-park idle funds back into yield after a position closes (Flash).', keywords: ['safety', 'safe', 'money', 'on-chain', 'realized', 'price impact', 'fail closed', 'equity', 'balance', 'auto unpark', 'fund trade', 'top up', 'collateral', 'per bot', 'per-bot', 'auto park', 'auto-park', 'repark', 'idle funds', 'after close', 'earn between trades', 'flash'] },
+  { id: 'borrow-overview', label: 'Borrow Overview', snippet: 'Borrow USDC against collateral like INF without selling it. Built on Jupiter Lend (Fluid). Live health factor, borrow rate APR, and carry-trade guidance.', keywords: ['borrow', 'debt', 'loan', 'lend', 'collateral', 'inf', 'jupiter lend', 'fluid', 'health factor', 'liquidation', 'ltv', 'borrow rate', 'apr', 'carry trade', 'carry', 'usdc', 'liability', 'repay', 'supply collateral', 'pledge', 'position'] },
+  { id: 'borrow-perbot', label: 'Per-Bot Borrow', snippet: 'Borrow USDC against a single bot\'s collateral. Available on Flash bots. Automatic repay and collateral return when the bot closes.', keywords: ['per bot', 'per-bot', 'bot borrow', 'borrow against bot', 'flash borrow', 'bot collateral', 'auto repay', 'automatic close', 'equity tab', 'carry advisor', 'bot debt', 'bot liability'] },
   { id: 'quantumlab-overview', label: 'QuantumLab Overview', snippet: 'QuantumLab is the built-in backtesting and strategy optimization engine. Test strategies before deploying them live.', keywords: ['quantumlab', 'quantum lab', 'backtest', 'backtesting', 'lab', 'test', 'simulation', 'historical', 'strategy', 'candle', 'ohlc'] },
   { id: 'quantumlab-strategies', label: 'Strategy Library', snippet: 'Write and save Pine Script strategies in QuantumLab. Load from the library to backtest or optimize.', keywords: ['strategy', 'library', 'pine script', 'pine', 'script', 'code', 'write', 'save', 'load', 'indicator', 'signal', 'entry', 'exit'] },
   { id: 'quantumlab-optimizer', label: 'Optimizer', snippet: 'Run random search and refinement optimization to find the best parameters for your strategy.', keywords: ['optimizer', 'optimize', 'optimization', 'parameter', 'tune', 'search', 'random search', 'refinement', 'coordinate', 'best', 'sharpe', 'drawdown', 'win rate'] },
@@ -3427,6 +3657,10 @@ export default function DocsPage() {
         return <VaultsDestinationsSection />;
       case 'vaults-safety':
         return <VaultsSafetySection />;
+      case 'borrow-overview':
+        return <BorrowOverviewSection />;
+      case 'borrow-perbot':
+        return <BorrowPerbotSection />;
       case 'quantumlab-overview':
         return <QuantumLabOverviewSection />;
       case 'quantumlab-strategies':
@@ -3551,6 +3785,7 @@ export default function DocsPage() {
                     const Icon = item.icon;
                     const isFirstVaults = item.id === 'vaults-overview';
                     const isFirstQuantumLab = item.id === 'quantumlab-overview';
+                    const isFirstBorrow = item.id === 'borrow-overview';
                     return (
                       <div key={item.id}>
                         {isFirstVaults && (
@@ -3566,6 +3801,14 @@ export default function DocsPage() {
                             <div className="flex items-center gap-2 px-3">
                               <FlaskConical className="w-3.5 h-3.5 text-violet-400" />
                               <span className="text-xs font-semibold text-violet-400 uppercase tracking-wider">QuantumLab</span>
+                            </div>
+                          </div>
+                        )}
+                        {isFirstBorrow && (
+                          <div className="pt-3 pb-2 mt-2 mb-1 border-t border-white/10">
+                            <div className="flex items-center gap-2 px-3">
+                              <Landmark className="w-3.5 h-3.5 text-cyan-400" />
+                              <span className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">Borrow</span>
                             </div>
                           </div>
                         )}
