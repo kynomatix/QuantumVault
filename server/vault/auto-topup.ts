@@ -102,9 +102,12 @@ export function decideAutoTopUp(input: {
 // AUTO REPAY — the second defense (opt-in via bot.autoRepayEnabled). When a
 // collateral top-up is NOT possible (top-up disabled, or the account wallet
 // holds no spare collateral → decideAutoTopUp said "alert"), pay the loan's
-// debt DOWN from the BOT wallet's own idle USDC instead. v1 is bot idle USDC
-// ONLY: no autonomous swaps, no unparking, never touches trading collateral
-// inside the venue — only USDC already sitting in the bot's Solana wallet.
+// debt DOWN from the BOT wallet's own idle USDC — and, when that alone can't
+// restore the target LTV, from the bot's PARKED vault savings too (the THIRD
+// defense: unpark yield token → USDC, then repay; mirrors the manual Repay
+// waterfall). It never touches trading collateral inside the venue. Parked
+// value is counted from ENABLED yield assets only — unparkToUsdc fail-closes
+// on a disabled asset, so counting one would promise cash we cannot move.
 //
 // NOTE on idempotency: unlike the top-up (two money legs — transfer then
 // supply — resumable by clientRequestId), the repay executor
@@ -122,8 +125,24 @@ export function decideAutoTopUp(input: {
  */
 export const AUTO_REPAY_MIN_USD = 5;
 
+/** Buffers applied when sizing the unpark leg of an auto repay — identical to
+ *  the manual Repay waterfall's buffers: +5% for swap slippage and +$0.25 for
+ *  rounding / stablecoin price drift, so one pass covers the shortfall in the
+ *  common case. The unpark service clamps to the live balance, and the repay
+ *  itself is sized off a fresh strict balance read, so an over-ask is safe. */
+export const AUTO_REPAY_UNPARK_BUFFER_MULT = 1.05;
+export const AUTO_REPAY_UNPARK_BUFFER_FLAT = 0.25;
+
 export type AutoRepayDecision =
-  | { action: "repay"; repayRaw: bigint; repayUsd: number; targetFinalDebtRaw: bigint }
+  | {
+      action: "repay";
+      repayRaw: bigint;
+      repayUsd: number;
+      targetFinalDebtRaw: bigint;
+      /** USD of parked vault savings to bring back (unpark → USDC) BEFORE the
+       *  repay leg. 0 = the bot's idle USDC alone covers the planned repay. */
+      unparkUsd: number;
+    }
   | { action: "alert"; reason: string }
   | { action: "skip"; reason: string };
 
@@ -134,9 +153,11 @@ export type AutoRepayDecision =
  * act on a liquidatable loan, only defend urgent-or-worse), then:
  * - Compute the debt that would put the loan AT the target LTV (default 0.5,
  *   the same "safe" target the manual Repay path restores to).
- * - Repay the shortfall, capped at the bot wallet's idle USDC (strict read).
- * - `alert` when the loan needs defending but the bot wallet lacks enough idle
- *   USDC to make a worthwhile paydown (the user opted in — tell them to act).
+ * - Repay the shortfall, capped at what the bot can afford: idle USDC (strict
+ *   read) PLUS the live value of its parked vault savings (enabled assets
+ *   only — a sizing estimate; the spend leg re-reads strict balances).
+ * - `alert` when the loan needs defending but idle USDC + parked savings can't
+ *   make a worthwhile paydown (the user opted in — tell them to act).
  *
  * The returned `targetFinalDebtRaw` MUST be passed to the executor: it is the
  * server-enforced floor that makes a duplicate/stale-sized submit safe.
@@ -153,6 +174,11 @@ export function decideAutoRepay(input: {
   debtDecimals: number;
   /** BOT wallet's live idle USDC balance (strict read). */
   botIdleUsdcRaw: bigint;
+  /** Live USDC value of the bot's parked vault savings (ENABLED yield assets
+   *  only), in debt raw units. Optional — omit/0n = idle-USDC-only decision.
+   *  This is a sizing ESTIMATE: the spend leg unparks with buffers, then sizes
+   *  the actual repay off a fresh strict balance read. */
+  parkedUsdcValueRaw?: bigint;
   /** LTV to restore to; defaults to 0.5 (same as the manual repay target). */
   targetLtv?: number;
   minUsd?: number;
@@ -207,16 +233,28 @@ export function decideAutoRepay(input: {
     return { action: "skip", reason: "already at/below target LTV" };
   }
 
-  // Cap at the bot wallet's idle USDC (the executor re-caps at its own strict
-  // live read too). A partial paydown still improves health — proceed as long
-  // as it clears the dust floor.
-  const repayRaw = input.botIdleUsdcRaw < neededRaw ? input.botIdleUsdcRaw : neededRaw;
+  // Cap at what the bot can afford: idle USDC + parked savings value (the
+  // executor re-caps at its own strict live read too). A partial paydown still
+  // improves health — proceed as long as it clears the dust floor.
+  const parkedRaw = input.parkedUsdcValueRaw != null && input.parkedUsdcValueRaw > 0n
+    ? input.parkedUsdcValueRaw
+    : 0n;
+  const affordableRaw = input.botIdleUsdcRaw + parkedRaw;
+  const repayRaw = affordableRaw < neededRaw ? affordableRaw : neededRaw;
   const repayUsd = Number(repayRaw) / 10 ** input.debtDecimals;
   if (repayRaw <= 0n || repayUsd < minUsd) {
-    return { action: "alert", reason: "insufficient idle USDC in bot wallet" };
+    return { action: "alert", reason: "insufficient idle USDC + parked savings" };
   }
 
-  return { action: "repay", repayRaw, repayUsd, targetFinalDebtRaw };
+  // Shortfall beyond idle USDC → bring back that much from parked savings
+  // first (buffered like the manual Repay waterfall).
+  let unparkUsd = 0;
+  if (repayRaw > input.botIdleUsdcRaw) {
+    const shortfallUsd = Number(repayRaw - input.botIdleUsdcRaw) / 10 ** input.debtDecimals;
+    unparkUsd = shortfallUsd * AUTO_REPAY_UNPARK_BUFFER_MULT + AUTO_REPAY_UNPARK_BUFFER_FLAT;
+  }
+
+  return { action: "repay", repayRaw, repayUsd, targetFinalDebtRaw, unparkUsd };
 }
 
 /** A `borrow_operations` row narrowed to the fields the resume selector reads. */

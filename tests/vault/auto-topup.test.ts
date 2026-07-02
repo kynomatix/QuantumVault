@@ -8,6 +8,8 @@ import {
   AUTO_TOPUP_MIN_USD,
   AUTO_TOPUP_COOLDOWN_MS,
   AUTO_REPAY_MIN_USD,
+  AUTO_REPAY_UNPARK_BUFFER_MULT,
+  AUTO_REPAY_UNPARK_BUFFER_FLAT,
 } from "../../server/vault/auto-topup";
 import type {
   TopUpOpRow,
@@ -538,6 +540,7 @@ describe("decideAutoRepay — repay (pay bot idle USDC toward the target LTV)", 
       expect(d.repayRaw).toBe(30_000_000n); // $80 debt → $50 target
       expect(d.repayUsd).toBeCloseTo(30, 6);
       expect(d.targetFinalDebtRaw).toBe(50_000_000n);
+      expect(d.unparkUsd).toBe(0); // idle alone covers — no unpark leg
     }
   });
 
@@ -554,6 +557,7 @@ describe("decideAutoRepay — repay (pay bot idle USDC toward the target LTV)", 
       // The target floor is unchanged — the executor stops AT the target even
       // if a stale-sized duplicate lands.
       expect(d.targetFinalDebtRaw).toBe(50_000_000n);
+      expect(d.unparkUsd).toBe(0); // no parked savings passed — idle-only
     }
   });
 
@@ -594,6 +598,83 @@ describe("decideAutoRepay — repay (pay bot idle USDC toward the target LTV)", 
 
   it("exposes a sane economic floor", () => {
     expect(AUTO_REPAY_MIN_USD).toBe(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THIRD DEFENSE — parked vault savings counted alongside idle USDC. The
+// decision sizes an unpark leg (buffered like the manual Repay waterfall)
+// whenever the planned repay exceeds what idle USDC alone can cover.
+// ---------------------------------------------------------------------------
+describe("decideAutoRepay — parked savings (third defense)", () => {
+  it("covers the full shortfall when idle USDC + parked savings suffice", () => {
+    // Need $30; idle $10 + parked $25 → full $30 repay, unpark the $20 gap (buffered).
+    const d = decideAutoRepay({
+      health: health(),
+      ...repayBase,
+      botIdleUsdcRaw: 10_000_000n,
+      parkedUsdcValueRaw: 25_000_000n,
+    });
+    expect(d.action).toBe("repay");
+    if (d.action === "repay") {
+      expect(d.repayRaw).toBe(30_000_000n);
+      expect(d.targetFinalDebtRaw).toBe(50_000_000n);
+      expect(d.unparkUsd).toBeCloseTo(20 * AUTO_REPAY_UNPARK_BUFFER_MULT + AUTO_REPAY_UNPARK_BUFFER_FLAT, 6);
+    }
+  });
+
+  it("turns an idle-only alert into a repay when parked savings cover the floor", () => {
+    // Idle $0 (alert on its own) + parked $12 → $12 partial repay, all unparked.
+    const d = decideAutoRepay({
+      health: health(),
+      ...repayBase,
+      botIdleUsdcRaw: 0n,
+      parkedUsdcValueRaw: 12_000_000n,
+    });
+    expect(d.action).toBe("repay");
+    if (d.action === "repay") {
+      expect(d.repayRaw).toBe(12_000_000n);
+      expect(d.unparkUsd).toBeCloseTo(12 * AUTO_REPAY_UNPARK_BUFFER_MULT + AUTO_REPAY_UNPARK_BUFFER_FLAT, 6);
+    }
+  });
+
+  it("still alerts when idle + parked together stay under the economic floor", () => {
+    // $2 idle + $2 parked = $4 < $5 floor → not worth the gas, tell the owner.
+    const d = decideAutoRepay({
+      health: health(),
+      ...repayBase,
+      botIdleUsdcRaw: 2_000_000n,
+      parkedUsdcValueRaw: 2_000_000n,
+    });
+    expect(d.action).toBe("alert");
+  });
+
+  it("ignores parked savings when idle USDC already covers the full shortfall", () => {
+    const d = decideAutoRepay({
+      health: health(),
+      ...repayBase,
+      botIdleUsdcRaw: 50_000_000n,
+      parkedUsdcValueRaw: 100_000_000n,
+    });
+    expect(d.action).toBe("repay");
+    if (d.action === "repay") {
+      expect(d.repayRaw).toBe(30_000_000n);
+      expect(d.unparkUsd).toBe(0); // never unpark what the repay doesn't need
+    }
+  });
+
+  it("never repays past the target even with deep parked savings", () => {
+    const d = decideAutoRepay({
+      health: health(),
+      ...repayBase,
+      botIdleUsdcRaw: 0n,
+      parkedUsdcValueRaw: 500_000_000n, // $500 parked, only $30 needed
+    });
+    expect(d.action).toBe("repay");
+    if (d.action === "repay") {
+      expect(d.repayRaw).toBe(30_000_000n);
+      expect(d.targetFinalDebtRaw).toBe(50_000_000n);
+    }
   });
 });
 

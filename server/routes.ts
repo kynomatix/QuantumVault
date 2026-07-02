@@ -1500,6 +1500,7 @@ import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
 import { getBestQuote } from "./swap/index.js";
 import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, valueVaultRowsForWallet, sumVaultPositionValueUsdc, type VaultPositionView, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
+import { cancelAutoRepark } from "./vault/auto-repark";
 import { getCollateralStakingApyMap } from "./vault/collateral-apy";
 import { getEnabledYieldAssets, getYieldAssetByKey, getDetectableYieldAssets } from "./vault/yield-assets";
 import { getYieldTableCached } from "./vault/yield-oracle";
@@ -2441,13 +2442,16 @@ async function performAutoRepaySpend(args: {
   position: BorrowPosition;
   repayRaw: bigint;
   targetFinalDebtRaw: bigint;
+  /** USD of parked vault savings to bring back (unpark → USDC) before the
+   *  repay leg. 0 = the bot's idle USDC alone covers the planned repay. */
+  unparkUsd: number;
   scopeLabel: string;
   collateralLabel: string;
   logPrefix: string;
 }): Promise<void> {
   const {
     bot, wallet, agentPublicKey, position,
-    repayRaw, targetFinalDebtRaw, scopeLabel, collateralLabel, logPrefix,
+    repayRaw, targetFinalDebtRaw, unparkUsd, scopeLabel, collateralLabel, logPrefix,
   } = args;
   const mint = position.collateralMint;
   if (!mint) return;
@@ -2494,6 +2498,79 @@ async function performAutoRepaySpend(args: {
   }
 
   try {
+    // THIRD DEFENSE — the decision found idle USDC alone can't cover the
+    // planned repay: bring back parked vault savings first (unpark yield
+    // token → USDC into the bot wallet), then repay. Each unpark is its own
+    // scope-locked, clamped, gas-ensured money leg; a failure here still
+    // falls through to repay whatever cash IS available.
+    let amountRaw = repayRaw;
+    if (unparkUsd > 0) {
+      // A pending auto-repark could re-park the cash between the unpark and
+      // the repay — cancel it (it re-arms itself on the bot's next close).
+      try { await cancelAutoRepark(bot.id); } catch { /* best-effort */ }
+      let views: VaultPositionView[] = [];
+      try {
+        views = await getVaultPositionViews(bot.walletAddress, botCtx.botPublicKey, bot.id);
+      } catch (e: any) {
+        console.warn(`${logPrefix} could not enumerate parked savings: ${e?.message ?? e}`);
+      }
+      let broughtBackUsd = 0;
+      for (const v of views) {
+        if (broughtBackUsd >= unparkUsd) break; // enough — leave the rest earning
+        let heldRaw = 0n;
+        try { heldRaw = BigInt(v.onChainAmountRaw ?? "0"); } catch { continue; }
+        if (heldRaw <= 0n) continue;
+        const remainingUsd = unparkUsd - broughtBackUsd;
+        try {
+          const res = await unparkToUsdc({
+            walletAddress: bot.walletAddress,
+            tradingBotId: bot.id,
+            agentPublicKey: botCtx.botPublicKey,
+            agentSecretKey: botKey.secretKey,
+            assetKey: v.assetKey,
+            // All parked yield assets are USD stablecoins (~$1) — token amount
+            // ~= USDC still needed; the service clamps to the live balance.
+            amountToken: remainingUsd,
+            funderPublicKey: agentPublicKey,
+            funderSecretKey: funder.secretKey,
+          });
+          if (res.success) {
+            broughtBackUsd += Number(res.usdcReceived ?? 0);
+          } else {
+            console.warn(`${logPrefix} unpark of ${v.assetKey} did not complete: ${res.error ?? "unknown"}`);
+          }
+        } catch (e: any) {
+          console.warn(`${logPrefix} unpark of ${v.assetKey} threw: ${e?.message ?? e}`);
+        }
+      }
+      if (broughtBackUsd > 0) {
+        console.log(`${logPrefix} brought back ~$${broughtBackUsd.toFixed(2)} of parked savings for the repay`);
+      }
+      // Size the ACTUAL repay off a fresh STRICT read of the bot's USDC —
+      // never the unpark estimate. Fail closed on an unreadable balance: any
+      // unparked USDC sits safely in the bot wallet and the next tick repays.
+      let freshIdleRaw: bigint;
+      try {
+        freshIdleRaw = BigInt((await getAgentTokenBalanceRawStrict(botCtx.botPublicKey, SWAP_USDC_MINT)).amountRaw);
+      } catch (e: any) {
+        console.warn(`${logPrefix} strict bot USDC re-read failed after unpark — retry next tick: ${e?.message ?? e}`);
+        await sendAutoTopUpNotification(bot.walletAddress, {
+          scopeLabel, collateralLabel, kind: "repay", ok: false,
+          reason: "we brought savings back but couldn't confirm the bot's cash — we'll retry shortly",
+        }).catch(() => {});
+        return;
+      }
+      amountRaw = repayRaw < freshIdleRaw ? repayRaw : freshIdleRaw;
+      if (amountRaw <= 0n) {
+        console.warn(`${logPrefix} nothing spendable after unpark — alerting owner`);
+        await sendAutoTopUpNotification(bot.walletAddress, {
+          scopeLabel, collateralLabel, kind: "repay", ok: false,
+          reason: "we couldn't bring back enough parked savings to pay down debt",
+        }).catch(() => {});
+        return;
+      }
+    }
+
     const result = await repayPartialOnExistingBotPosition({
       walletAddress: bot.walletAddress,
       tradingBotId: bot.id,
@@ -2503,13 +2580,13 @@ async function performAutoRepaySpend(args: {
       accountSecretKey: funder.secretKey,
       collateralMint: mint,
       borrowPositionId: position.id,
-      amount: repayRaw,
+      amount: amountRaw,
       targetFinalDebtRaw,
     });
     if (result.success) {
       const repaidUsd = typeof result.repaidUsdc === "number" ? result.repaidUsdc : 0;
       if (repaidUsd > 0) {
-        console.log(`${logPrefix} defended loan — repaid ~$${repaidUsd.toFixed(2)} of debt from bot idle USDC`);
+        console.log(`${logPrefix} defended loan — repaid ~$${repaidUsd.toFixed(2)} of debt from the bot's spare cash${unparkUsd > 0 ? " + parked savings" : ""}`);
         await sendAutoTopUpNotification(bot.walletAddress, {
           scopeLabel, collateralLabel, kind: "repay", ok: true, repaidUsd,
         }).catch((e) => console.warn(`${logPrefix} success alert failed: ${e?.message ?? e}`));
@@ -2686,7 +2763,7 @@ async function defendOneLoanAutonomously(
         console.warn(`${logPrefix} strict bot USDC read failed — repay unavailable this tick: ${e?.message ?? e}`);
       }
       if (botIdleUsdcRaw != null) {
-        repayDecision = decideAutoRepay({
+        const decideInput = {
           health,
           debtRaw: BigInt(live.debtRaw),
           collateralRaw: BigInt(live.collateralRaw),
@@ -2694,7 +2771,36 @@ async function defendOneLoanAutonomously(
           collateralDecimals: vault.collateralDecimals,
           debtDecimals: vault.debtDecimals,
           botIdleUsdcRaw,
-        });
+        };
+        repayDecision = decideAutoRepay(decideInput);
+        // THIRD DEFENSE — idle USDC alone can't fully restore the target LTV
+        // (partial repay, or nothing worthwhile): count the bot's parked
+        // vault savings too and re-decide. The parked read is extra RPC, so
+        // it only runs when actually needed; an unreadable/unquotable parked
+        // value counts as 0 (falls back to idle-only — conservative, never
+        // fabricates affordability the spend leg couldn't realize).
+        const idleCoversFully =
+          repayDecision.action === "repay" &&
+          repayDecision.repayRaw >= BigInt(live.debtRaw) - repayDecision.targetFinalDebtRaw;
+        if (repayDecision.action !== "skip" && !idleCoversFully) {
+          let parkedUsdcValueRaw = 0n;
+          try {
+            const views = await getVaultPositionViews(bot.walletAddress, botCtx.botPublicKey, bot.id);
+            for (const v of views) {
+              let heldRaw = 0n;
+              try { heldRaw = BigInt(v.onChainAmountRaw ?? "0"); } catch { continue; }
+              if (heldRaw <= 0n) continue;
+              if (typeof v.currentValueUsdc === "number" && v.currentValueUsdc > 0) {
+                parkedUsdcValueRaw += BigInt(Math.floor(v.currentValueUsdc * 10 ** vault.debtDecimals));
+              }
+            }
+          } catch (e: any) {
+            console.warn(`${logPrefix} parked savings read failed — idle-only repay this tick: ${e?.message ?? e}`);
+          }
+          if (parkedUsdcValueRaw > 0n) {
+            repayDecision = decideAutoRepay({ ...decideInput, parkedUsdcValueRaw });
+          }
+        }
       }
     }
   }
@@ -2728,11 +2834,12 @@ async function defendOneLoanAutonomously(
   }
 
   if (repayDecision?.action === "repay") {
-    console.log(`${logPrefix} auto-repay ~$${repayDecision.repayUsd.toFixed(2)} from bot idle USDC (top-up ${bot.autoCollateralTopUp ? "couldn't act" : "disabled"})`);
+    console.log(`${logPrefix} auto-repay ~$${repayDecision.repayUsd.toFixed(2)} from bot cash${repayDecision.unparkUsd > 0 ? ` (+ ~$${repayDecision.unparkUsd.toFixed(2)} from parked savings)` : ""} (top-up ${bot.autoCollateralTopUp ? "couldn't act" : "disabled"})`);
     await performAutoRepaySpend({
       bot, wallet, agentPublicKey, position,
       repayRaw: repayDecision.repayRaw,
       targetFinalDebtRaw: repayDecision.targetFinalDebtRaw,
+      unparkUsd: repayDecision.unparkUsd,
       scopeLabel, collateralLabel, logPrefix,
     });
     return;
@@ -2741,10 +2848,10 @@ async function defendOneLoanAutonomously(
   // ALERT: opted-in but nothing we can safely spend — tell the owner to act.
   const alertReason =
     topUpDecision?.action === "alert" && repayDecision?.action === "alert"
-      ? "neither the account wallet's collateral nor the bot wallet's spare USDC is enough"
+      ? "neither the account wallet's collateral nor the bot's spare USDC and parked savings are enough"
       : topUpDecision?.action === "alert"
         ? "the account wallet doesn't hold enough of that collateral"
-        : "the bot wallet doesn't hold enough spare USDC";
+        : "the bot doesn't hold enough spare USDC or parked savings";
   console.log(`${logPrefix} urgent but not auto-defendable — alerting owner (${alertReason})`);
   await sendAutoTopUpNotification(bot.walletAddress, {
     scopeLabel,

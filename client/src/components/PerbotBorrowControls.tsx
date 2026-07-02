@@ -462,7 +462,7 @@ function DefendLoanDialog({
       toast({
         title: next ? "Auto Repay On" : "Auto Repay Off",
         description: next
-          ? "If a top-up isn't possible, we'll pay down debt from the bot's spare USDC automatically."
+          ? "If a top-up isn't possible, we'll pay down debt from the bot's spare USDC — and its parked Vault savings if needed."
           : "Automatic debt pay-downs are off for this loan.",
       });
       await onChanged();
@@ -811,7 +811,8 @@ function DefendLoanDialog({
               <p className="text-sm font-medium">Auto Repay</p>
               <InfoTip testId="info-auto-repay">
                 If this loan drifts toward liquidation and a top-up isn't possible, we automatically
-                pay down some debt using spare USDC sitting in the bot's wallet.
+                pay down some debt using spare USDC sitting in the bot's wallet — and if that isn't
+                enough, we bring back some of the bot's parked Vault savings to cover it.
               </InfoTip>
             </div>
             <div className="flex items-center gap-2 shrink-0">
