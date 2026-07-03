@@ -81,7 +81,7 @@ import {
   type LoopPolicyReason,
 } from "./loop-risk-policy";
 import { getFreshLoopRates, sampleAndPersistLoopRates, LOOP_RATE_REGISTRY, type FreshLoopRate } from "./loop-rate-oracle";
-import type { BorrowPosition } from "@shared/schema";
+import type { BorrowPosition, BorrowOperation } from "@shared/schema";
 
 // --- Constants ---------------------------------------------------------------
 
@@ -275,6 +275,138 @@ function buildLoopHealthSnapshot(
     collateralValueSol: colValueSol,
     debtSol: debt,
   };
+}
+
+/**
+ * SOL-denominated per-position card view: actual leverage, current balance
+ * (equity) in SOL, and PnL vs the SOL principal that went into the loop.
+ *
+ * PnL = (current equity) + (SOL already returned by unwinds/delever/close)
+ *       - (SOL principal deposited at open).
+ * Every swap cost, flash-loan fee, and slippage the loop pays shows up here,
+ * because equity is valued from on-chain amounts while principal is what the
+ * user actually put in.
+ *
+ * Principal and opened-at leverage come from the position's LATEST loop_open
+ * op (positions have no metadata column; NFT reuse re-claims the SAME row
+ * across lifecycles, so the latest open anchors the current lifecycle).
+ * Returned SOL is summed from the SUCCEEDED returning ops of that lifecycle
+ * (result.solReturnedLamports on loop_close / loop_unwind / loop_delever_hold /
+ * loop_relever) — no new write path, and past unwinds are already covered.
+ * Fail closed: any op whose returned amount could not be measured
+ * (solDeltaUnknown) makes PnL null rather than a guess.
+ */
+export interface LoopSolView {
+  /** Actual live leverage (collateral value / equity); falls back to opened-at leverage. */
+  leverage: number | null;
+  /** Current equity in SOL (collateral valued at the live LST rate, minus debt). */
+  balanceSol: number | null;
+  /** True when balanceSol came from a live on-chain read (vs the last stored snapshot). */
+  balanceLive: boolean;
+  pnlSol: number | null;
+  /** PnL as a fraction of principal (0.05 = +5%). */
+  pnlPct: number | null;
+  principalSol: number | null;
+  returnedSol: number;
+}
+
+// loop_relever results currently carry no solReturnedLamports (observed amounts
+// only) — included so that IF a relever ever measures stranded SOL, it counts.
+const LOOP_RETURNING_OP_TYPES = new Set(["loop_close", "loop_unwind", "loop_delever_hold", "loop_relever"]);
+
+export function buildLoopSolView(
+  row: BorrowPosition,
+  live: { collateralRaw: string; debtRaw: string; oraclePriceUsd: number | null } | null,
+  allOps: BorrowOperation[],
+): LoopSolView {
+  const rowOps = allOps.filter((op) => op.borrowPositionId === row.id);
+
+  // Lifecycle anchor: the latest loop_open op for this row. Prefer a SUCCEEDED
+  // open; a pending row may only have an unresolved open (ambiguous-kept-pending),
+  // so fall back to the latest open of any status there.
+  const openOps = rowOps
+    .filter((op) => op.operationType === "loop_open")
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  const openOp =
+    openOps.find((op) => op.status === "succeeded") ??
+    (row.status === "pending" ? openOps[0] ?? null : null);
+
+  // Principal + opened-at leverage: from the anchoring open op's metadata.
+  let principalSol: number | null = null;
+  let openedLeverage: number | null = null;
+  if (openOp) {
+    const m = (openOp.metadata ?? {}) as Record<string, unknown>;
+    if (typeof m.principalLamports === "string" && /^\d+$/.test(m.principalLamports)) {
+      principalSol = Number(new Decimal(m.principalLamports).div(1e9));
+    }
+    if (typeof m.leverage === "number" && Number.isFinite(m.leverage)) {
+      openedLeverage = m.leverage;
+    }
+  }
+
+  // Returned SOL: succeeded returning ops of THIS lifecycle (at/after the open).
+  const openAt = openOp ? new Date(openOp.createdAt).getTime() : null;
+  let returnedLamports = 0n;
+  let returnedUnknown = false;
+  for (const op of rowOps) {
+    if (op.status !== "succeeded") continue;
+    if (!LOOP_RETURNING_OP_TYPES.has(op.operationType)) continue;
+    if (openAt !== null && new Date(op.createdAt).getTime() < openAt) continue;
+    const r = (op.result ?? {}) as Record<string, unknown>;
+    if (typeof r.solReturnedLamports === "string" && /^\d+$/.test(r.solReturnedLamports)) {
+      returnedLamports += BigInt(r.solReturnedLamports);
+    } else if (r.solDeltaUnknown) {
+      returnedUnknown = true; // measured amount lost -> PnL would be a guess
+    }
+  }
+  const returnedSol = Number(new Decimal(returnedLamports.toString()).div(1e9));
+
+  // Equity: live read first, stored SOL snapshot second, closed rows are 0.
+  let balanceSol: number | null = null;
+  let collateralValueSol: number | null = null;
+  let balanceLive = false;
+  const isActive = row.status === "open" || row.status === "pending";
+  if (!isActive) {
+    balanceSol = 0;
+  } else if (live) {
+    // On WSOL-debt loop vaults the oracle price IS the SOL-per-LST rate.
+    const rate = live.oraclePriceUsd;
+    if (typeof rate === "number" && Number.isFinite(rate) && rate > 0) {
+      const col = Number(new Decimal(live.collateralRaw).div(1e9));
+      const debt = Number(new Decimal(live.debtRaw).div(1e9));
+      collateralValueSol = col * rate;
+      balanceSol = collateralValueSol - debt;
+      balanceLive = true;
+    }
+  }
+  if (isActive && balanceSol === null) {
+    const snap = row.healthSnapshot as { denomination?: string; collateralValueSol?: number | null; debtSol?: number | null } | null;
+    if (
+      snap &&
+      snap.denomination === "SOL" &&
+      typeof snap.collateralValueSol === "number" &&
+      typeof snap.debtSol === "number"
+    ) {
+      collateralValueSol = snap.collateralValueSol;
+      balanceSol = snap.collateralValueSol - snap.debtSol;
+    }
+  }
+
+  // Leverage: actual (collateral value / equity) when readable, else opened-at.
+  let leverage: number | null = null;
+  if (collateralValueSol !== null && balanceSol !== null && balanceSol > 0) {
+    leverage = collateralValueSol / balanceSol;
+  } else if (openedLeverage !== null) {
+    leverage = openedLeverage;
+  }
+
+  const pnlSol =
+    principalSol !== null && balanceSol !== null && !returnedUnknown
+      ? balanceSol + returnedSol - principalSol
+      : null;
+  const pnlPct = pnlSol !== null && principalSol !== null && principalSol > 0 ? pnlSol / principalSol : null;
+
+  return { leverage, balanceSol, balanceLive, pnlSol, pnlPct, principalSol, returnedSol };
 }
 
 async function failOp(opId: string, step: string, error: string): Promise<void> {

@@ -1510,7 +1510,7 @@ import { previewBorrowEligibility } from "./vault/borrow-eligibility";
 import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { isBorrowEligibleWallet, isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, repayPartialOnExistingBotPosition, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
-import { executeLoopOpen, executeLoopClose, executeLoopPartialUnwind, executeLoopDeleverToHold, executeLoopLstDepositOpen, getLoopDepositAssets } from "./vault/loop/loop-executor";
+import { executeLoopOpen, executeLoopClose, executeLoopPartialUnwind, executeLoopDeleverToHold, executeLoopLstDepositOpen, getLoopDepositAssets, buildLoopSolView } from "./vault/loop/loop-executor";
 import { LOOP_VAULT_ALLOWLIST, LOOP_RISK_POLICY, LOOP_ALLOCATION_POLICY, computeLoopTargetLeverage } from "./vault/loop/loop-risk-policy";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
 import { runBorrowHealthScan } from "./vault/borrow-health-monitor";
@@ -10195,6 +10195,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!requireLoopOwner(req, res)) return;
 
       const rows = await storage.getBorrowPositions(req.walletAddress!, null, "loop");
+      // One ops fetch for the whole wallet: feeds the per-position SOL view
+      // (returned-SOL history for PnL) without a query per row.
+      const allOps = rows.length > 0 ? await storage.getBorrowOperations(req.walletAddress!) : [];
       const borrowRoute = new JupiterLendBorrowRoute();
       const positions = await Promise.all(rows.map(async (r) => {
         let live: { collateralRaw: string; debtRaw: string; liquidatable: boolean; oraclePriceUsd: number | null } | null = null;
@@ -10213,7 +10216,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             }
           }
         }
-        return { ...r, live };
+        // Leverage / Balance (SOL) / PnL for the position card. Display only;
+        // fail-closed nulls render as an em placeholder client-side.
+        const solView = buildLoopSolView(r, live, allOps);
+        return { ...r, live, solView };
       }));
       // Which LST a new deposit would go into right now (display only — the
       // open route re-picks at execution time). Fresh-rates-only, no on-demand

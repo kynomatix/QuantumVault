@@ -64,7 +64,28 @@ interface LoopRow {
   collateralAmountRaw: string;
   debtAmountRaw: string;
   live: LoopLive | null;
+  solView: LoopSolView | null;
 }
+
+// Server-computed per-position card stats (display only, fail-closed nulls).
+interface LoopSolView {
+  leverage: number | null;
+  balanceSol: number | null;
+  balanceLive: boolean;
+  pnlSol: number | null;
+  pnlPct: number | null;
+  principalSol: number | null;
+  returnedSol: number;
+}
+
+const fmtSolNum = (n: number | null | undefined, dp = 4): string =>
+  typeof n === "number" && Number.isFinite(n) ? n.toFixed(dp) : "—";
+
+const fmtLeverage = (n: number | null | undefined): string =>
+  typeof n === "number" && Number.isFinite(n) ? `${n.toFixed(2)}x` : "—";
+
+const fmtPnlSol = (n: number | null | undefined, dp = 4): string =>
+  typeof n === "number" && Number.isFinite(n) ? `${n >= 0 ? "+" : ""}${n.toFixed(dp)}` : "—";
 
 const fmtSol = (raw: string | null | undefined, dp = 4): string => {
   if (!raw) return "—";
@@ -931,11 +952,49 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
                         </span>
                       )}
                     </div>
+                    <div className="grid grid-cols-3 gap-2 py-1">
+                      <div>
+                        <p className="text-[11px] text-muted-foreground">Leverage</p>
+                        <p className="text-sm font-semibold" data-testid={`text-loop-leverage-${r.id}`}>
+                          {fmtLeverage(r.solView?.leverage)}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-[11px] text-muted-foreground">Balance</p>
+                        <p className="text-sm font-semibold" data-testid={`text-loop-balance-${r.id}`}>
+                          {fmtSolNum(r.solView?.balanceSol)}
+                          {typeof r.solView?.balanceSol === "number" && <span className="font-normal text-muted-foreground"> SOL</span>}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-[11px] text-muted-foreground">PnL</p>
+                        <p
+                          className={`text-sm font-semibold ${
+                            typeof r.solView?.pnlSol === "number"
+                              ? r.solView.pnlSol >= 0
+                                ? "text-emerald-500"
+                                : "text-red-500"
+                              : ""
+                          }`}
+                          data-testid={`text-loop-pnl-${r.id}`}
+                        >
+                          {fmtPnlSol(r.solView?.pnlSol)}
+                          {typeof r.solView?.pnlPct === "number" && (
+                            <span className="font-normal"> ({(r.solView.pnlPct * 100).toFixed(2)}%)</span>
+                          )}
+                        </p>
+                      </div>
+                    </div>
                     <p className="text-xs text-muted-foreground">
                       Collateral: {fmtSol(r.live?.collateralRaw ?? r.collateralAmountRaw)} {vaultSymbol(r.venueVaultId)}
                       {" · "}Debt: {fmtSol(r.live?.debtRaw ?? r.debtAmountRaw)} SOL
                       {r.live ? " (live)" : " (last known)"}
                     </p>
+                    {(r.solView?.returnedSol ?? 0) > 0 && (
+                      <p className="text-[11px] text-muted-foreground" data-testid={`text-loop-returned-${r.id}`}>
+                        Includes {fmtSolNum(r.solView?.returnedSol)} SOL already returned to your wallet.
+                      </p>
+                    )}
                     {(r.status === "open" || r.status === "pending") && (
                       <div className="flex gap-2 pt-1">
                         <Button
