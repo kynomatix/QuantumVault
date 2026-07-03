@@ -1510,7 +1510,7 @@ import { previewBorrowEligibility } from "./vault/borrow-eligibility";
 import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { isBorrowEligibleWallet, isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, repayPartialOnExistingBotPosition, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
-import { executeLoopOpen, executeLoopClose, executeLoopPartialUnwind, executeLoopDeleverToHold } from "./vault/loop/loop-executor";
+import { executeLoopOpen, executeLoopClose, executeLoopPartialUnwind, executeLoopDeleverToHold, executeLoopLstDepositOpen, getLoopDepositAssets } from "./vault/loop/loop-executor";
 import { LOOP_VAULT_ALLOWLIST, LOOP_RISK_POLICY, LOOP_ALLOCATION_POLICY, computeLoopTargetLeverage } from "./vault/loop/loop-risk-policy";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
 import { runBorrowHealthScan } from "./vault/borrow-health-monitor";
@@ -9976,6 +9976,82 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     }
   });
 
+  // DEPOSIT an LST (JupSOL/JitoSOL/INF/...) already transferred to the agent
+  // wallet, convert it to SOL server-side, and open the loop into the best
+  // vault. Body: { mint, amountRaw, clientRequestId, sessionId, slippageBps? }.
+  // clientRequestId is REQUIRED: the same id resumes a stuck attempt (the swap
+  // never runs twice); a failure with resumable:true means the funds are safe
+  // in the internal wallet and the client should retry with the SAME id.
+  app.post("/api/vault/loop/deposit-lst-open", requireWallet, async (req, res) => {
+    try {
+      if (!requireLoopOwner(req, res)) return;
+
+      const { mint, clientRequestId } = req.body || {};
+      if (!mint || typeof mint !== "string") {
+        return res.status(400).json({ error: "mint required" });
+      }
+      if (!clientRequestId || typeof clientRequestId !== "string" || clientRequestId.length < 8) {
+        return res.status(400).json({ error: "clientRequestId (min 8 chars) required for a safe retry path." });
+      }
+      const amountParsed = parseLoopRawPositive(req.body?.amountRaw, "amountRaw");
+      if (typeof amountParsed === "object") return res.status(400).json(amountParsed);
+      const slip = parseLoopSlippage(req.body?.slippageBps);
+      if (slip && typeof slip === "object") return res.status(400).json(slip);
+
+      // Platform picks the best vault — same fresh-rate pick as the open route.
+      const allowedIds = Object.keys(LOOP_VAULT_ALLOWLIST).map(Number);
+      let best = pickBestLoopVault(
+        await getFreshLoopRates(LOOP_ALLOCATION_POLICY.rateStalenessMs),
+        allowedIds,
+      );
+      if (!best) {
+        await sampleAndPersistLoopRates().catch(() => undefined);
+        best = pickBestLoopVault(
+          await getFreshLoopRates(LOOP_ALLOCATION_POLICY.rateStalenessMs),
+          allowedIds,
+        );
+      }
+      if (!best) {
+        return res.status(503).json({
+          error: "Live staking rates are unavailable right now. Please try again in a minute.",
+        });
+      }
+
+      const ctx = await resolveLoopAgentKey(req, res);
+      if (!ctx) return;
+
+      let result;
+      try {
+        result = await executeLoopLstDepositOpen({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: ctx.scope.agentPublicKey,
+          agentSecretKey: ctx.agentKeyResult.secretKey,
+          mint,
+          amountRaw: amountParsed.toString(),
+          clientRequestId,
+          vaultId: best.vaultId,
+          slippageBps: slip as number | undefined,
+        });
+      } finally {
+        ctx.agentKeyResult.cleanup();
+      }
+
+      if (!result || !result.success) {
+        return res.status(400).json({
+          error: result?.error || "Loop deposit failed",
+          ...(result?.resumable ? { resumable: true } : {}),
+          ...(result?.terminal ? { terminal: true } : {}),
+          ...(result?.swappedLamports ? { swappedLamports: result.swappedLamports } : {}),
+          ...(result?.swapSignature ? { swapSignature: result.swapSignature } : {}),
+        });
+      }
+      res.json(result);
+    } catch (error: any) {
+      console.error("[Loop] deposit-lst-open error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
   // CLOSE a loop in full: flash-repay ALL debt, withdraw ALL collateral, swap
   // back to SOL. Body: { borrowPositionId, sessionId, slippageBps?, clientRequestId? }
   app.post("/api/vault/loop/close", requireWallet, async (req, res) => {
@@ -10146,7 +10222,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         await getFreshLoopRates(LOOP_ALLOCATION_POLICY.rateStalenessMs),
         Object.keys(LOOP_VAULT_ALLOWLIST).map(Number),
       );
-      res.json({ positions, recommended });
+      // LSTs the loop accepts as deposits (mint + decimals so the client can
+      // read the user's wallet balances — it NEVER hardcodes mints). Cached
+      // after the first successful read; fail-open to [] (SOL-only deposit UI).
+      const depositAssets = await getLoopDepositAssets().catch(() => []);
+      res.json({ positions, recommended, depositAssets });
     } catch (error: any) {
       console.error("[Loop] status error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });

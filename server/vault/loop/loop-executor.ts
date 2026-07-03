@@ -41,6 +41,8 @@ import {
   getServerConnection,
   executeAgentInstructions,
   executeAgentInstructionsConfirmOnly,
+  executeAgentSwap,
+  getAgentTokenBalanceRawStrict,
   NATIVE_SOL_MINT,
 } from "../../agent-wallet";
 import { storage } from "../../storage";
@@ -78,7 +80,7 @@ import {
   LOOP_VAULT_ALLOWLIST,
   type LoopPolicyReason,
 } from "./loop-risk-policy";
-import { getFreshLoopRates, sampleAndPersistLoopRates, type FreshLoopRate } from "./loop-rate-oracle";
+import { getFreshLoopRates, sampleAndPersistLoopRates, LOOP_RATE_REGISTRY, type FreshLoopRate } from "./loop-rate-oracle";
 import type { BorrowPosition } from "@shared/schema";
 
 // --- Constants ---------------------------------------------------------------
@@ -407,6 +409,53 @@ async function resolveFreshLoopRate(vaultId: number): Promise<FreshLoopRate | nu
     console.error(`[loop-executor] rate resolution failed for vault ${vaultId}:`, e);
     return null;
   }
+}
+
+// --- LST deposit assets ------------------------------------------------------
+
+/** One LST the loop accepts as a deposit (its vault's collateral token). */
+export interface LoopDepositAsset {
+  vaultId: number;
+  symbol: string;
+  mint: string;
+  decimals: number;
+}
+
+// Mint/decimals never change for a vault, so successful reads cache forever.
+const depositAssetCache = new Map<number, LoopDepositAsset>();
+
+/**
+ * Every LST the loop can accept as a deposit: the collateral token of each
+ * tracked loop vault (allowlisted or not — deposits are converted to SOL, so
+ * any tracked LST is fine as an INPUT; the open itself still only targets
+ * allowlisted vaults). Fail-open per asset: an unreadable vault config just
+ * omits that asset — the client then simply doesn't offer it.
+ */
+export async function getLoopDepositAssets(): Promise<LoopDepositAsset[]> {
+  const borrowRoute = new JupiterLendBorrowRoute();
+  const out: LoopDepositAsset[] = [];
+  for (const reg of LOOP_RATE_REGISTRY) {
+    const cached = depositAssetCache.get(reg.vaultId);
+    if (cached) {
+      out.push(cached);
+      continue;
+    }
+    try {
+      const cfg = await borrowRoute.getLoopVaultConfig(reg.vaultId);
+      if (!cfg || cfg.debtMint !== WSOL_MINT || !cfg.collateralMint) continue;
+      const asset: LoopDepositAsset = {
+        vaultId: reg.vaultId,
+        symbol: cfg.collateralSymbol,
+        mint: cfg.collateralMint,
+        decimals: cfg.collateralDecimals,
+      };
+      depositAssetCache.set(reg.vaultId, asset);
+      out.push(asset);
+    } catch {
+      /* omit this asset; retried on the next call */
+    }
+  }
+  return out;
 }
 
 export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenResult> {
@@ -936,6 +985,394 @@ async function finalizeLoopOpen(p: {
     observedDebtRaw: observedDebtRaw.toString(),
     ...(verifyWarning ? { verifyWarning } : {}),
   };
+}
+
+// --- LST DEPOSIT → SOL → OPEN ------------------------------------------------
+
+export interface LoopLstDepositOpenParams {
+  walletAddress: string;
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  /** Mint of the deposited LST (must be a tracked loop deposit asset). */
+  mint: string;
+  /** Requested LST amount, raw base units — capped at what the wallet holds. */
+  amountRaw: string;
+  /** REQUIRED: the retry handle. The same id resumes, never re-swaps. */
+  clientRequestId: string;
+  /** Vault the OPEN targets (route picks the best one; must be allowlisted). */
+  vaultId: number;
+  slippageBps?: number;
+}
+
+export interface LoopLstDepositOpenResult {
+  success: boolean;
+  error?: string;
+  /**
+   * true = the deposited funds are safe in the internal wallet and a retry
+   * with the SAME clientRequestId picks up where this attempt stopped.
+   */
+  resumable?: boolean;
+  /**
+   * true = this clientRequestId can NEVER succeed (op row already terminally
+   * failed). The client must drop its retry handle and start a fresh deposit;
+   * any tokens still in the internal wallet are swept by the next attempt.
+   */
+  terminal?: boolean;
+  /** Realized SOL from the conversion (set once the swap step is done). */
+  swappedLamports?: string;
+  swapSignature?: string;
+  open?: LoopOpenResult;
+  alreadyCompleted?: boolean;
+}
+
+/**
+ * Deposit-any-LST open: the user's LST is already in the agent wallet (client
+ * transferred it via /api/agent/deposit-token); this converts it to SOL and
+ * opens the loop into the given (best) vault, sizing the principal so the open
+ * consumes ONLY the swapped SOL — pre-existing agent SOL stays untouched.
+ *
+ * Money-safety model (mirrors the borrow-op machine):
+ * - Durable op row keyed by clientRequestId; every retry loads it and resumes
+ *   from the step breadcrumb, so the swap can never run twice.
+ * - Swap signature is written BEFORE broadcast (onBeforeBroadcast); an
+ *   ambiguous swap is reconciled by ON-CHAIN SIGNATURE STATUS, never by a
+ *   balance read alone (in-flight balances read stale → double-swap).
+ * - Realized SOL = strict output delta (fail-closed reads only).
+ * - The open leg reuses executeLoopOpen wholesale (its own op row, policy
+ *   gates, verification). An open failure leaves the op at step 'swapped'
+ *   with the SOL intact — retry-safe.
+ */
+export async function executeLoopLstDepositOpen(
+  params: LoopLstDepositOpenParams,
+): Promise<LoopLstDepositOpenResult> {
+  const { walletAddress, agentPublicKey, agentSecretKey, mint, vaultId } = params;
+  const slippageBps = params.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
+
+  if (!params.clientRequestId || typeof params.clientRequestId !== "string") {
+    return { success: false, error: "clientRequestId is required for a safe retry path." };
+  }
+  if (!LOOP_VAULT_ALLOWLIST[vaultId]) {
+    return { success: false, error: `Vault ${vaultId} is not on the loop launch allowlist.` };
+  }
+  const assets = await getLoopDepositAssets();
+  const asset = assets.find((a) => a.mint === mint);
+  if (!asset) {
+    return { success: false, error: "This token is not supported as a loop deposit." };
+  }
+  if (mint === NATIVE_SOL_MINT || mint === WSOL_MINT) {
+    return { success: false, error: "Use the normal SOL deposit path for SOL." };
+  }
+
+  const connection = getServerConnection();
+
+  // Same lock the open path takes: one loop money-op per wallet+vault at a time.
+  return await withBorrowLock(borrowLockKey(walletAddress, null, vaultId), async () => {
+    // Load-or-create the durable op row (idempotent on clientRequestId).
+    let op = await storage.getBorrowOperationByClientRequestId(walletAddress, params.clientRequestId);
+    if (op && op.operationType !== "loop_lst_deposit") {
+      return { success: false, error: "This request id was already used by a different operation." };
+    }
+    if (op && (op.status === "succeeded" || op.status === "completed")) {
+      return { success: true, alreadyCompleted: true, swappedLamports: (op.metadata as any)?.realizedLamports };
+    }
+    if (op && op.status === "failed") {
+      // terminal:true tells the client to DROP its retry handle: this id can
+      // never succeed, and a fresh deposit sweeps any tokens still held.
+      return {
+        success: false,
+        terminal: true,
+        error: "This deposit attempt already failed. Your funds stay safe in your account. Start a new deposit.",
+      };
+    }
+    if (!op) {
+      // FRESH deposit: refuse when the target vault already has an active or
+      // unresolved loop — BEFORE any money moves, so nothing gets stranded.
+      const existing = await storage.getBorrowPositions(walletAddress, null, "loop");
+      const active = existing.find(
+        (r) => (r.status === "open" || r.status === "pending") && String(r.venueVaultId) === String(vaultId),
+      );
+      if (active) {
+        return {
+          success: false,
+          error:
+            active.status === "open"
+              ? `You already have an open ${asset.symbol} loop. Close it before depositing more.`
+              : "A previous loop attempt is still unresolved. It must be reconciled before a new deposit.",
+        };
+      }
+      try {
+        op = await storage.createBorrowOperation({
+          walletAddress,
+          operationType: "loop_lst_deposit",
+          status: "pending",
+          step: "initialized",
+          clientRequestId: params.clientRequestId,
+          metadata: {
+            kind: "loop",
+            mint,
+            symbol: asset.symbol,
+            requestedAmountRaw: params.amountRaw,
+            vaultId,
+          },
+        });
+      } catch (e) {
+        if (isUniqueViolation(e)) {
+          op = await storage.getBorrowOperationByClientRequestId(walletAddress, params.clientRequestId);
+        }
+        if (!op) throw e;
+      }
+    }
+    const opId = op.id;
+    let meta = (op.metadata ?? {}) as Record<string, any>;
+
+    let realizedLamports: bigint | null = null;
+    let swapSignature: string | undefined = typeof meta.swapSignature === "string" ? meta.swapSignature : undefined;
+    try {
+      if (typeof meta.realizedLamports === "string") realizedLamports = BigInt(meta.realizedLamports);
+    } catch {
+      realizedLamports = null;
+    }
+
+    try {
+      // --- Resume an ambiguous swap by ON-CHAIN STATUS (never balance-only) ---
+      if (realizedLamports === null && op.step === "swap_sent" && swapSignature) {
+        const statuses = await connection.getSignatureStatuses([swapSignature], { searchTransactionHistory: true });
+        const st = statuses.value[0];
+        const landedOk = !!st && !st.err && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized");
+        if (landedOk) {
+          // The swap landed: realized = strict SOL now minus the write-ahead
+          // baseline. Both reads are strict (throw → fail closed, retryable).
+          const beforeRaw = BigInt(String(meta.solBeforeLamports ?? ""));
+          const nowRaw = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, NATIVE_SOL_MINT)).amountRaw);
+          const delta = nowRaw - beforeRaw;
+          if (delta <= 0n) {
+            return {
+              success: false,
+              resumable: true,
+              swapSignature,
+              error:
+                "The conversion landed on-chain but the credited SOL could not be measured yet. Wait a minute and retry.",
+            };
+          }
+          realizedLamports = delta;
+          await storage.updateBorrowOperation(opId, {
+            step: "swapped",
+            mergeMetadata: { realizedLamports: realizedLamports.toString() },
+          });
+        } else if (st && st.err) {
+          // Failed on-chain: the LST never left the wallet. Clear the
+          // breadcrumb and fall through to a fresh swap in this same call.
+          await storage.updateBorrowOperation(opId, {
+            step: "initialized",
+            mergeMetadata: { swapSignature: null, solBeforeLamports: null },
+          });
+          swapSignature = undefined;
+        } else {
+          // Not found: only safe to re-swap once the recorded blockhash window
+          // is provably over (the tx can never land afterwards). 0 = no hint.
+          const lvbh = Number(meta.swapLastValidBlockHeight ?? 0);
+          let expired = false;
+          if (Number.isFinite(lvbh) && lvbh > 0) {
+            const h = await connection.getBlockHeight("confirmed").catch(() => null);
+            if (h !== null && h > lvbh + 30) expired = true;
+          }
+          if (!expired) {
+            return {
+              success: false,
+              resumable: true,
+              swapSignature,
+              error: "A previous conversion is still unresolved on-chain. Wait a minute and retry.",
+            };
+          }
+          await storage.updateBorrowOperation(opId, {
+            step: "initialized",
+            mergeMetadata: { swapSignature: null, solBeforeLamports: null },
+          });
+          swapSignature = undefined;
+        }
+      }
+
+      // --- Swap LST → SOL (skipped entirely when already 'swapped') ---
+      if (realizedLamports === null) {
+        const bal = await getAgentTokenBalanceRawStrict(agentPublicKey, mint); // throws → fail closed
+        let toSwap = BigInt(bal.amountRaw);
+        let requested = 0n;
+        try {
+          requested = BigInt(String(meta.requestedAmountRaw ?? params.amountRaw));
+        } catch {
+          requested = 0n;
+        }
+        if (requested > 0n && requested < toSwap) toSwap = requested;
+        if (toSwap <= 0n) {
+          await failOp(opId, "no_tokens", `No ${asset.symbol} found in the deposit wallet to convert.`);
+          return {
+            success: false,
+            error: `No ${asset.symbol} arrived in the deposit wallet. If your transfer just confirmed, wait a few seconds and start a new deposit.`,
+          };
+        }
+
+        // Write-ahead baseline BEFORE any broadcast: the ambiguous-swap
+        // reconcile above depends on this exact pre-swap lamport reading.
+        const solBefore = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, NATIVE_SOL_MINT)).amountRaw);
+        await storage.updateBorrowOperation(opId, {
+          mergeMetadata: { swapAmountRaw: toSwap.toString(), solBeforeLamports: solBefore.toString() },
+        });
+
+        const swap = await executeAgentSwap({
+          agentPublicKey,
+          agentSecretKey,
+          inputMint: mint,
+          outputMint: NATIVE_SOL_MINT,
+          amountRaw: toSwap.toString(),
+          slippageBps,
+          onBeforeBroadcast: async (info) => {
+            await storage.updateBorrowOperation(opId, {
+              step: "swap_sent",
+              appendTxSignature: info.signature,
+              mergeMetadata: {
+                swapSignature: info.signature,
+                swapLastValidBlockHeight: info.lastValidBlockHeight,
+              },
+            });
+          },
+        });
+
+        if (!swap.success) {
+          if (swap.signature) {
+            // Broadcast happened but the outcome is unknown/failed — leave the
+            // 'swap_sent' breadcrumb; the resume block above reconciles it.
+            return {
+              success: false,
+              resumable: true,
+              swapSignature: swap.signature,
+              error: `${swap.error || "Conversion did not complete."} Your deposit is safe. Retry to reconcile.`,
+            };
+          }
+          // Nothing broadcast: the LST is untouched. Fully retryable.
+          await storage.updateBorrowOperation(opId, {
+            step: "initialized",
+            mergeMetadata: { swapSignature: null, solBeforeLamports: null },
+          });
+          return {
+            success: false,
+            resumable: true,
+            error: `${swap.error || "Conversion failed."} Your deposit is safe in the internal wallet. Retry in a moment.`,
+          };
+        }
+
+        realizedLamports = BigInt(swap.outputReceivedRaw!);
+        swapSignature = swap.signature;
+        await storage.updateBorrowOperation(opId, {
+          step: "swapped",
+          mergeMetadata: { realizedLamports: realizedLamports.toString() },
+        });
+
+        // Audit trail (best-effort): the deposit credited as realized SOL.
+        try {
+          await storage.createEquityEvent({
+            walletAddress,
+            eventType: "sol_deposit",
+            amount: lamportsToSol(realizedLamports),
+            assetType: "SOL",
+            txSignature: swapSignature ?? null,
+            notes: `${asset.symbol} deposit converted to SOL for the loop`,
+          });
+        } catch (e) {
+          console.warn("[loop-executor] lst-deposit equity event failed (non-fatal):", e);
+        }
+      }
+
+      // --- Size the principal so the open consumes ONLY the swapped SOL ---
+      // Preflight with principal=realized to learn the exact overhead bar
+      // (NFT mint rent + missing ATA rents + fee headroom); the true principal
+      // is realized minus that overhead.
+      const pf = await executeLoopOpen({
+        walletAddress,
+        agentPublicKey,
+        agentSecretKey,
+        vaultId,
+        principalLamports: realizedLamports,
+        slippageBps,
+        preflightOnly: true,
+      });
+      if (!pf.success || !pf.preflight) {
+        return {
+          success: false,
+          resumable: true,
+          swappedLamports: realizedLamports.toString(),
+          swapSignature,
+          error: pf.error || "Could not size the loop open. Your converted SOL is safe. Retry in a moment.",
+        };
+      }
+      const overhead = BigInt(Math.max(0, Math.round(pf.preflight.requiredLamports))) - realizedLamports;
+      const principal = realizedLamports - (overhead > 0n ? overhead : 0n);
+      if (principal <= 0n) {
+        return {
+          success: false,
+          resumable: true,
+          swappedLamports: realizedLamports.toString(),
+          swapSignature,
+          error: `The converted SOL (${lamportsToSol(realizedLamports)} SOL) is too small to cover account rent and fees. It stays safe in the internal wallet.`,
+        };
+      }
+
+      // --- Open (its own op row + policy gates + verification) ---
+      const attempt = Number(meta.openAttempts ?? 0) + 1;
+      await storage.updateBorrowOperation(opId, { mergeMetadata: { openAttempts: attempt } });
+      const openResult = await executeLoopOpen({
+        walletAddress,
+        agentPublicKey,
+        agentSecretKey,
+        vaultId,
+        principalLamports: principal,
+        slippageBps,
+        clientRequestId: `${params.clientRequestId}:open:${attempt}`,
+      });
+
+      if (!openResult.success) {
+        // The SOL is intact in the agent wallet; the op stays at 'swapped'.
+        return {
+          success: false,
+          resumable: true,
+          swappedLamports: realizedLamports.toString(),
+          swapSignature,
+          open: openResult,
+          error: `${openResult.error || "Loop open failed."} Your converted SOL is safe. Retry to finish.`,
+        };
+      }
+
+      await storage.updateBorrowOperation(opId, {
+        status: "succeeded",
+        step: "opened",
+        result: {
+          swapSignature: swapSignature ?? null,
+          realizedLamports: realizedLamports.toString(),
+          principalLamports: principal.toString(),
+          borrowPositionId: openResult.borrowPositionId ?? null,
+          openSignature: openResult.signature ?? null,
+        },
+      });
+
+      return {
+        success: true,
+        swappedLamports: realizedLamports.toString(),
+        swapSignature,
+        open: openResult,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // NEVER terminal-fail after money may have moved: the op keeps its step
+      // breadcrumb so a retry resumes instead of re-swapping.
+      console.error(`[loop-executor] lst-deposit-open op ${opId} threw:`, e);
+      return {
+        success: false,
+        resumable: true,
+        ...(realizedLamports !== null ? { swappedLamports: realizedLamports.toString() } : {}),
+        ...(swapSignature ? { swapSignature } : {}),
+        error: `Deposit conversion hit an error: ${msg}. Your funds are safe. Retry with the same request.`,
+      };
+    }
+  });
 }
 
 // --- CLOSE (full unwind) ---------------------------------------------------------

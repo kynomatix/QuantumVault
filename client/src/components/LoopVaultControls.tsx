@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useConnection } from "@solana/wallet-adapter-react";
+import { useConnection, useWallet as useSolanaWallet } from "@solana/wallet-adapter-react";
+import { Transaction, PublicKey } from "@solana/web3.js";
+import { Buffer } from "buffer";
 import { Loader2, AlertTriangle, RefreshCw, Repeat, ArrowUpFromLine, Table2 } from "lucide-react";
 import { useWallet } from "@/hooks/useWallet";
 import { useToast } from "@/hooks/use-toast";
@@ -78,6 +80,14 @@ const vaultSymbol = (venueVaultId: string | null): string => {
   return v?.symbol ?? `vault ${venueVaultId ?? "?"}`;
 };
 
+// One LST the loop accepts as a DEPOSIT (server-provided; never hardcoded).
+interface LoopDepositAsset {
+  vaultId: number;
+  symbol: string;
+  mint: string;
+  decimals: number;
+}
+
 // One row of the live LST rate table (display only — the server picks).
 interface LoopRateRow {
   vaultId: number;
@@ -108,11 +118,19 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
   const { toast } = useToast();
   const { retryAuth, publicKeyString } = useWallet();
   const { connection } = useConnection();
+  const solanaWallet = useSolanaWallet();
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [amountSol, setAmountSol] = useState<string>("");
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<string | null>(null);
+  // Which asset the deposit input is denominated in: "SOL" or an LST mint.
+  const [depositMint, setDepositMint] = useState<string>("SOL");
+  // Retry handle for an LST deposit whose transfer already landed in the
+  // internal wallet: the SAME clientRequestId resumes the server op (the
+  // conversion never runs twice). Persisted per-wallet in localStorage so a
+  // reload can't strand the funds; cleared ONLY on confirmed success.
+  const [lstPending, setLstPendingState] = useState<{ id: string; mint: string; amountRaw: string; symbol: string } | null>(null);
   // Set when a loop op needs SOL from the user's wallet: exact server numbers
   // + a retry closure. For OPEN this IS the primary deposit step (principal +
   // rent + fees, deposit-framed); for close/unwind it's a small gas top-up.
@@ -144,6 +162,7 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
       netCarryAtTarget: number | null;
       netCarry2x: number | null;
     } | null;
+    depositAssets?: LoopDepositAsset[];
   } | null>({
     queryKey: ["/api/vault/loop/status"],
     enabled: active,
@@ -173,6 +192,36 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
       });
       if (!res.ok) return null;
       return await safeResponseJson(res);
+    },
+  });
+
+  // Connected-wallet balances for the deposit input: SOL plus each deposit
+  // LST the server lists. Read-only display + input caps; polled only while
+  // the dialog is open.
+  const depositAssetsList = statusQuery.data?.depositAssets ?? [];
+  const depositMintsKey = depositAssetsList.map((a) => a.mint).join(",");
+  const walletBalQuery = useQuery<{ sol: number; tokens: Record<string, { raw: string; ui: number }> } | null>({
+    queryKey: ["loop-wallet-balances", publicKeyString, depositMintsKey],
+    enabled: active && open && !!publicKeyString,
+    refetchInterval: open ? 30000 : false,
+    queryFn: async () => {
+      if (!publicKeyString) return null;
+      const owner = new PublicKey(publicKeyString);
+      const lamports = await connection.getBalance(owner);
+      const tokens: Record<string, { raw: string; ui: number }> = {};
+      for (const a of depositAssetsList) {
+        try {
+          const resp = await connection.getParsedTokenAccountsByOwner(owner, { mint: new PublicKey(a.mint) });
+          let raw = 0n;
+          for (const acc of resp.value) {
+            raw += BigInt(acc.account.data.parsed?.info?.tokenAmount?.amount ?? "0");
+          }
+          tokens[a.mint] = { raw: raw.toString(), ui: Number(rawToDecimalString(raw.toString(), a.decimals)) };
+        } catch {
+          /* unreadable token: just don't offer it this round */
+        }
+      }
+      return { sol: lamports / 1e9, tokens };
     },
   });
 
@@ -209,6 +258,44 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
       else localStorage.removeItem(pendingKey);
     } catch {
       /* storage unavailable — state still shows it this session */
+    }
+  };
+
+  // LST retry handle persistence (wallet-scoped, survives reloads). Once the
+  // user's LST transfer lands in the internal wallet, this handle is the ONLY
+  // client-side link to the resumable server op — losing it would strand the
+  // funds until a manual recovery. So it is stored immediately and cleared
+  // only on confirmed success.
+  const lstPendingKey = `qv-loop-lst-pending:${publicKeyString ?? "unknown"}`;
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(lstPendingKey);
+      const v = raw ? JSON.parse(raw) : null;
+      if (
+        v &&
+        typeof v.id === "string" &&
+        typeof v.mint === "string" &&
+        typeof v.amountRaw === "string" &&
+        typeof v.symbol === "string"
+      ) {
+        setLstPendingState(v);
+        setDepositMint(v.mint);
+      } else {
+        setLstPendingState(null);
+      }
+    } catch {
+      setLstPendingState(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lstPendingKey]);
+  const updateLstPending = (v: { id: string; mint: string; amountRaw: string; symbol: string } | null) => {
+    setLstPendingState(v);
+    if (v) setDepositMint(v.mint);
+    try {
+      if (v) localStorage.setItem(lstPendingKey, JSON.stringify(v));
+      else localStorage.removeItem(lstPendingKey);
+    } catch {
+      /* storage unavailable — state still covers this session */
     }
   };
 
@@ -335,7 +422,7 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
         // row shows the SOL with a Return to Wallet button.
         toast({
           title: "SOL is waiting to return",
-          description: "Sending the proceeds to your wallet didn't go through — use Return to Wallet below.",
+          description: "Sending the proceeds to your wallet didn't go through. Use Return to Wallet below.",
         });
       } else {
         toast({ title: "SOL return failed", description: e?.message || String(e), variant: "destructive" });
@@ -424,8 +511,125 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
     }
   };
 
+  // --- LST deposit path: user-signed transfer of the LST into the internal
+  // wallet, then a server op that converts it to SOL and opens the loop into
+  // the best vault. Everything after the transfer is retryable with the SAME
+  // clientRequestId, so the conversion can never run twice.
+  const selectedAsset = depositAssetsList.find((a) => a.mint === depositMint) ?? null;
+  const walletSol = walletBalQuery.data?.sol ?? null;
+  const heldFor = (mint: string) => walletBalQuery.data?.tokens[mint] ?? null;
+  // Max leaves 0.04 SOL behind for rent + network fees on the deposit tx.
+  const maxDepositSol = walletSol !== null ? Math.max(0, Math.floor((walletSol - 0.04) * 1e4) / 1e4) : null;
+
+  const runLstServerOpen = async (asset: LoopDepositAsset, amountRaw: string, requestId: string) => {
+    const sessionId = await getSessionId();
+    const res = await fetch("/api/vault/loop/deposit-lst-open", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+      body: JSON.stringify({ mint: asset.mint, amountRaw, clientRequestId: requestId, sessionId }),
+    });
+    const data = await safeResponseJson(res);
+    if (!res.ok || !data?.success) {
+      if (data?.terminal) {
+        // The server says this request id can NEVER succeed (op row failed
+        // terminally). Drop the handle so the UI unlocks; a fresh deposit
+        // sweeps any tokens still sitting in the internal wallet.
+        updateLstPending(null);
+        throw new Error(data?.error || "That deposit attempt failed. Start a new deposit.");
+      }
+      // Otherwise the transfer already landed, so the retry handle is kept:
+      // retrying with the SAME id is always safe (the server op is idempotent
+      // on clientRequestId) and dropping it would strand funds.
+      updateLstPending({ id: requestId, mint: asset.mint, amountRaw, symbol: asset.symbol });
+      throw new Error(
+        data?.error || `The deposit didn't finish. Your ${asset.symbol} is safe. Tap Retry to continue.`,
+      );
+    }
+    updateLstPending(null);
+    setAmountSol("");
+    setDepositMint("SOL");
+    toast({
+      title: "Loop opened",
+      description: `Converted your ${asset.symbol} to SOL and opened the loop.`,
+    });
+  };
+
+  const startLstOpen = async () => {
+    const asset = selectedAsset;
+    if (!asset) return;
+    setBusy("open");
+    try {
+      // Resume path: the transfer already landed. Re-run only the server op.
+      if (lstPending && lstPending.mint === asset.mint) {
+        await runLstServerOpen(asset, lstPending.amountRaw, lstPending.id);
+        return;
+      }
+      // Never start a NEW deposit while another one is unfinished: that
+      // would overwrite the retry handle and strand the earlier transfer.
+      if (lstPending) {
+        throw new Error(`Finish your pending ${lstPending.symbol} deposit first.`);
+      }
+      const amountRaw = toRawBaseUnits(amountSol, asset.decimals);
+      if (!amountRaw || BigInt(amountRaw) <= 0n) throw new Error("Enter a valid amount");
+      const held = heldFor(asset.mint);
+      if (held && BigInt(amountRaw) > BigInt(held.raw)) {
+        throw new Error(`You only hold ${held.ui} ${asset.symbol}.`);
+      }
+      if (!solanaWallet.publicKey || !solanaWallet.signTransaction) {
+        throw new Error("Wallet not connected");
+      }
+
+      // Step 1: user-signed transfer of the LST into the internal wallet.
+      const depRes = await fetch("/api/agent/deposit-token", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+        body: JSON.stringify({ mint: asset.mint, amountRaw }),
+      });
+      const depData = await safeResponseJson(depRes);
+      if (!depRes.ok) throw new Error(depData?.error || "Could not build the deposit transaction");
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight } = depData;
+      const transaction = Transaction.from(Buffer.from(serializedTx, "base64"));
+      const signedTx = await solanaWallet.signTransaction(transaction);
+
+      // Pin the retry handle (state + localStorage) BEFORE broadcast: a
+      // reload or crash during the confirm wait can no longer lose track of
+      // an in-flight transfer. If the tx never actually lands, the retry is
+      // still safe: the server op reads a zero balance, fails the op
+      // terminally, and the terminal response clears this handle.
+      const requestId = crypto.randomUUID();
+      updateLstPending({ id: requestId, mint: asset.mint, amountRaw, symbol: asset.symbol });
+
+      const depositSig = await connection.sendRawTransaction(signedTx.serialize());
+      await confirmTransactionWithFallback(connection, { signature: depositSig, blockhash, lastValidBlockHeight });
+
+      // Step 2: server converts the LST to SOL and opens the loop.
+      await runLstServerOpen(asset, amountRaw, requestId);
+    } catch (e: any) {
+      if (isSessionError(e)) {
+        showReconnectToast({
+          toast,
+          retryAuth,
+          title: "Loop deposit failed",
+          retry: () => void startLstOpen(),
+        });
+      } else {
+        toast({ title: "Loop deposit failed", description: e?.message || String(e), variant: "destructive" });
+      }
+    } finally {
+      setBusy(null);
+      refresh();
+      void walletBalQuery.refetch();
+    }
+  };
+
   const principalLamports = toRawBaseUnits(amountSol, 9);
-  const openDisabled = !!busy || !principalLamports || BigInt(principalLamports) <= 0n;
+  const lstResumeReady = !!(lstPending && depositMint === lstPending.mint);
+  const depositRaw =
+    depositMint === "SOL" ? principalLamports : toRawBaseUnits(amountSol, selectedAsset?.decimals ?? 9);
+  const openDisabled =
+    !!busy || (!lstResumeReady && (!depositRaw || BigInt(depositRaw) <= 0n));
   const label = (key: string, normal: string) => (confirmAction === key ? "Confirm?" : normal);
 
   return (
@@ -518,21 +722,91 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
               </span>
             </DialogTitle>
             <DialogDescription>
-              Deposit SOL from your wallet — the platform puts it into the best staked SOL token and loops it
-              for boosted staking yield. Leverage is set automatically from the vault's live limits with a
-              safety buffer, and only while the yield beats the borrow cost. Leveraged: it can be liquidated
-              if rates move sharply against it.
+              Deposit SOL or a staked SOL token from your wallet. The platform puts it into the best staked
+              SOL token and loops it for boosted staking yield. Leverage is set automatically from the
+              vault's live limits with a safety buffer, and only while the yield beats the borrow cost.
+              Leveraged: it can be liquidated if rates move sharply against it.
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4">
             <div className="space-y-2">
               <div>
-                <p className="text-xs text-muted-foreground mb-1">Deposit (SOL)</p>
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-xs text-muted-foreground">
+                    Deposit ({selectedAsset ? selectedAsset.symbol : "SOL"})
+                  </p>
+                  {depositMint === "SOL" && walletSol !== null && (
+                    <p className="text-[11px] text-muted-foreground tabular-nums" data-testid="text-loop-wallet-sol">
+                      Balance: {walletSol.toFixed(4)} SOL
+                      <button
+                        type="button"
+                        className="ml-2 text-primary font-medium hover:underline disabled:opacity-50"
+                        disabled={!!busy || !maxDepositSol}
+                        onClick={() => {
+                          setAmountSol(maxDepositSol ? String(maxDepositSol) : "");
+                          setConfirmAction(null);
+                        }}
+                        data-testid="button-loop-max-sol"
+                      >
+                        Max
+                      </button>
+                    </p>
+                  )}
+                  {selectedAsset && heldFor(selectedAsset.mint) && (
+                    <p className="text-[11px] text-muted-foreground tabular-nums" data-testid="text-loop-wallet-lst">
+                      Balance: {heldFor(selectedAsset.mint)!.ui} {selectedAsset.symbol}
+                      <button
+                        type="button"
+                        className="ml-2 text-primary font-medium hover:underline disabled:opacity-50"
+                        disabled={!!busy}
+                        onClick={() => {
+                          setAmountSol(rawToDecimalString(heldFor(selectedAsset.mint)!.raw, selectedAsset.decimals));
+                          setConfirmAction(null);
+                        }}
+                        data-testid="button-loop-max-lst"
+                      >
+                        Max
+                      </button>
+                    </p>
+                  )}
+                </div>
+                {(depositAssetsList.length > 0) && (
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    {["SOL", ...depositAssetsList.map((a) => a.mint)].map((m) => {
+                      const asset = depositAssetsList.find((a) => a.mint === m);
+                      const sym = m === "SOL" ? "SOL" : asset?.symbol ?? "?";
+                      const held = m === "SOL" ? null : heldFor(m);
+                      const hasBalance = m === "SOL" || (held !== null && Number(held.ui) > 0);
+                      if (!hasBalance && !(lstPending && lstPending.mint === m)) return null;
+                      return (
+                        <button
+                          key={m}
+                          type="button"
+                          className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                            depositMint === m
+                              ? "bg-primary/15 border-primary/50 text-primary"
+                              : "bg-muted/30 border-border/60 text-muted-foreground hover:text-foreground"
+                          }`}
+                          disabled={!!busy || (!!lstPending && lstPending.mint !== m)}
+                          onClick={() => {
+                            setDepositMint(m);
+                            setAmountSol("");
+                            setConfirmAction(null);
+                          }}
+                          data-testid={`chip-loop-asset-${sym}`}
+                        >
+                          {sym}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
                 <Input
                   inputMode="decimal"
-                  placeholder="0.5"
+                  placeholder={depositMint === "SOL" ? "0.5" : `Amount in ${selectedAsset?.symbol ?? ""}`}
                   value={amountSol}
+                  disabled={lstResumeReady}
                   onChange={(e) => {
                     setAmountSol(e.target.value);
                     setConfirmAction(null);
@@ -540,18 +814,32 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
                   data-testid="input-loop-principal"
                 />
               </div>
+              {lstResumeReady && (
+                <p className="text-[11px] text-amber-500" data-testid="text-loop-lst-pending">
+                  Your {lstPending!.symbol} is already in the internal wallet and is safe. Tap the button to
+                  finish converting it and open the loop.
+                </p>
+              )}
               <Button
                 className="w-full"
                 disabled={openDisabled}
-                onClick={() => runConfirmed("open", () => void startOpen())}
+                onClick={() =>
+                  depositMint === "SOL"
+                    ? runConfirmed("open", () => void startOpen())
+                    : runConfirmed("open", () => void startLstOpen())
+                }
                 data-testid="button-loop-open"
               >
-                {busy === "open" ? <Loader2 className="h-4 w-4 animate-spin" /> : label("open", "Deposit & Open Loop")}
+                {busy === "open" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  label("open", lstResumeReady ? "Retry: Finish Deposit" : "Deposit & Open Loop")
+                )}
               </Button>
               <p className="text-[11px] text-muted-foreground" data-testid="text-loop-auto-pick">
                 Comes straight from your connected wallet. The platform picks the best staked SOL token
                 automatically{statusQuery.data.recommended ? (
-                  <> — currently <span className="font-medium text-foreground">{statusQuery.data.recommended.symbol}</span></>
+                  <> (currently <span className="font-medium text-foreground">{statusQuery.data.recommended.symbol}</span>)</>
                 ) : null}.
               </p>
               <Button
@@ -694,7 +982,7 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
                     )}
                     {r.status === "pending" && (
                       <p className="text-[11px] text-amber-500">
-                        Pending — confirmation unresolved; new opens on this vault are blocked until reconciled.
+                        Pending: confirmation unresolved. New opens on this vault are blocked until reconciled.
                       </p>
                     )}
                   </div>
@@ -728,7 +1016,7 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
             </div>
           ) : !ratesQuery.data?.rates?.length ? (
             <p className="text-sm text-muted-foreground py-4 text-center" data-testid="text-loop-rates-empty">
-              Live rates are unavailable right now — try again in a minute.
+              Live rates are unavailable right now. Try again in a minute.
             </p>
           ) : (
             <div className="space-y-2">
@@ -773,7 +1061,7 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
                             ) : !r.allowlisted ? (
                               "Watch only"
                             ) : r.noTargetReason === "carry_nonpositive" ? (
-                              <span className="text-amber-500">Paused — yield below borrow cost</span>
+                              <span className="text-amber-500">Paused: yield below borrow cost</span>
                             ) : r.targetLeverage === null ? (
                               "No data"
                             ) : (
@@ -828,7 +1116,7 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
         title={shortfall?.kind === "open" ? "Deposit SOL to open your loop" : undefined}
         description={
           shortfall?.kind === "open"
-            ? "This comes straight from your connected wallet. It covers your deposit plus one-time account rent and network fees — after you approve it, the loop opens automatically."
+            ? "This comes straight from your connected wallet. It covers your deposit plus one-time account rent and network fees. After you approve it, the loop opens automatically."
             : undefined
         }
         onDeposited={async () => {
