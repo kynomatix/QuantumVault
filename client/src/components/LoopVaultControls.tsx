@@ -1,12 +1,15 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2, AlertTriangle, RefreshCw, Repeat } from "lucide-react";
+import { useConnection } from "@solana/wallet-adapter-react";
+import { Loader2, AlertTriangle, RefreshCw, Repeat, ArrowUpFromLine } from "lucide-react";
 import { useWallet } from "@/hooks/useWallet";
 import { useToast } from "@/hooks/use-toast";
 import { isSessionError, showReconnectToast } from "@/lib/reconnect-toast";
 import { walletAuthHeaders } from "@/lib/queryClient";
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { getSessionId, toRawBaseUnits, rawToDecimalString } from "@/lib/lending-format";
+import { confirmTransactionWithFallback } from "@/lib/solana-utils";
+import { SolGasShortfallDialog } from "@/components/SolGasShortfallDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -70,12 +73,16 @@ const vaultSymbol = (venueVaultId: string | null): string => {
 export default function LoopVaultControls({ active }: { active: boolean }) {
   const { toast } = useToast();
   const { retryAuth } = useWallet();
+  const { connection } = useConnection();
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [vaultId, setVaultId] = useState<string>("4");
   const [amountSol, setAmountSol] = useState<string>("");
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<string | null>(null);
+  // Set when a loop op fails on a SOL shortfall: exact server numbers + a retry
+  // closure. Drives the reusable "deposit just what you need" popup.
+  const [shortfall, setShortfall] = useState<{ requiredSol: number; heldSol: number; reason: string; retry: () => void } | null>(null);
 
   const statusQuery = useQuery<{ positions: LoopRow[] } | null>({
     queryKey: ["/api/vault/loop/status"],
@@ -88,6 +95,21 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
       });
       if (res.status === 403 || res.status === 401) return null; // not the owner / signed out -> hide
       if (!res.ok) throw new Error("Loop status failed");
+      return await safeResponseJson(res);
+    },
+  });
+
+  // Agent wallet SOL — funds loop opens; spare can be withdrawn back to the
+  // user's wallet. Only polled while the dialog is open.
+  const balanceQuery = useQuery<{ solBalance: number } | null>({
+    queryKey: ["/api/agent/balance", "loop-dialog"],
+    enabled: active && open,
+    queryFn: async () => {
+      const res = await fetch("/api/agent/balance", {
+        credentials: "include",
+        headers: walletAuthHeaders(),
+      });
+      if (!res.ok) return null;
       return await safeResponseJson(res);
     },
   });
@@ -105,7 +127,10 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
     }
   }, 0n);
 
-  const refresh = () => queryClient.invalidateQueries({ queryKey: ["/api/vault/loop/status"] });
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: ["/api/vault/loop/status"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/agent/balance", "loop-dialog"] });
+  };
 
   const doOp = async (key: string, path: string, body: Record<string, unknown>, okMsg: string) => {
     setBusy(key);
@@ -119,6 +144,21 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
       });
       const data = await safeResponseJson(res);
       if (!res.ok || !data?.success) {
+        // Exact SOL shortfall from the server -> open the deposit popup instead
+        // of a dead-end error toast. After the deposit confirms, retry this op.
+        const gs = data?.gasShortfall;
+        if (gs && typeof gs.requiredLamports === "number") {
+          setShortfall({
+            requiredSol: gs.requiredLamports / 1e9,
+            heldSol: (typeof gs.heldLamports === "number" ? gs.heldLamports : 0) / 1e9,
+            reason:
+              key === "open"
+                ? "to fund your loop principal, rent and network fees"
+                : "to cover this loop operation's network fees",
+            retry: () => void doOp(key, path, body, okMsg),
+          });
+          return;
+        }
         throw new Error(data?.error || "Operation failed");
       }
       toast({ title: okMsg, description: data.signature ? `Tx: ${String(data.signature).slice(0, 16)}…` : undefined });
@@ -133,6 +173,51 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
         });
       } else {
         toast({ title: "Loop operation failed", description: e?.message || String(e), variant: "destructive" });
+      }
+    } finally {
+      setBusy(null);
+      refresh();
+    }
+  };
+
+  // Send the agent wallet's spare SOL back to the user's wallet. The tx is
+  // agent-signed server-side; the client just submits + confirms it, then
+  // records the equity event (same flow as the wallet page).
+  const agentSol = balanceQuery.data?.solBalance ?? null;
+  const spareSol = agentSol !== null ? Math.max(0, Math.floor((agentSol - 0.01) * 1e4) / 1e4) : 0;
+  const doWithdrawSpare = async () => {
+    if (spareSol <= 0) return;
+    setBusy("withdraw-sol");
+    try {
+      const res = await fetch("/api/agent/withdraw-sol", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+        body: JSON.stringify({ amount: spareSol }),
+      });
+      const data = await safeResponseJson(res);
+      if (!res.ok) throw new Error(data?.error || "SOL withdrawal failed");
+      const { transaction: serializedTx, blockhash, lastValidBlockHeight } = data;
+      const txBytes = Uint8Array.from(atob(serializedTx), (c) => c.charCodeAt(0));
+      const signature = await connection.sendRawTransaction(txBytes);
+      await confirmTransactionWithFallback(connection, { signature, blockhash, lastValidBlockHeight });
+      await fetch("/api/agent/confirm-sol-withdraw", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+        body: JSON.stringify({ amount: spareSol, txSignature: signature }),
+      });
+      toast({ title: `Withdrew ${spareSol.toFixed(4)} SOL to your wallet` });
+    } catch (e: any) {
+      if (isSessionError(e)) {
+        showReconnectToast({
+          toast,
+          retryAuth,
+          title: "SOL withdrawal failed",
+          retry: () => void doWithdrawSpare(),
+        });
+      } else {
+        toast({ title: "SOL withdrawal failed", description: e?.message || String(e), variant: "destructive" });
       }
     } finally {
       setBusy(null);
@@ -288,6 +373,48 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
               </Button>
             </div>
 
+            {/* --- Agent wallet SOL (funds opens; spare goes back to Phantom) --- */}
+            <div className="rounded-lg border border-border/60 bg-muted/20 p-3 space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">Agent wallet SOL</span>
+                <span className="font-medium tabular-nums" data-testid="text-loop-agent-sol">
+                  {balanceQuery.isLoading ? "…" : agentSol !== null ? agentSol.toFixed(4) : "—"}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[11px] text-muted-foreground flex-1">
+                  Opens are funded from this SOL — if it's short you'll be prompted to deposit the exact amount.
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="shrink-0"
+                  disabled={!!busy || spareSol <= 0}
+                  onClick={() => {
+                    if (confirmAction !== "withdraw-sol") {
+                      setConfirmAction("withdraw-sol");
+                      setTimeout(() => setConfirmAction((c) => (c === "withdraw-sol" ? null : c)), 5000);
+                      return;
+                    }
+                    setConfirmAction(null);
+                    void doWithdrawSpare();
+                  }}
+                  data-testid="button-loop-withdraw-sol"
+                >
+                  {busy === "withdraw-sol" ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : confirmAction === "withdraw-sol" ? (
+                    "Confirm?"
+                  ) : (
+                    <>
+                      <ArrowUpFromLine className="h-3.5 w-3.5 mr-1" />
+                      {spareSol > 0 ? `Withdraw ${spareSol.toFixed(4)}` : "Withdraw spare"}
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <p className="text-xs font-semibold text-muted-foreground">Positions</p>
@@ -393,6 +520,23 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Exact-shortfall SOL deposit popup: Phantom -> agent wallet, then retry the op. */}
+      <SolGasShortfallDialog
+        open={!!shortfall}
+        onOpenChange={(o) => {
+          if (!o) setShortfall(null);
+        }}
+        heldSol={shortfall?.heldSol}
+        requiredSol={shortfall?.requiredSol ?? 0}
+        reason={shortfall?.reason}
+        onDeposited={async () => {
+          const retry = shortfall?.retry;
+          setShortfall(null);
+          refresh();
+          await retry?.();
+        }}
+      />
     </>
   );
 }

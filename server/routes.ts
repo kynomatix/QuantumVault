@@ -9842,7 +9842,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       if (!result || !result.success) {
-        return res.status(400).json({ error: result?.error || "Loop open failed" });
+        return res.status(400).json({
+          error: result?.error || "Loop open failed",
+          ...(result?.gasShortfall ? { gasShortfall: result.gasShortfall } : {}),
+        });
       }
       res.json(result);
     } catch (error: any) {
@@ -9882,7 +9885,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       if (!result || !result.success) {
-        return res.status(400).json({ error: result?.error || "Loop close failed" });
+        return res.status(400).json({
+          error: result?.error || "Loop close failed",
+          ...(result?.gasShortfall ? { gasShortfall: result.gasShortfall } : {}),
+        });
       }
       res.json(result);
     } catch (error: any) {
@@ -9926,7 +9932,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       if (!result || !result.success) {
-        return res.status(400).json({ error: result?.error || "Loop unwind failed" });
+        return res.status(400).json({
+          error: result?.error || "Loop unwind failed",
+          ...(result?.gasShortfall ? { gasShortfall: result.gasShortfall } : {}),
+        });
       }
       res.json(result);
     } catch (error: any) {

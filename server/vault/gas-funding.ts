@@ -74,6 +74,13 @@ export interface EnsureVaultGasParams {
    * the on-chain mint can't revert mid-instruction with "insufficient lamports".
    */
   extraRentLamports?: number;
+  /**
+   * When false, NEVER sell the funder's USDC to raise SOL — fail closed with the
+   * exact shortfall instead. Used by user-funded flows (e.g. loop open, where the
+   * "gas" bar includes the PRINCIPAL: auto-swapping would silently convert the
+   * account's trading USDC into loop principal). Default true (hands-off refill).
+   */
+  allowUsdcRefill?: boolean;
 }
 
 export interface EnsureVaultGasResult {
@@ -119,6 +126,14 @@ export async function ensureVaultGas(p: EnsureVaultGasParams): Promise<EnsureVau
   // CASE A: the payer IS the funder (account vault). There is no second wallet to
   // pull from, so the wallet must raise its OWN SOL by selling some of its USDC.
   if (sameWallet) {
+    if (p.allowUsdcRefill === false) {
+      return {
+        ok: false,
+        requiredLamports,
+        payerLamportsBefore,
+        error: `${p.label}: not enough SOL (have ${(payerLamportsBefore / LAMPORTS_PER_SOL).toFixed(4)}, need ${(requiredLamports / LAMPORTS_PER_SOL).toFixed(4)}). Deposit SOL to continue.`,
+      };
+    }
     const refill = await refillFunderSol(connection, p, requiredLamports);
     if (!refill.ok) {
       return { ok: false, requiredLamports, payerLamportsBefore, error: refill.error };
@@ -175,6 +190,14 @@ export async function ensureVaultGas(p: EnsureVaultGasParams): Promise<EnsureVau
   let refilledLamports: number | undefined;
   let refillSignature: string | undefined;
   if (funderLamports < funderNeed) {
+    if (p.allowUsdcRefill === false) {
+      return {
+        ok: false,
+        requiredLamports,
+        payerLamportsBefore,
+        error: `${p.label}: not enough SOL (have ${(payerLamportsBefore / LAMPORTS_PER_SOL).toFixed(4)}, need ${(requiredLamports / LAMPORTS_PER_SOL).toFixed(4)}). Deposit SOL to continue.`,
+      };
+    }
     const refill = await refillFunderSol(connection, p, funderNeed);
     if (!refill.ok) {
       return { ok: false, requiredLamports, payerLamportsBefore, error: refill.error };

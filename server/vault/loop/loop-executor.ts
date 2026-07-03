@@ -321,6 +321,14 @@ export interface LoopOpenResult {
   policyReasons?: LoopPolicyReason[];
   verifyWarning?: string;
   error?: string;
+  /** Present when the failure is a SOL shortfall the user can fix by depositing. */
+  gasShortfall?: LoopGasShortfall;
+}
+
+/** Exact SOL bar vs. what the agent wallet held, for a client "deposit X SOL" prompt. */
+export interface LoopGasShortfall {
+  requiredLamports: number;
+  heldLamports: number;
 }
 
 export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenResult> {
@@ -413,6 +421,9 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
       (willMint ? LOOP_NFT_MINT_RENT_LAMPORTS : 0) +
       prepIxs.length * ATA_RENT_LAMPORTS +
       LOOP_FEE_HEADROOM_LAMPORTS;
+    // User-funded: the "gas" bar includes the PRINCIPAL, so never auto-sell the
+    // account's trading USDC to meet it — fail closed with the exact shortfall
+    // and let the client prompt a SOL deposit from the user's wallet.
     const gas = await ensureVaultGas({
       payingPublicKey: agentPublicKey,
       funderPublicKey: agentPublicKey,
@@ -420,9 +431,17 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
       destMint: null,
       label: "Loop Open",
       extraRentLamports,
+      allowUsdcRefill: false,
     });
     if (!gas.ok) {
-      return { success: false, error: gas.error || "Loop Open: insufficient SOL for principal + rent + fees." };
+      return {
+        success: false,
+        error: gas.error || "Loop Open: insufficient SOL for principal + rent + fees.",
+        gasShortfall: {
+          requiredLamports: gas.requiredLamports,
+          heldLamports: gas.payerLamportsBefore + (gas.refilledLamports ?? 0) + (gas.fundedLamports ?? 0),
+        },
+      };
     }
 
     // Durable op row (idempotency-lite: a duplicate clientRequestId refuses).
@@ -805,6 +824,7 @@ export interface LoopCloseResult {
   solReturnedLamports?: string;
   verifyWarning?: string;
   error?: string;
+  gasShortfall?: LoopGasShortfall;
 }
 
 export async function executeLoopClose(params: LoopCloseParams): Promise<LoopCloseResult> {
@@ -920,7 +940,14 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
       });
       if (!gas.ok) {
         await failOp(opId, "gas_failed", gas.error || "insufficient SOL for fees");
-        return { success: false, error: gas.error || "Loop Close: insufficient SOL for fees." };
+        return {
+          success: false,
+          error: gas.error || "Loop Close: insufficient SOL for fees.",
+          gasShortfall: {
+            requiredLamports: gas.requiredLamports,
+            heldLamports: gas.payerLamportsBefore + (gas.refilledLamports ?? 0) + (gas.fundedLamports ?? 0),
+          },
+        };
       }
 
       if (prepIxs.length > 0) {
@@ -1179,6 +1206,7 @@ export interface LoopPartialUnwindResult {
   observedDebtRaw?: string;
   verifyWarning?: string;
   error?: string;
+  gasShortfall?: LoopGasShortfall;
 }
 
 export async function executeLoopPartialUnwind(params: LoopPartialUnwindParams): Promise<LoopPartialUnwindResult> {
@@ -1279,7 +1307,14 @@ export async function executeLoopPartialUnwind(params: LoopPartialUnwindParams):
       });
       if (!gas.ok) {
         await failOp(opId, "gas_failed", gas.error || "insufficient SOL for fees");
-        return { success: false, error: gas.error || "Loop Unwind: insufficient SOL for fees." };
+        return {
+          success: false,
+          error: gas.error || "Loop Unwind: insufficient SOL for fees.",
+          gasShortfall: {
+            requiredLamports: gas.requiredLamports,
+            heldLamports: gas.payerLamportsBefore + (gas.refilledLamports ?? 0) + (gas.fundedLamports ?? 0),
+          },
+        };
       }
 
       if (prepIxs.length > 0) {
