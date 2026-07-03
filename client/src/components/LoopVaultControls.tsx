@@ -139,6 +139,13 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
   // agent's own gas float can never show up here.
   const pendingKey = `qv-loop-pending-return:${publicKeyString ?? "unknown"}`;
   const [pendingReturnSol, setPendingReturnSol] = useState(0);
+  // Ref (not state) guard: closes the sub-second window where an auto-return
+  // is in flight but `busy` reads stale in a manual click's closure — a
+  // double-send would eat the agent's gas float. MUST be declared BEFORE the
+  // `!statusQuery.data` early return below — a hook after a conditional
+  // return crashes the whole page ("Rendered more hooks than during the
+  // previous render") the moment the status query resolves.
+  const returningRef = useRef(false);
   const readStoredPending = () => {
     try {
       const v = Number(localStorage.getItem(pendingKey) ?? "0");
@@ -246,10 +253,6 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
   const round4 = (n: number) => Math.floor(n * 1e4) / 1e4;
   // The withdraw route keeps a 0.005 SOL reserve; leave a hair extra for fees.
   const maxSendable = (sol: number | null) => (sol !== null ? Math.max(0, round4(sol - 0.006)) : 0);
-  // Ref (not state) guard: closes the sub-second window where an auto-return
-  // is in flight but `busy` reads stale in a manual click's closure — a
-  // double-send would eat the agent's gas float.
-  const returningRef = useRef(false);
   const returnSpareSol = async (amount: number, opts: { auto?: boolean; pendingOnSuccess: number }) => {
     if (amount <= 0) return;
     if (returningRef.current) return;
