@@ -80,9 +80,10 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
   const [amountSol, setAmountSol] = useState<string>("");
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<string | null>(null);
-  // Set when a loop op fails on a SOL shortfall: exact server numbers + a retry
-  // closure. Drives the reusable "deposit just what you need" popup.
-  const [shortfall, setShortfall] = useState<{ requiredSol: number; heldSol: number; reason: string; retry: () => void } | null>(null);
+  // Set when a loop op needs SOL from the user's wallet: exact server numbers
+  // + a retry closure. For OPEN this IS the primary deposit step (principal +
+  // rent + fees, deposit-framed); for close/unwind it's a small gas top-up.
+  const [shortfall, setShortfall] = useState<{ requiredSol: number; heldSol: number; reason: string; kind: "open" | "fees"; retry: () => void } | null>(null);
 
   const statusQuery = useQuery<{ positions: LoopRow[] } | null>({
     queryKey: ["/api/vault/loop/status"],
@@ -153,8 +154,9 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
             heldSol: (typeof gs.heldLamports === "number" ? gs.heldLamports : 0) / 1e9,
             reason:
               key === "open"
-                ? "to fund your loop principal, rent and network fees"
+                ? "to fund your loop deposit, one-time account rent and network fees"
                 : "to cover this loop operation's network fees",
+            kind: key === "open" ? "open" : "fees",
             retry: () => void doOp(key, path, body, okMsg),
           });
           return;
@@ -269,8 +271,11 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
               <h3 className="font-semibold text-base truncate">SOL Loop</h3>
               <p className="text-sm text-muted-foreground flex items-center gap-2">
                 <span className="tabular-nums">2x staking loop</span>
-                <span className="px-1.5 py-0.5 rounded text-[11px] font-medium bg-amber-500/15 text-amber-500">
-                  Owner test
+                <span
+                  className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium leading-none whitespace-nowrap bg-cyan-500/15 text-cyan-600 dark:text-cyan-400"
+                  data-testid="chip-risk-loop"
+                >
+                  Loop
                 </span>
               </p>
             </div>
@@ -317,9 +322,13 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Repeat className="w-4 h-4 text-primary" /> SOL Loop
+              <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium leading-none whitespace-nowrap bg-cyan-500/15 text-cyan-600 dark:text-cyan-400">
+                Loop
+              </span>
             </DialogTitle>
             <DialogDescription>
-              Leveraged LST staking loop on Jupiter Lend Multiply. Fixed 2x. Owner-only test surface — dust amounts.
+              Deposit SOL from your wallet — it's automatically swapped into a staked SOL token and looped at 2x
+              for boosted staking yield. Leveraged: it can be liquidated if rates move sharply against it.
             </DialogDescription>
           </DialogHeader>
 
@@ -348,10 +357,10 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
                   </Select>
                 </div>
                 <div className="flex-1">
-                  <p className="text-xs text-muted-foreground mb-1">Principal (SOL)</p>
+                  <p className="text-xs text-muted-foreground mb-1">Deposit (SOL)</p>
                   <Input
                     inputMode="decimal"
-                    placeholder="0.02"
+                    placeholder="0.5"
                     value={amountSol}
                     onChange={(e) => {
                       setAmountSol(e.target.value);
@@ -369,8 +378,11 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
                 }
                 data-testid="button-loop-open"
               >
-                {busy === "open" ? <Loader2 className="h-4 w-4 animate-spin" /> : label("open", "Open 2x Loop")}
+                {busy === "open" ? <Loader2 className="h-4 w-4 animate-spin" /> : label("open", "Deposit & Open 2x Loop")}
               </Button>
+              <p className="text-[11px] text-muted-foreground">
+                Funded from your connected wallet and swapped into {vaultSymbol(vaultId)} automatically.
+              </p>
             </div>
 
             {/* --- Agent wallet SOL (funds opens; spare goes back to Phantom) --- */}
@@ -383,7 +395,7 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
               </div>
               <div className="flex items-center justify-between gap-2">
                 <p className="text-[11px] text-muted-foreground flex-1">
-                  Opens are funded from this SOL — if it's short you'll be prompted to deposit the exact amount.
+                  SOL parked here between operations — spare can go back to your wallet anytime.
                 </p>
                 <Button
                   size="sm"
@@ -521,7 +533,8 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
         </DialogContent>
       </Dialog>
 
-      {/* Exact-shortfall SOL deposit popup: Phantom -> agent wallet, then retry the op. */}
+      {/* Exact-amount SOL deposit popup: user wallet -> agent wallet, then the
+          op auto-retries. For OPEN this is the primary deposit step. */}
       <SolGasShortfallDialog
         open={!!shortfall}
         onOpenChange={(o) => {
@@ -530,6 +543,13 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
         heldSol={shortfall?.heldSol}
         requiredSol={shortfall?.requiredSol ?? 0}
         reason={shortfall?.reason}
+        variant={shortfall?.kind === "open" ? "deposit" : "gas"}
+        title={shortfall?.kind === "open" ? "Deposit SOL to open your loop" : undefined}
+        description={
+          shortfall?.kind === "open"
+            ? "This comes straight from your connected wallet. It covers your deposit plus one-time account rent and network fees — after you approve it, the loop opens automatically."
+            : undefined
+        }
         onDeposited={async () => {
           const retry = shortfall?.retry;
           setShortfall(null);

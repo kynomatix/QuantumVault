@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Buffer } from 'buffer';
 import { Transaction } from '@solana/web3.js';
 import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
-import { Fuel, Loader2 } from 'lucide-react';
+import { Fuel, Loader2, Wallet } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -30,6 +30,16 @@ export interface SolGasShortfallDialogProps {
   reason?: string;
   /** Runs after a confirmed deposit — refresh balances and/or retry the action. */
   onDeposited?: () => void | Promise<void>;
+  /**
+   * 'gas' (default): small fee top-up framing. 'deposit': the deposit IS the
+   * main event (e.g. funding a loop principal from the user's wallet) — same
+   * exact-amount plumbing, friendlier title/copy.
+   */
+  variant?: 'gas' | 'deposit';
+  /** Overrides the default title for the chosen variant. */
+  title?: string;
+  /** Overrides the default description for the chosen variant. */
+  description?: string;
 }
 
 // A small, reusable "you're a little short on SOL — top up just what you need"
@@ -43,6 +53,9 @@ export function SolGasShortfallDialog({
   requiredSol,
   reason,
   onDeposited,
+  variant = 'gas',
+  title,
+  description,
 }: SolGasShortfallDialogProps) {
   const { toast } = useToast();
   const solanaWallet = useSolanaWallet();
@@ -76,7 +89,12 @@ export function SolGasShortfallDialog({
       const signed = await solanaWallet.signTransaction(tx);
       const sig = await connection.sendRawTransaction(signed.serialize());
       await confirmTransactionWithFallback(connection, { signature: sig, blockhash, lastValidBlockHeight });
-      toast({ title: `Added ${depositAmount.toFixed(3)} SOL for gas` });
+      toast({
+        title:
+          variant === 'deposit'
+            ? `Deposited ${depositAmount.toFixed(3)} SOL`
+            : `Added ${depositAmount.toFixed(3)} SOL for gas`,
+      });
       onOpenChange(false);
       await onDeposited?.();
     } catch (e: any) {
@@ -91,21 +109,28 @@ export function SolGasShortfallDialog({
       <DialogContent className="sm:max-w-sm" data-testid="dialog-sol-gas-shortfall">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Fuel className="w-5 h-5 text-orange-500" /> Add a little SOL for gas
+            {variant === 'deposit' ? (
+              <Wallet className="w-5 h-5 text-primary" />
+            ) : (
+              <Fuel className="w-5 h-5 text-orange-500" />
+            )}{' '}
+            {title || (variant === 'deposit' ? 'Deposit SOL from your wallet' : 'Add a little SOL for gas')}
           </DialogTitle>
           <DialogDescription>
-            Solana charges a tiny network fee {reason || 'for this action'}. Your agent wallet is a
-            bit short, so top it up with just what's needed — it stays in your agent wallet for future fees.
+            {description ||
+              (variant === 'deposit'
+                ? `This deposit comes straight from your connected wallet ${reason || 'to fund this action'}.`
+                : `Solana charges a tiny network fee ${reason || 'for this action'}. Your agent wallet is a bit short, so top it up with just what's needed — it stays in your agent wallet for future fees.`)}
           </DialogDescription>
         </DialogHeader>
 
         <div className="rounded-lg border border-border/60 bg-muted/30 p-3 text-sm space-y-1.5">
           <div className="flex justify-between">
-            <span className="text-muted-foreground">You have</span>
+            <span className="text-muted-foreground">{variant === 'deposit' ? 'Already held' : 'You have'}</span>
             <span data-testid="text-gas-held">{held.toFixed(4)} SOL</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-muted-foreground">Needed</span>
+            <span className="text-muted-foreground">{variant === 'deposit' ? 'Total needed' : 'Needed'}</span>
             <span data-testid="text-gas-required">{requiredSol.toFixed(4)} SOL</span>
           </div>
           <div className="flex justify-between font-medium border-t border-border/60 pt-1.5">
@@ -125,9 +150,12 @@ export function SolGasShortfallDialog({
           </Button>
           <Button onClick={handleDeposit} disabled={depositing} data-testid="button-gas-deposit">
             {depositing ? (
-              <><Loader2 className="w-4 h-4 mr-1 animate-spin" /> Adding…</>
+              <><Loader2 className="w-4 h-4 mr-1 animate-spin" /> {variant === 'deposit' ? 'Depositing…' : 'Adding…'}</>
             ) : (
-              <><Fuel className="w-4 h-4 mr-1" /> Deposit {depositAmount.toFixed(3)} SOL</>
+              <>
+                {variant === 'deposit' ? <Wallet className="w-4 h-4 mr-1" /> : <Fuel className="w-4 h-4 mr-1" />}
+                Deposit {depositAmount.toFixed(3)} SOL
+              </>
             )}
           </Button>
         </DialogFooter>
