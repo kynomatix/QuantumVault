@@ -90,6 +90,27 @@ const DEFAULT_SLIPPAGE_BPS = 50;
 /** Flash 2% over live debt on a full close — repay MAX takes only what is owed. */
 const CLOSE_FLASH_BUFFER_NUM = 102n;
 const CLOSE_FLASH_BUFFER_DEN = 100n;
+/**
+ * Partial unwind flash cushion. The vault's EXACT repay pull can round UP a
+ * hair above the requested amount (same Fluid exchange-price rounding class as
+ * the deposit round-up), so an ATA funded with exactly `repayRaw` fails the
+ * repay transfer with SPL "insufficient funds" (custom error 0x1). Verified by
+ * live simulation on vault 4 / position 5659: flash=repayRaw FAILED at the
+ * operate ix, flash=repayRaw+0.001 SOL SUCCEEDED. The cushion rides through
+ * the tx and comes back to the agent when the WSOL ATA is closed at the end.
+ */
+const UNWIND_FLASH_CUSHION_LAMPORTS = 1_000_000n;
+/**
+ * The swap's worst-case output must cover the flash payback even when the
+ * repay pull rounds up. Require minOut to clear repayRaw by this margin
+ * (10k lamports = 0.00001 SOL — noise vs any real unwind size).
+ * ASSUMES the SDK flashloan fee stays 0 (payback == flash amount). If the fee
+ * ever becomes nonzero, payback = flash x (1e4+fee)/1e4 and this FIXED margin
+ * stops scaling with unwind size — large unwinds would revert atomically at
+ * the payback ix (fail closed, no money moves). Switch to a proportional
+ * margin like the close path's 2% buffer in that case.
+ */
+const UNWIND_MIN_OUT_MARGIN_LAMPORTS = 10_000n;
 /** Partial unwind sizing bounds: 1..9000 bps (>90% must use the full close). */
 const MAX_UNWIND_BPS = 9000;
 /** Bound the reuse scan: only probe the newest N closed rows on this vault. */
@@ -1339,11 +1360,12 @@ export async function executeLoopPartialUnwind(params: LoopPartialUnwindParams):
         await storage.updateBorrowOperation(opId, { step: "atas_prepared" });
       }
 
-      // Swap the withdrawn slice back to WSOL; must cover the flash payback.
+      // Swap the withdrawn slice back to WSOL; must cover the flash payback
+      // (including the rounded-up repay pull — see UNWIND_MIN_OUT_MARGIN).
       const quote = await jupQuote(cfg.collateralMint, WSOL_MINT, withdrawRaw, slippageBps);
       const minOut = BigInt(quote.otherAmountThreshold);
-      if (minOut <= repayRaw) {
-        await failOp(opId, "swap_would_not_cover_payback", `minOut ${minOut} <= repay ${repayRaw}`);
+      if (minOut <= repayRaw + UNWIND_MIN_OUT_MARGIN_LAMPORTS) {
+        await failOp(opId, "swap_would_not_cover_payback", `minOut ${minOut} <= repay ${repayRaw} + margin ${UNWIND_MIN_OUT_MARGIN_LAMPORTS}`);
         return {
           success: false,
           error: "Loop Unwind: the swap's worst-case output would not cover the repayment (slippage/depeg). Nothing was moved.",
@@ -1362,8 +1384,12 @@ export async function executeLoopPartialUnwind(params: LoopPartialUnwindParams):
       const flash = await import("@jup-ag/lend/flashloan");
       const borrowMod = await import("@jup-ag/lend/borrow");
       const BN = (await import("bn.js")).default;
+      // Flash-borrow a cushion above the exact repay: the vault's repay pull
+      // can round up past repayRaw, and an exactly-funded ATA fails SPL 0x1.
+      // The surplus returns to the agent via the WSOL ATA close at tx end.
+      const flashAmountRaw = repayRaw + UNWIND_FLASH_CUSHION_LAMPORTS;
       const { borrowIx, paybackIx } = await flash.getFlashloanIx({
-        amount: new BN(repayRaw.toString()),
+        amount: new BN(flashAmountRaw.toString()),
         asset: wsolMintPk,
         signer: agentPubkey,
         connection,
