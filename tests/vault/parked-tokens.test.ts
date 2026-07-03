@@ -27,12 +27,13 @@ describe("detectParkedYieldTokens (Flash teardown guard, fail closed)", () => {
   });
 
   it("never probes a blank-mint placeholder row (no new PublicKey('') throw)", async () => {
-    // Sanity: the registry really does carry at least one disabled blank-mint row
-    // and at least one disabled-but-verified row (e.g. Kamino), so this test is
-    // meaningful rather than vacuous.
+    // The registry no longer carries a blank-mint placeholder (the last one,
+    // jupiter_lend_usdc, got its verified mint on 2026-06-20) — but the FILTER
+    // invariant must hold regardless of current registry contents: detectable
+    // is exactly the verified-mint rows, and disabled-but-verified rows are kept.
     const all = getAllYieldAssets();
     const detectable = getDetectableYieldAssets();
-    expect(all.length).toBeGreaterThan(detectable.length); // a blank-mint row exists
+    expect(detectable.length).toBe(all.filter((a) => a.mint.length > 0).length);
     expect(detectable.every((a) => a.mint.length > 0)).toBe(true);
     expect(detectable.some((a) => !a.enabled)).toBe(true); // disabled-but-verified kept
 

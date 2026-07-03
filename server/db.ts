@@ -538,6 +538,10 @@ export async function ensureSchema() {
       // The autonomous scanner claims a position by stamping this, so a loan that
       // stays urgent can't re-fire (top-up OR alert) within the cooldown window.
       `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS last_auto_topup_attempt_at timestamp`,
+      // Additive (SOL Loop Vault P2): position-family discriminator. 'borrow' =
+      // the shipped LST→stable engine; 'loop' = leveraged LST→WSOL staking loop.
+      // Existing rows are borrow rows, so the default backfills correctly.
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'borrow'`,
 
       // --- Vaults borrow engine (Phase A scaffold): money-op AUDIT log. ---
       // Append-only record of every multi-hop borrow/repay/carry operation, so

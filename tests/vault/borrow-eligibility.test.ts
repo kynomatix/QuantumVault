@@ -104,7 +104,9 @@ describe("evaluateBorrowPreview", () => {
     expect(r.projection!.projectedLtv).toBeCloseTo(0.05, 6); // 100/2000
     expect(r.reasons.some((x) => x.code === "oracle_unreadable")).toBe(true);
     expect(r.reasons.some((x) => x.code === "price_move_unreadable")).toBe(true);
-    expect(r.reasons.some((x) => x.code === "not_borrow_allowlisted")).toBe(true);
+    // Borrow launched OPEN TO ALL wallets (BORROW_OPEN_TO_ALL=true in
+    // borrow-allowlist.ts), so the wallet-allowlist deny no longer fires.
+    expect(r.reasons.some((x) => x.code === "not_borrow_allowlisted")).toBe(false);
     // vault 43 IS on the launch collateral allowlist:
     expect(r.reasons.some((x) => x.code === "collateral_not_allowlisted")).toBe(false);
   });

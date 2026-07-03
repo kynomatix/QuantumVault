@@ -289,11 +289,21 @@ export interface BotBorrowHealthDeps {
       venuePositionId: string | number | null;
       collateralMint: string | null;
       collateralAssetKey: string | null;
+      /** Position family ('borrow' default / 'loop') — threaded so a future
+       *  per-bot loop row can NEVER fall into the mint-keyed read path. */
+      kind?: string | null;
+      venueVaultId?: string | number | null;
     }>
   >;
   getVaultConfig(collateralMint: string): Promise<BorrowVaultConfig | null>;
   readLivePositionHealth(
     collateralMint: string,
+    positionId: number,
+  ): Promise<LivePositionHealth | null>;
+  /** Loop-vault (SOL-debt) reads, keyed by VAULT ID — see computeRowHealth. */
+  getLoopVaultConfig(vaultId: number): Promise<BorrowVaultConfig | null>;
+  readLoopLivePositionHealth(
+    vaultId: number,
     positionId: number,
   ): Promise<LivePositionHealth | null>;
 }
@@ -304,6 +314,8 @@ function defaultDeps(): BotBorrowHealthDeps {
     getBorrowPositions: (w, b) => storage.getBorrowPositions(w, b),
     getVaultConfig: (m) => route.getVaultConfig(m),
     readLivePositionHealth: (m, p) => route.readLivePositionHealth(m, p),
+    getLoopVaultConfig: (v) => route.getLoopVaultConfig(v),
+    readLoopLivePositionHealth: (v, p) => route.readLoopLivePositionHealth(v, p),
   };
 }
 
@@ -318,6 +330,12 @@ export interface RowHealthDeps {
     collateralMint: string,
     positionId: number,
   ): Promise<LivePositionHealth | null>;
+  /** Loop-vault (SOL-debt) reads, keyed by VAULT ID — see computeRowHealth. */
+  getLoopVaultConfig(vaultId: number): Promise<BorrowVaultConfig | null>;
+  readLoopLivePositionHealth(
+    vaultId: number,
+    positionId: number,
+  ): Promise<LivePositionHealth | null>;
 }
 
 export function defaultRowHealthDeps(): RowHealthDeps {
@@ -325,6 +343,8 @@ export function defaultRowHealthDeps(): RowHealthDeps {
   return {
     getVaultConfig: (m) => route.getVaultConfig(m),
     readLivePositionHealth: (m, p) => route.readLivePositionHealth(m, p),
+    getLoopVaultConfig: (v) => route.getLoopVaultConfig(v),
+    readLoopLivePositionHealth: (v, p) => route.readLoopLivePositionHealth(v, p),
   };
 }
 
@@ -335,6 +355,16 @@ export function defaultRowHealthDeps(): RowHealthDeps {
  * computePerBotPositionHealth only takes facts. Fail-closed per failure mode
  * (unreadable config/position ⇒ `unavailable`, never a guessed "healthy"); never
  * throws. Pass a shared `cfgCache` to read each distinct mint's config once.
+ *
+ * KIND ROUTING (money-safety): `kind: 'loop'` rows MUST resolve their vault by
+ * `venueVaultId` (never by collateral mint — JupSOL/mSOL each have several
+ * sibling vaults on the same mint; a mint-keyed read would pair the row with
+ * the WRONG vault's config AND could read a DIFFERENT USER's position with the
+ * same numeric id, which the monitor would then self-heal the stored amounts
+ * from). A loop row without a parseable venueVaultId is `unavailable` (fail
+ * closed). Loop health numbers are SOL-denominated in the `...Usd` fields; the
+ * LTV/HF ratios stay correct because config + position come from the SAME
+ * SOL-debt vault (see decodeLoopVaultConfig).
  */
 export async function computeRowHealth(
   row: {
@@ -342,6 +372,10 @@ export async function computeRowHealth(
     venuePositionId: string | number | null;
     collateralMint: string | null;
     collateralAssetKey: string | null;
+    /** Position family: 'borrow' (default) or 'loop'. */
+    kind?: string | null;
+    /** Venue vault id — REQUIRED for loop rows (the vault authority). */
+    venueVaultId?: string | number | null;
   },
   deps: RowHealthDeps = defaultRowHealthDeps(),
   cfgCache?: Map<string, BorrowVaultConfig | null>,
@@ -351,7 +385,36 @@ export async function computeRowHealth(
   let vault: BorrowVaultConfig | null = null;
   let live: LivePositionHealth | null = null;
 
-  if (mint) {
+  if ((row.kind ?? "borrow") === "loop") {
+    const vaultId = row.venueVaultId != null ? Number(row.venueVaultId) : NaN;
+    if (Number.isInteger(vaultId) && vaultId > 0) {
+      const cacheKey = `loop:${vaultId}`; // mints never contain ':' — no collision with mint keys
+      if (cfgCache) {
+        if (!cfgCache.has(cacheKey)) {
+          try {
+            cfgCache.set(cacheKey, await deps.getLoopVaultConfig(vaultId));
+          } catch {
+            cfgCache.set(cacheKey, null);
+          }
+        }
+        vault = cfgCache.get(cacheKey) ?? null;
+      } else {
+        try {
+          vault = await deps.getLoopVaultConfig(vaultId);
+        } catch {
+          vault = null;
+        }
+      }
+      if (Number.isInteger(venueId) && venueId > 0) {
+        try {
+          live = await deps.readLoopLivePositionHealth(vaultId, venueId);
+        } catch {
+          live = null;
+        }
+      }
+    }
+    // else: no vault id ⇒ vault stays null ⇒ unavailable (fail closed).
+  } else if (mint) {
     if (cfgCache) {
       if (!cfgCache.has(mint)) {
         try {
@@ -416,6 +479,8 @@ export async function enumerateBotBorrowHealth(
           venuePositionId: r.venuePositionId,
           collateralMint: r.collateralMint ?? null,
           collateralAssetKey: r.collateralAssetKey ?? null,
+          kind: r.kind ?? null,
+          venueVaultId: r.venueVaultId ?? null,
         },
         deps,
         cfgCache,

@@ -202,6 +202,10 @@ function defaultDeps(): BorrowHealthScanDeps {
           venuePositionId: row.venuePositionId,
           collateralMint: row.collateralMint ?? null,
           collateralAssetKey: row.collateralAssetKey ?? null,
+          // Loop rows (kind 'loop') resolve their vault by venueVaultId, never
+          // by mint — see computeRowHealth's KIND ROUTING note (money-safety).
+          kind: row.kind ?? null,
+          venueVaultId: row.venueVaultId ?? null,
         },
         rowDeps,
         cfgCache,

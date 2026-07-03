@@ -115,9 +115,19 @@ describe("evaluateBorrowRequest — hard denies", () => {
     expect(denied(d)).not.toContain("scope_not_supported");
   });
 
-  it("denies scope 'bot' for a NON-owner wallet (still gated until rollout)", () => {
+  it("allows scope 'bot' for an ALLOWLISTED non-owner wallet (per-bot rollout un-gated)", () => {
+    // Per-bot borrow rolled out beyond the owner: scope 'bot' is structurally
+    // allowed for owner OR allowlisted/eligible wallets (with BORROW_OPEN_TO_ALL
+    // every wallet is eligible). Every LTV/oracle/exposure gate still applies.
     const d = evaluateBorrowRequest(
       validInput({ scope: "bot", isOwnerWallet: false, isBorrowAllowlisted: true }),
+    );
+    expect(denied(d)).not.toContain("scope_not_supported");
+  });
+
+  it("denies scope 'bot' when neither owner nor allowlisted", () => {
+    const d = evaluateBorrowRequest(
+      validInput({ scope: "bot", isOwnerWallet: false, isBorrowAllowlisted: false }),
     );
     expect(denied(d)).toContain("scope_not_supported");
   });

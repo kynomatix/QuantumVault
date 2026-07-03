@@ -484,6 +484,12 @@ export const borrowPositions = pgTable("borrow_positions", {
   debtMint: text("debt_mint").notNull(),
   debtAmountRaw: text("debt_amount_raw").notNull().default('0'),
   attributedBotId: varchar("attributed_bot_id"),
+  // Discriminator between position families sharing this table:
+  //   'borrow' — LST collateral → stable debt (the shipped account/per-bot engine).
+  //   'loop'   — leveraged LST staking loop (LST collateral → WSOL debt, SOL Loop Vault).
+  // Loop rows MUST be excluded from borrow-only machinery (auto-topup defense,
+  // USD exposure caps, NFT reuse scans, borrow UI reads) — filter on kind there.
+  kind: text("kind").notNull().default('borrow'),
   status: text("status").notNull().default('pending'),
   // Last health read cached for display/monitoring. On-chain remains authority.
   healthSnapshot: jsonb("health_snapshot").$type<{

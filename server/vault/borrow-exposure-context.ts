@@ -44,6 +44,14 @@ export interface BorrowExposureRow {
   debtAmountRaw: string;
   updatedAt?: Date | string | null;
   healthAsOf?: Date | string | null;
+  /**
+   * Position-family discriminator. `'loop'` rows (SOL Loop Vault: WSOL debt,
+   * leverage-denominated) are DELIBERATELY excluded from this USD book — their
+   * exposure is governed by the loop risk policy in SOL terms. Without this
+   * exemption a single loop row would trip `exposure_non_usdc_debt` and deny
+   * every borrow platform-wide. Absent/undefined kind counts as 'borrow'.
+   */
+  kind?: string | null;
 }
 
 export interface BuildExposureOptions {
@@ -127,6 +135,13 @@ export function buildBorrowExposureContext(
   }
 
   for (const row of rows) {
+    // SOL-loop rows are a different product with SOL-denominated debt; they are
+    // not part of the USDC borrow book (see BorrowExposureRow.kind docs). This
+    // is an explicit EXEMPTION, not a fail-open: only the exact 'loop' tag is
+    // skipped — any other unexpected debt denomination still fails closed below.
+    if (row.kind === "loop") {
+      continue;
+    }
     if (TERMINAL_STATUSES.has(String(row.status))) {
       skippedTerminal++;
       continue;

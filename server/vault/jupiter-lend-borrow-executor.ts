@@ -106,7 +106,7 @@ export async function withBorrowLock<T>(key: string, fn: () => Promise<T>): Prom
   }
 }
 
-function borrowLockKey(walletAddress: string, tradingBotId: string | null, vaultId: number | string): string {
+export function borrowLockKey(walletAddress: string, tradingBotId: string | null, vaultId: number | string): string {
   return JSON.stringify(["borrow", walletAddress, tradingBotId ?? null, String(vaultId)]);
 }
 

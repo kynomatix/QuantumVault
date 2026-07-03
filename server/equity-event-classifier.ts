@@ -29,6 +29,9 @@ const INTERNAL_TRANSFER_TYPES = new Set([
   'pacifica_dust_stranded',  // Dust left on exchange after close
   'borrow',                  // Jupiter Lend: USDC borrowed against collateral (a LIABILITY, not a deposit)
   'repay',                   // Jupiter Lend: paying down borrowed-USDC debt
+  'loop_open',               // SOL Loop Vault: SOL principal moved into a leveraged LST loop (SOL asset — belt-and-braces; NON_USDC_ASSETS already ignores it)
+  'loop_close',              // SOL Loop Vault: full unwind, SOL returned to the agent wallet
+  'loop_unwind',             // SOL Loop Vault: partial deleverage, SOL returned to the agent wallet
 ]);
 
 // Asset-types that are not part of USDC trading P&L (SOL gas tops, etc.).

@@ -625,3 +625,219 @@ export function verifyWithdrawOutcome(f: WithdrawVerifyFacts): VerifyResult {
   }
   return { ok: true };
 }
+
+/* ========================================================================== *
+ * SOL LOOP VAULT (qntSOL) — plan builders + verify predicates.
+ *
+ * A loop position is a Jupiter Lend Multiply position on an LST/WSOL pegged
+ * vault: collateral = LST (9 dp), debt = WSOL (9 dp). The open is atomic
+ * (flash-borrow SOL -> swap principal+flash to LST -> operate deposit+borrow
+ * -> flash payback); the unwind is the reverse. These builders are SDK-free
+ * OperatePlans for ONLY the operate leg — flash-loan and swap assembly live in
+ * the loop executor. Same PLAN/VERIFY discipline as the borrow engine above.
+ *
+ * SCALING NOTE: WSOL and every allowlisted LST are 9-decimal mints, so the
+ * SDK's position scale (max(decimals, 9)) equals native scale — but callers
+ * MUST still convert getCurrentPosition reads through positionRawToNativeRaw
+ * and the vault exchange prices (debt "ceil", collateral "floor") before
+ * feeding verify facts. Facts below are TRUE NATIVE raw (lamport-scale).
+ * ========================================================================== */
+
+/**
+ * Residual WSOL debt (raw lamports, 9 dp) treated as fully repaid on a loop
+ * close. DEFAULT_DEBT_DUST_RAW above is USDC-6dp (0.01 USDC) and MUST NOT be
+ * used for SOL-denominated debt: 10_000 lamports is 0.00001 SOL, far below
+ * interest-tick noise. 100_000 lamports = 0.0001 SOL (~a cent).
+ */
+export const DEFAULT_SOL_DEBT_DUST_RAW = 100_000n;
+/** Residual LST collateral (raw, 9 dp) treated as fully withdrawn on a loop close. */
+export const DEFAULT_LST_COLLATERAL_DUST_RAW = 100_000n;
+
+/**
+ * Pure open sizing: at leverage L on principal P, the flash-borrowed leg is
+ * P*(L-1) and the total swapped to LST is P*L (= principal + flash, computed
+ * exactly to avoid double rounding). Leverage is validated against an INSANITY
+ * bound only — the enforced cap lives in loop-risk-policy (never here).
+ */
+export function computeLoopOpenAmounts(
+  principalLamports: bigint,
+  leverage: number,
+): { flashLamports: bigint; totalSwapLamports: bigint } {
+  if (principalLamports <= 0n) throw new Error("computeLoopOpenAmounts: principal must be > 0");
+  if (!Number.isFinite(leverage) || leverage <= 1 || leverage > 10) {
+    throw new Error(`computeLoopOpenAmounts: leverage ${leverage} outside sane bounds (1, 10]`);
+  }
+  const leverageMinusOneBps = BigInt(Math.round((leverage - 1) * 10_000));
+  const flashLamports = (principalLamports * leverageMinusOneBps) / 10_000n;
+  if (flashLamports <= 0n) throw new Error("computeLoopOpenAmounts: flash leg rounded to zero");
+  return { flashLamports, totalSwapLamports: principalLamports + flashLamports };
+}
+
+export interface LoopOpenRequest {
+  /** LST collateral to deposit (raw, 9 dp) — the swap's REAL output, not an estimate. */
+  lstCollateralRaw: bigint;
+  /** WSOL to borrow (raw lamports) — must equal the flash-borrowed leg exactly. */
+  wsolDebtRaw: bigint;
+  /** 0 (default) mints a fresh position NFT; a verified-EMPTY nftId reuses it. */
+  positionId?: number;
+}
+
+/** Plan a loop OPEN: deposit LST and borrow WSOL in one atomic operate. */
+export function planLoopOpen(req: LoopOpenRequest): OperatePlan {
+  if (req.lstCollateralRaw <= 0n) throw new Error("planLoopOpen: lstCollateralRaw must be > 0");
+  if (req.wsolDebtRaw <= 0n) throw new Error("planLoopOpen: wsolDebtRaw must be > 0");
+  const positionId = req.positionId ?? 0;
+  if (!Number.isInteger(positionId) || positionId < 0) {
+    throw new Error("planLoopOpen: positionId must be a non-negative integer (0 = mint)");
+  }
+  return {
+    positionId,
+    colAmount: { kind: "exact", raw: req.lstCollateralRaw },
+    debtAmount: { kind: "exact", raw: req.wsolDebtRaw },
+  };
+}
+
+/**
+ * Plan a FULL loop unwind: repay ALL WSOL debt and withdraw ALL LST collateral
+ * in one atomic operate (flash loan supplies the repay WSOL; the executor
+ * swaps the withdrawn LST back and pays the flash back in the same tx).
+ */
+export function planLoopClose(positionId: number): OperatePlan {
+  if (!Number.isInteger(positionId) || positionId <= 0) {
+    throw new Error("planLoopClose: a real (minted) positionId is required");
+  }
+  return {
+    positionId,
+    colAmount: { kind: "max" },
+    debtAmount: { kind: "max" },
+  };
+}
+
+export interface LoopPartialUnwindRequest {
+  /** WSOL debt to repay (raw lamports). Must be > 0. */
+  repayWsolRaw: bigint;
+  /** LST collateral to withdraw (raw, 9 dp). Must be > 0. */
+  withdrawLstRaw: bigint;
+}
+
+/**
+ * Plan a PARTIAL loop unwind (G5): repay `repayWsolRaw` debt and withdraw
+ * `withdrawLstRaw` collateral in ONE atomic operate (flash-borrow the repay
+ * WSOL -> operate -> swap the withdrawn LST -> flash payback). The caller
+ * sizes the pair PROPORTIONALLY so the position's debt/collateral ratio never
+ * worsens — verifyLoopPartialUnwindOutcome enforces exactly that afterwards.
+ * Requires a real (minted) positionId.
+ */
+export function planLoopPartialUnwind(positionId: number, req: LoopPartialUnwindRequest): OperatePlan {
+  if (!Number.isInteger(positionId) || positionId <= 0) {
+    throw new Error("planLoopPartialUnwind: a real (minted) positionId is required");
+  }
+  if (req.repayWsolRaw <= 0n) throw new Error("planLoopPartialUnwind: repayWsolRaw must be > 0");
+  if (req.withdrawLstRaw <= 0n) throw new Error("planLoopPartialUnwind: withdrawLstRaw must be > 0");
+  return {
+    positionId,
+    colAmount: { kind: "exact", raw: -req.withdrawLstRaw },
+    debtAmount: { kind: "exact", raw: -req.repayWsolRaw },
+  };
+}
+
+export interface LoopOpenVerifyFacts {
+  /** WSOL the plan borrowed (the flash leg), raw lamports. */
+  flashDebtRaw: bigint;
+  /** The swap quote's minOut — the LST floor the open must have deposited. */
+  minCollateralRaw: bigint;
+  /** TRUE debt after open (position read x borrow exchange price, ceil), native raw. */
+  observedDebtRaw: bigint;
+  /** TRUE collateral after open (position read x supply exchange price, floor), native raw. */
+  observedColRaw: bigint;
+  toleranceBps?: number;
+}
+
+/**
+ * ADVISORY sanity check of a loop open. Debt must match the flash leg within
+ * tolerance (and never exceed it beyond tolerance — the dangerous direction);
+ * collateral is checked against the swap's minOut FLOOR (aggregator output
+ * varies upward with positive slippage, so tolerance-equality is wrong here).
+ */
+export function verifyLoopOpenOutcome(f: LoopOpenVerifyFacts): VerifyResult {
+  const tol = f.toleranceBps ?? DEFAULT_TOLERANCE_BPS;
+  if (f.observedColRaw < f.minCollateralRaw) return { ok: false, reason: "loop_collateral_below_min_out" };
+  if (f.observedDebtRaw > f.flashDebtRaw && !withinToleranceBps(f.observedDebtRaw, f.flashDebtRaw, tol)) {
+    return { ok: false, reason: "loop_debt_exceeds_flash_leg" };
+  }
+  if (!withinToleranceBps(f.observedDebtRaw, f.flashDebtRaw, tol)) {
+    return { ok: false, reason: "loop_debt_mismatch" };
+  }
+  return { ok: true };
+}
+
+export interface LoopCloseVerifyFacts {
+  /** TRUE debt after close (must be <= SOL dust), native raw lamports. */
+  observedDebtRaw: bigint;
+  /** TRUE collateral after close (must be <= LST dust), native raw. */
+  observedColRaw: bigint;
+  /** Realized SOL returned to the wallet (principal minus costs) — must be > 0. */
+  solDeltaLamports: bigint;
+  debtDustRaw?: bigint;
+  collateralDustRaw?: bigint;
+}
+
+/**
+ * A loop close is complete only when debt is cleared (<= SOL dust), the
+ * collateral side is emptied (<= LST dust), AND SOL actually came back to the
+ * wallet. The executor must NOT mark `closed` unless this is ok.
+ */
+export function verifyLoopCloseOutcome(f: LoopCloseVerifyFacts): VerifyResult {
+  const debtDust = f.debtDustRaw ?? DEFAULT_SOL_DEBT_DUST_RAW;
+  const colDust = f.collateralDustRaw ?? DEFAULT_LST_COLLATERAL_DUST_RAW;
+  if (f.solDeltaLamports <= 0n) return { ok: false, reason: "loop_no_sol_returned" };
+  if (f.observedDebtRaw > debtDust) return { ok: false, reason: "loop_debt_not_cleared" };
+  if (f.observedColRaw > colDust) return { ok: false, reason: "loop_collateral_not_emptied" };
+  return { ok: true };
+}
+
+export interface LoopPartialUnwindVerifyFacts {
+  /** TRUE debt before/after (native raw lamports, exchange-price scaled). */
+  debtBeforeRaw: bigint;
+  debtAfterRaw: bigint;
+  /** WSOL the plan repaid, raw lamports. */
+  repayRequestedRaw: bigint;
+  /** TRUE collateral before/after (native raw, exchange-price scaled). */
+  colBeforeRaw: bigint;
+  colAfterRaw: bigint;
+  /** LST the plan withdrew, raw. */
+  withdrawRequestedRaw: bigint;
+  toleranceBps?: number;
+}
+
+/**
+ * A partial unwind must (a) reduce debt by ~the repaid amount, (b) reduce
+ * collateral by ~the withdrawn amount, and (c) NEVER worsen the position's
+ * debt/collateral ratio beyond tolerance — the whole point of a deleverage.
+ * Ratio check is a pure cross-multiplication (unit-free: both sides are
+ * debt x collateral), so no price input can poison it.
+ */
+export function verifyLoopPartialUnwindOutcome(f: LoopPartialUnwindVerifyFacts): VerifyResult {
+  const tol = f.toleranceBps ?? DEFAULT_TOLERANCE_BPS;
+  if (f.colAfterRaw <= 0n) {
+    // Fully-withdrawn collateral with debt remaining is a broken position;
+    // with debt also cleared it was a FULL close and must be verified as one.
+    return { ok: false, reason: "loop_partial_unwind_emptied_collateral" };
+  }
+  const debtReduced = f.debtBeforeRaw - f.debtAfterRaw;
+  if (debtReduced <= 0n) return { ok: false, reason: "loop_debt_not_reduced" };
+  if (!withinToleranceBps(debtReduced, f.repayRequestedRaw, tol)) {
+    return { ok: false, reason: "loop_debt_delta_mismatch" };
+  }
+  const colReduced = f.colBeforeRaw - f.colAfterRaw;
+  if (colReduced <= 0n) return { ok: false, reason: "loop_collateral_not_reduced" };
+  if (!withinToleranceBps(colReduced, f.withdrawRequestedRaw, tol)) {
+    return { ok: false, reason: "loop_collateral_delta_mismatch" };
+  }
+  // debtAfter/colAfter <= debtBefore/colBefore (+ tolerance), cross-multiplied.
+  const lhs = f.debtAfterRaw * f.colBeforeRaw;
+  const rhs = f.debtBeforeRaw * f.colAfterRaw;
+  const allowed = rhs + (rhs * BigInt(Math.round(tol))) / 10_000n;
+  if (lhs > allowed) return { ok: false, reason: "loop_ratio_worsened" };
+  return { ok: true };
+}

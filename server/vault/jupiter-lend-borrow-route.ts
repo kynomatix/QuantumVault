@@ -185,9 +185,33 @@ export interface LivePositionHealth {
  * Returns null if the row is not a USDC-borrow vault or is missing risk fields.
  */
 export function decodeVaultConfig(v: any): BorrowVaultConfig | null {
+  if (!v || !v.borrowToken) return null;
+  if (String(v.borrowToken.symbol || "").toUpperCase() !== "USDC") return null;
+  return decodeVaultConfigAnyDebt(v);
+}
+
+/** Wrapped SOL mint — the debt token of every SOL Loop Vault (pinned by MINT, not symbol). */
+export const WSOL_MINT = "So11111111111111111111111111111111111111112";
+
+/**
+ * Loop-vault variant of `decodeVaultConfig`: accepts ONLY WSOL-debt vaults,
+ * pinned by the debt MINT (never by symbol — symbols are impersonatable).
+ * Numeric fields keep their `...Usd` names but are DEBT-TOKEN (SOL) denominated
+ * for these vaults: Jupiter's pegged-vault oracle prices the collateral in the
+ * debt token (verified live 2026-07-03: vault 47 oraclePriceLiquidate ≈ 1.391 =
+ * mSOL/SOL rate, NOT $). Ratio math (LTV / health factor) stays unit-consistent
+ * as long as config and position come from the SAME vault.
+ */
+export function decodeLoopVaultConfig(v: any): BorrowVaultConfig | null {
+  if (!v || !v.borrowToken) return null;
+  if (String(v.borrowToken.address || "") !== WSOL_MINT) return null;
+  return decodeVaultConfigAnyDebt(v);
+}
+
+/** Shared decode body — debt-token acceptance is the CALLER's gate (see wrappers above). */
+function decodeVaultConfigAnyDebt(v: any): BorrowVaultConfig | null {
   try {
     if (!v || !v.supplyToken || !v.borrowToken) return null;
-    if (String(v.borrowToken.symbol || "").toUpperCase() !== "USDC") return null;
 
     const required = [
       v.collateralFactor,
@@ -391,6 +415,26 @@ export class JupiterLendBorrowRoute {
   }
 
   /**
+   * Decoded config for a SOL Loop Vault, keyed by VAULT ID (the authority — a
+   * collateral mint is AMBIGUOUS: JupSOL alone has WSOL-debt vault 4 plus
+   * USDC/USDG/EURC/USDS/... siblings sharing the same mint). Accepts ONLY
+   * WSOL-debt vaults via `decodeLoopVaultConfig` (fail closed on anything else).
+   */
+  async getLoopVaultConfig(vaultId: number): Promise<BorrowVaultConfig | null> {
+    try {
+      if (!Number.isInteger(vaultId) || vaultId <= 0) return null;
+      const { Client } = await import("@jup-ag/lend/api");
+      const client = new Client();
+      const vaults = await client.borrow.getVaults();
+      const v = vaults.find((x: any) => Number(x?.id) === vaultId);
+      if (!v) return null;
+      return decodeLoopVaultConfig(v);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Decoded configs for the LAUNCH-allowlisted borrow vaults — the read-only
    * source the UI uses to render the Borrow form (collateral symbol/decimals,
    * max LTV, live borrowable, oracle price). It is server-derived: the caller
@@ -432,9 +476,19 @@ export class JupiterLendBorrowRoute {
    * Returns USD per collateral token, or null (fail closed).
    */
   async readOraclePriceUsd(collateralMint: string): Promise<number | null> {
+    const config = await this.getVaultConfig(collateralMint).catch(() => null);
+    if (!config) return null;
+    return this.readOraclePriceForConfig(config);
+  }
+
+  /**
+   * On-chain oracle read for an ALREADY-RESOLVED vault config (shared by the
+   * USDC-borrow and loop-vault paths — the config's own oracle address keeps the
+   * price in that vault's native denomination: $ for USDC vaults, SOL for loop
+   * vaults).
+   */
+  private async readOraclePriceForConfig(config: BorrowVaultConfig): Promise<number | null> {
     try {
-      const config = await this.getVaultConfig(collateralMint);
-      if (!config) return null;
       const borrow = await import("@jup-ag/lend/borrow");
       const connection = getServerConnection();
       // NOTE: do NOT pass `signer`. With a signer, the SDK routes through
@@ -610,9 +664,34 @@ export class JupiterLendBorrowRoute {
     collateralMint: string,
     positionId: number,
   ): Promise<LivePositionHealth | null> {
+    const config = await this.getVaultConfig(collateralMint).catch(() => null);
+    if (!config) return null;
+    return this.readLiveHealthForConfig(config, positionId);
+  }
+
+  /**
+   * Loop-vault variant: live health keyed by VAULT ID (never by collateral
+   * mint — JupSOL/mSOL each have several sibling vaults sharing the mint, and a
+   * mint-keyed read would query the position id in the WRONG vault, potentially
+   * reading a DIFFERENT USER's position with the same numeric id). Fail closed
+   * (null) unless the vault decodes as a WSOL-debt loop vault. All amounts are
+   * SOL-denominated (see `decodeLoopVaultConfig`).
+   */
+  async readLoopLivePositionHealth(
+    vaultId: number,
+    positionId: number,
+  ): Promise<LivePositionHealth | null> {
+    const config = await this.getLoopVaultConfig(vaultId).catch(() => null);
+    if (!config) return null;
+    return this.readLiveHealthForConfig(config, positionId);
+  }
+
+  /** Shared live-position read for an ALREADY-RESOLVED vault config. */
+  private async readLiveHealthForConfig(
+    config: BorrowVaultConfig,
+    positionId: number,
+  ): Promise<LivePositionHealth | null> {
     try {
-      const config = await this.getVaultConfig(collateralMint);
-      if (!config) return null;
       const borrow = await import("@jup-ag/lend/borrow");
       const connection = getServerConnection();
 
@@ -664,7 +743,7 @@ export class JupiterLendBorrowRoute {
         "floor",
       );
 
-      const oraclePriceUsd = await this.readOraclePriceUsd(collateralMint);
+      const oraclePriceUsd = await this.readOraclePriceForConfig(config);
       return {
         vaultId: config.vaultId,
         positionId,

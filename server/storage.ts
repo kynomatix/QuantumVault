@@ -368,14 +368,16 @@ export interface IStorage {
   // these readers expose the DB-cache/audit rows for display and the exposure
   // builder. No writers here — borrow/repay money paths are gated on owner go-ahead.
   getBorrowPosition(walletAddress: string, id: string): Promise<BorrowPosition | undefined>;
-  getBorrowPositions(walletAddress: string, tradingBotId?: string | null): Promise<BorrowPosition[]>;
-  getBorrowPositionsAllScopes(walletAddress: string): Promise<BorrowPosition[]>;
+  // kind defaults to 'borrow': classic borrow surfaces never see SOL-loop rows.
+  // The loop engine passes kind:'loop' explicitly.
+  getBorrowPositions(walletAddress: string, tradingBotId?: string | null, kind?: string): Promise<BorrowPosition[]>;
+  getBorrowPositionsAllScopes(walletAddress: string, kind?: string): Promise<BorrowPosition[]>;
   getActiveBorrowPositionsAllWallets(): Promise<BorrowPosition[]>;
   // Autonomous auto-collateral-top-up scanner support (opt-in "defend the loan").
   getAutoTopUpCandidatePositions(): Promise<{ position: BorrowPosition; bot: TradingBot }[]>;
   claimBorrowPositionAutoTopupAttempt(id: string, cooldownMs: number): Promise<BorrowPosition | null>;
   getBorrowOperations(walletAddress: string, borrowPositionId?: string | null): Promise<BorrowOperation[]>;
-  createBorrowPosition(p: { walletAddress: string; tradingBotId?: string | null; debtVenue: string; venueVaultId?: string | null; venuePositionId?: string | null; collateralAssetKey: string; collateralMint: string; collateralAmountRaw?: string; debtAssetKey?: string; debtMint: string; debtAmountRaw?: string; attributedBotId?: string | null; status?: string; }): Promise<BorrowPosition>;
+  createBorrowPosition(p: { walletAddress: string; tradingBotId?: string | null; debtVenue: string; venueVaultId?: string | null; venuePositionId?: string | null; collateralAssetKey: string; collateralMint: string; collateralAmountRaw?: string; debtAssetKey?: string; debtMint: string; debtAmountRaw?: string; attributedBotId?: string | null; status?: string; kind?: string; }): Promise<BorrowPosition>;
   updateBorrowPosition(id: string, patch: { venuePositionId?: string | null; venueVaultId?: string | null; collateralAmountRaw?: string; debtAmountRaw?: string; status?: string; attributedBotId?: string | null; healthSnapshot?: BorrowPosition['healthSnapshot']; healthAsOf?: Date | null; healthSource?: string | null; lastObservedHealthBand?: string | null; healthBandChangedAt?: Date | null; lastHealthAlertBand?: string | null; lastHealthAlertAt?: Date | null; }, ifStatus?: string): Promise<BorrowPosition | undefined>;
   createBorrowOperation(p: { walletAddress: string; borrowPositionId?: string | null; operationType: string; status?: string; step?: string | null; clientRequestId?: string | null; metadata?: Record<string, unknown> | null; }): Promise<BorrowOperation>;
   updateBorrowOperation(id: string, patch: { status?: string; step?: string | null; error?: string | null; borrowPositionId?: string | null; appendTxSignature?: string; metadata?: Record<string, unknown> | null; mergeMetadata?: Record<string, unknown>; result?: Record<string, unknown> | null; }): Promise<BorrowOperation | undefined>;
@@ -2150,23 +2152,37 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  async getBorrowPositions(walletAddress: string, tradingBotId: string | null = null): Promise<BorrowPosition[]> {
+  // kind-scoped BY DEFAULT ('borrow'): every pre-loop call site (routes, UI
+  // reads, NFT-reuse scans, carve, repay orchestrators) expects only classic
+  // borrow rows. SOL-loop rows share this table but are a different product —
+  // they must never leak into borrow UX, USDC repay paths, or NFT reuse.
+  // The loop engine passes kind:'loop' explicitly.
+  async getBorrowPositions(walletAddress: string, tradingBotId: string | null = null, kind: string = 'borrow'): Promise<BorrowPosition[]> {
     return await db.select().from(borrowPositions)
-      .where(and(eq(borrowPositions.walletAddress, walletAddress), this.borrowScopeCond(tradingBotId)))
+      .where(and(
+        eq(borrowPositions.walletAddress, walletAddress),
+        this.borrowScopeCond(tradingBotId),
+        eq(borrowPositions.kind, kind),
+      ))
       .orderBy(desc(borrowPositions.updatedAt));
   }
 
   // Every borrow row the wallet owns, across ALL scopes (account + per-bot), for
   // the read-only exposure aggregate. Grouping by scope is the caller's job.
-  async getBorrowPositionsAllScopes(walletAddress: string): Promise<BorrowPosition[]> {
+  // kind-scoped to 'borrow' by default (loop rows are not part of the borrow book).
+  async getBorrowPositionsAllScopes(walletAddress: string, kind: string = 'borrow'): Promise<BorrowPosition[]> {
     return await db.select().from(borrowPositions)
-      .where(eq(borrowPositions.walletAddress, walletAddress))
+      .where(and(eq(borrowPositions.walletAddress, walletAddress), eq(borrowPositions.kind, kind)))
       .orderBy(desc(borrowPositions.updatedAt));
   }
 
   // Platform-wide active borrow rows for the monitor (Phase C read path) and the
   // aggregate-exposure circuit-breaker input. Terminal rows ('closed' = repaid,
   // 'failed' = never opened) are excluded — they carry no live platform debt.
+  // Deliberately ALL kinds: the health monitor must watch loop rows too. Callers
+  // feeding the USDC exposure book must drop kind==='loop' rows themselves
+  // (buildBorrowExposureContext does) — SOL-denominated loop debt is not part of
+  // the dollar book and would otherwise fail the builder closed platform-wide.
   async getActiveBorrowPositionsAllWallets(): Promise<BorrowPosition[]> {
     return await db.select().from(borrowPositions)
       .where(and(ne(borrowPositions.status, 'closed'), ne(borrowPositions.status, 'failed')))
@@ -2195,6 +2211,10 @@ export class DatabaseStorage implements IStorage {
         ),
         eq(tradingBots.activeProtocol, 'flash'),
         inArray(borrowPositions.lastObservedHealthBand, ['urgent', 'liquidation']),
+        // NEVER hand a SOL-loop row to the USDC "defend the loan" machinery —
+        // it would try to defend WSOL debt with USDC. (Loops are account-scope
+        // in P2 so the bot join already excludes them; this is the hard guard.)
+        eq(borrowPositions.kind, 'borrow'),
       ));
     return rows;
   }
@@ -2248,6 +2268,7 @@ export class DatabaseStorage implements IStorage {
     debtAmountRaw?: string;
     attributedBotId?: string | null;
     status?: string;
+    kind?: string;
   }): Promise<BorrowPosition> {
     const rows = await db.insert(borrowPositions).values({
       walletAddress: p.walletAddress,
@@ -2263,6 +2284,7 @@ export class DatabaseStorage implements IStorage {
       debtAmountRaw: p.debtAmountRaw ?? '0',
       attributedBotId: p.attributedBotId ?? null,
       status: p.status ?? 'pending',
+      kind: p.kind ?? 'borrow',
     }).returning();
     return rows[0];
   }
