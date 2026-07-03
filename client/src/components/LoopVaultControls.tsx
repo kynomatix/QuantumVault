@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useConnection } from "@solana/wallet-adapter-react";
-import { Loader2, AlertTriangle, RefreshCw, Repeat, ArrowUpFromLine } from "lucide-react";
+import { Loader2, AlertTriangle, RefreshCw, Repeat, ArrowUpFromLine, Table2 } from "lucide-react";
 import { useWallet } from "@/hooks/useWallet";
 import { useToast } from "@/hooks/use-toast";
 import { isSessionError, showReconnectToast } from "@/lib/reconnect-toast";
@@ -78,6 +78,32 @@ const vaultSymbol = (venueVaultId: string | null): string => {
   return v?.symbol ?? `vault ${venueVaultId ?? "?"}`;
 };
 
+// One row of the live LST rate table (display only — the server picks).
+interface LoopRateRow {
+  vaultId: number;
+  symbol: string;
+  allowlisted: boolean;
+  stakingApy: number | null;
+  borrowApr: number | null;
+  targetLeverage: number | null;
+  noTargetReason: string | null;
+  netCarryAtTarget: number | null;
+  asOf: string | null;
+}
+
+const fmtPct = (f: number | null | undefined): string =>
+  typeof f === "number" && Number.isFinite(f) ? `${(f * 100).toFixed(2)}%` : "—";
+
+const fmtAgo = (iso: string | null): string | null => {
+  if (!iso) return null;
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const m = Math.round(ms / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  return `${Math.round(m / 60)}h ago`;
+};
+
 export default function LoopVaultControls({ active }: { active: boolean }) {
   const { toast } = useToast();
   const { retryAuth, publicKeyString } = useWallet();
@@ -91,6 +117,23 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
   // + a retry closure. For OPEN this IS the primary deposit step (principal +
   // rent + fees, deposit-framed); for close/unwind it's a small gas top-up.
   const [shortfall, setShortfall] = useState<{ requiredSol: number; heldSol: number; reason: string; kind: "open" | "fees"; retry: () => void } | null>(null);
+  const [ratesOpen, setRatesOpen] = useState(false);
+
+  // Live LST rate table — display only, fetched when the rates dialog opens.
+  const ratesQuery = useQuery<{ rates: LoopRateRow[]; recommendedVaultId: number | null } | null>({
+    queryKey: ["/api/vault/loop/rates"],
+    enabled: active && ratesOpen,
+    refetchInterval: ratesOpen ? 60000 : false,
+    queryFn: async () => {
+      const res = await fetch("/api/vault/loop/rates", {
+        credentials: "include",
+        headers: walletAuthHeaders(),
+      });
+      if (res.status === 403 || res.status === 401) return null;
+      if (!res.ok) throw new Error("Loop rates failed");
+      return await safeResponseJson(res);
+    },
+  });
 
   const statusQuery = useQuery<{
     positions: LoopRow[];
@@ -511,6 +554,15 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
                   <> — currently <span className="font-medium text-foreground">{statusQuery.data.recommended.symbol}</span></>
                 ) : null}.
               </p>
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full"
+                onClick={() => setRatesOpen(true)}
+                data-testid="button-loop-rates"
+              >
+                <Table2 className="w-3.5 h-3.5 mr-1.5" /> Compare live rates
+              </Button>
             </div>
 
             {/* --- Recovery row: only appears when TRACKED loop proceeds are
@@ -650,6 +702,115 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
               )}
             </div>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* --- Live LST rate table: display only. Same rate table + target
+          function the brain uses server-side — never a picker. --- */}
+      <Dialog open={ratesOpen} onOpenChange={setRatesOpen}>
+        <DialogContent className="max-w-md" data-testid="dialog-loop-rates">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Table2 className="w-4 h-4 text-primary" /> Live loop rates
+              <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium leading-none whitespace-nowrap bg-cyan-500/15 text-cyan-600 dark:text-cyan-400">
+                Loop
+              </span>
+            </DialogTitle>
+            <DialogDescription>
+              Every staked SOL token the platform tracks, with its staking yield and what it costs to
+              borrow SOL against it. The loop always uses the best one automatically.
+            </DialogDescription>
+          </DialogHeader>
+
+          {ratesQuery.isLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : !ratesQuery.data?.rates?.length ? (
+            <p className="text-sm text-muted-foreground py-4 text-center" data-testid="text-loop-rates-empty">
+              Live rates are unavailable right now — try again in a minute.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-4 px-3 text-[10px] uppercase tracking-wide text-muted-foreground">
+                <span>Token</span>
+                <span className="text-right w-16">Staking</span>
+                <span className="text-right w-16">Borrow</span>
+                <span className="text-right w-20">Net yield</span>
+              </div>
+              {[...ratesQuery.data.rates]
+                .sort((a, b) => {
+                  if (a.allowlisted !== b.allowlisted) return a.allowlisted ? -1 : 1;
+                  return (b.netCarryAtTarget ?? -Infinity) - (a.netCarryAtTarget ?? -Infinity);
+                })
+                .map((r) => {
+                  const isBest = r.vaultId === ratesQuery.data?.recommendedVaultId;
+                  return (
+                    <div
+                      key={r.vaultId}
+                      className={`grid grid-cols-[1fr_auto_auto_auto] gap-x-4 items-center rounded-lg px-3 py-2.5 ${
+                        isBest
+                          ? "bg-cyan-500/10 ring-1 ring-cyan-500/40"
+                          : r.allowlisted
+                            ? "bg-muted/30"
+                            : "bg-muted/20 opacity-60"
+                      }`}
+                      data-testid={`row-loop-rate-${r.symbol}`}
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div
+                          className={`w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 ${
+                            isBest ? "bg-gradient-to-br from-primary to-accent text-white" : "bg-muted text-muted-foreground"
+                          }`}
+                        >
+                          {r.symbol.slice(0, 2)}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium leading-tight truncate">{r.symbol}</p>
+                          <p className="text-[10px] leading-tight text-muted-foreground">
+                            {isBest ? (
+                              <span className="text-cyan-600 dark:text-cyan-400 font-medium">Best right now</span>
+                            ) : !r.allowlisted ? (
+                              "Watch only"
+                            ) : r.noTargetReason === "carry_nonpositive" ? (
+                              <span className="text-amber-500">Paused — yield below borrow cost</span>
+                            ) : r.targetLeverage === null ? (
+                              "No data"
+                            ) : (
+                              "Loop-ready"
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                      <span className="text-right w-16 text-sm tabular-nums text-emerald-500" data-testid={`text-rate-staking-${r.symbol}`}>
+                        {fmtPct(r.stakingApy)}
+                      </span>
+                      <span className="text-right w-16 text-sm tabular-nums text-amber-500" data-testid={`text-rate-borrow-${r.symbol}`}>
+                        {fmtPct(r.borrowApr)}
+                      </span>
+                      <span className="text-right w-20 text-sm tabular-nums font-semibold" data-testid={`text-rate-net-${r.symbol}`}>
+                        {r.targetLeverage !== null && r.netCarryAtTarget !== null ? (
+                          <>
+                            {fmtPct(r.netCarryAtTarget)}
+                            <span className="block text-[10px] font-normal text-muted-foreground">at {r.targetLeverage.toFixed(1)}x</span>
+                          </>
+                        ) : (
+                          "—"
+                        )}
+                      </span>
+                    </div>
+                  );
+                })}
+              <p className="text-[11px] text-muted-foreground px-1 pt-1" data-testid="text-loop-rates-footnote">
+                Net yield = staking yield on the whole looped position minus borrow cost on the debt, at the
+                safe auto-leverage for that token.
+                {(() => {
+                  const ago = fmtAgo(ratesQuery.data?.rates?.find((r) => r.asOf)?.asOf ?? null);
+                  return ago ? <> Updated {ago}.</> : null;
+                })()}
+              </p>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
 

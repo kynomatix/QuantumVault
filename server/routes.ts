@@ -1517,7 +1517,7 @@ import { runBorrowHealthScan } from "./vault/borrow-health-monitor";
 import { runLoopSafetyTick, buildLoopSafetyDeps } from "./vault/loop/loop-safety-tick";
 import { runLoopAllocationTick, buildLoopAllocationDeps } from "./vault/loop/loop-allocation-tick";
 import { computeTickCoverage, summarizeDecisionsForGate } from "./vault/loop/loop-status";
-import { getFreshLoopRates, pickBestLoopVault, sampleAndPersistLoopRates } from "./vault/loop/loop-rate-oracle";
+import { getFreshLoopRates, pickBestLoopVault, sampleAndPersistLoopRates, LOOP_RATE_REGISTRY, netCarryAt } from "./vault/loop/loop-rate-oracle";
 import { planPerbotCarve, runPerbotCarveOpen, runPerbotUnwindClose, selectBlockingBotPositions, resolveDisplayPrincipalRaw, runPerbotCollateralTopUp, runPerbotGrowLoan, runPerbotRemoveCollateral } from "./vault/jupiter-lend-perbot-carve";
 import { computePerBotPositionHealth, summarizeBotBorrowHealth, derivePerbotTopUpSuggestion, derivePerbotRemovableSpare, defaultRowHealthDeps, BAND_SEVERITY } from "./vault/borrow-health";
 import { PERBOT_CARVE_DEFAULT_TARGET_LTV } from "./vault/borrow-risk-policy";
@@ -10149,6 +10149,61 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       res.json({ positions, recommended });
     } catch (error: any) {
       console.error("[Loop] status error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // Live LST rate table for the loop dialog — DISPLAY ONLY. Lists every
+  // tracked pair (including non-allowlisted telemetry pairs, marked as such)
+  // with its staking yield, borrow APY, and the net yield at that vault's own
+  // dynamic target leverage — the SAME rate table + target function the brain
+  // and the open route use, never a second objective. Read-only: null cells
+  // render as "—" client-side; nothing here sizes or opens anything.
+  app.get("/api/vault/loop/rates", requireWallet, async (req, res) => {
+    try {
+      if (!requireLoopOwner(req, res)) return;
+
+      let fresh = await getFreshLoopRates(LOOP_ALLOCATION_POLICY.rateStalenessMs);
+      // Empty table (e.g. fresh boot before the hourly tick) → one on-demand
+      // sample, same as the open route. Still display-only if it fails.
+      if (fresh.size === 0) {
+        await sampleAndPersistLoopRates().catch(() => undefined);
+        fresh = await getFreshLoopRates(LOOP_ALLOCATION_POLICY.rateStalenessMs);
+      }
+      const recommended = pickBestLoopVault(
+        fresh,
+        Object.keys(LOOP_VAULT_ALLOWLIST).map(Number),
+      );
+      const rates = LOOP_RATE_REGISTRY.map((pair) => {
+        const r = fresh.get(pair.vaultId);
+        const allowlisted = !!LOOP_VAULT_ALLOWLIST[pair.vaultId];
+        const target = allowlisted && r
+          ? computeLoopTargetLeverage({
+              vaultId: pair.vaultId,
+              liquidationThreshold: r.liquidationThreshold,
+              stakingApy: r.stakingApy,
+              borrowApr: r.borrowApr,
+            })
+          : null;
+        return {
+          vaultId: pair.vaultId,
+          symbol: pair.symbol,
+          allowlisted,
+          stakingApy: r?.stakingApy ?? null,
+          borrowApr: r?.borrowApr ?? null,
+          targetLeverage: target?.leverage ?? null,
+          // Why no target (display copy only): carry_nonpositive => "paused",
+          // lt_unreadable / rates_unreadable => "no data".
+          noTargetReason: target && target.leverage === null ? target.reason : null,
+          netCarryAtTarget: target?.leverage != null && r
+            ? netCarryAt(r.stakingApy, r.borrowApr, target.leverage)
+            : null,
+          asOf: r ? r.asOf.toISOString() : null,
+        };
+      });
+      res.json({ rates, recommendedVaultId: recommended?.vaultId ?? null });
+    } catch (error: any) {
+      console.error("[Loop] rates error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
     }
   });
