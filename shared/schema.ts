@@ -515,6 +515,19 @@ export const borrowPositions = pgTable("borrow_positions", {
   // succeeds once per cooldown window, so a still-urgent loan can't re-fire every
   // scan tick. NULL = never auto-attempted.
   lastAutoTopupAttemptAt: timestamp("last_auto_topup_attempt_at"),
+  // SOL Loop Vault P3 brain state (kind='loop' rows ONLY; null on borrow rows).
+  // 'levered' = carries WSOL debt (numeric HF, safety-tick eligible);
+  // 'holding' = collateral stays SUPPLIED with ZERO debt (HF null — must NEVER
+  // be fed to keeper decideDeleverage). Transitions are ONLY written by the
+  // executor legs after on-chain verification, with the deciding reason.
+  policyState: text("policy_state"),
+  policyReason: text("policy_reason"),
+  policyStateChangedAt: timestamp("policy_state_changed_at"),
+  // SOL Loop Vault P3 safety-tick throttle (kind='loop' rows). Stamped by the
+  // atomic per-position claim before an autonomous reduce/unwind attempt, so a
+  // still-unhealthy loop re-fires at most once per cooldown window (mirrors
+  // lastAutoTopupAttemptAt on borrow rows). NULL = never policy-acted.
+  lastPolicyActionAt: timestamp("last_policy_action_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
@@ -623,6 +636,104 @@ export const insertYieldApyCacheSchema = createInsertSchema(yieldApyCache).omit(
 });
 export type InsertYieldApyCache = z.infer<typeof insertYieldApyCacheSchema>;
 export type YieldApyCache = typeof yieldApyCache.$inferSelect;
+
+// SOL Loop Vault P3: hourly rate telemetry for the allocation tick. One row per
+// (vault_id, sample time) — staking APY from DeFiLlama, WSOL borrow APR +
+// withdraw-side utilization from the Jupiter Lend vaults API. All rate columns
+// are FRACTIONS (0.08 = 8%), matching BorrowVaultConfig conventions; nullable
+// per-field so a partial upstream outage still records what WAS readable (the
+// allocation policy fails closed on nulls at read time). Display/telemetry +
+// policy input — never a direct money gate; money paths re-read live. Rows are
+// pruned past a bounded retention window (memory/disk hygiene).
+export const loopRateSamples = pgTable("loop_rate_samples", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  // Jupiter Lend Multiply vault id (registry-pinned; symbol asserted at sample time).
+  vaultId: integer("vault_id").notNull(),
+  symbol: text("symbol").notNull(),
+  // LST staking APY (fraction) from DeFiLlama; null = upstream unreadable this sample.
+  stakingApy: decimal("staking_apy", { precision: 12, scale: 8 }),
+  // Trailing 30d mean of the staking APY (fraction); smoother EV input when present.
+  stakingApyMean30d: decimal("staking_apy_mean_30d", { precision: 12, scale: 8 }),
+  // Vault WSOL borrow APR (fraction) from the lend vaults API.
+  borrowApr: decimal("borrow_apr", { precision: 12, scale: 8 }),
+  // Per-vault withdraw-side utilization (fraction 0..1); predicts unwind blockage.
+  withdrawUtilization: decimal("withdraw_utilization", { precision: 8, scale: 6 }),
+  // Net carry at the reference 2x leverage: staking×2 − borrow×1 (fraction).
+  // Derivable from the two rate columns; materialized so the P3 gate check and
+  // admin views are one SQL pass with no app-side math.
+  netCarry2x: decimal("net_carry_2x", { precision: 12, scale: 8 }),
+  asOf: timestamp("as_of").defaultNow().notNull(),
+}, (table) => ({
+  // Latest-per-vault and trailing-window reads scan one vault's series by time.
+  vaultTimeIdx: index("idx_loop_rate_samples_vault_time").on(table.vaultId, table.asOf),
+}));
+
+export const insertLoopRateSampleSchema = createInsertSchema(loopRateSamples).omit({
+  id: true,
+  asOf: true,
+});
+export type InsertLoopRateSample = z.infer<typeof insertLoopRateSampleSchema>;
+export type LoopRateSample = typeof loopRateSamples.$inferSelect;
+
+// SOL Loop Vault P3: append-only decision journal for the policy brain. EVERY
+// tick evaluation persists one row — including outcome 'none' — so hysteresis
+// streaks are derived from the last N rows in DB (survives restarts, no
+// separate counter to desync) and the P3 observation gate is one SQL pass.
+// Audit/telemetry only: rows are never a money gate; executors re-read live.
+export const loopPolicyDecisions = pgTable("loop_policy_decisions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: text("wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  // Null when the decision is not about one specific position (e.g. a re-lever
+  // considered while flat, or a tick-level refusal such as stale rates).
+  borrowPositionId: varchar("borrow_position_id"),
+  vaultId: integer("vault_id").notNull(),
+  // Which cadence produced it: 'safety' (60s reflex) | 'allocation' (~hourly EV).
+  tick: text("tick").notNull(),
+  // 'none' | 'reduce' | 'unwind_to_hold' | 'relever' | 'close' — what the policy
+  // chose (NOT necessarily what executed; details carries the execution result).
+  action: text("action").notNull(),
+  // Fraction of the position the action applies to (reduce steps), null otherwise.
+  fraction: decimal("fraction", { precision: 8, scale: 6 }),
+  reason: text("reason").notNull(),
+  // Free-form inputs snapshot: carry numbers, health factor, rate-sample age,
+  // execution outcome (opId/signature/error) — whatever made the decision auditable.
+  details: jsonb("details"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  // Hysteresis + gate checks scan one vault's recent decisions by time.
+  vaultTimeIdx: index("idx_loop_policy_decisions_vault_time").on(table.vaultId, table.createdAt),
+  walletIdx: index("idx_loop_policy_decisions_wallet").on(table.walletAddress),
+}));
+
+export const insertLoopPolicyDecisionSchema = createInsertSchema(loopPolicyDecisions).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertLoopPolicyDecision = z.infer<typeof insertLoopPolicyDecisionSchema>;
+export type LoopPolicyDecision = typeof loopPolicyDecisions.$inferSelect;
+
+// SOL Loop Vault P3 gate instrumentation: one row per completed tick pass so
+// the observation-week gate can measure expected-vs-actual tick coverage from
+// DB alone (decision rows only exist when there are candidates; heartbeats
+// exist even when the platform holds zero loop positions). Telemetry only.
+export const loopTickHeartbeats = pgTable("loop_tick_heartbeats", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  // Which cadence beat: 'safety' (60s reflex scan) | 'allocation' (~hourly EV).
+  tick: text("tick").notNull(),
+  evaluated: integer("evaluated").notNull().default(0),
+  acted: integer("acted").notNull().default(0),
+  failed: integer("failed").notNull().default(0),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  tickTimeIdx: index("idx_loop_tick_heartbeats_tick_time").on(table.tick, table.createdAt),
+}));
+
+export const insertLoopTickHeartbeatSchema = createInsertSchema(loopTickHeartbeats).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertLoopTickHeartbeat = z.infer<typeof insertLoopTickHeartbeatSchema>;
+export type LoopTickHeartbeat = typeof loopTickHeartbeats.$inferSelect;
 
 export const webhookLogs = pgTable("webhook_logs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),

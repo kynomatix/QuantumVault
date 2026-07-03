@@ -376,6 +376,91 @@ export async function sendAutoTopUpNotification(
   }
 }
 
+export interface LoopSafetyNotification {
+  /** Loop collateral symbol, e.g. "JupSOL" (escaped before send). */
+  symbol: string;
+  /** What the policy tick did (or tried to do). */
+  action: "reduce" | "unwind_to_hold" | "relever";
+  /** True when the action landed on-chain; false = it needs the owner's eyes. */
+  ok: boolean;
+  /** The policy reason that triggered the action (escaped before send). */
+  reason: string;
+  /** Failure detail (error text), failure path only. */
+  detail?: string | null;
+}
+
+function formatLoopSafetyMessage(n: LoopSafetyNotification): { title: string; body: string } {
+  const symbol = escapeTelegramHtml(n.symbol);
+  const reason = escapeTelegramHtml(n.reason);
+  // Title-Case labels per owner preference.
+  if (n.ok) {
+    if (n.action === "unwind_to_hold") {
+      return {
+        title: '🛡️ Loop Unwound To Hold',
+        body: `We fully unwound your ${symbol} loop to unleveraged holding to protect it (${reason}). Your ${symbol} stays supplied and earning — no debt remains.`,
+      };
+    }
+    if (n.action === "relever") {
+      return {
+        title: '📈 Loop Re-Levered',
+        body: `Rates turned favorable again (${reason}), so we re-levered your ${symbol} loop to earn the boosted yield. We keep watching it every minute.`,
+      };
+    }
+    return {
+      title: '🛡️ Loop Position Reduced',
+      body: `We trimmed your ${symbol} loop to protect it (${reason}). The loop stays open at lower leverage.`,
+    };
+  }
+  const detail = n.detail ? `: ${escapeTelegramHtml(n.detail)}` : '';
+  const actionLabel =
+    n.action === "unwind_to_hold" ? "fully unwind" : n.action === "relever" ? "re-lever" : "reduce";
+  return {
+    title: '⚠️ Loop Safety Action Needs Attention',
+    body: `We tried to ${actionLabel} your ${symbol} loop (${reason}) but it didn't complete${detail}. We'll retry automatically; you can also unwind it manually.`,
+  };
+}
+
+/**
+ * Send a SOL Loop Vault safety-tick outcome to the owner's Telegram. Same
+ * recipient gating + tri-state result as the borrow-health alerts. Best-effort;
+ * never throws — a delivery failure must never block or falsify the reflex.
+ */
+export async function sendLoopSafetyNotification(
+  walletAddress: string | undefined | null,
+  notification: LoopSafetyNotification,
+): Promise<BorrowHealthNotifyResult> {
+  try {
+    if (!walletAddress) return "skipped";
+
+    const [wallet] = await db
+      .select()
+      .from(wallets)
+      .where(eq(wallets.address, walletAddress))
+      .limit(1);
+
+    if (!wallet) return "skipped";
+    if (!wallet.notificationsEnabled) return "skipped";
+    if (!wallet.telegramChatId) return "skipped";
+
+    const { title, body } = formatLoopSafetyMessage(notification);
+    const message = `<b>${title}</b>\n${body}`;
+
+    const success = await sendTelegramMessage(
+      wallet.telegramChatId,
+      message,
+      buildDefaultInlineKeyboard(),
+    );
+    if (success) {
+      console.log(`[Notifications] Sent loop-safety (${notification.action}, ${notification.ok ? 'ok' : 'attention'}) alert to ${walletAddress}`);
+      return "sent";
+    }
+    return "failed";
+  } catch (error) {
+    console.error('[Notifications] Error sending loop-safety notification:', error);
+    return "failed";
+  }
+}
+
 function formatNotificationMessage(notification: TradeNotification): { title: string; body: string } {
   const { type, size, price, pnl } = notification;
   // Escape user/creator-derived values (bot names, symbols, error text) before

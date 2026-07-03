@@ -39,6 +39,7 @@ import {
   type BorrowHealthNotifyResult,
 } from "../notification-service";
 import type { BorrowPosition } from "@shared/schema";
+import type { LoopHealthObservation } from "./loop/loop-safety-tick";
 
 /**
  * Anti-flap: only LOWER the alert baseline (so a re-worsening can re-alert) once
@@ -260,7 +261,7 @@ function defaultDeps(): BorrowHealthScanDeps {
  */
 export async function runBorrowHealthScan(
   overrides?: Partial<BorrowHealthScanDeps>,
-): Promise<{ scanned: number; alerted: number; failed: number }> {
+): Promise<{ scanned: number; alerted: number; failed: number; loopObservations: LoopHealthObservation[] }> {
   const deps: BorrowHealthScanDeps = { ...defaultDeps(), ...overrides };
 
   let rows: BorrowPosition[];
@@ -268,17 +269,26 @@ export async function runBorrowHealthScan(
     rows = await deps.getActiveBorrowPositions();
   } catch (err) {
     console.error("[BorrowHealthMonitor] could not list active positions:", err);
-    return { scanned: 0, alerted: 0, failed: 0 };
+    return { scanned: 0, alerted: 0, failed: 0, loopObservations: [] };
   }
 
   const cfgCache = new Map<string, BorrowVaultConfig | null>();
   const now = deps.now();
   let alerted = 0;
   let failed = 0;
+  // SOL Loop Vault P3: the safety-tick reflex rides THIS scan (no second
+  // scanner). Collect every open loop row's health observation immediately
+  // after the read, BEFORE alert/persist — a Telegram or persist failure must
+  // never starve the deleverage reflex of a valid health reading. The caller
+  // runs the reflex AFTER this whole persist loop, same tick, same guard.
+  const loopObservations: LoopHealthObservation[] = [];
 
   for (const row of rows) {
     try {
       const health = await deps.computeRowHealth(row, cfgCache);
+      if ((row.kind ?? "borrow") === "loop" && row.status === "open") {
+        loopObservations.push({ row, health });
+      }
       const prev: HealthAlertPersistedState = {
         lastHealthAlertBand: parseBand(row.lastHealthAlertBand),
         lastHealthAlertAt: row.lastHealthAlertAt ?? null,
@@ -328,5 +338,5 @@ export async function runBorrowHealthScan(
       `[BorrowHealthMonitor] scan complete: scanned=${rows.length} alerted=${alerted} failed=${failed}`,
     );
   }
-  return { scanned: rows.length, alerted, failed };
+  return { scanned: rows.length, alerted, failed, loopObservations };
 }

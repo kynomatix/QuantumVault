@@ -1510,10 +1510,14 @@ import { previewBorrowEligibility } from "./vault/borrow-eligibility";
 import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { isBorrowEligibleWallet, isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, repayPartialOnExistingBotPosition, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
-import { executeLoopOpen, executeLoopClose, executeLoopPartialUnwind } from "./vault/loop/loop-executor";
-import { LOOP_VAULT_ALLOWLIST, LOOP_RISK_POLICY } from "./vault/loop/loop-risk-policy";
+import { executeLoopOpen, executeLoopClose, executeLoopPartialUnwind, executeLoopDeleverToHold } from "./vault/loop/loop-executor";
+import { LOOP_VAULT_ALLOWLIST, LOOP_RISK_POLICY, LOOP_ALLOCATION_POLICY } from "./vault/loop/loop-risk-policy";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
 import { runBorrowHealthScan } from "./vault/borrow-health-monitor";
+import { runLoopSafetyTick, buildLoopSafetyDeps } from "./vault/loop/loop-safety-tick";
+import { runLoopAllocationTick, buildLoopAllocationDeps } from "./vault/loop/loop-allocation-tick";
+import { computeTickCoverage, summarizeDecisionsForGate } from "./vault/loop/loop-status";
+import { getFreshLoopRates } from "./vault/loop/loop-rate-oracle";
 import { planPerbotCarve, runPerbotCarveOpen, runPerbotUnwindClose, selectBlockingBotPositions, resolveDisplayPrincipalRaw, runPerbotCollateralTopUp, runPerbotGrowLoan, runPerbotRemoveCollateral } from "./vault/jupiter-lend-perbot-carve";
 import { computePerBotPositionHealth, summarizeBotBorrowHealth, derivePerbotTopUpSuggestion, derivePerbotRemovableSpare, defaultRowHealthDeps, BAND_SEVERITY } from "./vault/borrow-health";
 import { PERBOT_CARVE_DEFAULT_TARGET_LTV } from "./vault/borrow-risk-policy";
@@ -5749,16 +5753,98 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // Read-only + notification only; fail-closed per row, never throws out.
   // In-flight guard: a slow scan must never overlap the next tick (an overlap
   // could read a stale baseline and double-fire the same band).
+  //
+  // SOL Loop Vault P3 SAFETY reflex rides this SAME tick (plan §4.4 — NO second
+  // scanner): the scan hands back the loop rows' health observations, and the
+  // reflex runs AFTER the scan inside the SAME in-flight guard, so alerting and
+  // autonomous deleverage can never overlap or double-read the chain.
+  //
+  // Autonomous signing for the reflex: execution-wrapped UMK (getUmkForWebhook,
+  // gated on executionEnabled + emergency stop) → ACCOUNT vault scope key
+  // (loops live on the main agent wallet). Keys are wiped in finally blocks.
+  async function resolveLoopSafetySigner(
+    walletAddress: string,
+  ): Promise<{ agentPublicKey: string; secretKey: Uint8Array; cleanup: () => void } | null> {
+    const wallet = await storage.getWallet(walletAddress);
+    if (!wallet) return null;
+    const umkResult = await getUmkForWebhook(walletAddress);
+    if (!umkResult) return null; // execution disabled / emergency stop / no wrapped UMK
+    try {
+      const resolved = await resolveVaultScope(walletAddress, wallet, null);
+      if (!resolved.ok || !resolved.scope.agentPublicKey) return null;
+      const keyResult = await decryptVaultScopeKey(resolved.scope, walletAddress, wallet, umkResult.umk);
+      if (!keyResult) return null;
+      return { agentPublicKey: resolved.scope.agentPublicKey, secretKey: keyResult.secretKey, cleanup: keyResult.cleanup };
+    } finally {
+      umkResult.cleanup();
+    }
+  }
+  const loopSafetyDeps = buildLoopSafetyDeps(resolveLoopSafetySigner);
+
   let borrowHealthScanInFlight = false;
   setInterval(() => {
     if (borrowHealthScanInFlight) return;
     borrowHealthScanInFlight = true;
-    runBorrowHealthScan()
+    (async () => {
+      const scan = await runBorrowHealthScan();
+      let safetyTickResult: { acted: number; failed: number } | null = null;
+      if (scan.loopObservations.length > 0) {
+        safetyTickResult = await runLoopSafetyTick(scan.loopObservations, loopSafetyDeps);
+      }
+      // T106 heartbeat: EVERY completed scan pass (even with zero loop
+      // positions) so the observation gate can measure tick coverage from DB.
+      // Fail-soft — telemetry must never break the reflex.
+      await storage.insertLoopTickHeartbeat({
+        tick: "safety",
+        evaluated: scan.loopObservations.length,
+        acted: safetyTickResult?.acted ?? 0,
+        failed: safetyTickResult?.failed ?? 0,
+      }).catch((e) => console.warn('[LoopSafetyTick] heartbeat write failed:', e instanceof Error ? e.message : e));
+    })()
       .catch((e) => console.error('[BorrowHealthMonitor] scan error:', e))
       .finally(() => {
         borrowHealthScanInFlight = false;
       });
   }, 60 * 1000);
+
+  // SOL Loop Vault ALLOCATION tick (plan §4.4) — the slow ~hourly EV brain
+  // that owns LEVERED↔HOLD (hysteresis + cooldown inside the tick). Reuses the
+  // safety tick's signer resolution; its OWN in-flight flag + interval so the
+  // 60s reflex above is never delayed by an hourly pass. Same claim column
+  // gives mutual exclusion between the two ticks per position.
+  const loopAllocationDeps = buildLoopAllocationDeps(resolveLoopSafetySigner);
+  const allocTickMsRaw = Number(process.env.LOOP_ALLOCATION_TICK_MS);
+  const allocTickMs = Number.isFinite(allocTickMsRaw) && allocTickMsRaw > 0
+    ? Math.max(allocTickMsRaw, 5 * 60 * 1000) // clamp: never faster than 5 min
+    : 60 * 60 * 1000;
+  let loopAllocationInFlight = false;
+  const runAllocationPass = () => {
+    if (loopAllocationInFlight) return;
+    loopAllocationInFlight = true;
+    runLoopAllocationTick(loopAllocationDeps)
+      .then(async (result) => {
+        // T106 heartbeat + bounded retention (fail-soft; tick already succeeded).
+        try {
+          await storage.insertLoopTickHeartbeat({
+            tick: "allocation",
+            evaluated: result.evaluated,
+            acted: result.acted,
+            failed: result.failed,
+          });
+          await storage.pruneLoopTickHeartbeats(new Date(Date.now() - 14 * 24 * 60 * 60 * 1000));
+        } catch (e) {
+          console.warn('[LoopAllocationTick] heartbeat write failed:', e instanceof Error ? e.message : e);
+        }
+      })
+      .catch((e) => console.error('[LoopAllocationTick] pass error:', e))
+      .finally(() => {
+        loopAllocationInFlight = false;
+      });
+  };
+  setInterval(runAllocationPass, allocTickMs);
+  // One early pass shortly after boot so a restart never leaves positions
+  // unassessed for a full hour (rates sample inside the tick itself).
+  setTimeout(runAllocationPass, 60 * 1000);
 
   // Emergency admin stop - immediately disables all execution for a wallet
   // Requires ADMIN_SECRET environment variable for authorization
@@ -9940,6 +10026,51 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       res.json(result);
     } catch (error: any) {
       console.error("[Loop] unwind error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // DELEVER TO HOLD (P3): clear ALL debt in one atomic tx, keep the remaining
+  // LST supplied, stamp policyState='holding'. Body: { borrowPositionId,
+  // sessionId, slippageBps?, clientRequestId?, policyReason? }
+  app.post("/api/vault/loop/delever", requireWallet, async (req, res) => {
+    try {
+      if (!requireLoopOwner(req, res)) return;
+
+      const { borrowPositionId, clientRequestId, policyReason } = req.body || {};
+      if (!borrowPositionId || typeof borrowPositionId !== "string") {
+        return res.status(400).json({ error: "borrowPositionId required" });
+      }
+      const slip = parseLoopSlippage(req.body?.slippageBps);
+      if (slip && typeof slip === "object") return res.status(400).json(slip);
+
+      const ctx = await resolveLoopAgentKey(req, res);
+      if (!ctx) return;
+
+      let result;
+      try {
+        result = await executeLoopDeleverToHold({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: ctx.scope.agentPublicKey,
+          agentSecretKey: ctx.agentKeyResult.secretKey,
+          borrowPositionId,
+          slippageBps: slip as number | undefined,
+          ...(typeof clientRequestId === "string" && clientRequestId ? { clientRequestId } : {}),
+          ...(typeof policyReason === "string" && policyReason ? { policyReason } : {}),
+        });
+      } finally {
+        ctx.agentKeyResult.cleanup();
+      }
+
+      if (!result || !result.success) {
+        return res.status(400).json({
+          error: result?.error || "Loop delever failed",
+          ...(result?.gasShortfall ? { gasShortfall: result.gasShortfall } : {}),
+        });
+      }
+      res.json(result);
+    } catch (error: any) {
+      console.error("[Loop] delever error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
     }
   });
@@ -22651,6 +22782,110 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to read lab status" });
+    }
+  });
+
+  // SOL Loop Vault P3 (T106): observation-gate status. One call answers the
+  // §5 gate: are BOTH ticks actually beating (expected-vs-actual coverage +
+  // max silent gap), what is each open loop's brain state + last decision,
+  // what is the current carry, and has a forced deleverage been observed.
+  // Read-only telemetry — never a money gate.
+  app.get("/api/admin/loop/status", requireAdminAuth, async (_req, res) => {
+    try {
+      const now = new Date();
+      const windowMs = 24 * 60 * 60 * 1000;
+      const since = new Date(now.getTime() - windowMs);
+      const safetyIntervalMs = 60 * 1000;
+
+      const [safetyBeats, allocationBeats, decisions, allPositions, freshRates] = await Promise.all([
+        storage.listLoopTickHeartbeatsSince("safety", since),
+        storage.listLoopTickHeartbeatsSince("allocation", since),
+        storage.listLoopPolicyDecisionsSince(since, 500),
+        storage.getActiveBorrowPositionsAllWallets(),
+        getFreshLoopRates(LOOP_ALLOCATION_POLICY.rateStalenessMs),
+      ]);
+
+      // Allowed gap = 5 intervals: tolerates a deploy restart (~2 min pause)
+      // without letting a genuinely dead scheduler pass.
+      const safetyCoverage = computeTickCoverage({
+        beatsAsc: safetyBeats.map((b) => b.createdAt),
+        intervalMs: safetyIntervalMs,
+        windowMs,
+        allowedGapMs: 5 * safetyIntervalMs,
+        now,
+      });
+      const allocationCoverage = computeTickCoverage({
+        beatsAsc: allocationBeats.map((b) => b.createdAt),
+        intervalMs: allocTickMs,
+        windowMs,
+        allowedGapMs: 5 * allocTickMs,
+        now,
+      });
+
+      const gateSummary = summarizeDecisionsForGate(decisions);
+
+      const loopRows = allPositions.filter((p) => p.kind === "loop");
+      const positions = loopRows.map((p) => {
+        const last = decisions.find((d) => d.borrowPositionId === p.id);
+        const vaultId = Number(p.venueVaultId);
+        return {
+          id: p.id,
+          wallet: `${p.walletAddress.slice(0, 4)}…${p.walletAddress.slice(-4)}`,
+          vaultId,
+          symbol: LOOP_VAULT_ALLOWLIST[vaultId]?.symbol ?? `vault ${p.venueVaultId}`,
+          policyState: p.policyState,
+          policyReason: p.policyReason,
+          policyStateChangedAt: p.policyStateChangedAt,
+          lastPolicyActionAt: p.lastPolicyActionAt,
+          lastDecision: last ? {
+            tick: last.tick,
+            action: last.action,
+            reason: last.reason,
+            executed: (last.details as Record<string, unknown> | null)?.executed === true,
+            at: last.createdAt,
+          } : null,
+        };
+      });
+
+      const carry = Array.from(freshRates.values()).map((r) => ({
+        vaultId: r.vaultId,
+        symbol: r.symbol,
+        stakingApy: r.stakingApy,
+        borrowApr: r.borrowApr,
+        netCarry2x: r.netCarry2x,
+        asOf: r.asOf,
+      }));
+
+      const recentDecisions = decisions.slice(0, 50).map((d) => ({
+        at: d.createdAt,
+        tick: d.tick,
+        action: d.action,
+        vaultId: d.vaultId,
+        borrowPositionId: d.borrowPositionId,
+        reason: d.reason,
+        executed: (d.details as Record<string, unknown> | null)?.executed === true,
+      }));
+
+      res.json({
+        now,
+        windowHours: 24,
+        ticks: {
+          safety: { intervalMs: safetyIntervalMs, ...safetyCoverage },
+          allocation: { intervalMs: allocTickMs, ...allocationCoverage },
+        },
+        openLoopPositions: positions,
+        carry,
+        decisions: { window: gateSummary, recent: recentDecisions },
+        gate: {
+          safetyCoverageOk: safetyCoverage.ok,
+          allocationCoverageOk: allocationCoverage.ok,
+          executedMissingAnchor: gateSummary.executedMissingAnchor,
+          forcedDeleverageSeen: gateSummary.forcedDeleverageSeen,
+          ok: safetyCoverage.ok && allocationCoverage.ok && gateSummary.executedMissingAnchor === 0,
+        },
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to read loop status" });
     }
   });
 

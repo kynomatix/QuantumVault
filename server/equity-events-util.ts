@@ -13,9 +13,16 @@
 // `repay` pays that liability down. Both carry a positive `amount`, so counting
 // either would inflate net-deposited and read as a false PnL swing. They belong
 // in the history feed + tax export but never in the deposit denominator.
+// SOL Loop Vault events are the same hazard class: loop_open moves wallet SOL
+// into SUPPLIED collateral, loop_close / loop_unwind / loop_delever_hold bring
+// it back — internal reallocations inside the SAME wallet (and SOL-denominated,
+// not USDC), never external deposits or withdrawals. History + tax export only.
 // UPDATE THIS SET when adding any new vault-internal (cash<->yield) or
 // liability (cash<->debt) event type, or it will silently be counted as a deposit.
-export const VAULT_INTERNAL_EVENT_TYPES = new Set<string>(['vault_park', 'vault_unpark', 'borrow', 'repay']);
+export const VAULT_INTERNAL_EVENT_TYPES = new Set<string>([
+  'vault_park', 'vault_unpark', 'borrow', 'repay',
+  'loop_open', 'loop_close', 'loop_unwind', 'loop_delever_hold', 'loop_relever',
+]);
 
 export function isVaultInternalEvent(eventType: string | null | undefined): boolean {
   return eventType != null && VAULT_INTERNAL_EVENT_TYPES.has(eventType);

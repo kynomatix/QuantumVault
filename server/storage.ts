@@ -1,4 +1,4 @@
-import { eq, ne, desc, sql, and, or, ilike, gte, lte, lt, inArray, isNotNull, isNull } from "drizzle-orm";
+import { eq, ne, desc, asc, sql, and, or, ilike, gte, lte, lt, inArray, isNotNull, isNull } from "drizzle-orm";
 import { createHash, randomBytes } from "crypto";
 import { vaultLockKey as computeVaultLockKey } from "./vault/scope";
 import { db } from "./db";
@@ -19,6 +19,9 @@ import {
   borrowOperations,
   yieldPriceSnapshots,
   yieldApyCache,
+  loopRateSamples,
+  loopPolicyDecisions,
+  loopTickHeartbeats,
   webhookLogs,
   subscriptions,
   portfolios,
@@ -59,6 +62,12 @@ import {
   type InsertYieldPriceSnapshot,
   type YieldApyCache,
   type InsertYieldApyCache,
+  type LoopRateSample,
+  type InsertLoopRateSample,
+  type LoopPolicyDecision,
+  type InsertLoopPolicyDecision,
+  type LoopTickHeartbeat,
+  type InsertLoopTickHeartbeat,
   type WebhookLog,
   type InsertWebhookLog,
   type Subscription,
@@ -376,6 +385,7 @@ export interface IStorage {
   // Autonomous auto-collateral-top-up scanner support (opt-in "defend the loan").
   getAutoTopUpCandidatePositions(): Promise<{ position: BorrowPosition; bot: TradingBot }[]>;
   claimBorrowPositionAutoTopupAttempt(id: string, cooldownMs: number): Promise<BorrowPosition | null>;
+  claimBorrowPositionPolicyAction(id: string, cooldownMs: number): Promise<BorrowPosition | null>;
   getBorrowOperations(walletAddress: string, borrowPositionId?: string | null): Promise<BorrowOperation[]>;
   createBorrowPosition(p: { walletAddress: string; tradingBotId?: string | null; debtVenue: string; venueVaultId?: string | null; venuePositionId?: string | null; collateralAssetKey: string; collateralMint: string; collateralAmountRaw?: string; debtAssetKey?: string; debtMint: string; debtAmountRaw?: string; attributedBotId?: string | null; status?: string; kind?: string; }): Promise<BorrowPosition>;
   updateBorrowPosition(id: string, patch: { venuePositionId?: string | null; venueVaultId?: string | null; collateralAmountRaw?: string; debtAmountRaw?: string; status?: string; attributedBotId?: string | null; healthSnapshot?: BorrowPosition['healthSnapshot']; healthAsOf?: Date | null; healthSource?: string | null; lastObservedHealthBand?: string | null; healthBandChangedAt?: Date | null; lastHealthAlertBand?: string | null; lastHealthAlertAt?: Date | null; }, ifStatus?: string): Promise<BorrowPosition | undefined>;
@@ -392,6 +402,23 @@ export interface IStorage {
   pruneYieldPriceSnapshots(olderThan: Date): Promise<void>;
   upsertYieldApyCache(row: InsertYieldApyCache): Promise<void>;
   getYieldApyCacheAll(): Promise<YieldApyCache[]>;
+  // SOL Loop Vault P3: rate telemetry samples (allocation-tick input).
+  insertLoopRateSamples(rows: InsertLoopRateSample[]): Promise<void>;
+  // Newest persisted sample per vault id, at or after `since` (staleness gate at caller).
+  getLatestLoopRateSamples(since: Date): Promise<LoopRateSample[]>;
+  // One vault's series at or after `since`, oldest first (trailing-window smoothing).
+  getLoopRateSamples(vaultId: number, since: Date): Promise<LoopRateSample[]>;
+  pruneLoopRateSamples(olderThan: Date): Promise<void>;
+  // SOL Loop Vault P3: append-only policy decision journal (audit + hysteresis).
+  insertLoopPolicyDecision(d: InsertLoopPolicyDecision): Promise<LoopPolicyDecision>;
+  // Newest first; optional tick filter. Hysteresis reads the last N for one vault+wallet.
+  getRecentLoopPolicyDecisions(opts: { walletAddress: string; vaultId: number; tick?: string; borrowPositionId?: string; limit: number }): Promise<LoopPolicyDecision[]>;
+  pruneLoopPolicyDecisions(olderThan: Date): Promise<void>;
+  // T106 gate instrumentation: cross-wallet decision window + tick heartbeats.
+  listLoopPolicyDecisionsSince(since: Date, limit: number): Promise<LoopPolicyDecision[]>;
+  insertLoopTickHeartbeat(h: InsertLoopTickHeartbeat): Promise<void>;
+  listLoopTickHeartbeatsSince(tick: string, since: Date): Promise<LoopTickHeartbeat[]>;
+  pruneLoopTickHeartbeats(olderThan: Date): Promise<void>;
 
   getBotPosition(tradingBotId: string, market: string): Promise<BotPosition | undefined>;
   getBotPositions(walletAddress: string): Promise<BotPosition[]>;
@@ -2239,6 +2266,26 @@ export class DatabaseStorage implements IStorage {
     return row ?? null;
   }
 
+  // SOL Loop Vault P3 safety tick: same atomic-claim pattern as the auto-topup
+  // throttle above, on its OWN column (last_policy_action_at) so the two
+  // autonomous defenders never share a cooldown. Exactly one caller per window
+  // wins the UPDATE; a loop that stays unhealthy re-fires at most once per
+  // cooldown. Does NOT bump updatedAt (internal scheduling state).
+  async claimBorrowPositionPolicyAction(id: string, cooldownMs: number): Promise<BorrowPosition | null> {
+    const [row] = await db.update(borrowPositions)
+      .set({ lastPolicyActionAt: sql`NOW()` })
+      .where(and(
+        eq(borrowPositions.id, id),
+        eq(borrowPositions.status, 'open'),
+        or(
+          isNull(borrowPositions.lastPolicyActionAt),
+          lte(borrowPositions.lastPolicyActionAt, sql`NOW() - make_interval(secs => ${cooldownMs} / 1000.0)`),
+        ),
+      ))
+      .returning();
+    return row ?? null;
+  }
+
   async getBorrowOperations(walletAddress: string, borrowPositionId: string | null = null): Promise<BorrowOperation[]> {
     const cond = borrowPositionId == null
       ? eq(borrowOperations.walletAddress, walletAddress)
@@ -2308,6 +2355,9 @@ export class DatabaseStorage implements IStorage {
       healthBandChangedAt?: Date | null;
       lastHealthAlertBand?: string | null;
       lastHealthAlertAt?: Date | null;
+      policyState?: string | null;
+      policyReason?: string | null;
+      policyStateChangedAt?: Date | null;
     },
     ifStatus?: string,
   ): Promise<BorrowPosition | undefined> {
@@ -2683,6 +2733,86 @@ export class DatabaseStorage implements IStorage {
   // All cached external-APY rows (a handful), for the oracle's last-good fallback.
   async getYieldApyCacheAll(): Promise<YieldApyCache[]> {
     return await db.select().from(yieldApyCache);
+  }
+
+  // --- SOL Loop Vault P3: rate telemetry samples. ---
+  async insertLoopRateSamples(rows: InsertLoopRateSample[]): Promise<void> {
+    if (rows.length === 0) return;
+    await db.insert(loopRateSamples).values(rows);
+  }
+
+  // Newest sample per vault id at or after `since`. DISTINCT ON keeps this one
+  // SQL pass; the caller applies the staleness gate (rows older than its window
+  // simply don't come back because of the `since` bound).
+  async getLatestLoopRateSamples(since: Date): Promise<LoopRateSample[]> {
+    return await db.selectDistinctOn([loopRateSamples.vaultId]).from(loopRateSamples)
+      .where(gte(loopRateSamples.asOf, since))
+      .orderBy(loopRateSamples.vaultId, desc(loopRateSamples.asOf));
+  }
+
+  // One vault's series at or after `since`, oldest first.
+  async getLoopRateSamples(vaultId: number, since: Date): Promise<LoopRateSample[]> {
+    return await db.select().from(loopRateSamples)
+      .where(and(eq(loopRateSamples.vaultId, vaultId), gte(loopRateSamples.asOf, since)))
+      .orderBy(loopRateSamples.asOf);
+  }
+
+  // Bounded retention: drop samples older than the cutoff (cross-vault).
+  async pruneLoopRateSamples(olderThan: Date): Promise<void> {
+    await db.delete(loopRateSamples).where(lt(loopRateSamples.asOf, olderThan));
+  }
+
+  // --- SOL Loop Vault P3: policy decision journal (append-only). ---
+  async insertLoopPolicyDecision(d: InsertLoopPolicyDecision): Promise<LoopPolicyDecision> {
+    const rows = await db.insert(loopPolicyDecisions).values(d).returning();
+    return rows[0];
+  }
+
+  // Newest first, bounded. Hysteresis derives streaks from the last N rows.
+  // Scope by borrowPositionId where possible — a position closed and re-opened
+  // on the same vault must NEVER inherit the old position's streak rows.
+  async getRecentLoopPolicyDecisions(opts: { walletAddress: string; vaultId: number; tick?: string; borrowPositionId?: string; limit: number }): Promise<LoopPolicyDecision[]> {
+    const conds = [
+      eq(loopPolicyDecisions.walletAddress, opts.walletAddress),
+      eq(loopPolicyDecisions.vaultId, opts.vaultId),
+      ...(opts.tick ? [eq(loopPolicyDecisions.tick, opts.tick)] : []),
+      ...(opts.borrowPositionId ? [eq(loopPolicyDecisions.borrowPositionId, opts.borrowPositionId)] : []),
+    ];
+    return await db.select().from(loopPolicyDecisions)
+      .where(and(...conds))
+      .orderBy(desc(loopPolicyDecisions.createdAt))
+      .limit(Math.max(1, Math.min(opts.limit, 500)));
+  }
+
+  // Bounded retention: decisions are telemetry/audit, not a ledger — prune old rows.
+  async pruneLoopPolicyDecisions(olderThan: Date): Promise<void> {
+    await db.delete(loopPolicyDecisions).where(lt(loopPolicyDecisions.createdAt, olderThan));
+  }
+
+  // T106 gate instrumentation: admin status view — ALL wallets, one window.
+  async listLoopPolicyDecisionsSince(since: Date, limit: number): Promise<LoopPolicyDecision[]> {
+    return await db.select().from(loopPolicyDecisions)
+      .where(gte(loopPolicyDecisions.createdAt, since))
+      .orderBy(desc(loopPolicyDecisions.createdAt))
+      .limit(Math.max(1, Math.min(limit, 1000)));
+  }
+
+  // T106 gate instrumentation: tick heartbeats (fail-soft at every call site —
+  // telemetry must never break a tick).
+  async insertLoopTickHeartbeat(h: InsertLoopTickHeartbeat): Promise<void> {
+    await db.insert(loopTickHeartbeats).values(h);
+  }
+
+  // Ascending by time so gap analysis is a single linear pass.
+  async listLoopTickHeartbeatsSince(tick: string, since: Date): Promise<LoopTickHeartbeat[]> {
+    return await db.select().from(loopTickHeartbeats)
+      .where(and(eq(loopTickHeartbeats.tick, tick), gte(loopTickHeartbeats.createdAt, since)))
+      .orderBy(asc(loopTickHeartbeats.createdAt))
+      .limit(5000);
+  }
+
+  async pruneLoopTickHeartbeats(olderThan: Date): Promise<void> {
+    await db.delete(loopTickHeartbeats).where(lt(loopTickHeartbeats.createdAt, olderThan));
   }
 
   async reconcileDeposit(walletAddress: string, botId: string, gap: number, onChainBalance: number): Promise<boolean> {

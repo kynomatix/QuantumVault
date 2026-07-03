@@ -259,7 +259,7 @@ describe("runBorrowHealthScan (orchestrator)", () => {
 
     const res = await runBorrowHealthScan(deps);
 
-    expect(res).toEqual({ scanned: 2, alerted: 1, failed: 0 });
+    expect(res).toEqual({ scanned: 2, alerted: 1, failed: 0, loopObservations: [] });
     expect(notifications).toEqual([
       { wallet: "Wallet1", band: "urgent", scope: "Account" },
     ]);
@@ -281,7 +281,7 @@ describe("runBorrowHealthScan (orchestrator)", () => {
 
     const res = await runBorrowHealthScan(deps);
 
-    expect(res).toEqual({ scanned: 2, alerted: 1, failed: 1 });
+    expect(res).toEqual({ scanned: 2, alerted: 1, failed: 1, loopObservations: [] });
     expect(notifications).toEqual([
       { wallet: "Wallet1", band: "liquidation", scope: "My Bot" },
     ]);
@@ -293,7 +293,32 @@ describe("runBorrowHealthScan (orchestrator)", () => {
         throw new Error("db down");
       },
     });
-    expect(res).toEqual({ scanned: 0, alerted: 0, failed: 0 });
+    expect(res).toEqual({ scanned: 0, alerted: 0, failed: 0, loopObservations: [] });
+  });
+
+  it("collects loop observations for open loop rows — even when alert persist fails (safety reflex must not starve)", async () => {
+    const rows = [
+      row({ id: "loop-open", kind: "loop", status: "open" } as Partial<BorrowPosition>),
+      row({ id: "borrow-row", tradingBotId: "bot-1" }),
+    ];
+    const { deps } = statefulDeps({
+      rows,
+      healthByRowId: {
+        "loop-open": health("urgent", 1.2),
+        "borrow-row": health("healthy", 2.0),
+      },
+    });
+    // Persist failure must NOT drop the loop observation (collected pre-persist).
+    deps.persistAlertState = async () => {
+      throw new Error("persist down");
+    };
+
+    const res = await runBorrowHealthScan(deps);
+
+    expect(res.failed).toBe(2); // both rows failed persist…
+    expect(res.loopObservations).toHaveLength(1); // …but the loop reading survived
+    expect(res.loopObservations[0].row.id).toBe("loop-open");
+    expect(res.loopObservations[0].health.band).toBe("urgent");
   });
 
   it("FAIL CLOSED: a transient send failure keeps the baseline so the NEXT scan retries", async () => {

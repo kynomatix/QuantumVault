@@ -841,3 +841,196 @@ export function verifyLoopPartialUnwindOutcome(f: LoopPartialUnwindVerifyFacts):
   if (lhs > allowed) return { ok: false, reason: "loop_ratio_worsened" };
   return { ok: true };
 }
+
+// --- DELEVER TO HOLD (P3): clear ALL debt, keep the rest of the collateral supplied. ---
+
+export interface LoopDeleverToHoldRequest {
+  /** LST collateral to withdraw for the flash payback swap (raw, 9 dp). Must be > 0. */
+  withdrawLstRaw: bigint;
+}
+
+/**
+ * Plan a DELEVER-TO-HOLD: repay ALL WSOL debt (MAX — takes only what is owed)
+ * and withdraw EXACTLY the LST needed to swap into the flash payback, in one
+ * atomic operate. The remaining collateral STAYS SUPPLIED (the HOLD state) —
+ * this is the difference from `planLoopClose`, which empties the position.
+ * Requires a real (minted) positionId.
+ */
+export function planLoopDeleverToHold(positionId: number, req: LoopDeleverToHoldRequest): OperatePlan {
+  if (!Number.isInteger(positionId) || positionId <= 0) {
+    throw new Error("planLoopDeleverToHold: a real (minted) positionId is required");
+  }
+  if (req.withdrawLstRaw <= 0n) throw new Error("planLoopDeleverToHold: withdrawLstRaw must be > 0");
+  return {
+    positionId,
+    colAmount: { kind: "exact", raw: -req.withdrawLstRaw },
+    debtAmount: { kind: "max" },
+  };
+}
+
+/**
+ * Plan a HOLD EXIT: withdraw ALL collateral from a ZERO-DEBT position (debt leg
+ * is an explicit no-op). This is the no-flash close branch — with nothing owed
+ * there is nothing to flash-repay, so the close is a plain withdraw-all.
+ * The debt-0 operate shape mirrors `planWithdrawCollateral` (proven on-chain).
+ */
+export function planLoopHoldExit(positionId: number): OperatePlan {
+  if (!Number.isInteger(positionId) || positionId <= 0) {
+    throw new Error("planLoopHoldExit: a real (minted) positionId is required");
+  }
+  return {
+    positionId,
+    colAmount: { kind: "max" },
+    debtAmount: { kind: "exact", raw: 0n },
+  };
+}
+
+export interface LoopDeleverSizingInput {
+  /** WSOL owed back to the flash loan (flash amount; Jupiter flash fee is 0), raw lamports. */
+  flashPaybackRaw: bigint;
+  /** SOL per LST rate (loop-vault oracle price — debt-token denominated). */
+  solPerLst: number;
+  /**
+   * Safety margin on TOP of the exact conversion, basis points. Must cover the
+   * swap's worst-case slippage (quote slippageBps) plus oracle staleness pad —
+   * the swap of the withdrawn LST must ALWAYS clear the flash payback.
+   */
+  sizingMarginBps: number;
+  /** TRUE live collateral (exchange-price scaled), raw. */
+  liveCollateralRaw: bigint;
+  /** Vault-wide withdrawable liquidity right now (config), raw. Optional gate. */
+  withdrawableCollateralRaw?: bigint;
+  /** Smallest collateral worth KEEPING supplied (below it, full-close instead). */
+  minRemainingColRaw?: bigint;
+}
+
+export type LoopDeleverSizing =
+  | { ok: true; withdrawLstRaw: bigint; remainingColRaw: bigint }
+  | { ok: false; reason: string };
+
+/**
+ * Size the LST withdrawal for a delever-to-hold: the withdrawn LST, swapped at
+ * worst-case (rate less margin), must cover the flash payback. Pure bigint
+ * ceiling math — rounds UP so the swap NEVER under-covers:
+ *   W = ceil( payback x (10000 + margin) / (10000 x solPerLst) )
+ * Refuses (fail closed) when the remainder would drop below `minRemainingColRaw`
+ * (that is a full close, not a hold) or exceed the vault's withdrawable window.
+ */
+export function sizeLoopDeleverWithdraw(input: LoopDeleverSizingInput): LoopDeleverSizing {
+  const { flashPaybackRaw, solPerLst, sizingMarginBps, liveCollateralRaw } = input;
+  if (flashPaybackRaw <= 0n) return { ok: false, reason: "delever_payback_not_positive" };
+  if (!Number.isFinite(solPerLst) || solPerLst <= 0) return { ok: false, reason: "delever_rate_unreadable" };
+  if (!Number.isInteger(sizingMarginBps) || sizingMarginBps < 0 || sizingMarginBps > 2_000) {
+    return { ok: false, reason: "delever_margin_out_of_range" };
+  }
+  if (liveCollateralRaw <= 0n) return { ok: false, reason: "delever_no_collateral" };
+
+  // Scale the float rate to 1e9 once; all math after this is exact bigint.
+  const rateScaled = BigInt(Math.round(solPerLst * 1e9));
+  if (rateScaled <= 0n) return { ok: false, reason: "delever_rate_unreadable" };
+
+  const numerator = flashPaybackRaw * BigInt(10_000 + sizingMarginBps) * 1_000_000_000n;
+  const denominator = 10_000n * rateScaled;
+  const withdrawLstRaw = (numerator + denominator - 1n) / denominator; // ceil
+  if (withdrawLstRaw <= 0n) return { ok: false, reason: "delever_withdraw_rounds_to_zero" };
+
+  if (withdrawLstRaw >= liveCollateralRaw) {
+    return { ok: false, reason: "delever_would_empty_collateral" };
+  }
+  const remainingColRaw = liveCollateralRaw - withdrawLstRaw;
+  const minRemaining = input.minRemainingColRaw ?? DEFAULT_LST_COLLATERAL_DUST_RAW;
+  if (remainingColRaw <= minRemaining) {
+    return { ok: false, reason: "delever_remainder_below_dust" };
+  }
+  if (input.withdrawableCollateralRaw !== undefined && withdrawLstRaw > input.withdrawableCollateralRaw) {
+    return { ok: false, reason: "delever_exceeds_withdrawable" };
+  }
+  return { ok: true, withdrawLstRaw, remainingColRaw };
+}
+
+export interface LoopDeleverToHoldVerifyFacts {
+  /** TRUE debt after the delever (must be <= SOL dust), native raw lamports. */
+  observedDebtRaw: bigint;
+  /** TRUE collateral after the delever (must REMAIN above LST dust), native raw. */
+  observedColRaw: bigint;
+  debtDustRaw?: bigint;
+  collateralDustRaw?: bigint;
+}
+
+/**
+ * A delever-to-hold is complete only when the debt is CLEARED (<= SOL dust)
+ * AND collateral REMAINS supplied (> LST dust). Debt cleared with collateral
+ * also emptied is a full close and must not be recorded as a HOLD.
+ */
+export function verifyLoopDeleverToHoldOutcome(f: LoopDeleverToHoldVerifyFacts): VerifyResult {
+  const debtDust = f.debtDustRaw ?? DEFAULT_SOL_DEBT_DUST_RAW;
+  const colDust = f.collateralDustRaw ?? DEFAULT_LST_COLLATERAL_DUST_RAW;
+  if (f.observedDebtRaw > debtDust) return { ok: false, reason: "loop_delever_debt_not_cleared" };
+  if (f.observedColRaw <= colDust) return { ok: false, reason: "loop_delever_collateral_emptied" };
+  return { ok: true };
+}
+
+// --- RE-LEVER FROM HOLD (P3 allocation tick): HOLD -> LEVERED on the SAME position. ---
+
+/**
+ * Pure re-lever sizing. A HOLD position has equity E = C(lst) × solPerLst SOL
+ * and ZERO debt. Returning it to leverage L means flash-borrowing
+ * F = E×(L−1) SOL, swapping F to LST, and depositing that while borrowing F —
+ * post-state: collateral value ≈ E×L, debt = F = E×(L−1), exactly the shape
+ * `computeLoopOpenAmounts` produces on a fresh open with principal E.
+ * Rounds DOWN (less debt = conservative). Same exact-bigint discipline as
+ * `sizeLoopDeleverWithdraw` (float rate scaled to 1e9 once).
+ */
+export function computeLoopReleverAmounts(
+  liveCollateralRaw: bigint,
+  solPerLst: number,
+  leverage: number,
+): { ok: true; flashLamports: bigint; equityLamports: bigint } | { ok: false; reason: string } {
+  if (liveCollateralRaw <= 0n) return { ok: false, reason: "relever_no_collateral" };
+  if (!Number.isFinite(solPerLst) || solPerLst <= 0) return { ok: false, reason: "relever_rate_unreadable" };
+  if (!Number.isFinite(leverage) || leverage <= 1 || leverage > 10) {
+    return { ok: false, reason: "relever_leverage_out_of_bounds" };
+  }
+  const rateScaled = BigInt(Math.round(solPerLst * 1e9));
+  if (rateScaled <= 0n) return { ok: false, reason: "relever_rate_unreadable" };
+  const equityLamports = (liveCollateralRaw * rateScaled) / 1_000_000_000n; // floor
+  if (equityLamports <= 0n) return { ok: false, reason: "relever_equity_rounds_to_zero" };
+  const leverageMinusOneBps = BigInt(Math.round((leverage - 1) * 10_000));
+  const flashLamports = (equityLamports * leverageMinusOneBps) / 10_000n; // floor
+  if (flashLamports <= 0n) return { ok: false, reason: "relever_flash_rounds_to_zero" };
+  return { ok: true, flashLamports, equityLamports };
+}
+
+export interface LoopReleverVerifyFacts {
+  /** TRUE collateral before the re-lever (exchange-price scaled), native raw. */
+  preColRaw: bigint;
+  /** WSOL the plan flash-borrowed (the new debt), raw lamports. */
+  flashDebtRaw: bigint;
+  /** The swap quote's minOut — the LST floor the re-lever must have deposited. */
+  minCollateralAddRaw: bigint;
+  /** TRUE debt after (position read × borrow exchange price, ceil), native raw. */
+  observedDebtRaw: bigint;
+  /** TRUE collateral after (position read × supply exchange price, floor), native raw. */
+  observedColRaw: bigint;
+  toleranceBps?: number;
+}
+
+/**
+ * ADVISORY sanity check of a re-lever, mirroring `verifyLoopOpenOutcome`:
+ * debt must match the flash leg within tolerance (and never exceed it beyond
+ * tolerance — the dangerous direction); collateral must have GROWN by at
+ * least the swap's minOut floor on top of what was already supplied.
+ */
+export function verifyLoopReleverOutcome(f: LoopReleverVerifyFacts): VerifyResult {
+  const tol = f.toleranceBps ?? DEFAULT_TOLERANCE_BPS;
+  if (f.observedColRaw < f.preColRaw + f.minCollateralAddRaw) {
+    return { ok: false, reason: "loop_relever_collateral_below_min_add" };
+  }
+  if (f.observedDebtRaw > f.flashDebtRaw && !withinToleranceBps(f.observedDebtRaw, f.flashDebtRaw, tol)) {
+    return { ok: false, reason: "loop_relever_debt_exceeds_flash_leg" };
+  }
+  if (!withinToleranceBps(f.observedDebtRaw, f.flashDebtRaw, tol)) {
+    return { ok: false, reason: "loop_relever_debt_mismatch" };
+  }
+  return { ok: true };
+}

@@ -62,6 +62,99 @@ export const LOOP_RISK_POLICY = {
   utilizationCeiling: 0.9,
 } as const;
 
+/**
+ * P3 SAFETY-TICK deleverage policy (60s reflex). The health/carry fields are
+ * the keeper `DeleveragePolicyParams` (structurally compatible — pass this
+ * object straight to `decideDeleverage`); the rest configure the reflex around
+ * the keeper decision. Deleverage is NEVER oracle-gated (plan §4.4).
+ */
+export const LOOP_DELEVERAGE_POLICY = {
+  /**
+   * Jupiter Lend Multiply liquidates below health factor 1.0 (the read boundary
+   * already normalizes HF so 1 = at liquidation, matching borrow-health.ts).
+   */
+  liquidationFloor: 1.0,
+  /** Start shaving the loop when HF ≤ floor × this (HF ≤ 1.25). */
+  healthReduceMultiple: 1.25,
+  /** Fully unwind to HOLD when HF ≤ floor × this (HF ≤ 1.10). MUST stay < reduce multiple (keeper throws otherwise). */
+  healthUnwindMultiple: 1.10,
+  /**
+   * Fast bleed-stopper only: reduce one step when the persisted net carry (at
+   * the launch 2x reference leverage) falls below this. The full LEVERED→HOLD
+   * carry decision with hysteresis belongs to the ALLOCATION tick (P3 T105) —
+   * this floor just stops paying to hold leverage between hourly ticks.
+   */
+  carryReduceApy: 0.005,
+  /** Fraction shaved per reduce action (25% partial unwind). */
+  reduceStep: 0.25,
+  /**
+   * Max age of a persisted rate sample the 60s carry check may consume. The
+   * sampler cadence is ~hourly (allocation tick); anything older than this is
+   * treated as UNREADABLE → carry rule silently skipped (health bands never
+   * depend on the rate table). The safety tick must NEVER fetch rates upstream.
+   */
+  rateStalenessMs: 3 * 60 * 60 * 1000,
+  /**
+   * Per-position atomic cooldown between autonomous action attempts (mirrors
+   * the auto-topup throttle). The executors are resumable/idempotent, so a
+   * failed attempt safely retries next window.
+   */
+  cooldownMs: 10 * 60 * 1000,
+} as const;
+
+/**
+ * P3 ALLOCATION-TICK policy (~hourly brain, plan §4.4). Owns the REAL
+ * LEVERED↔HOLD carry decision with hysteresis; the safety tick's
+ * `carryReduceApy` above is only the fast bleed-stopper between these ticks.
+ *
+ * EV model (single-pair v0.5 — HOP across pairs is P4):
+ *   EV(hold)    = stakingApy                        (unleveraged LST yield)
+ *   EV(levered) = netCarryAt(L) = s·L − b·(L−1)
+ *   EV(levered) − EV(hold) = (L−1)·(s − b)
+ * So levered beats hold exactly when staking APY exceeds the borrow APR.
+ */
+export const LOOP_ALLOCATION_POLICY = {
+  /**
+   * Minimum EV edge (fraction APY) re-levering must clear over holding before
+   * it fires: (L−1)·(s−b) > this. A simple constant switching-cost cover
+   * (~2 swaps of slippage+fees amortized over weeks), NOT a cost model —
+   * keeps the brain auditable (architect plan, 2026-07-03).
+   */
+  minEvGapApy: 0.01,
+  /**
+   * Unwind to HOLD when the levered net carry falls below this floor even if
+   * the EV gap alone would not trigger (paying to stay levered is never worth
+   * it). Matches the safety tick's bleed-stopper threshold.
+   */
+  carryFloorApy: 0.005,
+  /**
+   * Consecutive allocation ticks that must agree on the SAME intent before it
+   * executes (current tick + the last N−1 persisted decision rows). Hysteresis
+   * substrate is the journal itself — restart-safe, no in-memory counter.
+   */
+  hysteresisTicks: 3,
+  /**
+   * Max age of the OLDEST row in a qualifying streak. A streak spanning a long
+   * outage is stale information and must NOT fire (~2×N×hourly cadence).
+   */
+  streakMaxAgeMs: 6 * 60 * 60 * 1000,
+  /**
+   * Per-position atomic cooldown for allocation-driven actions. SHARED claim
+   * column with the safety tick (last_policy_action_at) — mutual exclusion
+   * between opposing autonomous actions on one row is desirable. Residual
+   * risk accepted: an allocation claim can delay the safety reflex ≤ this
+   * window; at 2x on a pegged pair that matters only in a catastrophic depeg.
+   */
+  cooldownMs: 30 * 60 * 1000,
+  /**
+   * Rate samples older than this are unreadable to the allocation brain →
+   * intent 'none' (fail closed). The tick samples upstream FIRST, so in the
+   * healthy path the reading is seconds old; this only gates the fallback
+   * where sampling failed and we would otherwise decide off yesterday's rates.
+   */
+  rateStalenessMs: 3 * 60 * 60 * 1000,
+} as const;
+
 export interface LoopOpenPolicyInput {
   /** Jupiter Lend Multiply vault id (must be allowlisted). */
   vaultId: number;

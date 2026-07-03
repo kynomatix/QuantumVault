@@ -57,9 +57,15 @@ import {
   planLoopOpen,
   planLoopClose,
   planLoopPartialUnwind,
+  planLoopDeleverToHold,
+  planLoopHoldExit,
+  sizeLoopDeleverWithdraw,
+  computeLoopReleverAmounts,
   verifyLoopOpenOutcome,
   verifyLoopCloseOutcome,
   verifyLoopPartialUnwindOutcome,
+  verifyLoopDeleverToHoldOutcome,
+  verifyLoopReleverOutcome,
   DEFAULT_SOL_DEBT_DUST_RAW,
   DEFAULT_LST_COLLATERAL_DUST_RAW,
   type AmountSpec,
@@ -87,6 +93,12 @@ const LOOP_CU_LIMIT = 1_400_000;
 const PREP_CU_LIMIT = 60_000;
 const CU_PRICE_MICRO_LAMPORTS = 50_000;
 const DEFAULT_SLIPPAGE_BPS = 50;
+/**
+ * Extra pad ON TOP of the swap's slippageBps when sizing the delever-to-hold
+ * LST withdrawal (oracle staleness / rounding). Any over-withdrawn sliver
+ * comes back to the agent as native SOL via the WSOL ATA close.
+ */
+const DELEVER_SIZING_PAD_BPS = 20;
 /** Flash 2% over live debt on a full close — repay MAX takes only what is owed. */
 const CLOSE_FLASH_BUFFER_NUM = 102n;
 const CLOSE_FLASH_BUFFER_DEN = 100n;
@@ -266,7 +278,7 @@ async function failOp(opId: string, step: string, error: string): Promise<void> 
 /** Best-effort equity event — audit trail only, never fails the money op. */
 async function recordLoopEquityEvent(p: {
   walletAddress: string;
-  eventType: "loop_open" | "loop_close" | "loop_unwind";
+  eventType: "loop_open" | "loop_close" | "loop_unwind" | "loop_delever_hold" | "loop_relever";
   amountLamports: bigint;
   txSignature: string | null;
   notes: string;
@@ -792,6 +804,10 @@ async function finalizeLoopOpen(p: {
       healthSnapshot: snapshot,
       healthAsOf: new Date(),
       healthSource,
+      // P3 policy loop: a fresh open is by definition the LEVERED state.
+      policyState: "levered",
+      policyReason: "loop_open",
+      policyStateChangedAt: new Date(),
     },
     "pending",
   );
@@ -846,6 +862,8 @@ export interface LoopCloseResult {
   signature?: string;
   /** Realized SOL returned to the agent wallet, raw lamports. */
   solReturnedLamports?: string;
+  /** True when the position was already in the target state on-chain — state stamped WITHOUT a transaction (no signature by design). */
+  selfHeal?: boolean;
   verifyWarning?: string;
   error?: string;
   gasShortfall?: LoopGasShortfall;
@@ -893,6 +911,9 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
           healthSnapshot: snapshot,
           healthAsOf: new Date(),
           healthSource: "loop_close_selfheal",
+          policyState: null,
+          policyReason: "loop_close",
+          policyStateChangedAt: new Date(),
         },
         "open",
       );
@@ -909,14 +930,17 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
       } catch (e) {
         if (!isUniqueViolation(e)) throw e;
       }
-      return { success: true, verifyWarning: "Position was already flat on-chain — marked closed without a transaction." };
+      return { success: true, selfHeal: true, verifyWarning: "Position was already flat on-chain — marked closed without a transaction." };
     }
     if (liveCol <= 0n) {
       return { success: false, error: "Loop Close: position shows debt without collateral — refusing automated close. Contact support." };
     }
 
+    // A ZERO-DEBT position (the P3 HOLD state) exits with a plain withdraw-all:
+    // nothing is owed, so there is nothing to flash-repay.
+    const isHoldExit = liveDebt <= 0n;
     // Flash 2% over live debt; repay MAX takes only what is owed, surplus rides back.
-    const flashRepay = (liveDebt * CLOSE_FLASH_BUFFER_NUM) / CLOSE_FLASH_BUFFER_DEN;
+    const flashRepay = isHoldExit ? 0n : (liveDebt * CLOSE_FLASH_BUFFER_NUM) / CLOSE_FLASH_BUFFER_DEN;
 
     let opId: string;
     try {
@@ -935,6 +959,7 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
           liveDebtRaw: liveDebt.toString(),
           liveCollateralRaw: liveCol.toString(),
           flashRepayRaw: flashRepay.toString(),
+          ...(isHoldExit ? { holdExit: true } : {}),
         },
       });
       opId = op.id;
@@ -996,7 +1021,7 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
       // Swap the withdrawn LST back to WSOL; proceeds must cover the flash payback.
       const quote = await jupQuote(cfg.collateralMint, WSOL_MINT, liveCol, slippageBps);
       const minOut = BigInt(quote.otherAmountThreshold);
-      if (minOut <= liveDebt) {
+      if (!isHoldExit && minOut <= liveDebt) {
         await failOp(opId, "swap_would_not_cover_payback", `minOut ${minOut} <= live debt ${liveDebt}`);
         return {
           success: false,
@@ -1013,16 +1038,20 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
         return { success: false, error: "Loop Close: swap instructions unavailable. Nothing was moved." };
       }
 
-      const flash = await import("@jup-ag/lend/flashloan");
       const borrowMod = await import("@jup-ag/lend/borrow");
       const BN = (await import("bn.js")).default;
-      const { borrowIx, paybackIx } = await flash.getFlashloanIx({
-        amount: new BN(flashRepay.toString()),
-        asset: wsolMintPk,
-        signer: agentPubkey,
-        connection,
-      });
-      const plan = planLoopClose(nftId);
+      // HOLD exit skips the flash loan entirely — the withdraw needs no repay funding.
+      let flashLegs: { borrowIx: TransactionInstruction; paybackIx: TransactionInstruction } | null = null;
+      if (!isHoldExit) {
+        const flash = await import("@jup-ag/lend/flashloan");
+        flashLegs = await flash.getFlashloanIx({
+          amount: new BN(flashRepay.toString()),
+          asset: wsolMintPk,
+          signer: agentPubkey,
+          connection,
+        });
+      }
+      const plan = isHoldExit ? planLoopHoldExit(nftId) : planLoopClose(nftId);
       const operate = await borrowMod.getOperateIx({
         vaultId,
         positionId: plan.positionId,
@@ -1034,10 +1063,10 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
 
       const instructions: TransactionInstruction[] = [
         ...cuIxs(LOOP_CU_LIMIT),
-        borrowIx,
+        ...(flashLegs ? [flashLegs.borrowIx] : []),
         ...operate.ixs,
         deserializeJupIx(swapResp.swapInstruction),
-        paybackIx,
+        ...(flashLegs ? [flashLegs.paybackIx] : []),
         ixCloseAccount(wsolAta, agentPubkey, agentPubkey), // unwrap leftovers to native SOL
       ];
       const alts = [
@@ -1107,6 +1136,9 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
               healthSnapshot: snapshot,
               healthAsOf: new Date(),
               healthSource: "loop_close_onchain",
+              policyState: null,
+              policyReason: "loop_close",
+              policyStateChangedAt: new Date(),
             },
             "open",
           );
@@ -1136,6 +1168,9 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
             debtAmountRaw: "0",
             healthAsOf: new Date(),
             healthSource: "loop_close_unverified",
+            policyState: null,
+            policyReason: "loop_close",
+            policyStateChangedAt: new Date(),
           },
           "open",
         );
@@ -1174,6 +1209,9 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
             healthSnapshot: snapshot,
             healthAsOf: new Date(),
             healthSource: "loop_close_ambiguous_cleared",
+            policyState: null,
+            policyReason: "loop_close",
+            policyStateChangedAt: new Date(),
           },
           "open",
         );
@@ -1546,6 +1584,876 @@ export async function executeLoopPartialUnwind(params: LoopPartialUnwindParams):
       const msg = e instanceof Error ? e.message : String(e);
       await failOp(opId, "unexpected_error", msg);
       return { success: false, error: `Loop Unwind failed: ${msg}` };
+    }
+  });
+}
+
+// --- DELEVER TO HOLD (P3 policy leg) -----------------------------------------------
+//
+// Clears ALL WSOL debt in one atomic tx (flash borrow → repay MAX + withdraw the
+// exact LST needed → swap → flash payback) and leaves the REMAINING collateral
+// supplied. The row stays `open` with policyState='holding' — the allocation
+// tick re-levers or fully exits later. Same fail-closed contract as the close.
+
+export interface LoopDeleverParams {
+  walletAddress: string;
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  borrowPositionId: string;
+  slippageBps?: number;
+  clientRequestId?: string;
+  /** Why the policy loop chose HOLD (persisted to the row + decision journal). */
+  policyReason?: string;
+}
+
+export interface LoopDeleverResult {
+  success: boolean;
+  signature?: string;
+  /** Leftover native SOL returned to the agent wallet (cushion + swap surplus), raw lamports. */
+  solReturnedLamports?: string;
+  observedDebtRaw?: string;
+  observedCollateralRaw?: string;
+  /** True when the position was already in the target state on-chain — state stamped WITHOUT a transaction (no signature by design). */
+  selfHeal?: boolean;
+  verifyWarning?: string;
+  error?: string;
+  gasShortfall?: LoopGasShortfall;
+}
+
+export async function executeLoopDeleverToHold(params: LoopDeleverParams): Promise<LoopDeleverResult> {
+  const { walletAddress, agentPublicKey, agentSecretKey, borrowPositionId } = params;
+  const slippageBps = params.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
+  const policyReason = (params.policyReason || "carry_negative").slice(0, 200);
+
+  const loadedRes = await loadOpenLoopPosition(walletAddress, borrowPositionId);
+  if (!loadedRes.ok) return { success: false, error: loadedRes.error };
+  const { vaultId } = loadedRes.loaded;
+
+  const borrowRoute = new JupiterLendBorrowRoute();
+  const cfg = await borrowRoute.getLoopVaultConfig(vaultId);
+  if (!cfg) return { success: false, error: `Could not read loop vault ${vaultId} config — refusing (fail closed).` };
+
+  return await withBorrowLock(borrowLockKey(walletAddress, null, vaultId), async () => {
+    const relock = await loadOpenLoopPosition(walletAddress, borrowPositionId);
+    if (!relock.ok) return { success: false, error: relock.error };
+    const { pos, nftId } = relock.loaded;
+
+    const connection = getServerConnection();
+    const agentPubkey = new PublicKey(agentPublicKey);
+    const wsolMintPk = new PublicKey(WSOL_MINT);
+    const lstMintPk = new PublicKey(cfg.collateralMint);
+
+    const live = await borrowRoute.readLoopLivePositionHealth(vaultId, nftId);
+    if (!live) return { success: false, error: "Loop Delever: could not read the live position — refusing (fail closed). Retry shortly." };
+    const liveDebt = BigInt(live.debtRaw);
+    const liveCol = BigInt(live.collateralRaw);
+
+    // Self-heal: debt already cleared on-chain (a prior delever landed but we
+    // crashed before recording it) — just stamp the HOLD state, no transaction.
+    if (liveDebt <= DEFAULT_SOL_DEBT_DUST_RAW && liveCol > DEFAULT_LST_COLLATERAL_DUST_RAW) {
+      const snapshot = buildLoopHealthSnapshot(cfg, liveCol, liveDebt, live.oraclePriceUsd, "loop_delever_selfheal");
+      await storage.updateBorrowPosition(pos.id, {
+        collateralAmountRaw: liveCol.toString(),
+        debtAmountRaw: liveDebt.toString(),
+        healthSnapshot: snapshot,
+        healthAsOf: new Date(),
+        healthSource: "loop_delever_selfheal",
+        policyState: "holding",
+        policyReason,
+        policyStateChangedAt: new Date(),
+      });
+      try {
+        await storage.createBorrowOperation({
+          walletAddress,
+          borrowPositionId: pos.id,
+          operationType: "loop_delever_hold",
+          status: "succeeded",
+          step: "already_delevered_onchain",
+          clientRequestId: params.clientRequestId ?? null,
+          metadata: { kind: "loop", vaultId, nftId, selfHeal: true, policyReason },
+        });
+      } catch (e) {
+        if (!isUniqueViolation(e)) throw e;
+      }
+      return { success: true, selfHeal: true, verifyWarning: "Debt was already cleared on-chain — marked holding without a transaction." };
+    }
+    if (liveDebt <= 0n || liveCol <= 0n) {
+      return { success: false, error: "Loop Delever: the position reads flat or broken on-chain — use the full close path." };
+    }
+
+    // Size the LST withdrawal: swapped at worst case it must cover the flash
+    // payback (debt + cushion). Fail closed on any sizing refusal.
+    // The withdrawable gate is skipped ONLY when the config value is unreadable
+    // — a genuine 0 must refuse here, not waste a fee reverting on-chain.
+    const flashAmountRaw = liveDebt + UNWIND_FLASH_CUSHION_LAMPORTS;
+    let withdrawableGate: bigint | undefined;
+    try {
+      withdrawableGate = BigInt(cfg.withdrawableCollateralRaw);
+      if (withdrawableGate < 0n) withdrawableGate = undefined;
+    } catch {
+      withdrawableGate = undefined;
+    }
+    const sizing = sizeLoopDeleverWithdraw({
+      flashPaybackRaw: flashAmountRaw,
+      solPerLst: live.oraclePriceUsd ?? NaN,
+      sizingMarginBps: slippageBps + DELEVER_SIZING_PAD_BPS,
+      liveCollateralRaw: liveCol,
+      withdrawableCollateralRaw: withdrawableGate,
+    });
+    if (!sizing.ok) {
+      const friendly =
+        sizing.reason === "delever_would_empty_collateral" || sizing.reason === "delever_remainder_below_dust"
+          ? "Loop Delever would leave almost nothing supplied — use the full close instead."
+          : sizing.reason === "delever_exceeds_withdrawable"
+            ? "Loop Delever: the vault does not have enough withdrawable liquidity right now. Retry shortly."
+            : `Loop Delever refused (fail closed): ${sizing.reason}.`;
+      return { success: false, error: friendly };
+    }
+    const withdrawRaw = sizing.withdrawLstRaw;
+
+    let opId: string;
+    try {
+      const op = await storage.createBorrowOperation({
+        walletAddress,
+        borrowPositionId: pos.id,
+        operationType: "loop_delever_hold",
+        status: "pending",
+        step: "initialized",
+        clientRequestId: params.clientRequestId ?? null,
+        metadata: {
+          kind: "loop",
+          vaultId,
+          nftId,
+          slippageBps,
+          policyReason,
+          liveDebtRaw: liveDebt.toString(),
+          liveCollateralRaw: liveCol.toString(),
+          flashAmountRaw: flashAmountRaw.toString(),
+          withdrawRaw: withdrawRaw.toString(),
+        },
+      });
+      opId = op.id;
+    } catch (e) {
+      if (isUniqueViolation(e)) {
+        return { success: false, error: "This delever was already submitted. Check its status before retrying." };
+      }
+      throw e;
+    }
+
+    try {
+      const wsolAta = ataFor(agentPubkey, wsolMintPk);
+      const lstAta = ataFor(agentPubkey, lstMintPk);
+      const infos = await connection.getMultipleAccountsInfo([wsolAta, lstAta]);
+      const prepIxs: TransactionInstruction[] = [];
+      if (!infos[0]) prepIxs.push(ixCreateAtaIdempotent(agentPubkey, agentPubkey, wsolMintPk));
+      if (!infos[1]) prepIxs.push(ixCreateAtaIdempotent(agentPubkey, agentPubkey, lstMintPk));
+
+      const gas = await ensureVaultGas({
+        payingPublicKey: agentPublicKey,
+        funderPublicKey: agentPublicKey,
+        funderSecretKey: agentSecretKey,
+        destMint: null,
+        label: "Loop Delever",
+        extraRentLamports: prepIxs.length * ATA_RENT_LAMPORTS + LOOP_FEE_HEADROOM_LAMPORTS,
+      });
+      if (!gas.ok) {
+        await failOp(opId, "gas_failed", gas.error || "insufficient SOL for fees");
+        return {
+          success: false,
+          error: gas.error || "Loop Delever: insufficient SOL for fees.",
+          gasShortfall: {
+            requiredLamports: gas.requiredLamports,
+            heldLamports: gas.payerLamportsBefore + (gas.refilledLamports ?? 0) + (gas.fundedLamports ?? 0),
+          },
+        };
+      }
+
+      if (prepIxs.length > 0) {
+        const prep = await executeAgentInstructionsConfirmOnly({
+          agentPublicKey,
+          agentSecretKey,
+          instructions: [...cuIxs(PREP_CU_LIMIT), ...prepIxs],
+          label: "Loop Delever ATA prep",
+        });
+        if (!prep.success) {
+          await failOp(opId, "ata_prep_failed", prep.error || "ATA prep tx did not confirm.");
+          return { success: false, error: prep.error || "Loop Delever: token account prep failed. Nothing was moved." };
+        }
+        await storage.updateBorrowOperation(opId, {
+          step: "atas_prepared",
+          ...(prep.signature ? { appendTxSignature: prep.signature } : {}),
+        });
+      } else {
+        await storage.updateBorrowOperation(opId, { step: "atas_prepared" });
+      }
+
+      // Swap the withdrawn LST slice to WSOL; worst case must clear the TRUE
+      // debt pull (repay MAX) with margin — the cushion rides back via ATA close.
+      const quote = await jupQuote(cfg.collateralMint, WSOL_MINT, withdrawRaw, slippageBps);
+      const minOut = BigInt(quote.otherAmountThreshold);
+      if (minOut <= liveDebt + UNWIND_MIN_OUT_MARGIN_LAMPORTS) {
+        await failOp(opId, "swap_would_not_cover_payback", `minOut ${minOut} <= debt ${liveDebt} + margin ${UNWIND_MIN_OUT_MARGIN_LAMPORTS}`);
+        return {
+          success: false,
+          error: "Loop Delever: the swap's worst-case output would not cover the repayment (slippage/depeg). Nothing was moved.",
+        };
+      }
+      const swapResp = await jupSwapIxs(quote, agentPublicKey);
+      if ((swapResp.setupInstructions || []).length > 0) {
+        await failOp(opId, "swap_setup_ixs", `Swap returned ${swapResp.setupInstructions.length} setup ix(s).`);
+        return { success: false, error: "Loop Delever: swap route needs extra account setup — aborted. Retry shortly." };
+      }
+      if (!swapResp.swapInstruction) {
+        await failOp(opId, "swap_ix_missing", "Swap response carried no swapInstruction.");
+        return { success: false, error: "Loop Delever: swap instructions unavailable. Nothing was moved." };
+      }
+
+      const flash = await import("@jup-ag/lend/flashloan");
+      const borrowMod = await import("@jup-ag/lend/borrow");
+      const BN = (await import("bn.js")).default;
+      const { borrowIx, paybackIx } = await flash.getFlashloanIx({
+        amount: new BN(flashAmountRaw.toString()),
+        asset: wsolMintPk,
+        signer: agentPubkey,
+        connection,
+      });
+      const plan = planLoopDeleverToHold(nftId, { withdrawLstRaw: withdrawRaw });
+      const operate = await borrowMod.getOperateIx({
+        vaultId,
+        positionId: plan.positionId,
+        colAmount: specToBN(BN, plan.colAmount, "col", borrowMod.MAX_WITHDRAW_AMOUNT, borrowMod.MAX_REPAY_AMOUNT),
+        debtAmount: specToBN(BN, plan.debtAmount, "debt", borrowMod.MAX_WITHDRAW_AMOUNT, borrowMod.MAX_REPAY_AMOUNT),
+        connection,
+        signer: agentPubkey,
+      });
+
+      const instructions: TransactionInstruction[] = [
+        ...cuIxs(LOOP_CU_LIMIT),
+        borrowIx,
+        ...operate.ixs,
+        deserializeJupIx(swapResp.swapInstruction),
+        paybackIx,
+        ixCloseAccount(wsolAta, agentPubkey, agentPubkey), // return cushion + surplus as native SOL
+      ];
+      const alts = [
+        ...(await loadAlts(connection, swapResp.addressLookupTableAddresses || [])),
+        ...(operate.addressLookupTableAccounts || []),
+      ];
+
+      const exec = await executeAgentInstructions({
+        agentPublicKey,
+        agentSecretKey,
+        instructions,
+        verifyOutputMint: NATIVE_SOL_MINT,
+        addressLookupTables: alts,
+        label: "Loop Delever",
+        onBeforeBroadcast: async (info) => {
+          const updated = await storage.updateBorrowOperation(opId, {
+            step: "loop_sig_writeahead",
+            appendTxSignature: info.signature,
+            mergeMetadata: { blockhash: info.blockhash, lastValidBlockHeight: info.lastValidBlockHeight },
+          });
+          if (!updated) throw new Error("write-ahead signature persist failed — refusing to broadcast");
+        },
+      });
+
+      if (exec.onChainFailed || (!exec.success && !exec.signature)) {
+        await failOp(opId, exec.onChainFailed ? "tx_failed_onchain" : "exec_failed", exec.error || "Loop delever tx failed.");
+        return { success: false, signature: exec.signature, error: exec.error || "Loop Delever failed — the position is unchanged." };
+      }
+
+      const persistHolding = async (
+        postDebt: bigint,
+        postCol: bigint,
+        oraclePriceUsd: number | null,
+        source: string,
+      ): Promise<void> => {
+        const snapshot = buildLoopHealthSnapshot(cfg, postCol, postDebt, oraclePriceUsd, source);
+        await storage.updateBorrowPosition(pos.id, {
+          collateralAmountRaw: postCol.toString(),
+          debtAmountRaw: postDebt.toString(),
+          healthSnapshot: snapshot,
+          healthAsOf: new Date(),
+          healthSource: source,
+          policyState: "holding",
+          policyReason,
+          policyStateChangedAt: new Date(),
+        });
+      };
+
+      if (exec.success) {
+        const solDelta = BigInt(exec.outputReceivedRaw || "0");
+        const post = await borrowRoute.readLoopLivePositionHealth(vaultId, nftId).catch(() => null);
+        if (post) {
+          const postDebt = BigInt(post.debtRaw);
+          const postCol = BigInt(post.collateralRaw);
+          const verify = verifyLoopDeleverToHoldOutcome({ observedDebtRaw: postDebt, observedColRaw: postCol });
+          if (!verify.ok) {
+            // Fail closed: do NOT stamp HOLD. Persist the on-chain truth loudly.
+            const snapshot = buildLoopHealthSnapshot(cfg, postCol, postDebt, post.oraclePriceUsd, "loop_delever_verify_failed");
+            await storage.updateBorrowPosition(pos.id, {
+              collateralAmountRaw: postCol.toString(),
+              debtAmountRaw: postDebt.toString(),
+              healthSnapshot: snapshot,
+              healthAsOf: new Date(),
+              healthSource: "loop_delever_verify_failed",
+            });
+            await failOp(opId, "delever_verify_failed", `verify: ${verify.reason}; solDelta=${solDelta}`);
+            return {
+              success: false,
+              signature: exec.signature,
+              solReturnedLamports: solDelta.toString(),
+              observedDebtRaw: postDebt.toString(),
+              observedCollateralRaw: postCol.toString(),
+              error: `Loop Delever transaction landed but verification failed (${verify.reason}). Recorded on-chain observed amounts — check the position.`,
+            };
+          }
+          await persistHolding(postDebt, postCol, post.oraclePriceUsd, "loop_delever_onchain");
+          await storage.updateBorrowOperation(opId, {
+            status: "succeeded",
+            step: "final_read",
+            result: {
+              signature: exec.signature,
+              solReturnedLamports: solDelta.toString(),
+              observedDebtRaw: postDebt.toString(),
+              observedCollateralRaw: postCol.toString(),
+            },
+          });
+          await recordLoopEquityEvent({
+            walletAddress,
+            eventType: "loop_delever_hold",
+            amountLamports: solDelta,
+            txSignature: exec.signature ?? null,
+            notes: `Delever ${cfg.collateralSymbol} Loop to Hold: repaid ${lamportsToSol(liveDebt)} SOL debt, ${lamportsToSol(solDelta)} SOL returned`,
+          });
+          return {
+            success: true,
+            signature: exec.signature,
+            solReturnedLamports: solDelta.toString(),
+            observedDebtRaw: postDebt.toString(),
+            observedCollateralRaw: postCol.toString(),
+          };
+        }
+
+        // Atomic tx confirmed (repay MAX + exact withdraw are IN it) but the
+        // post-read failed: debt IS cleared and collateral reduced by exactly
+        // the withdrawn amount, by construction — record deterministically.
+        const deterministicCol = liveCol - withdrawRaw;
+        await persistHolding(0n, deterministicCol, null, "loop_delever_unverified");
+        await storage.updateBorrowOperation(opId, {
+          status: "succeeded",
+          step: "delever_unverified",
+          result: { signature: exec.signature, solReturnedLamports: solDelta.toString(), unverified: true },
+        });
+        await recordLoopEquityEvent({
+          walletAddress,
+          eventType: "loop_delever_hold",
+          amountLamports: solDelta,
+          txSignature: exec.signature ?? null,
+          notes: `Delever ${cfg.collateralSymbol} Loop to Hold: repaid ${lamportsToSol(liveDebt)} SOL debt, ${lamportsToSol(solDelta)} SOL returned`,
+        });
+        return {
+          success: true,
+          signature: exec.signature,
+          solReturnedLamports: solDelta.toString(),
+          observedDebtRaw: "0",
+          observedCollateralRaw: deterministicCol.toString(),
+          verifyWarning: "Delever confirmed but the final position read failed — recorded deterministic amounts (atomic tx repaid MAX).",
+        };
+      }
+
+      // AMBIGUOUS: probe whether the debt actually cleared.
+      const probe = await borrowRoute.readLoopLivePositionHealth(vaultId, nftId).catch(() => null);
+      if (probe && BigInt(probe.debtRaw) <= DEFAULT_SOL_DEBT_DUST_RAW && BigInt(probe.collateralRaw) > DEFAULT_LST_COLLATERAL_DUST_RAW) {
+        const postDebt = BigInt(probe.debtRaw);
+        const postCol = BigInt(probe.collateralRaw);
+        await persistHolding(postDebt, postCol, probe.oraclePriceUsd, "loop_delever_ambiguous_landed");
+        await storage.updateBorrowOperation(opId, {
+          status: "succeeded",
+          step: "delever_ambiguous_but_landed",
+          result: {
+            signature: exec.signature,
+            solDeltaUnknown: true,
+            observedDebtRaw: postDebt.toString(),
+            observedCollateralRaw: postCol.toString(),
+          },
+        });
+        return {
+          success: true,
+          signature: exec.signature,
+          observedDebtRaw: postDebt.toString(),
+          observedCollateralRaw: postCol.toString(),
+          verifyWarning: "Delever landed (debt cleared on-chain) but the returned SOL amount could not be measured.",
+        };
+      }
+      if (probe) {
+        await failOp(opId, "delever_ambiguous_not_landed", `sig ${exec.signature} unconfirmed; live debt unchanged.`);
+        return { success: false, signature: exec.signature, error: "Loop Delever could not be confirmed and the position still carries debt on-chain. Retry." };
+      }
+      await failOp(opId, "delever_ambiguous_unreadable", `sig ${exec.signature} unconfirmed; live read unreadable.`);
+      return {
+        success: false,
+        signature: exec.signature,
+        error: "Loop Delever result is unknown (confirmation and position read both failed). Recorded amounts are unchanged — retry shortly; an already-landed delever is detected automatically.",
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      await failOp(opId, "unexpected_error", msg);
+      return { success: false, error: `Loop Delever failed: ${msg}` };
+    }
+  });
+}
+
+// --- RE-LEVER (HOLD -> LEVERED, allocation tick) --------------------------------
+
+export interface LoopReleverParams {
+  walletAddress: string;
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  borrowPositionId: string;
+  /** Target leverage (allocation tick passes the vault's allowlisted max). */
+  leverage: number;
+  slippageBps?: number;
+  clientRequestId?: string;
+  /** Why the policy loop chose LEVERED (persisted to the row + decision journal). */
+  policyReason?: string;
+}
+
+export interface LoopReleverResult {
+  success: boolean;
+  signature?: string;
+  observedDebtRaw?: string;
+  observedCollateralRaw?: string;
+  policyReasons?: LoopPolicyReason[];
+  /** True when the position was already in the target state on-chain — state stamped WITHOUT a transaction (no signature by design). */
+  selfHeal?: boolean;
+  verifyWarning?: string;
+  error?: string;
+  gasShortfall?: LoopGasShortfall;
+}
+
+/**
+ * Return a HOLD position (debt cleared, collateral supplied) to leverage L on
+ * the SAME position NFT. Atomic sandwich, identical to the open's but with NO
+ * principal transfer leg — the equity is already supplied as LST:
+ *   flash-borrow F = equity x (L-1) WSOL -> swap F to LST -> operate
+ *   (deposit minOut LST + borrow F against the position) -> flash payback.
+ * LEVERAGE-INCREASING: this path IS gated by `evaluateLoopOpenRequest`
+ * (depeg band / borrow APR ceiling / utilization), unlike the deleverage
+ * reflex which must never be blocked. Fails closed on every unreadable input.
+ */
+export async function executeLoopRelever(params: LoopReleverParams): Promise<LoopReleverResult> {
+  const { walletAddress, agentPublicKey, agentSecretKey, borrowPositionId, leverage } = params;
+  const slippageBps = params.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
+  const policyReason = (params.policyReason || "carry_positive").slice(0, 200);
+
+  const loadedRes = await loadOpenLoopPosition(walletAddress, borrowPositionId);
+  if (!loadedRes.ok) return { success: false, error: loadedRes.error };
+  const { vaultId } = loadedRes.loaded;
+
+  const vaultPolicy = LOOP_VAULT_ALLOWLIST[vaultId];
+  if (!vaultPolicy) return { success: false, error: `Vault ${vaultId} is not on the loop launch allowlist.` };
+  if (!Number.isFinite(leverage) || leverage <= 1 || leverage > vaultPolicy.maxLeverage) {
+    return { success: false, error: `Re-lever leverage ${leverage} is outside (1, ${vaultPolicy.maxLeverage}].` };
+  }
+
+  const borrowRoute = new JupiterLendBorrowRoute();
+  const cfg = await borrowRoute.getLoopVaultConfig(vaultId);
+  if (!cfg) return { success: false, error: `Could not read loop vault ${vaultId} config — refusing (fail closed).` };
+  if (cfg.debtMint !== WSOL_MINT) {
+    return { success: false, error: `Vault ${vaultId} does not borrow WSOL — refusing.` };
+  }
+
+  return await withBorrowLock(borrowLockKey(walletAddress, null, vaultId), async () => {
+    const relock = await loadOpenLoopPosition(walletAddress, borrowPositionId);
+    if (!relock.ok) return { success: false, error: relock.error };
+    const { pos, nftId } = relock.loaded;
+
+    const connection = getServerConnection();
+    const agentPubkey = new PublicKey(agentPublicKey);
+    const wsolMintPk = new PublicKey(WSOL_MINT);
+    const lstMintPk = new PublicKey(cfg.collateralMint);
+
+    // LIVE state decides, never the row's policyState: a re-lever is valid
+    // ONLY from a debt-free position (anything else is already levered or broken).
+    const live = await borrowRoute.readLoopLivePositionHealth(vaultId, nftId);
+    if (!live) return { success: false, error: "Loop Re-Lever: could not read the live position — refusing (fail closed). Retry shortly." };
+    const liveDebt = BigInt(live.debtRaw);
+    const liveCol = BigInt(live.collateralRaw);
+
+    // Self-heal: debt already on-chain (a prior re-lever landed but we crashed
+    // before recording it) — just stamp the LEVERED state, no transaction.
+    if (liveDebt > DEFAULT_SOL_DEBT_DUST_RAW && liveCol > DEFAULT_LST_COLLATERAL_DUST_RAW) {
+      const snapshot = buildLoopHealthSnapshot(cfg, liveCol, liveDebt, live.oraclePriceUsd, "loop_relever_selfheal");
+      await storage.updateBorrowPosition(pos.id, {
+        collateralAmountRaw: liveCol.toString(),
+        debtAmountRaw: liveDebt.toString(),
+        healthSnapshot: snapshot,
+        healthAsOf: new Date(),
+        healthSource: "loop_relever_selfheal",
+        policyState: "levered",
+        policyReason,
+        policyStateChangedAt: new Date(),
+      });
+      try {
+        await storage.createBorrowOperation({
+          walletAddress,
+          borrowPositionId: pos.id,
+          operationType: "loop_relever",
+          status: "succeeded",
+          step: "already_levered_onchain",
+          clientRequestId: params.clientRequestId ?? null,
+          metadata: { kind: "loop", vaultId, nftId, selfHeal: true, policyReason },
+        });
+      } catch (e) {
+        if (!isUniqueViolation(e)) throw e;
+      }
+      return { success: true, selfHeal: true, verifyWarning: "The position already carries debt on-chain — marked levered without a transaction." };
+    }
+    if (liveCol <= DEFAULT_LST_COLLATERAL_DUST_RAW) {
+      return { success: false, error: "Loop Re-Lever: the position holds no meaningful collateral on-chain — nothing to re-lever." };
+    }
+
+    // Pure sizing off the LIVE collateral at the venue's own operate price.
+    const sized = computeLoopReleverAmounts(liveCol, live.oraclePriceUsd ?? NaN, leverage);
+    if (!sized.ok) {
+      return { success: false, error: `Loop Re-Lever refused (fail closed): ${sized.reason}.` };
+    }
+    const { flashLamports, equityLamports } = sized;
+    const minBorrowRaw = BigInt(cfg.minimumBorrowingRaw || "0");
+    if (flashLamports < minBorrowRaw) {
+      return {
+        success: false,
+        error: `Re-lever borrow leg ${lamportsToSol(flashLamports)} SOL is below the vault minimum ${lamportsToSol(minBorrowRaw)} SOL — staying in hold.`,
+      };
+    }
+
+    let opId: string;
+    try {
+      const op = await storage.createBorrowOperation({
+        walletAddress,
+        borrowPositionId: pos.id,
+        operationType: "loop_relever",
+        status: "pending",
+        step: "initialized",
+        clientRequestId: params.clientRequestId ?? null,
+        metadata: {
+          kind: "loop",
+          vaultId,
+          nftId,
+          leverage,
+          slippageBps,
+          policyReason,
+          liveCollateralRaw: liveCol.toString(),
+          equityLamports: equityLamports.toString(),
+          flashLamports: flashLamports.toString(),
+        },
+      });
+      opId = op.id;
+    } catch (e) {
+      if (isUniqueViolation(e)) {
+        return { success: false, error: "This re-lever was already submitted. Check its status before retrying." };
+      }
+      throw e;
+    }
+
+    try {
+      const wsolAta = ataFor(agentPubkey, wsolMintPk);
+      const lstAta = ataFor(agentPubkey, lstMintPk);
+      const infos = await connection.getMultipleAccountsInfo([wsolAta, lstAta]);
+      const prepIxs: TransactionInstruction[] = [];
+      if (!infos[0]) prepIxs.push(ixCreateAtaIdempotent(agentPubkey, agentPubkey, wsolMintPk));
+      if (!infos[1]) prepIxs.push(ixCreateAtaIdempotent(agentPubkey, agentPubkey, lstMintPk));
+
+      // No NFT mint (existing position) and no principal leg — fees + ATA rent only.
+      const gas = await ensureVaultGas({
+        payingPublicKey: agentPublicKey,
+        funderPublicKey: agentPublicKey,
+        funderSecretKey: agentSecretKey,
+        destMint: null,
+        label: "Loop Re-Lever",
+        extraRentLamports: prepIxs.length * ATA_RENT_LAMPORTS + LOOP_FEE_HEADROOM_LAMPORTS,
+      });
+      if (!gas.ok) {
+        await failOp(opId, "gas_failed", gas.error || "insufficient SOL for fees");
+        return {
+          success: false,
+          error: gas.error || "Loop Re-Lever: insufficient SOL for fees.",
+          gasShortfall: {
+            requiredLamports: gas.requiredLamports,
+            heldLamports: gas.payerLamportsBefore + (gas.refilledLamports ?? 0) + (gas.fundedLamports ?? 0),
+          },
+        };
+      }
+
+      if (prepIxs.length > 0) {
+        const prep = await executeAgentInstructionsConfirmOnly({
+          agentPublicKey,
+          agentSecretKey,
+          instructions: [...cuIxs(PREP_CU_LIMIT), ...prepIxs],
+          label: "Loop Re-Lever ATA prep",
+        });
+        if (!prep.success) {
+          await failOp(opId, "ata_prep_failed", prep.error || "ATA prep tx did not confirm.");
+          return { success: false, error: prep.error || "Loop Re-Lever: token account prep failed. Nothing was moved." };
+        }
+        await storage.updateBorrowOperation(opId, {
+          step: "atas_prepared",
+          ...(prep.signature ? { appendTxSignature: prep.signature } : {}),
+        });
+      } else {
+        await storage.updateBorrowOperation(opId, { step: "atas_prepared" });
+      }
+
+      // Swap quote (WSOL -> LST) — its REAL market rate feeds the policy gate.
+      const quote = await jupQuote(WSOL_MINT, cfg.collateralMint, flashLamports, slippageBps);
+      const minOut = BigInt(quote.otherAmountThreshold);
+      if (minOut <= 0n) {
+        await failOp(opId, "quote_failed", "Swap quote returned a zero min-out.");
+        return { success: false, error: "Loop Re-Lever: swap quote unusable. Nothing was moved." };
+      }
+      const outAmountNum = Number(quote.outAmount);
+      const marketSolPerLst =
+        Number.isFinite(outAmountNum) && outAmountNum > 0 ? Number(flashLamports) / outAmountNum : null;
+
+      // Policy gate — leverage-increasing, so the SAME gate as a fresh open
+      // (depeg band, borrow APR ceiling, utilization). Fail closed on unreadables.
+      const decision = evaluateLoopOpenRequest({
+        vaultId,
+        requestedLeverage: leverage,
+        principalLamports: equityLamports,
+        stakePoolSolPerLst: cfg.oraclePriceOperateUsd,
+        marketSolPerLst,
+        borrowApr: cfg.borrowApr,
+        utilization: cfg.withdrawUtilization,
+        stakingApy: null,
+      });
+      if (!decision.allowed) {
+        const denyMsgs = decision.reasons.filter((r) => r.severity === "deny").map((r) => r.message);
+        await failOp(opId, "policy_denied", denyMsgs.join(" | ") || "Loop policy denied the re-lever.");
+        return {
+          success: false,
+          policyReasons: decision.reasons,
+          error: `Loop Re-Lever blocked by risk policy: ${denyMsgs.join(" ")}`,
+        };
+      }
+
+      const swapResp = await jupSwapIxs(quote, agentPublicKey);
+      if ((swapResp.setupInstructions || []).length > 0) {
+        await failOp(opId, "swap_setup_ixs", `Swap returned ${swapResp.setupInstructions.length} setup ix(s).`);
+        return { success: false, error: "Loop Re-Lever: swap route needs extra account setup — aborted. Retry shortly." };
+      }
+      if (!swapResp.swapInstruction) {
+        await failOp(opId, "swap_ix_missing", "Swap response carried no swapInstruction.");
+        return { success: false, error: "Loop Re-Lever: swap instructions unavailable. Nothing was moved." };
+      }
+
+      const flash = await import("@jup-ag/lend/flashloan");
+      const borrowMod = await import("@jup-ag/lend/borrow");
+      const BN = (await import("bn.js")).default;
+      const { borrowIx, paybackIx } = await flash.getFlashloanIx({
+        amount: new BN(flashLamports.toString()),
+        asset: wsolMintPk,
+        signer: agentPubkey,
+        connection,
+      });
+      // Same shape as an open, on the EXISTING position NFT: deposit the
+      // swapped LST floor + borrow the flash leg against it.
+      const plan = planLoopOpen({
+        lstCollateralRaw: minOut,
+        wsolDebtRaw: flashLamports,
+        positionId: nftId,
+      });
+      const operate = await borrowMod.getOperateIx({
+        vaultId,
+        positionId: plan.positionId,
+        colAmount: specToBN(BN, plan.colAmount, "col", borrowMod.MAX_WITHDRAW_AMOUNT, borrowMod.MAX_REPAY_AMOUNT),
+        debtAmount: specToBN(BN, plan.debtAmount, "debt", borrowMod.MAX_WITHDRAW_AMOUNT, borrowMod.MAX_REPAY_AMOUNT),
+        connection,
+        signer: agentPubkey,
+      });
+
+      // Atomic sandwich — NO principal transfer/syncNative: the flash borrow
+      // funds the WSOL ATA, operate's borrow leg funds the payback.
+      const instructions: TransactionInstruction[] = [
+        ...cuIxs(LOOP_CU_LIMIT),
+        borrowIx,
+        deserializeJupIx(swapResp.swapInstruction),
+        ...operate.ixs,
+        paybackIx,
+      ];
+      const alts = [
+        ...(await loadAlts(connection, swapResp.addressLookupTableAddresses || [])),
+        ...(operate.addressLookupTableAccounts || []),
+      ];
+
+      const exec = await executeAgentInstructionsConfirmOnly({
+        agentPublicKey,
+        agentSecretKey,
+        instructions,
+        addressLookupTables: alts,
+        label: "Loop Re-Lever",
+        onBeforeBroadcast: async (info) => {
+          const updated = await storage.updateBorrowOperation(opId, {
+            step: "loop_sig_writeahead",
+            appendTxSignature: info.signature,
+            mergeMetadata: { blockhash: info.blockhash, lastValidBlockHeight: info.lastValidBlockHeight },
+          });
+          if (!updated) throw new Error("write-ahead signature persist failed — refusing to broadcast");
+        },
+      });
+
+      if (exec.onChainFailed || (!exec.success && !exec.signature)) {
+        // Atomic on-chain failure or never broadcast: position unchanged (still HOLD).
+        await failOp(opId, exec.onChainFailed ? "tx_failed_onchain" : "exec_failed", exec.error || "Loop re-lever tx failed.");
+        return { success: false, signature: exec.signature, error: exec.error || "Loop Re-Lever failed — the position is unchanged." };
+      }
+
+      const persistLevered = async (
+        postDebt: bigint,
+        postCol: bigint,
+        oraclePriceUsd: number | null,
+        source: string,
+      ): Promise<void> => {
+        const snapshot = buildLoopHealthSnapshot(cfg, postCol, postDebt, oraclePriceUsd, source);
+        await storage.updateBorrowPosition(pos.id, {
+          collateralAmountRaw: postCol.toString(),
+          debtAmountRaw: postDebt.toString(),
+          healthSnapshot: snapshot,
+          healthAsOf: new Date(),
+          healthSource: source,
+          policyState: "levered",
+          policyReason,
+          policyStateChangedAt: new Date(),
+        });
+      };
+      const equityNote = `Re-Lever ${cfg.collateralSymbol} Loop: borrowed ${lamportsToSol(flashLamports)} SOL at ${leverage}x`;
+
+      if (exec.success) {
+        const post = await borrowRoute.readLoopLivePositionHealth(vaultId, nftId).catch(() => null);
+        if (post) {
+          const postDebt = BigInt(post.debtRaw);
+          const postCol = BigInt(post.collateralRaw);
+          const verify = verifyLoopReleverOutcome({
+            preColRaw: liveCol,
+            flashDebtRaw: flashLamports,
+            minCollateralAddRaw: minOut,
+            observedDebtRaw: postDebt,
+            observedColRaw: postCol,
+          });
+          if (!verify.ok) {
+            // Fail closed: do NOT stamp LEVERED. Persist the on-chain truth loudly.
+            const snapshot = buildLoopHealthSnapshot(cfg, postCol, postDebt, post.oraclePriceUsd, "loop_relever_verify_failed");
+            await storage.updateBorrowPosition(pos.id, {
+              collateralAmountRaw: postCol.toString(),
+              debtAmountRaw: postDebt.toString(),
+              healthSnapshot: snapshot,
+              healthAsOf: new Date(),
+              healthSource: "loop_relever_verify_failed",
+            });
+            await failOp(opId, "relever_verify_failed", `verify: ${verify.reason}`);
+            return {
+              success: false,
+              signature: exec.signature,
+              observedDebtRaw: postDebt.toString(),
+              observedCollateralRaw: postCol.toString(),
+              error: `Loop Re-Lever transaction landed but verification failed (${verify.reason}). Recorded on-chain observed amounts — check the position.`,
+            };
+          }
+          await persistLevered(postDebt, postCol, post.oraclePriceUsd, "loop_relever_onchain");
+          await storage.updateBorrowOperation(opId, {
+            status: "succeeded",
+            step: "final_read",
+            result: {
+              signature: exec.signature,
+              observedDebtRaw: postDebt.toString(),
+              observedCollateralRaw: postCol.toString(),
+            },
+          });
+          await recordLoopEquityEvent({
+            walletAddress,
+            eventType: "loop_relever",
+            amountLamports: flashLamports,
+            txSignature: exec.signature ?? null,
+            notes: equityNote,
+          });
+          return {
+            success: true,
+            signature: exec.signature,
+            observedDebtRaw: postDebt.toString(),
+            observedCollateralRaw: postCol.toString(),
+          };
+        }
+
+        // Atomic tx confirmed (exact deposit minOut floor + exact borrow flash
+        // are IN it) but the post-read failed — record deterministically.
+        const deterministicCol = liveCol + minOut;
+        await persistLevered(flashLamports, deterministicCol, null, "loop_relever_unverified");
+        await storage.updateBorrowOperation(opId, {
+          status: "succeeded",
+          step: "relever_unverified",
+          result: { signature: exec.signature, unverified: true },
+        });
+        await recordLoopEquityEvent({
+          walletAddress,
+          eventType: "loop_relever",
+          amountLamports: flashLamports,
+          txSignature: exec.signature ?? null,
+          notes: equityNote,
+        });
+        return {
+          success: true,
+          signature: exec.signature,
+          observedDebtRaw: flashLamports.toString(),
+          observedCollateralRaw: deterministicCol.toString(),
+          verifyWarning: "Re-lever confirmed but the final position read failed — recorded deterministic amounts (atomic tx).",
+        };
+      }
+
+      // AMBIGUOUS: probe whether the debt actually appeared.
+      const probe = await borrowRoute.readLoopLivePositionHealth(vaultId, nftId).catch(() => null);
+      if (probe && BigInt(probe.debtRaw) > DEFAULT_SOL_DEBT_DUST_RAW && BigInt(probe.collateralRaw) > DEFAULT_LST_COLLATERAL_DUST_RAW) {
+        const postDebt = BigInt(probe.debtRaw);
+        const postCol = BigInt(probe.collateralRaw);
+        await persistLevered(postDebt, postCol, probe.oraclePriceUsd, "loop_relever_ambiguous_landed");
+        await storage.updateBorrowOperation(opId, {
+          status: "succeeded",
+          step: "relever_ambiguous_but_landed",
+          result: {
+            signature: exec.signature,
+            observedDebtRaw: postDebt.toString(),
+            observedCollateralRaw: postCol.toString(),
+          },
+        });
+        await recordLoopEquityEvent({
+          walletAddress,
+          eventType: "loop_relever",
+          amountLamports: postDebt,
+          txSignature: exec.signature ?? null,
+          notes: equityNote,
+        });
+        return {
+          success: true,
+          signature: exec.signature,
+          observedDebtRaw: postDebt.toString(),
+          observedCollateralRaw: postCol.toString(),
+          verifyWarning: "Re-lever landed (debt live on-chain) but confirmation was not observed directly.",
+        };
+      }
+      if (probe) {
+        await failOp(opId, "relever_ambiguous_not_landed", `sig ${exec.signature} unconfirmed; live debt still clear.`);
+        return { success: false, signature: exec.signature, error: "Loop Re-Lever could not be confirmed and the position is still debt-free on-chain. It stays in hold; the next tick may retry." };
+      }
+      await failOp(opId, "relever_ambiguous_unreadable", `sig ${exec.signature} unconfirmed; live read unreadable.`);
+      return {
+        success: false,
+        signature: exec.signature,
+        error: "Loop Re-Lever result is unknown (confirmation and position read both failed). Recorded amounts are unchanged — an already-landed re-lever is detected automatically on retry.",
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      await failOp(opId, "unexpected_error", msg);
+      return { success: false, error: `Loop Re-Lever failed: ${msg}` };
     }
   });
 }

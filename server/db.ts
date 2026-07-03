@@ -487,6 +487,24 @@ export async function ensureSchema() {
         as_of timestamp NOT NULL DEFAULT now()
       )`,
 
+      // --- SOL Loop Vault P3: hourly rate telemetry (allocation-tick input). ---
+      // Rates are FRACTIONS (0.08 = 8%), nullable per-field (partial upstream
+      // outage still records readable fields; policy fails closed on null at
+      // read time). Telemetry/policy input only — money paths re-read live.
+      // Bounded retention (pruned by the sampler). Additive + idempotent.
+      `CREATE TABLE IF NOT EXISTS loop_rate_samples (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        vault_id integer NOT NULL,
+        symbol text NOT NULL,
+        staking_apy numeric(12, 8),
+        staking_apy_mean_30d numeric(12, 8),
+        borrow_apr numeric(12, 8),
+        withdraw_utilization numeric(8, 6),
+        net_carry_2x numeric(12, 8),
+        as_of timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_loop_rate_samples_vault_time ON loop_rate_samples (vault_id, as_of)`,
+
       // --- Vaults borrow engine (Phase A scaffold): debt LEDGER. ---
       // Empty + additive; NO writers wired yet (Phase A = spec & hard gates, no
       // money moves). One row per isolated borrow position. Scope mirrors
@@ -542,6 +560,47 @@ export async function ensureSchema() {
       // the shipped LST→stable engine; 'loop' = leveraged LST→WSOL staking loop.
       // Existing rows are borrow rows, so the default backfills correctly.
       `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'borrow'`,
+      // Additive (SOL Loop Vault P3): policy brain state on kind='loop' rows.
+      // 'levered' (has debt, safety-tick eligible) | 'holding' (zero debt, HF
+      // null — excluded from keeper decideDeleverage). Null on borrow rows.
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS policy_state text`,
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS policy_reason text`,
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS policy_state_changed_at timestamp`,
+      // Additive (SOL Loop Vault P3): safety-tick action throttle on loop rows.
+      // The reflex claims a position by stamping this atomically, so an unhealthy
+      // loop is handed to the executor at most once per cooldown window.
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS last_policy_action_at timestamp`,
+
+      // --- SOL Loop Vault P3: append-only policy decision journal. ---
+      // One row per tick evaluation (including outcome 'none') so hysteresis is
+      // DB-derived and the observation gate is one SQL pass. Never a money gate.
+      `CREATE TABLE IF NOT EXISTS loop_policy_decisions (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        wallet_address text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        borrow_position_id varchar,
+        vault_id integer NOT NULL,
+        tick text NOT NULL,
+        action text NOT NULL,
+        fraction numeric(8, 6),
+        reason text NOT NULL,
+        details jsonb,
+        created_at timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_loop_policy_decisions_vault_time ON loop_policy_decisions (vault_id, created_at)`,
+      `CREATE INDEX IF NOT EXISTS idx_loop_policy_decisions_wallet ON loop_policy_decisions (wallet_address)`,
+
+      // --- SOL Loop Vault P3 (T106): tick heartbeats for the observation gate. ---
+      // One row per completed safety/allocation pass; lets the admin status
+      // route measure tick coverage even with zero loop positions. Pruned.
+      `CREATE TABLE IF NOT EXISTS loop_tick_heartbeats (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        tick text NOT NULL,
+        evaluated integer NOT NULL DEFAULT 0,
+        acted integer NOT NULL DEFAULT 0,
+        failed integer NOT NULL DEFAULT 0,
+        created_at timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_loop_tick_heartbeats_tick_time ON loop_tick_heartbeats (tick, created_at)`,
 
       // --- Vaults borrow engine (Phase A scaffold): money-op AUDIT log. ---
       // Append-only record of every multi-hop borrow/repay/carry operation, so
