@@ -9948,6 +9948,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           principalLamports: principalParsed,
           leverage: fixedLeverage,
           slippageBps: slip as number | undefined,
+          // preflight: report the exact deposit bar without executing, so the
+          // client can fund the WHOLE open from the user's wallet up front
+          // (agent-held SOL is gas plumbing — never consumed as principal).
+          preflightOnly: req.body?.preflight === true,
           ...(typeof clientRequestId === "string" && clientRequestId ? { clientRequestId } : {}),
         });
       } finally {

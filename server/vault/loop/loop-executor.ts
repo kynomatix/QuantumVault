@@ -342,6 +342,13 @@ export interface LoopOpenParams {
   leverage: number;
   slippageBps?: number;
   clientRequestId?: string;
+  /**
+   * Report the exact SOL bar (principal + rent + fees) WITHOUT executing.
+   * The client uses this to collect the FULL bar from the USER's wallet
+   * before the real open, so an open never consumes SOL the agent wallet
+   * already held — that SOL is gas plumbing for other operations.
+   */
+  preflightOnly?: boolean;
 }
 
 export interface LoopOpenResult {
@@ -356,6 +363,8 @@ export interface LoopOpenResult {
   error?: string;
   /** Present when the failure is a SOL shortfall the user can fix by depositing. */
   gasShortfall?: LoopGasShortfall;
+  /** Present (with success:true) when the call was a preflight — nothing executed. */
+  preflight?: LoopGasShortfall;
 }
 
 /** Exact SOL bar vs. what the agent wallet held, for a client "deposit X SOL" prompt. */
@@ -466,6 +475,19 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
       extraRentLamports,
       allowUsdcRefill: false,
     });
+    // PREFLIGHT: return the exact bar without executing anything — even when
+    // the wallet technically holds enough. The client always collects the FULL
+    // bar from the USER's wallet first, so pre-existing agent SOL (gas
+    // plumbing) is never consumed as loop principal.
+    if (params.preflightOnly) {
+      return {
+        success: true,
+        preflight: {
+          requiredLamports: gas.requiredLamports,
+          heldLamports: gas.payerLamportsBefore + (gas.refilledLamports ?? 0) + (gas.fundedLamports ?? 0),
+        },
+      };
+    }
     if (!gas.ok) {
       return {
         success: false,

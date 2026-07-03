@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useConnection } from "@solana/wallet-adapter-react";
 import { Loader2, AlertTriangle, RefreshCw, Repeat, ArrowUpFromLine } from "lucide-react";
@@ -29,10 +29,16 @@ import {
 // OWNER UI RULES (plan §4.5 — re-read it before touching this surface):
 // - The user NEVER picks the LST. The platform auto-picks the best pair
 //   server-side; the dialog only SHOWS which LST is in use.
-// - The agent wallet is GAS PLUMBING, never a user-facing balance. Deposits
-//   come from the USER's wallet; close/unwind proceeds auto-return to the
-//   USER's wallet. The only agent-wallet surface allowed is a recovery row
-//   that appears when SOL is stranded there (e.g. an auto-return failed).
+// - The agent wallet is GAS PLUMBING, never a user-facing balance, and its
+//   SOL is NEVER touched in either direction:
+//   * OPEN is deposit-first: preflight the exact bar, collect the FULL bar
+//     from the USER's wallet, then open — pre-existing agent SOL is never
+//     consumed as principal.
+//   * CLOSE/UNWIND auto-return EXACTLY the server-reported proceeds
+//     (solReturnedLamports) to the USER's wallet — never a balance sweep
+//     that would drain the agent's gas float.
+//   The only agent-wallet surface allowed is a recovery row for tracked
+//   proceeds whose auto-return failed (never derived from wallet balance).
 
 // Display names for position rows only (venueVaultId -> symbol). NOT a picker.
 const LOOP_VAULTS: Array<{ id: number; symbol: string }> = [
@@ -74,7 +80,7 @@ const vaultSymbol = (venueVaultId: string | null): string => {
 
 export default function LoopVaultControls({ active }: { active: boolean }) {
   const { toast } = useToast();
-  const { retryAuth } = useWallet();
+  const { retryAuth, publicKeyString } = useWallet();
   const { connection } = useConnection();
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -120,6 +126,35 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
       return await safeResponseJson(res);
     },
   });
+
+  // Stranded-proceeds tracker (wallet-scoped, survives reloads). ONLY SOL that
+  // a close/unwind actually returned — as reported by the server — may ever be
+  // offered back to the user. Never derived from the wallet balance, so the
+  // agent's own gas float can never show up here.
+  const pendingKey = `qv-loop-pending-return:${publicKeyString ?? "unknown"}`;
+  const [pendingReturnSol, setPendingReturnSol] = useState(0);
+  const readStoredPending = () => {
+    try {
+      const v = Number(localStorage.getItem(pendingKey) ?? "0");
+      return Number.isFinite(v) && v > 0 ? v : 0;
+    } catch {
+      return 0;
+    }
+  };
+  useEffect(() => {
+    setPendingReturnSol(readStoredPending());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingKey]);
+  const updatePendingReturn = (sol: number) => {
+    const v = Math.max(0, Math.round(sol * 1e4) / 1e4);
+    setPendingReturnSol(v);
+    try {
+      if (v > 0) localStorage.setItem(pendingKey, String(v));
+      else localStorage.removeItem(pendingKey);
+    } catch {
+      /* storage unavailable — state still shows it this session */
+    }
+  };
 
   // Hide entirely unless the server confirms this wallet may see the loop.
   if (!statusQuery.data) return null;
@@ -172,11 +207,12 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
       toast({ title: okMsg, description: data.signature ? `Tx: ${String(data.signature).slice(0, 16)}…` : undefined });
       setAmountSol("");
       // Close/unwind proceeds land as SOL in the internal gas wallet — send
-      // them straight back to the user's wallet so the agent wallet never
-      // becomes a user-facing balance (it's gas plumbing only). If this leg
-      // fails, nothing is lost: the recovery row shows the stranded SOL.
+      // EXACTLY the amount the server says the op credited straight back to
+      // the user's wallet. Never a balance sweep: SOL the agent wallet holds
+      // for other operations stays put. If this leg fails, nothing is lost:
+      // the tracked amount shows in the recovery row.
       if (key.startsWith("close-") || key.startsWith("unwind-")) {
-        void autoReturnProceeds();
+        void autoReturnProceeds(typeof data.solReturnedLamports === "string" ? data.solReturnedLamports : undefined);
       }
     } catch (e: any) {
       if (isSessionError(e)) {
@@ -195,16 +231,23 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
     }
   };
 
-  // Send SOL sitting in the internal gas wallet back to the user's wallet.
-  // The tx is agent-signed server-side; the client just submits + confirms
-  // it, then records the equity event (same flow as the wallet page). Leaves
-  // a small gas float (0.01 SOL) behind for future operation fees.
+  // Send loop proceeds sitting in the internal gas wallet back to the user's
+  // wallet. The tx is agent-signed server-side; the client just submits +
+  // confirms it, then records the equity event (same flow as the wallet page).
+  // Amounts are ALWAYS the exact tracked proceeds — never a balance sweep, so
+  // SOL the agent wallet holds for other operations is never touched.
   const agentSol = balanceQuery.data?.solBalance ?? null;
-  const spareFrom = (sol: number | null) =>
-    sol !== null ? Math.max(0, Math.floor((sol - 0.01) * 1e4) / 1e4) : 0;
-  const spareSol = spareFrom(agentSol);
-  const returnSpareSol = async (amount: number, auto = false) => {
+  const round4 = (n: number) => Math.floor(n * 1e4) / 1e4;
+  // The withdraw route keeps a 0.005 SOL reserve; leave a hair extra for fees.
+  const maxSendable = (sol: number | null) => (sol !== null ? Math.max(0, round4(sol - 0.006)) : 0);
+  // Ref (not state) guard: closes the sub-second window where an auto-return
+  // is in flight but `busy` reads stale in a manual click's closure — a
+  // double-send would eat the agent's gas float.
+  const returningRef = useRef(false);
+  const returnSpareSol = async (amount: number, opts: { auto?: boolean; pendingOnSuccess: number }) => {
     if (amount <= 0) return;
+    if (returningRef.current) return;
+    returningRef.current = true;
     setBusy("withdraw-sol");
     try {
       const res = await fetch("/api/agent/withdraw-sol", {
@@ -226,15 +269,16 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
         body: JSON.stringify({ amount, txSignature: signature }),
       });
       toast({ title: `Returned ${amount.toFixed(4)} SOL to your wallet` });
+      updatePendingReturn(opts.pendingOnSuccess);
     } catch (e: any) {
       if (isSessionError(e)) {
         showReconnectToast({
           toast,
           retryAuth,
           title: "SOL return failed",
-          retry: () => void autoReturnProceeds(),
+          retry: () => void returnSpareSol(amount, opts),
         });
-      } else if (auto) {
+      } else if (opts.auto) {
         // The close itself succeeded — don't scare the user. The recovery
         // row shows the SOL with a Return to Wallet button.
         toast({
@@ -245,27 +289,87 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
         toast({ title: "SOL return failed", description: e?.message || String(e), variant: "destructive" });
       }
     } finally {
+      returningRef.current = false;
       setBusy(null);
       refresh();
     }
   };
-  // Re-read the gas wallet fresh (state is stale right after a close) and
-  // return everything above the gas float to the user's wallet.
-  const autoReturnProceeds = async () => {
+  // Auto-return EXACTLY what the close/unwind reported it credited
+  // (solReturnedLamports). No proceeds -> nothing moves; the agent wallet's
+  // own gas float is invisible to this path by construction.
+  const autoReturnProceeds = async (proceedsLamports?: string) => {
+    let proceeds = 0;
+    try {
+      proceeds = Number(BigInt(proceedsLamports ?? "0")) / 1e9;
+    } catch {
+      proceeds = 0;
+    }
+    const tracked = round4(proceeds);
+    if (tracked <= 0) return;
+    // ACCUMULATE onto any prior stranded proceeds (read from storage, not the
+    // possibly-stale state closure) — overwriting would invisibly strand the
+    // earlier failed return. Track BEFORE sending so a failed send still shows.
+    const newPending = Math.round((readStoredPending() + tracked) * 1e4) / 1e4;
+    updatePendingReturn(newPending);
     const fresh = await balanceQuery.refetch();
-    const amount = spareFrom(fresh.data?.solBalance ?? null);
-    if (amount <= 0) return;
-    await returnSpareSol(amount, true);
+    const amount = Math.min(newPending, maxSendable(fresh.data?.solBalance ?? null));
+    if (amount <= 0) return; // stays tracked; the recovery row offers it
+    await returnSpareSol(amount, { auto: true, pendingOnSuccess: newPending - amount });
   };
+  // Manual recovery send: capped by what the withdraw route will allow now.
+  const manualReturnSol = Math.min(pendingReturnSol, maxSendable(agentSol));
 
-  const runMoneyOp = (key: string, path: string, body: Record<string, unknown>, okMsg: string) => {
+  const runConfirmed = (key: string, fn: () => void) => {
     if (confirmAction !== key) {
       setConfirmAction(key);
       setTimeout(() => setConfirmAction((c) => (c === key ? null : c)), 5000);
       return;
     }
     setConfirmAction(null);
-    void doOp(key, path, body, okMsg);
+    fn();
+  };
+  const runMoneyOp = (key: string, path: string, body: Record<string, unknown>, okMsg: string) =>
+    runConfirmed(key, () => void doOp(key, path, body, okMsg));
+
+  // OPEN is deposit-first: preflight the exact bar (principal + rent + fees),
+  // collect the FULL bar from the USER's wallet (heldSol=0 — SOL already in
+  // the agent wallet is gas plumbing and is never counted toward the deposit),
+  // then run the real open. Pre-existing agent gas survives untouched.
+  const startOpen = async () => {
+    setBusy("open");
+    try {
+      const sessionId = await getSessionId();
+      const res = await fetch("/api/vault/loop/open", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
+        body: JSON.stringify({ principalLamports, preflight: true, sessionId }),
+      });
+      const data = await safeResponseJson(res);
+      if (!res.ok || !data?.success || typeof data?.preflight?.requiredLamports !== "number") {
+        throw new Error(data?.error || "Could not prepare the loop deposit");
+      }
+      setShortfall({
+        requiredSol: data.preflight.requiredLamports / 1e9,
+        heldSol: 0,
+        reason: "to fund your loop deposit, one-time account rent and network fees",
+        kind: "open",
+        retry: () => void doOp("open", "/api/vault/loop/open", { principalLamports }, "Loop opened"),
+      });
+    } catch (e: any) {
+      if (isSessionError(e)) {
+        showReconnectToast({
+          toast,
+          retryAuth,
+          title: "Loop open failed",
+          retry: () => void startOpen(),
+        });
+      } else {
+        toast({ title: "Loop open failed", description: e?.message || String(e), variant: "destructive" });
+      }
+    } finally {
+      setBusy(null);
+    }
   };
 
   const principalLamports = toRawBaseUnits(amountSol, 9);
@@ -381,9 +485,7 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
               <Button
                 className="w-full"
                 disabled={openDisabled}
-                onClick={() =>
-                  runMoneyOp("open", "/api/vault/loop/open", { principalLamports }, "Loop opened")
-                }
+                onClick={() => runConfirmed("open", () => void startOpen())}
                 data-testid="button-loop-open"
               >
                 {busy === "open" ? <Loader2 className="h-4 w-4 animate-spin" /> : label("open", "Deposit & Open 2x Loop")}
@@ -396,21 +498,26 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
               </p>
             </div>
 
-            {/* --- Recovery row: only appears if SOL is stranded in the gas
-                wallet (e.g. an auto-return after close failed). The gas wallet
-                is plumbing — it must never look like a user balance. --- */}
-            {spareSol > 0 && (
+            {/* --- Recovery row: only appears when TRACKED loop proceeds are
+                stranded in the gas wallet (an auto-return after close/unwind
+                failed). Never balance-derived — the agent wallet's own gas
+                float must never look like a user balance. --- */}
+            {pendingReturnSol > 0 && (
               <div className="rounded-lg border border-border/60 bg-muted/20 p-3 flex items-center justify-between gap-2">
                 <p className="text-[11px] text-muted-foreground flex-1" data-testid="text-loop-spare-sol">
-                  <span className="font-medium text-foreground tabular-nums">{spareSol.toFixed(4)} SOL</span> from loop
+                  <span className="font-medium text-foreground tabular-nums">{pendingReturnSol.toFixed(4)} SOL</span> from loop
                   operations is ready to go back to your wallet.
                 </p>
                 <Button
                   size="sm"
                   variant="outline"
                   className="shrink-0"
-                  disabled={!!busy}
-                  onClick={() => void returnSpareSol(spareSol)}
+                  disabled={!!busy || manualReturnSol <= 0}
+                  onClick={() =>
+                    void returnSpareSol(manualReturnSol, {
+                      pendingOnSuccess: pendingReturnSol - manualReturnSol,
+                    })
+                  }
                   data-testid="button-loop-withdraw-sol"
                 >
                   {busy === "withdraw-sol" ? (
