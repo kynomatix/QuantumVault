@@ -779,7 +779,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-display font-bold">Wallet Management</h1>
-          <p className="text-muted-foreground">Manage your trading funds</p>
+          <p className="text-muted-foreground">Your trading funds and lending collateral</p>
         </div>
         <Button
           variant="outline"
@@ -933,7 +933,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                 </div>
                 <div>
                   <h2 className="font-semibold leading-tight">Lending collateral</h2>
-                  <p className="text-xs text-muted-foreground mt-0.5">Held as collateral · borrow USDC against it</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">Held as-is · each asset borrows USDC on its own</p>
                 </div>
               </div>
               <Button
@@ -1018,6 +1018,9 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                         <span className={`w-2 h-2 rounded-full ${poolColor.get(p.id)}`} />
                         <span className="text-[11px] font-medium">{p.symbol ?? '\u2014'}</span>
                         <span className="text-[11px] text-muted-foreground tabular-nums">{fmtUsd(p.collateralUsd)}</span>
+                        <span className="text-[10px] text-muted-foreground/70 tabular-nums">
+                          {Math.round(((p.collateralUsd as number) / totalCollateralUsd) * 100)}%
+                        </span>
                       </div>
                     ))}
                     {splitPools.length > 5 && (
@@ -1032,7 +1035,9 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
               {loanPools.length > 0 && (
                 <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground border-t border-border/50 pt-2.5">
                   <HeartPulse className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                  <span>{loanPools.length} pool{loanPools.length > 1 ? 's have' : ' has'} an active loan — open to check each one&rsquo;s health.</span>
+                  <span>
+                    {loanPools.length} of {pools.length} pool{pools.length > 1 ? 's' : ''} {loanPools.length > 1 ? 'have' : 'has'} an active loan — open to check each one&rsquo;s health.
+                  </span>
                 </div>
               )}
 
@@ -1042,7 +1047,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                   className="w-full flex items-center justify-center gap-1.5 text-xs font-medium py-2 rounded-lg border border-border/60 hover:bg-muted/30 transition-colors"
                   data-testid="button-toggle-pools"
                 >
-                  {poolsOpen ? 'Hide loans' : `View ${pools.length} loan${pools.length > 1 ? 's' : ''}`}
+                  {poolsOpen ? 'Hide pools' : `View all ${pools.length} pool${pools.length > 1 ? 's' : ''}`}
                   {poolsOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
                 </button>
               )}
@@ -1114,28 +1119,41 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                         </div>
                         <div className="text-right shrink-0">
                           <p className="text-sm font-semibold tabular-nums" data-testid={`text-loan-collateral-${p.id}`}>{fmtUsd(p.collateralUsd)}</p>
-                          <p className="text-[11px] text-muted-foreground">collateral</p>
+                          <p className="text-[11px] text-muted-foreground">supplied</p>
                         </div>
                       </div>
 
+                      {/* "No loan" renders ONLY when the debt read succeeded and is
+                          truly zero. An unreadable debt (debtUsd null) keeps the
+                          loan framing with an em-dash + health chip — fail closed,
+                          never claim "No loan" off a failed read. */}
                       <div className="mt-3 space-y-1.5">
                         <div className="flex items-center justify-between text-[11px]">
-                          <span className="text-muted-foreground">Outstanding debt</span>
+                          <span className="text-muted-foreground">{p.hasLoan || p.debtUsd == null ? 'Outstanding debt' : 'No loan'}</span>
                           <span className="flex items-center gap-2">
-                            <span className="tabular-nums text-accent" data-testid={`text-loan-debt-${p.id}`}>
-                              {poolBorrowLimitUsd != null
-                                ? `${fmtUsd(p.debtUsd)} / ${fmtUsd(poolBorrowLimitUsd)}`
-                                : `${fmtUsd(p.debtUsd)} USDC`}
-                            </span>
-                            <span className={`flex items-center gap-1 ${health.cls}`} data-testid={`text-loan-risk-${p.id}`}>
-                              <health.Icon className="w-3.5 h-3.5" />{health.label}
-                            </span>
+                            {p.hasLoan || p.debtUsd == null ? (
+                              <span className="tabular-nums text-accent" data-testid={`text-loan-debt-${p.id}`}>
+                                {poolBorrowLimitUsd != null
+                                  ? `${fmtUsd(p.debtUsd)} / ${fmtUsd(poolBorrowLimitUsd)}`
+                                  : `${fmtUsd(p.debtUsd)} USDC`}
+                              </span>
+                            ) : (
+                              <span className="tabular-nums text-muted-foreground" data-testid={`text-loan-debt-${p.id}`}>
+                                borrow up to {fmtUsd(poolBorrowLimitUsd)}
+                              </span>
+                            )}
+                            {(p.hasLoan || p.debtUsd == null) && (
+                              <span className={`flex items-center gap-1 ${health.cls}`} data-testid={`text-loan-risk-${p.id}`}>
+                                <health.Icon className="w-3.5 h-3.5" />{health.label}
+                              </span>
+                            )}
                           </span>
                         </div>
                         {/* Per-pool health bar — fill = share of this pool's borrow
                             capacity already used. Real on-chain inputs only; hidden
-                            entirely when the capacity or debt can't be read. */}
-                        {poolBarModel.fillPct != null && (
+                            entirely when there's no loan or when the capacity or
+                            debt can't be read. */}
+                        {p.hasLoan && poolBarModel.fillPct != null && (
                           <LtvBar
                             model={poolBarModel}
                             currentLtvLabel={poolCurrentLtvPct != null ? `${Math.round(poolCurrentLtvPct)}% LTV` : null}

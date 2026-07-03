@@ -58,8 +58,9 @@ function borrowCollateralFromNotes(notes: string | null): string | null {
   return m ? m[1].trim() : null;
 }
 
-// How many rows to show before the user expands the full history.
-const VISIBLE_COUNT = 5;
+// How many rows to show before the user expands the full history. The approved
+// design collapses the history to a 2-row preview so page length stays constant.
+const VISIBLE_COUNT = 2;
 
 export function EquityHistory({ walletAddress }: EquityHistoryProps) {
   const [events, setEvents] = useState<EquityEvent[]>([]);
@@ -236,7 +237,7 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
                           </p>
                         )}
                         {liabilityNote && (
-                          <p className="text-[11px] text-muted-foreground" data-testid={`equity-event-note-${event.id}`}>
+                          <p className={`text-[11px] ${tone}`} data-testid={`equity-event-note-${event.id}`}>
                             {liabilityNote}
                           </p>
                         )}
