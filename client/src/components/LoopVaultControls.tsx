@@ -19,20 +19,22 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 
 // Owner-only SOL Loop vault card (P2 exit-gate surface). Renders as one more
 // card in the account Vaults grid, matching the look of the other vault cards;
 // clicking it opens a dialog with the loop controls (open / unwind / close).
 // Self-gating: the server returns 401/403 for non-owner wallets and the card
 // renders nothing in that case, so no other user ever sees it.
+//
+// OWNER UI RULES (plan §4.5 — re-read it before touching this surface):
+// - The user NEVER picks the LST. The platform auto-picks the best pair
+//   server-side; the dialog only SHOWS which LST is in use.
+// - The agent wallet is GAS PLUMBING, never a user-facing balance. Deposits
+//   come from the USER's wallet; close/unwind proceeds auto-return to the
+//   USER's wallet. The only agent-wallet surface allowed is a recovery row
+//   that appears when SOL is stranded there (e.g. an auto-return failed).
 
+// Display names for position rows only (venueVaultId -> symbol). NOT a picker.
 const LOOP_VAULTS: Array<{ id: number; symbol: string }> = [
   { id: 4, symbol: "JupSOL" },
   { id: 47, symbol: "mSOL" },
@@ -76,7 +78,6 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
   const { connection } = useConnection();
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
-  const [vaultId, setVaultId] = useState<string>("4");
   const [amountSol, setAmountSol] = useState<string>("");
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<string | null>(null);
@@ -85,7 +86,10 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
   // rent + fees, deposit-framed); for close/unwind it's a small gas top-up.
   const [shortfall, setShortfall] = useState<{ requiredSol: number; heldSol: number; reason: string; kind: "open" | "fees"; retry: () => void } | null>(null);
 
-  const statusQuery = useQuery<{ positions: LoopRow[] } | null>({
+  const statusQuery = useQuery<{
+    positions: LoopRow[];
+    recommended?: { vaultId: number; symbol: string; netCarry2x: number } | null;
+  } | null>({
     queryKey: ["/api/vault/loop/status"],
     enabled: active,
     refetchInterval: active ? 20000 : false,
@@ -100,8 +104,10 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
     },
   });
 
-  // Agent wallet SOL — funds loop opens; spare can be withdrawn back to the
-  // user's wallet. Only polled while the dialog is open.
+  // Internal gas-wallet SOL — plumbing only, never a user-facing balance.
+  // Read so close/unwind proceeds can be auto-returned to the user's wallet
+  // and so the recovery row can appear if any SOL ever strands there.
+  // Only polled while the dialog is open.
   const balanceQuery = useQuery<{ solBalance: number } | null>({
     queryKey: ["/api/agent/balance", "loop-dialog"],
     enabled: active && open,
@@ -165,6 +171,13 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
       }
       toast({ title: okMsg, description: data.signature ? `Tx: ${String(data.signature).slice(0, 16)}…` : undefined });
       setAmountSol("");
+      // Close/unwind proceeds land as SOL in the internal gas wallet — send
+      // them straight back to the user's wallet so the agent wallet never
+      // becomes a user-facing balance (it's gas plumbing only). If this leg
+      // fails, nothing is lost: the recovery row shows the stranded SOL.
+      if (key.startsWith("close-") || key.startsWith("unwind-")) {
+        void autoReturnProceeds();
+      }
     } catch (e: any) {
       if (isSessionError(e)) {
         showReconnectToast({
@@ -182,23 +195,26 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
     }
   };
 
-  // Send the agent wallet's spare SOL back to the user's wallet. The tx is
-  // agent-signed server-side; the client just submits + confirms it, then
-  // records the equity event (same flow as the wallet page).
+  // Send SOL sitting in the internal gas wallet back to the user's wallet.
+  // The tx is agent-signed server-side; the client just submits + confirms
+  // it, then records the equity event (same flow as the wallet page). Leaves
+  // a small gas float (0.01 SOL) behind for future operation fees.
   const agentSol = balanceQuery.data?.solBalance ?? null;
-  const spareSol = agentSol !== null ? Math.max(0, Math.floor((agentSol - 0.01) * 1e4) / 1e4) : 0;
-  const doWithdrawSpare = async () => {
-    if (spareSol <= 0) return;
+  const spareFrom = (sol: number | null) =>
+    sol !== null ? Math.max(0, Math.floor((sol - 0.01) * 1e4) / 1e4) : 0;
+  const spareSol = spareFrom(agentSol);
+  const returnSpareSol = async (amount: number, auto = false) => {
+    if (amount <= 0) return;
     setBusy("withdraw-sol");
     try {
       const res = await fetch("/api/agent/withdraw-sol", {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
-        body: JSON.stringify({ amount: spareSol }),
+        body: JSON.stringify({ amount }),
       });
       const data = await safeResponseJson(res);
-      if (!res.ok) throw new Error(data?.error || "SOL withdrawal failed");
+      if (!res.ok) throw new Error(data?.error || "SOL return failed");
       const { transaction: serializedTx, blockhash, lastValidBlockHeight } = data;
       const txBytes = Uint8Array.from(atob(serializedTx), (c) => c.charCodeAt(0));
       const signature = await connection.sendRawTransaction(txBytes);
@@ -207,24 +223,39 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
-        body: JSON.stringify({ amount: spareSol, txSignature: signature }),
+        body: JSON.stringify({ amount, txSignature: signature }),
       });
-      toast({ title: `Withdrew ${spareSol.toFixed(4)} SOL to your wallet` });
+      toast({ title: `Returned ${amount.toFixed(4)} SOL to your wallet` });
     } catch (e: any) {
       if (isSessionError(e)) {
         showReconnectToast({
           toast,
           retryAuth,
-          title: "SOL withdrawal failed",
-          retry: () => void doWithdrawSpare(),
+          title: "SOL return failed",
+          retry: () => void autoReturnProceeds(),
+        });
+      } else if (auto) {
+        // The close itself succeeded — don't scare the user. The recovery
+        // row shows the SOL with a Return to Wallet button.
+        toast({
+          title: "SOL is waiting to return",
+          description: "Sending the proceeds to your wallet didn't go through — use Return to Wallet below.",
         });
       } else {
-        toast({ title: "SOL withdrawal failed", description: e?.message || String(e), variant: "destructive" });
+        toast({ title: "SOL return failed", description: e?.message || String(e), variant: "destructive" });
       }
     } finally {
       setBusy(null);
       refresh();
     }
+  };
+  // Re-read the gas wallet fresh (state is stale right after a close) and
+  // return everything above the gas float to the user's wallet.
+  const autoReturnProceeds = async () => {
+    const fresh = await balanceQuery.refetch();
+    const amount = spareFrom(fresh.data?.solBalance ?? null);
+    if (amount <= 0) return;
+    await returnSpareSol(amount, true);
   };
 
   const runMoneyOp = (key: string, path: string, body: Record<string, unknown>, okMsg: string) => {
@@ -327,105 +358,72 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
               </span>
             </DialogTitle>
             <DialogDescription>
-              Deposit SOL from your wallet — it's automatically swapped into a staked SOL token and looped at 2x
-              for boosted staking yield. Leveraged: it can be liquidated if rates move sharply against it.
+              Deposit SOL from your wallet — the platform puts it into the best staked SOL token and loops it at
+              2x for boosted staking yield. Leveraged: it can be liquidated if rates move sharply against it.
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4">
             <div className="space-y-2">
-              <div className="flex items-end gap-2">
-                <div className="w-32">
-                  <p className="text-xs text-muted-foreground mb-1">Vault</p>
-                  <Select
-                    value={vaultId}
-                    onValueChange={(v) => {
-                      setVaultId(v);
-                      setConfirmAction(null);
-                    }}
-                  >
-                    <SelectTrigger data-testid="select-loop-vault">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {LOOP_VAULTS.map((v) => (
-                        <SelectItem key={v.id} value={String(v.id)}>
-                          {v.symbol}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="flex-1">
-                  <p className="text-xs text-muted-foreground mb-1">Deposit (SOL)</p>
-                  <Input
-                    inputMode="decimal"
-                    placeholder="0.5"
-                    value={amountSol}
-                    onChange={(e) => {
-                      setAmountSol(e.target.value);
-                      setConfirmAction(null);
-                    }}
-                    data-testid="input-loop-principal"
-                  />
-                </div>
+              <div>
+                <p className="text-xs text-muted-foreground mb-1">Deposit (SOL)</p>
+                <Input
+                  inputMode="decimal"
+                  placeholder="0.5"
+                  value={amountSol}
+                  onChange={(e) => {
+                    setAmountSol(e.target.value);
+                    setConfirmAction(null);
+                  }}
+                  data-testid="input-loop-principal"
+                />
               </div>
               <Button
                 className="w-full"
                 disabled={openDisabled}
                 onClick={() =>
-                  runMoneyOp("open", "/api/vault/loop/open", { vaultId: Number(vaultId), principalLamports }, "Loop opened")
+                  runMoneyOp("open", "/api/vault/loop/open", { principalLamports }, "Loop opened")
                 }
                 data-testid="button-loop-open"
               >
                 {busy === "open" ? <Loader2 className="h-4 w-4 animate-spin" /> : label("open", "Deposit & Open 2x Loop")}
               </Button>
-              <p className="text-[11px] text-muted-foreground">
-                Funded from your connected wallet and swapped into {vaultSymbol(vaultId)} automatically.
+              <p className="text-[11px] text-muted-foreground" data-testid="text-loop-auto-pick">
+                Comes straight from your connected wallet. The platform picks the best staked SOL token
+                automatically{statusQuery.data.recommended ? (
+                  <> — currently <span className="font-medium text-foreground">{statusQuery.data.recommended.symbol}</span></>
+                ) : null}.
               </p>
             </div>
 
-            {/* --- Agent wallet SOL (funds opens; spare goes back to Phantom) --- */}
-            <div className="rounded-lg border border-border/60 bg-muted/20 p-3 space-y-2">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-muted-foreground">Agent wallet SOL</span>
-                <span className="font-medium tabular-nums" data-testid="text-loop-agent-sol">
-                  {balanceQuery.isLoading ? "…" : agentSol !== null ? agentSol.toFixed(4) : "—"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-[11px] text-muted-foreground flex-1">
-                  SOL parked here between operations — spare can go back to your wallet anytime.
+            {/* --- Recovery row: only appears if SOL is stranded in the gas
+                wallet (e.g. an auto-return after close failed). The gas wallet
+                is plumbing — it must never look like a user balance. --- */}
+            {spareSol > 0 && (
+              <div className="rounded-lg border border-border/60 bg-muted/20 p-3 flex items-center justify-between gap-2">
+                <p className="text-[11px] text-muted-foreground flex-1" data-testid="text-loop-spare-sol">
+                  <span className="font-medium text-foreground tabular-nums">{spareSol.toFixed(4)} SOL</span> from loop
+                  operations is ready to go back to your wallet.
                 </p>
                 <Button
                   size="sm"
                   variant="outline"
                   className="shrink-0"
-                  disabled={!!busy || spareSol <= 0}
-                  onClick={() => {
-                    if (confirmAction !== "withdraw-sol") {
-                      setConfirmAction("withdraw-sol");
-                      setTimeout(() => setConfirmAction((c) => (c === "withdraw-sol" ? null : c)), 5000);
-                      return;
-                    }
-                    setConfirmAction(null);
-                    void doWithdrawSpare();
-                  }}
+                  disabled={!!busy}
+                  onClick={() => void returnSpareSol(spareSol)}
                   data-testid="button-loop-withdraw-sol"
                 >
                   {busy === "withdraw-sol" ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : confirmAction === "withdraw-sol" ? (
-                    "Confirm?"
                   ) : (
                     <>
                       <ArrowUpFromLine className="h-3.5 w-3.5 mr-1" />
-                      {spareSol > 0 ? `Withdraw ${spareSol.toFixed(4)}` : "Withdraw spare"}
+                      Return to Wallet
                     </>
                   )}
                 </Button>
               </div>
-            </div>
+            )}
 
             <div className="space-y-2">
               <div className="flex items-center justify-between">

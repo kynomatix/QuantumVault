@@ -125,15 +125,22 @@ export function SolGasShortfallDialog({
         </DialogHeader>
 
         <div className="rounded-lg border border-border/60 bg-muted/30 p-3 text-sm space-y-1.5">
-          <div className="flex justify-between">
-            <span className="text-muted-foreground">{variant === 'deposit' ? 'Already held' : 'You have'}</span>
-            <span data-testid="text-gas-held">{held.toFixed(4)} SOL</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-muted-foreground">{variant === 'deposit' ? 'Total needed' : 'Needed'}</span>
-            <span data-testid="text-gas-required">{requiredSol.toFixed(4)} SOL</span>
-          </div>
-          <div className="flex justify-between font-medium border-t border-border/60 pt-1.5">
+          {/* Deposit variant shows ONE number — the internal gas wallet is
+              plumbing, so "already held / total needed" breakdowns (which
+              surface it) are gas-variant only. */}
+          {variant !== 'deposit' && (
+            <>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">You have</span>
+                <span data-testid="text-gas-held">{held.toFixed(4)} SOL</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Needed</span>
+                <span data-testid="text-gas-required">{requiredSol.toFixed(4)} SOL</span>
+              </div>
+            </>
+          )}
+          <div className={`flex justify-between font-medium ${variant !== 'deposit' ? 'border-t border-border/60 pt-1.5' : ''}`}>
             <span>Deposit now</span>
             <span data-testid="text-gas-deposit">{depositAmount.toFixed(3)} SOL</span>
           </div>

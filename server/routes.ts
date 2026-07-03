@@ -1517,7 +1517,7 @@ import { runBorrowHealthScan } from "./vault/borrow-health-monitor";
 import { runLoopSafetyTick, buildLoopSafetyDeps } from "./vault/loop/loop-safety-tick";
 import { runLoopAllocationTick, buildLoopAllocationDeps } from "./vault/loop/loop-allocation-tick";
 import { computeTickCoverage, summarizeDecisionsForGate } from "./vault/loop/loop-status";
-import { getFreshLoopRates } from "./vault/loop/loop-rate-oracle";
+import { getFreshLoopRates, pickBestLoopVault, sampleAndPersistLoopRates } from "./vault/loop/loop-rate-oracle";
 import { planPerbotCarve, runPerbotCarveOpen, runPerbotUnwindClose, selectBlockingBotPositions, resolveDisplayPrincipalRaw, runPerbotCollateralTopUp, runPerbotGrowLoan, runPerbotRemoveCollateral } from "./vault/jupiter-lend-perbot-carve";
 import { computePerBotPositionHealth, summarizeBotBorrowHealth, derivePerbotTopUpSuggestion, derivePerbotRemovableSpare, defaultRowHealthDeps, BAND_SEVERITY } from "./vault/borrow-health";
 import { PERBOT_CARVE_DEFAULT_TARGET_LTV } from "./vault/borrow-risk-policy";
@@ -9893,7 +9893,34 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     try {
       if (!requireLoopOwner(req, res)) return;
 
-      const { vaultId, leverage, clientRequestId } = req.body || {};
+      const { leverage, clientRequestId } = req.body || {};
+      let vaultId = req.body?.vaultId;
+      if (vaultId === undefined || vaultId === null) {
+        // No vaultId = the PLATFORM picks the best LST (plan §4.5: defaults
+        // over choices — the user never selects a pair). Uses the same fresh
+        // rate table the allocation brain reads; if the table is empty (e.g.
+        // fresh boot before the hourly tick), sample once on demand. Fails
+        // closed when no allowlisted vault has a readable carry — never falls
+        // back to a hardcoded vault.
+        const allowedIds = Object.keys(LOOP_VAULT_ALLOWLIST).map(Number);
+        let best = pickBestLoopVault(
+          await getFreshLoopRates(LOOP_ALLOCATION_POLICY.rateStalenessMs),
+          allowedIds,
+        );
+        if (!best) {
+          await sampleAndPersistLoopRates().catch(() => undefined);
+          best = pickBestLoopVault(
+            await getFreshLoopRates(LOOP_ALLOCATION_POLICY.rateStalenessMs),
+            allowedIds,
+          );
+        }
+        if (!best) {
+          return res.status(503).json({
+            error: "Live staking rates are unavailable right now — please try again in a minute.",
+          });
+        }
+        vaultId = best.vaultId;
+      }
       if (!Number.isInteger(vaultId) || !LOOP_VAULT_ALLOWLIST[vaultId as number]) {
         return res.status(400).json({ error: "vaultId must be an allowlisted loop vault id." });
       }
@@ -10103,7 +10130,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
         return { ...r, live };
       }));
-      res.json({ positions });
+      // Which LST a new deposit would go into right now (display only — the
+      // open route re-picks at execution time). Fresh-rates-only, no on-demand
+      // sampling here: status must stay cheap. null = "best available" copy.
+      const recommended = pickBestLoopVault(
+        await getFreshLoopRates(LOOP_ALLOCATION_POLICY.rateStalenessMs),
+        Object.keys(LOOP_VAULT_ALLOWLIST).map(Number),
+      );
+      res.json({ positions, recommended });
     } catch (error: any) {
       console.error("[Loop] status error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });

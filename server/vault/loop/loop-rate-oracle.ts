@@ -235,6 +235,33 @@ function decodeSample(row: LoopRateSample): FreshLoopRate {
 }
 
 /**
+ * Pick the best loop vault for a user-initiated OPEN: highest fresh 2x net
+ * carry among the allowlisted vaults (deterministic tie-break: lower vaultId).
+ * The USER never chooses the LST — defaults over choices (plan §4.5); this is
+ * the same rate table the allocation brain reads, not a second objective.
+ * Returns null when no allowlisted vault has a readable fresh carry → callers
+ * must fail closed (never fall back to a hardcoded vault).
+ */
+export function pickBestLoopVault(
+  rates: Map<number, FreshLoopRate>,
+  allowedVaultIds: number[],
+): { vaultId: number; symbol: string; netCarry2x: number } | null {
+  let best: { vaultId: number; symbol: string; netCarry2x: number } | null = null;
+  for (const id of allowedVaultIds) {
+    const r = rates.get(id);
+    if (!r || r.netCarry2x === null) continue;
+    if (
+      best === null ||
+      r.netCarry2x > best.netCarry2x ||
+      (r.netCarry2x === best.netCarry2x && id < best.vaultId)
+    ) {
+      best = { vaultId: id, symbol: r.symbol, netCarry2x: r.netCarry2x };
+    }
+  }
+  return best;
+}
+
+/**
  * Latest persisted sample per vault, STALENESS-GATED: anything older than
  * `maxAgeMs` is simply absent from the map, so a consumer that finds no entry
  * MUST treat the rate as unreadable and fail closed (hold / skip), never
