@@ -148,7 +148,10 @@ async function loadWallet(web3) {
 }
 
 async function jupQuote(inputMint, outputMint, amountRaw, slippageBps) {
-  const u = `${QUOTE_URL}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountRaw}&slippageBps=${slippageBps}&restrictIntermediateTokens=true`;
+  // Route constraints are ESSENTIAL for the atomic sandwich: an unconstrained
+  // aggregator route can carry enough accounts to blow the 1232-byte tx limit
+  // (observed live). LST<->SOL pairs always have deep direct pools.
+  const u = `${QUOTE_URL}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountRaw}&slippageBps=${slippageBps}&restrictIntermediateTokens=true&onlyDirectRoutes=true&maxAccounts=28`;
   return fetchJson(u);
 }
 async function jupSwapIxs(quote, userPublicKey) {
@@ -178,7 +181,16 @@ async function buildAndRun(web3, connection, wallet, instructions, alts, label, 
   }).compileToV0Message(alts);
   const tx = new web3.VersionedTransaction(msg);
   tx.sign([wallet]);
-  const size = tx.serialize().length;
+  let size;
+  try {
+    size = tx.serialize().length;
+  } catch (e) {
+    // web3.js throws "encoding overruns Uint8Array" instead of reporting size
+    // when the message exceeds the packet limit. Estimate from the message.
+    const msgLen = msg.serialize().length;
+    console.log(`\n[${label}] tx TOO BIG to serialize: message ${msgLen} + 65 sig bytes = ~${msgLen + 65} / ${TX_SIZE_LIMIT} (${instructions.length} ixs, ${alts.length} ALTs)`);
+    return { fits: false, size: msgLen + 65 };
+  }
   const fits = size <= TX_SIZE_LIMIT;
   console.log(`\n[${label}] tx size: ${size} / ${TX_SIZE_LIMIT} bytes ${fits ? "✅ FITS" : "❌ TOO BIG"} (${instructions.length} ixs, ${alts.length} ALTs)`);
   if (!fits) return { fits, size };
@@ -264,6 +276,27 @@ async function cmdOpen(web3, connection) {
   console.log(`OPEN plan: ${principalSol} SOL principal @ ${leverage}x on ${vault.symbol} (vault ${vault.vaultId})`);
   console.log(`  wrap ${Number(P) / 1e9} + flash ${Number(F) / 1e9} -> swap ${Number(S) / 1e9} WSOL -> ${vault.symbol} -> deposit + borrow ${Number(F) / 1e9} -> payback`);
 
+  // ATA prep MUST be a separate tx: with in-tx creates the loop tx measured
+  // OVER 1232 bytes ("encoding overruns Uint8Array"); without them it fits
+  // (1215 measured). Production does the same — per-user ATAs created once.
+  const wsolMintPkEarly = new web3.PublicKey(WSOL_MINT);
+  const lstMintPk = new web3.PublicKey(vault.lstMint);
+  const wsolAtaEarly = ataFor(web3, wallet.publicKey, wsolMintPkEarly);
+  const lstAta = ataFor(web3, wallet.publicKey, lstMintPk);
+  const infos = await connection.getMultipleAccountsInfo([wsolAtaEarly, lstAta]);
+  const prepIxs = [];
+  if (!infos[0]) prepIxs.push(ixCreateAtaIdempotent(web3, wallet.publicKey, wallet.publicKey, wsolMintPkEarly));
+  if (!infos[1]) prepIxs.push(ixCreateAtaIdempotent(web3, wallet.publicKey, wallet.publicKey, lstMintPk));
+  if (prepIxs.length > 0) {
+    console.log(`  PREP: creating ${prepIxs.length} missing token account(s) in a separate tx (one-time rent ~${(prepIxs.length * 0.00204).toFixed(4)} SOL)`);
+    const prepRes = await buildAndRun(web3, connection, wallet, [...cuIxs(web3, 60_000), ...prepIxs], [], "PREP");
+    if (!SEND) {
+      console.log(`Dry run stops here: the loop tx needs the token accounts to exist before it can simulate. Re-run with --send.`);
+      return;
+    }
+    if (!prepRes.signature) throw new Error("PREP tx did not confirm — aborting open");
+  }
+
   const quote = await jupQuote(WSOL_MINT, vault.lstMint, S.toString(), slippageBps);
   const minOut = BigInt(quote.otherAmountThreshold);
   console.log(`  swap quote: ${quote.outAmount} ${vault.symbol} raw (min ${minOut}), impact ${Number(quote.priceImpactPct).toFixed(6)}%`);
@@ -293,13 +326,17 @@ async function cmdOpen(web3, connection) {
   const nftId = reuseNftId || Number(operate.nftId);
   console.log(`  position NFT: ${reuseNftId ? `REUSING ${reuseNftId} (no rent)` : `minting new (nftId ${nftId}, ~0.0215 SOL rent)`}`);
 
-  const wsolAta = ataFor(web3, wallet.publicKey, wsolMintPk);
+  // Lean atomic tx: NO ATA creates in here (prep tx handled them; in-tx
+  // creates blow the 1232-byte limit). setupInstructions are also creates —
+  // must be empty now that both ATAs exist.
+  if ((swapResp.setupInstructions || []).length > 0) {
+    throw new Error(`swap returned ${swapResp.setupInstructions.length} setup ix(s) despite ATAs existing — would blow tx size, aborting`);
+  }
+  const wsolAta = wsolAtaEarly;
   const instructions = [
     ...cuIxs(web3, 1_400_000),
-    ixCreateAtaIdempotent(web3, wallet.publicKey, wallet.publicKey, wsolMintPk),
     web3.SystemProgram.transfer({ fromPubkey: wallet.publicKey, toPubkey: wsolAta, lamports: Number(P) }),
     ixSyncNative(web3, wsolAta),
-    ...(swapResp.setupInstructions || []).map((ix) => deserializeJupIx(web3, ix)),
     borrowIx,
     deserializeJupIx(web3, swapResp.swapInstruction),
     ...operate.ixs,
@@ -368,11 +405,13 @@ async function cmdClose(web3, connection) {
     signer: wallet.publicKey,
   });
 
+  // Lean atomic tx (see open): ATAs must already exist from the open leg.
+  if ((swapResp.setupInstructions || []).length > 0) {
+    throw new Error(`swap returned ${swapResp.setupInstructions.length} setup ix(s) — ATAs missing? Would blow tx size, aborting`);
+  }
   const wsolAta = ataFor(web3, wallet.publicKey, wsolMintPk);
   const instructions = [
     ...cuIxs(web3, 1_400_000),
-    ixCreateAtaIdempotent(web3, wallet.publicKey, wallet.publicKey, wsolMintPk),
-    ...(swapResp.setupInstructions || []).map((ix) => deserializeJupIx(web3, ix)),
     borrowIx,
     ...operate.ixs,
     deserializeJupIx(web3, swapResp.swapInstruction),
