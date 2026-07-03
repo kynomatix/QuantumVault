@@ -1510,6 +1510,8 @@ import { previewBorrowEligibility } from "./vault/borrow-eligibility";
 import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { isBorrowEligibleWallet, isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, repayPartialOnExistingBotPosition, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
+import { executeLoopOpen, executeLoopClose, executeLoopPartialUnwind } from "./vault/loop/loop-executor";
+import { LOOP_VAULT_ALLOWLIST, LOOP_RISK_POLICY } from "./vault/loop/loop-risk-policy";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
 import { runBorrowHealthScan } from "./vault/borrow-health-monitor";
 import { planPerbotCarve, runPerbotCarveOpen, runPerbotUnwindClose, selectBlockingBotPositions, resolveDisplayPrincipalRaw, runPerbotCollateralTopUp, runPerbotGrowLoan, runPerbotRemoveCollateral } from "./vault/jupiter-lend-perbot-carve";
@@ -9736,6 +9738,234 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       res.json(result);
     } catch (error: any) {
       console.error("[Vault] borrow close error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // ==========================================================================
+  // SOL LOOP VAULT (qntSOL P2) — OWNER-ONLY routes. Leveraged LST staking loop
+  // on Jupiter Lend Multiply (vaults 4 JupSOL / 47 mSOL), fixed 2x at launch.
+  //
+  // GATE: isBorrowOwnerWallet ONLY — deliberately NOT isBorrowEligibleWallet,
+  // because BORROW_OPEN_TO_ALL=true would open the loop to every wallet. When
+  // BORROW_OWNER_WALLET is unset, isBorrowOwnerWallet returns false for all
+  // wallets → these routes fail closed. Account scope only (no botId).
+  // ==========================================================================
+  const requireLoopOwner = (req: any, res: any): boolean => {
+    if (!isBorrowOwnerWallet(req.walletAddress!)) {
+      res.status(403).json({ error: "Not available." });
+      return false;
+    }
+    return true;
+  };
+  const resolveLoopAgentKey = async (req: any, res: any): Promise<{ scope: any; agentKeyResult: { secretKey: Uint8Array; cleanup: () => void } } | null> => {
+    const { sessionId } = req.body || {};
+    const wallet = await storage.getWallet(req.walletAddress!);
+    if (!wallet) { res.status(404).json({ error: "Wallet not found" }); return null; }
+    if (!sessionId) { res.status(400).json({ error: "Session ID required for security verification" }); return null; }
+    const session = getSession(sessionId);
+    if (!session || session.walletAddress !== req.walletAddress) {
+      res.status(401).json({ error: "Invalid or expired session. Please reconnect your wallet." });
+      return null;
+    }
+    if (!session.umk) {
+      res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
+      return null;
+    }
+    const resolved = await resolveVaultScope(req.walletAddress!, wallet, null);
+    if (!resolved.ok) { res.status(resolved.status).json({ error: resolved.error }); return null; }
+    const { scope } = resolved;
+    if (!scope.agentPublicKey) { res.status(400).json({ error: "Agent wallet not initialized" }); return null; }
+    const agentKeyResult = await decryptVaultScopeKey(scope, req.walletAddress!, wallet, session.umk);
+    if (!agentKeyResult) {
+      res.status(400).json({ error: "Your wallet needs to be re-keyed. Please sign out and sign back in." });
+      return null;
+    }
+    return { scope, agentKeyResult };
+  };
+  // Strict base-unit integer string (no 0x, +, whitespace, decimals); > 0.
+  const parseLoopRawPositive = (v: unknown, name: string): bigint | { error: string } => {
+    if (typeof v !== "string" || !/^\d+$/.test(v)) return { error: `${name} must be a base-unit integer string` };
+    try {
+      const b = BigInt(v);
+      if (b <= BigInt(0)) return { error: `${name} must be greater than zero` };
+      return b;
+    } catch {
+      return { error: `${name} must be a base-unit integer string` };
+    }
+  };
+  const parseLoopSlippage = (v: unknown): number | undefined | { error: string } => {
+    if (v === undefined || v === null) return undefined;
+    if (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > 500) {
+      return { error: "slippageBps must be an integer in 1..500" };
+    }
+    return v;
+  };
+
+  // OPEN a loop: principal SOL in, fixed 2x. Body: { vaultId, principalLamports, sessionId, leverage?, slippageBps?, clientRequestId? }
+  app.post("/api/vault/loop/open", requireWallet, async (req, res) => {
+    try {
+      if (!requireLoopOwner(req, res)) return;
+
+      const { vaultId, leverage, clientRequestId } = req.body || {};
+      if (!Number.isInteger(vaultId) || !LOOP_VAULT_ALLOWLIST[vaultId as number]) {
+        return res.status(400).json({ error: "vaultId must be an allowlisted loop vault id." });
+      }
+      const principalParsed = parseLoopRawPositive(req.body?.principalLamports, "principalLamports");
+      if (typeof principalParsed === "object") return res.status(400).json(principalParsed);
+      // P2 launch is FIXED 2x. Reject any other requested leverage explicitly
+      // rather than silently overriding it (fail closed on surprises).
+      const fixedLeverage = LOOP_RISK_POLICY.defaultMaxLeverage;
+      if (leverage !== undefined && leverage !== fixedLeverage) {
+        return res.status(400).json({ error: `Leverage is fixed at ${fixedLeverage}x for launch.` });
+      }
+      const slip = parseLoopSlippage(req.body?.slippageBps);
+      if (slip && typeof slip === "object") return res.status(400).json(slip);
+
+      const ctx = await resolveLoopAgentKey(req, res);
+      if (!ctx) return;
+
+      let result;
+      try {
+        result = await executeLoopOpen({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: ctx.scope.agentPublicKey,
+          agentSecretKey: ctx.agentKeyResult.secretKey,
+          vaultId,
+          principalLamports: principalParsed,
+          leverage: fixedLeverage,
+          slippageBps: slip as number | undefined,
+          ...(typeof clientRequestId === "string" && clientRequestId ? { clientRequestId } : {}),
+        });
+      } finally {
+        ctx.agentKeyResult.cleanup();
+      }
+
+      if (!result || !result.success) {
+        return res.status(400).json({ error: result?.error || "Loop open failed" });
+      }
+      res.json(result);
+    } catch (error: any) {
+      console.error("[Loop] open error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // CLOSE a loop in full: flash-repay ALL debt, withdraw ALL collateral, swap
+  // back to SOL. Body: { borrowPositionId, sessionId, slippageBps?, clientRequestId? }
+  app.post("/api/vault/loop/close", requireWallet, async (req, res) => {
+    try {
+      if (!requireLoopOwner(req, res)) return;
+
+      const { borrowPositionId, clientRequestId } = req.body || {};
+      if (!borrowPositionId || typeof borrowPositionId !== "string") {
+        return res.status(400).json({ error: "borrowPositionId required" });
+      }
+      const slip = parseLoopSlippage(req.body?.slippageBps);
+      if (slip && typeof slip === "object") return res.status(400).json(slip);
+
+      const ctx = await resolveLoopAgentKey(req, res);
+      if (!ctx) return;
+
+      let result;
+      try {
+        result = await executeLoopClose({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: ctx.scope.agentPublicKey,
+          agentSecretKey: ctx.agentKeyResult.secretKey,
+          borrowPositionId,
+          slippageBps: slip as number | undefined,
+          ...(typeof clientRequestId === "string" && clientRequestId ? { clientRequestId } : {}),
+        });
+      } finally {
+        ctx.agentKeyResult.cleanup();
+      }
+
+      if (!result || !result.success) {
+        return res.status(400).json({ error: result?.error || "Loop close failed" });
+      }
+      res.json(result);
+    } catch (error: any) {
+      console.error("[Loop] close error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // PARTIAL UNWIND: reduce the loop by unwindBps (1..9000; beyond 90% use full
+  // close). Body: { borrowPositionId, unwindBps, sessionId, slippageBps?, clientRequestId? }
+  app.post("/api/vault/loop/unwind", requireWallet, async (req, res) => {
+    try {
+      if (!requireLoopOwner(req, res)) return;
+
+      const { borrowPositionId, unwindBps, clientRequestId } = req.body || {};
+      if (!borrowPositionId || typeof borrowPositionId !== "string") {
+        return res.status(400).json({ error: "borrowPositionId required" });
+      }
+      if (!Number.isInteger(unwindBps) || unwindBps < 1 || unwindBps > 9000) {
+        return res.status(400).json({ error: "unwindBps must be an integer in 1..9000 (use full close beyond 90%)." });
+      }
+      const slip = parseLoopSlippage(req.body?.slippageBps);
+      if (slip && typeof slip === "object") return res.status(400).json(slip);
+
+      const ctx = await resolveLoopAgentKey(req, res);
+      if (!ctx) return;
+
+      let result;
+      try {
+        result = await executeLoopPartialUnwind({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: ctx.scope.agentPublicKey,
+          agentSecretKey: ctx.agentKeyResult.secretKey,
+          borrowPositionId,
+          unwindBps,
+          slippageBps: slip as number | undefined,
+          ...(typeof clientRequestId === "string" && clientRequestId ? { clientRequestId } : {}),
+        });
+      } finally {
+        ctx.agentKeyResult.cleanup();
+      }
+
+      if (!result || !result.success) {
+        return res.status(400).json({ error: result?.error || "Loop unwind failed" });
+      }
+      res.json(result);
+    } catch (error: any) {
+      console.error("[Loop] unwind error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // STATUS: list this wallet's loop positions with a best-effort live read for
+  // open/pending rows. Read-only; live read fail-OPEN to null (row data still
+  // returned — actual money paths always re-read strictly server-side).
+  app.get("/api/vault/loop/status", requireWallet, async (req, res) => {
+    try {
+      if (!requireLoopOwner(req, res)) return;
+
+      const rows = await storage.getBorrowPositions(req.walletAddress!, null, "loop");
+      const borrowRoute = new JupiterLendBorrowRoute();
+      const positions = await Promise.all(rows.map(async (r) => {
+        let live: { collateralRaw: string; debtRaw: string; liquidatable: boolean; oraclePriceUsd: number | null } | null = null;
+        if ((r.status === "open" || r.status === "pending") && r.venueVaultId && r.venuePositionId) {
+          const vid = Number(r.venueVaultId);
+          const nft = Number(r.venuePositionId);
+          if (Number.isInteger(vid) && vid > 0 && Number.isInteger(nft) && nft > 0) {
+            const read = await borrowRoute.readLoopLivePositionHealth(vid, nft).catch(() => null);
+            if (read) {
+              live = {
+                collateralRaw: String(read.collateralRaw),
+                debtRaw: String(read.debtRaw),
+                liquidatable: read.liquidatable,
+                oraclePriceUsd: read.oraclePriceUsd,
+              };
+            }
+          }
+        }
+        return { ...r, live };
+      }));
+      res.json({ positions });
+    } catch (error: any) {
+      console.error("[Loop] status error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
     }
   });
