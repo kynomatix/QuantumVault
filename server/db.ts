@@ -501,9 +501,14 @@ export async function ensureSchema() {
         borrow_apr numeric(12, 8),
         withdraw_utilization numeric(8, 6),
         net_carry_2x numeric(12, 8),
+        liquidation_threshold numeric(8, 6),
         as_of timestamp NOT NULL DEFAULT now()
       )`,
       `CREATE INDEX IF NOT EXISTS idx_loop_rate_samples_vault_time ON loop_rate_samples (vault_id, as_of)`,
+      // Dynamic-leverage input: vault LT sampled into the rate row (additive;
+      // pre-migration rows stay null → consumers fail closed, self-heals on
+      // the next hourly sample).
+      `ALTER TABLE loop_rate_samples ADD COLUMN IF NOT EXISTS liquidation_threshold numeric(8, 6)`,
 
       // --- Vaults borrow engine (Phase A scaffold): debt LEDGER. ---
       // Empty + additive; NO writers wired yet (Phase A = spec & hard gates, no

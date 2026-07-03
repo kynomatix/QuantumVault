@@ -47,15 +47,20 @@ function obs(row: Partial<BorrowPosition>, health: Partial<PerBotPositionHealth>
   return { row: makeRow(row), health: makeHealth(health) };
 }
 
-function makeRate(vaultId: number, netCarry2x: number | null): FreshLoopRate {
+function makeRate(
+  vaultId: number,
+  overrides: Partial<FreshLoopRate> = {},
+): FreshLoopRate {
   return {
     vaultId,
     symbol: "JupSOL",
     stakingApy: 0.07,
     stakingApyMean30d: 0.07,
     borrowApr: 0.05,
-    netCarry2x,
+    liquidationThreshold: 0.85, // default HF 1.9 → actual L = 1.9/(1.9−0.85) ≈ 1.81
+    netCarry2x: 0.09,
     asOf: new Date(),
+    ...overrides,
   } as unknown as FreshLoopRate;
 }
 
@@ -139,7 +144,8 @@ describe("buildLoopSafetyInputs", () => {
     expect(candidates[0].vaultId).toBe(4);
     expect(candidates[0].liveDebtRaw).toBe(1_000_000_000n);
     expect(positions).toEqual([
-      { venue: "vault:4", positionId: "r1", healthFactor: 1.42, liquidationFloor: LOOP_DELEVERAGE_POLICY.liquidationFloor },
+      // Keyed PER POSITION — two wallets on one vault sit at different leverage.
+      { venue: "vault:4:pos:r1", positionId: "r1", healthFactor: 1.42, liquidationFloor: LOOP_DELEVERAGE_POLICY.liquidationFloor },
     ]);
   });
 
@@ -196,21 +202,43 @@ describe("buildLoopSafetyInputs", () => {
     expect(skipped).toHaveLength(2);
   });
 
-  it("builds a VenueState only from a fresh rate with a finite net carry", () => {
+  it("builds a per-position VenueState with the carry at the position's ACTUAL leverage", () => {
     const rates = new Map<number, FreshLoopRate>([
-      [4, makeRate(4, 0.031)],
-      [47, makeRate(47, null)],
+      [4, makeRate(4)], // s 0.07, b 0.05, LT 0.85
+      [47, makeRate(47, { stakingApy: null })], // unreadable rates → no carry state
     ]);
     const { states } = buildLoopSafetyInputs(
       [
-        obs({ id: "r4", venueVaultId: "4" }, {}),
+        obs({ id: "r4", venueVaultId: "4" }, {}), // HF 1.9 → L = 1.9/1.05 ≈ 1.8095
         obs({ id: "r47", venueVaultId: "47" }, {}),
       ],
       rates,
     );
     expect(states.size).toBe(1);
-    expect(states.get("vault:4")).toMatchObject({ venue: "vault:4", netCarryApy: 0.031, paused: false });
-    expect(states.has("vault:47")).toBe(false); // unreadable carry → carry rule skips
+    // carry at actual L: s·L − b·(L−1) = 0.07 + (L−1)·0.02 ≈ 0.08619
+    const state = states.get("vault:4:pos:r4");
+    expect(state).toBeDefined();
+    expect(state!.venue).toBe("vault:4:pos:r4");
+    expect(state!.paused).toBe(false);
+    expect(state!.netCarryApy).toBeCloseTo(0.07 + (1.9 / 1.05 - 1) * 0.02, 6);
+    expect(states.has("vault:47:pos:r47")).toBe(false); // unreadable carry → carry rule skips
+  });
+
+  it("carry state FAILS CLOSED to none when the LT is unreadable or HF ≤ LT", () => {
+    // LT unreadable → no carry state (health bands unaffected — position still built).
+    const noLt = buildLoopSafetyInputs(
+      [obs({ id: "r1" }, {})],
+      new Map([[4, makeRate(4, { liquidationThreshold: null })]]),
+    );
+    expect(noLt.positions).toHaveLength(1);
+    expect(noLt.states.size).toBe(0);
+    // HF ≤ LT → leverage identity degenerates → no carry state, position still built.
+    const degenerate = buildLoopSafetyInputs(
+      [obs({ id: "r2" }, { healthFactor: 0.8 })],
+      new Map([[4, makeRate(4)]]), // LT 0.85 ≥ HF 0.8
+    );
+    expect(degenerate.positions).toHaveLength(1);
+    expect(degenerate.states.size).toBe(0);
   });
 });
 
@@ -269,8 +297,9 @@ describe("runLoopSafetyTick", () => {
   });
 
   it("carry reflex: reduces a HEALTHY loop when the fresh net carry is below the floor", async () => {
+    // HF 1.9, LT 0.85 → actual L ≈ 1.81; carry = s + (L−1)(s−b) = 0.005 − 0.81·0.005 ≈ 0.00095 < 0.005
     const { deps, calls } = makeDeps({
-      getFreshRates: async () => new Map([[4, makeRate(4, 0.001)]]), // below carryReduceApy 0.005
+      getFreshRates: async () => new Map([[4, makeRate(4, { stakingApy: 0.005, borrowApr: 0.01 })]]),
     });
     const result = await runLoopSafetyTick([obs({ id: "r3" }, { healthFactor: 1.9 })], deps);
     expect(result.acted).toBe(1);

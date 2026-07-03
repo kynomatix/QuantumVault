@@ -39,8 +39,8 @@ import type { BorrowPosition, LoopPolicyDecision } from "@shared/schema";
 import { storage } from "../../storage";
 import { sendLoopSafetyNotification, type LoopSafetyNotification } from "../../notification-service";
 import { DEFAULT_SOL_DEBT_DUST_RAW } from "../borrow-engine-core";
-import { getFreshLoopRates, netCarryAt, sampleAndPersistLoopRates, type FreshLoopRate, type LoopRateReading } from "./loop-rate-oracle";
-import { LOOP_ALLOCATION_POLICY, LOOP_VAULT_ALLOWLIST } from "./loop-risk-policy";
+import { getFreshLoopRates, LOOP_CARRY_REFERENCE_LEVERAGE, netCarryAt, sampleAndPersistLoopRates, type FreshLoopRate, type LoopRateReading } from "./loop-rate-oracle";
+import { computeLoopTargetLeverage, LOOP_ALLOCATION_POLICY, LOOP_VAULT_ALLOWLIST } from "./loop-risk-policy";
 import type { LoopSafetySigner } from "./loop-safety-tick";
 import {
   executeLoopRelever,
@@ -283,8 +283,24 @@ async function processAllocationCandidate(
   }
   result.evaluated++;
 
-  const leverage = vaultPolicy.maxLeverage;
   const rate = rates.get(vaultId) ?? null;
+
+  // DYNAMIC target leverage from the SAME fresh persisted sample the intent
+  // reads (live vault LT + min open health buffer + caps, positive carry
+  // required). No computable target = NEVER lever up this tick.
+  const target = computeLoopTargetLeverage({
+    vaultId,
+    liquidationThreshold: rate?.liquidationThreshold ?? null,
+    stakingApy: rate?.stakingApy ?? null,
+    borrowApr: rate?.borrowApr ?? null,
+  });
+  // Leverage the intent math runs at: the dynamic target when computable.
+  // When it is not, LEVERED rows still need their unwind rules evaluated —
+  // the decisions that matter there (carry inverted, unreadable rates) are
+  // leverage-independent; the 2x reference only affects the floor check and
+  // matches the previously shipped behavior. HOLD rows with no target are
+  // forced to 'none' below regardless of this value.
+  const leverage = target.leverage ?? LOOP_CARRY_REFERENCE_LEVERAGE;
 
   // Intent from the PERSISTED debt (executors re-verify live and self-heal).
   let levered = false;
@@ -294,18 +310,32 @@ async function processAllocationCandidate(
     levered = false;
   }
 
-  const intentRes = decideAllocationIntent({
+  let intentRes = decideAllocationIntent({
     levered,
     stakingApy: rate?.stakingApy ?? null,
     borrowApr: rate?.borrowApr ?? null,
     leverage,
   });
+  if (target.leverage === null && intentRes.intent === "relever") {
+    // FAIL CLOSED: no computable target → a HOLD row STAYS unlevered, however
+    // favorable the EV gap looks (reachable when the LT is unreadable in the
+    // sample — carry alone must never size a levered position).
+    intentRes = {
+      intent: "none",
+      reason: `no_target_${target.reason ?? "unknown"}`,
+      evGapApy: intentRes.evGapApy,
+      netCarryApy: intentRes.netCarryApy,
+    };
+  }
 
   const journalAction = intentRes.intent === "unwind" ? "unwind_to_hold" : intentRes.intent;
   const baseDetails: Record<string, unknown> = {
     intent: intentRes.intent,
     levered,
     leverage,
+    targetLeverage: target.leverage,
+    targetReason: target.reason ?? null,
+    liquidationThreshold: rate?.liquidationThreshold ?? null,
     stakingApy: rate?.stakingApy ?? null,
     borrowApr: rate?.borrowApr ?? null,
     evGapApy: intentRes.evGapApy,

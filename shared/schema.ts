@@ -658,6 +658,11 @@ export const loopRateSamples = pgTable("loop_rate_samples", {
   borrowApr: decimal("borrow_apr", { precision: 12, scale: 8 }),
   // Per-vault withdraw-side utilization (fraction 0..1); predicts unwind blockage.
   withdrawUtilization: decimal("withdraw_utilization", { precision: 8, scale: 6 }),
+  // Vault liquidation threshold (fraction, e.g. 0.95) sampled from the same
+  // decoded config the money paths use. Quasi-static venue config; lets the
+  // allocation brain + vault ranking compute the DYNAMIC target leverage from
+  // the table alone. null = unreadable → consumers fail closed (no target).
+  liquidationThreshold: decimal("liquidation_threshold", { precision: 8, scale: 6 }),
   // Net carry at the reference 2x leverage: staking×2 − borrow×1 (fraction).
   // Derivable from the two rate columns; materialized so the P3 gate check and
   // admin views are one SQL pass with no app-side math.

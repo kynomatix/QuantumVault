@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   LOOP_RISK_POLICY,
   LOOP_VAULT_ALLOWLIST,
+  computeLoopTargetLeverage,
   evaluateLoopOpenRequest,
+  maxLeverageForHealthBuffer,
   type LoopOpenPolicyInput,
 } from "../../server/vault/loop/loop-risk-policy";
 
@@ -10,6 +12,7 @@ function goodInput(overrides: Partial<LoopOpenPolicyInput> = {}): LoopOpenPolicy
   return {
     vaultId: 4,
     requestedLeverage: 2,
+    liquidationThreshold: 0.85, // HF at 2x = 2·0.85/1 = 1.7, above the 1.3 buffer
     principalLamports: 50_000_000n, // 0.05 SOL
     stakePoolSolPerLst: 1.1,
     marketSolPerLst: 1.1005, // ~4.5 bps off peg
@@ -25,14 +28,14 @@ describe("evaluateLoopOpenRequest", () => {
     const d = evaluateLoopOpenRequest(goodInput());
     expect(d.allowed).toBe(true);
     expect(d.reasons.filter((r) => r.severity === "deny")).toHaveLength(0);
-    expect(d.effectiveMaxLeverage).toBe(2);
+    expect(d.effectiveMaxLeverage).toBe(5);
     expect(d.depegBps).not.toBeNull();
     expect(d.depegBps!).toBeLessThan(LOOP_RISK_POLICY.depegBandBps);
   });
 
-  it("both launch vaults (4 JupSOL, 47 mSOL) are allowlisted at 2x", () => {
-    expect(LOOP_VAULT_ALLOWLIST[4]).toEqual({ symbol: "JupSOL", maxLeverage: 2 });
-    expect(LOOP_VAULT_ALLOWLIST[47]).toEqual({ symbol: "mSOL", maxLeverage: 2 });
+  it("both launch vaults (4 JupSOL, 47 mSOL) are allowlisted with venue-quality caps", () => {
+    expect(LOOP_VAULT_ALLOWLIST[4]).toEqual({ symbol: "JupSOL", maxLeverage: 5 });
+    expect(LOOP_VAULT_ALLOWLIST[47]).toEqual({ symbol: "mSOL", maxLeverage: 4 });
     expect(evaluateLoopOpenRequest(goodInput({ vaultId: 47 })).allowed).toBe(true);
   });
 
@@ -44,9 +47,28 @@ describe("evaluateLoopOpenRequest", () => {
   });
 
   it("leverage above the per-vault cap → deny loop_leverage_exceeds_cap", () => {
-    const d = evaluateLoopOpenRequest(goodInput({ requestedLeverage: 2.5 }));
+    const d = evaluateLoopOpenRequest(goodInput({ vaultId: 47, requestedLeverage: 4.5 }));
     expect(d.allowed).toBe(false);
     expect(d.reasons.some((r) => r.code === "loop_leverage_exceeds_cap")).toBe(true);
+  });
+
+  it("unreadable/out-of-range liquidation threshold → FAIL CLOSED deny", () => {
+    for (const lt of [null, NaN, 0, 1, 1.2, -0.5]) {
+      const d = evaluateLoopOpenRequest(goodInput({ liquidationThreshold: lt }));
+      expect(d.allowed).toBe(false);
+      expect(d.reasons.some((r) => r.code === "loop_liquidation_threshold_unreadable" && r.severity === "deny")).toBe(
+        true,
+      );
+    }
+  });
+
+  it("requested leverage landing below the min open health buffer → deny loop_health_buffer_violated", () => {
+    // LT 0.85 → HF at 2.9x = 2.9·0.85/1.9 ≈ 1.297 < 1.3
+    const d = evaluateLoopOpenRequest(goodInput({ requestedLeverage: 2.9 }));
+    expect(d.allowed).toBe(false);
+    expect(d.reasons.some((r) => r.code === "loop_health_buffer_violated" && r.severity === "deny")).toBe(true);
+    // 2.8x lands at ≈1.322 ≥ 1.3 → allowed
+    expect(evaluateLoopOpenRequest(goodInput({ requestedLeverage: 2.8 })).allowed).toBe(true);
   });
 
   it("leverage <= 1 or non-finite → deny loop_leverage_invalid", () => {
@@ -134,5 +156,69 @@ describe("evaluateLoopOpenRequest", () => {
     const d = evaluateLoopOpenRequest(goodInput({ stakingApy: null }));
     expect(d.allowed).toBe(true);
     expect(d.reasons.some((r) => r.code === "loop_negative_carry")).toBe(false);
+  });
+});
+
+describe("maxLeverageForHealthBuffer", () => {
+  it("solves L = minHF/(minHF − LT) for readable LTs", () => {
+    // minHF 1.3: LT 0.95 → 1.3/0.35 ≈ 3.714; LT 0.90 → 1.3/0.40 = 3.25
+    expect(maxLeverageForHealthBuffer(0.95)!).toBeCloseTo(3.7142857, 5);
+    expect(maxLeverageForHealthBuffer(0.9)!).toBeCloseTo(3.25, 10);
+  });
+
+  it("fails closed on unreadable/out-of-range LT", () => {
+    for (const lt of [null, undefined, NaN, Infinity, 0, 1, 1.5, -0.2]) {
+      expect(maxLeverageForHealthBuffer(lt as number | null | undefined)).toBeNull();
+    }
+  });
+});
+
+describe("computeLoopTargetLeverage", () => {
+  const good = { vaultId: 4, liquidationThreshold: 0.95, stakingApy: 0.08, borrowApr: 0.05 };
+
+  it("targets the health-buffer max, quantized DOWN to 0.1x, with the HF at that leverage", () => {
+    // JupSOL LT 0.95 → healthMax ≈ 3.714 → 3.7x; HF = 3.7·0.95/2.7 ≈ 1.3018
+    const t = computeLoopTargetLeverage(good);
+    expect(t.leverage).toBe(3.7);
+    expect(t.healthAtOpen!).toBeCloseTo((3.7 * 0.95) / 2.7, 10);
+    expect(t.healthAtOpen!).toBeGreaterThanOrEqual(LOOP_RISK_POLICY.minOpenHealthFactor);
+    // mSOL LT 0.90 → 3.25 → 3.2x
+    expect(computeLoopTargetLeverage({ ...good, vaultId: 47, liquidationThreshold: 0.9 }).leverage).toBe(3.2);
+  });
+
+  it("binds on the per-vault cap when the LT allows more", () => {
+    // mSOL cap 4: LT 0.999 → healthMax = 1.3/(1.3−0.999) ≈ 4.32 > cap → capped at 4x.
+    const t = computeLoopTargetLeverage({ ...good, vaultId: 47, liquidationThreshold: 0.999 });
+    expect(t.leverage).toBe(4);
+  });
+
+  it("fails closed: no target when not allowlisted, LT unreadable, or rates unreadable", () => {
+    expect(computeLoopTargetLeverage({ ...good, vaultId: 999 }).reason).toBe("vault_not_allowlisted");
+    expect(computeLoopTargetLeverage({ ...good, liquidationThreshold: null }).reason).toBe("lt_unreadable");
+    expect(computeLoopTargetLeverage({ ...good, liquidationThreshold: 1.2 }).reason).toBe("lt_unreadable");
+    expect(computeLoopTargetLeverage({ ...good, stakingApy: null }).reason).toBe("rates_unreadable");
+    expect(computeLoopTargetLeverage({ ...good, borrowApr: null }).reason).toBe("rates_unreadable");
+    for (const r of [
+      computeLoopTargetLeverage({ ...good, vaultId: 999 }),
+      computeLoopTargetLeverage({ ...good, liquidationThreshold: null }),
+      computeLoopTargetLeverage({ ...good, stakingApy: null }),
+    ]) {
+      expect(r.leverage).toBeNull();
+      expect(r.healthAtOpen).toBeNull();
+    }
+  });
+
+  it("UNLEVERED when carry is non-positive: staking APY ≤ borrow APR → null target", () => {
+    expect(computeLoopTargetLeverage({ ...good, stakingApy: 0.05, borrowApr: 0.05 }).reason).toBe("carry_nonpositive");
+    expect(computeLoopTargetLeverage({ ...good, stakingApy: 0.04, borrowApr: 0.05 }).reason).toBe("carry_nonpositive");
+    expect(computeLoopTargetLeverage({ ...good, stakingApy: 0.04, borrowApr: 0.05 }).leverage).toBeNull();
+  });
+
+  it("a target LT so low the buffer allows ≤1x → cap_too_low, never a degenerate leverage", () => {
+    // LT 0.3 → healthMax = 1.3/1.0 = 1.3 → floor(1.3·10)/10 = 1.3 > 1 → fine;
+    // LT 0.1 → 1.3/1.2 ≈ 1.083 → quantized 1.0 → not > 1 → cap_too_low.
+    const t = computeLoopTargetLeverage({ ...good, liquidationThreshold: 0.1 });
+    expect(t.leverage).toBeNull();
+    expect(t.reason).toBe("cap_too_low");
   });
 });

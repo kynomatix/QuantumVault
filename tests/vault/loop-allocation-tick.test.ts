@@ -206,20 +206,26 @@ function makeRow(overrides: Partial<BorrowPosition> = {}): BorrowPosition {
     walletAddress: "WALLET_A",
     kind: "loop",
     status: "open",
-    venueVaultId: "4", // JupSOL, maxLeverage 2 on the allowlist
+    venueVaultId: "4", // JupSOL on the allowlist
     debtAmountRaw: "1000000000", // levered by default
     policyState: "levered",
     ...overrides,
   } as unknown as BorrowPosition;
 }
 
-function makeRate(vaultId: number, stakingApy: number, borrowApr: number): FreshLoopRate {
+function makeRate(
+  vaultId: number,
+  stakingApy: number,
+  borrowApr: number,
+  liquidationThreshold: number | null = 0.95, // JupSOL live LT → dynamic target 3.7x
+): FreshLoopRate {
   return {
     vaultId,
     symbol: "JupSOL",
     stakingApy,
     stakingApyMean30d: stakingApy,
     borrowApr,
+    liquidationThreshold,
     netCarry2x: 2 * stakingApy - borrowApr,
     asOf: new Date(),
   } as unknown as FreshLoopRate;
@@ -384,7 +390,7 @@ describe("runLoopAllocationTick", () => {
     expect(calls.unwinds).toHaveLength(0);
   });
 
-  it("HOLD row with a favorable EV gap and full streak → re-levers at the allowlist leverage", async () => {
+  it("HOLD row with a favorable EV gap and full streak → re-levers at the DYNAMIC target leverage", async () => {
     const { deps, calls } = makeDeps({
       listActivePositions: async () => [makeRow({ debtAmountRaw: "0", policyState: "hold" })],
       getFreshRates: async () => new Map([[4, makeRate(4, 0.08, 0.05)]]), // gap 0.03 > 0.01
@@ -394,7 +400,8 @@ describe("runLoopAllocationTick", () => {
     expect(res.acted).toBe(1);
     expect(calls.relevers).toHaveLength(1);
     expect(calls.unwinds).toHaveLength(0);
-    expect(calls.relevers[0].leverage).toBe(2);
+    // LT 0.95 → min(cap 5, hard cap 5, 1.3/(1.3−0.95) ≈ 3.714) quantized DOWN → 3.7x
+    expect(calls.relevers[0].leverage).toBe(3.7);
     expect(calls.relevers[0].policyReason).toBe("ev_gap_favorable");
     expect(calls.decisions[0].action).toBe("relever");
     expect(calls.decisions[0].details.executed).toBe(true);
@@ -429,7 +436,8 @@ describe("runLoopAllocationTick", () => {
   it("HOLD row with a thin gap → stays hold, journaled, no claim", async () => {
     const { deps, calls } = makeDeps({
       listActivePositions: async () => [makeRow({ debtAmountRaw: "0" })],
-      getFreshRates: async () => new Map([[4, makeRate(4, 0.056, 0.05)]]),
+      // At the 3.7x dynamic target, gap = (L−1)(s−b) = 2.7·0.002 ≈ 0.0054 < 0.01 → thin.
+      getFreshRates: async () => new Map([[4, makeRate(4, 0.052, 0.05)]]),
     });
     const res = await runLoopAllocationTick(deps);
     expect(res.acted).toBe(0);

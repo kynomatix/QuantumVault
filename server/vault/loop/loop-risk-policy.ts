@@ -37,18 +37,31 @@ export interface LoopVaultPolicy {
  * docs/qntsol/SOL_LOOP_VAULT_PLAN.md §P1 for signatures).
  */
 export const LOOP_VAULT_ALLOWLIST: Readonly<Record<number, LoopVaultPolicy>> = {
-  4: { symbol: "JupSOL", maxLeverage: 2 },
-  47: { symbol: "mSOL", maxLeverage: 2 },
+  // Per-vault caps are VENUE-QUALITY overrides (pool depth / liquidity
+  // judgment), not the binding safety constraint — the minOpenHealthFactor
+  // gate binds first (JupSOL LT .95 → ~3.7x, mSOL LT .90 → ~3.2x today).
+  4: { symbol: "JupSOL", maxLeverage: 5 },
+  47: { symbol: "mSOL", maxLeverage: 4 },
 } as const;
 
 export const LOOP_RISK_POLICY = {
   /**
-   * Platform default + hard leverage cap for P2. Conservative launch value —
-   * the venue's CF 94/LT 95 would allow ~16x, but the cap is stress math
-   * (depeg tolerance + rate drift + unwind cost vs distance-to-LT), raisable
-   * per-vault via LOOP_VAULT_ALLOWLIST once P3 keeper policy lands.
+   * Platform-wide ABSOLUTE leverage ceiling. Never binding by itself today
+   * (the health-buffer gate cuts in earlier at current LTs) — it exists so a
+   * future high-LT vault can never push effective leverage into the zone
+   * where a small stake-pool rate hiccup closes the distance to liquidation.
    */
-  defaultMaxLeverage: 2,
+  hardCapLeverage: 5,
+  /**
+   * Minimum health factor a fresh open / re-lever must land at, evaluated on
+   * the THEORETICAL requested leverage (HF = L·LT/(L−1)) — never a
+   * post-slippage re-check (that would fail every at-target open). Must stay
+   * ABOVE the safety tick's reduce band (1.25) or the keeper would fight
+   * fresh opens. Positive-carry loops self-IMPROVE health over time
+   * (collateral compounds at staking APY, debt at the lower borrow APR), so
+   * opening near this buffer does not churn.
+   */
+  minOpenHealthFactor: 1.3,
   /**
    * Max |market LST/SOL rate − stake-pool rate| deviation (basis points) before
    * opens are PAUSED. Pegged vaults liquidate on the stake-pool rate, so a
@@ -80,9 +93,10 @@ export const LOOP_DELEVERAGE_POLICY = {
   healthUnwindMultiple: 1.10,
   /**
    * Fast bleed-stopper only: reduce one step when the persisted net carry (at
-   * the launch 2x reference leverage) falls below this. The full LEVERED→HOLD
-   * carry decision with hysteresis belongs to the ALLOCATION tick (P3 T105) —
-   * this floor just stops paying to hold leverage between hourly ticks.
+   * the position's ACTUAL leverage, derived from its live HF and the vault's
+   * LT) falls below this. The full LEVERED→HOLD carry decision with hysteresis
+   * belongs to the ALLOCATION tick (P3 T105) — this floor just stops paying to
+   * hold leverage between hourly ticks.
    */
   carryReduceApy: 0.005,
   /** Fraction shaved per reduce action (25% partial unwind). */
@@ -143,7 +157,8 @@ export const LOOP_ALLOCATION_POLICY = {
    * column with the safety tick (last_policy_action_at) — mutual exclusion
    * between opposing autonomous actions on one row is desirable. Residual
    * risk accepted: an allocation claim can delay the safety reflex ≤ this
-   * window; at 2x on a pegged pair that matters only in a catastrophic depeg.
+   * window; every open is gated to HF ≥ minOpenHealthFactor (1.3) on a pegged
+   * pair, so that matters only in a catastrophic depeg.
    */
   cooldownMs: 30 * 60 * 1000,
   /**
@@ -155,11 +170,81 @@ export const LOOP_ALLOCATION_POLICY = {
   rateStalenessMs: 3 * 60 * 60 * 1000,
 } as const;
 
+/**
+ * Max leverage that still lands at `minOpenHealthFactor` for a vault with
+ * liquidation threshold `lt` (fraction, 0<lt<1): from HF = L·LT/(L−1) ≥ minHF,
+ * L ≤ minHF/(minHF − LT). Fail closed: unreadable/out-of-range LT → null.
+ */
+export function maxLeverageForHealthBuffer(lt: number | null | undefined): number | null {
+  if (typeof lt !== "number" || !Number.isFinite(lt) || lt <= 0 || lt >= 1) return null;
+  const minHF = LOOP_RISK_POLICY.minOpenHealthFactor;
+  if (minHF <= lt) return null; // degenerate config — never trust it
+  return minHF / (minHF - lt);
+}
+
+export interface LoopTargetLeverageInput {
+  vaultId: number;
+  /** Live vault liquidation threshold (fraction). null = unreadable → no target. */
+  liquidationThreshold: number | null;
+  /** LST staking APY (fraction). null = unreadable → no target. */
+  stakingApy: number | null;
+  /** Vault WSOL borrow APR (fraction). null = unreadable → no target. */
+  borrowApr: number | null;
+}
+
+export interface LoopTargetLeverageResult {
+  /** Target leverage quantized DOWN to 0.1x, or null (do not lever). */
+  leverage: number | null;
+  /** Theoretical HF at that leverage (L·LT/(L−1)); null when leverage is null. */
+  healthAtOpen: number | null;
+  /**
+   * Why there is no target (only set when leverage is null):
+   *  - vault_not_allowlisted / lt_unreadable / rates_unreadable: fail closed.
+   *  - carry_nonpositive: staking APY ≤ borrow APR — levering LOSES money, hold instead.
+   */
+  reason?: "vault_not_allowlisted" | "lt_unreadable" | "rates_unreadable" | "carry_nonpositive" | "cap_too_low";
+}
+
+/**
+ * DYNAMIC target leverage for a loop open / re-lever: the max leverage that
+ * (a) respects the per-vault cap and the platform hard cap, (b) lands at or
+ * above `minOpenHealthFactor` for the vault's LIVE liquidation threshold, and
+ * (c) is actually PROFITABLE to hold (staking APY > borrow APR — otherwise
+ * null: the position should sit unlevered, exactly what the allocation brain
+ * enforces on existing rows). PURE, fail closed on every unreadable input.
+ */
+export function computeLoopTargetLeverage(input: LoopTargetLeverageInput): LoopTargetLeverageResult {
+  const vaultPolicy = LOOP_VAULT_ALLOWLIST[input.vaultId];
+  if (!vaultPolicy) return { leverage: null, healthAtOpen: null, reason: "vault_not_allowlisted" };
+
+  const healthMax = maxLeverageForHealthBuffer(input.liquidationThreshold);
+  if (healthMax === null) return { leverage: null, healthAtOpen: null, reason: "lt_unreadable" };
+
+  const s = input.stakingApy;
+  const b = input.borrowApr;
+  if (
+    typeof s !== "number" || !Number.isFinite(s) ||
+    typeof b !== "number" || !Number.isFinite(b) || b < 0
+  ) {
+    return { leverage: null, healthAtOpen: null, reason: "rates_unreadable" };
+  }
+  if (s - b <= 0) return { leverage: null, healthAtOpen: null, reason: "carry_nonpositive" };
+
+  const raw = Math.min(vaultPolicy.maxLeverage, LOOP_RISK_POLICY.hardCapLeverage, healthMax);
+  const leverage = Math.floor(raw * 10) / 10; // quantize DOWN — never round INTO the buffer
+  if (!(leverage > 1)) return { leverage: null, healthAtOpen: null, reason: "cap_too_low" };
+
+  const lt = input.liquidationThreshold as number;
+  return { leverage, healthAtOpen: (leverage * lt) / (leverage - 1) };
+}
+
 export interface LoopOpenPolicyInput {
   /** Jupiter Lend Multiply vault id (must be allowlisted). */
   vaultId: number;
   /** Requested leverage multiple (e.g. 2 = 2x). */
   requestedLeverage: number;
+  /** Live vault liquidation threshold (fraction). null = unreadable → deny (fail closed). */
+  liquidationThreshold: number | null;
   /** SOL principal for the open, raw lamports. */
   principalLamports: bigint;
   /** Stake-pool LST/SOL rate (SOL per 1 LST). null = unreadable → deny. */
@@ -224,6 +309,39 @@ export function evaluateLoopOpenRequest(input: LoopOpenPolicyInput): LoopPolicyD
       message: `Requested leverage ${input.requestedLeverage}x exceeds the ${vaultPolicy!.symbol} cap of ${effectiveMaxLeverage}x.`,
       facts: { requestedLeverage: input.requestedLeverage, cap: effectiveMaxLeverage },
     });
+  } else if (input.requestedLeverage > LOOP_RISK_POLICY.hardCapLeverage) {
+    reasons.push({
+      code: "loop_leverage_exceeds_hard_cap",
+      severity: "deny",
+      message: `Requested leverage ${input.requestedLeverage}x exceeds the platform hard cap of ${LOOP_RISK_POLICY.hardCapLeverage}x.`,
+      facts: { requestedLeverage: input.requestedLeverage, hardCap: LOOP_RISK_POLICY.hardCapLeverage },
+    });
+  }
+
+  // Health-buffer gate — evaluated on the THEORETICAL requested-L health
+  // (HF = L·LT/(L−1)); LT unreadable → deny (fail closed). This is what keeps
+  // fresh opens clear of the safety tick's 1.25 reduce band.
+  if (!isReadable(input.liquidationThreshold) || input.liquidationThreshold <= 0 || input.liquidationThreshold >= 1) {
+    reasons.push({
+      code: "loop_liquidation_threshold_unreadable",
+      severity: "deny",
+      message: "Vault liquidation threshold is unreadable — opens are paused (fail closed).",
+    });
+  } else if (Number.isFinite(input.requestedLeverage) && input.requestedLeverage > 1) {
+    const hfAtOpen = (input.requestedLeverage * input.liquidationThreshold) / (input.requestedLeverage - 1);
+    if (hfAtOpen < LOOP_RISK_POLICY.minOpenHealthFactor) {
+      reasons.push({
+        code: "loop_health_buffer_violated",
+        severity: "deny",
+        message: `Opening at ${input.requestedLeverage}x would land at health ${hfAtOpen.toFixed(3)}, below the ${LOOP_RISK_POLICY.minOpenHealthFactor} minimum open buffer.`,
+        facts: {
+          requestedLeverage: input.requestedLeverage,
+          liquidationThreshold: input.liquidationThreshold,
+          healthAtOpen: hfAtOpen,
+          minOpenHealthFactor: LOOP_RISK_POLICY.minOpenHealthFactor,
+        },
+      });
+    }
   }
 
   if (input.principalLamports <= 0n) {

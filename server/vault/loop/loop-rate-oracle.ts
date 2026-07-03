@@ -24,7 +24,7 @@ import { storage } from "../../storage";
 import type { InsertLoopRateSample, LoopRateSample } from "@shared/schema";
 import { decodeLoopVaultConfig } from "../jupiter-lend-borrow-route";
 import { fetchDefiLlamaApy } from "../defillama-apy";
-import { LOOP_VAULT_ALLOWLIST } from "./loop-risk-policy";
+import { computeLoopTargetLeverage, LOOP_VAULT_ALLOWLIST } from "./loop-risk-policy";
 
 /** One registry pair: a Jupiter Lend Multiply vault and its DeFiLlama staking-APY pool. */
 export interface LoopRatePair {
@@ -49,7 +49,11 @@ export const LOOP_RATE_REGISTRY: readonly LoopRatePair[] = [
   { vaultId: 47, symbol: "mSOL", llamaPool: "b3f93865-5ec8-4662-90a0-11808e0aa2bd" },
 ] as const;
 
-/** Reference leverage for the materialized carry column (matches launch cap). */
+/**
+ * Reference leverage for the materialized netCarry2x column — a STABLE
+ * telemetry series for cross-time comparison, NOT the sizing target (the
+ * dynamic target comes from computeLoopTargetLeverage off the live LT).
+ */
 export const LOOP_CARRY_REFERENCE_LEVERAGE = 2;
 
 /** Keep ~30 days of hourly samples (~4 vaults × 24 × 30 ≈ 2.9k rows — tiny). */
@@ -84,7 +88,9 @@ export interface LoopRateReading {
   stakingApyMean30d: number | null;
   borrowApr: number | null;
   withdrawUtilization: number | null;
-  /** Net carry at the reference 2x leverage. */
+  /** Vault liquidation threshold (fraction); dynamic-leverage input. */
+  liquidationThreshold: number | null;
+  /** Net carry at the reference 2x leverage (stable telemetry series). */
   netCarry2x: number | null;
   /** Structural refusal (vault missing / symbol mismatch) — row NOT persisted. */
   refusedReason?: string;
@@ -122,6 +128,7 @@ export async function sampleLoopRates(): Promise<LoopRateReading[]> {
 
     let borrowApr: number | null = null;
     let withdrawUtilization: number | null = null;
+    let liquidationThreshold: number | null = null;
     let refusedReason: string | undefined;
 
     if (Array.isArray(vaults)) {
@@ -142,6 +149,7 @@ export async function sampleLoopRates(): Promise<LoopRateReading[]> {
           if (cfg) {
             borrowApr = cfg.borrowApr;
             withdrawUtilization = cfg.withdrawUtilization;
+            liquidationThreshold = cfg.liquidationThreshold;
           }
         }
       }
@@ -155,6 +163,7 @@ export async function sampleLoopRates(): Promise<LoopRateReading[]> {
       stakingApyMean30d,
       borrowApr,
       withdrawUtilization,
+      liquidationThreshold,
       netCarry2x: netCarryAt(stakingApy, borrowApr, LOOP_CARRY_REFERENCE_LEVERAGE),
       ...(refusedReason ? { refusedReason } : {}),
     });
@@ -190,6 +199,7 @@ export async function sampleAndPersistLoopRates(): Promise<LoopRateReading[]> {
       stakingApyMean30d: r.stakingApyMean30d !== null ? r.stakingApyMean30d.toFixed(8) : null,
       borrowApr: r.borrowApr !== null ? r.borrowApr.toFixed(8) : null,
       withdrawUtilization: r.withdrawUtilization !== null ? r.withdrawUtilization.toFixed(6) : null,
+      liquidationThreshold: r.liquidationThreshold !== null ? r.liquidationThreshold.toFixed(6) : null,
       netCarry2x: r.netCarry2x !== null ? r.netCarry2x.toFixed(8) : null,
     });
   }
@@ -211,6 +221,7 @@ export interface FreshLoopRate {
   stakingApyMean30d: number | null;
   borrowApr: number | null;
   withdrawUtilization: number | null;
+  liquidationThreshold: number | null;
   netCarry2x: number | null;
   asOf: Date;
 }
@@ -229,33 +240,64 @@ function decodeSample(row: LoopRateSample): FreshLoopRate {
     stakingApyMean30d: num(row.stakingApyMean30d),
     borrowApr: num(row.borrowApr),
     withdrawUtilization: num(row.withdrawUtilization),
+    liquidationThreshold: num(row.liquidationThreshold),
     netCarry2x: num(row.netCarry2x),
     asOf: row.asOf,
   };
 }
 
+/** The winning vault for an open: its DYNAMIC target leverage + carry there. */
+export interface BestLoopVault {
+  vaultId: number;
+  symbol: string;
+  /** Dynamic target leverage (health buffer + caps + positive carry). */
+  targetLeverage: number;
+  /** Net carry (fraction APY) at that target leverage. */
+  netCarryAtTarget: number;
+  /** Carry at the stable 2x reference (telemetry/back-compat consumers). */
+  netCarry2x: number | null;
+}
+
 /**
- * Pick the best loop vault for a user-initiated OPEN: highest fresh 2x net
- * carry among the allowlisted vaults (deterministic tie-break: lower vaultId).
- * The USER never chooses the LST — defaults over choices (plan §4.5); this is
- * the same rate table the allocation brain reads, not a second objective.
- * Returns null when no allowlisted vault has a readable fresh carry → callers
- * must fail closed (never fall back to a hardcoded vault).
+ * Pick the best loop vault for a user-initiated OPEN: highest fresh net carry
+ * AT EACH VAULT'S OWN DYNAMIC TARGET LEVERAGE (health buffer + per-vault cap +
+ * platform hard cap), deterministic tie-break: lower vaultId. A vault with no
+ * computable target (LT/rates unreadable, or carry non-positive — levering
+ * would lose money) is simply ineligible. The USER never chooses the LST —
+ * defaults over choices (plan §4.5); this is the same rate table + the same
+ * target function the allocation brain uses, not a second objective.
+ * Returns null when NO allowlisted vault has a target → callers must fail
+ * closed (never fall back to a hardcoded vault or leverage).
  */
 export function pickBestLoopVault(
   rates: Map<number, FreshLoopRate>,
   allowedVaultIds: number[],
-): { vaultId: number; symbol: string; netCarry2x: number } | null {
-  let best: { vaultId: number; symbol: string; netCarry2x: number } | null = null;
+): BestLoopVault | null {
+  let best: BestLoopVault | null = null;
   for (const id of allowedVaultIds) {
     const r = rates.get(id);
-    if (!r || r.netCarry2x === null) continue;
+    if (!r) continue;
+    const target = computeLoopTargetLeverage({
+      vaultId: id,
+      liquidationThreshold: r.liquidationThreshold,
+      stakingApy: r.stakingApy,
+      borrowApr: r.borrowApr,
+    });
+    if (target.leverage === null) continue;
+    const carry = netCarryAt(r.stakingApy, r.borrowApr, target.leverage);
+    if (carry === null) continue;
     if (
       best === null ||
-      r.netCarry2x > best.netCarry2x ||
-      (r.netCarry2x === best.netCarry2x && id < best.vaultId)
+      carry > best.netCarryAtTarget ||
+      (carry === best.netCarryAtTarget && id < best.vaultId)
     ) {
-      best = { vaultId: id, symbol: r.symbol, netCarry2x: r.netCarry2x };
+      best = {
+        vaultId: id,
+        symbol: r.symbol,
+        targetLeverage: target.leverage,
+        netCarryAtTarget: carry,
+        netCarry2x: r.netCarry2x,
+      };
     }
   }
   return best;

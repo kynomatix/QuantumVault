@@ -1511,7 +1511,7 @@ import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { isBorrowEligibleWallet, isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, repayPartialOnExistingBotPosition, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
 import { executeLoopOpen, executeLoopClose, executeLoopPartialUnwind, executeLoopDeleverToHold } from "./vault/loop/loop-executor";
-import { LOOP_VAULT_ALLOWLIST, LOOP_RISK_POLICY, LOOP_ALLOCATION_POLICY } from "./vault/loop/loop-risk-policy";
+import { LOOP_VAULT_ALLOWLIST, LOOP_RISK_POLICY, LOOP_ALLOCATION_POLICY, computeLoopTargetLeverage } from "./vault/loop/loop-risk-policy";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
 import { runBorrowHealthScan } from "./vault/borrow-health-monitor";
 import { runLoopSafetyTick, buildLoopSafetyDeps } from "./vault/loop/loop-safety-tick";
@@ -9888,7 +9888,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     return v;
   };
 
-  // OPEN a loop: principal SOL in, fixed 2x. Body: { vaultId, principalLamports, sessionId, leverage?, slippageBps?, clientRequestId? }
+  // OPEN a loop: principal SOL in, DYNAMIC leverage (derived server-side from
+  // the live vault LT + min health buffer + caps; positive carry required).
+  // Body: { vaultId?, principalLamports, sessionId, leverage?, slippageBps?, clientRequestId? }
   app.post("/api/vault/loop/open", requireWallet, async (req, res) => {
     try {
       if (!requireLoopOwner(req, res)) return;
@@ -9926,11 +9928,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       const principalParsed = parseLoopRawPositive(req.body?.principalLamports, "principalLamports");
       if (typeof principalParsed === "object") return res.status(400).json(principalParsed);
-      // P2 launch is FIXED 2x. Reject any other requested leverage explicitly
-      // rather than silently overriding it (fail closed on surprises).
-      const fixedLeverage = LOOP_RISK_POLICY.defaultMaxLeverage;
-      if (leverage !== undefined && leverage !== fixedLeverage) {
-        return res.status(400).json({ error: `Leverage is fixed at ${fixedLeverage}x for launch.` });
+      // Leverage is DYNAMIC: omitted = the executor derives the target from
+      // the live vault LT + min health buffer + caps (the normal path). An
+      // explicit number is allowed through but stays fully policy-gated and
+      // hard-capped inside the executor (fail closed on anything unreadable).
+      if (leverage !== undefined) {
+        if (typeof leverage !== "number" || !Number.isFinite(leverage) || leverage <= 1 || leverage > LOOP_RISK_POLICY.hardCapLeverage) {
+          return res.status(400).json({ error: `leverage must be a number in (1, ${LOOP_RISK_POLICY.hardCapLeverage}] — or omit it and the platform picks the safe target.` });
+        }
       }
       const slip = parseLoopSlippage(req.body?.slippageBps);
       if (slip && typeof slip === "object") return res.status(400).json(slip);
@@ -9946,7 +9951,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           agentSecretKey: ctx.agentKeyResult.secretKey,
           vaultId,
           principalLamports: principalParsed,
-          leverage: fixedLeverage,
+          leverage: leverage as number | undefined,
           slippageBps: slip as number | undefined,
           // preflight: report the exact deposit bar without executing, so the
           // client can fund the WHOLE open from the user's wallet up front
@@ -22885,14 +22890,25 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         };
       });
 
-      const carry = Array.from(freshRates.values()).map((r) => ({
-        vaultId: r.vaultId,
-        symbol: r.symbol,
-        stakingApy: r.stakingApy,
-        borrowApr: r.borrowApr,
-        netCarry2x: r.netCarry2x,
-        asOf: r.asOf,
-      }));
+      const carry = Array.from(freshRates.values()).map((r) => {
+        const target = computeLoopTargetLeverage({
+          vaultId: r.vaultId,
+          liquidationThreshold: r.liquidationThreshold,
+          stakingApy: r.stakingApy,
+          borrowApr: r.borrowApr,
+        });
+        return {
+          vaultId: r.vaultId,
+          symbol: r.symbol,
+          stakingApy: r.stakingApy,
+          borrowApr: r.borrowApr,
+          liquidationThreshold: r.liquidationThreshold,
+          netCarry2x: r.netCarry2x,
+          targetLeverage: target.leverage,
+          targetReason: target.reason ?? null,
+          asOf: r.asOf,
+        };
+      });
 
       const recentDecisions = decisions.slice(0, 50).map((d) => ({
         at: d.createdAt,

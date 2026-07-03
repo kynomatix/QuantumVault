@@ -43,7 +43,7 @@ import type { PerBotPositionHealth } from "../borrow-health";
 import { sendLoopSafetyNotification, type LoopSafetyNotification } from "../../notification-service";
 import { decideDeleverage } from "./keeper/policy";
 import type { DeleverageDecision, PositionHealth, VenueState } from "./keeper/types";
-import { getFreshLoopRates, type FreshLoopRate } from "./loop-rate-oracle";
+import { getFreshLoopRates, netCarryAt, type FreshLoopRate } from "./loop-rate-oracle";
 import { LOOP_DELEVERAGE_POLICY, LOOP_VAULT_ALLOWLIST } from "./loop-risk-policy";
 import {
   executeLoopPartialUnwind,
@@ -189,24 +189,33 @@ export function buildLoopSafetyInputs(
     }
 
     candidates.push({ row, vaultId, healthFactor: health.healthFactor, liveDebtRaw });
+
+    // Carry at the position's ACTUAL leverage, derived from the live health
+    // factor: HF = colSol·LT/debtSol and L = col/(col−debt) give the identity
+    // L = HF/(HF−LT). Keyed PER POSITION (not per vault) because two wallets
+    // on the same vault can sit at different leverage. Guards, all fail closed
+    // to "no carry state" (health bands are unaffected):
+    //  - LT unreadable/invalid → skip carry rule.
+    //  - HF ≤ LT → leverage identity degenerates (at/inside liquidation
+    //    territory) → skip carry rule; the health bands own this position.
+    const posKey = `${venueKey(vaultId)}:pos:${row.id}`;
     positions.push({
-      venue: venueKey(vaultId),
+      venue: posKey,
       positionId: row.id,
       healthFactor: health.healthFactor,
       liquidationFloor: policy.liquidationFloor,
     });
-
-    // Carry state: ONLY from a fresh persisted sample with a readable net
-    // carry. Absent/stale/unreadable → no VenueState → the keeper's carry rule
-    // silently skips for this venue (health bands are unaffected).
-    if (!states.has(venueKey(vaultId))) {
-      const rate = rates.get(vaultId);
-      if (rate && typeof rate.netCarry2x === "number" && Number.isFinite(rate.netCarry2x)) {
-        states.set(venueKey(vaultId), {
-          venue: venueKey(vaultId),
+    const rate = rates.get(vaultId);
+    const lt = rate?.liquidationThreshold ?? null;
+    if (rate && typeof lt === "number" && Number.isFinite(lt) && lt > 0 && lt < 1 && health.healthFactor > lt) {
+      const actualLeverage = health.healthFactor / (health.healthFactor - lt);
+      const carryAtActual = netCarryAt(rate.stakingApy, rate.borrowApr, actualLeverage);
+      if (carryAtActual !== null) {
+        states.set(posKey, {
+          venue: posKey,
           borrowRateApy: rate.borrowApr ?? 0,
           stakingYieldApy: rate.stakingApy ?? 0,
-          netCarryApy: rate.netCarry2x,
+          netCarryApy: carryAtActual,
           borrowLiquiditySol: 0, // unused by decideDeleverage
           isFixedRate: false, // Jupiter Lend is variable-rate
           paused: false,

@@ -94,7 +94,13 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
 
   const statusQuery = useQuery<{
     positions: LoopRow[];
-    recommended?: { vaultId: number; symbol: string; netCarry2x: number } | null;
+    recommended?: {
+      vaultId: number;
+      symbol: string;
+      targetLeverage: number | null;
+      netCarryAtTarget: number | null;
+      netCarry2x: number | null;
+    } | null;
   } | null>({
     queryKey: ["/api/vault/loop/status"],
     enabled: active,
@@ -405,7 +411,7 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
             <div className="min-w-0">
               <h3 className="font-semibold text-base truncate">SOL Loop</h3>
               <p className="text-sm text-muted-foreground flex items-center gap-2">
-                <span className="tabular-nums">2x staking loop</span>
+                <span className="tabular-nums">Auto-leverage staking loop</span>
                 <span
                   className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium leading-none whitespace-nowrap bg-cyan-500/15 text-cyan-600 dark:text-cyan-400"
                   data-testid="chip-risk-loop"
@@ -427,7 +433,11 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
 
         <div className="grid grid-cols-3 gap-3 text-center">
           <div className="p-2.5 rounded-lg bg-muted/30">
-            <p className="text-lg font-bold tabular-nums">2x</p>
+            <p className="text-lg font-bold tabular-nums" data-testid="stat-loop-target-leverage">
+              {typeof statusQuery.data?.recommended?.targetLeverage === "number"
+                ? `${statusQuery.data.recommended.targetLeverage.toFixed(1)}x`
+                : "Auto"}
+            </p>
             <p className="text-xs text-muted-foreground">Leverage</p>
           </div>
           <div className="p-2.5 rounded-lg bg-muted/30">
@@ -462,8 +472,10 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
               </span>
             </DialogTitle>
             <DialogDescription>
-              Deposit SOL from your wallet — the platform puts it into the best staked SOL token and loops it at
-              2x for boosted staking yield. Leveraged: it can be liquidated if rates move sharply against it.
+              Deposit SOL from your wallet — the platform puts it into the best staked SOL token and loops it
+              for boosted staking yield. Leverage is set automatically from the vault's live limits with a
+              safety buffer, and only while the yield beats the borrow cost. Leveraged: it can be liquidated
+              if rates move sharply against it.
             </DialogDescription>
           </DialogHeader>
 
@@ -488,7 +500,7 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
                 onClick={() => runConfirmed("open", () => void startOpen())}
                 data-testid="button-loop-open"
               >
-                {busy === "open" ? <Loader2 className="h-4 w-4 animate-spin" /> : label("open", "Deposit & Open 2x Loop")}
+                {busy === "open" ? <Loader2 className="h-4 w-4 animate-spin" /> : label("open", "Deposit & Open Loop")}
               </Button>
               <p className="text-[11px] text-muted-foreground" data-testid="text-loop-auto-pick">
                 Comes straight from your connected wallet. The platform picks the best staked SOL token

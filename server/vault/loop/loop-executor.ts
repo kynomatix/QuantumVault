@@ -70,7 +70,15 @@ import {
   DEFAULT_LST_COLLATERAL_DUST_RAW,
   type AmountSpec,
 } from "../borrow-engine-core";
-import { evaluateLoopOpenRequest, LOOP_VAULT_ALLOWLIST, type LoopPolicyReason } from "./loop-risk-policy";
+import {
+  computeLoopTargetLeverage,
+  evaluateLoopOpenRequest,
+  LOOP_ALLOCATION_POLICY,
+  LOOP_RISK_POLICY,
+  LOOP_VAULT_ALLOWLIST,
+  type LoopPolicyReason,
+} from "./loop-risk-policy";
+import { getFreshLoopRates, sampleAndPersistLoopRates, type FreshLoopRate } from "./loop-rate-oracle";
 import type { BorrowPosition } from "@shared/schema";
 
 // --- Constants ---------------------------------------------------------------
@@ -338,8 +346,13 @@ export interface LoopOpenParams {
   vaultId: number;
   /** SOL principal, raw lamports. */
   principalLamports: bigint;
-  /** Leverage multiple (P2: fixed 2x from the route layer; policy enforces the cap). */
-  leverage: number;
+  /**
+   * Leverage multiple. OMIT for the normal path: the executor derives the
+   * DYNAMIC target (live vault LT + min open health buffer + per-vault and
+   * platform caps, positive carry required) via `computeLoopTargetLeverage`.
+   * An explicit value is an owner-only API override — still fully policy-gated.
+   */
+  leverage?: number;
   slippageBps?: number;
   clientRequestId?: string;
   /**
@@ -373,8 +386,31 @@ export interface LoopGasShortfall {
   heldLamports: number;
 }
 
+/**
+ * Fresh rate row for one vault from the SAME staleness-gated table the
+ * allocation brain reads. If the table has no fresh row (e.g. right after
+ * boot, before the hourly sampler has run), sample ONCE on demand and re-read.
+ * Returns null when rates are genuinely unavailable — callers fail closed.
+ */
+async function resolveFreshLoopRate(vaultId: number): Promise<FreshLoopRate | null> {
+  const staleness = LOOP_ALLOCATION_POLICY.rateStalenessMs;
+  try {
+    let rates = await getFreshLoopRates(staleness);
+    let row = rates.get(vaultId) ?? null;
+    if (!row) {
+      await sampleAndPersistLoopRates();
+      rates = await getFreshLoopRates(staleness);
+      row = rates.get(vaultId) ?? null;
+    }
+    return row;
+  } catch (e) {
+    console.error(`[loop-executor] rate resolution failed for vault ${vaultId}:`, e);
+    return null;
+  }
+}
+
 export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenResult> {
-  const { walletAddress, agentPublicKey, agentSecretKey, vaultId, principalLamports, leverage } = params;
+  const { walletAddress, agentPublicKey, agentSecretKey, vaultId, principalLamports } = params;
   const slippageBps = params.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
 
   if (principalLamports <= 0n) return { success: false, error: "Principal must be > 0." };
@@ -382,7 +418,47 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
     return { success: false, error: `Vault ${vaultId} is not on the loop launch allowlist.` };
   }
 
-  // Pure sizing (throws on insane leverage) — before any I/O.
+  const borrowRoute = new JupiterLendBorrowRoute();
+  const cfg = await borrowRoute.getLoopVaultConfig(vaultId);
+  if (!cfg) return { success: false, error: `Could not read loop vault ${vaultId} config — refusing (fail closed).` };
+  if (cfg.debtMint !== WSOL_MINT) {
+    return { success: false, error: `Vault ${vaultId} does not borrow WSOL — refusing.` };
+  }
+
+  // DYNAMIC leverage: the venue's LIVE liquidation threshold + the min open
+  // health buffer + the caps decide, and only when the carry is PROFITABLE
+  // (staking APY > borrow APR — otherwise levering loses money and we refuse,
+  // exactly like the allocation brain holds existing rows unlevered).
+  // Staking APY comes from the same fresh rate table the brain reads
+  // (sample once on demand if empty, e.g. right after boot); fail closed.
+  let stakingApyForGate: number | null = null;
+  let leverage: number;
+  {
+    const rateRes = await resolveFreshLoopRate(vaultId);
+    stakingApyForGate = rateRes?.stakingApy ?? null;
+    if (typeof params.leverage === "number") {
+      leverage = params.leverage; // owner override — still fully policy-gated below
+    } else {
+      const target = computeLoopTargetLeverage({
+        vaultId,
+        liquidationThreshold: cfg.liquidationThreshold,
+        stakingApy: rateRes?.stakingApy ?? null,
+        borrowApr: cfg.borrowApr,
+      });
+      if (target.leverage === null) {
+        return {
+          success: false,
+          error:
+            target.reason === "carry_nonpositive"
+              ? `Looping ${cfg.collateralSymbol} is not profitable right now (staking yield does not beat the SOL borrow rate) — refusing to open a levered position.`
+              : `Cannot determine a safe leverage for ${cfg.collateralSymbol} right now (${target.reason ?? "inputs unreadable"}) — refusing (fail closed). Try again shortly.`,
+        };
+      }
+      leverage = target.leverage;
+    }
+  }
+
+  // Pure sizing (throws on insane leverage) — before any money I/O.
   let flashLamports: bigint;
   let totalSwapLamports: bigint;
   try {
@@ -391,13 +467,6 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
     totalSwapLamports = amounts.totalSwapLamports;
   } catch (e) {
     return { success: false, error: e instanceof Error ? e.message : String(e) };
-  }
-
-  const borrowRoute = new JupiterLendBorrowRoute();
-  const cfg = await borrowRoute.getLoopVaultConfig(vaultId);
-  if (!cfg) return { success: false, error: `Could not read loop vault ${vaultId} config — refusing (fail closed).` };
-  if (cfg.debtMint !== WSOL_MINT) {
-    return { success: false, error: `Vault ${vaultId} does not borrow WSOL — refusing.` };
   }
   const minBorrowRaw = BigInt(cfg.minimumBorrowingRaw || "0");
   if (flashLamports < minBorrowRaw) {
@@ -572,7 +641,8 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
         // the debt-token market metric and reads >1 on WSOL (would deny every
         // loop open with a nonsense "265%"). null = unreadable → policy denies.
         utilization: cfg.withdrawUtilization,
-        stakingApy: null,
+        stakingApy: stakingApyForGate,
+        liquidationThreshold: cfg.liquidationThreshold,
       });
       if (!decision.allowed) {
         const denyMsgs = decision.reasons.filter((r) => r.severity === "deny").map((r) => r.message);
@@ -2033,8 +2103,14 @@ export interface LoopReleverParams {
   agentPublicKey: string;
   agentSecretKey: Uint8Array;
   borrowPositionId: string;
-  /** Target leverage (allocation tick passes the vault's allowlisted max). */
-  leverage: number;
+  /**
+   * Target leverage. OMIT for the normal path: the executor derives the
+   * DYNAMIC target (live vault LT + min open health buffer + caps, positive
+   * carry required) — same function the allocation brain uses. An explicit
+   * value (e.g. the brain passing its own computed target) is still bounded
+   * by the caps and fully policy-gated.
+   */
+  leverage?: number;
   slippageBps?: number;
   clientRequestId?: string;
   /** Why the policy loop chose LEVERED (persisted to the row + decision journal). */
@@ -2065,7 +2141,7 @@ export interface LoopReleverResult {
  * reflex which must never be blocked. Fails closed on every unreadable input.
  */
 export async function executeLoopRelever(params: LoopReleverParams): Promise<LoopReleverResult> {
-  const { walletAddress, agentPublicKey, agentSecretKey, borrowPositionId, leverage } = params;
+  const { walletAddress, agentPublicKey, agentSecretKey, borrowPositionId } = params;
   const slippageBps = params.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
   const policyReason = (params.policyReason || "carry_positive").slice(0, 200);
 
@@ -2075,15 +2151,45 @@ export async function executeLoopRelever(params: LoopReleverParams): Promise<Loo
 
   const vaultPolicy = LOOP_VAULT_ALLOWLIST[vaultId];
   if (!vaultPolicy) return { success: false, error: `Vault ${vaultId} is not on the loop launch allowlist.` };
-  if (!Number.isFinite(leverage) || leverage <= 1 || leverage > vaultPolicy.maxLeverage) {
-    return { success: false, error: `Re-lever leverage ${leverage} is outside (1, ${vaultPolicy.maxLeverage}].` };
-  }
 
   const borrowRoute = new JupiterLendBorrowRoute();
   const cfg = await borrowRoute.getLoopVaultConfig(vaultId);
   if (!cfg) return { success: false, error: `Could not read loop vault ${vaultId} config — refusing (fail closed).` };
   if (cfg.debtMint !== WSOL_MINT) {
     return { success: false, error: `Vault ${vaultId} does not borrow WSOL — refusing.` };
+  }
+
+  // DYNAMIC leverage (same function + same rate table as the open path and
+  // the allocation brain). Explicit values stay bounded by BOTH caps.
+  let stakingApyForGate: number | null = null;
+  let leverage: number;
+  {
+    const rateRes = await resolveFreshLoopRate(vaultId);
+    stakingApyForGate = rateRes?.stakingApy ?? null;
+    if (typeof params.leverage === "number") {
+      leverage = params.leverage;
+    } else {
+      const target = computeLoopTargetLeverage({
+        vaultId,
+        liquidationThreshold: cfg.liquidationThreshold,
+        stakingApy: rateRes?.stakingApy ?? null,
+        borrowApr: cfg.borrowApr,
+      });
+      if (target.leverage === null) {
+        return {
+          success: false,
+          error:
+            target.reason === "carry_nonpositive"
+              ? `Looping ${cfg.collateralSymbol} is not profitable right now — refusing to re-lever.`
+              : `Cannot determine a safe leverage for ${cfg.collateralSymbol} right now (${target.reason ?? "inputs unreadable"}) — refusing (fail closed).`,
+        };
+      }
+      leverage = target.leverage;
+    }
+  }
+  const effectiveCap = Math.min(vaultPolicy.maxLeverage, LOOP_RISK_POLICY.hardCapLeverage);
+  if (!Number.isFinite(leverage) || leverage <= 1 || leverage > effectiveCap) {
+    return { success: false, error: `Re-lever leverage ${leverage} is outside (1, ${effectiveCap}].` };
   }
 
   return await withBorrowLock(borrowLockKey(walletAddress, null, vaultId), async () => {
@@ -2248,7 +2354,8 @@ export async function executeLoopRelever(params: LoopReleverParams): Promise<Loo
         marketSolPerLst,
         borrowApr: cfg.borrowApr,
         utilization: cfg.withdrawUtilization,
-        stakingApy: null,
+        stakingApy: stakingApyForGate,
+        liquidationThreshold: cfg.liquidationThreshold,
       });
       if (!decision.allowed) {
         const denyMsgs = decision.reasons.filter((r) => r.severity === "deny").map((r) => r.message);
