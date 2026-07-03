@@ -98,8 +98,22 @@ export interface BorrowVaultConfig {
   supplyApr: number;
   /** Borrow fee (fraction). */
   borrowFee: number;
-  /** Pool utilization (fraction 0..1). */
+  /**
+   * DEBT-TOKEN liquidity-market utilization (decoded borrowLimitUtilization).
+   * WARNING: this is a market-wide metric shared by every vault with the same
+   * debt token, NOT per-vault — and on WSOL markets it reads >1 (verified live
+   * 2026-07-03: 2.652 on ALL WSOL-debt vaults), so it is unusable as a 0..1
+   * fraction there. Do not gate loop opens on it.
+   */
   utilization: number;
+  /**
+   * Per-vault WITHDRAW-side utilization: 1 − withdrawableUntilLimit /
+   * totalSupplyLiquidity (fraction 0..1). Measures how much of the vault's
+   * supplied collateral is NOT instantly withdrawable — the figure that
+   * predicts whether an unwind's withdraw leg could be blocked. null when the
+   * source fields are missing/unreadable (loop policy fails closed on null).
+   */
+  withdrawUtilization: number | null;
   /** Oracle price liquidation uses, USD per collateral token. */
   oraclePriceLiquidateUsd: number;
   /** Oracle price operate uses, USD per collateral token. */
@@ -227,6 +241,23 @@ function decodeVaultConfigAnyDebt(v: any): BorrowVaultConfig | null {
     ];
     if (required.some((x) => x === undefined || x === null || String(x).length === 0)) return null;
 
+    // Per-vault withdraw-side utilization (see interface doc). Nullable on
+    // unreadable inputs rather than failing the whole decode, so the USDC
+    // borrow dashboard keeps working if the API ever drops these fields; the
+    // loop open policy fails closed on null.
+    let withdrawUtilization: number | null = null;
+    {
+      const ts = Number(v.totalSupplyLiquidity);
+      const wd = Number(v.withdrawableUntilLimit);
+      // wd > ts is impossible on a coherent read (can't withdraw more than is
+      // supplied) — treat it as unreadable (null → loop policy denies) instead
+      // of clamping to 0, which would be the MOST permissive value. Allow a
+      // tiny tolerance for rounding between the two REST fields.
+      if (Number.isFinite(ts) && ts > 0 && Number.isFinite(wd) && wd >= 0 && wd <= ts * 1.001) {
+        withdrawUtilization = Math.min(Math.max(1 - Math.min(wd, ts) / ts, 0), 1);
+      }
+    }
+
     const cfg: BorrowVaultConfig = {
       vaultId: Number(v.id),
       vaultAddress: String(v.address),
@@ -244,6 +275,7 @@ function decodeVaultConfigAnyDebt(v: any): BorrowVaultConfig | null {
       supplyApr: decodeRateToFraction(v.supplyRate ?? 0),
       borrowFee: decodeRateToFraction(v.borrowFee ?? 0),
       utilization: decode1e15(v.borrowLimitUtilization),
+      withdrawUtilization,
       oraclePriceLiquidateUsd: decode1e15(v.oraclePriceLiquidate),
       oraclePriceOperateUsd: decode1e15(v.oraclePriceOperate),
       marketPriceUsd: Number(v.supplyToken.price ?? 0),

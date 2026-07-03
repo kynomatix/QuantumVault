@@ -50,6 +50,10 @@ const RAW_MSOL_LOOP = {
   minimumBorrowing: "1000000",
   borrowable: "5838249171951",
   withdrawable: "11610714005191",
+  // Withdraw-side utilization sources (live vault 47 shape 2026-07-03):
+  // 1 - 95/100 = 0.05 withdraw-side utilization.
+  totalSupplyLiquidity: "100000000000000",
+  withdrawableUntilLimit: "95000000000000",
   oraclePriceLiquidate: "1391000000000000",
   oraclePriceOperate: "1391000000000000",
 };
@@ -66,6 +70,25 @@ describe("decodeLoopVaultConfig (WSOL debt pinned by MINT)", () => {
     expect(cfg.liquidationThreshold).toBeCloseTo(0.9, 6);
     // 1e15-scaled oracle decodes to the mSOL/SOL rate (SOL per mSOL), NOT $.
     expect(cfg.oraclePriceLiquidateUsd).toBeCloseTo(1.391, 6);
+  });
+
+  it("withdrawUtilization = 1 − withdrawableUntilLimit/totalSupplyLiquidity (per-vault), NOT borrowLimitUtilization", () => {
+    const cfg = decodeLoopVaultConfig(RAW_MSOL_LOOP) as BorrowVaultConfig;
+    expect(cfg.withdrawUtilization).toBeCloseTo(0.05, 9);
+    // borrowLimitUtilization is a debt-token MARKET metric (identical across
+    // all WSOL vaults, reads >1 live) — the loop gate must never receive it.
+    expect(cfg.withdrawUtilization).not.toBeCloseTo(cfg.utilization, 6);
+  });
+
+  it("withdrawUtilization is null (→ policy denies, fail closed) when source fields are missing or garbled", () => {
+    const { totalSupplyLiquidity: _ts, withdrawableUntilLimit: _wd, ...noFields } = RAW_MSOL_LOOP as any;
+    expect((decodeLoopVaultConfig(noFields) as BorrowVaultConfig).withdrawUtilization).toBeNull();
+    const garbled = { ...RAW_MSOL_LOOP, totalSupplyLiquidity: "0", withdrawableUntilLimit: "not-a-number" };
+    expect((decodeLoopVaultConfig(garbled) as BorrowVaultConfig).withdrawUtilization).toBeNull();
+    // Incoherent read (withdrawable > supplied) must be null, NOT clamped to
+    // 0 — clamping would hand the policy the most permissive possible value.
+    const incoherent = { ...RAW_MSOL_LOOP, totalSupplyLiquidity: "100000000000000", withdrawableUntilLimit: "150000000000000" };
+    expect((decodeLoopVaultConfig(incoherent) as BorrowVaultConfig).withdrawUtilization).toBeNull();
   });
 
   it("rejects a USDC-debt vault (fail closed)", () => {

@@ -513,7 +513,10 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
         stakePoolSolPerLst: cfg.oraclePriceOperateUsd, // SOL-per-LST on WSOL-debt vaults
         marketSolPerLst,
         borrowApr: cfg.borrowApr,
-        utilization: cfg.utilization,
+        // Per-vault withdraw-side utilization — NOT cfg.utilization, which is
+        // the debt-token market metric and reads >1 on WSOL (would deny every
+        // loop open with a nonsense "265%"). null = unreadable → policy denies.
+        utilization: cfg.withdrawUtilization,
         stakingApy: null,
       });
       if (!decision.allowed) {
