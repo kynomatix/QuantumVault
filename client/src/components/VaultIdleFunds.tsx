@@ -15,6 +15,7 @@ import { useToast } from "@/hooks/use-toast";
 import { isSessionError, showReconnectToast } from "@/lib/reconnect-toast";
 import { walletAuthHeaders } from "@/lib/queryClient";
 import { safeResponseJson } from "@/lib/safe-fetch";
+import LoopVaultControls from "@/components/LoopVaultControls";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -730,6 +731,9 @@ export default function VaultIdleFunds({
     return (
       <div className={gridClass} data-testid="section-vault-assets">
         {assets.map(renderVaultCard)}
+        {/* Owner-only SOL Loop card (self-gating: renders nothing unless the
+            server's owner gate passes; account-level vault grid only). */}
+        {!botId && <LoopVaultControls active={active} />}
       </div>
     );
   };
