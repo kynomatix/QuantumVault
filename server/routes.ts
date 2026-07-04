@@ -13502,8 +13502,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const { scope } = resolved;
       if (!scope.agentPublicKey) return res.status(400).json({ error: "Agent wallet not initialized" });
 
-      // Money-safety: never park while a position is open — that idle USDC is the
-      // liquidation buffer. Fail closed (a read error blocks the park).
+      // Money-safety: parked funds in Earn (ONyc) are EXEMPT from the
+      // auto-unpark — the system cannot recall them for margin top-up. Never
+      // park while a position is open (idle USDC is the liquidation buffer).
+      // Fail closed (a read error blocks the park).
       const flatCheck = await assertVaultScopeFlatForParking(req.walletAddress!, wallet, scope);
       if (!flatCheck.ok) {
         return res.status(409).json({
