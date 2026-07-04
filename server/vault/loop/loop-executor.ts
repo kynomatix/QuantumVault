@@ -409,6 +409,84 @@ export function buildLoopSolView(
   return { leverage, balanceSol, balanceLive, pnlSol, pnlPct, principalSol, returnedSol };
 }
 
+/**
+ * Wallet-level lifetime P/L for the SOL Loop card: total across ALL historical
+ * positions (every lifecycle, including past lifecycles on reused NFT rows —
+ * which the per-position view intentionally excludes because it anchors on the
+ * LATEST open).
+ *
+ * pnlSol = (current equity of active rows) + (every SOL ever returned by
+ *          succeeded loop_close / loop_unwind / loop_delever_hold / loop_relever)
+ *        - (every SOL principal that ever went in via a succeeded loop_open).
+ *
+ * Fail closed, never a guess: any succeeded open missing its recorded
+ * principal, any returning op whose amount could not be measured
+ * (solDeltaUnknown), or any active row whose equity is unreadable makes
+ * pnlSol null (renders as an em dash client-side). Display only.
+ */
+export interface LoopLifetimeView {
+  pnlSol: number | null;
+  principalSol: number | null;
+  returnedSol: number;
+  equitySol: number | null;
+}
+
+export function buildLoopLifetimeView(
+  positions: Array<BorrowPosition & { solView: LoopSolView }>,
+  allOps: BorrowOperation[],
+): LoopLifetimeView {
+  // Principal: every succeeded loop_open ever (loop_* op types are loop-only,
+  // so no kind filter is needed on the wallet-wide ops list).
+  let principalLamports = 0n;
+  let principalUnknown = false;
+  let openCount = 0;
+  for (const op of allOps) {
+    if (op.operationType !== "loop_open" || op.status !== "succeeded") continue;
+    openCount += 1;
+    const m = (op.metadata ?? {}) as Record<string, unknown>;
+    if (typeof m.principalLamports === "string" && /^\d+$/.test(m.principalLamports)) {
+      principalLamports += BigInt(m.principalLamports);
+    } else {
+      principalUnknown = true; // recorded open with no measured principal -> no guessing
+    }
+  }
+
+  // Returned: every succeeded returning op ever.
+  let returnedLamports = 0n;
+  let returnedUnknown = false;
+  for (const op of allOps) {
+    if (op.status !== "succeeded") continue;
+    if (!LOOP_RETURNING_OP_TYPES.has(op.operationType)) continue;
+    const r = (op.result ?? {}) as Record<string, unknown>;
+    if (typeof r.solReturnedLamports === "string" && /^\d+$/.test(r.solReturnedLamports)) {
+      returnedLamports += BigInt(r.solReturnedLamports);
+    } else if (r.solDeltaUnknown) {
+      returnedUnknown = true;
+    }
+  }
+  const returnedSol = Number(new Decimal(returnedLamports.toString()).div(1e9));
+
+  // Equity: sum of the active rows' current balances (already computed by the
+  // per-position view). One unreadable active row poisons the total.
+  let equitySol: number | null = 0;
+  for (const p of positions) {
+    if (p.status !== "open" && p.status !== "pending") continue;
+    if (typeof p.solView.balanceSol === "number" && Number.isFinite(p.solView.balanceSol)) {
+      equitySol += p.solView.balanceSol;
+    } else {
+      equitySol = null;
+      break;
+    }
+  }
+
+  const principalSol = principalUnknown ? null : Number(new Decimal(principalLamports.toString()).div(1e9));
+  const pnlSol =
+    openCount > 0 && principalSol !== null && equitySol !== null && !returnedUnknown
+      ? equitySol + returnedSol - principalSol
+      : null;
+  return { pnlSol, principalSol, returnedSol, equitySol };
+}
+
 async function failOp(opId: string, step: string, error: string): Promise<void> {
   try {
     await storage.updateBorrowOperation(opId, { status: "failed", step, error: error.slice(0, 1000) });

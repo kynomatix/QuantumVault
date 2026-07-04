@@ -163,7 +163,7 @@ const fmtAgo = (iso: string | null): string | null => {
   return `${Math.round(m / 60)}h ago`;
 };
 
-export default function LoopVaultControls({ active }: { active: boolean }) {
+export default function LoopVaultControls({ active, gridClass }: { active: boolean; gridClass?: string }) {
   const { toast } = useToast();
   const { retryAuth, publicKeyString } = useWallet();
   const { connection } = useConnection();
@@ -212,6 +212,13 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
       netCarry2x: number | null;
     } | null;
     depositAssets?: LoopDepositAsset[];
+    /** Lifetime P/L across ALL historical positions (server-computed, fail-closed nulls). */
+    lifetime?: {
+      pnlSol: number | null;
+      principalSol: number | null;
+      returnedSol: number;
+      equitySol: number | null;
+    } | null;
   } | null>({
     queryKey: ["/api/vault/loop/status"],
     enabled: active,
@@ -353,13 +360,18 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
   const rows = statusQuery.data.positions ?? [];
   const activeRows = rows.filter((r) => r.status === "open" || r.status === "pending");
   const isActive = activeRows.length > 0;
-  const totalDebtLamports = activeRows.reduce((acc, r) => {
-    try {
-      return acc + BigInt(r.live?.debtRaw ?? r.debtAmountRaw ?? "0");
-    } catch {
-      return acc;
-    }
-  }, 0n);
+  // Card stats: actual leverage of the live position (fallback: the auto
+  // target), total balance in SOL (fail-closed — one unreadable row -> "—"),
+  // and lifetime P/L across all historical positions (server-computed).
+  const cardLeverage: number | null = isActive ? activeRows[0]?.solView?.leverage ?? null : null;
+  const cardBalanceSol: number | null = isActive
+    ? activeRows.reduce<number | null>((acc, r) => {
+        if (acc === null) return null;
+        const b = r.solView?.balanceSol;
+        return typeof b === "number" && Number.isFinite(b) ? acc + b : null;
+      }, 0)
+    : null;
+  const lifetimePnlSol = statusQuery.data.lifetime?.pnlSol ?? null;
 
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/vault/loop/status"] });
@@ -683,6 +695,12 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
 
   return (
     <>
+      {/* --- "Asset Vaults" section: heading + grid. Owned by this component so
+          the WHOLE section (heading included) hides for non-owners — the parent
+          only renders the stablecoin section. --- */}
+      <div data-testid="section-asset-vaults">
+      <h3 className="text-sm font-semibold text-muted-foreground mb-3">Asset Vaults</h3>
+      <div className={gridClass ?? "grid md:grid-cols-2 xl:grid-cols-3 gap-5"}>
       {/* --- Card (matches the other vault destination cards) --- */}
       <div
         role="button"
@@ -732,24 +750,31 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
 
         <div className="grid grid-cols-3 gap-3 text-center">
           <div className="p-2.5 rounded-lg bg-muted/30">
-            <p className="text-lg font-bold tabular-nums" data-testid="stat-loop-target-leverage">
-              {typeof statusQuery.data?.recommended?.targetLeverage === "number"
-                ? `${statusQuery.data.recommended.targetLeverage.toFixed(1)}x`
-                : "Auto"}
+            <p className="text-lg font-bold tabular-nums" data-testid="stat-loop-leverage">
+              {isActive
+                ? fmtLeverage(cardLeverage)
+                : typeof statusQuery.data?.recommended?.targetLeverage === "number"
+                  ? `${statusQuery.data.recommended.targetLeverage.toFixed(1)}x`
+                  : "Auto"}
             </p>
             <p className="text-xs text-muted-foreground">Leverage</p>
           </div>
           <div className="p-2.5 rounded-lg bg-muted/30">
-            <p className="text-lg font-bold tabular-nums" data-testid="stat-loop-positions">
-              {activeRows.length}
+            <p className="text-lg font-bold tabular-nums" data-testid="stat-loop-balance">
+              {isActive ? fmtSolNum(cardBalanceSol, 3) : "—"}
             </p>
-            <p className="text-xs text-muted-foreground">Positions</p>
+            <p className="text-xs text-muted-foreground">Balance (SOL)</p>
           </div>
           <div className="p-2.5 rounded-lg bg-muted/30">
-            <p className="text-lg font-bold tabular-nums" data-testid="stat-loop-debt">
-              {isActive ? fmtSol(totalDebtLamports.toString(), 3) : "—"}
+            <p
+              className={`text-lg font-bold tabular-nums ${
+                lifetimePnlSol === null ? "" : lifetimePnlSol >= 0 ? "text-emerald-400" : "text-red-400"
+              }`}
+              data-testid="stat-loop-pnl"
+            >
+              {fmtPnlSol(lifetimePnlSol, 3)}
             </p>
-            <p className="text-xs text-muted-foreground">Debt (SOL)</p>
+            <p className="text-xs text-muted-foreground">P/L (SOL)</p>
           </div>
         </div>
 
@@ -758,6 +783,8 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
             <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> A position is liquidatable.
           </p>
         )}
+      </div>
+      </div>
       </div>
 
       {/* --- Detail dialog with the loop controls --- */}

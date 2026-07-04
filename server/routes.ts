@@ -1510,7 +1510,7 @@ import { previewBorrowEligibility } from "./vault/borrow-eligibility";
 import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { isBorrowEligibleWallet, isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, repayPartialOnExistingBotPosition, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
-import { executeLoopOpen, executeLoopClose, executeLoopPartialUnwind, executeLoopDeleverToHold, executeLoopLstDepositOpen, getLoopDepositAssets, buildLoopSolView } from "./vault/loop/loop-executor";
+import { executeLoopOpen, executeLoopClose, executeLoopPartialUnwind, executeLoopDeleverToHold, executeLoopLstDepositOpen, getLoopDepositAssets, buildLoopSolView, buildLoopLifetimeView } from "./vault/loop/loop-executor";
 import { LOOP_VAULT_ALLOWLIST, LOOP_RISK_POLICY, LOOP_ALLOCATION_POLICY, computeLoopTargetLeverage, maxLeverageForHealthBuffer } from "./vault/loop/loop-risk-policy";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
 import { runBorrowHealthScan } from "./vault/borrow-health-monitor";
@@ -10222,6 +10222,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         const solView = buildLoopSolView(r, live, allOps);
         return { ...r, live, solView };
       }));
+      // Wallet-level lifetime P/L for the card: total across ALL historical
+      // positions/lifecycles (display only, fail-closed nulls -> em dash).
+      const lifetime = buildLoopLifetimeView(positions, allOps);
       // Which LST a new deposit would go into right now (display only — the
       // open route re-picks at execution time). Fresh-rates-only, no on-demand
       // sampling here: status must stay cheap. null = "best available" copy.
@@ -10233,7 +10236,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // read the user's wallet balances — it NEVER hardcodes mints). Cached
       // after the first successful read; fail-open to [] (SOL-only deposit UI).
       const depositAssets = await getLoopDepositAssets().catch(() => []);
-      res.json({ positions, recommended, depositAssets });
+      res.json({ positions, recommended, depositAssets, lifetime });
     } catch (error: any) {
       console.error("[Loop] status error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });

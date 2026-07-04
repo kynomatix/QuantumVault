@@ -729,11 +729,20 @@ export default function VaultIdleFunds({
       );
     }
     return (
-      <div className={gridClass} data-testid="section-vault-assets">
-        {assets.map(renderVaultCard)}
-        {/* Owner-only SOL Loop card (self-gating: renders nothing unless the
-            server's owner gate passes; account-level vault grid only). */}
-        {!botId && <LoopVaultControls active={active} />}
+      <div className="space-y-6">
+        <div>
+          {!botId && (
+            <h3 className="text-sm font-semibold text-muted-foreground mb-3">Stablecoin Vaults</h3>
+          )}
+          <div className={gridClass} data-testid="section-vault-assets">
+            {assets.map(renderVaultCard)}
+          </div>
+        </div>
+        {/* Owner-only SOL Loop (self-gating: renders nothing unless the
+            server's owner gate passes; account-level vault grid only). It
+            renders its own "Asset Vaults" section heading + grid so the
+            heading also disappears when the card does. */}
+        {!botId && <LoopVaultControls active={active} gridClass={gridClass} />}
       </div>
     );
   };
