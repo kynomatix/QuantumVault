@@ -1515,6 +1515,7 @@ import { LOOP_VAULT_ALLOWLIST, LOOP_RISK_POLICY, LOOP_ALLOCATION_POLICY, compute
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
 import { runBorrowHealthScan } from "./vault/borrow-health-monitor";
 import { runLoopSafetyTick, buildLoopSafetyDeps } from "./vault/loop/loop-safety-tick";
+import { getVenueSolBorrowRates } from "./vault/loop/venue-watch";
 import { runLoopAllocationTick, buildLoopAllocationDeps } from "./vault/loop/loop-allocation-tick";
 import { computeTickCoverage, summarizeDecisionsForGate } from "./vault/loop/loop-status";
 import { getFreshLoopRates, pickBestLoopVault, sampleAndPersistLoopRates, LOOP_RATE_REGISTRY, netCarryAt } from "./vault/loop/loop-rate-oracle";
@@ -10249,6 +10250,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     try {
       if (!requireLoopOwner(req, res)) return;
 
+      // Cross-venue watch (Kamino/Save SOL borrow) — display-only, fail-soft
+      // (empty array on upstream failure); fetched in parallel with our rates.
+      const venuesPromise = getVenueSolBorrowRates();
       let fresh = await getFreshLoopRates(LOOP_ALLOCATION_POLICY.rateStalenessMs);
       // Empty table (e.g. fresh boot before the hourly tick) → one on-demand
       // sample, same as the open route. Still display-only if it fails.
@@ -10311,7 +10315,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           asOf: r ? r.asOf.toISOString() : null,
         };
       });
-      res.json({ rates, recommendedVaultId: recommended?.vaultId ?? null });
+      res.json({ rates, recommendedVaultId: recommended?.vaultId ?? null, venues: await venuesPromise });
     } catch (error: any) {
       console.error("[Loop] rates error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });

@@ -126,6 +126,30 @@ interface LoopRateRow {
   asOf: string | null;
 }
 
+/** Cross-venue SOL borrow watch row — display only, from DeFiLlama. */
+interface VenueWatchRow {
+  venue: string;
+  borrowApy: number | null;
+  supplyUsd: number | null;
+  utilization: number | null;
+  maxLtv: number | null;
+  asOf: string;
+}
+
+const fmtUsdM = (v: number | null): string =>
+  typeof v === "number" && Number.isFinite(v) ? `$${(v / 1e6).toFixed(0)}M` : "—";
+
+/** One-line verdict vs our current (Jupiter) SOL borrow cost. */
+const venueVerdict = (row: VenueWatchRow, ourBorrow: number | null): { text: string; tone: "good" | "warn" | "bad" | "muted" } => {
+  if (row.borrowApy === null) return { text: "No data", tone: "muted" };
+  if (row.utilization !== null && row.utilization >= 0.9)
+    return { text: "Pool nearly full — exits risky", tone: "bad" };
+  if (ourBorrow === null) return { text: "", tone: "muted" };
+  if (row.borrowApy < ourBorrow - 0.002) return { text: "Cheaper than our venue", tone: "good" };
+  if (row.borrowApy <= ourBorrow + 0.002) return { text: "On par with our venue", tone: "muted" };
+  return { text: "More expensive than our venue", tone: "warn" };
+};
+
 const fmtPct = (f: number | null | undefined): string =>
   typeof f === "number" && Number.isFinite(f) ? `${(f * 100).toFixed(2)}%` : "—";
 
@@ -163,7 +187,7 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
   const [ratesOpen, setRatesOpen] = useState(false);
 
   // Live LST rate table — display only, fetched when the rates dialog opens.
-  const ratesQuery = useQuery<{ rates: LoopRateRow[]; recommendedVaultId: number | null } | null>({
+  const ratesQuery = useQuery<{ rates: LoopRateRow[]; recommendedVaultId: number | null; venues?: VenueWatchRow[] } | null>({
     queryKey: ["/api/vault/loop/rates"],
     enabled: active && ratesOpen,
     refetchInterval: ratesOpen ? 60000 : false,
@@ -1164,6 +1188,65 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
                   return ago ? <> Updated {ago}.</> : null;
                 })()}
               </p>
+              {!!ratesQuery.data?.venues?.length && (
+                <div className="pt-2 space-y-1.5" data-testid="section-loop-venue-watch">
+                  <p className="px-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                    Other venues — SOL borrow cost (watch list)
+                  </p>
+                  {(() => {
+                    const ourBorrow = ratesQuery.data.rates
+                      .map((r) => r.borrowApr)
+                      .filter((v): v is number => typeof v === "number")
+                      .reduce<number | null>((min, v) => (min === null || v < min ? v : min), null);
+                    return ratesQuery.data.venues.map((v) => {
+                      const verdict = venueVerdict(v, ourBorrow);
+                      return (
+                        <div
+                          key={v.venue}
+                          className="flex items-center justify-between gap-3 rounded-lg bg-muted/20 px-3 py-2"
+                          data-testid={`row-venue-watch-${v.venue}`}
+                        >
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium leading-tight">{v.venue}</p>
+                            {verdict.text && (
+                              <p
+                                className={`text-[10px] leading-tight ${
+                                  verdict.tone === "good"
+                                    ? "text-emerald-500"
+                                    : verdict.tone === "bad"
+                                      ? "text-red-500"
+                                      : verdict.tone === "warn"
+                                        ? "text-amber-500"
+                                        : "text-muted-foreground"
+                                }`}
+                              >
+                                {verdict.text}
+                              </p>
+                            )}
+                          </div>
+                          <div className="text-right shrink-0">
+                            <p className="text-sm tabular-nums text-amber-500" data-testid={`text-venue-borrow-${v.venue}`}>
+                              {fmtPct(v.borrowApy)}
+                            </p>
+                            <p className="text-[10px] tabular-nums text-muted-foreground">
+                              {fmtUsdM(v.supplyUsd)} pool
+                              {v.utilization !== null ? ` · ${Math.round(v.utilization * 100)}% used` : ""}
+                            </p>
+                          </div>
+                        </div>
+                      );
+                    });
+                  })()}
+                  <p className="px-1 text-[11px] text-muted-foreground">
+                    Watch list only — loops can&apos;t open on these venues yet. P0 and Drift don&apos;t publish
+                    rates publicly; reading them directly is the next step.
+                    {(() => {
+                      const ago = fmtAgo(ratesQuery.data?.venues?.[0]?.asOf ?? null);
+                      return ago ? <> Sampled {ago}.</> : null;
+                    })()}
+                  </p>
+                </div>
+              )}
             </div>
           )}
         </DialogContent>
