@@ -163,7 +163,7 @@ const fmtAgo = (iso: string | null): string | null => {
   return `${Math.round(m / 60)}h ago`;
 };
 
-export default function LoopVaultControls({ active }: { active: boolean }) {
+export default function LoopVaultControls({ active, gridClass }: { active: boolean; gridClass?: string }) {
   const { toast } = useToast();
   const { retryAuth, publicKeyString } = useWallet();
   const { connection } = useConnection();
@@ -695,10 +695,12 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
 
   return (
     <>
-      {/* --- Card (matches the other vault destination cards). The "Asset
-          Vaults" section heading + grid are owned by VaultIdleFunds now that
-          Fixed Yield (ungated) shares the section; this component renders
-          just its card into that grid — or nothing for non-owners. --- */}
+      {/* --- Owner-only "Asset Vaults" section. This component owns the
+          section heading + grid so non-owners (who get null above) never see
+          an orphaned heading. --- */}
+      <div data-testid="section-asset-vaults">
+      <h3 className="text-sm font-semibold text-muted-foreground mb-3">Asset Vaults</h3>
+      <div className={gridClass ?? ""}>
       <div
         role="button"
         tabIndex={0}
@@ -780,6 +782,8 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
             <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> A position is liquidatable.
           </p>
         )}
+      </div>
+      </div>
       </div>
 
       {/* --- Detail dialog with the loop controls --- */}

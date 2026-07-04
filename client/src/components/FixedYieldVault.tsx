@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Lock, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { useWallet } from "@/hooks/useWallet";
 import { useToast } from "@/hooks/use-toast";
 import { isSessionError, showReconnectToast } from "@/lib/reconnect-toast";
@@ -17,9 +17,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
-// Fixed Yield vault card (Exponent PT markets). Renders in the "Asset Vaults"
-// grid next to the SOL Loop card. Open to all wallets (no owner gate — the
-// owner explicitly waived it for the dev environment).
+// Fixed Yield vault card (Exponent PT markets). Renders in the "Stablecoin
+// Vaults" grid — it is USDC in → USDC out at a fixed rate (via ONyc under the
+// hood), so it sits with the other stablecoin destinations. Open to all
+// wallets (no owner gate — the owner explicitly waived it for the dev
+// environment).
 //
 // The platform auto-picks the best fixed-rate market server-side; the user
 // never picks a market (platform philosophy: defaults over choices). The
@@ -178,6 +180,16 @@ export default function FixedYieldVault({ active }: { active: boolean }) {
   const positions = (status?.positions ?? []).filter((p) => p.status === "active");
   const totalLocked = positions.reduce((s, p) => s + p.costBasisUsdc, 0);
   const spareUsdc = assetsQuery.data?.spareUsdc ?? 0;
+  const isEarning = positions.length > 0;
+  // Card stat: the unlock date that matters to the viewer — their earliest
+  // position's maturity when they hold one, else the best market's.
+  const unlockTs = isEarning
+    ? Math.min(...positions.map((p) => p.maturityTs))
+    : best?.maturityTs ?? null;
+  const unlockShort =
+    unlockTs !== null
+      ? new Date(unlockTs * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+      : null;
 
   // Re-read per-position exit breadcrumbs whenever the dialog opens, the
   // wallet changes, or the position list changes.
@@ -302,7 +314,7 @@ export default function FixedYieldVault({ active }: { active: boolean }) {
 
   return (
     <>
-      {/* --- Card (matches the other vault destination cards) --- */}
+      {/* --- Card (matches the stablecoin vault cards) --- */}
       <div
         role="button"
         tabIndex={0}
@@ -319,48 +331,59 @@ export default function FixedYieldVault({ active }: { active: boolean }) {
       >
         <div className="flex items-start justify-between mb-4">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 bg-gradient-to-br from-emerald-500/30 to-teal-500/30">
-              <Lock className="w-6 h-6 text-emerald-500" />
+            <div
+              className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${
+                isEarning ? "bg-gradient-to-br from-primary to-accent" : "bg-gradient-to-br from-primary/30 to-accent/30"
+              }`}
+            >
+              <img
+                src="/images/vaults/exponent_white.webp"
+                alt=""
+                aria-hidden="true"
+                className="w-7 h-7 object-contain"
+              />
             </div>
             <div className="min-w-0">
               <h3 className="font-semibold text-base truncate">Fixed Yield</h3>
-              <p className="text-xs text-muted-foreground truncate">
-                Lock in today's rate until a set date
+              <p className="text-sm text-muted-foreground flex items-center gap-2">
+                <span className="tabular-nums" data-testid="text-fy-apy">
+                  {rateKnown ? `${apyPct}% fixed` : statusQuery.isLoading ? "Loading rate…" : "Rate unavailable"}
+                </span>
+                <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium leading-none whitespace-nowrap bg-primary/15 text-primary">
+                  Fixed Rate
+                </span>
               </p>
             </div>
           </div>
-          <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium leading-none whitespace-nowrap bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
-            Fixed Rate
+          <span
+            className={`px-2.5 py-1 rounded-full text-xs font-medium shrink-0 ${
+              isEarning ? "bg-emerald-500/20 text-emerald-400" : "bg-muted text-muted-foreground"
+            }`}
+          >
+            {isEarning ? "Earning" : "Idle"}
           </span>
         </div>
 
-        {rateKnown ? (
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <p className="text-lg font-semibold tabular-nums text-emerald-600 dark:text-emerald-400" data-testid="text-fy-apy">
-                {apyPct}%
-              </p>
-              <p className="text-xs text-muted-foreground">Fixed APY</p>
-            </div>
-            <div>
-              <p className="text-lg font-semibold tabular-nums" data-testid="text-fy-maturity">
-                {fmtMaturity(best!.maturityTs)}
-              </p>
-              <p className="text-xs text-muted-foreground">
-                Unlocks ({best!.daysToMaturity}d)
-              </p>
-            </div>
+        <div className="grid grid-cols-3 gap-3 text-center">
+          <div className="p-2.5 rounded-lg bg-muted/30">
+            <p className="text-lg font-bold tabular-nums" data-testid="stat-fy-apy">
+              {rateKnown ? `${apyPct}%` : "—"}
+            </p>
+            <p className="text-xs text-muted-foreground">Fixed APY</p>
           </div>
-        ) : (
-          <p className="text-sm text-muted-foreground" data-testid="text-fy-unavailable">
-            {statusQuery.isLoading ? "Loading rate…" : "Rate unavailable right now."}
-          </p>
-        )}
-        {positions.length > 0 && (
-          <p className="mt-3 text-xs text-muted-foreground" data-testid="text-fy-locked-summary">
-            <span className="font-medium text-foreground tabular-nums">{usd(totalLocked)}</span> locked in
-          </p>
-        )}
+          <div className="p-2.5 rounded-lg bg-muted/30">
+            <p className="text-lg font-bold tabular-nums" data-testid="text-fy-locked-summary">
+              {isEarning ? usd(totalLocked) : "—"}
+            </p>
+            <p className="text-xs text-muted-foreground">Your balance</p>
+          </div>
+          <div className="p-2.5 rounded-lg bg-muted/30">
+            <p className="text-lg font-bold tabular-nums" data-testid="text-fy-maturity">
+              {unlockShort ?? "—"}
+            </p>
+            <p className="text-xs text-muted-foreground">Unlocks</p>
+          </div>
+        </div>
       </div>
 
       {/* --- Detail dialog --- */}
@@ -368,8 +391,11 @@ export default function FixedYieldVault({ active }: { active: boolean }) {
         <DialogContent className="max-w-md" data-testid="dialog-fixed-yield">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <Lock className="w-4 h-4 text-emerald-500" /> Fixed Yield
-              <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium leading-none whitespace-nowrap bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+              <span className="w-6 h-6 rounded-md bg-gradient-to-br from-primary to-accent flex items-center justify-center shrink-0">
+                <img src="/images/vaults/exponent_white.webp" alt="" aria-hidden="true" className="w-4 h-4 object-contain" />
+              </span>
+              Fixed Yield
+              <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium leading-none whitespace-nowrap bg-primary/15 text-primary">
                 Fixed Rate
               </span>
             </DialogTitle>
@@ -387,9 +413,7 @@ export default function FixedYieldVault({ active }: { active: boolean }) {
               <div className="rounded-lg border border-border/60 p-3 space-y-2 text-sm">
                 <div className="flex items-center justify-between">
                   <span className="text-muted-foreground">Fixed APY</span>
-                  <span className="font-medium tabular-nums text-emerald-600 dark:text-emerald-400">
-                    {apyPct}%
-                  </span>
+                  <span className="font-medium tabular-nums">{apyPct}%</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-muted-foreground">Unlock Date</span>

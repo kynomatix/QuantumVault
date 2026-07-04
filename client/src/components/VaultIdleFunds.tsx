@@ -737,21 +737,15 @@ export default function VaultIdleFunds({
           )}
           <div className={gridClass} data-testid="section-vault-assets">
             {assets.map(renderVaultCard)}
+            {/* Fixed Yield is a stablecoin vault (USDC in → USDC out at a
+                fixed rate via ONyc) — account-level only. */}
+            {!botId && <FixedYieldVault active={active} />}
           </div>
         </div>
-        {/* Asset Vaults: Fixed Yield (open to all) + owner-only SOL Loop
-            (self-gating: renders nothing unless the server's owner gate
-            passes). Account-level vault grid only — the section heading
-            lives here now that an ungated card shares it. */}
-        {!botId && (
-          <div data-testid="section-asset-vaults">
-            <h3 className="text-sm font-semibold text-muted-foreground mb-3">Asset Vaults</h3>
-            <div className={gridClass}>
-              <FixedYieldVault active={active} />
-              <LoopVaultControls active={active} />
-            </div>
-          </div>
-        )}
+        {/* Asset Vaults: owner-only SOL Loop. Self-gating — the component
+            renders the section heading + its card, or nothing at all for
+            non-owners (so no orphaned heading). Account-level only. */}
+        {!botId && <LoopVaultControls active={active} gridClass={gridClass} />}
       </div>
     );
   };
