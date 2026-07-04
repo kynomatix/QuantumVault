@@ -9329,58 +9329,40 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     return await decryptAgentKeyStrict(walletAddress, umk, wallet, scope.agentPublicKey!);
   }
 
-  // Money-safety guard: refuse to park while a position that draws on this scope's
-  // collateral is open. Idle USDC in a trading account IS the equity buffer that
-  // keeps an open position away from its liquidation price — parking it can drop
-  // the health factor to 0 (real liquidations have happened this way). The Vault is
-  // all-in / all-out: you only park while FLAT; auto-park already re-checks flat,
-  // so this guard covers the manual park path.
+  // Money-safety guard: refuse to park while a Flash per-bot position is open.
   //
-  // FAIL CLOSED: on-chain reads go straight to the adapter (NOT the fail-open
-  // getPerpPositions helper) so a read error BLOCKS the park rather than letting it
-  // slip through. Mirrors assertNoOpenPositionBeforeProtocolSwitch.
-  //   - scope='bot' (Flash isolated wallet): check only THAT bot's position.
-  //   - scope='account' (Pacifica/Drift): the account vault is SHARED reserve/top-up
-  //     capital, so ANY open position on ANY subaccount-model bot of this wallet
-  //     needs the buffer — enumerate them all. Flash bots are excluded (isolated).
+  // Applies ONLY to scope='bot' (Flash isolated wallets). Flash gives every bot its
+  // own isolated wallet; the USDC sitting in that wallet IS the position's margin
+  // buffer — parking it removes the cushion that keeps the position from liquidating.
+  //
+  // Account scope (Pacifica / Drift) is intentionally NOT checked here. Those
+  // protocols use subaccount-isolated margin: each bot's deposited USDC lives inside
+  // its own protocol subaccount, completely separate from the main agent wallet. The
+  // agent wallet's idle USDC — including any proceeds from an account-level INF/LST
+  // borrow — is NOT the margin for any open Pacifica or Drift position, so blocking
+  // the park would be wrong (and would strand borrowed capital earning nothing while
+  // the user pays borrow cost).
+  //
+  // FAIL CLOSED: on-chain read goes straight to the adapter (NOT the fail-open
+  // getPerpPositions helper) so a read error BLOCKS the Flash park.
   async function assertVaultScopeFlatForParking(
-    walletAddress: string,
-    wallet: NonNullable<Awaited<ReturnType<typeof storage.getWallet>>>,
+    _walletAddress: string,
+    _wallet: NonNullable<Awaited<ReturnType<typeof storage.getWallet>>>,
     scope: ResolvedVaultScope,
   ): Promise<{ ok: true } | { ok: false; reason: string }> {
-    const DUST = 0.0001;
-    const firstOpen = (positions: Awaited<ReturnType<ProtocolAdapter['getPositions']>>) =>
-      positions.find((p) => Math.abs(p.baseSize || 0) > DUST);
-    try {
-      if (scope.scope === 'bot' && scope.bot) {
-        const bot = scope.bot;
-        if (!bot.protocolSubaccountId) return { ok: true }; // wallet not set up → nothing parked
-        const open = firstOpen(await getAdapterForBot(bot).getPositions(bot.protocolSubaccountId));
-        if (open) return { ok: false, reason: `Your ${normalizeMarket(open.internalSymbol)} bot has an open position.` };
-        return { ok: true };
-      }
+    // Only Flash per-bot wallets need the flat gate.
+    if (scope.scope !== 'bot' || !scope.bot) return { ok: true };
 
-      // Account scope: enumerate every bot that shares the account margin.
-      const bots = await storage.getTradingBots(walletAddress);
-      for (const bot of bots) {
-        const adapter = getAdapterForBot(bot);
-        if (adapter.subaccountCaps?.accountModel === 'independent_trader') continue; // Flash = isolated, excluded
-        let account: string | null;
-        let subIdStr: string | undefined;
-        if (bot.protocolSubaccountId) {
-          account = bot.protocolSubaccountId; // external-key (Pacifica) — read that account
-          subIdStr = undefined;
-        } else {
-          account = wallet.agentPublicKey ?? null; // legacy Drift — agent main + subaccount
-          subIdStr = _subIdStr(bot.driftSubaccountId ?? 0);
-        }
-        if (!account) continue;
-        const open = firstOpen(await adapter.getPositions(account, subIdStr));
-        if (open) return { ok: false, reason: `Your ${normalizeMarket(open.internalSymbol)} bot has an open position.` };
-      }
+    try {
+      const bot = scope.bot;
+      if (!bot.protocolSubaccountId) return { ok: true }; // wallet not set up → nothing parked
+      const DUST = 0.0001;
+      const positions = await getAdapterForBot(bot).getPositions(bot.protocolSubaccountId);
+      const open = positions.find((p) => Math.abs(p.baseSize || 0) > DUST);
+      if (open) return { ok: false, reason: `Your ${normalizeMarket(open.internalSymbol)} bot has an open position.` };
       return { ok: true };
     } catch (err: any) {
-      return { ok: false, reason: `couldn't verify your positions are flat (${err?.message || String(err)})` };
+      return { ok: false, reason: `couldn't verify your position is flat (${err?.message || String(err)})` };
     }
   }
 
