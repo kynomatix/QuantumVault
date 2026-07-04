@@ -1441,7 +1441,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       {/* "How Borrow Works" tutorial video — lazy chunk mounts only while open. */}
       <Dialog open={howBorrowOpen} onOpenChange={setHowBorrowOpen}>
         <DialogContent
-          className="max-w-[min(96vw,960px)] p-2 sm:p-3 bg-[#0a0b12] border-teal-400/20"
+          className="max-w-[min(96vw,1400px)] p-2 sm:p-3 bg-[#0a0b12] border-teal-400/20"
           data-testid="dialog-how-borrow-video"
         >
           <DialogHeader className="px-1 pt-1 pb-0 space-y-0.5">
