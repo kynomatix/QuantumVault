@@ -1511,7 +1511,7 @@ import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { isBorrowEligibleWallet, isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, repayPartialOnExistingBotPosition, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
 import { executeLoopOpen, executeLoopClose, executeLoopPartialUnwind, executeLoopDeleverToHold, executeLoopLstDepositOpen, getLoopDepositAssets, buildLoopSolView } from "./vault/loop/loop-executor";
-import { LOOP_VAULT_ALLOWLIST, LOOP_RISK_POLICY, LOOP_ALLOCATION_POLICY, computeLoopTargetLeverage } from "./vault/loop/loop-risk-policy";
+import { LOOP_VAULT_ALLOWLIST, LOOP_RISK_POLICY, LOOP_ALLOCATION_POLICY, computeLoopTargetLeverage, maxLeverageForHealthBuffer } from "./vault/loop/loop-risk-policy";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
 import { runBorrowHealthScan } from "./vault/borrow-health-monitor";
 import { runLoopSafetyTick, buildLoopSafetyDeps } from "./vault/loop/loop-safety-tick";
@@ -10271,18 +10271,42 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               borrowApr: r.borrowApr,
             })
           : null;
+        // Watch-only rows: DISPLAY-ONLY hypothetical target — the exact same
+        // health-buffer + hard-cap + positive-carry math, minus the allowlist
+        // gate — so the table shows what the token WOULD net if enabled.
+        // Never feeds sizing: pickBestLoopVault above only sees allowlisted
+        // vaults, and the open route re-derives its own target.
+        let hypoLeverage: number | null = null;
+        if (!allowlisted && r) {
+          const healthMax = maxLeverageForHealthBuffer(r.liquidationThreshold);
+          const s = r.stakingApy;
+          const b = r.borrowApr;
+          if (
+            healthMax !== null &&
+            typeof s === "number" && Number.isFinite(s) &&
+            typeof b === "number" && Number.isFinite(b) && b >= 0 &&
+            s - b > 0
+          ) {
+            const lv = Math.floor(Math.min(LOOP_RISK_POLICY.hardCapLeverage, healthMax) * 10) / 10;
+            if (lv > 1) hypoLeverage = lv;
+          }
+        }
+        const displayLeverage = target?.leverage ?? hypoLeverage;
         return {
           vaultId: pair.vaultId,
           symbol: pair.symbol,
           allowlisted,
           stakingApy: r?.stakingApy ?? null,
           borrowApr: r?.borrowApr ?? null,
-          targetLeverage: target?.leverage ?? null,
+          targetLeverage: displayLeverage,
+          // True when the leverage/net-yield shown is the if-enabled estimate
+          // for a watch-only token (client labels it as such).
+          hypothetical: !allowlisted && hypoLeverage !== null,
           // Why no target (display copy only): carry_nonpositive => "paused",
           // lt_unreadable / rates_unreadable => "no data".
           noTargetReason: target && target.leverage === null ? target.reason : null,
-          netCarryAtTarget: target?.leverage != null && r
-            ? netCarryAt(r.stakingApy, r.borrowApr, target.leverage)
+          netCarryAtTarget: displayLeverage != null && r
+            ? netCarryAt(r.stakingApy, r.borrowApr, displayLeverage)
             : null,
           asOf: r ? r.asOf.toISOString() : null,
         };
