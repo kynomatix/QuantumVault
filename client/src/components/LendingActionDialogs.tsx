@@ -178,10 +178,13 @@ export function SupplyCollateralDialog({
           const agentRaw = agentTok ? safeBigInt(agentTok.amountRaw) : 0n;
           if (walletRaw <= 0n && agentRaw <= 0n) return null;
           const src = walletTok ?? agentTok!;
+          // Canonical display: Jupiter Lend's vault uses the WSOL mint for the
+          // SOL collateral type. Show "SOL" — wrapping/unwrapping is automatic.
+          const displaySymbol = c.collateralSymbol === 'WSOL' ? 'SOL' : c.collateralSymbol;
           return {
             mint: c.collateralMint,
-            symbol: c.collateralSymbol,
-            name: src.name || c.collateralSymbol,
+            symbol: displaySymbol,
+            name: src.name === 'Wrapped SOL' ? 'SOL' : (src.name || displaySymbol),
             logoURI: c.collateralLogoURI ?? src.logoURI,
             decimals: c.collateralDecimals,
             amountUi: (walletTok?.amountUi ?? 0) + (agentTok?.amountUi ?? 0),
@@ -791,6 +794,20 @@ export function BorrowMoreDialog({
     maxLtv: protocolMaxLtv,
     liquidationThreshold: liqThreshold,
   });
+  // Projected liquidation price: the collateral price below which
+  // (collateral_value × LT) < debt → position gets liquidated.
+  // Formula: total_projected_debt / (collateral_tokens × LT)
+  // Uses collateralAmountRaw (real on-chain figure) + cfg decimals.
+  const projCollateralTokens =
+    pool?.collateralAmountRaw != null && cfg?.collateralDecimals != null
+      ? Number(pool.collateralAmountRaw) / 10 ** cfg.collateralDecimals
+      : null;
+  const projLiqPrice =
+    projCollateralTokens != null && projCollateralTokens > 0 &&
+    liqThreshold != null && liqThreshold > 0 &&
+    projectedDebtUsd != null && projectedDebtUsd > 0
+      ? projectedDebtUsd / (projCollateralTokens * liqThreshold)
+      : null;
 
   const setMaxBorrow = () => {
     if (availableToBorrowUsd == null || !(availableToBorrowUsd > 0)) return;
@@ -922,11 +939,12 @@ export function BorrowMoreDialog({
                         : proj.projectedHealthFactor.toFixed(2)}
                     </span>
                   </div>
-                  {cfg && (
+                  {(projLiqPrice != null || cfg) && (
                     <div className="flex items-center justify-between">
                       <span className="text-muted-foreground">Liquidation price</span>
                       <span className="tabular-nums" data-testid="text-borrow-more-liq-price">
-                        {fmtUsd(cfg.oraclePriceLiquidateUsd)} <span className="text-muted-foreground">/ {symbol}</span>
+                        {projLiqPrice != null ? fmtUsd(projLiqPrice) : '\u2014'}{' '}
+                        <span className="text-muted-foreground">/ {symbol} — price drops below → liquidation</span>
                       </span>
                     </div>
                   )}

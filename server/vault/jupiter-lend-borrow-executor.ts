@@ -1093,6 +1093,28 @@ export async function executeSupplyCollateral(params: SupplyCollateralParams): P
     }
     await storage.updateBorrowOperation(op.id, { status: "succeeded", step: "supply_confirmed", appendTxSignature: exec.signature });
 
+    // History row (INTERNAL: collateral moves from agent to lending protocol;
+    // not a deposit or withdrawal — excluded from net-deposited via
+    // equity-events-util VAULT_INTERNAL_EVENT_TYPES). Non-fatal: money already
+    // moved and position persisted, so a history-write hiccup must never fail
+    // a settled supply.
+    try {
+      const collateralAmt = fromRaw(observedColRaw, cfg.collateralDecimals);
+      if (collateralAmt > 0) {
+        await storage.createEquityEvent({
+          walletAddress: params.walletAddress,
+          tradingBotId: null,
+          eventType: "collateral_supplied",
+          amount: new Decimal(health.collateralValueUsd ?? 0).toFixed(6),
+          assetType: cfg.collateralSymbol,
+          txSignature: exec.signature ?? null,
+          notes: `Supplied ${new Decimal(collateralAmt).toFixed(6)} ${cfg.collateralSymbol} as collateral`,
+        });
+      }
+    } catch (e) {
+      console.warn("[Borrow] supply: failed to record equity event (non-fatal)", e);
+    }
+
     return {
       success: true,
       borrowPositionId: position!.id,

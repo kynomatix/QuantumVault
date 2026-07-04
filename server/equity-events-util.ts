@@ -26,6 +26,9 @@ export const VAULT_INTERNAL_EVENT_TYPES = new Set<string>([
   'vault_park', 'vault_unpark', 'borrow', 'repay',
   'loop_open', 'loop_close', 'loop_unwind', 'loop_delever_hold', 'loop_relever',
   'fy_deposit', 'fy_withdraw',
+  // collateral_supplied: collateral moves from agent → lending protocol (internal
+  // reallocation). Not a deposit or withdrawal; excluded so it never inflates PnL.
+  'collateral_supplied',
 ]);
 
 export function isVaultInternalEvent(eventType: string | null | undefined): boolean {

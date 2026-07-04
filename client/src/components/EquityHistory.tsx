@@ -121,6 +121,7 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
       case 'loop_relever': return 'Increase Loop Leverage';
       case 'fy_deposit': return 'Fixed Yield Deposit';
       case 'fy_withdraw': return 'Fixed Yield Withdraw';
+      case 'collateral_supplied': return 'Supply Collateral';
       default:
         // Convert snake_case to Title Case (capitalize each word)
         return type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -163,6 +164,9 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
     }
     if (event.eventType === 'repay') {
       return { tone: 'text-orange-500', wrap: 'bg-orange-500/10', Icon: RotateCcw };
+    }
+    if (event.eventType === 'collateral_supplied') {
+      return { tone: 'text-sky-400', wrap: 'bg-sky-500/10', Icon: Landmark };
     }
     const positive = isPositive(event.amount);
     const tone = positive ? 'text-chart-4' : 'text-orange-500';
