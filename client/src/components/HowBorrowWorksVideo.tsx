@@ -726,8 +726,9 @@ export function TutorialPlayerShell({ duration = DUR, children }) {
   const fmt = (t) => { const m = Math.floor(t / 60); const s = Math.floor(t % 60); return `${m}:${String(s).padStart(2, '0')}`; };
 
   return (
-    <div className="absolute inset-0 flex flex-col bg-black">
-      <div ref={wrapRef} className="relative flex-1 min-h-0 flex items-center justify-center overflow-hidden">
+    <div className="absolute inset-0 bg-black">
+      {/* Stage fills the entire container so scale = width/1920 — no black bars. */}
+      <div ref={wrapRef} className="absolute inset-0 flex items-center justify-center overflow-hidden">
         <div style={{ width: W, height: H, position: 'relative', transform: `scale(${scale})`, transformOrigin: 'center', flexShrink: 0, overflow: 'hidden' }}>
           <TimelineContext.Provider value={ctx}>{children}</TimelineContext.Provider>
         </div>
@@ -746,8 +747,9 @@ export function TutorialPlayerShell({ duration = DUR, children }) {
           </button>
         )}
       </div>
-      {/* control bar */}
-      <div className="flex items-center gap-2 sm:gap-3 px-2.5 sm:px-4 py-2 bg-[#0c0c12] border-t border-teal-400/15 select-none">
+      {/* Controls overlay at the bottom — standard video player pattern. Overlaying
+          (not flex-col sibling) keeps the stage full-height so scale is width-driven. */}
+      <div className="absolute bottom-0 left-0 right-0 flex items-center gap-2 sm:gap-3 px-2.5 sm:px-4 py-2 bg-black/75 backdrop-blur-sm select-none">
         <button
           type="button"
           onClick={togglePlay}
