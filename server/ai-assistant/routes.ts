@@ -23,6 +23,7 @@ import {
   getSessionByWalletAddress,
   encryptLlmApiKeyV3,
   decryptLlmApiKeyV3,
+  restoreWalletSecurityFromStorage,
 } from "../session-v3";
 import { parsePineScript } from "../lab/pine-parser";
 import { draftStrategy, improveStrategy } from "./creator";
@@ -61,8 +62,19 @@ const requireCreatorSession: RequestHandler = (req: any, res: Response, next: Ne
   next();
 };
 
+// Auto-restore the in-memory UMK from DB if it has expired (server restart / 4-hour
+// TTL). The Express cookie was already validated by requireCreatorSession, so the
+// prior signature proof is intact — no new wallet signature needed.
+async function tryRestoreUmk(walletAddress: string): Promise<void> {
+  if (getSessionByWalletAddress(walletAddress)?.session?.umk) return;
+  await restoreWalletSecurityFromStorage(walletAddress);
+}
+
 // Resolve the live interactive UMK for the session-bound wallet, or fail closed.
-function getInteractiveUmk(req: any, res: Response): Buffer | null {
+// Auto-restores from DB first so a 4-hour TTL expiry or server restart doesn't
+// force the user to re-sign mid-session.
+async function getInteractiveUmk(req: any, res: Response): Promise<Buffer | null> {
+  await tryRestoreUmk(req.walletAddress);
   const sessionRes = getSessionByWalletAddress(req.walletAddress);
   const umk = sessionRes?.session?.umk;
   if (!umk) {
@@ -222,6 +234,7 @@ export function registerCreatorRoutes(
   const resolveLlmKey = async (walletAddress: string): Promise<Buffer | null> => {
     const ciphertext = await storage.getWalletLlmApiKeyCiphertext(walletAddress);
     if (!ciphertext) return null;
+    await tryRestoreUmk(walletAddress);
     const sessionRes = getSessionByWalletAddress(walletAddress);
     const umk = sessionRes?.session?.umk;
     if (!umk) return null;
@@ -308,6 +321,7 @@ export function registerCreatorRoutes(
   ): Promise<"started" | "already" | "no-key"> => {
     const ciphertext = await storage.getWalletLlmApiKeyCiphertext(walletAddress);
     if (!ciphertext) return "no-key";
+    await tryRestoreUmk(walletAddress);
     const sessionRes = getSessionByWalletAddress(walletAddress);
     const umk = sessionRes?.session?.umk;
     if (!umk) return "no-key";
@@ -732,6 +746,9 @@ export function registerCreatorRoutes(
       // user ALWAYS gets the re-sign path and never the generic capability pitch. Without
       // this, rapid retries while locked trip the rate limiter and fall into the catch-block
       // degrade (the keyless capability shell), which reads as "the assistant gave up".
+      // Auto-restore the UMK before declaring the session locked — covers the 4-hour
+      // TTL expiry and server restarts. Cookie still valid = no re-sign needed.
+      await tryRestoreUmk(r.walletAddress);
       if (!getSessionByWalletAddress(r.walletAddress)?.session?.umk) {
         return await degradeToShell({ sessionLocked: true });
       }
@@ -1328,7 +1345,7 @@ export function registerCreatorRoutes(
       if (apiKey.length < 16 || apiKey.length > 400) {
         return res.status(400).json({ error: "That key length looks wrong — double-check and paste it again." });
       }
-      const umk = getInteractiveUmk(r, res);
+      const umk = await getInteractiveUmk(r, res);
       if (!umk) return;
       keyBuf = Buffer.from(apiKey, "utf8");
       const encrypted = encryptLlmApiKeyV3(umk, keyBuf, r.walletAddress);
@@ -1388,7 +1405,7 @@ export function registerCreatorRoutes(
       const ciphertext = await storage.getWalletLlmApiKeyCiphertext(r.walletAddress);
       if (!ciphertext) return res.status(400).json({ error: "Add your OpenRouter API key first." });
 
-      const umk = getInteractiveUmk(r, res);
+      const umk = await getInteractiveUmk(r, res);
       if (!umk) return;
       keyBuf = decryptLlmApiKeyV3(umk, ciphertext, r.walletAddress);
       // Capture the key as an (immutable) string the background job can hold, then
@@ -1454,7 +1471,7 @@ export function registerCreatorRoutes(
       const ciphertext = await storage.getWalletLlmApiKeyCiphertext(r.walletAddress);
       if (!ciphertext) return res.status(400).json({ error: "Add your OpenRouter API key first." });
 
-      const umk = getInteractiveUmk(r, res);
+      const umk = await getInteractiveUmk(r, res);
       if (!umk) return;
       keyBuf = decryptLlmApiKeyV3(umk, ciphertext, r.walletAddress);
       // See /draft above for why the key is captured as a string and the buffer is
