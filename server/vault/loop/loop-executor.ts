@@ -1430,14 +1430,21 @@ export async function executeLoopLstDepositOpen(
         });
 
         // Audit trail (best-effort): the deposit credited as realized SOL.
+        // Distinct 'loop_deposit' type so the history feed labels it as a
+        // vault deposit (NOT "SOL Deposit (Gas)"). It is EXTERNAL capital
+        // arriving, so it deliberately stays OUT of VAULT_INTERNAL_EVENT_TYPES.
         try {
+          const lstUi = (Number(toSwap) / 10 ** asset.decimals)
+            .toFixed(Math.min(asset.decimals, 6))
+            .replace(/(\.\d*?)0+$/, "$1")
+            .replace(/\.$/, "");
           await storage.createEquityEvent({
             walletAddress,
-            eventType: "sol_deposit",
+            eventType: "loop_deposit",
             amount: lamportsToSol(realizedLamports),
             assetType: "SOL",
             txSignature: swapSignature ?? null,
-            notes: `${asset.symbol} deposit converted to SOL for the loop`,
+            notes: `Deposited ${lstUi} ${asset.symbol}, converted to SOL for the loop`,
           });
         } catch (e) {
           console.warn("[loop-executor] lst-deposit equity event failed (non-fatal):", e);

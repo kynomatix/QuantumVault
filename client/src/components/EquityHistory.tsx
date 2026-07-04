@@ -113,6 +113,12 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
       case 'auto_topup': return 'Auto Top-Up';
       case 'auto_withdraw': return 'Auto Withdraw';
       case 'pacifica_withdraw_fee': return 'Pacifica Withdrawal Fee';
+      case 'loop_deposit': return 'Deposit to Loop Vault';
+      case 'loop_open': return 'Open Loop Vault';
+      case 'loop_close': return 'Close Loop Vault';
+      case 'loop_unwind': return 'Partial Loop Withdraw';
+      case 'loop_delever_hold': return 'Reduce Loop Leverage';
+      case 'loop_relever': return 'Increase Loop Leverage';
       default:
         // Convert snake_case to Title Case (capitalize each word)
         return type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -128,6 +134,11 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
       return sym ? `Borrow USDC Against ${sym}` : 'Borrow USDC';
     }
     if (event.eventType === 'repay') return 'Repay Debt';
+    // Legacy rows: early loop LST deposits were recorded as 'sol_deposit' with a
+    // conversion note. Label them as the vault deposit they really were.
+    if (event.eventType === 'sol_deposit' && event.notes?.includes('converted to SOL for the loop')) {
+      return 'Deposit to Loop Vault';
+    }
     return formatEventType(event.eventType);
   };
 
@@ -212,6 +223,9 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
                     : null;
                 const positive = isPositive(event.amount);
                 const { tone, wrap, Icon } = flowMeta(event);
+                // Loop Vault rows carry a human note (principal, leverage, what
+                // was converted) — surface it so deposits are self-explanatory.
+                const loopNote = event.eventType.startsWith('loop_') ? event.notes : null;
                 return (
                   <div
                     key={event.id}
@@ -239,6 +253,11 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
                         {liabilityNote && (
                           <p className={`text-[11px] ${tone}`} data-testid={`equity-event-note-${event.id}`}>
                             {liabilityNote}
+                          </p>
+                        )}
+                        {loopNote && (
+                          <p className="text-[11px] text-muted-foreground" data-testid={`equity-event-loopnote-${event.id}`}>
+                            {loopNote}
                           </p>
                         )}
                         <p className="text-xs text-muted-foreground">
