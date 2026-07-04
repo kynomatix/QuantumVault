@@ -10313,14 +10313,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const { scope } = resolved;
       if (!scope.agentPublicKey) return res.status(400).json({ error: "Agent wallet not initialized" });
 
-      // Money-safety: same rule as Earn — never move spare USDC while a
-      // position is open (it is the liquidation buffer). Fail closed.
-      const flatCheck = await assertVaultScopeFlatForParking(req.walletAddress!, wallet, scope);
-      if (!flatCheck.ok) {
-        return res.status(409).json({
-          error: `Can't lock funds at a fixed rate while a position is open — these funds are your liquidation buffer (${flatCheck.reason}). They'll be available once you're flat.`,
-        });
-      }
+      // No flat-check here: the user is making an explicit, amount-specific
+      // decision to lock funds in a fixed-rate vault. Unlike the automated Earn
+      // park (which pulls all spare USDC), this is a deliberate UI action where
+      // the user has read the unlock date and chosen an amount. Trust the choice.
+      // The early-exit path ("exit at market rate") means the funds are also not
+      // permanently unreachable if the position needs margin later.
+      // The Earn vault route KEEPS its flat-check (automated/bulk move).
 
       const agentKeyResult = await decryptVaultScopeKey(scope, req.walletAddress!, wallet, session.umk);
       if (!agentKeyResult) {
