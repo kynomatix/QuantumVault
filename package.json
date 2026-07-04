@@ -21,6 +21,7 @@
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",
     "@drift-labs/sdk": "^2.146.0-beta.7",
+    "@exponent-labs/exponent-sdk": "^0.9.20",
     "@flash_trade/magic-trade-client": "^1.0.47",
     "@google/genai": "^2.6.0",
     "@hookform/resolvers": "^3.10.0",

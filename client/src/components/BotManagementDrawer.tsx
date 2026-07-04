@@ -2720,6 +2720,8 @@ export function BotManagementDrawer({
                         case 'auto_withdraw': return 'Auto Withdraw';
                         case 'borrow': return borrowSym ? `Borrow USDC Against ${borrowSym}` : 'Borrow USDC';
                         case 'repay': return 'Repay Debt';
+                        case 'fy_deposit': return 'Fixed Yield Deposit';
+                        case 'fy_withdraw': return 'Fixed Yield Withdraw';
                         default: return type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
                       }
                     };

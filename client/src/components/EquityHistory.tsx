@@ -119,6 +119,8 @@ export function EquityHistory({ walletAddress }: EquityHistoryProps) {
       case 'loop_unwind': return 'Partial Loop Withdraw';
       case 'loop_delever_hold': return 'Reduce Loop Leverage';
       case 'loop_relever': return 'Increase Loop Leverage';
+      case 'fy_deposit': return 'Fixed Yield Deposit';
+      case 'fy_withdraw': return 'Fixed Yield Withdraw';
       default:
         // Convert snake_case to Title Case (capitalize each word)
         return type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());

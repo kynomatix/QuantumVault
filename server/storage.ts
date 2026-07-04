@@ -17,6 +17,7 @@ import {
   vaultPositions,
   borrowPositions,
   borrowOperations,
+  fyPositions,
   yieldPriceSnapshots,
   yieldApyCache,
   loopRateSamples,
@@ -58,6 +59,8 @@ import {
   type VaultPosition,
   type BorrowPosition,
   type BorrowOperation,
+  type FyPosition,
+  type InsertFyPosition,
   type YieldPriceSnapshot,
   type InsertYieldPriceSnapshot,
   type YieldApyCache,
@@ -394,6 +397,13 @@ export interface IStorage {
   getBorrowOperationById(id: string): Promise<BorrowOperation | undefined>;
   getBorrowOperationByClientRequestId(walletAddress: string, clientRequestId: string): Promise<BorrowOperation | undefined>;
   sumOpenBorrowDebtUsdc(walletAddress: string): Promise<number>;
+
+  // Fixed Yield vault: PT holdings (cost-basis + maturity bookkeeping cache).
+  createFyPosition(p: InsertFyPosition): Promise<FyPosition>;
+  updateFyPosition(id: string, patch: { ptAmountRaw?: string; costBasisUsdc?: string; status?: string; notifiedMaturityAt?: Date | null; }): Promise<FyPosition | undefined>;
+  getFyPositionById(id: string): Promise<FyPosition | undefined>;
+  getFyPositionsByWallet(walletAddress: string, includeClosed?: boolean): Promise<FyPosition[]>;
+  getMaturedUnnotifiedFyPositions(now: Date, limit?: number): Promise<FyPosition[]>;
   sumOpenBorrowDebtUsdcForBot(walletAddress: string, tradingBotId: string): Promise<number>;
 
   // Phase 1 Vaults yield oracle: display-only realized-APY price snapshots.
@@ -2441,6 +2451,46 @@ export class DatabaseStorage implements IStorage {
       .where(and(eq(borrowOperations.walletAddress, walletAddress), eq(borrowOperations.clientRequestId, clientRequestId)))
       .limit(1);
     return rows[0];
+  }
+
+  // --- Fixed Yield vault positions -----------------------------------------
+
+  async createFyPosition(p: InsertFyPosition): Promise<FyPosition> {
+    const [row] = await db.insert(fyPositions).values(p).returning();
+    return row;
+  }
+
+  async updateFyPosition(id: string, patch: { ptAmountRaw?: string; costBasisUsdc?: string; status?: string; notifiedMaturityAt?: Date | null; }): Promise<FyPosition | undefined> {
+    const [row] = await db.update(fyPositions)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(eq(fyPositions.id, id))
+      .returning();
+    return row;
+  }
+
+  async getFyPositionById(id: string): Promise<FyPosition | undefined> {
+    const rows = await db.select().from(fyPositions).where(eq(fyPositions.id, id)).limit(1);
+    return rows[0];
+  }
+
+  async getFyPositionsByWallet(walletAddress: string, includeClosed = false): Promise<FyPosition[]> {
+    const cond = includeClosed
+      ? eq(fyPositions.walletAddress, walletAddress)
+      : and(eq(fyPositions.walletAddress, walletAddress), ne(fyPositions.status, 'closed'));
+    return db.select().from(fyPositions).where(cond).orderBy(desc(fyPositions.createdAt));
+  }
+
+  // Matured, still-active fixed-yield positions whose owner has NOT yet been
+  // told — the maturity-notify scan's worklist (bounded; oldest first).
+  async getMaturedUnnotifiedFyPositions(now: Date, limit = 50): Promise<FyPosition[]> {
+    return db.select().from(fyPositions)
+      .where(and(
+        eq(fyPositions.status, 'active'),
+        lte(fyPositions.maturityAt, now),
+        isNull(fyPositions.notifiedMaturityAt),
+      ))
+      .orderBy(fyPositions.maturityAt)
+      .limit(limit);
   }
 
   // Sum of the wallet's OPEN borrow debt (USDC), in USD — the liability to

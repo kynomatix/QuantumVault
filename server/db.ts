@@ -636,6 +636,31 @@ export async function ensureSchema() {
       // UNIQUE per (wallet, client_request_id) so a retried logical op reuses its
       // row instead of double-executing. Partial: only enforced on non-null keys.
       `CREATE UNIQUE INDEX IF NOT EXISTS uq_borrow_operations_client_req ON borrow_operations (wallet_address, client_request_id) WHERE client_request_id IS NOT NULL`,
+
+      // --- Fixed Yield vault: PT holdings bought on a fixed-rate venue. ---
+      // One row per open PT position (Exponent first). On-chain PT balance is
+      // the display truth; this row is cost-basis + maturity bookkeeping. Ops
+      // audit through borrow_operations (fy_deposit / fy_exit / fy_redeem).
+      `CREATE TABLE IF NOT EXISTS fy_positions (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        wallet_address text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        venue text NOT NULL DEFAULT 'exponent',
+        market_address text NOT NULL,
+        venue_vault_address text,
+        pt_mint text NOT NULL,
+        pt_decimals integer NOT NULL DEFAULT 9,
+        underlying_mint text NOT NULL,
+        underlying_symbol text NOT NULL,
+        pt_amount_raw text NOT NULL DEFAULT '0',
+        cost_basis_usdc numeric(20, 6) NOT NULL DEFAULT '0',
+        implied_apy_at_entry numeric(10, 6),
+        maturity_at timestamp NOT NULL,
+        status text NOT NULL DEFAULT 'active',
+        notified_maturity_at timestamp,
+        created_at timestamp NOT NULL DEFAULT now(),
+        updated_at timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_fy_positions_wallet ON fy_positions (wallet_address)`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner

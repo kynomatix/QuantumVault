@@ -16,6 +16,7 @@ import { isSessionError, showReconnectToast } from "@/lib/reconnect-toast";
 import { walletAuthHeaders } from "@/lib/queryClient";
 import { safeResponseJson } from "@/lib/safe-fetch";
 import LoopVaultControls from "@/components/LoopVaultControls";
+import FixedYieldVault from "@/components/FixedYieldVault";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -738,11 +739,19 @@ export default function VaultIdleFunds({
             {assets.map(renderVaultCard)}
           </div>
         </div>
-        {/* Owner-only SOL Loop (self-gating: renders nothing unless the
-            server's owner gate passes; account-level vault grid only). It
-            renders its own "Asset Vaults" section heading + grid so the
-            heading also disappears when the card does. */}
-        {!botId && <LoopVaultControls active={active} gridClass={gridClass} />}
+        {/* Asset Vaults: Fixed Yield (open to all) + owner-only SOL Loop
+            (self-gating: renders nothing unless the server's owner gate
+            passes). Account-level vault grid only — the section heading
+            lives here now that an ungated card shares it. */}
+        {!botId && (
+          <div data-testid="section-asset-vaults">
+            <h3 className="text-sm font-semibold text-muted-foreground mb-3">Asset Vaults</h3>
+            <div className={gridClass}>
+              <FixedYieldVault active={active} />
+              <LoopVaultControls active={active} />
+            </div>
+          </div>
+        )}
       </div>
     );
   };

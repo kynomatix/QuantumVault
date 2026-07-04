@@ -1511,6 +1511,9 @@ import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { isBorrowEligibleWallet, isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, repayPartialOnExistingBotPosition, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
 import { executeLoopOpen, executeLoopClose, executeLoopPartialUnwind, executeLoopDeleverToHold, executeLoopLstDepositOpen, getLoopDepositAssets, buildLoopSolView, buildLoopLifetimeView } from "./vault/loop/loop-executor";
+import { pickBestFixedYieldMarket, getEligibleFixedYieldMarkets } from "./vault/fixed-yield/exponent-markets";
+import { executeFixedYieldDeposit, executeFixedYieldExit } from "./vault/fixed-yield/fixed-yield-executor";
+import { runFyMaturityScan } from "./vault/fixed-yield/fy-maturity-notify";
 import { LOOP_VAULT_ALLOWLIST, LOOP_RISK_POLICY, LOOP_ALLOCATION_POLICY, computeLoopTargetLeverage, maxLeverageForHealthBuffer } from "./vault/loop/loop-risk-policy";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
 import { runBorrowHealthScan } from "./vault/borrow-health-monitor";
@@ -5807,6 +5810,25 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         borrowHealthScanInFlight = false;
       });
   }, 60 * 1000);
+
+  // Fixed Yield maturity notifier — DB-only worklist (no chain reads), so a
+  // slow cadence is plenty. One-time Telegram note per matured position;
+  // failed sends stay un-marked and retry next pass (see fy-maturity-notify).
+  let fyMaturityScanInFlight = false;
+  setInterval(() => {
+    if (fyMaturityScanInFlight) return;
+    fyMaturityScanInFlight = true;
+    runFyMaturityScan()
+      .then((r) => {
+        if (r.scanned > 0) {
+          console.log(`[fixed-yield] maturity scan: ${r.scanned} matured, ${r.sent} sent, ${r.skipped} skipped, ${r.failed} failed`);
+        }
+      })
+      .catch((e) => console.error('[fixed-yield] maturity scan error:', e))
+      .finally(() => {
+        fyMaturityScanInFlight = false;
+      });
+  }, 10 * 60 * 1000);
 
   // SOL Loop Vault ALLOCATION tick (plan §4.4) — the slow ~hourly EV brain
   // that owns LEVERED↔HOLD (hysteresis + cooldown inside the tick). Reuses the
@@ -10184,6 +10206,198 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       res.json(result);
     } catch (error: any) {
       console.error("[Loop] delever error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // ===================== Fixed Yield vault (Exponent PT) =====================
+  // Read-only status: the best fixed-rate market we'd deposit into + this
+  // wallet's PT holdings. No owner gate (owner's explicit call).
+  app.get("/api/vault/fixed-yield/status", requireWallet, async (req, res) => {
+    try {
+      let bestMarket = null;
+      let marketCount = 0;
+      let rateAvailable = true;
+      try {
+        const markets = await getEligibleFixedYieldMarkets();
+        marketCount = markets.length;
+        bestMarket = await pickBestFixedYieldMarket();
+      } catch (err) {
+        // Fail closed on the rate feed: card shows "rate unavailable", never a
+        // fabricated number. Positions are DB rows, unaffected by API health.
+        console.error("[fixed-yield] market feed unavailable:", err instanceof Error ? err.message : err);
+        rateAvailable = false;
+      }
+      const rows = await storage.getFyPositionsByWallet(req.walletAddress!);
+      const nowMs = Date.now();
+      const positions = rows.map((r) => {
+        const maturityMs = r.maturityAt.getTime();
+        const entryMs = r.createdAt.getTime();
+        const costBasis = Number(r.costBasisUsdc);
+        const apy = r.impliedApyAtEntry !== null ? Number(r.impliedApyAtEntry) : null;
+        // The fixed-rate promise at entry: cost basis grown at the locked APY
+        // over the actual holding term. Display-only estimate ("est.").
+        const termYears = Math.max(0, (maturityMs - entryMs) / (365.25 * 86_400_000));
+        const projectedValueUsdc = apy !== null ? costBasis * (1 + apy * termYears) : null;
+        return {
+          id: r.id,
+          venue: r.venue,
+          marketAddress: r.marketAddress,
+          ptMint: r.ptMint,
+          underlyingSymbol: r.underlyingSymbol,
+          ptAmountUi: Number(r.ptAmountRaw) / 10 ** r.ptDecimals,
+          costBasisUsdc: costBasis,
+          impliedApyAtEntry: apy,
+          maturityTs: Math.floor(maturityMs / 1000),
+          daysToMaturity: Math.max(0, (maturityMs - nowMs) / 86_400_000),
+          matured: maturityMs <= nowMs,
+          projectedValueUsdc,
+          status: r.status,
+          createdAt: r.createdAt.toISOString(),
+        };
+      });
+      res.json({
+        rateAvailable,
+        bestMarket,
+        marketCount,
+        positions,
+      });
+    } catch (error) {
+      console.error("[fixed-yield] status error:", error);
+      res.status(500).json({ error: "Failed to load Fixed Yield status" });
+    }
+  });
+
+  // DEPOSIT: lock spare USDC at the current best fixed rate. Account scope only
+  // (v1). Auth + flat-gate + key handling clone the audited park route exactly;
+  // the executor itself is the resumable/idempotent op machine.
+  app.post("/api/vault/fixed-yield/deposit", requireWallet, async (req, res) => {
+    try {
+      const { amountUsdc, sessionId, clientRequestId } = req.body || {};
+      if (typeof amountUsdc !== "number" || !(amountUsdc > 0)) {
+        return res.status(400).json({ error: "amountUsdc must be a positive number" });
+      }
+      if (!clientRequestId || typeof clientRequestId !== "string" || clientRequestId.length > 128) {
+        return res.status(400).json({ error: "clientRequestId required" });
+      }
+      let slippageBps: number | undefined;
+      if (typeof req.body.slippageBps === "number" && req.body.slippageBps > 0 && req.body.slippageBps <= 500) {
+        slippageBps = req.body.slippageBps;
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+
+      if (!sessionId) return res.status(400).json({ error: "Session ID required for security verification" });
+      const session = getSession(sessionId);
+      if (!session || session.walletAddress !== req.walletAddress) {
+        return res.status(401).json({ error: "Invalid or expired session. Please reconnect your wallet." });
+      }
+      if (!session.umk) {
+        return res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
+      }
+
+      const resolved = await resolveVaultScope(req.walletAddress!, wallet, null);
+      if (!resolved.ok) return res.status(resolved.status).json({ error: resolved.error });
+      const { scope } = resolved;
+      if (!scope.agentPublicKey) return res.status(400).json({ error: "Agent wallet not initialized" });
+
+      // Money-safety: same rule as Earn — never move spare USDC while a
+      // position is open (it is the liquidation buffer). Fail closed.
+      const flatCheck = await assertVaultScopeFlatForParking(req.walletAddress!, wallet, scope);
+      if (!flatCheck.ok) {
+        return res.status(409).json({
+          error: `Can't lock funds at a fixed rate while a position is open — these funds are your liquidation buffer (${flatCheck.reason}). They'll be available once you're flat.`,
+        });
+      }
+
+      const agentKeyResult = await decryptVaultScopeKey(scope, req.walletAddress!, wallet, session.umk);
+      if (!agentKeyResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed. Please sign out and sign back in." });
+      }
+
+      let result;
+      try {
+        result = await executeFixedYieldDeposit({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: scope.agentPublicKey,
+          agentSecretKey: agentKeyResult.secretKey,
+          amountUsdc,
+          clientRequestId,
+          slippageBps,
+        });
+      } finally {
+        agentKeyResult.cleanup();
+      }
+
+      if (!result.success) {
+        return res.status(400).json(result);
+      }
+      res.json(result);
+    } catch (error: any) {
+      console.error("[fixed-yield] deposit error:", error);
+      res.status(500).json({ error: error?.message || "Internal server error" });
+    }
+  });
+
+  // EXIT EARLY: sell a fixed-rate position back to USDC before maturity.
+  // No flat-gate — an exit only brings funds BACK to the spare-USDC wallet.
+  app.post("/api/vault/fixed-yield/exit", requireWallet, async (req, res) => {
+    try {
+      const { positionId, sessionId, clientRequestId } = req.body || {};
+      if (!positionId || typeof positionId !== "string") {
+        return res.status(400).json({ error: "positionId required" });
+      }
+      if (!clientRequestId || typeof clientRequestId !== "string" || clientRequestId.length > 128) {
+        return res.status(400).json({ error: "clientRequestId required" });
+      }
+      let slippageBps: number | undefined;
+      if (typeof req.body.slippageBps === "number" && req.body.slippageBps > 0 && req.body.slippageBps <= 500) {
+        slippageBps = req.body.slippageBps;
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+
+      if (!sessionId) return res.status(400).json({ error: "Session ID required for security verification" });
+      const session = getSession(sessionId);
+      if (!session || session.walletAddress !== req.walletAddress) {
+        return res.status(401).json({ error: "Invalid or expired session. Please reconnect your wallet." });
+      }
+      if (!session.umk) {
+        return res.status(401).json({ error: "Security session not initialized. Please reconnect your wallet." });
+      }
+
+      const resolved = await resolveVaultScope(req.walletAddress!, wallet, null);
+      if (!resolved.ok) return res.status(resolved.status).json({ error: resolved.error });
+      const { scope } = resolved;
+      if (!scope.agentPublicKey) return res.status(400).json({ error: "Agent wallet not initialized" });
+
+      const agentKeyResult = await decryptVaultScopeKey(scope, req.walletAddress!, wallet, session.umk);
+      if (!agentKeyResult) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed. Please sign out and sign back in." });
+      }
+
+      let result;
+      try {
+        result = await executeFixedYieldExit({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: scope.agentPublicKey,
+          agentSecretKey: agentKeyResult.secretKey,
+          positionId,
+          clientRequestId,
+          slippageBps,
+        });
+      } finally {
+        agentKeyResult.cleanup();
+      }
+
+      if (!result.success) {
+        return res.status(400).json(result);
+      }
+      res.json(result);
+    } catch (error: any) {
+      console.error("[fixed-yield] exit error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
     }
   });

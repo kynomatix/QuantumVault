@@ -281,6 +281,70 @@ export async function sendBorrowHealthNotification(
   }
 }
 
+/** Fixed Yield: a locked position reached maturity — the full fixed rate is earned. */
+export interface FyMaturityNotification {
+  /** e.g. "ONyc" (escaped before send). */
+  underlyingSymbol: string;
+  costBasisUsdc: number | null;
+  /** Estimated value at maturity (cost basis × fixed rate). */
+  projectedValueUsdc: number | null;
+  /** ISO date (yyyy-mm-dd) the position matured. */
+  maturityDateLabel: string;
+}
+
+/**
+ * Tri-state, same contract as borrow-health: `sent`/`skipped` advance the
+ * baseline (persist notifiedMaturityAt); `failed` retries next scan.
+ */
+export async function sendFyMaturityNotification(
+  walletAddress: string | undefined | null,
+  n: FyMaturityNotification,
+): Promise<BorrowHealthNotifyResult> {
+  try {
+    if (!walletAddress) return "skipped";
+
+    const [wallet] = await db
+      .select()
+      .from(wallets)
+      .where(eq(wallets.address, walletAddress))
+      .limit(1);
+
+    if (!wallet) return "skipped";
+    if (!wallet.notificationsEnabled) return "skipped";
+    if (!wallet.telegramChatId) return "skipped";
+
+    const sym = escapeTelegramHtml(n.underlyingSymbol);
+    const title = "🎉 Fixed-Rate Position Matured";
+    const lines: string[] = [
+      `Your fixed-rate position (PT-${sym}) reached maturity on ${n.maturityDateLabel}. The full fixed rate is now earned.`,
+    ];
+    const figures: string[] = [];
+    if (typeof n.costBasisUsdc === "number" && Number.isFinite(n.costBasisUsdc)) {
+      figures.push(`Deposited: ${n.costBasisUsdc.toFixed(2)} USDC`);
+    }
+    if (typeof n.projectedValueUsdc === "number" && Number.isFinite(n.projectedValueUsdc)) {
+      figures.push(`Value At Maturity (est.): ${n.projectedValueUsdc.toFixed(2)} USDC`);
+    }
+    if (figures.length) lines.push(figures.join(" · "));
+    lines.push("Redemption back to USDC is being finalized on the platform — your funds remain yours on-chain in the meantime.");
+    const message = `<b>${title}</b>\n${lines.join("\n")}`;
+
+    const success = await sendTelegramMessage(
+      wallet.telegramChatId,
+      message,
+      buildDefaultInlineKeyboard(),
+    );
+    if (success) {
+      console.log(`[Notifications] Sent fixed-yield maturity alert to ${walletAddress}`);
+      return "sent";
+    }
+    return "failed";
+  } catch (error) {
+    console.error('[Notifications] Error sending fixed-yield maturity notification:', error);
+    return "failed";
+  }
+}
+
 /** Autonomous "defend the loan" outcome notification (top-up OR repay). */
 export interface AutoTopUpNotification {
   /** The bot's display name (escaped before send). */

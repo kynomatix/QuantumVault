@@ -19,9 +19,13 @@
 // not USDC), never external deposits or withdrawals. History + tax export only.
 // UPDATE THIS SET when adding any new vault-internal (cash<->yield) or
 // liability (cash<->debt) event type, or it will silently be counted as a deposit.
+// Fixed Yield vault events are the same hazard class again: fy_deposit moves
+// wallet USDC into a PT holding, fy_withdraw brings it back — internal
+// reallocations inside the SAME wallet, never external deposits/withdrawals.
 export const VAULT_INTERNAL_EVENT_TYPES = new Set<string>([
   'vault_park', 'vault_unpark', 'borrow', 'repay',
   'loop_open', 'loop_close', 'loop_unwind', 'loop_delever_hold', 'loop_relever',
+  'fy_deposit', 'fy_withdraw',
 ]);
 
 export function isVaultInternalEvent(eventType: string | null | undefined): boolean {

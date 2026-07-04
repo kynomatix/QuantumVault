@@ -163,7 +163,7 @@ const fmtAgo = (iso: string | null): string | null => {
   return `${Math.round(m / 60)}h ago`;
 };
 
-export default function LoopVaultControls({ active, gridClass }: { active: boolean; gridClass?: string }) {
+export default function LoopVaultControls({ active }: { active: boolean }) {
   const { toast } = useToast();
   const { retryAuth, publicKeyString } = useWallet();
   const { connection } = useConnection();
@@ -695,13 +695,10 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
 
   return (
     <>
-      {/* --- "Asset Vaults" section: heading + grid. Owned by this component so
-          the WHOLE section (heading included) hides for non-owners — the parent
-          only renders the stablecoin section. --- */}
-      <div data-testid="section-asset-vaults">
-      <h3 className="text-sm font-semibold text-muted-foreground mb-3">Asset Vaults</h3>
-      <div className={gridClass ?? "grid md:grid-cols-2 xl:grid-cols-3 gap-5"}>
-      {/* --- Card (matches the other vault destination cards) --- */}
+      {/* --- Card (matches the other vault destination cards). The "Asset
+          Vaults" section heading + grid are owned by VaultIdleFunds now that
+          Fixed Yield (ungated) shares the section; this component renders
+          just its card into that grid — or nothing for non-owners. --- */}
       <div
         role="button"
         tabIndex={0}
@@ -783,8 +780,6 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
             <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> A position is liquidatable.
           </p>
         )}
-      </div>
-      </div>
       </div>
 
       {/* --- Detail dialog with the loop controls --- */}

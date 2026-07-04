@@ -588,6 +588,45 @@ export const insertBorrowOperationSchema = createInsertSchema(borrowOperations).
 export type InsertBorrowOperation = z.infer<typeof insertBorrowOperationSchema>;
 export type BorrowOperation = typeof borrowOperations.$inferSelect;
 
+// Fixed Yield vault: one row per open PT (principal token) holding bought on a
+// fixed-rate venue (Exponent first). On-chain PT balance is the display truth;
+// this row is the cost-basis + maturity bookkeeping cache. Ops audit through
+// borrow_operations (operation_type 'fy_deposit' / 'fy_exit' / 'fy_redeem') so
+// the multi-hop deposit (USDC -> underlying swap -> buy PT) is resumable and
+// idempotent. Mirrors the idempotent DDL in server/db.ts.
+export const fyPositions = pgTable("fy_positions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: text("wallet_address").notNull().references(() => wallets.address, { onDelete: "cascade" }),
+  venue: text("venue").notNull().default('exponent'),
+  marketAddress: text("market_address").notNull(),
+  venueVaultAddress: text("venue_vault_address"),
+  ptMint: text("pt_mint").notNull(),
+  ptDecimals: integer("pt_decimals").notNull().default(9),
+  underlyingMint: text("underlying_mint").notNull(),
+  underlyingSymbol: text("underlying_symbol").notNull(),
+  // Current PT holding in base units (raw integer string).
+  ptAmountRaw: text("pt_amount_raw").notNull().default('0'),
+  // Cumulative USDC spent for the current holding.
+  costBasisUsdc: decimal("cost_basis_usdc", { precision: 20, scale: 6 }).notNull().default('0'),
+  // Implied APY at entry (fraction, e.g. 0.1585). Display-only.
+  impliedApyAtEntry: decimal("implied_apy_at_entry", { precision: 10, scale: 6 }),
+  maturityAt: timestamp("maturity_at").notNull(),
+  status: text("status").notNull().default('active'),
+  notifiedMaturityAt: timestamp("notified_maturity_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  walletIdx: index("idx_fy_positions_wallet").on(table.walletAddress),
+}));
+
+export const insertFyPositionSchema = createInsertSchema(fyPositions).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertFyPosition = z.infer<typeof insertFyPositionSchema>;
+export type FyPosition = typeof fyPositions.$inferSelect;
+
 // Phase 1 Vaults: yield-oracle price/rate snapshots. The yield oracle measures
 // REALIZED APY per asset from the movement of its own on-chain price over time,
 // never a protocol's projected/marketing rate. One row per (asset, sample):
