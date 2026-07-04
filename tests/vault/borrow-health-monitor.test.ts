@@ -3,6 +3,7 @@ import {
   decideHealthAlertTransition,
   runBorrowHealthScan,
   RECOVER_HYSTERESIS_MS,
+  RECOVER_HYSTERESIS_FROM_UNAVAILABLE_MS,
   type HealthAlertPersistedState,
   type BorrowHealthScanDeps,
 } from "../../server/vault/borrow-health-monitor";
@@ -150,6 +151,86 @@ describe("decideHealthAlertTransition (pure)", () => {
     expect(d.shouldAlert).toBe(false);
     expect(d.next.lastHealthAlertBand).toBeNull();
     expect(d.next.lastObservedHealthBand).toBe("healthy");
+  });
+
+  // ── unavailable flap-spam suppression ──────────────────────────────────────
+
+  it("unavailable baseline does NOT lower after the standard 10-min window (4-h required)", () => {
+    // Simulates: API fails → alert (baseline=unavailable). API then succeeds
+    // for 10 min (old window). Standard hysteresis would have dropped the
+    // baseline here, allowing the next API failure to re-alert. It must NOT.
+    const changedAt = T0; // band changed to 'healthy' at T0
+    const prev: HealthAlertPersistedState = {
+      lastHealthAlertBand: "unavailable",
+      lastHealthAlertAt: ms(T0, -60_000),
+      lastObservedHealthBand: "healthy",
+      healthBandChangedAt: changedAt,
+    };
+    // Standard 10-min window has elapsed — but baseline is 'unavailable', so
+    // the longer window applies and the baseline must NOT drop yet.
+    const d = decideHealthAlertTransition(
+      prev,
+      "healthy",
+      ms(changedAt, RECOVER_HYSTERESIS_MS),
+    );
+    expect(d.shouldAlert).toBe(false);
+    expect(d.next.lastHealthAlertBand).toBe("unavailable"); // still held
+  });
+
+  it("unavailable baseline DOES lower after 4 h of continuously readable health", () => {
+    const changedAt = T0;
+    const prev: HealthAlertPersistedState = {
+      lastHealthAlertBand: "unavailable",
+      lastHealthAlertAt: ms(T0, -60_000),
+      lastObservedHealthBand: "healthy",
+      healthBandChangedAt: changedAt,
+    };
+    const d = decideHealthAlertTransition(
+      prev,
+      "healthy",
+      ms(changedAt, RECOVER_HYSTERESIS_FROM_UNAVAILABLE_MS),
+    );
+    expect(d.shouldAlert).toBe(false);
+    expect(d.next.lastHealthAlertBand).toBeNull(); // cleared: genuinely healthy for 4 h
+    expect(d.next.lastHealthAlertAt).toBeNull();
+  });
+
+  it("unavailable re-alerts after baseline cleared by 4-h recovery (correct re-fire)", () => {
+    // After 4 h of healthy the baseline is null; the position going unreadable
+    // again is a genuine new event and should alert.
+    const prev: HealthAlertPersistedState = {
+      lastHealthAlertBand: null, // cleared after 4-h recovery
+      lastHealthAlertAt: null,
+      lastObservedHealthBand: "healthy",
+      healthBandChangedAt: T0,
+    };
+    const d = decideHealthAlertTransition(prev, "unavailable", ms(T0, 1_000));
+    expect(d.shouldAlert).toBe(true);
+    expect(d.next.lastHealthAlertBand).toBe("unavailable");
+  });
+
+  it("flapping unavailable→healthy within 4 h does not re-alert on next unavailable read", () => {
+    // Full flap cycle in miniature: alert fired, health briefly readable, then
+    // unreadable again — all within the 4-h window. Must stay silent.
+    const alertFiredAt = T0;
+    const changedToHealthy = ms(T0, 30 * 60_000); // 30 min later
+
+    // State after 30-min good API run (still within the 4-h unavailable window)
+    const midFlap: HealthAlertPersistedState = {
+      lastHealthAlertBand: "unavailable",
+      lastHealthAlertAt: alertFiredAt,
+      lastObservedHealthBand: "healthy",
+      healthBandChangedAt: changedToHealthy,
+    };
+
+    // Another 30 min pass — still inside the 4-h window. API fails again.
+    const d = decideHealthAlertTransition(
+      midFlap,
+      "unavailable",
+      ms(changedToHealthy, 30 * 60_000),
+    );
+    expect(d.shouldAlert).toBe(false); // suppressed: baseline still "unavailable"
+    expect(d.next.lastHealthAlertBand).toBe("unavailable");
   });
 });
 

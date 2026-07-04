@@ -48,6 +48,23 @@ import type { LoopHealthObservation } from "./loop/loop-safety-tick";
  */
 export const RECOVER_HYSTERESIS_MS = 10 * 60 * 1000;
 
+/**
+ * Longer hysteresis specifically for recovering FROM the `unavailable` band.
+ *
+ * Problem it solves: the vault-config API (Jupiter Lend) is intermittent for
+ * some collateral types. When it flaps — failing every few minutes but
+ * occasionally succeeding — the 10-minute window lets the baseline drop on each
+ * API-success run, so the very next API failure re-fires the alert. Result:
+ * repeated "Loan Health Unreadable" Telegram messages at random intervals even
+ * though the loan itself is fine.
+ *
+ * Fix: require 4 hours of CONTINUOUSLY readable health before the `unavailable`
+ * baseline is cleared. An API that flaps within that window can never lower the
+ * baseline, so the re-alert is suppressed until the position has genuinely been
+ * healthy for a meaningful stretch.
+ */
+export const RECOVER_HYSTERESIS_FROM_UNAVAILABLE_MS = 4 * 60 * 60 * 1000;
+
 const HEALTH_SOURCE = "borrow-health-monitor";
 
 const KNOWN_BANDS: readonly BorrowHealthBand[] = [
@@ -136,11 +153,21 @@ export function decideHealthAlertTransition(
 
   // Improved below the alert baseline → lower the baseline ONLY after the better
   // band has been stable for the hysteresis window. No "recovered" spam.
+  //
+  // Special case: recovering FROM `unavailable` uses a much longer window
+  // (RECOVER_HYSTERESIS_FROM_UNAVAILABLE_MS, default 4 h) to prevent spam when
+  // the vault-config API is intermittent. A flapping API can drop the baseline
+  // with a 10-min window, letting each subsequent API failure re-alert. The 4-h
+  // window requires genuinely sustained readable health before clearing.
   let nextAlertBand = prev.lastHealthAlertBand;
   let nextAlertAt = prev.lastHealthAlertAt;
   if (sevNew < sevBaseline) {
     const stableForMs = now.getTime() - healthBandChangedAt.getTime();
-    if (stableForMs >= hysteresisMs) {
+    const effectiveHysteresis =
+      baselineBand === "unavailable"
+        ? RECOVER_HYSTERESIS_FROM_UNAVAILABLE_MS
+        : hysteresisMs;
+    if (stableForMs >= effectiveHysteresis) {
       nextAlertBand = newBand === "healthy" ? null : newBand;
       nextAlertAt = newBand === "healthy" ? null : prev.lastHealthAlertAt;
     }
