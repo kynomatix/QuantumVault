@@ -496,6 +496,14 @@ export interface LoopOpenParams {
    * already held — that SOL is gas plumbing for other operations.
    */
   preflightOnly?: boolean;
+  /**
+   * INTERNAL: set ONLY by callers that already hold the borrow lock for this
+   * exact (wallet, null, vaultId) key (e.g. executeLoopLstDepositOpen, which
+   * serializes swap + open under one lock). The lock is a promise-chain
+   * serializer and NOT reentrant — nesting the same key self-deadlocks
+   * forever. Never set this from a route handler.
+   */
+  callerHoldsBorrowLock?: boolean;
 }
 
 export interface LoopOpenResult {
@@ -657,7 +665,7 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
     };
   }
 
-  return await withBorrowLock(borrowLockKey(walletAddress, null, vaultId), async () => {
+  const runOpen = async (): Promise<LoopOpenResult> => {
     const connection = getServerConnection();
     const agentPubkey = new PublicKey(agentPublicKey);
     const wsolMintPk = new PublicKey(WSOL_MINT);
@@ -1019,7 +1027,14 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
       await failOp(opId, "unexpected_error", msg);
       return { success: false, error: `Loop Open failed: ${msg}` };
     }
-  });
+  };
+
+  // The borrow lock is NOT reentrant (promise-chain serializer): a caller that
+  // already holds this exact key must NOT re-acquire it or it deadlocks.
+  if (params.callerHoldsBorrowLock) {
+    return await runOpen();
+  }
+  return await withBorrowLock(borrowLockKey(walletAddress, null, vaultId), runOpen);
 }
 
 /** Success finalization for an open: authoritative live re-read gates everything. */
@@ -1177,12 +1192,27 @@ export interface LoopLstDepositOpenResult {
 export async function executeLoopLstDepositOpen(
   params: LoopLstDepositOpenParams,
 ): Promise<LoopLstDepositOpenResult> {
-  const { walletAddress, agentPublicKey, agentSecretKey, mint, vaultId } = params;
+  const { walletAddress, agentPublicKey, agentSecretKey, mint } = params;
   const slippageBps = params.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
 
   if (!params.clientRequestId || typeof params.clientRequestId !== "string") {
     return { success: false, error: "clientRequestId is required for a safe retry path." };
   }
+
+  // PIN the vault to the persisted op row BEFORE taking the lock. The lock key
+  // includes vaultId, and the route re-picks the "best" vault on every call —
+  // if that pick drifts between the original attempt and a retry, the retry
+  // would take a DIFFERENT lock key and could run concurrently with the
+  // original under disjoint locks (double-consuming the swapped SOL).
+  let vaultId = params.vaultId;
+  const priorOp = await storage.getBorrowOperationByClientRequestId(walletAddress, params.clientRequestId);
+  if (priorOp && priorOp.operationType === "loop_lst_deposit") {
+    const persisted = Number((priorOp.metadata as any)?.vaultId);
+    if (Number.isFinite(persisted) && persisted > 0) {
+      vaultId = persisted;
+    }
+  }
+
   if (!LOOP_VAULT_ALLOWLIST[vaultId]) {
     return { success: false, error: `Vault ${vaultId} is not on the loop launch allowlist.` };
   }
@@ -1426,6 +1456,7 @@ export async function executeLoopLstDepositOpen(
         principalLamports: realizedLamports,
         slippageBps,
         preflightOnly: true,
+        callerHoldsBorrowLock: true, // we hold this exact lock — re-acquiring deadlocks
       });
       if (!pf.success || !pf.preflight) {
         return {
@@ -1459,6 +1490,7 @@ export async function executeLoopLstDepositOpen(
         principalLamports: principal,
         slippageBps,
         clientRequestId: `${params.clientRequestId}:open:${attempt}`,
+        callerHoldsBorrowLock: true, // we hold this exact lock — re-acquiring deadlocks
       });
 
       if (!openResult.success) {
