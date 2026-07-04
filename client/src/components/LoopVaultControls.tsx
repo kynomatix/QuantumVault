@@ -22,11 +22,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
-// Owner-only SOL Loop vault card (P2 exit-gate surface). Renders as one more
-// card in the account Vaults grid, matching the look of the other vault cards;
-// clicking it opens a dialog with the loop controls (open / unwind / close).
-// Self-gating: the server returns 401/403 for non-owner wallets and the card
-// renders nothing in that case, so no other user ever sees it.
+// SOL Loop vault card. Renders as one more card in the account Vaults grid,
+// matching the look of the other vault cards; clicking it opens a dialog with
+// the loop controls (open / unwind / close).
+// Self-gating: the server returns 401/403 when the loop is not eligible for
+// this wallet, and the card renders nothing in that case. While
+// LOOP_OPEN_TO_ALL is set the loop is open to every connected wallet (live
+// production test); flipping that flag re-closes it to the owner wallet.
 //
 // OWNER UI RULES (plan §4.5 — re-read it before touching this surface):
 // - The user NEVER picks the LST. The platform auto-picks the best pair

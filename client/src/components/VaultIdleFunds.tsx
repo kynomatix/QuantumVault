@@ -742,9 +742,10 @@ export default function VaultIdleFunds({
             {!botId && <FixedYieldVault active={active} />}
           </div>
         </div>
-        {/* Asset Vaults: owner-only SOL Loop. Self-gating — the component
-            renders the section heading + its card, or nothing at all for
-            non-owners (so no orphaned heading). Account-level only. */}
+        {/* Asset Vaults: SOL Loop. Self-gating — the component renders the
+            section heading + its card, or nothing at all when the loop is not
+            eligible for this wallet (so no orphaned heading). Account-level
+            only. Open to all wallets while LOOP_OPEN_TO_ALL is set. */}
         {!botId && <LoopVaultControls active={active} gridClass={gridClass} />}
       </div>
     );

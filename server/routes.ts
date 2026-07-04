@@ -1508,7 +1508,7 @@ import { detectParkedYieldTokens as detectParkedYieldTokensPure } from "./vault/
 import { JupiterLendBorrowRoute } from "./vault/jupiter-lend-borrow-route";
 import { previewBorrowEligibility } from "./vault/borrow-eligibility";
 import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
-import { isBorrowEligibleWallet, isBorrowOwnerWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
+import { isBorrowEligibleWallet, isBorrowOwnerWallet, isLoopEligibleWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, repayPartialOnExistingBotPosition, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
 import { executeLoopOpen, executeLoopClose, executeLoopPartialUnwind, executeLoopDeleverToHold, executeLoopLstDepositOpen, getLoopDepositAssets, buildLoopSolView, buildLoopLifetimeView } from "./vault/loop/loop-executor";
 import { pickBestFixedYieldMarket, getEligibleFixedYieldMarkets } from "./vault/fixed-yield/exponent-markets";
@@ -9852,16 +9852,18 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   });
 
   // ==========================================================================
-  // SOL LOOP VAULT (qntSOL P2) — OWNER-ONLY routes. Leveraged LST staking loop
-  // on Jupiter Lend Multiply (vaults 4 JupSOL / 47 mSOL), fixed 2x at launch.
+  // SOL LOOP VAULT (qntSOL P2) — user routes. Leveraged LST staking loop on
+  // Jupiter Lend Multiply (vaults 4 JupSOL / 47 mSOL), fixed 2x at launch.
   //
-  // GATE: isBorrowOwnerWallet ONLY — deliberately NOT isBorrowEligibleWallet,
-  // because BORROW_OPEN_TO_ALL=true would open the loop to every wallet. When
-  // BORROW_OWNER_WALLET is unset, isBorrowOwnerWallet returns false for all
-  // wallets → these routes fail closed. Account scope only (no botId).
+  // GATE: isLoopEligibleWallet. While LOOP_OPEN_TO_ALL=true (owner has opened the
+  // loop publicly to test in production) this passes for every connected wallet.
+  // Flip LOOP_OPEN_TO_ALL to false to re-close to owner-only (then it resolves
+  // from BORROW_OWNER_WALLET). Every other money-safety breaker is unchanged.
+  // Account scope only (no botId). The internal _perbot-proof endpoint stays
+  // isBorrowOwnerWallet-only — it is a proving tool, not a user feature.
   // ==========================================================================
-  const requireLoopOwner = (req: any, res: any): boolean => {
-    if (!isBorrowOwnerWallet(req.walletAddress!)) {
+  const requireLoopEligible = (req: any, res: any): boolean => {
+    if (!isLoopEligibleWallet(req.walletAddress!)) {
       res.status(403).json({ error: "Not available." });
       return false;
     }
@@ -9916,7 +9918,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // Body: { vaultId?, principalLamports, sessionId, leverage?, slippageBps?, clientRequestId? }
   app.post("/api/vault/loop/open", requireWallet, async (req, res) => {
     try {
-      if (!requireLoopOwner(req, res)) return;
+      if (!requireLoopEligible(req, res)) return;
 
       const { leverage, clientRequestId } = req.body || {};
       let vaultId = req.body?.vaultId;
@@ -9952,10 +9954,19 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const principalParsed = parseLoopRawPositive(req.body?.principalLamports, "principalLamports");
       if (typeof principalParsed === "object") return res.status(400).json(principalParsed);
       // Leverage is DYNAMIC: omitted = the executor derives the target from
-      // the live vault LT + min health buffer + caps (the normal path). An
-      // explicit number is allowed through but stays fully policy-gated and
-      // hard-capped inside the executor (fail closed on anything unreadable).
+      // the live vault LT + min health buffer + caps, positive carry required
+      // (the normal path — this is what EVERY user wallet gets). An explicit
+      // number is an OWNER-ONLY API override: it bypasses computeLoopTargetLeverage,
+      // whose positive-carry refusal is the ONLY hard deny (evaluateLoopOpenRequest
+      // merely WARNS on negative carry for an explicit value). With the loop now
+      // open to all wallets (LOOP_OPEN_TO_ALL), a non-owner must NOT be able to
+      // force a knowingly-negative-carry levered position — the product contract
+      // is "the platform picks the safe target." Health/cap gates still apply
+      // either way; this just keeps the carry-gate un-bypassable for users.
       if (leverage !== undefined) {
+        if (!isBorrowOwnerWallet(req.walletAddress!)) {
+          return res.status(400).json({ error: "Leverage is chosen automatically — omit it and the platform picks the safe target." });
+        }
         if (typeof leverage !== "number" || !Number.isFinite(leverage) || leverage <= 1 || leverage > LOOP_RISK_POLICY.hardCapLeverage) {
           return res.status(400).json({ error: `leverage must be a number in (1, ${LOOP_RISK_POLICY.hardCapLeverage}] — or omit it and the platform picks the safe target.` });
         }
@@ -10007,7 +10018,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // in the internal wallet and the client should retry with the SAME id.
   app.post("/api/vault/loop/deposit-lst-open", requireWallet, async (req, res) => {
     try {
-      if (!requireLoopOwner(req, res)) return;
+      if (!requireLoopEligible(req, res)) return;
 
       const { mint, clientRequestId } = req.body || {};
       if (!mint || typeof mint !== "string") {
@@ -10079,7 +10090,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // back to SOL. Body: { borrowPositionId, sessionId, slippageBps?, clientRequestId? }
   app.post("/api/vault/loop/close", requireWallet, async (req, res) => {
     try {
-      if (!requireLoopOwner(req, res)) return;
+      if (!requireLoopEligible(req, res)) return;
 
       const { borrowPositionId, clientRequestId } = req.body || {};
       if (!borrowPositionId || typeof borrowPositionId !== "string") {
@@ -10122,7 +10133,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // close). Body: { borrowPositionId, unwindBps, sessionId, slippageBps?, clientRequestId? }
   app.post("/api/vault/loop/unwind", requireWallet, async (req, res) => {
     try {
-      if (!requireLoopOwner(req, res)) return;
+      if (!requireLoopEligible(req, res)) return;
 
       const { borrowPositionId, unwindBps, clientRequestId } = req.body || {};
       if (!borrowPositionId || typeof borrowPositionId !== "string") {
@@ -10170,7 +10181,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // sessionId, slippageBps?, clientRequestId?, policyReason? }
   app.post("/api/vault/loop/delever", requireWallet, async (req, res) => {
     try {
-      if (!requireLoopOwner(req, res)) return;
+      if (!requireLoopEligible(req, res)) return;
 
       const { borrowPositionId, clientRequestId, policyReason } = req.body || {};
       if (!borrowPositionId || typeof borrowPositionId !== "string") {
@@ -10407,7 +10418,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // returned — actual money paths always re-read strictly server-side).
   app.get("/api/vault/loop/status", requireWallet, async (req, res) => {
     try {
-      if (!requireLoopOwner(req, res)) return;
+      if (!requireLoopEligible(req, res)) return;
 
       const rows = await storage.getBorrowPositions(req.walletAddress!, null, "loop");
       // One ops fetch for the whole wallet: feeds the per-position SOL view
@@ -10465,7 +10476,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // render as "—" client-side; nothing here sizes or opens anything.
   app.get("/api/vault/loop/rates", requireWallet, async (req, res) => {
     try {
-      if (!requireLoopOwner(req, res)) return;
+      if (!requireLoopEligible(req, res)) return;
 
       // Cross-venue watch (Kamino/Save SOL borrow) — display-only, fail-soft
       // (empty array on upstream failure); fetched in parallel with our rates.

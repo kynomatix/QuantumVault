@@ -100,3 +100,34 @@ export function isBorrowOwnerWallet(walletAddress: string): boolean {
 export function isBorrowEligibleWallet(walletAddress: string): boolean {
   return isBorrowOpenToAll() || isBorrowOwnerWallet(walletAddress) || isBorrowAllowlisted(walletAddress);
 }
+
+/**
+ * SOL LOOP VAULT OPEN TO ALL — the owner has opened the SOL Loop Vault (the
+ * leveraged LST staking loop on Jupiter Lend Multiply) publicly to test it in the
+ * live production environment from any connected wallet, in EVERY environment.
+ *
+ * This is a SEPARATE gate from BORROW_OPEN_TO_ALL on purpose: the loop was kept
+ * owner-only after the account/per-bot borrow engines launched publicly, because
+ * it is the first novel vault. The owner has now chosen to open it to all wallets.
+ *
+ * IMPORTANT: this removes ONLY the per-WALLET owner gate. Every other money-safety
+ * breaker still runs unchanged — carry/rate gating, dynamic-leverage caps, the
+ * health-factor deleverage reflex, oracle freshness, and the vault allowlist.
+ *
+ * To re-close the loop to owner-only, flip this to false (the gate then resolves
+ * from the BORROW_OWNER_WALLET env var via isBorrowOwnerWallet, as before).
+ */
+export const LOOP_OPEN_TO_ALL = true;
+
+export function isLoopOpenToAll(): boolean {
+  return LOOP_OPEN_TO_ALL;
+}
+
+/**
+ * The single "may this wallet use the SOL Loop Vault?" check the loop routes gate
+ * on. While LOOP_OPEN_TO_ALL is true this returns true for every wallet. If the
+ * loop is re-closed, it reduces to "owner wallet only".
+ */
+export function isLoopEligibleWallet(walletAddress: string): boolean {
+  return isLoopOpenToAll() || isBorrowOwnerWallet(walletAddress);
+}
