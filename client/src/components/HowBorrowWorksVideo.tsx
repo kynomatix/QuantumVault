@@ -8,6 +8,10 @@
 import React from 'react';
 import { Play, Pause, RotateCcw } from 'lucide-react';
 
+// Live rates injected from WalletManagement (both as decimals, e.g. 0.10 = 10%).
+// Falls back to the original hardcoded demo values when unavailable.
+const LiveRatesContext = React.createContext({ borrowApr: null, vaultApy: null });
+
 /* ───────── Engine (same pattern as launch video) ───────── */
 const Easing = {
   linear: (t) => t,
@@ -474,10 +478,14 @@ function S6b() {
       <span style={{ fontFamily: FM, fontWeight: 700, fontSize: 22, color: C.green, padding: '8px 18px', borderRadius: 12, background: 'rgba(9,14,20,0.9)', border: '1.5px solid rgba(52,211,153,0.5)', boxShadow: '0 0 24px rgba(52,211,153,0.3)' }}>+$1,000</span>
     </div>
   );
+  const { borrowApr, vaultApy } = React.useContext(LiveRatesContext);
+  const yieldPct  = vaultApy  != null ? vaultApy  * 100 : 10.0;
+  const borrowPct = borrowApr != null ? borrowApr * 100 : 5.2;
+  const edgePct   = yieldPct - borrowPct;
   const rows = [
-    ['Vault yield', '10%', false],
-    ['Borrow cost', '5.2%', false],
-    ['Your edge', '+4.8%', true],
+    ['Vault yield',  `${yieldPct.toFixed(1)}%`,  false],
+    ['Borrow cost',  `${borrowPct.toFixed(1)}%`,  false],
+    ['Your edge',    `${edgePct >= 0 ? '+' : ''}${edgePct.toFixed(1)}%`, true],
   ];
   return (
     <div style={{ position: 'absolute', inset: 0 }}>
@@ -785,8 +793,9 @@ export function TutorialPlayerShell({ duration = DUR, children }) {
 }
 
 /* ───────── App ───────── */
-export default function HowBorrowWorksVideo() {
+export default function HowBorrowWorksVideo({ borrowApr = null, vaultApy = null }) {
   return (
+    <LiveRatesContext.Provider value={{ borrowApr, vaultApy }}>
     <TutorialPlayerShell duration={DUR}>
       <Background />
       <Sprite start={0.0} end={4.3}><S1 /></Sprite>
@@ -800,5 +809,6 @@ export default function HowBorrowWorksVideo() {
       <Sprite start={50.2} end={57.3}><S8 /></Sprite>
       <Sprite start={57.2} end={62.0}><S9 /></Sprite>
     </TutorialPlayerShell>
+    </LiveRatesContext.Provider>
   );
 }

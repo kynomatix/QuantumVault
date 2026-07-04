@@ -179,6 +179,21 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
   // mint alone) so multi-position wallets always act on the right loan.
   const [supplyOpen, setSupplyOpen] = useState(false);
   const [howBorrowOpen, setHowBorrowOpen] = useState(false);
+  const [howBorrowVaultApy, setHowBorrowVaultApy] = useState<number | null>(null);
+
+  // Fetch live yield rates the first time the tutorial dialog opens.
+  // /api/vault/yield-rates is public — no auth needed.
+  useEffect(() => {
+    if (!howBorrowOpen || howBorrowVaultApy !== null) return;
+    fetch('/api/vault/yield-rates')
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (!data?.assets?.length) return;
+        const best = Math.max(...data.assets.map((a: any) => a.apy ?? 0).filter(Number.isFinite));
+        if (Number.isFinite(best) && best > 0) setHowBorrowVaultApy(best);
+      })
+      .catch(() => {/* fall through to hardcoded fallback */});
+  }, [howBorrowOpen]);
   const [borrowMorePool, setBorrowMorePool] = useState<LendingPool | null>(null);
   const [repayPool, setRepayPool] = useState<LendingPool | null>(null);
   const [withdrawPool, setWithdrawPool] = useState<LendingPool | null>(null);
@@ -1461,7 +1476,10 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                   </div>
                 }
               >
-                <HowBorrowWorksVideo />
+                {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                <HowBorrowWorksVideo
+                  {...({ borrowApr: borrowConfig?.collaterals?.[0]?.borrowApr ?? null, vaultApy: howBorrowVaultApy } as any)}
+                />
               </Suspense>
             )}
           </div>
