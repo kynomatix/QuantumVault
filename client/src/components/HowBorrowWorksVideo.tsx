@@ -479,8 +479,8 @@ function S6b() {
     </div>
   );
   const { borrowApr, vaultApy } = React.useContext(LiveRatesContext);
-  const yieldPct  = vaultApy  != null ? vaultApy  * 100 : 10.0;
-  const borrowPct = borrowApr != null ? borrowApr * 100 : 5.2;
+  const yieldPct  = vaultApy  != null ? vaultApy        : 10.0;  // already %, e.g. 11.8
+  const borrowPct = borrowApr != null ? borrowApr * 100 : 5.2;  // decimal → %
   const edgePct   = yieldPct - borrowPct;
   const rows = [
     ['Vault yield',  `${yieldPct.toFixed(1)}%`,  false],
@@ -587,10 +587,31 @@ function S8() {
   const releasedP = Easing.easeOutBack(clamp((lt - 4.8) / 0.6, 0, 1));
   const flourish = interpolate([4.4, 4.8, 5.6], [0, 1, 0], [Easing.easeOutCubic, Easing.easeInOutSine])(lt);
   const exitP = Easing.easeInCubic(clamp((lt - (dur - 0.5)) / 0.5, 0, 1));
+  const panelRef = React.useRef(null);
+  React.useEffect(() => {
+    const p = panelRef.current;
+    if (!p) return;
+    // Measure actual rendered stage-coords for Max and Repay button centers.
+    // Panel is position:absolute left:1000 top:200 width:590 — at dlgP=1 scale=1.
+    const pRect = p.getBoundingClientRect();
+    const stageScale = pRect.width / 590; // stage scale factor (cancels with panel scale=1)
+    const measure = (el) => {
+      const r = el.getBoundingClientRect();
+      const sx = 1000 + (r.left - pRect.left) / stageScale + (r.width / stageScale) / 2;
+      const sy =  200 + (r.top  - pRect.top)  / stageScale + (r.height / stageScale) / 2;
+      return [Math.round(sx), Math.round(sy)];
+    };
+    // children: [0]=title [1]=debt row [2]=pills [3]=amount field [4]=repay btn
+    const field = p.children[3];
+    const maxBtn = field?.lastElementChild; // Max is last in the flex row
+    const repayBtn = p.children[4];
+    if (maxBtn)  console.log('[S8 cursor] Max   center (stage):', ...measure(maxBtn));
+    if (repayBtn) console.log('[S8 cursor] Repay center (stage):', ...measure(repayBtn));
+  }, []);
   return (
     <div style={{ position: 'absolute', inset: 0 }}>
       <Copy lt={lt} dur={dur} x={92} y={340} headline={<span>Step 3 — <span style={{ color: C.teal }}>Repay anytime</span></span>} sub="Max clears the exact debt — no dust left over" micro="Fully repaid? Your collateral is released." maxW={620} size={62} />
-      <div style={{ position: 'absolute', left: 1000, top: 200, width: 590, ...panel, padding: 32, boxShadow: tealGlow, opacity: (1 - exitP) * clamp(dlgP, 0, 1), transform: `scale(${0.87 + dlgP * 0.13}) translateY(${(1 - dlgP) * 26}px)`, transformOrigin: 'top center' }}>
+      <div ref={panelRef} style={{ position: 'absolute', left: 1000, top: 200, width: 590, ...panel, padding: 32, boxShadow: tealGlow, opacity: (1 - exitP) * clamp(dlgP, 0, 1), transform: `scale(${0.87 + dlgP * 0.13}) translateY(${(1 - dlgP) * 26}px)`, transformOrigin: 'top center' }}>
         <div style={{ fontFamily: FD, fontWeight: 600, fontSize: 30, color: C.text, marginBottom: 8 }}>Repay</div>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '13px 18px', borderRadius: 12, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(140,150,220,0.12)', marginBottom: 18 }}>
           <span style={{ fontFamily: FUI, fontSize: 17, fontWeight: 600, color: C.sub }}>Outstanding debt</span>
@@ -616,7 +637,7 @@ function S8() {
           </div>
         </div>
       </div>
-      <Cursor lt={lt} path={[[0.5, 1700, 820], [1.3, 1511, 440], [2.8, 1289, 518], [4.6, 1560, 700]]} taps={[1.4, 3.0]} />
+      <Cursor lt={lt} path={[[0.5, 1700, 820], [1.3, 1500, 452], [2.8, 1289, 532], [4.6, 1560, 700]]} taps={[1.4, 3.0]} />
     </div>
   );
 }
