@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState, type ElementType, type ReactNode } from "react";
-import { Loader2, Landmark, Check, AlertCircle, AlertTriangle, RotateCcw, TrendingUp, TrendingDown, Info } from "lucide-react";
+import { lazy, Suspense, useEffect, useRef, useState, type ElementType, type ReactNode } from "react";
+import { Loader2, Landmark, Check, AlertCircle, AlertTriangle, RotateCcw, TrendingUp, TrendingDown, Info, GraduationCap } from "lucide-react";
+
 import { useWallet } from "@/hooks/useWallet";
 import { useToast } from "@/hooks/use-toast";
 import { isSessionError, showReconnectToast } from "@/lib/reconnect-toast";
@@ -44,6 +45,13 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+
+const HowPerbotBorrowWorksVideo = lazy(() => import("./HowPerbotBorrowWorksVideo"));
 
 /**
  * Actionable per-bot borrow controls (Flash / independent_trader bots only).
@@ -994,6 +1002,7 @@ export default function PerbotBorrowControls({
   const [hasInflightRemoveColl, setHasInflightRemoveColl] = useState(false);
   // "Manage Loan" modal (Borrow More + Repay + Defend it: Auto top-up).
   const [defendOpen, setDefendOpen] = useState(false);
+  const [howPerbotOpen, setHowPerbotOpen] = useState(false);
   // The drawer is a single reused instance: a slow response for a previous
   // bot/wallet must never overwrite the current one.
   const reqRef = useRef(0);
@@ -2612,9 +2621,26 @@ export default function PerbotBorrowControls({
             {/* Borrow header — collateral avatar + symbol (Wallet-tab borrow styling). */}
             <div className="flex items-center gap-2.5">
               <CollateralAvatar logoURI={collLogoURI} symbol={collSym} testId="img-perbot-borrow-collateral" />
-              <div className="min-w-0">
+              <div className="min-w-0 flex-1">
                 <h3 className="text-sm font-semibold leading-tight">Borrow Against Collateral</h3>
                 <p className="text-xs text-muted-foreground truncate">Backed by your {collSym ?? "account"} collateral</p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-8 w-8 text-teal-300/80"
+                      onClick={() => setHowPerbotOpen(true)}
+                      data-testid="button-how-perbot-borrow-video"
+                      aria-label="Watch: How Per-Bot Borrow works"
+                    >
+                      <GraduationCap className="w-4.5 h-4.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">Watch: How Per-Bot Borrow works &middot; 60s</TooltipContent>
+                </Tooltip>
               </div>
             </div>
             <p className="text-sm text-muted-foreground">
@@ -2771,6 +2797,37 @@ export default function PerbotBorrowControls({
           )}
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* "How Per-Bot Borrow Works" tutorial video — lazy chunk mounts only while open. */}
+      <Dialog open={howPerbotOpen} onOpenChange={setHowPerbotOpen}>
+        <DialogContent
+          className="max-w-[min(96vw,1400px)] p-2 sm:p-3 bg-[#0a0b12] border-teal-400/20"
+          data-testid="dialog-how-perbot-borrow-video"
+        >
+          <DialogHeader className="px-1 pt-1 pb-0 space-y-0.5">
+            <DialogTitle className="text-base flex items-center gap-2">
+              <GraduationCap className="w-4 h-4 text-teal-300" /> How Per-Bot Borrow Works
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              A 65-second tour of the full per-bot borrow flow.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="relative w-full aspect-video overflow-hidden rounded-lg bg-black">
+            {howPerbotOpen && (
+              <Suspense
+                fallback={
+                  <div className="absolute inset-0 flex items-center justify-center bg-black">
+                    <Loader2 className="w-6 h-6 animate-spin text-teal-300/70" />
+                  </div>
+                }
+              >
+                {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                <HowPerbotBorrowWorksVideo />
+              </Suspense>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {openPos && bot && (
         <DefendLoanDialog
