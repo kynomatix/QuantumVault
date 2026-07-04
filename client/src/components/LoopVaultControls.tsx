@@ -45,6 +45,8 @@ import {
 // Display names for position rows only (venueVaultId -> symbol). NOT a picker.
 const LOOP_VAULTS: Array<{ id: number; symbol: string }> = [
   { id: 4, symbol: "JupSOL" },
+  { id: 5, symbol: "JitoSOL" },
+  { id: 42, symbol: "INF" },
   { id: 47, symbol: "mSOL" },
 ];
 
@@ -1155,8 +1157,8 @@ export default function LoopVaultControls({ active }: { active: boolean }) {
               <p className="text-[11px] text-muted-foreground px-1 pt-1" data-testid="text-loop-rates-footnote">
                 Net yield = staking yield on the whole looped position minus borrow cost on the debt, at the
                 safe auto-leverage for that token. Every pool borrows SOL from Jupiter&apos;s one shared
-                liquidity pool, so the borrow cost is the same across tokens. Watch-only tokens show what
-                they would earn if enabled — the loop can&apos;t use them yet.
+                liquidity pool, so the borrow cost is the same across tokens. Tokens whose staking yield
+                is below the borrow cost sit out — looping them would lose money.
                 {(() => {
                   const ago = fmtAgo(ratesQuery.data?.rates?.find((r) => r.asOf)?.asOf ?? null);
                   return ago ? <> Updated {ago}.</> : null;

@@ -33,14 +33,20 @@ export interface LoopVaultPolicy {
 
 /**
  * Launch allowlist — the ONLY Jupiter Lend Multiply vaults a loop may open on.
- * Both proven with live mainnet round trips in P1 (see
- * docs/qntsol/SOL_LOOP_VAULT_PLAN.md §P1 for signatures).
+ * JupSOL + mSOL proven with live mainnet round trips in P1 (see
+ * docs/qntsol/SOL_LOOP_VAULT_PLAN.md §P1 for signatures). JitoSOL + INF added
+ * 2026-07-04 at the owner's direction (owner runs the live proof himself);
+ * the executor is vault-generic (mint/oracle/LT all come from the vault
+ * config by id), so no per-token code exists beyond this entry.
  */
 export const LOOP_VAULT_ALLOWLIST: Readonly<Record<number, LoopVaultPolicy>> = {
   // Per-vault caps are VENUE-QUALITY overrides (pool depth / liquidity
   // judgment), not the binding safety constraint — the minOpenHealthFactor
-  // gate binds first (JupSOL LT .95 → ~3.7x, mSOL LT .90 → ~3.2x today).
+  // gate binds first (LT .95 → ~3.7x for JupSOL/JitoSOL/INF, mSOL LT .90 →
+  // ~3.2x today).
   4: { symbol: "JupSOL", maxLeverage: 5 },
+  5: { symbol: "JitoSOL", maxLeverage: 5 },
+  42: { symbol: "INF", maxLeverage: 4 },
   47: { symbol: "mSOL", maxLeverage: 4 },
 } as const;
 
