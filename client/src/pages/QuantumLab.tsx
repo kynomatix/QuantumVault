@@ -6431,15 +6431,37 @@ function CreatorPanel({ strategies, onUseStrategy }: {
     },
     // Preserve the original variables (incl. useDraftPine) so a re-auth retry of
     // "Apply fixes" still improves the on-screen draft, not a saved strategy.
-    onError: (err: any, variables) => handleCreatorError(err, "Improve failed", () => improveMutation.mutate(variables)),
+    onError: (err: any, variables) => {
+      // Console-visible surfacing so a failure is never truly silent — the reason
+      // (401/locked/rate-limit/etc.) is inspectable even when the toast is missed.
+      console.error("[Creator] improve failed:", err);
+      handleCreatorError(err, "Improve failed", () => improveMutation.mutate(variables));
+    },
   });
 
   // Pipe the reviewer's flags straight back into the AI: revise the current draft to
   // address the critique. This is the actionable answer to "what do I do with the notes".
+  // Works with reviewer notes alone — no backtest / saved strategy required (it improves
+  // the on-screen draft's Pine directly via useDraftPine).
   const applyReviewFixes = () => {
-    if (!draft?.criticNotes) return;
-    setInsightsText(draft.criticNotes.slice(0, CREATOR_MAX_TEXT));
-    improveMutation.mutate({ insights: draft.criticNotes, useDraftPine: true });
+    // Fail loudly instead of a silent no-op if there's nothing to act on.
+    if (!draft) {
+      toast({ title: "Nothing to fix yet", description: "Draft a strategy first, then apply the reviewer's fixes.", variant: "destructive" });
+      return;
+    }
+    const notes = (draft.criticNotes ?? "").trim();
+    if (!notes) {
+      toast({ title: "No reviewer notes to apply", description: "The reviewer didn't flag anything to fix on this draft.", variant: "destructive" });
+      return;
+    }
+    // Slice to the same cap the improve endpoint enforces (keeps insights in lockstep
+    // with what the Improve tab shows and can never trip the server's length guard).
+    const insights = notes.slice(0, CREATOR_MAX_TEXT);
+    setInsightsText(insights);
+    // Immediate feedback: the improve chain runs 1–2 min in the background, so confirm
+    // the click registered instead of leaving the user staring at an idle button.
+    toast({ title: "Applying reviewer fixes", description: "Revising the strategy to address the notes — this can take a minute." });
+    improveMutation.mutate({ insights, useDraftPine: true });
   };
 
   const pullInsights = async () => {

@@ -499,30 +499,16 @@ export class LabTurnOrchestrator {
         continue;
       }
       if (decision.action === "await_confirm") {
-        // A Stop can land AFTER this iteration's top gate but before we park. This is the
-        // ONLY park that stays in auto + ready (final/degrade flip to chat), and the client
-        // stops polling once ready — so nothing else would consume the flag. Check BEFORE
-        // asking/approving (so we don't post a prompt — or spend — we're about to moot)...
+        // Check for Stop before spending anything.
         if (await this.stopAutoIfRequested(taskId)) return { outcome: "stopped" };
 
-        // Task 201 — hands-off mode: skip the human confirm and approve the paid step
-        // ourselves. Gated by BOTH the user's persisted intent AND a LIVE whitelist
-        // re-check (fail-closed: a throw or a removed wallet falls through to the watched
-        // park below). Every other cap is untouched — the planner's 90% guard already ran
-        // INSIDE requestPaid before this await_confirm, and the loop's top gates (Stop,
-        // spend cap, maxAutoSteps) re-fire next iteration before the approved tool runs.
-        if (readMemory(task).auto?.handsOff === true && (await this.handsOffAllowed(task))) {
-          await this.autoApproveConfirmation(task, decision, nextAuto);
-          // A Stop could have raced the approval write; honor it before looping back.
-          if (await this.stopAutoIfRequested(taskId)) return { outcome: "stopped" };
-          continue; // next planner tick sees the confirmed token and runs the paid tool
-        }
-
-        // Auto mode paid-step gate (watched): park the turn until the user confirms.
-        await this.requestConfirmation(task, decision, nextAuto);
-        // ...and once more AFTER the park write, to catch a Stop that raced it.
+        // Always auto-approve paid steps — seamless flow beats interrupting the user
+        // for a few cents of API spend. The loop's own caps (Stop, spend cap,
+        // maxAutoSteps) still fire on the next iteration, so budget is still bounded.
+        await this.autoApproveConfirmation(task, decision, nextAuto);
+        // Honor a Stop that raced the approval write.
         if (await this.stopAutoIfRequested(taskId)) return { outcome: "stopped" };
-        return { outcome: "awaiting_confirm" };
+        continue; // next planner tick sees the confirmed token and runs the paid tool
       }
 
       if (decision.action === "await_style") {

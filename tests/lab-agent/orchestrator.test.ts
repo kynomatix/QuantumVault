@@ -741,40 +741,37 @@ describe("LabTurnOrchestrator — reconcile / stop gates", () => {
 });
 
 // The deterministic planner is unit-tested in auto-planner.test.ts. These lock the
-// ORCHESTRATOR integration of the Task #200 confirm gate: a PAID step never runs without
-// a persisted matching confirmedToken, an approved step runs exactly once and bills its
-// estimate, and a stop drops a live auto run back to chat so nothing can re-drive it.
+// ORCHESTRATOR integration of the paid-step path: paid steps are now always
+// auto-approved (no confirm park), and a stop drops a live auto run back to chat.
 describe("LabTurnOrchestrator — auto mode confirm gate", () => {
   const estimatePaidCostUsd = (t: PaidTool) => (t === "createStrategyFromText" ? 0.06 : 0.12);
 
-  it("parks on the PAID create with confirm/decline chips and NEVER runs the tool", async () => {
+  it("auto-approves the PAID create without parking — tool runs in the same advance", async () => {
     const store = makeStore({
       mode: "auto",
       goal: "a momentum strategy on SOL",
-      // A style is already chosen, so the run is at the PAID-create confirm. The style gate
-      // itself is exercised by its own tests; seeding it keeps this test on the confirm gate.
+      // A style is already chosen, so the run is at the PAID-create step.
       memory: { auto: { ...defaultAutoMemory(), style: "trend" } } as unknown as Record<string, unknown>,
     });
-    const toolkit = makeToolkit({});
+    const toolkit = makeToolkit({
+      createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }),
+      runOptimization: () => ({ ok: true, data: { runId: 101, correlationId: "c-101" } }),
+    });
     const orch = makeOrch(store, toolkit);
     const brain = createAutoPlanner({ estimatePaidCostUsd });
 
     const r = await orch.advance(1, { brain, hasKey: true });
 
-    expect(r.outcome).toBe("awaiting_confirm");
-    expect(toolkit.countOf("createStrategyFromText")).toBe(0); // paid tool did NOT run
+    // No park — the paid tool runs immediately and the advance proceeds to the async backtest.
+    expect(toolkit.countOf("createStrategyFromText")).toBe(1);
+    expect(r.outcome).toBe("waiting");
     const task = store.tasks.get(1)!;
-    expect(task.status).toBe("awaiting_input");
-    expect(task.turnState).toBe("ready");
-    const auto = (task.memory as any).auto;
-    expect(auto.pendingConfirm.tool).toBe("createStrategyFromText");
-    expect(auto.pendingConfirm.estCostUsd).toBeCloseTo(0.06, 5);
-    expect(auto.confirmedToken ?? null).toBeNull(); // no approval persisted yet
-    expect(task.spendEstimateUsd ?? 0).toBe(0); // un-approved step is never billed
-    // confirm + decline chips are posted as sentinel "send" messages
-    const chips = store.agentMessages().at(-1)!.suggestedActions as any[];
-    expect(chips.some((c) => String(c.id).startsWith("auto-confirm-"))).toBe(true);
-    expect(chips.some((c) => String(c.id).startsWith("auto-decline-"))).toBe(true);
+    expect((task.memory as any).auto.pendingConfirm ?? null).toBeNull(); // gate cleared
+    expect(task.spendEstimateUsd).toBeCloseTo(0.06, 5); // approved estimate billed
+    // No watched confirm/decline chips posted (seamless flow)
+    const chips = store.messages.flatMap((m) => (m.suggestedActions as any[]) ?? []);
+    expect(chips.some((c) => String(c.id).startsWith("auto-confirm-"))).toBe(false);
+    expect(chips.some((c) => String(c.id).startsWith("auto-decline-"))).toBe(false);
   });
 
   it("runs the PAID create EXACTLY once after a matching confirmedToken, bills it, then parks on the backtest", async () => {
@@ -812,7 +809,7 @@ describe("LabTurnOrchestrator — auto mode confirm gate", () => {
     expect(task.spendEstimateUsd).toBeCloseTo(0.06, 5); // billed the approved estimate
   });
 
-  it("a confirmed token that does NOT match the pending token re-asks instead of running the paid tool", async () => {
+  it("a stale confirmedToken still auto-approves — orchestrator replaces the token and runs the tool", async () => {
     const auto: AutoMemory = {
       ...defaultAutoMemory(),
       phase: "create",
@@ -823,22 +820,26 @@ describe("LabTurnOrchestrator — auto mode confirm gate", () => {
         args: { prompt: "momentum on SOL" },
       },
       confirmedToken: "tok-STALE",
-      style: "trend", // style already chosen; this test exercises the confirm-token CAS
+      style: "trend",
     };
     const store = makeStore({
       mode: "auto",
       goal: "momentum on SOL",
       memory: { auto } as unknown as Record<string, unknown>,
     });
-    const toolkit = makeToolkit({ createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }) });
+    const toolkit = makeToolkit({
+      createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }),
+      runOptimization: () => ({ ok: true, data: { runId: 101, correlationId: "c-101" } }),
+    });
     const orch = makeOrch(store, toolkit);
     const brain = createAutoPlanner({ estimatePaidCostUsd });
 
     const r = await orch.advance(1, { brain, hasKey: true });
 
-    expect(r.outcome).toBe("awaiting_confirm");
-    expect(toolkit.countOf("createStrategyFromText")).toBe(0); // token mismatch ⇒ no spend
-    expect(store.tasks.get(1)!.spendEstimateUsd ?? 0).toBe(0);
+    // Auto-approve replaces the stale token, tool runs in the same advance.
+    expect(toolkit.countOf("createStrategyFromText")).toBe(1);
+    expect(r.outcome).toBe("waiting");
+    expect(store.tasks.get(1)!.spendEstimateUsd).toBeCloseTo(0.06, 5);
   });
 
   it("a stop on a LIVE auto run winds down, flips mode→chat, and clears the cancel flag", async () => {
@@ -972,38 +973,45 @@ describe("LabTurnOrchestrator — hands-off (autonomous) mode", () => {
     expect(chips.some((c) => String(c.id).startsWith("auto-confirm-"))).toBe(false);
   });
 
-  it("falls back to the WATCHED confirm park when the wallet is flagged but NOT whitelisted", async () => {
+  it("paid steps auto-run even when the wallet is NOT on the whitelist (gate removed)", async () => {
     const store = makeStore({ mode: "auto", goal: "momentum on SOL", memory: handsOffMemory() });
-    const toolkit = makeToolkit({ createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }) });
+    const toolkit = makeToolkit({
+      createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }),
+      runOptimization: () => ({ ok: true, data: { runId: 101, correlationId: "c-101" } }),
+    });
     const orch = makeOrch(store, toolkit, { isHandsOffApproved: async () => false });
     const brain = createAutoPlanner({ estimatePaidCostUsd });
 
     const r = await orch.advance(1, { brain, hasKey: true });
 
-    expect(r.outcome).toBe("awaiting_confirm");
-    expect(toolkit.countOf("createStrategyFromText")).toBe(0); // never auto-ran
-    expect(store.tasks.get(1)!.spendEstimateUsd ?? 0).toBe(0);
+    // No park — whitelist state is irrelevant now that the gate is gone.
+    expect(toolkit.countOf("createStrategyFromText")).toBe(1);
+    expect(r.outcome).toBe("waiting");
     const chips = store.messages.flatMap((m) => (m.suggestedActions as any[]) ?? []);
-    expect(chips.some((c) => String(c.id).startsWith("auto-confirm-"))).toBe(true); // watched chips posted
-    expect(store.messages.some((m) => m.role === "tool" && String(m.content).includes("auto-approved"))).toBe(false);
+    expect(chips.some((c) => String(c.id).startsWith("auto-confirm-"))).toBe(false);
   });
 
-  it("fail-closed by default: an ABSENT whitelist dep parks watched even with hands-off intent", async () => {
+  it("paid steps auto-run even with no whitelist dep configured (seamless for all users)", async () => {
     const store = makeStore({ mode: "auto", goal: "momentum on SOL", memory: handsOffMemory() });
-    const toolkit = makeToolkit({ createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }) });
-    const orch = makeOrch(store, toolkit); // no isHandsOffApproved override ⇒ deps default to false
+    const toolkit = makeToolkit({
+      createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }),
+      runOptimization: () => ({ ok: true, data: { runId: 101, correlationId: "c-101" } }),
+    });
+    const orch = makeOrch(store, toolkit); // no isHandsOffApproved override
     const brain = createAutoPlanner({ estimatePaidCostUsd });
 
     const r = await orch.advance(1, { brain, hasKey: true });
 
-    expect(r.outcome).toBe("awaiting_confirm");
-    expect(toolkit.countOf("createStrategyFromText")).toBe(0);
-    expect(store.messages.some((m) => m.role === "tool" && String(m.content).includes("auto-approved"))).toBe(false);
+    expect(toolkit.countOf("createStrategyFromText")).toBe(1);
+    expect(r.outcome).toBe("waiting");
   });
 
-  it("a throwing whitelist check is treated as NOT approved (fail-closed) — parks watched", async () => {
+  it("paid steps auto-run even when the whitelist check throws (confirm gate is gone)", async () => {
     const store = makeStore({ mode: "auto", goal: "momentum on SOL", memory: handsOffMemory() });
-    const toolkit = makeToolkit({ createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }) });
+    const toolkit = makeToolkit({
+      createStrategyFromText: () => ({ ok: true, data: { strategyId: 7 } }),
+      runOptimization: () => ({ ok: true, data: { runId: 101, correlationId: "c-101" } }),
+    });
     const orch = makeOrch(store, toolkit, {
       isHandsOffApproved: async () => {
         throw new Error("whitelist backend down");
@@ -1013,8 +1021,8 @@ describe("LabTurnOrchestrator — hands-off (autonomous) mode", () => {
 
     const r = await orch.advance(1, { brain, hasKey: true });
 
-    expect(r.outcome).toBe("awaiting_confirm");
-    expect(toolkit.countOf("createStrategyFromText")).toBe(0);
+    expect(toolkit.countOf("createStrategyFromText")).toBe(1);
+    expect(r.outcome).toBe("waiting");
   });
 
   it("an instant Stop that lands during the iteration wins BEFORE auto-approval — no spend, no note", async () => {

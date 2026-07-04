@@ -15,7 +15,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { Sparkles, Send, X, Bot, Loader2, Wallet, Square, Activity, Wand2, ChevronDown, ShieldCheck, ShieldAlert, TrendingUp, Rocket, Settings2 } from "lucide-react";
+import { Sparkles, Send, X, Bot, Loader2, Wallet, Square, Activity, Wand2, ChevronDown, ShieldCheck, ShieldAlert, TrendingUp, Rocket, Settings2, Pause } from "lucide-react";
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import type { AgentSuggestedAction, LabTradeRecord } from "@shared/schema";
 import { looksLikeApiKey } from "@shared/api-key-detect";
@@ -1199,16 +1199,31 @@ export function LabAssistantDock({
         {isAuto && (
           <div
             data-testid="lab-assistant-auto-banner"
-            className="flex items-center justify-between gap-2 border-b border-indigo-400/20 bg-indigo-500/10 px-4 py-2"
+            className={cn(
+              "flex items-center justify-between gap-2 border-b px-4 py-2",
+              // Amber when paused waiting for user input; indigo when actively working.
+              awaitingConfirm
+                ? "border-amber-400/30 bg-amber-500/10"
+                : "border-indigo-400/20 bg-indigo-500/10",
+            )}
           >
-            <div className="flex min-w-0 items-center gap-2 text-xs text-indigo-100">
-              <Loader2
-                className={cn("h-3.5 w-3.5 shrink-0", (turnActive || stop.isPending) && "animate-spin")}
-              />
+            <div className={cn(
+              "flex min-w-0 items-center gap-2 text-xs",
+              awaitingConfirm ? "text-amber-100" : "text-indigo-100",
+            )}>
+              {awaitingConfirm ? (
+                // Pause icon makes it obvious the run is PAUSED and needs the user's tap,
+                // not frozen — static Loader2 looked identical to a broken/stuck spinner.
+                <Pause className="h-3.5 w-3.5 shrink-0 text-amber-300" />
+              ) : (
+                <Loader2
+                  className={cn("h-3.5 w-3.5 shrink-0", (turnActive || stop.isPending) && "animate-spin")}
+                />
+              )}
               <span className="font-medium" data-testid="text-lab-assistant-auto-status">
-                {stopPending ? "Stopping…" : turnActive ? "Auto-run active" : "Waiting for your OK"}
+                {stopPending ? "Stopping…" : turnActive ? "Auto-run active" : "Tap below to approve the next step"}
               </span>
-              <span className="truncate text-indigo-200/70" data-testid="text-lab-assistant-spend">
+              <span className={cn("truncate", awaitingConfirm ? "text-amber-200/70" : "text-indigo-200/70")} data-testid="text-lab-assistant-spend">
                 · ~${spend.toFixed(2)} spent
               </span>
             </div>
