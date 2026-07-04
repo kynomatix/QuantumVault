@@ -1,6 +1,6 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { walletAuthHeaders } from "@/lib/queryClient";
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import { motion } from 'framer-motion';
 import { useWallet } from '@/hooks/useWallet';
 import { useTokenBalance } from '@/hooks/useTokenBalance';
@@ -27,6 +27,7 @@ import {
   ChevronDown,
   ChevronUp,
   Plus,
+  GraduationCap,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -38,6 +39,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adapter-react';
 import { Transaction, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { Buffer } from 'buffer';
@@ -60,6 +62,9 @@ import {
   RepayLoanDialog,
   WithdrawCollateralDialog,
 } from '@/components/LendingActionDialogs';
+
+// Heavy 62s animation chunk — loaded only when the tutorial dialog is opened.
+const HowBorrowWorksVideo = lazy(() => import('@/components/HowBorrowWorksVideo'));
 
 interface AgentWallet {
   agentPublicKey: string;
@@ -173,6 +178,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
   // Lending action dialogs. Each holds the EXACT position it targets (never by
   // mint alone) so multi-position wallets always act on the right loan.
   const [supplyOpen, setSupplyOpen] = useState(false);
+  const [howBorrowOpen, setHowBorrowOpen] = useState(false);
   const [borrowMorePool, setBorrowMorePool] = useState<LendingPool | null>(null);
   const [repayPool, setRepayPool] = useState<LendingPool | null>(null);
   const [withdrawPool, setWithdrawPool] = useState<LendingPool | null>(null);
@@ -936,15 +942,32 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                   <p className="text-xs text-muted-foreground mt-0.5">Held as-is · each asset borrows USDC on its own</p>
                 </div>
               </div>
-              <Button
-                size="sm"
-                className="bg-teal-500 hover:bg-teal-500/90 text-background shrink-0"
-                onClick={() => setSupplyOpen(true)}
-                disabled={!borrowConfig?.eligible || !borrowCol}
-                data-testid="button-add-collateral"
-              >
-                <Plus className="w-4 h-4 mr-2" /> Add Collateral
-              </Button>
+              <div className="flex items-center gap-2 shrink-0">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-8 w-8 text-teal-300/80"
+                      onClick={() => setHowBorrowOpen(true)}
+                      data-testid="button-how-borrow-video"
+                      aria-label="Watch: How Borrow works"
+                    >
+                      <GraduationCap className="w-4.5 h-4.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">Watch: How Borrow works &middot; 60s</TooltipContent>
+                </Tooltip>
+                <Button
+                  size="sm"
+                  className="bg-teal-500 hover:bg-teal-500/90 text-background"
+                  onClick={() => setSupplyOpen(true)}
+                  disabled={!borrowConfig?.eligible || !borrowCol}
+                  data-testid="button-add-collateral"
+                >
+                  <Plus className="w-4 h-4 mr-2" /> Add Collateral
+                </Button>
+              </div>
             </div>
 
             <p className="text-xs text-muted-foreground -mt-1">
@@ -1411,6 +1434,36 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                 )}
               </Button>
             </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* "How Borrow Works" tutorial video — lazy chunk mounts only while open. */}
+      <Dialog open={howBorrowOpen} onOpenChange={setHowBorrowOpen}>
+        <DialogContent
+          className="max-w-[min(96vw,960px)] p-2 sm:p-3 bg-[#0a0b12] border-teal-400/20"
+          data-testid="dialog-how-borrow-video"
+        >
+          <DialogHeader className="px-1 pt-1 pb-0 space-y-0.5">
+            <DialogTitle className="text-base flex items-center gap-2">
+              <GraduationCap className="w-4 h-4 text-teal-300" /> How Borrow Works
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              A 60-second tour of supply, borrow and repay.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="relative w-full aspect-video overflow-hidden rounded-lg bg-black">
+            {howBorrowOpen && (
+              <Suspense
+                fallback={
+                  <div className="absolute inset-0 flex items-center justify-center bg-black">
+                    <Loader2 className="w-6 h-6 animate-spin text-teal-300/70" />
+                  </div>
+                }
+              >
+                <HowBorrowWorksVideo />
+              </Suspense>
+            )}
           </div>
         </DialogContent>
       </Dialog>
