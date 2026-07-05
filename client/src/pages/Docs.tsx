@@ -29,6 +29,8 @@ type DocSection =
   | 'vaults-overview'
   | 'vaults-destinations'
   | 'vaults-safety'
+  | 'asset-vaults'
+  | 'sol-loop-vault'
   | 'borrow-overview'
   | 'borrow-perbot'
   | 'quantumlab-overview'
@@ -59,8 +61,10 @@ const navItems: NavItem[] = [
   { id: 'trade-execution', label: 'Trade Execution', icon: Zap },
   { id: 'ai-agents', label: 'AI Agent Integration', icon: Cpu },
   { id: 'vaults-overview', label: 'Vaults Overview', icon: Landmark },
-  { id: 'vaults-destinations', label: 'Yield Destinations', icon: Coins },
+  { id: 'vaults-destinations', label: 'Stable Vaults', icon: Coins },
   { id: 'vaults-safety', label: 'Safety & Funding', icon: ShieldCheck },
+  { id: 'asset-vaults', label: 'Asset Vaults', icon: TrendingUp },
+  { id: 'sol-loop-vault', label: 'SOL Loop Vault', icon: RefreshCw },
   { id: 'borrow-overview', label: 'Borrow Overview', icon: Landmark },
   { id: 'borrow-perbot', label: 'Per-Bot Borrow', icon: Landmark },
   { id: 'quantumlab-overview', label: 'QuantumLab Overview', icon: FlaskConical },
@@ -1946,9 +1950,11 @@ function VaultsOverviewSection() {
         Vaults Overview
       </SectionHeading>
       <Paragraph>
-        Vaults put your idle USDC to work. Instead of letting spare cash sit unused between trades, you can park it 
-        in a yield destination where it earns — then pull it back whenever you need it. One tap in, one tap out, 
-        with no amounts to set.
+        Vaults come in two kinds. <strong className="text-white/90">Stable Vaults</strong> park your idle USDC into 
+        a yield token that trades near $1 — simple, lower-risk, one tap in and one tap out. {' '}
+        <strong className="text-white/90">Asset Vaults</strong> put your SOL or other assets into a DeFi strategy 
+        that the platform manages automatically — higher yield potential but more complex and leveraged. Both live in 
+        the Vaults tab and can be used independently.
       </Paragraph>
 
       <SubHeading>What Makes It Different</SubHeading>
@@ -2056,11 +2062,12 @@ function VaultsDestinationsSection() {
     <div>
       <SectionHeading>
         <Coins className="w-6 h-6 text-emerald-400" />
-        Yield Destinations
+        Stable Vaults
       </SectionHeading>
       <Paragraph>
-        Vaults offer a short, vetted menu of places to earn — not an endless DeFi list to research. Each 
-        destination is one of two types, shown clearly on its card.
+        Stable Vaults park your idle USDC into yield tokens that trade near $1 — a simple way to put spare cash 
+        to work without taking on extra complexity. One tap to park your full idle balance, one tap to pull it all 
+        back. Vaults offer a short, vetted menu of places to earn, not an endless DeFi list to research.
       </Paragraph>
 
       <SubHeading>Two Types of Destination</SubHeading>
@@ -2216,6 +2223,212 @@ function VaultsSafetySection() {
         Auto-park idle funds is available on Flash bots, where each bot has its own isolated wallet. It's a 
         persistent per-bot setting — turn it on once and it keeps working after every trade. All the same 
         money-safety rules apply: on-chain truth, realized amounts only, price-impact cap, and fail-closed.
+      </Alert>
+    </div>
+  );
+}
+
+function AssetVaultsSection() {
+  return (
+    <div>
+      <SectionHeading>
+        <TrendingUp className="w-6 h-6 text-emerald-400" />
+        Asset Vaults
+      </SectionHeading>
+      <Paragraph>
+        Asset Vaults are a different kind of vault. Instead of parking idle USDC into a yield token, an Asset Vault 
+        puts your actual SOL or other assets to work through a DeFi strategy — fully managed by the platform on 
+        your behalf.
+      </Paragraph>
+
+      <SubHeading>How They Differ From Stable Vaults</SubHeading>
+      <div className="grid gap-4 mb-6 sm:grid-cols-2">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
+            <h4 className="font-medium text-white">Stable Vaults</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Your USDC earns yield in a near-$1 token. Simple, lower-risk, one tap in and one tap out. Great 
+            for idle trading capital.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="w-2.5 h-2.5 rounded-full bg-sky-400" />
+            <h4 className="font-medium text-white">Asset Vaults</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            Your SOL or other assets run a DeFi strategy. Leveraged positions, higher yield potential, 
+            automatically managed — and higher risk.
+          </p>
+        </div>
+      </div>
+
+      <SubHeading>Fully Automated Management</SubHeading>
+      <Paragraph>
+        Asset Vaults are not set-and-forget in the same way as Stable Vaults — the platform actively manages each 
+        position on your behalf, checking it every minute. If conditions turn against you, it unwinds automatically 
+        to protect your funds. When conditions improve, it re-engages. You receive a Telegram alert for every 
+        significant action.
+      </Paragraph>
+
+      <SubHeading>Currently Available</SubHeading>
+      <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-6">
+        <div className="flex items-center gap-3 mb-2">
+          <RefreshCw className="w-5 h-5 text-sky-400" />
+          <h4 className="font-medium text-white">SOL Loop Vault</h4>
+          <span className="text-xs text-white/40">Leveraged LST Staking</span>
+        </div>
+        <p className="text-white/60 text-sm">
+          Automated leveraged staking on Solana. Your SOL is looped through a liquid staking token to earn 
+          boosted staking yield — with automatic safety management and pair-switching when a better option appears.
+        </p>
+      </div>
+
+      <Alert type="warning">
+        Asset Vaults use leverage. A leveraged position can be liquidated if borrow rates spike sharply or market 
+        conditions move against it quickly. The platform protects you automatically, but these carry more risk 
+        than Stable Vaults. Only use funds you can afford to keep locked in a position for a period of time.
+      </Alert>
+    </div>
+  );
+}
+
+function SolLoopVaultSection() {
+  const pairs = [
+    { token: 'INF', full: 'Infinity by Sanctum', note: 'Diversified LST index — broad exposure to the LST market.' },
+    { token: 'mSOL', full: 'Marinade staked SOL', note: 'Liquid staking from Marinade Finance.' },
+    { token: 'JitoSOL', full: 'Jito staked SOL', note: 'Includes MEV rewards on top of base staking yield.' },
+    { token: 'JupSOL', full: 'Jupiter staked SOL', note: "Jupiter's liquid staking token." },
+  ];
+
+  return (
+    <div>
+      <SectionHeading>
+        <RefreshCw className="w-6 h-6 text-emerald-400" />
+        SOL Loop Vault
+      </SectionHeading>
+      <Paragraph>
+        The SOL Loop Vault earns boosted staking yield by looping your SOL through a liquid staking token (LST). 
+        You pick an LST pair and leverage level — the platform opens and manages the position automatically from 
+        that point on.
+      </Paragraph>
+
+      <SubHeading>How the Loop Works</SubHeading>
+      <Paragraph>A loop multiplies your effective staking yield. In plain terms:</Paragraph>
+      <StepList steps={[
+        'Your SOL is converted to an LST (INF, mSOL, JitoSOL, or JupSOL).',
+        'That LST is used as collateral to borrow more SOL.',
+        'The borrowed SOL is also converted to the same LST.',
+        'Now you hold more LST than you started with — the whole stack earns staking yield.',
+        'The borrow costs a rate; the staking yield across the whole stack has to beat it to produce a net gain.',
+      ]} />
+      <Paragraph>
+        At 3× leverage, for example, you earn staking yield on roughly 3× your original SOL, minus the borrow 
+        rate on the extra 2× you borrowed. If the LST yields 8% and the borrow costs 4%, your net is roughly 
+        8% × 3 − 4% × 2 = 16% on your original SOL. Rates shift with the market, so the platform monitors 
+        them every minute.
+      </Paragraph>
+
+      <SubHeading>What the Platform Manages For You</SubHeading>
+      <div className="grid gap-4 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <Shield className="w-5 h-5 text-emerald-400" />
+            <h4 className="font-medium text-white">Automatic Safety Unwind</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            If your health factor drops toward liquidation, or borrow rates flip so the position is losing money, 
+            the platform fully unwinds to unleveraged holding — your LST stays in your wallet but the debt is 
+            cleared. You get a Telegram alert.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <TrendingUp className="w-5 h-5 text-emerald-400" />
+            <h4 className="font-medium text-white">Automatic Re-Levering</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            After a safety unwind, when conditions improve — rates favorable again, health factor back to a 
+            comfortable level — the platform re-opens the loop at your chosen leverage. You earn again without 
+            lifting a finger.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-3 mb-2">
+            <RefreshCw className="w-5 h-5 text-emerald-400" />
+            <h4 className="font-medium text-white">Pair Switching (Hopping)</h4>
+          </div>
+          <p className="text-white/60 text-sm">
+            The platform watches all available LST pairs. If another pair consistently pays more — at least 2% 
+            better APY for three checks in a row — it fully unwinds the current position and re-loops onto the 
+            better pair automatically. Your funds stay in the vault the whole time. You get a Telegram 
+            notification when this happens.
+          </p>
+        </div>
+      </div>
+
+      <SubHeading>Available Pairs</SubHeading>
+      <div className="space-y-2 mb-6">
+        {pairs.map((p) => (
+          <div key={p.token} className="flex items-start gap-3 p-3 rounded-lg bg-white/5 border border-white/10">
+            <span className="font-mono font-medium text-sky-400 text-sm w-16 shrink-0">{p.token}</span>
+            <div>
+              <p className="text-white/80 text-sm">{p.full}</p>
+              <p className="text-white/45 text-xs">{p.note}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <SubHeading>Where to Find It</SubHeading>
+      <Paragraph>
+        Open the <strong className="text-white/90">Vaults</strong> tab in your dashboard, then look for the 
+        Asset Vaults section. Tap the SOL Loop card to see current rates and open a position.
+      </Paragraph>
+
+      <SubHeading>How to Open a Position</SubHeading>
+      <StepList steps={[
+        'Open the Vaults tab and find the Asset Vaults section.',
+        'Tap the SOL Loop card to see current carry rates for each pair.',
+        'Pick your LST pair — the live net APY for each is shown.',
+        'Choose your leverage (1×–3× depending on the pair).',
+        "Confirm — the platform opens the loop on-chain and starts monitoring it immediately.",
+        "You'll receive a Telegram alert when the position opens and whenever it adjusts automatically.",
+      ]} />
+
+      <SubHeading>Risks</SubHeading>
+      <div className="space-y-3 mb-6">
+        <div className="p-4 rounded-lg bg-amber-500/10 border border-amber-500/20">
+          <h4 className="font-medium text-amber-300 mb-1">Liquidation Risk</h4>
+          <p className="text-amber-200/70 text-sm">
+            This is a leveraged position. If your health factor falls too low — because borrow rates spike sharply 
+            or the LST price drops relative to SOL — the lending protocol may liquidate part of your collateral. 
+            The platform unwinds early to try to prevent this, but cannot guarantee protection in extreme, sudden moves.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-amber-500/10 border border-amber-500/20">
+          <h4 className="font-medium text-amber-300 mb-1">Rate Risk</h4>
+          <p className="text-amber-200/70 text-sm">
+            Borrow rates and staking yields both move with the market. If the borrow rate rises above the staking 
+            yield, the position costs money to hold. The platform will unwind automatically in this case, but you 
+            may exit at a loss if rates moved sharply.
+          </p>
+        </div>
+        <div className="p-4 rounded-lg bg-amber-500/10 border border-amber-500/20">
+          <h4 className="font-medium text-amber-300 mb-1">LST Depeg Risk</h4>
+          <p className="text-amber-200/70 text-sm">
+            LSTs trade closely to SOL but are not perfectly pegged. A significant depeg event would reduce the 
+            collateral value of your position and could trigger a safety unwind or, in a severe case, a partial 
+            liquidation.
+          </p>
+        </div>
+      </div>
+
+      <Alert type="info">
+        You receive a Telegram notification for every automatic action — safety unwind, re-lever, and pair switch. 
+        If you have Telegram alerts turned off, check the position card in the Vaults tab for its current status.
       </Alert>
     </div>
   );
@@ -3624,8 +3837,10 @@ const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet:
   { id: 'trade-execution', label: 'Trade Execution', snippet: 'How trades are routed from webhook signals through the execution engine, including retries and error handling.', keywords: ['trade execution', 'execution', 'order', 'fill', 'route', 'retry', 'error', 'failed trade', 'slippage', 'entry price', 'size', 'notional', 'fee'] },
   { id: 'ai-agents', label: 'AI Agent Integration', snippet: 'Use AI agents (Claude, GPT, etc.) to send trade signals to QuantumVault via the agent API.', keywords: ['ai', 'agent', 'claude', 'gpt', 'openai', 'llm', 'language model', 'api', 'integration', 'programmatic', 'automated', 'server execution key'] },
   { id: 'vaults-overview', label: 'Vaults Overview', snippet: 'Vaults put idle USDC to work earning yield. One tap to park all spare USDC, one tap to unpark it back.', keywords: ['vault', 'vaults', 'earn', 'yield', 'idle', 'spare', 'park', 'unpark', 'interest', 'apy', 'save', 'savings', 'passive', 'stablecoin'] },
-  { id: 'vaults-destinations', label: 'Yield Destinations', snippet: 'The yield options available in Vaults: Kamino USDC, Perena USD*, Jupiter Lend USDC, Ondo USDY, and OnRe ONyc.', keywords: ['destination', 'destinations', 'yield', 'apy', 'kamino', 'perena', 'jupiter lend', 'ondo', 'usdy', 'onre', 'onyc', 'stablecoin', 'stable', 'floating', 'reinsurance', 'treasury'] },
+  { id: 'vaults-destinations', label: 'Stable Vaults', snippet: 'Stable Vaults park idle USDC into near-$1 yield tokens: Kamino USDC, Perena USD*, Jupiter Lend USDC, Ondo USDY, and OnRe ONyc. Simple, one tap in and one tap out.', keywords: ['stable vaults', 'destination', 'destinations', 'yield', 'apy', 'kamino', 'perena', 'jupiter lend', 'ondo', 'usdy', 'onre', 'onyc', 'stablecoin', 'stable', 'floating', 'reinsurance', 'treasury', 'park usdc', 'idle usdc'] },
   { id: 'vaults-safety', label: 'Safety & Funding', snippet: 'How Vaults stay money-safe (on-chain truth, realized amounts, price-impact cap), auto-unpark to fund trades, and auto-park idle funds back into yield after a position closes (Flash).', keywords: ['safety', 'safe', 'money', 'on-chain', 'realized', 'price impact', 'fail closed', 'equity', 'balance', 'auto unpark', 'fund trade', 'top up', 'collateral', 'per bot', 'per-bot', 'auto park', 'auto-park', 'repark', 'idle funds', 'after close', 'earn between trades', 'flash'] },
+  { id: 'asset-vaults', label: 'Asset Vaults', snippet: 'Asset Vaults run DeFi strategies on your SOL — leveraged, actively managed every minute, with automatic safety unwinds and Telegram alerts. More complex than Stable Vaults.', keywords: ['asset vault', 'asset vaults', 'defi', 'leveraged', 'automated', 'strategy', 'sol', 'managed', 'active', 'auto-manage', 'loop', 'hopping', 'complex', 'risk', 'liquidation'] },
+  { id: 'sol-loop-vault', label: 'SOL Loop Vault', snippet: 'Leveraged LST staking loop. Pick a pair (INF, mSOL, JitoSOL, JupSOL) and leverage (1×–3×). Platform auto-manages: safety unwind, re-lever, and pair-switching when a better option appears.', keywords: ['sol loop', 'loop vault', 'lst', 'liquid staking', 'leveraged staking', 'inf', 'msol', 'jitosol', 'jupsol', 'leverage', 'borrow rate', 'carry', 'net apy', 'pair switching', 'hop', 'hopping', 'unwind', 'relever', 'health factor', 'liquidation', 'staking yield', 'sanctum', 'marinade', 'jito', 'jupiter'] },
   { id: 'borrow-overview', label: 'Borrow Overview', snippet: 'Borrow USDC against collateral like SOL, INF, or BTC without selling it. Built on Jupiter Lend (Fluid). Live health factor, borrow rate APR, and carry-trade guidance.', keywords: ['borrow', 'debt', 'loan', 'lend', 'collateral', 'inf', 'sol', 'jitosol', 'msol', 'wbtc', 'cbbtc', 'xbtc', 'lbtc', 'btc', 'jlp', 'jup', 'syrupusdc', 'tslax', 'nvdax', 'spyx', 'qqqx', 'jupiter lend', 'fluid', 'health factor', 'liquidation', 'ltv', 'borrow rate', 'apr', 'carry trade', 'carry', 'usdc', 'liability', 'repay', 'supply collateral', 'pledge', 'position'] },
   { id: 'borrow-perbot', label: 'Per-Bot Borrow', snippet: 'Borrow USDC against a single bot\'s collateral. Available on Flash bots. Automatic repay and collateral return when the bot closes.', keywords: ['per bot', 'per-bot', 'bot borrow', 'borrow against bot', 'flash borrow', 'bot collateral', 'auto repay', 'automatic close', 'equity tab', 'carry advisor', 'bot debt', 'bot liability'] },
   { id: 'quantumlab-overview', label: 'QuantumLab Overview', snippet: 'QuantumLab is the built-in backtesting and strategy optimization engine. Test strategies before deploying them live.', keywords: ['quantumlab', 'quantum lab', 'backtest', 'backtesting', 'lab', 'test', 'simulation', 'historical', 'strategy', 'candle', 'ohlc'] },
@@ -3683,6 +3898,10 @@ export default function DocsPage() {
         return <VaultsDestinationsSection />;
       case 'vaults-safety':
         return <VaultsSafetySection />;
+      case 'asset-vaults':
+        return <AssetVaultsSection />;
+      case 'sol-loop-vault':
+        return <SolLoopVaultSection />;
       case 'borrow-overview':
         return <BorrowOverviewSection />;
       case 'borrow-perbot':
@@ -3810,6 +4029,7 @@ export default function DocsPage() {
                   {navItems.map((item) => {
                     const Icon = item.icon;
                     const isFirstVaults = item.id === 'vaults-overview';
+                    const isFirstAssetVaults = item.id === 'asset-vaults';
                     const isFirstQuantumLab = item.id === 'quantumlab-overview';
                     const isFirstBorrow = item.id === 'borrow-overview';
                     return (
@@ -3828,6 +4048,11 @@ export default function DocsPage() {
                               <FlaskConical className="w-3.5 h-3.5 text-violet-400" />
                               <span className="text-xs font-semibold text-violet-400 uppercase tracking-wider">QuantumLab</span>
                             </div>
+                          </div>
+                        )}
+                        {isFirstAssetVaults && (
+                          <div className="pt-2 pb-1 px-3">
+                            <span className="text-xs text-white/30 uppercase tracking-wider">Asset Vaults</span>
                           </div>
                         )}
                         {isFirstBorrow && (

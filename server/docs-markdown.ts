@@ -805,7 +805,9 @@ Turn your AI trading signals into a subscription service:
 
 ## Vaults Overview
 
-Vaults put your idle USDC to work. Instead of letting spare cash sit unused between trades, you can park it in a yield destination where it earns — then pull it back whenever you need it. One tap in, one tap out, with no amounts to set.
+Vaults come in two kinds. **Stable Vaults** park your idle USDC into a yield token that trades near $1 — simple, lower-risk, one tap in and one tap out. **Asset Vaults** put your SOL or other assets into a DeFi strategy that the platform manages automatically on your behalf — higher yield potential, but more complex and leveraged.
+
+Both types live in the Vaults tab. You can use them independently or together.
 
 ### What Makes It Different
 
@@ -830,11 +832,11 @@ Open your dashboard and select the **Vaults** tab. You'll see how much spare USD
 
 ---
 
-## Yield Destinations
+## Stable Vaults
 
-Vaults offer a short, vetted menu of places to earn — not an endless DeFi list to research. Each destination is one of two types, shown clearly on its card.
+Stable Vaults park your idle USDC into yield tokens that trade near $1 — a simple way to put spare cash to work without taking on extra complexity. One tap to park your full idle balance, one tap to pull it all back.
 
-### Two Types of Destination
+### Two Types of Stable Destination
 
 - **Stable** — Trades near $1 and earns yield. Your principal stays in USDC terms and the value accrues over time. The lower-risk choice.
 - **Floating** — The price can move up or down rather than holding a fixed $1. Higher potential yield, but one option (OnRe ONyc) can lose value.
@@ -888,6 +890,70 @@ Put together with the auto-funding above, a Flash bot runs a fully automatic loo
 6. About a minute later, the leftover USDC is parked again — back to earning.
 
 > **Note:** Auto-park idle funds is available on Flash bots, where each bot has its own isolated wallet. It's a persistent per-bot setting — turn it on once and it keeps working after every trade. All the same money-safety rules apply: on-chain truth, realized amounts only, price-impact cap, and fail-closed.
+
+---
+
+## Asset Vaults
+
+Asset Vaults are a different kind of vault from the Stable Vaults above. Instead of parking idle USDC into a yield token, an Asset Vault puts your SOL or other assets to work through a DeFi strategy — fully managed by the platform on your behalf.
+
+### Stable Vaults vs Asset Vaults
+
+- **Stable Vaults** — Your USDC earns yield in a near-$1 token. Simple, lower-risk, one tap in and one tap out. Great for idle trading capital.
+- **Asset Vaults** — Your SOL or other assets run a DeFi strategy. Leveraged positions, higher yield potential, and fully automated management — but with more risk.
+
+### Automated Management
+
+Asset Vaults are actively managed. The platform checks each position every minute and acts without you having to do anything: it unwinds automatically if conditions turn against you, re-engages when they improve, and can switch pairs when a better opportunity opens up. You receive a Telegram alert for every significant action.
+
+> **Important:** Asset Vaults use leverage. A leveraged position can be liquidated if borrow rates spike sharply or market conditions move against it quickly. Only use funds you can afford to have tied up in a position.
+
+---
+
+## SOL Loop Vault
+
+The SOL Loop Vault earns boosted staking yield by looping your SOL through a liquid staking token (LST). You pick an LST pair and a leverage level; the platform opens and manages the position automatically from that point on.
+
+### How the Loop Works
+
+A loop multiplies your effective staking yield. In plain terms:
+
+1. Your SOL is converted to an LST (INF, mSOL, JitoSOL, or JupSOL).
+2. That LST is used as collateral to borrow more SOL.
+3. The borrowed SOL is also converted to the same LST.
+4. Now you hold more LST than you started with — the whole stack earns staking yield.
+5. The borrow costs a rate; the staking yield across the whole stack has to beat it to produce a net gain.
+
+At 3× leverage, for example, you earn staking yield on roughly 3× your original SOL, minus the borrow rate on the extra 2× you borrowed. If the LST yields 8% and the borrow costs 4%, your net is roughly 8% × 3 − 4% × 2 = 16% on your original SOL. Rates shift with the market, so the platform monitors them every minute.
+
+### What the Platform Manages For You
+
+- **Automatic safety unwind** — If your health factor drops toward liquidation, or borrow rates flip so the position is losing money, the platform fully unwinds to unleveraged holding. Your LST stays in your wallet but the debt is cleared. You get a Telegram alert.
+- **Automatic re-levering** — After a safety unwind, when conditions improve, the platform re-opens the loop at your chosen leverage. You earn again without lifting a finger.
+- **Pair switching (hopping)** — The platform watches all available LST pairs. If another pair consistently pays more — at least 2% better APY for three consecutive checks — it fully unwinds the current position and re-loops onto the better pair. Your funds stay in the vault the whole time. You get a Telegram notification when this happens.
+
+### Available Pairs
+
+- **INF** (Infinity by Sanctum) — Diversified LST index, broad exposure.
+- **mSOL** (Marinade staked SOL) — Liquid staking from Marinade Finance.
+- **JitoSOL** (Jito staked SOL) — Includes MEV rewards on top of staking yield.
+- **JupSOL** (Jupiter staked SOL) — Jupiter's liquid staking token.
+
+### How to Open a Position
+
+1. Open the **Vaults** tab and find the Asset Vaults section.
+2. Tap the SOL Loop card to see current rates for each pair.
+3. Pick your LST pair — the live carry rate for each is shown.
+4. Choose your leverage (1×–3× depending on the pair).
+5. Confirm — the platform opens the loop on-chain and starts monitoring it.
+
+### Risks
+
+- **Liquidation risk** — A leveraged position can be partially liquidated if the health factor falls too low. The platform unwinds early to try to prevent this, but cannot guarantee protection in sudden, extreme market moves.
+- **Rate risk** — If borrow rates rise above the staking yield, the position costs money to hold. The platform unwinds automatically in this case, but you may exit at a loss if rates moved sharply.
+- **LST depeg risk** — LSTs track SOL closely but are not perfectly pegged. A significant depeg event would reduce collateral value and could trigger a safety unwind or, in a severe case, a partial liquidation.
+
+> **Note:** You receive a Telegram notification for every automatic action — safety unwind, re-lever, and pair switch. If Telegram alerts are off, check the position card in the Vaults tab for its current status.
 
 ---
 
