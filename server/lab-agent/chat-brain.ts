@@ -73,30 +73,65 @@ function namedAvailableTickersLine(
 export const DEFAULT_CHAT_MODEL = "deepseek/deepseek-v4-pro";
 
 // Bounded context (§5/§7): keep the prompt small so the turn stays fast and cheap.
-const MAX_CONTEXT_MESSAGES = 10; // most-recent turns included as chat history
-const MAX_CONTEXT_CHARS = 6000; // hard ceiling on assembled transcript text
+const MAX_CONTEXT_MESSAGES = 20; // most-recent turns included as chat history
+const MAX_CONTEXT_CHARS = 12000; // hard ceiling on assembled transcript text
 const MAX_GOAL_CHARS = 600;
+const MAX_TOOL_RESULT_CHARS = 800; // per-message cap on a tool result in the transcript
 const CHAT_MAX_TOKENS = 700; // short conversational answers; bounds spend + latency
 const CHAT_TIMEOUT_MS = 18_000; // stay well inside the ~60s proxy-reap window
 const CHAT_TEMPERATURE = 0.4;
 
+// Pure acknowledgment turns ("ok", "go on", "yes") carry zero new information. They
+// used to burn a full context slot each and push the real strategy discussion out of
+// the window, so we strip them before assembling the transcript. Only user turns are
+// stripped — agent/tool turns always carry substance.
+const FILLER_MESSAGE_RE =
+  /^(ok|okay|go on|go on then|yes|sure|k|yep|yeah|got it|continue|do it)[.!]*$/i;
+
+function isFillerUserMessage(role: "user" | "agent" | "tool", content: string): boolean {
+  return role === "user" && FILLER_MESSAGE_RE.test(content.trim());
+}
+
+// Tool results are large JSON blobs already parsed into working memory; the brain only
+// needs a snippet in the transcript. Truncate anything over the cap to a header so a
+// single result can't devour the char budget.
+function truncateForContext(role: "user" | "agent" | "tool", text: string): string {
+  if (role === "tool" && text.length > MAX_TOOL_RESULT_CHARS) {
+    return (
+      text.slice(0, MAX_TOOL_RESULT_CHARS) +
+      "\n…(tool result truncated; the full data is already in working memory)"
+    );
+  }
+  return text;
+}
+
 const SYSTEM_PROMPT = [
-  "You are the QuantumLab Lab Assistant, a friendly guide inside QuantumLab — the backtesting",
+  "You are the QuantumLab Lab Assistant, an expert operator inside QuantumLab — the backtesting",
   "and strategy-optimization lab of a Solana perpetual-futures bot-trading platform.",
   "",
-  "What you do RIGHT NOW: you TALK and GUIDE only. You explain how the lab works, help the user",
-  "reason about strategies, backtests, results, and why a strategy wins or loses, and you point",
-  "them to the right tab (Creator, Backtest Setup, Results, Heatmap, Insights).",
+  "What you do RIGHT NOW: you DIRECTLY operate the lab for the user. You draft new strategies",
+  "from a plain-English idea, queue and run backtests and optimizations across assets, refine",
+  "around a run's best params, read and robustness-rank results, generate insights, check run",
+  "status, improve a weak strategy, and cancel runs. These are things you DO NOW, not later.",
+  "You also explain how the lab works and why a strategy wins or loses. Talk like a colleague",
+  "who is already doing the work, not a help desk pointing at tabs.",
   "",
-  "Hard limits — be honest about these, never pretend otherwise:",
-  "- You CANNOT yet run backtests, draft or edit strategies, place trades, or change anything in",
-  "  the app. The user does those in the lab today; you will be able to do them directly later.",
+  "How to act:",
+  "- When the user's message implies an action you have a tool for, DO it — do not ask permission",
+  "  first. NEVER reply with 'Want me to run X?' or 'Should I do Y?' when X/Y is the obvious next",
+  "  step; just do it and report what you found. Only pause at a genuine fork where you truly need",
+  "  the user's direction.",
+  "- Never say a capability is 'coming soon', 'in a later phase', or that the user has to do it",
+  "  themselves in the Creator or Backtest tab. If they ask for something you can do, do it.",
   "- Never invent specific numbers (PnL, win rate, parameter values) you were not given. If you",
-  "  don't have the data, say so and tell the user where in the lab they can see it.",
+  "  don't have the data, read it with a tool or say plainly you don't have it.",
   "- Never ask the user to paste an API key into the chat. Keys are added securely in the Creator.",
   "- This is not financial advice; the user is responsible for their own trading decisions.",
   "",
-  "Style: concise, plain everyday language, encouraging. A few sentences is usually enough.",
+  "Always respond in English regardless of your internal reasoning language. Do not output any",
+  "non-English text, internal reasoning, or chain-of-thought — only your final answer.",
+  "",
+  "Style: concise, plain everyday language, confident. A few sentences is usually enough.",
   "Avoid markdown headings and code fences unless the user explicitly asks for code.",
 ].join("\n");
 
@@ -135,12 +170,13 @@ export function buildChatMessages(input: ChatBrainInput): LlmMessage[] {
 
   const history = input.recentMessages
     .filter((m) => typeof m.content === "string" && m.content.trim().length > 0)
+    .filter((m) => !isFillerUserMessage(m.role, m.content))
     .slice(-MAX_CONTEXT_MESSAGES);
 
   const picked: LlmMessage[] = [];
   let used = 0;
   for (let i = history.length - 1; i >= 0; i--) {
-    const text = history[i].content.trim();
+    const text = truncateForContext(history[i].role, history[i].content.trim());
     if (used + text.length > MAX_CONTEXT_CHARS && picked.length > 0) break;
     used += text.length;
     picked.push({ role: toLlmRole(history[i].role), content: text });
@@ -447,6 +483,9 @@ const DECIDE_SYSTEM_PROMPT = [
   "Each turn you output EXACTLY ONE JSON object and NOTHING else — no prose, no markdown,",
   "no code fences.",
   "",
+  "Always respond in English regardless of your internal reasoning language. Do not output any",
+  "non-English text, internal reasoning, or chain-of-thought — only the JSON object.",
+  "",
   "The JSON must be one of these three shapes:",
   '1. {"action":"tool","tool":"<toolName>","args":{...}} — call one toolkit tool.',
   '2. {"action":"update_plan","plan":["step 1","step 2"],"note":"optional"} — record a short checklist.',
@@ -461,10 +500,10 @@ const DECIDE_SYSTEM_PROMPT = [
   '- generateInsights {"strategyId":N} — compute FRESH insights (which params drive profit + a robustness read) from existing results. Free, no key.',
   '- getRunStatus {"runId":N} — status/progress of a run.',
   '- getQueuePosition {} — jobs ahead + whether you already hold an active run.',
-  '- createStrategyFromText {"prompt":"plain-English strategy idea","name":"optional"} — the AI DRAFTS a new Pine strategy from a description. Spends the user\'s key. Returns the new strategyId; backtest it next.',
+  '- createStrategyFromText {"prompt":"plain-English strategy idea","name":"optional"} — the AI DRAFTS a new Pine strategy from a description and SAVES it to the user\'s QuantumLab library (the Strategies list in this app) — it IS the library; it is NEVER saved to TradingView. Spends the user\'s key. Returns the new strategyId. After it succeeds, tell the user the strategy is saved in their QuantumLab library and offer to queue a backtest (or just queue one as the obvious next step). Never mention TradingView.',
   '- runOptimization {"strategyId":N,"symbols":["SOL","ETH"],"timeframes":["1h","4h"],"stages":["random","refine","deep"]?,"outOfSampleFraction":0.2?,"excludeTestedTickers":true?} — QUEUE a backtest/optimization (async). Set excludeTestedTickers:true to auto-skip markets already tested for this strategy.',
   '- refineFrom {"resultId":N} — QUICK targeted hone of ONE specific result (the resultId from getTopResults): re-seeds that result\'s EXACT saved params and coordinate-tunes with deep search OFF. Repeatable — refine, read the new top result, refine again; stop after ~3 if it stops improving. Or refineFrom {"runId":N} for the heavier whole-run refine (deep search on). Provide EXACTLY ONE of resultId or runId. (async)',
-  '- improve {"strategyId":N,"insightsOrWeaknesses":"what to fix"} — the AI rewrites the strategy\'s LOGIC from its weaknesses into a NEW strategy and QUEUES a fresh backtest for it (async). Spends the user\'s key; requires existing results.',
+  '- improve {"strategyId":N,"insightsOrWeaknesses":"what to fix"} — the AI rewrites the strategy\'s LOGIC from the given notes into a NEW strategy and QUEUES a fresh backtest for it (async). Spends the user\'s key. It accepts ANY text as insightsOrWeaknesses — reviewer or critic notes, a plain description of what is weak, or your own read of the strategy are all valid. Existing backtest results are NOT a prerequisite: NEVER refuse to improve by citing missing results.',
   '- cancelRun {"runId":N} — cancel a queued/running run.',
   "",
   "Do NOT include an idempotencyKey — the system adds it. Do NOT invent strategy ids,",
@@ -531,18 +570,24 @@ const DECIDE_SYSTEM_PROMPT = [
   "  Do NOT end a turn with 'want me to refine?' when refining is the clear next move,",
   "  just do it and report what changed.",
   "- NEVER stall — this is the most important rule. A final message that promises a future",
-  "  action but does NOT call the tool ENDS the turn with nothing done. The user then has to",
-  "  reply 'OK' or 'go ahead' just to get you to actually act, which is the #1 complaint.",
+  "  action, OR that ASKS PERMISSION to do the obvious next step, ENDS the turn with nothing",
+  "  done. The user then has to reply 'OK' or 'go ahead' just to get you to actually act, which",
+  "  is the #1 complaint. If the user's message requests or implies an action you have a tool",
+  "  for — run, test, backtest, refine, improve, widen, draft, create, try, check, read — call",
+  "  that tool THIS turn. Do not ask 'Want me to...?' first.",
   "  THE BAD PATTERN (do not do this — it ends the turn, user must nudge you to continue):",
   "    {\"action\":\"final\",\"message\":\"I'll draft a strategy for you now!\"}",
   "    {\"action\":\"final\",\"message\":\"Let me run a backtest on that.\"}",
   "    {\"action\":\"final\",\"message\":\"One moment while I look at the results.\"}",
   "    {\"action\":\"final\",\"message\":\"I'm going to refine that result.\"}",
-  "  THE GOOD PATTERN (call the tool immediately — no announcement needed):",
+  "    {\"action\":\"final\",\"message\":\"Want me to run a backtest on SOL for you?\"}",
+  "    {\"action\":\"final\",\"message\":\"Should I refine that result?\"}",
+  "  THE GOOD PATTERN (call the tool immediately — no announcement, no permission ask):",
   "    {\"action\":\"tool\",\"tool\":\"createStrategyFromText\",\"args\":{...}}",
-  "  Phrases like 'I'll ...', 'Let me ...', 'One moment', 'I'm going to...', 'I will now...'",
-  "  as your ONLY output are ALWAYS wrong when a tool is the next step. Do NOT announce and",
-  "  stop — just call the tool. The user can see what you're doing from the tool result.",
+  "  Phrases like 'I'll ...', 'Let me ...', 'One moment', 'I'm going to...', 'I will now...',",
+  "  'Want me to ...?', 'Should I ...?', 'Do you want me to ...?' as your ONLY output are ALWAYS",
+  "  wrong when a tool is the obvious next step. Do NOT announce or ask — just call the tool.",
+  "  The user can see what you're doing from the tool result.",
   "  When you are resumed after a run finishes, immediately read the results and deliver the",
   "  COMPLETE verdict in the same turn — never a 'let me look' placeholder.",
   "- When you report a backtest RESULT, format it as clean SEPARATE LINES (the chat keeps",
@@ -776,12 +821,13 @@ export function buildDecisionMessages(input: BrainTurnContext): LlmMessage[] {
 
   const history = input.recentMessages
     .filter((m) => typeof m.content === "string" && m.content.trim().length > 0)
+    .filter((m) => !isFillerUserMessage(m.role, m.content))
     .slice(-MAX_CONTEXT_MESSAGES);
 
   const picked: LlmMessage[] = [];
   let used = 0;
   for (let i = history.length - 1; i >= 0; i--) {
-    const text = history[i].content.trim();
+    const text = truncateForContext(history[i].role, history[i].content.trim());
     if (used + text.length > MAX_CONTEXT_CHARS && picked.length > 0) break;
     used += text.length;
     picked.push({ role: toLlmRole(history[i].role), content: text });

@@ -127,9 +127,8 @@ const INTENTS: Intent[] = [
     test: /\b(draft|create|build|make|new|generate|write)\b[^.?!]*\b(strateg\w*|bots?|scripts?|pine)\b|\b(strateg\w*|bots?|scripts?|pine)\b[^.?!]*\b(draft|create|build|make|new|generate|write)\b|suggest (a |an )?(strateg\w*|idea)/i,
     reply: () => ({
       content:
-        "I draft strategies from a plain-English idea, then write the Pine and backtest it for you. " +
-        "Tell me the strategy you want (the asset, the style, and any rules) and I'll build it. " +
-        "You can also open the Creator to draft one by hand.",
+        "Drafting a strategy — give me the asset, the style, and any rules, and I'll write the Pine, " +
+        "save it to your library, and backtest it. You can also open the Creator to draft one by hand.",
       suggestedActions: [NAV.draft, NAV.backtest, ASK.help],
     }),
     needsKey: true,
@@ -139,7 +138,7 @@ const INTENTS: Intent[] = [
     test: /\btemplate/i,
     reply: () => ({
       content:
-        "I can start you from a ready-made template and tune it for you — or open the Creator to browse templates yourself.",
+        "Starting you from a ready-made template and tuning it — or open the Creator to browse templates yourself.",
       suggestedActions: [NAV.draft, NAV.backtest],
     }),
   },
@@ -149,8 +148,8 @@ const INTENTS: Intent[] = [
     test: /\bimprove\b/i,
     reply: () => ({
       content:
-        "I can improve a strategy for you — I rewrite it from its weaknesses and backtest the new version. That's an AI " +
-        "step on your OpenRouter key, so I run it once the free search is exhausted. Tell me which strategy to improve.",
+        "Improving it — I rewrite the logic from its weaknesses and backtest the new version. It's an AI step on " +
+        "your OpenRouter key, so I run it once the free search is exhausted. Just name the strategy to improve.",
       suggestedActions: [NAV.draft, NAV.insights],
     }),
     needsKey: true,
@@ -160,8 +159,8 @@ const INTENTS: Intent[] = [
     test: /\b(why|lose|losing|loss|drawdown|insight|report|explain|overfit|underperform)\b/i,
     reply: () => ({
       content:
-        "I can read your insights — parameter sensitivity, directional bias, robustness — and explain in plain language " +
-        "why a strategy underperforms, then improve it for you. Want me to take a look?",
+        "Reading the insights now — parameter sensitivity, directional bias, robustness — and I'll explain in plain " +
+        "language why it underperforms, then improve it. Name the strategy and I'll dig in.",
       suggestedActions: [NAV.insights, NAV.results],
     }),
   },
@@ -169,7 +168,7 @@ const INTENTS: Intent[] = [
     // heatmap
     test: /\bheat ?map/i,
     reply: () => ({
-      content: "I can pull up your heatmap — it shows how results shift across ticker and timeframe so you can see where a strategy holds up.",
+      content: "Pulling up your heatmap — it shows how results shift across ticker and timeframe so you can see where a strategy holds up.",
       suggestedActions: [NAV.heatmap, NAV.results],
     }),
   },
@@ -178,7 +177,7 @@ const INTENTS: Intent[] = [
     test: /\b(result|best|top|winner|leaderboard|ranked|ranking|profit)\b/i,
     reply: () => ({
       content:
-        "I can pull up your results and rank them by robustness, not just headline profit — a result that holds up out-of-sample " +
+        "Pulling your results and ranking them by robustness, not just headline profit — a result that holds up out-of-sample " +
         "beats a bigger in-sample number. Ask me for your most robust result, or open the Results tab.",
       suggestedActions: [NAV.results, NAV.heatmap, ASK.whyLosing],
     }),
@@ -188,7 +187,7 @@ const INTENTS: Intent[] = [
     test: /\brefin/i,
     reply: () => ({
       content:
-        "I can refine a finished run for you — hone in around its best parameters, and chain random → refine → deep search " +
+        "Refining a finished run — honing in around its best parameters and chaining random → refine → deep search " +
         "automatically. Point me at a run and I'll take it from there.",
       suggestedActions: [NAV.results, NAV.backtest],
     }),
@@ -198,8 +197,8 @@ const INTENTS: Intent[] = [
     test: /\b(backtest|back-test|optimi[sz]e|optimi[sz]ation|run|test)\b/i,
     reply: () => ({
       content:
-        "I can run a backtest or optimization for you — I queue it across assets, watch it, and read the results when it's done. " +
-        "Tell me the strategy and assets, or open Backtest Setup to configure it yourself.",
+        "Running a backtest — tell me the strategy and assets and I'll queue it across markets, watch it, and pull up the " +
+        "results when it's done. You can also open Backtest Setup to configure it yourself.",
       suggestedActions: [NAV.backtest, NAV.results, ASK.help],
     }),
   },
@@ -208,7 +207,7 @@ const INTENTS: Intent[] = [
     test: /\b(hi|hey|hello|help|what can you|who are you|capab|how do you)\b/i,
     reply: () => ({
       content:
-        "I drive the lab for you — I don't just point you around. I can draft a strategy from a plain-English idea, run and " +
+        "I drive the lab for you — I don't just point you around. I draft a strategy from a plain-English idea, run and " +
         "refine backtests across assets, pull up and robustness-rank your results, read your insights to explain wins and " +
         "losses, and improve a weak strategy. Tell me what you want and I'll do it.",
       suggestedActions: STARTER_ACTIONS,

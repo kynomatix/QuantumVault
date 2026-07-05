@@ -31,13 +31,15 @@ describe("DEFAULT_CHAT_MODEL", () => {
 });
 
 describe("buildChatMessages", () => {
-  it("starts with a system prompt that states the C0 honesty limits", () => {
+  it("starts with a system prompt that states the honesty limits + acts-now framing", () => {
     const msgs = buildChatMessages(baseInput());
     expect(msgs[0].role).toBe("system");
     const sys = msgs[0].content;
-    // Limits the brain must carry into every turn (talk-only + never solicit keys).
-    expect(sys).toMatch(/CANNOT/);
+    // The brain now DOES the work; it must never solicit a key, and must respond in English.
     expect(/never ask .* api key/i.test(sys)).toBe(true);
+    expect(/always respond in english/i.test(sys)).toBe(true);
+    // Old stale shell claim must be gone (it caused the confirmation-seeking pattern).
+    expect(sys).not.toMatch(/\bCANNOT\b/);
   });
 
   it("ends with the user's newest turn", () => {
@@ -75,17 +77,59 @@ describe("buildChatMessages", () => {
     expect(body.map((m) => m.role)).toEqual(["assistant", "assistant", "user"]);
   });
 
-  it("keeps at most the 10 most-recent turns, in chronological order", () => {
-    const recent = Array.from({ length: 15 }, (_, i) => ({
+  it("keeps at most the 20 most-recent turns, in chronological order", () => {
+    const recent = Array.from({ length: 25 }, (_, i) => ({
       role: (i % 2 === 0 ? "user" : "agent") as "user" | "agent",
       content: `m${i}`,
     }));
     const msgs = buildChatMessages(baseInput({ recentMessages: recent }));
     const body = msgs.slice(1);
-    expect(body.length).toBe(10);
-    // newest-first selection then restored to order => kept window is m5..m14.
+    expect(body.length).toBe(20);
+    // newest-first selection then restored to order => kept window is m5..m24.
     expect(body[0].content).toBe("m5");
-    expect(body[body.length - 1].content).toBe("m14");
+    expect(body[body.length - 1].content).toBe("m24");
+  });
+
+  it("strips pure filler user turns so they don't consume context slots", () => {
+    const msgs = buildChatMessages(
+      baseInput({
+        recentMessages: [
+          { role: "user", content: "draft me a momentum bot on SOL" },
+          { role: "agent", content: "Drafting it now." },
+          { role: "user", content: "ok" },
+          { role: "user", content: "go on then" },
+          { role: "user", content: "yes" },
+          { role: "user", content: "what's the win rate?" },
+        ],
+      }),
+    );
+    const body = msgs.slice(1);
+    const contents = body.map((m) => m.content);
+    expect(contents).not.toContain("ok");
+    expect(contents).not.toContain("go on then");
+    expect(contents).not.toContain("yes");
+    // Substantive turns survive.
+    expect(contents).toContain("draft me a momentum bot on SOL");
+    expect(contents).toContain("what's the win rate?");
+  });
+
+  it("truncates an oversized tool result but keeps user turns intact", () => {
+    const bigTool = "T".repeat(3000);
+    const bigUser = "U".repeat(3000);
+    const msgs = buildChatMessages(
+      baseInput({
+        recentMessages: [
+          { role: "tool", content: bigTool },
+          { role: "user", content: bigUser },
+        ],
+      }),
+    );
+    const body = msgs.slice(1);
+    const toolMsg = body[0];
+    expect(toolMsg.content.length).toBeLessThan(bigTool.length);
+    expect(toolMsg.content).toMatch(/tool result truncated/);
+    // A user turn of the same size is NOT truncated.
+    expect(body[body.length - 1].content).toBe(bigUser);
   });
 
   it("drops empty / whitespace-only messages", () => {
@@ -102,8 +146,8 @@ describe("buildChatMessages", () => {
     expect(body[0].content).toBe("real question");
   });
 
-  it("enforces the ~6k char budget but always keeps the newest turn", () => {
-    const huge = "x".repeat(5000);
+  it("enforces the ~12k char budget but always keeps the newest turn", () => {
+    const huge = "x".repeat(10000);
     const recent: ChatBrainInput["recentMessages"] = [
       { role: "user", content: huge }, // oldest
       { role: "agent", content: huge },
@@ -111,10 +155,10 @@ describe("buildChatMessages", () => {
     ];
     const msgs = buildChatMessages(baseInput({ recentMessages: recent }));
     const body = msgs.slice(1);
-    // Newest is always admitted; the budget then fits exactly one 5000-char turn.
+    // Newest is always admitted; the budget then fits exactly one 10000-char turn.
     expect(body[body.length - 1].content).toBe("newest");
     const totalChars = body.reduce((n, m) => n + m.content.length, 0);
-    expect(totalChars).toBeLessThanOrEqual(6000);
+    expect(totalChars).toBeLessThanOrEqual(12000);
   });
 
   it("trims surrounding whitespace on turns", () => {

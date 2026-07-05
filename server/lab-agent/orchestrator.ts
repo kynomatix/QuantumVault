@@ -795,12 +795,36 @@ export class LabTurnOrchestrator {
   }
 
   // Degrade to the fully-deterministic shell reply (§7c). Never fabricates content.
+  // Context-aware: when the task is already mid-conversation about a strategy (or has a
+  // recent finished run), a full capability-menu shell reply reads as the assistant
+  // "forgetting" the work. Instead emit a short in-character recovery sentence that keeps
+  // the thread, WITHOUT the chip menu. Only a brand-new task (no strategy, no run) falls
+  // through to the keyword INTENTS shell.
   private async degrade(task: LabAgentTask, hasKey: boolean, userText?: string): Promise<void> {
     const text = userText ?? lastUserContent(
       sortedChronological(
         await this.storage.listRecentAgentMessagesForWallet(task.walletAddress, task.id, RECENT_MESSAGES),
       ),
     );
+    const memory = readMemory(task);
+    const hasContext = memory.currentStrategyId != null || memory.lastFinishedRunId != null;
+    if (hasContext) {
+      const strategyId = memory.currentStrategyId ?? null;
+      const recovery = strategyId != null
+        ? `I lost my thread for a second there — I'm still on strategy #${strategyId}. Tell me the next move (backtest, refine, or improve it) and I'll pick it right back up.`
+        : "I lost my thread for a second there. Tell me the next move and I'll pick it right back up.";
+      await this.storage.createAgentMessageForWallet(task.walletAddress, task.id, {
+        role: "agent",
+        content: recovery,
+        suggestedActions: [],
+      });
+      if (task.mode === "auto") {
+        (task as { mode?: string }).mode = "chat";
+        await this.storage.updateAgentTask(task.id, { mode: "chat" });
+      }
+      await this.finishTurn(task.id);
+      return;
+    }
     const reply = this.composeReply(text, hasKey);
     await this.storage.createAgentMessageForWallet(task.walletAddress, task.id, {
       role: "agent",

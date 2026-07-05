@@ -450,9 +450,11 @@ export function LabAssistantDock({
   const [draft, setDraft] = useState("");
   // Inline notice (e.g. the pasted-API-key guard) shown just above the composer.
   const [notice, setNotice] = useState<string | null>(null);
-  // Task 201: hands-off toggle. Only ever offered to admin-whitelisted wallets; the
-  // server re-checks eligibility on /auto/start so a stale UI can't force it on.
-  const [handsOff, setHandsOff] = useState(false);
+  // Task 201: hands-off toggle. The gate is open to all wallets (HANDSOFF_OPEN_TO_ALL);
+  // the server re-checks eligibility on /auto/start so a stale UI can't force it on.
+  // Defaults ON so auto mode runs end-to-end without stopping at every paid step — users
+  // who want step-by-step approval flip it off (persisted per wallet).
+  const [handsOff, setHandsOff] = useState(true);
   // Success path the user picks for an auto run (Ask 3). "safe" = Sharpe + out-of-sample
   // robustness (the conservative default); "degen" = biggest after-leverage profit + low
   // drawdown. Open to ALL wallets (unlike hands-off). Persisted per wallet so it survives
@@ -595,9 +597,11 @@ export function LabAssistantDock({
       return;
     }
     try {
-      setHandsOff(localStorage.getItem(`qv-lab-handsoff:${walletAddress}`) === "1");
+      // No saved choice yet ⇒ default ON (only an explicit "0" turns it off).
+      const saved = localStorage.getItem(`qv-lab-handsoff:${walletAddress}`);
+      setHandsOff(saved === null ? true : saved === "1");
     } catch {
-      /* localStorage unavailable (private mode etc.); just leave it off. */
+      /* localStorage unavailable (private mode etc.); keep the default ON. */
     }
   }, [walletAddress, handsOffEligible, handsOffEligibilityQuery.isSuccess]);
 
@@ -776,6 +780,19 @@ export function LabAssistantDock({
   // Auto-mode watch state: the banner + Stop control show while mode==="auto".
   const isAuto = task?.mode === "auto";
   const spend = task?.spendEstimateUsd ?? 0;
+
+  // Step 11: when the brain creates a new strategy (createStrategyFromText), the task's
+  // currentStrategyId flips to the new id. Refresh the QuantumLab strategy-list cache so
+  // the new strategy shows up immediately without the user reloading. We share the same
+  // queryClient as the page, so invalidating the shared key refetches it there too.
+  const lastSeenStrategyId = useRef<number | null>(null);
+  useEffect(() => {
+    const sid = task?.currentStrategyId ?? null;
+    if (sid == null) return;
+    if (lastSeenStrategyId.current === sid) return;
+    lastSeenStrategyId.current = sid;
+    qc.invalidateQueries({ queryKey: ["/api/lab/strategies"] });
+  }, [task?.currentStrategyId, qc]);
 
   // Quant-agent checklist collapse. The checklist sits pinned above the chat while a run
   // drives it. Once the run finishes it would otherwise stay fully expanded and eat most
@@ -1463,7 +1480,10 @@ export function LabAssistantDock({
                 data-testid="button-lab-assistant-auto-continue"
                 className="bg-indigo-600 text-xs hover:bg-indigo-500"
               >
-                Continue current strategy
+                {(() => {
+                  const sid = task?.currentStrategyId ?? task?.resumableStrategyId ?? null;
+                  return sid != null ? `Continue with strategy #${sid}` : "Continue current strategy";
+                })()}
               </Button>
               <Button
                 type="button"
