@@ -10,7 +10,8 @@
  * Money-safety posture (architect-reviewed):
  * - The API is an OFF-CHAIN source. It may inform display and candidate
  *   selection, but any money path MUST re-verify the market on-chain
- *   (MarketThree.load → mintPt + vault expiration match) before trading.
+ *   (load by on-chain discriminator → mintPt + vault expiration match) before
+ *   trading.
  * - Underlyings are a CURATED allowlist pinned BY MINT (never symbol lookup —
  *   scam-impersonator precedent). v1: ONyc only (mint already verified and
  *   Jupiter-swappable by the stablecoin vault).
@@ -58,7 +59,7 @@ const CACHE_TTL_MS = 10 * 60 * 1000;
 
 /** Pinned subset of the API record we rely on. Anything missing ⇒ record skipped. */
 export interface ExponentMarketView {
-  /** CLMM/legacy AMM market address used for trading (MarketThree). */
+  /** AMM market address used for trading (MarketTwo/MarketThree — resolved on-chain by account discriminator). */
   marketAddress: string;
   /** Exponent core vault (strip/merge) address. */
   vaultAddress: string;
@@ -126,9 +127,10 @@ function parseEligibleMarket(raw: any, nowSec: number): ExponentMarketView | nul
   if (!vaultAddress || !ptMint || impliedApy === null || maturityTs === null) return null;
 
   // Trading venue: current liquidity lives either on the new CLMM ("liquidity")
-  // or a legacy MarketThree AMM ("legacyLiquidity" + legacyMarketAddresses).
-  // We trade wherever the API points via legacyMarketAddresses for now and
-  // verify on-chain before any trade (Phase B).
+  // or a legacy AMM ("legacyLiquidity" + legacyMarketAddresses). The legacy pool
+  // may be a MarketTwo OR MarketThree account — the money path resolves the class
+  // on-chain by discriminator. We trade wherever the API points via
+  // legacyMarketAddresses for now and verify on-chain before any trade.
   const legacyMarkets: unknown[] = Array.isArray(raw.legacyMarketAddresses)
     ? raw.legacyMarketAddresses
     : [];

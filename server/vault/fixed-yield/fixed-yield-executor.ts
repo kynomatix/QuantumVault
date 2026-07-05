@@ -27,6 +27,13 @@ import { storage } from "../../storage";
 import { ensureVaultGas } from "../gas-funding";
 import { withBorrowLock } from "../jupiter-lend-borrow-executor";
 import { pickBestFixedYieldMarket, getFixedYieldMarketQuote, type ExponentMarketView } from "./exponent-markets";
+import {
+  type MarketKind,
+  classifyMarketDiscriminator,
+  buildBuyPtArgs,
+  decideUnwindResume,
+  type UnwindSwapStatus,
+} from "./fixed-yield-core";
 
 const DEFAULT_SLIPPAGE_BPS = 100; // 1% — PT books are thinner than spot
 const ATA_RENT_LAMPORTS = 2_039_280;
@@ -68,25 +75,66 @@ function toUi(raw: bigint, decimals: number): number {
   return Number(raw) / 10 ** decimals;
 }
 
-/** Load the Exponent market via the SDK and verify it against the pinned facts. */
-async function loadVerifiedMarket(meta: Record<string, any>): Promise<{ market: any; error?: string }> {
-  const sdk: any = await import("@exponent-labs/exponent-sdk");
+/** Flat result for the market loaders — market set on success, error+permanent on failure. */
+type LoadedMarket = { market: any; kind: MarketKind | null; error?: string; permanent?: boolean };
+
+/**
+ * Load an Exponent market by DISPATCHING on its on-chain account discriminator.
+ * `permanent:true` = the market is genuinely wrong/unsupported (bad address or an
+ * unknown discriminator) and retrying won't help; `permanent:false` = a transient
+ * read (RPC blip / account not seen yet). Never assumes the class.
+ */
+async function loadExponentMarketByKind(marketAddress: string): Promise<LoadedMarket> {
   const connection = getServerConnection();
-  const market = await sdk.MarketThree.load(sdk.LOCAL_ENV, connection, new PublicKey(meta.marketAddress));
+  let pk: PublicKey;
+  try {
+    pk = new PublicKey(marketAddress);
+  } catch {
+    return { market: null, kind: null, error: "The fixed-rate market address on record is invalid.", permanent: true };
+  }
+  let info;
+  try {
+    info = await connection.getAccountInfo(pk);
+  } catch {
+    return { market: null, kind: null, error: "Couldn't read the fixed-rate market on-chain right now. Retry in a moment.", permanent: false };
+  }
+  if (!info) {
+    return { market: null, kind: null, error: "The fixed-rate market account wasn't found on-chain. Retry in a moment.", permanent: false };
+  }
+  const kind = classifyMarketDiscriminator(info.data);
+  if (kind === "unsupported") {
+    return { market: null, kind: null, error: "This fixed-rate market type isn't supported. Deposit aborted.", permanent: true };
+  }
+  try {
+    const sdk: any = await import("@exponent-labs/exponent-sdk");
+    const market = kind === "two"
+      ? await sdk.Market.load(sdk.LOCAL_ENV, connection, pk)
+      : await sdk.MarketThree.load(sdk.LOCAL_ENV, connection, pk);
+    return { market, kind };
+  } catch {
+    return { market: null, kind: null, error: "Couldn't load the fixed-rate market right now. Retry in a moment.", permanent: false };
+  }
+}
+
+/** Load + verify the Exponent market against the pinned facts (deposit path). */
+async function loadVerifiedMarket(meta: Record<string, any>): Promise<LoadedMarket> {
+  const loaded = await loadExponentMarketByKind(meta.marketAddress);
+  if (!loaded.market) return loaded;
+  const market = loaded.market;
   const mintPt: PublicKey | undefined = market?.mintPt;
   if (!mintPt || mintPt.toBase58() !== meta.ptMint) {
-    return { market: null, error: "Fixed Yield market changed on-chain (PT mint mismatch). Deposit aborted." };
+    return { market: null, kind: null, error: "Fixed Yield market changed on-chain (PT mint mismatch). Deposit aborted.", permanent: true };
   }
   const expSec = Number(market?.vault?.expirationTimestamp ?? 0);
   const pinnedTs = Number(meta.maturityTs ?? 0);
   if (!Number.isFinite(expSec) || expSec <= 0 || Math.abs(expSec - pinnedTs) > 86_400) {
-    return { market: null, error: "Fixed Yield market maturity does not match the quoted market. Deposit aborted." };
+    return { market: null, kind: null, error: "Fixed Yield market maturity does not match the quoted market. Deposit aborted.", permanent: true };
   }
   const nowSec = Math.floor(Date.now() / 1000);
   if (expSec <= nowSec + 3 * 86_400) {
-    return { market: null, error: "This fixed-rate market is too close to maturity to enter. Try again later." };
+    return { market: null, kind: null, error: "This fixed-rate market is too close to maturity to enter. Try again later.", permanent: true };
   }
-  return { market };
+  return { market, kind: loaded.kind };
 }
 
 /**
@@ -300,6 +348,44 @@ export async function executeFixedYieldDeposit(params: {
         }
       }
 
+      // --- Load + verify the market BEFORE any swap (fail closed) -----------
+      // Dispatch on the on-chain discriminator (MarketTwo vs MarketThree). If it
+      // can't load: pre-swap → fail cleanly (USDC untouched); post-swap → unwind
+      // the converted underlying back to USDC. Never loop forever on the buy leg.
+      let loadedMarket: any = null;
+      let loadedKind: MarketKind | null = null;
+      if (ptReceivedRaw === null) {
+        const res = await loadVerifiedMarket(meta);
+        if (!res.market) {
+          const err = res.error || "The fixed-rate market couldn't be loaded.";
+          if (realizedUnderlyingRaw === null) {
+            // No money has moved yet. Permanent → fail; transient → let retry re-verify.
+            if (res.permanent) {
+              await failOp("initialized", err);
+              return { success: false, error: err };
+            }
+            return { success: false, resumable: true, error: err };
+          }
+          // Funds already converted to underlying (ONyc sits in the wallet).
+          if (res.permanent) {
+            return await unwindStrandedFyDeposit({
+              opId,
+              walletAddress,
+              agentPublicKey,
+              agentSecretKey,
+              underlyingMint,
+              realizedUnderlyingRaw,
+              slippageBps,
+              reason: err,
+            });
+          }
+          // Transient read failure — the buy can still complete once it loads.
+          return { success: false, resumable: true, error: err };
+        }
+        loadedMarket = res.market;
+        loadedKind = res.kind;
+      }
+
       // --- Gas: fund fees + the up-to-3 new ATAs (skip once past the legs) ---
       if (ptReceivedRaw === null) {
         const gas = await ensureVaultGas({
@@ -388,10 +474,9 @@ export async function executeFixedYieldDeposit(params: {
           return { success: false, error: "Something went wrong recording the conversion. Start a new deposit." };
         }
 
-        const { market, error: mktError } = await loadVerifiedMarket(meta);
-        if (!market) {
-          // Nothing broadcast — the underlying sits in the wallet. Resumable.
-          return { success: false, resumable: true, error: mktError };
+        if (!loadedMarket || !loadedKind) {
+          // Loaded above whenever ptReceivedRaw === null; guard anyway (fail closed).
+          return { success: false, resumable: true, error: "The market wasn't ready. Retry in a moment." };
         }
 
         // PT decimals from the chain (authoritative), cached in metadata.
@@ -402,15 +487,17 @@ export async function executeFixedYieldDeposit(params: {
           await storage.updateBorrowOperation(opId, { mergeMetadata: { ptDecimals } });
         }
 
-        // minPtOut from the pinned picker price (sanity-gated at pin time):
-        // expected PT ≈ baseIn / ptPrice, then the slippage haircut.
+        // Target PT from the pinned picker price (sanity-gated at pin time):
+        // expected PT ≈ baseIn / ptPrice, then the slippage haircut. This single
+        // number is BOTH the exact-INPUT floor (MarketThree minPtOut) AND the
+        // exact-OUTPUT target (MarketTwo ptOut).
         const ptPrice = Number(meta.ptPriceAtPin);
         if (!Number.isFinite(ptPrice) || ptPrice <= PT_PRICE_SANE_MIN || ptPrice >= PT_PRICE_SANE_MAX) {
           return { success: false, resumable: true, error: "The market price on record looks unreliable. Retry in a moment." };
         }
         const baseInUi = toUi(realizedUnderlyingRaw, underlyingDecimals);
-        const minPtOut = BigInt(Math.floor((baseInUi / ptPrice) * (1 - slippageBps / 10_000) * 10 ** ptDecimals));
-        if (minPtOut <= 0n) {
+        const targetPtRaw = BigInt(Math.floor((baseInUi / ptPrice) * (1 - slippageBps / 10_000) * 10 ** ptDecimals));
+        if (targetPtRaw <= 0n) {
           return { success: false, resumable: true, error: "Deposit too small to protect against slippage. Start a new, larger deposit." };
         }
 
@@ -421,14 +508,14 @@ export async function executeFixedYieldDeposit(params: {
         });
 
         const owner = new PublicKey(agentPublicKey);
-        const { ixs, setupIxs } = await market.ixWrapperBuyPt({
-          owner,
-          baseIn: realizedUnderlyingRaw,
-          minPtOut,
-        });
+        // MarketThree = exact INPUT (baseIn + minPtOut floor); MarketTwo = exact
+        // OUTPUT (ptOut + maxBaseIn cap, small leftover ONyc may remain — the
+        // Earn vault sweeps it on the next park). See buildBuyPtArgs.
+        const buyArgs = buildBuyPtArgs({ kind: loadedKind, targetPtRaw, baseInRaw: realizedUnderlyingRaw });
+        const { ixs, setupIxs } = await loadedMarket.ixWrapperBuyPt({ owner, ...buyArgs });
 
-        const altAccount = market.addressLookupTable
-          ? (await connection.getAddressLookupTable(market.addressLookupTable)).value
+        const altAccount = loadedMarket.addressLookupTable
+          ? (await connection.getAddressLookupTable(loadedMarket.addressLookupTable)).value
           : null;
 
         const buy = await executeAgentInstructions({
@@ -569,6 +656,108 @@ export async function executeFixedYieldDeposit(params: {
   });
 }
 
+/**
+ * Recover a deposit whose underlying was already bought (USDC → ONyc) but whose
+ * market can NO LONGER load (genuinely dead / unsupported discriminator). Swaps
+ * ONLY this deposit's converted amount back to USDC and marks the op failed —
+ * never the full wallet balance (ONyc is also the Earn vault's park asset). Robust
+ * to a broadcast-unknown swap: reconciles the recorded signature by on-chain
+ * status BEFORE ever swapping again, so a retry can't double-swap parked funds.
+ */
+async function unwindStrandedFyDeposit(ctx: {
+  opId: string;
+  walletAddress: string;
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  underlyingMint: string;
+  realizedUnderlyingRaw: bigint;
+  slippageBps: number;
+  reason?: string;
+}): Promise<FyDepositResult> {
+  const { opId, agentPublicKey, agentSecretKey, underlyingMint, realizedUnderlyingRaw, slippageBps } = ctx;
+  const reason = ctx.reason || "This fixed-rate market can no longer be entered.";
+  const connection = getServerConnection();
+  const doneMsg = `${reason} Your funds were returned to your spare USDC balance.`;
+
+  const finalizeFailed = async (): Promise<FyDepositResult> => {
+    await storage.updateBorrowOperation(opId, { status: "failed", step: "unwound", error: doneMsg });
+    return { success: false, error: doneMsg };
+  };
+
+  const fresh = await storage.getBorrowOperationById(opId);
+  const meta = (fresh?.metadata ?? {}) as Record<string, any>;
+  let unwindSig: string | undefined =
+    typeof meta.unwindSwapSignature === "string" ? meta.unwindSwapSignature : undefined;
+
+  // Reconcile an in-flight unwind swap by on-chain status (never balance-only —
+  // an in-flight ONyc balance reads unchanged and would trigger a double-swap).
+  if (unwindSig) {
+    const statuses = await connection.getSignatureStatuses([unwindSig], { searchTransactionHistory: true });
+    const st = statuses.value[0];
+    let status: UnwindSwapStatus;
+    if (!st) status = null;
+    else if (st.err) status = "reverted";
+    else if (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized") status = "landed";
+    else status = "in_flight";
+
+    // Fetch the current height only when the outcome is still unknown (saves an RPC).
+    let currentBlockHeight: number | null = null;
+    if (status === null || status === "in_flight") {
+      currentBlockHeight = await connection.getBlockHeight("confirmed").catch(() => null);
+    }
+
+    const decision = decideUnwindResume({
+      recordedSig: unwindSig,
+      status,
+      lastValidBlockHeight: Number(meta.unwindLastValidBlockHeight ?? 0),
+      currentBlockHeight,
+    });
+
+    if (decision.action === "finalize_failed") {
+      return await finalizeFailed();
+    } else if (decision.action === "stop_in_flight") {
+      return { success: false, resumable: true, error: `${reason} Returning your funds to spare USDC — retry in a moment.` };
+    }
+    // retry_swap — clear the dead breadcrumb and re-swap below.
+    await storage.updateBorrowOperation(opId, { mergeMetadata: { unwindSwapSignature: null } });
+    unwindSig = undefined;
+  }
+
+  // Swap ONLY this deposit's converted amount, capped at what is actually held.
+  const held = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, underlyingMint)).amountRaw); // throws → fail closed
+  const toSwap = realizedUnderlyingRaw < held ? realizedUnderlyingRaw : held;
+  if (toSwap <= 0n) {
+    // Nothing left to return (already swept / dust) — just close the op out.
+    return await finalizeFailed();
+  }
+
+  const swap = await executeAgentSwap({
+    agentPublicKey,
+    agentSecretKey,
+    inputMint: underlyingMint,
+    outputMint: USDC_MINT,
+    amountRaw: toSwap.toString(),
+    slippageBps,
+    onBeforeBroadcast: async (info) => {
+      await storage.updateBorrowOperation(opId, {
+        step: "unwind_sent",
+        appendTxSignature: info.signature,
+        mergeMetadata: {
+          unwindSwapSignature: info.signature,
+          unwindLastValidBlockHeight: info.lastValidBlockHeight,
+        },
+      });
+    },
+  });
+
+  if (!swap.success) {
+    // Broadcast-unknown or failed → stay resumable so a retry finishes the unwind.
+    return { success: false, resumable: true, error: `${reason} Returning your funds to spare USDC — retry in a moment.` };
+  }
+
+  return await finalizeFailed();
+}
+
 // ---------------------------------------------------------------------------
 // Early exit: sell the position's PT back into the underlying on the same
 // Exponent market (ixWrapperSellPt), then swap underlying → USDC. All-out per
@@ -591,16 +780,19 @@ export interface FyExitResult {
   swapSignature?: string;
 }
 
-/** Verify the market on-chain for an EXIT (no minimum-days gate — we are leaving). */
+/**
+ * Verify the market on-chain for an EXIT (no minimum-days gate — we are leaving).
+ * Uses the same discriminator dispatch as the deposit path: the sell wrapper
+ * (ixWrapperSellPt) is identical across MarketTwo/MarketThree, so no kind branch.
+ */
 async function loadVerifiedMarketForExit(meta: Record<string, any>): Promise<{ market: any; error?: string }> {
-  const sdk: any = await import("@exponent-labs/exponent-sdk");
-  const connection = getServerConnection();
-  const market = await sdk.MarketThree.load(sdk.LOCAL_ENV, connection, new PublicKey(meta.marketAddress));
-  const mintPt: PublicKey | undefined = market?.mintPt;
+  const loaded = await loadExponentMarketByKind(meta.marketAddress);
+  if (!loaded.market) return { market: null, error: loaded.error };
+  const mintPt: PublicKey | undefined = loaded.market?.mintPt;
   if (!mintPt || mintPt.toBase58() !== meta.ptMint) {
     return { market: null, error: "The market on-chain no longer matches this position (PT mint mismatch). Exit aborted." };
   }
-  return { market };
+  return { market: loaded.market };
 }
 
 /**
