@@ -10470,15 +10470,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!requireLoopEligible(req, res)) return;
 
       // Cross-venue watch (Kamino/Save SOL borrow) — display-only, fail-soft
-      // (empty array on upstream failure); fetched in parallel with our rates.
+      // (empty array on upstream failure); run in parallel with the live sample.
       const venuesPromise = getVenueSolBorrowRates();
-      let fresh = await getFreshLoopRates(LOOP_ALLOCATION_POLICY.rateStalenessMs);
-      // Empty table (e.g. fresh boot before the hourly tick) → one on-demand
-      // sample, same as the open route. Still display-only if it fails.
-      if (fresh.size === 0) {
-        await sampleAndPersistLoopRates().catch(() => undefined);
-        fresh = await getFreshLoopRates(LOOP_ALLOCATION_POLICY.rateStalenessMs);
-      }
+      // Always sample live when the dialog opens. Jupiter borrow APR moves with
+      // utilization throughout the day; serving a stale DB row (up to 3h old)
+      // would show wrong rates and the wrong "best" token. One Jupiter getVaults()
+      // call + one DeFiLlama batch, both in parallel inside sampleAndPersistLoopRates —
+      // fast enough for a display endpoint the user opens intentionally.
+      await sampleAndPersistLoopRates().catch(() => undefined);
+      const fresh = await getFreshLoopRates(LOOP_ALLOCATION_POLICY.rateStalenessMs);
       const recommended = pickBestLoopVault(
         fresh,
         Object.keys(LOOP_VAULT_ALLOWLIST).map(Number),
