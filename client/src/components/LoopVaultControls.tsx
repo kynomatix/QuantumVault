@@ -46,10 +46,11 @@ import {
 
 // Display names for position rows only (venueVaultId -> symbol). NOT a picker.
 const LOOP_VAULTS: Array<{ id: number; symbol: string }> = [
-  { id: 4, symbol: "JupSOL" },
-  { id: 5, symbol: "JitoSOL" },
+  { id: 4,  symbol: "JupSOL" },
+  { id: 5,  symbol: "JitoSOL" },
   { id: 42, symbol: "INF" },
   { id: 47, symbol: "mSOL" },
+  { id: 63, symbol: "dfdvSOL" },
 ];
 
 interface LoopLive {
@@ -111,6 +112,8 @@ interface LoopDepositAsset {
   symbol: string;
   mint: string;
   decimals: number;
+  /** Resolved via Helius DAS; null on error → no icon shown. */
+  logoURI?: string | null;
 }
 
 // One row of the live LST rate table (display only — the server picks).
@@ -126,6 +129,8 @@ interface LoopRateRow {
   noTargetReason: string | null;
   netCarryAtTarget: number | null;
   asOf: string | null;
+  /** Resolved via Helius DAS; null on error → letter-placeholder fallback. */
+  logoURI?: string | null;
 }
 
 /** Cross-venue SOL borrow watch row — display only, from DeFiLlama. */
@@ -214,6 +219,8 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
       netCarry2x: number | null;
     } | null;
     depositAssets?: LoopDepositAsset[];
+    /** Logo for native SOL (resolved via Helius DAS wrapped-SOL mint); null → no icon. */
+    solLogoURI?: string | null;
     /** Lifetime P/L across ALL historical positions (server-computed, fail-closed nulls). */
     lifetime?: {
       pnlSol: number | null;
@@ -860,7 +867,7 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
                         <button
                           key={m}
                           type="button"
-                          className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                          className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors flex items-center gap-1 ${
                             depositMint === m
                               ? "bg-primary/15 border-primary/50 text-primary"
                               : "bg-muted/30 border-border/60 text-muted-foreground hover:text-foreground"
@@ -873,7 +880,21 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
                           }}
                           data-testid={`chip-loop-asset-${sym}`}
                         >
-                          {sym}
+                          {m === "SOL" ? (
+                            <>
+                              {statusQuery.data?.solLogoURI && (
+                                <img src={statusQuery.data.solLogoURI} alt="SOL" className="w-3.5 h-3.5 rounded-full shrink-0" />
+                              )}
+                              SOL
+                            </>
+                          ) : (
+                            <>
+                              {asset?.logoURI && (
+                                <img src={asset.logoURI} alt={sym} className="w-3.5 h-3.5 rounded-full shrink-0" />
+                              )}
+                              {sym}
+                            </>
+                          )}
                         </button>
                       );
                     })}
@@ -1161,13 +1182,21 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
                       data-testid={`row-loop-rate-${r.symbol}`}
                     >
                       <div className="flex items-center gap-2 min-w-0">
-                        <div
-                          className={`w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 ${
-                            isBest ? "bg-gradient-to-br from-primary to-accent text-white" : "bg-muted text-muted-foreground"
-                          }`}
-                        >
-                          {r.symbol.slice(0, 2)}
-                        </div>
+                        {r.logoURI ? (
+                          <img
+                            src={r.logoURI}
+                            alt={r.symbol}
+                            className="w-7 h-7 rounded-full shrink-0 object-cover bg-muted"
+                          />
+                        ) : (
+                          <div
+                            className={`w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 ${
+                              isBest ? "bg-gradient-to-br from-primary to-accent text-white" : "bg-muted text-muted-foreground"
+                            }`}
+                          >
+                            {r.symbol.slice(0, 2)}
+                          </div>
+                        )}
                         <div className="min-w-0">
                           <p className="text-sm font-medium leading-tight truncate">{r.symbol}</p>
                           <p className="text-[10px] leading-tight text-muted-foreground">

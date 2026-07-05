@@ -34,6 +34,12 @@ export interface LoopRatePair {
   symbol: string;
   /** Pinned DeFiLlama pool id for the LST's staking APY. */
   llamaPool: string;
+  /**
+   * On-chain collateral mint for this LST. Token-level constant — the same
+   * mint regardless of which Jupiter Lend vault program (regular vs multiply).
+   * Used by the rates API to resolve token logos via Helius DAS.
+   */
+  mint: string;
 }
 
 /**
@@ -43,14 +49,14 @@ export interface LoopRatePair {
  * only ever ACTS on `LOOP_VAULT_ALLOWLIST` vaults.
  */
 export const LOOP_RATE_REGISTRY: readonly LoopRatePair[] = [
-  { vaultId: 4, symbol: "JupSOL", llamaPool: "52bd72a7-9e81-4112-abb4-71673e8de9bf" },
-  { vaultId: 5, symbol: "JitoSOL", llamaPool: "0e7d0722-9054-4907-8593-567b353c0900" },
-  { vaultId: 42, symbol: "INF", llamaPool: "3075a746-bdd1-4aac-bcd5-b035abee2622" },
-  { vaultId: 47, symbol: "mSOL", llamaPool: "b3f93865-5ec8-4662-90a0-11808e0aa2bd" },
+  { vaultId: 4,  symbol: "JupSOL",  llamaPool: "52bd72a7-9e81-4112-abb4-71673e8de9bf", mint: "jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v" },
+  { vaultId: 5,  symbol: "JitoSOL", llamaPool: "0e7d0722-9054-4907-8593-567b353c0900", mint: "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn" },
+  { vaultId: 42, symbol: "INF",     llamaPool: "3075a746-bdd1-4aac-bcd5-b035abee2622", mint: "5oVNBeEEQvYi1cX3ir8Dx5n1P7pdxydbGF2X4TxVusJm" },
+  { vaultId: 47, symbol: "mSOL",    llamaPool: "b3f93865-5ec8-4662-90a0-11808e0aa2bd", mint: "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So" },
   // dfdvSOL (DeFi Development Corp Staked SOL, vault 63). DeFiLlama pool is the
   // staking pool under project "dfdv-staked-sol" (NOT the jupiter-lend entries
   // which report 0 — those are the lending market, not the underlying LST yield).
-  { vaultId: 63, symbol: "dfdvSOL", llamaPool: "568bbb48-dc88-4313-b1cc-ab1d4e763d6d" },
+  { vaultId: 63, symbol: "dfdvSOL", llamaPool: "568bbb48-dc88-4313-b1cc-ab1d4e763d6d", mint: "sctmB7GPi5L2Q5G9tUSzXvhZ4YiDMEGcRov9KfArQpx" },
 ] as const;
 
 /**

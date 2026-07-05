@@ -10442,7 +10442,17 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // read the user's wallet balances — it NEVER hardcodes mints). Cached
       // after the first successful read; fail-open to [] (SOL-only deposit UI).
       const depositAssets = await getLoopDepositAssets().catch(() => []);
-      res.json({ positions, recommended, depositAssets, lifetime });
+      // Resolve logos for each LST deposit asset + native SOL (via wrapped mint).
+      // Fail-soft: on Helius error, logoURI is null and client shows no icon.
+      const SOL_LOGO_MINT = "So11111111111111111111111111111111111111112";
+      const depositMints = [...depositAssets.map((a) => a.mint), SOL_LOGO_MINT];
+      const depositLogoMap = await resolveTokenLogos(depositMints).catch(() => new Map<string, string | null>());
+      const depositAssetsWithLogos = depositAssets.map((a) => ({
+        ...a,
+        logoURI: depositLogoMap.get(a.mint) ?? null,
+      }));
+      const solLogoURI = depositLogoMap.get(SOL_LOGO_MINT) ?? null;
+      res.json({ positions, recommended, depositAssets: depositAssetsWithLogos, lifetime, solLogoURI });
     } catch (error: any) {
       console.error("[Loop] status error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
@@ -10473,6 +10483,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         fresh,
         Object.keys(LOOP_VAULT_ALLOWLIST).map(Number),
       );
+      // Resolve token logos via Helius DAS for all registry mints (fail-soft —
+      // empty map on error means every row gets logoURI: null, client falls back
+      // to letter placeholder). Runs in parallel with venuesPromise.
+      const logoMapPromise = resolveTokenLogos(LOOP_RATE_REGISTRY.map((r) => r.mint))
+        .catch(() => new Map<string, string | null>());
+
       const rates = LOOP_RATE_REGISTRY.map((pair) => {
         const r = fresh.get(pair.vaultId);
         const allowlisted = !!LOOP_VAULT_ALLOWLIST[pair.vaultId];
@@ -10522,8 +10538,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             ? netCarryAt(r.stakingApy, r.borrowApr, displayLeverage)
             : null,
           asOf: r ? r.asOf.toISOString() : null,
+          logoURI: null as string | null, // placeholder; replaced below after logo resolution
         };
       });
+      const logoMap = await logoMapPromise;
+      for (const row of rates) {
+        const pair = LOOP_RATE_REGISTRY.find((p) => p.vaultId === row.vaultId);
+        if (pair) row.logoURI = logoMap.get(pair.mint) ?? null;
+      }
       res.json({ rates, recommendedVaultId: recommended?.vaultId ?? null, venues: await venuesPromise });
     } catch (error: any) {
       console.error("[Loop] rates error:", error);
