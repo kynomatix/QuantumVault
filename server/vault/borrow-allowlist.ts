@@ -30,11 +30,16 @@
 export const ALLOWED_BORROW_VAULT_IDS: ReadonlySet<number> = new Set<number>([
   43, // INF
   1, 15, 49, // SOL, JitoSOL, mSOL
+  13, // JupSOL (stakePool+Chainlink composite; Pyth SOL/USD used as freshness proxy)
+  63, // dfdvSOL — DeFi Development Corp Staked SOL (same oracle type as JupSOL)
   8, // JLP
   41, 9, 11, 25, // LBTC, xBTC, cbBTC, WBTC
   7, // syrupUSDC
   40, // JUP
   77, 80, 78, 79, // TSLAx, NVDAx, SPYx, QQQx (tokenized equities; off-hours stale by design)
+  // NOT added: 45 (PST / PayFi Strategy Token — Pyth feed address unresolved to a
+  //   verifiable hex feedId); 68 (jlJUPUSD — uses jupLend oracle type, unsupported
+  //   by current registry; also an unusual Lend receipt token collateral).
 ]);
 
 export function isCollateralVaultAllowlisted(vaultId: number): boolean {

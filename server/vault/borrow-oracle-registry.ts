@@ -31,7 +31,28 @@ export interface PythDirectOracleSource {
   feedId: string;
 }
 
-export type BorrowOracleSource = PythDirectOracleSource;
+/**
+ * An LST whose Jupiter Lend vault uses a stakePool + Chainlink composite oracle
+ * with NO direct Pyth feed (e.g. JupSOL, dfdvSOL). The Pyth SOL/USD feed is used
+ * as a PROXY for freshness and 1h volatility checking:
+ *   - Sound: the LST's price volatility directly tracks SOL (same underlying).
+ *   - The stakePool rate is stable on-chain (slow accumulation), so SOL feed
+ *     freshness covers the volatile component.
+ *   - The price-divergence guard is intentionally SKIPPED for this kind — SOL/USD
+ *     price ≠ LST/USD price by design, and the proxy relationship is hardcoded
+ *     (not user-supplied), so the guard's purpose (catch wrong feed mappings) does
+ *     not apply.
+ */
+export interface PythSolProxyOracleSource {
+  kind: "pyth_sol_proxy";
+  vaultId: number;
+  collateralMint: string;
+  collateralSymbol: string;
+  /** Pyth SOL/USD feed id (hex, no 0x) — freshness + 1h volatility proxy. */
+  solFeedId: string;
+}
+
+export type BorrowOracleSource = PythDirectOracleSource | PythSolProxyOracleSource;
 
 /**
  * Registry keyed by the on-chain vault id (stable). The `collateralMint` is the
@@ -196,6 +217,39 @@ const REGISTRY: Record<number, BorrowOracleSource> = {
     collateralSymbol: "QQQx",
     feedId: "178a6f73a5aede9d0d682e86b0047c9f333ed0efe5c6537ca937565219c4054d",
   },
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // SOL-proxy LSTs. These vaults use a stakePool + Chainlink composite oracle
+  // on Jupiter Lend's side and have NO direct Pyth price feed. The Pyth SOL/USD
+  // feed (same feedId as vault 1) is registered here as a proxy for freshness and
+  // 1h volatility. The price-divergence guard is skipped by the freshness reader
+  // for this kind (SOL/USD price intentionally differs from the LST price).
+  // Both vaults share the same LT=0.80 / CF=0.75 risk params as JitoSOL/mSOL.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  // JupSOL (Jupiter Staked SOL) -> USDC, vault 13.
+  // Pyth has no direct JupSOL/USD feed; vault uses stakePool 8VpRhuxa... + Chainlink.
+  // Mint + vault ID verified 2026-07-05 via @jup-ag/lend/api getVaults().
+  // Oracle price: ~$97 (JupSOL stakePool rate ~0.97 when SOL ~$101).
+  13: {
+    kind: "pyth_sol_proxy",
+    vaultId: 13,
+    collateralMint: "jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v",
+    collateralSymbol: "JupSOL",
+    solFeedId: "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+  },
+
+  // dfdvSOL (DeFi Development Corp Staked SOL) -> USDC, vault 63.
+  // Same oracle type as JupSOL: stakePool pyZMBjpW... + Chainlink, no direct Pyth feed.
+  // Mint + vault ID verified 2026-07-05 via @jup-ag/lend/api getVaults().
+  // Oracle price: ~$88 (dfdvSOL stakePool rate ~0.87 when SOL ~$101).
+  63: {
+    kind: "pyth_sol_proxy",
+    vaultId: 63,
+    collateralMint: "sctmB7GPi5L2Q5G9tUSzXvhZ4YiDMEGcRov9KfArQpx",
+    collateralSymbol: "dfdvSOL",
+    solFeedId: "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+  },
 };
 
 /**
@@ -210,7 +264,13 @@ export function getBorrowOracleSource(
   const src = REGISTRY[vaultId];
   if (!src) return null;
   if (src.collateralMint !== collateralMint) return null;
-  if (!src.feedId || typeof src.feedId !== "string") return null;
+  if (src.kind === "pyth_direct") {
+    if (!src.feedId || typeof src.feedId !== "string") return null;
+  } else if (src.kind === "pyth_sol_proxy") {
+    if (!src.solFeedId || typeof src.solFeedId !== "string") return null;
+  } else {
+    return null; // unknown kind → fail closed
+  }
   return src;
 }
 

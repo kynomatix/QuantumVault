@@ -174,8 +174,23 @@ export async function readBorrowOracleContext(
   try {
     const getSource = deps.getOracleSource ?? getBorrowOracleSource;
     const source = getSource(vault.vaultId, vault.collateralMint);
-    if (!source || source.kind !== "pyth_direct") return UNREADABLE;
-    if (!source.feedId || typeof source.feedId !== "string") return UNREADABLE;
+    if (!source) return UNREADABLE;
+
+    // Resolve the Pyth feed id for this oracle kind.
+    //   pyth_direct    → source.feedId (direct USD price for this collateral)
+    //   pyth_sol_proxy → source.solFeedId (Pyth SOL/USD used as a freshness/
+    //                    volatility proxy for LSTs whose vault uses stakePool +
+    //                    Chainlink with no direct Pyth feed)
+    let feedId: string;
+    if (source.kind === "pyth_direct") {
+      feedId = source.feedId;
+    } else if (source.kind === "pyth_sol_proxy") {
+      feedId = source.solFeedId;
+    } else {
+      return UNREADABLE; // unknown kind → fail closed
+    }
+    if (!feedId || typeof feedId !== "string") return UNREADABLE;
+
     if (!(Number.isFinite(vault.oraclePriceLiquidateUsd) && vault.oraclePriceLiquidateUsd > 0)) {
       return UNREADABLE;
     }
@@ -188,8 +203,8 @@ export async function readBorrowOracleContext(
     const base = (deps.hermesBase ?? HERMES_BASE).replace(/\/+$/, "");
     const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-    const latestUrl = `${base}/v2/updates/price/latest?ids[]=${source.feedId}&parsed=true`;
-    const benchUrl = `${base}/v2/updates/price/${targetSec}?ids[]=${source.feedId}&parsed=true`;
+    const latestUrl = `${base}/v2/updates/price/latest?ids[]=${feedId}&parsed=true`;
+    const benchUrl = `${base}/v2/updates/price/${targetSec}?ids[]=${feedId}&parsed=true`;
 
     const [latestJson, benchJson] = await Promise.all([
       fetchJson(latestUrl, fetchImpl, timeoutMs),
@@ -197,21 +212,26 @@ export async function readBorrowOracleContext(
     ]);
     if (!latestJson || !benchJson) return UNREADABLE;
 
-    const latestMap = parseHermesParsed(latestJson, [source.feedId]);
-    const benchMap = parseHermesParsed(benchJson, [source.feedId]);
+    const latestMap = parseHermesParsed(latestJson, [feedId]);
+    const benchMap = parseHermesParsed(benchJson, [feedId]);
     if (!latestMap || !benchMap) return UNREADABLE;
 
-    const id = normFeedId(source.feedId);
+    const id = normFeedId(feedId);
     const latest = latestMap.get(id);
     const hourAgo = benchMap.get(id);
     if (!latest || !hourAgo) return UNREADABLE;
 
-    // Wrong-feed guard: the Hermes price must track the vault's own on-chain
-    // oracle price. A gross divergence means the feed id is mismapped (or an
-    // extreme desync) -> fail closed. Sanity guard ONLY; never a price authority.
-    const divergence = Math.abs(latest.priceUsd / vault.oraclePriceLiquidateUsd - 1);
-    if (!Number.isFinite(divergence) || divergence > VAULT_PRICE_MAX_DIVERGENCE) {
-      return UNREADABLE;
+    // Wrong-feed guard (pyth_direct only): the Hermes price must track the
+    // vault's own on-chain oracle price. A gross divergence means the feed id is
+    // mismapped (or an extreme desync) -> fail closed.
+    // Skipped for pyth_sol_proxy: the SOL/USD price intentionally differs from
+    // the LST vault price (e.g. SOL ~$101 vs JupSOL ~$97); the proxy relationship
+    // is hardcoded and the guard's wrong-map purpose does not apply.
+    if (source.kind === "pyth_direct") {
+      const divergence = Math.abs(latest.priceUsd / vault.oraclePriceLiquidateUsd - 1);
+      if (!Number.isFinite(divergence) || divergence > VAULT_PRICE_MAX_DIVERGENCE) {
+        return UNREADABLE;
+      }
     }
 
     return computeDirectOracleContext(latest, hourAgo, { nowSec, targetSec });
