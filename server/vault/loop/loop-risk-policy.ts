@@ -51,9 +51,11 @@ export const LOOP_VAULT_ALLOWLIST: Readonly<Record<number, LoopVaultPolicy>> = {
   5: { symbol: "JitoSOL", maxLeverage: 5 },
   42: { symbol: "INF", maxLeverage: 4 },
   47: { symbol: "mSOL", maxLeverage: 4 },
-  // dfdvSOL: LT=0.80 → HF gate floors effective leverage to 2.6×; maxLeverage
-  // cap here is redundant but documents intent (never open at 3x, HF=1.2 < 1.3).
-  63: { symbol: "dfdvSOL", maxLeverage: 3 },
+  // dfdvSOL: MULTIPLY vault 62 (LT=0.93). vault 63 is the BORROW vault (USDC
+  // debt) — wrong for the loop. maxLeverage: 3 is a conservative hard cap;
+  // the live HF gate will compute ~3.7× from LT=0.93 but we run dfdvSOL
+  // cautiously until it has more on-chain history.
+  62: { symbol: "dfdvSOL", maxLeverage: 3 },
 } as const;
 
 export const LOOP_RISK_POLICY = {

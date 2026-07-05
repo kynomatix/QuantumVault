@@ -27,9 +27,10 @@ const REGISTRY = [
   { vaultId: 5,  symbol: "JitoSOL", llamaPool: "0e7d0722-9054-4907-8593-567b353c0900" },
   { vaultId: 42, symbol: "INF",     llamaPool: "3075a746-bdd1-4aac-bcd5-b035abee2622" },
   { vaultId: 47, symbol: "mSOL",    llamaPool: "b3f93865-5ec8-4662-90a0-11808e0aa2bd" },
-  // dfdvSOL: DeFi Development Corp Staked SOL (vault 63, LT=0.80 → 2.6× max safe lever).
-  // llamaPool is the staking pool under project "dfdv-staked-sol" (not the jupiter-lend entry).
-  { vaultId: 63, symbol: "dfdvSOL", llamaPool: "568bbb48-dc88-4313-b1cc-ab1d4e763d6d" },
+  // dfdvSOL: MULTIPLY vault 62 (LT=0.93, WSOL debt). vault 63 is the BORROW vault
+  // (USDC debt) — wrong for the loop. llamaPool is the staking pool under
+  // project "dfdv-staked-sol" (not the jupiter-lend entry which reports 0).
+  { vaultId: 62, symbol: "dfdvSOL", llamaPool: "568bbb48-dc88-4313-b1cc-ab1d4e763d6d" },
 ];
 
 const CANDIDATE_LEVERAGES = [2, 3, 4, 5];

@@ -50,7 +50,7 @@ const LOOP_VAULTS: Array<{ id: number; symbol: string }> = [
   { id: 5,  symbol: "JitoSOL" },
   { id: 42, symbol: "INF" },
   { id: 47, symbol: "mSOL" },
-  { id: 63, symbol: "dfdvSOL" },
+  { id: 62, symbol: "dfdvSOL" },
 ];
 
 interface LoopLive {

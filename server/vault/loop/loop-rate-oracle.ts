@@ -53,10 +53,13 @@ export const LOOP_RATE_REGISTRY: readonly LoopRatePair[] = [
   { vaultId: 5,  symbol: "JitoSOL", llamaPool: "0e7d0722-9054-4907-8593-567b353c0900", mint: "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn" },
   { vaultId: 42, symbol: "INF",     llamaPool: "3075a746-bdd1-4aac-bcd5-b035abee2622", mint: "5oVNBeEEQvYi1cX3ir8Dx5n1P7pdxydbGF2X4TxVusJm" },
   { vaultId: 47, symbol: "mSOL",    llamaPool: "b3f93865-5ec8-4662-90a0-11808e0aa2bd", mint: "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So" },
-  // dfdvSOL (DeFi Development Corp Staked SOL, vault 63). DeFiLlama pool is the
-  // staking pool under project "dfdv-staked-sol" (NOT the jupiter-lend entries
-  // which report 0 — those are the lending market, not the underlying LST yield).
-  { vaultId: 63, symbol: "dfdvSOL", llamaPool: "568bbb48-dc88-4313-b1cc-ab1d4e763d6d", mint: "sctmB7GPi5L2Q5G9tUSzXvhZ4YiDMEGcRov9KfArQpx" },
+  // dfdvSOL (DeFi Development Corp Staked SOL, MULTIPLY vault 62). DeFiLlama pool
+  // is the staking pool under project "dfdv-staked-sol" (NOT the jupiter-lend
+  // entries which report 0 — those are the lending market, not the LST yield).
+  // NOTE: vault 63 is the BORROW vault (USDC debt) — decodeLoopVaultConfig
+  // rejects it (borrowToken !== WSOL). Vault 62 is the multiply vault (WSOL debt,
+  // LT=0.93). Verified 2026-07-05 via client.borrow.getVaults().
+  { vaultId: 62, symbol: "dfdvSOL", llamaPool: "568bbb48-dc88-4313-b1cc-ab1d4e763d6d", mint: "sctmB7GPi5L2Q5G9tUSzXvhZ4YiDMEGcRov9KfArQpx" },
 ] as const;
 
 /**
