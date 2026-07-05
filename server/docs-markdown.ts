@@ -918,7 +918,7 @@ The SOL Loop Vault earns boosted staking yield by looping your SOL through a liq
 
 A loop multiplies your effective staking yield. In plain terms:
 
-1. Your SOL is converted to an LST (INF, mSOL, JitoSOL, or JupSOL).
+1. Your SOL is converted to an LST (INF, mSOL, JitoSOL, JupSOL, or dfdvSOL).
 2. That LST is used as collateral to borrow more SOL.
 3. The borrowed SOL is also converted to the same LST.
 4. Now you hold more LST than you started with — the whole stack earns staking yield.
@@ -938,13 +938,14 @@ At 3× leverage, for example, you earn staking yield on roughly 3× your origina
 - **mSOL** (Marinade staked SOL) — Liquid staking from Marinade Finance.
 - **JitoSOL** (Jito staked SOL) — Includes MEV rewards on top of staking yield.
 - **JupSOL** (Jupiter staked SOL) — Jupiter's liquid staking token.
+- **dfdvSOL** (DeFi Development Corp Staked SOL) — Corporate validator LST from DFDV (Nasdaq-listed). Currently the highest staking yield of the five pairs. Its lending liquidation threshold is lower (0.80 vs 0.95 for the others), which caps effective leverage at ~2.6× — lower than the other pairs but still profitable when carry is positive.
 
 ### How to Open a Position
 
 1. Open the **Vaults** tab and find the Asset Vaults section.
 2. Tap the SOL Loop card to see current rates for each pair.
 3. Pick your LST pair — the live carry rate for each is shown.
-4. Choose your leverage (1×–3× depending on the pair).
+4. Choose your leverage — up to ~3.7× for INF, JitoSOL, and JupSOL; ~3.2× for mSOL; ~2.6× for dfdvSOL.
 5. Confirm — the platform opens the loop on-chain and starts monitoring it.
 
 ### Risks

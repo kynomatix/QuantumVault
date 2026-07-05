@@ -35,19 +35,25 @@ export interface LoopVaultPolicy {
  * Launch allowlist — the ONLY Jupiter Lend Multiply vaults a loop may open on.
  * JupSOL + mSOL proven with live mainnet round trips in P1 (see
  * docs/qntsol/SOL_LOOP_VAULT_PLAN.md §P1 for signatures). JitoSOL + INF added
- * 2026-07-04 at the owner's direction (owner runs the live proof himself);
- * the executor is vault-generic (mint/oracle/LT all come from the vault
+ * 2026-07-04 at the owner's direction (owner runs the live proof himself).
+ * dfdvSOL (DeFi Development Corp Staked SOL) added 2026-07-05 at owner's
+ * direction; LT=0.80 floors the HF gate to 2.6× effective leverage (lower
+ * than the other pairs), but its staking APY is currently the highest.
+ * The executor is vault-generic (mint/oracle/LT all come from the vault
  * config by id), so no per-token code exists beyond this entry.
  */
 export const LOOP_VAULT_ALLOWLIST: Readonly<Record<number, LoopVaultPolicy>> = {
   // Per-vault caps are VENUE-QUALITY overrides (pool depth / liquidity
   // judgment), not the binding safety constraint — the minOpenHealthFactor
-  // gate binds first (LT .95 → ~3.7x for JupSOL/JitoSOL/INF, mSOL LT .90 →
-  // ~3.2x today).
+  // gate binds first (LT .95 → ~3.7x for JupSOL/JitoSOL/INF, LT .90 →
+  // ~3.2x for mSOL, LT .80 → ~2.6x for dfdvSOL).
   4: { symbol: "JupSOL", maxLeverage: 5 },
   5: { symbol: "JitoSOL", maxLeverage: 5 },
   42: { symbol: "INF", maxLeverage: 4 },
   47: { symbol: "mSOL", maxLeverage: 4 },
+  // dfdvSOL: LT=0.80 → HF gate floors effective leverage to 2.6×; maxLeverage
+  // cap here is redundant but documents intent (never open at 3x, HF=1.2 < 1.3).
+  63: { symbol: "dfdvSOL", maxLeverage: 3 },
 } as const;
 
 export const LOOP_RISK_POLICY = {

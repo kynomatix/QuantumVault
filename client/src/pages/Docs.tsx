@@ -2301,6 +2301,7 @@ function SolLoopVaultSection() {
     { token: 'mSOL', full: 'Marinade staked SOL', note: 'Liquid staking from Marinade Finance.' },
     { token: 'JitoSOL', full: 'Jito staked SOL', note: 'Includes MEV rewards on top of base staking yield.' },
     { token: 'JupSOL', full: 'Jupiter staked SOL', note: "Jupiter's liquid staking token." },
+    { token: 'dfdvSOL', full: 'DeFi Development Corp Staked SOL', note: 'Corporate validator LST from DFDV (Nasdaq-listed). Highest staking APY of the five pairs but lower lending LT (0.80 vs 0.95), which caps effective leverage at ~2.6×.' },
   ];
 
   return (
@@ -2318,7 +2319,7 @@ function SolLoopVaultSection() {
       <SubHeading>How the Loop Works</SubHeading>
       <Paragraph>A loop multiplies your effective staking yield. In plain terms:</Paragraph>
       <StepList steps={[
-        'Your SOL is converted to an LST (INF, mSOL, JitoSOL, or JupSOL).',
+        'Your SOL is converted to an LST (INF, mSOL, JitoSOL, JupSOL, or dfdvSOL).',
         'That LST is used as collateral to borrow more SOL.',
         'The borrowed SOL is also converted to the same LST.',
         'Now you hold more LST than you started with — the whole stack earns staking yield.',
@@ -2393,7 +2394,7 @@ function SolLoopVaultSection() {
         'Open the Vaults tab and find the Asset Vaults section.',
         'Tap the SOL Loop card to see current carry rates for each pair.',
         'Pick your LST pair — the live net APY for each is shown.',
-        'Choose your leverage (1×–3× depending on the pair).',
+        'Choose your leverage — up to ~3.7× for INF, JitoSOL, JupSOL; ~3.2× for mSOL; ~2.6× for dfdvSOL.',
         "Confirm — the platform opens the loop on-chain and starts monitoring it immediately.",
         "You'll receive a Telegram alert when the position opens and whenever it adjusts automatically.",
       ]} />
@@ -3840,7 +3841,7 @@ const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet:
   { id: 'vaults-destinations', label: 'Stable Vaults', snippet: 'Stable Vaults park idle USDC into near-$1 yield tokens: Kamino USDC, Perena USD*, Jupiter Lend USDC, Ondo USDY, and OnRe ONyc. Simple, one tap in and one tap out.', keywords: ['stable vaults', 'destination', 'destinations', 'yield', 'apy', 'kamino', 'perena', 'jupiter lend', 'ondo', 'usdy', 'onre', 'onyc', 'stablecoin', 'stable', 'floating', 'reinsurance', 'treasury', 'park usdc', 'idle usdc'] },
   { id: 'vaults-safety', label: 'Safety & Funding', snippet: 'How Vaults stay money-safe (on-chain truth, realized amounts, price-impact cap), auto-unpark to fund trades, and auto-park idle funds back into yield after a position closes (Flash).', keywords: ['safety', 'safe', 'money', 'on-chain', 'realized', 'price impact', 'fail closed', 'equity', 'balance', 'auto unpark', 'fund trade', 'top up', 'collateral', 'per bot', 'per-bot', 'auto park', 'auto-park', 'repark', 'idle funds', 'after close', 'earn between trades', 'flash'] },
   { id: 'asset-vaults', label: 'Asset Vaults', snippet: 'Asset Vaults run DeFi strategies on your SOL — leveraged, actively managed every minute, with automatic safety unwinds and Telegram alerts. More complex than Stable Vaults.', keywords: ['asset vault', 'asset vaults', 'defi', 'leveraged', 'automated', 'strategy', 'sol', 'managed', 'active', 'auto-manage', 'loop', 'hopping', 'complex', 'risk', 'liquidation'] },
-  { id: 'sol-loop-vault', label: 'SOL Loop Vault', snippet: 'Leveraged LST staking loop. Pick a pair (INF, mSOL, JitoSOL, JupSOL) and leverage (1×–3×). Platform auto-manages: safety unwind, re-lever, and pair-switching when a better option appears.', keywords: ['sol loop', 'loop vault', 'lst', 'liquid staking', 'leveraged staking', 'inf', 'msol', 'jitosol', 'jupsol', 'leverage', 'borrow rate', 'carry', 'net apy', 'pair switching', 'hop', 'hopping', 'unwind', 'relever', 'health factor', 'liquidation', 'staking yield', 'sanctum', 'marinade', 'jito', 'jupiter'] },
+  { id: 'sol-loop-vault', label: 'SOL Loop Vault', snippet: 'Leveraged LST staking loop. Pick a pair (INF, mSOL, JitoSOL, JupSOL, dfdvSOL) and leverage (up to ~3.7×). Platform auto-manages: safety unwind, re-lever, and pair-switching when a better option appears.', keywords: ['sol loop', 'loop vault', 'lst', 'liquid staking', 'leveraged staking', 'inf', 'msol', 'jitosol', 'jupsol', 'dfdvsol', 'dfdv', 'leverage', 'borrow rate', 'carry', 'net apy', 'pair switching', 'hop', 'hopping', 'unwind', 'relever', 'health factor', 'liquidation', 'staking yield', 'sanctum', 'marinade', 'jito', 'jupiter'] },
   { id: 'borrow-overview', label: 'Borrow Overview', snippet: 'Borrow USDC against collateral like SOL, INF, or BTC without selling it. Built on Jupiter Lend (Fluid). Live health factor, borrow rate APR, and carry-trade guidance.', keywords: ['borrow', 'debt', 'loan', 'lend', 'collateral', 'inf', 'sol', 'jitosol', 'msol', 'wbtc', 'cbbtc', 'xbtc', 'lbtc', 'btc', 'jlp', 'jup', 'syrupusdc', 'tslax', 'nvdax', 'spyx', 'qqqx', 'jupiter lend', 'fluid', 'health factor', 'liquidation', 'ltv', 'borrow rate', 'apr', 'carry trade', 'carry', 'usdc', 'liability', 'repay', 'supply collateral', 'pledge', 'position'] },
   { id: 'borrow-perbot', label: 'Per-Bot Borrow', snippet: 'Borrow USDC against a single bot\'s collateral. Available on Flash bots. Automatic repay and collateral return when the bot closes.', keywords: ['per bot', 'per-bot', 'bot borrow', 'borrow against bot', 'flash borrow', 'bot collateral', 'auto repay', 'automatic close', 'equity tab', 'carry advisor', 'bot debt', 'bot liability'] },
   { id: 'quantumlab-overview', label: 'QuantumLab Overview', snippet: 'QuantumLab is the built-in backtesting and strategy optimization engine. Test strategies before deploying them live.', keywords: ['quantumlab', 'quantum lab', 'backtest', 'backtesting', 'lab', 'test', 'simulation', 'historical', 'strategy', 'candle', 'ohlc'] },
