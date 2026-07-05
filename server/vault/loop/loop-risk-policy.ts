@@ -142,6 +142,18 @@ export const LOOP_ALLOCATION_POLICY = {
    */
   minEvGapApy: 0.01,
   /**
+   * P4 HOP: minimum net-carry improvement (fraction APY) a BETTER allowlisted
+   * pair must beat the current pair by before the brain fully unwinds one loop
+   * and re-loops onto the other. A hop pays TWO full-notional swaps (close leg
+   * LST→SOL + open leg SOL→LST) plus possible NFT-mint rent — materially more
+   * than a re-lever's single incremental swap — so this gate is DELIBERATELY
+   * higher than `minEvGapApy` (~2× as a conservative default). Owner-tunable
+   * (plan §6): raise it to hop less often, lower it to chase yield harder.
+   * Same "simple switching-cost cover, not a cost model" philosophy as
+   * `minEvGapApy` — keeps the brain auditable.
+   */
+  hopMinCarryGainApy: 0.02,
+  /**
    * Unwind to HOLD when the levered net carry falls below this floor even if
    * the EV gap alone would not trigger (paying to stay levered is never worth
    * it). Matches the safety tick's bleed-stopper threshold.
@@ -447,4 +459,64 @@ export function evaluateLoopOpenRequest(input: LoopOpenPolicyInput): LoopPolicyD
     depegBps,
     reasons,
   };
+}
+
+// ---------------------------------------------------------------------------
+// P4 HOP — returned-SOL reconstruction after the close leg
+// ---------------------------------------------------------------------------
+export type HopSolReturnedResult =
+  | { ok: true; solReturnedRaw: bigint }
+  | { ok: false; reason: string };
+
+/**
+ * Reconstruct the lamports the close leg of a hop returned to the agent wallet,
+ * so the re-loop can be sized. Money-safety rules (architect review, P4):
+ *
+ *   1. PREFER the close op's own reported figure (`closeSolReturnedRaw`) — it is
+ *      the exact confirmed delta the close executor measured.
+ *   2. Otherwise fall back to the STRICT on-chain delta `now − baseline`, where
+ *      `baselineRaw` is the PERSISTED PRE-close reading. Never a fresh
+ *      (post-close) baseline: after the unwind, `now − now ≈ 0` would size the
+ *      re-loop to nothing and strand the returned SOL un-levered.
+ *   3. Fail closed (never guess): a missing/zero/negative figure, a missing
+ *      persisted baseline, or an unreadable current balance all STOP the hop
+ *      resumably — the SOL is safe in the agent wallet, retry once measurable.
+ *
+ * Pure and side-effect free so it can be unit-tested directly; the executor
+ * supplies the strict reads.
+ */
+export function recoverHopSolReturned(input: {
+  /** `solReturnedLamports` from the close leg / its persisted op result. */
+  closeSolReturnedRaw?: string | bigint | null;
+  /** Persisted PRE-close agent-wallet lamports (write-ahead baseline). */
+  baselineRaw?: bigint | null;
+  /** Current strict agent-wallet lamports; null = unreadable (fail closed). */
+  agentLamportsNowRaw?: bigint | null;
+}): HopSolReturnedResult {
+  // 1. Trust the close leg's own figure when present and positive.
+  const fig = input.closeSolReturnedRaw;
+  if (fig != null && fig !== "") {
+    let parsed: bigint | null = null;
+    try {
+      parsed = typeof fig === "bigint" ? fig : BigInt(fig);
+    } catch {
+      parsed = null;
+    }
+    if (parsed != null && parsed > 0n) return { ok: true, solReturnedRaw: parsed };
+    // A present-but-unusable figure (unparseable / ≤0) falls through to the
+    // delta path rather than being trusted.
+  }
+
+  // 2. Strict delta vs the PERSISTED pre-close baseline.
+  if (input.baselineRaw == null) {
+    return { ok: false, reason: "no persisted pre-close baseline to measure the returned SOL against" };
+  }
+  if (input.agentLamportsNowRaw == null) {
+    return { ok: false, reason: "current agent-wallet balance is unreadable" };
+  }
+  const delta = input.agentLamportsNowRaw - input.baselineRaw;
+  if (delta <= 0n) {
+    return { ok: false, reason: "no positive SOL delta since the pre-close baseline yet" };
+  }
+  return { ok: true, solReturnedRaw: delta };
 }

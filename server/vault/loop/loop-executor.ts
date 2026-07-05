@@ -75,12 +75,13 @@ import {
 import {
   computeLoopTargetLeverage,
   evaluateLoopOpenRequest,
+  recoverHopSolReturned,
   LOOP_ALLOCATION_POLICY,
   LOOP_RISK_POLICY,
   LOOP_VAULT_ALLOWLIST,
   type LoopPolicyReason,
 } from "./loop-risk-policy";
-import { getFreshLoopRates, sampleAndPersistLoopRates, LOOP_RATE_REGISTRY, type FreshLoopRate } from "./loop-rate-oracle";
+import { getFreshLoopRates, sampleAndPersistLoopRates, netCarryAt, pickBestLoopVault, LOOP_RATE_REGISTRY, type FreshLoopRate } from "./loop-rate-oracle";
 import type { BorrowPosition, BorrowOperation } from "@shared/schema";
 
 // --- Constants ---------------------------------------------------------------
@@ -2023,6 +2024,621 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
       return { success: false, error: `Loop Close failed: ${msg}` };
     }
   });
+}
+
+// --- HOP (P4: fully unwind one pair, re-loop onto a better allowlisted pair) ------
+
+export interface LoopHopParams {
+  walletAddress: string;
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  /** The CURRENTLY OPEN loop position to unwind. */
+  borrowPositionId: string;
+  /** The better allowlisted vault to re-loop onto (must differ from current). */
+  targetVaultId: number;
+  slippageBps?: number;
+  /** REQUIRED — the retry/idempotency key for the whole hop op. */
+  clientRequestId: string;
+  /** Free-form policy audit string (e.g. the allocation reason that triggered it). */
+  policyReason?: string;
+}
+
+export interface LoopHopResult {
+  success: boolean;
+  /** The NEW loop position id (set once the re-open lands). */
+  borrowPositionId?: string;
+  closeSignature?: string;
+  openSignature?: string;
+  /** SOL realized from the unwind, raw lamports (the re-loop principal budget). */
+  solReturnedLamports?: string;
+  /** Estimated hop cost (2 full-notional swap slippage + rent overhead), raw lamports. */
+  predictedCostLamports?: string;
+  /**
+   * Realized rent+fee overhead (solReturned − principal), raw lamports. NOTE:
+   * this is an OVERHEAD proxy only — it does NOT include the swap slippage paid
+   * on each leg (that is priced into solReturned itself and cannot be cheaply
+   * isolated), so it UNDERSTATES the true all-in hop cost. `predictedCost` is
+   * the honest all-in estimate.
+   */
+  realizedCostLamports?: string;
+  verifyWarning?: string;
+  /** True = declined by the execution-time carry re-gate (NOT an error; nothing moved). */
+  policyDenied?: boolean;
+  /** True = interrupted after money moved; retry the SAME clientRequestId to resume. */
+  resumable?: boolean;
+  /** True = this clientRequestId already succeeded. */
+  alreadyCompleted?: boolean;
+  /** True = this clientRequestId terminally failed BEFORE any money moved; use a fresh one. */
+  terminal?: boolean;
+  error?: string;
+}
+
+/**
+ * Execution-time carry re-gate for a hop: recompute BOTH pairs' net carry at
+ * their OWN dynamic target leverage from FRESH single-vault reads (the sampled
+ * decision-table may be minutes old after hysteresis), and require the target
+ * to still beat the current pair by more than `hopMinCarryGainApy`. Fail closed
+ * on any unreadable input — an unmeasurable edge is NOT an edge.
+ */
+async function evaluateHopCarryGain(
+  fromVaultId: number,
+  toVaultId: number,
+): Promise<{ ok: boolean; gainApy: number | null; fromCarryApy: number | null; toCarryApy: number | null; toLeverage: number | null; reason?: string }> {
+  const fromRate = await resolveFreshLoopRate(fromVaultId);
+  const toRate = await resolveFreshLoopRate(toVaultId);
+  if (!fromRate) return { ok: false, gainApy: null, fromCarryApy: null, toCarryApy: null, toLeverage: null, reason: "current pair rates unreadable" };
+  if (!toRate) return { ok: false, gainApy: null, fromCarryApy: null, toCarryApy: null, toLeverage: null, reason: "target pair rates unreadable" };
+
+  const fromTarget = computeLoopTargetLeverage({
+    vaultId: fromVaultId,
+    liquidationThreshold: fromRate.liquidationThreshold,
+    stakingApy: fromRate.stakingApy,
+    borrowApr: fromRate.borrowApr,
+  });
+  const toTarget = computeLoopTargetLeverage({
+    vaultId: toVaultId,
+    liquidationThreshold: toRate.liquidationThreshold,
+    stakingApy: toRate.stakingApy,
+    borrowApr: toRate.borrowApr,
+  });
+  if (fromTarget.leverage === null) return { ok: false, gainApy: null, fromCarryApy: null, toCarryApy: null, toLeverage: null, reason: "current pair leverage unreadable" };
+  if (toTarget.leverage === null) return { ok: false, gainApy: null, fromCarryApy: null, toCarryApy: null, toLeverage: null, reason: "target pair not profitable to loop right now" };
+
+  const fromCarryApy = netCarryAt(fromRate.stakingApy, fromRate.borrowApr, fromTarget.leverage);
+  const toCarryApy = netCarryAt(toRate.stakingApy, toRate.borrowApr, toTarget.leverage);
+  if (fromCarryApy === null || toCarryApy === null) {
+    return { ok: false, gainApy: null, fromCarryApy, toCarryApy, toLeverage: toTarget.leverage, reason: "net carry unreadable" };
+  }
+  const gainApy = toCarryApy - fromCarryApy;
+  return {
+    ok: gainApy > LOOP_ALLOCATION_POLICY.hopMinCarryGainApy,
+    gainApy,
+    fromCarryApy,
+    toCarryApy,
+    toLeverage: toTarget.leverage,
+    reason: gainApy > LOOP_ALLOCATION_POLICY.hopMinCarryGainApy ? undefined : "carry gain no longer clears the hop threshold",
+  };
+}
+
+/**
+ * P4 HOP (plan §4.4/§5): fully unwind the current loop pair to SOL and re-loop
+ * that SOL onto a BETTER allowlisted pair. NOT atomic in one transaction — a
+ * loop tx is already 1215/1232 bytes, so a close+open in one tx is impossible.
+ * Instead each leg is INDIVIDUALLY atomic and the whole hop is CRASH-RESUMABLE
+ * through a durable op row, so funds are never stranded:
+ *
+ *  - PRE-CLOSE (no money moved): re-gate the carry edge at EXECUTION time
+ *    (fresh reads) — if the target no longer beats the current pair by
+ *    `hopMinCarryGainApy`, decline cleanly (policyDenied, nothing closed).
+ *    Record the pre-close agent SOL baseline. → step `pre_gated`.
+ *  - CLOSE: full unwind to SOL via executeLoopClose (its own lock + op + swap
+ *    reconcile). solReturned = its reported figure, ELSE the STRICT balance
+ *    delta vs the pre-close baseline (self-heal / ambiguous-clear paths report
+ *    no figure). → step `close_done`, solReturned persisted.
+ *  - RE-OPEN: size the principal from the REAL solReturned exactly like the
+ *    deposit-open path (preflight → overhead → principal = solReturned −
+ *    overhead), open on the target. If the target is unopenable at this size,
+ *    FALL BACK to the best openable allowlisted vault (which may be the ORIGINAL
+ *    pair — a hop that reverses to where it started is still fund-safe). If
+ *    nothing is openable, leave it resumable: the SOL sits safely in the agent
+ *    wallet and the next tick / retry re-loops it. → step `opened`, succeeded.
+ *
+ * NO wrapping borrow lock: the close and open take DIFFERENT lock keys
+ * (fromVault vs toVault), and the op row is the cross-leg coordination point.
+ */
+export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResult> {
+  const { walletAddress, agentPublicKey, agentSecretKey, borrowPositionId, targetVaultId } = params;
+  const slippageBps = params.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
+
+  if (!params.clientRequestId || typeof params.clientRequestId !== "string") {
+    return { success: false, error: "clientRequestId is required for a safe hop retry path." };
+  }
+  if (!LOOP_VAULT_ALLOWLIST[targetVaultId]) {
+    return { success: false, error: `Hop target vault ${targetVaultId} is not on the loop launch allowlist.` };
+  }
+
+  // Load-or-create the durable op row (idempotent on clientRequestId). Do this
+  // BEFORE touching the source position: on a RESUME the close has already run,
+  // so the source position is CLOSED and cannot be re-loaded — we read the
+  // source vault from the op metadata instead (only the FRESH path reads chain).
+  let op = await storage.getBorrowOperationByClientRequestId(walletAddress, params.clientRequestId);
+  if (op && op.operationType !== "loop_hop") {
+    return { success: false, error: "This request id was already used by a different operation." };
+  }
+  if (op && (op.status === "succeeded" || op.status === "completed")) {
+    const r = (op.result ?? {}) as Record<string, any>;
+    return {
+      success: true,
+      alreadyCompleted: true,
+      borrowPositionId: r.borrowPositionId ?? undefined,
+      closeSignature: r.closeSignature ?? undefined,
+      openSignature: r.openSignature ?? undefined,
+      solReturnedLamports: r.solReturnedLamports ?? undefined,
+    };
+  }
+  if (op && op.status === "failed") {
+    // Terminal ONLY when it failed BEFORE the close (money never moved). If the
+    // close had already run, the op would carry a solReturnedLamports crumb and
+    // must be resumable, not terminal — guard on that.
+    const meta0 = (op.metadata ?? {}) as Record<string, any>;
+    if (!meta0.solReturnedLamports) {
+      return {
+        success: false,
+        terminal: true,
+        error: "This hop attempt was declined or failed before any funds moved. Your position is unchanged.",
+      };
+    }
+  }
+
+  let fromVaultId: number;
+  if (op) {
+    // RESUME: trust the source vault recorded at creation (the source position
+    // may already be closed, so we cannot re-derive it from chain).
+    const m = (op.metadata ?? {}) as Record<string, any>;
+    const fv = Number(m.fromVaultId);
+    if (!Number.isInteger(fv) || fv <= 0) {
+      return { success: false, resumable: true, error: "Hop op is missing its source vault id; cannot safely resume." };
+    }
+    fromVaultId = fv;
+  } else {
+    // FRESH: the source position MUST still be open (fail closed).
+    const loaded = await loadOpenLoopPosition(walletAddress, borrowPositionId);
+    if (!loaded.ok) return { success: false, error: loaded.error };
+    fromVaultId = loaded.loaded.vaultId;
+    if (fromVaultId === targetVaultId) {
+      return { success: false, error: "Hop target is the same pair as the current position — nothing to do." };
+    }
+    try {
+      op = await storage.createBorrowOperation({
+        walletAddress,
+        borrowPositionId, // the SOURCE position; result records the new one
+        operationType: "loop_hop",
+        status: "pending",
+        step: "initialized",
+        clientRequestId: params.clientRequestId,
+        metadata: {
+          kind: "loop",
+          fromVaultId,
+          toVaultId: targetVaultId,
+          slippageBps,
+          sourceBorrowPositionId: borrowPositionId,
+          ...(params.policyReason ? { policyReason: params.policyReason } : {}),
+        },
+      });
+    } catch (e) {
+      if (isUniqueViolation(e)) {
+        op = await storage.getBorrowOperationByClientRequestId(walletAddress, params.clientRequestId);
+      }
+      if (!op) throw e;
+    }
+  }
+  const opId = op.id;
+  let meta = (op.metadata ?? {}) as Record<string, any>;
+
+  let solReturned: bigint | null = null;
+  try {
+    if (typeof meta.solReturnedLamports === "string") solReturned = BigInt(meta.solReturnedLamports);
+  } catch {
+    solReturned = null;
+  }
+  let closeSignature: string | undefined = typeof meta.closeSignature === "string" ? meta.closeSignature : undefined;
+  let targetLeverage: number | null = typeof meta.targetLeverage === "number" ? meta.targetLeverage : null;
+
+  try {
+    // ---- PHASE 1: PRE-CLOSE GATE + CLOSE (skipped once solReturned is known) ----
+    if (solReturned === null) {
+      // Per-attempt close crid (mirrors the re-open leg below). executeLoopClose
+      // REJECTS a duplicate clientRequestId (the unique index has no status
+      // filter), so a FAILED close row under a FIXED crid would wedge every retry
+      // on "already submitted" — freezing the hop and, via hopInFlightPositionIds,
+      // excluding the position from all allocation decisions. Each attempt gets
+      // its own crid; executeLoopClose re-reads live state and self-heals if the
+      // position is already flat, so retries progress instead of deadlocking.
+      const priorCloseAttempts = Number(meta.closeAttempts ?? 0);
+      const closeCridFor = (n: number) => `${params.clientRequestId}:close:${n}`;
+
+      // The persisted pre-close SOL baseline is the durable marker that the gate
+      // already passed and the close leg is in play. Its PRESENCE means we must
+      // NOT re-gate or re-read the baseline on resume: after the close, a fresh
+      // read is post-close (overstated), and a rate that has since drifted would
+      // falsely decline a hop whose funds have already moved.
+      let baseline: bigint | null = null;
+      try {
+        if (typeof meta.preCloseAgentLamports === "string") baseline = BigInt(meta.preCloseAgentLamports);
+      } catch {
+        baseline = null;
+      }
+
+      // Ground truth for "did the unwind move money?": the source position is no
+      // longer open (a loop is only marked closed AFTER its unwind tx confirms).
+      // This survives executeLoopClose's own crash window — position closed but
+      // its op not yet marked succeeded — where blindly re-invoking it would fail
+      // loadOpenLoopPosition and stall the hop forever.
+      const sourceStillOpen = (await loadOpenLoopPosition(walletAddress, borrowPositionId)).ok;
+
+      if (sourceStillOpen) {
+        // Money has NOT moved yet.
+        if (baseline === null) {
+          // FRESH: execution-time carry re-gate — a decline is clean and terminal
+          // for THIS attempt (nothing has moved).
+          const gate = await evaluateHopCarryGain(fromVaultId, targetVaultId);
+          if (!gate.ok) {
+            await failOp(opId, "carry_gate_failed", gate.reason ?? "hop no longer beats the carry threshold");
+            return {
+              success: false,
+              policyDenied: true,
+              error: `Hop declined: ${gate.reason ?? "the better pair no longer beats the current one by enough to justify the switch"}. Your position is unchanged.`,
+            };
+          }
+          targetLeverage = gate.toLeverage;
+
+          // Write-ahead a genuine PRE-close SOL baseline (STRICT read → fail
+          // closed): the self-heal / ambiguous-clear close paths report no
+          // returned figure, so we reconstruct solReturned from this baseline.
+          baseline = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, NATIVE_SOL_MINT)).amountRaw);
+          const baselinePersisted = await storage.updateBorrowOperation(opId, {
+            step: "pre_gated",
+            mergeMetadata: {
+              preCloseAgentLamports: baseline.toString(),
+              ...(targetLeverage != null ? { targetLeverage } : {}),
+              gateGainApy: gate.gainApy,
+              gateFromCarryApy: gate.fromCarryApy,
+              gateToCarryApy: gate.toCarryApy,
+            },
+          });
+          // The persisted baseline is how a no-figure close path (self-heal /
+          // ambiguous-clear) reconstructs solReturned on resume. If it did not
+          // persist, a post-close crash would leave the hop resumable forever
+          // (funds safe in wallet, never re-looped) — refuse to close until it's
+          // durable.
+          if (!baselinePersisted) {
+            return {
+              success: false,
+              resumable: true,
+              error: "Could not record the pre-unwind baseline. Your funds are safe. Wait a minute and retry.",
+            };
+          }
+        }
+
+        // CLOSE — full unwind to SOL (its own lock + op + swap reconcile).
+        // Write-ahead the attempt number BEFORE the call so a resume can find and
+        // vet every close op we created (mirrors openAttempts on the re-open leg).
+        // If that write does not persist, a resume can't discover this close op
+        // and would mis-terminal a genuine own-close as closed_outside_hop — so
+        // refuse to broadcast until the attempt marker is durable.
+        const closeAttempt = priorCloseAttempts + 1;
+        const attemptPersisted = await storage.updateBorrowOperation(opId, { mergeMetadata: { closeAttempts: closeAttempt } });
+        if (!attemptPersisted) {
+          return {
+            success: false,
+            resumable: true,
+            error: "Could not record the unwind attempt. Your funds are safe. Wait a minute and retry.",
+          };
+        }
+        const close = await executeLoopClose({
+          walletAddress,
+          agentPublicKey,
+          agentSecretKey,
+          borrowPositionId,
+          slippageBps,
+          clientRequestId: closeCridFor(closeAttempt),
+        });
+        if (!close.success) {
+          // The unwind did not complete: the source position is still open (or
+          // unresolved). Nothing to re-open yet — resumable, funds intact.
+          return {
+            success: false,
+            resumable: true,
+            ...(close.signature ? { closeSignature: close.signature } : {}),
+            error: `${close.error || "Unwind did not complete."} Your position is safe. Retry to finish the hop.`,
+          };
+        }
+        closeSignature = close.signature;
+
+        // Measure solReturned via the shared money-safety helper: prefer the
+        // close's own figure; otherwise the STRICT delta vs the write-ahead
+        // baseline (valid here — baseline was read pre-close this same pass).
+        let nowRaw: bigint | null = null;
+        if (!close.solReturnedLamports) {
+          try {
+            nowRaw = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, NATIVE_SOL_MINT)).amountRaw);
+          } catch {
+            nowRaw = null;
+          }
+        }
+        const rec = recoverHopSolReturned({
+          closeSolReturnedRaw: close.solReturnedLamports ?? null,
+          baselineRaw: baseline,
+          agentLamportsNowRaw: nowRaw,
+        });
+        if (!rec.ok) {
+          return {
+            success: false,
+            resumable: true,
+            ...(closeSignature ? { closeSignature } : {}),
+            error: "The unwind landed but the returned SOL could not be measured yet. Your funds are safe. Wait a minute and retry.",
+          };
+        }
+        solReturned = rec.solReturnedRaw;
+      } else {
+        // RESUME after a crash: the source is no longer open. "Closed" ALONE is
+        // NOT proof that OUR unwind ran — a position closed OUTSIDE this hop (a
+        // user close, a safety unwind) also reads closed, and consuming the
+        // delta-vs-baseline would then re-lever funds this hop never touched.
+        // Require close-leg PROVENANCE: one of our OWN close attempts must have
+        // either succeeded (every success path CAS-closes the position BEFORE it
+        // marks its op succeeded) or be sitting in the narrow post-broadcast crash
+        // window (step loop_sig_writeahead WITH a recorded signature — that tx is
+        // what closed the position). A failed / pre-broadcast close op is NOT
+        // proof (those paths always leave the position open).
+        let provenClose:
+          | NonNullable<Awaited<ReturnType<typeof storage.getBorrowOperationByClientRequestId>>>
+          | null = null;
+        // A crash-window op recorded a broadcast signature but never marked
+        // succeeded. A recorded sig only proves BROADCAST — if that tx expired
+        // without landing AND the position was then closed out-of-band, trusting
+        // the sig alone would re-lever the user's proceeds. So the writeahead
+        // clause must confirm the sig actually LANDED on-chain. If the RPC can't
+        // tell us, we neither re-lever nor terminal — stay resumable, re-check.
+        const hopConnection = getServerConnection();
+        let writeaheadUnverifiable = false;
+        for (let n = priorCloseAttempts; n >= 1; n--) {
+          const co = await storage.getBorrowOperationByClientRequestId(walletAddress, closeCridFor(n));
+          if (!co) continue;
+          if (co.status === "succeeded") {
+            // Every success path CAS-closes the position BEFORE marking the op
+            // succeeded → definitive proof our unwind ran.
+            provenClose = co;
+            break;
+          }
+          const sigs = Array.isArray(co.txSignatures) ? co.txSignatures : [];
+          if (co.step === "loop_sig_writeahead" && sigs.length > 0) {
+            let landed = false;
+            try {
+              const statuses = await hopConnection.getSignatureStatuses(sigs, { searchTransactionHistory: true });
+              landed = statuses.value.some(
+                (st) => !!st && !st.err && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized"),
+              );
+            } catch {
+              writeaheadUnverifiable = true; // decide on a later tick
+              continue;
+            }
+            if (landed) {
+              provenClose = co;
+              break;
+            }
+            // Sig never landed → this attempt's tx died; keep scanning older ones.
+          }
+        }
+        if (!provenClose) {
+          if (writeaheadUnverifiable) {
+            // A crash-window close sig exists but the RPC could not confirm whether
+            // it landed. Refuse to re-lever (could seize an out-of-band close) and
+            // refuse to terminal (could de-lever a real own-close) — resumable.
+            return {
+              success: false,
+              resumable: true,
+              error: "Could not yet confirm on-chain whether the unwind landed. Your funds are safe. Wait a minute and retry.",
+            };
+          }
+          // Nothing this hop did closed the position → re-levering would seize
+          // funds the user (or a safety unwind) deliberately took out. Terminal:
+          // failing the op frees the position from hopInFlightPositionIds so the
+          // allocation brain can act on it normally again.
+          await failOp(opId, "closed_outside_hop", "source position closed outside this hop — refusing to re-lever");
+          return {
+            success: false,
+            error: "Hop aborted: the position was closed outside this hop, so there is nothing to re-loop. Your funds are safe in your account.",
+          };
+        }
+        // Provenance holds → recover the returned SOL from the close op's own
+        // result, else the STRICT delta vs the PERSISTED pre-close baseline —
+        // never a fresh (post-close) baseline, and never re-gate (that would
+        // falsely decline a hop whose funds have already moved).
+        const r = (provenClose.result ?? {}) as Record<string, any>;
+        if (!closeSignature && typeof r.signature === "string") closeSignature = r.signature;
+        const closeFig = typeof r.solReturnedLamports === "string" ? r.solReturnedLamports : null;
+        // Only read the live balance when we must fall back to the delta path
+        // (baseline present but no close figure); never a fresh read otherwise.
+        let nowRaw: bigint | null = null;
+        if (!closeFig && baseline !== null) {
+          try {
+            nowRaw = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, NATIVE_SOL_MINT)).amountRaw);
+          } catch {
+            nowRaw = null;
+          }
+        }
+        const rec = recoverHopSolReturned({
+          closeSolReturnedRaw: closeFig,
+          baselineRaw: baseline,
+          agentLamportsNowRaw: nowRaw,
+        });
+        if (!rec.ok) {
+          // Money is back in the agent wallet but not yet measurable — resumable.
+          return {
+            success: false,
+            resumable: true,
+            ...(closeSignature ? { closeSignature } : {}),
+            error: "The unwind landed but the returned SOL could not be measured yet. Your funds are safe. Wait a minute and retry.",
+          };
+        }
+        solReturned = rec.solReturnedRaw;
+      }
+
+      await storage.updateBorrowOperation(opId, {
+        step: "close_done",
+        mergeMetadata: {
+          solReturnedLamports: solReturned.toString(),
+          ...(closeSignature ? { closeSignature } : {}),
+        },
+      });
+    } else if (solReturned !== null && op.step !== "close_done" && op.step !== "opened") {
+      // Defensive: solReturned crumb exists but the step wasn't advanced — treat
+      // as close_done (the close provably happened) and proceed to re-open.
+      await storage.updateBorrowOperation(opId, { step: "close_done" });
+    }
+
+    // ---- PHASE 2: RE-OPEN (size from the real solReturned; fallback + resume) ----
+    if (solReturned === null || solReturned <= 0n) {
+      return {
+        success: false,
+        resumable: true,
+        ...(closeSignature ? { closeSignature } : {}),
+        error: "Hop is mid-flight but the unwound SOL is not yet measurable. Your funds are safe. Retry shortly.",
+      };
+    }
+
+    // Preflight the target to learn the exact overhead (NFT mint rent + missing
+    // ATA rents + fee headroom); the true principal is solReturned − overhead.
+    let chosenVaultId = targetVaultId;
+    let pf = await executeLoopOpen({
+      walletAddress,
+      agentPublicKey,
+      agentSecretKey,
+      vaultId: chosenVaultId,
+      principalLamports: solReturned,
+      slippageBps,
+      preflightOnly: true,
+      callerHoldsBorrowLock: false,
+    });
+    if (!pf.success || !pf.preflight) {
+      // Target unopenable at this size → fall back to the best openable pair
+      // (may be the ORIGINAL — a reversing hop is still fund-safe).
+      const allowIds = Object.keys(LOOP_VAULT_ALLOWLIST).map(Number);
+      const rates = await getFreshLoopRates(LOOP_ALLOCATION_POLICY.rateStalenessMs).catch(() => null);
+      const best = rates ? pickBestLoopVault(rates, allowIds) : null;
+      if (best && best.vaultId !== chosenVaultId) {
+        chosenVaultId = best.vaultId;
+        targetLeverage = best.targetLeverage;
+        pf = await executeLoopOpen({
+          walletAddress,
+          agentPublicKey,
+          agentSecretKey,
+          vaultId: chosenVaultId,
+          principalLamports: solReturned,
+          slippageBps,
+          preflightOnly: true,
+          callerHoldsBorrowLock: false,
+        });
+      }
+      if (!pf.success || !pf.preflight) {
+        return {
+          success: false,
+          resumable: true,
+          solReturnedLamports: solReturned.toString(),
+          ...(closeSignature ? { closeSignature } : {}),
+          error: `${pf.error || "Could not size a re-loop."} Your unwound SOL is safe in your account and will be re-looped on the next attempt.`,
+        };
+      }
+    }
+
+    const overhead = BigInt(Math.max(0, Math.round(pf.preflight.requiredLamports))) - solReturned;
+    const principal = solReturned - (overhead > 0n ? overhead : 0n);
+    if (principal <= 0n) {
+      return {
+        success: false,
+        resumable: true,
+        solReturnedLamports: solReturned.toString(),
+        ...(closeSignature ? { closeSignature } : {}),
+        error: `The unwound SOL (${lamportsToSol(solReturned)} SOL) is too small to cover account rent and fees for a re-loop. It stays safe in your account.`,
+      };
+    }
+
+    const attempt = Number(meta.openAttempts ?? 0) + 1;
+    await storage.updateBorrowOperation(opId, { mergeMetadata: { openAttempts: attempt, reopenVaultId: chosenVaultId } });
+    const open = await executeLoopOpen({
+      walletAddress,
+      agentPublicKey,
+      agentSecretKey,
+      vaultId: chosenVaultId,
+      principalLamports: principal,
+      slippageBps,
+      clientRequestId: `${params.clientRequestId}:open:${attempt}`,
+      callerHoldsBorrowLock: false,
+    });
+    if (!open.success) {
+      // The SOL is intact in the agent wallet; the op stays at close_done.
+      return {
+        success: false,
+        resumable: true,
+        solReturnedLamports: solReturned.toString(),
+        ...(closeSignature ? { closeSignature } : {}),
+        ...(open.gasShortfall ? {} : {}),
+        error: `${open.error || "Re-loop open failed."} Your unwound SOL is safe. Retry to finish the hop.`,
+      };
+    }
+
+    // predictedCost = both legs' slippage on the whole notional + rent overhead;
+    // realizedCost = the rent/fee overhead proxy (see the field doc).
+    const effLev = targetLeverage ?? 1;
+    const predictedCost =
+      BigInt(Math.max(0, Math.round((2 * slippageBps) / 10000 * Number(solReturned) * effLev))) +
+      (overhead > 0n ? overhead : 0n);
+    const realizedCost = solReturned - principal;
+
+    await storage.updateBorrowOperation(opId, {
+      status: "succeeded",
+      step: "opened",
+      borrowPositionId: open.borrowPositionId ?? borrowPositionId,
+      result: {
+        borrowPositionId: open.borrowPositionId ?? null,
+        closeSignature: closeSignature ?? null,
+        openSignature: open.signature ?? null,
+        solReturnedLamports: solReturned.toString(),
+        principalLamports: principal.toString(),
+        predictedCostLamports: predictedCost.toString(),
+        realizedCostLamports: realizedCost.toString(),
+        fromVaultId,
+        toVaultId: chosenVaultId,
+        reversed: chosenVaultId === fromVaultId,
+      },
+    });
+
+    return {
+      success: true,
+      borrowPositionId: open.borrowPositionId,
+      closeSignature,
+      openSignature: open.signature,
+      solReturnedLamports: solReturned.toString(),
+      predictedCostLamports: predictedCost.toString(),
+      realizedCostLamports: realizedCost.toString(),
+      ...(chosenVaultId === fromVaultId
+        ? { verifyWarning: "The target pair was no longer openable, so the SOL was re-looped onto the original pair (your funds are safe)." }
+        : {}),
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // NEVER terminal-fail after money may have moved: keep the step breadcrumb so
+    // a retry resumes from close_done instead of re-closing.
+    console.error(`[loop-executor] hop op ${opId} threw:`, e);
+    return {
+      success: false,
+      resumable: true,
+      ...(solReturned !== null ? { solReturnedLamports: solReturned.toString() } : {}),
+      ...(closeSignature ? { closeSignature } : {}),
+      error: `Hop hit an error: ${msg}. Your funds are safe. Retry with the same request to resume.`,
+    };
+  }
 }
 
 // --- PARTIAL UNWIND ---------------------------------------------------------------

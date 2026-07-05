@@ -444,7 +444,7 @@ export interface LoopSafetyNotification {
   /** Loop collateral symbol, e.g. "JupSOL" (escaped before send). */
   symbol: string;
   /** What the policy tick did (or tried to do). */
-  action: "reduce" | "unwind_to_hold" | "relever";
+  action: "reduce" | "unwind_to_hold" | "relever" | "hop";
   /** True when the action landed on-chain; false = it needs the owner's eyes. */
   ok: boolean;
   /** The policy reason that triggered the action (escaped before send). */
@@ -470,6 +470,12 @@ function formatLoopSafetyMessage(n: LoopSafetyNotification): { title: string; bo
         body: `Rates turned favorable again (${reason}), so we re-levered your ${symbol} loop to earn the boosted yield. We keep watching it every minute.`,
       };
     }
+    if (n.action === "hop") {
+      return {
+        title: '🔀 Loop Hopped',
+        body: `A different staking pair now pays better (${reason}), so we moved your ${symbol} loop to it to earn more. Your funds stayed in the vault the whole time.`,
+      };
+    }
     return {
       title: '🛡️ Loop Position Reduced',
       body: `We trimmed your ${symbol} loop to protect it (${reason}). The loop stays open at lower leverage.`,
@@ -477,7 +483,10 @@ function formatLoopSafetyMessage(n: LoopSafetyNotification): { title: string; bo
   }
   const detail = n.detail ? `: ${escapeTelegramHtml(n.detail)}` : '';
   const actionLabel =
-    n.action === "unwind_to_hold" ? "fully unwind" : n.action === "relever" ? "re-lever" : "reduce";
+    n.action === "unwind_to_hold" ? "fully unwind"
+      : n.action === "relever" ? "re-lever"
+      : n.action === "hop" ? "move"
+      : "reduce";
   return {
     title: '⚠️ Loop Safety Action Needs Attention',
     body: `We tried to ${actionLabel} your ${symbol} loop (${reason}) but it didn't complete${detail}. We'll retry automatically; you can also unwind it manually.`,

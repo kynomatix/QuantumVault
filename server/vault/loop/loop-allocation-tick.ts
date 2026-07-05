@@ -35,20 +35,23 @@
  *    the hysteresis substrate, so silence would break the streak logic.
  */
 
-import type { BorrowPosition, LoopPolicyDecision } from "@shared/schema";
+import type { BorrowPosition, BorrowOperation, LoopPolicyDecision } from "@shared/schema";
 import { storage } from "../../storage";
 import { sendLoopSafetyNotification, type LoopSafetyNotification } from "../../notification-service";
 import { DEFAULT_SOL_DEBT_DUST_RAW } from "../borrow-engine-core";
-import { getFreshLoopRates, LOOP_CARRY_REFERENCE_LEVERAGE, netCarryAt, sampleAndPersistLoopRates, type FreshLoopRate, type LoopRateReading } from "./loop-rate-oracle";
+import { getFreshLoopRates, LOOP_CARRY_REFERENCE_LEVERAGE, netCarryAt, pickBestLoopVault, sampleAndPersistLoopRates, type FreshLoopRate, type LoopRateReading } from "./loop-rate-oracle";
 import { computeLoopTargetLeverage, LOOP_ALLOCATION_POLICY, LOOP_VAULT_ALLOWLIST } from "./loop-risk-policy";
 import type { LoopSafetySigner } from "./loop-safety-tick";
 import {
   executeLoopRelever,
   executeLoopDeleverToHold,
+  executeLoopHop,
   type LoopReleverParams,
   type LoopReleverResult,
   type LoopDeleverParams,
   type LoopDeleverResult,
+  type LoopHopParams,
+  type LoopHopResult,
 } from "./loop-executor";
 
 // ---------------------------------------------------------------------------
@@ -75,6 +78,9 @@ export interface LoopAllocationTickDeps {
   claimPolicyAction(positionId: string, cooldownMs: number): Promise<BorrowPosition | null>;
   executeRelever(params: LoopReleverParams): Promise<LoopReleverResult>;
   executeUnwindToHold(params: LoopDeleverParams): Promise<LoopDeleverResult>;
+  executeHop(params: LoopHopParams): Promise<LoopHopResult>;
+  /** Mid-flight hop ops (close done, re-open pending) to resume before deciding. */
+  getPendingHops(): Promise<BorrowOperation[]>;
   persistDecision(d: {
     walletAddress: string;
     borrowPositionId: string | null;
@@ -102,6 +108,8 @@ export function buildLoopAllocationDeps(
     claimPolicyAction: (id, cooldownMs) => storage.claimBorrowPositionPolicyAction(id, cooldownMs),
     executeRelever: executeLoopRelever,
     executeUnwindToHold: executeLoopDeleverToHold,
+    executeHop: executeLoopHop,
+    getPendingHops: () => storage.getPendingLoopHopOperations(),
     persistDecision: async (d) => {
       await storage.insertLoopPolicyDecision(d);
     },
@@ -114,7 +122,7 @@ export function buildLoopAllocationDeps(
 // PURE intent + hysteresis — unit-testable, no I/O.
 // ---------------------------------------------------------------------------
 
-export type AllocationIntent = "relever" | "unwind" | "none";
+export type AllocationIntent = "relever" | "unwind" | "hop" | "none";
 
 export interface AllocationIntentResult {
   intent: AllocationIntent;
@@ -169,6 +177,103 @@ export function decideAllocationIntent(input: {
   return { intent: "none", reason: "stay_hold", evGapApy, netCarryApy };
 }
 
+export interface HopTargetResult {
+  /** The better allowlisted vault to hop TO, or null (no worthwhile hop). */
+  targetVaultId: number | null;
+  /** Target's dynamic target leverage; null when no target. */
+  targetLeverage: number | null;
+  /** Net carry at the target's dynamic leverage (fraction APY); null = no target. */
+  targetNetCarryApy: number | null;
+  /** Current pair's net carry at ITS dynamic target leverage (fraction APY); null = unreadable. */
+  currentNetCarryApy: number | null;
+  /** targetNetCarry − currentNetCarry (fraction APY); null when either is unreadable. */
+  carryGainApy: number | null;
+  /**
+   * Why no hop fires (only meaningful when targetVaultId is null):
+   *  - current_carry_unreadable: the CURRENT pair has no readable carry-at-target → fail closed.
+   *  - no_alternative_target: no OTHER allowlisted vault has a computable target.
+   *  - gain_below_threshold: a better pair exists but the gain doesn't clear hopMinCarryGainApy.
+   *  - hop_carry_favorable: a hop DOES fire (targetVaultId is set).
+   */
+  reason:
+    | "current_carry_unreadable"
+    | "no_alternative_target"
+    | "gain_below_threshold"
+    | "hop_carry_favorable";
+}
+
+/**
+ * PURE hop decision for a LEVERED position, plan §4.4. Compare the CURRENT
+ * pair's net carry (at its OWN dynamic target leverage) against the best
+ * ALTERNATIVE allowlisted pair (same rate table + same target function the
+ * open path uses via pickBestLoopVault). A hop fires ONLY when the alternative
+ * beats the current pair by MORE than `hopMinCarryGainApy` — a deliberately
+ * higher bar than a re-lever, because a hop pays two full-notional swaps.
+ *
+ * FAIL CLOSED on every unreadable input:
+ *  - current pair carry unreadable → NEVER hop (we can't prove the move helps).
+ *  - no alternative has a target   → NEVER hop.
+ * The caller only invokes this from a position the single-pair brain already
+ * decided to KEEP levered (unwind always dominates — never hop a bleeding loop).
+ */
+export function decideHopTarget(input: {
+  currentVaultId: number;
+  rates: Map<number, FreshLoopRate>;
+  allowedVaultIds: number[];
+  policy?: typeof LOOP_ALLOCATION_POLICY;
+}): HopTargetResult {
+  const policy = input.policy ?? LOOP_ALLOCATION_POLICY;
+  const none = (
+    reason: HopTargetResult["reason"],
+    extra?: Partial<HopTargetResult>,
+  ): HopTargetResult => ({
+    targetVaultId: null,
+    targetLeverage: null,
+    targetNetCarryApy: null,
+    currentNetCarryApy: null,
+    carryGainApy: null,
+    reason,
+    ...extra,
+  });
+
+  // Current pair carry-at-target — the benchmark the hop must beat. Same math
+  // pickBestLoopVault runs, so current vs alternatives is apples-to-apples.
+  const cur = input.rates.get(input.currentVaultId);
+  if (!cur) return none("current_carry_unreadable");
+  const curTarget = computeLoopTargetLeverage({
+    vaultId: input.currentVaultId,
+    liquidationThreshold: cur.liquidationThreshold,
+    stakingApy: cur.stakingApy,
+    borrowApr: cur.borrowApr,
+  });
+  if (curTarget.leverage === null) return none("current_carry_unreadable");
+  const currentNetCarryApy = netCarryAt(cur.stakingApy, cur.borrowApr, curTarget.leverage);
+  if (currentNetCarryApy === null) return none("current_carry_unreadable");
+
+  // Best ALTERNATIVE (exclude the current vault so a hop is always a real move).
+  const altVaultIds = input.allowedVaultIds.filter((id) => id !== input.currentVaultId);
+  const best = pickBestLoopVault(input.rates, altVaultIds);
+  if (!best) return none("no_alternative_target", { currentNetCarryApy });
+
+  const carryGainApy = best.netCarryAtTarget - currentNetCarryApy;
+  if (carryGainApy > policy.hopMinCarryGainApy) {
+    return {
+      targetVaultId: best.vaultId,
+      targetLeverage: best.targetLeverage,
+      targetNetCarryApy: best.netCarryAtTarget,
+      currentNetCarryApy,
+      carryGainApy,
+      reason: "hop_carry_favorable",
+    };
+  }
+  return none("gain_below_threshold", {
+    targetLeverage: best.targetLeverage,
+    targetNetCarryApy: best.netCarryAtTarget,
+    currentNetCarryApy,
+    carryGainApy,
+  });
+}
+
 /**
  * PURE streak check over the persisted journal (newest first). The current
  * tick counts as tick #N; the last N−1 rows must ALL carry the same intent
@@ -180,6 +285,13 @@ export function hasIntentStreak(opts: {
   priorDecisions: Array<Pick<LoopPolicyDecision, "details" | "createdAt">>;
   now: Date;
   policy?: typeof LOOP_ALLOCATION_POLICY;
+  /**
+   * HOP only: the target vault this tick would hop to. Prior rows must ALSO be
+   * hop intents toward the SAME vault to count — an A-then-B sequence of two
+   * different hop targets is NOT a streak (the yield leader was flapping, which
+   * is exactly what hysteresis must suppress). Ignored for non-hop intents.
+   */
+  matchTargetVaultId?: number | null;
 }): { fires: boolean; streak: number } {
   const policy = opts.policy ?? LOOP_ALLOCATION_POLICY;
   const needed = Math.max(1, policy.hysteresisTicks) - 1; // current tick is #N
@@ -188,8 +300,14 @@ export function hasIntentStreak(opts: {
   let streak = 1; // current tick
   for (let i = 0; i < opts.priorDecisions.length && streak <= needed; i++) {
     const row = opts.priorDecisions[i];
-    const intent = (row.details as Record<string, unknown> | null)?.intent;
+    const details = row.details as Record<string, unknown> | null;
+    const intent = details?.intent;
     if (intent !== opts.currentIntent) break; // streak broken (incl. 'none')
+    if (opts.currentIntent === "hop" && opts.matchTargetVaultId != null) {
+      const priorTarget = Number(details?.hopTargetVaultId);
+      // Same intent but a DIFFERENT (or unrecorded) target breaks the streak.
+      if (!Number.isFinite(priorTarget) || priorTarget !== opts.matchTargetVaultId) break;
+    }
     const created = row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt as unknown as string);
     if (!Number.isFinite(created.getTime())) break;
     if (opts.now.getTime() - created.getTime() > policy.streakMaxAgeMs) break; // stale streak
@@ -236,6 +354,62 @@ export async function runLoopAllocationTick(deps: LoopAllocationTickDeps): Promi
     return result;
   }
   const loops = rows.filter((r) => (r.kind ?? "borrow") === "loop" && r.status === "open");
+
+  // Resume any mid-flight hop BEFORE the early-return and BEFORE the per-row
+  // pass. A hopping position's SOURCE row may already be CLOSED (so it is absent
+  // from `loops`) while its SOL sits in the agent wallet awaiting the re-loop —
+  // drive each pending hop to terminal with the SAME clientRequestId (idempotent
+  // resume). Record the source ids so the per-row pass below can NOT open a
+  // second, competing action on a position that already has a hop in flight this
+  // tick (the hop's clientRequestId is timestamp-based, so a fresh decision would
+  // otherwise mint a rival op once the 30-min claim cooldown lapses).
+  const hopInFlightPositionIds = new Set<string>();
+  try {
+    const pendingHops = await deps.getPendingHops();
+    for (const op of pendingHops) {
+      const m = (op.metadata ?? {}) as Record<string, any>;
+      const sourceId =
+        (typeof m.sourceBorrowPositionId === "string" ? m.sourceBorrowPositionId : null) ??
+        op.borrowPositionId ??
+        null;
+      if (sourceId) hopInFlightPositionIds.add(sourceId);
+      try {
+        if (!op.clientRequestId) continue;
+        const toVaultId = Number(m.toVaultId);
+        if (!sourceId || !Number.isInteger(toVaultId) || toVaultId <= 0) {
+          console.warn(`[LoopAllocationTick] cannot resume hop op ${op.id}: incomplete metadata`);
+          continue;
+        }
+        const signer = await deps.resolveSigner(op.walletAddress);
+        if (!signer) {
+          console.warn(`[LoopAllocationTick] cannot resume hop op ${op.id}: no execution authorization`);
+          continue;
+        }
+        try {
+          const res = await deps.executeHop({
+            walletAddress: op.walletAddress,
+            agentPublicKey: signer.agentPublicKey,
+            agentSecretKey: signer.secretKey,
+            borrowPositionId: sourceId,
+            targetVaultId: toVaultId,
+            clientRequestId: op.clientRequestId,
+            policyReason: (typeof m.policyReason === "string" ? m.policyReason : undefined) ?? "resume",
+          });
+          if (res.success) result.acted++;
+          else if (res.resumable !== true) result.failed++;
+        } finally {
+          // Zeroize key material even on throw (mirrors the per-row finally).
+          signer.cleanup();
+        }
+      } catch (e) {
+        result.failed++;
+        console.error(`[LoopAllocationTick] hop resume failed for op ${op.id}:`, e);
+      }
+    }
+  } catch (e) {
+    console.error(`[LoopAllocationTick] pending-hop sweep failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   if (loops.length === 0) return result;
 
   let rates: Map<number, FreshLoopRate>;
@@ -247,6 +421,12 @@ export async function runLoopAllocationTick(deps: LoopAllocationTickDeps): Promi
   }
 
   for (const row of loops) {
+    // A position with a hop already in flight this tick was handled by the
+    // resume sweep above — never open a second, competing action on it.
+    if (hopInFlightPositionIds.has(row.id)) {
+      result.skipped++;
+      continue;
+    }
     try {
       await processAllocationCandidate(row, rates, deps, result);
     } catch (e) {
@@ -328,6 +508,24 @@ async function processAllocationCandidate(
     };
   }
 
+  // HOP (P4, plan §4.4): only for a position the single-pair brain decided to
+  // KEEP levered (reason 'stay_levered'). Unwind ALWAYS dominates — never hop a
+  // bleeding loop. If a better allowlisted pair clears the (higher) hop bar,
+  // promote 'none/stay_levered' → 'hop'.
+  let hopTarget: HopTargetResult | null = null;
+  if (levered && intentRes.intent === "none" && intentRes.reason === "stay_levered") {
+    const allowedVaultIds = Object.keys(LOOP_VAULT_ALLOWLIST).map(Number);
+    hopTarget = decideHopTarget({ currentVaultId: vaultId, rates, allowedVaultIds });
+    if (hopTarget.targetVaultId !== null) {
+      intentRes = {
+        intent: "hop",
+        reason: "hop_carry_favorable",
+        evGapApy: intentRes.evGapApy,
+        netCarryApy: intentRes.netCarryApy,
+      };
+    }
+  }
+
   const journalAction = intentRes.intent === "unwind" ? "unwind_to_hold" : intentRes.intent;
   const baseDetails: Record<string, unknown> = {
     intent: intentRes.intent,
@@ -340,6 +538,18 @@ async function processAllocationCandidate(
     borrowApr: rate?.borrowApr ?? null,
     evGapApy: intentRes.evGapApy,
     netCarryApy: intentRes.netCarryApy,
+    // HOP audit facts (present only when this tick's intent is a hop). The
+    // hopTargetVaultId is ALSO the hysteresis key: the streak only counts prior
+    // rows that hopped toward the SAME target.
+    ...(hopTarget && hopTarget.targetVaultId !== null
+      ? {
+          hopTargetVaultId: hopTarget.targetVaultId,
+          hopTargetLeverage: hopTarget.targetLeverage,
+          hopTargetNetCarryApy: hopTarget.targetNetCarryApy,
+          hopCurrentNetCarryApy: hopTarget.currentNetCarryApy,
+          hopCarryGainApy: hopTarget.carryGainApy,
+        }
+      : {}),
   };
 
   const journal = async (details: Record<string, unknown>) => {
@@ -384,7 +594,12 @@ async function processAllocationCandidate(
     // Unreadable journal → treat as no streak (fail closed for actions).
     console.error(`[LoopAllocationTick] streak read failed for ${row.id} (treating as broken):`, e);
   }
-  const streakRes = hasIntentStreak({ currentIntent: intentRes.intent, priorDecisions: prior, now: deps.now() });
+  const streakRes = hasIntentStreak({
+    currentIntent: intentRes.intent,
+    priorDecisions: prior,
+    now: deps.now(),
+    matchTargetVaultId: hopTarget?.targetVaultId ?? null,
+  });
   if (!streakRes.fires) {
     await journal({ executed: false, streak: streakRes.streak, hysteresis: "building" });
     return;
@@ -411,7 +626,7 @@ async function processAllocationCandidate(
     await deps
       .notify(row.walletAddress, {
         symbol: symbolFor(vaultId),
-        action: journalAction as "relever" | "unwind_to_hold",
+        action: journalAction as "relever" | "unwind_to_hold" | "hop",
         ok: false,
         reason: intentRes.reason,
         detail: "we couldn't access execution authorization — reconnect your wallet to re-enable it",
@@ -442,6 +657,28 @@ async function processAllocationCandidate(
       errorText = res.error;
       verifyWarning = res.verifyWarning;
       selfHeal = res.selfHeal === true;
+    } else if (intentRes.intent === "hop") {
+      const toVaultId = hopTarget?.targetVaultId;
+      if (toVaultId == null) {
+        // Unreachable — intent 'hop' is only set with a target — but fail closed.
+        errorText = "internal: hop intent without a target vault";
+      } else {
+        const res = await deps.executeHop({
+          walletAddress: row.walletAddress,
+          agentPublicKey: signer.agentPublicKey,
+          agentSecretKey: signer.secretKey,
+          borrowPositionId: row.id,
+          targetVaultId: toVaultId,
+          clientRequestId,
+          policyReason: intentRes.reason,
+        });
+        ok = res.success;
+        // A hop reports both legs; prefer the re-open sig, else the close sig.
+        signature = res.openSignature ?? res.closeSignature;
+        errorText = res.error;
+        verifyWarning = res.verifyWarning;
+        policyDenied = !ok && res.policyDenied === true;
+      }
     } else {
       const res = await deps.executeRelever({
         walletAddress: row.walletAddress,

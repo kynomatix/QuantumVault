@@ -396,6 +396,7 @@ export interface IStorage {
   updateBorrowOperation(id: string, patch: { status?: string; step?: string | null; error?: string | null; borrowPositionId?: string | null; appendTxSignature?: string; metadata?: Record<string, unknown> | null; mergeMetadata?: Record<string, unknown>; result?: Record<string, unknown> | null; }): Promise<BorrowOperation | undefined>;
   getBorrowOperationById(id: string): Promise<BorrowOperation | undefined>;
   getBorrowOperationByClientRequestId(walletAddress: string, clientRequestId: string): Promise<BorrowOperation | undefined>;
+  getPendingLoopHopOperations(): Promise<BorrowOperation[]>;
   sumOpenBorrowDebtUsdc(walletAddress: string): Promise<number>;
 
   // Fixed Yield vault: PT holdings (cost-basis + maturity bookkeeping cache).
@@ -2451,6 +2452,23 @@ export class DatabaseStorage implements IStorage {
       .where(and(eq(borrowOperations.walletAddress, walletAddress), eq(borrowOperations.clientRequestId, clientRequestId)))
       .limit(1);
     return rows[0];
+  }
+
+  // P4 HOP resume sweep: every loop_hop op that is NOT terminal (still pending)
+  // across ALL wallets, oldest first. The allocation tick re-drives each one so
+  // a hop interrupted mid-flight (after the close, before the re-open) always
+  // resumes from its step breadcrumb — the SOL is sitting in the agent wallet
+  // and must be re-looped, never stranded. Terminal rows (succeeded/failed) are
+  // excluded so the sweep is idempotent.
+  async getPendingLoopHopOperations(): Promise<BorrowOperation[]> {
+    return await db.select().from(borrowOperations)
+      .where(and(
+        eq(borrowOperations.operationType, 'loop_hop'),
+        ne(borrowOperations.status, 'succeeded'),
+        ne(borrowOperations.status, 'completed'),
+        ne(borrowOperations.status, 'failed'),
+      ))
+      .orderBy(asc(borrowOperations.createdAt));
   }
 
   // --- Fixed Yield vault positions -----------------------------------------

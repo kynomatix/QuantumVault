@@ -5,6 +5,7 @@ import {
   computeLoopTargetLeverage,
   evaluateLoopOpenRequest,
   maxLeverageForHealthBuffer,
+  recoverHopSolReturned,
   type LoopOpenPolicyInput,
 } from "../../server/vault/loop/loop-risk-policy";
 
@@ -220,5 +221,57 @@ describe("computeLoopTargetLeverage", () => {
     const t = computeLoopTargetLeverage({ ...good, liquidationThreshold: 0.1 });
     expect(t.leverage).toBeNull();
     expect(t.reason).toBe("cap_too_low");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P4 HOP — recoverHopSolReturned (money-safety: never guess the returned SOL)
+// ---------------------------------------------------------------------------
+describe("recoverHopSolReturned", () => {
+  it("prefers the close leg's own figure when present and positive (string or bigint)", () => {
+    expect(recoverHopSolReturned({ closeSolReturnedRaw: "1500" })).toEqual({ ok: true, solReturnedRaw: 1500n });
+    expect(recoverHopSolReturned({ closeSolReturnedRaw: 900n })).toEqual({ ok: true, solReturnedRaw: 900n });
+  });
+
+  it("trusts the figure even when a baseline is also available (figure wins)", () => {
+    const r = recoverHopSolReturned({ closeSolReturnedRaw: "1000", baselineRaw: 5n, agentLamportsNowRaw: 999999n });
+    expect(r).toEqual({ ok: true, solReturnedRaw: 1000n });
+  });
+
+  it("falls back to the STRICT delta vs the PERSISTED pre-close baseline when no figure", () => {
+    const r = recoverHopSolReturned({ closeSolReturnedRaw: null, baselineRaw: 1000n, agentLamportsNowRaw: 1600n });
+    expect(r).toEqual({ ok: true, solReturnedRaw: 600n });
+  });
+
+  it("uses the delta path when the figure is present-but-unusable (unparseable or ≤0)", () => {
+    expect(recoverHopSolReturned({ closeSolReturnedRaw: "not-a-number", baselineRaw: 100n, agentLamportsNowRaw: 450n }))
+      .toEqual({ ok: true, solReturnedRaw: 350n });
+    expect(recoverHopSolReturned({ closeSolReturnedRaw: "0", baselineRaw: 100n, agentLamportsNowRaw: 450n }))
+      .toEqual({ ok: true, solReturnedRaw: 350n });
+    expect(recoverHopSolReturned({ closeSolReturnedRaw: -5n, baselineRaw: 100n, agentLamportsNowRaw: 450n }))
+      .toEqual({ ok: true, solReturnedRaw: 350n });
+  });
+
+  it("FAILS CLOSED when no figure and no persisted baseline (cannot size the reopen)", () => {
+    const r = recoverHopSolReturned({ closeSolReturnedRaw: null, baselineRaw: null, agentLamportsNowRaw: 1600n });
+    expect(r.ok).toBe(false);
+  });
+
+  it("FAILS CLOSED when the current balance is unreadable (never a fresh guess)", () => {
+    const r = recoverHopSolReturned({ closeSolReturnedRaw: null, baselineRaw: 1000n, agentLamportsNowRaw: null });
+    expect(r.ok).toBe(false);
+  });
+
+  it("FAILS CLOSED when the delta is zero or negative (no measurable SOL yet)", () => {
+    expect(recoverHopSolReturned({ closeSolReturnedRaw: null, baselineRaw: 1000n, agentLamportsNowRaw: 1000n }).ok).toBe(false);
+    expect(recoverHopSolReturned({ closeSolReturnedRaw: null, baselineRaw: 1000n, agentLamportsNowRaw: 400n }).ok).toBe(false);
+  });
+
+  it("a fresh POST-close baseline (≈ now) fails closed rather than sizing the reopen to ~0", () => {
+    // Simulates the bug the fix prevents: reading the baseline AFTER the close so
+    // now − baseline ≈ 0. Must fail closed, never return a near-zero solReturned.
+    const postClose = 1600n;
+    const r = recoverHopSolReturned({ closeSolReturnedRaw: null, baselineRaw: postClose, agentLamportsNowRaw: postClose });
+    expect(r.ok).toBe(false);
   });
 });

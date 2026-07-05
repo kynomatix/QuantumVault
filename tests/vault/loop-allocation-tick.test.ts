@@ -7,7 +7,7 @@
  * refuse-without-signer, per-position failure isolation).
  */
 import { describe, expect, it } from "vitest";
-import type { BorrowPosition, LoopPolicyDecision } from "@shared/schema";
+import type { BorrowOperation, BorrowPosition, LoopPolicyDecision } from "@shared/schema";
 import {
   computeLoopReleverAmounts,
   verifyLoopReleverOutcome,
@@ -17,6 +17,7 @@ import { LOOP_ALLOCATION_POLICY } from "../../server/vault/loop/loop-risk-policy
 import type { LoopSafetySigner } from "../../server/vault/loop/loop-safety-tick";
 import {
   decideAllocationIntent,
+  decideHopTarget,
   hasIntentStreak,
   runLoopAllocationTick,
   type LoopAllocationTickDeps,
@@ -159,6 +160,13 @@ function decisionRow(intent: string, ageMs: number, now: Date): Pick<LoopPolicyD
   } as unknown as Pick<LoopPolicyDecision, "details" | "createdAt">;
 }
 
+function hopRow(targetVaultId: number, ageMs: number, now: Date): Pick<LoopPolicyDecision, "details" | "createdAt"> {
+  return {
+    details: { intent: "hop", hopTargetVaultId: targetVaultId },
+    createdAt: new Date(now.getTime() - ageMs),
+  } as unknown as Pick<LoopPolicyDecision, "details" | "createdAt">;
+}
+
 describe("hasIntentStreak", () => {
   const now = new Date("2026-07-03T12:00:00Z");
   const HOUR = 60 * 60 * 1000;
@@ -195,6 +203,75 @@ describe("hasIntentStreak", () => {
     const r = hasIntentStreak({ currentIntent: "relever", priorDecisions: prior, now });
     expect(r.fires).toBe(false);
     expect(r.streak).toBe(2);
+  });
+
+  it("HOP: prior rows toward the SAME target count as a streak", () => {
+    const prior = [hopRow(5, 1 * HOUR, now), hopRow(5, 2 * HOUR, now)];
+    const r = hasIntentStreak({ currentIntent: "hop", priorDecisions: prior, now, matchTargetVaultId: 5 });
+    expect(r.fires).toBe(true);
+    expect(r.streak).toBe(LOOP_ALLOCATION_POLICY.hysteresisTicks);
+  });
+
+  it("HOP: a DIFFERENT prior target breaks the streak (yield leader flapping)", () => {
+    const prior = [hopRow(42, 1 * HOUR, now), hopRow(5, 2 * HOUR, now)];
+    const r = hasIntentStreak({ currentIntent: "hop", priorDecisions: prior, now, matchTargetVaultId: 5 });
+    expect(r.fires).toBe(false);
+    expect(r.streak).toBe(1);
+  });
+
+  it("HOP: a prior hop row with NO recorded target breaks the streak", () => {
+    const prior = [decisionRow("hop", 1 * HOUR, now), hopRow(5, 2 * HOUR, now)];
+    const r = hasIntentStreak({ currentIntent: "hop", priorDecisions: prior, now, matchTargetVaultId: 5 });
+    expect(r.fires).toBe(false);
+    expect(r.streak).toBe(1);
+  });
+});
+
+// ─── pure brain: hop decision ────────────────────────────────────────────────
+
+describe("decideHopTarget", () => {
+  const ALLOWED = [4, 5, 42, 47]; // JupSOL, JitoSOL, INF, mSOL
+
+  it("hops to an alternative pair whose carry gain clears the bar", () => {
+    // current (4): 3.7·0.06 − 2.7·0.05 = 0.087; alt (5): 3.7·0.09 − 2.7·0.05 = 0.198.
+    const rates = new Map([
+      [4, makeRate(4, 0.06, 0.05)],
+      [5, makeRate(5, 0.09, 0.05)],
+    ]);
+    const r = decideHopTarget({ currentVaultId: 4, rates, allowedVaultIds: ALLOWED });
+    expect(r.reason).toBe("hop_carry_favorable");
+    expect(r.targetVaultId).toBe(5);
+    expect(r.carryGainApy!).toBeGreaterThan(LOOP_ALLOCATION_POLICY.hopMinCarryGainApy);
+  });
+
+  it("does NOT hop when the best alternative's gain is below the bar", () => {
+    // alt (5) barely better: gain ≈ 0.011 < 0.02 bar.
+    const rates = new Map([
+      [4, makeRate(4, 0.06, 0.05)],
+      [5, makeRate(5, 0.063, 0.05)],
+    ]);
+    const r = decideHopTarget({ currentVaultId: 4, rates, allowedVaultIds: ALLOWED });
+    expect(r.reason).toBe("gain_below_threshold");
+    expect(r.targetVaultId).toBeNull();
+    expect(r.carryGainApy).not.toBeNull();
+    expect(r.carryGainApy!).toBeLessThanOrEqual(LOOP_ALLOCATION_POLICY.hopMinCarryGainApy);
+  });
+
+  it("fails closed when the CURRENT pair's carry is unreadable", () => {
+    // rates has an alternative but nothing for the current vault → never hop.
+    const rates = new Map([[5, makeRate(5, 0.09, 0.05)]]);
+    const r = decideHopTarget({ currentVaultId: 4, rates, allowedVaultIds: ALLOWED });
+    expect(r.reason).toBe("current_carry_unreadable");
+    expect(r.targetVaultId).toBeNull();
+  });
+
+  it("does NOT hop when no alternative pair has a computable target", () => {
+    // only the current pair is readable → no alternative to move to.
+    const rates = new Map([[4, makeRate(4, 0.06, 0.05)]]);
+    const r = decideHopTarget({ currentVaultId: 4, rates, allowedVaultIds: ALLOWED });
+    expect(r.reason).toBe("no_alternative_target");
+    expect(r.targetVaultId).toBeNull();
+    expect(r.currentNetCarryApy).not.toBeNull();
   });
 });
 
@@ -237,6 +314,8 @@ interface Calls {
   signerRequests: string[];
   relevers: Array<Record<string, unknown>>;
   unwinds: Array<Record<string, unknown>>;
+  hops: Array<Record<string, unknown>>;
+  pendingHopFetches: number;
   decisions: Array<Record<string, any>>;
   notifications: Array<Record<string, unknown>>;
   cleanups: number;
@@ -250,6 +329,8 @@ function makeDeps(overrides: Partial<LoopAllocationTickDeps> = {}): { deps: Loop
     signerRequests: [],
     relevers: [],
     unwinds: [],
+    hops: [],
+    pendingHopFetches: 0,
     decisions: [],
     notifications: [],
     cleanups: 0,
@@ -295,6 +376,21 @@ function makeDeps(overrides: Partial<LoopAllocationTickDeps> = {}): { deps: Loop
       calls.order.push("executeUnwind");
       return { success: true, signature: "SIG_UNWIND" };
     },
+    executeHop: async (params) => {
+      calls.hops.push(params as unknown as Record<string, unknown>);
+      calls.order.push("executeHop");
+      return {
+        success: true,
+        openSignature: "SIG_HOP_OPEN",
+        closeSignature: "SIG_HOP_CLOSE",
+        borrowPositionId: "NEW_LOOP",
+      };
+    },
+    getPendingHops: async () => {
+      calls.pendingHopFetches++;
+      calls.order.push("getPendingHops");
+      return [];
+    },
     persistDecision: async (d) => {
       calls.decisions.push(d as unknown as Record<string, any>);
       calls.order.push("persist");
@@ -317,6 +413,23 @@ function priorRows(intent: string, count: number): LoopPolicyDecision[] {
   return Array.from({ length: count }, (_, i) =>
     decisionRow(intent, (i + 1) * HOUR, NOW),
   ) as unknown as LoopPolicyDecision[];
+}
+
+function priorHopRows(targetVaultId: number, count: number): LoopPolicyDecision[] {
+  return Array.from({ length: count }, (_, i) =>
+    hopRow(targetVaultId, (i + 1) * HOUR, NOW),
+  ) as unknown as LoopPolicyDecision[];
+}
+
+function makeHopOp(overrides: Record<string, any> = {}): BorrowOperation {
+  return {
+    id: "op-hop-1",
+    walletAddress: "WALLET_A",
+    clientRequestId: "creq-1",
+    borrowPositionId: "row-1",
+    metadata: { sourceBorrowPositionId: "row-1", toVaultId: 5, policyReason: "hop_carry_favorable" },
+    ...overrides,
+  } as unknown as BorrowOperation;
 }
 
 // ─── orchestrator behavior ───────────────────────────────────────────────────
@@ -533,5 +646,119 @@ describe("runLoopAllocationTick", () => {
     expect(res.acted).toBe(1);
     expect(calls.relevers).toHaveLength(1);
     expect((calls.relevers[0] as any).walletAddress).toBe("WALLET_B");
+  });
+
+  // ─── HOP (P4) ──────────────────────────────────────────────────────────────
+
+  it("levered position kept by the single-pair brain HOPS to a better pair when the gain clears the bar and the streak is full", async () => {
+    const { deps, calls } = makeDeps({
+      // current (4) healthy carry → single-pair brain says stay_levered;
+      // alt (5) beats it by ≫ the hop bar.
+      getFreshRates: async () => new Map([[4, makeRate(4, 0.06, 0.05)], [5, makeRate(5, 0.09, 0.05)]]),
+      getRecentDecisions: async () => priorHopRows(5, 2),
+    });
+    const res = await runLoopAllocationTick(deps);
+    expect(res.acted).toBe(1);
+    expect(calls.hops).toHaveLength(1);
+    expect(calls.hops[0].targetVaultId).toBe(5);
+    expect(calls.hops[0].borrowPositionId).toBe("row-1");
+    expect(calls.hops[0].policyReason).toBe("hop_carry_favorable");
+    expect(calls.relevers).toHaveLength(0);
+    expect(calls.unwinds).toHaveLength(0);
+    expect(calls.decisions[0].action).toBe("hop");
+    expect(calls.decisions[0].reason).toBe("hop_carry_favorable");
+    expect(calls.decisions[0].details.hopTargetVaultId).toBe(5);
+    expect(calls.decisions[0].details.executed).toBe(true);
+    expect(calls.notifications[0]).toMatchObject({ action: "hop", ok: true });
+    expect(calls.cleanups).toBe(1);
+    // Money-safety ordering: claim BEFORE key material.
+    expect(calls.order.indexOf("claim")).toBeLessThan(calls.order.indexOf("resolveSigner"));
+  });
+
+  it("hop is streak-gated — a single prior tick toward the target does NOT fire (building)", async () => {
+    const { deps, calls } = makeDeps({
+      getFreshRates: async () => new Map([[4, makeRate(4, 0.06, 0.05)], [5, makeRate(5, 0.09, 0.05)]]),
+      getRecentDecisions: async () => priorHopRows(5, 1),
+    });
+    const res = await runLoopAllocationTick(deps);
+    expect(res.acted).toBe(0);
+    expect(calls.hops).toHaveLength(0);
+    expect(calls.claims).toHaveLength(0);
+    expect(calls.decisions[0].action).toBe("hop");
+    expect(calls.decisions[0].details.hysteresis).toBe("building");
+    expect(calls.decisions[0].details.executed).toBe(false);
+  });
+
+  it("hop streak toward a DIFFERENT prior target does NOT fire (flapping suppression)", async () => {
+    const { deps, calls } = makeDeps({
+      getFreshRates: async () => new Map([[4, makeRate(4, 0.06, 0.05)], [5, makeRate(5, 0.09, 0.05)]]),
+      getRecentDecisions: async () => priorHopRows(42, 2), // prior hops targeted vault 42, this tick targets 5
+    });
+    const res = await runLoopAllocationTick(deps);
+    expect(res.acted).toBe(0);
+    expect(calls.hops).toHaveLength(0);
+    expect(calls.claims).toHaveLength(0);
+    expect(calls.decisions[0].details.hysteresis).toBe("building");
+  });
+
+  it("gain below the hop bar → stays levered, no hop, no claim", async () => {
+    const { deps, calls } = makeDeps({
+      // alt (5) only marginally better → gain below the 0.02 bar.
+      getFreshRates: async () => new Map([[4, makeRate(4, 0.06, 0.05)], [5, makeRate(5, 0.063, 0.05)]]),
+      getRecentDecisions: async () => priorHopRows(5, 2),
+    });
+    const res = await runLoopAllocationTick(deps);
+    expect(res.acted).toBe(0);
+    expect(calls.hops).toHaveLength(0);
+    expect(calls.claims).toHaveLength(0);
+    expect(calls.decisions[0].action).toBe("none");
+    expect(calls.decisions[0].reason).toBe("stay_levered");
+  });
+
+  it("resume sweep drives a mid-flight hop to terminal with the SAME key BEFORE the per-row pass, and skips a second action on that position", async () => {
+    const { deps, calls } = makeDeps({
+      getPendingHops: async () => {
+        calls.pendingHopFetches++;
+        calls.order.push("getPendingHops");
+        return [makeHopOp()];
+      },
+      // source row is still open; if the resume didn't claim it, the per-row
+      // pass could mint a rival hop once the cooldown lapses.
+      listActivePositions: async () => [makeRow({ id: "row-1" })],
+      getFreshRates: async () => new Map([[4, makeRate(4, 0.06, 0.05)], [5, makeRate(5, 0.09, 0.05)]]),
+      getRecentDecisions: async () => priorHopRows(5, 2),
+    });
+    const res = await runLoopAllocationTick(deps);
+    // Exactly ONE hop — the resume — with the persisted (idempotent) key.
+    expect(calls.hops).toHaveLength(1);
+    expect(calls.hops[0].clientRequestId).toBe("creq-1");
+    expect(calls.hops[0].targetVaultId).toBe(5);
+    expect(calls.hops[0].borrowPositionId).toBe("row-1");
+    expect(res.acted).toBe(1);
+    expect(res.skipped).toBe(1); // per-row pass skipped the in-flight source
+    expect(calls.claims).toHaveLength(0); // the per-row pass never claimed it
+    expect(calls.decisions).toHaveLength(0); // skipped rows are not journaled
+    // The resume (getPendingHops → executeHop) runs before the per-row pass.
+    expect(calls.order.indexOf("getPendingHops")).toBeLessThan(calls.order.indexOf("executeHop"));
+  });
+
+  it("a resumable hop failure is NOT counted as failed; a terminal one is", async () => {
+    const resumable = makeDeps({
+      getPendingHops: async () => [makeHopOp()],
+      listActivePositions: async () => [],
+      executeHop: async () => ({ success: false, resumable: true }),
+    });
+    const r1 = await runLoopAllocationTick(resumable.deps);
+    expect(r1.acted).toBe(0);
+    expect(r1.failed).toBe(0); // still in flight — will be retried next pass
+
+    const terminal = makeDeps({
+      getPendingHops: async () => [makeHopOp()],
+      listActivePositions: async () => [],
+      executeHop: async () => ({ success: false, resumable: false, error: "hard fail" }),
+    });
+    const r2 = await runLoopAllocationTick(terminal.deps);
+    expect(r2.acted).toBe(0);
+    expect(r2.failed).toBe(1);
   });
 });
