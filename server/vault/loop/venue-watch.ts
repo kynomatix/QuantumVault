@@ -11,8 +11,9 @@
  * pinned by DeFiLlama pool UUID, and the reading is REFUSED (nulled) unless
  * the row's underlying token is native SOL — never resolve by name/symbol.
  *
- * Not covered here: Loopscale (no borrow-side data on DeFiLlama).
- * P0 / Project Zero: pending identification of the correct DeFiLlama pool or SDK.
+ * Not covered here: P0 / Project Zero (marginfi v2 rebrand) — DeFiLlama only
+ * tracks their LST product, not a native-SOL borrow market. Needs direct SDK
+ * integration (@0dotxyz/p0-ts-sdk) before it can be added.
  */
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
@@ -28,13 +29,17 @@ interface VenueWatchEntry {
 }
 
 /**
- * Pinned 2026-07-04 from yields.llama.fi (main SOL market per venue).
- * Loopscale's SOL pool exposes no borrow-side data on DeFiLlama, so it is
- * deliberately absent rather than showing a permanent "no data" row.
+ * Pinned from yields.llama.fi (main SOL market per venue).
+ *
+ * Loopscale (pinned 2026-07-06): pool 6b824912 is present in the DeFiLlama
+ * pools API but absent from the lendBorrow API (no borrow-side data exposed).
+ * The row appears in the watch list with all-null fields → "No data" verdict.
+ * Keeping it visible so the comparison table is complete.
  */
 const VENUE_WATCH_REGISTRY: readonly VenueWatchEntry[] = [
   { venue: "Kamino", llamaPool: "525b2dab-ea6a-4cbc-a07f-84ce561d1f83" },
   { venue: "Save", llamaPool: "1170b465-309b-4026-b10d-abdf7b1ac369" },
+  { venue: "Loopscale", llamaPool: "6b824912-fb93-469c-ab3c-8cdcf7bb13a8" },
 ] as const;
 
 export interface VenueSolBorrowReading {
