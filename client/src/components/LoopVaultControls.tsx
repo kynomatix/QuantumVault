@@ -1295,8 +1295,7 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
                     });
                   })()}
                   <p className="px-1 text-[11px] text-muted-foreground">
-                    Watch list only — loops can&apos;t open on these venues yet. P0 and Drift don&apos;t publish
-                    rates publicly; reading them directly is the next step.
+                    Watch list only — loops open on Jupiter Lend only.
                     {(() => {
                       const ago = fmtAgo(ratesQuery.data?.venues?.[0]?.asOf ?? null);
                       return ago ? <> Sampled {ago}.</> : null;

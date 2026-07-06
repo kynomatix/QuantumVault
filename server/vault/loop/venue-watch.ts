@@ -11,8 +11,8 @@
  * pinned by DeFiLlama pool UUID, and the reading is REFUSED (nulled) unless
  * the row's underlying token is native SOL — never resolve by name/symbol.
  *
- * Not covered here (no public feed — needs a direct SDK read, future step):
- * P0 / Project Zero (marginfi v2) and Drift borrow/lend.
+ * Not covered here: Loopscale (no borrow-side data on DeFiLlama).
+ * P0 / Project Zero: pending identification of the correct DeFiLlama pool or SDK.
  */
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
