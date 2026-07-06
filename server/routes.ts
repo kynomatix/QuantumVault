@@ -1510,7 +1510,7 @@ import { previewBorrowEligibility } from "./vault/borrow-eligibility";
 import { readBorrowOracleContext } from "./vault/borrow-oracle-freshness";
 import { isBorrowEligibleWallet, isBorrowOwnerWallet, isLoopEligibleWallet, isCollateralVaultAllowlisted, ALLOWED_BORROW_VAULT_IDS } from "./vault/borrow-allowlist";
 import { executeBorrowOpen, executeBorrowClose, executeSupplyCollateral, executeBorrowMore, executeRepayFromAgentUsdc, executeWithdrawCollateral, repayPartialOnExistingBotPosition, withBorrowLock } from "./vault/jupiter-lend-borrow-executor";
-import { executeLoopOpen, executeLoopClose, executeLoopPartialUnwind, executeLoopDeleverToHold, executeLoopLstDepositOpen, getLoopDepositAssets, buildLoopSolView, buildLoopLifetimeView } from "./vault/loop/loop-executor";
+import { executeLoopOpen, executeLoopClose, executeLoopPartialUnwind, executeLoopDeleverToHold, executeLoopLstDepositOpen, getLoopDepositAssets, buildLoopSolView, buildLoopLifetimeView, executeLoopHop } from "./vault/loop/loop-executor";
 import { pickBestFixedYieldMarket, getEligibleFixedYieldMarkets } from "./vault/fixed-yield/exponent-markets";
 import { executeFixedYieldDeposit, executeFixedYieldExit } from "./vault/fixed-yield/fixed-yield-executor";
 import { runFyMaturityScan } from "./vault/fixed-yield/fy-maturity-notify";
@@ -23342,6 +23342,53 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to read loop status" });
+    }
+  });
+
+  // DEV/TEST: manually trigger a loop hop for a specific position.
+  // Bypasses the carry-gain threshold so you can test the hop plumbing
+  // end-to-end without waiting for a 2pp spread to materialise.
+  // Requires execution to be enabled on the wallet (uses the same
+  // resolveLoopSafetySigner path the automatic allocation tick uses).
+  app.post("/api/admin/loop/hop", requireAdminAuth, async (req, res) => {
+    const { borrowPositionId, targetVaultId } = req.body ?? {};
+    if (!borrowPositionId || typeof borrowPositionId !== "string") {
+      return res.status(400).json({ error: "borrowPositionId required" });
+    }
+    const tvId = Number(targetVaultId);
+    if (!Number.isInteger(tvId) || tvId <= 0) {
+      return res.status(400).json({ error: "targetVaultId must be a positive integer" });
+    }
+    if (!LOOP_VAULT_ALLOWLIST[tvId]) {
+      return res.status(400).json({ error: `Vault ${tvId} is not on the loop allowlist` });
+    }
+    try {
+      const position = await storage.getBorrowPosition(borrowPositionId);
+      if (!position) return res.status(404).json({ error: "Position not found" });
+      if (position.status !== "open") return res.status(400).json({ error: `Position is ${position.status}, not open` });
+      if (position.kind !== "loop") return res.status(400).json({ error: "Position is not a loop position" });
+
+      const signer = await resolveLoopSafetySigner(position.walletAddress);
+      if (!signer) {
+        return res.status(403).json({ error: "Cannot resolve signer — execution may be disabled for this wallet" });
+      }
+      try {
+        const clientRequestId = `admin-hop-${borrowPositionId}-${tvId}-${Date.now()}`;
+        const result = await executeLoopHop({
+          walletAddress: position.walletAddress,
+          agentPublicKey: signer.agentPublicKey,
+          agentSecretKey: signer.secretKey,
+          borrowPositionId,
+          targetVaultId: tvId,
+          clientRequestId,
+          policyReason: "admin manual trigger",
+        });
+        res.json(result);
+      } finally {
+        signer.cleanup();
+      }
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Hop failed" });
     }
   });
 
