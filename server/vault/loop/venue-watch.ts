@@ -3,8 +3,8 @@
  *
  * Samples the main SOL borrow market of venues we do NOT loop on yet, so the
  * owner's rates dialog can show what borrowing SOL costs elsewhere (Kamino,
- * Save, ...) next to our live Jupiter Lend vaults. This NEVER feeds the
- * picker, sizing, or any money path — the loop still only opens on
+ * Save, Loopscale, ...) next to our live Jupiter Lend vaults. This NEVER feeds
+ * the picker, sizing, or any money path — the loop still only opens on
  * `LOOP_VAULT_ALLOWLIST` vaults.
  *
  * Identity discipline (same stance as LOOP_RATE_REGISTRY): every row is
@@ -26,6 +26,11 @@ interface VenueWatchEntry {
   venue: string;
   /** Pinned DeFiLlama pool UUID — the AUTHORITY for this row. */
   llamaPool: string;
+  /**
+   * Optional fixed note shown instead of the dynamic verdict when borrow-rate
+   * data is unavailable (e.g. architecture mismatch, CF-gated API, etc.).
+   */
+  note?: string;
 }
 
 /**
@@ -33,13 +38,17 @@ interface VenueWatchEntry {
  *
  * Loopscale (pinned 2026-07-06): pool 6b824912 is present in the DeFiLlama
  * pools API but absent from the lendBorrow API (no borrow-side data exposed).
- * The row appears in the watch list with all-null fields → "No data" verdict.
- * Keeping it visible so the comparison table is complete.
+ * Their API is also Cloudflare-protected with no public subdomain.
+ * Shown as a fixed-note row so the table remains complete.
  */
 const VENUE_WATCH_REGISTRY: readonly VenueWatchEntry[] = [
   { venue: "Kamino", llamaPool: "525b2dab-ea6a-4cbc-a07f-84ce561d1f83" },
-  { venue: "Save", llamaPool: "1170b465-309b-4026-b10d-abdf7b1ac369" },
-  { venue: "Loopscale", llamaPool: "6b824912-fb93-469c-ab3c-8cdcf7bb13a8" },
+  { venue: "Save",   llamaPool: "1170b465-309b-4026-b10d-abdf7b1ac369" },
+  {
+    venue: "Loopscale",
+    llamaPool: "6b824912-fb93-469c-ab3c-8cdcf7bb13a8",
+    note: "Fixed-rate order-book · borrow rate not publicly exposed",
+  },
 ] as const;
 
 export interface VenueSolBorrowReading {
@@ -53,6 +62,11 @@ export interface VenueSolBorrowReading {
   /** Max LTV the venue advertises for SOL collateral markets; null = unreadable. */
   maxLtv: number | null;
   asOf: string;
+  /**
+   * Fixed note for this venue (shown instead of dynamic verdict when borrow
+   * data is unavailable, e.g. architecture mismatch or gated API).
+   */
+  note?: string;
 }
 
 const asFiniteOrNull = (v: unknown): number | null =>
@@ -92,7 +106,7 @@ export async function getVenueSolBorrowRates(): Promise<VenueSolBorrowReading[]>
         row.underlyingTokens.length === 1 &&
         row.underlyingTokens[0] === SOL_MINT;
       if (!isSol) {
-        return { venue: reg.venue, borrowApy: null, supplyUsd: null, utilization: null, maxLtv: null, asOf };
+        return { venue: reg.venue, borrowApy: null, supplyUsd: null, utilization: null, maxLtv: null, asOf, note: reg.note };
       }
       const borrowPct = asFiniteOrNull(row.apyBaseBorrow);
       const supplyUsd = asFiniteOrNull(row.totalSupplyUsd);
@@ -105,6 +119,7 @@ export async function getVenueSolBorrowRates(): Promise<VenueSolBorrowReading[]>
           supplyUsd !== null && supplyUsd > 0 && borrowUsd !== null ? borrowUsd / supplyUsd : null,
         maxLtv: asFiniteOrNull(row.ltv),
         asOf,
+        note: reg.note,
       };
     });
     cache = { at: Date.now(), rows };

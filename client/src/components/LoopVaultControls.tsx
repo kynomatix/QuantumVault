@@ -141,6 +141,8 @@ interface VenueWatchRow {
   utilization: number | null;
   maxLtv: number | null;
   asOf: string;
+  netCarryAt2x?: number | null;
+  note?: string;
 }
 
 const fmtUsdM = (v: number | null): string =>
@@ -148,11 +150,11 @@ const fmtUsdM = (v: number | null): string =>
 
 /** One-line verdict vs our current (Jupiter) SOL borrow cost. */
 const venueVerdict = (row: VenueWatchRow, ourBorrow: number | null): { text: string; tone: "good" | "warn" | "bad" | "muted" } => {
-  if (row.borrowApy === null) return { text: "No data", tone: "muted" };
+  if (row.borrowApy === null) return { text: row.note ?? "No borrow rate data", tone: "muted" };
   if (row.utilization !== null && row.utilization >= 0.9)
     return { text: "Pool nearly full — exits risky", tone: "bad" };
   if (ourBorrow === null) return { text: "", tone: "muted" };
-  if (row.borrowApy < ourBorrow - 0.002) return { text: "Cheaper than our venue", tone: "good" };
+  if (row.borrowApy < ourBorrow - 0.002) return { text: "Cheaper borrow than our venue", tone: "good" };
   if (row.borrowApy <= ourBorrow + 0.002) return { text: "On par with our venue", tone: "muted" };
   return { text: "More expensive than our venue", tone: "warn" };
 };
@@ -1227,6 +1229,15 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
                             <span className="block text-[10px] font-normal text-muted-foreground">
                               {r.hypothetical ? `if enabled · at ${r.targetLeverage.toFixed(1)}x` : `at ${r.targetLeverage.toFixed(1)}x`}
                             </span>
+                            {r.allowlisted && !r.hypothetical && r.netCarryAtTarget > 0 &&
+                              r.stakingApy !== null && r.targetLeverage > 1 && (() => {
+                                const breakEven = r.stakingApy * r.targetLeverage / (r.targetLeverage - 1);
+                                return (
+                                  <span className="block text-[10px] font-normal text-muted-foreground/70" title="Borrow rate at which carry turns negative">
+                                    loss &gt; {fmtPct(breakEven)} borrow
+                                  </span>
+                                );
+                              })()}
                           </>
                         ) : (
                           "—"
@@ -1248,7 +1259,7 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
               {!!ratesQuery.data?.venues?.length && (
                 <div className="pt-2 space-y-1.5" data-testid="section-loop-venue-watch">
                   <p className="px-1 text-[10px] uppercase tracking-wide text-muted-foreground">
-                    Other venues — SOL borrow cost (watch list)
+                    All venues — SOL borrow cost
                   </p>
                   {(() => {
                     const ourBorrow = ratesQuery.data.rates
@@ -1257,6 +1268,11 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
                       .reduce<number | null>((min, v) => (min === null || v < min ? v : min), null);
                     return ratesQuery.data.venues.map((v) => {
                       const verdict = venueVerdict(v, ourBorrow);
+                      const maxLev = v.maxLtv !== null && v.maxLtv > 0 && v.maxLtv < 1
+                        ? (1 / (1 - v.maxLtv)).toFixed(1)
+                        : null;
+                      const carry2x = v.netCarryAt2x ?? null;
+                      const carry2xNeg = carry2x !== null && carry2x < 0;
                       return (
                         <div
                           key={v.venue}
@@ -1285,8 +1301,17 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
                             <p className="text-sm tabular-nums text-amber-500" data-testid={`text-venue-borrow-${v.venue}`}>
                               {fmtPct(v.borrowApy)}
                             </p>
+                            {carry2x !== null && (
+                              <p
+                                className={`text-[10px] tabular-nums font-medium ${carry2xNeg ? "text-red-500" : "text-emerald-500"}`}
+                                title="Net carry at 2× leverage using the best available LST"
+                                data-testid={`text-venue-carry2x-${v.venue}`}
+                              >
+                                {carry2x >= 0 ? "+" : ""}{fmtPct(carry2x)} at 2×
+                              </p>
+                            )}
                             <p className="text-[10px] tabular-nums text-muted-foreground">
-                              {fmtUsdM(v.supplyUsd)} pool
+                              {maxLev ? `up to ${maxLev}× · ` : ""}{fmtUsdM(v.supplyUsd)} pool
                               {v.utilization !== null ? ` · ${Math.round(v.utilization * 100)}% used` : ""}
                             </p>
                           </div>
@@ -1295,7 +1320,8 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
                     });
                   })()}
                   <p className="px-1 text-[11px] text-muted-foreground">
-                    Watch list only — loops open on Jupiter Lend only.
+                    Loops open on Jupiter Lend only — other venues shown for comparison.
+                    Net carry at 2× uses the best available LST staking yield; actual carry depends on the LST and leverage.
                     {(() => {
                       const ago = fmtAgo(ratesQuery.data?.venues?.[0]?.asOf ?? null);
                       return ago ? <> Sampled {ago}.</> : null;

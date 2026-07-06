@@ -10546,7 +10546,24 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         const pair = LOOP_RATE_REGISTRY.find((p) => p.vaultId === row.vaultId);
         if (pair) row.logoURI = logoMap.get(pair.mint) ?? null;
       }
-      res.json({ rates, recommendedVaultId: recommended?.vaultId ?? null, venues: await venuesPromise });
+      // Augment venue rows with net carry at 2× leverage (can be negative).
+      // Uses the best live staking APY across all tracked vaults as the
+      // reference LST — gives an apples-to-apples borrow-cost comparison
+      // ("what would the best LST earn you at each venue at 2× leverage?").
+      const venuesRaw = await venuesPromise;
+      const refStakingApy =
+        [...fresh.values()]
+          .map((r) => r.stakingApy)
+          .filter((v): v is number => typeof v === "number" && Number.isFinite(v) && v > 0)
+          .reduce<number>((best, v) => Math.max(best, v), 0) || null;
+      const venues = venuesRaw.map((v) => ({
+        ...v,
+        netCarryAt2x:
+          refStakingApy !== null && v.borrowApy !== null
+            ? refStakingApy * 2 - v.borrowApy * 1
+            : null,
+      }));
+      res.json({ rates, recommendedVaultId: recommended?.vaultId ?? null, venues });
     } catch (error: any) {
       console.error("[Loop] rates error:", error);
       res.status(500).json({ error: error?.message || "Internal server error" });
