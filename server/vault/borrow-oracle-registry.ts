@@ -283,3 +283,28 @@ export function getBorrowOracleSource(
 export function getRegisteredCollateralMint(vaultId: number): string | null {
   return REGISTRY[vaultId]?.collateralMint ?? null;
 }
+
+export interface BorrowOracleEntry {
+  feedId: string;
+  symbol: string;
+}
+
+/**
+ * Returns all unique Pyth feed ids registered for borrow-gate use.
+ * For pyth_direct entries the feedId is used; for pyth_sol_proxy entries the
+ * solFeedId (SOL/USD proxy) is used. Results are deduplicated by feedId.
+ *
+ * NOT used by any money path — introspection-only for the snapshot recorder
+ * and shadow freshness logger. Read-only, no side effects.
+ */
+export function getAllBorrowOracleEntries(): BorrowOracleEntry[] {
+  const seen = new Set<string>();
+  const out: BorrowOracleEntry[] = [];
+  for (const src of Object.values(REGISTRY)) {
+    const feedId = src.kind === 'pyth_direct' ? src.feedId : src.solFeedId;
+    if (!feedId || seen.has(feedId)) continue;
+    seen.add(feedId);
+    out.push({ feedId, symbol: src.collateralSymbol });
+  }
+  return out;
+}

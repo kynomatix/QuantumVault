@@ -661,6 +661,21 @@ export async function ensureSchema() {
         updated_at timestamp NOT NULL DEFAULT now()
       )`,
       `CREATE INDEX IF NOT EXISTS idx_fy_positions_wallet ON fy_positions (wallet_address)`,
+
+      // --- HERMES_EXIT_PLAN Phase 3b: on-chain Pyth oracle snapshot store. ---
+      // Append-only 26h ring for on-chain Pyth price readings (borrow-gate feeds
+      // + Flash crypto feeds). Pruned by oracle-snapshot-recorder.ts on every
+      // tick. Additive + idempotent. No foreign keys — purely observational.
+      `CREATE TABLE IF NOT EXISTS oracle_price_snapshots (
+        id serial PRIMARY KEY,
+        feed_id text NOT NULL,
+        symbol text NOT NULL,
+        price_usd real NOT NULL,
+        publish_time_sec integer NOT NULL,
+        taken_at timestamp NOT NULL DEFAULT now(),
+        source text NOT NULL DEFAULT 'onchain'
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_oracle_snapshots_feed_taken ON oracle_price_snapshots (feed_id, taken_at)`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner

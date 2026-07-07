@@ -1665,6 +1665,20 @@ export const insertUserApiTokenSchema = createInsertSchema(userApiTokens).omit({
 export type UserApiToken = typeof userApiTokens.$inferSelect;
 export type InsertUserApiToken = z.infer<typeof insertUserApiTokenSchema>;
 
+// HERMES_EXIT_PLAN Phase 3b: on-chain Pyth price snapshots (26h ring).
+// Append-only observational table — no foreign keys, no money-path reads.
+export const oraclePriceSnapshots = pgTable("oracle_price_snapshots", {
+  id: serial("id").primaryKey(),
+  feedId: text("feed_id").notNull(),
+  symbol: text("symbol").notNull(),
+  priceUsd: real("price_usd").notNull(),
+  publishTimeSec: integer("publish_time_sec").notNull(),
+  takenAt: timestamp("taken_at").notNull().defaultNow(),
+  source: text("source").notNull().default("onchain"),
+}, (table) => [
+  index("idx_oracle_snapshots_feed_taken").on(table.feedId, table.takenAt),
+]);
+
 export const insertLabStrategySchema = createInsertSchema(labStrategies).omit({ id: true, createdAt: true });
 export const insertLabRunSchema = createInsertSchema(labOptimizationRuns).omit({ id: true, createdAt: true, completedAt: true });
 export const insertLabResultSchema = createInsertSchema(labOptimizationResults).omit({ id: true });

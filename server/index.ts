@@ -796,6 +796,23 @@ app.use((req, res, next) => {
           console.error('[Spine] init failed:', err);
         }
       }, 82_000);
+
+      // ~87s: Oracle Snapshot Recorder (HERMES_EXIT_PLAN Phase 3b, READ-ONLY).
+      // Reads on-chain Pyth prices every 5 min via getMultipleAccountsInfo;
+      // persists to oracle_price_snapshots table + bounded 26h in-memory ring;
+      // shadow-logs [OracleShadow] on-chain vs Hermes for borrow-gate feeds.
+      // No gate logic, no money-path changes, no threshold changes.
+      // Gated by ORACLE_SNAPSHOT_DISABLED=true (default: enabled).
+      setTimeout(() => {
+        log('[Staggered startup] Initializing Oracle Snapshot Recorder');
+        import('./vault/oracle-snapshot-recorder').then(({ initOracleSnapshotRecorder }) => {
+          try {
+            initOracleSnapshotRecorder();
+          } catch (err) {
+            console.error('[OracleSnapshot] init failed:', err);
+          }
+        }).catch((err) => console.error('[OracleSnapshot] import failed:', err));
+      }, 87_000);
     },
   );
 })();
