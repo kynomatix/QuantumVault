@@ -15821,6 +15821,28 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               message: 'Please try again in a moment to reclaim it, or withdraw funds manually before deleting.',
             });
           }
+          // Audit path (accounting) — record the sweep BEFORE the bot row is deleted
+          // (equity_events.trading_bot_id is ON DELETE SET NULL, so the row survives
+          // as wallet-level history). Creation recorded a positive 'drift_deposit'
+          // ("Initial funding for Flash bot wallet"); without this offsetting negative
+          // 'drift_withdraw', every deleted Flash bot permanently inflates wallet
+          // net-deposited and the transfer is invisible to history/tax/reconciliation.
+          // Insert UNCONDITIONALLY in try/catch — do NOT gate on
+          // getEquityEventByTxSignature (see .agents/memory/equity-event-tx-signature-collision.md).
+          if (sweep.usdcSwept > 0) {
+            try {
+              await storage.createEquityEvent({
+                walletAddress: bot.walletAddress,
+                tradingBotId: bot.id,
+                eventType: 'drift_withdraw',
+                amount: String(-sweep.usdcSwept),
+                txSignature: sweep.usdcTxSignature || null,
+                notes: 'Capital returned to agent wallet on Flash bot delete',
+              });
+            } catch (eventErr: any) {
+              console.error(`[Delete] CRITICAL: Flash sweep succeeded (tx ${sweep.usdcTxSignature || 'n/a'}) but equity event recording failed: ${eventErr?.message || eventErr}. Untracked sweep: wallet=${bot.walletAddress}, botId=${bot.id}, amount=${sweep.usdcSwept}`);
+            }
+          }
           await storage.deleteTradingBot(req.params.id);
           const msg = sweep.usdcSwept > 0
             ? `Returned $${sweep.usdcSwept.toFixed(2)} USDC to your agent wallet before deletion`
