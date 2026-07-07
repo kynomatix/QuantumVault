@@ -51,11 +51,26 @@ interface PriceEntry {
   completionPerM: number | null;
 }
 
+/** Per-model capability flags derived from OpenRouter's `supported_parameters` list. */
+export interface ModelCapabilities {
+  /** Model supports `tools` + `tool_choice` (native tool calling). */
+  tools: boolean;
+  /** Model supports `response_format`. */
+  responseFormat: boolean;
+  /** Model supports `structured_outputs` (strict JSON schema enforcement). */
+  structuredOutputs: boolean;
+}
+
 const PRICE_TTL_MS = 12 * 60 * 60 * 1000; // 12h on success
 const FAILURE_RETRY_MS = 5 * 60 * 1000; // retry 5 min after a failure
 const FETCH_TIMEOUT_MS = 8000;
 
-let priceCache: { at: number; prices: Map<string, PriceEntry>; live: boolean } | null = null;
+let priceCache: {
+  at: number;
+  prices: Map<string, PriceEntry>;
+  caps: Map<string, ModelCapabilities>;
+  live: boolean;
+} | null = null;
 
 // OpenRouter quotes price per single token as a decimal string (e.g. "0.000003").
 // Convert to USD per 1,000,000 tokens, rounded to 2dp.
@@ -65,14 +80,19 @@ function perMillion(v: unknown): number | null {
   return Math.round(n * 1e6 * 100) / 100;
 }
 
-async function loadPrices(): Promise<{ prices: Map<string, PriceEntry>; live: boolean }> {
+async function loadPrices(): Promise<{
+  prices: Map<string, PriceEntry>;
+  caps: Map<string, ModelCapabilities>;
+  live: boolean;
+}> {
   const now = Date.now();
   const fresh = priceCache && now - priceCache.at < (priceCache.live ? PRICE_TTL_MS : FAILURE_RETRY_MS);
   if (priceCache && fresh) {
-    return { prices: priceCache.prices, live: priceCache.live };
+    return { prices: priceCache.prices, caps: priceCache.caps, live: priceCache.live };
   }
 
   const prices = new Map<string, PriceEntry>();
+  const caps = new Map<string, ModelCapabilities>();
   let live = false;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -87,17 +107,25 @@ async function loadPrices(): Promise<{ prices: Map<string, PriceEntry>; live: bo
           promptPerM: perMillion(m?.pricing?.prompt),
           completionPerM: perMillion(m?.pricing?.completion),
         });
+        // WO-1: capability map — union across all providers (OpenRouter aggregates).
+        // `tools` requires BOTH `tools` AND `tool_choice` in the list.
+        const params: string[] = Array.isArray(m?.supported_parameters) ? m.supported_parameters : [];
+        caps.set(m.id, {
+          tools: params.includes("tools") && params.includes("tool_choice"),
+          responseFormat: params.includes("response_format"),
+          structuredOutputs: params.includes("structured_outputs"),
+        });
       }
       live = true;
     }
   } catch {
-    /* fail-open: leave prices empty, mark not-live so the list still renders */
+    /* fail-open: leave prices/caps empty, mark not-live so the list still renders */
   } finally {
     clearTimeout(timer);
   }
 
-  priceCache = { at: now, prices, live };
-  return { prices, live };
+  priceCache = { at: now, prices, caps, live };
+  return { prices, caps, live };
 }
 
 export async function getCreatorModelCatalog(): Promise<CreatorModelCatalog> {
@@ -124,6 +152,27 @@ export async function getCreatorModelCatalog(): Promise<CreatorModelCatalog> {
     },
     models,
   };
+}
+
+// --- Capability lookup (WO-1) ---------------------------------------------------
+
+/**
+ * Return the capability flags for `modelId`, piggybacking on the same 12h
+ * price-cache fetch so we never add a second network call. Fail-soft: when
+ * the fetch failed or the model is unknown, returns all-false + `live:false`
+ * so callers always fall back to the prose path — never throws, never blocks a turn.
+ */
+export async function getModelCapabilities(
+  modelId: string,
+): Promise<ModelCapabilities & { live: boolean }> {
+  try {
+    const { caps, live } = await loadPrices();
+    const c = caps.get(modelId);
+    if (!c) return { tools: false, responseFormat: false, structuredOutputs: false, live };
+    return { ...c, live };
+  } catch {
+    return { tools: false, responseFormat: false, structuredOutputs: false, live: false };
+  }
 }
 
 // --- Spend accounting helpers (used by the Lab Assistant chat brain) ----------

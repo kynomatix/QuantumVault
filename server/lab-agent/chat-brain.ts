@@ -13,7 +13,8 @@
 // used for the single call, and never logged or persisted here.
 
 import { z } from "zod";
-import { callOpenRouterWithUsage, type LlmMessage, type LlmUsage } from "../ai-assistant/router";
+import { callOpenRouterWithUsage, LlmGatewayError, type LlmMessage, type LlmUsage } from "../ai-assistant/router";
+import { getModelCapabilities } from "../ai-assistant/models-catalog";
 import type { LabAgentToolkitMethod } from "@shared/lab-agent-contract";
 import { LAB_AVAILABLE_TICKERS } from "@shared/schema";
 
@@ -456,6 +457,9 @@ export interface BrainTurnResult {
   // The planner's NEXT persisted auto state (auto mode only). The orchestrator writes
   // it into task.memory.auto. Undefined for the LLM chat brain.
   auto?: AutoMemory;
+  // WO-5: which enforcement path produced this decision ("tools"|"json_schema"|"prose").
+  // Present only when decideTurnAction() made the call (absent for auto-planner ticks).
+  decisionPath?: "tools" | "json_schema" | "prose";
 }
 
 /** The brain seam the orchestrator depends on. The job binds the key + model. */
@@ -771,40 +775,167 @@ export function isSafeDirectAnswerTurn(userText: string): boolean {
   return true;
 }
 
+// WO-3 -----------------------------------------------------------------------
+// Native structured-decision constants.
+//
+// DECIDE_SCHEMA is the JSON Schema for the `decide` function.  It is also used
+// as the `json_schema.schema` value for Path B (response_format).
+// DECIDE_TOOL wraps it in the OpenAI function-tool envelope for Path A.
+// Both are defined as plain objects (not `as const`) so TypeScript infers them
+// as the widest compatible type accepted by callOpenRouterWithUsage's `unknown` params.
+
+const DECIDE_SCHEMA = {
+  anyOf: [
+    {
+      type: "object",
+      required: ["action", "tool"],
+      properties: {
+        action: { type: "string", enum: ["tool"] },
+        tool: { type: "string", enum: [...WORKING_TOOLS] },
+        args: { type: "object", additionalProperties: true },
+      },
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      required: ["action", "message"],
+      properties: {
+        action: { type: "string", enum: ["final"] },
+        message: { type: "string", minLength: 1 },
+      },
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      required: ["action", "plan"],
+      properties: {
+        action: { type: "string", enum: ["update_plan"] },
+        plan: {
+          type: "array",
+          items: { type: "string", minLength: 1 },
+          minItems: 1,
+          maxItems: 12,
+        },
+        note: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  ],
+};
+
+const DECIDE_TOOL = {
+  type: "function",
+  function: {
+    name: "decide",
+    description:
+      "Emit exactly one action per turn — a tool call, a final reply to the user, or a plan update.",
+    parameters: DECIDE_SCHEMA,
+  },
+};
+
 /**
  * Make ONE turn decision on the user's key. Throws MalformedDecisionError when the
  * model's output can't be parsed/validated (the orchestrator retries within a
  * bounded repair budget, then degrades). Throws LlmGatewayError on transport
- * failures. Never throws a raw provider error.
+ * failures (except 404, which retries via the prose path). Never throws a raw
+ * provider error.
+ *
+ * WO-3 routing:
+ *   Path A — caps.tools: native tool calling (DECIDE_TOOL + toolChoice + require_parameters).
+ *             tool_calls → parseBrainDecision(arguments); content fallback → parse content.
+ *             404 → fall through to Path C.
+ *   Path B — caps.structuredOutputs && !caps.tools: response_format json_schema.
+ *             404 → fall through to Path C.
+ *   Path C — prose (existing behaviour, also serves as the universal fallback).
+ *
+ * All paths apply the same coerceProseToFinal salvage on MalformedDecisionError before
+ * re-throwing, so the orchestrator's retry budget is the last line of defence.
  */
 export async function decideTurnAction(
   input: BrainTurnContext & { apiKey: string; model?: string },
 ): Promise<BrainTurnResult> {
   const model = input.model || DEFAULT_CHAT_MODEL;
   const messages = buildDecisionMessages(input);
-  const { content, usage } = await callOpenRouterWithUsage({
+
+  const caps = await getModelCapabilities(model);
+
+  const baseOpts = {
     apiKey: input.apiKey,
     model,
     messages,
     maxTokens: DECIDE_MAX_TOKENS,
     temperature: DECIDE_TEMPERATURE,
     timeoutMs: DECIDE_TIMEOUT_MS,
-  });
-  let decision: BrainDecision;
-  try {
-    decision = parseBrainDecision(content);
-  } catch (err) {
-    // The model wrote a post-tool answer as plain prose instead of the JSON envelope.
-    // Salvage it (gated on a tool having run this turn) rather than degrade to a canned
-    // reply that discards the data it just gathered. Usage is still billed (the call
-    // happened) — we only reinterpret the SAME response.
-    if (err instanceof MalformedDecisionError) {
-      const salvaged = coerceProseToFinal(content, input.recentMessages);
-      if (salvaged) return { decision: salvaged, usage, model };
+  } as const;
+
+  // Inner helper: parse a raw string into a validated BrainTurnResult.
+  // Applies coerceProseToFinal salvage on MalformedDecisionError, then re-throws
+  // when salvage fails. Usage is from the gateway call that produced `raw`.
+  function tryParse(
+    raw: string,
+    usage: LlmUsage | undefined,
+    path: "tools" | "json_schema" | "prose",
+  ): BrainTurnResult {
+    try {
+      const decision = parseBrainDecision(raw);
+      return { decision, usage, model, decisionPath: path };
+    } catch (err) {
+      if (err instanceof MalformedDecisionError) {
+        const salvaged = coerceProseToFinal(err.raw ?? raw, input.recentMessages);
+        if (salvaged) return { decision: salvaged, usage, model, decisionPath: "prose" };
+      }
+      throw err;
     }
-    throw err;
   }
-  return { decision, usage, model };
+
+  // Path A: native tool calling — structured arguments, no fence stripping needed.
+  if (caps.tools) {
+    try {
+      const res = await callOpenRouterWithUsage({
+        ...baseOpts,
+        tools: [DECIDE_TOOL],
+        toolChoice: { type: "function", function: { name: "decide" } },
+        requireParameters: true,
+      });
+      if (res.toolCalls && res.toolCalls.length > 0) {
+        // Model returned a proper tool_calls entry — parse the arguments JSON.
+        return tryParse(res.toolCalls[0].arguments, res.usage, "tools");
+      }
+      // Provider answered in content instead (tool_calls missing) — parse as prose.
+      return tryParse(res.content, res.usage, "prose");
+    } catch (err) {
+      if (err instanceof LlmGatewayError && err.status === 404) {
+        // No eligible provider honours require_parameters — fall through to Path C.
+      } else {
+        throw err; // MalformedDecisionError, transport errors, etc.
+      }
+    }
+  }
+
+  // Path B: structured output via response_format (no native tool support needed).
+  if (caps.structuredOutputs) {
+    try {
+      const res = await callOpenRouterWithUsage({
+        ...baseOpts,
+        responseFormat: {
+          type: "json_schema",
+          json_schema: { name: "decide", strict: true, schema: DECIDE_SCHEMA },
+        },
+        requireParameters: true,
+      });
+      return tryParse(res.content, res.usage, "json_schema");
+    } catch (err) {
+      if (err instanceof LlmGatewayError && err.status === 404) {
+        // No eligible provider — fall through to Path C.
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  // Path C: prose (caps absent / unknown model / 404 fallback from A or B).
+  const { content, usage } = await callOpenRouterWithUsage(baseOpts);
+  return tryParse(content, usage, "prose");
 }
 
 // Assemble the decision prompt: system contract+rules, optional goal + memory

@@ -348,6 +348,13 @@ export class LabTurnOrchestrator {
     let segmentIters = 0;
     let malformedStreak = 0;
     let toolErrorStreak = 0;
+    // WO-4: transient corrective note injected into the brain context after a
+    // MalformedDecisionError. Cleared immediately on the next successful parse.
+    // Never written to storage.
+    let correctiveNote: string | undefined;
+    // WO-5: model + raw-sample tracking for degrade telemetry.
+    let lastModel: string | undefined;
+    let lastMalformedRaw: string | undefined;
 
     while (true) {
       const task = await this.storage.getAgentTask(taskId);
@@ -392,6 +399,7 @@ export class LabTurnOrchestrator {
           // The replay failed cleanly; clear it and let the brain re-decide.
           toolErrorStreak++;
           if (toolErrorStreak > this.limits.maxToolErrorRetries) {
+            this.logDegrade({ taskId, mode: task.mode, model: lastModel, trigger: "tool_errors", malformedStreak });
             await this.degrade(task, opts.hasKey);
             return { outcome: "halted_tool_errors" };
           }
@@ -419,10 +427,12 @@ export class LabTurnOrchestrator {
       const userText = lastUserContent(messages);
 
       if (task.loopCount >= this.limits.maxBrainCalls) {
+        this.logDegrade({ taskId, mode: task.mode, model: lastModel, trigger: "iterations", malformedStreak });
         await this.degrade(task, opts.hasKey, userText);
         return { outcome: "halted_iterations" };
       }
       if ((task.spendEstimateUsd ?? 0) >= this.limits.hardSpendCapUsd) {
+        this.logDegrade({ taskId, mode: task.mode, model: lastModel, trigger: "spend", malformedStreak });
         await this.degrade(task, opts.hasKey, userText);
         return { outcome: "halted_spend" };
       }
@@ -432,6 +442,7 @@ export class LabTurnOrchestrator {
         // this only trips if the planner somehow fails to terminate.
         const steps = readMemory(task).auto?.autoStepCount ?? 0;
         if (steps >= this.limits.maxAutoSteps) {
+          this.logDegrade({ taskId, mode: task.mode, model: lastModel, trigger: "auto_steps", malformedStreak });
           await this.degrade(task, opts.hasKey, userText);
           return { outcome: "halted_auto_steps" };
         }
@@ -445,11 +456,17 @@ export class LabTurnOrchestrator {
       // --- ask the brain --------------------------------------------------------
       let result;
       try {
-        result = await opts.brain(this.buildBrainContext(task, messages));
+        result = await opts.brain(this.buildBrainContext(task, messages, correctiveNote));
       } catch (e) {
         await this.bumpLoopCount(task); // a failed attempt still counts (no usage to price)
         if (e instanceof MalformedDecisionError) {
           malformedStreak++;
+          lastMalformedRaw = e.raw?.slice(0, 400);
+          // WO-4: inject a corrective note into the NEXT brain call's context so the
+          // model sees why its last response was rejected, without storing anything.
+          correctiveNote =
+            `Your previous output was rejected: ${e.message} ` +
+            `Respond with ONLY the required JSON envelope — no prose, no fences.`;
           if (malformedStreak <= this.limits.maxMalformedRetries) continue; // bounded repair
           // LAST RESORT: the model kept answering as prose instead of the JSON envelope.
           // For a CHAT-mode conversational / scope / how-it-works question (never the auto
@@ -464,14 +481,23 @@ export class LabTurnOrchestrator {
               return { outcome: "final" };
             }
           }
+          this.logDegrade({ taskId, mode: task.mode, model: lastModel, trigger: "malformed", malformedStreak, rawSample: lastMalformedRaw });
           await this.degrade(task, opts.hasKey, userText);
           return { outcome: "halted_malformed" };
         }
         // Transport / gateway error (key rejected, rate-limited, timeout, …).
+        this.logDegrade({ taskId, mode: task.mode, model: lastModel, trigger: "transport", malformedStreak });
         await this.degrade(task, opts.hasKey, userText);
         return { outcome: "error" };
       }
       malformedStreak = 0;
+      correctiveNote = undefined;
+      lastMalformedRaw = undefined;
+      lastModel = result.model;
+      // WO-5: log the decision path on every successful LLM brain call.
+      if (result.decisionPath) {
+        console.log(JSON.stringify({ event: "lab_agent_decision", taskId, path: result.decisionPath }));
+      }
       await this.recordBrainCost(task, result.model, result.usage);
 
       const decision = result.decision;
@@ -532,6 +558,7 @@ export class LabTurnOrchestrator {
         // queue failed: fold the error and let the brain retry within budget
         toolErrorStreak++;
         if (toolErrorStreak > this.limits.maxToolErrorRetries) {
+          this.logDegrade({ taskId, mode: task.mode, model: lastModel, trigger: "tool_errors", malformedStreak });
           await this.degrade(task, opts.hasKey, userText);
           return { outcome: "halted_tool_errors" };
         }
@@ -543,6 +570,7 @@ export class LabTurnOrchestrator {
       if (!sync.ok) {
         toolErrorStreak++;
         if (toolErrorStreak > this.limits.maxToolErrorRetries) {
+          this.logDegrade({ taskId, mode: task.mode, model: lastModel, trigger: "tool_errors", malformedStreak });
           await this.degrade(task, opts.hasKey, userText);
           return { outcome: "halted_tool_errors" };
         }
@@ -870,9 +898,40 @@ export class LabTurnOrchestrator {
     return false;
   }
 
+  // --- observability (WO-5) -------------------------------------------------------
+
+  /**
+   * Log a structured degrade event. Called at every entry into `degrade()` and at
+   * each halt outcome. `rawSample` is only set for malformed triggers — never log key
+   * material, full provider bodies, or anything from a non-malformed error path.
+   */
+  private logDegrade(opts: {
+    taskId: number;
+    mode: string;
+    model: string | undefined;
+    trigger: "malformed" | "tool_errors" | "transport" | "spend" | "iterations" | "auto_steps";
+    malformedStreak: number;
+    rawSample?: string;
+  }): void {
+    const line: Record<string, unknown> = {
+      event: "lab_agent_degrade",
+      taskId: opts.taskId,
+      mode: opts.mode,
+      model: opts.model ?? null,
+      trigger: opts.trigger,
+      malformedStreak: opts.malformedStreak,
+    };
+    if (opts.rawSample !== undefined) line.rawSample = opts.rawSample;
+    console.log(JSON.stringify(line));
+  }
+
   // --- brain context + cost -------------------------------------------------------
 
-  private buildBrainContext(task: LabAgentTask, messages: LabAgentMessage[]): BrainTurnContext {
+  private buildBrainContext(
+    task: LabAgentTask,
+    messages: LabAgentMessage[],
+    correctiveNote?: string,
+  ): BrainTurnContext {
     const memory = readMemory(task);
     const plan = readPlan(task);
     const ctx: BrainTurnContext = {
@@ -883,6 +942,12 @@ export class LabTurnOrchestrator {
       })),
       memoryDigest: renderMemoryDigest(memory, plan),
     };
+    // WO-4: inject a transient corrective note as the last "agent" turn when present.
+    // This is intentionally NOT written to storage — it lives only in the current brain
+    // call context and is cleared the moment the next parse succeeds.
+    if (correctiveNote) {
+      ctx.recentMessages = [...ctx.recentMessages, { role: "agent", content: correctiveNote }];
+    }
     // Auto mode: assemble the deterministic planner's view from persisted memory + live
     // task fields. The planner is pure — everything it branches on lives here.
     if (task.mode === "auto") {

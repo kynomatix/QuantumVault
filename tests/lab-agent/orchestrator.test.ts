@@ -1110,3 +1110,119 @@ describe("LabTurnOrchestrator — hands-off (autonomous) mode", () => {
     expect(String(store.agentMessages().at(-1)!.content)).toMatch(/spend cap/i);
   });
 });
+
+// ---------------------------------------------------------------------------
+// WO-4: corrective note — transient context injected after MalformedDecisionError
+// ---------------------------------------------------------------------------
+
+describe("LabTurnOrchestrator — WO-4 corrective note", () => {
+  it("injects a corrective note into brain context after a MalformedDecisionError", async () => {
+    const store = makeStore();
+    await seedUser(store, "what is the win rate?");
+    const toolkit = makeToolkit();
+
+    const capturedCtxs: import("../../server/lab-agent/chat-brain").BrainTurnContext[] = [];
+    let callIdx = 0;
+    const brain: BrainFn = async (ctx) => {
+      capturedCtxs.push(ctx);
+      callIdx++;
+      if (callIdx === 1) throw new MalformedDecisionError("No JSON object found", "just prose text");
+      return { decision: { action: "final", message: "The win rate is 68%." }, usage: { promptTokens: 5, completionTokens: 5 }, model: "test-model" };
+    };
+
+    const orch = makeOrch(store, toolkit, {
+      limits: { maxMalformedRetries: 1, maxBrainCalls: 10, hardSpendCapUsd: 9999, maxToolErrorRetries: 3, maxAutoSteps: 50, maxSegmentIterations: 30 },
+    });
+    const res = await orch.advance(1, { brain, hasKey: true });
+
+    expect(res.outcome).toBe("final");
+    expect(capturedCtxs).toHaveLength(2);
+    // First call: NO corrective note
+    const firstNote = capturedCtxs[0]!.recentMessages.find(
+      (m) => m.role === "agent" && m.content.includes("rejected"),
+    );
+    expect(firstNote).toBeUndefined();
+    // Second call: corrective note present as last message in recentMessages
+    const secondNote = capturedCtxs[1]!.recentMessages.find(
+      (m) => m.role === "agent" && m.content.includes("rejected"),
+    );
+    expect(secondNote).toBeDefined();
+    expect(secondNote!.content).toMatch(/JSON envelope/i);
+  });
+
+  it("clears the corrective note after a successful parse (does not bleed into next turn)", async () => {
+    const store = makeStore();
+    await seedUser(store, "first question");
+    const toolkit = makeToolkit();
+
+    const capturedCtxs: import("../../server/lab-agent/chat-brain").BrainTurnContext[] = [];
+    let callIdx = 0;
+    const brain: BrainFn = async (ctx) => {
+      capturedCtxs.push(ctx);
+      callIdx++;
+      if (callIdx === 1) throw new MalformedDecisionError("bad", "bad output");
+      // Second call succeeds — corrective note should be in ctx
+      if (callIdx === 2) return { decision: { action: "final", message: "done" }, usage: { promptTokens: 5, completionTokens: 5 }, model: "m" };
+      // Third call (new turn after user sends another message)
+      return { decision: { action: "final", message: "second done" }, usage: { promptTokens: 5, completionTokens: 5 }, model: "m" };
+    };
+
+    const orch = makeOrch(store, toolkit, {
+      limits: { maxMalformedRetries: 1, maxBrainCalls: 10, hardSpendCapUsd: 9999, maxToolErrorRetries: 3, maxAutoSteps: 50, maxSegmentIterations: 30 },
+    });
+    // First segment: malformed on call 1, succeeds on call 2
+    await orch.advance(1, { brain, hasKey: true });
+    // Second segment: simulate a new user message
+    await seedUser(store, "second question");
+    await orch.advance(1, { brain, hasKey: true });
+
+    // Third call: no corrective note (cleared after call 2)
+    if (capturedCtxs[2]) {
+      const bleedNote = capturedCtxs[2].recentMessages.find(
+        (m) => m.role === "agent" && m.content.includes("rejected") && m.content.includes("JSON envelope"),
+      );
+      expect(bleedNote).toBeUndefined();
+    }
+  });
+
+  it("does not write the corrective note to storage", async () => {
+    const store = makeStore();
+    await seedUser(store, "why did my strategy fail?");
+    const toolkit = makeToolkit();
+
+    let callIdx = 0;
+    const brain: BrainFn = async () => {
+      callIdx++;
+      if (callIdx === 1) throw new MalformedDecisionError("bad json", "bad output");
+      return { decision: { action: "final", message: "Here is why." }, usage: { promptTokens: 5, completionTokens: 5 }, model: "m" };
+    };
+
+    const orch = makeOrch(store, toolkit, {
+      limits: { maxMalformedRetries: 1, maxBrainCalls: 10, hardSpendCapUsd: 9999, maxToolErrorRetries: 3, maxAutoSteps: 50, maxSegmentIterations: 30 },
+    });
+    await orch.advance(1, { brain, hasKey: true });
+
+    // Corrective note must NOT be persisted to the message store
+    const allMessages = store.messages as import("../../shared/schema").LabAgentMessage[];
+    const hasNote = allMessages.some(
+      (m) => m.role === "agent" && m.content.includes("rejected") && m.content.includes("JSON envelope"),
+    );
+    expect(hasNote).toBe(false);
+  });
+
+  it("halts with halted_malformed when malformed streak exceeds maxMalformedRetries", async () => {
+    const store = makeStore();
+    await seedUser(store, "when will SOL moon?");
+    const toolkit = makeToolkit();
+
+    const brain: BrainFn = async () => {
+      throw new MalformedDecisionError("bad", "bad prose");
+    };
+
+    const orch = makeOrch(store, toolkit, {
+      limits: { maxMalformedRetries: 0, maxBrainCalls: 10, hardSpendCapUsd: 9999, maxToolErrorRetries: 3, maxAutoSteps: 50, maxSegmentIterations: 30 },
+    });
+    const res = await orch.advance(1, { brain, hasKey: true });
+    expect(res.outcome).toBe("halted_malformed");
+  });
+});

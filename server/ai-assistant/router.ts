@@ -119,6 +119,9 @@ function parseUsage(u: any): LlmUsage | undefined {
 // Core gateway call: returns the final answer AND token usage (for spend tracking).
 // `callOpenRouter` below is the back-compat wrapper that returns just the string,
 // so existing draft/improve callers are untouched.
+//
+// WO-2: extended with optional structured-output fields. All four are omitted from the
+// request body when absent, so callers that don't set them get a byte-identical request.
 export async function callOpenRouterWithUsage(opts: {
   apiKey: string;
   model: string;
@@ -126,7 +129,15 @@ export async function callOpenRouterWithUsage(opts: {
   maxTokens?: number;
   temperature?: number;
   timeoutMs?: number;
-}): Promise<{ content: string; usage?: LlmUsage }> {
+  /** OpenAI-shape function tool definitions. When present, enables tool-call response parsing. */
+  tools?: unknown[];
+  /** e.g. `{type:"function",function:{name:"decide"}}` — forces the model to call a specific tool. */
+  toolChoice?: unknown;
+  /** e.g. `{type:"json_schema", json_schema:{...}}` — structured output format. */
+  responseFormat?: unknown;
+  /** When true, adds `provider:{require_parameters:true}` to pin providers that honour the extras. */
+  requireParameters?: boolean;
+}): Promise<{ content: string; usage?: LlmUsage; toolCalls?: { name: string; arguments: string }[] }> {
   const { apiKey, model, messages } = opts;
   // Thinking models need a bigger output budget (thinking eats tokens) and longer to
   // respond; pick the per-model cap so an explicit caller value can't exceed it.
@@ -164,6 +175,13 @@ export async function callOpenRouterWithUsage(opts: {
         max_tokens: maxTokens,
         temperature,
         reasoning: { enabled: reasoningRequired },
+        // WO-2: include structured-output fields only when the caller set them.
+        // Absent fields are NOT serialised (undefined → omitted by JSON.stringify),
+        // so draft/improve callers get a byte-identical request body.
+        ...(opts.tools !== undefined ? { tools: opts.tools } : {}),
+        ...(opts.toolChoice !== undefined ? { tool_choice: opts.toolChoice } : {}),
+        ...(opts.responseFormat !== undefined ? { response_format: opts.responseFormat } : {}),
+        ...(opts.requireParameters ? { provider: { require_parameters: true } } : {}),
       }),
       signal: controller.signal,
     });
@@ -196,6 +214,31 @@ export async function callOpenRouterWithUsage(opts: {
 
   const choice: any = data?.choices?.[0];
   const content: unknown = choice?.message?.content;
+
+  // WO-2: when caller sent `tools`, a valid response may carry tool_calls instead of
+  // (or in addition to) content. Parse the first call and return early so the empty-
+  // content check below never fires on a legitimate tool-call response.
+  if (opts.tools) {
+    const toolCallsArr: any[] | undefined = Array.isArray(choice?.message?.tool_calls)
+      ? choice.message.tool_calls
+      : undefined;
+    if (toolCallsArr && toolCallsArr.length > 0) {
+      const first = toolCallsArr[0];
+      const name: string = typeof first?.function?.name === 'string' ? first.function.name : '';
+      const args: string =
+        typeof first?.function?.arguments === 'string'
+          ? first.function.arguments
+          : JSON.stringify(first?.function?.arguments ?? {});
+      const contentStr = typeof content === 'string' ? content.trim() : '';
+      return {
+        content: contentStr,
+        toolCalls: [{ name, arguments: args }],
+        usage: parseUsage(data?.usage),
+      };
+    }
+    // Provider answered in content instead of tool_calls — fall through to normal handling.
+  }
+
   if (typeof content !== 'string' || content.trim().length === 0) {
     // finish_reason "length" => the model ran out of output budget before answering.
     if (choice?.finish_reason === 'length') {
