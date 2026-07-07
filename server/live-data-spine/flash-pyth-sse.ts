@@ -15,8 +15,7 @@
  */
 
 import type { PriceTick } from './types.js';
-
-export const PYTH_HERMES_BASE = 'https://hermes.pyth.network';
+import { getHermesBase, getHermesHeaders } from '../pricing/hermes-config.js';
 
 const RECONNECT_INITIAL_MS = 1_000;
 const RECONNECT_MAX_MS = 60_000;
@@ -136,7 +135,7 @@ export class FlashPythSseManager {
 
   constructor(opts: FlashPythSseOptions) {
     this.feedMap = opts.feedMap;
-    this.hermesBase = opts.hermesBase ?? PYTH_HERMES_BASE;
+    this.hermesBase = opts.hermesBase ?? getHermesBase();
     this.onTick = opts.onTick;
     this.onHealth = opts.onHealth;
     this.onParseError = opts.onParseError;
@@ -225,7 +224,7 @@ export class FlashPythSseManager {
     this.abortController = controller;
     const res = await this.fetchImpl(this.buildUrl(), {
       signal: controller.signal,
-      headers: { Accept: 'text/event-stream' },
+      headers: { Accept: 'text/event-stream', ...getHermesHeaders() },
     });
     if (!res.ok || !res.body) {
       throw new Error(`Hermes SSE HTTP ${res.status}`);

@@ -14,6 +14,7 @@ import { startReferralRewardsRetryJob } from "./referral-rewards-retry-job";
 import { startPacificaReferralBackfillJob } from "./pacifica-referral-backfill-job";
 import { initLeverageCache, setOnCacheRefreshed } from "./leverage-cache-service";
 import { initLiveDataSpine, stopLiveDataSpine } from "./live-data-spine/spine-service";
+import { logHermesAuthStatus } from "./pricing/hermes-config.js";
 import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
 import { startTelegramDailySummaryJob } from "./telegram-daily-summary-job";
 import { recordCriticalError, flushErrorLog } from "./error-log";
@@ -779,6 +780,9 @@ app.use((req, res, next) => {
         runPrune();
         setInterval(runPrune, 24 * 60 * 60 * 1000);
       }, 77_000);
+
+      // Pyth Hermes auth status (one line; warns if unauthenticated past-cutover risk).
+      logHermesAuthStatus();
 
       // ~82s: Live-Data & Monitoring Spine (Phase 0, READ-ONLY shadow mode).
       // Gated by SPINE_ENABLED (default off) — no-op when unset. Uses Pacifica's

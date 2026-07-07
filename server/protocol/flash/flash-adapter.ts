@@ -137,10 +137,10 @@ import {
   FLASH_PRIVILEGE_REFERRAL,
 } from './flash-referral.js';
 import { getPrimaryRpcUrl } from '../../rpc-config.js';
+import { hermesUrl, getHermesHeaders } from '../../pricing/hermes-config.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const PYTH_HERMES_BASE = 'https://hermes.pyth.network';
 const PYTH_FETCH_TIMEOUT_MS = 8_000;
 const FLASH_CLUSTER = 'mainnet-beta' as const;
 
@@ -1716,14 +1716,14 @@ export class FlashAdapter implements ProtocolAdapter {
     if (symbolsWithIds.length === 0) return {};
 
     const qs = symbolsWithIds.map((e) => `ids[]=${e.id}`).join('&');
-    const url = `${PYTH_HERMES_BASE}/v2/updates/price/latest?${qs}`;
+    const url = hermesUrl(`/v2/updates/price/latest?${qs}`);
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), PYTH_FETCH_TIMEOUT_MS);
 
     let data: PythHermesResponse;
     try {
-      const res = await fetch(url, { signal: controller.signal });
+      const res = await fetch(url, { signal: controller.signal, headers: getHermesHeaders() });
       if (!res.ok) {
         throw new Error(`Pyth Hermes HTTP ${res.status}: ${res.statusText}`);
       }

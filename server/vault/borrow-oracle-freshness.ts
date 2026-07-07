@@ -29,8 +29,7 @@
 import type { BorrowOracleContext } from "./borrow-risk-policy";
 import type { BorrowVaultConfig } from "./jupiter-lend-borrow-route";
 import { getBorrowOracleSource, type BorrowOracleSource } from "./borrow-oracle-registry";
-
-const HERMES_BASE = "https://hermes.pyth.network";
+import { getHermesBase, getHermesHeaders } from "../pricing/hermes-config.js";
 const DEFAULT_TIMEOUT_MS = 8000;
 /** Tolerate the latest publish time up to this far in the "future" (clock skew). */
 const CLOCK_SKEW_SEC = 30;
@@ -148,11 +147,12 @@ async function fetchJson(
   url: string,
   fetchImpl: typeof fetch,
   timeoutMs: number,
+  headers?: Record<string, string>,
 ): Promise<unknown | null> {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetchImpl(url, { signal: ctrl.signal });
+    const res = await fetchImpl(url, { signal: ctrl.signal, headers });
     if (!res || !res.ok) return null;
     return await res.json();
   } catch {
@@ -200,15 +200,15 @@ export async function readBorrowOracleContext(
     if (!Number.isFinite(nowMs)) return UNREADABLE;
     const nowSec = Math.floor(nowMs / 1000);
     const targetSec = nowSec - 3600;
-    const base = (deps.hermesBase ?? HERMES_BASE).replace(/\/+$/, "");
+    const base = (deps.hermesBase ?? getHermesBase()).replace(/\/+$/, "");
     const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
     const latestUrl = `${base}/v2/updates/price/latest?ids[]=${feedId}&parsed=true`;
     const benchUrl = `${base}/v2/updates/price/${targetSec}?ids[]=${feedId}&parsed=true`;
 
     const [latestJson, benchJson] = await Promise.all([
-      fetchJson(latestUrl, fetchImpl, timeoutMs),
-      fetchJson(benchUrl, fetchImpl, timeoutMs),
+      fetchJson(latestUrl, fetchImpl, timeoutMs, getHermesHeaders()),
+      fetchJson(benchUrl, fetchImpl, timeoutMs, getHermesHeaders()),
     ]);
     if (!latestJson || !benchJson) return UNREADABLE;
 

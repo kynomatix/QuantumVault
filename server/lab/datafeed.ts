@@ -1,5 +1,6 @@
 import type { OHLCV } from "./engine";
 import { getCachedCandles, saveCandlesToDb } from "./candle-store";
+import { getBenchmarksBase, getHermesHeaders } from '../pricing/hermes-config.js';
 
 const OKX_BATCH_SIZE = 300;
 const GATE_BATCH_SIZE = 900;
@@ -8,6 +9,9 @@ const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
 
 const NEGATIVE_CACHE_TTL_MS = 30 * 60 * 1000;
+
+/** One-time flag: log the first 401/403 from Pyth Benchmarks (auth cutover signal). */
+let pythBenchmarksAuthWarned = false;
 
 const okxFailedInstruments = new Map<string, number>();
 const gateFailedPairs = new Map<string, number>();
@@ -285,11 +289,18 @@ async function fetchPythCandles(
     to: String(toSec),
   });
 
-  const url = `https://benchmarks.pyth.network/v1/shims/tradingview/history?${params}`;
+  const url = `${getBenchmarksBase()}/v1/shims/tradingview/history?${params}`;
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+      const res = await fetch(url, { signal: AbortSignal.timeout(20000), headers: getHermesHeaders() });
+      if ((res.status === 401 || res.status === 403) && !pythBenchmarksAuthWarned) {
+        pythBenchmarksAuthWarned = true;
+        console.error(
+          `[Pyth] Benchmarks returned HTTP ${res.status}: candle source now requires ` +
+            'authentication. Set PYTH_HERMES_API_KEY / PYTH_BENCHMARKS_BASE.',
+        );
+      }
       if (res.status === 429) {
         const wait = RETRY_DELAY_MS * (attempt + 1) * 2;
         console.log(`[Pyth] Rate limited, waiting ${wait}ms before retry ${attempt + 1}/${MAX_RETRIES}`);
