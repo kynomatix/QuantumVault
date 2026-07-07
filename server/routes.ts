@@ -15734,6 +15734,29 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           return res.json({ success: true, swept: false, message: 'Bot deleted' });
         }
 
+        // Parked-Vault guard (money-safety) — MUST be above the no-key shortcut below.
+        // sweepBotWallet moves ONLY USDC + SOL, so any parked yield tokens (ONyc/jlUSDC/…)
+        // would be STRANDED, and a legacy no-key bot takes an early "delete audit row"
+        // exit just below that never sweeps at all. Detection needs only the public
+        // wallet key + the STRICT fail-closed reader (no private key), so it works for
+        // every case. Mirrors the guard in _sweepFlashWalletToAgent (recovery path).
+        try {
+          const parkedAssets = await detectParkedYieldTokens(bot.protocolSubaccountId!);
+          if (parkedAssets.length > 0) {
+            return res.status(409).json({
+              error: `Cannot delete bot - it still holds parked Vault funds (${parkedAssets.join(', ')}).`,
+              message: 'Unpark these back to USDC first, then delete the bot.',
+              parkedAssets,
+            });
+          }
+        } catch (parkErr: any) {
+          console.error(`[Delete] Flash parked-Vault check failed for bot ${bot.id}: ${parkErr?.message || parkErr}`);
+          return res.status(500).json({
+            error: 'Cannot delete bot - unable to verify parked Vault balances.',
+            message: 'Please try again in a moment.',
+          });
+        }
+
         // Phase 4b (Flash agent-HD wallets): an agent_hd bot is ALWAYS recoverable
         // from the agent seed + its non-secret derivation index, even with no persisted
         // encrypted blob — so it must NOT take the "no key ⇒ delete audit row" shortcut.
