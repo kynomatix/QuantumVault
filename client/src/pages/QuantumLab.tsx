@@ -23,6 +23,7 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { useConfirm } from "@/hooks/useConfirm";
 
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { LlmKeyStatusRow } from '@/components/LlmKeyStatusRow';
 import { useWallet, useConnection } from "@/hooks/useWallet";
 import { useBindAgentWallet } from "@/hooks/useBindAgentWallet";
 import { Transaction } from "@solana/web3.js";
@@ -6279,8 +6280,6 @@ function CreatorPanel({ strategies, onUseStrategy }: {
 }) {
   const { toast } = useToast();
   const { retryAuth } = useWallet();
-  const [apiKeyInput, setApiKeyInput] = useState("");
-  const [editingKey, setEditingKey] = useState(false);
   const [idea, setIdea] = useState("");
   // Persist the draft across reloads / HMR / server restarts so a regenerated Pine
   // script isn't lost. Session-scoped (cleared when the tab closes).
@@ -6371,30 +6370,6 @@ function CreatorPanel({ strategies, onUseStrategy }: {
   const selectableModels = modelCatalog?.models ?? [];
   const selectedModelInfo = selectedModel ? selectableModels.find((m) => m.id === selectedModel) ?? null : null;
 
-  const saveKeyMutation = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/lab/creator/key", { apiKey: apiKeyInput.trim() });
-      return safeResponseJson(res);
-    },
-    onSuccess: () => {
-      setApiKeyInput("");
-      setEditingKey(false);
-      queryClient.invalidateQueries({ queryKey: ["/api/lab/creator/key"] });
-      toast({ title: "API key saved", description: "Your OpenRouter key is encrypted and stored only for you." });
-    },
-    onError: (err: any) => handleCreatorError(err, "Couldn't save key", () => saveKeyMutation.mutate()),
-  });
-
-  const clearKeyMutation = useMutation({
-    mutationFn: async () => { await apiRequest("DELETE", "/api/lab/creator/key"); },
-    onSuccess: () => {
-      setEditingKey(false);
-      setApiKeyInput("");
-      queryClient.invalidateQueries({ queryKey: ["/api/lab/creator/key"] });
-      toast({ title: "API key removed" });
-    },
-    onError: (err: any) => handleCreatorError(err, "Couldn't remove key", () => clearKeyMutation.mutate()),
-  });
 
   const draftMutation = useMutation({
     mutationFn: async () => {
@@ -6689,48 +6664,7 @@ function CreatorPanel({ strategies, onUseStrategy }: {
                   <KeyRound className="w-4 h-4 text-indigo-300" />
                   <span className="text-sm font-semibold text-white">Your OpenRouter key</span>
                 </div>
-                {keyLoading ? (
-                  <div className="flex items-center gap-2 text-white/50 text-sm"><Loader2 className="w-4 h-4 animate-spin" /> Checking…</div>
-                ) : hasKey && !editingKey ? (
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 text-sm text-white/70">
-                      <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                      <span>Key set</span>
-                      <code className="px-1.5 py-0.5 rounded bg-black/40 text-white/60 text-[12px]">sk-or-…{keyMeta?.last4}</code>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Button size="sm" variant="secondary" onClick={() => setEditingKey(true)} data-testid="button-replace-key" className="bg-white/5 hover:bg-white/10 text-white/70">Replace</Button>
-                      <Button size="sm" variant="secondary" onClick={() => clearKeyMutation.mutate()} disabled={clearKeyMutation.isPending} data-testid="button-clear-key" className="bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/20">
-                        {clearKeyMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Trash2 className="w-3 h-3 mr-1" />}
-                        Remove
-                      </Button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    <p className="text-[12px] text-white/50">
-                      The Creator runs on your own OpenRouter account, so you control the spend. Get a key at{" "}
-                      <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline" data-testid="link-openrouter-keys">openrouter.ai/keys</a>. Encrypted on our server, never shown again.
-                    </p>
-                    <Input
-                      type="password"
-                      value={apiKeyInput}
-                      onChange={(e) => setApiKeyInput(e.target.value)}
-                      placeholder="sk-or-v1-…"
-                      className="bg-black/40 border-white/10 text-white font-mono text-sm"
-                      data-testid="input-api-key"
-                    />
-                    <div className="flex items-center gap-2">
-                      <Button size="sm" onClick={() => saveKeyMutation.mutate()} disabled={saveKeyMutation.isPending || !apiKeyInput.trim()} data-testid="button-save-key" className="bg-indigo-600 hover:bg-indigo-500 text-white">
-                        {saveKeyMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Save className="w-3 h-3 mr-1" />}
-                        Save key
-                      </Button>
-                      {hasKey && editingKey && (
-                        <Button size="sm" variant="ghost" onClick={() => { setEditingKey(false); setApiKeyInput(""); }} data-testid="button-cancel-key" className="text-white/50 hover:text-white/80">Cancel</Button>
-                      )}
-                    </div>
-                  </div>
-                )}
+                <LlmKeyStatusRow dark />
               </PopoverContent>
             </Popover>
 

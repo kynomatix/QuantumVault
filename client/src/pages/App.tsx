@@ -64,7 +64,8 @@ import {
   ArrowDown,
   Cpu,
   Code2,
-  Vault as VaultIcon
+  Vault as VaultIcon,
+  Brain,
 } from 'lucide-react';
 import {
   AlertDialog,
@@ -105,6 +106,7 @@ import { BotManagementDrawer } from '@/components/BotManagementDrawer';
 import VaultIdleFunds from '@/components/VaultIdleFunds';
 import { ExchangeBadge } from '@/components/ExchangeBadge';
 import { CreateBotModal } from '@/components/CreateBotModal';
+import { CreateAiTraderModal } from '@/components/CreateAiTraderModal';
 import { TradeHistoryModal } from '@/components/TradeHistoryModal';
 import { WalletContent } from '@/pages/WalletManagement';
 import { WelcomePopup } from '@/components/WelcomePopup';
@@ -264,6 +266,8 @@ export default function AppPage() {
   const [showInactiveBots, setShowInactiveBots] = useState(false);
   const [expandedPositionBotId, setExpandedPositionBotId] = useState<string | null>(null);
   const [createBotOpen, setCreateBotOpen] = useState(false);
+  const [createAiTraderOpen, setCreateAiTraderOpen] = useState(false);
+  const [aiTraderCreating, setAiTraderCreating] = useState(false);
   const [tradeHistoryOpen, setTradeHistoryOpen] = useState(false);
   const [portfolioChartView, setPortfolioChartView] = useState<'dollar' | 'percent'>('dollar');
   const [portfolioChartRange, setPortfolioChartRange] = useState<string>('3m');
@@ -390,6 +394,15 @@ export default function AppPage() {
   const { data: tradesData, refetch: refetchTrades } = useTrades(10);
   const { data: allTradesData } = useTrades(500);
   const { data: botsData, refetch: refetchBots } = useTradingBots();
+  const { data: aiTraderBotsData, refetch: refetchAiTraderBots } = useQuery({
+    queryKey: ['/api/ai-trader'],
+    queryFn: async () => {
+      const res = await fetch('/api/ai-trader', { credentials: 'include', headers: walletAuthHeaders() });
+      if (!res.ok) return [] as any[];
+      return safeResponseJson(res);
+    },
+    enabled: !!publicKeyString && sessionConnected,
+  });
   const { data: leaderboardData } = useLeaderboard(100);
   const leaderboardWallets = useMemo(
     () => (leaderboardData ?? []).map((t: { walletAddress: string }) => t.walletAddress),
@@ -853,6 +866,53 @@ export default function AppPage() {
       });
     } finally {
       setRefreshing(false);
+    }
+  };
+
+  const handleTryOnPaper = async () => {
+    if (aiTraderCreating) return;
+    setAiTraderCreating(true);
+    try {
+      const createRes = await fetch('/api/ai-trader', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json', ...walletAuthHeaders() },
+        body: JSON.stringify({
+          market: 'SOL-PERP',
+          timeframe: '1h',
+          mode: 'suggest',
+          allocatedUsdc: 100,
+          model: 'anthropic/claude-opus-4.8',
+        }),
+      });
+      const createData = await safeResponseJson(createRes);
+      if (!createRes.ok) {
+        toast({ title: 'Could not start AI Trader', description: createData.error ?? 'Unknown error', variant: 'destructive' });
+        return;
+      }
+      refetchAiTraderBots().catch(() => null);
+      const analyzeRes = await fetch(`/api/ai-trader/${createData.id}/analyze`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: walletAuthHeaders(),
+      });
+      const analyzeData = await safeResponseJson(analyzeRes);
+      if (!analyzeRes.ok) {
+        const is402 = analyzeRes.status === 402;
+        toast({
+          title: is402 ? 'Add your OpenRouter key' : 'Analysis failed',
+          description: is402
+            ? "You've used your 3 free paper decisions. Add a key to continue."
+            : analyzeData.error ?? 'Unknown error',
+          variant: 'destructive',
+        });
+        return;
+      }
+      toast({ title: 'First decision ready!', description: 'Your AI Trader has analyzed SOL-PERP.' });
+    } catch (err: any) {
+      toast({ title: 'Could not start AI Trader', description: err?.message ?? 'Unknown error', variant: 'destructive' });
+    } finally {
+      setAiTraderCreating(false);
     }
   };
 
@@ -2949,7 +3009,73 @@ export default function AppPage() {
                   </Button>
                 </div>
 
-                {botsData && botsData.length > 0 ? (
+                {botsData && botsData.length > 0 && (
+                  <div className="flex items-center gap-3">
+                    <div className="h-px flex-1 bg-border/50" />
+                    <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider px-1">Featured</span>
+                    <div className="h-px flex-1 bg-border/50" />
+                  </div>
+                )}
+                <div className="grid md:grid-cols-2 gap-4" data-testid="section-ai-feature-cards">
+                  <div className="gradient-border p-5 noise flex flex-col gap-3" data-testid="card-ai-trader">
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center flex-shrink-0">
+                          <Brain className="w-5 h-5 text-primary" />
+                        </div>
+                        <div>
+                          <h3 className="font-semibold">AI Trader</h3>
+                          <p className="text-xs text-muted-foreground">Autonomous AI trading decisions</p>
+                        </div>
+                      </div>
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border/60 shrink-0">Paper</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground">An AI monitors the market and proposes trades, building a paper track record you can review before going live.</p>
+                    <p className="text-xs text-muted-foreground/70">3 free decisions included — no API key needed to start.</p>
+                    <div className="flex items-center gap-2 mt-auto pt-1">
+                      <Button
+                        className="flex-1 bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                        onClick={handleTryOnPaper}
+                        disabled={aiTraderCreating}
+                        data-testid="button-try-on-paper"
+                      >
+                        {aiTraderCreating ? (
+                          <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Analyzing…</>
+                        ) : (
+                          <>Try on paper →</>
+                        )}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setCreateAiTraderOpen(true)}
+                        data-testid="button-customize-ai-trader"
+                      >
+                        Customize
+                      </Button>
+                    </div>
+                  </div>
+                  <div
+                    className="gradient-border p-5 noise opacity-60 select-none cursor-not-allowed"
+                    aria-hidden="true"
+                    data-testid="card-grid-bot-coming-soon"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-muted/50 to-muted/30 flex items-center justify-center flex-shrink-0">
+                          <BarChart3 className="w-5 h-5 text-muted-foreground" />
+                        </div>
+                        <div>
+                          <h3 className="font-semibold">Grid Bot</h3>
+                          <p className="text-xs text-muted-foreground">Automated grid trading</p>
+                        </div>
+                      </div>
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border/60 shrink-0">Coming soon</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground mt-3">Buys and sells automatically within a price range, capturing volatility without predicting direction.</p>
+                  </div>
+                </div>
+                {botsData && botsData.length > 0 && (
                   (() => {
                     const renderBotCard = (bot: TradingBot) => {
                       const position = positionsData?.find((p: any) => p.botId === bot.id);
@@ -3094,20 +3220,6 @@ export default function AppPage() {
                       </div>
                     );
                   })()
-                ) : (
-                  <div className="gradient-border p-12 noise text-center">
-                    <Bot className="w-12 h-12 mx-auto mb-4 text-muted-foreground opacity-50" />
-                    <h3 className="text-lg font-display font-semibold mb-2">No Bots Yet</h3>
-                    <p className="text-muted-foreground mb-6">Create your first TradingView bot to start automated trading</p>
-                    <Button 
-                      className="bg-gradient-to-r from-primary to-accent hover:opacity-90"
-                      onClick={() => setCreateBotOpen(true)}
-                      data-testid="button-create-first-bot"
-                    >
-                      <Plus className="w-4 h-4 mr-2" />
-                      Create Your First Bot
-                    </Button>
-                  </div>
                 )}
               </motion.div>
             )}
@@ -5623,6 +5735,15 @@ export default function AppPage() {
         defaultLeverage={defaultLeverage}
         onBotCreated={() => {
           refetchBots();
+        }}
+      />
+
+      <CreateAiTraderModal
+        isOpen={createAiTraderOpen}
+        onClose={() => setCreateAiTraderOpen(false)}
+        walletAddress={publicKeyString || ''}
+        onBotCreated={(_botId) => {
+          refetchAiTraderBots().catch(() => null);
         }}
       />
 
