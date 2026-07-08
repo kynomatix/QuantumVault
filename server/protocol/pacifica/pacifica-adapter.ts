@@ -1095,7 +1095,16 @@ export class PacificaAdapter implements ProtocolAdapter {
   async getOpenStopOrders(agentPublicKey: string, subaccountId?: string, symbol?: string): Promise<Array<{ order_id: string; symbol: string; side: string; stop_price: string; limit_price?: string; order_type?: string }>> {
     const params: Record<string, string> = { account: agentPublicKey };
     if (subaccountId) params.subaccount_id = subaccountId;
-    if (symbol) params.symbol = symbol;
+    if (symbol) {
+      // Callers pass either an internal symbol ("SOL-PERP" — executor G10,
+      // ai-trader monitor) or an already-converted protocol symbol ("SOL" —
+      // verifyStopOrdersExist below). Normalize tolerantly: internal symbols
+      // convert, everything else passes through raw. Forwarding an internal
+      // symbol raw made Pacifica return an empty list, which the G10 path
+      // reads as "bracket missing" — a money-path misread (force-close).
+      const registry = this.getRegistry();
+      params.symbol = registry.isKnownInternal(symbol) ? registry.internalToProtocol(symbol) : symbol;
+    }
     try {
       const response = await this.get('/orders/stop', params);
       if (!Array.isArray(response)) return [];

@@ -764,6 +764,16 @@ app.use((req, res, next) => {
         });
       }, 72_000);
 
+      // ~77s: AI Trader monitor (WO-6): startup reconciliation + 15s
+      // close-detection tick + graduation sweep. Dynamic import keeps the
+      // ai-trader module graph off the boot critical path.
+      setTimeout(() => {
+        log('[Staggered startup] Starting AI Trader monitor');
+        import('./ai-trader/monitor').then(({ startAiTraderMonitor }) => {
+          startAiTraderMonitor();
+        }).catch(err => console.error('[AiTraderMonitor] failed to start:', err));
+      }, 77_000);
+
       // Admin error-log retention: prune on startup, then daily. Bounded table
       // (30d age + hard row cap) so the "Errors" tab never balloons. Fail-safe.
       setTimeout(() => {

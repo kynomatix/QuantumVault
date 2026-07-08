@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { escapeTelegramHtml } from "./telegram-html";
 
 export interface TradeNotification {
-  type: 'trade_executed' | 'trade_failed' | 'position_closed' | 'partial_close';
+  type: 'trade_executed' | 'trade_failed' | 'position_closed' | 'partial_close' | 'ai_trader_graduation';
   botName: string;
   market: string;
   side?: 'LONG' | 'SHORT';
@@ -140,7 +140,10 @@ export async function sendTradeNotification(
       (notification.type === 'trade_failed' && wallet.notifyTradeFailed) ||
       (notification.type === 'position_closed' && wallet.notifyPositionClosed) ||
       // partial_close ties to the same flag as position_closed
-      (notification.type === 'partial_close' && wallet.notifyPositionClosed);
+      (notification.type === 'partial_close' && wallet.notifyPositionClosed) ||
+      // AI Trader graduation rides the position-closed preference (milestone
+      // about trading outcomes; no dedicated toggle — WO-6 additive change)
+      (notification.type === 'ai_trader_graduation' && wallet.notifyPositionClosed);
 
     if (!shouldNotify) {
       console.log(`[Notifications] Notification type ${notification.type} disabled for ${walletAddress}`);
@@ -569,6 +572,17 @@ function formatNotificationMessage(notification: TradeNotification): { title: st
       return {
         title: `📊 Position Closed`,
         body: `${emoji} ${botName}: ${market} ${pnlStr}${reasonSuffix}`.trim()
+      };
+    }
+
+    case 'ai_trader_graduation': {
+      const pnlStr = pnl !== undefined
+        ? (pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`)
+        : '';
+      const detailSuffix = notification.closeReason ? ` — ${escapeTelegramHtml(notification.closeReason)}` : '';
+      return {
+        title: `🎓 Paper Trial Passed`,
+        body: `${botName}: ${market} graduated with ${pnlStr} net paper PnL${detailSuffix}. You can now take it live from the app.`.trim()
       };
     }
 
