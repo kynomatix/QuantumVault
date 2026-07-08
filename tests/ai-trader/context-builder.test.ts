@@ -30,7 +30,10 @@ function makeCandles(count: number, tfMs: number, lastCandleAgeMs: number, baseP
   return candles;
 }
 
-const SELECTED_CANDLES_15M = makeCandles(100, 900_000, 60_000, 140);
+// WO-3.1: the golden fixture now spans 400 bars — the module's INDICATOR_BARS
+// window — so EMA200/EMA50 seed with real values. Only the most recent 100 bars
+// are serialized into the CSV block (asserted below).
+const SELECTED_CANDLES_15M = makeCandles(400, 900_000, 60_000, 140);
 const PARENT_CANDLES_1H = makeCandles(30, 3_600_000, 5 * 60_000, 138);
 
 function makeBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
@@ -181,13 +184,54 @@ describe("buildMarketContext (WO-3)", () => {
 
     // Targeted, human-readable assertions on top of the snapshot so intent survives
     // even if someone regenerates the snapshot without reading the diff closely.
-    expect(result.user).toContain("EMA(200): n/a (prev n/a)"); // 100-bar window can never seed a 200-period EMA (flagged spec gap)
+    // WO-3.1: the 400-bar indicator window now seeds real EMA200/EMA50 values
+    // (previously "n/a" — the WO-3 spec bug, since amended).
+    expect(result.user).toMatch(/EMA\(200\): \d+\.\d{2} \(prev \d+\.\d{2}\)/);
+    expect(result.user).toMatch(/EMA\(50\): \d+\.\d{2} \(prev \d+\.\d{2}\)/);
     expect(result.user).toContain("regime=trending (ADX 30.2)");
     expect(result.user).toContain("regime=ranging (ADX 15.4)");
     expect(result.user).toContain("regime=regime unknown (no ADX recorded)");
     expect(result.user).toContain("## Candles — 1h parent timeframe (oldest -> newest, CSV)");
     expect(result.user).toContain("Open position: long 2.5 @ entry 145.00");
     expect(fetchOHLCVMock).toHaveBeenCalledTimes(2);
+
+    // WO-3.1 token-size guard: despite the 400-bar indicator window, the selected-
+    // timeframe CSV block must still serialize exactly the 100 most recent bars.
+    const selectedCsvBlock = result.user
+      .split("## Candles — 15m (oldest -> newest, CSV)")[1]
+      .split("## Candles — 1h parent timeframe")[0]
+      .trim();
+    const csvRows = selectedCsvBlock.split("\n");
+    expect(csvRows[0]).toBe("time,open,high,low,close,volume");
+    expect(csvRows.length - 1).toBe(100);
+    // ...and those 100 rows are the NEWEST 100 of the 400-bar fixture.
+    const fixtureNewest = SELECTED_CANDLES_15M[SELECTED_CANDLES_15M.length - 1];
+    const fixtureOldestSerialized = SELECTED_CANDLES_15M[SELECTED_CANDLES_15M.length - 100];
+    expect(csvRows[1]).toContain(new Date(fixtureOldestSerialized.time).toISOString().slice(0, 16));
+    expect(csvRows[csvRows.length - 1]).toContain(new Date(fixtureNewest.time).toISOString().slice(0, 16));
+  });
+
+  it("EMA200 still renders 'n/a' as the fallback when history is genuinely insufficient (<200 bars)", async () => {
+    fetchOHLCVMock.mockImplementation((_symbol: string, timeframe: string) => {
+      // Venue/cache only has 120 bars of history — the module must degrade
+      // honestly rather than fabricate an unseeded EMA200.
+      if (timeframe === "15m") return Promise.resolve(makeCandles(120, 900_000, 60_000, 140));
+      if (timeframe === "1h") return Promise.resolve(PARENT_CANDLES_1H);
+      throw new Error(`unexpected timeframe requested in test: ${timeframe}`);
+    });
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+    expect(result.user).toContain("EMA(200): n/a (prev n/a)");
+    // 120 bars still seeds EMA50 — only the genuinely unseedable indicator degrades.
+    expect(result.user).toMatch(/EMA\(50\): \d+\.\d{2} \(prev \d+\.\d{2}\)/);
   });
 
   it("returns stale:true when the newest candle exceeds 2x the timeframe in age", async () => {

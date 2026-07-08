@@ -47,10 +47,17 @@ const opLog = new Map<string, number[]>();
 
 export class LlmGatewayError extends Error {
   status?: number;
-  constructor(message: string, status?: number) {
+  /**
+   * WO-4: true when a 400 response body mentioned "temperature" — some providers
+   * reject any explicit temperature value. Derived server-side from the (never
+   * surfaced) raw body so callers can retry once with `omitTemperature:true`.
+   */
+  temperatureUnsupported?: boolean;
+  constructor(message: string, status?: number, opts?: { temperatureUnsupported?: boolean }) {
     super(message);
     this.name = 'LlmGatewayError';
     this.status = status;
+    if (opts?.temperatureUnsupported) this.temperatureUnsupported = true;
   }
 }
 
@@ -137,6 +144,12 @@ export async function callOpenRouterWithUsage(opts: {
   responseFormat?: unknown;
   /** When true, adds `provider:{require_parameters:true}` to pin providers that honour the extras. */
   requireParameters?: boolean;
+  /**
+   * WO-4: when true, the `temperature` field is omitted from the request body entirely.
+   * Used for the one-shot retry after a 400 whose body mentioned temperature
+   * (some providers reject any explicit value; their default then applies).
+   */
+  omitTemperature?: boolean;
 }): Promise<{ content: string; usage?: LlmUsage; toolCalls?: { name: string; arguments: string }[] }> {
   const { apiKey, model, messages } = opts;
   // Thinking models need a bigger output budget (thinking eats tokens) and longer to
@@ -173,7 +186,8 @@ export async function callOpenRouterWithUsage(opts: {
         model,
         messages,
         max_tokens: maxTokens,
-        temperature,
+        // WO-4: omitted entirely on the temperature-quirk retry (provider default applies).
+        ...(opts.omitTemperature ? {} : { temperature }),
         reasoning: { enabled: reasoningRequired },
         // WO-2: include structured-output fields only when the caller set them.
         // Absent fields are NOT serialised (undefined → omitted by JSON.stringify),
@@ -196,13 +210,20 @@ export async function callOpenRouterWithUsage(opts: {
   }
 
   if (!res.ok) {
-    // Drain the body so the socket frees, but DO NOT log or surface it.
+    // Drain the body so the socket frees, but DO NOT log or surface it. WO-4: sniff a
+    // 400 body for the temperature quirk (some providers reject any explicit value) and
+    // expose ONLY the boolean flag — never the raw body — so callers can retry once
+    // with `omitTemperature:true`.
+    let temperatureUnsupported = false;
     try {
-      await res.text();
+      const bodyText = await res.text();
+      if (res.status === 400 && !opts.omitTemperature && /temperature/i.test(bodyText)) {
+        temperatureUnsupported = true;
+      }
     } catch {
       /* ignore */
     }
-    throw new LlmGatewayError(mapStatusToMessage(res.status), res.status);
+    throw new LlmGatewayError(mapStatusToMessage(res.status), res.status, { temperatureUnsupported });
   }
 
   let data: any;

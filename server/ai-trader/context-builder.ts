@@ -47,6 +47,14 @@ const PARENT_TIMEFRAME: Record<AiTraderTimeframe, AiTraderTimeframe | "1w" | nul
   "1d": null,
 };
 
+// WO-3.1: indicator computation and CSV serialization now use two different
+// windows. WO-3's original 100-bar fetch could never seed a 200-period EMA
+// (the lab's ema() is SMA-seeded at period-1) and left EMA50 under-converged —
+// a genuine spec bug, since amended. INDICATOR_BARS is the wider window fed to
+// every indicator function; SELECTED_BARS remains the number of most-recent
+// bars actually serialized into the CSV block, so prompt token size is
+// unchanged from WO-3.
+const INDICATOR_BARS = 400;
 const SELECTED_BARS = 100;
 const PARENT_BARS = 30;
 
@@ -134,16 +142,19 @@ export async function buildMarketContext(
   const tfMs = TIMEFRAME_MS[timeframe];
   const now = Date.now();
   const selectedEnd = new Date(now).toISOString();
-  const selectedStart = new Date(now - SELECTED_BARS * tfMs).toISOString();
+  const selectedStart = new Date(now - INDICATOR_BARS * tfMs).toISOString();
 
   const selectedRaw = await fetchOHLCV(market, timeframe, selectedStart, selectedEnd);
   if (selectedRaw.length === 0) {
     return { stale: true, reason: `No ${timeframe} candle data returned for ${market}` };
   }
-  const candles = selectedRaw.slice(-SELECTED_BARS);
+  // Indicator computation uses the wide (up to 400-bar) window; the CSV block
+  // below only ever serializes the most recent SELECTED_BARS of it.
+  const indicatorCandles = selectedRaw.slice(-INDICATOR_BARS);
+  const csvCandles = indicatorCandles.slice(-SELECTED_BARS);
 
   // G9: staleness gate. Never build a prompt on stale data.
-  const newest = candles[candles.length - 1];
+  const newest = indicatorCandles[indicatorCandles.length - 1];
   const ageMs = now - newest.time;
   if (ageMs > 2 * tfMs) {
     return {
@@ -168,10 +179,10 @@ export async function buildMarketContext(
     return { stale: true, reason: `No live price available for ${market}` };
   }
 
-  const closes = candles.map((c) => c.close);
-  const highs = candles.map((c) => c.high);
-  const lows = candles.map((c) => c.low);
-  const volumes = candles.map((c) => c.volume);
+  const closes = indicatorCandles.map((c) => c.close);
+  const highs = indicatorCandles.map((c) => c.high);
+  const lows = indicatorCandles.map((c) => c.low);
+  const volumes = indicatorCandles.map((c) => c.volume);
 
   const ema20 = lastTwo(ema(closes, 20));
   const ema50 = lastTwo(ema(closes, 50));
@@ -291,7 +302,7 @@ export async function buildMarketContext(
     `Trades today: ${tradesToday}/${maxTradesPerDay} (${LTF_TIMEFRAMES.has(timeframe) ? "LTF" : "HTF"} cap)`,
   ].join("\n");
 
-  const selectedCsv = candlesToCsv(candles);
+  const selectedCsv = candlesToCsv(csvCandles);
   const parentCsv = parentCandles.length > 0 ? candlesToCsv(parentCandles) : null;
 
   const userSections = [
