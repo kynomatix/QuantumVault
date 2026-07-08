@@ -48,7 +48,7 @@ import {
 import { sendTradeNotification, getCloseReasonLabel } from "../notification-service";
 import { evaluatePaperBracket, paperRealizedPnl, paperExitPrice, type PaperSide } from "./paper-math";
 import { fetchOHLCV } from "../lab/datafeed";
-import { buildMarketContext, type AiTraderTimeframe } from "./context-builder";
+import { buildMarketContext, marketToDatafeedTicker, type AiTraderTimeframe } from "./context-builder";
 import { runDecision } from "./decide";
 import { executeDecision, checkCooldownAndCaps } from "./executor";
 import { evaluateGraduation, type GraduationTradeRecord } from "./graduation";
@@ -412,7 +412,7 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
   let candles;
   try {
     candles = await fetchOHLCV(
-      bot.market,
+      marketToDatafeedTicker(bot.market),
       bot.timeframe,
       new Date(entryCandleOpen).toISOString(),
       new Date(now).toISOString()

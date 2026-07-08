@@ -75,9 +75,13 @@ vi.mock("../../server/lab/datafeed", () => ({
 }));
 
 const buildContextMock = vi.fn();
-vi.mock("../../server/ai-trader/context-builder", () => ({
-  buildMarketContext: (...a: unknown[]) => buildContextMock(...a),
-}));
+vi.mock("../../server/ai-trader/context-builder", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../server/ai-trader/context-builder")>();
+  return {
+    ...actual,
+    buildMarketContext: (...a: unknown[]) => buildContextMock(...a),
+  };
+});
 
 const runDecisionMock = vi.fn();
 vi.mock("../../server/ai-trader/decide", () => ({

@@ -1539,6 +1539,7 @@ import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable
 import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification, type TradeNotification, buildDefaultInlineKeyboard, sendAutoTopUpNotification } from "./notification-service";
 import { classifySignal } from "./trading/signal-classifier";
 import { registerTelegramMiniAppRoutes } from "./telegram-mini-app";
+import { registerAiTraderRoutes } from "./ai-trader/routes";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, healExecutionUmkFromStorage, restoreWalletSecurityFromStorage, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, decryptBotSubaccountKey, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3, rebindRetainedKeyToBotUuidV3, decryptMnemonic, deriveBotKeypairFromAgentSeed, BOT_DERIVATION_PATH_VERSION } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback, cancelRetryJobsForBot } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
@@ -24574,6 +24575,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // or the planned Bearer middleware. Every /api/tg/* request HMAC-verifies
   // initData against TELEGRAM_BOT_TOKEN. All endpoints are read-only.
   registerTelegramMiniAppRoutes(app);
+
+  // Agentic Trader (WO-7): create/analyze/execute/close/pause/resume/go-live +
+  // history for user-owned bots, plus a public track-record aggregate.
+  registerAiTraderRoutes(app);
 
   return httpServer;
 }

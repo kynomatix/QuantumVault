@@ -615,9 +615,11 @@ export interface IStorage {
   getAiTraderBot(id: string): Promise<AiTraderBot | undefined>;
   getAiTraderBotsByWallet(walletAddress: string): Promise<AiTraderBot[]>;
   getActiveAiTraderBots(): Promise<AiTraderBot[]>;
-  // graduatedAt is omitted from InsertAiTraderBot (never client-set); the
-  // monitor's graduation path is the legitimate server-side writer.
-  updateAiTraderBot(id: string, updates: Partial<InsertAiTraderBot> & { graduatedAt?: Date }): Promise<AiTraderBot | undefined>;
+  // graduatedAt/trialStartedAt are omitted from InsertAiTraderBot (never
+  // client-set at creation); graduatedAt is written by the monitor's
+  // graduation path, trialStartedAt by WO-7's restart-trial route (the only
+  // other legitimate server-side writer of either field).
+  updateAiTraderBot(id: string, updates: Partial<InsertAiTraderBot> & { graduatedAt?: Date; trialStartedAt?: Date }): Promise<AiTraderBot | undefined>;
   insertAiTraderDecision(decision: InsertAiTraderDecision): Promise<AiTraderDecision>;
   updateAiTraderDecision(id: string, updates: Partial<InsertAiTraderDecision>): Promise<AiTraderDecision | undefined>;
   getAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
@@ -4474,7 +4476,7 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(aiTraderBots).where(ne(aiTraderBots.status, 'stopped'));
   }
 
-  async updateAiTraderBot(id: string, updates: Partial<InsertAiTraderBot> & { graduatedAt?: Date }): Promise<AiTraderBot | undefined> {
+  async updateAiTraderBot(id: string, updates: Partial<InsertAiTraderBot> & { graduatedAt?: Date; trialStartedAt?: Date }): Promise<AiTraderBot | undefined> {
     const result = await db.update(aiTraderBots)
       .set({ ...updates, updatedAt: sql`NOW()` } as any)
       .where(eq(aiTraderBots.id, id))

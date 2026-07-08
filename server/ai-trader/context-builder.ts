@@ -82,6 +82,25 @@ const LTF_TIMEFRAMES = new Set<AiTraderTimeframe>(["15m", "1h"]);
 const SMART_LEVERAGE_K = 3;
 const SMART_LEVERAGE_HARD_CEILING = 5;
 
+// Exchange market symbols (e.g. "BTC-PERP", "EURUSD-PERP" — validated against
+// server/market-registry.ts and used for adapter.getPrice/order calls) use a
+// different naming convention than the Lab/datafeed layer's ccxt-style tickers
+// (e.g. "BTC/USDT", "EURUSD/USDT" — see server/lab/datafeed.ts
+// symbolToOkxInstId/isNonCryptoSymbol, both of which split the ticker on "/").
+// Passing the raw exchange symbol straight to fetchOHLCV silently produces an
+// invalid OKX instrument ID (e.g. "BTC-PERP-USDT-SWAP" doesn't exist) and
+// fetchOHLCV returns zero candles — surfaced live during WO-7's round-trip
+// test, but the mismatch was latent since WO-3/WO-4 first called fetchOHLCV
+// with bot.market. Strip the "-PERP" suffix (same convention already used by
+// server/market-liquidity-service.ts's buildMarketFromRegistry) and append
+// "/USDT" to get a ticker datafeed.ts actually understands. Only fetchOHLCV
+// call sites need this — adapter.getPrice/getPosition/etc. still take the raw
+// exchange symbol.
+export function marketToDatafeedTicker(market: string): string {
+  const base = market.replace(/-PERP$/, "");
+  return `${base}/USDT`;
+}
+
 function fmtPrice(v: number): string {
   return Number.isFinite(v) ? v.toFixed(2) : "n/a";
 }
@@ -152,7 +171,8 @@ export async function buildMarketContext(
   const selectedEnd = new Date(now).toISOString();
   const selectedStart = new Date(now - INDICATOR_BARS * tfMs).toISOString();
 
-  const selectedRaw = await fetchOHLCV(market, timeframe, selectedStart, selectedEnd);
+  const datafeedTicker = marketToDatafeedTicker(market);
+  const selectedRaw = await fetchOHLCV(datafeedTicker, timeframe, selectedStart, selectedEnd);
   if (selectedRaw.length === 0) {
     return { stale: true, reason: `No ${timeframe} candle data returned for ${market}` };
   }
@@ -178,7 +198,7 @@ export async function buildMarketContext(
   if (parentTf) {
     const parentTfMs = TIMEFRAME_MS[parentTf];
     const parentStart = new Date(now - PARENT_BARS * parentTfMs).toISOString();
-    const parentRaw = await fetchOHLCV(market, parentTf, parentStart, selectedEnd);
+    const parentRaw = await fetchOHLCV(datafeedTicker, parentTf, parentStart, selectedEnd);
     parentCandles = parentRaw.slice(-PARENT_BARS);
   }
 
@@ -234,11 +254,20 @@ export async function buildMarketContext(
 
   const fundingInfo = await adapter.getFundingRate(market);
   const roundTripFeePct = 2 * EXCHANGE_TAKER_FEE_RATE * 100;
+  // The ProtocolAdapter contract types nextFundingTime as a required number, but
+  // the Pacifica adapter (server/protocol/pacifica/pacifica-adapter.ts) violates
+  // it in two paths (fast-path market-cache read and its own catch fallback),
+  // returning `undefined` — `new Date(undefined).toISOString()` throws
+  // RangeError: Invalid time value, discovered live during WO-7's round-trip
+  // test. Fixing the Pacifica adapter's contract violation is out of scope
+  // here (a protocol-adapter/money-adjacent file); guard defensively instead.
+  const nextFundingLabel =
+    typeof fundingInfo.nextFundingTime === "number" && Number.isFinite(fundingInfo.nextFundingTime)
+      ? new Date(fundingInfo.nextFundingTime).toISOString()
+      : "unknown";
   const microstateBlock = [
     `Mark price: ${fmtPrice(price)}`,
-    `Funding rate: ${(fundingInfo.rate * 100).toFixed(4)}% (next funding at ${new Date(
-      fundingInfo.nextFundingTime
-    ).toISOString()})`,
+    `Funding rate: ${(fundingInfo.rate * 100).toFixed(4)}% (next funding at ${nextFundingLabel})`,
     `Taker fee: ${(EXCHANGE_TAKER_FEE_RATE * 100).toFixed(2)}% per side, ${roundTripFeePct.toFixed(
       2
     )}% round-trip. TP distance must clear this by a wide margin (guardrail G4 requires ≥ 4x).`,
