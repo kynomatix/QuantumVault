@@ -555,6 +555,112 @@ async function closeLivePositionAndPause(
   await afterClose(bot, close, { alreadyPaused: true });
 }
 
+/**
+ * User-initiated manual close (WO-7 `/api/ai-trader/:id/close`). Mirrors the
+ * paper close math in `monitorPaperBot` and the live protective-close
+ * template in `closeLivePositionAndPause`, but is caller-invoked rather than
+ * monitor-tick-invoked, and — unlike every other close path — must NOT
+ * record or pause the bot on a live order FAILURE: a failed close leaves the
+ * position exactly where it was (still protected by its resting venue-side
+ * bracket), so the bot must stay exactly as it was rather than be silently
+ * paused out from under the user. `exitReason: "user_close"` is already a
+ * documented enum value in the decisions table (schema comment, WO-2).
+ */
+export async function userInitiatedClose(
+  bot: AiTraderBot
+): Promise<
+  | { ok: true; closed: false }
+  | { ok: true; closed: true; exitPrice: number | null; realizedPnl: number | null }
+  | { ok: false; detail: string }
+> {
+  const decisions = await storage.getAiTraderDecisions(bot.id, 20);
+  const view = parseOpenDecision(decisions);
+  if (!view) {
+    // Nothing open to close — not an error, just a no-op the route can 200 on.
+    return { ok: true, closed: false };
+  }
+
+  const adapter = getAdapter(bot.protocol);
+
+  if (bot.paperMode) {
+    let markPrice: number | null;
+    try {
+      markPrice = await adapter.getPrice(bot.market);
+    } catch (err) {
+      return { ok: false, detail: `price read failed: ${err instanceof Error ? err.message : err}` };
+    }
+    if (markPrice === null || view.entryPrice === null) {
+      return { ok: false, detail: "no live price available to close the paper position" };
+    }
+    const exitPrice = paperExitPrice(markPrice, view.side);
+    const pnl = paperRealizedPnl({
+      side: view.side,
+      entryPrice: view.entryPrice,
+      exitPrice,
+      sizeBase: view.sizeBase,
+      takerFeeRate: EXCHANGE_TAKER_FEE_RATE,
+    });
+    const close: CloseRecord = {
+      exitPrice,
+      exitReason: "user_close",
+      realizedPnl: pnl.netPnl,
+      feesPaid: pnl.fees,
+      closedAt: new Date(),
+    };
+    await recordClose(bot, view, close);
+    await notifyClosed(bot, close, "Closed by You");
+    await afterClose(bot, close, { alreadyPaused: false });
+    return { ok: true, closed: true, exitPrice, realizedPnl: pnl.netPnl };
+  }
+
+  // Live: same cancel-survivor-leg + closePosition template as
+  // closeLivePositionAndPause, but ok:false on failure instead of pausing —
+  // an unclosed live position is still bracket-protected.
+  const subaccountId = bot.protocolSubaccountId ?? undefined;
+  const result = await withSigningContext(bot.walletAddress, async (keyTrio) => {
+    try {
+      await adapter.cancelTpSlOrders?.({ ...keyTrio, internalSymbol: bot.market, subaccountId });
+    } catch (err) {
+      console.warn(`[AiTraderMonitor] cancelTpSlOrders failed before user-initiated close: ${err instanceof Error ? err.message : err}`);
+    }
+    return adapter.closePosition({
+      ...keyTrio,
+      internalSymbol: bot.market,
+      subaccountId,
+      maxSlippagePct: PROTECTIVE_CLOSE_MAX_SLIPPAGE_PCT,
+    });
+  });
+
+  if (!result.ok) {
+    return { ok: false, detail: result.detail };
+  }
+  const order = result.value;
+  if (!order.success) {
+    return { ok: false, detail: order.error ?? "close order failed" };
+  }
+
+  const fillPrice = typeof order.fillPrice === "number" && Number.isFinite(order.fillPrice) ? order.fillPrice : null;
+  let realizedPnl: number | null = null;
+  let feesPaid: number | null = null;
+  if (fillPrice !== null && view.entryPrice !== null) {
+    const direction = view.side === "long" ? 1 : -1;
+    const grossPnl = (fillPrice - view.entryPrice) * view.sizeBase * direction;
+    feesPaid = EXCHANGE_TAKER_FEE_RATE * (view.entryPrice + fillPrice) * view.sizeBase;
+    realizedPnl = grossPnl - feesPaid;
+  }
+  const close: CloseRecord = {
+    exitPrice: fillPrice,
+    exitReason: "user_close",
+    realizedPnl,
+    feesPaid,
+    closedAt: new Date(),
+  };
+  await recordClose(bot, view, close);
+  await notifyClosed(bot, close, "Closed by You");
+  await afterClose(bot, close, { alreadyPaused: false });
+  return { ok: true, closed: true, exitPrice: fillPrice, realizedPnl };
+}
+
 /** Live close detection: position is GONE — classify from fills, cancel survivor leg. */
 async function handleLiveClose(
   bot: AiTraderBot,

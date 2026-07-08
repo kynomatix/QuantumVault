@@ -622,6 +622,19 @@ export interface IStorage {
   updateAiTraderDecision(id: string, updates: Partial<InsertAiTraderDecision>): Promise<AiTraderDecision | undefined>;
   getAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
   getRecentClosedDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
+  // WO-7 additions.
+  getAiTraderDecision(id: string): Promise<AiTraderDecision | undefined>;
+  deleteAiTraderBot(id: string): Promise<void>;
+  /**
+   * Atomically claims one free platform-key paper trial for a wallet with no
+   * BYO OpenRouter key. Returns the post-increment count when the wallet was
+   * under `limit` (caller may proceed), or null when the cap was already hit
+   * (conditional `UPDATE ... WHERE ai_trader_free_calls_used < limit`, so
+   * concurrent requests can never push the counter past `limit`).
+   */
+  incrementAiTraderFreeCalls(walletAddress: string, limit: number): Promise<number | null>;
+  /** Refunds one free trial when a claimed call never actually reached the LLM (e.g. stale-context abort). Floors at 0. */
+  decrementAiTraderFreeCalls(walletAddress: string): Promise<void>;
 }
 
 // Raw SQL predicate that is TRUE for a "phantom duplicate" close row: a
@@ -4495,6 +4508,30 @@ export class DatabaseStorage implements IStorage {
       .where(and(eq(aiTraderDecisions.botId, botId), isNotNull(aiTraderDecisions.closedAt)))
       .orderBy(desc(aiTraderDecisions.decidedAt))
       .limit(limit);
+  }
+
+  // --- AI Trader (WO-7) ---
+  async getAiTraderDecision(id: string): Promise<AiTraderDecision | undefined> {
+    const result = await db.select().from(aiTraderDecisions).where(eq(aiTraderDecisions.id, id));
+    return result[0];
+  }
+
+  async deleteAiTraderBot(id: string): Promise<void> {
+    await db.delete(aiTraderBots).where(eq(aiTraderBots.id, id));
+  }
+
+  async incrementAiTraderFreeCalls(walletAddress: string, limit: number): Promise<number | null> {
+    const result = await db.update(wallets)
+      .set({ aiTraderFreeCallsUsed: sql`${wallets.aiTraderFreeCallsUsed} + 1` })
+      .where(and(eq(wallets.address, walletAddress), lt(wallets.aiTraderFreeCallsUsed, limit)))
+      .returning({ count: wallets.aiTraderFreeCallsUsed });
+    return result[0]?.count ?? null;
+  }
+
+  async decrementAiTraderFreeCalls(walletAddress: string): Promise<void> {
+    await db.update(wallets)
+      .set({ aiTraderFreeCallsUsed: sql`GREATEST(${wallets.aiTraderFreeCallsUsed} - 1, 0)` })
+      .where(eq(wallets.address, walletAddress));
   }
 }
 

@@ -732,6 +732,9 @@ export async function ensureSchema() {
         closed_at timestamp
       )`,
       `CREATE INDEX IF NOT EXISTS idx_ai_trader_decisions_bot_decided ON ai_trader_decisions (bot_id, decided_at DESC)`,
+
+      // WO-7: free paper-trial counter for wallets with no BYO OpenRouter key.
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS ai_trader_free_calls_used integer NOT NULL DEFAULT 0`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner

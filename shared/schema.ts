@@ -116,6 +116,13 @@ export const wallets = pgTable("wallets", {
   llmApiKeyProvider: text("llm_api_key_provider"),
   llmApiKeyUpdatedAt: timestamp("llm_api_key_updated_at"),
 
+  // AI Trader (Agentic Trader plan §8/WO-7) — free paper-trial counter. A
+  // wallet with no BYO OpenRouter key gets up to FREE_PAPER_TRIAL_LIMIT
+  // /analyze calls on the platform's own OpenRouter key, paper bots only,
+  // never live. Incremented atomically (WHERE ... < limit) so concurrent
+  // requests can't exceed the cap.
+  aiTraderFreeCallsUsed: integer("ai_trader_free_calls_used").notNull().default(0),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
   lastSeen: timestamp("last_seen").defaultNow().notNull(),
 });
