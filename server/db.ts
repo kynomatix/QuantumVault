@@ -676,6 +676,62 @@ export async function ensureSchema() {
         source text NOT NULL DEFAULT 'onchain'
       )`,
       `CREATE INDEX IF NOT EXISTS idx_oracle_snapshots_feed_taken ON oracle_price_snapshots (feed_id, taken_at)`,
+
+      // --- AGENTIC_TRADER_PLAN WO-2: AI Trader bots + decision audit trail. ---
+      // Additive + idempotent, mirrors the shared/schema.ts pgTable definitions
+      // verbatim (see AGENTIC_TRADER_PLAN.md §7). Schema/storage only for WO-2 —
+      // no routes/executor/monitor read or write these tables yet. FK is inline
+      // (created atomically with the table) to avoid the separate
+      // ADD CONSTRAINT 42P07-vs-42710 trap described above.
+      `CREATE TABLE IF NOT EXISTS ai_trader_bots (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        wallet_address text NOT NULL,
+        protocol text NOT NULL,
+        protocol_subaccount_id text,
+        market text NOT NULL,
+        timeframe text NOT NULL,
+        mode text NOT NULL DEFAULT 'suggest',
+        risk_profile text NOT NULL DEFAULT 'guarded',
+        paper_mode boolean NOT NULL DEFAULT true,
+        auto_next boolean NOT NULL DEFAULT false,
+        model text NOT NULL DEFAULT 'anthropic/claude-opus-4.8',
+        allocated_usdc numeric(20, 2) NOT NULL,
+        max_leverage integer NOT NULL DEFAULT 3,
+        stop_policy text NOT NULL DEFAULT 'static',
+        park_when_idle boolean NOT NULL DEFAULT false,
+        graduation_state text NOT NULL DEFAULT 'in_trial',
+        graduation_criteria jsonb NOT NULL,
+        trial_started_at timestamp DEFAULT now(),
+        graduated_at timestamp,
+        policy_hmac text NOT NULL,
+        status text NOT NULL DEFAULT 'idle',
+        pause_reason text,
+        daily_realized_pnl numeric(20, 2) DEFAULT '0',
+        consecutive_losses integer NOT NULL DEFAULT 0,
+        created_at timestamp DEFAULT now(),
+        updated_at timestamp DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_ai_trader_bots_wallet ON ai_trader_bots (wallet_address)`,
+      `CREATE INDEX IF NOT EXISTS idx_ai_trader_bots_status ON ai_trader_bots (status)`,
+      `CREATE TABLE IF NOT EXISTS ai_trader_decisions (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        bot_id varchar REFERENCES ai_trader_bots(id) ON DELETE CASCADE,
+        context_digest jsonb,
+        raw_decision jsonb NOT NULL,
+        clamped_decision jsonb,
+        guardrail_violations jsonb,
+        outcome text,
+        entry_price numeric(20, 8),
+        exit_price numeric(20, 8),
+        exit_reason text,
+        realized_pnl numeric(20, 2),
+        fees_paid numeric(20, 6),
+        llm_cost_usd numeric(10, 6),
+        llm_latency_ms integer,
+        decided_at timestamp DEFAULT now(),
+        closed_at timestamp
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_ai_trader_decisions_bot_decided ON ai_trader_decisions (bot_id, decided_at DESC)`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner

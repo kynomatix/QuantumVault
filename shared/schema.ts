@@ -1977,6 +1977,98 @@ export const insertLabStrategyBodySchema = z.object({
 
 export const updateLabStrategyBodySchema = insertLabStrategyBodySchema.partial();
 
+// AI Trader (Agentic Trader plan, docs/AGENTIC_TRADER_PLAN.md §7 — single source
+// of truth for both tables below). WO-2: schema + storage only; no routes/
+// executor/monitor wiring yet.
+export const aiTraderBots = pgTable("ai_trader_bots", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  walletAddress: text("wallet_address").notNull(),
+  protocol: text("protocol").notNull(),
+  protocolSubaccountId: text("protocol_subaccount_id"),
+  market: text("market").notNull(),
+  timeframe: text("timeframe").notNull(),              // '15m'|'1h'|'4h'|'1d'
+  mode: text("mode").notNull().default("suggest"),      // 'suggest' | 'auto'
+  riskProfile: text("risk_profile").notNull().default("guarded"), // 'guarded' | 'degen' (§5a)
+  paperMode: boolean("paper_mode").notNull().default(true),       // flips false only via go-live (§2e gate)
+  autoNext: boolean("auto_next").notNull().default(false),
+  model: text("model").notNull().default("anthropic/claude-opus-4.8"),
+  allocatedUsdc: decimal("allocated_usdc", { precision: 20, scale: 2 }).notNull(),
+  maxLeverage: integer("max_leverage").notNull().default(3),
+  // Exit management seam — 'static' (exchange-native setTpSl bracket, MVP) or a
+  // stop personality from INTELLIGENT_STOPS_PLAN.md once the Watchdog ships
+  // (e.g. 'breakeven_ladder', 'atr_trail'). The executor branches on this; the
+  // native bracket ALWAYS exists as the safety net either way (G10 invariant).
+  stopPolicy: text("stop_policy").notNull().default("static"),
+  // Flash-only (idle-funds Vault parking; Pacifica excluded — $10 min deposit/
+  // withdrawal + $1 withdrawal fee kills yield). Default false; UI shows the
+  // toggle only when the selected protocol supports parking.
+  parkWhenIdle: boolean("park_when_idle").notNull().default(false),
+  // Paper graduation (§2e). Bot-type-agnostic shape so the evaluator can later
+  // wrap regular tradingBots (Phase 4 platform rollout).
+  graduationState: text("graduation_state").notNull().default("in_trial"),
+  // 'in_trial' | 'graduated' | 'failed' | 'waived'  (waived = admin/founder override)
+  graduationCriteria: jsonb("graduation_criteria").notNull(),
+  // { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 } — floors enforced server-side
+  trialStartedAt: timestamp("trial_started_at").defaultNow(),
+  graduatedAt: timestamp("graduated_at"),
+  policyHmac: text("policy_hmac").notNull(),
+  status: text("status").notNull().default("idle"),
+  // 'idle'|'analyzing'|'proposed'|'executing'|'open'|'paused'|'stopped'
+  // 'executing' is a transient crash-safety state (external audit, Qwen #1): set BEFORE the
+  // entry order is sent, cleared to 'open' only after the bracket is verified. Startup
+  // reconciliation treats any 'executing'/'analyzing'/'proposed' bot as potentially holding
+  // a live position and checks the exchange (WO-6 step 5).
+  pauseReason: text("pause_reason"),
+  dailyRealizedPnl: decimal("daily_realized_pnl", { precision: 20, scale: 2 }).default("0"),
+  consecutiveLosses: integer("consecutive_losses").notNull().default(0),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => [
+  index("idx_ai_trader_bots_wallet").on(table.walletAddress),
+  index("idx_ai_trader_bots_status").on(table.status),
+]);
+
+export const aiTraderDecisions = pgTable("ai_trader_decisions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  botId: varchar("bot_id").references(() => aiTraderBots.id, { onDelete: 'cascade' }),
+  // Full audit trail: what the AI saw, said, and what actually happened
+  contextDigest: jsonb("context_digest"),               // compact snapshot of inputs (not full candles)
+  rawDecision: jsonb("raw_decision").notNull(),          // as returned by the model
+  clampedDecision: jsonb("clamped_decision"),            // after guardrails (null if rejected)
+  guardrailViolations: jsonb("guardrail_violations"),    // which G-rules fired
+  outcome: text("outcome"),
+  // 'executed'|'user_skipped'|'rejected_guardrails'|'flat'|'aborted_malformed'|'aborted_stale'|'aborted_funding'|'expired'
+  // Execution + result (filled in over the trade's life)
+  entryPrice: decimal("entry_price", { precision: 20, scale: 8 }),
+  exitPrice: decimal("exit_price", { precision: 20, scale: 8 }),
+  exitReason: text("exit_reason"),                       // 'sl'|'tp'|'ai_close'|'user_close'|'circuit_breaker'|'liquidation'
+  realizedPnl: decimal("realized_pnl", { precision: 20, scale: 2 }),
+  feesPaid: decimal("fees_paid", { precision: 20, scale: 6 }),
+  llmCostUsd: decimal("llm_cost_usd", { precision: 10, scale: 6 }),
+  llmLatencyMs: integer("llm_latency_ms"),
+  decidedAt: timestamp("decided_at").defaultNow(),
+  closedAt: timestamp("closed_at"),
+}, (table) => [
+  index("idx_ai_trader_decisions_bot_decided").on(table.botId, table.decidedAt.desc()),
+]);
+
+export const insertAiTraderBotSchema = createInsertSchema(aiTraderBots).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  trialStartedAt: true, // server-set at creation (§2e trial start)
+  graduatedAt: true,    // server-set on graduation, never client-set
+});
+export type AiTraderBot = typeof aiTraderBots.$inferSelect;
+export type InsertAiTraderBot = z.infer<typeof insertAiTraderBotSchema>;
+
+export const insertAiTraderDecisionSchema = createInsertSchema(aiTraderDecisions).omit({
+  id: true,
+  decidedAt: true,
+});
+export type AiTraderDecision = typeof aiTraderDecisions.$inferSelect;
+export type InsertAiTraderDecision = z.infer<typeof insertAiTraderDecisionSchema>;
+
 export const labOptimizationConfigSchema = z.object({
   pineScript: z.string().min(1),
   parsedInputs: z.array(z.any()),

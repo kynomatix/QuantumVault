@@ -115,6 +115,12 @@ import {
   type InsertReferralLink,
   type ReferralRewardEvent,
   type InsertReferralRewardEvent,
+  aiTraderBots,
+  aiTraderDecisions,
+  type AiTraderBot,
+  type InsertAiTraderBot,
+  type AiTraderDecision,
+  type InsertAiTraderDecision,
 } from "@shared/schema";
 
 /** A spare subaccount row atomically claimed for reuse (Subaccount Recycling Plan §5.1). */
@@ -603,6 +609,17 @@ export interface IStorage {
   getReferralEarnings(earnerWallet: string): Promise<{ l1: number; l2: number; l3: number; total: number }>;
   getReferralEarningsForReferee(earnerWallet: string, refereeWallet: string): Promise<number>;
   getReferralEarningsByReferee(earnerWallet: string, refereeWallets: string[]): Promise<Map<string, number>>;
+
+  // AI Trader (Agentic Trader plan §7 / WO-2) — schema + storage only.
+  createAiTraderBot(bot: InsertAiTraderBot): Promise<AiTraderBot>;
+  getAiTraderBot(id: string): Promise<AiTraderBot | undefined>;
+  getAiTraderBotsByWallet(walletAddress: string): Promise<AiTraderBot[]>;
+  getActiveAiTraderBots(): Promise<AiTraderBot[]>;
+  updateAiTraderBot(id: string, updates: Partial<InsertAiTraderBot>): Promise<AiTraderBot | undefined>;
+  insertAiTraderDecision(decision: InsertAiTraderDecision): Promise<AiTraderDecision>;
+  updateAiTraderDecision(id: string, updates: Partial<InsertAiTraderDecision>): Promise<AiTraderDecision | undefined>;
+  getAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
+  getRecentClosedDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
 }
 
 // Raw SQL predicate that is TRUE for a "phantom duplicate" close row: a
@@ -4419,6 +4436,63 @@ export class DatabaseStorage implements IStorage {
       deletedByCap = byCap.length;
     }
     return { deletedByAge: byAge.length, deletedByCap };
+  }
+
+  // --- AI Trader (Agentic Trader plan §7 / WO-2) — schema + storage only. ---
+  async createAiTraderBot(bot: InsertAiTraderBot): Promise<AiTraderBot> {
+    const result = await db.insert(aiTraderBots).values(bot as any).returning();
+    return result[0];
+  }
+
+  async getAiTraderBot(id: string): Promise<AiTraderBot | undefined> {
+    const result = await db.select().from(aiTraderBots).where(eq(aiTraderBots.id, id));
+    return result[0];
+  }
+
+  async getAiTraderBotsByWallet(walletAddress: string): Promise<AiTraderBot[]> {
+    return db.select().from(aiTraderBots).where(eq(aiTraderBots.walletAddress, walletAddress));
+  }
+
+  // "Active" = not permanently retired. Used by the monitor loop (WO-6) to
+  // decide which bots still need polling; 'stopped' is the only terminal state.
+  async getActiveAiTraderBots(): Promise<AiTraderBot[]> {
+    return db.select().from(aiTraderBots).where(ne(aiTraderBots.status, 'stopped'));
+  }
+
+  async updateAiTraderBot(id: string, updates: Partial<InsertAiTraderBot>): Promise<AiTraderBot | undefined> {
+    const result = await db.update(aiTraderBots)
+      .set({ ...updates, updatedAt: sql`NOW()` } as any)
+      .where(eq(aiTraderBots.id, id))
+      .returning();
+    return result[0];
+  }
+
+  async insertAiTraderDecision(decision: InsertAiTraderDecision): Promise<AiTraderDecision> {
+    const result = await db.insert(aiTraderDecisions).values(decision as any).returning();
+    return result[0];
+  }
+
+  async updateAiTraderDecision(id: string, updates: Partial<InsertAiTraderDecision>): Promise<AiTraderDecision | undefined> {
+    const result = await db.update(aiTraderDecisions)
+      .set(updates as any)
+      .where(eq(aiTraderDecisions.id, id))
+      .returning();
+    return result[0];
+  }
+
+  async getAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]> {
+    return db.select().from(aiTraderDecisions)
+      .where(eq(aiTraderDecisions.botId, botId))
+      .orderBy(desc(aiTraderDecisions.decidedAt))
+      .limit(limit);
+  }
+
+  // Last N CLOSED decisions (closedAt set) — the WO-3 memory-context block.
+  async getRecentClosedDecisions(botId: string, limit: number): Promise<AiTraderDecision[]> {
+    return db.select().from(aiTraderDecisions)
+      .where(and(eq(aiTraderDecisions.botId, botId), isNotNull(aiTraderDecisions.closedAt)))
+      .orderBy(desc(aiTraderDecisions.decidedAt))
+      .limit(limit);
   }
 }
 
