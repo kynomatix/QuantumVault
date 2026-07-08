@@ -19,6 +19,14 @@ export interface BuildMarketContextInput {
   adapter: ProtocolAdapter;
   bot: AiTraderBot;
   recentDecisions: AiTraderDecision[];
+  /**
+   * The server-managed agent SIGNING pubkey for this bot's venue account
+   * (wallet.agentPublicKey), resolved by the caller via storage.getWallet —
+   * NOT the user's connected wallet address. Required since WO-5: the old
+   * WO-3 placeholder passed bot.walletAddress here, which reads the wrong
+   * (empty) account on every venue.
+   */
+  agentPublicKey: string;
 }
 
 export type BuildMarketContextResult =
@@ -236,16 +244,12 @@ export async function buildMarketContext(
     )}% round-trip. TP distance must clear this by a wide margin (guardrail G4 requires ≥ 4x).`,
   ].join("\n");
 
-  // KNOWN SPEC GAP (flagged for WO-4/WO-5, not resolved here — WO-3 is prompt-
-  // building only): ProtocolAdapter.getPositions wants an `agentPublicKey` — the
-  // server-managed per-user/subaccount SIGNING key — but `AiTraderBot` has no such
-  // column today, only `walletAddress` (the user's own connected wallet). Passing
-  // `bot.walletAddress` here is a placeholder and is almost certainly WRONG once a
-  // real per-bot agent key exists elsewhere in the codebase; there is no
-  // resolution mechanism for this within WO-3's scope. Whoever wires the executor
-  // (later WO) must either add an `agentPublicKey`/keypair lookup to `AiTraderBot`
-  // or resolve it via `bot.protocolSubaccountId` before this call can be trusted.
-  const positions = await adapter.getPositions(bot.walletAddress, bot.protocolSubaccountId ?? undefined);
+  // WO-5 corrective (was a flagged WO-3 spec gap): positions are read with the
+  // caller-resolved agent SIGNING pubkey (input.agentPublicKey), never the
+  // user's connected wallet address — bot.walletAddress owns nothing on any
+  // venue, so the old placeholder always read an empty account and would have
+  // told the model "no open position" while one was open.
+  const positions = await adapter.getPositions(input.agentPublicKey, bot.protocolSubaccountId ?? undefined);
   const openPosition = positions.find((p) => p.internalSymbol.toUpperCase() === market.toUpperCase());
   const allocatedUsdc = parseFloat(bot.allocatedUsdc);
   const accountBlock = openPosition

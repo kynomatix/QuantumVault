@@ -112,16 +112,23 @@ const LTF_TIMEFRAMES: ReadonlySet<GuardrailTimeframe> = new Set(["15m", "1h"]);
 /**
  * G1 volatility-based leverage cap — EXACT formula from the plan's B0 primitives
  * (~L513) and the WO-3 context-builder echo: ddProxy = k × ATR(14)/price;
- * cap = clamp(floor(0.5/ddProxy), 1, 5). Reuses the platform's existing
- * 50%-effective-drawdown convention. Non-finite/zero inputs fall back to the hard
- * ceiling (same semantics as the WO-3 echo — the *bot max* still applies).
+ * cap = clamp(floor(0.5/ddProxy), 1, 5).  Reuses the platform's existing
+ * 50%-effective-drawdown convention.
+ *
+ * WO-4.1 corrective: non-finite/zero ATR or price now FAILS CLOSED to 1× — an
+ * unknown volatility regime must get the SAFEST leverage, not the most
+ * permissive. (The original fallback to the hard ceiling matched the WO-3
+ * prompt-echo semantics, but the echo is advisory text for the model; this
+ * function is the enforcement point and must not reward missing data with 5×.
+ * The WO-3 echo remains deliberately divergent — it only tells the model what
+ * the *bot max* is, it never executes anything.)
  */
 export function smartLeverageCap(atr14: number, price: number): number {
   const ddProxy =
     Number.isFinite(atr14) && Number.isFinite(price) && price > 0
       ? (SMART_LEVERAGE_K * atr14) / price
       : 0;
-  if (!(ddProxy > 0)) return LEVERAGE_HARD_CEILING;
+  if (!(ddProxy > 0)) return 1;
   return Math.min(LEVERAGE_HARD_CEILING, Math.max(1, Math.floor(0.5 / ddProxy)));
 }
 
@@ -361,18 +368,22 @@ export function applyGuardrails(
     }
 
     // G3: reward:risk ≥ 1.2 after fees. Fees are charged on notional ≈ a price move
-    // of roundTripFeeRate × entry, so net reward = |TP−entry| − entry×roundTripFee.
+    // of roundTripFeeRate × entry. WO-4.1 corrective: fees hurt BOTH sides of the
+    // ratio — a TP exit nets reward − feeMove, and an SL exit costs risk + feeMove
+    // (the stopped-out trader still pays the round trip). The original formula
+    // divided by bare `risk`, understating the true loss and letting marginal
+    // trades through:  rrAfterFees = (reward − feeMove) / (risk + feeMove).
     if (slOnCorrectSide) {
       const reward = Math.abs(tp - entry);
       const risk = Math.abs(entry - sl); // > 0, else sl_wrong_side already fired
       const feeMove = entry * roundTripFeeRate;
-      const rrAfterFees = (reward - feeMove) / risk;
+      const rrAfterFees = (reward - feeMove) / (risk + feeMove);
       if (rrAfterFees < RR_FLOOR) {
         violations.push(
           violation(
             "G3",
             "rr_below_floor",
-            `reward:risk after fees ${rrAfterFees.toFixed(3)} is below the ${RR_FLOOR} floor (reward ${reward.toFixed(6)}, risk ${risk.toFixed(6)}, fee move ${feeMove.toFixed(6)})`,
+            `reward:risk after fees ${rrAfterFees.toFixed(3)} is below the ${RR_FLOOR} floor (reward ${reward.toFixed(6)}, risk ${risk.toFixed(6)}, fee move ${feeMove.toFixed(6)} charged on both legs)`,
             true
           )
         );

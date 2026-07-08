@@ -73,11 +73,13 @@ describe("smartLeverageCap (G1 primitive)", () => {
     expect(smartLeverageCap(100, 100)).toBe(1);
   });
 
-  it("falls back to the hard ceiling on non-finite/zero inputs (bot max still applies)", () => {
-    expect(smartLeverageCap(0, 100)).toBe(LEVERAGE_HARD_CEILING);
-    expect(smartLeverageCap(NaN, 100)).toBe(LEVERAGE_HARD_CEILING);
-    expect(smartLeverageCap(5, 0)).toBe(LEVERAGE_HARD_CEILING);
-    expect(smartLeverageCap(5, NaN)).toBe(LEVERAGE_HARD_CEILING);
+  it("fails CLOSED to 1× on non-finite/zero inputs (WO-4.1: unknown volatility gets the safest leverage)", () => {
+    expect(smartLeverageCap(0, 100)).toBe(1);
+    expect(smartLeverageCap(NaN, 100)).toBe(1);
+    expect(smartLeverageCap(5, 0)).toBe(1);
+    expect(smartLeverageCap(5, NaN)).toBe(1);
+    expect(smartLeverageCap(Infinity, 100)).toBe(1);
+    expect(smartLeverageCap(5, -100)).toBe(1);
   });
 });
 
@@ -392,7 +394,7 @@ describe("G3/G4 — take-profit sanity", () => {
     // 0.33% TP distance clears the 0.32% G4 floor (the exact boundary 100.32 is not
     // representable in binary floats — it lands at 0.319999…% and correctly fires)
     // but cannot possibly satisfy RR ≥ 1.2 with the minimum legal 0.5% stop —
-    // mathematically TP must be ≥ 1.2×risk + feeMove.
+    // mathematically TP must be ≥ 1.2×(risk + feeMove) + feeMove (WO-4.1 formula).
     const r = applyGuardrails(
       makeLong({ stopLossPrice: 99.5, takeProfitPrice: 100.33 }),
       makeInput()
@@ -402,32 +404,56 @@ describe("G3/G4 — take-profit sanity", () => {
     expect(codes(r.violations)).toContain("rr_below_floor");
   });
 
-  it("G3: RR after fees exactly 1.2 passes; just below rejects", () => {
-    // risk 2 (SL 98), feeMove 0.08 → boundary TP = 100 + 1.2×2 + 0.08 = 102.48.
+  it("G3: RR after fees at the WO-4.1 boundary — just above passes, at/below rejects", () => {
+    // WO-4.1 formula: rr = (reward − feeMove) / (risk + feeMove). Risk 2 (SL 98),
+    // feeMove 0.08 → boundary reward = 1.2×(2 + 0.08) + 0.08 = 2.576, i.e. TP
+    // 102.576. In binary floats 102.576 − 100 lands at 2.57599…, so the exact
+    // boundary computes 1.19999… < 1.2 and correctly FIRES (floor is inclusive
+    // only for exactly-representable values). 102.58 (rr ≈ 1.2019) passes.
     const pass = applyGuardrails(
-      makeLong({ stopLossPrice: 98, takeProfitPrice: 102.48 }),
+      makeLong({ stopLossPrice: 98, takeProfitPrice: 102.58 }),
       makeInput()
     );
     expect(pass.ok).toBe(true);
 
+    const boundary = applyGuardrails(
+      makeLong({ stopLossPrice: 98, takeProfitPrice: 102.576 }),
+      makeInput()
+    );
+    expect(boundary.ok).toBe(false);
+    expect(codes(boundary.violations)).toContain("rr_below_floor");
+
     const fail = applyGuardrails(
-      makeLong({ stopLossPrice: 98, takeProfitPrice: 102.47 }),
+      makeLong({ stopLossPrice: 98, takeProfitPrice: 102.57 }),
       makeInput()
     );
     expect(fail.ok).toBe(false);
     expect(codes(fail.violations)).toContain("rr_below_floor");
   });
 
+  it("G3: the pre-WO-4.1 boundary (TP 102.48, rr_old = 1.2 with bare-risk denominator) now rejects", () => {
+    // Regression pin for the corrective: (2.48 − 0.08)/2 = 1.2 passed under the
+    // old formula, but (2.48 − 0.08)/(2 + 0.08) ≈ 1.1538 — the stopped-out side
+    // pays fees too, so this trade is genuinely below floor.
+    const r = applyGuardrails(
+      makeLong({ stopLossPrice: 98, takeProfitPrice: 102.48 }),
+      makeInput()
+    );
+    expect(r.ok).toBe(false);
+    expect(codes(r.violations)).toContain("rr_below_floor");
+  });
+
   it("G3: short-side RR mirrors (reward measured downward)", () => {
-    // Short entry 100, SL 102 (risk 2): boundary TP = 100 − 2.48 = 97.52.
+    // Short entry 100, SL 102 (risk 2): boundary TP = 100 − 2.576 = 97.424;
+    // 97.42 (rr ≈ 1.2019) passes, 97.43 (rr ≈ 1.1971) rejects.
     const pass = applyGuardrails(
-      makeShort({ stopLossPrice: 102, takeProfitPrice: 97.52 }),
+      makeShort({ stopLossPrice: 102, takeProfitPrice: 97.42 }),
       makeInput()
     );
     expect(pass.ok).toBe(true);
 
     const fail = applyGuardrails(
-      makeShort({ stopLossPrice: 102, takeProfitPrice: 97.6 }),
+      makeShort({ stopLossPrice: 102, takeProfitPrice: 97.43 }),
       makeInput()
     );
     expect(fail.ok).toBe(false);

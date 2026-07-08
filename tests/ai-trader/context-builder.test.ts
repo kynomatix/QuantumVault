@@ -124,6 +124,10 @@ const RECENT_DECISIONS: AiTraderDecision[] = [
   }),
 ];
 
+// WO-5 corrective: positions are read with the agent SIGNING pubkey, resolved by
+// the caller — the tests pin that the placeholder walletAddress is gone.
+const AGENT_PUBKEY = "AgEntPubKey1111111111111111111111111111111";
+
 function makeAdapter(overrides: Partial<ProtocolAdapter> = {}): ProtocolAdapter {
   return {
     getPrice: vi.fn().mockResolvedValue(150.1234),
@@ -167,12 +171,14 @@ afterEach(() => {
 describe("buildMarketContext (WO-3)", () => {
   it("golden file: builds the full system+user prompt and contextDigest for an open-position bot", async () => {
     const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const adapter = makeAdapter();
     const result = await buildMarketContext({
       market: "SOL-PERP",
       timeframe: "15m",
-      adapter: makeAdapter(),
+      adapter,
       bot: makeBot(),
       recentDecisions: RECENT_DECISIONS,
+      agentPublicKey: AGENT_PUBKEY,
     });
 
     expect("stale" in result).toBe(false);
@@ -181,6 +187,10 @@ describe("buildMarketContext (WO-3)", () => {
     expect(result.system).toMatchSnapshot("system-prompt");
     expect(result.user).toMatchSnapshot("user-prompt");
     expect(result.contextDigest).toMatchSnapshot("context-digest");
+
+    // WO-5 corrective pin: positions must be read with the resolved agent
+    // SIGNING pubkey, never bot.walletAddress (the old WO-3 placeholder).
+    expect(adapter.getPositions).toHaveBeenCalledWith(AGENT_PUBKEY, "sub-1");
 
     // Targeted, human-readable assertions on top of the snapshot so intent survives
     // even if someone regenerates the snapshot without reading the diff closely.
@@ -226,6 +236,7 @@ describe("buildMarketContext (WO-3)", () => {
       adapter: makeAdapter(),
       bot: makeBot(),
       recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
     if ("stale" in result) throw new Error("expected a built context, not stale");
@@ -247,6 +258,7 @@ describe("buildMarketContext (WO-3)", () => {
       adapter: makeAdapter(),
       bot: makeBot(),
       recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
     });
     expect(result).toEqual({ stale: true, reason: expect.stringContaining("candle is") });
   });
@@ -260,6 +272,7 @@ describe("buildMarketContext (WO-3)", () => {
       adapter: makeAdapter(),
       bot: makeBot(),
       recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
     });
     expect(result).toEqual({ stale: true, reason: expect.stringContaining("No 15m candle data") });
   });
@@ -272,6 +285,7 @@ describe("buildMarketContext (WO-3)", () => {
       adapter: makeAdapter({ getPrice: vi.fn().mockResolvedValue(null) }),
       bot: makeBot(),
       recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
     });
     expect(result).toEqual({ stale: true, reason: expect.stringContaining("No live price available") });
   });
@@ -288,6 +302,7 @@ describe("buildMarketContext (WO-3)", () => {
       adapter: makeAdapter(),
       bot: makeBot({ timeframe: "1d" }),
       recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
     if ("stale" in result) throw new Error("expected a built context, not stale");
@@ -303,6 +318,7 @@ describe("buildMarketContext (WO-3)", () => {
       adapter: makeAdapter(),
       bot: makeBot(),
       recentDecisions: [makeDecision({ closedAt: new Date(FIXED_NOW - 60_000) })],
+      agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
     if ("stale" in result) throw new Error("expected a built context, not stale");
@@ -334,6 +350,7 @@ describe("buildMarketContext (WO-3)", () => {
       adapter: makeAdapter(),
       bot: makeBot({ maxLeverage: 5 }),
       recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
     if ("stale" in result) throw new Error("expected a built context, not stale");
@@ -351,6 +368,7 @@ describe("buildMarketContext (WO-3)", () => {
       adapter: makeAdapter({ getPositions: vi.fn().mockResolvedValue([]) }),
       bot: makeBot(),
       recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
     if ("stale" in result) throw new Error("expected a built context, not stale");
