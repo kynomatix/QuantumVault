@@ -107,6 +107,7 @@ import VaultIdleFunds from '@/components/VaultIdleFunds';
 import { ExchangeBadge } from '@/components/ExchangeBadge';
 import { CreateBotModal } from '@/components/CreateBotModal';
 import { CreateAiTraderModal } from '@/components/CreateAiTraderModal';
+import { AiTraderDrawer } from '@/components/AiTraderDrawer';
 import { TradeHistoryModal } from '@/components/TradeHistoryModal';
 import { WalletContent } from '@/pages/WalletManagement';
 import { WelcomePopup } from '@/components/WelcomePopup';
@@ -263,6 +264,8 @@ export default function AppPage() {
   const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
   const [manageBotDrawerOpen, setManageBotDrawerOpen] = useState(false);
   const [selectedManagedBot, setSelectedManagedBot] = useState<TradingBot | null>(null);
+  const [aiTraderDrawerOpen, setAiTraderDrawerOpen] = useState(false);
+  const [selectedAiTraderBotId, setSelectedAiTraderBotId] = useState<string | null>(null);
   const [showInactiveBots, setShowInactiveBots] = useState(false);
   const [expandedPositionBotId, setExpandedPositionBotId] = useState<string | null>(null);
   const [createBotOpen, setCreateBotOpen] = useState(false);
@@ -3017,6 +3020,72 @@ export default function AppPage() {
                   </div>
                 )}
                 <div className="grid md:grid-cols-2 gap-4" data-testid="section-ai-feature-cards">
+                  {aiTraderBotsData && (aiTraderBotsData as any[]).length > 0 ? (() => {
+                    const aiBot = (aiTraderBotsData as any[])[0];
+                    const statusMap: Record<string, { label: string; cls: string }> = {
+                      idle: { label: 'Idle', cls: 'bg-muted text-muted-foreground' },
+                      analyzing: { label: 'Analyzing…', cls: 'bg-primary/20 text-primary' },
+                      proposed: { label: 'Proposed', cls: 'bg-primary/20 text-primary' },
+                      executing: { label: 'Executing…', cls: 'bg-amber-500/20 text-amber-400' },
+                      open: { label: 'Position open', cls: 'bg-emerald-500/20 text-emerald-400' },
+                      paused: { label: 'Paused', cls: 'bg-yellow-500/20 text-yellow-400' },
+                      stopped: { label: 'Stopped', cls: 'bg-red-500/20 text-red-400' },
+                    };
+                    const st = statusMap[aiBot.status] ?? { label: aiBot.status, cls: 'bg-muted text-muted-foreground' };
+                    return (
+                      <div
+                        className="gradient-border p-5 noise flex flex-col gap-3 hover:scale-[1.01] transition-transform cursor-pointer"
+                        data-testid="card-ai-trader-live"
+                        onClick={() => { setSelectedAiTraderBotId(aiBot.id); setAiTraderDrawerOpen(true); }}
+                      >
+                        <div className="flex items-start justify-between">
+                          <div className="flex items-center gap-3">
+                            <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${
+                              aiBot.status === 'open' ? 'bg-gradient-to-br from-primary to-accent' : 'bg-gradient-to-br from-primary/30 to-accent/30'
+                            }`}>
+                              <Brain className={`w-5 h-5 ${aiBot.status === 'open' ? 'text-white' : 'text-primary'}`} />
+                            </div>
+                            <div>
+                              <h3 className="font-semibold">AI Trader</h3>
+                              <p className="text-xs text-muted-foreground">{aiBot.market} · {aiBot.timeframe}</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/50 text-amber-400 font-medium shrink-0">PAPER</span>
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium shrink-0 ${st.cls}`}>{st.label}</span>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-sm">
+                          <div className="p-2 rounded-lg bg-muted/30">
+                            <p className="text-xs text-muted-foreground">Mode</p>
+                            <p className="font-medium capitalize">{aiBot.mode}</p>
+                          </div>
+                          <div className="p-2 rounded-lg bg-muted/30">
+                            <p className="text-xs text-muted-foreground">Risk</p>
+                            <p className="font-medium capitalize">{aiBot.riskProfile}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 mt-auto pt-1">
+                          <Button
+                            className="flex-1 bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                            onClick={(e) => { e.stopPropagation(); setSelectedAiTraderBotId(aiBot.id); setAiTraderDrawerOpen(true); }}
+                            data-testid="button-ai-trader-open-drawer"
+                          >
+                            <Brain className="w-4 h-4 mr-2" />
+                            View →
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={(e) => { e.stopPropagation(); setCreateAiTraderOpen(true); }}
+                            data-testid="button-ai-trader-new"
+                          >
+                            + New
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })() : (
                   <div className="gradient-border p-5 noise flex flex-col gap-3" data-testid="card-ai-trader">
                     <div className="flex items-start justify-between">
                       <div className="flex items-center gap-3">
@@ -3055,6 +3124,7 @@ export default function AppPage() {
                       </Button>
                     </div>
                   </div>
+                  )}
                   <div
                     className="gradient-border p-5 noise opacity-60 select-none cursor-not-allowed"
                     aria-hidden="true"
@@ -5743,6 +5813,19 @@ export default function AppPage() {
         onClose={() => setCreateAiTraderOpen(false)}
         walletAddress={publicKeyString || ''}
         onBotCreated={(_botId) => {
+          refetchAiTraderBots().catch(() => null);
+        }}
+      />
+
+      <AiTraderDrawer
+        isOpen={aiTraderDrawerOpen}
+        onClose={() => {
+          setAiTraderDrawerOpen(false);
+          setSelectedAiTraderBotId(null);
+        }}
+        botId={selectedAiTraderBotId}
+        walletAddress={publicKeyString || ''}
+        onBotUpdated={() => {
           refetchAiTraderBots().catch(() => null);
         }}
       />
