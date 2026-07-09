@@ -1062,12 +1062,19 @@ export function registerAiTraderRoutes(app: Express): void {
   // re-return any of that. Window is the decision's decidedAt->closedAt (or "now" for
   // the still-open position), padded and floored per CHART_PAD_CANDLES/
   // CHART_MIN_TOTAL_CANDLES above so a very short trade still renders a real chart.
-  app.get("/api/ai-trader/:id/decisions/:decisionId/chart", requireWallet, async (req: any, res) => {
+  app.get("/api/ai-trader/:id/chart", requireWallet, async (req: any, res) => {
     try {
       const bot = await loadOwnedBot(req, res);
       if (!bot) return;
-      const decision = await storage.getAiTraderDecision(req.params.decisionId);
-      if (!decision || decision.botId !== bot.id) {
+
+      const decisionId = req.query.decisionId;
+      if (!decisionId || typeof decisionId !== "string") {
+        return res.status(400).json({ error: "decisionId is required" });
+      }
+
+      const decisions = await storage.getAiTraderDecisions(bot.id, 200);
+      const decision = decisions.find((d) => d.id === decisionId);
+      if (!decision) {
         return res.status(404).json({ error: "Decision not found" });
       }
 
@@ -1084,15 +1091,23 @@ export function registerAiTraderRoutes(app: Express): void {
         startMs -= deficit / 2;
         endMs = Math.min(endMs + deficit / 2, now);
       }
+      endMs = Math.min(endMs, now);
 
       const datafeedTicker = marketToDatafeedTicker(bot.market);
-      const candles = await fetchOHLCV(
+      const rawCandles = await fetchOHLCV(
         datafeedTicker,
         bot.timeframe,
         new Date(startMs).toISOString(),
         new Date(endMs).toISOString()
       );
-      res.json({ candles });
+      const candles = rawCandles.map((c) => ({
+        time: Math.floor(c.time / 1000),
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      }));
+      res.json({ candles, market: bot.market, timeframe: bot.timeframe });
     } catch (err) {
       console.error("[AiTrader] chart error:", err);
       res.status(500).json({ error: "Internal server error" });
