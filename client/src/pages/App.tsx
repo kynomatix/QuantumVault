@@ -3020,74 +3020,6 @@ export default function AppPage() {
                   </div>
                 )}
                 <div className="grid md:grid-cols-2 gap-4" data-testid="section-ai-feature-cards">
-                  {aiTraderBotsData && (aiTraderBotsData as any[]).length > 0 ? (() => {
-                    const aiBot = (aiTraderBotsData as any[])[0];
-                    const statusMap: Record<string, { label: string; cls: string }> = {
-                      idle: { label: 'Idle', cls: 'bg-muted text-muted-foreground' },
-                      analyzing: { label: 'Analyzing…', cls: 'bg-primary/20 text-primary' },
-                      proposed: { label: 'Proposed', cls: 'bg-primary/20 text-primary' },
-                      executing: { label: 'Executing…', cls: 'bg-amber-500/20 text-amber-400' },
-                      open: { label: 'Position open', cls: 'bg-emerald-500/20 text-emerald-400' },
-                      paused: { label: 'Paused', cls: 'bg-yellow-500/20 text-yellow-400' },
-                      stopped: { label: 'Stopped', cls: 'bg-red-500/20 text-red-400' },
-                    };
-                    const st = statusMap[aiBot.status] ?? { label: aiBot.status, cls: 'bg-muted text-muted-foreground' };
-                    return (
-                      <div
-                        className="gradient-border p-5 noise flex flex-col gap-3 hover:scale-[1.01] transition-transform cursor-pointer"
-                        data-testid="card-ai-trader-live"
-                        onClick={() => { setSelectedAiTraderBotId(aiBot.id); setAiTraderDrawerOpen(true); }}
-                      >
-                        <div className="flex items-start justify-between">
-                          <div className="flex items-center gap-3">
-                            <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${
-                              aiBot.status === 'open' ? 'bg-gradient-to-br from-primary to-accent' : 'bg-gradient-to-br from-primary/30 to-accent/30'
-                            }`}>
-                              <Brain className={`w-5 h-5 ${aiBot.status === 'open' ? 'text-white' : 'text-primary'}`} />
-                            </div>
-                            <div>
-                              <h3 className="font-semibold">AI Trader</h3>
-                              <p className="text-xs text-muted-foreground">{aiBot.market} · {aiBot.timeframe}</p>
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-1.5">
-                            {!!aiBot.paperMode && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/50 text-amber-400 font-medium shrink-0">PAPER</span>
-                            )}
-                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium shrink-0 ${st.cls}`}>{st.label}</span>
-                          </div>
-                        </div>
-                        <div className="grid grid-cols-2 gap-2 text-sm">
-                          <div className="p-2 rounded-lg bg-muted/30">
-                            <p className="text-xs text-muted-foreground">Mode</p>
-                            <p className="font-medium capitalize">{aiBot.mode}</p>
-                          </div>
-                          <div className="p-2 rounded-lg bg-muted/30">
-                            <p className="text-xs text-muted-foreground">Risk</p>
-                            <p className="font-medium capitalize">{aiBot.riskProfile}</p>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2 mt-auto pt-1">
-                          <Button
-                            className="flex-1 bg-gradient-to-r from-primary to-accent hover:opacity-90"
-                            onClick={(e) => { e.stopPropagation(); setSelectedAiTraderBotId(aiBot.id); setAiTraderDrawerOpen(true); }}
-                            data-testid="button-ai-trader-open-drawer"
-                          >
-                            <Brain className="w-4 h-4 mr-2" />
-                            View →
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={(e) => { e.stopPropagation(); setCreateAiTraderOpen(true); }}
-                            data-testid="button-ai-trader-new"
-                          >
-                            + New
-                          </Button>
-                        </div>
-                      </div>
-                    );
-                  })() : (
                   <div className="gradient-border p-5 noise flex flex-col gap-3" data-testid="card-ai-trader">
                     <div className="flex items-start justify-between">
                       <div className="flex items-center gap-3">
@@ -3126,7 +3058,6 @@ export default function AppPage() {
                       </Button>
                     </div>
                   </div>
-                  )}
                   <div
                     className="gradient-border p-5 noise opacity-60 select-none cursor-not-allowed"
                     aria-hidden="true"
@@ -3147,7 +3078,7 @@ export default function AppPage() {
                     <p className="text-sm text-muted-foreground mt-3">Buys and sells automatically within a price range, capturing volatility without predicting direction.</p>
                   </div>
                 </div>
-                {botsData && botsData.length > 0 && (
+                {((botsData && botsData.length > 0) || ((aiTraderBotsData as any)?.bots?.length > 0)) && (
                   (() => {
                     const renderBotCard = (bot: TradingBot) => {
                       const position = positionsData?.find((p: any) => p.botId === bot.id);
@@ -3258,12 +3189,76 @@ export default function AppPage() {
                         </div>
                       );
                     };
-                    const activeBots = botsData.filter((b: TradingBot) => b.isActive);
-                    const inactiveBots = botsData.filter((b: TradingBot) => !b.isActive);
+                    const aiStatusMap: Record<string, { label: string; cls: string }> = {
+                      idle: { label: 'Idle', cls: 'bg-muted text-muted-foreground' },
+                      analyzing: { label: 'Analyzing…', cls: 'bg-primary/20 text-primary' },
+                      proposed: { label: 'Proposed', cls: 'bg-primary/20 text-primary' },
+                      executing: { label: 'Executing…', cls: 'bg-amber-500/20 text-amber-400' },
+                      open: { label: 'Position open', cls: 'bg-emerald-500/20 text-emerald-400' },
+                      paused: { label: 'Paused', cls: 'bg-yellow-500/20 text-yellow-400' },
+                      stopped: { label: 'Stopped', cls: 'bg-red-500/20 text-red-400' },
+                    };
+                    const renderAiTraderCard = (aiBot: any) => {
+                      const aiSt = aiStatusMap[aiBot.status] ?? { label: aiBot.status, cls: 'bg-muted text-muted-foreground' };
+                      const isBright = ['open', 'executing', 'analyzing', 'proposed'].includes(aiBot.status);
+                      const dailyPnl = Number(aiBot.dailyRealizedPnl ?? 0);
+                      return (
+                        <div
+                          key={aiBot.id}
+                          className="gradient-border p-5 noise hover:scale-[1.01] transition-transform cursor-pointer"
+                          data-testid={`ai-trader-card-${aiBot.id}`}
+                          onClick={() => { setSelectedAiTraderBotId(aiBot.id); setAiTraderDrawerOpen(true); }}
+                        >
+                          <div className="flex items-start justify-between mb-4">
+                            <div className="flex items-center gap-3">
+                              <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${
+                                isBright ? 'bg-gradient-to-br from-primary to-accent' : 'bg-gradient-to-br from-primary/30 to-accent/30'
+                              }`}>
+                                <Brain className={`w-6 h-6 ${isBright ? 'text-white' : 'text-primary'}`} />
+                              </div>
+                              <div>
+                                <h3 className="font-semibold text-base">{aiBot.market}</h3>
+                                <p className="text-sm text-muted-foreground">{aiBot.timeframe} · AI Trader</p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                              {!!aiBot.paperMode && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/50 text-amber-400 font-medium">PAPER</span>
+                              )}
+                              <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${aiSt.cls}`}>{aiSt.label}</span>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-3 gap-3 text-center">
+                            <div className="p-2.5 rounded-lg bg-muted/30">
+                              <p className="text-sm font-bold capitalize">{aiBot.riskProfile}</p>
+                              <p className="text-xs text-muted-foreground">Risk</p>
+                            </div>
+                            <div className="p-2.5 rounded-lg bg-muted/30">
+                              <p className="text-sm font-bold">{aiBot.maxLeverage}x</p>
+                              <p className="text-xs text-muted-foreground">Max lev.</p>
+                            </div>
+                            <div className="p-2.5 rounded-lg bg-muted/30">
+                              <p className={`text-sm font-bold ${dailyPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                {dailyPnl >= 0 ? '+' : ''}${dailyPnl.toFixed(2)}
+                              </p>
+                              <p className="text-xs text-muted-foreground">Today P&L</p>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    };
+                    const aiBots: any[] = (aiTraderBotsData as any)?.bots ?? [];
+                    const activeAiBots = aiBots.filter((b: any) => b.status !== 'stopped');
+                    const inactiveAiBots = aiBots.filter((b: any) => b.status === 'stopped');
+                    const activeBots = (botsData ?? []).filter((b: TradingBot) => b.isActive);
+                    const inactiveBots = (botsData ?? []).filter((b: TradingBot) => !b.isActive);
+                    const hasActive = activeBots.length > 0 || activeAiBots.length > 0;
+                    const hasInactive = inactiveBots.length > 0 || inactiveAiBots.length > 0;
                     return (
                       <div className="space-y-6">
-                        {activeBots.length > 0 ? (
+                        {hasActive ? (
                           <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+                            {activeAiBots.map((b: any) => renderAiTraderCard(b))}
                             {activeBots.map((bot: TradingBot) => renderBotCard(bot))}
                           </div>
                         ) : (
@@ -3271,7 +3266,7 @@ export default function AppPage() {
                             <p className="text-muted-foreground">No active bots right now.</p>
                           </div>
                         )}
-                        {inactiveBots.length > 0 && (
+                        {hasInactive && (
                           <div className="space-y-4">
                             <button
                               type="button"
@@ -3280,10 +3275,11 @@ export default function AppPage() {
                               data-testid="button-toggle-inactive-bots"
                             >
                               {showInactiveBots ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                              Inactive bots ({inactiveBots.length})
+                              Inactive bots ({inactiveBots.length + inactiveAiBots.length})
                             </button>
                             {showInactiveBots && (
                               <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+                                {inactiveAiBots.map((b: any) => renderAiTraderCard(b))}
                                 {inactiveBots.map((bot: TradingBot) => renderBotCard(bot))}
                               </div>
                             )}

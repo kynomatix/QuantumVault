@@ -45,7 +45,7 @@ import {
 } from 'lucide-react';
 import { LlmKeyStatusRow } from '@/components/LlmKeyStatusRow';
 
-const DEGEN_CONFIRM_PHRASE = "this bot can lose the full allocation without pausing";
+const DEGEN_CONFIRM_PHRASE = "send it";
 
 const SELECTABLE_MODELS = [
   { id: "anthropic/claude-opus-4.8", label: "Claude Opus 4.8", note: "Peak reasoning — best for intricate, multi-condition logic." },
@@ -464,7 +464,7 @@ export function CreateAiTraderModal({
                 <Input
                   value={form.degenConfirm}
                   onChange={e => set('degenConfirm', e.target.value)}
-                  placeholder="Type phrase exactly…"
+                  placeholder="Type 'send it'…"
                   className="text-sm"
                   data-testid="input-degen-confirm"
                 />

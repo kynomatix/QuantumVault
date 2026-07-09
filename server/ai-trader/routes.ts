@@ -98,7 +98,7 @@ const FREE_PAPER_TRIALS = true;
 const FREE_PAPER_TRIAL_LIMIT = 3;
 const FREE_TRIAL_MODEL = "deepseek/deepseek-v4-flash"; // cheapest curated model (models-catalog.ts)
 
-const DEGEN_CONFIRM_PHRASE = "this bot can lose the full allocation without pausing";
+const DEGEN_CONFIRM_PHRASE = "send it";
 const MIN_ALLOCATED_USDC = 10;
 const MAX_ALLOCATED_USDC = 1_000_000; // sanity ceiling only — paper allocation moves no real funds
 
