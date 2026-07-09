@@ -564,9 +564,21 @@ export async function fetchOHLCV(
   onProgress?.(`Checking cache for ${symbol} ${timeframe}...`);
   const cached = await getCachedCandles(symbol, timeframe, startMs, endMs);
   if (cached && cached.length >= 100) {
-    console.log(`[CandleCache] Hit: ${cached.length} candles for ${symbol} ${timeframe}`);
-    onProgress?.(`Loaded ${cached.length} cached candles for ${symbol} ${timeframe}`);
-    return cached;
+    // For live requests (endMs near now), also require the newest cached candle to be
+    // recent enough. Historical backtest ranges (endMs well in the past) always
+    // cache-hit unchanged — QuantumLab optimizer depends on this behaviour.
+    const intervalMs = getTimeframeSeconds(timeframe) * 1000;
+    const isLiveRequest = endMs > Date.now() - 2 * intervalMs;
+    const newestCachedTs = cached[cached.length - 1].time;
+    if (!isLiveRequest || newestCachedTs > endMs - 2 * intervalMs) {
+      console.log(`[CandleCache] Hit: ${cached.length} candles for ${symbol} ${timeframe}`);
+      onProgress?.(`Loaded ${cached.length} cached candles for ${symbol} ${timeframe}`);
+      return cached;
+    }
+    console.log(
+      `[CandleCache] Live miss: newest candle is ` +
+      `${Math.round(((endMs - newestCachedTs) / intervalMs) * 10) / 10} intervals stale — refetching`
+    );
   }
 
   const synthetic = SYNTHETIC_TIMEFRAMES[timeframe];
