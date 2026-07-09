@@ -10,6 +10,7 @@ import type { OHLCV } from "../lab/engine";
 import { ema, rsi, macd, atr, adx, bollingerBands, supertrend, obv } from "../lab/indicators";
 import type { ProtocolAdapter } from "../protocol/adapter";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
+import { getHlParticipationSnapshot, type HlParticipationSnapshot } from "./hl-context";
 
 export type AiTraderTimeframe = "15m" | "1h" | "4h" | "1d";
 
@@ -117,6 +118,26 @@ function fmtObv(v: number): string {
   return Number.isFinite(v) ? Math.round(v).toString() : "n/a";
 }
 
+// WO-8f formatting helpers for the Hyperliquid participation block. Deltas
+// and rates keep the file's existing convention of a plain toFixed (no
+// forced "+" sign — a negative already renders its own "-"), matching
+// fmtPct1/fmtMacdComponent above.
+function fmtPct1Signed(v: number | null): string {
+  return v === null || !Number.isFinite(v) ? "n/a" : `${v.toFixed(1)}%`;
+}
+
+function fmtRatePct4(v: number): string {
+  return Number.isFinite(v) ? `${(v * 100).toFixed(4)}%` : "n/a";
+}
+
+function fmtCommaNum(v: number): string {
+  return Number.isFinite(v) ? Math.round(v).toLocaleString("en-US") : "n/a";
+}
+
+function fmtUsd0(v: number): string {
+  return Number.isFinite(v) ? `$${Math.round(v).toLocaleString("en-US")}` : "n/a";
+}
+
 function isoMinute(timeMs: number): string {
   return new Date(timeMs).toISOString().slice(0, 16);
 }
@@ -159,7 +180,9 @@ Rules:
 - Never increase size or leverage to recover a prior loss. No martingale, no revenge trading.
 - On a lower timeframe (15m/1h), treat the higher timeframe trend shown in this context as the dominant bias. Do not fight it without a clearly stated, strong invalidation case.
 - The fee context below is real: a take-profit that does not clear the round-trip fee by a wide margin is not a trade worth taking.
-- Base your decision only on the market data, indicators, account state, and guardrails provided in this context. All of it comes from verified market/account data — none of it is user-supplied free text.`;
+- Base your decision only on the market data, indicators, account state, and guardrails provided in this context. All of it comes from verified market/account data — none of it is user-supplied free text.
+
+Hyperliquid participation data in this context (open interest, 24h volume, funding, and mark/oracle premium) is corroboration only, from a reference venue you do not trade on. Rising open interest alongside a price move signals conviction behind it; falling open interest against the move signals weak participation. It must never be the sole basis for an entry, and its absence or unavailability must never be a reason to refuse an otherwise valid decision.`;
 
 export async function buildMarketContext(
   input: BuildMarketContextInput
@@ -267,11 +290,41 @@ export async function buildMarketContext(
       : "unknown";
   const microstateBlock = [
     `Mark price: ${fmtPrice(price)}`,
-    `Funding rate: ${(fundingInfo.rate * 100).toFixed(4)}% (next funding at ${nextFundingLabel})`,
+    `Funding rate (Pacifica — this is what your position actually pays): ${(fundingInfo.rate * 100).toFixed(
+      4
+    )}% (next funding at ${nextFundingLabel})`,
     `Taker fee: ${(EXCHANGE_TAKER_FEE_RATE * 100).toFixed(2)}% per side, ${roundTripFeePct.toFixed(
       2
     )}% round-trip. TP distance must clear this by a wide margin (guardrail G4 requires ≥ 4x).`,
   ].join("\n");
+
+  // WO-8f: Hyperliquid participation data (open interest, 24h volume,
+  // funding, mark/oracle premium) as non-load-bearing confirmation context.
+  // hl-context.ts's own contract already resolves every failure mode to
+  // null rather than throwing; the try/catch here is defense-in-depth so a
+  // future change to that contract can never turn "reference data
+  // unavailable" into "decision cycle failed".
+  let hlSnapshot: HlParticipationSnapshot | null;
+  try {
+    hlSnapshot = await getHlParticipationSnapshot(market);
+  } catch {
+    hlSnapshot = null;
+  }
+  const participationBlock = hlSnapshot
+    ? [
+        `Open interest: ${fmtCommaNum(hlSnapshot.openInterest)} ${hlSnapshot.hlSymbol} (Δ ${fmtPct1Signed(
+          hlSnapshot.openInterestDeltaPct
+        )} since last cycle, Δ ${fmtPct1Signed(hlSnapshot.openInterestDeltaPctWindow)} over stored window)`,
+        `24h volume: ${fmtUsd0(hlSnapshot.volume24h)} (trend: ${hlSnapshot.volumeTrend})`,
+        `HL funding: ${fmtRatePct4(hlSnapshot.fundingRate)} (trajectory, oldest to newest: ${hlSnapshot.fundingTrajectory
+          .map((r) => fmtRatePct4(r))
+          .join(", ")})`,
+        `Mark/oracle premium: ${fmtRatePct4(hlSnapshot.premium)}`,
+        `HL-vs-Pacifica funding spread: ${fmtRatePct4(
+          hlSnapshot.fundingRate - fundingInfo.rate
+        )} (positive = HL funding richer than Pacifica)`,
+      ].join("\n")
+    : "Participation data: unavailable this cycle";
 
   // WO-5 corrective (was a flagged WO-3 spec gap): positions are read with the
   // caller-resolved agent SIGNING pubkey (input.agentPublicKey), never the
@@ -348,6 +401,8 @@ export async function buildMarketContext(
     indicatorBlock,
     `## Market microstate`,
     microstateBlock,
+    `## Market participation — Hyperliquid (reference venue; you trade on Pacifica)`,
+    participationBlock,
     `## Account state`,
     accountBlock,
     `## Last ${recentDecisions.length} closed trades (most recent first)`,
@@ -369,6 +424,21 @@ export async function buildMarketContext(
     price,
     fundingRate: fundingInfo.rate,
     nextFundingTime: fundingInfo.nextFundingTime,
+    participation: hlSnapshot
+      ? {
+          hlSymbol: hlSnapshot.hlSymbol,
+          openInterest: hlSnapshot.openInterest,
+          openInterestDeltaPct: hlSnapshot.openInterestDeltaPct,
+          openInterestDeltaPctWindow: hlSnapshot.openInterestDeltaPctWindow,
+          volume24h: hlSnapshot.volume24h,
+          volumeTrend: hlSnapshot.volumeTrend,
+          fundingRate: hlSnapshot.fundingRate,
+          fundingTrajectory: hlSnapshot.fundingTrajectory,
+          markPrice: hlSnapshot.markPrice,
+          oraclePrice: hlSnapshot.oraclePrice,
+          premium: hlSnapshot.premium,
+        }
+      : null,
     indicators: {
       ema20,
       ema50,

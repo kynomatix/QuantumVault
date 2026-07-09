@@ -87,6 +87,23 @@ exports[`buildMarketContext (WO-3) > golden file: builds the full system+user pr
   },
   "market": "SOL-PERP",
   "nextFundingTime": 1768482000000,
+  "participation": {
+    "fundingRate": 0.0000125,
+    "fundingTrajectory": [
+      0.000011,
+      0.0000118,
+      0.0000125,
+    ],
+    "hlSymbol": "SOL",
+    "markPrice": 78.085,
+    "openInterest": 5364594.64,
+    "openInterestDeltaPct": 1.2,
+    "openInterestDeltaPctWindow": -3.4,
+    "oraclePrice": 78.115,
+    "premium": -0.000384,
+    "volume24h": 196439874.67,
+    "volumeTrend": "rising",
+  },
   "price": 150.1234,
   "timeframe": "15m",
 }
@@ -103,7 +120,9 @@ Rules:
 - Never increase size or leverage to recover a prior loss. No martingale, no revenge trading.
 - On a lower timeframe (15m/1h), treat the higher timeframe trend shown in this context as the dominant bias. Do not fight it without a clearly stated, strong invalidation case.
 - The fee context below is real: a take-profit that does not clear the round-trip fee by a wide margin is not a trade worth taking.
-- Base your decision only on the market data, indicators, account state, and guardrails provided in this context. All of it comes from verified market/account data — none of it is user-supplied free text."
+- Base your decision only on the market data, indicators, account state, and guardrails provided in this context. All of it comes from verified market/account data — none of it is user-supplied free text.
+
+Hyperliquid participation data in this context (open interest, 24h volume, funding, and mark/oracle premium) is corroboration only, from a reference venue you do not trade on. Rising open interest alongside a price move signals conviction behind it; falling open interest against the move signals weak participation. It must never be the sole basis for an entry, and its absence or unavailability must never be a reason to refuse an otherwise valid decision."
 `;
 
 exports[`buildMarketContext (WO-3) > golden file: builds the full system+user prompt and contextDigest for an open-position bot > user-prompt 1`] = `
@@ -127,8 +146,16 @@ OBV: 32114 (prev 34311)
 ## Market microstate
 
 Mark price: 150.12
-Funding rate: 0.0123% (next funding at 2026-01-15T13:00:00.000Z)
+Funding rate (Pacifica — this is what your position actually pays): 0.0123% (next funding at 2026-01-15T13:00:00.000Z)
 Taker fee: 0.04% per side, 0.08% round-trip. TP distance must clear this by a wide margin (guardrail G4 requires ≥ 4x).
+
+## Market participation — Hyperliquid (reference venue; you trade on Pacifica)
+
+Open interest: 5,364,595 SOL (Δ 1.2% since last cycle, Δ -3.4% over stored window)
+24h volume: $196,439,875 (trend: rising)
+HL funding: 0.0013% (trajectory, oldest to newest: 0.0011%, 0.0012%, 0.0013%)
+Mark/oracle premium: -0.0384%
+HL-vs-Pacifica funding spread: -0.0111% (positive = HL funding richer than Pacifica)
 
 ## Account state
 

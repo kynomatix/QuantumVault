@@ -13,6 +13,30 @@ vi.mock("../../server/lab/datafeed", () => ({
   fetchOHLCV: (...args: unknown[]) => fetchOHLCVMock(...args),
 }));
 
+// WO-8f: hl-context.ts is a separate module with its own dedicated test file
+// (tests/ai-trader/hl-context.test.ts) — mocked here so context-builder's own
+// tests stay focused on prompt/digest assembly, not Hyperliquid parsing.
+const getHlParticipationSnapshotMock = vi.fn();
+vi.mock("../../server/ai-trader/hl-context", () => ({
+  getHlParticipationSnapshot: (...args: unknown[]) => getHlParticipationSnapshotMock(...args),
+}));
+
+// Fixture values match a live metaAndAssetCtxs read for SOL taken during WO-8f
+// development, so the golden snapshot reflects realistic magnitudes.
+const HL_FIXTURE = {
+  hlSymbol: "SOL",
+  openInterest: 5_364_594.64,
+  openInterestDeltaPct: 1.2,
+  openInterestDeltaPctWindow: -3.4,
+  volume24h: 196_439_874.67,
+  volumeTrend: "rising" as const,
+  fundingRate: 0.0000125,
+  fundingTrajectory: [0.000011, 0.0000118, 0.0000125],
+  markPrice: 78.085,
+  oraclePrice: 78.115,
+  premium: -0.000384,
+};
+
 const FIXED_NOW = Date.parse("2026-01-15T12:00:00.000Z");
 
 function makeCandles(count: number, tfMs: number, lastCandleAgeMs: number, basePrice: number): OHLCV[] {
@@ -162,6 +186,8 @@ beforeEach(() => {
     if (timeframe === "1h") return Promise.resolve(PARENT_CANDLES_1H);
     throw new Error(`unexpected timeframe requested in test: ${timeframe}`);
   });
+  getHlParticipationSnapshotMock.mockReset();
+  getHlParticipationSnapshotMock.mockResolvedValue(HL_FIXTURE);
 });
 
 afterEach(() => {
@@ -206,6 +232,18 @@ describe("buildMarketContext (WO-3)", () => {
     expect(result.user).toContain("## Candles — 1h parent timeframe (oldest -> newest, CSV)");
     expect(result.user).toContain("Open position: long 2.5 @ entry 145.00");
     expect(fetchOHLCVMock).toHaveBeenCalledTimes(2);
+
+    // WO-8f: Hyperliquid participation block renders when data is present.
+    expect(getHlParticipationSnapshotMock).toHaveBeenCalledWith("SOL-PERP");
+    expect(result.user).toContain("## Market participation — Hyperliquid (reference venue; you trade on Pacifica)");
+    expect(result.user).toContain("Open interest: 5,364,595 SOL (Δ 1.2% since last cycle, Δ -3.4% over stored window)");
+    expect(result.user).toContain("24h volume: $196,439,875 (trend: rising)");
+    expect(result.user).toContain("HL funding: 0.0013% (trajectory, oldest to newest: 0.0011%, 0.0012%, 0.0013%)");
+    expect(result.user).toContain("Mark/oracle premium: -0.0384%");
+    expect(result.user).toContain("HL-vs-Pacifica funding spread:");
+    expect(result.user).toContain("Funding rate (Pacifica — this is what your position actually pays):");
+    expect(result.system).toContain("corroboration only, from a reference venue you do not trade on");
+    expect((result.contextDigest as any).participation).toMatchObject({ hlSymbol: "SOL" });
 
     // WO-3.1 token-size guard: despite the 400-bar indicator window, the selected-
     // timeframe CSV block must still serialize exactly the 100 most recent bars.
@@ -378,5 +416,42 @@ describe("buildMarketContext (WO-3)", () => {
     expect(result.user).toContain("Unrealized PnL: $0.00");
     expect(result.user).toContain("No closed trades yet.");
     expect((result.contextDigest as any).account.hasPosition).toBe(false);
+  });
+
+  it("WO-8f: renders 'unavailable this cycle' and a null contextDigest.participation when Hyperliquid data is null", async () => {
+    getHlParticipationSnapshotMock.mockResolvedValue(null);
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+    expect(result.user).toContain(
+      "## Market participation — Hyperliquid (reference venue; you trade on Pacifica)\n\nParticipation data: unavailable this cycle"
+    );
+    expect(result.user).not.toContain("Open interest:");
+    expect((result.contextDigest as any).participation).toBeNull();
+  });
+
+  it("WO-8f: a throwing hl-context call degrades to 'unavailable this cycle' instead of failing the decision cycle", async () => {
+    getHlParticipationSnapshotMock.mockRejectedValue(new Error("hyperliquid boom"));
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+    expect(result.user).toContain("Participation data: unavailable this cycle");
+    expect((result.contextDigest as any).participation).toBeNull();
   });
 });
