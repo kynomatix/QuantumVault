@@ -5826,6 +5826,10 @@ export default function AppPage() {
         onBotUpdated={() => {
           refetchAiTraderBots().catch(() => null);
         }}
+        onOpenDeposit={() => {
+          setWalletInitialTab('deposit');
+          setActiveNav('wallet');
+        }}
       />
 
       <TradeHistoryModal

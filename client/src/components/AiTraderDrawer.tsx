@@ -48,6 +48,7 @@ import {
   Trophy,
   AlertCircle,
   RefreshCw,
+  Wallet,
 } from 'lucide-react';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
@@ -86,6 +87,7 @@ interface AiTraderDrawerProps {
   botId: string | null;
   walletAddress: string;
   onBotUpdated: () => void;
+  onOpenDeposit?: () => void;
 }
 
 interface BotDetailResponse {
@@ -148,7 +150,37 @@ function formatRelTime(iso: string | null): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
-function TrialStrip({ bot, tradesCount, netPnl, maxDdPct, onGoLive, onRestartTrial, goLiveLoading, restartLoading }: {
+function PreflightRow({ loading, available, needed, onOpenDeposit }: {
+  loading: boolean;
+  available: number | null;
+  needed: number;
+  onOpenDeposit?: () => void;
+}) {
+  if (loading) return (
+    <p className="text-[10px] text-muted-foreground flex items-center gap-1">
+      <Loader2 className="w-2.5 h-2.5 animate-spin" />Checking available funds…
+    </p>
+  );
+  if (available === null) return null;
+  const ok = available >= needed;
+  return (
+    <div className="flex items-center gap-2 text-[10px]">
+      <span className={ok ? 'text-emerald-300' : 'text-amber-400'}>
+        Wallet ${available.toFixed(2)} · Needs ${needed.toFixed(2)}
+      </span>
+      {!ok && onOpenDeposit && (
+        <button
+          onClick={onOpenDeposit}
+          className="text-primary underline underline-offset-2 hover:no-underline flex items-center gap-0.5"
+        >
+          Deposit <Wallet className="w-2.5 h-2.5" />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function TrialStrip({ bot, tradesCount, netPnl, maxDdPct, onGoLive, onRestartTrial, goLiveLoading, restartLoading, preflight, onOpenDeposit }: {
   bot: AiTraderBot;
   tradesCount: number;
   netPnl: number;
@@ -157,7 +189,10 @@ function TrialStrip({ bot, tradesCount, netPnl, maxDdPct, onGoLive, onRestartTri
   onRestartTrial: () => void;
   goLiveLoading: boolean;
   restartLoading: boolean;
+  preflight: { loading: boolean; available: number | null };
+  onOpenDeposit?: () => void;
 }) {
+  const allocatedNum = Number(bot.allocatedUsdc);
   const criteria = bot.graduationCriteria as { periodDays?: number; minTrades?: number } | null;
   const periodDays = criteria?.periodDays ?? 30;
   const minTrades = criteria?.minTrades ?? 10;
@@ -169,28 +204,31 @@ function TrialStrip({ bot, tradesCount, netPnl, maxDdPct, onGoLive, onRestartTri
 
   if (bot.graduationState === 'graduated') {
     return (
-      <div className="flex items-center justify-between px-4 py-2.5 bg-emerald-500/10 border-b border-emerald-500/20">
-        <div className="flex items-center gap-2">
-          <Trophy className="w-4 h-4 text-emerald-400" />
-          <span className="text-xs font-medium text-emerald-400">GRADUATED — ready to go live</span>
+      <div className="px-4 py-2.5 bg-emerald-500/10 border-b border-emerald-500/20 space-y-1.5">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Trophy className="w-4 h-4 text-emerald-400" />
+            <span className="text-xs font-medium text-emerald-400">GRADUATED — ready to go live</span>
+          </div>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  size="sm"
+                  className="h-7 text-xs bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                  onClick={onGoLive}
+                  disabled={goLiveLoading}
+                  data-testid="button-ai-trader-go-live"
+                >
+                  {goLiveLoading ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
+                  Go live
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Fund and activate a live trading account</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         </div>
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                size="sm"
-                className="h-7 text-xs bg-gradient-to-r from-primary to-accent hover:opacity-90"
-                onClick={onGoLive}
-                disabled={goLiveLoading}
-                data-testid="button-ai-trader-go-live"
-              >
-                {goLiveLoading ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
-                Go live
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Fund and activate a live trading account</TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+        <PreflightRow loading={preflight.loading} available={preflight.available} needed={allocatedNum} onOpenDeposit={onOpenDeposit} />
       </div>
     );
   }
@@ -219,25 +257,28 @@ function TrialStrip({ bot, tradesCount, netPnl, maxDdPct, onGoLive, onRestartTri
 
   if (bot.graduationState === 'waived') {
     return (
-      <div className="flex items-center justify-between px-4 py-2 bg-primary/10 border-b border-primary/20">
-        <span className="text-xs text-primary font-medium">Trial waived — ready to go live</span>
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                size="sm"
-                className="h-7 text-xs bg-gradient-to-r from-primary to-accent hover:opacity-90"
-                onClick={onGoLive}
-                disabled={goLiveLoading}
-                data-testid="button-ai-trader-go-live"
-              >
-                {goLiveLoading ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
-                Go live
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Fund and activate a live trading account</TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+      <div className="px-4 py-2.5 bg-primary/10 border-b border-primary/20 space-y-1.5">
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-primary font-medium">Trial waived — ready to go live</span>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  size="sm"
+                  className="h-7 text-xs bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                  onClick={onGoLive}
+                  disabled={goLiveLoading}
+                  data-testid="button-ai-trader-go-live"
+                >
+                  {goLiveLoading ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
+                  Go live
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Fund and activate a live trading account</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        </div>
+        <PreflightRow loading={preflight.loading} available={preflight.available} needed={allocatedNum} onOpenDeposit={onOpenDeposit} />
       </div>
     );
   }
@@ -258,7 +299,7 @@ function TrialStrip({ bot, tradesCount, netPnl, maxDdPct, onGoLive, onRestartTri
   );
 }
 
-export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpdated }: AiTraderDrawerProps) {
+export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpdated, onOpenDeposit }: AiTraderDrawerProps) {
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState<string>('activity');
   const [detail, setDetail] = useState<BotDetailResponse | null>(null);
@@ -266,6 +307,19 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   const [loading, setLoading] = useState(false);
   const [analyzeLoading, setAnalyzeLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [preflight, setPreflight] = useState<{ loading: boolean; available: number | null }>({ loading: false, available: null });
+
+  const fetchPreflight = useCallback(async () => {
+    setPreflight(p => ({ ...p, loading: true }));
+    try {
+      const res = await fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders() });
+      if (!res.ok) { setPreflight({ loading: false, available: null }); return; }
+      const data = await safeResponseJson(res);
+      setPreflight({ loading: false, available: Number(data.agentBalance ?? 0) });
+    } catch {
+      setPreflight({ loading: false, available: null });
+    }
+  }, [walletAddress]);
 
   const fetchDetail = useCallback(async () => {
     if (!botId || !walletAddress) return;
@@ -303,8 +357,16 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
       setDetail(null);
       setHistory([]);
       setActiveTab('activity');
+      setPreflight({ loading: false, available: null });
     }
   }, [isOpen]);
+
+  const graduationState = detail?.bot?.graduationState;
+  useEffect(() => {
+    if (isOpen && (graduationState === 'graduated' || graduationState === 'waived')) {
+      fetchPreflight();
+    }
+  }, [isOpen, graduationState, fetchPreflight]);
 
   const bot = detail?.bot ?? null;
   const openDecision = detail?.openPosition ?? null;
@@ -542,6 +604,8 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                 onRestartTrial={handleRestartTrial}
                 goLiveLoading={actionLoading === 'go-live'}
                 restartLoading={actionLoading === 'restart-trial'}
+                preflight={preflight}
+                onOpenDeposit={onOpenDeposit}
               />
             )}
 

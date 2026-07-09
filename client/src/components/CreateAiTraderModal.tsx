@@ -42,6 +42,7 @@ import {
   Sparkles,
   Brain,
   FlaskConical,
+  Zap,
 } from 'lucide-react';
 import { LlmKeyStatusRow } from '@/components/LlmKeyStatusRow';
 
@@ -82,6 +83,7 @@ interface FormState {
   maxLeverage: number;
   allocatedUsdc: string;
   riskProfile: 'guarded' | 'degen';
+  mode: 'suggest' | 'auto';
   degenConfirm: string;
   parkWhenIdle: boolean;
   autoNext: boolean;
@@ -114,6 +116,7 @@ export function CreateAiTraderModal({
     maxLeverage: 3,
     allocatedUsdc: '100',
     riskProfile: 'guarded',
+    mode: 'suggest',
     degenConfirm: '',
     parkWhenIdle: false,
     autoNext: false,
@@ -196,6 +199,7 @@ export function CreateAiTraderModal({
       maxLeverage: 3,
       allocatedUsdc: '100',
       riskProfile: 'guarded',
+      mode: 'suggest',
       degenConfirm: '',
       parkWhenIdle: false,
       autoNext: false,
@@ -212,7 +216,7 @@ export function CreateAiTraderModal({
       const body: Record<string, unknown> = {
         market: form.market,
         timeframe: form.timeframe,
-        mode: 'suggest',
+        mode: form.mode,
         riskProfile: form.riskProfile,
         model: form.model,
         allocatedUsdc: allocatedNum,
@@ -471,6 +475,55 @@ export function CreateAiTraderModal({
                 {form.degenConfirm && !degenConfirmed && (
                   <p className="text-xs text-destructive">Phrase doesn't match.</p>
                 )}
+              </div>
+            )}
+          </div>
+
+          {/* Mode */}
+          <div className="space-y-2">
+            <Label>Mode</Label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setForm(prev => ({ ...prev, mode: 'suggest' }))}
+                data-testid="button-mode-suggest"
+                className={`p-3 rounded-lg border text-left transition-colors ${
+                  form.mode === 'suggest'
+                    ? 'border-primary/60 bg-primary/10'
+                    : 'border-border/60 bg-muted/30 hover:bg-muted/50'
+                }`}
+              >
+                <p className="text-sm font-medium">Suggest</p>
+                <p className="text-xs text-muted-foreground mt-0.5">You approve each trade proposal</p>
+              </button>
+              <button
+                type="button"
+                onClick={() => setForm(prev => ({ ...prev, mode: 'auto', autoNext: true }))}
+                data-testid="button-mode-auto"
+                className={`p-3 rounded-lg border text-left transition-colors ${
+                  form.mode === 'auto'
+                    ? 'border-primary/60 bg-primary/10'
+                    : 'border-border/60 bg-muted/30 hover:bg-muted/50'
+                }`}
+              >
+                <p className="text-sm font-medium flex items-center gap-1.5">
+                  <Zap className="w-3.5 h-3.5 text-primary" />
+                  Auto
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5">Hands-free paper testing — re-analyzes automatically after every close to build a graduation record</p>
+              </button>
+            </div>
+            {form.mode === 'auto' && (
+              <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 p-3">
+                <div>
+                  <p className="text-sm font-medium">After-close</p>
+                  <p className="text-xs text-muted-foreground">Ask AI again automatically after each close</p>
+                </div>
+                <Switch
+                  checked={form.autoNext}
+                  onCheckedChange={v => set('autoNext', v)}
+                  data-testid="switch-auto-next"
+                />
               </div>
             )}
           </div>
