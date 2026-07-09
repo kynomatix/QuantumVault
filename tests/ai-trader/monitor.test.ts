@@ -43,6 +43,7 @@ vi.mock("../../server/storage", () => ({
 
 const getUmkMock = vi.fn();
 const decryptKeyMock = vi.fn();
+const decryptSubKeyMock = vi.fn();
 const healUmkMock = vi.fn();
 const getSessionByWalletMock = vi.fn();
 const restoreSecurityMock = vi.fn();
@@ -50,6 +51,8 @@ const decryptLlmKeyMock = vi.fn();
 vi.mock("../../server/session-v3", () => ({
   getUmkForWebhook: (...a: unknown[]) => getUmkMock(...a),
   decryptAgentKeyStrict: (...a: unknown[]) => decryptKeyMock(...a),
+  // WO-7.1: signing.ts resolves the bot's OWN subaccount key through this.
+  decryptBotSubaccountKey: (...a: unknown[]) => decryptSubKeyMock(...a),
   healExecutionUmkFromStorage: (...a: unknown[]) => healUmkMock(...a),
   getSessionByWalletAddress: (...a: unknown[]) => getSessionByWalletMock(...a),
   restoreWalletSecurityFromStorage: (...a: unknown[]) => restoreSecurityMock(...a),
@@ -109,7 +112,11 @@ function makeBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
     id: "bot-1111-2222",
     walletAddress: "WALLET_X",
     protocol: "pacifica",
+    // WO-7.1 live-funded bot: own venue subaccount + V3 sub-key material.
     protocolSubaccountId: "sub-1",
+    botSubaccountKeyEncryptedV3: "v3-sub-ciphertext",
+    derivationIndex: null,
+    derivationPathVersion: null,
     market: "SOL-PERP",
     timeframe: "15m",
     mode: "manual",
@@ -179,6 +186,9 @@ function armLiveAuth() {
   cleanupUmk = vi.fn();
   cleanupKey = vi.fn();
   getUmkMock.mockResolvedValue({ umk: Buffer.from("umk"), cleanup: cleanupUmk });
+  // Sub-key bot (default fixture) signs with its own subaccount key; legacy
+  // bots (protocolSubaccountId=null) use the main agent key.
+  decryptSubKeyMock.mockResolvedValue({ secretKey: new Uint8Array([4, 5, 6]), cleanup: cleanupKey });
   decryptKeyMock.mockResolvedValue({ secretKey: new Uint8Array([1, 2, 3]), cleanup: cleanupKey });
 }
 
@@ -212,7 +222,7 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
   for (const m of [
     getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getDecisionsMock,
-    getBotMock, getActiveBotsMock, getLlmCiphertextMock, getUmkMock, decryptKeyMock, healUmkMock,
+    getBotMock, getActiveBotsMock, getLlmCiphertextMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, healUmkMock,
     getSessionByWalletMock, restoreSecurityMock, decryptLlmKeyMock, notifyMock, getAdapterMock,
     fetchOHLCVMock, buildContextMock, runDecisionMock, executeDecisionMock,
   ]) {

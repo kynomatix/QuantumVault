@@ -13,15 +13,16 @@
 // (UMK-derived subkey, AAD-bound to the wallet), used, and the plaintext
 // buffer is zeroized; it is never returned to the client and never logged.
 //
-// SCOPE (documented deviation — see the go-live handler below): flipping a
-// bot from paper to live requires allocating/funding a real venue subaccount,
-// which is a separate money-moving flow (recycler → transferBetweenSubaccounts
-// → HMAC) not wired up in this work order. The go-live route fully implements
-// the REJECT path (canGoLive gate) but fails closed with 501 on the accept
-// path rather than half-building fund movement.
+// GO-LIVE (WO-7.1): the accept path is now wired up. It reuses the SAME
+// provisioning + fail-closed sweep helpers as regular bot creation
+// (provisionExternalKeyBotSubaccount / sweepProvisionedExternalKeyFunds,
+// imported lazily from ../routes to avoid a module-load cycle). See the
+// handler's own comment block for the exact flow, ordering guarantees, and
+// the two documented deviations (no spare-pool recycling; no policyHmac
+// recompute — paperMode is outside the HMAC envelope by design).
 
 import type { Express, Response } from "express";
-import { and, desc, eq, isNotNull } from "drizzle-orm";
+import { and, desc, eq, isNotNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { fromZodError } from "zod-validation-error";
 import { db } from "../db";
@@ -32,7 +33,13 @@ import {
   restoreWalletSecurityFromStorage,
   decryptLlmApiKeyV3,
   computeBotPolicyHmac,
+  getUmkForWebhook,
+  healExecutionUmkFromStorage,
+  decryptAgentKeyStrict,
+  decryptMnemonic,
+  encryptBotSubaccountKeyV3,
 } from "../session-v3";
+import { resolveAgentKeypair } from "../agent-wallet";
 import { getAdapter, getDefaultAdapter } from "../protocol/adapter-registry";
 import { getMarketInfo } from "../market-registry";
 import { isSelectableModel } from "../ai-assistant/models-catalog";
@@ -629,11 +636,54 @@ export function registerAiTraderRoutes(app: Express): void {
     }
   });
 
-  // --- Go live -------------------------------------------------------------------------
+  // --- Go live (WO-7.1: live funding wire-up) -----------------------------------------
+  // Flow — fail-closed at every step; the bot stays in paper mode until funding is
+  // VERIFIED on-venue:
+  //   1. Gates: owner (loadOwnedBot) → not already live → canGoLive(graduationState)
+  //      → no open/in-flight paper cycle → Pacifica-only (executor's live path is
+  //      Pacifica-only today) → allocatedUsdc ≥ venue min transfer.
+  //   2. Idempotent retry: if a previous attempt already persisted subId + V3 key,
+  //      SKIP provisioning — verify/complete funding only, then flip. The venue
+  //      balance read throws on non-404 (fail closed), so an unreadable venue can
+  //      never cause a duplicate funding transfer or a blind flip.
+  //   3. Fresh path: UMK (durable execution copy, session fallback) → strict agent
+  //      key decrypt → mnemonic (Pacifica is agent_hd: the per-bot key is HD-derived
+  //      from the agent seed, so it stays seed-recoverable) → venue subaccount cap
+  //      check → atomic provision+fund via the SAME provisionExternalKeyBotSubaccount
+  //      helper regular bot-create uses → encrypt sub key under the owner's UMK
+  //      (AAD = wallet + bot.id) → persist {subId, keyV3, derivation meta} with
+  //      paperMode STILL true → only then flip paperMode=false.
+  //   4. Key-persist failure: sweep the freshly funded subaccount back to the agent
+  //      with the still-in-memory key (sweepProvisionedExternalKeyFunds, fail-closed
+  //      verify-empty). The bot row is NEVER deleted and NEVER flipped live.
+  // Documented deviations from regular bot-create (deliberate):
+  //   - No spare-pool recycling (claimSpareSubaccount): its HD-index race guard only
+  //     knows trading_bots; reusing it across tables risks index collisions for zero
+  //     benefit at AI-trader volume. Fresh provision only. Spares still COUNT toward
+  //     the cap below (they occupy venue slots).
+  //   - policyHmac is NOT recomputed: aiTraderPolicyObject covers market/leverage/
+  //     allocatedUsdc only — paperMode is deliberately outside the HMAC envelope.
+  //
+  // Concurrency: a per-bot in-flight guard (matches the single-process model, same
+  // pattern as other money-path locks). Without it, two overlapping requests both
+  // read the bot pre-provision → double provision + double fund on the fresh path
+  // (the second key-persist would overwrite the first row's subId/derivationIndex,
+  // stranding the first sub's funds), or a double funding transfer on the retry
+  // path. The window spans several venue round-trips, so a double-click suffices.
   app.post("/api/ai-trader/:id/go-live", requireWallet, async (req: any, res) => {
+    let umkHandle: { umk: Buffer; cleanup: () => void } | null = null;
+    let agentKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+    let mnemonic: Buffer | null = null;
+    let inFlightClaimedBotId: string | null = null;
     try {
       const bot = await loadOwnedBot(req, res);
       if (!bot) return;
+      // Claim the in-flight slot BEFORE any venue read or money movement.
+      if (goLiveInFlight.has(bot.id)) {
+        return res.status(409).json({ error: "A go-live attempt for this bot is already in progress — wait for it to finish." });
+      }
+      goLiveInFlight.add(bot.id);
+      inFlightClaimedBotId = bot.id;
       if (!bot.paperMode) {
         return res.status(409).json({ error: "This bot is already live." });
       }
@@ -641,19 +691,252 @@ export function registerAiTraderRoutes(app: Express): void {
       if (!gate.ok) {
         return res.status(403).json({ error: gate.error });
       }
-      // Deliberate WO-7 scope boundary (see file header): flipping paperMode
-      // requires allocating/funding a real venue subaccount first (the same
-      // recycler → transferBetweenSubaccounts → HMAC path used by regular bot
-      // creation, plan L664). That money-moving flow is not wired up here —
-      // shipping "live" with protocolSubaccountId still null would let the
-      // executor's live path silently operate on the wrong account. Fail
-      // closed until funding has its own dedicated review.
-      res.status(501).json({
-        error: "live_funding_not_implemented",
-        detail: "This bot has graduated and is eligible to go live, but live-funding setup isn't wired up yet.",
+      if (bot.status === "open" || bot.status === "executing" || bot.status === "analyzing" || bot.status === "proposed") {
+        return res.status(409).json({ error: "Close the open paper position (or wait for the in-flight cycle to finish) before going live." });
+      }
+
+      const adapter = getAdapter(bot.protocol);
+      const caps = adapter.getCapabilities();
+      if (adapter.protocolName !== "pacifica" || !caps.requiresExternalSubaccountKey) {
+        return res.status(501).json({ error: `Live mode currently supports Pacifica only (this bot's protocol: ${bot.protocol}).` });
+      }
+
+      const fundingAmount = Number(bot.allocatedUsdc);
+      if (!(Number.isFinite(fundingAmount) && fundingAmount >= adapter.minTransferAmount)) {
+        return res.status(400).json({ error: `Allocated USDC ($${bot.allocatedUsdc}) is below the venue minimum transfer ($${adapter.minTransferAmount}).` });
+      }
+
+      const wallet = await storage.getWallet(req.walletAddress!);
+      if (!wallet?.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
+        return res.status(400).json({ error: "No trading account on file — set up your trading account first." });
+      }
+      const agentPublicKey = wallet.agentPublicKey;
+
+      // UMK: prefer the durable execution copy (survives restarts; self-heal a stale
+      // one first — mirrors bot-create), fall back to the live session UMK.
+      await healExecutionUmkFromStorage(req.walletAddress!);
+      umkHandle = await getUmkForWebhook(req.walletAddress!);
+      let umkBuf: Buffer | null = umkHandle?.umk ?? null;
+      if (!umkBuf) {
+        await tryRestoreUmk(req.walletAddress!);
+        umkBuf = getSessionByWalletAddress(req.walletAddress!)?.session?.umk ?? null;
+      }
+      if (!umkBuf) {
+        return res.status(400).json({ error: "Your session has expired — please sign out and back in, then retry going live." });
+      }
+
+      agentKey = await decryptAgentKeyStrict(req.walletAddress!, umkBuf, wallet, agentPublicKey);
+      if (!agentKey) {
+        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
+      }
+      const agentKeypair = resolveAgentKeypair(agentKey.secretKey);
+
+      const alreadyProvisioned = !!(bot.protocolSubaccountId && bot.botSubaccountKeyEncryptedV3);
+      let subaccountId: string;
+      let fundingDetail: string;
+
+      if (alreadyProvisioned) {
+        // ---- Idempotent retry: provisioned earlier, funding didn't complete ----
+        subaccountId = bot.protocolSubaccountId!;
+        // getAccountInfo throws on any non-404 error → caught below → 500, stays
+        // paper. It NEVER silently reads 0 on an unreadable venue, so this branch
+        // cannot double-fund a funded subaccount.
+        const info = await adapter.getAccountInfo(subaccountId);
+        const equity = info?.equity ?? info?.balance ?? 0;
+        // "Already funded" means the PREVIOUS attempt's transfer landed — that
+        // transfer is atomic (full allocatedUsdc or nothing), so genuine success
+        // leaves ~the full allocation. Gating on the venue minimum alone would
+        // let stray dust above $minTransfer flip a badly under-funded bot live;
+        // half the allocation cleanly separates "funded" from "dust" without
+        // false negatives from small mark-to-market drift.
+        if (equity >= Math.max(adapter.minTransferAmount, fundingAmount / 2)) {
+          fundingDetail = `already funded (equity $${equity.toFixed(2)})`;
+        } else {
+          const tr = await adapter.transferBetweenSubaccounts({
+            // Normalized 64-byte secret (resolveAgentKeypair) — the raw stored key
+            // may be a 32-byte seed, which PacificaSigner would mis-handle.
+            agentSecretKey: agentKeypair.secretKey,
+            mainWalletAddress: agentPublicKey,
+            fromSubaccountId: agentPublicKey,
+            toSubaccountId: subaccountId,
+            amount: fundingAmount,
+          });
+          if (!tr.success) {
+            return res.status(502).json({ error: `Funding transfer failed: ${tr.error || "venue rejected the transfer"}. The bot stays in paper mode — retry go-live.` });
+          }
+          // Verify the transfer landed (fail closed: read failure = not live).
+          const after = await adapter.getAccountInfo(subaccountId);
+          const afterEquity = after?.equity ?? after?.balance ?? 0;
+          if (afterEquity < adapter.minTransferAmount) {
+            return res.status(502).json({ error: "Funding transfer sent but the subaccount balance could not be verified. The bot stays in paper mode — retry go-live." });
+          }
+          fundingDetail = `funded $${fundingAmount.toFixed(2)} on retry (equity $${afterEquity.toFixed(2)})`;
+        }
+      } else {
+        // ---- Fresh path: provision + fund a new venue subaccount ----
+        // Pacifica is agent_hd — the recovery phrase is REQUIRED so the per-bot key
+        // is derived from the agent seed (seed + index recoverable, mirrors bot-create).
+        if (caps.walletDerivation === "agent_hd") {
+          mnemonic = await decryptMnemonic(req.walletAddress!, umkBuf);
+          if (!mnemonic) {
+            return res.status(400).json({ error: "This wallet has no recovery phrase on file, which is required to go live. Please sign out and sign back in to re-key your wallet." });
+          }
+        }
+
+        // Venue subaccount cap: live slots are consumed by regular bots, AI-trader
+        // bots, AND pooled spares (they hold venue subaccounts too). Fail closed on
+        // an unreadable count.
+        const maxPerAgent = adapter.subaccountCaps?.maxPerAgent ?? null;
+        if (maxPerAgent !== null) {
+          const capResult = await db.execute(sql`
+            SELECT
+              (SELECT COUNT(*) FROM trading_bots
+                WHERE wallet_address = ${req.walletAddress!} AND active_protocol = ${bot.protocol}
+                  AND protocol_subaccount_id IS NOT NULL)
+            + (SELECT COUNT(*) FROM ai_trader_bots
+                WHERE wallet_address = ${req.walletAddress!} AND protocol = ${bot.protocol}
+                  AND protocol_subaccount_id IS NOT NULL)
+            + (SELECT COUNT(*) FROM protocol_subaccounts
+                WHERE wallet_address = ${req.walletAddress!} AND protocol = ${bot.protocol}
+                  AND status IN ('spare', 'reserving') AND protocol_subaccount_id IS NOT NULL) AS used
+          `);
+          const used = Number((capResult.rows?.[0] as any)?.used ?? NaN);
+          if (!Number.isFinite(used)) {
+            return res.status(500).json({ error: "Could not verify your venue subaccount count — try again." });
+          }
+          if (used >= maxPerAgent) {
+            return res.status(409).json({ error: `You've reached the venue's limit of ${maxPerAgent} subaccounts. Delete an unused bot to free a slot, then retry.` });
+          }
+        }
+
+        // Lazy import breaks the module-load cycle (server/routes.ts imports this file).
+        const { provisionExternalKeyBotSubaccount, sweepProvisionedExternalKeyFunds } = await import("../routes");
+
+        // Atomic provision + fund (throws on atomic failure → nothing stranded).
+        // The helper consumes + zeroizes the mnemonic internally.
+        const provision = await provisionExternalKeyBotSubaccount({
+          walletAddress: req.walletAddress!,
+          agentKeypair,
+          agentMnemonic: mnemonic,
+          adapter,
+          fundingAmount,
+        });
+        mnemonic = null; // consumed (zeroized) by the helper
+        subaccountId = provision.botSubaccountPublicKey;
+
+        // Encrypt + persist the sub key BEFORE any flip, with paperMode STILL true.
+        // On persist failure: sweep the funded subaccount back with the in-memory
+        // key (fail-closed verify-empty), stay paper, never delete the bot row.
+        const pendingKey = provision.pendingBotSecretKeyForV3;
+        try {
+          let persisted: AiTraderBot | undefined;
+          let persistError: unknown = null;
+          try {
+            const keyV3 = encryptBotSubaccountKeyV3(umkBuf, Buffer.from(pendingKey), req.walletAddress!, bot.id);
+            persisted = await storage.updateAiTraderBot(bot.id, {
+              protocolSubaccountId: subaccountId,
+              botSubaccountKeyEncryptedV3: keyV3,
+              derivationIndex: provision.derivationIndex,
+              derivationPathVersion: provision.derivationPathVersion,
+            });
+          } catch (persistErr) {
+            persistError = persistErr;
+          }
+          if (!persisted || persistError) {
+            console.error(`[AiTrader] go-live key-persist FAILED for bot ${bot.id} — sweeping subaccount ${subaccountId} back to agent:`, persistError);
+            const sweep = await sweepProvisionedExternalKeyFunds({
+              adapter,
+              subSecretKey: pendingKey,
+              subaccountPublicKey: subaccountId,
+              agentPublicKey,
+              logPrefix: "[AiTrader:GoLive]",
+            });
+            if (!sweep.swept) {
+              console.error(`[AiTrader] go-live rollback sweep INCOMPLETE for bot ${bot.id}: ${sweep.detail} — funds remain on subaccount ${subaccountId}, recoverable via the agent main key`);
+            }
+            return res.status(500).json({
+              error: sweep.swept
+                ? "Could not save the bot's trading key — the funds were returned to your trading account. The bot stays in paper mode; retry go-live."
+                : "Could not save the bot's trading key. Funds may still sit on the new venue subaccount — they remain recoverable from your trading account. The bot stays in paper mode; contact support if a retry doesn't resolve this.",
+            });
+          }
+        } finally {
+          try { pendingKey.fill(0); } catch { /* noop */ }
+        }
+
+        // Funding must be VERIFIED before flipping live. (Pacifica's atomic provision
+        // reports transferSucceeded; ambiguous is Flash-only but handled the same.)
+        if (!provision.provisionMeta.funded || provision.ambiguous) {
+          return res.status(502).json({
+            error: "Your live subaccount was created but the funding transfer didn't complete. The bot stays in paper mode — retry go-live to finish funding.",
+            detail: provision.provisionMeta.warning,
+          });
+        }
+        fundingDetail = `provisioned + funded $${provision.provisionMeta.fundedAmount.toFixed(2)}${provision.provisionMeta.wasNewAccount ? " (new venue account)" : ""}`;
+      }
+
+      // Everything verified — flip live. Single final write; every earlier failure
+      // path returns with paperMode still true.
+      const updated = await storage.updateAiTraderBot(bot.id, {
+        paperMode: false,
+        status: "idle",
+        pauseReason: null,
+      });
+      console.log(`[AiTrader] Bot ${bot.id} (${bot.market}) is LIVE on ${adapter.protocolName} — subaccount=${subaccountId} ${fundingDetail}`);
+      res.json({ bot: updated ? toBotDto(updated) : null, live: true, funding: fundingDetail });
+    } catch (err: any) {
+      console.error("[AiTrader] go-live error:", err);
+      res.status(500).json({ error: `Go-live failed: ${err?.message || "internal error"}. The bot stays in paper mode.` });
+    } finally {
+      try { mnemonic?.fill(0); } catch { /* noop */ }
+      agentKey?.cleanup();
+      umkHandle?.cleanup();
+      if (inFlightClaimedBotId) goLiveInFlight.delete(inFlightClaimedBotId);
+    }
+  });
+
+  // --- Admin: founder waive (WO-7.1) ----------------------------------------------------
+  // Marks a trial bot's graduation as 'waived' so the founder can run the live canary
+  // without waiting out the 30-day paper trial (plan §2e: waived = admin override).
+  // This ONLY changes eligibility — going live still runs the full funded go-live path
+  // above (same gates, same fail-closed funding). Auth duplicates the Bearer
+  // ADMIN_PASSWORD convention from server/routes.ts (defined there as a local closure,
+  // not exportable). 503 when unset — never falls open.
+  const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD?.trim();
+  const requireAdminAuth = (req: any, res: any, next: any) => {
+    if (!ADMIN_PASSWORD) {
+      return res.status(503).json({ error: "Admin endpoints disabled - ADMIN_PASSWORD not configured" });
+    }
+    const providedToken = req.headers.authorization?.replace("Bearer ", "").trim();
+    if (!providedToken || providedToken !== ADMIN_PASSWORD) {
+      console.log("[AiTrader:Admin] Auth failed - invalid token");
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    next();
+  };
+
+  app.post("/api/admin/ai-trader/waive", requireAdminAuth, async (req, res) => {
+    try {
+      const botId = typeof req.body?.botId === "string" ? req.body.botId.trim() : "";
+      if (!botId) {
+        return res.status(400).json({ error: "botId is required" });
+      }
+      const bot = await storage.getAiTraderBot(botId);
+      if (!bot) {
+        return res.status(404).json({ error: "Bot not found" });
+      }
+      if (bot.graduationState === "graduated" || bot.graduationState === "waived") {
+        return res.status(409).json({ error: `Bot is already eligible to go live (graduationState: ${bot.graduationState}).` });
+      }
+      // Only in_trial / failed reach here (the four states are exhaustive).
+      const updated = await storage.updateAiTraderBot(botId, { graduationState: "waived" });
+      console.log(`[AiTrader:Admin] Graduation WAIVED for bot ${botId} (${bot.market}, wallet ${bot.walletAddress.slice(0, 8)}..., was ${bot.graduationState})`);
+      res.json({
+        ok: true,
+        bot: updated ? { id: updated.id, market: updated.market, graduationState: updated.graduationState, paperMode: updated.paperMode } : null,
       });
     } catch (err) {
-      console.error("[AiTrader] go-live error:", err);
+      console.error("[AiTrader:Admin] waive error:", err);
       res.status(500).json({ error: "Internal server error" });
     }
   });

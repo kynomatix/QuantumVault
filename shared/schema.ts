@@ -1992,6 +1992,14 @@ export const aiTraderBots = pgTable("ai_trader_bots", {
   walletAddress: text("wallet_address").notNull(),
   protocol: text("protocol").notNull(),
   protocolSubaccountId: text("protocol_subaccount_id"),
+  // WO-7.1 go-live: the bot's OWN venue subaccount key (V3 ciphertext, AAD-bound
+  // to walletAddress + this row's id — same encryptBotSubaccountKeyV3 envelope as
+  // trading_bots). Live trades are signed with THIS key (each Pacifica subaccount
+  // is its own account); the unsigned `subaccount_id` body field is never relied on.
+  botSubaccountKeyEncryptedV3: text("bot_subaccount_key_encrypted_v3"),
+  // HD derivation metadata (seed-fallback recoverability, mirrors trading_bots).
+  derivationIndex: integer("derivation_index"),
+  derivationPathVersion: integer("derivation_path_version"),
   market: text("market").notNull(),
   timeframe: text("timeframe").notNull(),              // '15m'|'1h'|'4h'|'1d'
   mode: text("mode").notNull().default("suggest"),      // 'suggest' | 'auto'

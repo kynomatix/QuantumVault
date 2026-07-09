@@ -46,6 +46,7 @@ import {
   decryptLlmApiKeyV3,
 } from "../session-v3";
 import { sendTradeNotification, getCloseReasonLabel } from "../notification-service";
+import { resolveAiTraderSubaccountSigner, liveReadAccount } from "./signing";
 import { evaluatePaperBracket, paperRealizedPnl, paperExitPrice, type PaperSide } from "./paper-math";
 import { fetchOHLCV } from "../lab/datafeed";
 import { buildMarketContext, marketToDatafeedTicker, type AiTraderTimeframe } from "./context-builder";
@@ -236,13 +237,20 @@ export function extractExitFills(
 }
 
 // --- Signing context (canonical headless pattern — executor L256–304) --------------------
+// WO-7.1: takes the BOT, not just the wallet address. A bot with its own venue
+// subaccount signs with the bot's OWN sub key (the signed account IS the sub
+// pubkey; adapter subaccountId stays undefined) and fails closed when that key
+// is unavailable — it NEVER downgrades to the main agent key, which would act
+// on the user's main account. Legacy canary bots (protocolSubaccountId=null)
+// keep the main-agent-key path.
 
 type KeyTrio = { agentPublicKey: string; agentSecretKey: Uint8Array; mainWalletAddress: string };
 
 async function withSigningContext<T>(
-  walletAddress: string,
+  bot: AiTraderBot,
   fn: (keyTrio: KeyTrio) => Promise<T>
 ): Promise<{ ok: true; value: T } | { ok: false; detail: string }> {
+  const walletAddress = bot.walletAddress;
   const wallet = await storage.getWallet(walletAddress);
   if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncryptedV3) {
     return { ok: false, detail: "wallet missing V3 envelope or agent public key" };
@@ -254,23 +262,40 @@ async function withSigningContext<T>(
   }
   let agentKeyResult: { secretKey: Uint8Array; cleanup: () => void } | null = null;
   try {
-    agentKeyResult = await decryptAgentKeyStrict(walletAddress, umkResult.umk, wallet, wallet.agentPublicKey);
-    if (!agentKeyResult) {
-      // Self-heal path shared with the executor/webhook: the execution-wrapped
-      // UMK copy can drift from canonical — heal once, retry once.
-      umkResult.cleanup();
-      umkResult = null;
-      await healExecutionUmkFromStorage(walletAddress);
-      umkResult = await getUmkForWebhook(walletAddress);
-      if (umkResult) {
-        agentKeyResult = await decryptAgentKeyStrict(walletAddress, umkResult.umk, wallet, wallet.agentPublicKey);
-      }
+    if (bot.protocolSubaccountId) {
+      agentKeyResult = await resolveAiTraderSubaccountSigner(bot, umkResult.umk);
       if (!agentKeyResult) {
-        return { ok: false, detail: "V3 strict agent-key decrypt failed (after execution-UMK heal attempt)" };
+        // Same heal-once as the agent-key path (execution-UMK drift).
+        umkResult.cleanup();
+        umkResult = null;
+        await healExecutionUmkFromStorage(walletAddress);
+        umkResult = await getUmkForWebhook(walletAddress);
+        if (umkResult) {
+          agentKeyResult = await resolveAiTraderSubaccountSigner(bot, umkResult.umk);
+        }
+        if (!agentKeyResult) {
+          return { ok: false, detail: `bot subaccount key unavailable for ${bot.protocolSubaccountId} (fail closed — will NOT sign with the main agent key)` };
+        }
+      }
+    } else {
+      agentKeyResult = await decryptAgentKeyStrict(walletAddress, umkResult.umk, wallet, wallet.agentPublicKey);
+      if (!agentKeyResult) {
+        // Self-heal path shared with the executor/webhook: the execution-wrapped
+        // UMK copy can drift from canonical — heal once, retry once.
+        umkResult.cleanup();
+        umkResult = null;
+        await healExecutionUmkFromStorage(walletAddress);
+        umkResult = await getUmkForWebhook(walletAddress);
+        if (umkResult) {
+          agentKeyResult = await decryptAgentKeyStrict(walletAddress, umkResult.umk, wallet, wallet.agentPublicKey);
+        }
+        if (!agentKeyResult) {
+          return { ok: false, detail: "V3 strict agent-key decrypt failed (after execution-UMK heal attempt)" };
+        }
       }
     }
     const value = await fn({
-      agentPublicKey: wallet.agentPublicKey,
+      agentPublicKey: liveReadAccount(bot, wallet.agentPublicKey),
       agentSecretKey: agentKeyResult.secretKey,
       mainWalletAddress: walletAddress,
     });
@@ -510,8 +535,10 @@ async function closeLivePositionAndPause(
   adapter: ProtocolAdapter,
   args: { pauseReason: string; exitReason: string; detail: string }
 ): Promise<void> {
-  const subaccountId = bot.protocolSubaccountId ?? undefined;
-  const result = await withSigningContext(bot.walletAddress, async (keyTrio) => {
+  // WO-7.1: subaccountId is always undefined — a sub-provisioned bot signs AS
+  // its subaccount (keyTrio.agentPublicKey is the sub pubkey).
+  const subaccountId = undefined;
+  const result = await withSigningContext(bot, async (keyTrio) => {
     try {
       await adapter.cancelTpSlOrders?.({ ...keyTrio, internalSymbol: bot.market, subaccountId });
     } catch (err) {
@@ -616,8 +643,8 @@ export async function userInitiatedClose(
   // Live: same cancel-survivor-leg + closePosition template as
   // closeLivePositionAndPause, but ok:false on failure instead of pausing —
   // an unclosed live position is still bracket-protected.
-  const subaccountId = bot.protocolSubaccountId ?? undefined;
-  const result = await withSigningContext(bot.walletAddress, async (keyTrio) => {
+  const subaccountId = undefined; // WO-7.1: sub-provisioned bots sign AS the subaccount
+  const result = await withSigningContext(bot, async (keyTrio) => {
     try {
       await adapter.cancelTpSlOrders?.({ ...keyTrio, internalSymbol: bot.market, subaccountId });
     } catch (err) {
@@ -668,11 +695,11 @@ async function handleLiveClose(
   adapter: ProtocolAdapter,
   agentPublicKey: string
 ): Promise<void> {
-  const subaccountId = bot.protocolSubaccountId ?? undefined;
+  const subaccountId = undefined; // WO-7.1: reads target the bot's own account directly
 
   let trades: TradeRecord[];
   try {
-    trades = await adapter.getTradeHistory(agentPublicKey, {
+    trades = await adapter.getTradeHistory(liveReadAccount(bot, agentPublicKey), {
       startTime: view.decidedAtMs,
       limit: 200,
     });
@@ -698,7 +725,7 @@ async function handleLiveClose(
 
   // Cancel the surviving bracket leg (best-effort; reduce-only orders on a
   // flat account are inert, but leaving them resting is sloppy and confusing).
-  const cancelRes = await withSigningContext(bot.walletAddress, async (keyTrio) => {
+  const cancelRes = await withSigningContext(bot, async (keyTrio) => {
     try {
       await adapter.cancelTpSlOrders?.({ ...keyTrio, internalSymbol: bot.market, subaccountId });
       return true;
@@ -753,8 +780,10 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
     console.error(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: wallet has no agentPublicKey — cannot monitor live position`);
     return;
   }
-  const agentPublicKey = wallet.agentPublicKey;
-  const subaccountId = bot.protocolSubaccountId ?? undefined;
+  // WO-7.1: all reads target the bot's own account (sub pubkey when
+  // provisioned); adapter subaccountId stays undefined.
+  const agentPublicKey = liveReadAccount(bot, wallet.agentPublicKey);
+  const subaccountId = undefined;
 
   let positions: ProtocolPosition[];
   try {
@@ -792,7 +821,7 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
       }
       bracketReplaceAttempted.add(view.decision.id);
       console.warn(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: bracket MISSING — re-placing once (G10)`);
-      const replaceRes = await withSigningContext(bot.walletAddress, (keyTrio) =>
+      const replaceRes = await withSigningContext(bot, (keyTrio) =>
         adapter.setTpSl!({
           ...keyTrio,
           internalSymbol: bot.market,
@@ -1113,11 +1142,13 @@ export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> 
     console.error(`[AiTraderMonitor] reconcile: bot ${bot.id.slice(0, 8)} wallet has no agentPublicKey`);
     return false;
   }
-  const subaccountId = bot.protocolSubaccountId ?? undefined;
+  // WO-7.1: reads target the bot's own account (sub pubkey when provisioned).
+  const readAccount = liveReadAccount(bot, wallet.agentPublicKey);
+  const subaccountId = undefined;
 
   let positions: ProtocolPosition[];
   try {
-    positions = await adapter.getPositions(wallet.agentPublicKey, subaccountId);
+    positions = await adapter.getPositions(readAccount, subaccountId);
   } catch (err) {
     console.warn(`[AiTraderMonitor] reconcile: getPositions failed for bot ${bot.id.slice(0, 8)} (${err instanceof Error ? err.message : err}) — will retry`);
     return false;
@@ -1163,9 +1194,8 @@ export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> 
       entryPrice: position.entryPrice,
       decidedAtMs: Date.now(),
     };
-    const subId = bot.protocolSubaccountId ?? undefined;
-    const res = await withSigningContext(bot.walletAddress, (keyTrio) =>
-      adapter.closePosition({ ...keyTrio, internalSymbol: bot.market, subaccountId: subId, maxSlippagePct: PROTECTIVE_CLOSE_MAX_SLIPPAGE_PCT })
+    const res = await withSigningContext(bot, (keyTrio) =>
+      adapter.closePosition({ ...keyTrio, internalSymbol: bot.market, subaccountId: undefined, maxSlippagePct: PROTECTIVE_CLOSE_MAX_SLIPPAGE_PCT })
     );
     await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "reconcile_orphan_position" });
     await sendTradeNotification(bot.walletAddress, {
@@ -1190,13 +1220,13 @@ export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> 
   }
   let bracketOk = false;
   try {
-    const resting = await adapter.getOpenStopOrders(wallet.agentPublicKey, subaccountId, bot.market);
+    const resting = await adapter.getOpenStopOrders(readAccount, subaccountId, bot.market);
     bracketOk = resting.length > 0;
   } catch {
     bracketOk = false;
   }
   if (!bracketOk) {
-    const placed = await withSigningContext(bot.walletAddress, (keyTrio) =>
+    const placed = await withSigningContext(bot, (keyTrio) =>
       adapter.setTpSl!({
         ...keyTrio,
         internalSymbol: bot.market,
@@ -1208,7 +1238,7 @@ export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> 
     let verified = false;
     if (placed.ok && placed.value.success) {
       try {
-        const after = await adapter.getOpenStopOrders(wallet.agentPublicKey, subaccountId, bot.market);
+        const after = await adapter.getOpenStopOrders(readAccount, subaccountId, bot.market);
         verified = after.length > 0;
       } catch {
         verified = false;

@@ -3571,7 +3571,7 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
  * For agent_hd adapters (Flash) the caller passes the decrypted agent mnemonic,
  * which this helper CONSUMES and zeroizes the instant it has derived the wallet.
  */
-async function provisionExternalKeyBotSubaccount(params: {
+export async function provisionExternalKeyBotSubaccount(params: {
   walletAddress: string;
   agentKeypair: import('@solana/web3.js').Keypair;
   agentMnemonic: Buffer | null;
@@ -3704,7 +3704,7 @@ async function provisionExternalKeyBotSubaccount(params: {
  * agent's main account (funds are safe + recoverable there) and verify the subaccount
  * drained below the min-transfer floor. Reads fail CLOSED (any unknown ⇒ not swept).
  */
-async function sweepProvisionedExternalKeyFunds(params: {
+export async function sweepProvisionedExternalKeyFunds(params: {
   adapter: ProtocolAdapter;
   subSecretKey: Uint8Array;
   subaccountPublicKey: string;

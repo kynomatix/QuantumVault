@@ -24,6 +24,7 @@
 // it was immediately closed.
 import { storage } from "../storage";
 import { getUmkForWebhook, decryptAgentKeyStrict, verifyBotPolicyHmac, healExecutionUmkFromStorage } from "../session-v3";
+import { resolveAiTraderSubaccountSigner } from "./signing";
 import { sendTradeNotification } from "../notification-service";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import type { ProtocolAdapter } from "../protocol/adapter";
@@ -239,7 +240,12 @@ async function executeLiveEntry(
   n: LiveEntryNumbers
 ): Promise<ExecuteDecisionResult> {
   const { bot, decisionId, adapter } = input;
-  const subaccountId = bot.protocolSubaccountId ?? undefined;
+  // WO-7.1: the adapter `subaccountId` param is ALWAYS undefined on the live
+  // path. A bot with its own venue subaccount signs AS that subaccount (the
+  // signed account field IS the sub pubkey — Phase 4b model); the unsigned
+  // Pacifica `subaccount_id` body field is unverified and never relied on.
+  // Legacy canary bots (protocolSubaccountId=null) trade the main account.
+  const subaccountId = undefined;
 
   // Capability pre-flight (BEFORE any order): if the adapter cannot place or
   // verify a native bracket, G10 is unenforceable — refuse to open at all.
@@ -282,24 +288,53 @@ async function executeLiveEntry(
       return { ok: false, reason: "policy_hmac_mismatch", detail: "G15 policy HMAC mismatch — bot paused" };
     }
 
-    agentKeyResult = await decryptAgentKeyStrict(bot.walletAddress, umkResult.umk, wallet, wallet.agentPublicKey);
-    if (!agentKeyResult) {
-      // Same self-heal as the webhook path: the execution-wrapped UMK copy can
-      // drift from the canonical one (see healExecutionUmkFromStorage docs).
-      // Heal once and retry with a freshly unwrapped UMK.
-      umkResult.cleanup();
-      umkResult = null;
-      await healExecutionUmkFromStorage(bot.walletAddress);
-      umkResult = await getUmkForWebhook(bot.walletAddress);
-      if (umkResult) {
-        agentKeyResult = await decryptAgentKeyStrict(bot.walletAddress, umkResult.umk, wallet, wallet.agentPublicKey);
-      }
+    // --- Trade signer (WO-7.1) --------------------------------------------
+    // Bot HAS a venue subaccount → sign with the bot's OWN sub key, fail
+    // closed if it's missing/undecryptable (NEVER downgrade to the main agent
+    // key — that would trade the user's main account). No subaccount (legacy
+    // founder canary) → original main-agent-key path.
+    if (bot.protocolSubaccountId) {
+      agentKeyResult = await resolveAiTraderSubaccountSigner(bot, umkResult.umk);
       if (!agentKeyResult) {
-        return { ok: false, reason: "auth_unavailable", detail: "V3 strict agent-key decrypt failed (after execution-UMK heal attempt)" };
+        // Same heal-once as the agent-key path: the execution-wrapped UMK copy
+        // can drift from canonical, which breaks the V3 subkey derivation.
+        umkResult.cleanup();
+        umkResult = null;
+        await healExecutionUmkFromStorage(bot.walletAddress);
+        umkResult = await getUmkForWebhook(bot.walletAddress);
+        if (umkResult) {
+          agentKeyResult = await resolveAiTraderSubaccountSigner(bot, umkResult.umk);
+        }
+        if (!agentKeyResult) {
+          return {
+            ok: false,
+            reason: "auth_unavailable",
+            detail: `bot subaccount key unavailable for ${bot.protocolSubaccountId} (fail closed — will NOT sign with the main agent key)`,
+          };
+        }
+      }
+    } else {
+      agentKeyResult = await decryptAgentKeyStrict(bot.walletAddress, umkResult.umk, wallet, wallet.agentPublicKey);
+      if (!agentKeyResult) {
+        // Same self-heal as the webhook path: the execution-wrapped UMK copy can
+        // drift from the canonical one (see healExecutionUmkFromStorage docs).
+        // Heal once and retry with a freshly unwrapped UMK.
+        umkResult.cleanup();
+        umkResult = null;
+        await healExecutionUmkFromStorage(bot.walletAddress);
+        umkResult = await getUmkForWebhook(bot.walletAddress);
+        if (umkResult) {
+          agentKeyResult = await decryptAgentKeyStrict(bot.walletAddress, umkResult.umk, wallet, wallet.agentPublicKey);
+        }
+        if (!agentKeyResult) {
+          return { ok: false, reason: "auth_unavailable", detail: "V3 strict agent-key decrypt failed (after execution-UMK heal attempt)" };
+        }
       }
     }
 
-    const agentPublicKey = wallet.agentPublicKey;
+    // The account all orders are signed for AND all reads target: the bot's
+    // own subaccount when provisioned, else the main agent account.
+    const agentPublicKey = bot.protocolSubaccountId ?? wallet.agentPublicKey;
     const agentSecretKey = agentKeyResult.secretKey;
     const keyTrio = { agentPublicKey, agentSecretKey, mainWalletAddress: bot.walletAddress };
 

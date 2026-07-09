@@ -735,6 +735,13 @@ export async function ensureSchema() {
 
       // WO-7: free paper-trial counter for wallets with no BYO OpenRouter key.
       `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS ai_trader_free_calls_used integer NOT NULL DEFAULT 0`,
+
+      // WO-7.1 go-live: per-bot venue subaccount key (V3 ciphertext) + HD
+      // derivation metadata on ai_trader_bots, mirroring trading_bots. Additive
+      // + idempotent; live signing fails closed when the key is absent.
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS bot_subaccount_key_encrypted_v3 text`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS derivation_index integer`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS derivation_path_version integer`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner

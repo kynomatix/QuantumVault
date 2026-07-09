@@ -278,7 +278,10 @@ export async function buildMarketContext(
   // user's connected wallet address — bot.walletAddress owns nothing on any
   // venue, so the old placeholder always read an empty account and would have
   // told the model "no open position" while one was open.
-  const positions = await adapter.getPositions(input.agentPublicKey, bot.protocolSubaccountId ?? undefined);
+  // WO-7.1: a sub-provisioned live bot's positions live on its OWN subaccount
+  // (read with the sub pubkey, no subaccountId param); canary/paper bots read
+  // the main agent account as before.
+  const positions = await adapter.getPositions(bot.protocolSubaccountId ?? input.agentPublicKey, undefined);
   const openPosition = positions.find((p) => p.internalSymbol.toUpperCase() === market.toUpperCase());
   const allocatedUsdc = parseFloat(bot.allocatedUsdc);
   const accountBlock = openPosition

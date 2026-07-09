@@ -28,11 +28,14 @@ vi.mock("../../server/storage", () => ({
 
 const getUmkMock = vi.fn();
 const decryptKeyMock = vi.fn();
+const decryptSubKeyMock = vi.fn();
 const verifyHmacMock = vi.fn();
 const healUmkMock = vi.fn();
 vi.mock("../../server/session-v3", () => ({
   getUmkForWebhook: (...a: unknown[]) => getUmkMock(...a),
   decryptAgentKeyStrict: (...a: unknown[]) => decryptKeyMock(...a),
+  // WO-7.1: signing.ts resolves the bot's OWN subaccount key through this.
+  decryptBotSubaccountKey: (...a: unknown[]) => decryptSubKeyMock(...a),
   verifyBotPolicyHmac: (...a: unknown[]) => verifyHmacMock(...a),
   healExecutionUmkFromStorage: (...a: unknown[]) => healUmkMock(...a),
 }));
@@ -51,7 +54,12 @@ function makeBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
     id: "bot-1111-2222",
     walletAddress: "WALLET_X",
     protocol: "pacifica",
+    // WO-7.1 live-funded bot: has its own venue subaccount + V3 sub-key material.
+    // Live orders are signed AS this subaccount (adapter subaccountId stays undefined).
     protocolSubaccountId: "sub-1",
+    botSubaccountKeyEncryptedV3: "v3-sub-ciphertext",
+    derivationIndex: null,
+    derivationPathVersion: null,
     market: "SOL-PERP",
     timeframe: "15m",
     mode: "auto",
@@ -136,6 +144,9 @@ function armLiveAuth() {
   cleanupKey = vi.fn();
   getUmkMock.mockResolvedValue({ umk: Buffer.from("umk"), cleanup: cleanupUmk });
   verifyHmacMock.mockReturnValue(true);
+  // Sub-key bot (default fixture) resolves its own subaccount signer; the legacy
+  // main-agent-key path (protocolSubaccountId=null) resolves via decryptAgentKeyStrict.
+  decryptSubKeyMock.mockResolvedValue({ secretKey: new Uint8Array([4, 5, 6]), cleanup: cleanupKey });
   decryptKeyMock.mockResolvedValue({ secretKey: new Uint8Array([1, 2, 3]), cleanup: cleanupKey });
 }
 
@@ -150,7 +161,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
   callOrder = [];
-  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getUmkMock, decryptKeyMock, verifyHmacMock, healUmkMock, notifyMock]) {
+  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock]) {
     m.mockReset();
   }
   getRecentClosedMock.mockResolvedValue([]);
@@ -469,22 +480,27 @@ describe("live execution — happy path", () => {
       "updateBot:open",
     ]);
 
+    // WO-7.1 signing model: the signed account IS the bot's own subaccount pubkey
+    // (Phase 4b), and the unsigned adapter `subaccountId` param stays undefined.
     expect((adapter.placeMarketOrder as any)).toHaveBeenCalledWith(
       expect.objectContaining({
-        agentPublicKey: AGENT_PUBKEY,
+        agentPublicKey: "sub-1",
         mainWalletAddress: "WALLET_X",
         internalSymbol: "SOL-PERP",
         side: "long",
         sizeBase: 6.66,
         clientOrderId: "aitrader-d-live",
-        subaccountId: "sub-1",
+        subaccountId: undefined,
         maxSlippagePct: 0.5,
         leverage: 2,
       })
     );
     expect((adapter.setTpSl as any)).toHaveBeenCalledWith(
-      expect.objectContaining({ stopLossPrice: 145, takeProfitPrice: 160, subaccountId: "sub-1" })
+      expect.objectContaining({ stopLossPrice: 145, takeProfitPrice: 160, subaccountId: undefined })
     );
+    // The sub key signed — the main agent key was never decrypted.
+    expect(decryptSubKeyMock).toHaveBeenCalled();
+    expect(decryptKeyMock).not.toHaveBeenCalled();
     expect(updateDecisionMock).toHaveBeenCalledWith("d-live", {
       outcome: "executed",
       entryPrice: "150.20000000",
@@ -731,9 +747,9 @@ describe("live execution — failure handling (fail closed)", () => {
     expect(args.exitPrice).toBeUndefined();
   });
 
-  it("strict-decrypt failure heals the execution UMK once and retries; both cleanups still run", async () => {
+  it("sub-key decrypt failure heals the execution UMK once and retries; both cleanups still run", async () => {
     armLiveAuth();
-    decryptKeyMock
+    decryptSubKeyMock
       .mockResolvedValueOnce(null) // first attempt fails
       .mockResolvedValueOnce({ secretKey: new Uint8Array([9]), cleanup: cleanupKey });
     const { executeDecision } = await importExecutor();
@@ -751,9 +767,9 @@ describe("live execution — failure handling (fail closed)", () => {
     expect(cleanupKey).toHaveBeenCalled();
   });
 
-  it("heal + retry both failing → auth_unavailable, nothing sent", async () => {
+  it("sub-key heal + retry both failing → auth_unavailable, NEVER downgrades to the main agent key", async () => {
     armLiveAuth();
-    decryptKeyMock.mockResolvedValue(null);
+    decryptSubKeyMock.mockResolvedValue(null);
     const adapter = makeAdapter();
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
@@ -765,6 +781,45 @@ describe("live execution — failure handling (fail closed)", () => {
     });
     expect(r).toMatchObject({ ok: false, reason: "auth_unavailable" });
     expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
+    // Money-safety invariant: a subaccount bot must NEVER fall back to signing
+    // with the main agent key (that would trade the user's main account).
+    expect(decryptKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("bot with a subaccount but NO key material refuses to sign (fail closed)", async () => {
+    armLiveAuth();
+    const adapter = makeAdapter();
+    const { executeDecision } = await importExecutor();
+    const r = await executeDecision({
+      bot: makeBot({ paperMode: false, botSubaccountKeyEncryptedV3: null, derivationIndex: null, derivationPathVersion: null }),
+      decisionId: "d-1",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+    expect(r).toMatchObject({ ok: false, reason: "auth_unavailable" });
+    expect(decryptKeyMock).not.toHaveBeenCalled();
+    expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
+  });
+
+  it("legacy founder-canary bot (no subaccount) still signs with the main agent key", async () => {
+    armLiveAuth();
+    const adapter = makeAdapter();
+    const { executeDecision } = await importExecutor();
+    const r = await executeDecision({
+      bot: makeBot({ paperMode: false, protocolSubaccountId: null, botSubaccountKeyEncryptedV3: null }),
+      decisionId: "d-1",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+    expect(r).toMatchObject({ ok: true, mode: "live" });
+    expect(decryptKeyMock).toHaveBeenCalled();
+    expect(decryptSubKeyMock).not.toHaveBeenCalled();
+    // Legacy path signs for and reads the MAIN agent account.
+    expect((adapter.placeMarketOrder as any)).toHaveBeenCalledWith(
+      expect.objectContaining({ agentPublicKey: AGENT_PUBKEY, subaccountId: undefined })
+    );
   });
 });
 

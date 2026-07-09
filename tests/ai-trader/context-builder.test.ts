@@ -188,9 +188,11 @@ describe("buildMarketContext (WO-3)", () => {
     expect(result.user).toMatchSnapshot("user-prompt");
     expect(result.contextDigest).toMatchSnapshot("context-digest");
 
-    // WO-5 corrective pin: positions must be read with the resolved agent
-    // SIGNING pubkey, never bot.walletAddress (the old WO-3 placeholder).
-    expect(adapter.getPositions).toHaveBeenCalledWith(AGENT_PUBKEY, "sub-1");
+    // WO-7.1 read model: positions are read from the bot's OWN subaccount
+    // pubkey (liveReadAccount — the sub IS the account on Pacifica's Phase 4b
+    // model), with the adapter subaccountId param always undefined. Never
+    // bot.walletAddress (the old WO-3 placeholder).
+    expect(adapter.getPositions).toHaveBeenCalledWith("sub-1", undefined);
 
     // Targeted, human-readable assertions on top of the snapshot so intent survives
     // even if someone regenerates the snapshot without reading the diff closely.
