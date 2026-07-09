@@ -483,6 +483,61 @@ describe("go-live idempotent retry (subaccount + key already persisted)", () => 
     expect(updateBotMock.mock.calls[0][1]).toMatchObject({ paperMode: false, status: "idle" });
   });
 
+  it("dust above the venue minimum but under half the allocation is NOT 'already funded' — the transfer still runs", async () => {
+    // Guards against stray dust ($12 on a $100 allocation) flipping a badly
+    // under-funded bot live: "already funded" requires >= max(venueMin, alloc/2).
+    getAiTraderBotMock.mockResolvedValue(provisionedBot());
+    const adapter = makeAdapter();
+    (adapter.getAccountInfo as any)
+      .mockResolvedValueOnce({ equity: 12, balance: 12 })    // >= $10 venue min, < $50 half-allocation
+      .mockResolvedValueOnce({ equity: 112, balance: 112 }); // post-transfer verify
+    (adapter.transferBetweenSubaccounts as any).mockResolvedValue({ success: true });
+    getAdapterMock.mockReturnValue(adapter);
+    armHappyCrypto();
+    updateBotMock.mockImplementation(async (_id: string, updates: any) => ({ ...provisionedBot(), ...updates }));
+
+    const r = await invoke(routes, GO_LIVE, goLiveReq());
+
+    expect(r.statusCode).toBe(200);
+    expect(adapter.transferBetweenSubaccounts).toHaveBeenCalledOnce();
+    expect(updateBotMock.mock.calls.at(-1)![1]).toMatchObject({ paperMode: false });
+  });
+
+  it("409 rejects a concurrent go-live for the same bot (in-flight guard) — and releases the claim after completion", async () => {
+    getAiTraderBotMock.mockResolvedValue(provisionedBot());
+    const adapter = makeAdapter();
+    // First request hangs at the venue balance read so the second overlaps it.
+    let releaseRead: ((v: any) => void) | undefined;
+    (adapter.getAccountInfo as any).mockImplementationOnce(
+      () => new Promise((resolve) => { releaseRead = resolve; }),
+    );
+    getAdapterMock.mockReturnValue(adapter);
+    armHappyCrypto();
+    updateBotMock.mockImplementation(async (_id: string, updates: any) => ({ ...provisionedBot(), ...updates }));
+
+    const first = invoke(routes, GO_LIVE, goLiveReq());
+    await vi.waitFor(() => { if (!releaseRead) throw new Error("first request not at the venue read yet"); });
+
+    // Overlapping second request: rejected BEFORE any venue read or money movement.
+    const second = await invoke(routes, GO_LIVE, goLiveReq());
+    expect(second.statusCode).toBe(409);
+    expect(second.body.error).toMatch(/already in progress/i);
+    expect((adapter.getAccountInfo as any).mock.calls.length).toBe(1); // only the first request read the venue
+    expect(adapter.transferBetweenSubaccounts).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+
+    // Let the first request finish (already funded → flips live).
+    releaseRead!({ equity: 100, balance: 100 });
+    const r1 = await first;
+    expect(r1.statusCode).toBe(200);
+    expect(updateBotMock).toHaveBeenCalledTimes(1); // exactly one flip, no double funding
+
+    // Claim released in finally → a later attempt is NOT blocked by the guard.
+    (adapter.getAccountInfo as any).mockResolvedValue({ equity: 100, balance: 100 });
+    const third = await invoke(routes, GO_LIVE, goLiveReq());
+    expect(third.statusCode).toBe(200);
+  });
+
   it("unfunded → completes the funding transfer, verifies it landed, then flips", async () => {
     getAiTraderBotMock.mockResolvedValue(provisionedBot());
     const adapter = makeAdapter();

@@ -485,6 +485,28 @@ describe("runDecision — flat and guardrail rejection", () => {
     expect(row.rawDecision).toMatchObject({ stopLossPrice: 102 });
   });
 
+  it("WO-9: every guardrail rejection is logged with the RAW decision (observability)", async () => {
+    const { runDecision } = await importDecide();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    callMock.mockResolvedValueOnce(toolResponse({ ...VALID_LONG_ARGS, stopLossPrice: 102 }));
+
+    const result = await runDecision({
+      bot: makeBot(),
+      apiKey: "k",
+      context: makeContext(),
+      adapter: makeAdapter(),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.rejected).toBe(true);
+
+    const line = warnSpy.mock.calls.map((c) => String(c[0])).find((s) => s.includes("guardrails REJECTED"));
+    expect(line).toBeDefined();
+    expect(line).toContain("sl_wrong_side"); // violation codes present
+    expect(line).toContain('"stopLossPrice":102'); // full raw decision serialized into the line
+    warnSpy.mockRestore();
+  });
+
   it("close without an open position rejects via guardrails (contract violation)", async () => {
     const { runDecision } = await importDecide();
     const closeArgs = { action: "close", confidence: 6, invalidation: "n/a", rationale: "exit" };

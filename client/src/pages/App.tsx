@@ -3051,7 +3051,9 @@ export default function AppPage() {
                             </div>
                           </div>
                           <div className="flex items-center gap-1.5">
-                            <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/50 text-amber-400 font-medium shrink-0">PAPER</span>
+                            {!!aiBot.paperMode && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/50 text-amber-400 font-medium shrink-0">PAPER</span>
+                            )}
                             <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium shrink-0 ${st.cls}`}>{st.label}</span>
                           </div>
                         </div>

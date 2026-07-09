@@ -108,6 +108,12 @@ const MAX_ALLOCATED_USDC = 1_000_000; // sanity ceiling only — paper allocatio
 const DECISION_EXPIRY_MS = 10 * 60 * 1000;
 const PRICE_DRIFT_STALE_PCT = 0.5;
 
+// Per-bot go-live in-flight guard (WO-7.1). Two overlapping go-live requests
+// would otherwise both read the bot pre-provision → double provision + double
+// fund (fresh path) or double funding transfer (retry path). Module-level Set
+// matches the single-process model — same pattern as other money-path locks.
+const goLiveInFlight = new Set<string>();
+
 function toBotDto(bot: AiTraderBot): Omit<AiTraderBot, "policyHmac"> {
   const { policyHmac, ...rest } = bot;
   return rest;

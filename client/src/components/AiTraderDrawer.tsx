@@ -52,7 +52,7 @@ import {
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
 import { useToast } from '@/hooks/use-toast';
-import { AiTraderDecisionCard, type AiDecisionRow } from './AiTraderDecisionCard';
+import { AiTraderDecisionCard, violationChipLabels, type AiDecisionRow } from './AiTraderDecisionCard';
 
 interface AiTraderBot {
   id: string;
@@ -219,8 +219,25 @@ function TrialStrip({ bot, tradesCount, netPnl, maxDdPct, onGoLive, onRestartTri
 
   if (bot.graduationState === 'waived') {
     return (
-      <div className="px-4 py-2 bg-primary/10 border-b border-primary/20">
+      <div className="flex items-center justify-between px-4 py-2 bg-primary/10 border-b border-primary/20">
         <span className="text-xs text-primary font-medium">Trial waived — ready to go live</span>
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="sm"
+                className="h-7 text-xs bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                onClick={onGoLive}
+                disabled={goLiveLoading}
+                data-testid="button-ai-trader-go-live"
+              >
+                {goLiveLoading ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
+                Go live
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Fund and activate a live trading account</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       </div>
     );
   }
@@ -549,6 +566,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     <AiTraderDecisionCard
                       botId={bot.id}
                       decision={openDecision}
+                      paperMode={!!bot.paperMode}
                       onExecute={() => { fetchDetail(); fetchHistory(); onBotUpdated(); }}
                       onSkip={() => { fetchDetail(); fetchHistory(); onBotUpdated(); }}
                       onAskAgain={handleAnalyze}
@@ -567,7 +585,9 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                         <span className="text-sm font-semibold text-emerald-400">
                           {((openDecision.clampedDecision as any)?.action ?? '').toUpperCase()} open
                         </span>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/50 text-amber-400 font-medium">PAPER</span>
+                        {!!bot.paperMode && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/50 text-amber-400 font-medium">PAPER</span>
+                        )}
                       </div>
                       <span className="text-xs text-muted-foreground">
                         entry ${Number(openDecision.entryPrice ?? 0).toFixed(2)}
@@ -586,7 +606,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                   {history.map((d) => {
                     const oc = outcomeLabel(d.outcome);
                     const clamped = d.clampedDecision as any;
-                    const violations = (d.guardrailViolations as string[] | null) ?? [];
+                    const violations = violationChipLabels(d.guardrailViolations);
                     const pnl = Number(d.realizedPnl ?? 0);
                     const hasPnl = d.closedAt && d.outcome === 'executed';
                     return (
@@ -610,7 +630,9 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                               {oc.icon}
                               {oc.label}
                             </div>
-                            <span className="text-[10px] px-1 py-0.5 rounded border border-amber-500/50 text-amber-400 font-medium">PAPER</span>
+                            {!!bot.paperMode && (
+                              <span className="text-[10px] px-1 py-0.5 rounded border border-amber-500/50 text-amber-400 font-medium">PAPER</span>
+                            )}
                           </div>
                           <div className="flex items-center gap-2">
                             {hasPnl && (

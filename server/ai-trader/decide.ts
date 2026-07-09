@@ -369,6 +369,17 @@ async function finalizeDecision(args: {
   const outcome =
     decision.action === "flat" ? "flat" : guardrailResult.ok ? null : "rejected_guardrails";
 
+  // WO-9 observability: every guardrail rejection is logged with the RAW decision
+  // ("you cannot tune what you can't see"). The DB audit row carries the same
+  // facts; this line makes rejections greppable in server logs without a DB query.
+  if (outcome === "rejected_guardrails") {
+    console.warn(
+      `[AiTraderDecide] guardrails REJECTED bot=${bot.id.slice(0, 8)} market=${bot.market} ` +
+        `violations=${guardrailResult.violations.map((v) => v.code).join(",")} ` +
+        `rawDecision=${JSON.stringify(decision)}`,
+    );
+  }
+
   const row = await storage.insertAiTraderDecision({
     botId: bot.id,
     contextDigest: digest,

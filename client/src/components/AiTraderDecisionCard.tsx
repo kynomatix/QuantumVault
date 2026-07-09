@@ -34,10 +34,21 @@ export interface AiDecisionRow {
 interface AiTraderDecisionCardProps {
   botId: string;
   decision: AiDecisionRow;
+  /** PAPER badge is shown only for paper bots — a live bot's card must never say PAPER. */
+  paperMode: boolean;
   onExecute?: () => void;
   onSkip?: () => void;
   onAskAgain?: () => void;
   analyzeLoading?: boolean;
+}
+
+/**
+ * Server stores guardrailViolations as objects ({rule, code, message, fatal});
+ * render the short code as the chip label. Tolerates legacy string entries.
+ */
+export function violationChipLabels(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((v: any) => (typeof v === 'string' ? v : v?.code ?? 'violation'));
 }
 
 const EXPIRY_MS = 10 * 60 * 1000;
@@ -51,6 +62,7 @@ function formatCountdown(ms: number): string {
 export function AiTraderDecisionCard({
   botId,
   decision,
+  paperMode,
   onExecute,
   onSkip,
   onAskAgain,
@@ -62,7 +74,7 @@ export function AiTraderDecisionCard({
   const [skipLoading, setSkipLoading] = useState(false);
 
   const clamped = decision.clampedDecision as ClampedDecision | null;
-  const violations = (decision.guardrailViolations as string[] | null) ?? [];
+  const violations = violationChipLabels(decision.guardrailViolations);
   const isProposed = decision.outcome === null || decision.outcome === undefined;
   const isFlat = !clamped || clamped.action === 'flat' || clamped.action === 'close';
 
@@ -139,7 +151,9 @@ export function AiTraderDecisionCard({
           </span>
         </div>
         <div className="flex items-center gap-1.5">
-          <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/50 text-amber-400 font-medium" data-testid="badge-paper">PAPER</span>
+          {paperMode && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/50 text-amber-400 font-medium" data-testid="badge-paper">PAPER</span>
+          )}
           {isProposed && timeLeft !== null && (
             <span
               className={`flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium ${
