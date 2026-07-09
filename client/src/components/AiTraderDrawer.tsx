@@ -49,11 +49,17 @@ import {
   AlertCircle,
   RefreshCw,
   Wallet,
+  Zap,
+  AlertTriangle,
 } from 'lucide-react';
+import { Switch } from '@/components/ui/switch';
+import { Input } from '@/components/ui/input';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
 import { useToast } from '@/hooks/use-toast';
 import { AiTraderDecisionCard, violationChipLabels, type AiDecisionRow } from './AiTraderDecisionCard';
+
+const DEGEN_CONFIRM_PHRASE = "send it";
 
 interface AiTraderBot {
   id: string;
@@ -308,6 +314,11 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   const [analyzeLoading, setAnalyzeLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [preflight, setPreflight] = useState<{ loading: boolean; available: number | null }>({ loading: false, available: null });
+  const [settingsMode, setSettingsMode] = useState('suggest');
+  const [settingsRisk, setSettingsRisk] = useState('guarded');
+  const [settingsAutoNext, setSettingsAutoNext] = useState(false);
+  const [settingsDegenConfirm, setSettingsDegenConfirm] = useState('');
+  const [settingsSaving, setSettingsSaving] = useState(false);
 
   const fetchPreflight = useCallback(async () => {
     setPreflight(p => ({ ...p, loading: true }));
@@ -370,6 +381,50 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
 
   const bot = detail?.bot ?? null;
   const openDecision = detail?.openPosition ?? null;
+
+  // Sync editable settings local state whenever the active bot changes (WO-8e).
+  useEffect(() => {
+    if (bot) {
+      setSettingsMode(bot.mode);
+      setSettingsRisk(bot.riskProfile);
+      setSettingsAutoNext(bot.autoNext);
+      setSettingsDegenConfirm('');
+    }
+  }, [bot?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleSaveSettings = async () => {
+    if (!bot || settingsSaving) return;
+    setSettingsSaving(true);
+    try {
+      const body: Record<string, unknown> = {
+        mode: settingsMode,
+        riskProfile: settingsRisk,
+        autoNext: settingsAutoNext,
+      };
+      if (settingsRisk === 'degen' && bot.riskProfile !== 'degen') {
+        body.degenConfirm = settingsDegenConfirm.trim().toLowerCase();
+      }
+      const res = await fetch(`/api/ai-trader/${bot.id}`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json', ...walletAuthHeaders() },
+        body: JSON.stringify(body),
+      });
+      const data = await safeResponseJson(res);
+      if (!res.ok) {
+        toast({ title: 'Could not save settings', description: data?.error ?? 'Unknown error', variant: 'destructive' });
+        return;
+      }
+      toast({ title: 'Settings saved' });
+      setSettingsDegenConfirm('');
+      await fetchDetail();
+      onBotUpdated();
+    } catch (err: any) {
+      toast({ title: 'Could not save settings', description: err?.message ?? 'Unknown error', variant: 'destructive' });
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
 
   const closedDecisions = history.filter((d) => d.closedAt && d.outcome === 'executed');
   const tradesCount = closedDecisions.length;
@@ -549,7 +604,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                       )}
                     </SheetTitle>
                     <SheetDescription className="text-xs flex items-center gap-1.5 mt-0.5">
-                      {bot.market} · {bot.timeframe} · {bot.riskProfile === 'degen' ? '🔥 Degen' : 'Guarded'}
+                      {bot.market} · {bot.timeframe} · {bot.riskProfile === 'degen' ? '🔥 Full Send' : 'Guarded'}
                     </SheetDescription>
                   </div>
                 </div>
@@ -752,7 +807,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                   <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center gap-3" data-testid="degen-survival">
                     <Flame className="w-5 h-5 text-red-400 flex-shrink-0" />
                     <div>
-                      <p className="text-xs font-semibold text-red-400">Degen survival</p>
+                      <p className="text-xs font-semibold text-red-400">Full Send survival</p>
                       <p className="text-sm text-muted-foreground">
                         {degenDaysAlive}d · <span className={degenPct > 50 ? 'text-emerald-400' : degenPct > 20 ? 'text-amber-400' : 'text-red-400'}>{degenPct}%</span> of allocation remaining
                       </p>
@@ -766,23 +821,150 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
               </TabsContent>
 
               <TabsContent value="settings" className="space-y-4 mt-3">
+                {/* Editable: Mode */}
+                <div className="space-y-1.5">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Mode</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSettingsMode('suggest')}
+                      data-testid="settings-button-mode-suggest"
+                      className={`p-3 rounded-lg border text-left transition-colors ${
+                        settingsMode === 'suggest'
+                          ? 'border-primary/60 bg-primary/10'
+                          : 'border-border/60 bg-muted/30 hover:bg-muted/50'
+                      }`}
+                    >
+                      <p className="text-xs font-medium">Suggest</p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">You approve each trade</p>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSettingsMode('auto')}
+                      data-testid="settings-button-mode-auto"
+                      className={`p-3 rounded-lg border text-left transition-colors ${
+                        settingsMode === 'auto'
+                          ? 'border-primary/60 bg-primary/10'
+                          : 'border-border/60 bg-muted/30 hover:bg-muted/50'
+                      }`}
+                    >
+                      <p className="text-xs font-medium flex items-center gap-1">
+                        <Zap className="w-3 h-3 text-primary" />Auto
+                      </p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">Hands-free paper testing</p>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Editable: Risk profile */}
+                <div className="space-y-1.5">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Risk profile</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => { setSettingsRisk('guarded'); setSettingsDegenConfirm(''); }}
+                      data-testid="settings-button-risk-guarded"
+                      className={`p-3 rounded-lg border text-left transition-colors ${
+                        settingsRisk === 'guarded'
+                          ? 'border-primary/60 bg-primary/10'
+                          : 'border-border/60 bg-muted/30 hover:bg-muted/50'
+                      }`}
+                    >
+                      <p className="text-xs font-medium">Guarded</p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">Pauses on losses</p>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSettingsRisk('degen')}
+                      data-testid="settings-button-risk-full-send"
+                      className={`p-3 rounded-lg border text-left transition-colors ${
+                        settingsRisk === 'degen'
+                          ? 'border-destructive/60 bg-destructive/10'
+                          : 'border-border/60 bg-muted/30 hover:bg-muted/50'
+                      }`}
+                    >
+                      <p className="text-xs font-medium flex items-center gap-1">
+                        <AlertTriangle className="w-3 h-3 text-destructive" />Full Send
+                      </p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">Never auto-pauses</p>
+                    </button>
+                  </div>
+                  {settingsRisk === 'degen' && bot.riskProfile !== 'degen' && (
+                    <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 space-y-2">
+                      <p className="text-xs text-destructive font-medium">Type the confirmation phrase:</p>
+                      <p className="text-xs font-mono bg-muted/50 rounded px-2 py-1 select-all text-muted-foreground">{DEGEN_CONFIRM_PHRASE}</p>
+                      <Input
+                        value={settingsDegenConfirm}
+                        onChange={e => setSettingsDegenConfirm(e.target.value)}
+                        placeholder="Type 'send it'…"
+                        className="text-xs h-8"
+                        data-testid="settings-input-degen-confirm"
+                      />
+                    </div>
+                  )}
+                  <p className="text-[10px] text-muted-foreground">Risk profile controls the loss brakes, not automation — Auto mode is what makes the bot trade by itself.</p>
+                </div>
+
+                {/* Editable: Auto-next */}
+                <div className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2.5">
+                  <div>
+                    <p className="text-xs font-medium">Auto-next</p>
+                    <p className="text-[10px] text-muted-foreground">Re-analyze automatically after each close</p>
+                  </div>
+                  <Switch
+                    checked={settingsAutoNext}
+                    onCheckedChange={setSettingsAutoNext}
+                    data-testid="settings-switch-auto-next"
+                  />
+                </div>
+
+                {/* Read-only: locked policy fields */}
                 <div className="rounded-xl border border-border bg-card/40 divide-y divide-border/50" data-testid="settings-policy">
-                  {[
-                    { label: 'Market', value: bot.market },
-                    { label: 'Exchange', value: bot.protocol },
-                    { label: 'Timeframe', value: bot.timeframe },
-                    { label: 'Mode', value: bot.mode === 'suggest' ? 'Suggest (approve each trade)' : 'Auto (executes automatically)' },
-                    { label: 'Risk profile', value: bot.riskProfile === 'degen' ? '🔥 Degen' : 'Guarded' },
-                    { label: 'Max leverage', value: `${bot.maxLeverage}×` },
-                    { label: 'Model', value: bot.model.split('/').pop() ?? bot.model },
-                    { label: 'Auto-next', value: bot.autoNext ? 'On' : 'Off' },
-                  ].map((row) => (
-                    <div key={row.label} className="flex items-center justify-between px-3 py-2.5 text-sm">
-                      <span className="text-muted-foreground text-xs">{row.label}</span>
+                  {([
+                    { label: 'Market', value: bot.market, locked: true },
+                    { label: 'Exchange', value: bot.protocol, locked: false },
+                    { label: 'Timeframe', value: bot.timeframe, locked: false },
+                    { label: 'Max leverage', value: `${bot.maxLeverage}×`, locked: true },
+                    { label: 'Model', value: bot.model.split('/').pop() ?? bot.model, locked: false },
+                  ] as { label: string; value: string; locked: boolean }[]).map((row) => (
+                    <div key={row.label} className="flex items-center justify-between px-3 py-2.5">
+                      <span className="text-muted-foreground text-xs flex items-center gap-1">
+                        {row.label}
+                        {row.locked && (
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="cursor-help text-[10px] text-muted-foreground/60 leading-none">ⓘ</span>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                <p className="text-xs max-w-[180px]">Changing market or leverage requires creating a new bot.</p>
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                        )}
+                      </span>
                       <span className="font-medium text-xs">{row.value}</span>
                     </div>
                   ))}
                 </div>
+
+                {/* Save button */}
+                {(() => {
+                  const changed = settingsMode !== bot.mode || settingsRisk !== bot.riskProfile || settingsAutoNext !== bot.autoNext;
+                  const needsDegenConfirm = settingsRisk === 'degen' && bot.riskProfile !== 'degen';
+                  const degenOk = !needsDegenConfirm || settingsDegenConfirm.trim().toLowerCase() === DEGEN_CONFIRM_PHRASE;
+                  return (
+                    <Button
+                      className="w-full"
+                      onClick={handleSaveSettings}
+                      disabled={!changed || !degenOk || settingsSaving}
+                      data-testid="button-ai-trader-save-settings"
+                    >
+                      {settingsSaving && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+                      Save settings
+                    </Button>
+                  );
+                })()}
 
                 {bot.pauseReason && (
                   <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-start gap-2">

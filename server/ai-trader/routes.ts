@@ -354,6 +354,53 @@ export function registerAiTraderRoutes(app: Express): void {
     }
   });
 
+  // --- Patch mutable settings (mode / riskProfile / autoNext) --------------------------
+  app.patch("/api/ai-trader/:id", requireWallet, async (req: any, res) => {
+    try {
+      const bot = await loadOwnedBot(req, res);
+      if (!bot) return;
+
+      const patchSchema = z.object({
+        mode: z.enum(["suggest", "auto"]).optional(),
+        riskProfile: z.enum(["guarded", "degen"]).optional(),
+        autoNext: z.boolean().optional(),
+        degenConfirm: z.string().optional(),
+      });
+      const parsed = patchSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: fromZodError(parsed.error).message });
+      }
+      const body = parsed.data;
+
+      // Switching TO Full Send (degen) requires the same typed phrase as creation.
+      if (body.riskProfile === "degen" && bot.riskProfile !== "degen") {
+        const confirm = (body.degenConfirm ?? "").trim().toLowerCase();
+        if (confirm !== DEGEN_CONFIRM_PHRASE) {
+          return res.status(400).json({
+            error: `Switching to Full Send requires typed confirmation: "${DEGEN_CONFIRM_PHRASE}"`,
+          });
+        }
+      }
+
+      const updates: Record<string, unknown> = {};
+      if (body.mode !== undefined) updates.mode = body.mode;
+      if (body.riskProfile !== undefined) updates.riskProfile = body.riskProfile;
+      if (body.autoNext !== undefined) updates.autoNext = body.autoNext;
+
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: "No mutable fields provided." });
+      }
+
+      const updated = await storage.updateAiTraderBot(bot.id, updates as any);
+      if (!updated) return res.status(404).json({ error: "Bot not found." });
+
+      res.json({ bot: toBotDto(updated) });
+    } catch (err) {
+      console.error("[AiTrader] patch error:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // --- Delete ---------------------------------------------------------------------------
   app.delete("/api/ai-trader/:id", requireWallet, async (req: any, res) => {
     try {

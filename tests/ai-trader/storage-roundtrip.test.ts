@@ -127,4 +127,45 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
     expect(closed[0].id).toBe(decisionId);
     expect(closed.every((d) => d.closedAt !== null)).toBe(true);
   });
+
+  // WO-8e: degen-persistence proof — createAiTraderBot must store riskProfile:'degen'
+  // in the DB row, not silently fall back to the column default ('guarded').
+  it("createAiTraderBot persists a non-default riskProfile ('degen')", async () => {
+    const DEGEN_WALLET = "ai-trader-degen-test-" + Math.random().toString(36).slice(2);
+    let degenBotId: string | undefined;
+    try {
+      const bot = await storage.createAiTraderBot({
+        walletAddress: DEGEN_WALLET,
+        protocol: "pacifica",
+        market: "SOL-PERP",
+        timeframe: "15m",
+        mode: "suggest",
+        riskProfile: "degen",
+        paperMode: true,
+        autoNext: false,
+        model: "test/model",
+        allocatedUsdc: "100.00",
+        maxLeverage: 3,
+        stopPolicy: "static",
+        parkWhenIdle: false,
+        graduationState: "in_trial",
+        graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
+        policyHmac: "test-hmac-degen",
+        status: "idle",
+        pauseReason: null,
+        dailyRealizedPnl: "0",
+        consecutiveLosses: 0,
+      } as any);
+      degenBotId = bot.id;
+
+      // Both the RETURNING row from INSERT and a fresh SELECT must carry 'degen'.
+      expect(bot.riskProfile).toBe("degen");
+      const fetched = await storage.getAiTraderBot(bot.id);
+      expect(fetched?.riskProfile).toBe("degen");
+    } finally {
+      if (degenBotId) {
+        await db.delete(aiTraderBots).where(eq(aiTraderBots.id, degenBotId));
+      }
+    }
+  });
 });

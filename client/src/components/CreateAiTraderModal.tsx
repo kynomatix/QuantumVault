@@ -240,7 +240,7 @@ export function CreateAiTraderModal({
         return;
       }
       toast({ title: 'AI Trader created', description: `${form.name} is ready. Run Analyze to get your first decision.` });
-      onBotCreated(data.id);
+      onBotCreated(data.bot?.id);
       handleClose();
     } catch (err: any) {
       toast({ title: 'Could not create AI Trader', description: err?.message ?? 'Unknown error', variant: 'destructive' });
@@ -425,60 +425,6 @@ export function CreateAiTraderModal({
             )}
           </div>
 
-          {/* 8. Risk profile */}
-          <div className="space-y-2">
-            <Label>Risk profile</Label>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => set('riskProfile', 'guarded')}
-                data-testid="button-risk-guarded"
-                className={`p-3 rounded-lg border text-left transition-colors ${
-                  form.riskProfile === 'guarded'
-                    ? 'border-primary/60 bg-primary/10'
-                    : 'border-border/60 bg-muted/30 hover:bg-muted/50'
-                }`}
-              >
-                <p className="text-sm font-medium">Guarded</p>
-                <p className="text-xs text-muted-foreground mt-0.5">Pauses on consecutive losses</p>
-              </button>
-              <button
-                type="button"
-                onClick={() => set('riskProfile', 'degen')}
-                data-testid="button-risk-degen"
-                className={`p-3 rounded-lg border text-left transition-colors ${
-                  form.riskProfile === 'degen'
-                    ? 'border-destructive/60 bg-destructive/10'
-                    : 'border-border/60 bg-muted/30 hover:bg-muted/50'
-                }`}
-              >
-                <p className="text-sm font-medium flex items-center gap-1.5">
-                  <AlertTriangle className="w-3.5 h-3.5 text-destructive" />
-                  Degen
-                </p>
-                <p className="text-xs text-muted-foreground mt-0.5">Never auto-pauses</p>
-              </button>
-            </div>
-            {isDegenMode && (
-              <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 space-y-2">
-                <p className="text-xs text-destructive font-medium">Type the confirmation phrase to continue:</p>
-                <p className="text-xs text-muted-foreground font-mono bg-muted/50 rounded px-2 py-1 select-all" data-testid="text-degen-phrase">
-                  {DEGEN_CONFIRM_PHRASE}
-                </p>
-                <Input
-                  value={form.degenConfirm}
-                  onChange={e => set('degenConfirm', e.target.value)}
-                  placeholder="Type 'send it'…"
-                  className="text-sm"
-                  data-testid="input-degen-confirm"
-                />
-                {form.degenConfirm && !degenConfirmed && (
-                  <p className="text-xs text-destructive">Phrase doesn't match.</p>
-                )}
-              </div>
-            )}
-          </div>
-
           {/* Mode */}
           <div className="space-y-2">
             <Label>Mode</Label>
@@ -526,6 +472,61 @@ export function CreateAiTraderModal({
                 />
               </div>
             )}
+          </div>
+
+          {/* Risk profile */}
+          <div className="space-y-2">
+            <Label>Risk profile</Label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => set('riskProfile', 'guarded')}
+                data-testid="button-risk-guarded"
+                className={`p-3 rounded-lg border text-left transition-colors ${
+                  form.riskProfile === 'guarded'
+                    ? 'border-primary/60 bg-primary/10'
+                    : 'border-border/60 bg-muted/30 hover:bg-muted/50'
+                }`}
+              >
+                <p className="text-sm font-medium">Guarded</p>
+                <p className="text-xs text-muted-foreground mt-0.5">Pauses on consecutive losses</p>
+              </button>
+              <button
+                type="button"
+                onClick={() => set('riskProfile', 'degen')}
+                data-testid="button-risk-full-send"
+                className={`p-3 rounded-lg border text-left transition-colors ${
+                  form.riskProfile === 'degen'
+                    ? 'border-destructive/60 bg-destructive/10'
+                    : 'border-border/60 bg-muted/30 hover:bg-muted/50'
+                }`}
+              >
+                <p className="text-sm font-medium flex items-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5 text-destructive" />
+                  Full Send
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5">Never auto-pauses</p>
+              </button>
+            </div>
+            {isDegenMode && (
+              <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 space-y-2">
+                <p className="text-xs text-destructive font-medium">Type the confirmation phrase to continue:</p>
+                <p className="text-xs text-muted-foreground font-mono bg-muted/50 rounded px-2 py-1 select-all" data-testid="text-degen-phrase">
+                  {DEGEN_CONFIRM_PHRASE}
+                </p>
+                <Input
+                  value={form.degenConfirm}
+                  onChange={e => set('degenConfirm', e.target.value)}
+                  placeholder="Type 'send it'…"
+                  className="text-sm"
+                  data-testid="input-degen-confirm"
+                />
+                {form.degenConfirm && !degenConfirmed && (
+                  <p className="text-xs text-destructive">Phrase doesn't match.</p>
+                )}
+              </div>
+            )}
+            <p className="text-[11px] text-muted-foreground">Risk profile controls the loss brakes, not automation — Auto mode is what makes the bot trade by itself.</p>
           </div>
 
           {/* Park when idle — Flash only */}

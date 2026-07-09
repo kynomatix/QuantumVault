@@ -4457,8 +4457,20 @@ export class DatabaseStorage implements IStorage {
 
   // --- AI Trader (Agentic Trader plan §7 / WO-2) — schema + storage only. ---
   async createAiTraderBot(bot: InsertAiTraderBot): Promise<AiTraderBot> {
-    const result = await db.insert(aiTraderBots).values(bot as any).returning();
-    return result[0];
+    const [created] = await db.insert(aiTraderBots).values(bot as any).returning();
+    // WO-8e: drizzle-zod 0.7 marks .default()-columns optional in InsertAiTraderBot.
+    // Drizzle 0.39 values(obj as any) can silently fall back to the Postgres column
+    // default for those keys, letting the DB default win over the caller's value.
+    // Detect and repair on the way out so the returned row always matches the intent.
+    if (bot.riskProfile !== undefined && created.riskProfile !== bot.riskProfile) {
+      const [patched] = await db
+        .update(aiTraderBots)
+        .set({ riskProfile: bot.riskProfile })
+        .where(eq(aiTraderBots.id, created.id))
+        .returning();
+      return patched;
+    }
+    return created;
   }
 
   async getAiTraderBot(id: string): Promise<AiTraderBot | undefined> {
