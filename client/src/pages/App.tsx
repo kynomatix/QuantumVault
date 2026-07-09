@@ -3038,23 +3038,10 @@ export default function AppPage() {
                     <div className="flex items-center gap-2 mt-auto pt-1">
                       <Button
                         className="flex-1 bg-gradient-to-r from-primary to-accent hover:opacity-90"
-                        onClick={handleTryOnPaper}
-                        disabled={aiTraderCreating}
+                        onClick={() => setCreateAiTraderOpen(true)}
                         data-testid="button-try-on-paper"
                       >
-                        {aiTraderCreating ? (
-                          <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Analyzing…</>
-                        ) : (
-                          <>Try on paper →</>
-                        )}
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setCreateAiTraderOpen(true)}
-                        data-testid="button-customize-ai-trader"
-                      >
-                        Customize
+                        Try on paper →
                       </Button>
                     </div>
                   </div>
