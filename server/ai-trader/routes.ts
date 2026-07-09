@@ -43,7 +43,8 @@ import { resolveAgentKeypair } from "../agent-wallet";
 import { getAdapter, getDefaultAdapter } from "../protocol/adapter-registry";
 import { getMarketInfo } from "../market-registry";
 import { isSelectableModel } from "../ai-assistant/models-catalog";
-import { buildMarketContext } from "./context-builder";
+import { buildMarketContext, marketToDatafeedTicker } from "./context-builder";
+import { fetchOHLCV } from "../lab/datafeed";
 import { runDecision } from "./decide";
 import { executeDecision, aiTraderPolicyObject } from "./executor";
 import { userInitiatedClose, parseOpenDecision } from "./monitor";
@@ -208,6 +209,22 @@ const createBotBodySchema = z.object({
     .optional(),
   degenConfirm: z.string().optional(),
 });
+
+// --- Chart data window sizing (read-only, view-only feature) -----------------------
+// bot.timeframe is one of AiTraderTimeframe ('15m'|'1h'|'4h'|'1d' — context-builder.ts
+// L15/L41-46); duplicated here rather than importing the module-private TIMEFRAME_MS
+// from context-builder.ts, same "scoped to this file" convention that map already uses
+// relative to datafeed.ts's own (also module-private) getTimeframeSeconds.
+const CHART_TIMEFRAME_MS: Record<string, number> = {
+  "15m": 900_000,
+  "1h": 3_600_000,
+  "4h": 14_400_000,
+  "1d": 86_400_000,
+};
+// Bars of padding on each side of the entry->exit window, and a floor on the total
+// number of bars so a very short (sub-candle) trade still renders a readable chart.
+const CHART_PAD_CANDLES = 20;
+const CHART_MIN_TOTAL_CANDLES = 60;
 
 export function registerAiTraderRoutes(app: Express): void {
   // --- Create -----------------------------------------------------------------------
@@ -1035,6 +1052,49 @@ export function registerAiTraderRoutes(app: Express): void {
       res.json({ decisions });
     } catch (err) {
       console.error("[AiTrader] history error:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // --- Chart data (read-only) -------------------------------------------------------
+  // Candles only — the client already holds entry/exit/SL/TP/realizedPnl/exitReason
+  // from the /history decision rows it keeps in state, so this deliberately does not
+  // re-return any of that. Window is the decision's decidedAt->closedAt (or "now" for
+  // the still-open position), padded and floored per CHART_PAD_CANDLES/
+  // CHART_MIN_TOTAL_CANDLES above so a very short trade still renders a real chart.
+  app.get("/api/ai-trader/:id/decisions/:decisionId/chart", requireWallet, async (req: any, res) => {
+    try {
+      const bot = await loadOwnedBot(req, res);
+      if (!bot) return;
+      const decision = await storage.getAiTraderDecision(req.params.decisionId);
+      if (!decision || decision.botId !== bot.id) {
+        return res.status(404).json({ error: "Decision not found" });
+      }
+
+      const tfMs = CHART_TIMEFRAME_MS[bot.timeframe] ?? CHART_TIMEFRAME_MS["1h"];
+      const now = Date.now();
+      const decidedAtMs = decision.decidedAt ? new Date(decision.decidedAt).getTime() : now;
+      const closedAtMs = decision.closedAt ? new Date(decision.closedAt).getTime() : now;
+
+      let startMs = decidedAtMs - CHART_PAD_CANDLES * tfMs;
+      let endMs = Math.min(closedAtMs + CHART_PAD_CANDLES * tfMs, now);
+      const minSpanMs = CHART_MIN_TOTAL_CANDLES * tfMs;
+      if (endMs - startMs < minSpanMs) {
+        const deficit = minSpanMs - (endMs - startMs);
+        startMs -= deficit / 2;
+        endMs = Math.min(endMs + deficit / 2, now);
+      }
+
+      const datafeedTicker = marketToDatafeedTicker(bot.market);
+      const candles = await fetchOHLCV(
+        datafeedTicker,
+        bot.timeframe,
+        new Date(startMs).toISOString(),
+        new Date(endMs).toISOString()
+      );
+      res.json({ candles });
+    } catch (err) {
+      console.error("[AiTrader] chart error:", err);
       res.status(500).json({ error: "Internal server error" });
     }
   });
