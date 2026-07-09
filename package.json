@@ -86,6 +86,7 @@
     "html2canvas": "^1.4.1",
     "http-proxy-middleware": "^3.0.5",
     "input-otp": "^1.4.2",
+    "lightweight-charts": "^4.2.3",
     "lucide-react": "^0.545.0",
     "p-limit": "^7.3.0",
     "p-retry": "^7.1.1",

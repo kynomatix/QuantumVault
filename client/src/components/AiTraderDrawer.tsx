@@ -51,6 +51,7 @@ import {
   Wallet,
   Zap,
   AlertTriangle,
+  CandlestickChart,
 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
@@ -58,6 +59,7 @@ import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
 import { useToast } from '@/hooks/use-toast';
 import { AiTraderDecisionCard, violationChipLabels, type AiDecisionRow } from './AiTraderDecisionCard';
+import { AiTraderDecisionChart } from './AiTraderDecisionChart';
 
 const DEGEN_CONFIRM_PHRASE = "send it";
 
@@ -132,6 +134,23 @@ interface BotDetailResponse {
   openPosition: OpenPositionView | null;
   recentDecisions: AiDecisionRow[];
   markPrice: number | null;
+}
+
+// Everything AiTraderDecisionChart needs as props, minus open/onOpenChange
+// (which the drawer derives from chartTarget !== null / setChartTarget(null)).
+interface ChartTarget {
+  decisionId: string;
+  direction: 'long' | 'short';
+  entryPrice: number;
+  exitPrice: number | null;
+  stopLossPrice: number | null;
+  takeProfitPrice: number | null;
+  realizedPnl: number | null;
+  exitReason: string | null;
+  decidedAt: string | number | null;
+  closedAt: string | number | null;
+  markPrice: number | null;
+  unrealizedPnl: number | null;
 }
 
 function outcomeLabel(outcome: string | null): { label: string; className: string; icon: React.ReactNode } {
@@ -351,6 +370,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   const [settingsAutoNext, setSettingsAutoNext] = useState(false);
   const [settingsDegenConfirm, setSettingsDegenConfirm] = useState('');
   const [settingsSaving, setSettingsSaving] = useState(false);
+  const [chartTarget, setChartTarget] = useState<ChartTarget | null>(null);
 
   const fetchPreflight = useCallback(async () => {
     setPreflight(p => ({ ...p, loading: true }));
@@ -778,6 +798,32 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                         TP ${formatPrice(openDecision.takeProfitPrice)}
                       </span>
                     </div>
+                    <div className="flex justify-end">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 px-2 text-[10px] gap-1"
+                        onClick={() => setChartTarget({
+                          decisionId: openDecision.decision.id,
+                          direction: openDecision.side,
+                          entryPrice: openDecision.entryPrice,
+                          exitPrice: null,
+                          stopLossPrice: openDecision.stopLossPrice,
+                          takeProfitPrice: openDecision.takeProfitPrice,
+                          realizedPnl: null,
+                          exitReason: null,
+                          decidedAt: openDecision.decidedAtMs,
+                          closedAt: null,
+                          markPrice: markPrice,
+                          unrealizedPnl: openUnrealizedPnl,
+                        })}
+                        data-testid="button-view-chart-open-position"
+                      >
+                        <CandlestickChart className="w-3 h-3" />
+                        View Chart
+                      </Button>
+                    </div>
                   </div>
                 )}
 
@@ -841,6 +887,37 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                           <p className="text-[11px] text-muted-foreground leading-relaxed border-l-2 border-primary/30 pl-2 italic">
                             {clamped.rationale}
                           </p>
+                        )}
+                        {d.outcome === 'executed' && d.entryPrice != null && (
+                          <div className="flex justify-end">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 px-2 text-[10px] gap-1"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setChartTarget({
+                                  decisionId: d.id,
+                                  direction: clamped?.action === 'short' ? 'short' : 'long',
+                                  entryPrice: Number(d.entryPrice),
+                                  exitPrice: (d as any).exitPrice != null ? Number((d as any).exitPrice) : null,
+                                  stopLossPrice: clamped?.stopLossPrice != null ? Number(clamped.stopLossPrice) : null,
+                                  takeProfitPrice: clamped?.takeProfitPrice != null ? Number(clamped.takeProfitPrice) : null,
+                                  realizedPnl: d.realizedPnl != null ? Number(d.realizedPnl) : null,
+                                  exitReason: d.exitReason ?? null,
+                                  decidedAt: d.decidedAt,
+                                  closedAt: d.closedAt ?? null,
+                                  markPrice: null,
+                                  unrealizedPnl: null,
+                                });
+                              }}
+                              data-testid={`button-view-chart-${d.id}`}
+                            >
+                              <CandlestickChart className="w-3 h-3" />
+                              View Chart
+                            </Button>
+                          </div>
                         )}
                       </div>
                     );
@@ -1090,6 +1167,26 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                 </div>
               </TabsContent>
             </Tabs>
+
+            <AiTraderDecisionChart
+              open={chartTarget != null}
+              onOpenChange={(o) => { if (!o) setChartTarget(null); }}
+              botId={bot.id}
+              market={bot.market}
+              timeframe={bot.timeframe}
+              decisionId={chartTarget?.decisionId ?? ''}
+              direction={chartTarget?.direction ?? 'long'}
+              entryPrice={chartTarget?.entryPrice ?? 0}
+              exitPrice={chartTarget?.exitPrice ?? null}
+              stopLossPrice={chartTarget?.stopLossPrice ?? null}
+              takeProfitPrice={chartTarget?.takeProfitPrice ?? null}
+              realizedPnl={chartTarget?.realizedPnl ?? null}
+              exitReason={chartTarget?.exitReason ?? null}
+              decidedAt={chartTarget?.decidedAt ?? null}
+              closedAt={chartTarget?.closedAt ?? null}
+              markPrice={chartTarget?.markPrice ?? null}
+              unrealizedPnl={chartTarget?.unrealizedPnl ?? null}
+            />
           </>
         )}
       </SheetContent>
