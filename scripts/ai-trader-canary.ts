@@ -51,7 +51,7 @@
  * not built yet, so exit detection during the canary is manual by design.
  */
 import { storage } from "../server/storage";
-import { getAdapter } from "../server/protocol/adapter-registry";
+import { PacificaAdapter } from "../server/protocol/pacifica/pacifica-adapter";
 import { getUmkForWebhook, computeBotPolicyHmac } from "../server/session-v3";
 import { executeDecision, aiTraderPolicyObject } from "../server/ai-trader/executor";
 import type { ClampedDecision } from "../server/ai-trader/guardrails";
@@ -94,7 +94,8 @@ async function main() {
   if (!(slPct >= 0.5 && slPct <= 10)) throw new Error("--sl-pct must be in the G2 band 0.5–10");
   if (drill && drill !== "bracket-fail") throw new Error("--drill only supports 'bracket-fail'");
 
-  const adapter = getAdapter("pacifica");
+  const adapter = new PacificaAdapter();
+  await adapter.initialize();
   const mark = await adapter.getPrice(MARKET);
   if (!mark || !Number.isFinite(mark) || mark <= 0) throw new Error(`No usable mark price for ${MARKET}`);
 
