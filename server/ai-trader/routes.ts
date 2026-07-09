@@ -392,6 +392,20 @@ export function registerAiTraderRoutes(app: Express): void {
       }
 
       try {
+        // Mirror the create-route model gate: a bot whose model isn't in the
+        // curated catalog (e.g. the hand-inserted live-canary sentinel
+        // 'manual/canary') must fail with an honest message here, not surface
+        // as an opaque provider-400 "gateway" error. Free-trial calls are
+        // overridden to the pinned (always-selectable) trial model, so only
+        // the non-override path can hit this.
+        const effectiveModel = keyRes.modelOverride ?? bot.model;
+        if (!isSelectableModel(effectiveModel)) {
+          if (keyRes.usedFreeTrial) await storage.decrementAiTraderFreeCalls(req.walletAddress);
+          return res.status(400).json({
+            error: `This bot's model '${bot.model}' isn't available for AI analysis. It looks like a manually managed bot — recreate it with a supported model to use Ask AI.`,
+          });
+        }
+
         const wallet = await storage.getWallet(bot.walletAddress);
         if (!wallet?.agentPublicKey) {
           if (keyRes.usedFreeTrial) await storage.decrementAiTraderFreeCalls(req.walletAddress);

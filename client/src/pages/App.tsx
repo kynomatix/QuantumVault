@@ -906,7 +906,7 @@ export default function AppPage() {
           title: is402 ? 'Add your OpenRouter key' : 'Analysis failed',
           description: is402
             ? "You've used your 3 free paper decisions. Add a key to continue."
-            : analyzeData.error ?? 'Unknown error',
+            : analyzeData.detail ?? analyzeData.error ?? 'Unknown error',
           variant: 'destructive',
         });
         return;

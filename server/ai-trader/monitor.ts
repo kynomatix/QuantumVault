@@ -51,6 +51,7 @@ import { evaluatePaperBracket, paperRealizedPnl, paperExitPrice, type PaperSide 
 import { fetchOHLCV } from "../lab/datafeed";
 import { buildMarketContext, marketToDatafeedTicker, type AiTraderTimeframe } from "./context-builder";
 import { runDecision } from "./decide";
+import { isSelectableModel } from "../ai-assistant/models-catalog";
 import { executeDecision, checkCooldownAndCaps } from "./executor";
 import { evaluateGraduation, type GraduationTradeRecord } from "./graduation";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
@@ -1038,6 +1039,13 @@ export async function runAutoCycle(botId: string): Promise<void> {
   const ciphertext = await storage.getWalletLlmApiKeyCiphertext(bot.walletAddress);
   if (!ciphertext) {
     await pauseBot(bot, "no_api_key", "no LLM API key on file — add an OpenRouter key in the app to resume");
+    return;
+  }
+  // Same gate as the /analyze route: never send a non-catalog model (e.g. a
+  // hand-inserted sentinel like 'manual/canary') to OpenRouter — it 400s every
+  // candle. Pause with an honest reason instead of burning cycles.
+  if (!isSelectableModel(bot.model)) {
+    await pauseBot(bot, "unsupported_model", `model '${bot.model}' isn't available for AI analysis — recreate the bot with a supported model`);
     return;
   }
   let keyBuf: Buffer;

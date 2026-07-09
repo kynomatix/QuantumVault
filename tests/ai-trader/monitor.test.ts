@@ -119,6 +119,7 @@ function makeBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
     derivationPathVersion: null,
     market: "SOL-PERP",
     timeframe: "15m",
+    model: "anthropic/claude-opus-4.8",
     mode: "manual",
     paperMode: true,
     riskProfile: "guarded",

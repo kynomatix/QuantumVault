@@ -344,7 +344,9 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
         body: JSON.stringify({}),
       });
       const data = await safeResponseJson(res);
-      if (!res.ok) throw new Error(data.error || 'Analyze failed');
+      // Prefer the human-readable `detail` (e.g. "The model request failed
+      // (HTTP 400).") over the short reason code (e.g. "gateway").
+      if (!res.ok) throw new Error(data.detail || data.error || 'Analyze failed');
       await fetchDetail();
       await fetchHistory();
     } catch (err: any) {
