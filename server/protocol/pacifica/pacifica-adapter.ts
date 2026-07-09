@@ -885,11 +885,18 @@ export class PacificaAdapter implements ProtocolAdapter {
     const signer = new PacificaSigner(params.agentSecretKey);
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
 
+    // Field layout verified against live Pacifica serde errors (2026-07-08).
+    // Top-level: symbol, side, reduce_only (matches placeOrder contract).
+    // Nested under stop_order: amount, stop_price.
+    // builder_code, client_order_id → also top-level.
     const operationData: Record<string, unknown> = {
       symbol: protocolSymbol,
-      amount: String(params.sizeBase),
       side: mapToProtocolSide(params.side),
-      trigger_price: String(params.triggerPrice),
+      reduce_only: params.reduceOnly ?? false,
+      stop_order: {
+        amount: String(this.quantizeOrderSize(params.internalSymbol, params.sizeBase)),
+        stop_price: String(this.quantizePrice(params.internalSymbol, params.triggerPrice)),
+      },
     };
 
     if (params.clientOrderId) {

@@ -82,7 +82,12 @@ async function main() {
   const confirmed = process.env.CANARY_CONFIRM === "TRADE_REAL_FUNDS";
 
   // ── Gate 3: hard caps, no flag overrides them ──────────────────────────────
-  if (!wallet || !subaccountId) throw new Error("--wallet and --subaccount are required");
+  if (!wallet) throw new Error("--wallet is required");
+  // --subaccount is optional: omitting it targets the main Pacifica account
+  // (no subaccount_id filter in API calls). The $20 unparked from the vault
+  // lands in the account-level main account, so the founder-wallet canary run
+  // deliberately omits this flag.
+  if (!subaccountId) console.warn("WARNING: no --subaccount provided — using main Pacifica account (protocolSubaccountId=null)");
   if (!["long", "short"].includes(side)) throw new Error("--side must be long|short");
   if (!(alloc > 0 && alloc <= MAX_ALLOC)) throw new Error(`--alloc must be 0<a≤${MAX_ALLOC} (canary hard cap)`);
   if (!(leverage >= 1 && leverage <= MAX_LEVERAGE)) throw new Error(`--leverage must be 1..${MAX_LEVERAGE} (canary hard cap)`);
