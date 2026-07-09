@@ -347,7 +347,23 @@ export function registerAiTraderRoutes(app: Express): void {
       if (!bot) return;
       const decisions = await storage.getAiTraderDecisions(bot.id, 10);
       const openPosition = parseOpenDecision(decisions);
-      res.json({ bot: toBotDto(bot), openPosition, recentDecisions: decisions });
+
+      // Live mark price for the open-position PnL banner only — display-grade,
+      // not money-critical (paper bots have no on-chain position to query, so
+      // client computes PnL from entryPrice/sizeBase/side + this mark price).
+      // Fail OPEN to null on any adapter error; client renders "—" rather than
+      // blocking the whole detail response over a display-only price fetch.
+      let markPrice: number | null = null;
+      if (openPosition) {
+        try {
+          const adapter = getAdapter(bot.protocol);
+          markPrice = await adapter.getPrice(bot.market);
+        } catch {
+          markPrice = null;
+        }
+      }
+
+      res.json({ bot: toBotDto(bot), openPosition, recentDecisions: decisions, markPrice });
     } catch (err) {
       console.error("[AiTrader] get error:", err);
       res.status(500).json({ error: "Internal server error" });

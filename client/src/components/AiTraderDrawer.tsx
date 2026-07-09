@@ -61,6 +61,22 @@ import { AiTraderDecisionCard, violationChipLabels, type AiDecisionRow } from '.
 
 const DEGEN_CONFIRM_PHRASE = "send it";
 
+// Mirrors BotManagementDrawer's formatPrice/formatUsdSigned — kept local since
+// they aren't exported, so precision stays correct for low-priced markets
+// instead of a flat toFixed(2).
+function formatPrice(price: number | null | undefined): string {
+  if (price === undefined || price === null) return '--';
+  if (price < 0.01) return price.toFixed(6);
+  if (price < 1) return price.toFixed(4);
+  if (price < 10) return price.toFixed(3);
+  return price.toFixed(2);
+}
+
+function formatUsdSigned(n: number): string {
+  const sign = n >= 0 ? '+' : '-';
+  return `${sign}$${Math.abs(n).toFixed(2)}`;
+}
+
 interface AiTraderBot {
   id: string;
   walletAddress: string;
@@ -96,10 +112,26 @@ interface AiTraderDrawerProps {
   onOpenDeposit?: () => void;
 }
 
+// Shape returned by server/ai-trader/monitor.ts parseOpenDecision() — a
+// flattened view of the open decision row, NOT the raw AiDecisionRow itself
+// (that lives nested at .decision). entryPrice/stopLossPrice/takeProfitPrice
+// are already coerced to numbers server-side.
+interface OpenPositionView {
+  decision: AiDecisionRow;
+  side: 'long' | 'short';
+  sizeBase: number;
+  marginUsdc: number;
+  stopLossPrice: number;
+  takeProfitPrice: number;
+  entryPrice: number;
+  decidedAtMs: number;
+}
+
 interface BotDetailResponse {
   bot: AiTraderBot;
-  openPosition: AiDecisionRow | null;
+  openPosition: OpenPositionView | null;
   recentDecisions: AiDecisionRow[];
+  markPrice: number | null;
 }
 
 function outcomeLabel(outcome: string | null): { label: string; className: string; icon: React.ReactNode } {
@@ -381,6 +413,17 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
 
   const bot = detail?.bot ?? null;
   const openDecision = detail?.openPosition ?? null;
+  const markPrice = detail?.markPrice ?? null;
+  const openUnrealizedPnl = openDecision && markPrice != null
+    ? (markPrice - openDecision.entryPrice) * openDecision.sizeBase * (openDecision.side === 'long' ? 1 : -1)
+    : null;
+  // The unresolved decision awaiting user action while status === 'proposed'.
+  // NOT the same object as openDecision — parseOpenDecision (server) only ever
+  // returns an already-executed, still-open position, so it is always null in
+  // the 'proposed' state. The proposal itself is simply the newest decision row.
+  const latestProposal = bot?.status === 'proposed' && history.length > 0 && history[0].outcome === null
+    ? history[0]
+    : null;
 
   // Sync editable settings local state whenever the active bot changes (WO-8e).
   useEffect(() => {
@@ -681,12 +724,12 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
               </TabsList>
 
               <TabsContent value="activity" className="space-y-3 mt-3">
-                {bot.status === 'proposed' && openDecision && (
+                {bot.status === 'proposed' && latestProposal && (
                   <div className="space-y-1.5">
                     <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide px-0.5">Current proposal</p>
                     <AiTraderDecisionCard
                       botId={bot.id}
-                      decision={openDecision}
+                      decision={latestProposal}
                       paperMode={!!bot.paperMode}
                       onExecute={() => { fetchDetail(); fetchHistory(); onBotUpdated(); }}
                       onSkip={() => { fetchDetail(); fetchHistory(); onBotUpdated(); }}
@@ -697,21 +740,42 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                 )}
 
                 {bot.status === 'open' && openDecision && (
-                  <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 space-y-1.5" data-testid="open-position-banner">
+                  <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 space-y-2" data-testid="open-position-banner">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
-                        {(openDecision.clampedDecision as any)?.action === 'long'
+                        {openDecision.side === 'long'
                           ? <TrendingUp className="w-4 h-4 text-emerald-400" />
                           : <TrendingDown className="w-4 h-4 text-red-400" />}
-                        <span className="text-sm font-semibold text-emerald-400">
-                          {((openDecision.clampedDecision as any)?.action ?? '').toUpperCase()} open
+                        <span className={`text-sm font-semibold ${openDecision.side === 'long' ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {openDecision.side.toUpperCase()} open
                         </span>
                         {!!bot.paperMode && (
                           <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/50 text-amber-400 font-medium">PAPER</span>
                         )}
                       </div>
-                      <span className="text-xs text-muted-foreground">
-                        entry ${Number(openDecision.entryPrice ?? 0).toFixed(2)}
+                      {openUnrealizedPnl !== null ? (
+                        <span
+                          className={`text-sm font-semibold ${openUnrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}
+                          data-testid="text-open-position-pnl"
+                        >
+                          {formatUsdSigned(openUnrealizedPnl)}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground" data-testid="text-open-position-pnl">—</span>
+                      )}
+                    </div>
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span data-testid="text-open-position-entry">entry ${formatPrice(openDecision.entryPrice)}</span>
+                      <span data-testid="text-open-position-mark">
+                        {markPrice != null ? `mark $${formatPrice(markPrice)}` : 'mark —'}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-red-400" data-testid="text-open-position-sl">
+                        SL ${formatPrice(openDecision.stopLossPrice)}
+                      </span>
+                      <span className="text-emerald-400" data-testid="text-open-position-tp">
+                        TP ${formatPrice(openDecision.takeProfitPrice)}
                       </span>
                     </div>
                   </div>
