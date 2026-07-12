@@ -71,10 +71,10 @@ import { AiTraderDecisionChart } from './AiTraderDecisionChart';
 const DEGEN_CONFIRM_PHRASE = "send it";
 
 const DRAWER_MODELS = [
-  { id: "anthropic/claude-opus-4.8",  label: "Claude Opus 4.8",  roughCost: "~$0.10/call",  callCostUsd: 0.10 },
-  { id: "qwen/qwen3.7-max",           label: "Qwen3.7 Max",       roughCost: "~$0.003/call", callCostUsd: 0.003 },
-  { id: "deepseek/deepseek-v4-pro",   label: "DeepSeek V4 Pro",   roughCost: "~$0.002/call", callCostUsd: 0.002 },
-  { id: "deepseek/deepseek-v4-flash", label: "DeepSeek V4 Flash", roughCost: "<$0.001/call", callCostUsd: 0.001 },
+  { id: "anthropic/claude-opus-4.8",  label: "Claude Opus 4.8",  note: "Deepest judgment — suits 4h/1d conviction calls",            roughCost: "~$0.10/call",  callCostUsd: 0.10 },
+  { id: "qwen/qwen3.7-max",           label: "Qwen3.7 Max",       note: "Disciplined and cheap — built for frequent 15m/1h decisions", roughCost: "~$0.003/call", callCostUsd: 0.003 },
+  { id: "deepseek/deepseek-v4-pro",   label: "DeepSeek V4 Pro",   note: "Strong value all-rounder",                                   roughCost: "~$0.002/call", callCostUsd: 0.002 },
+  { id: "deepseek/deepseek-v4-flash", label: "DeepSeek V4 Flash", note: "Cheapest and fastest — good for simple ideas",              roughCost: "<$0.001/call", callCostUsd: 0.001 },
 ];
 
 const CANDLES_PER_DAY: Record<string, number> = { '15m': 96, '1h': 24, '4h': 6, '1d': 2 };
@@ -1176,26 +1176,44 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                   <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">AI Model</p>
                   <Select value={settingsModel} onValueChange={setSettingsModel}>
                     <SelectTrigger data-testid="settings-select-model">
-                      <SelectValue />
+                      {(() => {
+                        const m = DRAWER_MODELS.find(x => x.id === settingsModel);
+                        if (!m) return <SelectValue />;
+                        const isRec = recommendedModelId(bot.timeframe) === m.id;
+                        const costStr = bot.mode === 'auto'
+                          ? `${estimateDailyStr(m.callCostUsd, bot.timeframe)} · auto`
+                          : m.roughCost;
+                        return (
+                          <span className="flex items-center justify-between w-full gap-2 min-w-0">
+                            <span className="flex items-center gap-1.5 min-w-0">
+                              <span className="text-sm truncate">{m.label}</span>
+                              {isRec && (
+                                <span className="text-[9px] px-1 py-0.5 rounded-full border border-current/40 font-semibold uppercase tracking-wide leading-none whitespace-nowrap shrink-0">Rec</span>
+                              )}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground font-mono shrink-0">{costStr}</span>
+                          </span>
+                        );
+                      })()}
                     </SelectTrigger>
                     <SelectContent>
                       {DRAWER_MODELS.map((m) => {
                         const isRec = recommendedModelId(bot.timeframe) === m.id;
+                        const costStr = bot.mode === 'auto'
+                          ? `${estimateDailyStr(m.callCostUsd, bot.timeframe)} on ${bot.timeframe} · auto est.`
+                          : m.roughCost;
                         return (
                           <SelectItem key={m.id} value={m.id} data-testid={`settings-option-model-${m.id}`}>
-                            <div className="flex flex-col gap-0.5 py-0.5">
-                              <div className="flex items-center gap-2">
-                                <span className="font-medium">{m.label}</span>
+                            <span className="flex flex-col gap-0.5 py-1">
+                              <span className="flex items-center gap-1.5">
+                                <span className="font-medium text-sm">{m.label}</span>
                                 {isRec && (
-                                  <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-primary/15 text-primary font-semibold uppercase tracking-wide leading-none">Recommended</span>
+                                  <span className="text-[9px] px-1 py-0.5 rounded-full bg-current/10 border border-current/30 font-semibold uppercase tracking-wide leading-none whitespace-nowrap shrink-0">Rec</span>
                                 )}
-                              </div>
-                              <span className="text-[10px] text-muted-foreground font-mono">
-                                {bot.mode === 'auto'
-                                  ? `${estimateDailyStr(m.callCostUsd, bot.timeframe)} on ${bot.timeframe} · auto est.`
-                                  : m.roughCost}
                               </span>
-                            </div>
+                              <span className="text-[11px] opacity-70">{m.note}</span>
+                              <span className="text-[10px] opacity-60 font-mono">{costStr}</span>
+                            </span>
                           </SelectItem>
                         );
                       })}
