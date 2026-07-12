@@ -49,9 +49,10 @@ import { LlmKeyStatusRow } from '@/components/LlmKeyStatusRow';
 const DEGEN_CONFIRM_PHRASE = "send it";
 
 const SELECTABLE_MODELS = [
-  { id: "anthropic/claude-opus-4.8", label: "Claude Opus 4.8", note: "Peak reasoning — best for intricate, multi-condition logic." },
-  { id: "deepseek/deepseek-v4-pro", label: "DeepSeek V4 Pro", note: "Excellent value — capable on most strategies." },
-  { id: "deepseek/deepseek-v4-flash", label: "DeepSeek V4 Flash", note: "Cheapest and fastest — good for simple ideas." },
+  { id: "anthropic/claude-opus-4.8",   label: "Claude Opus 4.8",   note: "Peak reasoning — best for intricate, multi-condition logic.", roughCost: "~$0.10/call" },
+  { id: "qwen/qwen3.7-max",            label: "Qwen3.7 Max",        note: "Strong coding with independent provenance.",                  roughCost: "~$0.003/call" },
+  { id: "deepseek/deepseek-v4-pro",    label: "DeepSeek V4 Pro",    note: "Excellent value — capable on most strategies.",              roughCost: "~$0.002/call" },
+  { id: "deepseek/deepseek-v4-flash",  label: "DeepSeek V4 Flash",  note: "Cheapest and fastest — good for simple ideas.",             roughCost: "<$0.001/call" },
 ];
 
 const TIMEFRAMES = [
@@ -352,9 +353,12 @@ export function CreateAiTraderModal({
                 <SelectContent>
                   {SELECTABLE_MODELS.map(m => (
                     <SelectItem key={m.id} value={m.id} data-testid={`option-model-${m.id}`}>
-                      <div>
-                        <span className="font-medium">{m.label}</span>
-                        <span className="ml-2 text-muted-foreground text-xs">{m.note}</span>
+                      <div className="flex flex-col gap-0.5 py-0.5">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium">{m.label}</span>
+                          <span className="text-[10px] text-muted-foreground font-mono">{m.roughCost}</span>
+                        </div>
+                        <span className="text-[11px] text-muted-foreground">{m.note}</span>
                       </div>
                     </SelectItem>
                   ))}

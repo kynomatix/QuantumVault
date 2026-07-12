@@ -324,6 +324,11 @@ export function registerAiTraderRoutes(app: Express): void {
       type PnlBlock = { unrealizedPnl: number; pnlPct: number; totalPnl: number };
       const pnlMap = new Map<string, PnlBlock>();
 
+      // WO-8h item 1: lifetime stats for all bots in one batch query.
+      type LifetimeStats = { totalRealized: number; totalFees: number; totalLlmCost: number; netPnlAllIn: number };
+      const allBotIds = bots.map((b) => b.id);
+      const lifetimeStatsMap = await storage.getAiTraderBotLifetimeStats(allBotIds);
+
       const openBots = bots.filter((b) => b.status === "open");
       if (openBots.length > 0) {
         const openBotIds = openBots.map((b) => b.id);
@@ -376,7 +381,18 @@ export function registerAiTraderRoutes(app: Express): void {
         }
       }
 
-      res.json({ bots: bots.map((b) => ({ ...toBotDto(b), pnl: pnlMap.get(b.id) ?? null })) });
+      res.json({
+        bots: bots.map((b) => {
+          const raw = lifetimeStatsMap.get(b.id) ?? { totalRealized: 0, totalFees: 0, totalLlmCost: 0 };
+          const pnlBlock = pnlMap.get(b.id) ?? null;
+          const unrealized = pnlBlock?.unrealizedPnl ?? 0;
+          const lifetimeStats: LifetimeStats = {
+            ...raw,
+            netPnlAllIn: raw.totalRealized + unrealized - raw.totalLlmCost,
+          };
+          return { ...toBotDto(b), pnl: pnlBlock, lifetimeStats };
+        }),
+      });
     } catch (err) {
       console.error("[AiTrader] list error:", err);
       res.status(500).json({ error: "Internal server error" });
@@ -441,21 +457,30 @@ export function registerAiTraderRoutes(app: Express): void {
         }
       }
 
-      // PnL block (WO-8g) — same formula as the list route; detail has markPrice
-      // already, so no extra price fetch needed.
+      // PnL block (WO-8g) + lifetime stats (WO-8h item 1).
+      // Fetch lifetime stats once; they feed both the pnl block and the lifetimeStats field.
       let pnl: { unrealizedPnl: number; pnlPct: number; totalPnl: number } | null = null;
+      const rawStats = await storage.getAiTraderBotLifetimeStats([bot.id]);
+      const raw = rawStats.get(bot.id) ?? { totalRealized: 0, totalFees: 0, totalLlmCost: 0 };
+
       if (openPosition && markPrice !== null) {
         const unrealizedPnl = computeUnrealizedPnl(openPosition, markPrice);
         if (unrealizedPnl !== null) {
           const alloc = Number(bot.allocatedUsdc ?? 0);
           const pnlPct = alloc > 0 ? (unrealizedPnl / alloc) * 100 : 0;
-          const realizedMap = await storage.getAiTraderTotalRealizedPnlMap([bot.id]);
-          const totalRealized = realizedMap.get(bot.id) ?? 0;
-          pnl = { unrealizedPnl, pnlPct, totalPnl: totalRealized + unrealizedPnl };
+          pnl = { unrealizedPnl, pnlPct, totalPnl: raw.totalRealized + unrealizedPnl };
         }
       }
 
-      res.json({ bot: toBotDto(bot), openPosition, recentDecisions: decisions, markPrice, pnl });
+      const unrealized = pnl?.unrealizedPnl ?? 0;
+      const lifetimeStats = {
+        totalRealized: raw.totalRealized,
+        totalFees: raw.totalFees,
+        totalLlmCost: raw.totalLlmCost,
+        netPnlAllIn: raw.totalRealized + unrealized - raw.totalLlmCost,
+      };
+
+      res.json({ bot: toBotDto(bot), openPosition, recentDecisions: decisions, markPrice, pnl, lifetimeStats });
     } catch (err) {
       console.error("[AiTrader] get error:", err);
       res.status(500).json({ error: "Internal server error" });
@@ -473,6 +498,7 @@ export function registerAiTraderRoutes(app: Express): void {
         riskProfile: z.enum(["guarded", "degen"]).optional(),
         autoNext: z.boolean().optional(),
         degenConfirm: z.string().optional(),
+        model: z.string().optional(),
       });
       const parsed = patchSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -490,10 +516,19 @@ export function registerAiTraderRoutes(app: Express): void {
         }
       }
 
+      // Model change is gated to the curated catalog. The new model takes effect
+      // from the NEXT decision cycle — never mid-cycle — so no cycle-lock check needed.
+      if (body.model !== undefined) {
+        if (!isSelectableModel(body.model)) {
+          return res.status(400).json({ error: "Model is not in the approved catalog." });
+        }
+      }
+
       const updates: Record<string, unknown> = {};
       if (body.mode !== undefined) updates.mode = body.mode;
       if (body.riskProfile !== undefined) updates.riskProfile = body.riskProfile;
       if (body.autoNext !== undefined) updates.autoNext = body.autoNext;
+      if (body.model !== undefined) updates.model = body.model;
 
       if (Object.keys(updates).length === 0) {
         return res.status(400).json({ error: "No mutable fields provided." });

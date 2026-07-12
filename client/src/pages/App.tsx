@@ -3225,26 +3225,46 @@ export default function AppPage() {
                               <p className="text-xs text-muted-foreground">Max lev.</p>
                             </div>
                             <div className="p-2.5 rounded-lg bg-muted/30">
-                              {(aiBot as any).pnl != null ? (
-                                <>
-                                  <p className={`text-sm font-bold ${(aiBot as any).pnl.unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                    {(aiBot as any).pnl.unrealizedPnl >= 0 ? '+' : ''}${(aiBot as any).pnl.unrealizedPnl.toFixed(2)}
-                                  </p>
-                                  <div className="flex items-center gap-1 justify-center">
-                                    <p className="text-xs text-muted-foreground">Live P&L</p>
-                                    {!!aiBot.paperMode && (
-                                      <span className="text-[9px] px-1 rounded border border-amber-500/40 text-amber-400 leading-tight">PAPER</span>
-                                    )}
-                                  </div>
-                                </>
-                              ) : (
-                                <>
-                                  <p className={`text-sm font-bold ${dailyPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                    {dailyPnl >= 0 ? '+' : ''}${dailyPnl.toFixed(2)}
-                                  </p>
-                                  <p className="text-xs text-muted-foreground">Today P&L</p>
-                                </>
-                              )}
+                              {(() => {
+                                const ls = (aiBot as any).lifetimeStats;
+                                const net: number = ls?.netPnlAllIn ?? 0;
+                                const unrealizedForTip: number = (aiBot as any).pnl?.unrealizedPnl ?? 0;
+                                return (
+                                  <TooltipProvider>
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <div className="cursor-help">
+                                          <p className={`text-sm font-bold ${net >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                            {net >= 0 ? '+' : ''}${Math.abs(net).toFixed(2)}
+                                          </p>
+                                          <div className="flex items-center gap-1 justify-center">
+                                            <p className="text-xs text-muted-foreground">Net P&L</p>
+                                            {!!aiBot.paperMode && (
+                                              <span className="text-[9px] px-1 rounded border border-amber-500/40 text-amber-400 leading-tight">PAPER</span>
+                                            )}
+                                          </div>
+                                        </div>
+                                      </TooltipTrigger>
+                                      {ls && (
+                                        <TooltipContent className="text-xs space-y-1.5 p-2.5 min-w-[190px]">
+                                          <div className="flex justify-between gap-4">
+                                            <span className="text-muted-foreground">Closed P&L</span>
+                                            <span>{Number(ls.totalRealized) >= 0 ? '+' : ''}${Number(ls.totalRealized).toFixed(2)}</span>
+                                          </div>
+                                          <div className="flex justify-between gap-4">
+                                            <span className="text-muted-foreground">Live unrealized</span>
+                                            <span>{unrealizedForTip >= 0 ? '+' : ''}${unrealizedForTip.toFixed(2)}</span>
+                                          </div>
+                                          <div className="flex justify-between gap-4">
+                                            <span className="text-muted-foreground">AI spend</span>
+                                            <span>−${Number(ls.totalLlmCost).toFixed(4)}</span>
+                                          </div>
+                                        </TooltipContent>
+                                      )}
+                                    </Tooltip>
+                                  </TooltipProvider>
+                                );
+                              })()}
                             </div>
                           </div>
                         </div>

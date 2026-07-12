@@ -631,6 +631,7 @@ export interface IStorage {
   getAiTraderOpenDecisionsByBotIds(botIds: string[]): Promise<AiTraderDecision[]>;
   /** Per-bot sum of lifetime realized PnL from all closed executed decisions. Missing keys ⇒ 0. */
   getAiTraderTotalRealizedPnlMap(botIds: string[]): Promise<Map<string, number>>;
+  getAiTraderBotLifetimeStats(botIds: string[]): Promise<Map<string, { totalRealized: number; totalFees: number; totalLlmCost: number }>>;
   /**
    * Atomically claims one free platform-key paper trial for a wallet with no
    * BYO OpenRouter key. Returns the post-increment count when the wallet was
@@ -4571,6 +4572,36 @@ export class DatabaseStorage implements IStorage {
     const map = new Map<string, number>();
     for (const row of rows) {
       if (row.botId) map.set(row.botId, Number(row.total));
+    }
+    return map;
+  }
+
+  // WO-8h item 1: lifetime stats for Net P&L computation (one batch query for
+  // all bots of a user — totalRealized already net-of-fees, fees shown for info).
+  async getAiTraderBotLifetimeStats(
+    botIds: string[],
+  ): Promise<Map<string, { totalRealized: number; totalFees: number; totalLlmCost: number }>> {
+    if (botIds.length === 0) return new Map();
+    const rows = await db
+      .select({
+        botId: aiTraderDecisions.botId,
+        totalRealized: sql<string>`COALESCE(SUM(${aiTraderDecisions.realizedPnl}::numeric)
+          FILTER (WHERE ${aiTraderDecisions.outcome} = 'executed' AND ${aiTraderDecisions.closedAt} IS NOT NULL), 0)`,
+        totalFees: sql<string>`COALESCE(SUM(${aiTraderDecisions.feesPaid}::numeric), 0)`,
+        totalLlmCost: sql<string>`COALESCE(SUM(${aiTraderDecisions.llmCostUsd}::numeric), 0)`,
+      })
+      .from(aiTraderDecisions)
+      .where(inArray(aiTraderDecisions.botId, botIds))
+      .groupBy(aiTraderDecisions.botId);
+    const map = new Map<string, { totalRealized: number; totalFees: number; totalLlmCost: number }>();
+    for (const row of rows) {
+      if (row.botId) {
+        map.set(row.botId, {
+          totalRealized: Number(row.totalRealized),
+          totalFees: Number(row.totalFees),
+          totalLlmCost: Number(row.totalLlmCost),
+        });
+      }
     }
     return map;
   }

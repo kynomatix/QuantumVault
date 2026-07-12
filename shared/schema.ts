@@ -2061,6 +2061,7 @@ export const aiTraderDecisions = pgTable("ai_trader_decisions", {
   feesPaid: decimal("fees_paid", { precision: 20, scale: 6 }),
   llmCostUsd: decimal("llm_cost_usd", { precision: 10, scale: 6 }),
   llmLatencyMs: integer("llm_latency_ms"),
+  modelUsed: text("model_used"),
   decidedAt: timestamp("decided_at").defaultNow(),
   closedAt: timestamp("closed_at"),
 }, (table) => [

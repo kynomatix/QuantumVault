@@ -389,6 +389,7 @@ async function finalizeDecision(args: {
     outcome,
     llmCostUsd,
     llmLatencyMs: latencyMs,
+    modelUsed: bot.model,
   });
 
   return {

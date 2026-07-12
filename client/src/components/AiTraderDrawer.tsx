@@ -55,6 +55,13 @@ import {
 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
 import { useToast } from '@/hooks/use-toast';
@@ -62,6 +69,13 @@ import { AiTraderDecisionCard, violationChipLabels, type AiDecisionRow } from '.
 import { AiTraderDecisionChart } from './AiTraderDecisionChart';
 
 const DEGEN_CONFIRM_PHRASE = "send it";
+
+const DRAWER_MODELS = [
+  { id: "anthropic/claude-opus-4.8",  label: "Claude Opus 4.8",  roughCost: "~$0.10/call" },
+  { id: "qwen/qwen3.7-max",           label: "Qwen3.7 Max",       roughCost: "~$0.003/call" },
+  { id: "deepseek/deepseek-v4-pro",   label: "DeepSeek V4 Pro",   roughCost: "~$0.002/call" },
+  { id: "deepseek/deepseek-v4-flash", label: "DeepSeek V4 Flash", roughCost: "<$0.001/call" },
+] as const;
 
 // Mirrors BotManagementDrawer's formatPrice/formatUsdSigned — kept local since
 // they aren't exported, so precision stays correct for low-priced markets
@@ -151,6 +165,7 @@ interface ChartTarget {
   closedAt: string | number | null;
   markPrice: number | null;
   unrealizedPnl: number | null;
+  sizeBase: number | null;
 }
 
 function outcomeLabel(outcome: string | null): { label: string; className: string; icon: React.ReactNode } {
@@ -369,6 +384,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   const [settingsRisk, setSettingsRisk] = useState('guarded');
   const [settingsAutoNext, setSettingsAutoNext] = useState(false);
   const [settingsDegenConfirm, setSettingsDegenConfirm] = useState('');
+  const [settingsModel, setSettingsModel] = useState('deepseek/deepseek-v4-pro');
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [chartTarget, setChartTarget] = useState<ChartTarget | null>(null);
 
@@ -457,13 +473,14 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
     ? history[0]
     : null;
 
-  // Sync editable settings local state whenever the active bot changes (WO-8e).
+  // Sync editable settings local state whenever the active bot changes (WO-8e/8h).
   useEffect(() => {
     if (bot) {
       setSettingsMode(bot.mode);
       setSettingsRisk(bot.riskProfile);
       setSettingsAutoNext(bot.autoNext);
       setSettingsDegenConfirm('');
+      setSettingsModel(bot.model);
     }
   }, [bot?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -475,6 +492,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
         mode: settingsMode,
         riskProfile: settingsRisk,
         autoNext: settingsAutoNext,
+        model: settingsModel,
       };
       if (settingsRisk === 'degen' && bot.riskProfile !== 'degen') {
         body.degenConfirm = settingsDegenConfirm.trim().toLowerCase();
@@ -520,6 +538,10 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
     }
     return alloc > 0 ? (dd / alloc) * 100 : 0;
   })();
+
+  // WO-8h item 1: net P&L = server-computed lifetimeStats with client fallback.
+  const lifetimeStats = (detail as any)?.lifetimeStats ?? null;
+  const netPnlAllIn: number = lifetimeStats?.netPnlAllIn ?? (netPnl + (openUnrealizedPnl ?? 0) - totalLlmCost);
 
   const degenDaysAlive = bot ? Math.floor((Date.now() - new Date(bot.createdAt ?? Date.now()).getTime()) / 86400000) : 0;
   const degenRemaining = alloc + netPnl;
@@ -839,6 +861,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                           closedAt: null,
                           markPrice: markPrice,
                           unrealizedPnl: openUnrealizedPnl,
+                          sizeBase: openDecision.sizeBase ?? null,
                         })}
                         data-testid="button-view-chart-open-position"
                       >
@@ -932,6 +955,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                                   closedAt: d.closedAt ?? null,
                                   markPrice: null,
                                   unrealizedPnl: null,
+                                  sizeBase: null,
                                 });
                               }}
                               data-testid={`button-view-chart-${d.id}`}
@@ -948,20 +972,48 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
               </TabsContent>
 
               <TabsContent value="track-record" className="space-y-4 mt-3">
+                {/* Net P&L headline — WO-8h item 1 */}
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div
+                        className={`p-4 rounded-xl border cursor-help ${netPnlAllIn >= 0 ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-red-500/10 border-red-500/20'}`}
+                        data-testid="track-record-net-pnl"
+                      >
+                        <p className="text-xs text-muted-foreground">Net P&L (closed + live − AI cost)</p>
+                        <p className={`text-2xl font-bold mt-0.5 ${netPnlAllIn >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {netPnlAllIn >= 0 ? '+' : ''}${Math.abs(netPnlAllIn).toFixed(2)}
+                        </p>
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent className="text-xs space-y-1.5 p-3 min-w-[200px]">
+                      <div className="flex justify-between gap-4">
+                        <span className="text-muted-foreground">Closed P&L (fees in)</span>
+                        <span>{netPnl >= 0 ? '+' : ''}${netPnl.toFixed(2)}</span>
+                      </div>
+                      <div className="flex justify-between gap-4">
+                        <span className="text-muted-foreground">Live unrealized</span>
+                        <span>{openUnrealizedPnl != null ? `${openUnrealizedPnl >= 0 ? '+' : ''}$${openUnrealizedPnl.toFixed(2)}` : '$0.00'}</span>
+                      </div>
+                      <div className="flex justify-between gap-4">
+                        <span className="text-muted-foreground">AI spend</span>
+                        <span>−${totalLlmCost.toFixed(4)}</span>
+                      </div>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+
                 <div className="grid grid-cols-2 gap-3">
                   {[
                     { label: 'Win rate', value: winRate !== null ? `${winRate}%` : '—' },
-                    { label: 'Closed trades', value: tradesCount },
-                    { label: openUnrealizedPnl !== null ? 'Closed P&L' : 'Net P&L', value: `${netPnl >= 0 ? '+' : ''}$${netPnl.toFixed(2)}`, colored: true, pnl: netPnl },
+                    { label: 'Closed trades', value: String(tradesCount) },
                     { label: 'Max drawdown', value: maxDdPct > 0 ? `${maxDdPct.toFixed(1)}%` : '—' },
                     { label: 'Fees paid', value: `$${totalFees.toFixed(4)}` },
                     { label: 'AI cost', value: `$${totalLlmCost.toFixed(4)}` },
                   ].map((item) => (
                     <div key={item.label} className="p-3 rounded-xl bg-muted/30 space-y-0.5">
                       <p className="text-xs text-muted-foreground">{item.label}</p>
-                      <p className={`text-lg font-bold ${item.colored ? (item.pnl! >= 0 ? 'text-emerald-400' : 'text-red-400') : ''}`}>
-                        {item.value}
-                      </p>
+                      <p className="text-lg font-bold">{item.value}</p>
                     </div>
                   ))}
                 </div>
@@ -1105,6 +1157,27 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                   />
                 </div>
 
+                {/* Editable: Model (WO-8h item 4) */}
+                <div className="space-y-1.5">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">AI Model</p>
+                  <Select value={settingsModel} onValueChange={setSettingsModel}>
+                    <SelectTrigger data-testid="settings-select-model">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {DRAWER_MODELS.map((m) => (
+                        <SelectItem key={m.id} value={m.id} data-testid={`settings-option-model-${m.id}`}>
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium">{m.label}</span>
+                            <span className="text-[10px] text-muted-foreground font-mono">{m.roughCost}</span>
+                          </div>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-[10px] text-muted-foreground">Takes effect from the next decision cycle.</p>
+                </div>
+
                 {/* Read-only: locked policy fields */}
                 <div className="rounded-xl border border-border bg-card/40 divide-y divide-border/50" data-testid="settings-policy">
                   {([
@@ -1112,7 +1185,6 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     { label: 'Exchange', value: bot.protocol, locked: false },
                     { label: 'Timeframe', value: bot.timeframe, locked: false },
                     { label: 'Max leverage', value: `${bot.maxLeverage}×`, locked: true },
-                    { label: 'Model', value: bot.model.split('/').pop() ?? bot.model, locked: false },
                   ] as { label: string; value: string; locked: boolean }[]).map((row) => (
                     <div key={row.label} className="flex items-center justify-between px-3 py-2.5">
                       <span className="text-muted-foreground text-xs flex items-center gap-1">
@@ -1137,7 +1209,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
 
                 {/* Save button */}
                 {(() => {
-                  const changed = settingsMode !== bot.mode || settingsRisk !== bot.riskProfile || settingsAutoNext !== bot.autoNext;
+                  const changed = settingsMode !== bot.mode || settingsRisk !== bot.riskProfile || settingsAutoNext !== bot.autoNext || settingsModel !== bot.model;
                   const needsDegenConfirm = settingsRisk === 'degen' && bot.riskProfile !== 'degen';
                   const degenOk = !needsDegenConfirm || settingsDegenConfirm.trim().toLowerCase() === DEGEN_CONFIRM_PHRASE;
                   return (
@@ -1232,6 +1304,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
               closedAt={chartTarget?.closedAt ?? null}
               markPrice={chartTarget?.markPrice ?? null}
               unrealizedPnl={chartTarget?.unrealizedPnl ?? null}
+              sizeBase={chartTarget?.sizeBase ?? null}
             />
           </>
         )}

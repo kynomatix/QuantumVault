@@ -742,6 +742,16 @@ export async function ensureSchema() {
       `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS bot_subaccount_key_encrypted_v3 text`,
       `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS derivation_index integer`,
       `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS derivation_path_version integer`,
+
+      // WO-8h item 3: model attribution on every decision row (stamps the model
+      // used at decision time so track records stay attributable when models change
+      // mid-flight). Backfill existing rows from the bot's current model.
+      `ALTER TABLE ai_trader_decisions ADD COLUMN IF NOT EXISTS model_used text`,
+      `UPDATE ai_trader_decisions d
+         SET model_used = b.model
+         FROM ai_trader_bots b
+         WHERE d.bot_id = b.id
+           AND d.model_used IS NULL`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner
