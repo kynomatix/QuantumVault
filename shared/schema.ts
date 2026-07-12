@@ -2085,6 +2085,30 @@ export const insertAiTraderDecisionSchema = createInsertSchema(aiTraderDecisions
 export type AiTraderDecision = typeof aiTraderDecisions.$inferSelect;
 export type InsertAiTraderDecision = z.infer<typeof insertAiTraderDecisionSchema>;
 
+// COT-A: CFTC Bitcoin Legacy futures-only COT positioning cache.
+// One row per weekly CFTC release. Single global BTC signal serving the whole fleet.
+// Phase B: the context-builder will inject: cotSignal: { state, commIndex, dumbIndex, reportDate }
+// from the latest snapshot into each decision's contextDigest.
+export const cotSnapshots = pgTable("cot_snapshots", {
+  id: serial("id").primaryKey(),
+  reportDate: text("report_date").notNull().unique(),        // YYYY-MM-DD (stored as text; DDL uses date)
+  commercialNet: integer("commercial_net").notNull(),        // comm long - comm short (smart money net)
+  noncommNet: integer("noncomm_net").notNull(),              // non-commercial net
+  nonreptNet: integer("nonrept_net").notNull(),              // non-reportable net
+  dumbNet: integer("dumb_net").notNull(),                    // noncomm + nonrept combined (dumb money net)
+  commIndex: decimal("comm_index", { precision: 6, scale: 2 }),    // smart line (0–100), null if window < 120
+  noncommIndex: decimal("noncomm_index", { precision: 6, scale: 2 }), // for transparency
+  nonreptIndex: decimal("nonrept_index", { precision: 6, scale: 2 }), // for transparency
+  dumbIndex: decimal("dumb_index", { precision: 6, scale: 2 }),    // dumb line (0–100), null if window < 120
+  state: text("state").notNull().default("insufficient_data"),
+  // 'bullish_flip' | 'bearish_flip' | 'neutral' | 'insufficient_data'
+  weeksInWindow: integer("weeks_in_window").notNull().default(0),  // < 120 → indices are null
+  fetchedAt: timestamp("fetched_at").notNull().defaultNow(),
+}, (table) => [
+  index("idx_cot_snapshots_report_date").on(table.reportDate),
+]);
+export type CotSnapshotRow = typeof cotSnapshots.$inferSelect;
+
 export const labOptimizationConfigSchema = z.object({
   pineScript: z.string().min(1),
   parsedInputs: z.array(z.any()),

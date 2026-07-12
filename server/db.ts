@@ -752,6 +752,26 @@ export async function ensureSchema() {
          FROM ai_trader_bots b
          WHERE d.bot_id = b.id
            AND d.model_used IS NULL`,
+
+      // COT-A: CFTC Bitcoin Legacy futures-only COT positioning cache.
+      // Idempotent startup DDL — never db:push. Single global BTC signal, one row per
+      // weekly CFTC release. report_date is a date column held as text in Drizzle.
+      `CREATE TABLE IF NOT EXISTS cot_snapshots (
+        id serial PRIMARY KEY,
+        report_date date NOT NULL UNIQUE,
+        commercial_net integer NOT NULL,
+        noncomm_net integer NOT NULL,
+        nonrept_net integer NOT NULL,
+        dumb_net integer NOT NULL,
+        comm_index numeric(6,2),
+        noncomm_index numeric(6,2),
+        nonrept_index numeric(6,2),
+        dumb_index numeric(6,2),
+        state text NOT NULL DEFAULT 'insufficient_data',
+        weeks_in_window integer NOT NULL DEFAULT 0,
+        fetched_at timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_cot_snapshots_report_date ON cot_snapshots (report_date DESC)`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner
