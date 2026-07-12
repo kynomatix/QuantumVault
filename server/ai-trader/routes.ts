@@ -47,7 +47,7 @@ import { buildMarketContext, marketToDatafeedTicker } from "./context-builder";
 import { fetchOHLCV } from "../lab/datafeed";
 import { runDecision } from "./decide";
 import { executeDecision, aiTraderPolicyObject } from "./executor";
-import { userInitiatedClose, parseOpenDecision } from "./monitor";
+import { userInitiatedClose, parseOpenDecision, computeUnrealizedPnl } from "./monitor";
 import { sanitizeGraduationCriteria, canGoLive } from "./graduation";
 import type { ClampedDecision } from "./guardrails";
 
@@ -315,7 +315,68 @@ export function registerAiTraderRoutes(app: Express): void {
   app.get("/api/ai-trader", requireWallet, async (req: any, res) => {
     try {
       const bots = await storage.getAiTraderBotsByWallet(req.walletAddress);
-      res.json({ bots: bots.map(toBotDto) });
+
+      // --- PnL blocks (WO-8g) ----------------------------------------------------------
+      // For every bot that currently has an open position, compute a server-side
+      // display-grade PnL block.  Prices are fetched ONCE per unique market (shared
+      // across all bots trading the same ticker) and fail-open to null — a single
+      // stale price feed must never block the whole list.
+      type PnlBlock = { unrealizedPnl: number; pnlPct: number; totalPnl: number };
+      const pnlMap = new Map<string, PnlBlock>();
+
+      const openBots = bots.filter((b) => b.status === "open");
+      if (openBots.length > 0) {
+        const openBotIds = openBots.map((b) => b.id);
+
+        const [openDecisions, realizedMap] = await Promise.all([
+          storage.getAiTraderOpenDecisionsByBotIds(openBotIds),
+          storage.getAiTraderTotalRealizedPnlMap(openBotIds),
+        ]);
+
+        // Deduplicate: one price fetch per unique (protocol, market) pair so two
+        // bots on the same ticker but different venues each get the right price.
+        const protoMarketKey = (bot: AiTraderBot) => `${bot.protocol ?? ''}:${bot.market}`;
+        const marketToBot = new Map<string, AiTraderBot>();
+        for (const bot of openBots) {
+          const key = protoMarketKey(bot);
+          if (!marketToBot.has(key)) marketToBot.set(key, bot);
+        }
+        const priceCache = new Map<string, number | null>();
+        await Promise.all(
+          [...marketToBot.entries()].map(async ([key, bot]) => {
+            try {
+              const p = await getAdapter(bot.protocol).getPrice(bot.market);
+              // Reject zero/negative prices — treat as unavailable.
+              priceCache.set(key, p !== null && Number.isFinite(p) && p > 0 ? p : null);
+            } catch {
+              priceCache.set(key, null);
+            }
+          }),
+        );
+
+        // Index open decisions by botId.
+        const decByBot = new Map<string, (typeof openDecisions)[0]>();
+        for (const d of openDecisions) {
+          if (d.botId) decByBot.set(d.botId, d);
+        }
+
+        for (const bot of openBots) {
+          const dec = decByBot.get(bot.id);
+          if (!dec) continue;
+          const view = parseOpenDecision([dec]);
+          if (!view) continue;
+          const mark = priceCache.get(protoMarketKey(bot)) ?? null;
+          if (mark === null) continue;
+          const unrealizedPnl = computeUnrealizedPnl(view, mark);
+          if (unrealizedPnl === null) continue;
+          const alloc = Number(bot.allocatedUsdc ?? 0);
+          const pnlPct = alloc > 0 ? (unrealizedPnl / alloc) * 100 : 0;
+          const totalRealized = realizedMap.get(bot.id) ?? 0;
+          pnlMap.set(bot.id, { unrealizedPnl, pnlPct, totalPnl: totalRealized + unrealizedPnl });
+        }
+      }
+
+      res.json({ bots: bots.map((b) => ({ ...toBotDto(b), pnl: pnlMap.get(b.id) ?? null })) });
     } catch (err) {
       console.error("[AiTrader] list error:", err);
       res.status(500).json({ error: "Internal server error" });
@@ -380,7 +441,21 @@ export function registerAiTraderRoutes(app: Express): void {
         }
       }
 
-      res.json({ bot: toBotDto(bot), openPosition, recentDecisions: decisions, markPrice });
+      // PnL block (WO-8g) — same formula as the list route; detail has markPrice
+      // already, so no extra price fetch needed.
+      let pnl: { unrealizedPnl: number; pnlPct: number; totalPnl: number } | null = null;
+      if (openPosition && markPrice !== null) {
+        const unrealizedPnl = computeUnrealizedPnl(openPosition, markPrice);
+        if (unrealizedPnl !== null) {
+          const alloc = Number(bot.allocatedUsdc ?? 0);
+          const pnlPct = alloc > 0 ? (unrealizedPnl / alloc) * 100 : 0;
+          const realizedMap = await storage.getAiTraderTotalRealizedPnlMap([bot.id]);
+          const totalRealized = realizedMap.get(bot.id) ?? 0;
+          pnl = { unrealizedPnl, pnlPct, totalPnl: totalRealized + unrealizedPnl };
+        }
+      }
+
+      res.json({ bot: toBotDto(bot), openPosition, recentDecisions: decisions, markPrice, pnl });
     } catch (err) {
       console.error("[AiTrader] get error:", err);
       res.status(500).json({ error: "Internal server error" });

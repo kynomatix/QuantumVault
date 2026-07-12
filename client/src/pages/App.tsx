@@ -3225,10 +3225,26 @@ export default function AppPage() {
                               <p className="text-xs text-muted-foreground">Max lev.</p>
                             </div>
                             <div className="p-2.5 rounded-lg bg-muted/30">
-                              <p className={`text-sm font-bold ${dailyPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                {dailyPnl >= 0 ? '+' : ''}${dailyPnl.toFixed(2)}
-                              </p>
-                              <p className="text-xs text-muted-foreground">Today P&L</p>
+                              {(aiBot as any).pnl != null ? (
+                                <>
+                                  <p className={`text-sm font-bold ${(aiBot as any).pnl.unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                    {(aiBot as any).pnl.unrealizedPnl >= 0 ? '+' : ''}${(aiBot as any).pnl.unrealizedPnl.toFixed(2)}
+                                  </p>
+                                  <div className="flex items-center gap-1 justify-center">
+                                    <p className="text-xs text-muted-foreground">Live P&L</p>
+                                    {!!aiBot.paperMode && (
+                                      <span className="text-[9px] px-1 rounded border border-amber-500/40 text-amber-400 leading-tight">PAPER</span>
+                                    )}
+                                  </div>
+                                </>
+                              ) : (
+                                <>
+                                  <p className={`text-sm font-bold ${dailyPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                    {dailyPnl >= 0 ? '+' : ''}${dailyPnl.toFixed(2)}
+                                  </p>
+                                  <p className="text-xs text-muted-foreground">Today P&L</p>
+                                </>
+                              )}
                             </div>
                           </div>
                         </div>

@@ -434,9 +434,21 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   const bot = detail?.bot ?? null;
   const openDecision = detail?.openPosition ?? null;
   const markPrice = detail?.markPrice ?? null;
-  const openUnrealizedPnl = openDecision && markPrice != null
-    ? (markPrice - openDecision.entryPrice) * openDecision.sizeBase * (openDecision.side === 'long' ? 1 : -1)
-    : null;
+  // Prefer the server-computed pnl block (uses the single shared formula and
+  // includes accurate lifetime totals from the DB aggregate).  Fall back to
+  // client-side MTM only when the block is absent — price feed unavailable,
+  // stale cache entry, or pre-WO-8g response.
+  const serverPnl = (detail as any)?.pnl ?? null;
+  const openUnrealizedPnl: number | null = serverPnl?.unrealizedPnl != null
+    ? (serverPnl.unrealizedPnl as number)
+    : (openDecision && markPrice != null
+        ? (markPrice - openDecision.entryPrice) * openDecision.sizeBase * (openDecision.side === 'long' ? 1 : -1)
+        : null);
+  const openPnlPct: number | null = serverPnl?.pnlPct != null
+    ? (serverPnl.pnlPct as number)
+    : (openUnrealizedPnl !== null && Number(bot?.allocatedUsdc ?? 0) > 0
+        ? (openUnrealizedPnl / Number(bot!.allocatedUsdc)) * 100
+        : null);
   // The unresolved decision awaiting user action while status === 'proposed'.
   // NOT the same object as openDecision — parseOpenDecision (server) only ever
   // returns an already-executed, still-open position, so it is always null in
@@ -786,9 +798,19 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     </div>
                     <div className="flex items-center justify-between text-xs text-muted-foreground">
                       <span data-testid="text-open-position-entry">entry ${formatPrice(openDecision.entryPrice)}</span>
-                      <span data-testid="text-open-position-mark">
-                        {markPrice != null ? `mark $${formatPrice(markPrice)}` : 'mark —'}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        {openPnlPct !== null && (
+                          <span
+                            className={openPnlPct >= 0 ? 'text-emerald-400' : 'text-red-400'}
+                            data-testid="text-open-position-pnl-pct"
+                          >
+                            {openPnlPct >= 0 ? '+' : ''}{openPnlPct.toFixed(2)}%
+                          </span>
+                        )}
+                        <span data-testid="text-open-position-mark">
+                          {markPrice != null ? `mark $${formatPrice(markPrice)}` : 'mark —'}
+                        </span>
+                      </div>
                     </div>
                     <div className="flex items-center justify-between text-xs">
                       <span className="text-red-400" data-testid="text-open-position-sl">
@@ -930,7 +952,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                   {[
                     { label: 'Win rate', value: winRate !== null ? `${winRate}%` : '—' },
                     { label: 'Closed trades', value: tradesCount },
-                    { label: 'Net P&L', value: `${netPnl >= 0 ? '+' : ''}$${netPnl.toFixed(2)}`, colored: true, pnl: netPnl },
+                    { label: openUnrealizedPnl !== null ? 'Closed P&L' : 'Net P&L', value: `${netPnl >= 0 ? '+' : ''}$${netPnl.toFixed(2)}`, colored: true, pnl: netPnl },
                     { label: 'Max drawdown', value: maxDdPct > 0 ? `${maxDdPct.toFixed(1)}%` : '—' },
                     { label: 'Fees paid', value: `$${totalFees.toFixed(4)}` },
                     { label: 'AI cost', value: `$${totalLlmCost.toFixed(4)}` },
@@ -943,6 +965,30 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     </div>
                   ))}
                 </div>
+
+                {openUnrealizedPnl !== null && (
+                  <div
+                    className={`p-3 rounded-xl border space-y-0.5 ${openUnrealizedPnl >= 0 ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-red-500/10 border-red-500/20'}`}
+                    data-testid="track-record-live-unrealized"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <p className="text-xs text-muted-foreground">Live unrealized</p>
+                      {!!bot.paperMode && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/50 text-amber-400 font-medium">PAPER</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <p className={`text-lg font-bold ${openUnrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {openUnrealizedPnl >= 0 ? '+' : ''}${openUnrealizedPnl.toFixed(2)}
+                      </p>
+                      {openPnlPct !== null && (
+                        <p className={`text-sm font-medium ${openPnlPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          ({openPnlPct >= 0 ? '+' : ''}{openPnlPct.toFixed(2)}%)
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {bot.riskProfile === 'degen' && alloc > 0 && (
                   <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center gap-3" data-testid="degen-survival">

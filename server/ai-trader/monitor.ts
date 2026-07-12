@@ -174,6 +174,35 @@ export function parseOpenDecision(decisions: AiTraderDecision[]): OpenDecisionVi
   };
 }
 
+/**
+ * Display-grade mark-to-market for an open paper or live position.
+ *
+ * Shared by the list-route and detail-route PnL DTO blocks so both endpoints
+ * use the same arithmetic. The monitor's internal G7 breaker and graduation
+ * sweep keep their own inline copies — different input sources, different call
+ * sites — so do not attempt to unify them here.
+ *
+ * Returns null when:
+ *   - entryPrice is null (live bot pre-reconciliation) or ≤ 0 (bad data)
+ *   - markPrice is non-finite or ≤ 0 (price feed unavailable)
+ *   - sizeBase is non-positive (invalid view)
+ */
+export function computeUnrealizedPnl(view: OpenDecisionView, markPrice: number): number | null {
+  if (
+    view.entryPrice === null ||
+    !Number.isFinite(view.entryPrice) ||
+    view.entryPrice <= 0 ||
+    !Number.isFinite(markPrice) ||
+    markPrice <= 0 ||
+    !Number.isFinite(view.sizeBase) ||
+    view.sizeBase <= 0
+  ) {
+    return null;
+  }
+  const direction = view.side === "long" ? 1 : -1;
+  return (markPrice - view.entryPrice) * view.sizeBase * direction;
+}
+
 // --- Live exit classification (pure, exported for tests) --------------------------------
 
 /**

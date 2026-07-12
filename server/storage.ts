@@ -627,6 +627,10 @@ export interface IStorage {
   // WO-7 additions.
   getAiTraderDecision(id: string): Promise<AiTraderDecision | undefined>;
   deleteAiTraderBot(id: string): Promise<void>;
+  /** Batch-fetch open (outcome='executed', closedAt IS NULL) decisions for multiple bots at once. Used by the PnL list endpoint to avoid N+1 price fetches. Returns at most one row per bot. */
+  getAiTraderOpenDecisionsByBotIds(botIds: string[]): Promise<AiTraderDecision[]>;
+  /** Per-bot sum of lifetime realized PnL from all closed executed decisions. Missing keys ⇒ 0. */
+  getAiTraderTotalRealizedPnlMap(botIds: string[]): Promise<Map<string, number>>;
   /**
    * Atomically claims one free platform-key paper trial for a wallet with no
    * BYO OpenRouter key. Returns the post-increment count when the wallet was
@@ -4532,6 +4536,43 @@ export class DatabaseStorage implements IStorage {
 
   async deleteAiTraderBot(id: string): Promise<void> {
     await db.delete(aiTraderBots).where(eq(aiTraderBots.id, id));
+  }
+
+  async getAiTraderOpenDecisionsByBotIds(botIds: string[]): Promise<AiTraderDecision[]> {
+    if (botIds.length === 0) return [];
+    return db
+      .select()
+      .from(aiTraderDecisions)
+      .where(
+        and(
+          inArray(aiTraderDecisions.botId, botIds),
+          eq(aiTraderDecisions.outcome, "executed"),
+          isNull(aiTraderDecisions.closedAt),
+        ),
+      );
+  }
+
+  async getAiTraderTotalRealizedPnlMap(botIds: string[]): Promise<Map<string, number>> {
+    if (botIds.length === 0) return new Map();
+    const rows = await db
+      .select({
+        botId: aiTraderDecisions.botId,
+        total: sql<string>`COALESCE(SUM(${aiTraderDecisions.realizedPnl}::numeric), 0)`,
+      })
+      .from(aiTraderDecisions)
+      .where(
+        and(
+          inArray(aiTraderDecisions.botId, botIds),
+          isNotNull(aiTraderDecisions.closedAt),
+          eq(aiTraderDecisions.outcome, "executed"),
+        ),
+      )
+      .groupBy(aiTraderDecisions.botId);
+    const map = new Map<string, number>();
+    for (const row of rows) {
+      if (row.botId) map.set(row.botId, Number(row.total));
+    }
+    return map;
   }
 
   async incrementAiTraderFreeCalls(walletAddress: string, limit: number): Promise<number | null> {
