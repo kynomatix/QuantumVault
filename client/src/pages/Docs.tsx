@@ -40,7 +40,12 @@ type DocSection =
   | 'quantumlab-results'
   | 'quantumlab-insights'
   | 'lab-assistant'
-  | 'quantumlab-agent-api';
+  | 'quantumlab-agent-api'
+  | 'ai-trader-overview'
+  | 'ai-trader-trials'
+  | 'ai-trader-modes'
+  | 'ai-trader-models'
+  | 'ai-trader-faq';
 
 interface NavItem {
   id: DocSection;
@@ -60,6 +65,11 @@ const navItems: NavItem[] = [
   { id: 'security', label: 'Security', icon: Shield },
   { id: 'trade-execution', label: 'Trade Execution', icon: Zap },
   { id: 'ai-agents', label: 'AI Agent Integration', icon: Cpu },
+  { id: 'ai-trader-overview', label: 'AI Trader', icon: Bot },
+  { id: 'ai-trader-trials', label: 'Paper Trials & Graduation', icon: TestTube2 },
+  { id: 'ai-trader-modes', label: 'Modes & Risk Profiles', icon: SlidersHorizontal },
+  { id: 'ai-trader-models', label: 'Models & Costs', icon: DollarSign },
+  { id: 'ai-trader-faq', label: 'AI Trader FAQ', icon: BookOpen },
   { id: 'vaults-overview', label: 'Vaults Overview', icon: Landmark },
   { id: 'vaults-destinations', label: 'Stable Vaults', icon: Coins },
   { id: 'vaults-safety', label: 'Safety & Funding', icon: ShieldCheck },
@@ -3825,6 +3835,314 @@ GET /api/lab/strategies/:id/insights-reports`} language="http" />
   );
 }
 
+function AiTraderOverviewSection() {
+  return (
+    <div>
+      <SectionHeading>AI Trader</SectionHeading>
+      <Paragraph>
+        AI Trader is QuantumVault's built-in autonomous trading agent. Instead of writing signals or connecting TradingView, an AI model watches the market, decides whether to go long, short, or flat, and places a bracketed order — entry + stop-loss + take-profit — on your chosen exchange. Between trades it waits for the next candle close and decides again.
+      </Paragraph>
+
+      <Alert type="success">
+        Every bot starts in <strong>paper mode</strong>. It tracks every hypothetical trade, simulates fills conservatively, and requires a passing paper record before the live toggle unlocks. No real money moves until you choose to fund it after graduation.
+      </Alert>
+
+      <SubHeading>How It Decides</SubHeading>
+      <Paragraph>
+        At each analysis cycle the bot builds a market context package and sends it to the AI model:
+      </Paragraph>
+      <ul className="space-y-2 mb-6 text-white/70 text-sm leading-relaxed">
+        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Candles</strong> — last 100 bars of the selected timeframe plus 30 bars of the timeframe above for broader trend context</span></li>
+        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Indicators</strong> — EMA 20/50/200, RSI, MACD, ATR, ADX, Bollinger Bands, VWAP, OBV — values plus short recent deltas</span></li>
+        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Market microstate</strong> — mark price, funding rate (current + next), open interest trend, 24h volume</span></li>
+        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Account state</strong> — allocated collateral, any open position, unrealized PnL</span></li>
+        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Bot's last 10 closed trades</strong> — so the AI can learn from its own mistakes and avoid repeating them</span></li>
+      </ul>
+      <Paragraph>
+        The AI returns a structured decision — not prose. It specifies direction, leverage, size, stop-loss price, take-profit price, a confidence score (1–10), and a plain-English rationale. The rationale is shown verbatim in the decision card: it is what the bot "thought" and is the primary trust surface.
+      </Paragraph>
+      <Alert type="info">
+        <strong>Flat is a valid decision.</strong> "No trade" is fully supported and common. The bot is evaluated on risk-adjusted return net of fees, not on activity. A flat decision in Auto mode schedules the next analysis at the next candle close and does nothing else.
+      </Alert>
+
+      <SubHeading>The Decision Card</SubHeading>
+      <Paragraph>
+        Each decision renders as a card showing: direction and entry type (e.g. LONG at market), stop-loss price and distance %, take-profit price and distance %, leverage, size as a percentage of allocation, risk/reward ratio, confidence score, and the model's rationale verbatim. In Suggest mode you choose Execute, Skip, or Ask Again. In Auto mode the decision executes immediately and is logged for review.
+      </Paragraph>
+
+      <SubHeading>Hard Guardrails</SubHeading>
+      <Paragraph>
+        Every decision passes through code-enforced guardrails before any order is placed. The AI's output is a request; the guardrail layer decides what executes. These are always active in both risk profiles:
+      </Paragraph>
+      <div className="space-y-3 mb-6">
+        {[
+          { label: 'Mandatory stop-loss', desc: 'Every trade must have a stop-loss on the correct side, within a timeframe-appropriate distance band. No exceptions.' },
+          { label: 'SL verification after entry', desc: 'After an entry fills, the bracket (SL + TP) is verified on the exchange with a bounded retry. If the bracket cannot be confirmed, the position is immediately closed at market and the bot pauses. A naked position is never held, even briefly.' },
+          { label: 'Minimum risk/reward', desc: 'TP must deliver at least 1.2× risk after fees. Decisions with poor RR are rejected.' },
+          { label: 'Leverage clamp', desc: 'Hard ceiling of 5× in the current version, with a volatility-based smart cap below that.' },
+          { label: 'Stale data = no trade', desc: 'If the candle feed is stale or gapped, the bot refuses to call the AI at all and stays flat.' },
+        ].map(g => (
+          <div key={g.label} className="flex gap-3 p-3 rounded-lg bg-white/5 border border-white/10">
+            <div className="w-1.5 h-1.5 rounded-full bg-violet-400 flex-shrink-0 mt-2" />
+            <div>
+              <p className="text-sm font-medium text-white/90">{g.label}</p>
+              <p className="text-sm text-white/60 mt-0.5">{g.desc}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AiTraderTrialsSection() {
+  return (
+    <div>
+      <SectionHeading>Paper Trials &amp; Graduation</SectionHeading>
+      <Paragraph>
+        Every AI Trader bot must pass a paper trial before it can trade real funds. This is the platform's honesty mechanism: the bot earns the right to trade real money by building a verifiable record first.
+      </Paragraph>
+
+      <SubHeading>Graduation Criteria</SubHeading>
+      <div className="mb-6 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-white/10">
+              <th className="text-left py-2 text-white/60 font-medium">Criterion</th>
+              <th className="text-left py-2 text-white/60 font-medium">LTF (15m / 1h)</th>
+              <th className="text-left py-2 text-white/60 font-medium">HTF (4h / 1d)</th>
+            </tr>
+          </thead>
+          <tbody className="text-white/70">
+            <tr className="border-b border-white/5">
+              <td className="py-2 font-medium text-white/80">Trial period</td>
+              <td className="py-2">30 days</td>
+              <td className="py-2">30 days</td>
+            </tr>
+            <tr className="border-b border-white/5">
+              <td className="py-2 font-medium text-white/80">Closed paper trades</td>
+              <td className="py-2">≥ 10</td>
+              <td className="py-2">≥ 5</td>
+            </tr>
+            <tr className="border-b border-white/5">
+              <td className="py-2 font-medium text-white/80">Net paper PnL (after simulated fees + slippage)</td>
+              <td className="py-2">&gt; 0</td>
+              <td className="py-2">&gt; 0</td>
+            </tr>
+            <tr className="border-b border-white/5">
+              <td className="py-2 font-medium text-white/80">Profit factor (gross wins ÷ gross losses)</td>
+              <td className="py-2">≥ 1.1</td>
+              <td className="py-2">≥ 1.1</td>
+            </tr>
+            <tr className="border-b border-white/5">
+              <td className="py-2 font-medium text-white/80">Max drawdown — mark-to-market, including open positions</td>
+              <td className="py-2">≤ 30%</td>
+              <td className="py-2">≤ 30%</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <Paragraph>
+        The drawdown check uses the mark-to-market equity curve — not just closed trades. A bot sitting on a large floating loss cannot graduate on the strength of its closed record. The profit factor floor (≥ 1.1) blocks a lucky-variance record (nine losses, one windfall) from counting as proof. HTF bots get a lower trade-count default because a 1d bot may only find a few valid setups per month.
+      </Paragraph>
+
+      <SubHeading>What Graduation Means</SubHeading>
+      <Paragraph>
+        <strong className="text-white/90">Graduation is an unlock, not an auto-flip.</strong> When criteria pass, you receive a Telegram + in-app notification. The live toggle becomes available — funding real money is always an explicit action you take.
+      </Paragraph>
+      <Paragraph>
+        If the trial fails (period elapsed, criteria not met), the card shows the honest verdict and offers <strong className="text-white/90">Restart Trial</strong>. A failed trial is the system working: money saved.
+      </Paragraph>
+
+      <SubHeading>Conservative Paper Fills</SubHeading>
+      <Paragraph>
+        Paper fills are biased against flattery: taker fees are simulated on both entry and exit, plus a <strong className="text-white/90">0.05% synthetic slippage penalty per leg</strong>. A bot that barely passes on paper is not one you want to fund. A candle that spans both the SL and TP levels is counted as an SL (the conservative outcome).
+      </Paragraph>
+      <Alert type="warning">
+        Paper performance does not guarantee live performance. Fill prices, real slippage, and market regime all differ from simulation. Graduation is a gate, not a promise.
+      </Alert>
+    </div>
+  );
+}
+
+function AiTraderModesSection() {
+  return (
+    <div>
+      <SectionHeading>Modes &amp; Risk Profiles</SectionHeading>
+
+      <SubHeading>Operating Modes</SubHeading>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="w-2 h-2 rounded-full bg-violet-400" />
+            <h4 className="font-medium text-white">Suggest (default)</h4>
+          </div>
+          <p className="text-white/60 text-sm">The AI proposes a trade and waits. You see the full decision card — direction, SL, TP, leverage, rationale — then tap Execute, Skip, or Ask Again. Nothing executes without your tap.</p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="w-2 h-2 rounded-full bg-violet-400" />
+            <h4 className="font-medium text-white">Auto</h4>
+          </div>
+          <p className="text-white/60 text-sm">The AI executes decisions directly at each candle close. After a trade closes, it can either wait for you ("Wait for me") or immediately start the next analysis cycle ("Ask AI again automatically").</p>
+        </div>
+      </div>
+      <Paragraph>
+        You can switch modes from the bot settings at any time. A switch while a position is open takes effect after the current trade closes.
+      </Paragraph>
+
+      <SubHeading>Risk Profiles</SubHeading>
+      <div className="space-y-4 mb-6">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <div className="flex items-center gap-2 mb-3">
+            <div className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-xs font-medium">Default</div>
+            <h4 className="font-medium text-white">Guarded</h4>
+          </div>
+          <ul className="space-y-1.5 text-sm text-white/70">
+            <li className="flex gap-2"><span className="text-emerald-400">✓</span> Daily loss ≥ 15% of allocation → force flat, pause, Telegram alert. User-resume only.</li>
+            <li className="flex gap-2"><span className="text-emerald-400">✓</span> 3 consecutive stop-losses → pause + notify.</li>
+            <li className="flex gap-2"><span className="text-emerald-400">✓</span> Trade frequency capped (max 6/day for LTF, 2/day for HTF).</li>
+          </ul>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-amber-500/20">
+          <div className="flex items-center gap-2 mb-3">
+            <div className="px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs font-medium">Opt-in</div>
+            <h4 className="font-medium text-white">Degen</h4>
+          </div>
+          <p className="text-sm text-white/70 mb-2">Loss-pacing circuit breakers are off. The bot runs until the allocation is depleted below the minimum order size, then stops and reports. No daily loss limit. No consecutive-loss brake.</p>
+          <p className="text-sm text-white/60">A 20 trades/day hard ceiling still applies as a malfunction guard — not a strategy limit. Requires typed confirmation at creation: you acknowledge the allocation can go to zero without the bot pausing.</p>
+        </div>
+      </div>
+      <Alert type="info">
+        All other safety rules — mandatory SL per trade, bracket verification, stale-data refusal, LLM timeout protection — are always active in both modes. Degen disables the loss-pacing rules, not the malfunction-protection rules.
+      </Alert>
+    </div>
+  );
+}
+
+function AiTraderModelsSection() {
+  return (
+    <div>
+      <SectionHeading>Models &amp; Costs</SectionHeading>
+
+      <SubHeading>Your OpenRouter Key</SubHeading>
+      <Paragraph>
+        AI Trader uses your own OpenRouter API key — the same key as the AI Strategy Creator in QuantumLab. You stay in control of which models run and what they cost. The key is stored encrypted; the platform never sees it in plaintext.
+      </Paragraph>
+      <Alert type="info">
+        The first 3 paper decisions run without a key so you can see the format before committing. After that, your OpenRouter key is required for AI-powered analysis.
+      </Alert>
+
+      <SubHeading>Model Choice</SubHeading>
+      <Paragraph>
+        <strong className="text-white/90">Default: Claude Opus 4.8.</strong> As of June 2026 this is the top-performing available model for financial reasoning in the platform's internal evaluation. You can choose a different model per-bot in the creation flow. The decision card always shows which model was used.
+      </Paragraph>
+
+      <SubHeading>Cost Estimate Per Decision Cycle</SubHeading>
+      <div className="mb-6 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-white/10">
+              <th className="text-left py-2 text-white/60 font-medium">Scenario</th>
+              <th className="text-left py-2 text-white/60 font-medium">Decisions / day</th>
+              <th className="text-left py-2 text-white/60 font-medium">Approx. cost / day</th>
+            </tr>
+          </thead>
+          <tbody className="text-white/70">
+            <tr className="border-b border-white/5">
+              <td className="py-2">Single decision (Opus 4.8)</td>
+              <td className="py-2">1</td>
+              <td className="py-2">~$0.05–$0.08</td>
+            </tr>
+            <tr className="border-b border-white/5">
+              <td className="py-2">LTF Auto (15m / 1h)</td>
+              <td className="py-2">up to 6</td>
+              <td className="py-2">~$0.30–$0.50</td>
+            </tr>
+            <tr className="border-b border-white/5">
+              <td className="py-2">HTF Auto (4h / 1d)</td>
+              <td className="py-2">up to 2</td>
+              <td className="py-2">~$0.10</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <Paragraph>
+        Each cycle uses roughly 8,000–10,000 input tokens (market context + indicators + trade history) and ~500 output tokens (the structured decision). Cumulative LLM cost is shown separately in the bot detail view — it does not inflate the displayed PnL.
+      </Paragraph>
+
+      <SubHeading>Net P&amp;L Definition</SubHeading>
+      <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-6">
+        <p className="text-white/90 font-medium mb-3">Net P&amp;L = realized trade PnL − trading fees − LLM API costs</p>
+        <ul className="space-y-2 text-sm text-white/70">
+          <li className="flex gap-2"><span className="text-violet-400">•</span><span><strong className="text-white/80">Realized trade PnL</strong> — profit or loss from each closed trade at actual fill prices (paper: simulated prices)</span></li>
+          <li className="flex gap-2"><span className="text-violet-400">•</span><span><strong className="text-white/80">Trading fees</strong> — taker fee on entry + taker fee on exit for each trade</span></li>
+          <li className="flex gap-2"><span className="text-violet-400">•</span><span><strong className="text-white/80">LLM API costs</strong> — cost of each OpenRouter call, shown separately in the bot detail view</span></li>
+        </ul>
+      </div>
+      <Paragraph>
+        Open positions contribute unrealized PnL to the equity curve and to the drawdown check, but are not included in realized net P&amp;L until the trade closes.
+      </Paragraph>
+    </div>
+  );
+}
+
+function AiTraderFaqSection() {
+  const faqs = [
+    {
+      q: 'Does the bot always trade when it analyzes?',
+      a: '"Flat" (no trade) is a valid and common decision. The AI is instructed to stand aside unless it finds a setup that clears its internal guardrails: minimum 1.5 risk/reward, mandatory stop-loss beyond obvious structure, fee-clearing TP distance. In Auto mode, a flat decision schedules the next analysis at the next candle close and does nothing else.',
+    },
+    {
+      q: 'Can it lose my entire allocation?',
+      a: 'In Degen mode: yes, that is the explicit contract you confirm at creation. In Guarded mode: the daily-loss circuit breaker (15% of allocation) force-flattens and pauses the bot long before a full loss is possible in a single day. Per-trade loss is also bounded by the mandatory stop-loss.',
+    },
+    {
+      q: 'What happens if stop-loss placement fails after entry?',
+      a: 'The bot closes the position at market immediately and pauses. It will never hold a naked position, even briefly. This is enforced in code — not the prompt — and fires on every entry.',
+    },
+    {
+      q: 'Can the AI close early before SL or TP?',
+      a: 'Not in the current version. Entry + bracket (SL + TP) go on the exchange; the exchange manages the exit. The Stop button is always available for a user-initiated close.',
+    },
+    {
+      q: 'What if the model call times out or fails?',
+      a: 'The bot stays flat and retries at the next candle close. An aborted cycle never places an order. In Auto mode this is silent unless it happens repeatedly — in which case check your OpenRouter key and balance.',
+    },
+    {
+      q: 'Can I use a different model?',
+      a: 'Yes. You choose the model per-bot in the creation flow. Claude Opus 4.8 is the default; cheaper models cost less but may produce lower-quality decisions. The decision card always shows which model was used.',
+    },
+    {
+      q: 'Is this financial advice?',
+      a: 'No. AI Trader is a tool, not financial advice. The AI\'s reasoning is shown verbatim so you can evaluate it yourself. Past paper performance does not predict live results.',
+    },
+  ];
+
+  return (
+    <div>
+      <SectionHeading>AI Trader FAQ</SectionHeading>
+
+      <div className="space-y-4 mb-8">
+        {faqs.map((item, i) => (
+          <div key={i} className="p-4 rounded-lg bg-white/5 border border-white/10">
+            <p className="font-medium text-white/90 mb-1.5">{item.q}</p>
+            <p className="text-sm text-white/65 leading-relaxed">{item.a}</p>
+          </div>
+        ))}
+      </div>
+
+      <SubHeading>Disclaimer</SubHeading>
+      <div className="p-4 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-200/80 text-sm leading-relaxed space-y-2">
+        <p>AI Trader is an automated trading tool. It is not financial advice. No AI system — including this one — can guarantee profits or protect against losses in live markets.</p>
+        <p>Paper results are simulated with conservative assumptions but cannot replicate real fill prices, real slippage, or changing market regimes. A passing paper record is not a promise of live profitability.</p>
+        <p>You are responsible for all losses. Never allocate more than you can afford to lose entirely. Trading perpetual futures involves leverage. Leveraged positions can be liquidated. The platform's guardrails reduce the speed of loss but do not eliminate it.</p>
+        <p>The AI models used make mistakes. Guardrails catch certain classes of bad decisions but cannot catch every possible error in judgment. QuantumVault provides execution infrastructure. The trading decisions are made by an AI model. Use this feature with that distinction clearly in mind.</p>
+      </div>
+    </div>
+  );
+}
+
 const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet: string }[] = [
   { id: 'getting-started', label: 'Getting Started', snippet: 'Overview of how QuantumVault works: connect wallet, fund account, create bot, connect TradingView.', keywords: ['getting started', 'overview', 'intro', 'introduction', 'how it works', 'quickstart', 'first steps', 'onboarding', 'setup'] },
   { id: 'wallet-setup', label: 'Wallet Setup', snippet: 'Connect your Phantom or Solana wallet. Understand the two-wallet system: your personal wallet and your agent wallet.', keywords: ['wallet', 'phantom', 'solana', 'agent wallet', 'connect wallet', 'wallet standard', 'mobile wallet adapter', 'mwa', 'seeker'] },
@@ -3837,6 +4155,11 @@ const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet:
   { id: 'security', label: 'Security', snippet: 'Execution authorization, agent wallet backup (24-word phrase), key encryption, and how your funds are protected.', keywords: ['security', 'encryption', 'private key', 'backup', 'recovery phrase', 'mnemonic', 'seed phrase', '24 word', 'authorize', 'authorization', 'execution key', 'safe', 'protect', 'reset agent wallet'] },
   { id: 'trade-execution', label: 'Trade Execution', snippet: 'How trades are routed from webhook signals through the execution engine, including retries and error handling.', keywords: ['trade execution', 'execution', 'order', 'fill', 'route', 'retry', 'error', 'failed trade', 'slippage', 'entry price', 'size', 'notional', 'fee'] },
   { id: 'ai-agents', label: 'AI Agent Integration', snippet: 'Use AI agents (Claude, GPT, etc.) to send trade signals to QuantumVault via the agent API.', keywords: ['ai', 'agent', 'claude', 'gpt', 'openai', 'llm', 'language model', 'api', 'integration', 'programmatic', 'automated', 'server execution key'] },
+  { id: 'ai-trader-overview', label: 'AI Trader', snippet: 'Built-in autonomous trading agent. AI model watches the market, decides long/short/flat, and places bracketed orders (entry + SL + TP). Every bot starts in paper mode — no real money until graduation.', keywords: ['ai trader', 'autonomous', 'trading bot', 'ai bot', 'paper mode', 'paper trading', 'decision card', 'rationale', 'flat', 'guardrail', 'bracket', 'stop loss', 'take profit', 'entry', 'candle', 'indicator', 'context', 'confidence', 'openrouter', 'opus', 'claude'] },
+  { id: 'ai-trader-trials', label: 'Paper Trials & Graduation', snippet: 'Every AI Trader bot must pass a 30-day paper trial before live trading unlocks. Criteria: net PnL > 0, profit factor ≥ 1.1, drawdown ≤ 30% mark-to-market. Graduation is an unlock, not an auto-flip.', keywords: ['paper trial', 'graduation', 'graduate', 'paper mode', 'trial period', 'unlock', 'live toggle', 'net pnl', 'profit factor', 'drawdown', 'mark to market', 'slippage penalty', 'simulated', 'restart trial', 'failed trial', 'criteria', '30 days', 'ltf', 'htf', '30 day'] },
+  { id: 'ai-trader-modes', label: 'Modes & Risk Profiles', snippet: 'Suggest mode: AI proposes, you approve. Auto mode: AI executes at each candle close. Guarded profile adds daily-loss circuit breaker and consecutive-loss brake. Degen mode runs until allocation is depleted.', keywords: ['suggest mode', 'auto mode', 'guarded', 'degen', 'risk profile', 'circuit breaker', 'daily loss', 'consecutive loss', 'frequency cap', 'auto next', 'ask ai again', 'wait for me', 'execute', 'skip', 'mode switch', 'loss pacing'] },
+  { id: 'ai-trader-models', label: 'Models & Costs', snippet: 'Default model: Claude Opus 4.8. Cost ~$0.05–$0.08 per decision. LTF Auto ≈ $0.30–$0.50/day. HTF Auto ≈ $0.10/day. Uses your own OpenRouter key. Net P&L = realized PnL − trading fees − LLM costs.', keywords: ['model', 'claude', 'opus', 'openrouter', 'api key', 'cost', 'price', 'per decision', 'tokens', 'llm cost', 'net pnl', 'realized pnl', 'trading fees', 'taker fee', 'pnl definition', 'openrouter key', 'model picker', 'byo key'] },
+  { id: 'ai-trader-faq', label: 'AI Trader FAQ', snippet: 'Common questions: does it always trade, can it lose everything, what if SL placement fails, can the AI close early, what if the call times out. Includes disclaimer.', keywords: ['faq', 'frequently asked', 'questions', 'flat', 'no trade', 'lose everything', 'naked position', 'sl fail', 'stop loss fail', 'timeout', 'model fail', 'close early', 'financial advice', 'disclaimer', 'risk warning', 'not advice', 'all losses'] },
   { id: 'vaults-overview', label: 'Vaults Overview', snippet: 'Vaults put idle USDC to work earning yield. One tap to park all spare USDC, one tap to unpark it back.', keywords: ['vault', 'vaults', 'earn', 'yield', 'idle', 'spare', 'park', 'unpark', 'interest', 'apy', 'save', 'savings', 'passive', 'stablecoin'] },
   { id: 'vaults-destinations', label: 'Stable Vaults', snippet: 'Stable Vaults park idle USDC into near-$1 yield tokens: Kamino USDC, Perena USD*, Jupiter Lend USDC, Ondo USDY, and OnRe ONyc. Simple, one tap in and one tap out.', keywords: ['stable vaults', 'destination', 'destinations', 'yield', 'apy', 'kamino', 'perena', 'jupiter lend', 'ondo', 'usdy', 'onre', 'onyc', 'stablecoin', 'stable', 'floating', 'reinsurance', 'treasury', 'park usdc', 'idle usdc'] },
   { id: 'vaults-safety', label: 'Safety & Funding', snippet: 'How Vaults stay money-safe (on-chain truth, realized amounts, price-impact cap), auto-unpark to fund trades, and auto-park idle funds back into yield after a position closes (Flash).', keywords: ['safety', 'safe', 'money', 'on-chain', 'realized', 'price impact', 'fail closed', 'equity', 'balance', 'auto unpark', 'fund trade', 'top up', 'collateral', 'per bot', 'per-bot', 'auto park', 'auto-park', 'repark', 'idle funds', 'after close', 'earn between trades', 'flash'] },
@@ -3893,6 +4216,16 @@ export default function DocsPage() {
         return <TradeExecutionSection />;
       case 'ai-agents':
         return <AIAgentsSection />;
+      case 'ai-trader-overview':
+        return <AiTraderOverviewSection />;
+      case 'ai-trader-trials':
+        return <AiTraderTrialsSection />;
+      case 'ai-trader-modes':
+        return <AiTraderModesSection />;
+      case 'ai-trader-models':
+        return <AiTraderModelsSection />;
+      case 'ai-trader-faq':
+        return <AiTraderFaqSection />;
       case 'vaults-overview':
         return <VaultsOverviewSection />;
       case 'vaults-destinations':

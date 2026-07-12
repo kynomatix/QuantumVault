@@ -1628,6 +1628,177 @@ DELETE /api/lab/cache          — Clear the candle cache
 
 ---
 
+## AI Trader
+
+AI Trader is QuantumVault's built-in autonomous trading agent. Instead of writing signals or connecting TradingView, an AI model watches the market, decides whether to go long, short, or flat, and places a bracketed order — entry + stop-loss + take-profit — on your chosen exchange. Between trades it waits for the next candle close and decides again.
+
+Every bot **starts in paper mode**. It tracks every hypothetical trade, simulates fills conservatively, and requires a passing paper record before the live toggle unlocks. No real money moves until you choose to fund it after graduation.
+
+### How It Decides
+
+At each analysis cycle the bot builds a market context package and sends it to the AI:
+
+- Last 100 candles of the selected timeframe plus 30 candles of the timeframe above (higher-timeframe trend context)
+- Indicators: EMA 20/50/200, RSI, MACD, ATR, ADX, Bollinger Bands, VWAP, OBV — values plus short recent deltas
+- Market microstate: mark price, funding rate (current + next), open interest trend, 24h volume
+- Account state: allocated collateral, any open position, unrealized PnL
+- The bot's own last 10 closed trades — so the AI can learn from its mistakes and avoid repeating them
+
+The AI returns a structured decision — not prose. It specifies direction, leverage, size, stop-loss price, take-profit price, a confidence score (1–10), and a plain-English rationale. The rationale is shown verbatim in the decision card: it is what the bot "thought" and is the primary trust surface.
+
+**Flat is a valid decision.** "No trade" is fully supported and common. The bot is evaluated on risk-adjusted return net of fees, not on activity. A flat decision in Auto mode schedules the next analysis at the next candle close and does nothing else.
+
+### The Decision Card
+
+Each decision renders as a card showing: direction and entry type (e.g. LONG at market), stop-loss price and distance %, take-profit price and distance %, leverage, size as a percentage of allocation, risk/reward ratio, confidence score, and the model's rationale verbatim.
+
+In Suggest mode you choose Execute, Skip, or Ask Again. In Auto mode the decision executes immediately and is logged for review.
+
+### Hard Guardrails
+
+Every decision passes through code-enforced guardrails before any order is placed. The AI's output is a request; the guardrail layer decides what executes.
+
+Key rules (always active in both risk profiles):
+
+- **Mandatory stop-loss** — Every trade must have a stop-loss on the correct side, within a timeframe-appropriate distance band. No exceptions.
+- **SL verification after entry** — After an entry fills, the bracket (SL + TP) is verified on the exchange with a bounded retry. If the bracket cannot be confirmed, the position is immediately closed at market and the bot pauses. A naked position is never held, even briefly.
+- **Minimum risk/reward** — TP must deliver at least 1.2× risk after fees. Decisions with poor RR are rejected.
+- **Leverage clamp** — Hard ceiling of 5× in the current version, with a volatility-based smart cap below that.
+- **Stale data = no trade** — If the candle feed is stale or gapped, the bot refuses to call the AI at all and stays flat.
+
+---
+
+### Paper Trials & Graduation
+
+Every AI Trader bot must pass a paper trial before it can trade real funds.
+
+**Default graduation criteria:**
+
+| Criterion | LTF (15m / 1h) | HTF (4h / 1d) |
+|-----------|----------------|----------------|
+| Trial period | 30 days | 30 days |
+| Closed paper trades | ≥ 10 | ≥ 5 |
+| Net paper PnL (after simulated fees + slippage) | > 0 | > 0 |
+| Profit factor (gross wins ÷ gross losses) | ≥ 1.1 | ≥ 1.1 |
+| Max paper drawdown — mark-to-market, including open positions | ≤ 30% | ≤ 30% |
+
+The drawdown check uses the mark-to-market equity curve — not just closed trades. A bot sitting on a large floating loss cannot graduate on the strength of its closed record. The profit factor floor (≥ 1.1) blocks a lucky-variance record (nine losses, one windfall) from counting as proof.
+
+HTF bots get a lower trade-count default because a 1d bot may only find a few valid setups per month — same 30-day clock, realistic bar.
+
+**Graduation is an unlock, not an auto-flip.** When criteria pass, you receive a Telegram + in-app notification. The live toggle becomes available — funding real money is always an explicit action you take.
+
+If the trial fails (period elapsed, criteria not met), the card shows the honest verdict and offers Restart Trial. A failed trial is the system working: money saved.
+
+Paper fills are biased against flattery: taker fees on both entry and exit legs, plus a 0.05% synthetic slippage penalty per leg. A bot that barely passes on paper is not one you want to fund.
+
+> **Note:** Paper performance does not guarantee live performance. Fill prices, real slippage, and market regime all differ from simulation. Graduation is a gate, not a promise.
+
+---
+
+### Modes
+
+**Suggest** (default) — The AI proposes a trade and waits. You see the full decision card, then tap Execute, Skip, or Ask Again. Nothing executes without your tap. Good when you want to stay in the loop.
+
+**Auto** — The AI executes decisions directly at each candle close and schedules the next analysis automatically. After a trade closes, the bot can either wait for you ("Wait for me") or immediately begin the next analysis cycle ("Ask AI again automatically"). Good for true set-and-forget operation.
+
+You can switch modes from the bot settings at any time. A switch while a position is open takes effect after the current trade closes.
+
+---
+
+### Risk Profiles
+
+**Guarded** (default) — Loss-pacing circuit breakers are active:
+
+- Daily loss ≥ 15% of allocation → force flat, pause, Telegram alert. User-resume only.
+- 3 consecutive stop-losses → pause + notify.
+- Trade frequency capped (max 6/day for LTF, 2/day for HTF).
+
+**Degen** — Loss-pacing circuit breakers are off. The bot runs until the allocation is depleted below the minimum order size, then stops and reports. There is no daily loss limit and no consecutive-loss brake. A 20 trades/day hard ceiling still applies as a malfunction guard — not a strategy limit. Requires typed confirmation at creation: you acknowledge the allocation can go to zero without the bot pausing.
+
+All other safety rules — mandatory SL, bracket verification, stale-data refusal, LLM timeout protection — are always active in both modes. Degen disables the loss-pacing rules, not the malfunction-protection rules.
+
+---
+
+### Net P&L Definition
+
+**Net P&L = sum of realized trade PnL − trading fees − LLM API costs**
+
+- **Realized trade PnL** — the profit or loss from each closed trade at actual fill prices (paper: simulated prices)
+- **Trading fees** — taker fee on entry + taker fee on exit for each trade
+- **LLM API costs** — the cost of each OpenRouter API call, shown separately in the bot detail view
+
+Open positions contribute unrealized PnL to the equity curve and to the drawdown check, but are not included in realized net P&L until closed.
+
+---
+
+### Going Live
+
+1. Wait for your bot to pass its paper trial (founder accounts can waive the trial for testing).
+2. Open the bot drawer and tap **Go Live**.
+3. Fund the bot — enter how much USDC to allocate. The transfer goes to the bot's isolated subaccount, the same as a regular trading bot.
+4. The bot begins its first live analysis cycle at the next candle close of the chosen timeframe.
+
+**Stopping the bot** — Tap Stop at any time. The bot cancels all open orders, closes any open position at market, and leaves your funds in the subaccount to withdraw normally.
+
+On Flash bots with idle-funds parking enabled, funds park automatically back into the Vault after each trade closes — earning yield while the bot waits for the next setup. On Pacifica, idle funds stay in the subaccount (the $10 min withdrawal + $1 fee makes parking uneconomical on small allocations).
+
+---
+
+### Models & Costs
+
+AI Trader uses your own OpenRouter API key — the same key as the AI Strategy Creator in QuantumLab. You stay in control of which models run and what they cost.
+
+**Default model:** Claude Opus 4.8. As of June 2026 this is the top-performing available model for financial reasoning in the platform's internal evaluation. You can choose a different model per-bot in the creation flow.
+
+**Cost estimate per decision cycle:**
+- Input: ~8,000–10,000 tokens (market context + indicators + trade history)
+- Output: ~500 tokens (the structured decision)
+- At Opus 4.8 pricing via OpenRouter: roughly **$0.05–$0.08 per decision**
+- LTF Auto (6 decisions/day): approximately **$0.30–$0.50/day**
+- HTF Auto (2 decisions/day): approximately **$0.10/day**
+
+Cumulative LLM cost is shown in the bot detail view. The first 3 paper decisions run without a key so you can see the format before committing.
+
+---
+
+### FAQ
+
+**Does the bot always trade when it analyzes?**
+No. "Flat" (no trade) is a valid and common decision. The AI is instructed to stand aside unless it finds a setup that clears its internal guardrails: minimum 1.5 risk/reward, mandatory stop-loss beyond obvious structure, fee-clearing TP distance. In Auto mode, a flat decision schedules the next analysis at the next candle close and does nothing else.
+
+**Can it lose my entire allocation?**
+In Degen mode: yes, that is the explicit contract you confirm at creation. In Guarded mode: the daily-loss circuit breaker (15% of allocation) force-flattens and pauses the bot long before a full loss is possible in a single day. Per-trade loss is also bounded by the mandatory stop-loss.
+
+**What happens if stop-loss placement fails after entry?**
+The bot closes the position at market immediately and pauses. It will never hold a naked position, even briefly. This is enforced in code — not the prompt — and fires on every entry.
+
+**Can the AI close early before SL or TP?**
+Not in the current version. Entry + bracket (SL + TP) go on the exchange; the exchange manages the exit. The Stop button is always available for user-initiated close.
+
+**What if the model call times out or fails?**
+The bot stays flat and retries at the next candle close. An aborted cycle never places an order. In Auto mode this is silent unless it happens repeatedly — in which case check your OpenRouter key and balance.
+
+**Can I use a different model?**
+Yes. You choose the model per-bot in the creation flow. Claude Opus 4.8 is the default; cheaper models cost less but may produce lower-quality decisions.
+
+**Is this financial advice?**
+No. AI Trader is a tool, not financial advice. The AI's reasoning is shown verbatim so you can evaluate it yourself. Past paper performance does not predict live results.
+
+---
+
+### Disclaimer
+
+AI Trader is an automated trading tool. It is not financial advice. No AI system — including this one — can guarantee profits or protect against losses in live markets.
+
+Paper results are simulated with conservative assumptions but cannot replicate real fill prices, real slippage, or changing market regimes. A passing paper record is not a promise of live profitability.
+
+You are responsible for all losses. Never allocate more than you can afford to lose entirely. Trading perpetual futures involves leverage. Leveraged positions can be liquidated. The platform's guardrails reduce the speed of loss but do not eliminate it.
+
+The AI models used make mistakes. Guardrails catch certain classes of bad decisions but cannot catch every possible error in judgment. QuantumVault provides execution infrastructure. The trading decisions are made by an AI model. Use this feature with that distinction clearly in mind.
+
+---
+
 *QuantumVault — Built on Solana.*
 *Website: [https://myquantumvault.com](https://myquantumvault.com)*
 `;
