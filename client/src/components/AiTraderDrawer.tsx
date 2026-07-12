@@ -986,17 +986,17 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                         </p>
                       </div>
                     </TooltipTrigger>
-                    <TooltipContent className="text-xs space-y-1.5 p-3 min-w-[200px]">
+                    <TooltipContent className="max-w-[240px] bg-popover border border-border text-xs p-3 space-y-1.5">
                       <div className="flex justify-between gap-4">
-                        <span className="text-muted-foreground">Closed P&L (fees in)</span>
+                        <span>Closed P&L (fees in)</span>
                         <span>{netPnl >= 0 ? '+' : ''}${netPnl.toFixed(2)}</span>
                       </div>
                       <div className="flex justify-between gap-4">
-                        <span className="text-muted-foreground">Live unrealized</span>
+                        <span>Live unrealized</span>
                         <span>{openUnrealizedPnl != null ? `${openUnrealizedPnl >= 0 ? '+' : ''}$${openUnrealizedPnl.toFixed(2)}` : '$0.00'}</span>
                       </div>
                       <div className="flex justify-between gap-4">
-                        <span className="text-muted-foreground">AI spend</span>
+                        <span>AI spend</span>
                         <span>−${totalLlmCost.toFixed(4)}</span>
                       </div>
                     </TooltipContent>

@@ -3246,17 +3246,17 @@ export default function AppPage() {
                                         </div>
                                       </TooltipTrigger>
                                       {ls && (
-                                        <TooltipContent className="text-xs space-y-1.5 p-2.5 min-w-[190px]">
+                                        <TooltipContent className="max-w-[240px] bg-popover border border-border text-xs p-2.5 space-y-1.5">
                                           <div className="flex justify-between gap-4">
-                                            <span className="text-muted-foreground">Closed P&L</span>
+                                            <span>Closed P&L</span>
                                             <span>{Number(ls.totalRealized) >= 0 ? '+' : ''}${Number(ls.totalRealized).toFixed(2)}</span>
                                           </div>
                                           <div className="flex justify-between gap-4">
-                                            <span className="text-muted-foreground">Live unrealized</span>
+                                            <span>Live unrealized</span>
                                             <span>{unrealizedForTip >= 0 ? '+' : ''}${unrealizedForTip.toFixed(2)}</span>
                                           </div>
                                           <div className="flex justify-between gap-4">
-                                            <span className="text-muted-foreground">AI spend</span>
+                                            <span>AI spend</span>
                                             <span>−${Number(ls.totalLlmCost).toFixed(4)}</span>
                                           </div>
                                         </TooltipContent>

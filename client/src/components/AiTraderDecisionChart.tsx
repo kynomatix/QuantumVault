@@ -231,12 +231,27 @@ export function AiTraderDecisionChart({
     series.setData(candles as CandlestickData[]);
     seriesRef.current = series;
 
+    // Entry price line — broker-style when open position (WO-8h.1):
+    // solid line in direction color, title carries side + size + live P&L.
+    const isOpen = realizedPnl === null;
+    const entryColor = isOpen
+      ? (direction === 'long' ? '#2ec77e' : '#ef5350')
+      : '#58a6ff';
+    const sizeStr = isOpen && sizeBase != null
+      ? ' ' + Number(sizeBase).toPrecision(4)
+      : '';
+    const pnlStr = isOpen && unrealizedPnl != null
+      ? ` ${unrealizedPnl >= 0 ? '+' : '−'}$${Math.abs(unrealizedPnl).toFixed(2)}`
+      : '';
+    const entryTitle = isOpen
+      ? `${direction.toUpperCase()}${sizeStr}${pnlStr}`
+      : 'Entry';
     series.createPriceLine({
       price: entryPrice,
-      color: '#58a6ff',
-      lineStyle: LineStyle.Dashed,
-      lineWidth: 1,
-      title: 'Entry',
+      color: entryColor,
+      lineStyle: isOpen ? LineStyle.Solid : LineStyle.Dashed,
+      lineWidth: isOpen ? 2 : 1,
+      title: entryTitle,
     });
     if (stopLossPrice != null) {
       series.createPriceLine({
@@ -312,7 +327,7 @@ export function AiTraderDecisionChart({
       seriesRef.current = null;
       setHoverCandle(null);
     };
-  }, [open, loading, error, candles, entryPrice, stopLossPrice, takeProfitPrice, direction, decidedAt, closedAt]);
+  }, [open, loading, error, candles, entryPrice, stopLossPrice, takeProfitPrice, direction, decidedAt, closedAt, realizedPnl, sizeBase, unrealizedPnl]);
 
   const isOpenPosition = realizedPnl === null;
   const pnlValue = isOpenPosition ? (unrealizedPnl ?? null) : realizedPnl;
@@ -374,30 +389,6 @@ export function AiTraderDecisionChart({
           {!loading && !error && candles.length === 0 && (
             <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground" data-testid="state-chart-empty">
               No candle data available for this window.
-            </div>
-          )}
-          {/* Open-position overlay card (WO-8h item 2) */}
-          {isOpenPosition && !loading && !error && candles.length > 0 && (
-            <div
-              className="absolute top-2.5 right-2.5 z-10 pointer-events-none rounded-lg bg-black/75 backdrop-blur-sm border border-white/10 px-3 py-2 text-xs space-y-1"
-              data-testid="chart-open-position-overlay"
-            >
-              <div className="flex items-center gap-1.5">
-                <span className={`font-bold px-1.5 py-0.5 rounded text-[10px] ${direction === 'long' ? 'bg-emerald-500/25 text-emerald-400' : 'bg-red-500/25 text-red-400'}`}>
-                  {direction.toUpperCase()}
-                </span>
-                {sizeBase != null && (
-                  <span className="text-muted-foreground">{Number(sizeBase).toPrecision(4)}</span>
-                )}
-              </div>
-              <div className="text-muted-foreground">
-                Entry <span className="text-foreground font-medium">{formatPrice(entryPrice)}</span>
-              </div>
-              {unrealizedPnl != null && (
-                <div className={`font-semibold ${unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {formatUsdSigned(unrealizedPnl)} unrealized
-                </div>
-              )}
             </div>
           )}
           <div ref={containerRef} className="w-full h-full" />
