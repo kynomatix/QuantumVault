@@ -1749,16 +1749,30 @@ On Flash bots with idle-funds parking enabled, funds park automatically back int
 
 AI Trader uses your own OpenRouter API key — the same key as the AI Strategy Creator in QuantumLab. You stay in control of which models run and what they cost.
 
-**Default model:** Claude Opus 4.8. As of June 2026 this is the top-performing available model for financial reasoning in the platform's internal evaluation. You can choose a different model per-bot in the creation flow.
+**Decision frequency:** The bot runs one analysis at every candle close — approximately **96 decisions/day on 15m, 24 on 1h, 6 on 4h, 1–2 on 1d**. The Guarded trade-frequency cap limits *trades placed*, not decisions; most candle closes will produce a flat call.
 
-**Cost estimate per decision cycle:**
-- Input: ~8,000–10,000 tokens (market context + indicators + trade history)
-- Output: ~500 tokens (the structured decision)
-- At Opus 4.8 pricing via OpenRouter: roughly **$0.05–$0.08 per decision**
-- LTF Auto (6 decisions/day): approximately **$0.30–$0.50/day**
-- HTF Auto (2 decisions/day): approximately **$0.10/day**
+**Model defaults (pre-selected by timeframe, overridable at any time):**
+- **15m / 1h → Qwen3.7 Max** — disciplined and cheap. Qwen3.7 Max is also the winner of Alpha Arena Season 1, the only published real-money LLM trading competition (+22.3% return).
+- **4h / 1d → Claude Opus 4.8** — deepest reasoning; at 6 or fewer calls per day the cost is manageable.
 
-Cumulative LLM cost is shown in the bot detail view. The first 3 paper decisions run without a key so you can see the format before committing.
+**Cost by model and timeframe** (matches the in-app selector estimates):
+
+| Model | Per call | 15m / day | 1h / day | 4h / day | 1d / day |
+|---|---|---|---|---|---|
+| Claude Opus 4.8 | ~$0.10 | ~$9.60 | ~$2.40 | ~$0.60 | ~$0.20 |
+| Qwen3.7 Max | ~$0.003 | ~$0.29 | ~$0.07 | ~$0.02 | ~$0.006 |
+| DeepSeek V4 Pro | ~$0.002 | ~$0.19 | ~$0.05 | ~$0.01 | ~$0.004 |
+| DeepSeek V4 Flash | <$0.001 | ~$0.10 | ~$0.02 | <$0.01 | <$0.01 |
+
+Opus on a 15m bot costs roughly $9–10/day — which is exactly why Qwen is the default for short timeframes.
+
+**Net P&L definition:**
+
+> Net P&L = realized PnL + unrealized PnL − cumulative LLM cost
+
+LLM cost is **subtracted** from displayed Net P&L — it is not a separate line shown alongside a clean number. A bot that wins less than its AI bill is not profitable; the definition makes this visible rather than hiding the overhead. Cumulative LLM spend is also broken out individually in the bot detail view.
+
+The first 3 paper decisions run without a key so you can see the decision format before committing.
 
 ---
 
@@ -1780,7 +1794,7 @@ Not in the current version. Entry + bracket (SL + TP) go on the exchange; the ex
 The bot stays flat and retries at the next candle close. An aborted cycle never places an order. In Auto mode this is silent unless it happens repeatedly — in which case check your OpenRouter key and balance.
 
 **Can I use a different model?**
-Yes. You choose the model per-bot in the creation flow. Claude Opus 4.8 is the default; cheaper models cost less but may produce lower-quality decisions.
+Yes. You choose the model per-bot in the creation flow or adjust it in bot settings at any time. The platform pre-selects by timeframe (Qwen3.7 Max for 15m/1h, Claude Opus 4.8 for 4h/1d), but any manual choice sticks. The decision card always shows which model was used.
 
 **Is this financial advice?**
 No. AI Trader is a tool, not financial advice. The AI's reasoning is shown verbatim so you can evaluate it yourself. Past paper performance does not predict live results.

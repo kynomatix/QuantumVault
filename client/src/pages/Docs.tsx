@@ -4033,55 +4033,96 @@ function AiTraderModelsSection() {
         The first 3 paper decisions run without a key so you can see the format before committing. After that, your OpenRouter key is required for AI-powered analysis.
       </Alert>
 
-      <SubHeading>Model Choice</SubHeading>
+      <SubHeading>Decision Frequency</SubHeading>
       <Paragraph>
-        <strong className="text-white/90">Default: Claude Opus 4.8.</strong> As of June 2026 this is the top-performing available model for financial reasoning in the platform's internal evaluation. You can choose a different model per-bot in the creation flow. The decision card always shows which model was used.
+        The bot runs one analysis at every candle close — approximately <strong className="text-white/90">96 decisions/day on 15m, 24 on 1h, 6 on 4h, 1–2 on 1d</strong>. The Guarded trade-frequency cap limits <em>trades placed</em>, not decisions; most candle closes will produce a flat call.
       </Paragraph>
 
-      <SubHeading>Cost Estimate Per Decision Cycle</SubHeading>
+      <SubHeading>Model Defaults</SubHeading>
+      <Paragraph>
+        The platform pre-selects by timeframe; you can override at any time in the creation flow or bot settings:
+      </Paragraph>
+      <div className="mb-4 space-y-2">
+        <div className="flex items-start gap-3 p-3 rounded-lg bg-white/5 border border-white/10">
+          <span className="text-violet-400 font-mono text-xs mt-0.5">15m / 1h</span>
+          <div>
+            <p className="text-white/90 text-sm font-medium">Qwen3.7 Max <span className="text-white/40 font-normal">— default</span></p>
+            <p className="text-white/55 text-xs mt-0.5">Disciplined and cheap — built for frequent decisions. Also the winner of Alpha Arena Season 1, the only published real-money LLM trading competition (+22.3% return).</p>
+          </div>
+        </div>
+        <div className="flex items-start gap-3 p-3 rounded-lg bg-white/5 border border-white/10">
+          <span className="text-violet-400 font-mono text-xs mt-0.5">4h / 1d</span>
+          <div>
+            <p className="text-white/90 text-sm font-medium">Claude Opus 4.8</p>
+            <p className="text-white/55 text-xs mt-0.5">Deepest reasoning — suits conviction calls where call counts are low and cost is manageable.</p>
+          </div>
+        </div>
+      </div>
+
+      <SubHeading>Cost by Model &amp; Timeframe</SubHeading>
+      <Paragraph>
+        Estimates match exactly what the in-app model selector shows. Opus on 15m costs roughly $9–10/day — which is exactly why Qwen is the default for short timeframes.
+      </Paragraph>
       <div className="mb-6 overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-white/10">
-              <th className="text-left py-2 text-white/60 font-medium">Scenario</th>
-              <th className="text-left py-2 text-white/60 font-medium">Decisions / day</th>
-              <th className="text-left py-2 text-white/60 font-medium">Approx. cost / day</th>
+              <th className="text-left py-2 text-white/60 font-medium">Model</th>
+              <th className="text-left py-2 text-white/60 font-medium">Per call</th>
+              <th className="text-left py-2 text-white/60 font-medium">15m / day</th>
+              <th className="text-left py-2 text-white/60 font-medium">1h / day</th>
+              <th className="text-left py-2 text-white/60 font-medium">4h / day</th>
+              <th className="text-left py-2 text-white/60 font-medium">1d / day</th>
             </tr>
           </thead>
           <tbody className="text-white/70">
             <tr className="border-b border-white/5">
-              <td className="py-2">Single decision (Opus 4.8)</td>
-              <td className="py-2">1</td>
-              <td className="py-2">~$0.05–$0.08</td>
-            </tr>
-            <tr className="border-b border-white/5">
-              <td className="py-2">LTF Auto (15m / 1h)</td>
-              <td className="py-2">up to 6</td>
-              <td className="py-2">~$0.30–$0.50</td>
-            </tr>
-            <tr className="border-b border-white/5">
-              <td className="py-2">HTF Auto (4h / 1d)</td>
-              <td className="py-2">up to 2</td>
+              <td className="py-2">Claude Opus 4.8</td>
               <td className="py-2">~$0.10</td>
+              <td className="py-2 text-amber-400/80">~$9.60</td>
+              <td className="py-2">~$2.40</td>
+              <td className="py-2">~$0.60</td>
+              <td className="py-2">~$0.20</td>
+            </tr>
+            <tr className="border-b border-white/5">
+              <td className="py-2 font-medium text-white/85">Qwen3.7 Max <span className="text-violet-400 text-xs font-normal">★ default 15m/1h</span></td>
+              <td className="py-2">~$0.003</td>
+              <td className="py-2">~$0.29</td>
+              <td className="py-2">~$0.07</td>
+              <td className="py-2">~$0.02</td>
+              <td className="py-2">~$0.006</td>
+            </tr>
+            <tr className="border-b border-white/5">
+              <td className="py-2">DeepSeek V4 Pro</td>
+              <td className="py-2">~$0.002</td>
+              <td className="py-2">~$0.19</td>
+              <td className="py-2">~$0.05</td>
+              <td className="py-2">~$0.01</td>
+              <td className="py-2">~$0.004</td>
+            </tr>
+            <tr className="border-b border-white/5">
+              <td className="py-2">DeepSeek V4 Flash</td>
+              <td className="py-2">&lt;$0.001</td>
+              <td className="py-2">~$0.10</td>
+              <td className="py-2">~$0.02</td>
+              <td className="py-2">&lt;$0.01</td>
+              <td className="py-2">&lt;$0.01</td>
             </tr>
           </tbody>
         </table>
       </div>
-      <Paragraph>
-        Each cycle uses roughly 8,000–10,000 input tokens (market context + indicators + trade history) and ~500 output tokens (the structured decision). Cumulative LLM cost is shown separately in the bot detail view — it does not inflate the displayed PnL.
-      </Paragraph>
 
       <SubHeading>Net P&amp;L Definition</SubHeading>
-      <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-6">
-        <p className="text-white/90 font-medium mb-3">Net P&amp;L = realized trade PnL − trading fees − LLM API costs</p>
+      <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-4">
+        <p className="text-white/90 font-medium mb-3">Net P&amp;L = realized PnL + unrealized PnL − cumulative LLM cost</p>
         <ul className="space-y-2 text-sm text-white/70">
-          <li className="flex gap-2"><span className="text-violet-400">•</span><span><strong className="text-white/80">Realized trade PnL</strong> — profit or loss from each closed trade at actual fill prices (paper: simulated prices)</span></li>
-          <li className="flex gap-2"><span className="text-violet-400">•</span><span><strong className="text-white/80">Trading fees</strong> — taker fee on entry + taker fee on exit for each trade</span></li>
-          <li className="flex gap-2"><span className="text-violet-400">•</span><span><strong className="text-white/80">LLM API costs</strong> — cost of each OpenRouter call, shown separately in the bot detail view</span></li>
+          <li className="flex gap-2"><span className="text-violet-400">•</span><span><strong className="text-white/80">Realized PnL</strong> — profit or loss from each closed trade at actual fill prices (paper: simulated prices with taker fees + 0.05% slippage penalty)</span></li>
+          <li className="flex gap-2"><span className="text-violet-400">•</span><span><strong className="text-white/80">Unrealized PnL</strong> — mark-to-market on any open position</span></li>
+          <li className="flex gap-2"><span className="text-violet-400">•</span><span><strong className="text-white/80">Cumulative LLM cost</strong> — total OpenRouter spend since bot creation, <em>subtracted</em> from Net P&amp;L</span></li>
         </ul>
       </div>
       <Paragraph>
-        Open positions contribute unrealized PnL to the equity curve and to the drawdown check, but are not included in realized net P&amp;L until the trade closes.
+        LLM cost is subtracted, not shown alongside a clean number. A bot that wins less than its AI bill is not profitable — the definition makes this visible rather than hiding the overhead. Cumulative spend is also broken out individually in the bot detail view.
       </Paragraph>
     </div>
   );
@@ -4111,7 +4152,7 @@ function AiTraderFaqSection() {
     },
     {
       q: 'Can I use a different model?',
-      a: 'Yes. You choose the model per-bot in the creation flow. Claude Opus 4.8 is the default; cheaper models cost less but may produce lower-quality decisions. The decision card always shows which model was used.',
+      a: 'Yes. You choose the model per-bot in the creation flow or adjust it in bot settings at any time. The platform pre-selects by timeframe — Qwen3.7 Max for 15m/1h (cheap, disciplined, and the winner of Alpha Arena Season 1 at +22.3%), Claude Opus 4.8 for 4h/1d — but any manual choice sticks. The decision card always shows which model was used.',
     },
     {
       q: 'Is this financial advice?',
@@ -4158,7 +4199,7 @@ const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet:
   { id: 'ai-trader-overview', label: 'AI Trader', snippet: 'Built-in autonomous trading agent. AI model watches the market, decides long/short/flat, and places bracketed orders (entry + SL + TP). Every bot starts in paper mode — no real money until graduation.', keywords: ['ai trader', 'autonomous', 'trading bot', 'ai bot', 'paper mode', 'paper trading', 'decision card', 'rationale', 'flat', 'guardrail', 'bracket', 'stop loss', 'take profit', 'entry', 'candle', 'indicator', 'context', 'confidence', 'openrouter', 'opus', 'claude'] },
   { id: 'ai-trader-trials', label: 'Paper Trials & Graduation', snippet: 'Every AI Trader bot must pass a 30-day paper trial before live trading unlocks. Criteria: net PnL > 0, profit factor ≥ 1.1, drawdown ≤ 30% mark-to-market. Graduation is an unlock, not an auto-flip.', keywords: ['paper trial', 'graduation', 'graduate', 'paper mode', 'trial period', 'unlock', 'live toggle', 'net pnl', 'profit factor', 'drawdown', 'mark to market', 'slippage penalty', 'simulated', 'restart trial', 'failed trial', 'criteria', '30 days', 'ltf', 'htf', '30 day'] },
   { id: 'ai-trader-modes', label: 'Modes & Risk Profiles', snippet: 'Suggest mode: AI proposes, you approve. Auto mode: AI executes at each candle close. Guarded profile adds daily-loss circuit breaker and consecutive-loss brake. Degen mode runs until allocation is depleted.', keywords: ['suggest mode', 'auto mode', 'guarded', 'degen', 'risk profile', 'circuit breaker', 'daily loss', 'consecutive loss', 'frequency cap', 'auto next', 'ask ai again', 'wait for me', 'execute', 'skip', 'mode switch', 'loss pacing'] },
-  { id: 'ai-trader-models', label: 'Models & Costs', snippet: 'Default model: Claude Opus 4.8. Cost ~$0.05–$0.08 per decision. LTF Auto ≈ $0.30–$0.50/day. HTF Auto ≈ $0.10/day. Uses your own OpenRouter key. Net P&L = realized PnL − trading fees − LLM costs.', keywords: ['model', 'claude', 'opus', 'openrouter', 'api key', 'cost', 'price', 'per decision', 'tokens', 'llm cost', 'net pnl', 'realized pnl', 'trading fees', 'taker fee', 'pnl definition', 'openrouter key', 'model picker', 'byo key'] },
+  { id: 'ai-trader-models', label: 'Models & Costs', snippet: 'Default: Qwen3.7 Max for 15m/1h (96 decisions/day, ~$0.29/day), Opus 4.8 for 4h/1d. Opus on 15m ≈ $9.60/day. Net P&L subtracts cumulative LLM cost — a bot that wins less than its AI bill is not profitable.', keywords: ['model', 'claude', 'opus', 'qwen', 'deepseek', 'openrouter', 'api key', 'cost', 'price', 'per decision', 'tokens', 'llm cost', 'net pnl', 'realized pnl', 'trading fees', 'taker fee', 'pnl definition', 'openrouter key', 'model picker', 'byo key', 'alpha arena', 'decision frequency', 'candles per day'] },
   { id: 'ai-trader-faq', label: 'AI Trader FAQ', snippet: 'Common questions: does it always trade, can it lose everything, what if SL placement fails, can the AI close early, what if the call times out. Includes disclaimer.', keywords: ['faq', 'frequently asked', 'questions', 'flat', 'no trade', 'lose everything', 'naked position', 'sl fail', 'stop loss fail', 'timeout', 'model fail', 'close early', 'financial advice', 'disclaimer', 'risk warning', 'not advice', 'all losses'] },
   { id: 'vaults-overview', label: 'Vaults Overview', snippet: 'Vaults put idle USDC to work earning yield. One tap to park all spare USDC, one tap to unpark it back.', keywords: ['vault', 'vaults', 'earn', 'yield', 'idle', 'spare', 'park', 'unpark', 'interest', 'apy', 'save', 'savings', 'passive', 'stablecoin'] },
   { id: 'vaults-destinations', label: 'Stable Vaults', snippet: 'Stable Vaults park idle USDC into near-$1 yield tokens: Kamino USDC, Perena USD*, Jupiter Lend USDC, Ondo USDY, and OnRe ONyc. Simple, one tap in and one tap out.', keywords: ['stable vaults', 'destination', 'destinations', 'yield', 'apy', 'kamino', 'perena', 'jupiter lend', 'ondo', 'usdy', 'onre', 'onyc', 'stablecoin', 'stable', 'floating', 'reinsurance', 'treasury', 'park usdc', 'idle usdc'] },
