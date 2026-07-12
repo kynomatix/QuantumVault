@@ -49,11 +49,25 @@ import { LlmKeyStatusRow } from '@/components/LlmKeyStatusRow';
 const DEGEN_CONFIRM_PHRASE = "send it";
 
 const SELECTABLE_MODELS = [
-  { id: "anthropic/claude-opus-4.8",   label: "Claude Opus 4.8",   note: "Peak reasoning — best for intricate, multi-condition logic.", roughCost: "~$0.10/call" },
-  { id: "qwen/qwen3.7-max",            label: "Qwen3.7 Max",        note: "Strong coding with independent provenance.",                  roughCost: "~$0.003/call" },
-  { id: "deepseek/deepseek-v4-pro",    label: "DeepSeek V4 Pro",    note: "Excellent value — capable on most strategies.",              roughCost: "~$0.002/call" },
-  { id: "deepseek/deepseek-v4-flash",  label: "DeepSeek V4 Flash",  note: "Cheapest and fastest — good for simple ideas.",             roughCost: "<$0.001/call" },
+  { id: "anthropic/claude-opus-4.8",   label: "Claude Opus 4.8",   note: "Peak reasoning — best for intricate, multi-condition logic.", roughCost: "~$0.10/call",  callCostUsd: 0.10 },
+  { id: "qwen/qwen3.7-max",            label: "Qwen3.7 Max",        note: "Strong coding with independent provenance.",                  roughCost: "~$0.003/call", callCostUsd: 0.003 },
+  { id: "deepseek/deepseek-v4-pro",    label: "DeepSeek V4 Pro",    note: "Excellent value — capable on most strategies.",              roughCost: "~$0.002/call", callCostUsd: 0.002 },
+  { id: "deepseek/deepseek-v4-flash",  label: "DeepSeek V4 Flash",  note: "Cheapest and fastest — good for simple ideas.",             roughCost: "<$0.001/call", callCostUsd: 0.001 },
 ];
+
+const CANDLES_PER_DAY: Record<string, number> = { '15m': 96, '1h': 24, '4h': 6, '1d': 2 };
+
+/** Qwen for frequent TFs (15m/1h), Opus for slow TFs (4h/1d). */
+function recommendedModelId(timeframe: string): string {
+  return (timeframe === '4h' || timeframe === '1d')
+    ? 'anthropic/claude-opus-4.8'
+    : 'qwen/qwen3.7-max';
+}
+
+function estimateDailyStr(callCostUsd: number, timeframe: string): string {
+  const daily = (CANDLES_PER_DAY[timeframe] ?? 24) * callCostUsd;
+  return daily < 0.01 ? `~$${daily.toFixed(3)}/day` : `~$${daily.toFixed(2)}/day`;
+}
 
 const TIMEFRAMES = [
   { value: "15m", label: "15 minutes" },
@@ -107,13 +121,15 @@ export function CreateAiTraderModal({
   const [markets, setMarkets] = useState<MarketInfo[]>([]);
   const [isLoadingMarkets, setIsLoadingMarkets] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  // Tracks whether the user has manually chosen a model; if not, timeframe changes drive the default.
+  const [userPickedModel, setUserPickedModel] = useState(false);
 
   const [form, setForm] = useState<FormState>({
     name: 'AI Trader — SOL-PERP',
     market: 'SOL-PERP',
     protocol: 'pacifica',
     timeframe: '1h',
-    model: 'anthropic/claude-opus-4.8',
+    model: 'qwen/qwen3.7-max',
     maxLeverage: 3,
     allocatedUsdc: '100',
     riskProfile: 'guarded',
@@ -196,7 +212,7 @@ export function CreateAiTraderModal({
       market: 'SOL-PERP',
       protocol: 'pacifica',
       timeframe: '1h',
-      model: 'anthropic/claude-opus-4.8',
+      model: 'qwen/qwen3.7-max',
       maxLeverage: 3,
       allocatedUsdc: '100',
       riskProfile: 'guarded',
@@ -207,6 +223,7 @@ export function CreateAiTraderModal({
       graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 2.0, maxDrawdownPct: 25 },
     });
     setAdvancedOpen(false);
+    setUserPickedModel(false);
     onClose();
   };
 
@@ -328,7 +345,14 @@ export function CreateAiTraderModal({
           {/* 4. Timeframe */}
           <div className="space-y-1.5">
             <Label htmlFor="ai-trader-timeframe">Analysis timeframe</Label>
-            <Select value={form.timeframe} onValueChange={v => set('timeframe', v)}>
+            <Select value={form.timeframe} onValueChange={v => {
+              setForm(prev => ({
+                ...prev,
+                timeframe: v,
+                // Follow recommendation on timeframe change unless user already picked a model.
+                model: userPickedModel ? prev.model : recommendedModelId(v),
+              }));
+            }}>
               <SelectTrigger id="ai-trader-timeframe" data-testid="select-ai-trader-timeframe">
                 <SelectValue />
               </SelectTrigger>
@@ -346,7 +370,7 @@ export function CreateAiTraderModal({
           <div className="space-y-3">
             <div className="space-y-1.5">
               <Label htmlFor="ai-trader-model">AI model</Label>
-              <Select value={form.model} onValueChange={v => set('model', v)}>
+              <Select value={form.model} onValueChange={v => { setUserPickedModel(true); set('model', v); }}>
                 <SelectTrigger id="ai-trader-model" data-testid="select-ai-trader-model">
                   <SelectValue />
                 </SelectTrigger>
@@ -356,14 +380,24 @@ export function CreateAiTraderModal({
                       <div className="flex flex-col gap-0.5 py-0.5">
                         <div className="flex items-center gap-2">
                           <span className="font-medium">{m.label}</span>
-                          <span className="text-[10px] text-muted-foreground font-mono">{m.roughCost}</span>
+                          {recommendedModelId(form.timeframe) === m.id && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-primary/15 text-primary font-semibold uppercase tracking-wide leading-none">Recommended</span>
+                          )}
                         </div>
                         <span className="text-[11px] text-muted-foreground">{m.note}</span>
+                        <span className="text-[10px] text-muted-foreground font-mono">
+                          {form.mode === 'auto'
+                            ? `${estimateDailyStr(m.callCostUsd, form.timeframe)} on ${form.timeframe} · auto est.`
+                            : m.roughCost}
+                        </span>
                       </div>
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              <p className="text-[11px] text-muted-foreground leading-relaxed">
+                Frequent-decision bots burn AI cost fast — cheaper models often make the same disciplined calls. Every decision records which model made it, so the track record shows what actually works.
+              </p>
             </div>
             <div className="rounded-lg border border-border/60 p-3 space-y-1">
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">OpenRouter key</p>

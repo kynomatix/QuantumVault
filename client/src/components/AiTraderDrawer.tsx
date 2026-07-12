@@ -71,11 +71,25 @@ import { AiTraderDecisionChart } from './AiTraderDecisionChart';
 const DEGEN_CONFIRM_PHRASE = "send it";
 
 const DRAWER_MODELS = [
-  { id: "anthropic/claude-opus-4.8",  label: "Claude Opus 4.8",  roughCost: "~$0.10/call" },
-  { id: "qwen/qwen3.7-max",           label: "Qwen3.7 Max",       roughCost: "~$0.003/call" },
-  { id: "deepseek/deepseek-v4-pro",   label: "DeepSeek V4 Pro",   roughCost: "~$0.002/call" },
-  { id: "deepseek/deepseek-v4-flash", label: "DeepSeek V4 Flash", roughCost: "<$0.001/call" },
-] as const;
+  { id: "anthropic/claude-opus-4.8",  label: "Claude Opus 4.8",  roughCost: "~$0.10/call",  callCostUsd: 0.10 },
+  { id: "qwen/qwen3.7-max",           label: "Qwen3.7 Max",       roughCost: "~$0.003/call", callCostUsd: 0.003 },
+  { id: "deepseek/deepseek-v4-pro",   label: "DeepSeek V4 Pro",   roughCost: "~$0.002/call", callCostUsd: 0.002 },
+  { id: "deepseek/deepseek-v4-flash", label: "DeepSeek V4 Flash", roughCost: "<$0.001/call", callCostUsd: 0.001 },
+];
+
+const CANDLES_PER_DAY: Record<string, number> = { '15m': 96, '1h': 24, '4h': 6, '1d': 2 };
+
+/** Qwen for frequent TFs (15m/1h), Opus for slow TFs (4h/1d). */
+function recommendedModelId(timeframe: string): string {
+  return (timeframe === '4h' || timeframe === '1d')
+    ? 'anthropic/claude-opus-4.8'
+    : 'qwen/qwen3.7-max';
+}
+
+function estimateDailyStr(callCostUsd: number, timeframe: string): string {
+  const daily = (CANDLES_PER_DAY[timeframe] ?? 24) * callCostUsd;
+  return daily < 0.01 ? `~$${daily.toFixed(3)}/day` : `~$${daily.toFixed(2)}/day`;
+}
 
 // Mirrors BotManagementDrawer's formatPrice/formatUsdSigned — kept local since
 // they aren't exported, so precision stays correct for low-priced markets
@@ -1165,17 +1179,31 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {DRAWER_MODELS.map((m) => (
-                        <SelectItem key={m.id} value={m.id} data-testid={`settings-option-model-${m.id}`}>
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium">{m.label}</span>
-                            <span className="text-[10px] text-muted-foreground font-mono">{m.roughCost}</span>
-                          </div>
-                        </SelectItem>
-                      ))}
+                      {DRAWER_MODELS.map((m) => {
+                        const isRec = recommendedModelId(bot.timeframe) === m.id;
+                        return (
+                          <SelectItem key={m.id} value={m.id} data-testid={`settings-option-model-${m.id}`}>
+                            <div className="flex flex-col gap-0.5 py-0.5">
+                              <div className="flex items-center gap-2">
+                                <span className="font-medium">{m.label}</span>
+                                {isRec && (
+                                  <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-primary/15 text-primary font-semibold uppercase tracking-wide leading-none">Recommended</span>
+                                )}
+                              </div>
+                              <span className="text-[10px] text-muted-foreground font-mono">
+                                {bot.mode === 'auto'
+                                  ? `${estimateDailyStr(m.callCostUsd, bot.timeframe)} on ${bot.timeframe} · auto est.`
+                                  : m.roughCost}
+                              </span>
+                            </div>
+                          </SelectItem>
+                        );
+                      })}
                     </SelectContent>
                   </Select>
-                  <p className="text-[10px] text-muted-foreground">Takes effect from the next decision cycle.</p>
+                  <p className="text-[11px] text-muted-foreground leading-relaxed">
+                    Frequent-decision bots burn AI cost fast — cheaper models often make the same disciplined calls. Every decision records which model made it, so the track record shows what actually works.
+                  </p>
                 </div>
 
                 {/* Read-only: locked policy fields */}
