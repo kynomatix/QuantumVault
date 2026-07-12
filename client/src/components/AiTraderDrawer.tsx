@@ -1175,7 +1175,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                 <div className="space-y-1.5">
                   <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">AI Model</p>
                   <Select value={settingsModel} onValueChange={setSettingsModel}>
-                    <SelectTrigger data-testid="settings-select-model">
+                    <SelectTrigger data-testid="settings-select-model" className="h-auto py-2.5">
                       {(() => {
                         const m = DRAWER_MODELS.find(x => x.id === settingsModel);
                         if (!m) return <SelectValue />;
@@ -1184,14 +1184,14 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                           ? `${estimateDailyStr(m.callCostUsd, bot.timeframe)} · auto`
                           : m.roughCost;
                         return (
-                          <span className="flex items-center justify-between w-full gap-2 min-w-0">
+                          <span className="flex flex-col gap-1 min-w-0">
                             <span className="flex items-center gap-1.5 min-w-0">
                               <span className="text-sm truncate">{m.label}</span>
                               {isRec && (
                                 <span className="text-[9px] px-1 py-0.5 rounded-full border border-current/40 font-semibold uppercase tracking-wide leading-none whitespace-nowrap shrink-0">Rec</span>
                               )}
                             </span>
-                            <span className="text-[10px] text-muted-foreground font-mono shrink-0">{costStr}</span>
+                            <span className="text-[10px] text-muted-foreground font-mono">{costStr}</span>
                           </span>
                         );
                       })()}
