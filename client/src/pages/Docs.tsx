@@ -4366,6 +4366,7 @@ export default function DocsPage() {
                     const isFirstAssetVaults = item.id === 'asset-vaults';
                     const isFirstQuantumLab = item.id === 'quantumlab-overview';
                     const isFirstBorrow = item.id === 'borrow-overview';
+                    const isFirstAiTrader = item.id === 'ai-trader-overview';
                     return (
                       <div key={item.id}>
                         {isFirstVaults && (
@@ -4395,6 +4396,11 @@ export default function DocsPage() {
                               <Landmark className="w-3.5 h-3.5 text-cyan-400" />
                               <span className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">Borrow</span>
                             </div>
+                          </div>
+                        )}
+                        {isFirstAiTrader && (
+                          <div className="pt-2 pb-1 px-3">
+                            <span className="text-xs text-white/30 uppercase tracking-wider">AI Trader</span>
                           </div>
                         )}
                         <button
