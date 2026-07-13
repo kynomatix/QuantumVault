@@ -27,7 +27,7 @@
  */
 import { db } from "../server/db";
 import { aiTraderDecisions, aiTraderBots } from "@shared/schema";
-import { eq, and, isNotNull } from "drizzle-orm";
+import { eq, and, isNotNull, inArray } from "drizzle-orm";
 import { fetchOHLCV } from "../server/lab/datafeed";
 import { marketToDatafeedTicker } from "../server/ai-trader/context-builder";
 import type { OHLCV } from "../server/lab/engine";
@@ -220,7 +220,7 @@ async function main() {
     .where(
       botIds.length === 1
         ? eq(aiTraderBots.id, botIds[0])
-        : (aiTraderBots.id as any).in(botIds)   // drizzle inArray workaround for dynamic list
+        : inArray(aiTraderBots.id, botIds)
     );
 
   // Fallback: if inArray workaround is unreliable, fetch one by one
