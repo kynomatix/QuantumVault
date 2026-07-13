@@ -3012,306 +3012,357 @@ export default function AppPage() {
                   </Button>
                 </div>
 
-                {botsData && botsData.length > 0 && (
-                  <div className="flex items-center gap-3">
-                    <div className="h-px flex-1 bg-border/50" />
-                    <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider px-1">Featured</span>
-                    <div className="h-px flex-1 bg-border/50" />
-                  </div>
-                )}
-                <div className="grid md:grid-cols-2 gap-4" data-testid="section-ai-feature-cards">
-                  <div className="gradient-border p-5 noise flex flex-col gap-3" data-testid="card-ai-trader">
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center flex-shrink-0">
-                          <Brain className="w-5 h-5 text-primary" />
-                        </div>
-                        <div>
-                          <h3 className="font-semibold">AI Trader</h3>
-                          <p className="text-xs text-muted-foreground">Autonomous AI trading decisions</p>
-                        </div>
-                      </div>
-                      <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border/60 shrink-0">Paper</span>
-                    </div>
-                    <p className="text-sm text-muted-foreground">An AI monitors the market and proposes trades, building a paper track record you can review before going live.</p>
-                    <p className="text-xs text-muted-foreground/70">3 free decisions included — no API key needed to start.</p>
-                    <div className="flex items-center gap-2 mt-auto pt-1">
-                      <Button
-                        className="flex-1 bg-gradient-to-r from-primary to-accent hover:opacity-90"
-                        onClick={() => setCreateAiTraderOpen(true)}
-                        data-testid="button-try-on-paper"
+                {(() => {
+                  const renderBotCard = (bot: TradingBot) => {
+                    const position = positionsData?.find((p: any) => p.botId === bot.id);
+                    const hasPosition = position && Math.abs(position.baseAssetAmount) > 0.0001;
+                    const unrealizedPnl = position?.unrealizedPnl ?? 0;
+                    return (
+                      <div
+                        key={bot.id}
+                        className="gradient-border p-5 noise hover:scale-[1.01] transition-transform cursor-pointer"
+                        data-testid={`bot-card-${bot.id}`}
+                        onClick={() => {
+                          setSelectedManagedBot(bot);
+                          setManageBotDrawerOpen(true);
+                        }}
                       >
-                        Try on paper →
-                      </Button>
-                    </div>
-                  </div>
-                  <div
-                    className="gradient-border p-5 noise opacity-60 select-none cursor-not-allowed"
-                    aria-hidden="true"
-                    data-testid="card-grid-bot-coming-soon"
-                  >
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-muted/50 to-muted/30 flex items-center justify-center flex-shrink-0">
-                          <BarChart3 className="w-5 h-5 text-muted-foreground" />
-                        </div>
-                        <div>
-                          <h3 className="font-semibold">Grid Bot</h3>
-                          <p className="text-xs text-muted-foreground">Automated grid trading</p>
-                        </div>
-                      </div>
-                      <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border/60 shrink-0">Coming soon</span>
-                    </div>
-                    <p className="text-sm text-muted-foreground mt-3">Buys and sells automatically within a price range, capturing volatility without predicting direction.</p>
-                  </div>
-                </div>
-                {((botsData && botsData.length > 0) || ((aiTraderBotsData as any)?.bots?.length > 0)) && (
-                  (() => {
-                    const renderBotCard = (bot: TradingBot) => {
-                      const position = positionsData?.find((p: any) => p.botId === bot.id);
-                      const hasPosition = position && Math.abs(position.baseAssetAmount) > 0.0001;
-                      const unrealizedPnl = position?.unrealizedPnl ?? 0;
-                      
-                      return (
-                        <div 
-                          key={bot.id} 
-                          className="gradient-border p-5 noise hover:scale-[1.01] transition-transform cursor-pointer"
-                          data-testid={`bot-card-${bot.id}`}
-                          onClick={() => {
-                            setSelectedManagedBot(bot);
-                            setManageBotDrawerOpen(true);
-                          }}
-                        >
-                          <div className="flex items-start justify-between mb-4">
-                            <div className="flex items-center gap-3">
-                              <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${
-                                bot.isActive 
-                                  ? 'bg-gradient-to-br from-primary to-accent' 
-                                  : 'bg-gradient-to-br from-primary/30 to-accent/30'
-                              }`}>
-                                <Bot className={`w-6 h-6 ${bot.isActive ? 'text-white' : 'text-primary'}`} />
-                              </div>
-                              <div>
-                                <h3 className="font-semibold text-base">{bot.name}</h3>
-                                <p className="text-sm text-muted-foreground">{bot.market}</p>
-                              </div>
+                        <div className="flex items-start justify-between mb-4">
+                          <div className="flex items-center gap-3">
+                            <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${
+                              bot.isActive
+                                ? 'bg-gradient-to-br from-primary to-accent'
+                                : 'bg-gradient-to-br from-primary/30 to-accent/30'
+                            }`}>
+                              <Bot className={`w-6 h-6 ${bot.isActive ? 'text-white' : 'text-primary'}`} />
                             </div>
-                            <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
-                              bot.isActive 
-                                ? 'bg-emerald-500/20 text-emerald-400' 
-                                : 'bg-yellow-500/20 text-yellow-400'
-                            }`}>
-                              {bot.isActive ? 'Active' : 'Paused'}
-                            </span>
+                            <div>
+                              <h3 className="font-semibold text-base">{bot.name}</h3>
+                              <p className="text-sm text-muted-foreground">{bot.market}</p>
+                            </div>
                           </div>
-
-                          {hasPosition && (
-                            <div className={`mb-4 px-3 py-2.5 rounded-lg flex items-center justify-between ${
-                              position.side === 'LONG' ? 'bg-emerald-500/10 border border-emerald-500/20' : 'bg-red-500/10 border border-red-500/20'
-                            }`}>
-                              <div className="flex items-center gap-2">
-                                <span className={`text-xs font-bold px-2 py-0.5 rounded ${
-                                  position.side === 'LONG' 
-                                    ? 'bg-emerald-500/20 text-emerald-400' 
-                                    : 'bg-red-500/20 text-red-400'
-                                }`}>
-                                  {position.side}
-                                </span>
-                                <span className="text-sm font-medium">
-                                  {Math.abs(position.baseAssetAmount).toFixed(4)} {bot.market.replace('-PERP', '')}
-                                </span>
-                              </div>
-                              <span className={`text-sm font-semibold ${
-                                unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'
+                          <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
+                            bot.isActive
+                              ? 'bg-emerald-500/20 text-emerald-400'
+                              : 'bg-yellow-500/20 text-yellow-400'
+                          }`}>
+                            {bot.isActive ? 'Active' : 'Paused'}
+                          </span>
+                        </div>
+                        {hasPosition && (
+                          <div className={`mb-4 px-3 py-2.5 rounded-lg flex items-center justify-between ${
+                            position.side === 'LONG' ? 'bg-emerald-500/10 border border-emerald-500/20' : 'bg-red-500/10 border border-red-500/20'
+                          }`}>
+                            <div className="flex items-center gap-2">
+                              <span className={`text-xs font-bold px-2 py-0.5 rounded ${
+                                position.side === 'LONG'
+                                  ? 'bg-emerald-500/20 text-emerald-400'
+                                  : 'bg-red-500/20 text-red-400'
                               }`}>
-                                {unrealizedPnl >= 0 ? '+' : ''}{unrealizedPnl.toFixed(2)}
+                                {position.side}
+                              </span>
+                              <span className="text-sm font-medium">
+                                {Math.abs(position.baseAssetAmount).toFixed(4)} {bot.market.replace('-PERP', '')}
                               </span>
                             </div>
-                          )}
-
-                          <div className="grid grid-cols-3 gap-3 text-center">
-                            <div className="p-2.5 rounded-lg bg-muted/30">
-                              <p className="text-lg font-bold">{(bot as any).actualTradeCount ?? (bot.stats as any)?.totalTrades ?? 0}</p>
-                              <p className="text-xs text-muted-foreground">Trades</p>
-                            </div>
-                            <div className="p-2.5 rounded-lg bg-muted/30">
-                              <p className="text-lg font-bold">{bot.leverage}x</p>
-                              <p className="text-xs text-muted-foreground">Leverage</p>
-                            </div>
-                            <div className="p-2.5 rounded-lg bg-muted/30">
-                              <p className={`text-lg font-bold ${((bot as any).netPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                {((bot as any).netPnl ?? 0) >= 0 ? '+' : ''}${((bot as any).netPnl ?? 0).toFixed(2)}
-                              </p>
-                              {((bot as any).netDeposited ?? 0) > 0 && (
-                                <p className={`text-xs font-medium ${((bot as any).netPnlPercent ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                  {((bot as any).netPnlPercent ?? 0) >= 0 ? '+' : ''}{((bot as any).netPnlPercent ?? 0).toFixed(1)}%
-                                </p>
-                              )}
-                              <p className="text-xs text-muted-foreground">Net P&L</p>
-                            </div>
-                          </div>
-
-                          {!(bot as any).isPublished && (bot as any).botType !== 'grid' && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="w-full mt-4 border-primary/30 text-primary hover:bg-primary/10"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setBotToPublish({ id: bot.id, name: bot.name, market: bot.market });
-                                setPublishModalOpen(true);
-                              }}
-                              data-testid={`button-publish-${bot.id}`}
-                            >
-                              <Store className="w-4 h-4 mr-2" />
-                              Publish to Marketplace
-                            </Button>
-                          )}
-                          {(bot as any).isPublished && (
-                            <div className="mt-4 px-3 py-2 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center gap-2 text-sm text-primary">
-                              <Store className="w-4 h-4" />
-                              Published
-                            </div>
-                          )}
-                        </div>
-                      );
-                    };
-                    const aiStatusMap: Record<string, { label: string; cls: string }> = {
-                      idle: { label: 'Idle', cls: 'bg-muted text-muted-foreground' },
-                      analyzing: { label: 'Analyzing…', cls: 'bg-primary/20 text-primary' },
-                      proposed: { label: 'Proposed', cls: 'bg-primary/20 text-primary' },
-                      executing: { label: 'Executing…', cls: 'bg-amber-500/20 text-amber-400' },
-                      open: { label: 'Position open', cls: 'bg-emerald-500/20 text-emerald-400' },
-                      paused: { label: 'Paused', cls: 'bg-yellow-500/20 text-yellow-400' },
-                      stopped: { label: 'Stopped', cls: 'bg-red-500/20 text-red-400' },
-                    };
-                    const renderAiTraderCard = (aiBot: any) => {
-                      const aiSt = aiStatusMap[aiBot.status] ?? { label: aiBot.status, cls: 'bg-muted text-muted-foreground' };
-                      const isBright = ['open', 'executing', 'analyzing', 'proposed'].includes(aiBot.status);
-                      const dailyPnl = Number(aiBot.dailyRealizedPnl ?? 0);
-                      return (
-                        <div
-                          key={aiBot.id}
-                          className="gradient-border p-5 noise hover:scale-[1.01] transition-transform cursor-pointer"
-                          data-testid={`ai-trader-card-${aiBot.id}`}
-                          onClick={() => { setSelectedAiTraderBotId(aiBot.id); setAiTraderDrawerOpen(true); }}
-                        >
-                          <div className="flex items-start justify-between mb-4">
-                            <div className="flex items-center gap-3">
-                              <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${
-                                isBright ? 'bg-gradient-to-br from-primary to-accent' : 'bg-gradient-to-br from-primary/30 to-accent/30'
-                              }`}>
-                                <Brain className={`w-6 h-6 ${isBright ? 'text-white' : 'text-primary'}`} />
-                              </div>
-                              <div>
-                                <h3 className="font-semibold text-base">{aiBot.market}</h3>
-                                <p className="text-sm text-muted-foreground">{aiBot.timeframe} · AI Trader</p>
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                              {!!aiBot.paperMode && (
-                                <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/50 text-amber-400 font-medium">PAPER</span>
-                              )}
-                              <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${aiSt.cls}`}>{aiSt.label}</span>
-                            </div>
-                          </div>
-                          <div className="grid grid-cols-3 gap-3 text-center">
-                            <div className="p-2.5 rounded-lg bg-muted/30">
-                              <p className="text-sm font-bold capitalize">{aiBot.riskProfile}</p>
-                              <p className="text-xs text-muted-foreground">Risk</p>
-                            </div>
-                            <div className="p-2.5 rounded-lg bg-muted/30">
-                              <p className="text-sm font-bold">{aiBot.maxLeverage}x</p>
-                              <p className="text-xs text-muted-foreground">Max lev.</p>
-                            </div>
-                            <div className="p-2.5 rounded-lg bg-muted/30">
-                              {(() => {
-                                const ls = (aiBot as any).lifetimeStats;
-                                const net: number = ls?.netPnlAllIn ?? 0;
-                                const unrealizedForTip: number = (aiBot as any).pnl?.unrealizedPnl ?? 0;
-                                return (
-                                  <TooltipProvider>
-                                    <Tooltip>
-                                      <TooltipTrigger asChild>
-                                        <div className="cursor-help">
-                                          <p className={`text-sm font-bold ${net >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                            {net >= 0 ? '+' : ''}${Math.abs(net).toFixed(2)}
-                                          </p>
-                                          <div className="flex items-center gap-1 justify-center">
-                                            <p className="text-xs text-muted-foreground">Net P&L</p>
-                                            {!!aiBot.paperMode && (
-                                              <span className="text-[9px] px-1 rounded border border-amber-500/40 text-amber-400 leading-tight">PAPER</span>
-                                            )}
-                                          </div>
-                                        </div>
-                                      </TooltipTrigger>
-                                      {ls && (
-                                        <TooltipContent className="max-w-[240px] bg-popover border border-border text-xs p-2.5 space-y-1.5">
-                                          <div className="flex justify-between gap-4">
-                                            <span>Closed P&L</span>
-                                            <span>{Number(ls.totalRealized) >= 0 ? '+' : ''}${Number(ls.totalRealized).toFixed(2)}</span>
-                                          </div>
-                                          <div className="flex justify-between gap-4">
-                                            <span>Live unrealized</span>
-                                            <span>{unrealizedForTip >= 0 ? '+' : ''}${unrealizedForTip.toFixed(2)}</span>
-                                          </div>
-                                          <div className="flex justify-between gap-4">
-                                            <span>AI spend</span>
-                                            <span>−${Number(ls.totalLlmCost).toFixed(4)}</span>
-                                          </div>
-                                        </TooltipContent>
-                                      )}
-                                    </Tooltip>
-                                  </TooltipProvider>
-                                );
-                              })()}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    };
-                    const aiBots: any[] = (aiTraderBotsData as any)?.bots ?? [];
-                    const activeAiBots = aiBots.filter((b: any) => b.status !== 'stopped');
-                    const inactiveAiBots = aiBots.filter((b: any) => b.status === 'stopped');
-                    const activeBots = (botsData ?? []).filter((b: TradingBot) => b.isActive);
-                    const inactiveBots = (botsData ?? []).filter((b: TradingBot) => !b.isActive);
-                    const hasActive = activeBots.length > 0 || activeAiBots.length > 0;
-                    const hasInactive = inactiveBots.length > 0 || inactiveAiBots.length > 0;
-                    return (
-                      <div className="space-y-6">
-                        {hasActive ? (
-                          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
-                            {activeAiBots.map((b: any) => renderAiTraderCard(b))}
-                            {activeBots.map((bot: TradingBot) => renderBotCard(bot))}
-                          </div>
-                        ) : (
-                          <div className="gradient-border p-8 noise text-center">
-                            <p className="text-muted-foreground">No active bots right now.</p>
+                            <span className={`text-sm font-semibold ${
+                              unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'
+                            }`}>
+                              {unrealizedPnl >= 0 ? '+' : ''}{unrealizedPnl.toFixed(2)}
+                            </span>
                           </div>
                         )}
-                        {hasInactive && (
-                          <div className="space-y-4">
-                            <button
-                              type="button"
-                              onClick={() => setShowInactiveBots((v) => !v)}
-                              className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
-                              data-testid="button-toggle-inactive-bots"
-                            >
-                              {showInactiveBots ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                              Inactive bots ({inactiveBots.length + inactiveAiBots.length})
-                            </button>
-                            {showInactiveBots && (
-                              <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
-                                {inactiveAiBots.map((b: any) => renderAiTraderCard(b))}
-                                {inactiveBots.map((bot: TradingBot) => renderBotCard(bot))}
-                              </div>
+                        <div className="grid grid-cols-3 gap-3 text-center">
+                          <div className="p-2.5 rounded-lg bg-muted/30">
+                            <p className="text-lg font-bold">{(bot as any).actualTradeCount ?? (bot.stats as any)?.totalTrades ?? 0}</p>
+                            <p className="text-xs text-muted-foreground">Trades</p>
+                          </div>
+                          <div className="p-2.5 rounded-lg bg-muted/30">
+                            <p className="text-lg font-bold">{bot.leverage}x</p>
+                            <p className="text-xs text-muted-foreground">Leverage</p>
+                          </div>
+                          <div className="p-2.5 rounded-lg bg-muted/30">
+                            <p className={`text-lg font-bold ${((bot as any).netPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                              {((bot as any).netPnl ?? 0) >= 0 ? '+' : ''}${((bot as any).netPnl ?? 0).toFixed(2)}
+                            </p>
+                            {((bot as any).netDeposited ?? 0) > 0 && (
+                              <p className={`text-xs font-medium ${((bot as any).netPnlPercent ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                {((bot as any).netPnlPercent ?? 0) >= 0 ? '+' : ''}{((bot as any).netPnlPercent ?? 0).toFixed(1)}%
+                              </p>
                             )}
+                            <p className="text-xs text-muted-foreground">Net P&L</p>
+                          </div>
+                        </div>
+                        {!(bot as any).isPublished && (bot as any).botType !== 'grid' && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="w-full mt-4 border-primary/30 text-primary hover:bg-primary/10"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setBotToPublish({ id: bot.id, name: bot.name, market: bot.market });
+                              setPublishModalOpen(true);
+                            }}
+                            data-testid={`button-publish-${bot.id}`}
+                          >
+                            <Store className="w-4 h-4 mr-2" />
+                            Publish to Marketplace
+                          </Button>
+                        )}
+                        {(bot as any).isPublished && (
+                          <div className="mt-4 px-3 py-2 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center gap-2 text-sm text-primary">
+                            <Store className="w-4 h-4" />
+                            Published
                           </div>
                         )}
                       </div>
                     );
-                  })()
-                )}
+                  };
+
+                  const aiStatusMap: Record<string, { label: string; cls: string }> = {
+                    idle: { label: 'Idle', cls: 'bg-muted text-muted-foreground' },
+                    analyzing: { label: 'Analyzing…', cls: 'bg-primary/20 text-primary' },
+                    proposed: { label: 'Proposed', cls: 'bg-primary/20 text-primary' },
+                    executing: { label: 'Executing…', cls: 'bg-amber-500/20 text-amber-400' },
+                    open: { label: 'Position open', cls: 'bg-emerald-500/20 text-emerald-400' },
+                    paused: { label: 'Paused', cls: 'bg-yellow-500/20 text-yellow-400' },
+                    stopped: { label: 'Stopped', cls: 'bg-red-500/20 text-red-400' },
+                  };
+                  const renderAiTraderCard = (aiBot: any) => {
+                    const aiSt = aiStatusMap[aiBot.status] ?? { label: aiBot.status, cls: 'bg-muted text-muted-foreground' };
+                    const isBright = ['open', 'executing', 'analyzing', 'proposed'].includes(aiBot.status);
+                    return (
+                      <div
+                        key={aiBot.id}
+                        className="gradient-border p-5 noise hover:scale-[1.01] transition-transform cursor-pointer"
+                        data-testid={`ai-trader-card-${aiBot.id}`}
+                        onClick={() => { setSelectedAiTraderBotId(aiBot.id); setAiTraderDrawerOpen(true); }}
+                      >
+                        <div className="flex items-start justify-between mb-4">
+                          <div className="flex items-center gap-3">
+                            <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${
+                              isBright ? 'bg-gradient-to-br from-primary to-accent' : 'bg-gradient-to-br from-primary/30 to-accent/30'
+                            }`}>
+                              <Brain className={`w-6 h-6 ${isBright ? 'text-white' : 'text-primary'}`} />
+                            </div>
+                            <div>
+                              <h3 className="font-semibold text-base">{aiBot.market}</h3>
+                              <p className="text-sm text-muted-foreground">{aiBot.timeframe} · AI Trader</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                            {!!aiBot.paperMode && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/50 text-amber-400 font-medium">PAPER</span>
+                            )}
+                            <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${aiSt.cls}`}>{aiSt.label}</span>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-3 gap-3 text-center">
+                          <div className="p-2.5 rounded-lg bg-muted/30">
+                            <p className="text-sm font-bold capitalize">{aiBot.riskProfile}</p>
+                            <p className="text-xs text-muted-foreground">Risk</p>
+                          </div>
+                          <div className="p-2.5 rounded-lg bg-muted/30">
+                            <p className="text-sm font-bold">{aiBot.maxLeverage}x</p>
+                            <p className="text-xs text-muted-foreground">Max lev.</p>
+                          </div>
+                          <div className="p-2.5 rounded-lg bg-muted/30">
+                            {(() => {
+                              const ls = (aiBot as any).lifetimeStats;
+                              const net: number = ls?.netPnlAllIn ?? 0;
+                              const unrealizedForTip: number = (aiBot as any).pnl?.unrealizedPnl ?? 0;
+                              return (
+                                <TooltipProvider>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <div className="cursor-help">
+                                        <p className={`text-sm font-bold ${net >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                          {net >= 0 ? '+' : ''}${Math.abs(net).toFixed(2)}
+                                        </p>
+                                        <div className="flex items-center gap-1 justify-center">
+                                          <p className="text-xs text-muted-foreground">Net P&L</p>
+                                          {!!aiBot.paperMode && (
+                                            <span className="text-[9px] px-1 rounded border border-amber-500/40 text-amber-400 leading-tight">PAPER</span>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </TooltipTrigger>
+                                    {ls && (
+                                      <TooltipContent className="max-w-[240px] bg-popover border border-border text-xs p-2.5 space-y-1.5">
+                                        <div className="flex justify-between gap-4">
+                                          <span>Closed P&L</span>
+                                          <span>{Number(ls.totalRealized) >= 0 ? '+' : ''}${Number(ls.totalRealized).toFixed(2)}</span>
+                                        </div>
+                                        <div className="flex justify-between gap-4">
+                                          <span>Live unrealized</span>
+                                          <span>{unrealizedForTip >= 0 ? '+' : ''}${unrealizedForTip.toFixed(2)}</span>
+                                        </div>
+                                        <div className="flex justify-between gap-4">
+                                          <span>AI spend</span>
+                                          <span>−${Number(ls.totalLlmCost).toFixed(4)}</span>
+                                        </div>
+                                      </TooltipContent>
+                                    )}
+                                  </Tooltip>
+                                </TooltipProvider>
+                              );
+                            })()}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  };
+
+                  const aiBots: any[] = (aiTraderBotsData as any)?.bots ?? [];
+                  const activeAiBots = aiBots.filter((b: any) => b.status !== 'stopped');
+                  const inactiveAiBots = aiBots.filter((b: any) => b.status === 'stopped');
+                  const activeBots = (botsData ?? []).filter((b: TradingBot) => b.isActive);
+                  const inactiveBots = (botsData ?? []).filter((b: TradingBot) => !b.isActive);
+                  const totalInactive = inactiveBots.length + inactiveAiBots.length;
+
+                  return (
+                    <div className="space-y-8">
+                      {/* Signal Bots section */}
+                      <div className="space-y-4" data-testid="section-signal-bots">
+                        <div className="flex items-center gap-3">
+                          <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap flex items-center gap-1.5">
+                            <Bot className="w-3.5 h-3.5" />
+                            Signal Bots
+                          </h2>
+                          <div className="h-px flex-1 bg-border/50" />
+                        </div>
+                        {activeBots.length > 0 ? (
+                          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+                            {activeBots.map((bot) => renderBotCard(bot))}
+                          </div>
+                        ) : (
+                          <div className="gradient-border p-5 noise text-center">
+                            <p className="text-sm text-muted-foreground">No signal bots yet. Click <strong className="text-foreground">Add Bot</strong> to connect a TradingView webhook.</p>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* AI Trader section */}
+                      <div className="space-y-4" data-testid="section-ai-trader">
+                        <div className="flex items-center gap-3">
+                          <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap flex items-center gap-1.5">
+                            <Brain className="w-3.5 h-3.5" />
+                            AI Trader
+                          </h2>
+                          <div className="h-px flex-1 bg-border/50" />
+                        </div>
+                        {activeAiBots.length > 0 ? (
+                          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+                            {activeAiBots.map((b: any) => renderAiTraderCard(b))}
+                          </div>
+                        ) : (
+                          <div className="gradient-border p-5 noise flex flex-col gap-3" data-testid="card-ai-trader">
+                            <div className="flex items-start justify-between">
+                              <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center flex-shrink-0">
+                                  <Brain className="w-5 h-5 text-primary" />
+                                </div>
+                                <div>
+                                  <h3 className="font-semibold">AI Trader</h3>
+                                  <p className="text-xs text-muted-foreground">Autonomous AI trading decisions</p>
+                                </div>
+                              </div>
+                              <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border/60 shrink-0">Paper</span>
+                            </div>
+                            <p className="text-sm text-muted-foreground">An AI monitors the market and proposes trades, building a paper track record you can review before going live.</p>
+                            <p className="text-xs text-muted-foreground/70">3 free decisions included — no API key needed to start.</p>
+                            <div className="flex items-center gap-2 mt-auto pt-1">
+                              <Button
+                                className="flex-1 bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                                onClick={() => setCreateAiTraderOpen(true)}
+                                data-testid="button-try-on-paper"
+                              >
+                                Try on paper →
+                              </Button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Grid Bots section */}
+                      <div className="space-y-4" data-testid="section-grid-bots">
+                        <div className="flex items-center gap-3">
+                          <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap flex items-center gap-1.5">
+                            <BarChart3 className="w-3.5 h-3.5" />
+                            Grid Bots
+                          </h2>
+                          <div className="h-px flex-1 bg-border/50" />
+                        </div>
+                        <div
+                          className="gradient-border p-5 noise opacity-60 select-none cursor-not-allowed"
+                          aria-hidden="true"
+                          data-testid="card-grid-bot-coming-soon"
+                        >
+                          <div className="flex items-start justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-muted/50 to-muted/30 flex items-center justify-center flex-shrink-0">
+                                <BarChart3 className="w-5 h-5 text-muted-foreground" />
+                              </div>
+                              <div>
+                                <h3 className="font-semibold">Grid Bot</h3>
+                                <p className="text-xs text-muted-foreground">Automated grid trading</p>
+                              </div>
+                            </div>
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border/60 shrink-0">Coming soon</span>
+                          </div>
+                          <p className="text-sm text-muted-foreground mt-3">Buys and sells automatically within a price range, capturing volatility without predicting direction.</p>
+                        </div>
+                      </div>
+
+                      {/* Inactive bots (all types, collapsible) */}
+                      {totalInactive > 0 && (
+                        <div className="space-y-4">
+                          <button
+                            type="button"
+                            onClick={() => setShowInactiveBots((v) => !v)}
+                            className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+                            data-testid="button-toggle-inactive-bots"
+                          >
+                            {showInactiveBots ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                            Inactive bots ({totalInactive})
+                          </button>
+                          {showInactiveBots && (
+                            <div className="space-y-6">
+                              {inactiveBots.length > 0 && (
+                                <div className="space-y-3">
+                                  <div className="flex items-center gap-3">
+                                    <span className="text-xs text-muted-foreground/70 uppercase tracking-wider whitespace-nowrap flex items-center gap-1.5">
+                                      <Bot className="w-3 h-3" />
+                                      Signal Bots
+                                    </span>
+                                    <div className="h-px flex-1 bg-border/30" />
+                                  </div>
+                                  <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+                                    {inactiveBots.map((bot) => renderBotCard(bot))}
+                                  </div>
+                                </div>
+                              )}
+                              {inactiveAiBots.length > 0 && (
+                                <div className="space-y-3">
+                                  <div className="flex items-center gap-3">
+                                    <span className="text-xs text-muted-foreground/70 uppercase tracking-wider whitespace-nowrap flex items-center gap-1.5">
+                                      <Brain className="w-3 h-3" />
+                                      AI Trader
+                                    </span>
+                                    <div className="h-px flex-1 bg-border/30" />
+                                  </div>
+                                  <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+                                    {inactiveAiBots.map((b: any) => renderAiTraderCard(b))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </motion.div>
             )}
 

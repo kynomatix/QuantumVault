@@ -238,8 +238,8 @@ const CHART_TIMEFRAME_MS: Record<string, number> = {
 };
 // Bars of padding on each side of the entry->exit window, and a floor on the total
 // number of bars so a very short (sub-candle) trade still renders a readable chart.
-const CHART_PAD_CANDLES = 20;
-const CHART_MIN_TOTAL_CANDLES = 60;
+const CHART_PAD_CANDLES = 100;
+const CHART_MIN_TOTAL_CANDLES = 200;
 
 export function registerAiTraderRoutes(app: Express): void {
   // --- Create -----------------------------------------------------------------------
