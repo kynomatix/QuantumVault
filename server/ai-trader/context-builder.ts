@@ -426,13 +426,19 @@ export async function buildMarketContext(
     : SMART_LEVERAGE_HARD_CEILING;
   const maxLeverage = Math.min(bot.maxLeverage, smartLeverageCap, SMART_LEVERAGE_HARD_CEILING);
 
-  const guardrailBlock = [
+  const guardrailLines = [
     `Max leverage: ${maxLeverage}x (bot cap ${bot.maxLeverage}x, smart volatility cap ${smartLeverageCap}x, hard ceiling ${SMART_LEVERAGE_HARD_CEILING}x)`,
     `Size bounds: 10%-90% of allocated collateral as margin`,
     `Reward:risk floor (enforced): >= 1.2 after fees (target >= 1.5 per your instructions above)`,
     `Cooldown: ${cooldownRemainingMs > 0 ? `${Math.round(cooldownRemainingMs / 60_000)}m remaining before next entry` : "clear, no cooldown active"}`,
     `Trades today: ${tradesToday}/${maxTradesPerDay} (${LTF_TIMEFRAMES.has(timeframe) ? "LTF" : "HTF"} cap)`,
-  ].join("\n");
+  ];
+  if (bot.sizingMode === "risk_based") {
+    guardrailLines.push(
+      `Sizing: automatic and risk-normalised to a confidence-scaled fraction of live equity — sizePct and leverage requests are ignored, so focus on stop quality and report confidence honestly because it directly moves position size.`
+    );
+  }
+  const guardrailBlock = guardrailLines.join("\n");
 
   const selectedCsv = candlesToCsv(csvCandles);
   const parentCsv = parentCandles.length > 0 ? candlesToCsv(parentCandles) : null;

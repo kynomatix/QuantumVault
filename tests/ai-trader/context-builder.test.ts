@@ -577,4 +577,64 @@ describe("buildMarketContext (WO-3)", () => {
     expect(result.user).not.toContain("BTC positioning (COT, weekly):");
     expect((result.contextDigest as any).cotSignal).toBeNull();
   });
+
+  // ─── Phase B: risk_based prompt line golden-file tests ────────────────────────
+
+  it("risk_based sizing line — present when sizingMode is risk_based (not in discretionary default)", async () => {
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot({ sizingMode: "risk_based" } as any),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    // The exact line must appear verbatim in the guardrails block.
+    expect(result.user).toContain(
+      "Sizing: automatic and risk-normalised to a confidence-scaled fraction of live equity"
+    );
+    expect(result.user).toContain("sizePct and leverage requests are ignored");
+    expect(result.user).toContain("focus on stop quality");
+    expect(result.user).toContain("confidence honestly because it directly moves position size");
+    // It must live inside the guardrails section, not drift into another block.
+    const guardrailsSection = result.user.split("## Guardrails")[1]?.split("##")[0] ?? "";
+    expect(guardrailsSection).toContain("Sizing: automatic");
+  });
+
+  it("risk_based sizing line — absent when sizingMode is discretionary (default)", async () => {
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(), // sizingMode field absent → discretionary
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    expect(result.user).not.toContain("Sizing: automatic");
+    expect(result.user).not.toContain("sizePct and leverage requests are ignored");
+  });
+
+  it("risk_based sizing line — absent when sizingMode is explicitly discretionary", async () => {
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot({ sizingMode: "discretionary" } as any),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    expect(result.user).not.toContain("Sizing: automatic");
+  });
 });

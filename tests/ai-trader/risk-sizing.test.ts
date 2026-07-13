@@ -414,3 +414,52 @@ describe("risk_based sizing — audit stamps", () => {
     expect(c.confidence).toBe(9);
   });
 });
+
+// --- Phase B carry-forward: leverage_clamped suppressed in risk_based mode -----------
+
+describe("risk_based sizing — leverage_clamped audit note suppression", () => {
+  it("does NOT emit leverage_clamped when the model requests 5x but risk_based cap is 3x (would clamp in discretionary)", () => {
+    // botMaxLeverage 3 → G1 ceiling 3; model requests 5 → would emit leverage_clamped in discretionary.
+    // In risk_based mode the model's leverage is ignored (size derived from risk budget) so no note.
+    const r = applyGuardrails(
+      makeLong({ leverage: 5, confidence: 1 }), // model wants 5×; risk derives 1×
+      makeInput({ botMaxLeverage: 3 }) // cap 3 < 5 → clamp fires in discretionary
+    );
+    expectOk(r);
+    expect(r.clamped.leverage).toBe(1); // derived from risk budget, not clamped from model's request
+    expect(codes(r)).not.toContain("leverage_clamped");
+  });
+
+  it("does NOT emit leverage_clamped when the model requests above the bot cap in risk_based mode", () => {
+    // botMaxLeverage 2 → G1 ceiling 2; model requests 5 → would clamp in discretionary
+    const r = applyGuardrails(
+      makeLong({ leverage: 5, confidence: 10 }),
+      makeInput({ botMaxLeverage: 2 })
+    );
+    expectOk(r);
+    expect(codes(r)).not.toContain("leverage_clamped");
+  });
+
+  it("DOES emit leverage_clamped in discretionary mode when leverage exceeds the bot cap", () => {
+    const r = applyGuardrails(
+      makeLong({ leverage: 5 }),
+      makeInput({ sizingMode: "discretionary", botMaxLeverage: 2 })
+    );
+    expectOk(r);
+    expect(codes(r)).toContain("leverage_clamped");
+    const note = r.violations.find((v) => v.code === "leverage_clamped")!;
+    expect(note.fatal).toBe(false);
+    expect(note.rule).toBe("G1");
+  });
+
+  it("G2 liquidation check still runs at the derived leverage (model leverage ignored, not G2)", () => {
+    // mmw 0.35, 3% risk at 1% stop derives 3×: liq@3x ≈ 101.67 > SL 99 → G2 fires
+    const r = applyGuardrails(
+      makeLong({ leverage: 1, stopLossPrice: 99, takeProfitPrice: 103 }),
+      makeInput({ maintenanceMarginWeight: 0.35, riskMinPct: 3.0, riskMaxPct: 3.0 })
+    );
+    expect(r.ok).toBe(false);
+    expect(codes(r)).toContain("sl_inside_liquidation");
+    expect(codes(r)).not.toContain("leverage_clamped"); // suppressed, not the reason for rejection
+  });
+});

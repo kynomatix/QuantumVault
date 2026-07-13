@@ -318,6 +318,11 @@ export function applyGuardrails(
   const sl = decision.stopLossPrice as number;
   const tp = decision.takeProfitPrice as number;
 
+  // Hoisted here so both G1 and G5 can suppress their audit notes in risk_based mode:
+  // the model's leverage and sizePct are both ignored (size + leverage derived from
+  // the risk budget), so recording a clamp of an unused field corrupts the audit trail.
+  const riskBasedMode = input.sizingMode === "risk_based";
+
   // ---- G1: smart leverage clamp (clamp-only, never fatal) -------------------------
   const smartCap = smartLeverageCap(input.atr14, entry);
   const leverageCeiling = Math.max(
@@ -325,7 +330,7 @@ export function applyGuardrails(
     Math.min(input.botMaxLeverage, smartCap, LEVERAGE_HARD_CEILING)
   );
   const appliedLeverage = Math.min(Math.max(1, Math.floor(requestedLeverage)), leverageCeiling);
-  if (appliedLeverage !== requestedLeverage) {
+  if (!riskBasedMode && appliedLeverage !== requestedLeverage) {
     violations.push(
       violation(
         "G1",
@@ -340,8 +345,7 @@ export function applyGuardrails(
   // In risk_based mode the model's sizePct is IGNORED entirely (size derives from
   // the risk budget), so the clamp note is skipped — recording a clamp of an
   // unused field would corrupt the audit trail. The field is still contract-
-  // required above: the model's output contract is unchanged in Phase A.
-  const riskBasedMode = input.sizingMode === "risk_based";
+  // required above: the model's output contract is unchanged.
   const appliedSizePct = Math.min(Math.max(requestedSizePct, SIZE_PCT_MIN), SIZE_PCT_MAX);
   if (!riskBasedMode && appliedSizePct !== requestedSizePct) {
     violations.push(

@@ -186,29 +186,44 @@ async function resolveApiKeyForAnalyze(
 
 // --- Create-bot body validation ---------------------------------------------------------
 
-const createBotBodySchema = z.object({
-  market: z.string().min(1),
-  timeframe: z.enum(["15m", "1h", "4h", "1d"]),
-  mode: z.enum(["suggest", "auto"]).default("suggest"),
-  riskProfile: z.enum(["guarded", "degen"]).default("guarded"),
-  model: z.string().min(1).default("anthropic/claude-opus-4.8"),
-  allocatedUsdc: z.union([z.string(), z.number()]),
-  maxLeverage: z.coerce.number().int().min(1).max(5).default(3),
-  parkWhenIdle: z.boolean().default(false),
-  autoNext: z.boolean().default(false),
-  protocol: z.string().optional(),
-  graduationCriteria: z
-    .object({
-      periodDays: z.number().optional(),
-      minTrades: z.number().optional(),
-      minNetPnl: z.number().optional(),
-      maxDrawdownPct: z.number().optional(),
-      minProfitFactor: z.number().optional(),
-    })
-    .partial()
-    .optional(),
-  degenConfirm: z.string().optional(),
-});
+const RISK_BAND_BOUNDS = { min: 0.1, max: 3.0 } as const;
+
+const createBotBodySchema = z
+  .object({
+    market: z.string().min(1),
+    timeframe: z.enum(["15m", "1h", "4h", "1d"]),
+    mode: z.enum(["suggest", "auto"]).default("suggest"),
+    riskProfile: z.enum(["guarded", "degen"]).default("guarded"),
+    model: z.string().min(1).default("anthropic/claude-opus-4.8"),
+    allocatedUsdc: z.union([z.string(), z.number()]),
+    maxLeverage: z.coerce.number().int().min(1).max(5).default(3),
+    parkWhenIdle: z.boolean().default(false),
+    autoNext: z.boolean().default(false),
+    protocol: z.string().optional(),
+    graduationCriteria: z
+      .object({
+        periodDays: z.number().optional(),
+        minTrades: z.number().optional(),
+        minNetPnl: z.number().optional(),
+        maxDrawdownPct: z.number().optional(),
+        minProfitFactor: z.number().optional(),
+      })
+      .partial()
+      .optional(),
+    degenConfirm: z.string().optional(),
+    sizingMode: z.enum(["discretionary", "risk_based"]).default("discretionary"),
+    riskMinPct: z.number().min(RISK_BAND_BOUNDS.min).max(RISK_BAND_BOUNDS.max).default(0.5),
+    riskMaxPct: z.number().min(RISK_BAND_BOUNDS.min).max(RISK_BAND_BOUNDS.max).default(1.5),
+  })
+  .superRefine((data, ctx) => {
+    if (data.sizingMode === "risk_based" && data.riskMinPct > data.riskMaxPct) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["riskMinPct"],
+        message: `riskMinPct (${data.riskMinPct}) must be ≤ riskMaxPct (${data.riskMaxPct})`,
+      });
+    }
+  });
 
 // --- Chart data window sizing (read-only, view-only feature) -----------------------
 // bot.timeframe is one of AiTraderTimeframe ('15m'|'1h'|'4h'|'1d' — context-builder.ts
@@ -302,6 +317,9 @@ export function registerAiTraderRoutes(app: Express): void {
         pauseReason: null,
         dailyRealizedPnl: "0",
         consecutiveLosses: 0,
+        sizingMode: body.sizingMode,
+        riskMinPct: String(body.riskMinPct),
+        riskMaxPct: String(body.riskMaxPct),
       });
 
       res.status(201).json({ bot: toBotDto(bot) });
@@ -493,13 +511,28 @@ export function registerAiTraderRoutes(app: Express): void {
       const bot = await loadOwnedBot(req, res);
       if (!bot) return;
 
-      const patchSchema = z.object({
-        mode: z.enum(["suggest", "auto"]).optional(),
-        riskProfile: z.enum(["guarded", "degen"]).optional(),
-        autoNext: z.boolean().optional(),
-        degenConfirm: z.string().optional(),
-        model: z.string().optional(),
-      });
+      const patchSchema = z
+        .object({
+          mode: z.enum(["suggest", "auto"]).optional(),
+          riskProfile: z.enum(["guarded", "degen"]).optional(),
+          autoNext: z.boolean().optional(),
+          degenConfirm: z.string().optional(),
+          model: z.string().optional(),
+          sizingMode: z.enum(["discretionary", "risk_based"]).optional(),
+          riskMinPct: z.number().min(RISK_BAND_BOUNDS.min).max(RISK_BAND_BOUNDS.max).optional(),
+          riskMaxPct: z.number().min(RISK_BAND_BOUNDS.min).max(RISK_BAND_BOUNDS.max).optional(),
+        })
+        .superRefine((data, ctx) => {
+          const newMin = data.riskMinPct;
+          const newMax = data.riskMaxPct;
+          if (newMin !== undefined && newMax !== undefined && newMin > newMax) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["riskMinPct"],
+              message: `riskMinPct (${newMin}) must be ≤ riskMaxPct (${newMax})`,
+            });
+          }
+        });
       const parsed = patchSchema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({ error: fromZodError(parsed.error).message });
@@ -512,6 +545,32 @@ export function registerAiTraderRoutes(app: Express): void {
         if (confirm !== DEGEN_CONFIRM_PHRASE) {
           return res.status(400).json({
             error: `Switching to Full Send requires typed confirmation: "${DEGEN_CONFIRM_PHRASE}"`,
+          });
+        }
+      }
+
+      // Flipping a LIVE bot (paperMode=false) to risk_based requires a provisioned
+      // venue subaccount so the live-equity read has a real account to query.
+      // Paper bots are unaffected (their equity is simulated, not read from the venue).
+      if (body.sizingMode === "risk_based" && !bot.paperMode && !bot.protocolSubaccountId) {
+        return res.status(400).json({
+          error:
+            "risk_based sizing requires a provisioned venue account. This bot has no venue subaccount — go live first, then switch sizing mode.",
+        });
+      }
+
+      // Partial risk-band PATCH: when only one bound is supplied, validate the
+      // effective (merged) band so a single-field update cannot store min>max.
+      // Without this, riskMinPct=2.5 against a stored riskMaxPct=1.5 would succeed
+      // here and then fail-closed every cycle with risk_params_invalid — confusing.
+      if (body.riskMinPct !== undefined || body.riskMaxPct !== undefined) {
+        const storedMin = parseFloat(bot.riskMinPct ?? "0.5");
+        const storedMax = parseFloat(bot.riskMaxPct ?? "1.5");
+        const effectiveMin = body.riskMinPct ?? storedMin;
+        const effectiveMax = body.riskMaxPct ?? storedMax;
+        if (effectiveMin > effectiveMax) {
+          return res.status(400).json({
+            error: `riskMinPct (${effectiveMin}) must be ≤ riskMaxPct (${effectiveMax}) after merging with stored values.`,
           });
         }
       }
@@ -529,6 +588,9 @@ export function registerAiTraderRoutes(app: Express): void {
       if (body.riskProfile !== undefined) updates.riskProfile = body.riskProfile;
       if (body.autoNext !== undefined) updates.autoNext = body.autoNext;
       if (body.model !== undefined) updates.model = body.model;
+      if (body.sizingMode !== undefined) updates.sizingMode = body.sizingMode;
+      if (body.riskMinPct !== undefined) updates.riskMinPct = String(body.riskMinPct);
+      if (body.riskMaxPct !== undefined) updates.riskMaxPct = String(body.riskMaxPct);
 
       if (Object.keys(updates).length === 0) {
         return res.status(400).json({ error: "No mutable fields provided." });
