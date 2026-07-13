@@ -555,7 +555,8 @@ export async function fetchOHLCV(
   timeframe: string,
   startDate: string,
   endDate: string,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  options?: { skipSpotFallback?: boolean }
 ): Promise<OHLCV[]> {
   timeframe = timeframe.toLowerCase();
   const startMs = new Date(startDate).getTime();
@@ -691,7 +692,7 @@ export async function fetchOHLCV(
     console.log(`[OKX] Skipping ${instId} (recently failed) — trying Gate.io spot`);
   }
 
-  if (allCandles.length === 0) {
+  if (allCandles.length === 0 && !options?.skipSpotFallback) {
     try {
       allCandles = await fetchAllGateCandles(symbol, timeframe, startMs, endMs, onProgress);
     } catch (err: any) {
@@ -699,7 +700,7 @@ export async function fetchOHLCV(
     }
   }
 
-  if (allCandles.length === 0) {
+  if (allCandles.length === 0 && !options?.skipSpotFallback) {
     try {
       allCandles = await fetchAllPythCandles(symbol, timeframe, startMs, endMs, onProgress);
     } catch (err: any) {
