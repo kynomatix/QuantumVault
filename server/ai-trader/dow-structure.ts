@@ -38,6 +38,25 @@
 //
 //   ZigZag tie rule for consecutive same-side pivots of equal price: the EARLIER pivot
 //   is retained (replacement uses strict >, so equal does not replace).
+//
+// ─── Outside-bar edge (BINDING) ──────────────────────────────────────────────
+//
+//   A bar can simultaneously qualify as BOTH a swing high AND a swing low if its
+//   high strictly exceeds all N neighbors' highs AND its low strictly beats all N
+//   neighbors' lows (an "outside bar" that engulfs all neighbors on both sides).
+//
+//   When this occurs, the detection loop's two consecutive push lines (at the bottom
+//   of the inner loop below) append BOTH pivots to `raw` in HIGH-BEFORE-LOW order.
+//   After applyZigZag processes them, two alternating pivots appear at the SAME bar
+//   index — a swing high immediately followed by a swing low, both with `.index === i`.
+//
+//   Downstream consumers MUST handle this deterministically. Rules per consumer:
+//     • wm-detector.ts (Brick 3): any triplet where two pivots share the same `.index`
+//       is skipped entirely — geometry is undefined (neckline cannot coincide with an
+//       extreme; two extremes cannot exist at the same bar).
+//     • htf-levels.ts (Brick 4): each pivot is an independent cluster member with its
+//       own price; same-index pivots of opposite type cluster independently. No special
+//       casing required — the clustering loop is index-agnostic.
 
 export const FRACTAL_N = 3;
 
@@ -153,7 +172,10 @@ export function detectPivots(bars: Bar[], n: number = FRACTAL_N): SwingPivot[] {
     }
 
     if (isHigh) raw.push({ index: i, type: "high", price: bar.high });
-    if (isLow) raw.push({ index: i, type: "low", price: bar.low });
+    if (isLow)  raw.push({ index: i, type: "low",  price: bar.low  });
+    // Outside-bar edge: when both isHigh and isLow are true, both are appended in
+    // HIGH-BEFORE-LOW order. See module header "Outside-bar edge" section and the
+    // downstream handling rules in wm-detector.ts and htf-levels.ts.
   }
 
   return applyZigZag(raw);

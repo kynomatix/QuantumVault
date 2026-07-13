@@ -120,6 +120,54 @@ describe("htf-levels — multi-touch cluster formation", () => {
     const highLevel = result.levels.find((l) => l.price > 50)!;
     expect(highLevel.barsSinceLastTouch).toBe(1);
   });
+
+  it("barsSinceLastTouch=0 when parent pivot maps to the last closed selected bar", () => {
+    // Structural lower-bound test: barsSinceLastTouch = max(0, lastClosedIdx - lastTouchIdx).
+    // When a parent-bar pivot's timestamp ≥ selectedClosed[lastClosedIdx].time,
+    // floorTimeIdx maps it to lastClosedIdx, so lastTouchIdx = lastClosedIdx → barsSince=0.
+    //
+    // With n=1 and selected bars only, the minimum barsSinceLastTouch is 1 (a selected pivot
+    // at maxI = closed.length-2 gives barsSince = 1). The parent-pivot trick achieves 0.
+    //
+    // Layout:
+    //   selectedBars: warmup(0-14) · spikeHigh@15(56) · flatBar@16(right buffer) · flatBar@17(FORMING)
+    //   selectedClosed indices 0-16, lastClosedIdx=16.
+    //   Selected pivot: spikeHigh@15, n=1: left=bars[14].high=52<56 ✓, right=bars[16].high=52<56 ✓ → valid.
+    //   selectedClosedIdx for this pivot = 15.
+    //
+    //   parentBars: flatBar@13ms · spikeHigh@16ms(56.1) · flatBar@17ms · flatBar@18ms(FORMING)
+    //   parentClosed = [bar@13ms, bar@16ms, bar@17ms], length=3, maxI=3-1-1=1.
+    //   Parent pivot: bar@16ms, high=56.1, neighbors bar@13ms(H=52) and bar@17ms(H=52) → valid.
+    //   floorTimeIdx(selectedClosed, 16ms): selectedClosed[16].time=16ms → maps to idx=16=lastClosedIdx.
+    //   selectedClosedIdx for parent pivot = 16.
+    //
+    //   Cluster: [selected@15 price=56, parent→16 price=56.1]
+    //   |56.1-56|=0.1 < ATR_CLUSTER_MULT(0.5) × ATR14(≈4) = 2 → same cluster ✓
+    //   members=2 ≥ minTouches=2 ✓
+    //   lastTouchIdx = max(15, 16) = 16 = lastClosedIdx → barsSinceLastTouch=0 ✓
+    //   status=intact: closesAfter=selectedClosed.slice(17)=[] (no bars after lastClosedIdx).
+
+    const selectedBars: OHLCV[] = [
+      ...warmup(),               // indices 0-14, times 0ms..14ms
+      spikeHigh(15, 56),         // HIGH touch #1, selectedClosedIdx=15, time=15ms
+      flatBar(16),               // right buffer; time=16ms → lastClosedIdx=16
+      flatBar(17),               // FORMING (stripped by detectPivots/detectHTFLevels)
+    ];
+
+    const parentBars: OHLCV[] = [
+      { time: 13 * MS, open: 50, high: 52,   low: 48, close: 50, volume: 1_000 }, // left buffer
+      { time: 16 * MS, open: 50, high: 56.1, low: 48, close: 50, volume: 1_000 }, // HIGH pivot@time=16ms
+      { time: 17 * MS, open: 50, high: 52,   low: 48, close: 50, volume: 1_000 }, // right buffer (closed)
+      { time: 18 * MS, open: 50, high: 52,   low: 48, close: 50, volume: 1_000 }, // FORMING in parent
+    ];
+
+    const result = detectHTFLevels(selectedBars, parentBars, { n: 1 });
+    const highLevel = result.levels.find((l) => l.price > 50);
+    expect(highLevel).toBeDefined();
+    expect(highLevel!.barsSinceLastTouch).toBe(0);
+    // No closed bars after lastTouchIdx=lastClosedIdx → nothing to scan → intact.
+    expect(highLevel!.status).toBe("intact");
+  });
 });
 
 // ─── Status transitions ───────────────────────────────────────────────────────
