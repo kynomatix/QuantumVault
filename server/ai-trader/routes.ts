@@ -50,6 +50,7 @@ import { executeDecision, aiTraderPolicyObject } from "./executor";
 import { userInitiatedClose, parseOpenDecision, computeUnrealizedPnl } from "./monitor";
 import { sanitizeGraduationCriteria, canGoLive } from "./graduation";
 import type { ClampedDecision } from "./guardrails";
+import { computeConfidenceCalibration } from "./calibration";
 
 // --- Auth (duplicated verbatim from server/routes.ts requireWallet) --------------------
 // Kept as an exact copy rather than an import: server/routes.ts defines it as a
@@ -425,6 +426,8 @@ export function registerAiTraderRoutes(app: Express): void {
     try {
       const rows = await db
         .select({
+          rawDecision: aiTraderDecisions.rawDecision,
+          clampedDecision: aiTraderDecisions.clampedDecision,
           realizedPnl: aiTraderDecisions.realizedPnl,
           closedAt: aiTraderDecisions.closedAt,
         })
@@ -436,6 +439,13 @@ export function registerAiTraderRoutes(app: Express): void {
       const closed = rows.filter((r) => r.realizedPnl !== null);
       const wins = closed.filter((r) => Number(r.realizedPnl) > 0).length;
       const totalPnl = closed.reduce((sum, r) => sum + Number(r.realizedPnl ?? 0), 0);
+      const confidenceCalibration = computeConfidenceCalibration(
+        closed.map((r) => ({
+          rawDecision: r.rawDecision as Record<string, unknown> | null,
+          clampedDecision: r.clampedDecision as Record<string, unknown> | null,
+          realizedPnl: r.realizedPnl,
+        })),
+      );
 
       res.json({
         totalClosedTrades: closed.length,
@@ -443,6 +453,7 @@ export function registerAiTraderRoutes(app: Express): void {
         losses: closed.length - wins,
         winRatePct: closed.length > 0 ? (wins / closed.length) * 100 : null,
         totalRealizedPnlUsd: totalPnl,
+        confidenceCalibration,
         note:
           "Aggregated across all AI Trader bots on the platform (paper and live). Deleting a bot removes its trades from this record.",
       });
@@ -1224,6 +1235,45 @@ export function registerAiTraderRoutes(app: Express): void {
       res.json({ decisions });
     } catch (err) {
       console.error("[AiTrader] history error:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // --- Confidence calibration (read-only analytics) ------------------------------------
+  // PRECONDITION: This endpoint is Gate #1 for the reflection-playbook injection
+  // phase. The playbook will use per-bucket win-rate/PnL/riskPct to decide whether
+  // to widen or narrow risk bands. Do not alter bucket definitions or the confidence-
+  // precedence rule here without re-evaluating that downstream dependency.
+  // See server/ai-trader/calibration.ts for the full precondition comment.
+  app.get("/api/ai-trader/:id/calibration", requireWallet, async (req: any, res) => {
+    try {
+      const bot = await loadOwnedBot(req, res);
+      if (!bot) return;
+      const rows = await db
+        .select({
+          rawDecision: aiTraderDecisions.rawDecision,
+          clampedDecision: aiTraderDecisions.clampedDecision,
+          realizedPnl: aiTraderDecisions.realizedPnl,
+        })
+        .from(aiTraderDecisions)
+        .where(
+          and(
+            eq(aiTraderDecisions.botId, bot.id),
+            eq(aiTraderDecisions.outcome, "executed"),
+            isNotNull(aiTraderDecisions.closedAt),
+          ),
+        );
+      const buckets = computeConfidenceCalibration(
+        rows.map((r) => ({
+          rawDecision: r.rawDecision as Record<string, unknown> | null,
+          clampedDecision: r.clampedDecision as Record<string, unknown> | null,
+          realizedPnl: r.realizedPnl,
+        })),
+      );
+      const hasSmallSample = buckets.some((b) => b.trades > 0 && b.trades < 10);
+      res.json({ buckets, hasSmallSample });
+    } catch (err) {
+      console.error("[AiTrader] calibration error:", err);
       res.status(500).json({ error: "Internal server error" });
     }
   });

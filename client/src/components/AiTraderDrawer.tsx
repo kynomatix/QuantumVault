@@ -397,6 +397,23 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   const [loading, setLoading] = useState(false);
   const [analyzeLoading, setAnalyzeLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+
+  // --- Confidence Calibration panel state ---
+  // PRECONDITION: This panel is Gate #1 for the reflection-playbook injection phase.
+  // It surfaces whether the bot's stated confidence correlates with real outcomes.
+  // Do not remove or hide this panel without consulting the playbook precondition.
+  interface CalibrationBucket {
+    bucket: string;
+    trades: number;
+    winRate: number | null;
+    avgRealizedPnlUsd: number | null;
+    avgRiskPct: number | null;
+  }
+  interface CalibrationData {
+    buckets: CalibrationBucket[];
+    hasSmallSample: boolean;
+  }
+  const [calibration, setCalibration] = useState<CalibrationData | null>(null);
   const [preflight, setPreflight] = useState<{ loading: boolean; available: number | null }>({ loading: false, available: null });
   const [settingsMode, setSettingsMode] = useState('suggest');
   const [settingsRisk, setSettingsRisk] = useState('guarded');
@@ -441,21 +458,33 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
     } catch { /* silent */ }
   }, [botId, walletAddress]);
 
+  const fetchCalibration = useCallback(async () => {
+    if (!botId || !walletAddress) return;
+    try {
+      const res = await fetch(`/api/ai-trader/${botId}/calibration`, { credentials: 'include', headers: walletAuthHeaders() });
+      if (!res.ok) return;
+      const data = await safeResponseJson(res);
+      setCalibration(data ?? null);
+    } catch { /* silent */ }
+  }, [botId, walletAddress]);
+
   useEffect(() => {
     if (!isOpen || !botId) return;
     setLoading(true);
-    Promise.all([fetchDetail(), fetchHistory()]).finally(() => setLoading(false));
+    Promise.all([fetchDetail(), fetchHistory(), fetchCalibration()]).finally(() => setLoading(false));
     const id = setInterval(() => {
       fetchDetail();
       fetchHistory();
+      fetchCalibration();
     }, 10_000);
     return () => clearInterval(id);
-  }, [isOpen, botId, fetchDetail, fetchHistory]);
+  }, [isOpen, botId, fetchDetail, fetchHistory, fetchCalibration]);
 
   useEffect(() => {
     if (!isOpen) {
       setDetail(null);
       setHistory([]);
+      setCalibration(null);
       setActiveTab('activity');
       setPreflight({ loading: false, available: null });
     }
@@ -1088,6 +1117,68 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
 
                 {tradesCount === 0 && (
                   <p className="text-center text-sm text-muted-foreground py-6">No closed trades yet.</p>
+                )}
+
+                {/* Confidence Calibration panel — Gate #1 precondition for the
+                    reflection-playbook injection phase. If confidence is well-
+                    calibrated, higher buckets should win more often. This readout
+                    decides whether confidence-scaled sizing earns wider bands.
+                    Do not remove without re-evaluating that downstream dependency. */}
+                {calibration && calibration.buckets.some((b) => b.trades > 0) && (
+                  <div className="space-y-2.5" data-testid="confidence-calibration-panel">
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Confidence calibration</p>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground leading-relaxed">
+                      If confidence is well-calibrated, higher buckets should win more often. This is the readout that decides whether confidence-scaled sizing earns wider bands.
+                    </p>
+                    {calibration.hasSmallSample && (
+                      <p className="text-[10px] text-amber-400/80 bg-amber-500/8 border border-amber-500/15 rounded-lg px-2.5 py-1.5" data-testid="calibration-small-sample-note">
+                        Early data — not yet statistically meaningful (a bucket has fewer than 10 trades).
+                      </p>
+                    )}
+                    <div className="overflow-x-auto -mx-1">
+                      <table className="w-full text-[11px] border-collapse" data-testid="calibration-table">
+                        <thead>
+                          <tr className="text-muted-foreground">
+                            <th className="text-left py-1.5 px-2 font-medium">Confidence</th>
+                            <th className="text-right py-1.5 px-2 font-medium">Trades</th>
+                            <th className="text-right py-1.5 px-2 font-medium">Win rate</th>
+                            <th className="text-right py-1.5 px-2 font-medium">Avg P&L</th>
+                            <th className="text-right py-1.5 px-2 font-medium">Avg risk%</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {calibration.buckets.map((b) => {
+                            const isEmpty = b.trades === 0;
+                            const winRateColor = b.winRate === null ? '' : b.winRate >= 55 ? 'text-emerald-400' : b.winRate >= 45 ? 'text-amber-400' : 'text-red-400';
+                            const pnlColor = b.avgRealizedPnlUsd === null ? '' : b.avgRealizedPnlUsd >= 0 ? 'text-emerald-400' : 'text-red-400';
+                            return (
+                              <tr
+                                key={b.bucket}
+                                className={`border-t border-border/30 ${isEmpty ? 'opacity-35' : ''}`}
+                                data-testid={`calibration-row-${b.bucket.replace('–', '-')}`}
+                              >
+                                <td className="py-1.5 px-2 font-mono font-medium">{b.bucket}</td>
+                                <td className="py-1.5 px-2 text-right tabular-nums">{isEmpty ? '—' : b.trades}</td>
+                                <td className={`py-1.5 px-2 text-right tabular-nums font-medium ${winRateColor}`}>
+                                  {b.winRate === null ? '—' : `${b.winRate.toFixed(0)}%`}
+                                </td>
+                                <td className={`py-1.5 px-2 text-right tabular-nums ${pnlColor}`}>
+                                  {b.avgRealizedPnlUsd === null
+                                    ? '—'
+                                    : `${b.avgRealizedPnlUsd >= 0 ? '+' : ''}$${b.avgRealizedPnlUsd.toFixed(2)}`}
+                                </td>
+                                <td className="py-1.5 px-2 text-right tabular-nums text-muted-foreground">
+                                  {b.avgRiskPct === null ? '—' : `${b.avgRiskPct.toFixed(2)}%`}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
                 )}
               </TabsContent>
 
