@@ -14,6 +14,7 @@ import { getHlParticipationSnapshot, type HlParticipationSnapshot } from "./hl-c
 import { getCotSnapshot, type CotSnapshot } from "./cot-service";
 import { getSessionContext } from "./session-context";
 import { detectPivots, classifyDow, type DowStructureResult } from "./dow-structure";
+import { detectHTFLevels, type HtfLevel } from "./htf-levels";
 
 export type AiTraderTimeframe = "15m" | "1h" | "4h" | "1d";
 
@@ -261,6 +262,61 @@ function buildDowLine(
   };
 }
 
+// ─── Brick 4, Phase 4B: HTF-levels prompt helpers ────────────────────────────
+
+/**
+ * Convert a closed-bar count to a human-readable duration using the timeframe's
+ * millisecond length. Returns "0m" when bars=0 (edge: lost on the very last bar).
+ */
+function barsToDuration(bars: number, tfMs: number): string {
+  const totalMs = bars * tfMs;
+  const hours = totalMs / 3_600_000;
+  if (hours < 1) return `${Math.round(hours * 60)}m`;
+  if (hours < 24) return `${Math.round(hours)}h`;
+  return `${Math.round(totalMs / 86_400_000)}d`;
+}
+
+/** Format one HtfLevel for the prompt line. */
+function fmtHtfLevel(level: HtfLevel, tfMs: number): string {
+  const parts: string[] = [`${level.touchCount} touches`];
+  if (level.rejectedFromAbove > 0) {
+    parts.push(`rejected ${level.rejectedFromAbove}x`);
+  } else if (level.defendedFromBelow > 0) {
+    parts.push(`defended ${level.defendedFromBelow}x`);
+  }
+  if (level.status === "lost") {
+    const ago = level.barsSinceLastTouch === 0
+      ? "recently"
+      : `${barsToDuration(level.barsSinceLastTouch, tfMs)} ago`;
+    parts.push(`LOST ${ago}`);
+  } else {
+    parts.push(level.status); // "intact" or "reclaimed"
+    if (level.barsSinceLastTouch > 0) {
+      parts.push(`last ${barsToDuration(level.barsSinceLastTouch, tfMs)}`);
+    }
+  }
+  return `${fmtPrice(level.price)} (${parts.join(", ")})`;
+}
+
+/**
+ * Build the full HTF levels prompt line from the ≤4 selected levels.
+ * Levels arrive sorted ascending from detectHTFLevels.
+ * "above" renders nearest-first (ascending = correct order).
+ * "below" renders nearest-first (descending = reversed).
+ */
+function buildHtfLine(levels: HtfLevel[], formingClose: number, tfMs: number): string {
+  const above = levels.filter((l) => l.price > formingClose);
+  const below = levels.filter((l) => l.price <= formingClose).reverse();
+  const sections: string[] = [];
+  if (above.length > 0) {
+    sections.push(`above — ${above.map((l) => fmtHtfLevel(l, tfMs)).join(" · ")}`);
+  }
+  if (below.length > 0) {
+    sections.push(`below — ${below.map((l) => fmtHtfLevel(l, tfMs)).join(" · ")}`);
+  }
+  return `HTF levels (touch-counted, 400-bar window): ${sections.join(". ")}.`;
+}
+
 const SYSTEM_PROMPT = `You are an autonomous perpetual-futures trading strategist for QuantumVault's AI Trader. You operate on a fixed decision cadence and must respond with exactly one "decide" tool call — no prose, no free text.
 
 Core stance: flat is a position. You are evaluated on risk-adjusted return net of fees, not on how often you trade. Overtrading destroys accounts through fees and slippage long before any edge can compound — when in doubt, stay flat.
@@ -279,7 +335,9 @@ BTC COT positioning data (when present in this context) is a weekly macro bias f
 
 Session context (when present in this context) is liquidity fact, not signal — prefer standing aside on marginal setups in thin/boundary windows, widen breakout skepticism, cite it in the rationale when it moves the decision; never let it alone veto an otherwise strong setup.
 
-Dow structure (when present in this context) is trend-structure confirmation — alignment between the selected and parent timeframe supports trend entries with normal conviction; misalignment or mixed on either timeframe warrants smaller position size or standing aside on directional setups; insufficient means the window lacks enough pivot history to classify structure. Never use Dow structure alone as an entry trigger.`;
+Dow structure (when present in this context) is trend-structure confirmation — alignment between the selected and parent timeframe supports trend entries with normal conviction; misalignment or mixed on either timeframe warrants smaller position size or standing aside on directional setups; insufficient means the window lacks enough pivot history to classify structure. Never use Dow structure alone as an entry trigger.
+
+HTF levels (when present in this context) mark multi-touch price zones where orders historically cluster — prefer taking profit IN FRONT of a level rather than beyond it, prefer stops BEYOND defended levels rather than inside them, a lost-then-reclaimed level is meaningful directional context. Placement guidance and confluence only, never a standalone trigger.`;
 
 export async function buildMarketContext(
   input: BuildMarketContextInput
@@ -355,6 +413,26 @@ export async function buildMarketContext(
     return { stale: true, reason: `No live price available for ${market}` };
   }
 
+  // Brick 4, Phase 4B: HTF levels enrichment (enrichment rule — try/catch omits block,
+  // stamps null on any error; decision proceeds unaffected). Reuses indicatorCandles
+  // (400-bar selected) and parentIndicatorCandles (400-bar parent) already fetched above —
+  // no additional I/O. Placed after the price fetch so buildHtfLine uses the live adapter
+  // price as the "above/below" reference (consistent with what the model sees).
+  // Null convention: BOTH "try/catch error" AND "no qualifying levels" stamp htfLevels=null;
+  // there is no empty-array case.
+  let htfLine: string | null = null;
+  let htfDigest: HtfLevel[] | null = null;
+  try {
+    const htfResult = detectHTFLevels(indicatorCandles, parentIndicatorCandles);
+    if (htfResult.levels.length > 0) {
+      htfDigest = htfResult.levels;
+      htfLine = buildHtfLine(htfResult.levels, price, tfMs);
+    }
+    // Empty levels array → htfLine/htfDigest stay null (omission rule: no qualifying levels).
+  } catch {
+    // enrichment rule: omit block, digest null, decision proceeds
+  }
+
   const closes = indicatorCandles.map((c) => c.close);
   const highs = indicatorCandles.map((c) => c.high);
   const lows = indicatorCandles.map((c) => c.low);
@@ -400,6 +478,8 @@ export async function buildMarketContext(
     `OBV: ${fmtObv(obvVals.value)} (prev ${fmtObv(obvVals.prev)})`,
     // Brick 2, Phase 2B: Dow structure line (omitted when dowLine is null).
     ...(dowLine !== null ? [dowLine] : []),
+    // Brick 4, Phase 4B: HTF levels line (omitted when no levels qualify or on error).
+    ...(htfLine !== null ? [htfLine] : []),
   ].join("\n");
 
   // COT-B: fetch COT snapshot and fundingRate concurrently — both are cached reads.
@@ -628,6 +708,11 @@ export async function buildMarketContext(
     // aligned truth table: true=both directional+matching, false=both directional+opposite,
     // null=either side mixed/insufficient OR no parent timeframe.
     dowStructure: dowDigest,
+    // Brick 4, Phase 4B: HTF levels stamp. Null in BOTH the "try/catch error" case (enrichment
+    // rule) AND the "no qualifying levels" case (empty result from detectHTFLevels). There is
+    // never an empty-array value — null is the uniform signal for "absent from prompt".
+    // Non-null (non-empty HtfLevel[]) means ≥1 level met minTouches and was selected.
+    htfLevels: htfDigest,
     indicators: {
       ema20,
       ema50,

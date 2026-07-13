@@ -47,6 +47,14 @@ vi.mock("../../server/ai-trader/dow-structure", () => ({
   FRACTAL_N: 3,
 }));
 
+// Brick 4, Phase 4B: detectHTFLevels is mocked so context-builder tests stay focused on
+// prompt/digest assembly, not clustering math (covered in tests/ai-trader/htf-levels.test.ts).
+// Default: returns empty levels so existing tests are unaffected (no HTF block in prompt).
+const detectHTFLevelsMock = vi.fn();
+vi.mock("../../server/ai-trader/htf-levels", () => ({
+  detectHTFLevels: (...args: unknown[]) => detectHTFLevelsMock(...args),
+}));
+
 // COT-B: realistic fixture — bearish_flip with commIndex 18.50, dumbIndex 81.70.
 // reportDate is 2 days before FIXED_NOW (2026-01-15), so it is well within the 16-day
 // omission threshold and exactly matches the Phase A spec example magnitudes.
@@ -333,6 +341,10 @@ beforeEach(() => {
   detectPivotsMock.mockReturnValue([]); // passthrough — classifyDow is also mocked
   classifyDowMock.mockReset();
   classifyDowMock.mockReturnValue(DOW_RESULT_HHHL); // both calls → HH/HL (aligned)
+  // Brick 4, Phase 4B: default = no qualifying levels → HTF block absent from prompt.
+  // Keeps all pre-existing tests unaffected (snapshot, Dow, session, etc.).
+  detectHTFLevelsMock.mockReset();
+  detectHTFLevelsMock.mockReturnValue({ levels: [], atr14: 4, clusterThreshold: 2 });
 });
 
 afterEach(() => {
@@ -986,5 +998,121 @@ describe("buildMarketContext (WO-3)", () => {
 
     const digest = result.contextDigest as any;
     expect(digest.dowStructure).toBeNull();
+  });
+});
+
+// ─── Brick 4, Phase 4B: HTF levels enrichment goldens ────────────────────────
+
+// Fixture: 4 levels (2 above, 2 below price≈150.12) with mixed statuses including LOST.
+// 15m timeframe (tfMs=900_000): barsSinceLastTouch * 15min = duration.
+//   bars=16 → 240min = 4h; bars=48 → 720min = 12h; bars=20 → 300min = 5h; bars=0 → omit last clause
+const HTF_LEVELS_FIXTURE = [
+  // below (price ≤ 150.12), ascending order — buildHtfLine reverses for "nearest first":
+  { price: 143.00, touchCount: 2, rejectedFromAbove: 0, defendedFromBelow: 2, status: "lost" as const,    barsSinceLastTouch: 16 },
+  { price: 148.00, touchCount: 4, rejectedFromAbove: 0, defendedFromBelow: 4, status: "intact" as const,  barsSinceLastTouch: 0  },
+  // above (price > 150.12):
+  { price: 153.50, touchCount: 3, rejectedFromAbove: 3, defendedFromBelow: 0, status: "intact" as const,  barsSinceLastTouch: 48 },
+  { price: 158.00, touchCount: 2, rejectedFromAbove: 2, defendedFromBelow: 0, status: "reclaimed" as const, barsSinceLastTouch: 20 },
+];
+
+describe("Brick 4, Phase 4B — HTF levels enrichment", () => {
+  it("levels-present: injects the HTF block with above/below, mixed statuses, and stamps the digest", async () => {
+    detectHTFLevelsMock.mockReturnValue({ levels: HTF_LEVELS_FIXTURE, atr14: 4, clusterThreshold: 2 });
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    // Block is present in the indicator section.
+    expect(result.user).toContain("HTF levels (touch-counted, 400-bar window):");
+
+    // Above section: nearest first (ascending price) — 153.50 then 158.00.
+    // 153.50: intact, rejected 3x, last 12h (48 bars × 15m = 720min = 12h)
+    expect(result.user).toContain("153.50 (3 touches, rejected 3x, intact, last 12h)");
+    // 158.00: reclaimed, rejected 2x, last 5h (20 bars × 15m = 300min = 5h)
+    expect(result.user).toContain("158.00 (2 touches, rejected 2x, reclaimed, last 5h)");
+
+    // Below section: nearest first (descending price) — 148.00 then 143.00.
+    // 148.00: intact, defended 4x, barsSince=0 → no "last X" clause
+    expect(result.user).toContain("148.00 (4 touches, defended 4x, intact)");
+    // 143.00: LOST, 16 bars × 15m = 240min = 4h ago
+    expect(result.user).toContain("143.00 (2 touches, defended 2x, LOST 4h ago)");
+
+    // Section order: above . below .
+    const htfIdx = result.user.indexOf("HTF levels");
+    const aboveIdx = result.user.indexOf("above —");
+    const belowIdx = result.user.indexOf("below —");
+    expect(htfIdx).toBeGreaterThan(-1);
+    expect(aboveIdx).toBeGreaterThan(htfIdx);
+    expect(belowIdx).toBeGreaterThan(aboveIdx);
+
+    // Digest: the exact levels array, never null when levels are present.
+    const digest = result.contextDigest as any;
+    expect(digest.htfLevels).toEqual(HTF_LEVELS_FIXTURE);
+    expect(digest.htfLevels).not.toBeNull();
+
+    // System prompt carries the HTF guidance paragraph.
+    expect(result.system).toContain("HTF levels (when present in this context)");
+    expect(result.system).toContain("prefer taking profit IN FRONT of a level");
+    expect(result.system).toContain("prefer stops BEYOND defended levels");
+    expect(result.system).toContain("lost-then-reclaimed level is meaningful directional context");
+    expect(result.system).toContain("never a standalone trigger");
+  });
+
+  it("no-qualifying-levels: omits the HTF block entirely and stamps htfLevels=null", async () => {
+    // detectHTFLevels returns a valid result but with an empty levels array.
+    detectHTFLevelsMock.mockReturnValue({ levels: [], atr14: 4, clusterThreshold: 2 });
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    // Block is absent — no placeholder, no section heading.
+    expect(result.user).not.toContain("HTF levels");
+
+    // Digest stamps null (same as the error case — no empty-array distinction).
+    const digest = result.contextDigest as any;
+    expect(digest.htfLevels).toBeNull();
+  });
+
+  it("thrown omission: detectHTFLevels throws → block absent, htfLevels=null, rest of prompt intact", async () => {
+    detectHTFLevelsMock.mockImplementation(() => { throw new Error("simulated HTF detection failure"); });
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    // Enrichment rule: error omits the HTF block, decision cycle proceeds unaffected.
+    expect(result.user).not.toContain("HTF levels");
+
+    // Other blocks still present — enrichment failure is isolated.
+    expect(result.user).toContain("## Market participation");
+    expect(result.user).toContain("EMA(20):");
+    expect(result.user).toContain("Structure (Dow):");
+
+    // Digest stamps null — same convention as no-qualifying-levels.
+    const digest = result.contextDigest as any;
+    expect(digest.htfLevels).toBeNull();
   });
 });

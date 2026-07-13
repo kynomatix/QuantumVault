@@ -30,6 +30,7 @@ exports[`buildMarketContext (WO-3) > golden file: builds the full system+user pr
     "smartLeverageCap": 5,
     "tradesToday": 3,
   },
+  "htfLevels": null,
   "indicators": {
     "adx14": {
       "prev": 33.68226013874756,
@@ -144,7 +145,9 @@ BTC COT positioning data (when present in this context) is a weekly macro bias f
 
 Session context (when present in this context) is liquidity fact, not signal — prefer standing aside on marginal setups in thin/boundary windows, widen breakout skepticism, cite it in the rationale when it moves the decision; never let it alone veto an otherwise strong setup.
 
-Dow structure (when present in this context) is trend-structure confirmation — alignment between the selected and parent timeframe supports trend entries with normal conviction; misalignment or mixed on either timeframe warrants smaller position size or standing aside on directional setups; insufficient means the window lacks enough pivot history to classify structure. Never use Dow structure alone as an entry trigger."
+Dow structure (when present in this context) is trend-structure confirmation — alignment between the selected and parent timeframe supports trend entries with normal conviction; misalignment or mixed on either timeframe warrants smaller position size or standing aside on directional setups; insufficient means the window lacks enough pivot history to classify structure. Never use Dow structure alone as an entry trigger.
+
+HTF levels (when present in this context) mark multi-touch price zones where orders historically cluster — prefer taking profit IN FRONT of a level rather than beyond it, prefer stops BEYOND defended levels rather than inside them, a lost-then-reclaimed level is meaningful directional context. Placement guidance and confluence only, never a standalone trigger."
 `;
 
 exports[`buildMarketContext (WO-3) > golden file: builds the full system+user prompt and contextDigest for an open-position bot > user-prompt 1`] = `
