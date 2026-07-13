@@ -2997,19 +2997,9 @@ export default function AppPage() {
                 exit={{ opacity: 0, y: -10 }}
                 className="space-y-6"
               >
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                  <div className="min-w-0">
-                    <h1 className="text-2xl font-display font-bold">My Bots</h1>
-                    <p className="text-muted-foreground">Manage your TradingView trading bots</p>
-                  </div>
-                  <Button 
-                    className="bg-gradient-to-r from-primary to-accent hover:opacity-90 flex-shrink-0"
-                    onClick={() => setCreateBotOpen(true)}
-                    data-testid="button-create-bot"
-                  >
-                    <Plus className="w-4 h-4 mr-2" />
-                    Add Bot
-                  </Button>
+                <div className="min-w-0">
+                  <h1 className="text-2xl font-display font-bold">My Bots</h1>
+                  <p className="text-muted-foreground">Manage your trading bots</p>
                 </div>
 
                 {(() => {
@@ -3265,8 +3255,7 @@ export default function AppPage() {
                           <p className="text-sm text-muted-foreground">Run strategies you built in QuantumLab, or connect your own TradingView alerts via webhook.</p>
                           <div className="flex items-center gap-2 mt-auto pt-1">
                             <Button
-                              variant="outline"
-                              className="flex-1 border-primary/30 text-primary hover:bg-primary/10"
+                              className="flex-1 bg-gradient-to-r from-primary to-accent hover:opacity-90"
                               onClick={() => setCreateBotOpen(true)}
                               data-testid="button-add-signal-bot-card"
                             >
