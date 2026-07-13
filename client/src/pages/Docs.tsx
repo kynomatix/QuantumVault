@@ -3858,6 +3858,10 @@ function AiTraderOverviewSection() {
         <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Smart money positioning (COT)</strong> — weekly Bitcoin futures positioning from the CFTC's Commitment of Traders report, applied as a macro bias across all crypto markets</span></li>
         <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Account state</strong> — allocated collateral, any open position, unrealized PnL</span></li>
         <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Bot's last 10 closed trades</strong> — so the AI can learn from its own mistakes and avoid repeating them</span></li>
+        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Session &amp; time awareness</strong> — current trading session (Asia / London / New York / Weekend), proximity to the weekly candle open, proximity to each daily candle open</span></li>
+        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Dow trend structure</strong> — swing classification (uptrend, downtrend, mixed, or insufficient data) on both the selected timeframe and the parent timeframe, plus an aligned / misaligned flag across the two</span></li>
+        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Touch-counted price levels</strong> — up to 4 key zones from the last 400 bars, each with a touch count, status (intact / lost / reclaimed), and distance from current price</span></li>
+        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">W/M formations</strong> — double-top and double-bottom patterns, reported only when two symmetrical extremes are 10–60 bars apart and current price is within 0.5% of the confirmed neckline</span></li>
       </ul>
 
       <SubHeading>Smart money positioning (COT)</SubHeading>
@@ -3886,6 +3890,26 @@ function AiTraderOverviewSection() {
       <Alert type="info">
         Most automated traders only see price data — this gives the AI the same positioning context professional futures traders check weekly.
       </Alert>
+
+      <SubHeading>Session &amp; Time Awareness</SubHeading>
+      <Paragraph>
+        Each briefing stamps the current trading session (Asia, London, London/New York overlap, New York, or Weekend), proximity to the weekly candle open (±12h before / 2h after Monday 00:00 UTC), and proximity to each daily candle open. Weekend conditions signal thin liquidity and elevated false-move risk; session overlaps signal the highest-probability breakout windows; proximity to a weekly open flags the market-structure resets that institutional traders track. All boundaries are fixed UTC — no DST adjustment.
+      </Paragraph>
+
+      <SubHeading>Dow Trend Structure</SubHeading>
+      <Paragraph>
+        Swing points are classified on both the selected timeframe and the parent timeframe, yielding a label for each: uptrend (higher-highs + higher-lows), downtrend (lower-lows + lower-highs), mixed (structure broken), or insufficient data. The two labels are then compared — aligned or misaligned. A counter-trend setup against an aligned downtrend on both timeframes is a structural headwind the AI can weigh directly; it doesn't have to derive it from raw bars.
+      </Paragraph>
+
+      <SubHeading>Touch-Counted Price Levels</SubHeading>
+      <Paragraph>
+        Up to four significant price zones are extracted from the last 400 bars. Each zone reports its central price, touch count, and status: intact (holding), lost (decisively broken), or reclaimed (broken and returned to). Distance from the current price is included so the AI can judge proximity to the nearest key structure. A level touched five times carries different weight than one touched twice — the AI receives both.
+      </Paragraph>
+
+      <SubHeading>W/M Formations (Double Tops &amp; Bottoms)</SubHeading>
+      <Paragraph>
+        Double-top (M) and double-bottom (W) patterns are evaluated on every candle close. A formation is reported only when all conditions hold: two symmetrical extremes 10–60 bars apart, each within 0.25 ATR of the other, a confirmed neckline, and current price within 0.5% of that neckline — the actionability window. Patterns outside this window are omitted entirely; stale setups that already played out add noise, not signal. When a live pattern is present the AI receives the peak prices, neckline level, and pattern age in bars.
+      </Paragraph>
 
       <Paragraph>
         The AI returns a structured decision — not prose. It specifies direction, leverage, size, stop-loss price, take-profit price, a confidence score (1–10), and a plain-English rationale. The rationale is shown verbatim in the decision card: it is what the bot "thought" and is the primary trust surface.
@@ -4045,6 +4069,27 @@ function AiTraderModesSection() {
       <Alert type="info">
         All other safety rules — mandatory SL per trade, bracket verification, stale-data refusal, LLM timeout protection — are always active in both modes. Degen disables the loss-pacing rules, not the malfunction-protection rules.
       </Alert>
+
+      <SubHeading>Position Sizing</SubHeading>
+      <Paragraph>
+        By default AI Trader uses <strong className="text-white/90">Discretionary Sizing</strong> — the AI picks a size percentage and the guardrail layer clamps it to the 10–90% allocation band. All existing bots work this way.
+      </Paragraph>
+      <Paragraph>
+        <strong className="text-white/90">Risk-Based Sizing</strong> is an optional per-bot mode that derives position size automatically from three inputs: live equity (read fresh from the exchange at decision time), your risk band (what fraction of equity to risk at low vs. high confidence), and the AI's stop distance. A tighter stop yields a larger position for the same dollar risk; a wider stop yields a smaller one. Leverage is derived from the result — the AI's requested leverage is ignored. The AI's size request is ignored too; only its confidence score and stop placement matter.
+      </Paragraph>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2">Risk Band</h4>
+          <p className="text-sm text-white/60">Set a minimum % (risked at confidence 1) and a maximum % (risked at confidence 10). Risk scales linearly between them with the AI's confidence score. Default band: 0.5%–1.5%. Allowed range: 0.1%–3.0%.</p>
+        </div>
+        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
+          <h4 className="font-medium text-white mb-2">Live Equity Basis</h4>
+          <p className="text-sm text-white/60">Equity is read fresh before each entry. A bot that has drawn down will automatically risk a smaller dollar amount on the next trade — losses shrink subsequent risk without any manual adjustment.</p>
+        </div>
+      </div>
+      <Alert type="info">
+        Requires an active venue account on live bots (the equity read needs a real account). Paper bots can switch freely. Minimum stop distance is 1% — tighter stops are rejected because entry slippage alone could consume the entire risk budget.
+      </Alert>
     </div>
   );
 }
@@ -4184,6 +4229,18 @@ function AiTraderFaqSection() {
       a: 'Yes. You choose the model per-bot in the creation flow or adjust it in bot settings at any time. The platform pre-selects by timeframe — Qwen3.7 Max for 15m/1h (cheap, disciplined, and the winner of Alpha Arena Season 1 at +22.3%), Claude Opus 4.8 for 4h/1d — but any manual choice sticks. The decision card always shows which model was used.',
     },
     {
+      q: 'Does the bot reason differently on weekends or at different times of day?',
+      a: 'It can. The session context tells the AI which session is active (Asia, London, New York, or Weekend) and whether it is near a weekly or daily candle open. A weekend setup can be treated differently from a mid-week London-session breakout. This is available input, not a forced rule — the AI decides how much weight to give it.',
+    },
+    {
+      q: 'What are the "significant price levels" the bot sees?',
+      a: 'Up to four key price zones extracted from the last 400 bars — structural highs and lows that price has tested multiple times. Each level carries a touch count, a status (intact, lost, or reclaimed since the last touch), and distance from the current price. These are real chart structure levels, not indicator lines or round numbers.',
+    },
+    {
+      q: 'What happens if a context layer — session, trend structure, price levels — is unavailable?',
+      a: 'Context enrichment is fail-open: if any block encounters an error it is silently omitted from the briefing. The AI proceeds with whatever context it has. A missing block never pauses or blocks a decision cycle — the bot stays flat at worst, never errors out.',
+    },
+    {
       q: 'Is this financial advice?',
       a: 'No. AI Trader is a tool, not financial advice. The AI\'s reasoning is shown verbatim so you can evaluate it yourself. Past paper performance does not predict live results.',
     },
@@ -4225,9 +4282,9 @@ const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet:
   { id: 'security', label: 'Security', snippet: 'Execution authorization, agent wallet backup (24-word phrase), key encryption, and how your funds are protected.', keywords: ['security', 'encryption', 'private key', 'backup', 'recovery phrase', 'mnemonic', 'seed phrase', '24 word', 'authorize', 'authorization', 'execution key', 'safe', 'protect', 'reset agent wallet', 'aes-256', 'user master key', 'umk', 'ledger', 'hardware wallet', 'solflare', 'stranded funds', 'recover stranded'] },
   { id: 'trade-execution', label: 'Trade Execution', snippet: 'How trades are routed from webhook signals through the execution engine, including retries and error handling.', keywords: ['trade execution', 'execution', 'order', 'fill', 'route', 'retry', 'error', 'failed trade', 'slippage', 'entry price', 'size', 'notional', 'fee'] },
   { id: 'ai-agents', label: 'AI Agent Integration', snippet: 'Use AI agents (Claude, GPT, etc.) to send trade signals to QuantumVault via the agent API.', keywords: ['ai', 'agent', 'claude', 'gpt', 'openai', 'llm', 'language model', 'api', 'integration', 'programmatic', 'automated', 'server execution key', 'openclaw', 'mcp server', 'revoke', 'api access', 'sui-perp', 'apt-perp'] },
-  { id: 'ai-trader-overview', label: 'AI Trader', snippet: 'Built-in autonomous trading agent. AI model watches the market, decides long/short/flat, and places bracketed orders (entry + SL + TP). Every bot starts in paper mode — no real money until graduation.', keywords: ['ai trader', 'autonomous', 'trading bot', 'ai bot', 'paper mode', 'paper trading', 'decision card', 'rationale', 'flat', 'guardrail', 'bracket', 'stop loss', 'take profit', 'entry', 'candle', 'indicator', 'context', 'confidence', 'openrouter', 'opus', 'claude', 'cot', 'commitment of traders', 'cftc', 'smart money', 'positioning', 'macro bias', 'ema', 'rsi', 'macd', 'bollinger', 'vwap', 'adx', 'obv', 'funding rate', 'open interest', 'risk reward', 'accumulating', 'distributing'] },
+  { id: 'ai-trader-overview', label: 'AI Trader', snippet: 'Built-in autonomous trading agent. AI model watches the market, decides long/short/flat, and places bracketed orders (entry + SL + TP). Every bot starts in paper mode — no real money until graduation.', keywords: ['ai trader', 'autonomous', 'trading bot', 'ai bot', 'paper mode', 'paper trading', 'decision card', 'rationale', 'flat', 'guardrail', 'bracket', 'stop loss', 'take profit', 'entry', 'candle', 'indicator', 'context', 'confidence', 'openrouter', 'opus', 'claude', 'cot', 'commitment of traders', 'cftc', 'smart money', 'positioning', 'macro bias', 'ema', 'rsi', 'macd', 'bollinger', 'vwap', 'adx', 'obv', 'funding rate', 'open interest', 'risk reward', 'accumulating', 'distributing', 'session', 'trading session', 'weekend', 'asia', 'london', 'new york', 'dow structure', 'swing', 'trend structure', 'uptrend', 'downtrend', 'aligned', 'price levels', 'touch count', 'support', 'resistance', 'double top', 'double bottom', 'wm pattern', 'neckline', 'pattern detection'] },
   { id: 'ai-trader-trials', label: 'Paper Trials & Graduation', snippet: 'Every AI Trader bot must pass a 30-day paper trial before live trading unlocks. Criteria: net PnL > 0, profit factor ≥ 1.1, drawdown ≤ 30% mark-to-market. Graduation is an unlock, not an auto-flip.', keywords: ['paper trial', 'graduation', 'graduate', 'paper mode', 'trial period', 'unlock', 'live toggle', 'net pnl', 'profit factor', 'drawdown', 'mark to market', 'slippage penalty', 'simulated', 'restart trial', 'failed trial', 'criteria', '30 days', 'ltf', 'htf', '30 day'] },
-  { id: 'ai-trader-modes', label: 'Modes & Risk Profiles', snippet: 'Suggest mode: AI proposes, you approve. Auto mode: AI executes at each candle close. Guarded profile adds daily-loss circuit breaker and consecutive-loss brake. Degen mode runs until allocation is depleted.', keywords: ['suggest mode', 'auto mode', 'guarded', 'degen', 'risk profile', 'circuit breaker', 'daily loss', 'consecutive loss', 'frequency cap', 'auto next', 'ask ai again', 'wait for me', 'execute', 'skip', 'mode switch', 'loss pacing'] },
+  { id: 'ai-trader-modes', label: 'Modes & Risk Profiles', snippet: 'Suggest mode: AI proposes, you approve. Auto mode: AI executes at each candle close. Guarded profile adds daily-loss circuit breaker and consecutive-loss brake. Degen mode runs until allocation is depleted. Risk-Based Sizing optional mode.', keywords: ['suggest mode', 'auto mode', 'guarded', 'degen', 'risk profile', 'circuit breaker', 'daily loss', 'consecutive loss', 'frequency cap', 'auto next', 'ask ai again', 'wait for me', 'execute', 'skip', 'mode switch', 'loss pacing', 'position sizing', 'risk based', 'risk-based', 'sizing mode', 'risk band', 'live equity', 'confidence scaled', 'discretionary', 'stop distance', 'fixed fractional'] },
   { id: 'ai-trader-models', label: 'Models & Costs', snippet: 'Default: Qwen3.7 Max for 15m/1h (96 decisions/day, ~$0.29/day), Opus 4.8 for 4h/1d. Opus on 15m ≈ $9.60/day. Net P&L subtracts cumulative LLM cost — a bot that wins less than its AI bill is not profitable.', keywords: ['model', 'claude', 'opus', 'qwen', 'deepseek', 'openrouter', 'api key', 'cost', 'price', 'per decision', 'tokens', 'llm cost', 'net pnl', 'realized pnl', 'trading fees', 'taker fee', 'pnl definition', 'openrouter key', 'model picker', 'byo key', 'alpha arena', 'decision frequency', 'candles per day'] },
   { id: 'ai-trader-faq', label: 'AI Trader FAQ', snippet: 'Common questions: does it always trade, can it lose everything, what if SL placement fails, can the AI close early, what if the call times out. Includes disclaimer.', keywords: ['faq', 'frequently asked', 'questions', 'flat', 'no trade', 'lose everything', 'naked position', 'sl fail', 'stop loss fail', 'timeout', 'model fail', 'close early', 'financial advice', 'disclaimer', 'risk warning', 'not advice', 'all losses'] },
   { id: 'vaults-overview', label: 'Vaults Overview', snippet: 'Vaults put idle USDC to work earning yield. One tap to park all spare USDC, one tap to unpark it back.', keywords: ['vault', 'vaults', 'earn', 'yield', 'idle', 'spare', 'park', 'unpark', 'interest', 'apy', 'save', 'savings', 'passive', 'stablecoin'] },

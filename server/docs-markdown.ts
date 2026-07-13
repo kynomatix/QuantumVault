@@ -1644,6 +1644,10 @@ At each analysis cycle the bot builds a market context package and sends it to t
 - Smart money positioning (COT) — weekly Bitcoin futures positioning from the CFTC's Commitment of Traders report, applied as a macro bias across all crypto markets (see below)
 - Account state: allocated collateral, any open position, unrealized PnL
 - The bot's own last 10 closed trades — so the AI can learn from its mistakes and avoid repeating them
+- Session & time awareness — current trading session (Asia / London / New York / Weekend), proximity to the weekly candle open (±12h before / 2h after Monday 00:00 UTC), proximity to each daily candle open
+- Dow trend structure — swing classification on both the selected timeframe and the parent timeframe (higher-high / higher-low uptrend; lower-low / lower-high downtrend; mixed; or insufficient data), plus an aligned / misaligned flag comparing the two timeframes
+- Touch-counted price levels — up to 4 significant zones from the last 400 bars, each with a touch count, status (intact / lost / reclaimed), and distance from the current price
+- W/M formations — double-top and double-bottom patterns: reported only when two symmetrical extremes are 10–60 bars apart, within 0.25 ATR of each other, and current price is within 0.5% of the confirmed neckline (the actionability window)
 
 #### Smart money positioning (COT)
 
@@ -1659,6 +1663,22 @@ Honest scope:
 - **Auditability** — every decision records the positioning state it saw — accumulating, distributing, or neutral — alongside the index values. The track record shows whether the signal helped over time.
 
 Most automated traders only see price data — this gives the AI the same positioning context professional futures traders check weekly.
+
+#### Session & time awareness
+
+Each briefing stamps the current trading session (Asia, London, London/New York overlap, New York, or Weekend), proximity to the weekly candle open (±12h before / 2h after Monday 00:00 UTC), and proximity to each daily candle open (±1h window). Weekend conditions signal thin liquidity and elevated false-move risk; session overlaps signal the highest-probability breakout windows; proximity to a weekly open flags the market-structure resets that institutional traders track. Sessions are fixed UTC boundaries — no DST adjustment.
+
+#### Dow trend structure
+
+Swing points are classified on both the selected timeframe and the parent timeframe, yielding a label for each: uptrend (higher-highs + higher-lows), downtrend (lower-lows + lower-highs), mixed (structure broken), or insufficient data (not enough swings yet). The two labels are then compared — aligned (both agree on direction) or misaligned (they diverge). The AI uses this without doing the swing work itself: a counter-trend setup against an aligned downtrend on both timeframes is a meaningful headwind; a trade with the aligned trend gets a structural tailwind.
+
+#### Touch-counted price levels
+
+Up to four significant price zones are extracted from the last 400 bars of the selected timeframe. Each zone reports its central price, touch count (how many times price has tested it), and status: intact (holding), lost (decisively broken), or reclaimed (broken and then returned to). Distance from the current price is included so the AI can judge proximity to the nearest structure. A level touched five times is meaningfully different from one touched twice — the AI is given both the count and the current status.
+
+#### W/M formations (double tops & bottoms)
+
+Double-top (M) and double-bottom (W) patterns are detected on every candle close. A formation is only reported when all conditions hold: two symmetrical extremes 10–60 bars apart, each within 0.25 ATR of the other, a confirmed neckline, and current price within 0.5% of that neckline (the actionability window). Patterns outside this window are omitted — stale setups that already played out add noise, not signal. When a live pattern is present the AI receives the peak prices, neckline level, and pattern age in bars.
 
 The AI returns a structured decision — not prose. It specifies direction, leverage, size, stop-loss price, take-profit price, a confidence score (1–10), and a plain-English rationale. The rationale is shown verbatim in the decision card: it is what the bot "thought" and is the primary trust surface.
 
@@ -1733,6 +1753,24 @@ You can switch modes from the bot settings at any time. A switch while a positio
 **Degen** — Loss-pacing circuit breakers are off. The bot runs until the allocation is depleted below the minimum order size, then stops and reports. There is no daily loss limit and no consecutive-loss brake. A 20 trades/day hard ceiling still applies as a malfunction guard — not a strategy limit. Requires typed confirmation at creation: you acknowledge the allocation can go to zero without the bot pausing.
 
 All other safety rules — mandatory SL, bracket verification, stale-data refusal, LLM timeout protection — are always active in both modes. Degen disables the loss-pacing rules, not the malfunction-protection rules.
+
+---
+
+### Position Sizing
+
+By default AI Trader uses **discretionary sizing**: the AI picks a size percentage (10–90% of allocation) and the guardrail layer clamps it to the permitted band. All existing bots work this way.
+
+**Risk-based sizing** is an optional per-bot mode that derives position size automatically from three inputs:
+
+1. **Live equity** — read fresh from the exchange at decision time (free collateral for live bots; simulated for paper). A bot that has drawn down will risk a smaller absolute dollar amount on the next trade — losses automatically shrink subsequent risk.
+2. **Your risk band** — the fraction of live equity to risk per trade, set as a minimum % (at confidence 1) and a maximum % (at confidence 10). Default band: 0.5%–1.5%. Allowed range: 0.1%–3.0%.
+3. **Stop distance** — the stop-loss price determines position size. A tighter stop yields a larger position for the same dollar risk; a wider stop yields a smaller one. The AI is told that stop quality drives size, incentivizing careful stop placement over inflated stops.
+
+Leverage is derived from the resulting size — the AI's requested leverage is ignored. The AI's size request is also ignored; only its confidence score and stop placement matter.
+
+**Minimum stop distance: 1%.** A stop tighter than this would allow entry slippage to consume the entire risk budget before the trade even started — such decisions are rejected in risk-based mode.
+
+Risk-based sizing does not disable any other guardrail. G1–G4 (leverage ceiling, SL distance band, minimum RR, fee-clearing TP) still run. Switching a live bot to risk-based requires an active venue subaccount (the equity read needs a real account). Paper bots can switch freely. The decision card shows the risk percentage used and the dollar risk budget committed on each trade.
 
 ---
 
@@ -1811,6 +1849,15 @@ The bot stays flat and retries at the next candle close. An aborted cycle never 
 
 **Can I use a different model?**
 Yes. You choose the model per-bot in the creation flow or adjust it in bot settings at any time. The platform pre-selects by timeframe (Qwen3.7 Max for 15m/1h, Claude Opus 4.8 for 4h/1d), but any manual choice sticks. The decision card always shows which model was used.
+
+**Does the bot reason differently on weekends or at different times of day?**
+It can. The session context tells the AI which session is active (Asia, London, New York, or Weekend) and whether it is near a weekly or daily candle open. A weekend setup can be treated differently from a mid-week London-session breakout. The context is available input, not a forced rule — the AI decides how much weight to give it.
+
+**What are the "significant price levels" the bot sees?**
+Up to four key price zones extracted from the last 400 bars — structural highs and lows that price has tested repeatedly. Each level carries a touch count, a status (intact, lost, or reclaimed), and distance from the current price. These are real chart structure levels, not indicator lines or round numbers.
+
+**What happens if a context layer — session, Dow structure, price levels — is unavailable?**
+Context enrichment is fail-open: if any block encounters an error it is omitted from the briefing. The AI proceeds with whatever context it has. A missing block never pauses or blocks a decision cycle — the bot stays flat at worst, never errors out.
 
 **Is this financial advice?**
 No. AI Trader is a tool, not financial advice. The AI's reasoning is shown verbatim so you can evaluate it yourself. Past paper performance does not predict live results.
