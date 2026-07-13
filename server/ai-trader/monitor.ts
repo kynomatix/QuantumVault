@@ -45,6 +45,7 @@ import {
   restoreWalletSecurityFromStorage,
   decryptLlmApiKeyV3,
 } from "../session-v3";
+import { fireReflection } from "./reflection-service";
 import { sendTradeNotification, getCloseReasonLabel } from "../notification-service";
 import { resolveAiTraderSubaccountSigner, liveReadAccount } from "./signing";
 import { evaluatePaperBracket, paperRealizedPnl, paperExitPrice, type PaperSide } from "./paper-math";
@@ -382,6 +383,10 @@ async function afterClose(
     consecutiveLosses,
     ...(opts.alreadyPaused ? {} : { status: "idle", pauseReason: null }),
   });
+
+  // Fire reflection async — never blocks close-out, one in-flight per bot.
+  // INJECTION NOT YET ACTIVE: lessons accumulate only (see reflection-service.ts header).
+  fireReflection(bot);
 
   // Graduation runs on EVERY paper close, before pause checks — a pause must
   // not hide a completed record from the evaluator.

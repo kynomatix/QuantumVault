@@ -617,6 +617,25 @@ export function registerAiTraderRoutes(app: Express): void {
     }
   });
 
+  // --- Reset playbook ------------------------------------------------------------------
+  app.post("/api/ai-trader/:id/playbook/reset", requireWallet, async (req: any, res) => {
+    try {
+      const bot = await loadOwnedBot(req, res);
+      if (!bot) return;
+      const updated = await storage.updateAiTraderBot(bot.id, {
+        playbook: null,
+        playbookVersion: ((bot.playbookVersion ?? 0) + 1),
+        playbookUpdatedAt: new Date(),
+      } as any);
+      if (!updated) return res.status(404).json({ error: "Bot not found." });
+      console.log(`[AiTrader] Playbook reset for bot ${bot.id.slice(0, 8)} by ${req.walletAddress}`);
+      res.json({ ok: true, bot: toBotDto(updated) });
+    } catch (err) {
+      console.error("[AiTrader] playbook reset error:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // --- Delete ---------------------------------------------------------------------------
   app.delete("/api/ai-trader/:id", requireWallet, async (req: any, res) => {
     try {

@@ -2046,6 +2046,14 @@ export const aiTraderBots = pgTable("ai_trader_bots", {
   pauseReason: text("pause_reason"),
   dailyRealizedPnl: decimal("daily_realized_pnl", { precision: 20, scale: 2 }).default("0"),
   consecutiveLosses: integer("consecutive_losses").notNull().default(0),
+  // Reflection-playbook (reflection-playbook-spec.md Phase A — accumulate-only).
+  // Injection into context-builder is gated behind the calibration precondition
+  // and the structure-bricks keep-gate review; context-builder must NOT be touched
+  // until both gates clear. Plain-text entries written by the model, rendered
+  // verbatim. Managed server-side only; never client-set at bot creation.
+  playbook: jsonb("playbook"),
+  playbookVersion: integer("playbook_version").notNull().default(0),
+  playbookUpdatedAt: timestamp("playbook_updated_at"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => [

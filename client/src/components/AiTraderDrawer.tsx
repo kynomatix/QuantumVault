@@ -52,6 +52,7 @@ import {
   Zap,
   AlertTriangle,
   CandlestickChart,
+  BookOpen,
 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
@@ -135,6 +136,9 @@ interface AiTraderBot {
   consecutiveLosses: number;
   createdAt: string | null;
   updatedAt: string | null;
+  playbook: unknown[] | null;
+  playbookVersion: number;
+  playbookUpdatedAt: string | null;
 }
 
 interface AiTraderDrawerProps {
@@ -457,6 +461,27 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
       setHistory(data.decisions ?? []);
     } catch { /* silent */ }
   }, [botId, walletAddress]);
+
+  const handlePlaybookReset = async () => {
+    const bot = detail?.bot;
+    if (!bot) return;
+    setActionLoading('playbook_reset');
+    try {
+      const res = await fetch(`/api/ai-trader/${bot.id}/playbook/reset`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: walletAuthHeaders(),
+      });
+      if (!res.ok) throw new Error('Reset failed');
+      await fetchDetail();
+      onBotUpdated();
+      toast({ title: 'Playbook reset', description: 'The playbook has been cleared and will rebuild as trades close.' });
+    } catch {
+      toast({ title: 'Reset failed', description: 'Could not reset the playbook. Try again.', variant: 'destructive' });
+    } finally {
+      setActionLoading(null);
+    }
+  };
 
   const fetchCalibration = useCallback(async () => {
     if (!botId || !walletAddress) return;
@@ -818,16 +843,20 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
             )}
 
             <Tabs value={activeTab} onValueChange={setActiveTab} className="mt-3">
-              <TabsList className="w-full grid grid-cols-3" data-testid="tabs-ai-trader">
-                <TabsTrigger value="activity" className="text-xs px-2" data-testid="tab-ai-activity">
+              <TabsList className="w-full grid grid-cols-4" data-testid="tabs-ai-trader">
+                <TabsTrigger value="activity" className="text-xs px-1.5" data-testid="tab-ai-activity">
                   <History className="w-3.5 h-3.5 mr-1" />
                   Activity
                 </TabsTrigger>
-                <TabsTrigger value="track-record" className="text-xs px-2" data-testid="tab-ai-track-record">
+                <TabsTrigger value="track-record" className="text-xs px-1.5" data-testid="tab-ai-track-record">
                   <BarChart3 className="w-3.5 h-3.5 mr-1" />
-                  Track record
+                  Record
                 </TabsTrigger>
-                <TabsTrigger value="settings" className="text-xs px-2" data-testid="tab-ai-settings">
+                <TabsTrigger value="playbook" className="text-xs px-1.5" data-testid="tab-ai-playbook">
+                  <BookOpen className="w-3.5 h-3.5 mr-1" />
+                  Playbook
+                </TabsTrigger>
+                <TabsTrigger value="settings" className="text-xs px-1.5" data-testid="tab-ai-settings">
                   <Settings className="w-3.5 h-3.5 mr-1" />
                   Settings
                 </TabsTrigger>
@@ -1517,6 +1546,88 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     <p className="text-xs text-muted-foreground text-center">Close the open position before deleting.</p>
                   )}
                 </div>
+              </TabsContent>
+
+              {/* --- Playbook tab ---------------------------------------- */}
+              <TabsContent value="playbook" className="mt-3">
+                {(() => {
+                  const entries = (bot.playbook ?? []) as Array<{ lesson: string; regime: string; evidence: string }>;
+                  const updatedAt = bot.playbookUpdatedAt
+                    ? new Date(bot.playbookUpdatedAt).toLocaleDateString()
+                    : null;
+
+                  const REGIME_CHIP: Record<string, string> = {
+                    trending:     'bg-blue-500/10 text-blue-400 border-blue-500/20',
+                    ranging:      'bg-amber-500/10 text-amber-400 border-amber-500/20',
+                    transitional: 'bg-violet-500/10 text-violet-400 border-violet-500/20',
+                    any:          'bg-muted/40 text-muted-foreground border-border',
+                  };
+
+                  if (entries.length === 0) {
+                    return (
+                      <div className="flex flex-col items-center justify-center py-12 space-y-2 text-center">
+                        <BookOpen className="w-8 h-8 text-muted-foreground/30" />
+                        <p className="text-sm font-medium text-muted-foreground">No lessons yet</p>
+                        <p className="text-xs text-muted-foreground/60 max-w-[240px] leading-relaxed">
+                          The playbook builds as trades close — the bot will distill durable lessons from its own history.
+                        </p>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="space-y-2">
+                      {updatedAt && (
+                        <p className="text-[10px] text-muted-foreground px-0.5">
+                          Last updated {updatedAt} · {entries.length} {entries.length === 1 ? 'lesson' : 'lessons'}
+                        </p>
+                      )}
+
+                      {entries.map((entry, i) => (
+                        <div key={i} className="rounded-xl border border-border bg-card/40 px-3 py-2.5 space-y-1.5" data-testid={`playbook-entry-${i}`}>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide border leading-none ${REGIME_CHIP[entry.regime] ?? REGIME_CHIP.any}`}>
+                              {entry.regime}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground font-mono">{entry.evidence}</span>
+                          </div>
+                          <p className="text-xs text-foreground/90 leading-relaxed">{entry.lesson}</p>
+                        </div>
+                      ))}
+
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="w-full mt-1 text-xs text-muted-foreground/70 hover:text-muted-foreground"
+                            data-testid="button-playbook-reset"
+                          >
+                            Reset playbook
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>Reset playbook?</AlertDialogTitle>
+                            <AlertDialogDescription>
+                              This clears all {entries.length} {entries.length === 1 ? 'lesson' : 'lessons'} the bot has accumulated. The playbook will rebuild from scratch as new trades close.
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>Cancel</AlertDialogCancel>
+                            <AlertDialogAction
+                              onClick={handlePlaybookReset}
+                              disabled={actionLoading === 'playbook_reset'}
+                              data-testid="button-playbook-confirm-reset"
+                            >
+                              {actionLoading === 'playbook_reset' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Reset'}
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
+                    </div>
+                  );
+                })()}
               </TabsContent>
             </Tabs>
 

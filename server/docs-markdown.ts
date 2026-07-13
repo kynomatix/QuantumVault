@@ -1646,8 +1646,8 @@ At each analysis cycle the bot builds a market context package and sends it to t
 - The bot's own last 10 closed trades — so the AI can learn from its mistakes and avoid repeating them
 - Session & time awareness — current trading session (Asia / London / New York / Weekend), proximity to the weekly candle open (±12h before / 2h after Monday 00:00 UTC), proximity to each daily candle open
 - Dow trend structure — swing classification on both the selected timeframe and the parent timeframe (higher-high / higher-low uptrend; lower-low / lower-high downtrend; mixed; or insufficient data), plus an aligned / misaligned flag comparing the two timeframes
-- Touch-counted price levels — up to 4 significant zones from the last 400 bars, each with a touch count, status (intact / lost / reclaimed), and distance from the current price
-- W/M formations — double-top and double-bottom patterns: reported only when two symmetrical extremes are 10–60 bars apart, within 0.25 ATR of each other, and current price is within 0.5% of the confirmed neckline (the actionability window)
+- Touch-counted price levels — up to 4 significant zones from the last 400 bars on both the selected timeframe and the parent timeframe, each with a touch count, status (intact / lost / reclaimed), and distance from the current price
+- W/M formations — double-top and double-bottom patterns: reported only when two symmetrical extremes are 10–60 bars apart (patterns older than 60 bars are ignored — deliberately recent-only), within 0.25 ATR of each other, and current price is within 0.5% of the confirmed neckline (the actionability window)
 
 #### Smart money positioning (COT)
 
@@ -1674,11 +1674,11 @@ Swing points are classified on both the selected timeframe and the parent timefr
 
 #### Touch-counted price levels
 
-Up to four significant price zones are extracted from the last 400 bars of the selected timeframe. Each zone reports its central price, touch count (how many times price has tested it), and status: intact (holding), lost (decisively broken), or reclaimed (broken and then returned to). Distance from the current price is included so the AI can judge proximity to the nearest structure. A level touched five times is meaningfully different from one touched twice — the AI is given both the count and the current status.
+Up to four significant price zones are extracted from the last 400 bars of both the selected timeframe and the parent timeframe. Each zone reports its central price, touch count (how many times price has tested it), and status: intact (holding), lost (decisively broken), or reclaimed (broken and then returned to). Distance from the current price is included so the AI can judge proximity to the nearest structure. A level touched five times is meaningfully different from one touched twice — the AI is given both the count and the current status.
 
 #### W/M formations (double tops & bottoms)
 
-Double-top (M) and double-bottom (W) patterns are detected on every candle close. A formation is only reported when all conditions hold: two symmetrical extremes 10–60 bars apart, each within 0.25 ATR of the other, a confirmed neckline, and current price within 0.5% of that neckline (the actionability window). Patterns outside this window are omitted — stale setups that already played out add noise, not signal. When a live pattern is present the AI receives the peak prices, neckline level, and pattern age in bars.
+Double-top (M) and double-bottom (W) patterns are detected on every candle close. A formation is only reported when all conditions hold: two symmetrical extremes 10–60 bars apart (patterns older than 60 bars are ignored — deliberately recent-only), each within 0.25 ATR of the other, a confirmed neckline, and current price within 0.5% of that neckline (the actionability window). Patterns outside this window are omitted — stale setups that already played out add noise, not signal. When a live pattern is present the AI receives the peak prices, neckline level, and pattern age in bars.
 
 The AI returns a structured decision — not prose. It specifies direction, leverage, size, stop-loss price, take-profit price, a confidence score (1–10), and a plain-English rationale. The rationale is shown verbatim in the decision card: it is what the bot "thought" and is the primary trust surface.
 
@@ -1764,7 +1764,7 @@ By default AI Trader uses **discretionary sizing**: the AI picks a size percenta
 
 1. **Live equity** — read fresh from the exchange at decision time (free collateral for live bots; simulated for paper). A bot that has drawn down will risk a smaller absolute dollar amount on the next trade — losses automatically shrink subsequent risk.
 2. **Your risk band** — the fraction of live equity to risk per trade, set as a minimum % (at confidence 1) and a maximum % (at confidence 10). Default band: 0.5%–1.5%. Allowed range: 0.1%–3.0%.
-3. **Stop distance** — the stop-loss price determines position size. A tighter stop yields a larger position for the same dollar risk; a wider stop yields a smaller one. The AI is told that stop quality drives size, incentivizing careful stop placement over inflated stops.
+3. **Stop distance** — risk budget divided by stop distance gives position size; margin posted = size divided by the derived leverage. A tighter stop yields a larger position for the same dollar risk; a wider stop yields a smaller one. The AI is told that stop quality drives size, incentivizing careful stop placement over inflated stops.
 
 Leverage is derived from the resulting size — the AI's requested leverage is ignored. The AI's size request is also ignored; only its confidence score and stop placement matter.
 

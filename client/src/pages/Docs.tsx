@@ -3860,8 +3860,8 @@ function AiTraderOverviewSection() {
         <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Bot's last 10 closed trades</strong> — so the AI can learn from its own mistakes and avoid repeating them</span></li>
         <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Session &amp; time awareness</strong> — current trading session (Asia / London / New York / Weekend), proximity to the weekly candle open, proximity to each daily candle open</span></li>
         <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Dow trend structure</strong> — swing classification (uptrend, downtrend, mixed, or insufficient data) on both the selected timeframe and the parent timeframe, plus an aligned / misaligned flag across the two</span></li>
-        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Touch-counted price levels</strong> — up to 4 key zones from the last 400 bars, each with a touch count, status (intact / lost / reclaimed), and distance from current price</span></li>
-        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">W/M formations</strong> — double-top and double-bottom patterns, reported only when two symmetrical extremes are 10–60 bars apart and current price is within 0.5% of the confirmed neckline</span></li>
+        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Touch-counted price levels</strong> — up to 4 key zones from the last 400 bars on both the selected timeframe and the parent timeframe, each with a touch count, status (intact / lost / reclaimed), and distance from current price</span></li>
+        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">W/M formations</strong> — double-top and double-bottom patterns, reported only when two symmetrical extremes are 10–60 bars apart (patterns older than 60 bars are ignored — deliberately recent-only) and current price is within 0.5% of the confirmed neckline</span></li>
       </ul>
 
       <SubHeading>Smart money positioning (COT)</SubHeading>
@@ -3903,12 +3903,12 @@ function AiTraderOverviewSection() {
 
       <SubHeading>Touch-Counted Price Levels</SubHeading>
       <Paragraph>
-        Up to four significant price zones are extracted from the last 400 bars. Each zone reports its central price, touch count, and status: intact (holding), lost (decisively broken), or reclaimed (broken and returned to). Distance from the current price is included so the AI can judge proximity to the nearest key structure. A level touched five times carries different weight than one touched twice — the AI receives both.
+        Up to four significant price zones are extracted from the last 400 bars of both the selected timeframe and the parent timeframe. Each zone reports its central price, touch count, and status: intact (holding), lost (decisively broken), or reclaimed (broken and returned to). Distance from the current price is included so the AI can judge proximity to the nearest key structure. A level touched five times carries different weight than one touched twice — the AI receives both.
       </Paragraph>
 
       <SubHeading>W/M Formations (Double Tops &amp; Bottoms)</SubHeading>
       <Paragraph>
-        Double-top (M) and double-bottom (W) patterns are evaluated on every candle close. A formation is reported only when all conditions hold: two symmetrical extremes 10–60 bars apart, each within 0.25 ATR of the other, a confirmed neckline, and current price within 0.5% of that neckline — the actionability window. Patterns outside this window are omitted entirely; stale setups that already played out add noise, not signal. When a live pattern is present the AI receives the peak prices, neckline level, and pattern age in bars.
+        Double-top (M) and double-bottom (W) patterns are evaluated on every candle close. A formation is reported only when all conditions hold: two symmetrical extremes 10–60 bars apart (patterns older than 60 bars are ignored — deliberately recent-only), each within 0.25 ATR of the other, a confirmed neckline, and current price within 0.5% of that neckline — the actionability window. Patterns outside this window are omitted entirely; stale setups that already played out add noise, not signal. When a live pattern is present the AI receives the peak prices, neckline level, and pattern age in bars.
       </Paragraph>
 
       <Paragraph>
@@ -4075,7 +4075,7 @@ function AiTraderModesSection() {
         By default AI Trader uses <strong className="text-white/90">Discretionary Sizing</strong> — the AI picks a size percentage and the guardrail layer clamps it to the 10–90% allocation band. All existing bots work this way.
       </Paragraph>
       <Paragraph>
-        <strong className="text-white/90">Risk-Based Sizing</strong> is an optional per-bot mode that derives position size automatically from three inputs: live equity (read fresh from the exchange at decision time), your risk band (what fraction of equity to risk at low vs. high confidence), and the AI's stop distance. A tighter stop yields a larger position for the same dollar risk; a wider stop yields a smaller one. Leverage is derived from the result — the AI's requested leverage is ignored. The AI's size request is ignored too; only its confidence score and stop placement matter.
+        <strong className="text-white/90">Risk-Based Sizing</strong> is an optional per-bot mode that derives position size automatically from three inputs: live equity (read fresh from the exchange at decision time), your risk band (what fraction of equity to risk at low vs. high confidence), and the AI's stop distance. Risk budget divided by stop distance gives position size; margin posted = size divided by the derived leverage. A tighter stop yields a larger position for the same dollar risk; a wider stop yields a smaller one. Leverage is derived from the result — the AI's requested leverage is ignored. The AI's size request is ignored too; only its confidence score and stop placement matter.
       </Paragraph>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">

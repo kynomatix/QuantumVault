@@ -781,6 +781,13 @@ export async function ensureSchema() {
         fetched_at timestamp NOT NULL DEFAULT now()
       )`,
       `CREATE INDEX IF NOT EXISTS idx_cot_snapshots_report_date ON cot_snapshots (report_date DESC)`,
+
+      // Reflection-playbook-spec Phase A: per-bot accumulated lesson playbook.
+      // Accumulate-only — injection gated behind calibration precondition + structure-bricks
+      // keep-gate review. Idempotent startup DDL; never db:push.
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS playbook jsonb`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS playbook_version integer NOT NULL DEFAULT 0`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS playbook_updated_at timestamp`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner
