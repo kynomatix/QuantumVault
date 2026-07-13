@@ -3222,91 +3222,62 @@ export default function AppPage() {
 
                   return (
                     <div className="space-y-8">
-                      {/* AI Trader section — first per owner direction */}
-                      <div className="space-y-4" data-testid="section-ai-trader">
-                        <div className="flex items-center gap-3">
-                          <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap flex items-center gap-1.5">
-                            <Brain className="w-3.5 h-3.5" />
-                            AI Trader
-                          </h2>
-                          <div className="h-px flex-1 bg-border/50" />
-                          {activeAiBots.length > 0 && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="text-xs text-primary hover:text-primary hover:bg-primary/10 shrink-0 -mr-1"
-                              onClick={() => setCreateAiTraderOpen(true)}
-                              data-testid="button-create-ai-trader-section"
-                            >
-                              <Plus className="w-3 h-3 mr-1" />
-                              New
-                            </Button>
-                          )}
-                        </div>
-                        {activeAiBots.length > 0 ? (
-                          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
-                            {activeAiBots.map((b: any) => renderAiTraderCard(b))}
-                          </div>
-                        ) : (
-                          <div className="gradient-border p-5 noise flex flex-col gap-3" data-testid="card-ai-trader">
-                            <div className="flex items-start justify-between">
-                              <div className="flex items-center gap-3">
-                                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center flex-shrink-0">
-                                  <Brain className="w-5 h-5 text-primary" />
-                                </div>
-                                <div>
-                                  <h3 className="font-semibold">AI Trader</h3>
-                                  <p className="text-xs text-muted-foreground">Autonomous AI trading decisions</p>
-                                </div>
+                      {/* Bot type cards — always visible at the top */}
+                      <div className="grid md:grid-cols-3 gap-5">
+                        <div className="gradient-border p-5 noise flex flex-col gap-3" data-testid="card-ai-trader">
+                          <div className="flex items-start justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center flex-shrink-0">
+                                <Brain className="w-5 h-5 text-primary" />
                               </div>
-                              <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border/60 shrink-0">Paper</span>
+                              <div>
+                                <h3 className="font-semibold">AI Trader</h3>
+                                <p className="text-xs text-muted-foreground">Autonomous AI trading decisions</p>
+                              </div>
                             </div>
-                            <p className="text-sm text-muted-foreground">An AI monitors the market and proposes trades, building a paper track record you can review before going live.</p>
-                            <p className="text-xs text-muted-foreground/70">3 free decisions included — no API key needed to start.</p>
-                            <div className="flex items-center gap-2 mt-auto pt-1">
-                              <Button
-                                className="flex-1 bg-gradient-to-r from-primary to-accent hover:opacity-90"
-                                onClick={() => setCreateAiTraderOpen(true)}
-                                data-testid="button-try-on-paper"
-                              >
-                                Try on paper →
-                              </Button>
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border/60 shrink-0">Paper</span>
+                          </div>
+                          <p className="text-sm text-muted-foreground">An AI monitors the market and proposes trades, building a paper track record you can review before going live.</p>
+                          <p className="text-xs text-muted-foreground/70">3 free decisions included — no API key needed to start.</p>
+                          <div className="flex items-center gap-2 mt-auto pt-1">
+                            <Button
+                              className="flex-1 bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                              onClick={() => setCreateAiTraderOpen(true)}
+                              data-testid="button-try-on-paper"
+                            >
+                              Try on paper →
+                            </Button>
+                          </div>
+                        </div>
+
+                        <div className="gradient-border p-5 noise flex flex-col gap-3" data-testid="card-signal-bots">
+                          <div className="flex items-start justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/30 to-accent/30 flex items-center justify-center flex-shrink-0">
+                                <Bot className="w-5 h-5 text-primary" />
+                              </div>
+                              <div>
+                                <h3 className="font-semibold">Signal Bots</h3>
+                                <p className="text-xs text-muted-foreground">Strategy-driven webhook bots</p>
+                              </div>
                             </div>
                           </div>
-                        )}
-                      </div>
-
-                      {/* Signal Bots section */}
-                      <div className="space-y-4" data-testid="section-signal-bots">
-                        <div className="flex items-center gap-3">
-                          <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap flex items-center gap-1.5">
-                            <Bot className="w-3.5 h-3.5" />
-                            Signal Bots
-                          </h2>
-                          <div className="h-px flex-1 bg-border/50" />
-                        </div>
-                        {activeBots.length > 0 ? (
-                          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
-                            {activeBots.map((bot) => renderBotCard(bot))}
+                          <p className="text-sm text-muted-foreground">Run strategies you built in QuantumLab, or connect your own TradingView alerts via webhook.</p>
+                          <div className="flex items-center gap-2 mt-auto pt-1">
+                            <Button
+                              variant="outline"
+                              className="flex-1 border-primary/30 text-primary hover:bg-primary/10"
+                              onClick={() => setCreateBotOpen(true)}
+                              data-testid="button-add-signal-bot-card"
+                            >
+                              <Plus className="w-4 h-4 mr-2" />
+                              Add Bot
+                            </Button>
                           </div>
-                        ) : (
-                          <div className="gradient-border p-5 noise text-center">
-                            <p className="text-sm text-muted-foreground">No signal bots yet. Click <strong className="text-foreground">Add Bot</strong> to connect a TradingView webhook.</p>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Grid Bots section */}
-                      <div className="space-y-4" data-testid="section-grid-bots">
-                        <div className="flex items-center gap-3">
-                          <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap flex items-center gap-1.5">
-                            <BarChart3 className="w-3.5 h-3.5" />
-                            Grid Bots
-                          </h2>
-                          <div className="h-px flex-1 bg-border/50" />
                         </div>
+
                         <div
-                          className="gradient-border p-5 noise opacity-60 select-none cursor-not-allowed"
+                          className="gradient-border p-5 noise flex flex-col gap-3 opacity-60 select-none cursor-not-allowed"
                           aria-hidden="true"
                           data-testid="card-grid-bot-coming-soon"
                         >
@@ -3322,9 +3293,41 @@ export default function AppPage() {
                             </div>
                             <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border/60 shrink-0">Coming soon</span>
                           </div>
-                          <p className="text-sm text-muted-foreground mt-3">Buys and sells automatically within a price range, capturing volatility without predicting direction.</p>
+                          <p className="text-sm text-muted-foreground">Buys and sells automatically within a price range, capturing volatility without predicting direction.</p>
                         </div>
                       </div>
+
+                      {/* AI Trader bots */}
+                      {activeAiBots.length > 0 && (
+                        <div className="space-y-4" data-testid="section-ai-trader">
+                          <div className="flex items-center gap-3">
+                            <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap flex items-center gap-1.5">
+                              <Brain className="w-3.5 h-3.5" />
+                              AI Trader
+                            </h2>
+                            <div className="h-px flex-1 bg-border/50" />
+                          </div>
+                          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+                            {activeAiBots.map((b: any) => renderAiTraderCard(b))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Signal bots */}
+                      {activeBots.length > 0 && (
+                        <div className="space-y-4" data-testid="section-signal-bots">
+                          <div className="flex items-center gap-3">
+                            <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap flex items-center gap-1.5">
+                              <Bot className="w-3.5 h-3.5" />
+                              Signal Bots
+                            </h2>
+                            <div className="h-px flex-1 bg-border/50" />
+                          </div>
+                          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+                            {activeBots.map((bot) => renderBotCard(bot))}
+                          </div>
+                        </div>
+                      )}
 
                       {/* Inactive bots (all types, collapsible) */}
                       {totalInactive > 0 && (
