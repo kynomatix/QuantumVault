@@ -111,6 +111,11 @@ exports[`buildMarketContext (WO-3) > golden file: builds the full system+user pr
     "volumeTrend": "rising",
   },
   "price": 150.1234,
+  "sessionContext": {
+    "session": "london",
+    "weekendFlag": false,
+    "weeklyOpenProximity": false,
+  },
   "timeframe": "15m",
 }
 `;
@@ -130,7 +135,9 @@ Rules:
 
 Hyperliquid participation data in this context (open interest, 24h volume, funding, and mark/oracle premium) is corroboration only, from a reference venue you do not trade on. Rising open interest alongside a price move signals conviction behind it; falling open interest against the move signals weak participation. It must never be the sole basis for an entry, and its absence or unavailability must never be a reason to refuse an otherwise valid decision.
 
-BTC COT positioning data (when present in this context) is a weekly macro bias from the CFTC Legacy futures-only report, reflecting commercial-hedger versus speculator positioning. Because BTC sets the regime for the broader crypto market, this signal applies to all crypto markets — treat it as a tilt on directional lean and how much to trust a setup, never a standalone entry trigger. It degrades when the traded market decouples from BTC on an alt-specific move."
+BTC COT positioning data (when present in this context) is a weekly macro bias from the CFTC Legacy futures-only report, reflecting commercial-hedger versus speculator positioning. Because BTC sets the regime for the broader crypto market, this signal applies to all crypto markets — treat it as a tilt on directional lean and how much to trust a setup, never a standalone entry trigger. It degrades when the traded market decouples from BTC on an alt-specific move.
+
+Session context (when present in this context) is liquidity fact, not signal — prefer standing aside on marginal setups in thin/boundary windows, widen breakout skepticism, cite it in the rationale when it moves the decision; never let it alone veto an otherwise strong setup."
 `;
 
 exports[`buildMarketContext (WO-3) > golden file: builds the full system+user prompt and contextDigest for an open-position bot > user-prompt 1`] = `
@@ -157,6 +164,11 @@ Mark price: 150.12
 Funding rate (Pacifica — this is what your position actually pays): 0.0123% (next funding at 2026-01-15T13:00:00.000Z)
 Taker fee: 0.04% per side, 0.08% round-trip. TP distance must clear this by a wide margin (guardrail G4 requires ≥ 4x).
 BTC positioning (COT, weekly): commercials distributing — smart 19/100, retail/spec 82/100 — macro bias short.
+
+## Session context (UTC)
+Now: Thursday 12:00 UTC.
+Session: london (Asian range set; watch for London breakout direction).
+Next handoffs: London/NY overlap 13:30 (1h30m) · New York 16:00 · Asia 21:00.
 
 ## Market participation — Hyperliquid (reference venue; you trade on Pacifica)
 

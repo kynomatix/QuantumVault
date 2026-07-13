@@ -12,6 +12,7 @@ import type { ProtocolAdapter } from "../protocol/adapter";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import { getHlParticipationSnapshot, type HlParticipationSnapshot } from "./hl-context";
 import { getCotSnapshot, type CotSnapshot } from "./cot-service";
+import { getSessionContext } from "./session-context";
 
 export type AiTraderTimeframe = "15m" | "1h" | "4h" | "1d";
 
@@ -207,7 +208,9 @@ Rules:
 
 Hyperliquid participation data in this context (open interest, 24h volume, funding, and mark/oracle premium) is corroboration only, from a reference venue you do not trade on. Rising open interest alongside a price move signals conviction behind it; falling open interest against the move signals weak participation. It must never be the sole basis for an entry, and its absence or unavailability must never be a reason to refuse an otherwise valid decision.
 
-BTC COT positioning data (when present in this context) is a weekly macro bias from the CFTC Legacy futures-only report, reflecting commercial-hedger versus speculator positioning. Because BTC sets the regime for the broader crypto market, this signal applies to all crypto markets — treat it as a tilt on directional lean and how much to trust a setup, never a standalone entry trigger. It degrades when the traded market decouples from BTC on an alt-specific move.`;
+BTC COT positioning data (when present in this context) is a weekly macro bias from the CFTC Legacy futures-only report, reflecting commercial-hedger versus speculator positioning. Because BTC sets the regime for the broader crypto market, this signal applies to all crypto markets — treat it as a tilt on directional lean and how much to trust a setup, never a standalone entry trigger. It degrades when the traded market decouples from BTC on an alt-specific move.
+
+Session context (when present in this context) is liquidity fact, not signal — prefer standing aside on marginal setups in thin/boundary windows, widen breakout skepticism, cite it in the rationale when it moves the decision; never let it alone veto an otherwise strong setup.`;
 
 export async function buildMarketContext(
   input: BuildMarketContextInput
@@ -440,6 +443,26 @@ export async function buildMarketContext(
   }
   const guardrailBlock = guardrailLines.join("\n");
 
+  // Brick 1, Phase 1B: session context enrichment block (pure clock math, no I/O).
+  // Enrichment rule: a try/catch omits the block on any error; decision proceeds.
+  let sessionCtxBlock: string | null = null;
+  let sessionCtxDigest: {
+    session: string;
+    weekendFlag: boolean;
+    weeklyOpenProximity: boolean;
+  } | null = null;
+  try {
+    const sc = getSessionContext(new Date(now));
+    sessionCtxBlock = sc.block;
+    sessionCtxDigest = {
+      session: sc.label,
+      weekendFlag: sc.label === "weekend",
+      weeklyOpenProximity: sc.nearWeeklyOpen,
+    };
+  } catch {
+    // enrichment rule: omit block, decision proceeds unaffected
+  }
+
   const selectedCsv = candlesToCsv(csvCandles);
   const parentCsv = parentCandles.length > 0 ? candlesToCsv(parentCandles) : null;
 
@@ -450,6 +473,7 @@ export async function buildMarketContext(
     indicatorBlock,
     `## Market microstate`,
     microstateBlock,
+    ...(sessionCtxBlock !== null ? [sessionCtxBlock] : []),
     `## Market participation — Hyperliquid (reference venue; you trade on Pacifica)`,
     participationBlock,
     `## Account state`,
@@ -497,6 +521,9 @@ export async function buildMarketContext(
           reportDate: cotSnapshot.reportDate,
         }
       : null,
+    // Brick 1, Phase 1B: session context stamp. Null when module threw (enrichment rule).
+    // Mapping: session=label, weekendFlag=(label==="weekend"), weeklyOpenProximity=nearWeeklyOpen.
+    sessionContext: sessionCtxDigest,
     indicators: {
       ema20,
       ema50,

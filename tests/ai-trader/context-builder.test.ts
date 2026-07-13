@@ -28,6 +28,13 @@ vi.mock("../../server/ai-trader/cot-service", () => ({
   getCotSnapshot: (...args: unknown[]) => getCotSnapshotMock(...args),
 }));
 
+// Brick 1 Phase 1B: getSessionContext is mocked so context-builder tests are
+// clock-independent. Default (SESSION_CTX_DEFAULT): london, nothing near, for FIXED_NOW.
+const getSessionContextMock = vi.fn();
+vi.mock("../../server/ai-trader/session-context", () => ({
+  getSessionContext: (...args: unknown[]) => getSessionContextMock(...args),
+}));
+
 // COT-B: realistic fixture — bearish_flip with commIndex 18.50, dumbIndex 81.70.
 // reportDate is 2 days before FIXED_NOW (2026-01-15), so it is well within the 16-day
 // omission threshold and exactly matches the Phase A spec example magnitudes.
@@ -202,6 +209,64 @@ function makeAdapter(overrides: Partial<ProtocolAdapter> = {}): ProtocolAdapter 
   } as unknown as ProtocolAdapter;
 }
 
+// ─── Brick 1 Phase 1B session context fixtures ────────────────────────────────
+// These are the mock return values for getSessionContext under each golden scenario.
+// The context-builder tests assert injection and digest shape, not clock math
+// (clock math is fully covered in tests/ai-trader/session-context.test.ts).
+
+// Default: london, nothing near — deterministic for FIXED_NOW (Thu 2026-01-15 12:00 UTC).
+const SESSION_CTX_DEFAULT = {
+  label: "london" as const,
+  nearWeeklyOpen: false,
+  nearDailyOpen: false,
+  block: [
+    "## Session context (UTC)",
+    "Now: Thursday 12:00 UTC.",
+    "Session: london (Asian range set; watch for London breakout direction).",
+    "Next handoffs: London/NY overlap 13:30 (1h30m) · New York 16:00 · Asia 21:00.",
+  ].join("\n"),
+};
+
+// Weekend scenario: Fri 21:00–Sun 21:00, no candle proximity.
+const SESSION_CTX_WEEKEND = {
+  label: "weekend" as const,
+  nearWeeklyOpen: false,
+  nearDailyOpen: false,
+  block: [
+    "## Session context (UTC)",
+    "Now: Saturday 10:00 UTC.",
+    "Session: weekend (thin liquidity — historically elevated stop-hunt/false-move risk).",
+    "Next handoffs: Weekend end / Asia 21:00 Sun (35h00m) · London 07:00 Mon · New York 13:30 Mon.",
+  ].join("\n"),
+};
+
+// Mid-NY scenario: new_york session, nothing near (no proximity lines).
+const SESSION_CTX_MID_NY = {
+  label: "new_york" as const,
+  nearWeeklyOpen: false,
+  nearDailyOpen: false,
+  block: [
+    "## Session context (UTC)",
+    "Now: Tuesday 18:00 UTC.",
+    "Session: new_york (NY session; follow London trend or watch for reversal).",
+    "Next handoffs: Asia 21:00 (3h00m) · London 07:00 Wed · London/NY overlap 13:30 Wed.",
+  ].join("\n"),
+};
+
+// Near-weekly-open scenario: Sun 23:30 — both weekly and daily open proximity active.
+const SESSION_CTX_NEAR_WEEKLY = {
+  label: "weekend" as const,
+  nearWeeklyOpen: true,
+  nearDailyOpen: true,
+  block: [
+    "## Session context (UTC)",
+    "Now: Sunday 23:30 UTC.",
+    "Session: weekend (thin liquidity — historically elevated stop-hunt/false-move risk).",
+    "Weekly/daily candle opens in 0h30m. Weekly/daily opens frequently print false moves that fade once London/NY liquidity arrives.",
+    "Next handoffs: Asia 00:00 Mon (0h30m) · London 07:00 Mon · New York 13:30 Mon.",
+  ].join("\n"),
+};
+
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(FIXED_NOW);
@@ -215,6 +280,8 @@ beforeEach(() => {
   getHlParticipationSnapshotMock.mockResolvedValue(HL_FIXTURE);
   getCotSnapshotMock.mockReset();
   getCotSnapshotMock.mockResolvedValue(COT_FIXTURE);
+  getSessionContextMock.mockReset();
+  getSessionContextMock.mockReturnValue(SESSION_CTX_DEFAULT);
 });
 
 afterEach(() => {
@@ -636,5 +703,117 @@ describe("buildMarketContext (WO-3)", () => {
     if ("stale" in result) throw new Error("expected a built context, not stale");
 
     expect(result.user).not.toContain("Sizing: automatic");
+  });
+
+  // ─── Brick 1 Phase 1B: session context golden tests ───────────────────────
+
+  it("session context — weekend: block injected after microstate, weekendFlag=true, weeklyOpenProximity=false", async () => {
+    getSessionContextMock.mockReturnValue(SESSION_CTX_WEEKEND);
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    // Block rendered verbatim in the user prompt.
+    expect(result.user).toContain(SESSION_CTX_WEEKEND.block);
+    // Sits between microstate and participation sections (near the microstate section per spec).
+    const afterMicrostate = result.user.split("## Market microstate")[1];
+    const beforeParticipation = afterMicrostate.split("## Market participation")[0];
+    expect(beforeParticipation).toContain("## Session context (UTC)");
+    expect(beforeParticipation).toContain("Session: weekend");
+
+    // Digest stamp: mapping from module fields per spec.
+    const digest = result.contextDigest as any;
+    expect(digest.sessionContext).toEqual({
+      session: "weekend",
+      weekendFlag: true,
+      weeklyOpenProximity: false,
+    });
+  });
+
+  it("session context — mid-NY nothing-near: block present, no proximity line, weekendFlag=false", async () => {
+    getSessionContextMock.mockReturnValue(SESSION_CTX_MID_NY);
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    expect(result.user).toContain(SESSION_CTX_MID_NY.block);
+    expect(result.user).toContain("Session: new_york");
+    // No proximity lines present (nothing near in mid-NY fixture).
+    expect(result.user).not.toContain("candle opens in");
+    expect(result.user).not.toContain("Weekly/daily");
+
+    const digest = result.contextDigest as any;
+    expect(digest.sessionContext).toEqual({
+      session: "new_york",
+      weekendFlag: false,
+      weeklyOpenProximity: false,
+    });
+  });
+
+  it("session context — near-weekly-open: proximity line present, weeklyOpenProximity=true", async () => {
+    getSessionContextMock.mockReturnValue(SESSION_CTX_NEAR_WEEKLY);
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    expect(result.user).toContain(SESSION_CTX_NEAR_WEEKLY.block);
+    // Proximity line rendered inside the block.
+    expect(result.user).toContain("Weekly/daily candle opens in 0h30m");
+
+    const digest = result.contextDigest as any;
+    expect(digest.sessionContext).toEqual({
+      session: "weekend",
+      weekendFlag: true,
+      weeklyOpenProximity: true,
+    });
+  });
+
+  it("session context — module throws: block absent, sessionContext=null in digest, decision proceeds", async () => {
+    getSessionContextMock.mockImplementation(() => {
+      throw new Error("clock boom");
+    });
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    // Block absent — enrichment rule: error omits block, decision proceeds unaffected.
+    expect(result.user).not.toContain("## Session context (UTC)");
+    // The rest of the prompt is intact — participation block still renders.
+    expect(result.user).toContain("## Market participation");
+
+    const digest = result.contextDigest as any;
+    expect(digest.sessionContext).toBeNull();
   });
 });
