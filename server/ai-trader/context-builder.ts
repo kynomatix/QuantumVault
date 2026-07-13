@@ -15,6 +15,7 @@ import { getCotSnapshot, type CotSnapshot } from "./cot-service";
 import { getSessionContext } from "./session-context";
 import { detectPivots, classifyDow, type DowStructureResult } from "./dow-structure";
 import { detectHTFLevels, type HtfLevel } from "./htf-levels";
+import { detectWM, type WMFormation } from "./wm-detector";
 
 export type AiTraderTimeframe = "15m" | "1h" | "4h" | "1d";
 
@@ -317,6 +318,29 @@ function buildHtfLine(levels: HtfLevel[], formingClose: number, tfMs: number): s
   return `HTF levels (touch-counted, 400-bar window): ${sections.join(". ")}.`;
 }
 
+// ─── Brick 3, Phase 3B: W/M formation prompt helper ──────────────────────────
+
+/**
+ * Render one WMFormation as the single "Formation:" prompt line.
+ * Example (M): "Formation: M-pattern (double top) — peaks 64,230 / 64,190 (Δ 0.06×ATR),
+ *               22 bars apart; neckline 63,580; price 0.4% above neckline; second-peak volume lower."
+ */
+function buildWmLine(f: WMFormation): string {
+  const typeLabel  = f.type === "W" ? "W-pattern (double bottom)" : "M-pattern (double top)";
+  const extremeWord = f.type === "W" ? "troughs" : "peaks";
+  const secondWord  = f.type === "W" ? "second-trough" : "second-peak";
+  const distPct  = (Math.abs(f.currentPriceDistFromNeckline) * 100).toFixed(1);
+  const distDir  = f.currentPriceDistFromNeckline >= 0 ? "above" : "below";
+  const volFact  = f.secondExtremeVolumeLower
+    ? `${secondWord} volume lower`
+    : `${secondWord} volume higher (no divergence)`;
+  return (
+    `Formation: ${typeLabel} — ${extremeWord} ${fmtPrice(f.extreme1.price)} / ${fmtPrice(f.extreme2.price)}` +
+    ` (Δ ${f.deltaAtr.toFixed(2)}×ATR), ${f.barSeparation} bars apart;` +
+    ` neckline ${fmtPrice(f.neckline.price)}; price ${distPct}% ${distDir} neckline; ${volFact}.`
+  );
+}
+
 const SYSTEM_PROMPT = `You are an autonomous perpetual-futures trading strategist for QuantumVault's AI Trader. You operate on a fixed decision cadence and must respond with exactly one "decide" tool call — no prose, no free text.
 
 Core stance: flat is a position. You are evaluated on risk-adjusted return net of fees, not on how often you trade. Overtrading destroys accounts through fees and slippage long before any edge can compound — when in doubt, stay flat.
@@ -337,7 +361,9 @@ Session context (when present in this context) is liquidity fact, not signal —
 
 Dow structure (when present in this context) is trend-structure confirmation — alignment between the selected and parent timeframe supports trend entries with normal conviction; misalignment or mixed on either timeframe warrants smaller position size or standing aside on directional setups; insufficient means the window lacks enough pivot history to classify structure. Never use Dow structure alone as an entry trigger.
 
-HTF levels (when present in this context) mark multi-touch price zones where orders historically cluster — prefer taking profit IN FRONT of a level rather than beyond it, prefer stops BEYOND defended levels rather than inside them, a lost-then-reclaimed level is meaningful directional context. Placement guidance and confluence only, never a standalone trigger.`;
+HTF levels (when present in this context) mark multi-touch price zones where orders historically cluster — prefer taking profit IN FRONT of a level rather than beyond it, prefer stops BEYOND defended levels rather than inside them, a lost-then-reclaimed level is meaningful directional context. Placement guidance and confluence only, never a standalone trigger.
+
+W/M formations (double bottom/top, when present in this context) mark a completed two-test structure where current price is within 1% of the neckline — immediately actionable. A neckline tested twice and now retested is confluence for directional lean and SL/TP placement: prefer stops beyond the pattern's far extreme, targets beyond the neckline. Weigh it with Dow structure and participation; it is never a standalone entry trigger.`;
 
 export async function buildMarketContext(
   input: BuildMarketContextInput
@@ -433,6 +459,23 @@ export async function buildMarketContext(
     // enrichment rule: omit block, digest null, decision proceeds
   }
 
+  // Brick 3, Phase 3B: W/M formation enrichment (enrichment rule — try/catch omits the line
+  // and stamps null on any error; decision cycle proceeds unaffected). Uses indicatorCandles
+  // (400-bar selected window) — no additional I/O. Null convention: BOTH the "try/catch error"
+  // case AND the "no detection" case stamp wmFormation=null; there is no "detection but no line"
+  // case — any non-null WMFormation always produces a line.
+  let wmLine: string | null = null;
+  let wmDigest: WMFormation | null = null;
+  try {
+    const wm = detectWM(indicatorCandles);
+    if (wm !== null) {
+      wmDigest = wm;
+      wmLine = buildWmLine(wm);
+    }
+  } catch {
+    // enrichment rule: omit line, digest null, decision proceeds
+  }
+
   const closes = indicatorCandles.map((c) => c.close);
   const highs = indicatorCandles.map((c) => c.high);
   const lows = indicatorCandles.map((c) => c.low);
@@ -480,6 +523,8 @@ export async function buildMarketContext(
     ...(dowLine !== null ? [dowLine] : []),
     // Brick 4, Phase 4B: HTF levels line (omitted when no levels qualify or on error).
     ...(htfLine !== null ? [htfLine] : []),
+    // Brick 3, Phase 3B: W/M formation line (omitted when no detection or on error).
+    ...(wmLine !== null ? [wmLine] : []),
   ].join("\n");
 
   // COT-B: fetch COT snapshot and fundingRate concurrently — both are cached reads.
@@ -713,6 +758,10 @@ export async function buildMarketContext(
     // never an empty-array value — null is the uniform signal for "absent from prompt".
     // Non-null (non-empty HtfLevel[]) means ≥1 level met minTouches and was selected.
     htfLevels: htfDigest,
+    // Brick 3, Phase 3B: W/M formation stamp. Null in BOTH the "try/catch error" case
+    // (enrichment rule) AND the "no detection" case. Same null convention as htfLevels.
+    // Non-null means a qualifying formation was found and the Formation: line is in the prompt.
+    wmFormation: wmDigest,
     indicators: {
       ema20,
       ema50,

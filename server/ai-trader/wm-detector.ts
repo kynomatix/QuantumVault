@@ -117,18 +117,21 @@ export interface WMFormation {
  *
  * @param bars     Full bar array INCLUDING the forming bar as the last element.
  *                 bars[bars.length - 1].close is used as the current (live) price.
- * @param options  Optional overrides for testability:
- *                   n — fractal pivot width (default: FRACTAL_N = 3).
- *                       Lower values (n=1) make fixtures smaller and more predictable.
+ * @param options  Optional overrides for testability or calibration:
+ *                   n           — fractal pivot width (default: FRACTAL_N = 3).
+ *                                 Lower values (n=1) make fixtures smaller and more predictable.
+ *                   retraceFrac — override for RETRACE_MIN_FRAC (default: RETRACE_MIN_FRAC).
+ *                                 Used by the fire-rate calibration script; not for production calls.
  * @returns        The most recent qualifying WMFormation, or null if none qualifies.
  */
 export function detectWM(
   bars: OHLCV[],
-  options?: { n?: number }
+  options?: { n?: number; retraceFrac?: number }
 ): WMFormation | null {
   if (bars.length < 2) return null;
 
   const n = options?.n ?? FRACTAL_N;
+  const retraceFrac = options?.retraceFrac ?? RETRACE_MIN_FRAC;
 
   // bars[bars.length - 1] is the forming bar; its close = live price proxy.
   const currentPrice = bars[bars.length - 1].close;
@@ -182,15 +185,16 @@ export function detectWM(
     const extremeDelta = Math.abs(p0.price - p2.price);
     if (extremeDelta > EXTREME_ATR_MULT * atr14) continue;
 
-    // ── Criterion 3: neckline retrace (pattern height ≥ RETRACE_MIN_FRAC × ATR) ─
+    // ── Criterion 3: neckline retrace (pattern height ≥ retraceFrac × ATR) ──────
     // W: neckline is a swing high above the lows → height = neckline - min_extreme.
     // M: neckline is a swing low below the highs → height = max_extreme - neckline.
+    // retraceFrac defaults to RETRACE_MIN_FRAC; overridable via options for calibration.
     const minExtreme = Math.min(p0.price, p2.price);
     const maxExtreme = Math.max(p0.price, p2.price);
     const patternHeight = isW
       ? p1.price - minExtreme
       : maxExtreme - p1.price;
-    if (patternHeight < RETRACE_MIN_FRAC * atr14) continue;
+    if (patternHeight < retraceFrac * atr14) continue;
 
     // ── Criterion 4: actionability — current price within 1% of neckline ────
     const distFromNeckline = (currentPrice - p1.price) / p1.price;

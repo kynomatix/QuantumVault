@@ -55,6 +55,14 @@ vi.mock("../../server/ai-trader/htf-levels", () => ({
   detectHTFLevels: (...args: unknown[]) => detectHTFLevelsMock(...args),
 }));
 
+// Brick 3, Phase 3B: detectWM is mocked so context-builder tests stay focused on
+// prompt/digest assembly, not pattern math (covered in tests/ai-trader/wm-detector.test.ts).
+// Default: returns null so existing tests are unaffected (no Formation block in prompt).
+const detectWMMock = vi.fn();
+vi.mock("../../server/ai-trader/wm-detector", () => ({
+  detectWM: (...args: unknown[]) => detectWMMock(...args),
+}));
+
 // COT-B: realistic fixture — bearish_flip with commIndex 18.50, dumbIndex 81.70.
 // reportDate is 2 days before FIXED_NOW (2026-01-15), so it is well within the 16-day
 // omission threshold and exactly matches the Phase A spec example magnitudes.
@@ -345,6 +353,10 @@ beforeEach(() => {
   // Keeps all pre-existing tests unaffected (snapshot, Dow, session, etc.).
   detectHTFLevelsMock.mockReset();
   detectHTFLevelsMock.mockReturnValue({ levels: [], atr14: 4, clusterThreshold: 2 });
+  // Brick 3, Phase 3B: default = no detection → Formation line absent from prompt.
+  // Keeps all pre-existing tests unaffected (snapshot, Dow, HTF, session, etc.).
+  detectWMMock.mockReset();
+  detectWMMock.mockReturnValue(null);
 });
 
 afterEach(() => {
@@ -1114,5 +1126,114 @@ describe("Brick 4, Phase 4B — HTF levels enrichment", () => {
     // Digest stamps null — same convention as no-qualifying-levels.
     const digest = result.contextDigest as any;
     expect(digest.htfLevels).toBeNull();
+  });
+});
+
+// ─── Brick 3, Phase 3B: W/M formation enrichment goldens ─────────────────────
+//
+// Fixture: a textbook M-pattern (double top) matching the spec's example numbers.
+// currentPriceDistFromNeckline=+0.004 → "0.4% above neckline".
+// secondExtremeVolumeLower=true → "second-peak volume lower".
+const WM_FIXTURE_M = {
+  type: "M" as const,
+  extreme1: { price: 64230, index: 10, volume: 5000 },
+  extreme2: { price: 64190, index: 32, volume: 4200 },
+  barSeparation: 22,
+  deltaAtr: 0.06,
+  neckline: { price: 63580, index: 21 },
+  patternHeight: 650,
+  currentPriceDistFromNeckline: 0.004,
+  secondExtremeVolumeLower: true,
+  atr14: 610,
+};
+
+describe("Brick 3, Phase 3B — W/M formation enrichment", () => {
+  it("detection-present: injects the Formation line in the indicator block and stamps the digest", async () => {
+    detectWMMock.mockReturnValue(WM_FIXTURE_M);
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    // Formation line present with all fields rendered correctly.
+    expect(result.user).toContain("Formation: M-pattern (double top)");
+    expect(result.user).toContain("peaks 64230.00 / 64190.00");
+    expect(result.user).toContain("Δ 0.06×ATR");
+    expect(result.user).toContain("22 bars apart");
+    expect(result.user).toContain("neckline 63580.00");
+    expect(result.user).toContain("price 0.4% above neckline");
+    expect(result.user).toContain("second-peak volume lower");
+
+    // Formation line appears inside the Indicators section (before Market microstate).
+    const indicatorSection = result.user.split("## Market microstate")[0];
+    expect(indicatorSection).toContain("Formation:");
+
+    // Digest: the exact formation object, never null when detection is present.
+    const digest = result.contextDigest as any;
+    expect(digest.wmFormation).toEqual(WM_FIXTURE_M);
+    expect(digest.wmFormation).not.toBeNull();
+
+    // System prompt carries the W/M guidance paragraph.
+    expect(result.system).toContain("W/M formations (double bottom/top, when present in this context)");
+    expect(result.system).toContain("completed two-test structure");
+    expect(result.system).toContain("stops beyond the pattern's far extreme");
+    expect(result.system).toContain("never a standalone entry trigger");
+  });
+
+  it("no-detection: omits the Formation line entirely and stamps wmFormation=null", async () => {
+    // detectWM returns null (the default, re-stated explicitly for clarity).
+    detectWMMock.mockReturnValue(null);
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    // Formation line is entirely absent — no placeholder, no section heading.
+    expect(result.user).not.toContain("Formation:");
+
+    // Digest stamps null (same convention as the error case).
+    const digest = result.contextDigest as any;
+    expect(digest.wmFormation).toBeNull();
+  });
+
+  it("thrown omission: detectWM throws → line absent, wmFormation=null, rest of prompt intact", async () => {
+    detectWMMock.mockImplementation(() => { throw new Error("simulated W/M detection failure"); });
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    // Enrichment rule: error omits the Formation line, decision cycle proceeds unaffected.
+    expect(result.user).not.toContain("Formation:");
+
+    // Other blocks still present — enrichment failure is isolated.
+    expect(result.user).toContain("## Market participation");
+    expect(result.user).toContain("EMA(20):");
+    expect(result.user).toContain("Structure (Dow):");
+
+    // Digest stamps null — same convention as no-detection.
+    const digest = result.contextDigest as any;
+    expect(digest.wmFormation).toBeNull();
   });
 });
