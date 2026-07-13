@@ -13,6 +13,7 @@ import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import { getHlParticipationSnapshot, type HlParticipationSnapshot } from "./hl-context";
 import { getCotSnapshot, type CotSnapshot } from "./cot-service";
 import { getSessionContext } from "./session-context";
+import { detectPivots, classifyDow, type DowStructureResult } from "./dow-structure";
 
 export type AiTraderTimeframe = "15m" | "1h" | "4h" | "1d";
 
@@ -68,6 +69,13 @@ const PARENT_TIMEFRAME: Record<AiTraderTimeframe, AiTraderTimeframe | "1w" | nul
 const INDICATOR_BARS = 400;
 const SELECTED_BARS = 100;
 const PARENT_BARS = 30;
+// Brick 2 + Brick 4: wider parent fetch for pivot computation. The 30-bar window
+// is too shallow for N=3 fractals with 4 required alternating pivots — almost every
+// call would return "insufficient". PARENT_BARS=30 remains the render window written
+// into the CSV block (token economy unchanged from WO-3.1). Same computation-vs-render
+// split as the INDICATOR_BARS/SELECTED_BARS EMA fix. Brick 4 (HTF levels / ZEC
+// pattern) reuses the parentIndicatorCandles variable produced by this fetch.
+const PARENT_INDICATOR_BARS = 400;
 
 // Platform-wide taker fee convention already duplicated in server/routes.ts
 // (DEFAULT_EXCHANGE_FEE_RATE) and server/trade-retry-service.ts — no ProtocolAdapter
@@ -194,6 +202,65 @@ function decisionSide(d: AiTraderDecision): string {
   return clamped?.action ?? raw?.action ?? "unknown";
 }
 
+// ─── Brick 2, Phase 2B: Dow-structure prompt helpers ─────────────────────────
+// Kept module-private; consumed only by buildMarketContext.
+
+/**
+ * Render the measurement substring for one DowStructureResult.
+ * HH/HL / LH/LL → "HH/HL (last swing high X > Y; last swing low A > B)"
+ * mixed / insufficient → classification word only.
+ */
+function dowMeasurements(r: DowStructureResult): string {
+  const { classification: cls, pivots } = r;
+  if (cls !== "HH/HL" && cls !== "LH/LL") return cls;
+  const highs = pivots.filter((p) => p.type === "high");
+  const lows  = pivots.filter((p) => p.type === "low");
+  if (highs.length !== 2 || lows.length !== 2) return cls;
+  // highs[0]/lows[0] = earlier pivot; highs[1]/lows[1] = more recent.
+  const op = cls === "HH/HL" ? ">" : "<";
+  return (
+    `${cls} (last swing high ${fmtPrice(highs[1].price)} ${op} ${fmtPrice(highs[0].price)};` +
+    ` last swing low ${fmtPrice(lows[1].price)} ${op} ${fmtPrice(lows[0].price)})`
+  );
+}
+
+/**
+ * Build the full "Structure (Dow): ..." prompt line and derive the alignment value.
+ *
+ * Alignment truth table:
+ *   true  — both sides are directional (HH/HL or LH/LL) AND they match
+ *   false — both sides are directional AND they are opposite
+ *   null  — either side is mixed/insufficient, OR no parent timeframe
+ */
+function buildDowLine(
+  tf: string,
+  sel: DowStructureResult,
+  parentTf: string | null,
+  par: DowStructureResult | null
+): { line: string; aligned: boolean | null } {
+  const selStr = dowMeasurements(sel);
+  if (!parentTf || !par) {
+    return { line: `Structure (Dow): ${tf} ${selStr}`, aligned: null };
+  }
+  const parStr = dowMeasurements(par);
+  const sCls = sel.classification;
+  const pCls = par.classification;
+  const selDir = sCls === "HH/HL" || sCls === "LH/LL";
+  const parDir = pCls === "HH/HL" || pCls === "LH/LL";
+  let suffix = "";
+  let aligned: boolean | null = null;
+  if (selDir && parDir) {
+    aligned = sCls === pCls;
+    suffix = aligned
+      ? " — aligned."
+      : ` — MISALIGNED (${tf} counter to ${parentTf}).`;
+  }
+  return {
+    line: `Structure (Dow): ${tf} ${selStr} · ${parentTf} ${parStr}${suffix}`,
+    aligned,
+  };
+}
+
 const SYSTEM_PROMPT = `You are an autonomous perpetual-futures trading strategist for QuantumVault's AI Trader. You operate on a fixed decision cadence and must respond with exactly one "decide" tool call — no prose, no free text.
 
 Core stance: flat is a position. You are evaluated on risk-adjusted return net of fees, not on how often you trade. Overtrading destroys accounts through fees and slippage long before any edge can compound — when in doubt, stay flat.
@@ -210,7 +277,9 @@ Hyperliquid participation data in this context (open interest, 24h volume, fundi
 
 BTC COT positioning data (when present in this context) is a weekly macro bias from the CFTC Legacy futures-only report, reflecting commercial-hedger versus speculator positioning. Because BTC sets the regime for the broader crypto market, this signal applies to all crypto markets — treat it as a tilt on directional lean and how much to trust a setup, never a standalone entry trigger. It degrades when the traded market decouples from BTC on an alt-specific move.
 
-Session context (when present in this context) is liquidity fact, not signal — prefer standing aside on marginal setups in thin/boundary windows, widen breakout skepticism, cite it in the rationale when it moves the decision; never let it alone veto an otherwise strong setup.`;
+Session context (when present in this context) is liquidity fact, not signal — prefer standing aside on marginal setups in thin/boundary windows, widen breakout skepticism, cite it in the rationale when it moves the decision; never let it alone veto an otherwise strong setup.
+
+Dow structure (when present in this context) is trend-structure confirmation — alignment between the selected and parent timeframe supports trend entries with normal conviction; misalignment or mixed on either timeframe warrants smaller position size or standing aside on directional setups; insufficient means the window lacks enough pivot history to classify structure. Never use Dow structure alone as an entry trigger.`;
 
 export async function buildMarketContext(
   input: BuildMarketContextInput
@@ -245,12 +314,40 @@ export async function buildMarketContext(
   }
 
   const parentTf = PARENT_TIMEFRAME[timeframe];
+  let parentIndicatorCandles: OHLCV[] = [];
   let parentCandles: OHLCV[] = [];
   if (parentTf) {
     const parentTfMs = TIMEFRAME_MS[parentTf];
-    const parentStart = new Date(now - PARENT_BARS * parentTfMs).toISOString();
+    // Brick 2+4: fetch PARENT_INDICATOR_BARS for pivot computation.
+    // parentCandles (PARENT_BARS=30) is the CSV render slice only — token economy unchanged.
+    const parentStart = new Date(now - PARENT_INDICATOR_BARS * parentTfMs).toISOString();
     const parentRaw = await fetchOHLCV(datafeedTicker, parentTf, parentStart, selectedEnd);
-    parentCandles = parentRaw.slice(-PARENT_BARS);
+    parentIndicatorCandles = parentRaw.slice(-PARENT_INDICATOR_BARS);
+    parentCandles = parentIndicatorCandles.slice(-PARENT_BARS); // CSV render only
+  }
+
+  // Brick 2, Phase 2B: Dow structure enrichment (enrichment rule — try/catch omits
+  // the line and stamps null on any error; the decision cycle proceeds unaffected).
+  // Computation uses the wide 400-bar windows (both TFs) so the pivot detector has
+  // enough bars for N=3 fractals with 4 required alternating pivots.
+  // Brick 4 (HTF levels / ZEC pattern) reuses parentIndicatorCandles from above.
+  let dowLine: string | null = null;
+  let dowDigest: { selected: string; parent: string | null; aligned: boolean | null } | null = null;
+  try {
+    const selResult = classifyDow(detectPivots(indicatorCandles));
+    const parResult =
+      parentTf && parentIndicatorCandles.length > 0
+        ? classifyDow(detectPivots(parentIndicatorCandles))
+        : null;
+    const built = buildDowLine(timeframe, selResult, parentTf, parResult);
+    dowLine = built.line;
+    dowDigest = {
+      selected: selResult.classification,
+      parent:   parResult?.classification ?? null,
+      aligned:  built.aligned,
+    };
+  } catch {
+    // enrichment rule: omit line, digest null, decision proceeds
   }
 
   const price = await adapter.getPrice(market);
@@ -301,6 +398,8 @@ export async function buildMarketContext(
       stValue.prev
     )} dir=${stDir.prev === 1 ? "up" : stDir.prev === -1 ? "down" : "n/a"})`,
     `OBV: ${fmtObv(obvVals.value)} (prev ${fmtObv(obvVals.prev)})`,
+    // Brick 2, Phase 2B: Dow structure line (omitted when dowLine is null).
+    ...(dowLine !== null ? [dowLine] : []),
   ].join("\n");
 
   // COT-B: fetch COT snapshot and fundingRate concurrently — both are cached reads.
@@ -524,6 +623,11 @@ export async function buildMarketContext(
     // Brick 1, Phase 1B: session context stamp. Null when module threw (enrichment rule).
     // Mapping: session=label, weekendFlag=(label==="weekend"), weeklyOpenProximity=nearWeeklyOpen.
     sessionContext: sessionCtxDigest,
+    // Brick 2, Phase 2B: Dow structure stamp. Null when try/catch triggered (enrichment rule).
+    // selected/parent hold the DowClassification strings (not the timeframe labels).
+    // aligned truth table: true=both directional+matching, false=both directional+opposite,
+    // null=either side mixed/insufficient OR no parent timeframe.
+    dowStructure: dowDigest,
     indicators: {
       ema20,
       ema50,

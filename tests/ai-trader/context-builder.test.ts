@@ -7,6 +7,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { OHLCV } from "../../server/lab/engine";
 import type { ProtocolAdapter } from "../../server/protocol/adapter";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
+import type { DowStructureResult } from "../../server/ai-trader/dow-structure";
 
 const fetchOHLCVMock = vi.fn();
 vi.mock("../../server/lab/datafeed", () => ({
@@ -33,6 +34,17 @@ vi.mock("../../server/ai-trader/cot-service", () => ({
 const getSessionContextMock = vi.fn();
 vi.mock("../../server/ai-trader/session-context", () => ({
   getSessionContext: (...args: unknown[]) => getSessionContextMock(...args),
+}));
+
+// Brick 2, Phase 2B: dow-structure is mocked so context-builder tests stay focused on
+// prompt/digest assembly, not pivot math (pivot math is covered in dow-structure.test.ts).
+// detectPivots returns a dummy array; classifyDow returns controlled DowStructureResult fixtures.
+const classifyDowMock = vi.fn();
+const detectPivotsMock = vi.fn();
+vi.mock("../../server/ai-trader/dow-structure", () => ({
+  detectPivots: (...args: unknown[]) => detectPivotsMock(...args),
+  classifyDow:  (...args: unknown[]) => classifyDowMock(...args),
+  FRACTAL_N: 3,
 }));
 
 // COT-B: realistic fixture — bearish_flip with commIndex 18.50, dumbIndex 81.70.
@@ -267,6 +279,39 @@ const SESSION_CTX_NEAR_WEEKLY = {
   ].join("\n"),
 };
 
+// ─── Brick 2 Phase 2B: Dow structure fixtures ─────────────────────────────────
+// Pivot prices mirror the spec's example prompt line for readability.
+// Ordering: L1/H1 = earlier pivots in the 4-pivot alternating sequence;
+//           L2/H2 = more recent (the ones classifyDow uses for >/< comparison).
+//
+// fmtPrice() in context-builder is v.toFixed(2), so assertion strings use that:
+//   63200 → "63200.00", 63940 → "63940.00", 63580 → "63580.00", 64230 → "64230.00"
+
+const DOW_RESULT_HHHL: DowStructureResult = {
+  classification: "HH/HL",
+  pivots: [
+    { index: 10, type: "low",  price: 63200 }, // L1 (older)
+    { index: 30, type: "high", price: 63940 }, // H1 (older)
+    { index: 50, type: "low",  price: 63580 }, // L2 (HL: 63580 > 63200)
+    { index: 70, type: "high", price: 64230 }, // H2 (HH: 64230 > 63940)
+  ],
+};
+
+const DOW_RESULT_LHLL: DowStructureResult = {
+  classification: "LH/LL",
+  pivots: [
+    { index: 10, type: "high", price: 64230 }, // H1 (older)
+    { index: 30, type: "low",  price: 63580 }, // L1 (older)
+    { index: 50, type: "high", price: 63940 }, // H2 (LH: 63940 < 64230)
+    { index: 70, type: "low",  price: 63200 }, // L2 (LL: 63200 < 63580)
+  ],
+};
+
+const DOW_RESULT_INSUFFICIENT: DowStructureResult = {
+  classification: "insufficient",
+  pivots: [],
+};
+
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(FIXED_NOW);
@@ -282,6 +327,12 @@ beforeEach(() => {
   getCotSnapshotMock.mockResolvedValue(COT_FIXTURE);
   getSessionContextMock.mockReset();
   getSessionContextMock.mockReturnValue(SESSION_CTX_DEFAULT);
+  // Brick 2, Phase 2B: both TF calls default to HH/HL (aligned) so the existing
+  // golden snapshot captures a Dow line without any per-test override.
+  detectPivotsMock.mockReset();
+  detectPivotsMock.mockReturnValue([]); // passthrough — classifyDow is also mocked
+  classifyDowMock.mockReset();
+  classifyDowMock.mockReturnValue(DOW_RESULT_HHHL); // both calls → HH/HL (aligned)
 });
 
 afterEach(() => {
@@ -815,5 +866,125 @@ describe("buildMarketContext (WO-3)", () => {
 
     const digest = result.contextDigest as any;
     expect(digest.sessionContext).toBeNull();
+  });
+
+  // ─── Brick 2 Phase 2B: Dow structure golden tests ─────────────────────────
+
+  it("dow structure — aligned bullish: HH/HL on both TFs, line in indicator block, aligned=true in digest", async () => {
+    // Default mock: classifyDowMock returns DOW_RESULT_HHHL for both selected (15m) and parent (1h).
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    // classifyDow was called twice: once for selected (15m), once for parent (1h).
+    expect(classifyDowMock).toHaveBeenCalledTimes(2);
+    expect(detectPivotsMock).toHaveBeenCalledTimes(2);
+
+    // Line appears inside the indicator block (before ## Market microstate).
+    const indicatorSection = result.user.split("## Market microstate")[0];
+    expect(indicatorSection).toContain(
+      "Structure (Dow): 15m HH/HL (last swing high 64230.00 > 63940.00; last swing low 63580.00 > 63200.00)" +
+      " · 1h HH/HL (last swing high 64230.00 > 63940.00; last swing low 63580.00 > 63200.00) — aligned."
+    );
+
+    // Digest stamp (selected/parent hold DowClassification strings, not TF labels).
+    const digest = result.contextDigest as any;
+    expect(digest.dowStructure).toEqual({ selected: "HH/HL", parent: "HH/HL", aligned: true });
+
+    // System-prompt guidance paragraph present.
+    expect(result.system).toContain("Dow structure (when present in this context) is trend-structure confirmation");
+    expect(result.system).toContain("Never use Dow structure alone as an entry trigger.");
+
+    // Architect finding: pin the parent fetch span — reverting to PARENT_BARS=30 would otherwise
+    // pass all tests because detectPivots is mocked. 1h parent: 400 * 3_600_000 ms before FIXED_NOW.
+    const parentFetchCalls = fetchOHLCVMock.mock.calls.filter(([, tf]: [unknown, string]) => tf === "1h");
+    expect(parentFetchCalls).toHaveLength(1);
+    const expectedParentStart = new Date(FIXED_NOW - 400 * 3_600_000).toISOString();
+    expect(parentFetchCalls[0][2]).toBe(expectedParentStart);
+  });
+
+  it("dow structure — MISALIGNED: 15m HH/HL counter to 1h LH/LL, suffix and digest aligned=false", async () => {
+    classifyDowMock
+      .mockReturnValueOnce(DOW_RESULT_HHHL) // first call = selected (15m)
+      .mockReturnValueOnce(DOW_RESULT_LHLL); // second call = parent (1h)
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    expect(result.user).toContain(
+      "Structure (Dow): 15m HH/HL (last swing high 64230.00 > 63940.00; last swing low 63580.00 > 63200.00)" +
+      " · 1h LH/LL (last swing high 63940.00 < 64230.00; last swing low 63200.00 < 63580.00)" +
+      " — MISALIGNED (15m counter to 1h)."
+    );
+    expect(result.user).not.toContain("— aligned.");
+
+    const digest = result.contextDigest as any;
+    expect(digest.dowStructure).toEqual({ selected: "HH/HL", parent: "LH/LL", aligned: false });
+  });
+
+  it("dow structure — insufficient parent: no alignment suffix, aligned=null in digest", async () => {
+    classifyDowMock
+      .mockReturnValueOnce(DOW_RESULT_HHHL)       // selected (15m) = HH/HL
+      .mockReturnValueOnce(DOW_RESULT_INSUFFICIENT); // parent (1h) = insufficient
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    // Line present but no alignment suffix (insufficient → aligned=null).
+    expect(result.user).toContain("Structure (Dow): 15m HH/HL");
+    expect(result.user).toContain("1h insufficient");
+    expect(result.user).not.toContain("— aligned.");
+    expect(result.user).not.toContain("MISALIGNED");
+
+    const digest = result.contextDigest as any;
+    expect(digest.dowStructure).toEqual({ selected: "HH/HL", parent: "insufficient", aligned: null });
+  });
+
+  it("dow structure — classifyDow throws: line absent, dowStructure=null in digest, decision proceeds", async () => {
+    classifyDowMock.mockImplementation(() => {
+      throw new Error("pivot boom");
+    });
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    // Enrichment rule: error omits the line, rest of prompt intact.
+    expect(result.user).not.toContain("Structure (Dow):");
+    expect(result.user).toContain("## Market participation");
+
+    const digest = result.contextDigest as any;
+    expect(digest.dowStructure).toBeNull();
   });
 });

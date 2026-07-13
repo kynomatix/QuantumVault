@@ -13,6 +13,11 @@ exports[`buildMarketContext (WO-3) > golden file: builds the full system+user pr
     "reportDate": "2026-01-13",
     "state": "bearish_flip",
   },
+  "dowStructure": {
+    "aligned": true,
+    "parent": "HH/HL",
+    "selected": "HH/HL",
+  },
   "fundingRate": 0.0001234,
   "generatedAt": "2026-01-15T12:00:00.000Z",
   "guardrailEcho": {
@@ -137,7 +142,9 @@ Hyperliquid participation data in this context (open interest, 24h volume, fundi
 
 BTC COT positioning data (when present in this context) is a weekly macro bias from the CFTC Legacy futures-only report, reflecting commercial-hedger versus speculator positioning. Because BTC sets the regime for the broader crypto market, this signal applies to all crypto markets — treat it as a tilt on directional lean and how much to trust a setup, never a standalone entry trigger. It degrades when the traded market decouples from BTC on an alt-specific move.
 
-Session context (when present in this context) is liquidity fact, not signal — prefer standing aside on marginal setups in thin/boundary windows, widen breakout skepticism, cite it in the rationale when it moves the decision; never let it alone veto an otherwise strong setup."
+Session context (when present in this context) is liquidity fact, not signal — prefer standing aside on marginal setups in thin/boundary windows, widen breakout skepticism, cite it in the rationale when it moves the decision; never let it alone veto an otherwise strong setup.
+
+Dow structure (when present in this context) is trend-structure confirmation — alignment between the selected and parent timeframe supports trend entries with normal conviction; misalignment or mixed on either timeframe warrants smaller position size or standing aside on directional setups; insufficient means the window lacks enough pivot history to classify structure. Never use Dow structure alone as an entry trigger."
 `;
 
 exports[`buildMarketContext (WO-3) > golden file: builds the full system+user prompt and contextDigest for an open-position bot > user-prompt 1`] = `
@@ -157,6 +164,7 @@ ADX(14): 33.8 (prev 33.7)
 Bollinger(20,2): upper=162.21 basis=160.02 lower=157.83 (prev upper=162.10 basis=160.10 lower=158.10)
 Supertrend(3,10): 160.63 dir=down (prev 160.82 dir=down)
 OBV: 32114 (prev 34311)
+Structure (Dow): 15m HH/HL (last swing high 64230.00 > 63940.00; last swing low 63580.00 > 63200.00) · 1h HH/HL (last swing high 64230.00 > 63940.00; last swing low 63580.00 > 63200.00) — aligned.
 
 ## Market microstate
 
