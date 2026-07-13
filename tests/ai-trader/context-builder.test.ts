@@ -21,6 +21,31 @@ vi.mock("../../server/ai-trader/hl-context", () => ({
   getHlParticipationSnapshot: (...args: unknown[]) => getHlParticipationSnapshotMock(...args),
 }));
 
+// COT-B: getCotSnapshot is mocked so context-builder tests never hit the DB or CFTC API.
+// Default: returns a fresh bearish_flip snapshot 2 days before FIXED_NOW.
+const getCotSnapshotMock = vi.fn();
+vi.mock("../../server/ai-trader/cot-service", () => ({
+  getCotSnapshot: (...args: unknown[]) => getCotSnapshotMock(...args),
+}));
+
+// COT-B: realistic fixture — bearish_flip with commIndex 18.50, dumbIndex 81.70.
+// reportDate is 2 days before FIXED_NOW (2026-01-15), so it is well within the 16-day
+// omission threshold and exactly matches the Phase A spec example magnitudes.
+const COT_FIXTURE = {
+  reportDate: "2026-01-13",
+  commercialNet: -3217,
+  noncommNet: 3500,
+  nonreptNet: -283,
+  dumbNet: 3217,
+  commIndex: 18.5,
+  dumbIndex: 81.7,
+  noncommIndex: 82.1,
+  nonreptIndex: 45.3,
+  state: "bearish_flip" as const,
+  weeksInWindow: 120,
+  fetchedAt: new Date("2026-01-13T18:00:00.000Z"),
+};
+
 // Fixture values match a live metaAndAssetCtxs read for SOL taken during WO-8f
 // development, so the golden snapshot reflects realistic magnitudes.
 const HL_FIXTURE = {
@@ -188,6 +213,8 @@ beforeEach(() => {
   });
   getHlParticipationSnapshotMock.mockReset();
   getHlParticipationSnapshotMock.mockResolvedValue(HL_FIXTURE);
+  getCotSnapshotMock.mockReset();
+  getCotSnapshotMock.mockResolvedValue(COT_FIXTURE);
 });
 
 afterEach(() => {
@@ -453,5 +480,101 @@ describe("buildMarketContext (WO-3)", () => {
     if ("stale" in result) throw new Error("expected a built context, not stale");
     expect(result.user).toContain("Participation data: unavailable this cycle");
     expect((result.contextDigest as any).participation).toBeNull();
+  });
+
+  // ─── COT-B golden-file tests ───────────────────────────────────────────────
+
+  it("COT-B presence: bias line appears near the funding line and cotSignal recorded in digest", async () => {
+    // Default beforeEach already wires COT_FIXTURE (bearish_flip, commIndex 18.5, dumbIndex 81.7).
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    // Exact spec-format line present in the microstate block.
+    expect(result.user).toContain(
+      "BTC positioning (COT, weekly): commercials distributing — smart 19/100, retail/spec 82/100 — macro bias short."
+    );
+
+    // Sits within the microstate section (between Mark price and the participation section).
+    const microstateSection = result.user
+      .split("## Market microstate")[1]
+      .split("## Market participation")[0];
+    expect(microstateSection).toContain("BTC positioning (COT, weekly):");
+
+    // cotSignal recorded faithfully in contextDigest.
+    const digest = result.contextDigest as any;
+    expect(digest.cotSignal).toEqual({
+      state: "bearish_flip",
+      commIndex: 18.5,
+      dumbIndex: 81.7,
+      reportDate: "2026-01-13",
+    });
+
+    // System prompt mentions the COT note.
+    expect(result.system).toContain("BTC COT positioning data");
+    expect(result.system).toContain("never a standalone entry trigger");
+  });
+
+  it("COT-B omission — null snapshot: bias line absent and cotSignal is null in digest", async () => {
+    getCotSnapshotMock.mockResolvedValue(null);
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    expect(result.user).not.toContain("BTC positioning (COT, weekly):");
+    expect((result.contextDigest as any).cotSignal).toBeNull();
+  });
+
+  it("COT-B omission — insufficient_data state: bias line absent and cotSignal is null in digest", async () => {
+    getCotSnapshotMock.mockResolvedValue({ ...COT_FIXTURE, state: "insufficient_data" });
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    expect(result.user).not.toContain("BTC positioning (COT, weekly):");
+    expect((result.contextDigest as any).cotSignal).toBeNull();
+  });
+
+  it("COT-B omission — reportDate > 16 days old: bias line absent and cotSignal is null in digest", async () => {
+    // FIXED_NOW is 2026-01-15; 21 days prior is 2025-12-25 — clearly past the 16-day threshold.
+    getCotSnapshotMock.mockResolvedValue({ ...COT_FIXTURE, reportDate: "2025-12-25" });
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    expect(result.user).not.toContain("BTC positioning (COT, weekly):");
+    expect((result.contextDigest as any).cotSignal).toBeNull();
   });
 });

@@ -11,6 +11,7 @@ import { ema, rsi, macd, atr, adx, bollingerBands, supertrend, obv } from "../la
 import type { ProtocolAdapter } from "../protocol/adapter";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import { getHlParticipationSnapshot, type HlParticipationSnapshot } from "./hl-context";
+import { getCotSnapshot, type CotSnapshot } from "./cot-service";
 
 export type AiTraderTimeframe = "15m" | "1h" | "4h" | "1d";
 
@@ -164,6 +165,28 @@ function adxRegimeTag(adxValue: number | undefined | null): string {
   return `transitional (ADX ${adxValue.toFixed(1)})`;
 }
 
+// COT-B: omission threshold — genuinely stale feed (>16 days old) is distinct from
+// the 9-day background-refresh trigger in cot-service.ts. Also omit when the
+// rolling window has < 120 weeks (state='insufficient_data').
+const COT_OMISSION_THRESHOLD_MS = 16 * 24 * 60 * 60 * 1000;
+
+/** Format the one-line BTC COT bias for injection near the funding line. */
+function buildCotBiasLine(snap: CotSnapshot): string {
+  const sentiment =
+    snap.state === "bullish_flip" ? "accumulating" :
+    snap.state === "bearish_flip" ? "distributing" :
+    "neutral";
+  const bias =
+    snap.state === "bullish_flip" ? "long" :
+    snap.state === "bearish_flip" ? "short" :
+    "neutral";
+  return (
+    `BTC positioning (COT, weekly): commercials ${sentiment}` +
+    ` — smart ${Math.round(snap.commIndex)}/100, retail/spec ${Math.round(snap.dumbIndex)}/100` +
+    ` — macro bias ${bias}.`
+  );
+}
+
 function decisionSide(d: AiTraderDecision): string {
   const clamped = d.clampedDecision as { action?: string } | null | undefined;
   const raw = d.rawDecision as { action?: string } | null | undefined;
@@ -182,7 +205,9 @@ Rules:
 - The fee context below is real: a take-profit that does not clear the round-trip fee by a wide margin is not a trade worth taking.
 - Base your decision only on the market data, indicators, account state, and guardrails provided in this context. All of it comes from verified market/account data — none of it is user-supplied free text.
 
-Hyperliquid participation data in this context (open interest, 24h volume, funding, and mark/oracle premium) is corroboration only, from a reference venue you do not trade on. Rising open interest alongside a price move signals conviction behind it; falling open interest against the move signals weak participation. It must never be the sole basis for an entry, and its absence or unavailability must never be a reason to refuse an otherwise valid decision.`;
+Hyperliquid participation data in this context (open interest, 24h volume, funding, and mark/oracle premium) is corroboration only, from a reference venue you do not trade on. Rising open interest alongside a price move signals conviction behind it; falling open interest against the move signals weak participation. It must never be the sole basis for an entry, and its absence or unavailability must never be a reason to refuse an otherwise valid decision.
+
+BTC COT positioning data (when present in this context) is a weekly macro bias from the CFTC Legacy futures-only report, reflecting commercial-hedger versus speculator positioning. Because BTC sets the regime for the broader crypto market, this signal applies to all crypto markets — treat it as a tilt on directional lean and how much to trust a setup, never a standalone entry trigger. It degrades when the traded market decouples from BTC on an alt-specific move.`;
 
 export async function buildMarketContext(
   input: BuildMarketContextInput
@@ -275,7 +300,23 @@ export async function buildMarketContext(
     `OBV: ${fmtObv(obvVals.value)} (prev ${fmtObv(obvVals.prev)})`,
   ].join("\n");
 
-  const fundingInfo = await adapter.getFundingRate(market);
+  // COT-B: fetch COT snapshot and fundingRate concurrently — both are cached reads.
+  // getCotSnapshot() is fail-open; the IIFE applies the omission threshold so
+  // cotSnapshot is null whenever the line must be absent from the prompt.
+  const [fundingInfo, cotSnapshot] = await Promise.all([
+    adapter.getFundingRate(market),
+    (async (): Promise<CotSnapshot | null> => {
+      try {
+        const snap = await getCotSnapshot();
+        if (!snap) return null;
+        const reportAgeMs = now - new Date(snap.reportDate).getTime();
+        if (snap.state === "insufficient_data" || reportAgeMs > COT_OMISSION_THRESHOLD_MS) return null;
+        return snap;
+      } catch {
+        return null;
+      }
+    })(),
+  ]);
   const roundTripFeePct = 2 * EXCHANGE_TAKER_FEE_RATE * 100;
   // The ProtocolAdapter contract types nextFundingTime as a required number, but
   // the Pacifica adapter (server/protocol/pacifica/pacifica-adapter.ts) violates
@@ -296,6 +337,8 @@ export async function buildMarketContext(
     `Taker fee: ${(EXCHANGE_TAKER_FEE_RATE * 100).toFixed(2)}% per side, ${roundTripFeePct.toFixed(
       2
     )}% round-trip. TP distance must clear this by a wide margin (guardrail G4 requires ≥ 4x).`,
+    // COT-B: inject one line near the funding line when snapshot passes omission threshold.
+    ...(cotSnapshot ? [buildCotBiasLine(cotSnapshot)] : []),
   ].join("\n");
 
   // WO-8f: Hyperliquid participation data (open interest, 24h volume,
@@ -437,6 +480,15 @@ export async function buildMarketContext(
           markPrice: hlSnapshot.markPrice,
           oraclePrice: hlSnapshot.oraclePrice,
           premium: hlSnapshot.premium,
+        }
+      : null,
+    // COT-B: Phase A pre-declared field. Null when snapshot was absent or omitted.
+    cotSignal: cotSnapshot
+      ? {
+          state: cotSnapshot.state,
+          commIndex: cotSnapshot.commIndex,
+          dumbIndex: cotSnapshot.dumbIndex,
+          reportDate: cotSnapshot.reportDate,
         }
       : null,
     indicators: {
