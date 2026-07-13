@@ -1,17 +1,17 @@
 // scripts/wm-fire-rate.ts
-// Fire-rate gate for Brick 3 Phase 3B: measure W/M detection frequency at three
-// RETRACE_MIN_FRAC values (0.30, 0.50, 1.00) across the fleet's cached candle history.
+// Fire-rate calibration for Brick 3: measure W/M detection frequency across three
+// configurations to validate the recency criterion (MAX_PATTERN_AGE_BARS).
 //
 // Usage: npx tsx scripts/wm-fire-rate.ts
 //
-// For each (symbol, timeframe) pair in lab_candle_cache, fetches the last MAX_BARS bars,
-// then walks a WINDOW-bar rolling window across every position treating bars[i] as the
-// forming bar. Reports fire rate = detections / positions checked.
+// Configs tested (all use RETRACE_MIN_FRAC=0.30; retrace is not the binding gate):
+//   A  baseline — no age limit (Infinity), NECKLINE_WINDOW=1.0%
+//   B  age-60,   NECKLINE_WINDOW=1.0%
+//   C  age-60,   NECKLINE_WINDOW=0.5%
 //
-// The actionability criterion (price within 1% of neckline) is what makes this metric
-// meaningful: it counts only setups that were actionable AT THAT MOMENT, not all
-// historical patterns. A high fire rate here = the detector is overfitting / finding
-// noise. A low rate at 0.30 is acceptable; if 0.30 and 0.50 are similar, use 0.50.
+// For each (symbol, timeframe) pair in lab_candle_cache, fetches the last MAX_BARS bars,
+// then walks a WINDOW-bar rolling window treating bars[i] as the forming bar.
+// Fire rate = detections / positions checked (actionable at that exact moment).
 
 import pg from "pg";
 import { detectWM } from "../server/ai-trader/wm-detector.js";
@@ -19,18 +19,20 @@ import type { OHLCV } from "../server/lab/engine.js";
 
 const { Pool } = pg;
 
-const WINDOW = 400;     // matches INDICATOR_BARS in context-builder.ts
-const MAX_BARS = 2000;  // per owner spec
-const FRACS = [0.30, 0.50, 1.00];
+const WINDOW   = 400;    // matches INDICATOR_BARS in context-builder.ts
+const MAX_BARS = 2000;   // per owner spec
 
-// Only actual perpetual swap symbols (USDT:USDT), timeframes the AI trader uses.
-// BTC/USDT (non-swap) is also included as it has 1d data (only 1d source).
+const CONFIGS = [
+  { label: "baseline(no-age,1%)",  maxPatternAgeBars: Infinity, necklineWindow: 0.01  },
+  { label: "age-60,NKLN=1%",       maxPatternAgeBars: 60,       necklineWindow: 0.01  },
+  { label: "age-60,NKLN=0.5%",     maxPatternAgeBars: 60,       necklineWindow: 0.005 },
+] as const;
+
 const TARGET_TIMEFRAMES = new Set(["15m", "1h", "4h", "1d"]);
 
 async function main() {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-  // Fetch all qualifying (symbol, timeframe) pairs with enough bars.
   const pairsRes = await pool.query<{ symbol: string; timeframe: string; bar_count: string }>(`
     SELECT symbol, timeframe, COUNT(*) as bar_count
     FROM lab_candle_cache
@@ -41,25 +43,21 @@ async function main() {
   `, [Array.from(TARGET_TIMEFRAMES)]);
 
   const pairs = pairsRes.rows;
-  console.log(`\n=== W/M Fire-Rate Gate ===`);
+  const colW = 24;
+  console.log(`\n=== W/M Fire-Rate Calibration — Criterion 6 (Recency) ===`);
   console.log(`Window: ${WINDOW} bars, history: last ${MAX_BARS} bars, pairs: ${pairs.length}`);
-  console.log(`All criteria active (barSep [10,60], extremeDelta ≤0.25×ATR, neckline ≥ FRAC×ATR, price ±1% neckline)\n`);
+  console.log(`Retrace: FRAC=0.30 (confirmed not the binding gate in Phase 3B)\n`);
 
-  const header = "symbol".padEnd(22) + "tf".padEnd(5) + "bars".padEnd(7) +
-    "FRAC=0.30".padEnd(22) + "FRAC=0.50".padEnd(22) + "FRAC=1.00";
-  console.log(header);
-  console.log("─".repeat(90));
+  const labelRow = "symbol".padEnd(22) + "tf".padEnd(5) + "bars".padEnd(7) +
+    CONFIGS.map((c) => c.label.padEnd(colW)).join("");
+  console.log(labelRow);
+  console.log("─".repeat(22 + 5 + 7 + CONFIGS.length * colW));
 
-  const summary: Record<string, { det: number; total: number }[]> = {
-    "0.30": [],
-    "0.50": [],
-    "1.00": [],
-  };
+  const summary = CONFIGS.map(() => ({ det: 0, total: 0 }));
 
   for (const { symbol, timeframe, bar_count } of pairs) {
     const totalInDb = parseInt(bar_count, 10);
 
-    // Fetch last MAX_BARS bars ordered oldest-first.
     const barsRes = await pool.query<{
       time: string; open: string; high: string; low: string; close: string; volume: string;
     }>(`
@@ -71,7 +69,6 @@ async function main() {
       LIMIT $3
     `, [symbol, timeframe, MAX_BARS]);
 
-    // Reverse to chronological order (oldest first).
     const bars: OHLCV[] = barsRes.rows.reverse().map((r) => ({
       time: parseFloat(r.time),
       open: parseFloat(r.open),
@@ -83,44 +80,48 @@ async function main() {
 
     if (bars.length < 50) continue;
 
+    const positions = bars.length - 1;
     const rateCols: string[] = [];
 
-    for (const frac of FRACS) {
+    for (let ci = 0; ci < CONFIGS.length; ci++) {
+      const cfg = CONFIGS[ci];
       let detections = 0;
-      const positions = bars.length - 1; // positions 1..N-1 (each needs at least 1 prior bar)
 
       for (let i = 1; i < bars.length; i++) {
         const windowStart = Math.max(0, i - WINDOW + 1);
-        // bars[i] is the forming bar; bars[windowStart..i-1] are closed.
         const window = bars.slice(windowStart, i + 1);
-        const result = detectWM(window, { retraceFrac: frac });
+        const result = detectWM(window, {
+          retraceFrac:      0.30,
+          maxPatternAgeBars: cfg.maxPatternAgeBars,
+          necklineWindow:    cfg.necklineWindow,
+        });
         if (result !== null) detections++;
       }
 
-      const fracKey = frac.toFixed(2);
-      summary[fracKey].push({ det: detections, total: positions });
+      summary[ci].det   += detections;
+      summary[ci].total += positions;
 
       const pct = ((detections / positions) * 100).toFixed(2);
-      rateCols.push(`${pct}% (${detections}/${positions})`.padEnd(22));
+      rateCols.push(`${pct}% (${detections}/${positions})`.padEnd(colW));
     }
 
     const sym = symbol.padEnd(22);
-    const tf = timeframe.padEnd(5);
-    const n = Math.min(totalInDb, MAX_BARS).toString().padEnd(7);
+    const tf  = timeframe.padEnd(5);
+    const n   = Math.min(totalInDb, MAX_BARS).toString().padEnd(7);
     console.log(`${sym}${tf}${n}${rateCols.join("")}`);
   }
 
-  // Aggregate totals across all pairs.
-  console.log("\n" + "─".repeat(90));
-  const totCols = FRACS.map((frac) => {
-    const key = frac.toFixed(2);
-    const totDet = summary[key].reduce((a, x) => a + x.det, 0);
-    const totPos = summary[key].reduce((a, x) => a + x.total, 0);
-    const pct = totPos > 0 ? ((totDet / totPos) * 100).toFixed(2) : "0.00";
-    return `${pct}% (${totDet}/${totPos})`.padEnd(22);
+  console.log("\n" + "─".repeat(22 + 5 + 7 + CONFIGS.length * colW));
+  const totCols = summary.map(({ det, total }) => {
+    const pct = total > 0 ? ((det / total) * 100).toFixed(2) : "0.00";
+    return `${pct}% (${det}/${total})`.padEnd(colW);
   });
   console.log(`${"AGGREGATE".padEnd(22)}${"".padEnd(5)}${"".padEnd(7)}${totCols.join("")}`);
-  console.log();
+
+  // Decision guidance printed at the end.
+  console.log(`\nTarget: aggregate < ~3%, majors (SOL/BTC/ETH 1h-4h) < 5%.`);
+  console.log(`If age-60 + NKLN=1% hits target: keep NECKLINE_WINDOW=1.0% (production constant).`);
+  console.log(`If not: apply age-60 + NKLN=0.5% — rate in col C is the then-production rate.\n`);
 
   await pool.end();
 }

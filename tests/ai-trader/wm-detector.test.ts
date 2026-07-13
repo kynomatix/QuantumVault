@@ -51,6 +51,7 @@ import {
   EXTREME_ATR_MULT,
   RETRACE_MIN_FRAC,
   NECKLINE_WINDOW,
+  MAX_PATTERN_AGE_BARS,
 } from "../../server/ai-trader/wm-detector";
 
 // ─── Bar helpers ──────────────────────────────────────────────────────────────
@@ -340,13 +341,29 @@ describe("wm-detector — near-miss table (each failing criterion yields null)",
     expect(detectWM(bars, { n: 1 })).toBeNull();
   });
 
-  it("null when current price is 1.1% from neckline (outside NECKLINE_WINDOW=1%)", () => {
+  it("null when current price is 1.1% from neckline (outside NECKLINE_WINDOW=0.5%)", () => {
     // Standard textbook-W but forming close = 55.5 × 1.011 ≈ 56.11 (1.1% above neckline).
     // Math.abs((56.11 - 55.5) / 55.5) ≈ 1.10% > 1% → FAIL.
     // All other criteria identical to textbook-W → pass.
     const bars = textbookW({ formingClose: 56.12 });
     // Verify 1.1% distance explicitly.
     expect(Math.abs((56.12 - 55.5) / 55.5)).toBeGreaterThan(NECKLINE_WINDOW);
+    expect(detectWM(bars, { n: 1 })).toBeNull();
+  });
+
+  it("detects when current price is 0.49% from neckline (inside NECKLINE_WINDOW=0.5%)", () => {
+    // Locks in the new 0.5% boundary: close = 55.5 × 1.0049 ≈ 55.77 → 0.487% above neckline.
+    // dist = (55.77 − 55.5) / 55.5 ≈ 0.00486 < NECKLINE_WINDOW (0.005) → detects.
+    const bars = textbookW({ formingClose: 55.77 });
+    expect(Math.abs((55.77 - 55.5) / 55.5)).toBeLessThan(NECKLINE_WINDOW);
+    expect(detectWM(bars, { n: 1 })).not.toBeNull();
+  });
+
+  it("null when current price is 0.51% from neckline (outside NECKLINE_WINDOW=0.5%)", () => {
+    // Just outside the new 0.5% boundary: close = 55.5 × 1.0051 ≈ 55.78 → 0.505% above neckline.
+    // dist = (55.78 − 55.5) / 55.5 ≈ 0.00505 > NECKLINE_WINDOW (0.005) → null.
+    const bars = textbookW({ formingClose: 55.78 });
+    expect(Math.abs((55.78 - 55.5) / 55.5)).toBeGreaterThan(NECKLINE_WINDOW);
     expect(detectWM(bars, { n: 1 })).toBeNull();
   });
 });
@@ -480,6 +497,62 @@ describe("wm-detector — edge cases", () => {
       forming(24, 55.5),
     ];
     // Regardless of whether other criteria would pass, outside-bar triplets are skipped.
+    expect(detectWM(bars, { n: 1 })).toBeNull();
+  });
+});
+
+// ─── Criterion 6: recency near-misses ─────────────────────────────────────────
+//
+// Construct a textbook-W pattern with e2 at index 34, then extend the bar array
+// with flat filler bars so that e2 sits at exactly 60 (passes) or 61 (fails)
+// closed bars before the last closed bar.
+//
+// Fixture layout for "exactly 60 bars ago":
+//   bars[0-35]   original textbookW closed bars  (e1@21, neckline@32, e2@34)
+//   bars[36-94]  59 flat filler bars (t=36..94)   ← new closed bars
+//   bars[95]     forming bar (close=55.6, 0.18% above neckline 55.5)
+//   closed.length=95, last closed index=94
+//   age of e2 = 94 − 34 = 60  ≤  MAX_PATTERN_AGE_BARS(60)  → detects ✓
+//
+// For "61 bars ago": add one more filler bar (60 fillers, forming at index 96).
+//   age of e2 = 95 − 34 = 61  >  60  → null ✓
+//
+// All other criteria still hold (ATR≈4 from filler-bar window, neckline price
+// unchanged, forming close 0.18% from neckline, barSep=13 ∈ [10,60]).
+
+describe("wm-detector — criterion 6: recency near-misses", () => {
+  /** Build a textbook-W array with N flat filler bars inserted between the
+   *  last closed bar (index 35) and the new forming bar. */
+  function textbookWAged(fillerCount: number): OHLCV[] {
+    // textbookW() produces bars[0..36]: closed 0-35, forming at 36.
+    // We drop the original forming bar and append fillerCount flat bars + new forming.
+    const base = textbookW();                        // 37 bars
+    const closed36 = base.slice(0, 36);              // indices 0-35 (closed)
+    // Filler flat bars (H=52,L=48,C=50) produce no pivots with n=1 (strict > fails for
+    // equal H=52 neighbors). ATR(14) computed from the last 14 closed bars (all flat,
+    // TR=4) ≈ 4 — identical to the warmup period, so all five original criteria still hold.
+    const fillers = Array.from({ length: fillerCount }, (_, k) => flatBar(36 + k));
+    const newForming = forming(36 + fillerCount, 55.6); // 0.18% above neckline 55.5
+    return [...closed36, ...fillers, newForming];
+  }
+
+  it("second extreme exactly MAX_PATTERN_AGE_BARS bars ago → detects", () => {
+    // age of e2 = 60 = MAX_PATTERN_AGE_BARS → boundary passes (≤ not <)
+    const bars = textbookWAged(59); // closed.length=95, last closed=94; age=94-34=60
+    expect(bars.length).toBe(96);   // 36 original closed + 59 fillers + 1 forming
+    const result = detectWM(bars, { n: 1 });
+    expect(result).not.toBeNull();
+    expect(result?.type).toBe("W");
+    expect(result?.extreme2.index).toBe(34); // e2 unchanged
+    // barSeparation, neckline, and other fields are identical to textbook-W.
+    expect(result?.barSeparation).toBe(13);
+    expect(result?.neckline.price).toBeCloseTo(55.5);
+  });
+
+  it("second extreme MAX_PATTERN_AGE_BARS + 1 bars ago → null (stale pattern)", () => {
+    // age of e2 = 61 > MAX_PATTERN_AGE_BARS → criterion 6 fails; null returned.
+    const bars = textbookWAged(60); // closed.length=96, last closed=95; age=95-34=61
+    expect(bars.length).toBe(97);
     expect(detectWM(bars, { n: 1 })).toBeNull();
   });
 });

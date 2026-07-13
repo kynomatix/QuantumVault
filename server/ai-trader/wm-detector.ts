@@ -15,9 +15,14 @@
 //   3. One intervening opposite pivot (the neckline); pattern height (|neckline −
 //      nearer extreme|) must be ≥ RETRACE_MIN_FRAC × ATR(14). This ensures the
 //      neckline represents a meaningful retrace, not a micro-noise pivot.
-//   4. Actionability: |currentPrice − neckline| / neckline ≤ NECKLINE_WINDOW (1%).
+//   4. Actionability: |currentPrice − neckline| / neckline ≤ NECKLINE_WINDOW (0.5%).
 //      A fully-formed pattern from months ago is history, not context.
 //   5. Volume fact (reported as context, NOT a gate): second extreme volume ≤ first.
+//   6. Recency: the second extreme must lie within MAX_PATTERN_AGE_BARS (60) closed
+//      bars of the most recent closed bar. A stale formation fired when price
+//      revisits an old neckline during a range — that is noise, not signal.
+//      Scanning newest-first means the first trip > MAX_PATTERN_AGE_BARS can break
+//      (all remaining triplets are older still).
 //
 // ─── Outside-bar edge ────────────────────────────────────────────────────────
 //
@@ -55,7 +60,16 @@ export const EXTREME_ATR_MULT = 0.25;
  */
 export const RETRACE_MIN_FRAC = 0.30;
 /** Current price must be within this fraction of neckline price (actionability window). */
-export const NECKLINE_WINDOW = 0.01; // 1%
+export const NECKLINE_WINDOW = 0.005; // 0.5%
+/**
+ * Second extreme (p2) must be within this many closed bars of the most-recent closed bar.
+ * Prevents stale neckline revisits in ranging markets from firing the detector.
+ * Set equal to MAX_BAR_SEP: the largest valid formation spans 60 bars extreme-to-extreme;
+ * allowing p2 to be 60 bars old means total pattern span can reach up to
+ * MAX_BAR_SEP + MAX_PATTERN_AGE_BARS = 120 bars (p0→p2=60, p2→current=60). Intentional:
+ * p0 age is already bounded by the bar-separation criterion on p2.
+ */
+export const MAX_PATTERN_AGE_BARS = 60;
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -118,20 +132,26 @@ export interface WMFormation {
  * @param bars     Full bar array INCLUDING the forming bar as the last element.
  *                 bars[bars.length - 1].close is used as the current (live) price.
  * @param options  Optional overrides for testability or calibration:
- *                   n           — fractal pivot width (default: FRACTAL_N = 3).
- *                                 Lower values (n=1) make fixtures smaller and more predictable.
- *                   retraceFrac — override for RETRACE_MIN_FRAC (default: RETRACE_MIN_FRAC).
- *                                 Used by the fire-rate calibration script; not for production calls.
+ *                   n                — fractal pivot width (default: FRACTAL_N = 3).
+ *                                      Lower values (n=1) make fixtures smaller and more predictable.
+ *                   retraceFrac      — override for RETRACE_MIN_FRAC (default: RETRACE_MIN_FRAC).
+ *                                      Used by the fire-rate calibration script; not for production calls.
+ *                   maxPatternAgeBars — override for MAX_PATTERN_AGE_BARS (default: MAX_PATTERN_AGE_BARS).
+ *                                      Pass Infinity to disable the recency criterion (baseline measurement).
+ *                   necklineWindow   — override for NECKLINE_WINDOW (default: NECKLINE_WINDOW).
+ *                                      Used by the fire-rate calibration script to test tighter windows.
  * @returns        The most recent qualifying WMFormation, or null if none qualifies.
  */
 export function detectWM(
   bars: OHLCV[],
-  options?: { n?: number; retraceFrac?: number }
+  options?: { n?: number; retraceFrac?: number; maxPatternAgeBars?: number; necklineWindow?: number }
 ): WMFormation | null {
   if (bars.length < 2) return null;
 
-  const n = options?.n ?? FRACTAL_N;
-  const retraceFrac = options?.retraceFrac ?? RETRACE_MIN_FRAC;
+  const n                = options?.n               ?? FRACTAL_N;
+  const retraceFrac      = options?.retraceFrac      ?? RETRACE_MIN_FRAC;
+  const maxPatternAge    = options?.maxPatternAgeBars ?? MAX_PATTERN_AGE_BARS;
+  const necklineWindow   = options?.necklineWindow   ?? NECKLINE_WINDOW;
 
   // bars[bars.length - 1] is the forming bar; its close = live price proxy.
   const currentPrice = bars[bars.length - 1].close;
@@ -181,6 +201,13 @@ export function detectWM(
     const barSep = p2.index - p0.index;
     if (barSep < MIN_BAR_SEP || barSep > MAX_BAR_SEP) continue;
 
+    // ── Criterion 6: recency — p2 must be within maxPatternAge closed bars ───
+    // Safe to break (not continue): the single loop iterates i = pivots.length-3 → 0,
+    // so p2 = pivots[i+2] has strictly decreasing .index as i decreases — all subsequent
+    // p2 candidates are older than the current one. No younger p2 can appear below.
+    const p2Age = (closed.length - 1) - p2.index;
+    if (p2Age > maxPatternAge) break;
+
     // ── Criterion 2: extreme proximity ──────────────────────────────────────
     const extremeDelta = Math.abs(p0.price - p2.price);
     if (extremeDelta > EXTREME_ATR_MULT * atr14) continue;
@@ -196,9 +223,9 @@ export function detectWM(
       : maxExtreme - p1.price;
     if (patternHeight < retraceFrac * atr14) continue;
 
-    // ── Criterion 4: actionability — current price within 1% of neckline ────
+    // ── Criterion 4: actionability — current price within necklineWindow of neckline ──
     const distFromNeckline = (currentPrice - p1.price) / p1.price;
-    if (Math.abs(distFromNeckline) > NECKLINE_WINDOW) continue;
+    if (Math.abs(distFromNeckline) > necklineWindow) continue;
 
     // ── All criteria pass — build the result ─────────────────────────────────
     const vol1 = closed[p0.index]?.volume ?? 0;

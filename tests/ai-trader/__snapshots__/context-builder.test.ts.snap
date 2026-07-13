@@ -150,7 +150,7 @@ Dow structure (when present in this context) is trend-structure confirmation —
 
 HTF levels (when present in this context) mark multi-touch price zones where orders historically cluster — prefer taking profit IN FRONT of a level rather than beyond it, prefer stops BEYOND defended levels rather than inside them, a lost-then-reclaimed level is meaningful directional context. Placement guidance and confluence only, never a standalone trigger.
 
-W/M formations (double bottom/top, when present in this context) mark a completed two-test structure where current price is within 1% of the neckline — immediately actionable. A neckline tested twice and now retested is confluence for directional lean and SL/TP placement: prefer stops beyond the pattern's far extreme, targets beyond the neckline. Weigh it with Dow structure and participation; it is never a standalone entry trigger."
+W/M formations (double bottom/top, when present in this context) mark a completed two-test structure where current price is within 0.5% of the neckline — immediately actionable. A neckline tested twice and now retested is confluence for directional lean and SL/TP placement: prefer stops beyond the pattern's far extreme, targets beyond the neckline. Weigh it with Dow structure and participation; it is never a standalone entry trigger."
 `;
 
 exports[`buildMarketContext (WO-3) > golden file: builds the full system+user prompt and contextDigest for an open-position bot > user-prompt 1`] = `
