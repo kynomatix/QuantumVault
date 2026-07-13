@@ -52,6 +52,24 @@ export interface GuardrailInput {
    * injected as a function so this module stays pure and deterministic per inputs.
    */
   quantizeOrderSize: (sizeBase: number) => number;
+  /**
+   * risk-based-sizing-spec Phase A. 'discretionary' (default when absent) keeps
+   * the model-picked sizePct path byte-identical; 'risk_based' replaces ONLY the
+   * G5 margin derivation with confidence-scaled fixed-fractional sizing.
+   */
+  sizingMode?: "discretionary" | "risk_based";
+  /** Risk band: % of the sizing base risked at confidence 1 (min) / 10 (max). Required in risk_based mode; validated here, fail closed. */
+  riskMinPct?: number;
+  riskMaxPct?: number;
+  /**
+   * Live tradeable equity in collateral units, read FRESH by the caller at
+   * decision time (adapter free collateral for live bots; allocation + cumulative
+   * realized PnL for paper bots). Required in risk_based mode. A failed or
+   * unreadable equity read MUST be passed as NaN so this module fails closed
+   * (risk_equity_unavailable) — never fall back to the static allocation, which
+   * would silently re-inflate risk after a drawdown.
+   */
+  currentEquity?: number;
 }
 
 export interface GuardrailViolation {
@@ -82,6 +100,18 @@ export interface ClampedDecision {
   confidence: number;
   invalidation: string;
   rationale: string;
+  // --- risk-based sizing audit trail (Phase A amendment 2) — present only when
+  // sizingMode === 'risk_based', so every executed size is reconstructible from
+  // the decision row alone (base × riskPct/100 = riskBudgetUsd; confidence is
+  // stamped above for all modes).
+  /** Which sizing path produced marginUsdc/notionalUsdc/sizeBase. */
+  sizingMode?: "discretionary" | "risk_based";
+  /** Resolved confidence-scaled risk % of base actually used this trade. */
+  riskPct?: number;
+  /** Sizing base = min(allocatedUsdc, currentEquity) × RISK_BASE_HEADROOM. */
+  base?: number;
+  /** Promised max loss at the stop = base × riskPct/100. */
+  riskBudgetUsd?: number;
 }
 
 export type GuardrailResult =
@@ -104,6 +134,36 @@ export const SIZE_PCT_MAX = 90;
 /** G2 SL distance bands from entry, % — timeframe-aware (external audit). */
 export const SL_BAND_LTF = { minPct: 0.5, maxPct: 10 } as const;
 export const SL_BAND_HTF = { minPct: 1, maxPct: 15 } as const;
+
+// --- risk-based sizing constants (risk-based-sizing-spec Phase A) ---------------
+
+/**
+ * MIRROR of the executor's ENTRY_MAX_SLIPPAGE_PCT (0.5%), expressed as a
+ * fraction. This module is pure (no imports), so the constant cannot be
+ * imported from executor.ts; a sync test in tests/ai-trader/executor.test.ts
+ * pins `MAX_ENTRY_SLIPPAGE_FRAC === ENTRY_MAX_SLIPPAGE_PCT / 100` so the two
+ * can never drift silently. If the executor bound changes, this changes with it.
+ */
+export const MAX_ENTRY_SLIPPAGE_FRAC = 0.005;
+/**
+ * Amendment 3: a stop tighter than this multiple of the max entry slippage is
+ * rejected in risk_based mode — a fill slipped the full bound would consume
+ * ≥ 1/mult of the entire risk budget before the trade even starts, making the
+ * risk promise a lie. 2 × 0.5% ⇒ 1% minimum stop distance.
+ * Phase B note: the executor should additionally TIGHTEN its own slippage bound
+ * for risk-based entries (slippage directly erodes the risk promise there).
+ */
+export const RISK_STOP_MIN_SLIPPAGE_MULT = 2;
+/** Amendment 1: sizing-base headroom — base = min(allocation, equity) × 0.95, so posted margin leaves room for fees/entry slippage and never rejects on a full-margin post. */
+export const RISK_BASE_HEADROOM = 0.95;
+/** Post-quantization risk assert tolerance — float noise only, NEVER a real allowance (quantizers round down; anything above this means the quantizer rounded up). */
+export const RISK_ASSERT_EPSILON = 1e-6;
+/** Valid band for riskMinPct/riskMaxPct (mirrors the API-layer schema; re-validated here, fail closed). */
+export const RISK_PCT_MIN = 0.1;
+export const RISK_PCT_MAX = 3.0;
+/** Confidence scale endpoints for the linear risk interpolation. */
+export const RISK_CONF_MIN = 1;
+export const RISK_CONF_MAX = 10;
 
 const LTF_TIMEFRAMES: ReadonlySet<GuardrailTimeframe> = new Set(["15m", "1h"]);
 
@@ -277,8 +337,13 @@ export function applyGuardrails(
   }
 
   // ---- G5: size clamp (clamp-only for the pct bound) -------------------------------
+  // In risk_based mode the model's sizePct is IGNORED entirely (size derives from
+  // the risk budget), so the clamp note is skipped — recording a clamp of an
+  // unused field would corrupt the audit trail. The field is still contract-
+  // required above: the model's output contract is unchanged in Phase A.
+  const riskBasedMode = input.sizingMode === "risk_based";
   const appliedSizePct = Math.min(Math.max(requestedSizePct, SIZE_PCT_MIN), SIZE_PCT_MAX);
-  if (appliedSizePct !== requestedSizePct) {
+  if (!riskBasedMode && appliedSizePct !== requestedSizePct) {
     violations.push(
       violation(
         "G5",
@@ -393,7 +458,193 @@ export function applyGuardrails(
 
   if (violations.some((v) => v.fatal)) return { ok: false, violations };
 
-  // ---- G5: convert to executable size --------------------------------------------
+  // ---- G5 (risk_based replacement): confidence-scaled fixed-fractional sizing ------
+  // risk-based-sizing-spec Phase A. Replaces ONLY the margin derivation below;
+  // G1–G4 above ran verbatim (G1 supplies leverageCeiling = Lmax; the model's
+  // requested leverage and sizePct are ignored in this mode). Invariants:
+  // fail-safe direction is always UNDER-risking; every failure REJECTS the
+  // cycle (fail closed) — there is no fallback to the discretionary path.
+  if (riskBasedMode) {
+    const riskMin = input.riskMinPct;
+    const riskMax = input.riskMaxPct;
+    const equity = input.currentEquity;
+    const conf = decision.confidence;
+
+    // Fail closed on unusable inputs (invariant: never size off garbage).
+    if (!isPositiveFinite(equity)) {
+      violations.push(
+        violation(
+          "G5",
+          "risk_equity_unavailable",
+          `live equity read is not a positive finite number (${equity}) — failing closed; risk-based sizing never falls back to the static allocation`,
+          true
+        )
+      );
+      return { ok: false, violations };
+    }
+    if (
+      typeof riskMin !== "number" || !Number.isFinite(riskMin) ||
+      typeof riskMax !== "number" || !Number.isFinite(riskMax) ||
+      riskMin < RISK_PCT_MIN || riskMax > RISK_PCT_MAX || riskMin > riskMax ||
+      !Number.isFinite(conf)
+    ) {
+      violations.push(
+        violation(
+          "G5",
+          "risk_params_invalid",
+          `risk band [${riskMin}, ${riskMax}] or confidence ${conf} is invalid (band must satisfy ${RISK_PCT_MIN} <= min <= max <= ${RISK_PCT_MAX}) — failing closed`,
+          true
+        )
+      );
+      return { ok: false, violations };
+    }
+
+    // Stop distance as a fraction of entry (> 0: sl_wrong_side already gated).
+    const stopDistFrac = Math.abs(entry - sl) / entry;
+    if (!isPositiveFinite(stopDistFrac)) {
+      violations.push(
+        violation("G5", "risk_params_invalid", `stop distance fraction ${stopDistFrac} is not positive finite — failing closed`, true)
+      );
+      return { ok: false, violations };
+    }
+
+    // Amendment 3: slippage-aware minimum stop. A stop tighter than
+    // RISK_STOP_MIN_SLIPPAGE_MULT × the executor's max entry slippage would let
+    // a worst-case fill consume >= 1/mult of the risk budget at entry.
+    const minStopDistFrac = RISK_STOP_MIN_SLIPPAGE_MULT * MAX_ENTRY_SLIPPAGE_FRAC;
+    if (stopDistFrac < minStopDistFrac) {
+      violations.push(
+        violation(
+          "G5",
+          "risk_stop_too_tight_for_slippage",
+          `stop distance ${(stopDistFrac * 100).toFixed(3)}% is below ${RISK_STOP_MIN_SLIPPAGE_MULT}× the executor's max entry slippage (${(MAX_ENTRY_SLIPPAGE_FRAC * 100).toFixed(2)}%) — a slipped fill would consume too much of the risk budget before the trade starts`,
+          true
+        )
+      );
+      return { ok: false, violations };
+    }
+
+    // Confidence-scaled risk %, linear between the band endpoints (amendment:
+    // confidence is clamped defensively; zod already bounds it 1–10).
+    const confClamped = Math.min(Math.max(conf, RISK_CONF_MIN), RISK_CONF_MAX);
+    const riskPct =
+      riskMin + ((riskMax - riskMin) * (confClamped - RISK_CONF_MIN)) / (RISK_CONF_MAX - RISK_CONF_MIN);
+
+    // Amendment 1: base = min(allocation, live equity) × headroom. min() means a
+    // drawdown shrinks risk but a profit surplus never inflates it past the
+    // user's allocation; headroom keeps a full-margin post from rejecting on fees.
+    const base = Math.min(input.allocatedUsdc, equity) * RISK_BASE_HEADROOM;
+    if (!isPositiveFinite(base)) {
+      violations.push(
+        violation("G5", "risk_params_invalid", `sizing base ${base} is not positive finite — failing closed`, true)
+      );
+      return { ok: false, violations };
+    }
+
+    const riskBudgetUsd = (base * riskPct) / 100;
+    let riskNotionalUsdc = riskBudgetUsd / stopDistFrac;
+
+    // Leverage is DERIVED (minimal that fits the notional into base margin),
+    // never the model's request: minimal leverage maximizes the liquidation
+    // buffer. The tiny epsilon keeps float noise on exact multiples (e.g.
+    // notional/base = 3.0000000000004) from bumping leverage a full step up.
+    const lMax = leverageCeiling;
+    const lRequired = Math.ceil(riskNotionalUsdc / base - 1e-9);
+    const riskLeverage = Math.min(Math.max(lRequired, 1), lMax);
+
+    // Margin cap: if even Lmax cannot carry the risk-implied notional, cap the
+    // notional at base × Lmax and UNDER-risk (fail-safe direction), flagging it.
+    if (riskNotionalUsdc > base * riskLeverage) {
+      violations.push(
+        violation(
+          "G5",
+          "risk_capped",
+          `risk-implied notional ${riskNotionalUsdc.toFixed(2)} exceeds base ${base.toFixed(2)} × max leverage ${riskLeverage} — capped to ${(base * riskLeverage).toFixed(2)}; trade under-risks its budget`,
+          false
+        )
+      );
+      riskNotionalUsdc = base * riskLeverage;
+    }
+    const riskMarginUsdc = riskNotionalUsdc / riskLeverage;
+
+    // G2 liquidation buffer RE-CHECK at the DERIVED leverage. The first G2 pass
+    // used the model's (clamped) requested leverage; the derived leverage can be
+    // HIGHER (tight stop + high risk ⇒ more notional), which pulls the estimated
+    // liquidation price closer to entry. Same reject-only rule, same code.
+    const liqAtDerived = estimateLiquidationPrice(entry, side, riskLeverage, input.maintenanceMarginWeight);
+    const slInsideLiqAtDerived = side === "long" ? sl > liqAtDerived : sl < liqAtDerived;
+    if (!slInsideLiqAtDerived) {
+      violations.push(
+        violation(
+          "G2",
+          "sl_inside_liquidation",
+          `stopLossPrice ${sl} is at/beyond the estimated liquidation price ${liqAtDerived.toFixed(6)} at the risk-derived ${riskLeverage}× (mmw ${input.maintenanceMarginWeight}) — the position would liquidate before the stop fires`,
+          true
+        )
+      );
+      return { ok: false, violations };
+    }
+
+    // Venue lot quantization — round DOWN only; a sub-minimum size REJECTS
+    // (never bump up: that would breach the risk budget).
+    const riskSizeBase = input.quantizeOrderSize(riskNotionalUsdc / entry);
+    if (!isPositiveFinite(riskSizeBase)) {
+      violations.push(
+        violation(
+          "G5",
+          "size_quantized_to_zero",
+          `order size ${(riskNotionalUsdc / entry).toFixed(8)} quantized to a non-positive lot (${riskSizeBase}) — below the venue's minimum order size; risk-based sizing never bumps up to meet a venue minimum`,
+          true
+        )
+      );
+      return { ok: false, violations };
+    }
+
+    // Post-quantization assert: the size that will actually execute must still
+    // honor the risk budget. Epsilon covers float noise ONLY — a quantizer that
+    // rounds UP lands here and the cycle rejects (fail closed).
+    const realizedRiskUsd = riskSizeBase * Math.abs(entry - sl);
+    if (realizedRiskUsd > riskBudgetUsd * (1 + RISK_ASSERT_EPSILON)) {
+      violations.push(
+        violation(
+          "G5",
+          "risk_assert_failed",
+          `post-quantization realized risk ${realizedRiskUsd.toFixed(6)} exceeds the risk budget ${riskBudgetUsd.toFixed(6)} — quantizer enlarged the order; failing closed`,
+          true
+        )
+      );
+      return { ok: false, violations };
+    }
+
+    return {
+      ok: true,
+      clamped: {
+        action: side,
+        entryType: "market",
+        leverage: riskLeverage,
+        // sizePct deliberately omitted: ignored in this mode (executor validates
+        // sizeBase/marginUsdc/leverage/SL/TP only; stamping the unused request
+        // would misrepresent what sized the trade).
+        marginUsdc: riskMarginUsdc,
+        notionalUsdc: riskNotionalUsdc,
+        sizeBase: riskSizeBase,
+        stopLossPrice: sl,
+        takeProfitPrice: tp,
+        confidence: decision.confidence,
+        invalidation: decision.invalidation,
+        rationale: decision.rationale,
+        // Amendment 2: audit stamps — the executed size is reconstructible from
+        // the decision row alone.
+        sizingMode: "risk_based",
+        riskPct,
+        base,
+        riskBudgetUsd,
+      },
+      violations,
+    };
+  }
+
+  // ---- G5: convert to executable size (discretionary path, byte-identical) --------
   const marginUsdc = (input.allocatedUsdc * appliedSizePct) / 100;
   const notionalUsdc = marginUsdc * appliedLeverage;
   const sizeBase = input.quantizeOrderSize(notionalUsdc / entry);

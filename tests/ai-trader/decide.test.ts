@@ -30,9 +30,11 @@ vi.mock("../../server/ai-assistant/router", async (importOriginal) => {
 });
 
 const insertMock = vi.fn();
+const pnlMapMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
     insertAiTraderDecision: (...args: unknown[]) => insertMock(...args),
+    getAiTraderTotalRealizedPnlMap: (...args: unknown[]) => pnlMapMock(...args),
   },
 }));
 
@@ -72,10 +74,12 @@ function makeBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
   } as unknown as AiTraderBot;
 }
 
-function makeAdapter(): ProtocolAdapter {
+function makeAdapter(overrides: Record<string, unknown> = {}): ProtocolAdapter {
   return {
     getMaintenanceMarginWeight: vi.fn().mockReturnValue(0.02),
     quantizeOrderSize: vi.fn((_m: string, s: number) => Math.floor(s * 100) / 100),
+    getBalances: vi.fn().mockResolvedValue({ freeCollateral: 1000 }),
+    ...overrides,
   } as unknown as ProtocolAdapter;
 }
 
@@ -111,9 +115,11 @@ beforeEach(() => {
   callMock.mockReset();
   insertMock.mockReset();
   costMock.mockReset();
+  pnlMapMock.mockReset();
   capturedCalls.length = 0;
   insertMock.mockResolvedValue({ id: "dec-1" });
   costMock.mockResolvedValue(0.012345);
+  pnlMapMock.mockResolvedValue(new Map());
 });
 
 // --- Schema single-source parity -------------------------------------------------
@@ -524,5 +530,144 @@ describe("runDecision — flat and guardrail rejection", () => {
     expect(result.rejected).toBe(true);
     expect(result.violations.map((v) => v.code)).toContain("close_without_position");
     expect(insertMock.mock.calls[0][0].outcome).toBe("rejected_guardrails");
+  });
+});
+
+// --- risk-based-sizing-spec Phase A: equity-read wiring ------------------------------
+
+describe("risk_based sizing — decide.ts equity wiring", () => {
+  const RISK_BOT = {
+    sizingMode: "risk_based",
+    riskMinPct: "0.50",
+    riskMaxPct: "1.50",
+  } as const;
+
+  it("paper bot: equity = allocation + lifetime realized PnL; drawdown shrinks the base", async () => {
+    const { runDecision } = await importDecide();
+    callMock.mockResolvedValueOnce(toolResponse(VALID_LONG_ARGS));
+    pnlMapMock.mockResolvedValue(new Map([["bot-1", -300]])); // equity 700
+
+    const adapter = makeAdapter();
+    const result = await runDecision({
+      bot: makeBot({ ...RISK_BOT, paperMode: true } as any),
+      apiKey: "k",
+      context: makeContext(),
+      adapter,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.rejected).toBe(false);
+    expect(pnlMapMock).toHaveBeenCalledWith(["bot-1"]);
+    expect((adapter.getBalances as any)).not.toHaveBeenCalled(); // paper never touches the venue
+    expect(result.clamped).toMatchObject({ sizingMode: "risk_based", leverage: 1 });
+    // base = min(1000, 700) × 0.95 = 665
+    expect(result.clamped!.base).toBeCloseTo(665, 8);
+    expect(result.clamped!.sizePct).toBeUndefined();
+    // Audit row carries the stamps too.
+    expect(insertMock.mock.calls[0][0].clampedDecision).toMatchObject({ sizingMode: "risk_based" });
+  });
+
+  it("live bot: equity = adapter free collateral for the bot's OWN subaccount", async () => {
+    const { runDecision } = await importDecide();
+    callMock.mockResolvedValueOnce(toolResponse(VALID_LONG_ARGS));
+
+    const adapter = makeAdapter({ getBalances: vi.fn().mockResolvedValue({ freeCollateral: 800 }) });
+    const result = await runDecision({
+      bot: makeBot({ ...RISK_BOT, paperMode: false, protocolSubaccountId: "sub-9" } as any),
+      apiKey: "k",
+      context: makeContext(),
+      adapter,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.rejected).toBe(false);
+    expect((adapter.getBalances as any)).toHaveBeenCalledWith("sub-9", undefined);
+    expect(pnlMapMock).not.toHaveBeenCalled();
+    expect(result.clamped!.base).toBeCloseTo(800 * 0.95, 8); // min(1000, 800) × 0.95
+  });
+
+  it("live bot: a THROWING equity read fails closed to rejected_guardrails (risk_equity_unavailable)", async () => {
+    const { runDecision } = await importDecide();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    callMock.mockResolvedValueOnce(toolResponse(VALID_LONG_ARGS));
+
+    const adapter = makeAdapter({ getBalances: vi.fn().mockRejectedValue(new Error("venue down")) });
+    const result = await runDecision({
+      bot: makeBot({ ...RISK_BOT, paperMode: false, protocolSubaccountId: "sub-9" } as any),
+      apiKey: "k",
+      context: makeContext(),
+      adapter,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.rejected).toBe(true);
+    expect(result.clamped).toBeNull();
+    expect(result.violations.map((v) => v.code)).toContain("risk_equity_unavailable");
+    expect(insertMock.mock.calls[0][0].outcome).toBe("rejected_guardrails");
+    warnSpy.mockRestore();
+  });
+
+  it("live bot without a provisioned subaccount fails closed the same way", async () => {
+    const { runDecision } = await importDecide();
+    callMock.mockResolvedValueOnce(toolResponse(VALID_LONG_ARGS));
+
+    const adapter = makeAdapter();
+    const result = await runDecision({
+      bot: makeBot({ ...RISK_BOT, paperMode: false, protocolSubaccountId: null } as any),
+      apiKey: "k",
+      context: makeContext(),
+      adapter,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.rejected).toBe(true);
+    expect(result.violations.map((v) => v.code)).toContain("risk_equity_unavailable");
+    expect((adapter.getBalances as any)).not.toHaveBeenCalled();
+  });
+
+  it("discretionary bot: never reads equity and stamps no risk fields (regression)", async () => {
+    const { runDecision } = await importDecide();
+    callMock.mockResolvedValueOnce(toolResponse(VALID_LONG_ARGS));
+
+    const adapter = makeAdapter();
+    const result = await runDecision({
+      bot: makeBot({ paperMode: true } as any), // sizingMode absent → discretionary
+      apiKey: "k",
+      context: makeContext(),
+      adapter,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.rejected).toBe(false);
+    expect(pnlMapMock).not.toHaveBeenCalled();
+    expect((adapter.getBalances as any)).not.toHaveBeenCalled();
+    expect(result.clamped).toMatchObject({ sizePct: 50, marginUsdc: 500 });
+    expect(result.clamped!.sizingMode).toBeUndefined();
+    expect(result.clamped!.riskPct).toBeUndefined();
+  });
+
+  it("risk_based bot deciding FLAT never reads equity (no wasted venue call)", async () => {
+    const { runDecision } = await importDecide();
+    const flatArgs = { action: "flat", confidence: 4, invalidation: "n/a", rationale: "chop" };
+    callMock.mockResolvedValueOnce(toolResponse(flatArgs));
+
+    const adapter = makeAdapter();
+    const result = await runDecision({
+      bot: makeBot({ ...RISK_BOT, paperMode: false, protocolSubaccountId: "sub-9" } as any),
+      apiKey: "k",
+      context: makeContext(),
+      adapter,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.rejected).toBe(false);
+    expect((adapter.getBalances as any)).not.toHaveBeenCalled();
+    expect(pnlMapMock).not.toHaveBeenCalled();
   });
 });

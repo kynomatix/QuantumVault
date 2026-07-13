@@ -339,6 +339,41 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
 
 // --- Guardrails + audit record (WO-4 steps 4-5) ------------------------------------
 
+/**
+ * risk-based-sizing-spec Phase A: fresh live-equity read for risk_based sizing,
+ * performed once per entry decision. Realized state only — open-position
+ * unrealized PnL is deliberately excluded (paper) / implicitly handled by the
+ * venue's free-collateral accounting (live).
+ *
+ * Returns NaN on ANY failure so guardrails fail closed (risk_equity_unavailable)
+ * — NEVER the static allocation: falling back would silently re-inflate risk
+ * right after a drawdown, the exact failure mode this mode exists to prevent.
+ */
+async function readCurrentEquity(bot: AiTraderBot, adapter: ProtocolAdapter): Promise<number> {
+  try {
+    if (bot.paperMode) {
+      // Paper: simulated equity = allocation + lifetime realized PnL (the same
+      // per-bot sum the PnL endpoints use).
+      const pnlMap = await storage.getAiTraderTotalRealizedPnlMap([bot.id]);
+      const realized = pnlMap.get(bot.id) ?? 0;
+      const equity = parseFloat(bot.allocatedUsdc) + realized;
+      return Number.isFinite(equity) ? equity : NaN;
+    }
+    // Live: the bot's OWN venue subaccount (WO-7.1). Adapter called DIRECTLY —
+    // the error-swallowing read helpers fail open, which is exactly wrong here.
+    // An un-provisioned live bot (no subaccount yet) fails closed too.
+    if (!bot.protocolSubaccountId) return NaN;
+    const balances = await adapter.getBalances(bot.protocolSubaccountId, undefined);
+    const free = balances?.freeCollateral;
+    return typeof free === "number" && Number.isFinite(free) ? free : NaN;
+  } catch (err) {
+    console.warn(
+      `[AiTraderDecide] equity read FAILED bot=${bot.id.slice(0, 8)} — failing closed: ${err instanceof Error ? err.message : err}`,
+    );
+    return NaN;
+  }
+}
+
 async function finalizeDecision(args: {
   bot: AiTraderBot;
   adapter: ProtocolAdapter;
@@ -351,6 +386,15 @@ async function finalizeDecision(args: {
   const { bot, adapter, context, decision, usage, latencyMs, llmCostUsd } = args;
   const digest = context.contextDigest ?? {};
 
+  // risk-based-sizing-spec Phase A: the equity read happens ONLY when the bot is
+  // in risk_based mode AND the decision is an entry — flat/close/discretionary
+  // cycles never pay for (or depend on) the extra read. NaN ⇒ guardrails reject.
+  const sizingMode: "discretionary" | "risk_based" =
+    bot.sizingMode === "risk_based" ? "risk_based" : "discretionary";
+  const isEntry = decision.action === "long" || decision.action === "short";
+  const currentEquity =
+    sizingMode === "risk_based" && isEntry ? await readCurrentEquity(bot, adapter) : undefined;
+
   const guardrailResult = applyGuardrails(decision, {
     entryPrice: finiteOrNaN(digest?.price),
     atr14: finiteOrNaN(digest?.indicators?.atr14?.value),
@@ -361,6 +405,12 @@ async function finalizeDecision(args: {
     allocatedUsdc: parseFloat(bot.allocatedUsdc),
     hasOpenPosition: digest?.account?.hasPosition === true,
     quantizeOrderSize: (sizeBase: number) => adapter.quantizeOrderSize(bot.market, sizeBase),
+    sizingMode,
+    // Decimal columns are strings; a malformed value parses to NaN and guardrails
+    // reject (risk_params_invalid) — fail closed, never a silent default.
+    riskMinPct: parseFloat(bot.riskMinPct ?? "0.50"),
+    riskMaxPct: parseFloat(bot.riskMaxPct ?? "1.50"),
+    currentEquity,
   });
 
   // Outcome: 'flat' is terminal immediately; a guardrail reject is terminal as

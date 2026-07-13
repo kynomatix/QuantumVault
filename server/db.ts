@@ -753,6 +753,15 @@ export async function ensureSchema() {
          WHERE d.bot_id = b.id
            AND d.model_used IS NULL`,
 
+      // risk-based-sizing-spec Phase A: optional confidence-scaled risk-based
+      // sizing (per-bot, off by default). Additive + idempotent, mirrors
+      // shared/schema.ts. sizing_mode: 'discretionary' | 'risk_based'; the
+      // risk band is % of the sizing base per trade (validated 0.1–3.0 at the
+      // API layer; guardrails.ts re-validates and fails closed at runtime).
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS sizing_mode text NOT NULL DEFAULT 'discretionary'`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS risk_min_pct numeric(5, 2) NOT NULL DEFAULT 0.50`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS risk_max_pct numeric(5, 2) NOT NULL DEFAULT 1.50`,
+
       // COT-A: CFTC Bitcoin Legacy futures-only COT positioning cache.
       // Idempotent startup DDL — never db:push. Single global BTC signal, one row per
       // weekly CFTC release. report_date is a date column held as text in Drizzle.

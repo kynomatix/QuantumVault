@@ -2014,6 +2014,16 @@ export const aiTraderBots = pgTable("ai_trader_bots", {
   // (e.g. 'breakeven_ladder', 'atr_trail'). The executor branches on this; the
   // native bracket ALWAYS exists as the safety net either way (G10 invariant).
   stopPolicy: text("stop_policy").notNull().default("static"),
+  // risk-based-sizing-spec Phase A: optional confidence-scaled fixed-fractional
+  // sizing. 'discretionary' (default) keeps the model-picked sizePct path;
+  // 'risk_based' replaces ONLY the G5 margin derivation in guardrails.ts —
+  // each trade risks riskPct% of min(allocation, live equity)×0.95, sized off
+  // the actual stop distance, leverage auto-minimized. Off for existing bots.
+  // Deliberately OUTSIDE the policyHmac envelope (like paperMode): worst-case
+  // notional ≤ base × Lmax ≤ allocatedUsdc × maxLeverage, the sealed cap.
+  sizingMode: text("sizing_mode").notNull().default("discretionary"), // 'discretionary' | 'risk_based'
+  riskMinPct: decimal("risk_min_pct", { precision: 5, scale: 2 }).notNull().default("0.50"),
+  riskMaxPct: decimal("risk_max_pct", { precision: 5, scale: 2 }).notNull().default("1.50"),
   // Flash-only (idle-funds Vault parking; Pacifica excluded — $10 min deposit/
   // withdrawal + $1 withdrawal fee kills yield). Default false; UI shows the
   // toggle only when the selected protocol supports parking.
@@ -2074,6 +2084,39 @@ export const insertAiTraderBotSchema = createInsertSchema(aiTraderBots).omit({
   updatedAt: true,
   trialStartedAt: true, // server-set at creation (§2e trial start)
   graduatedAt: true,    // server-set on graduation, never client-set
+}).superRefine((b, ctx) => {
+  // risk-based-sizing-spec Phase A: 0.1 <= riskMinPct <= riskMaxPct <= 3.0.
+  // Decimal columns are strings in drizzle-zod, so validate numerically here.
+  if (b.sizingMode !== undefined && b.sizingMode !== "discretionary" && b.sizingMode !== "risk_based") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["sizingMode"],
+      message: "sizingMode must be 'discretionary' or 'risk_based'",
+    });
+  }
+  const min = b.riskMinPct !== undefined ? Number(b.riskMinPct) : undefined;
+  const max = b.riskMaxPct !== undefined ? Number(b.riskMaxPct) : undefined;
+  if (min !== undefined && (!Number.isFinite(min) || min < 0.1 || min > 3.0)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["riskMinPct"],
+      message: "riskMinPct must be a number between 0.1 and 3.0",
+    });
+  }
+  if (max !== undefined && (!Number.isFinite(max) || max < 0.1 || max > 3.0)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["riskMaxPct"],
+      message: "riskMaxPct must be a number between 0.1 and 3.0",
+    });
+  }
+  if (min !== undefined && max !== undefined && Number.isFinite(min) && Number.isFinite(max) && min > max) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["riskMinPct"],
+      message: "riskMinPct must be <= riskMaxPct",
+    });
+  }
 });
 export type AiTraderBot = typeof aiTraderBots.$inferSelect;
 export type InsertAiTraderBot = z.infer<typeof insertAiTraderBotSchema>;

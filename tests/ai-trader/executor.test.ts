@@ -835,3 +835,17 @@ describe("aiTraderPolicyObject (G15 single source for WO-7 creation + executor v
     });
   });
 });
+
+// --- risk-based-sizing-spec Phase A: slippage-constant sync pin ------------------------
+
+describe("risk-based sizing — slippage constant sync pin", () => {
+  it("guardrails' MAX_ENTRY_SLIPPAGE_FRAC mirrors the executor's ENTRY_MAX_SLIPPAGE_PCT exactly", async () => {
+    // guardrails.ts is a PURE module (no imports), so it carries a mirror of the
+    // executor's entry-slippage bound. The risk_based stop floor is derived from
+    // it (RISK_STOP_MIN_SLIPPAGE_MULT × slippage); if the executor bound ever
+    // changes without the mirror, this pin fails the build.
+    const { ENTRY_MAX_SLIPPAGE_PCT } = await importExecutor();
+    const { MAX_ENTRY_SLIPPAGE_FRAC } = await import("../../server/ai-trader/guardrails");
+    expect(MAX_ENTRY_SLIPPAGE_FRAC).toBe(ENTRY_MAX_SLIPPAGE_PCT / 100);
+  });
+});
