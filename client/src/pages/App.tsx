@@ -3222,27 +3222,7 @@ export default function AppPage() {
 
                   return (
                     <div className="space-y-8">
-                      {/* Signal Bots section */}
-                      <div className="space-y-4" data-testid="section-signal-bots">
-                        <div className="flex items-center gap-3">
-                          <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap flex items-center gap-1.5">
-                            <Bot className="w-3.5 h-3.5" />
-                            Signal Bots
-                          </h2>
-                          <div className="h-px flex-1 bg-border/50" />
-                        </div>
-                        {activeBots.length > 0 ? (
-                          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
-                            {activeBots.map((bot) => renderBotCard(bot))}
-                          </div>
-                        ) : (
-                          <div className="gradient-border p-5 noise text-center">
-                            <p className="text-sm text-muted-foreground">No signal bots yet. Click <strong className="text-foreground">Add Bot</strong> to connect a TradingView webhook.</p>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* AI Trader section */}
+                      {/* AI Trader section — first per owner direction */}
                       <div className="space-y-4" data-testid="section-ai-trader">
                         <div className="flex items-center gap-3">
                           <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap flex items-center gap-1.5">
@@ -3250,6 +3230,18 @@ export default function AppPage() {
                             AI Trader
                           </h2>
                           <div className="h-px flex-1 bg-border/50" />
+                          {activeAiBots.length > 0 && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="text-xs text-primary hover:text-primary hover:bg-primary/10 shrink-0 -mr-1"
+                              onClick={() => setCreateAiTraderOpen(true)}
+                              data-testid="button-create-ai-trader-section"
+                            >
+                              <Plus className="w-3 h-3 mr-1" />
+                              New
+                            </Button>
+                          )}
                         </div>
                         {activeAiBots.length > 0 ? (
                           <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
@@ -3280,6 +3272,26 @@ export default function AppPage() {
                                 Try on paper →
                               </Button>
                             </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Signal Bots section */}
+                      <div className="space-y-4" data-testid="section-signal-bots">
+                        <div className="flex items-center gap-3">
+                          <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap flex items-center gap-1.5">
+                            <Bot className="w-3.5 h-3.5" />
+                            Signal Bots
+                          </h2>
+                          <div className="h-px flex-1 bg-border/50" />
+                        </div>
+                        {activeBots.length > 0 ? (
+                          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+                            {activeBots.map((bot) => renderBotCard(bot))}
+                          </div>
+                        ) : (
+                          <div className="gradient-border p-5 noise text-center">
+                            <p className="text-sm text-muted-foreground">No signal bots yet. Click <strong className="text-foreground">Add Bot</strong> to connect a TradingView webhook.</p>
                           </div>
                         )}
                       </div>
