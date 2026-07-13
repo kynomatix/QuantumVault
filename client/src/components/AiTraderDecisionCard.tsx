@@ -14,6 +14,10 @@ interface ClampedDecision {
   confidence?: number;
   rationale?: string;
   invalidation?: string;
+  /** risk_based mode: equity fraction actually risked (confidence-scaled). */
+  riskPct?: number;
+  /** risk_based mode: promised max loss in USDC at the stop. */
+  riskBudgetUsd?: number;
 }
 
 export interface AiDecisionRow {
@@ -190,6 +194,14 @@ export function AiTraderDecisionCard({
             <div className="flex justify-between">
               <span className="text-muted-foreground">Size</span>
               <span className="font-medium">{clamped.sizePct}%</span>
+            </div>
+          )}
+          {clamped.riskPct != null && (
+            <div className="flex justify-between col-span-2">
+              <span className="text-muted-foreground">Risked</span>
+              <span className="font-medium" data-testid="stat-risk-pct">
+                {clamped.riskPct.toFixed(2)}%{clamped.riskBudgetUsd != null ? ` ≈ $${clamped.riskBudgetUsd.toFixed(2)}` : ''}
+              </span>
             </div>
           )}
         </div>

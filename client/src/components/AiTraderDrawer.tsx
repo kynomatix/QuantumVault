@@ -111,6 +111,7 @@ interface AiTraderBot {
   id: string;
   walletAddress: string;
   protocol: string;
+  protocolSubaccountId: string | null;
   market: string;
   timeframe: string;
   mode: string;
@@ -121,6 +122,9 @@ interface AiTraderBot {
   allocatedUsdc: string;
   maxLeverage: number;
   stopPolicy: string;
+  sizingMode: string;
+  riskMinPct: string;
+  riskMaxPct: string;
   graduationState: string;
   graduationCriteria: unknown;
   trialStartedAt: string | null;
@@ -399,6 +403,9 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   const [settingsAutoNext, setSettingsAutoNext] = useState(false);
   const [settingsDegenConfirm, setSettingsDegenConfirm] = useState('');
   const [settingsModel, setSettingsModel] = useState('deepseek/deepseek-v4-pro');
+  const [settingsSizingMode, setSettingsSizingMode] = useState<'discretionary' | 'risk_based'>('discretionary');
+  const [settingsRiskMinPct, setSettingsRiskMinPct] = useState(0.5);
+  const [settingsRiskMaxPct, setSettingsRiskMaxPct] = useState(1.5);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [chartTarget, setChartTarget] = useState<ChartTarget | null>(null);
 
@@ -495,6 +502,9 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
       setSettingsAutoNext(bot.autoNext);
       setSettingsDegenConfirm('');
       setSettingsModel(bot.model);
+      setSettingsSizingMode(bot.sizingMode === 'risk_based' ? 'risk_based' : 'discretionary');
+      setSettingsRiskMinPct(parseFloat(bot.riskMinPct ?? '0.5'));
+      setSettingsRiskMaxPct(parseFloat(bot.riskMaxPct ?? '1.5'));
     }
   }, [bot?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -507,6 +517,9 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
         riskProfile: settingsRisk,
         autoNext: settingsAutoNext,
         model: settingsModel,
+        sizingMode: settingsSizingMode,
+        riskMinPct: settingsRiskMinPct,
+        riskMaxPct: settingsRiskMaxPct,
       };
       if (settingsRisk === 'degen' && bot.riskProfile !== 'degen') {
         body.degenConfirm = settingsDegenConfirm.trim().toLowerCase();
@@ -942,6 +955,11 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                             ))}
                           </div>
                         )}
+                        {violations.includes('size_quantized_to_zero') && d.outcome === 'rejected_guardrails' && (
+                          <p className="text-[10px] text-amber-400/80" data-testid={`hint-size-quantized-to-zero-${d.id}`}>
+                            Position too small for the venue minimum — increase the allocation or widen the risk band.
+                          </p>
+                        )}
                         {clamped?.rationale && (
                           <p className="text-[11px] text-muted-foreground leading-relaxed border-l-2 border-primary/30 pl-2 italic">
                             {clamped.rationale}
@@ -1158,6 +1176,82 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                   <p className="text-[10px] text-muted-foreground">Risk profile controls the loss brakes, not automation — Auto mode is what makes the bot trade by itself.</p>
                 </div>
 
+                {/* Editable: Risk-based position sizing */}
+                <div className="space-y-1.5">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Position Sizing</p>
+                  <div className="flex items-start justify-between rounded-lg border border-border/60 px-3 py-2.5 gap-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-medium">Risk-based sizing</p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">Sizes off equity + stop distance instead of a margin %</p>
+                    </div>
+                    <TooltipProvider>
+                      {!bot.paperMode && !bot.protocolSubaccountId ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="cursor-not-allowed mt-0.5">
+                              <Switch
+                                checked={settingsSizingMode === 'risk_based'}
+                                disabled
+                                data-testid="settings-switch-risk-based-sizing"
+                              />
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="left" className="max-w-[220px] text-xs">
+                            No venue account provisioned yet — go live first, then switch sizing mode.
+                          </TooltipContent>
+                        </Tooltip>
+                      ) : (
+                        <Switch
+                          checked={settingsSizingMode === 'risk_based'}
+                          onCheckedChange={v => setSettingsSizingMode(v ? 'risk_based' : 'discretionary')}
+                          data-testid="settings-switch-risk-based-sizing"
+                        />
+                      )}
+                    </TooltipProvider>
+                  </div>
+                  {settingsSizingMode === 'risk_based' && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <p className="text-[10px] text-muted-foreground">Risk at low conviction</p>
+                        <div className="relative">
+                          <Input
+                            type="number"
+                            min={0.1}
+                            max={3.0}
+                            step={0.1}
+                            value={settingsRiskMinPct}
+                            onChange={e => setSettingsRiskMinPct(parseFloat(e.target.value) || 0.1)}
+                            className="text-xs h-8 pr-6"
+                            data-testid="settings-input-risk-min-pct"
+                          />
+                          <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground pointer-events-none">%</span>
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <p className="text-[10px] text-muted-foreground">Risk at high conviction</p>
+                        <div className="relative">
+                          <Input
+                            type="number"
+                            min={0.1}
+                            max={3.0}
+                            step={0.1}
+                            value={settingsRiskMaxPct}
+                            onChange={e => setSettingsRiskMaxPct(parseFloat(e.target.value) || 0.1)}
+                            className="text-xs h-8 pr-6"
+                            data-testid="settings-input-risk-max-pct"
+                          />
+                          <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground pointer-events-none">%</span>
+                        </div>
+                      </div>
+                      {settingsRiskMinPct > settingsRiskMaxPct && (
+                        <p className="col-span-2 text-[10px] text-destructive" data-testid="settings-text-risk-band-error">
+                          Low conviction risk must be ≤ high conviction risk.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
                 {/* Editable: Auto-next */}
                 <div className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2.5">
                   <div>
@@ -1255,7 +1349,10 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
 
                 {/* Save button */}
                 {(() => {
-                  const changed = settingsMode !== bot.mode || settingsRisk !== bot.riskProfile || settingsAutoNext !== bot.autoNext || settingsModel !== bot.model;
+                  const changed = settingsMode !== bot.mode || settingsRisk !== bot.riskProfile || settingsAutoNext !== bot.autoNext || settingsModel !== bot.model ||
+                    settingsSizingMode !== (bot.sizingMode === 'risk_based' ? 'risk_based' : 'discretionary') ||
+                    settingsRiskMinPct !== parseFloat(bot.riskMinPct ?? '0.5') ||
+                    settingsRiskMaxPct !== parseFloat(bot.riskMaxPct ?? '1.5');
                   const needsDegenConfirm = settingsRisk === 'degen' && bot.riskProfile !== 'degen';
                   const degenOk = !needsDegenConfirm || settingsDegenConfirm.trim().toLowerCase() === DEGEN_CONFIRM_PHRASE;
                   return (

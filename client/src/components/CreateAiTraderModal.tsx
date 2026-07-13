@@ -102,6 +102,9 @@ interface FormState {
   degenConfirm: string;
   parkWhenIdle: boolean;
   autoNext: boolean;
+  sizingMode: 'discretionary' | 'risk_based';
+  riskMinPct: number;
+  riskMaxPct: number;
   graduationCriteria: {
     periodDays: number;
     minTrades: number;
@@ -137,6 +140,9 @@ export function CreateAiTraderModal({
     degenConfirm: '',
     parkWhenIdle: false,
     autoNext: false,
+    sizingMode: 'discretionary',
+    riskMinPct: 0.5,
+    riskMaxPct: 1.5,
     graduationCriteria: {
       periodDays: 30,
       minTrades: 10,
@@ -197,12 +203,21 @@ export function CreateAiTraderModal({
   const allocatedNum = parseFloat(form.allocatedUsdc) || 0;
   const degenConfirmed = form.degenConfirm.trim().toLowerCase() === DEGEN_CONFIRM_PHRASE;
   const isDegenMode = form.riskProfile === 'degen';
+  const isRiskBased = form.sizingMode === 'risk_based';
+  const riskBandError = isRiskBased
+    ? (form.riskMinPct < 0.1 || form.riskMaxPct > 3.0)
+      ? 'Both values must be between 0.1% and 3.0%.'
+      : form.riskMinPct > form.riskMaxPct
+      ? 'Low conviction risk must be ≤ high conviction risk.'
+      : null
+    : null;
 
   const canCreate =
     !!form.name.trim() &&
     !!form.market &&
     allocatedNum >= 10 &&
     (!isDegenMode || degenConfirmed) &&
+    !riskBandError &&
     !isCreating;
 
   const handleClose = () => {
@@ -220,6 +235,9 @@ export function CreateAiTraderModal({
       degenConfirm: '',
       parkWhenIdle: false,
       autoNext: false,
+      sizingMode: 'discretionary',
+      riskMinPct: 0.5,
+      riskMaxPct: 1.5,
       graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 2.0, maxDrawdownPct: 25 },
     });
     setAdvancedOpen(false);
@@ -243,6 +261,9 @@ export function CreateAiTraderModal({
         autoNext: form.autoNext,
         protocol: form.protocol,
         graduationCriteria: form.graduationCriteria,
+        sizingMode: form.sizingMode,
+        riskMinPct: form.riskMinPct,
+        riskMaxPct: form.riskMaxPct,
       };
       if (isDegenMode) body.degenConfirm = form.degenConfirm.trim().toLowerCase();
 
@@ -585,6 +606,60 @@ export function CreateAiTraderModal({
               </div>
             )}
             <p className="text-[11px] text-muted-foreground">Risk profile controls the loss brakes, not automation — Auto mode is what makes the bot trade by itself.</p>
+          </div>
+
+          {/* Risk-based position sizing */}
+          <div className="space-y-2">
+            <div className="flex items-start justify-between rounded-lg border border-border/60 p-3 gap-3">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium">Risk-based position sizing</p>
+                <p className="text-xs text-muted-foreground mt-0.5">Sizes each trade off live equity and the stop distance, so the AI risks a set fraction per trade instead of picking a margin percentage; leverage is derived automatically.</p>
+              </div>
+              <Switch
+                checked={isRiskBased}
+                onCheckedChange={v => set('sizingMode', v ? 'risk_based' : 'discretionary')}
+                data-testid="switch-risk-based-sizing"
+              />
+            </div>
+            {isRiskBased && (
+              <div className="grid grid-cols-2 gap-3 px-1">
+                <div className="space-y-1">
+                  <Label className="text-xs">Risk at low conviction</Label>
+                  <div className="relative">
+                    <Input
+                      type="number"
+                      min={0.1}
+                      max={3.0}
+                      step={0.1}
+                      value={form.riskMinPct}
+                      onChange={e => set('riskMinPct', parseFloat(e.target.value) || 0.1)}
+                      className="text-sm pr-6"
+                      data-testid="input-risk-min-pct"
+                    />
+                    <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground pointer-events-none">%</span>
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Risk at high conviction</Label>
+                  <div className="relative">
+                    <Input
+                      type="number"
+                      min={0.1}
+                      max={3.0}
+                      step={0.1}
+                      value={form.riskMaxPct}
+                      onChange={e => set('riskMaxPct', parseFloat(e.target.value) || 0.1)}
+                      className="text-sm pr-6"
+                      data-testid="input-risk-max-pct"
+                    />
+                    <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground pointer-events-none">%</span>
+                  </div>
+                </div>
+                {riskBandError && (
+                  <p className="col-span-2 text-xs text-destructive" data-testid="text-risk-band-error">{riskBandError}</p>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Park when idle — Flash only */}
