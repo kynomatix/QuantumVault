@@ -1641,8 +1641,24 @@ At each analysis cycle the bot builds a market context package and sends it to t
 - Last 100 candles of the selected timeframe plus 30 candles of the timeframe above (higher-timeframe trend context)
 - Indicators: EMA 20/50/200, RSI, MACD, ATR, ADX, Bollinger Bands, VWAP, OBV — values plus short recent deltas
 - Market microstate: mark price, funding rate (current + next), open interest trend, 24h volume
+- Smart money positioning (COT) — weekly Bitcoin futures positioning from the CFTC's Commitment of Traders report, applied as a macro bias across all crypto markets (see below)
 - Account state: allocated collateral, any open position, unrealized PnL
 - The bot's own last 10 closed trades — so the AI can learn from its mistakes and avoid repeating them
+
+#### Smart money positioning (COT)
+
+Every briefing includes a positioning signal from the CFTC's Commitment of Traders report — the same public filing professional futures traders read each week.
+
+The mechanic: the CFTC collects position data for all large Bitcoin futures traders. Commercial hedgers — companies using futures to manage real Bitcoin exposure — behave like smart money, historically positioning well ahead of major moves. Speculators and smaller retail traders are the crowd. Each group's net position is converted into a 0–100 index over a rolling 120-week window. When the smart-money index crosses down through the crowd index — commercials selling into crowd euphoria — the macro bias tilts short. The inverse cross tilts long. Crosses near the extremes carry more weight than crossovers in the middle.
+
+Honest scope:
+
+- **Source** — CFTC's official Bitcoin Legacy futures-only report. Because BTC sets the broad crypto market regime, the signal applies to all crypto markets. It weakens when a coin moves independently of BTC on its own catalyst.
+- **Cadence** — weekly. The CFTC releases data each Friday for the prior Tuesday; the bias updates once per week and holds constant between releases.
+- **Role** — a bias on how much to trust a directional setup, not an entry trigger. A bearish macro bias doesn't prevent a long trade; it raises the bar. Price action, technicals, and hard guardrails still govern every decision.
+- **Auditability** — every decision records the positioning state it saw — accumulating, distributing, or neutral — alongside the index values. The track record shows whether the signal helped over time.
+
+Most automated traders only see price data — this gives the AI the same positioning context professional futures traders check weekly.
 
 The AI returns a structured decision — not prose. It specifies direction, leverage, size, stop-loss price, take-profit price, a confidence score (1–10), and a plain-English rationale. The rationale is shown verbatim in the decision card: it is what the bot "thought" and is the primary trust surface.
 

@@ -3855,9 +3855,38 @@ function AiTraderOverviewSection() {
         <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Candles</strong> — last 100 bars of the selected timeframe plus 30 bars of the timeframe above for broader trend context</span></li>
         <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Indicators</strong> — EMA 20/50/200, RSI, MACD, ATR, ADX, Bollinger Bands, VWAP, OBV — values plus short recent deltas</span></li>
         <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Market microstate</strong> — mark price, funding rate (current + next), open interest trend, 24h volume</span></li>
+        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Smart money positioning (COT)</strong> — weekly Bitcoin futures positioning from the CFTC's Commitment of Traders report, applied as a macro bias across all crypto markets</span></li>
         <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Account state</strong> — allocated collateral, any open position, unrealized PnL</span></li>
         <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span><strong className="text-white/80">Bot's last 10 closed trades</strong> — so the AI can learn from its own mistakes and avoid repeating them</span></li>
       </ul>
+
+      <SubHeading>Smart money positioning (COT)</SubHeading>
+      <Paragraph>
+        Every briefing includes a positioning signal from the CFTC's Commitment of Traders report — the same public filing professional futures traders read each week.
+      </Paragraph>
+      <Paragraph>
+        The mechanic: the CFTC collects position data for all large Bitcoin futures traders. Commercial hedgers — companies using futures to manage real Bitcoin exposure — behave like smart money, historically positioning well ahead of major moves. Speculators and smaller retail traders are the crowd. Each group's net position is converted into a 0–100 index over a rolling 120-week window. When the smart-money index crosses down through the crowd index — commercials selling into crowd euphoria — the macro bias tilts short. The inverse cross tilts long. Crosses near the extremes carry more weight than crossovers in the middle.
+      </Paragraph>
+      <div className="space-y-3 mb-6">
+        {[
+          { label: 'Source', desc: "CFTC's official Bitcoin Legacy futures-only report. Because BTC sets the broad crypto market regime, the signal applies to all crypto markets. It weakens when a coin moves independently of BTC on its own catalyst." },
+          { label: 'Cadence', desc: 'Weekly. The CFTC releases data each Friday for the prior Tuesday; the bias updates once per week and holds constant between releases.' },
+          { label: 'Role', desc: "A bias on how much to trust a directional setup, not an entry trigger. A bearish macro bias doesn't prevent a long trade; it raises the bar. Price action, technicals, and hard guardrails still govern every decision." },
+          { label: 'Auditability', desc: 'Every decision records the positioning state it saw — accumulating, distributing, or neutral — alongside the index values. The track record shows whether the signal helped over time.' },
+        ].map(g => (
+          <div key={g.label} className="flex gap-3 p-3 rounded-lg bg-white/5 border border-white/10">
+            <div className="w-1.5 h-1.5 rounded-full bg-violet-400 flex-shrink-0 mt-2" />
+            <div>
+              <p className="text-sm font-medium text-white/90">{g.label}</p>
+              <p className="text-sm text-white/60 mt-0.5">{g.desc}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+      <Alert type="info">
+        Most automated traders only see price data — this gives the AI the same positioning context professional futures traders check weekly.
+      </Alert>
+
       <Paragraph>
         The AI returns a structured decision — not prose. It specifies direction, leverage, size, stop-loss price, take-profit price, a confidence score (1–10), and a plain-English rationale. The rationale is shown verbatim in the decision card: it is what the bot "thought" and is the primary trust surface.
       </Paragraph>
