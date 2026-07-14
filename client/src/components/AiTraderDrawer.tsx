@@ -401,8 +401,10 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   const [loading, setLoading] = useState(false);
   const [analyzeLoading, setAnalyzeLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
-  const [tradesOnly, setTradesOnly] = useState(false);
-  const [tradeHistory, setTradeHistory] = useState<AiDecisionRow[]>([]);
+  const [filterMode, setFilterMode] = useState<'all' | 'executed' | 'non_flat'>('all');
+  const [historyCursor, setHistoryCursor] = useState<{ before: string; beforeId: string } | null>(null);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
 
   // --- Confidence Calibration panel state ---
   // PRECONDITION: This panel is Gate #1 for the reflection-playbook injection phase.
@@ -457,22 +459,36 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   const fetchHistory = useCallback(async () => {
     if (!botId || !walletAddress) return;
     try {
-      const res = await fetch(`/api/ai-trader/${botId}/history?limit=100`, { credentials: 'include', headers: walletAuthHeaders() });
+      const params = new URLSearchParams({ limit: '50', outcomes: filterMode });
+      const res = await fetch(`/api/ai-trader/${botId}/history?${params}`, { credentials: 'include', headers: walletAuthHeaders() });
       if (!res.ok) return;
       const data = await safeResponseJson(res);
       setHistory(data.decisions ?? []);
+      setHistoryCursor(data.nextCursor ?? null);
+      setHistoryHasMore(!!data.nextCursor);
     } catch { /* silent */ }
-  }, [botId, walletAddress]);
+  }, [botId, walletAddress, filterMode]);
 
-  const fetchTradeHistory = useCallback(async () => {
-    if (!botId || !walletAddress) return;
+  const loadOlderHistory = useCallback(async () => {
+    if (!historyCursor || !botId || !walletAddress) return;
+    setLoadingOlder(true);
     try {
-      const res = await fetch(`/api/ai-trader/${botId}/history?limit=100&tradesOnly=1`, { credentials: 'include', headers: walletAuthHeaders() });
+      const params = new URLSearchParams({
+        limit: '50',
+        outcomes: filterMode,
+        before: historyCursor.before,
+        beforeId: historyCursor.beforeId,
+      });
+      const res = await fetch(`/api/ai-trader/${botId}/history?${params}`, { credentials: 'include', headers: walletAuthHeaders() });
       if (!res.ok) return;
       const data = await safeResponseJson(res);
-      setTradeHistory(data.decisions ?? []);
+      const rows: AiDecisionRow[] = data.decisions ?? [];
+      setHistory(prev => [...prev, ...rows]);
+      setHistoryCursor(data.nextCursor ?? null);
+      setHistoryHasMore(!!data.nextCursor);
     } catch { /* silent */ }
-  }, [botId, walletAddress]);
+    finally { setLoadingOlder(false); }
+  }, [botId, walletAddress, filterMode, historyCursor]);
 
   const handlePlaybookReset = async () => {
     const bot = detail?.bot;
@@ -513,19 +529,19 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
       fetchDetail();
       fetchHistory();
       fetchCalibration();
-      if (tradesOnly) fetchTradeHistory();
     }, 10_000);
     return () => clearInterval(id);
-  }, [isOpen, botId, fetchDetail, fetchHistory, fetchCalibration, tradesOnly, fetchTradeHistory]);
+  }, [isOpen, botId, fetchDetail, fetchHistory, fetchCalibration]);
 
   useEffect(() => {
     if (!isOpen) {
       setDetail(null);
       setHistory([]);
-      setTradeHistory([]);
       setCalibration(null);
       setActiveTab('activity');
-      setTradesOnly(false);
+      setFilterMode('all');
+      setHistoryCursor(null);
+      setHistoryHasMore(false);
       setPreflight({ loading: false, available: null });
     }
   }, [isOpen]);
@@ -616,7 +632,6 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   };
 
   const closedDecisions = history.filter((d) => d.closedAt && d.outcome === 'executed');
-  const visibleHistory = tradesOnly ? tradeHistory : history;
   const tradesCount = closedDecisions.length;
   const netPnl = closedDecisions.reduce((sum, d) => sum + Number(d.realizedPnl ?? 0), 0);
   const totalFees = history.reduce((sum, d) => sum + Number(d.feesPaid ?? 0), 0);
@@ -979,33 +994,45 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                   </div>
                 )}
 
-                {history.length > 0 && (
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => { const next = !tradesOnly; setTradesOnly(next); if (next) fetchTradeHistory(); }}
-                      className={`flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full border transition-colors ${
-                        tradesOnly
-                          ? 'bg-primary/15 border-primary/40 text-primary'
-                          : 'border-border/50 text-muted-foreground hover:text-foreground hover:border-border'
-                      }`}
-                      data-testid="button-trades-only-filter"
-                    >
-                      <Zap className="w-3 h-3" />
-                      Trades only
-                    </button>
-                  </div>
-                )}
+                {/* Three-state outcome filter pill */}
+                <div className="flex items-center gap-1 rounded-full border border-border/50 p-0.5 self-start" data-testid="history-filter-pill">
+                  {((['all', 'executed', 'non_flat'] as const)).map((mode) => {
+                    const label = mode === 'all' ? 'All' : mode === 'executed' ? 'Trades' : 'Non-flat';
+                    const active = filterMode === mode;
+                    return (
+                      <button
+                        key={mode}
+                        onClick={() => { setFilterMode(mode); setHistory([]); setHistoryCursor(null); setHistoryHasMore(false); }}
+                        className={`text-[11px] font-medium px-2.5 py-0.5 rounded-full transition-colors ${
+                          active
+                            ? 'bg-primary/15 text-primary'
+                            : 'text-muted-foreground hover:text-foreground'
+                        }`}
+                        data-testid={`button-filter-${mode}`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
 
-                {tradesOnly && tradeHistory.length === 0 && history.length > 0 && (
-                  <div className="py-8 text-center text-sm text-muted-foreground" data-testid="activity-trades-empty">
-                    No executed trades yet.
+                {history.length === 0 && filterMode !== 'all' && (
+                  <div className="py-8 text-center text-sm text-muted-foreground" data-testid="activity-filter-empty">
+                    {filterMode === 'executed' ? 'No executed trades yet.' : 'No non-flat decisions yet.'}
                   </div>
                 )}
 
                 <div className="space-y-2" data-testid="activity-timeline">
-                  {visibleHistory.map((d) => {
+                  {history.map((d) => {
                     const oc = outcomeLabel(d.outcome);
                     const clamped = d.clampedDecision as any;
+                    const raw = d.rawDecision as any;
+                    // Compressed rows have clamped_decision stripped; action + excerpt live in the stub.
+                    const isCompressed = !!raw?.compressed;
+                    const resolvedAction: string = isCompressed ? (raw.action ?? 'flat') : (clamped?.action ?? 'flat');
+                    const resolvedRationale: string | null = isCompressed
+                      ? (raw.rationaleExcerpt ?? null)
+                      : (clamped?.rationale ?? null);
                     const violations = violationChipLabels(d.guardrailViolations);
                     const pnl = Number(d.realizedPnl ?? 0);
                     const hasPnl = d.closedAt && d.outcome === 'executed';
@@ -1017,14 +1044,14 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                       >
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
-                            {clamped?.action === 'long' && <TrendingUp className="w-3 h-3 text-emerald-400" />}
-                            {clamped?.action === 'short' && <TrendingDown className="w-3 h-3 text-red-400" />}
-                            {(!clamped?.action || clamped.action === 'flat' || clamped.action === 'close') && <Minus className="w-3 h-3 text-muted-foreground" />}
+                            {resolvedAction === 'long' && <TrendingUp className="w-3 h-3 text-emerald-400" />}
+                            {resolvedAction === 'short' && <TrendingDown className="w-3 h-3 text-red-400" />}
+                            {(resolvedAction === 'flat' || resolvedAction === 'close') && <Minus className="w-3 h-3 text-muted-foreground" />}
                             <span className={`text-xs font-medium uppercase ${
-                              clamped?.action === 'long' ? 'text-emerald-400' :
-                              clamped?.action === 'short' ? 'text-red-400' : 'text-muted-foreground'
+                              resolvedAction === 'long' ? 'text-emerald-400' :
+                              resolvedAction === 'short' ? 'text-red-400' : 'text-muted-foreground'
                             }`}>
-                              {clamped?.action ?? 'flat'}
+                              {resolvedAction}
                             </span>
                             <div className={`flex items-center gap-1 text-[10px] font-medium ${oc.className}`}>
                               {oc.icon}
@@ -1057,9 +1084,15 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                             Position too small for the venue minimum — increase the allocation or widen the risk band.
                           </p>
                         )}
-                        {clamped?.rationale && (
+                        {resolvedRationale && (
                           <p className="text-[11px] text-muted-foreground leading-relaxed border-l-2 border-primary/30 pl-2 italic">
-                            {clamped.rationale}
+                            {resolvedRationale}
+                            {isCompressed && <span className="text-muted-foreground/40 not-italic"> …</span>}
+                          </p>
+                        )}
+                        {isCompressed && !resolvedRationale && (
+                          <p className="text-[11px] text-muted-foreground/40 italic" data-testid={`compressed-note-${d.id}`}>
+                            Details archived
                           </p>
                         )}
                         {d.outcome === 'executed' && d.entryPrice != null && (
@@ -1073,7 +1106,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                                 e.stopPropagation();
                                 setChartTarget({
                                   decisionId: d.id,
-                                  direction: clamped?.action === 'short' ? 'short' : 'long',
+                                  direction: resolvedAction === 'short' ? 'short' : 'long',
                                   entryPrice: Number(d.entryPrice),
                                   exitPrice: (d as any).exitPrice != null ? Number((d as any).exitPrice) : null,
                                   stopLossPrice: clamped?.stopLossPrice != null ? Number(clamped.stopLossPrice) : null,
@@ -1098,6 +1131,24 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     );
                   })}
                 </div>
+
+                {/* Load older — appears only when a next cursor is available from the server. */}
+                {historyHasMore && (
+                  <div className="flex justify-center pt-1 pb-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="text-xs text-muted-foreground gap-1.5"
+                      onClick={loadOlderHistory}
+                      disabled={loadingOlder}
+                      data-testid="button-load-older-history"
+                    >
+                      {loadingOlder ? <Loader2 className="w-3 h-3 animate-spin" /> : <History className="w-3 h-3" />}
+                      {loadingOlder ? 'Loading…' : 'Load older'}
+                    </Button>
+                  </div>
+                )}
               </TabsContent>
 
               <TabsContent value="track-record" className="space-y-4 mt-3">

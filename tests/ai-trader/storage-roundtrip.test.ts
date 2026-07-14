@@ -188,7 +188,8 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
   });
 
   // compressOldAiTraderDecisions: strips jsonb from old non-trade rows, never touches executed rows.
-  it("compressOldAiTraderDecisions thins old flat rows but never executed rows, is idempotent, and leaves recent rows untouched", async () => {
+  // Also verifies the stub retains action + rationaleExcerpt for Activity-feed rendering.
+  it("compressOldAiTraderDecisions thins old flat rows but never executed rows, preserves action/rationaleExcerpt, is idempotent, and leaves recent rows untouched", async () => {
     const COMP_WALLET = "ai-trader-comp-test-" + Math.random().toString(36).slice(2);
     let compBotId: string | undefined;
     try {
@@ -206,13 +207,14 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
       const OLD_DATE = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000); // 35 days ago
       const SCALAR_COST = "0.001200";
       const SCALAR_FEE  = "0.005000";
+      const LONG_RATIONALE = "A".repeat(200); // 200-char rationale — excerpt must be capped at 120
 
-      // Old flat row (should be thinned).
+      // Old flat row (should be thinned). clampedDecision carries action + rationale.
       const oldFlat = await storage.insertAiTraderDecision({
         botId: compBotId,
-        rawDecision: { action: "flat", rationale: "no signal" },
+        rawDecision: { action: "flat", rationale: "raw rationale" },
         contextDigest: { price: 150, rsi: 55 },
-        clampedDecision: { action: "flat" },
+        clampedDecision: { action: "flat", rationale: LONG_RATIONALE },
         guardrailViolations: [{ code: "MAX_LOSS" }],
         outcome: "flat",
         llmCostUsd: SCALAR_COST,
@@ -221,11 +223,12 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
       // Backdate decidedAt (defaultNow is set at insert, so update after).
       await db.update(aiTraderDecisions).set({ decidedAt: OLD_DATE }).where(eq(aiTraderDecisions.id, oldFlat.id));
 
-      // Old executed row (must NEVER be thinned).
+      // Old executed row (must NEVER be thinned — full jsonb preserved forever).
       const oldExec = await storage.insertAiTraderDecision({
         botId: compBotId,
         rawDecision: { action: "open_long", confidence: 0.9 },
         contextDigest: { price: 148 },
+        clampedDecision: { action: "long", rationale: "strong setup" },
         outcome: "executed",
         closedAt: OLD_DATE,
         realizedPnl: "12.50",
@@ -246,6 +249,7 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
         botId: compBotId,
         rawDecision: { action: "flat", rationale: "recent" },
         contextDigest: { price: 151 },
+        clampedDecision: { action: "flat", rationale: "recent rationale" },
         outcome: "flat",
         llmCostUsd: SCALAR_COST,
         feesPaid: SCALAR_FEE,
@@ -255,20 +259,28 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
       const n = await storage.compressOldAiTraderDecisions(30, 500);
       expect(n).toBeGreaterThanOrEqual(1); // at least the old flat row
 
-      // Old flat row: heavy jsonb stripped, raw_decision = stub, scalars preserved.
+      // Old flat row: heavy jsonb stripped; stub retains action + rationaleExcerpt (≤120 chars).
       const [thinned] = await db.select().from(aiTraderDecisions).where(eq(aiTraderDecisions.id, oldFlat.id));
       expect(thinned.contextDigest).toBeNull();
       expect(thinned.clampedDecision).toBeNull();
       expect(thinned.guardrailViolations).toBeNull();
       expect((thinned.rawDecision as any)?.compressed).toBe(true);
+      expect((thinned.rawDecision as any)?.action).toBe("flat");
+      // rationaleExcerpt must be capped at 120 chars (LONG_RATIONALE is 200 chars).
+      expect(typeof (thinned.rawDecision as any)?.rationaleExcerpt).toBe("string");
+      expect((thinned.rawDecision as any).rationaleExcerpt.length).toBeLessThanOrEqual(120);
+      // Scalars survive intact.
       expect(thinned.outcome).toBe("flat");
       expect(thinned.llmCostUsd).toBe(SCALAR_COST);
       expect(thinned.feesPaid).toBe(SCALAR_FEE);
 
-      // Old executed row: byte-identical (never thinned).
+      // Old executed row: byte-identical — compressed flag absent, contextDigest intact.
+      // INVARIANT: executed rows feed graduation, net PnL, calibration, ZEC counter, playbook.
       const [execRow] = await db.select().from(aiTraderDecisions).where(eq(aiTraderDecisions.id, oldExec.id));
       expect((execRow.rawDecision as any)?.compressed).toBeUndefined();
       expect(execRow.contextDigest).not.toBeNull();
+      expect(execRow.clampedDecision).not.toBeNull();
+      expect(execRow.realizedPnl).toBe("12.50");
 
       // Old null-outcome row: untouched (not in allowlist).
       const [nullRow] = await db.select().from(aiTraderDecisions).where(eq(aiTraderDecisions.id, oldNull.id));
@@ -279,17 +291,99 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
       expect((recentRow.rawDecision as any)?.compressed).toBeUndefined();
       expect(recentRow.contextDigest).not.toBeNull();
 
-      // Idempotency: second run returns 0 for already-thinned rows.
+      // Idempotency: second run skips already-compressed rows (NOT (raw_decision ? 'compressed') guard).
       const n2 = await storage.compressOldAiTraderDecisions(30, 500);
-      // n2 may be > 0 if there are other old flat rows in the DB from prior tests,
-      // but the already-thinned row must NOT be updated again — confirm by re-reading.
       const [thinnedAgain] = await db.select().from(aiTraderDecisions).where(eq(aiTraderDecisions.id, oldFlat.id));
-      expect((thinnedAgain.rawDecision as any)?.compressed).toBe(true); // still stub, not double-processed
-      void n2; // suppress unused warning
+      expect((thinnedAgain.rawDecision as any)?.compressed).toBe(true); // still stub, not re-processed
+      void n2;
     } finally {
       if (compBotId) {
         await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, compBotId));
         await db.delete(aiTraderBots).where(eq(aiTraderBots.id, compBotId));
+      }
+    }
+  });
+
+  // getAiTraderDecisionsPaged: outcomes filter (all/executed/non_flat) + keyset pagination.
+  it("getAiTraderDecisionsPaged filters by outcomes and paginates with keyset cursor", async () => {
+    const PAGE_WALLET = "ai-trader-page-test-" + Math.random().toString(36).slice(2);
+    let pageBotId: string | undefined;
+    try {
+      const pageBot = await storage.createAiTraderBot({
+        walletAddress: PAGE_WALLET,
+        protocol: "pacifica",
+        market: "SOL-PERP",
+        timeframe: "15m",
+        allocatedUsdc: "100.00",
+        graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
+        policyHmac: "page-test-hmac",
+      } as any);
+      pageBotId = pageBot.id;
+
+      // Insert 3 flat + 2 executed rows in a known order.
+      const rows: Array<{ id: string; outcome: string }> = [];
+      for (let i = 0; i < 3; i++) {
+        const r = await storage.insertAiTraderDecision({
+          botId: pageBotId,
+          rawDecision: { action: "flat", i },
+          outcome: "flat",
+        } as any);
+        rows.push({ id: r.id, outcome: "flat" });
+      }
+      for (let i = 0; i < 2; i++) {
+        const r = await storage.insertAiTraderDecision({
+          botId: pageBotId,
+          rawDecision: { action: "open_long" },
+          outcome: "executed",
+        } as any);
+        rows.push({ id: r.id, outcome: "executed" });
+      }
+
+      // outcomes='all': returns all 5 rows.
+      const all = await storage.getAiTraderDecisionsPaged(pageBotId, 10, { outcomes: 'all' });
+      expect(all.rows.length).toBe(5);
+      expect(all.nextCursor).toBeNull();
+
+      // outcomes='executed': returns only the 2 executed rows, no flats.
+      const execOnly = await storage.getAiTraderDecisionsPaged(pageBotId, 10, { outcomes: 'executed' });
+      expect(execOnly.rows.length).toBe(2);
+      expect(execOnly.rows.every(r => r.outcome === 'executed')).toBe(true);
+      expect(execOnly.nextCursor).toBeNull();
+
+      // outcomes='non_flat': returns the 2 executed rows (excludes all 3 flats).
+      const nonFlat = await storage.getAiTraderDecisionsPaged(pageBotId, 10, { outcomes: 'non_flat' });
+      expect(nonFlat.rows.length).toBe(2);
+      expect(nonFlat.rows.every(r => r.outcome !== 'flat')).toBe(true);
+
+      // Pagination: limit=2 on 'all' returns first page + non-null nextCursor.
+      const page1 = await storage.getAiTraderDecisionsPaged(pageBotId, 2, { outcomes: 'all' });
+      expect(page1.rows.length).toBe(2);
+      expect(page1.nextCursor).not.toBeNull();
+
+      // Page 2 via cursor: gets the next 2 rows, no overlap with page 1.
+      const page1Ids = new Set(page1.rows.map(r => r.id));
+      const page2 = await storage.getAiTraderDecisionsPaged(pageBotId, 2, {
+        outcomes: 'all',
+        before: new Date(page1.nextCursor!.before),
+        beforeId: page1.nextCursor!.beforeId,
+      });
+      expect(page2.rows.length).toBe(2);
+      expect(page2.rows.every(r => !page1Ids.has(r.id))).toBe(true); // no overlap
+
+      // Page 3: last row, nextCursor = null.
+      const page2Ids = new Set(page2.rows.map(r => r.id));
+      const page3 = await storage.getAiTraderDecisionsPaged(pageBotId, 2, {
+        outcomes: 'all',
+        before: new Date(page2.nextCursor!.before),
+        beforeId: page2.nextCursor!.beforeId,
+      });
+      expect(page3.rows.length).toBe(1);
+      expect(page3.rows.every(r => !page1Ids.has(r.id) && !page2Ids.has(r.id))).toBe(true);
+      expect(page3.nextCursor).toBeNull();
+    } finally {
+      if (pageBotId) {
+        await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, pageBotId));
+        await db.delete(aiTraderBots).where(eq(aiTraderBots.id, pageBotId));
       }
     }
   });

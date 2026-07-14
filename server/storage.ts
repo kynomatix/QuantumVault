@@ -626,6 +626,18 @@ export interface IStorage {
   getExecutedDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
   getRecentClosedDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
   compressOldAiTraderDecisions(olderThanDays: number, batchSize: number): Promise<number>;
+  /**
+   * Paginated history fetch with server-side outcome filtering.
+   * outcomes: 'all' (default) | 'executed' (trades only) | 'non_flat' (exclude flat stand-asides).
+   * Keyset cursor: pass before + beforeId from the previous page's nextCursor to get older rows.
+   * Returns rows (length ≤ limit) + nextCursor (null when no more rows exist).
+   * Executed rows are NEVER stripped by compressOldAiTraderDecisions — full jsonb preserved.
+   */
+  getAiTraderDecisionsPaged(
+    botId: string,
+    limit: number,
+    opts?: { outcomes?: 'all' | 'executed' | 'non_flat'; before?: Date; beforeId?: string },
+  ): Promise<{ rows: AiTraderDecision[]; nextCursor: { before: string; beforeId: string } | null }>;
   // WO-7 additions.
   getAiTraderDecision(id: string): Promise<AiTraderDecision | undefined>;
   deleteAiTraderBot(id: string): Promise<void>;
@@ -4540,14 +4552,22 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Thin old non-trade decision rows: strip heavy jsonb, keep all scalars.
+  // Preserves a slim stub in raw_decision with the action and first 120 chars of rationale
+  // so old Activity rows still render meaningfully (show excerpt, not a blank card).
+  // INVARIANT: outcome='executed' rows are NEVER in the allowlist — full jsonb preserved forever.
+  //            Those rows feed graduation, net PnL, calibration, ZEC counter, and the playbook.
   // Returns the number of rows updated in this batch (0 = done).
   async compressOldAiTraderDecisions(olderThanDays: number, batchSize: number): Promise<number> {
     const result = await db.execute(sql`
       UPDATE ai_trader_decisions SET
         context_digest = NULL,
-        clamped_decision = NULL,
         guardrail_violations = NULL,
-        raw_decision = '{"compressed":true}'::jsonb
+        raw_decision = jsonb_build_object(
+          'compressed', true,
+          'action', COALESCE(clamped_decision->>'action', raw_decision->>'action'),
+          'rationaleExcerpt', left(COALESCE(clamped_decision->>'rationale', ''), 120)
+        ),
+        clamped_decision = NULL
       WHERE id IN (
         SELECT id FROM ai_trader_decisions
         WHERE decided_at < now() - (${olderThanDays}::text || ' days')::interval
@@ -4557,6 +4577,55 @@ export class DatabaseStorage implements IStorage {
       )
     `);
     return Number((result as any).rowCount ?? 0);
+  }
+
+  // Paginated history fetch with server-side outcome filtering + keyset cursor.
+  // outcomes: 'all' = no filter, 'executed' = trades only, 'non_flat' = exclude flat stand-asides.
+  // Cursor: pass { before, beforeId } from previous nextCursor to fetch the next older page.
+  // Fetches limit+1 rows to detect whether another page exists; returns at most limit rows.
+  async getAiTraderDecisionsPaged(
+    botId: string,
+    limit: number,
+    opts?: { outcomes?: 'all' | 'executed' | 'non_flat'; before?: Date; beforeId?: string },
+  ): Promise<{ rows: AiTraderDecision[]; nextCursor: { before: string; beforeId: string } | null }> {
+    const { outcomes = 'all', before, beforeId } = opts ?? {};
+
+    const outcomesCond =
+      outcomes === 'executed' ? eq(aiTraderDecisions.outcome, 'executed') :
+      outcomes === 'non_flat' ? ne(aiTraderDecisions.outcome, 'flat') :
+      undefined;
+
+    const cursorCond =
+      before && beforeId
+        ? or(
+            lt(aiTraderDecisions.decidedAt, before),
+            and(
+              eq(aiTraderDecisions.decidedAt, before),
+              lt(aiTraderDecisions.id, beforeId),
+            ),
+          )
+        : undefined;
+
+    const whereCond = and(
+      eq(aiTraderDecisions.botId, botId),
+      outcomesCond,
+      cursorCond,
+    );
+
+    const fetched = await db.select().from(aiTraderDecisions)
+      .where(whereCond)
+      .orderBy(desc(aiTraderDecisions.decidedAt), desc(aiTraderDecisions.id))
+      .limit(limit + 1);
+
+    const hasMore = fetched.length > limit;
+    const rows = hasMore ? fetched.slice(0, limit) : fetched;
+    const lastRow = rows[rows.length - 1];
+    const nextCursor =
+      hasMore && lastRow && lastRow.decidedAt != null
+        ? { before: lastRow.decidedAt.toISOString(), beforeId: lastRow.id }
+        : null;
+
+    return { rows, nextCursor };
   }
 
   // --- AI Trader (WO-7) ---

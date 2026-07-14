@@ -732,6 +732,11 @@ export async function ensureSchema() {
         closed_at timestamp
       )`,
       `CREATE INDEX IF NOT EXISTS idx_ai_trader_decisions_bot_decided ON ai_trader_decisions (bot_id, decided_at DESC)`,
+      // Partial index for the trades-only query path (outcome='executed' filter).
+      // Covers getAiTraderDecisionsPaged with outcomes='executed', avoids full-table seq scan
+      // on bots with thousands of flat rows. Deferred 60-day rollup — slim compressed rows
+      // are cheap; revisit if row counts cause measurable query latency.
+      `CREATE INDEX IF NOT EXISTS idx_ai_trader_decisions_executed ON ai_trader_decisions (bot_id, decided_at DESC) WHERE outcome = 'executed'`,
 
       // WO-7: free paper-trial counter for wallets with no BYO OpenRouter key.
       `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS ai_trader_free_calls_used integer NOT NULL DEFAULT 0`,

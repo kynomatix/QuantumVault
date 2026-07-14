@@ -1244,17 +1244,37 @@ export function registerAiTraderRoutes(app: Express): void {
   });
 
   // --- History --------------------------------------------------------------------------
+  // outcomes: 'all' (default) | 'executed' (trades only) | 'non_flat' (exclude flat stand-asides).
+  // tradesOnly=1 accepted as a legacy alias for outcomes=executed (backward compat).
+  // Keyset pagination: pass before=<ISO> + beforeId=<uuid> from the previous response's
+  // nextCursor to fetch older rows. limit capped at 200 per page.
   app.get("/api/ai-trader/:id/history", requireWallet, async (req: any, res) => {
     try {
       const bot = await loadOwnedBot(req, res);
       if (!bot) return;
       const limitRaw = parseInt(String(req.query.limit ?? "50"), 10);
       const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? limitRaw : 50, 1), 200);
-      const tradesOnly = req.query.tradesOnly === '1' || req.query.tradesOnly === 'true';
-      const decisions = tradesOnly
-        ? await storage.getExecutedDecisions(bot.id, limit)
-        : await storage.getAiTraderDecisions(bot.id, limit);
-      res.json({ decisions });
+
+      // Resolve outcomes filter — legacy tradesOnly=1 maps to executed.
+      const tradesOnlyLegacy = req.query.tradesOnly === '1' || req.query.tradesOnly === 'true';
+      const outcomesRaw = String(req.query.outcomes ?? '');
+      const outcomes: 'all' | 'executed' | 'non_flat' =
+        outcomesRaw === 'executed' || tradesOnlyLegacy ? 'executed' :
+        outcomesRaw === 'non_flat' ? 'non_flat' :
+        'all';
+
+      // Keyset cursor.
+      const beforeRaw = String(req.query.before ?? '');
+      const beforeId = String(req.query.beforeId ?? '');
+      const before = beforeRaw ? new Date(beforeRaw) : undefined;
+      const cursorOpts = before && beforeId && !Number.isNaN(before.getTime())
+        ? { before, beforeId }
+        : {};
+
+      const { rows: decisions, nextCursor } = await storage.getAiTraderDecisionsPaged(
+        bot.id, limit, { outcomes, ...cursorOpts },
+      );
+      res.json({ decisions, nextCursor });
     } catch (err) {
       console.error("[AiTrader] history error:", err);
       res.status(500).json({ error: "Internal server error" });
