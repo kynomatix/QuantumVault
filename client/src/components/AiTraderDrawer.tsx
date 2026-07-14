@@ -401,6 +401,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   const [loading, setLoading] = useState(false);
   const [analyzeLoading, setAnalyzeLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [tradesOnly, setTradesOnly] = useState(false);
 
   // --- Confidence Calibration panel state ---
   // PRECONDITION: This panel is Gate #1 for the reflection-playbook injection phase.
@@ -511,6 +512,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
       setHistory([]);
       setCalibration(null);
       setActiveTab('activity');
+      setTradesOnly(false);
       setPreflight({ loading: false, available: null });
     }
   }, [isOpen]);
@@ -601,6 +603,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   };
 
   const closedDecisions = history.filter((d) => d.closedAt && d.outcome === 'executed');
+  const visibleHistory = tradesOnly ? closedDecisions : history;
   const tradesCount = closedDecisions.length;
   const netPnl = closedDecisions.reduce((sum, d) => sum + Number(d.realizedPnl ?? 0), 0);
   const totalFees = history.reduce((sum, d) => sum + Number(d.feesPaid ?? 0), 0);
@@ -963,8 +966,31 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                   </div>
                 )}
 
+                {history.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setTradesOnly((v) => !v)}
+                      className={`flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full border transition-colors ${
+                        tradesOnly
+                          ? 'bg-primary/15 border-primary/40 text-primary'
+                          : 'border-border/50 text-muted-foreground hover:text-foreground hover:border-border'
+                      }`}
+                      data-testid="button-trades-only-filter"
+                    >
+                      <Zap className="w-3 h-3" />
+                      Trades only
+                    </button>
+                  </div>
+                )}
+
+                {tradesOnly && closedDecisions.length === 0 && history.length > 0 && (
+                  <div className="py-8 text-center text-sm text-muted-foreground" data-testid="activity-trades-empty">
+                    No executed trades yet.
+                  </div>
+                )}
+
                 <div className="space-y-2" data-testid="activity-timeline">
-                  {history.map((d) => {
+                  {visibleHistory.map((d) => {
                     const oc = outcomeLabel(d.outcome);
                     const clamped = d.clampedDecision as any;
                     const violations = violationChipLabels(d.guardrailViolations);
