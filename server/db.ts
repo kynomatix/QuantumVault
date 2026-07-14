@@ -7,14 +7,19 @@ if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL must be set");
 }
 
-const poolSize = parseInt(process.env.DB_POOL_SIZE || "12", 10);
+const poolSize = parseInt(process.env.DB_POOL_SIZE || "8", 10);
 const connTimeoutMs = parseInt(process.env.DB_CONN_TIMEOUT_MS || "10000", 10);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: poolSize,
   connectionTimeoutMillis: connTimeoutMs,
-  idleTimeoutMillis: 120_000,
+  // 15s: evict idle connections well before Neon's ~30s idle cutoff
+  // (was 120s — that kept stale connections in the pool for 2 minutes after
+  // the provider killed them, causing "Connection terminated" on every use).
+  // keepAlive guards against silent TCP drops by intermediate proxies.
+  idleTimeoutMillis: 15_000,
+  keepAlive: true,
 });
 
 pool.on("error", (err) => {

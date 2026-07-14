@@ -64,6 +64,8 @@ import type { ProtocolPosition, TradeRecord } from "../protocol/protocol-types";
 const MONITOR_TICK_MS = 15_000;
 const DAILY_SWEEP_MS = 6 * 60 * 60 * 1000; // graduation sweep every 6h (cheap; catches period-elapsed)
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 // Mirrors context-builder/decide (module-private there by WO scoping).
 const TIMEFRAME_MS: Record<string, number> = {
   "15m": 900_000,
@@ -1369,11 +1371,23 @@ async function tick(): Promise<void> {
   if (tickInFlight) return;
   tickInFlight = true;
   try {
-    let bots: AiTraderBot[];
-    try {
-      bots = await storage.getActiveAiTraderBots();
-    } catch (err) {
-      console.error(`[AiTraderMonitor] tick: getActiveAiTraderBots failed: ${err instanceof Error ? err.message : err}`);
+    // Bounded retry-with-backoff: a single stale connection eviction should not
+    // kill the whole tick.  After the first failure the pool drops the dead
+    // connection; the retry lands on a fresh one (or the next open slot).
+    let bots: AiTraderBot[] | undefined;
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        bots = await storage.getActiveAiTraderBots();
+        lastErr = undefined;
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < 2) await sleep(1_500);
+      }
+    }
+    if (lastErr !== undefined || bots === undefined) {
+      console.error(`[AiTraderMonitor] tick: getActiveAiTraderBots failed (3 attempts): ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
       return;
     }
     for (const bot of bots) {
@@ -1406,6 +1420,9 @@ async function runDecisionCompressionSweep(): Promise<void> {
     const n = await storage.compressOldAiTraderDecisions(30, 500);
     total += n;
     if (n === 0) break;
+    // Brief pause between batches so 20 consecutive 500-row UPDATEs don't
+    // exhaust the pool while other background processes also need connections.
+    if (i < MAX_ITER - 1) await sleep(150);
   }
   if (total > 0) {
     console.log(`[AiTraderMonitor] compression sweep: thinned ${total} old decision rows`);
@@ -1424,10 +1441,13 @@ export function startAiTraderMonitor(): void {
       runGraduationSweep().catch((err) =>
         console.error(`[AiTraderMonitor] boot graduation sweep crashed: ${err instanceof Error ? err.message : err}`)
       );
-      // Compression sweep once on boot (thin old non-trade rows accumulated during downtime).
-      runDecisionCompressionSweep().catch((err) =>
-        console.error(`[AiTraderMonitor] boot compression sweep crashed: ${err instanceof Error ? err.message : err}`)
-      );
+      // Compression sweep deferred by one tick so it never competes with both
+      // reconcileOnStartup AND the first tick simultaneously at boot.
+      setTimeout(() => {
+        runDecisionCompressionSweep().catch((err) =>
+          console.error(`[AiTraderMonitor] boot compression sweep crashed: ${err instanceof Error ? err.message : err}`)
+        );
+      }, MONITOR_TICK_MS);
     });
   tickTimer = setInterval(() => {
     tick().catch((err) => console.error(`[AiTraderMonitor] tick crashed: ${err instanceof Error ? err.message : err}`));
