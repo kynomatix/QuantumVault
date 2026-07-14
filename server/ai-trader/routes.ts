@@ -1344,7 +1344,7 @@ export function registerAiTraderRoutes(app: Express): void {
         new Date(startMs).toISOString(),
         new Date(endMs).toISOString(),
         undefined,
-        { skipSpotFallback: true }
+        { skipSpotFallback: true, bypassCache: true }
       );
       const candles = rawCandles.map((c) => ({
         time: Math.floor(c.time / 1000),

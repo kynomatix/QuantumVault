@@ -556,14 +556,14 @@ export async function fetchOHLCV(
   startDate: string,
   endDate: string,
   onProgress?: (msg: string) => void,
-  options?: { skipSpotFallback?: boolean }
+  options?: { skipSpotFallback?: boolean; bypassCache?: boolean }
 ): Promise<OHLCV[]> {
   timeframe = timeframe.toLowerCase();
   const startMs = new Date(startDate).getTime();
   const endMs = new Date(endDate).getTime();
 
   onProgress?.(`Checking cache for ${symbol} ${timeframe}...`);
-  const cached = await getCachedCandles(symbol, timeframe, startMs, endMs);
+  const cached = options?.bypassCache ? null : await getCachedCandles(symbol, timeframe, startMs, endMs);
   if (cached && cached.length >= 100) {
     // For live requests (endMs near now), also require the newest cached candle to be
     // recent enough. Historical backtest ranges (endMs well in the past) always
