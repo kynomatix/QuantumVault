@@ -623,7 +623,9 @@ export interface IStorage {
   insertAiTraderDecision(decision: InsertAiTraderDecision): Promise<AiTraderDecision>;
   updateAiTraderDecision(id: string, updates: Partial<InsertAiTraderDecision>): Promise<AiTraderDecision | undefined>;
   getAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
+  getExecutedDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
   getRecentClosedDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
+  compressOldAiTraderDecisions(olderThanDays: number, batchSize: number): Promise<number>;
   // WO-7 additions.
   getAiTraderDecision(id: string): Promise<AiTraderDecision | undefined>;
   deleteAiTraderBot(id: string): Promise<void>;
@@ -4521,12 +4523,40 @@ export class DatabaseStorage implements IStorage {
       .limit(limit);
   }
 
+  // Executed decisions only (includes open trades where closedAt is null).
+  async getExecutedDecisions(botId: string, limit: number): Promise<AiTraderDecision[]> {
+    return db.select().from(aiTraderDecisions)
+      .where(and(eq(aiTraderDecisions.botId, botId), eq(aiTraderDecisions.outcome, "executed")))
+      .orderBy(desc(aiTraderDecisions.decidedAt))
+      .limit(limit);
+  }
+
   // Last N CLOSED decisions (closedAt set) — the WO-3 memory-context block.
   async getRecentClosedDecisions(botId: string, limit: number): Promise<AiTraderDecision[]> {
     return db.select().from(aiTraderDecisions)
       .where(and(eq(aiTraderDecisions.botId, botId), isNotNull(aiTraderDecisions.closedAt)))
       .orderBy(desc(aiTraderDecisions.decidedAt))
       .limit(limit);
+  }
+
+  // Thin old non-trade decision rows: strip heavy jsonb, keep all scalars.
+  // Returns the number of rows updated in this batch (0 = done).
+  async compressOldAiTraderDecisions(olderThanDays: number, batchSize: number): Promise<number> {
+    const result = await db.execute(sql`
+      UPDATE ai_trader_decisions SET
+        context_digest = NULL,
+        clamped_decision = NULL,
+        guardrail_violations = NULL,
+        raw_decision = '{"compressed":true}'::jsonb
+      WHERE id IN (
+        SELECT id FROM ai_trader_decisions
+        WHERE decided_at < now() - (${olderThanDays}::text || ' days')::interval
+          AND outcome IN ('flat','user_skipped','rejected_guardrails','aborted_malformed','aborted_stale','aborted_funding','expired')
+          AND NOT (raw_decision ? 'compressed')
+        LIMIT ${batchSize}
+      )
+    `);
+    return Number((result as any).rowCount ?? 0);
   }
 
   // --- AI Trader (WO-7) ---

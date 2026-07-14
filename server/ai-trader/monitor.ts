@@ -1397,6 +1397,21 @@ async function tick(): Promise<void> {
   }
 }
 
+// --- Decision compression sweep ------------------------------------------------------
+
+async function runDecisionCompressionSweep(): Promise<void> {
+  let total = 0;
+  const MAX_ITER = 20;
+  for (let i = 0; i < MAX_ITER; i++) {
+    const n = await storage.compressOldAiTraderDecisions(30, 500);
+    total += n;
+    if (n === 0) break;
+  }
+  if (total > 0) {
+    console.log(`[AiTraderMonitor] compression sweep: thinned ${total} old decision rows`);
+  }
+}
+
 // --- Lifecycle -----------------------------------------------------------------------
 
 export function startAiTraderMonitor(): void {
@@ -1409,6 +1424,10 @@ export function startAiTraderMonitor(): void {
       runGraduationSweep().catch((err) =>
         console.error(`[AiTraderMonitor] boot graduation sweep crashed: ${err instanceof Error ? err.message : err}`)
       );
+      // Compression sweep once on boot (thin old non-trade rows accumulated during downtime).
+      runDecisionCompressionSweep().catch((err) =>
+        console.error(`[AiTraderMonitor] boot compression sweep crashed: ${err instanceof Error ? err.message : err}`)
+      );
     });
   tickTimer = setInterval(() => {
     tick().catch((err) => console.error(`[AiTraderMonitor] tick crashed: ${err instanceof Error ? err.message : err}`));
@@ -1416,6 +1435,9 @@ export function startAiTraderMonitor(): void {
   sweepTimer = setInterval(() => {
     runGraduationSweep().catch((err) =>
       console.error(`[AiTraderMonitor] graduation sweep crashed: ${err instanceof Error ? err.message : err}`)
+    );
+    runDecisionCompressionSweep().catch((err) =>
+      console.error(`[AiTraderMonitor] compression sweep crashed: ${err instanceof Error ? err.message : err}`)
     );
   }, DAILY_SWEEP_MS);
   tickTimer.unref?.();

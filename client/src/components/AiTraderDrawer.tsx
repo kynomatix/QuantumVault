@@ -402,6 +402,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   const [analyzeLoading, setAnalyzeLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [tradesOnly, setTradesOnly] = useState(false);
+  const [tradeHistory, setTradeHistory] = useState<AiDecisionRow[]>([]);
 
   // --- Confidence Calibration panel state ---
   // PRECONDITION: This panel is Gate #1 for the reflection-playbook injection phase.
@@ -463,6 +464,16 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
     } catch { /* silent */ }
   }, [botId, walletAddress]);
 
+  const fetchTradeHistory = useCallback(async () => {
+    if (!botId || !walletAddress) return;
+    try {
+      const res = await fetch(`/api/ai-trader/${botId}/history?limit=100&tradesOnly=1`, { credentials: 'include', headers: walletAuthHeaders() });
+      if (!res.ok) return;
+      const data = await safeResponseJson(res);
+      setTradeHistory(data.decisions ?? []);
+    } catch { /* silent */ }
+  }, [botId, walletAddress]);
+
   const handlePlaybookReset = async () => {
     const bot = detail?.bot;
     if (!bot) return;
@@ -502,14 +513,16 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
       fetchDetail();
       fetchHistory();
       fetchCalibration();
+      if (tradesOnly) fetchTradeHistory();
     }, 10_000);
     return () => clearInterval(id);
-  }, [isOpen, botId, fetchDetail, fetchHistory, fetchCalibration]);
+  }, [isOpen, botId, fetchDetail, fetchHistory, fetchCalibration, tradesOnly, fetchTradeHistory]);
 
   useEffect(() => {
     if (!isOpen) {
       setDetail(null);
       setHistory([]);
+      setTradeHistory([]);
       setCalibration(null);
       setActiveTab('activity');
       setTradesOnly(false);
@@ -603,7 +616,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   };
 
   const closedDecisions = history.filter((d) => d.closedAt && d.outcome === 'executed');
-  const visibleHistory = tradesOnly ? closedDecisions : history;
+  const visibleHistory = tradesOnly ? tradeHistory : history;
   const tradesCount = closedDecisions.length;
   const netPnl = closedDecisions.reduce((sum, d) => sum + Number(d.realizedPnl ?? 0), 0);
   const totalFees = history.reduce((sum, d) => sum + Number(d.feesPaid ?? 0), 0);
@@ -969,7 +982,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                 {history.length > 0 && (
                   <div className="flex items-center gap-2">
                     <button
-                      onClick={() => setTradesOnly((v) => !v)}
+                      onClick={() => { const next = !tradesOnly; setTradesOnly(next); if (next) fetchTradeHistory(); }}
                       className={`flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full border transition-colors ${
                         tradesOnly
                           ? 'bg-primary/15 border-primary/40 text-primary'
@@ -983,7 +996,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                   </div>
                 )}
 
-                {tradesOnly && closedDecisions.length === 0 && history.length > 0 && (
+                {tradesOnly && tradeHistory.length === 0 && history.length > 0 && (
                   <div className="py-8 text-center text-sm text-muted-foreground" data-testid="activity-trades-empty">
                     No executed trades yet.
                   </div>

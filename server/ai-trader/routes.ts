@@ -1250,7 +1250,10 @@ export function registerAiTraderRoutes(app: Express): void {
       if (!bot) return;
       const limitRaw = parseInt(String(req.query.limit ?? "50"), 10);
       const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? limitRaw : 50, 1), 200);
-      const decisions = await storage.getAiTraderDecisions(bot.id, limit);
+      const tradesOnly = req.query.tradesOnly === '1' || req.query.tradesOnly === 'true';
+      const decisions = tradesOnly
+        ? await storage.getExecutedDecisions(bot.id, limit)
+        : await storage.getAiTraderDecisions(bot.id, limit);
       res.json({ decisions });
     } catch (err) {
       console.error("[AiTrader] history error:", err);
