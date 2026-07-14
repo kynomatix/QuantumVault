@@ -486,7 +486,20 @@ describe("buildMarketContext (WO-3)", () => {
     expect(result).toEqual({ stale: true, reason: expect.stringContaining("No 15m candle data") });
   });
 
-  it("returns stale:true when the adapter has no live price", async () => {
+  it("returns stale:true when ALL price sources are unavailable (venue null + HL null + candle > tfMs old)", async () => {
+    // Drain all three fallback tiers:
+    //   1. venue → getPrice returns null
+    //   2. HL reference → getHlParticipationSnapshotMock returns null
+    //   3. candle → newest candle age (1_200_000ms=20m) ≥ tfMs (900_000ms=15m)
+    // Candle still passes G9 (1_200_000 ≤ 2*900_000=30m) so the stale-fail
+    // comes from the price fallback chain, not from the G9 gate.
+    getHlParticipationSnapshotMock.mockReset();
+    getHlParticipationSnapshotMock.mockResolvedValue(null);
+    fetchOHLCVMock.mockImplementation((_symbol: string, timeframe: string) => {
+      if (timeframe === "15m") return Promise.resolve(makeCandles(400, 900_000, 1_200_000, 140));
+      if (timeframe === "1h") return Promise.resolve(PARENT_CANDLES_1H);
+      throw new Error(`unexpected timeframe in no-price test: ${timeframe}`);
+    });
     const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
     const result = await buildMarketContext({
       market: "SOL-PERP",
@@ -1235,5 +1248,120 @@ describe("Brick 3, Phase 3B — W/M formation enrichment", () => {
     // Digest stamps null — same convention as no-detection.
     const digest = result.contextDigest as any;
     expect(digest.wmFormation).toBeNull();
+  });
+});
+
+// ─── PRICE-STARVE fix: priority pin + 3-tier fallback chain ───────────────────
+// These tests exercise the changes introduced to fix quota starvation on the
+// analyze path (context-builder.ts).  The global beforeEach already sets up
+// fake timers, default candles (400 × 15m, newest age=60s), and HL/COT/session
+// mocks — each test below only overrides what it needs to differ.
+
+describe("PRICE-STARVE fix — priority + fallback chain", () => {
+  it("passes { priority: 'normal' } to adapter.getPrice on the analyze path", async () => {
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const getPriceSpy = vi.fn().mockResolvedValue(150.1234);
+    const adapter = makeAdapter({ getPrice: getPriceSpy });
+    await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter,
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    // The first positional arg is the symbol; second must be { priority: 'normal' }.
+    expect(getPriceSpy.mock.calls[0]).toEqual(["SOL-PERP", { priority: "normal" }]);
+  });
+
+  it("hl_reference tier: venue null + fresh HL snapshot within ratio band → priceSource='hl_reference', price=HL markPrice, prompt label injected", async () => {
+    // candle close ≈ 158 for SELECTED_CANDLES_15M; markPrice=155 → ratio≈0.98 ∈ [0.5, 2.0] ✓
+    const HL_PRICE_FALLBACK = { ...HL_FIXTURE, markPrice: 155 };
+    getHlParticipationSnapshotMock.mockReset();
+    getHlParticipationSnapshotMock.mockResolvedValue(HL_PRICE_FALLBACK);
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter({ getPrice: vi.fn().mockResolvedValue(null) }),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context");
+    const d = result.contextDigest as any;
+    expect(d.priceSource).toBe("hl_reference");
+    expect(d.price).toBe(155);
+    expect(result.user).toContain("HL reference — venue price unavailable this cycle");
+  });
+
+  it("hl_reference ratio guard: HL markPrice outside [0.5, 2.0] band → rejected → falls to candle tier", async () => {
+    // candle close ≈ 158; HL_FIXTURE.markPrice=78.085 → ratio≈0.494 < 0.5 → guard rejects.
+    // Tier 2 (candle) activates instead: default candles are 60_000ms old < tfMs (900_000ms).
+    getHlParticipationSnapshotMock.mockReset();
+    getHlParticipationSnapshotMock.mockResolvedValue(HL_FIXTURE); // markPrice=78.085
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter({ getPrice: vi.fn().mockResolvedValue(null) }),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context");
+    const d = result.contextDigest as any;
+    // Tier 1 rejected → Tier 2 (candle) → priceSource='candle'
+    expect(d.priceSource).toBe("candle");
+    expect(d.price).toBe(SELECTED_CANDLES_15M[SELECTED_CANDLES_15M.length - 1].close);
+    expect(result.user).toContain("candle close — venue and HL price unavailable this cycle");
+  });
+
+  it("candle tier: venue null + HL null → priceSource='candle', price=newest close, prompt label injected", async () => {
+    getHlParticipationSnapshotMock.mockReset();
+    getHlParticipationSnapshotMock.mockResolvedValue(null);
+    // Default candles are 60_000ms old — well under 1 tfMs (900_000ms).
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter({ getPrice: vi.fn().mockResolvedValue(null) }),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context");
+    const d = result.contextDigest as any;
+    expect(d.priceSource).toBe("candle");
+    expect(d.price).toBe(SELECTED_CANDLES_15M[SELECTED_CANDLES_15M.length - 1].close);
+    expect(result.user).toContain("candle close — venue and HL price unavailable this cycle");
+  });
+
+  it("stale-fail: all sources dry (venue null, HL null, candle > tfMs old) → { stale: true }", async () => {
+    getHlParticipationSnapshotMock.mockReset();
+    getHlParticipationSnapshotMock.mockResolvedValue(null);
+    // lastCandleAgeMs=1_200_000ms (20m): passes G9 (ageMs ≤ 2*900_000=30m)
+    // but fails the candle tier (closeAge ≥ tfMs=900_000ms) → stale-fail.
+    fetchOHLCVMock.mockImplementation((_symbol: string, timeframe: string) => {
+      if (timeframe === "15m") return Promise.resolve(makeCandles(400, 900_000, 1_200_000, 140));
+      if (timeframe === "1h") return Promise.resolve(PARENT_CANDLES_1H);
+      throw new Error(`unexpected timeframe in stale-fail test: ${timeframe}`);
+    });
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter({ getPrice: vi.fn().mockResolvedValue(null) }),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(true);
+    if ("stale" in result) {
+      expect((result as any).reason).toContain("No live price");
+    }
   });
 });

@@ -109,7 +109,7 @@ export interface ProtocolAdapter {
   getCapabilities(): AdapterCapabilities;
 
   getMarkets(): Promise<ProtocolMarket[]>;
-  getPrice(internalSymbol: string): Promise<number | null>;
+  getPrice(internalSymbol: string, opts?: { priority?: 'critical' | 'normal' | 'background' }): Promise<number | null>;
   getAllPrices(): Promise<Record<string, number>>;
   getOrderbook(internalSymbol: string, depth?: number): Promise<OrderbookSnapshot>;
   getFundingRate(internalSymbol: string): Promise<FundingRateInfo>;

@@ -434,9 +434,62 @@ export async function buildMarketContext(
     // enrichment rule: omit line, digest null, decision proceeds
   }
 
-  const price = await adapter.getPrice(market);
+  // WO-8f / PRICE-STARVE: fetch the HL snapshot here — before the venue price
+  // check — so hlSnapshot.markPrice is available as a fallback tier if the
+  // Pacifica /book call is still starved after the priority upgrade above.
+  // hl-context.ts resolves all failure modes to null; the try/catch is
+  // defense-in-depth against future contract changes.
+  let hlSnapshot: HlParticipationSnapshot | null;
+  try {
+    hlSnapshot = await getHlParticipationSnapshot(market);
+  } catch {
+    hlSnapshot = null;
+  }
+
+  // PRICE-STARVE fix: request at 'normal' priority (270-credit cap) so the
+  // analyze cycle is not starved by background dashboard sweeps that compete
+  // for the 162-credit background cap.  If the venue price is still null,
+  // the three-tier fallback resolves a reference price without aborting:
+  //   1. hl_reference — hlSnapshot.markPrice (Hyperliquid, just fetched above)
+  //   2. candle       — newest candle close when age < 1 TF interval
+  //   3. stale-fail   — all sources dry; cycle aborts (G9 semantics preserved)
+  // The paper executor reads markPrice from contextDigest.price automatically.
+  let price = await adapter.getPrice(market, { priority: 'normal' });
+  let priceSource: 'venue' | 'hl_reference' | 'candle' = 'venue';
   if (price === null) {
-    return { stale: true, reason: `No live price available for ${market}` };
+    // Tier 1: HL reference — ratio guard vs newest candle close to reject
+    // unit-scale mismatches (e.g. HL kBONK = 1000× raw BONK → ratio ≈ 1000;
+    // any ratio outside [0.5, 2.0] is almost certainly a scale bug, not basis).
+    const candleClose = indicatorCandles[indicatorCandles.length - 1].close;
+    const hlMark = hlSnapshot?.markPrice;
+    if (hlMark != null && Number.isFinite(hlMark) && hlMark > 0 && candleClose > 0) {
+      const ratio = hlMark / candleClose;
+      if (ratio >= 0.5 && ratio <= 2.0) {
+        price = hlMark;
+        priceSource = 'hl_reference';
+        console.warn(`[ContextBuilder] venue price null for ${market} — using HL markPrice ${hlMark}`);
+      } else {
+        console.warn(
+          `[ContextBuilder] HL markPrice ${hlMark} rejected for ${market}: ratio ${ratio.toFixed(4)} outside [0.5, 2.0] (unit-scale guard)`,
+        );
+      }
+    }
+    // Tier 2: newest candle close when age < 1 TF interval (fallback for both
+    // HL-unavailable and HL-ratio-rejected).
+    if (price === null) {
+      const newest = indicatorCandles[indicatorCandles.length - 1];
+      const closeAge = now - newest.time;
+      if (closeAge < tfMs) {
+        price = newest.close;
+        priceSource = 'candle';
+        console.warn(
+          `[ContextBuilder] venue price null for ${market} — using newest ${timeframe} candle close ${price} (age ${Math.round(closeAge / 1000)}s)`,
+        );
+      } else {
+        // Tier 3: all sources dry → stale-fail (G9 semantics preserved).
+        return { stale: true, reason: `No live price available for ${market}` };
+      }
+    }
   }
 
   // Brick 4, Phase 4B: HTF levels enrichment (enrichment rule — try/catch omits block,
@@ -557,7 +610,7 @@ export async function buildMarketContext(
       ? new Date(fundingInfo.nextFundingTime).toISOString()
       : "unknown";
   const microstateBlock = [
-    `Mark price: ${fmtPrice(price)}`,
+    `Mark price: ${fmtPrice(price)}${priceSource === 'hl_reference' ? ' (HL reference — venue price unavailable this cycle)' : priceSource === 'candle' ? ' (candle close — venue and HL price unavailable this cycle)' : ''}`,
     `Funding rate (Pacifica — this is what your position actually pays): ${(fundingInfo.rate * 100).toFixed(
       4
     )}% (next funding at ${nextFundingLabel})`,
@@ -568,18 +621,10 @@ export async function buildMarketContext(
     ...(cotSnapshot ? [buildCotBiasLine(cotSnapshot)] : []),
   ].join("\n");
 
-  // WO-8f: Hyperliquid participation data (open interest, 24h volume,
-  // funding, mark/oracle premium) as non-load-bearing confirmation context.
-  // hl-context.ts's own contract already resolves every failure mode to
-  // null rather than throwing; the try/catch here is defense-in-depth so a
-  // future change to that contract can never turn "reference data
-  // unavailable" into "decision cycle failed".
-  let hlSnapshot: HlParticipationSnapshot | null;
-  try {
-    hlSnapshot = await getHlParticipationSnapshot(market);
-  } catch {
-    hlSnapshot = null;
-  }
+  // WO-8f / PRICE-STARVE: hlSnapshot was fetched before the venue price check
+  // (see above) so its markPrice can serve as a fallback tier when /book is
+  // quota-starved.  The variable remains in scope for participationBlock and
+  // contextDigest below.
   const participationBlock = hlSnapshot
     ? [
         `Open interest: ${fmtCommaNum(hlSnapshot.openInterest)} ${hlSnapshot.hlSymbol} (Δ ${fmtPct1Signed(
@@ -719,6 +764,7 @@ export async function buildMarketContext(
     timeframe,
     generatedAt: new Date(now).toISOString(),
     price,
+    priceSource,
     fundingRate: fundingInfo.rate,
     nextFundingTime: fundingInfo.nextFundingTime,
     participation: hlSnapshot

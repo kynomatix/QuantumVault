@@ -244,7 +244,7 @@ export class DriftAdapter implements ProtocolAdapter {
     return markets;
   }
 
-  async getPrice(internalSymbol: string): Promise<number | null> {
+  async getPrice(internalSymbol: string, _opts?: { priority?: 'critical' | 'normal' | 'background' }): Promise<number | null> {
     return getMarketPrice(internalSymbol);
   }
 

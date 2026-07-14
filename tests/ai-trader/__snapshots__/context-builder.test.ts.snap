@@ -117,6 +117,7 @@ exports[`buildMarketContext (WO-3) > golden file: builds the full system+user pr
     "volumeTrend": "rising",
   },
   "price": 150.1234,
+  "priceSource": "venue",
   "sessionContext": {
     "session": "london",
     "weekendFlag": false,

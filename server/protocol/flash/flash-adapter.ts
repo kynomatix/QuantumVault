@@ -287,7 +287,7 @@ export class FlashAdapter implements ProtocolAdapter {
 
   // ── Prices ──────────────────────────────────────────────────────────────────
 
-  async getPrice(internalSymbol: string): Promise<number | null> {
+  async getPrice(internalSymbol: string, _opts?: { priority?: 'critical' | 'normal' | 'background' }): Promise<number | null> {
     const cached = getCachedPrice(internalSymbol);
     if (cached !== null) return cached;
 

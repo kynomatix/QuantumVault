@@ -281,10 +281,47 @@ export class PacificaAdapter implements ProtocolAdapter {
     return markets;
   }
 
-  async getPrice(internalSymbol: string): Promise<number | null> {
+  async getPrice(internalSymbol: string, opts?: { priority?: RequestPriority }): Promise<number | null> {
+    const priority = opts?.priority ?? 'background';
+
     const cached = this.priceCache.get(internalSymbol.toUpperCase());
     if (cached && Date.now() - cached.fetchedAt < PRICE_CACHE_TTL_MS) {
       return cached.data;
+    }
+
+    // PRICE-STARVE fix: 'normal' / 'critical' callers (e.g. the analyze cycle)
+    // fetch this one symbol's /book directly at the requested priority so they
+    // are never starved by the background bulk sweep (getAllPrices) that the
+    // dashboard uses and that is capped at 162 credits/min.
+    if (priority !== 'background') {
+      const market = (this.marketCache?.data ?? []).find(
+        (m) => m.internalSymbol.toUpperCase() === internalSymbol.toUpperCase(),
+      );
+      if (!market) return null;
+      try {
+        const book = await this.get('/book', { symbol: market.protocolSymbol, depth: '1' }, { priority });
+        const bids = book?.l?.[0];
+        const asks = book?.l?.[1];
+        const bestBid = bids?.[0]?.p ? parseFloat(bids[0].p) : NaN;
+        const bestAsk = asks?.[0]?.p ? parseFloat(asks[0].p) : NaN;
+        let mid: number;
+        if (!isNaN(bestBid) && !isNaN(bestAsk)) {
+          mid = (bestBid + bestAsk) / 2;
+        } else if (!isNaN(bestBid)) {
+          mid = bestBid;
+        } else if (!isNaN(bestAsk)) {
+          mid = bestAsk;
+        } else {
+          return null;
+        }
+        if (this.priceCache.size >= MAX_PRICE_CACHE_SIZE) {
+          this.evictStalePrices();
+        }
+        this.priceCache.set(internalSymbol.toUpperCase(), { data: mid, fetchedAt: Date.now() });
+        return mid;
+      } catch {
+        return null;
+      }
     }
 
     const prices = await this.getAllPrices();
