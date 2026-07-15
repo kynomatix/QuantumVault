@@ -322,6 +322,33 @@ describe("scanner bot: per-candidate G6 filtering", () => {
     const ctxCall = buildContextMock.mock.calls[0][0];
     expect(ctxCall.market).toBe("ETH-PERP");
   });
+
+  it("stale candidate (>20 min old, e.g. crashed sweep left the old shortlist) → no LLM spend, rescheduled", async () => {
+    armScannerBot();
+    const staleCandidate = makeCandidate({ market: "BTC-PERP", evaluatedAt: Date.now() - 25 * 60_000 });
+    getScannerShortlistMock.mockReturnValue([staleCandidate]);
+
+    const { runAutoCycle } = await importMonitor();
+    await runAutoCycle("bot-scanner-2222");
+
+    expect(buildContextMock).not.toHaveBeenCalled();
+    expect(runDecisionMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+  });
+
+  it("one-boundary-lagged candidate (~14 min old — the normal sweep/cycle race) is still tried", async () => {
+    armScannerBot();
+    const laggedCandidate = makeCandidate({ market: "ETH-PERP", evaluatedAt: Date.now() - 14 * 60_000 });
+    getScannerShortlistMock.mockReturnValue([laggedCandidate]);
+    buildContextMock.mockResolvedValue({ system: "s", user: "u", contextDigest: { price: 3000 } });
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "d-x", clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
+
+    const { runAutoCycle } = await importMonitor();
+    await runAutoCycle("bot-scanner-2222");
+
+    expect(runDecisionMock).toHaveBeenCalledTimes(1);
+    expect(buildContextMock.mock.calls[0][0].market).toBe("ETH-PERP");
+  });
 });
 
 describe("scanner bot: 2-call LLM cap and candidate retry", () => {
@@ -617,5 +644,38 @@ describe("routes: scanner bot creation and PATCH contract", () => {
     const activeStatuses = ["open", "executing", "analyzing", "proposed"];
     expect(activeStatuses.includes("idle")).toBe(false);
     expect(activeStatuses.includes("paused")).toBe(false);
+  });
+
+  it("PATCH merged-state scanner invariant: any resulting scanner+suggest or scanner+autoNext:false is rejected", () => {
+    // Mirrors the routes.ts PATCH guard: the invariant is evaluated on the MERGED
+    // state (body value ?? stored value), so every door into a bricked scanner bot
+    // (one that runAutoCycle never fires for) returns 400 scanner_requires_auto.
+    const violates = (
+      bot: { marketSource: string; mode: string; autoNext: boolean },
+      body: { marketSource?: string; mode?: string; autoNext?: boolean },
+    ) => {
+      const effMarketSource = body.marketSource ?? bot.marketSource;
+      if (effMarketSource !== "scanner") return false;
+      const effMode = body.mode ?? bot.mode;
+      const effAutoNext = body.autoNext ?? bot.autoNext;
+      return effMode !== "auto" || !effAutoNext;
+    };
+
+    const scannerBot = { marketSource: "scanner", mode: "auto", autoNext: true };
+    const suggestBot = { marketSource: "fixed", mode: "suggest", autoNext: false };
+
+    // Door 1: suggest mode onto an existing scanner bot.
+    expect(violates(scannerBot, { mode: "suggest" })).toBe(true);
+    // Door 2: autoNext off onto an existing scanner bot.
+    expect(violates(scannerBot, { autoNext: false })).toBe(true);
+    // Door 3: switching a suggest bot to scanner without also sending mode/autoNext.
+    expect(violates(suggestBot, { marketSource: "scanner" })).toBe(true);
+    // Door 3 fixed: switching with the full auto payload is accepted.
+    expect(violates(suggestBot, { marketSource: "scanner", mode: "auto", autoNext: true })).toBe(false);
+    // Benign PATCHes on scanner bots still pass.
+    expect(violates(scannerBot, {})).toBe(false);
+    expect(violates(scannerBot, { mode: "auto" })).toBe(false);
+    // Scanner→fixed with suggest is fine (plan B2: bot keeps its last pick as a fixed bot).
+    expect(violates(scannerBot, { marketSource: "fixed", mode: "suggest", autoNext: false })).toBe(false);
   });
 });

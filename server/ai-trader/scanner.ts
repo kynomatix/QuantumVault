@@ -470,7 +470,20 @@ async function runSweep(): Promise<void> {
           pendingPromises.push(p);
 
           // ≥150ms stagger between dispatch initiations (spec: sleep after dispatch).
-          await sleep(FETCH_STAGGER_MS);
+          // Only pay it when this dispatch can actually hit the network: a market
+          // whose primary+parent bars are already in the per-sweep cache (or whose
+          // feed is health-skipped) does no fetch, and staggering those burned the
+          // 55s budget at multi-TF boundaries (00:00 UTC: ~400 dispatches × 150ms
+          // ≈ 60s of pure sleep → Pacifica 4h/1d systematically skipped).
+          const staggerTicker = marketToDatafeedTicker(market);
+          const staggerHealth = feedHealthMap.get(staggerTicker);
+          const healthSkipped = !!staggerHealth && Date.now() - staggerHealth.failedAt < FEED_HEALTH_TTL_MS;
+          const fullyCached =
+            candleCache.has(`${staggerTicker}:${tf}`) &&
+            (!parentTf || candleCache.has(`${staggerTicker}:${parentTf}`));
+          if (!healthSkipped && !fullyCached) {
+            await sleep(FETCH_STAGGER_MS);
+          }
         }
 
         // Wait for all in-flight fetches to finish.

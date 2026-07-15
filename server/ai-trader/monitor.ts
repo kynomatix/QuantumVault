@@ -1012,6 +1012,15 @@ export function nextCycleTimeframe(bot: AiTraderBot): string {
   return bot.marketSource === "scanner" ? "15m" : bot.timeframe;
 }
 
+// Max age of a scanner candidate at consumption time. Bot cycles and scanner sweeps
+// both fire at the 15m boundary (+2s), so a bot normally consumes the PREVIOUS
+// boundary's shortlist (~15 min old — fine: context is rebuilt fresh and the LLM
+// re-decides). But if a sweep crashes or stalls, the shortlist keeps its old
+// entries; without this cutoff a bot would burn LLM calls on arbitrarily stale
+// picks (candles stay fresh, so G9 does not catch it). 20 min admits the normal
+// one-boundary lag and rejects anything two or more boundaries old.
+const SCANNER_CANDIDATE_MAX_AGE_MS = 20 * 60_000;
+
 /** Schedule the next decision cycle at the next candle boundary (+2s settle). */
 export function scheduleAutoNext(botId: string, timeframe: string): void {
   const tfMs = TIMEFRAME_MS[timeframe];
@@ -1128,11 +1137,14 @@ export async function runAutoCycle(botId: string): Promise<void> {
 
       // Per-candidate G6: top-level G6 was skipped because bot.timeframe is the stale
       // previous pick / placeholder. Apply G6 to each candidate's own TF.
+      // Freshness: drop candidates older than the one-boundary lag allows (a crashed
+      // sweep leaves the old shortlist in place — never spend LLM calls on it).
       const eligible = shortlist.filter((c) =>
+        Date.now() - c.evaluatedAt <= SCANNER_CANDIDATE_MAX_AGE_MS &&
         checkCooldownAndCaps(c.timeframe, recentClosed, Date.now()).ok
       );
       if (eligible.length === 0) {
-        console.log(`[AiTraderMonitor] scanner: all candidates G6-capped for bot ${bot.id.slice(0, 8)} — rescheduling`);
+        console.log(`[AiTraderMonitor] scanner: all candidates G6-capped or stale for bot ${bot.id.slice(0, 8)} — rescheduling`);
         scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
         return;
       }

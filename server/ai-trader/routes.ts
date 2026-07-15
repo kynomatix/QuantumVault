@@ -679,6 +679,23 @@ export function registerAiTraderRoutes(app: Express): void {
         }
       }
 
+      // Scanner invariant on the MERGED state (mirror of the POST-route rule):
+      // a scanner bot must be auto + autoNext, or runAutoCycle never fires and the
+      // bot silently stops scanning. POST enforces this at creation; without this
+      // check PATCH was a second door (e.g. mode:'suggest' on a scanner bot, or
+      // marketSource:'scanner' on a suggest bot) that bricked the bot with no error.
+      const effMarketSource = body.marketSource ?? bot.marketSource;
+      if (effMarketSource === "scanner") {
+        const effMode = body.mode ?? bot.mode;
+        const effAutoNext = body.autoNext ?? bot.autoNext;
+        if (effMode !== "auto" || !effAutoNext) {
+          return res.status(400).json({
+            error: "scanner_requires_auto",
+            detail: "Scanner bots must stay in auto mode with auto-next enabled. Send mode:'auto' and autoNext:true, or switch marketSource to 'fixed' first.",
+          });
+        }
+      }
+
       const updates: Record<string, unknown> = {};
       if (body.mode !== undefined) updates.mode = body.mode;
       if (body.riskProfile !== undefined) updates.riskProfile = body.riskProfile;
