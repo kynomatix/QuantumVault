@@ -7,9 +7,9 @@
 
 ---
 
-## 1. Product framing
+## Background (read once; facts are re-stated per WO)
 
-Two complementary ways to use the AI Trader, chosen at bot setup:
+**Product framing.** Two complementary ways to use the AI Trader, chosen at bot setup:
 
 - **Market Scanner** (NEW): "get into a trade ASAP." The bot scans EVERY tradable market on its
   exchange across all four decision timeframes (15m/1h/4h/1d), a cheap deterministic pre-filter
@@ -25,9 +25,7 @@ Exchange selection stays first-class: each exchange has its own ticker set, so t
 (`server/ai-trader/routes.ts` ~line 1002 rejects non-Pacifica with 501). A Flash scanner bot is
 therefore **paper-only** until Flash live support ships. UI copy must not promise live Flash.
 
----
-
-## 2. Feasibility summary (probes 2026-07-14, re-confirmed 2026-07-15)
+**Feasibility summary (probes 2026-07-14, re-confirmed 2026-07-15):**
 
 - AI trader candles come ONLY from the free lab datafeed: `server/ai-trader/context-builder.ts`
   imports `fetchOHLCV` from `server/lab/datafeed.ts` (OKX → Gate → Pyth Benchmarks public REST,
@@ -40,7 +38,7 @@ therefore **paper-only** until Flash live support ships. UI copy must not promis
   but missing a `NON_CRYPTO_PYTH_MAP` entry — one-line fix, belongs to WO-0.
 - **Feed-dead set** (no OKX/Gate/Pyth source): SPCX (re-confirmed dead 2026-07-15: "Symbol SPCX
   doesn't exist"), SKHYNIX, SAMSUNG, URNM, COPPER, BP, NATGAS (deliberately absent from
-  `NON_CRYPTO_PYTH_MAP` — datafeed.ts comment ~line 80: Pyth has no natural-gas history feed).
+  `NON_CRYPTO_PYTH_MAP` — `datafeed.ts` comment ~line 80: Pyth has no natural-gas history feed).
 - CL/CRUDEOIL held out too: candle HISTORY works (`CRUDEOIL → USOILSPOT` mapping exists) but the
   live on-chain price path is broken (no Pyth shard-0 account) — a scanner must never pick a
   market the executor can't price.
@@ -52,71 +50,12 @@ therefore **paper-only** until Flash live support ships. UI copy must not promis
 - Side finding (pre-existing bug, out of scope): fixed-ticker bots on feed-dead markets (e.g.
   SPCX) are broken TODAY — `buildMarketContext` returns `stale: true` forever, the bot just
   reschedules each boundary. `/api/exchange/markets` does no feed-health filtering (verified:
-  `server/routes.ts` ~20331 only adds risk tiers). WO-0's audit output is the input to fixing
-  this separately.
+  `server/routes.ts` ~line 20331 only adds risk tiers). WO-0's audit output is the input to
+  fixing this separately.
 
 ---
 
-## 3. Verified codebase facts (re-verified 2026-07-15 — build on these)
-
-- **Candles:** `fetchOHLCV(symbol, timeframe, startDate, endDate, onProgress?, options?)` —
-  note `startDate`/`endDate` are ISO **strings**, not ms. Negative caches inside datafeed
-  (`okxFailedInstruments`, `gateFailedPairs`, `pythFailedSymbols`, 30-min TTL).
-- **Venue-symbol → datafeed-ticker mapping:** `marketToDatafeedTicker(market)` — already
-  **exported** from `server/ai-trader/context-builder.ts` (strips `-PERP`, appends `/USDT`;
-  datafeed then maps non-crypto bases via `NON_CRYPTO_PYTH_MAP`). Reuse it; do NOT invent a new
-  mapping.
-- **Venue universes:** Flash = `getFlashMarketSpecs()` (`server/protocol/flash/flash-markets.ts`
-  line 165, PoolConfig-driven with static fallback). Pacifica = adapter `getMarkets()`. The
-  exchange-aware REST list is `getAllPerpMarketsForExchange(exchange, forceRefresh)`
-  (`server/market-liquidity-service.ts` line 92), used by `GET /api/exchange/markets?exchange=`.
-- **Bot ⇄ venue:** `ai_trader_bots.protocol` + `getAdapter(bot.protocol)` (monitor uses
-  `getAdapter`, not `getAdapterForBot`).
-- **Schema:** `ai_trader_bots` (`shared/schema.ts` ~1990): `market text NOT NULL`, `timeframe
-  text NOT NULL`, `mode`, `paperMode`, `autoNext`, `status`, `riskProfile`, `sizingMode`,
-  `policyHmac`, ... `ai_trader_decisions` (~2064) has **NO market/timeframe columns** — the
-  per-decision market/TF live inside the `context_digest` jsonb (context-builder stamps
-  `market` + `timeframe` into `contextDigest`, lines 762-764).
-- **Auto flow:** `scheduleAutoNext(botId, timeframe)` (monitor.ts 1004; boundary =
-  `(floor(now/tfMs)+1)*tfMs + 2s`, timer unref'd) → `runAutoCycle(botId)` (1028) which:
-  re-reads the bot fresh; gates on `status==='idle' && mode==='auto' && autoNext`; runs G6
-  `checkCooldownAndCaps(bot.timeframe, recentClosed, now)` + malfunction ceiling BEFORE any LLM
-  spend; restores session UMK (pauses `reauth_required` if unrestorable); decrypts the BYO LLM
-  key; sets `status:'analyzing'`; `buildMarketContext({market: bot.market, timeframe:
-  bot.timeframe, adapter, bot, recentDecisions, agentPublicKey})`; `runDecision` →
-  `executeDecision`.
-- **G6:** `checkCooldownAndCaps` lives in `server/ai-trader/executor.ts` (line 106), caps LTF
-  6/day, HTF 2/day; `executeDecision` re-checks it internally (line ~186). **CAUTION:
-  `executeDecision` NEVER re-reads the bot from the DB** — it destructures the `bot` object it
-  is PASSED (executor.ts 150), and `runAutoCycle` passes its in-memory copy
-  (`bot: { ...bot, status: 'analyzing' }`, monitor.ts ~1126). Every downstream gate (G6, G15,
-  order placement on `bot.market`) therefore sees whatever object the caller hands it.
-- **G15 policy HMAC (CRITICAL for this feature):** `aiTraderPolicyObject(bot)` =
-  `{market, leverage: maxLeverage, maxPositionSize: allocatedUsdc}` (executor.ts 64).
-  `executeDecision` verifies `verifyBotPolicyHmac(umk, aiTraderPolicyObject(bot),
-  bot.policyHmac)` (line 278) and on mismatch pauses the bot (`policy_hmac_mismatch`) and sends
-  nothing. **Any code that changes `bot.market` MUST recompute `policyHmac` with
-  `computeBotPolicyHmac` (`server/session-v3.ts` 1200) in the same update, using the wallet's
-  UMK.** `runAutoCycle` already holds the UMK at that point.
-- **Entry-gate primitives (reuse, do NOT re-implement):** `detectWM(bars, options?)`
-  (`wm-detector.ts`; `NECKLINE_WINDOW = 0.005` — actionable = within 0.5% of neckline),
-  `detectPivots` + `classifyDow` (`dow-structure.ts`), `getSessionContext(now)`
-  (`session-context.ts`), G9 staleness (newest candle < 2 intervals old).
-- **Routes:** `POST /api/ai-trader` (routes.ts 247) validates `market` via `getMarketInfo`
-  (global market-registry cache) and `timeframe` via zod enum; computes `policyHmac` at creation
-  (line 294). `PATCH /api/ai-trader/:id` (line 520) — current patchable fields: `mode`,
-  `riskProfile`, `autoNext`, `degenConfirm`, `model`, `sizingMode`, `riskMinPct`, `riskMaxPct`.
-  **No market/marketSource in the patch schema today.**
-- **UI:** `client/src/components/CreateAiTraderModal.tsx` — exchange Select from
-  `SELECTABLE_PROTOCOLS`, market list refetched from `/api/exchange/markets?exchange=` on
-  protocol change, timeframe Select, mode `'suggest' | 'auto'` (default `'suggest'`), model
-  picker whose default follows timeframe.
-- **Monitor startup:** `startAiTraderMonitor()` (monitor.ts 1434) is a singleton; `startScanner()`
-  wires in alongside it. `stopAiTraderMonitor()` must gain a matching `stopScanner()` for tests.
-
----
-
-## 4. Progression gates (do not soften)
+## Progression gates (do not soften)
 
 Each gate is a hard STOP: finish the WO, post the gate evidence, and END THE TASK. The next WO
 is a separate task the owner dispatches after reviewing — never continue past a gate in the same
@@ -130,234 +69,493 @@ session.
 
 ---
 
-## 5. WO-0: Feed audit script (first, tiny)
+## WO-0 — Feed audit script
 
-- `scripts/scanner-feed-audit.mjs`: enumerate both venue universes (`getFlashMarketSpecs()`,
-  Pacifica adapter `getMarkets()`), map each via `marketToDatafeedTicker`, attempt a 10-bar 1h
-  `fetchOHLCV` (ISO string dates), print per-market: venue symbol → datafeed ticker → serving
-  source (okx/gate/pyth) or DEAD. Flag "shim-has-it, map-doesn't" cases by probing Pyth search
-  for dead non-crypto symbols (rate-limit: ~6 rapid calls trigger 429 — sleep ≥2s between).
-- Add `MSTR: "MSTR"` to `NON_CRYPTO_PYTH_MAP` (verified working upstream 2026-07-14 and -15).
-- Output pasted into the task summary = Gate 1 evidence.
+MODE: Economy · High-Effort
 
-**Acceptance WO-0:** script runs clean against both venues; table matches §2's feed-dead set (or
-documents drift); MSTR fetches via Pyth.
+**WORK ORDER 0 — Enumerate live datafeed coverage and patch the MSTR map entry**
 
----
+**GOAL:** Produce a complete, per-market feed-health table for both venue universes (Flash +
+Pacifica), confirm the feed-dead set from the feasibility probe, and add the one-line MSTR fix
+so the table is accurate at run time.
 
-## 6. WO-A: Scanner core (shadow mode — no trading, no schema, no UI)
+**CONTEXT (verified against live code):**
 
-### A1. New file `server/ai-trader/scanner.ts`
-- Export `startScanner()` / `stopScanner()` (wired next to `startAiTraderMonitor` /
-  `stopAiTraderMonitor`) and `getScannerShortlist(protocol: string): ScannerCandidate[]`.
-- **Scheduling:** single global timer aligned to 15m boundaries + 2s settle (same math as
-  `scheduleAutoNext`; timer unref'd). At each firing compute the boundary TFs: 15m always; 1h if
-  `minute === 0`; 4h if `hour % 4 === 0 && minute === 0`; 1d if `hour === 0 && minute === 0`
-  (UTC). Scan exactly those TFs.
-- **Implementation specifics (pinned so they aren't invented ad hoc):**
-  - All caches are plain in-memory `Map<key, { data, expiresAt }>` checked on read — the
-    codebase's bounded-cache convention. No new dependencies (`p-limit`, `node-cache`, etc.).
-  - Concurrency = manual semaphore: max 3 fetches in flight, ≥150ms between fetch *initiations*.
-  - Sweep budget: if a sweep passes 55s, abort the remaining markets, log
-    `[Scanner] TIMEOUT: {n} markets skipped`, and publish the candidates found so far.
-  - Telemetry ring buffer = plain array with `push` + `slice(-200)`; in-memory only, resets on
-    restart.
-  - `SCANNER_FEED_EXCLUDE` is a module-top `const Set` — edit-and-redeploy, no runtime config
-    in v1.
-- **Universe build** (cached 1h, per protocol):
-  - Flash: `getFlashMarketSpecs()`. Pacifica: adapter `getMarkets()`.
-  - Datafeed ticker via `marketToDatafeedTicker` — candles are shared per base across venues
-    (fetch once even if both venues list the base).
-  - Subtract `SCANNER_FEED_EXCLUDE: Set<string>` — seed `{ NATGAS-PERP, CL-PERP, CRUDEOIL-PERP,
-    SPCX-PERP, SKHYNIX-PERP, SAMSUNG-PERP, URNM-PERP, COPPER-PERP, BP-PERP }` (whichever of
-    these each venue actually lists). Comment: owner-confirmed broken feeds; re-verify with a
-    curl against the Pyth shim before ever removing an entry.
-  - Subtract markets whose last `fetchOHLCV` attempt returned empty/error (runtime feed-health
-    map, 30-min TTL — mirrors datafeed's negative caches). Closed-market equities/FX naturally
-    drop out via staleness below — that is CORRECT (e.g. AMZN outside NYSE hours).
-- **Per market × boundary-TF evaluation** — pure function
-  `evaluateCandidate(bars, parentBars, tf, now): ScannerCandidate | null`, exported for tests:
-  1. Fetch via existing `fetchOHLCV` (through candle-store cache): 400 bars primary TF + 400
-     bars parent TF (parent map: 15m→1h, 1h→4h, 4h→1d, 1d→none — same as context-builder).
-  2. G9 staleness: newest candle age < 2 × tfMs, else reject.
-  3. `detectWM(bars)`: require an actionable pattern (within `NECKLINE_WINDOW` of neckline). No
-     actionable W/M → reject. v1 pins W/M as the sole setup trigger.
-  4. `detectPivots` + `classifyDow` on parent TF: reject if parent trend OPPOSES the setup
-     direction (W-bottom long vs parent LH/LL downtrend → reject; neutral/unclassified → allow
-     with score penalty).
-  5. `getSessionContext(now)`: thin-liquidity window → score penalty (not a hard reject; the LLM
-     + guardrails still see session context downstream).
-  6. Score (deterministic, unit-tested):
-     `100 − necklineDistancePct×40 + (parentAligned ? 20 : 0) − (thinSession ? 10 : 0)`.
-     Weight rationale (comment it in code): distance dominates within the 0.5% actionable
-     window (max −20); parent alignment is the strong secondary signal (+20); session is a
-     minor penalty (−10). Do not "tune" these in v1 — they only rank an already-qualified
-     shortlist.
-- **Output:** per protocol, ranked `ScannerCandidate { protocol, market, timeframe, direction,
-  setup: 'W'|'M', score, necklineDistancePct, parentTrend, evaluatedAt }`. Keep top **K=3 per
-  protocol per boundary**. Bounded state only: a `Map<protocol, ScannerCandidate[]>` replaced
-  wholesale each boundary + a fixed 200-entry ring buffer of past shortlists for telemetry.
-- **Pacing:** concurrency 3 + 150ms stagger; full sweep must complete < 60s. One log line per
-  boundary: `[Scanner] pacifica 15m: 69 scanned, 61 fresh, 2 candidates (X-PERP W 97, Y-PERP M 84) in 12.3s`.
+- **`fetchOHLCV(symbol, timeframe, startDate, endDate, onProgress?, options?)`** — imported by
+  `context-builder.ts` from `server/lab/datafeed.ts`. `startDate`/`endDate` are ISO **strings**,
+  not ms. Negative caches inside datafeed: `okxFailedInstruments`, `gateFailedPairs`,
+  `pythFailedSymbols` (30-min TTL).
+- **`marketToDatafeedTicker(market)`** — exported from `server/ai-trader/context-builder.ts`
+  (line 112, drift-prone). Strips `-PERP`, appends `/USDT`; datafeed then routes non-crypto
+  bases via `NON_CRYPTO_PYTH_MAP`. Reuse it; do NOT invent a new mapping.
+- **`NON_CRYPTO_PYTH_MAP`** — module-top `const Record` in `server/lab/datafeed.ts` (line 62,
+  drift-prone). Contains EURUSD, USDJPY, XAU, XAG, PLATINUM and others. **MSTR is confirmed
+  working on Pyth but is absent from this map** — the one missing entry.
+- **Flash venue universe:** `getFlashMarketSpecs()` from
+  `server/protocol/flash/flash-markets.ts` (line 165, drift-prone; PoolConfig-driven with
+  static fallback).
+- **Pacifica venue universe:** adapter `getMarkets()` via
+  `getAllPerpMarketsForExchange(exchange, forceRefresh)` from
+  `server/market-liquidity-service.ts` (line 92, drift-prone), used by
+  `GET /api/exchange/markets?exchange=`.
+- **Feed-dead set (verified 2026-07-15):** SPCX, SKHYNIX, SAMSUNG, URNM, COPPER, BP, NATGAS
+  (no feed), CL/CRUDEOIL (history works but live on-chain price path broken — no Pyth shard-0
+  account; must never be picked by the scanner).
+- **Pyth rate limit:** ~6 rapid probes trigger 429 — sleep ≥ 2s between non-crypto symbol
+  searches.
 
-### A2. Telemetry endpoint
-- `GET /api/ai-trader/scanner/status` (wallet-authed like sibling routes): current shortlist per
-  protocol + last-boundary stats (sweep started/finished timestamps, duration, markets scanned /
-  fresh / skipped-by-timeout, error count) + exclusion list. Read-only; later feeds the UI
-  ("Scanning N markets…") and is the primary Gate 2 shadow-mode evidence.
-- Feed-dead recovery path: no cron. To re-admit an excluded market, re-run
-  `scripts/scanner-feed-audit.mjs` (WO-0) and remove the entry only on a passing probe.
+**BUILD:**
 
-### A3. Tests `tests/ai-trader/scanner.test.ts`
-- Boundary-TF math: table-driven (21:15→[15m]; 22:00→[15m,1h]; 00:00 UTC→all four).
-- `evaluateCandidate` on synthetic fixtures (reuse the large-ATR warmup trick from the W/M test
-  fixtures): actionable W → long candidate; actionable M + parent downtrend → short with
-  alignment bonus; W against parent downtrend → rejected; stale candles → rejected; no W/M →
-  rejected.
-- Scoring determinism + rank order; K=3 cap. Excluded symbols never evaluated (spy on fetchOHLCV).
+1. Create `scripts/scanner-feed-audit.mjs`. Enumerate both venue universes
+   (`getFlashMarketSpecs()` for Flash; `getAllPerpMarketsForExchange('pacifica')` or adapter
+   `getMarkets()` for Pacifica). Map each market through `marketToDatafeedTicker`. Attempt a
+   10-bar 1h `fetchOHLCV` (ISO string dates). Print one row per market:
+   `venue symbol → datafeed ticker → serving source (okx/gate/pyth) or DEAD`.
+2. Flag "shim-has-it, map-doesn't" cases: for any dead non-crypto symbol, probe the Pyth search
+   endpoint to check whether a shim feed exists (sleep ≥ 2s between probes). Print these
+   separately with a `SHIM_AVAILABLE` tag.
+3. Add `MSTR: "MSTR"` to `NON_CRYPTO_PYTH_MAP` in `server/lab/datafeed.ts`. (Verified working
+   on Pyth 2026-07-14 and -15; this is the only missing entry.)
+4. Run the script; paste the full output into the task summary. That output is Gate 1 evidence.
 
-**Acceptance WO-A:** scanner runs in dev, logs shortlists at boundaries, `/scanner/status`
-returns data, zero venue credits consumed, new tests pass, existing 578 ai-trader tests
-untouched and passing.
+**DO NOT TOUCH:**
+
+- No other file in `server/ai-trader/` — this WO touches only `scripts/` and `server/lab/datafeed.ts`.
+- Do not modify the negative-cache TTLs or datafeed routing logic.
+- OG image assets, og-image-v3.jpg, client/index.html OG tags — never touch.
+
+**TESTS:**
+
+- Manual: script exits 0; output table contains at least one DEAD row matching the known
+  feed-dead set; MSTR row shows `pyth` as source; no 429 errors in output.
+- Automated: no new test file required for this WO (the script is a one-shot audit tool).
+
+**ACCEPT:** Script runs clean against both venues; table matches the feed-dead set in the
+Background section above (or documents drift with explanation); MSTR fetches via Pyth.
+Post the complete script output as Gate 1 evidence.
+ARCHITECT REVIEW (executed, verdict quoted), then STOP and report the complete VERBATIM DIFF +
+all test output.
 
 ---
 
-## 7. WO-B: Scanner bot mode (schema + routes + monitor wiring)
+## WO-A — Scanner core (shadow mode)
 
-### B1. Schema (additive only)
-- `ai_trader_bots.market_source text NOT NULL DEFAULT 'fixed'` (`'fixed' | 'scanner'`), applied
-  via idempotent `ensureSchema` DDL in `server/db.ts` (`ADD COLUMN IF NOT EXISTS`, one statement
-  per try/catch — existing pattern). **Never blind-confirm `db:push`** (known column-drop drift).
-  Rollback is trivial and safe: `ALTER TABLE ai_trader_bots DROP COLUMN market_source` — every
-  reader treats a missing/default value as `'fixed'`, i.e. today's behavior.
-- No other schema change. Scanner bots keep `market`/`timeframe` NOT NULL: at creation the
-  placeholder is `SOL-PERP`/`15m` (SOL-PERP passes the `getMarketInfo` creation check on both
-  venues); after each pick the chosen market/TF are WRITTEN onto the bot row before the decision
-  runs, so every downstream reader (monitor 15s loop, executor, UI position card) works
-  unmodified.
+MODE: Economy · High-Effort
 
-### B2. Create/patch routes (`server/ai-trader/routes.ts`)
-- `POST /api/ai-trader`: accept `marketSource` (zod enum, default `'fixed'`). If `'scanner'`:
-  `market`/`timeframe` optional in the request (server fills placeholders); force
-  `mode: 'auto'` + `autoNext: true`; reject `mode: 'suggest'` with 400 `scanner_requires_auto`.
-  `policyHmac` is computed at creation over the PLACEHOLDER market — that is fine because every
-  scanner pick recomputes it (B3.3).
-- `PATCH /api/ai-trader/:id`: **add `marketSource` to the patch schema** (it does not exist
-  there today). Reject the change while `status` is `open`/`executing`/`analyzing`/`proposed`
-  (400 `cannot_switch_market_source_with_position`); allow fixed↔scanner when flat.
-  Switching scanner→fixed keeps the bot's current `market`/`timeframe` (the last pick or the
-  placeholder — always a valid market with a matching policyHmac). Do NOT add `market` to the
-  PATCH schema in v1: patching market would drag the policyHmac-recompute surface into PATCH
-  for no product need — the user can recreate the bot to change ticker, exactly as today.
+**WORK ORDER A — Build the scanner engine: sweep, filter, score — no bot wiring, no schema, no UI**
 
-### B3. Monitor wiring (`server/ai-trader/monitor.ts` — `runAutoCycle`)
-For `bot.marketSource === 'scanner'` (bot is flat by construction — `status==='idle'` gate):
-  1. **Skip the top-level G6 check** for scanner bots — it runs on `bot.timeframe`, which is the
-     PREVIOUS pick / placeholder, not the candidate TF. (The malfunction ceiling stays global
-     and unchanged.) Instead:
-  2. `getScannerShortlist(bot.protocol)`; if empty → `scheduleAutoNext(botId, '15m')`, return
-     (zero LLM spend).
-  3. Iterate candidates in rank order, skipping any whose `checkCooldownAndCaps(candidate.timeframe,
-     recentClosed, now)` fails (per-candidate G6). No eligible candidate → reschedule 15m, return.
-  4. Persist the pick in ONE update BEFORE building context:
-     `{ market, timeframe, policyHmac: computeBotPolicyHmac(umk, aiTraderPolicyObject({market:
-     candidate.market, maxLeverage: bot.maxLeverage, allocatedUsdc: bot.allocatedUsdc})) }`.
-     **This HMAC recompute is mandatory** — G15 binds `market`, and `executeDecision` pauses the
-     bot on mismatch (verified executor.ts 278). The UMK is already resolved at this point in
-     `runAutoCycle`; order the scanner branch AFTER the UMK/LLM-key section so the key is in
-     hand.
-     **MONEY-SAFETY — refresh the in-memory bot after the persist (architect-flagged):**
-     `executeDecision` does NOT re-read the bot row; it uses the object it is passed (executor.ts
-     150; `runAutoCycle` passes its local copy at ~1126). If the pick is persisted but the STALE
-     local `bot` keeps flowing, G15 still verifies (old market + old HMAC are self-consistent),
-     G6 runs on the old TF, and the order is placed on the OLD market while the decision was
-     built for the candidate — a wrong-market live trade that no gate catches. Therefore: after
-     the pick-persist update, spread the new values onto the local object
-     (`bot = { ...bot, market, timeframe, policyHmac }` — or re-read the row) and pass THAT to
-     `buildMarketContext`, `runDecision`, AND `executeDecision`. B4 pins this with a test.
-     `executeDecision`'s own G6 re-check then runs on the refreshed object's candidate TF —
-     defense in depth, no changes there.
-  5. Build context on the picked market/TF through the UNCHANGED chain. Inject one extra digest
-     line via a new optional `scannerNote?: string` on `BuildMarketContextInput`:
-     `Scanner: selected from {N}-market sweep — {setup} setup, neckline {d}% away, parent {trend}`.
-     Nothing else in context-builder changes.
-  6. If the LLM passes (no-trade) and candidate #2 exists with score ≥ 70: one retry with
-     candidate #2. **Hard cap: 2 LLM calls per boundary per scanner bot.** A FAILED call
-     (timeout / non-2xx) counts against the cap; never retry the same candidate — move to
-     candidate #2 if the cap allows, else reschedule.
-  7. Open position → scanner logic skipped entirely (existing `status` gate already ensures
-     this); the 15s loop monitors `bot.market` as today.
-- Scheduling: scanner bots ALWAYS `scheduleAutoNext(botId, '15m')` (they piggyback every 15m
-  boundary; the shortlist already encodes which TFs fired). All existing reschedule sites that
-  use `bot.timeframe` must route through a helper `nextCycleTimeframe(bot)` returning `'15m'`
-  for scanner bots — otherwise a 1d pick would sleep the bot for a day. Verified call sites
-  today (monitor.ts, **7 total**): ~426 (after position close), ~1045 (G6 fail), ~1058 (no
+**GOAL:** A standalone scanner module runs at every 15m boundary, sweeps all tradable markets
+on both venues through the datafeed cache, applies the W/M + Dow filter + scoring, exposes a
+`getScannerShortlist()` function and a `/api/ai-trader/scanner/status` telemetry endpoint. Zero
+LLM calls, zero venue credits. Gate 2 shadow monitoring runs against this WO alone.
+
+**CONTEXT (verified against live code):**
+
+- **`fetchOHLCV(symbol, timeframe, startDate, endDate, onProgress?, options?)`** — from
+  `server/lab/datafeed.ts`. `startDate`/`endDate` are ISO **strings**, not ms. Negative caches
+  (`okxFailedInstruments`, `gateFailedPairs`, `pythFailedSymbols`, 30-min TTL) mean dead feeds
+  return early without an HTTP call.
+- **`marketToDatafeedTicker(market)`** — exported from `server/ai-trader/context-builder.ts`
+  (line 112, drift-prone). Reuse it; candles are shared per base across venues (fetch once even
+  if both venues list the same base).
+- **Flash universe:** `getFlashMarketSpecs()` from `server/protocol/flash/flash-markets.ts`
+  (line 165, drift-prone). **Pacifica universe:** adapter `getMarkets()`.
+- **Entry-gate primitives (reuse, do NOT re-implement):**
+  - `detectWM(bars, options?)` from `wm-detector.ts` — `NECKLINE_WINDOW = 0.005` means
+    "actionable" = within 0.5% of neckline.
+  - `detectPivots` + `classifyDow` from `dow-structure.ts` — used on the parent-TF bars.
+  - `getSessionContext(now)` from `session-context.ts` — thin-liquidity window detection.
+  - G9 staleness rule: newest candle age < 2 × tfMs; feeds the staleness reject step.
+- **Monitor wiring anchors:** `startAiTraderMonitor()` (monitor.ts line 1434, drift-prone) and
+  `stopAiTraderMonitor()` (line 1468, drift-prone) are the singleton lifecycle hooks.
+  `startScanner()` wires in alongside them. `stopAiTraderMonitor()` must gain a matching
+  `stopScanner()` so tests can cleanly tear down.
+- **Cost invariants for this WO:** scanner sweep makes ZERO LLM calls and ZERO venue-credit
+  calls. All candle data flows through the shared lab datafeed (OKX → Gate → Pyth Benchmarks
+  public REST). Pacifica's 300 credits/60s budget is untouched.
+- **Feed-dead seed:** the following markets must be in `SCANNER_FEED_EXCLUDE` from day one —
+  `{ NATGAS-PERP, CL-PERP, CRUDEOIL-PERP, SPCX-PERP, SKHYNIX-PERP, SAMSUNG-PERP, URNM-PERP,
+  COPPER-PERP, BP-PERP }` (whichever of these each venue actually lists). These are
+  owner-confirmed broken feeds; re-verify with a curl against the Pyth shim before ever
+  removing an entry.
+- **Memory rules:** all scanner state must be bounded. No unbounded collections; no new
+  third-party dependencies (`p-limit`, `node-cache`, etc.).
+
+**BUILD:**
+
+1. **New file `server/ai-trader/scanner.ts`.** Export:
+   - `startScanner()` / `stopScanner()` — call `startScanner()` next to `startAiTraderMonitor()`
+     in the server startup path; call `stopScanner()` next to `stopAiTraderMonitor()` in tests
+     and shutdown.
+   - `getScannerShortlist(protocol: string): ScannerCandidate[]` — returns the current ranked
+     shortlist for the given protocol (empty array if no boundary has fired yet).
+   - `ScannerCandidate` interface:
+     `{ protocol, market, timeframe, direction: 'long'|'short', setup: 'W'|'M', score: number,
+      necklineDistancePct: number, parentTrend: string, evaluatedAt: number }`.
+
+2. **Scheduling.** Single global timer aligned to 15m UTC boundaries + 2s settle (same math as
+   `scheduleAutoNext`: `delay = (floor(now/tfMs)+1)*tfMs − now + 2000`; timer must be `unref()`d
+   so it does not hold the process). At each firing, derive the boundary TFs:
+   - 15m: always.
+   - 1h: if `minute === 0`.
+   - 4h: if `hour % 4 === 0 && minute === 0`.
+   - 1d: if `hour === 0 && minute === 0` (UTC).
+   Scan exactly those TFs.
+
+3. **Universe build** (cached 1h per protocol, in-memory `Map<protocol, { data, expiresAt }>`):
+   - Flash: call `getFlashMarketSpecs()`. Pacifica: call adapter `getMarkets()`.
+   - Map each market through `marketToDatafeedTicker` to get the datafeed ticker. Deduplicate
+     by datafeed ticker so shared bases (same base, listed on both venues) fetch candles once.
+   - Subtract `SCANNER_FEED_EXCLUDE` — a module-top `const Set<string>`. Seed it with the
+     feed-dead set listed in CONTEXT. Comment: owner-confirmed broken; re-verify via the WO-0
+     audit script before removing any entry. Edit-and-redeploy; no runtime config in v1.
+   - Subtract markets whose last `fetchOHLCV` attempt returned empty/error: track in a
+     runtime feed-health map (`Map<ticker, { failedAt: number }>`) with 30-min TTL, mirroring
+     datafeed's own negative caches. Closed-market equities/FX naturally drop out via the G9
+     staleness check below — that is CORRECT (e.g. AMZN outside NYSE hours); do not exclude them
+     statically.
+
+4. **`evaluateCandidate(bars, parentBars, tf, now): ScannerCandidate | null`** — pure function,
+   exported for tests. Steps in order:
+   1. Fetch via `fetchOHLCV` (through candle-store cache): 400 bars at the primary TF + 400 bars
+      at the parent TF. Parent map: 15m→1h, 1h→4h, 4h→1d, 1d→none (same as context-builder).
+   2. G9 staleness: newest candle age < 2 × tfMs, else return null.
+   3. `detectWM(bars)`: require an actionable pattern (within `NECKLINE_WINDOW` of neckline).
+      No actionable W/M → return null. v1 pins W/M as the sole setup trigger.
+   4. `detectPivots` + `classifyDow` on parent-TF bars. Reject if parent trend OPPOSES setup
+      direction (W-bottom → long vs. parent LH/LL downtrend → reject; neutral/unclassified →
+      allow with score penalty).
+   5. `getSessionContext(now)`: thin-liquidity window → score penalty (not a hard reject; the
+      LLM + guardrails still see session context downstream).
+   6. Score (deterministic — do not tune in v1):
+      `score = 100 − necklineDistancePct×40 + (parentAligned ? 20 : 0) − (thinSession ? 10 : 0)`.
+      Comment the rationale in code: distance dominates within the 0.5% actionable window
+      (max −20); parent alignment is the strong secondary signal (+20); session is a minor
+      penalty (−10). These weights only rank an already-qualified shortlist.
+
+5. **Sweep orchestration.** For each boundary firing:
+   - Concurrency = manual semaphore: max 3 `fetchOHLCV` calls in flight, ≥ 150ms between fetch
+     initiations (a `sleep(150)` after each dispatch, not after completion).
+   - Sweep budget: if the sweep passes 55s, abort remaining markets, log
+     `[Scanner] TIMEOUT: {n} markets skipped`, and publish the candidates found so far.
+   - Keep top K=3 candidates per protocol per boundary (ranked by score descending). Replace the
+     shortlist map wholesale each boundary:
+     `Map<protocol, ScannerCandidate[]>` — bounded, no unbounded growth.
+   - Append to a telemetry ring buffer: plain array, `push` + `slice(-200)`, in-memory only,
+     resets on restart.
+   - Emit one log line per protocol per boundary:
+     `[Scanner] pacifica 15m: 69 scanned, 61 fresh, 2 candidates (X-PERP W 97, Y-PERP M 84) in 12.3s`.
+
+6. **`GET /api/ai-trader/scanner/status`** (wallet-authed, same middleware as sibling
+   `/api/ai-trader` routes). Response: current shortlist per protocol + last-boundary stats
+   (sweep started/finished timestamps, duration ms, markets scanned / fresh / skipped-by-timeout,
+   error count) + the current `SCANNER_FEED_EXCLUDE` set as an array. Read-only. This endpoint
+   is the primary Gate 2 shadow-mode evidence source, and later feeds the setup UI.
+   - Feed-dead recovery: no cron. To re-admit an excluded market, re-run
+     `scripts/scanner-feed-audit.mjs` (WO-0) and remove the entry only on a passing probe.
+
+7. Wire `startScanner()` into server startup next to `startAiTraderMonitor()`. Wire
+   `stopScanner()` next to `stopAiTraderMonitor()` in all test teardown paths.
+
+**DO NOT TOUCH:**
+
+- `server/ai-trader/monitor.ts` — no bot wiring in this WO.
+- `server/ai-trader/executor.ts`, `server/ai-trader/guardrails.ts` — zero diffs.
+- `shared/schema.ts` — no schema changes in this WO.
+- `client/` — no UI changes in this WO.
+- Quota-manager global budget, G9 semantics, og-image assets.
+
+**TESTS:** New file `tests/ai-trader/scanner.test.ts`:
+
+- **Boundary-TF math:** table-driven — 21:15 UTC → [15m]; 22:00 UTC → [15m, 1h]; 00:00 UTC →
+  [15m, 1h, 4h, 1d].
+- **`evaluateCandidate` on synthetic fixtures** (reuse the large-ATR warmup trick from the W/M
+  detector test fixtures):
+  - Actionable W → returns a long `ScannerCandidate`.
+  - Actionable M + parent downtrend → short candidate with alignment bonus in score.
+  - W against parent downtrend → returns null (opposed trend rejection).
+  - Newest candle older than 2 × tfMs → returns null (G9 staleness).
+  - No W/M pattern → returns null.
+- **Scoring determinism:** same inputs → same score every call. Rank order correct for a
+  multi-candidate shortlist. K=3 cap enforced (4th candidate absent from result).
+- **Excluded symbols:** spy on `fetchOHLCV`; assert it is never called for a market in
+  `SCANNER_FEED_EXCLUDE`.
+- **Existing 578 ai-trader tests untouched and passing.**
+
+**ACCEPT:** Scanner module runs in dev, logs shortlists at every 15m boundary,
+`/api/ai-trader/scanner/status` returns well-formed data, zero venue credits consumed in 3 days
+of shadow operation (Gate 2 evidence). All new tests pass; 578 existing tests pass unchanged.
+ARCHITECT REVIEW (executed, verdict quoted), then STOP and report the complete VERBATIM DIFF +
+all test output.
+
+---
+
+## WO-B — Scanner bot mode
+
+MODE: Power · High-Effort
+
+**WORK ORDER B — Wire the scanner into bot lifecycle: schema, routes, monitor branching, policy HMAC**
+
+**GOAL:** A user can create a scanner bot (market_source = 'scanner'). At each 15m boundary the
+bot consults `getScannerShortlist`, persists the picked market/timeframe with a freshly computed
+policy HMAC, and runs the unchanged decide → guardrail → execute pipeline. Fixed-ticker bots
+are byte-identical to today. No code changes to executor or guardrails.
+
+*Power mode rationale: this WO inserts new branching into the live money path's caller
+(`runAutoCycle`), skips the top-level G6 check for scanner bots, and touches all 7 reschedule
+sites. Monitor work is historically the category where Power-mode review has caught
+position-destroying bugs. Architect review is explicitly ordered at ACCEPT.*
+
+**CONTEXT (verified against live code):**
+
+- **Schema — `ai_trader_bots`** (`shared/schema.ts` ~line 1990, drift-prone): `market text NOT
+  NULL`, `timeframe text NOT NULL`, `mode`, `paperMode`, `autoNext`, `status`, `riskProfile`,
+  `sizingMode`, `policyHmac`. No `marketSource` column today — must be added (B1).
+- **Schema — `ai_trader_decisions`** (~line 2064, drift-prone): **NO `market`/`timeframe`
+  columns.** The per-decision market/TF live inside `context_digest` jsonb; `context-builder.ts`
+  stamps `market` + `timeframe` into `contextDigest` (lines 762-764, drift-prone). No schema
+  change to this table.
+- **`runAutoCycle(botId)`** — `server/ai-trader/monitor.ts` (line 1028, drift-prone). Flow:
+  re-reads the bot fresh; gates on `status==='idle' && mode==='auto' && autoNext`; runs G6
+  `checkCooldownAndCaps(bot.timeframe, recentClosed, now)` + malfunction ceiling BEFORE any LLM
+  spend; restores session UMK (pauses `reauth_required` if unrestorable); decrypts the BYO LLM
+  key; sets `status:'analyzing'`; calls `buildMarketContext(…)`; `runDecision` → `executeDecision`.
+- **CRITICAL — `executeDecision` does NOT re-read the bot from DB.** It destructures the `bot`
+  object passed to it (executor.ts line 150, drift-prone). `runAutoCycle` passes its local copy
+  (`bot: { ...bot, status: 'analyzing' }` ~line 1126, drift-prone). Every downstream gate (G6,
+  G15, order placement on `bot.market`) therefore sees whatever object the caller hands it.
+  **After the pick-persist write, spread new values onto the local copy (`bot = { ...bot, market,
+  timeframe, policyHmac }`) and pass THAT to `buildMarketContext`, `runDecision`, AND
+  `executeDecision`.** Failing to refresh the local copy means the order is placed on the
+  OLD market while the decision was built for the candidate — a wrong-market live trade that no
+  gate catches. B4 pins this with a dedicated test.
+- **G6 — `checkCooldownAndCaps(timeframe, closedDecisions, now)`** — `server/ai-trader/executor.ts`
+  (line 106, drift-prone). Caps LTF 6/day, HTF 2/day. `executeDecision` re-checks it internally
+  (~line 186, drift-prone) as defense in depth. For scanner bots the TOP-LEVEL `runAutoCycle`
+  G6 call must be SKIPPED — it runs on `bot.timeframe`, which is the PREVIOUS pick /
+  placeholder, not the candidate TF. Instead, apply G6 per-candidate from the shortlist
+  (step B3.3). The malfunction ceiling is global and stays unchanged.
+- **G15 — policy HMAC (CRITICAL).** `aiTraderPolicyObject(bot)` (executor.ts line 64,
+  drift-prone) = `{ market, leverage: maxLeverage, maxPositionSize: allocatedUsdc }`.
+  `executeDecision` verifies `verifyBotPolicyHmac(umk, aiTraderPolicyObject(bot), bot.policyHmac)`
+  (line 278, drift-prone) and on mismatch pauses the bot (`policy_hmac_mismatch`) and sends
+  nothing to the venue. **Any write to `bot.market` MUST recompute `policyHmac` with
+  `computeBotPolicyHmac` (`server/session-v3.ts` line 1200, drift-prone) in the same DB update,
+  using the wallet's UMK.** The UMK is already resolved at this point in `runAutoCycle`; order
+  the scanner branch AFTER the UMK/LLM-key resolution section so the key is in hand.
+- **`scheduleAutoNext(botId, timeframe)`** — monitor.ts line 1004 (drift-prone). Seven call
+  sites that currently pass `bot.timeframe` (grep `scheduleAutoNext(bot.id` before editing —
+  line numbers will drift): ~426 (after position close), ~1045 (G6 fail), ~1058 (no
   agentPublicKey), ~1111 (stale context), ~1120 (no-trade), ~1142 (exec fail), ~1338 (startup
-  reconciliation restore) — grep `scheduleAutoNext(bot.id` before editing; line numbers will
-  drift. The after-close (~426) and startup-restore (~1338) sites are the easiest to miss and
-  each alone would sleep a scanner bot for a day after a 1d pick.
-- Decision rows: NO schema change needed — `contextDigest.market`/`.timeframe` already stamp
-  the pick per-decision (verified context-builder 762-764). Add a test asserting it.
+  reconciliation restore). All seven must route through a new helper `nextCycleTimeframe(bot)`
+  that returns `'15m'` for scanner bots. The after-close (~426) and startup-restore (~1338)
+  sites are the easiest to miss; each alone would strand a scanner bot for a full day after
+  a 1d pick.
+- **Routes today:** `POST /api/ai-trader` (routes.ts line 247, drift-prone) validates `market`
+  via `getMarketInfo` and `timeframe` via zod enum; computes `policyHmac` at creation (line 294,
+  drift-prone). `PATCH /api/ai-trader/:id` (line 520, drift-prone) — patchable fields today:
+  `mode`, `riskProfile`, `autoNext`, `degenConfirm`, `model`, `sizingMode`, `riskMinPct`,
+  `riskMaxPct`. **`marketSource` is not in the patch schema today** — it must be added.
+- **Adapter:** monitor uses `getAdapter(bot.protocol)`, not `getAdapterForBot` (verified).
+- **`getScannerShortlist(protocol)`** — from WO-A's `server/ai-trader/scanner.ts`. Must be
+  imported and called in `runAutoCycle`.
+- **Live-mode limitation:** `POST /api/ai-trader/:id/go-live` is Pacifica-only (501 for Flash).
+  Flash scanner bots are paper-only; no code change needed here, but copy/docs must reflect it.
 
-### B4. Tests `tests/ai-trader/scanner-bot.test.ts`
-- Routes: create scanner bot without market/TF → 201 with placeholders + mode forced auto;
-  suggest-mode scanner → 400; PATCH `marketSource` while open → 400; PATCH when flat → 200.
-- Monitor: flat scanner bot + shortlist → bot row updated to candidate market/TF **and a fresh
-  policyHmac that verifies**; decision pipeline invoked with the picked market (mock
-  `buildMarketContext`, assert args incl. `scannerNote`); **pinning test: `executeDecision`
-  receives a bot object whose `market`/`timeframe`/`policyHmac` equal the CANDIDATE values,
-  not the pre-pick row** (guards the stale-local-object wrong-market trade); empty shortlist →
-  no LLM call, rescheduled at 15m; G6-capped candidate skipped for next; 2-call cap enforced;
-  1d pick still reschedules at 15m.
-- Guardrails/executor: ZERO diffs to those files (code-review gate).
+**BUILD:**
 
-**Acceptance WO-B:** paper scanner bot on each venue picks from the shortlist and runs the
-unchanged decide→guardrail→execute path with a VERIFYING policy HMAC; fixed-ticker bots
-byte-identical (578 existing tests untouched); new tests pass.
+1. **B1 — Schema (additive only).** Add `ai_trader_bots.market_source text NOT NULL DEFAULT
+   'fixed'` (`'fixed' | 'scanner'`). Apply via idempotent `ensureSchema` DDL in `server/db.ts`
+   (`ADD COLUMN IF NOT EXISTS`, one statement per try/catch — existing pattern). **Never
+   blind-confirm `db:push`** (known column-drop drift on wallets.dialect_*). Also add
+   `marketSource` to the Drizzle table definition in `shared/schema.ts`.
+   Rollback note (safe, trivial):
+   `ALTER TABLE ai_trader_bots DROP COLUMN market_source` — every reader treats a missing/
+   default value as `'fixed'`, i.e. today's behavior.
+   No other schema change. Scanner bots keep `market`/`timeframe` NOT NULL: at creation the
+   placeholder is `SOL-PERP`/`15m` (passes `getMarketInfo` on both venues); after each pick the
+   chosen market/TF are written onto the bot row before the decision runs, so every downstream
+   reader (monitor 15s loop, executor, UI position card) works unmodified.
+
+2. **B2 — Create/patch routes (`server/ai-trader/routes.ts`).**
+   - `POST /api/ai-trader`: accept `marketSource` (zod enum `'fixed'|'scanner'`, default
+     `'fixed'`). If `'scanner'`: `market`/`timeframe` optional in the request (server fills
+     placeholders `SOL-PERP`/`15m`); force `mode: 'auto'` + `autoNext: true`; reject
+     `mode: 'suggest'` with 400 `scanner_requires_auto`. `policyHmac` is computed at creation
+     over the PLACEHOLDER market — correct because every scanner pick recomputes it (B3 step 4).
+   - `PATCH /api/ai-trader/:id`: add `marketSource` to the patch schema (it does not exist
+     there today). Reject the change while `status` is `open`/`executing`/`analyzing`/`proposed`
+     (400 `cannot_switch_market_source_with_position`); allow fixed↔scanner when flat.
+     Switching scanner→fixed keeps the bot's current `market`/`timeframe` (the last pick or the
+     placeholder — always a valid market with a matching policyHmac). Do NOT add `market` to
+     the PATCH schema in v1: patching market would drag the policyHmac-recompute surface into
+     PATCH for no product need — the user can recreate the bot to change ticker, exactly as today.
+
+3. **B3 — Monitor wiring (`server/ai-trader/monitor.ts` — `runAutoCycle`).**
+   For `bot.marketSource === 'scanner'` (bot is flat by construction — `status==='idle'` gate):
+
+   1. Skip the top-level G6 check (see CONTEXT — it runs on `bot.timeframe`, the stale previous
+      pick). The malfunction ceiling is global and unchanged.
+   2. `getScannerShortlist(bot.protocol)`. If empty → `scheduleAutoNext(botId, '15m')`, return
+      (zero LLM spend).
+   3. Iterate candidates in rank order. For each: `checkCooldownAndCaps(candidate.timeframe,
+      recentClosed, now)`. Skip G6-capped candidates. If no eligible candidate remains →
+      `scheduleAutoNext(botId, '15m')`, return.
+   4. Persist the pick in ONE DB update BEFORE building context:
+      `{ market: candidate.market, timeframe: candidate.timeframe,
+         policyHmac: computeBotPolicyHmac(umk, aiTraderPolicyObject({
+           market: candidate.market, maxLeverage: bot.maxLeverage,
+           allocatedUsdc: bot.allocatedUsdc })) }`.
+      **Immediately after the persist, refresh the local bot copy:**
+      `bot = { ...bot, market: candidate.market, timeframe: candidate.timeframe,
+               policyHmac: <newly computed> }`.
+      Pass this refreshed object to `buildMarketContext`, `runDecision`, AND `executeDecision`.
+      (See CONTEXT — stale local copy causes a wrong-market live trade that no gate catches.)
+   5. Call `buildMarketContext` through the UNCHANGED chain. Inject one extra digest line via a
+      new optional `scannerNote?: string` on `BuildMarketContextInput`:
+      `Scanner: selected from {N}-market sweep — {setup} setup, neckline {d}% away, parent {trend}`.
+      Nothing else in `context-builder.ts` changes.
+   6. If the LLM passes (no-trade) and candidate #2 exists with score ≥ 70: one retry with
+      candidate #2. **Hard cap: 2 LLM calls per boundary per scanner bot.** A FAILED call
+      (timeout / non-2xx) counts against the cap; never retry the same candidate — move to
+      candidate #2 if the cap allows, else reschedule at 15m.
+   7. Open position → scanner logic skipped entirely (existing `status` gate already ensures
+      this); the 15s loop monitors `bot.market` as today.
+
+4. **B3 (continued) — Reschedule helper.** Add `nextCycleTimeframe(bot): string` — returns
+   `'15m'` if `bot.marketSource === 'scanner'`, else `bot.timeframe`. Apply at ALL 7 verified
+   call sites (grep `scheduleAutoNext(bot.id` before editing; line numbers drift):
+   - ~426 after position close
+   - ~1045 G6 fail
+   - ~1058 no agentPublicKey
+   - ~1111 stale context
+   - ~1120 no-trade
+   - ~1142 exec fail
+   - ~1338 startup reconciliation restore
+   The after-close (~426) and startup-restore (~1338) sites are the easiest to miss; missing
+   either strands a scanner bot for a full day after a 1d pick.
+
+5. **Decision rows:** no schema change needed. `contextDigest.market`/`.timeframe` already stamp
+   the pick per-decision (context-builder lines 762-764). Add a test asserting it (B4).
+
+**DO NOT TOUCH:**
+
+- `server/ai-trader/executor.ts` — ZERO diffs (code-review gate).
+- `server/ai-trader/guardrails.ts` — ZERO diffs (code-review gate).
+- `server/ai-trader/context-builder.ts` — only the `BuildMarketContextInput` type gains the
+  optional `scannerNote?: string` field; no logic changes.
+- Quota-manager global budget, G9 semantics, og-image assets.
+- Do not add `market` to the PATCH schema (policy HMAC surface must stay minimal).
+- Do not touch the malfunction ceiling logic.
+
+**TESTS:** New file `tests/ai-trader/scanner-bot.test.ts`:
+
+- **Routes:**
+  - `POST /api/ai-trader` with `marketSource: 'scanner'` and no market/TF → 201 with
+    placeholders `SOL-PERP`/`15m` + `mode` forced `'auto'`.
+  - `POST /api/ai-trader` with `marketSource: 'scanner'` + `mode: 'suggest'` → 400.
+  - `PATCH /api/ai-trader/:id` with `marketSource` while `status: 'open'` → 400.
+  - `PATCH /api/ai-trader/:id` with `marketSource` while `status: 'idle'` → 200.
+- **Monitor — `runAutoCycle` for scanner bots:**
+  - Flat scanner bot + non-empty shortlist → bot row updated to candidate `market`/`timeframe`
+    **and a fresh `policyHmac` that passes `verifyBotPolicyHmac`**.
+  - Decision pipeline invoked with the picked market (mock `buildMarketContext`, assert args
+    include `scannerNote` and the candidate market/TF).
+  - **Pinning test (critical):** `executeDecision` receives a `bot` object whose
+    `market`/`timeframe`/`policyHmac` equal the CANDIDATE values, not the pre-pick row. Guards
+    the stale-local-object wrong-market trade.
+  - Empty shortlist → no LLM call, rescheduled at `'15m'`.
+  - G6-capped candidate → skipped; next eligible candidate tried.
+  - 2-call LLM cap enforced; failed call counts against cap.
+  - 1d pick → next reschedule is at `'15m'` (not 1d).
+  - `contextDigest.market`/`.timeframe` match the picked candidate.
+- **Guardrails/executor:** ZERO diffs verified (code-review gate).
+
+**ACCEPT:** Paper scanner bot on each venue picks from the shortlist and runs the unchanged
+decide → guardrail → execute path with a VERIFYING policy HMAC. Fixed-ticker bots byte-identical
+(578 existing tests untouched and passing). New tests pass. An independent code diff of
+`executor.ts` and `guardrails.ts` shows zero lines changed.
+ARCHITECT REVIEW (executed, verdict quoted), then STOP and report the complete VERBATIM DIFF +
+all test output.
 
 ---
 
-## 8. WO-C: Setup UI (`client/src/components/CreateAiTraderModal.tsx`)
+## WO-C — Setup UI
 
-- After the exchange Select, a two-option segmented choice (radio-card style, existing modal
-  styling):
-  - **"Pick a market"** (default) — current behavior; ticker + timeframe selects shown.
-  - **"Market Scanner"** — copy: *"Finds trades for you. Scans every {Flash|Pacifica} market on
-    all four timeframes and enters when a high-quality setup appears."* Ticker + timeframe
-    selects HIDDEN; in their place a static line fed by `/api/ai-trader/scanner/status`:
-    "Scanning {N} {exchange} markets · 15m / 1h / 4h / 1d".
-  - Exchange selector keeps working for both options (scanner count updates on protocol change).
-- Selecting Market Scanner: hide/pin the suggest/auto toggle to auto; allocation, leverage, risk
-  profile, sizing mode, model picker unchanged. Note: the model default follows timeframe today
-  (`recommendedModelId(form.timeframe)`); for scanner bots default from `'15m'` (the cycle
-  cadence) and let the user override.
-- Bot card/list: when `marketSource === 'scanner'` and flat → "Scanning markets…" badge instead
-  of the fixed ticker; in a position → picked market as today + a small "via Scanner" tag.
-  `data-testid`: `option-market-scanner`, `option-fixed-market`, `badge-scanner-status-${botId}`.
-- Docs: short section in BOTH surfaces (`client/src/pages/Docs.tsx` AND
-  `server/docs-markdown.ts` — keep in sync) with the "trade ASAP vs. time my own entry" framing,
-  including the Flash-paper-only caveat while live is Pacifica-only.
+MODE: Economy
 
-**Acceptance WO-C:** create-flow works end-to-end on both venues; exchange switch updates the
-scanned-market count; scanner bots display correctly flat and in-position; typecheck clean vs
-baseline.
+**WORK ORDER C — Scanner bot setup UI, bot card display, and docs**
+
+**GOAL:** The create-bot modal offers a "Market Scanner" option that hides the ticker/timeframe
+pickers and shows live scan stats. Bot cards show the correct state badge. Both doc surfaces are
+updated.
+
+**CONTEXT (verified against live code):**
+
+- **`CreateAiTraderModal.tsx`** — `client/src/components/CreateAiTraderModal.tsx`. Exchange
+  selector uses `SELECTABLE_PROTOCOLS`. Market list fetched from
+  `GET /api/exchange/markets?exchange=` on protocol change. Mode toggle: `'suggest' | 'auto'`
+  (default `'suggest'`). Model picker default follows timeframe via `recommendedModelId(form.timeframe)`.
+- **`/api/ai-trader/scanner/status`** — added in WO-A. Returns current shortlist per protocol
+  + last-boundary stats including markets-scanned count. Powers the "Scanning N markets" copy.
+- **`marketSource` field** — added to schema + routes in WO-B. `'fixed'` (default, today's
+  behavior) or `'scanner'`. Patch while flat is allowed; patch while open is rejected.
+- **Live-mode limitation:** `POST /api/ai-trader/:id/go-live` is Pacifica-only (501 for Flash).
+  Flash scanner bots are paper-only. UI copy must not promise live trading on Flash.
+- **Docs surfaces (both must stay in sync):**
+  - `client/src/pages/Docs.tsx` (React, /docs route)
+  - `server/docs-markdown.ts` (template-literal served at `/api/docs`)
+
+**BUILD:**
+
+1. **Mode selector in `CreateAiTraderModal.tsx`.** After the exchange Select, add a two-option
+   segmented choice (radio-card style, existing modal styling):
+   - **"Pick a market"** (default): current behavior; ticker + timeframe selects shown.
+   - **"Market Scanner"**: copy — *"Finds trades for you. Scans every {Flash|Pacifica} market
+     on all four timeframes and enters when a high-quality setup appears."* Ticker + timeframe
+     selects hidden; replaced by a static line fed from `/api/ai-trader/scanner/status`:
+     "Scanning {N} {exchange} markets · 15m / 1h / 4h / 1d". The scanner count updates when the
+     exchange selector changes.
+   - `data-testid`: `option-market-scanner`, `option-fixed-market`.
+
+2. **Scanner mode constraints.** Selecting "Market Scanner": hide and pin the suggest/auto
+   toggle to `'auto'`; allocation, leverage, risk profile, sizing mode, model picker unchanged.
+   Model picker default: use `recommendedModelId('15m')` for scanner bots (the cycle cadence),
+   user can override. Send `marketSource: 'scanner'` in the POST body.
+
+3. **Bot card/list.** When `marketSource === 'scanner'` and `status === 'idle'`: show
+   "Scanning markets…" badge instead of the fixed ticker. When in a position: show the picked
+   market as today + a small "via Scanner" tag.
+   `data-testid`: `badge-scanner-status-${botId}`.
+
+4. **Docs.** Add a short section in BOTH surfaces (`Docs.tsx` and `docs-markdown.ts`) with the
+   "trade ASAP vs. time my own entry" framing, including the Flash-paper-only caveat while live
+   trading is Pacifica-only. Keep both in sync — edit one, edit the other in the same commit.
+
+**DO NOT TOUCH:**
+
+- `server/ai-trader/` — no server logic changes in this WO (all server work shipped in WO-A/B).
+- `server/ai-trader/executor.ts`, `server/ai-trader/guardrails.ts` — zero diffs.
+- OG image assets, og-image-v3.jpg, client/index.html OG tags — never touch.
+- Do not add a suggest-mode scanner option (non-goal).
+
+**TESTS:**
+
+- Create flow: selecting "Market Scanner" hides the ticker/TF selects; exchange switch updates
+  the N-markets count; POST body contains `marketSource: 'scanner'`.
+- Bot card renders "Scanning markets…" badge when `marketSource === 'scanner'` + idle; renders
+  picked market + "via Scanner" tag when in position.
+- Typecheck clean (`npm run check`) vs. the pre-WO-C baseline.
+
+**ACCEPT:** Create-flow works end-to-end on both venues; exchange switch updates the
+scanned-market count; scanner bots display correctly flat and in-position; typecheck clean vs.
+baseline. Both doc surfaces updated and consistent. Flash-paper-only caveat present.
+ARCHITECT REVIEW (executed, verdict quoted), then STOP and report the complete VERBATIM DIFF +
+all test output.
 
 ---
 
-## 9. Cost & safety invariants (all WOs)
-
-- Scanner: ZERO LLM calls, ZERO venue-credit calls (candles only, via lab datafeed).
-- Scanner bot: ≤ 2 LLM calls per boundary; strictly cheaper than a fixed bot at idle.
-- Guardrails G1–G9, G15, executor live-path ordering (WO-5 invariants), sizing/lot quantization:
-  UNCHANGED. The scanner is a funnel in front of the existing pipeline, never a bypass.
-- Every `bot.market` write outside the creation route recomputes `policyHmac` in the same update
-  — no exceptions (G15 would otherwise pause the bot at first execution).
-- Per-market execution robustness: the existing min-notional/lot checks in the executor run
-  as-is; any market failing them rejects the decision (fail closed) — no new execution code.
-- Memory rules: all scanner state bounded (wholesale-replaced shortlist map + fixed ring buffer).
-- Do NOT touch: og-image assets, quota-manager global budget, G9 semantics.
-
-## 10. Explicit non-goals (v1)
+## Explicit non-goals (v1)
 
 - No multi-candidate comparison prompt (single-candidate decision, retry-once).
 - No suggest-mode scanner, no Telegram "setup found" alerts (future).
