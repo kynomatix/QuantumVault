@@ -774,6 +774,16 @@ app.use((req, res, next) => {
         }).catch(err => console.error('[AiTraderMonitor] failed to start:', err));
       }, 77_000);
 
+      // Scanner starts slightly later so the monitor is fully initialised first.
+      // Shadow mode only — zero trading, zero venue credits. Telemetry is exposed
+      // via GET /api/ai-trader/scanner/status (wallet-authed).
+      setTimeout(() => {
+        log('[Staggered startup] Starting AI Trader scanner (shadow mode)');
+        import('./ai-trader/scanner').then(({ startScanner }) => {
+          startScanner();
+        }).catch(err => console.error('[Scanner] failed to start:', err));
+      }, 80_000);
+
       // Admin error-log retention: prune on startup, then daily. Bounded table
       // (30d age + hard row cap) so the "Errors" tab never balloons. Fail-safe.
       setTimeout(() => {

@@ -49,6 +49,7 @@ import { runDecision } from "./decide";
 import { executeDecision, aiTraderPolicyObject } from "./executor";
 import { userInitiatedClose, parseOpenDecision, computeUnrealizedPnl } from "./monitor";
 import { sanitizeGraduationCriteria, canGoLive } from "./graduation";
+import { getScannerStatus } from "./scanner";
 import type { ClampedDecision } from "./guardrails";
 import { computeConfidenceCalibration } from "./calibration";
 
@@ -459,6 +460,19 @@ export function registerAiTraderRoutes(app: Express): void {
       });
     } catch (err) {
       console.error("[AiTrader] track-record error:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // --- Scanner status (WO-A shadow-mode telemetry) — MUST be before /:id catch-all ----
+  // Read-only. Wallet-authed. Zero venue credits: all candle data flows through the
+  // shared lab datafeed. Primary Gate 2 evidence source for the shadow-mode shortlists.
+  app.get("/api/ai-trader/scanner/status", requireWallet, async (_req, res) => {
+    try {
+      const status = getScannerStatus();
+      res.json(status);
+    } catch (err) {
+      console.error("[AiTrader] scanner status error:", err);
       res.status(500).json({ error: "Internal server error" });
     }
   });
@@ -1382,4 +1396,5 @@ export function registerAiTraderRoutes(app: Express): void {
       res.status(500).json({ error: "Internal server error" });
     }
   });
+
 }

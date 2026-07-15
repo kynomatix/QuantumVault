@@ -1476,6 +1476,9 @@ export function stopAiTraderMonitor(): void {
   pendingReconciliation.clear();
   bracketReplaceAttempted.clear();
   botInFlight.clear();
+  // Stop the market scanner (shadow-mode; no trading) in lockstep with the monitor
+  // so tests and server shutdown always tear down both subsystems together.
+  import("./scanner.js").then(({ stopScanner }) => stopScanner()).catch(() => {});
 }
 
 /** Exported for tests: run one full tick synchronously. */
