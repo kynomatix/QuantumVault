@@ -59,6 +59,8 @@ vi.mock("../../server/session-v3", () => ({
   decryptLlmApiKeyV3: (...a: unknown[]) => decryptLlmKeyMock(...a),
   // executor's real module (imported for checkCooldownAndCaps) also pulls this:
   verifyBotPolicyHmac: vi.fn(() => true),
+  // WO-B: scanner bot mode — monitor recomputes policyHmac for each picked market.
+  computeBotPolicyHmac: vi.fn(() => "hmac-scanner-recomputed"),
 }));
 
 const notifyMock = vi.fn();

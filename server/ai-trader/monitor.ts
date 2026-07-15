@@ -53,7 +53,9 @@ import { fetchOHLCV } from "../lab/datafeed";
 import { buildMarketContext, marketToDatafeedTicker, type AiTraderTimeframe } from "./context-builder";
 import { runDecision } from "./decide";
 import { isSelectableModel } from "../ai-assistant/models-catalog";
-import { executeDecision, checkCooldownAndCaps } from "./executor";
+import { executeDecision, checkCooldownAndCaps, aiTraderPolicyObject } from "./executor";
+import { computeBotPolicyHmac } from "../session-v3";
+import { getScannerShortlist } from "./scanner";
 import { evaluateGraduation, type GraduationTradeRecord } from "./graduation";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import type { ProtocolAdapter } from "../protocol/adapter";
@@ -423,7 +425,7 @@ async function afterClose(
   }
 
   if (bot.mode === "auto" && bot.autoNext) {
-    scheduleAutoNext(bot.id, bot.timeframe);
+    scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
   }
 }
 
@@ -1000,6 +1002,16 @@ function clearAutoNext(botId: string): void {
   }
 }
 
+/**
+ * WO-B: Returns the timeframe to use when scheduling the next auto cycle.
+ * Scanner bots always run at the 15m boundary regardless of which market was
+ * last picked — the pick itself happens inside runAutoCycle, not at schedule time.
+ * Fixed-ticker bots use their configured timeframe (unchanged from pre-WO-B).
+ */
+export function nextCycleTimeframe(bot: AiTraderBot): string {
+  return bot.marketSource === "scanner" ? "15m" : bot.timeframe;
+}
+
 /** Schedule the next decision cycle at the next candle boundary (+2s settle). */
 export function scheduleAutoNext(botId: string, timeframe: string): void {
   const tfMs = TIMEFRAME_MS[timeframe];
@@ -1026,7 +1038,7 @@ export function scheduleAutoNext(botId: string, timeframe: string): void {
  * session UMK (unrestorable ⇒ pause 'reauth_required' + Telegram nudge).
  */
 export async function runAutoCycle(botId: string): Promise<void> {
-  const bot = await storage.getAiTraderBot(botId);
+  let bot = await storage.getAiTraderBot(botId);
   if (!bot) return;
   if (bot.status !== "idle" || bot.mode !== "auto" || !bot.autoNext) return;
 
@@ -1040,12 +1052,16 @@ export async function runAutoCycle(botId: string): Promise<void> {
 
   // Cheap gates BEFORE LLM spend (G6 + always-on ceiling).
   const recentClosed = await storage.getRecentClosedDecisions(bot.id, 60);
-  const g6 = checkCooldownAndCaps(bot.timeframe, recentClosed, Date.now());
-  if (!g6.ok) {
-    // Log the skip — a silent reschedule here made cadence gaps undiagnosable.
-    console.log(`[AiTraderMonitor] auto cycle: bot ${bot.id.slice(0, 8)} skipped (${g6.reason}): ${g6.detail}`);
-    scheduleAutoNext(bot.id, bot.timeframe);
-    return;
+  // Scanner bots skip the top-level G6 check — bot.timeframe is the stale previous pick /
+  // placeholder, not the candidate TF. G6 is applied per-candidate inside the scanner branch.
+  if (bot.marketSource !== "scanner") {
+    const g6 = checkCooldownAndCaps(bot.timeframe, recentClosed, Date.now());
+    if (!g6.ok) {
+      // Log the skip — a silent reschedule here made cadence gaps undiagnosable.
+      console.log(`[AiTraderMonitor] auto cycle: bot ${bot.id.slice(0, 8)} skipped (${g6.reason}): ${g6.detail}`);
+      scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
+      return;
+    }
   }
   const dayStart = utcDayStartMs(Date.now());
   const closedToday = recentClosed.filter((d) => d.closedAt && new Date(d.closedAt).getTime() >= dayStart);
@@ -1057,7 +1073,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
   const wallet = await storage.getWallet(bot.walletAddress);
   if (!wallet?.agentPublicKey) {
     console.error(`[AiTraderMonitor] auto cycle: wallet has no agentPublicKey for bot ${bot.id.slice(0, 8)} — skipping`);
-    scheduleAutoNext(bot.id, bot.timeframe);
+    scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
     return;
   }
 
@@ -1096,6 +1112,116 @@ export async function runAutoCycle(botId: string): Promise<void> {
 
   try {
     const apiKey = keyBuf.toString("utf8");
+
+    // WO-B: Scanner bots pick from the shortlist at each 15m boundary.
+    // Multi-candidate loop: hard cap of 2 LLM calls per boundary.
+    // No-trade on candidate #1 retries candidate #2 if it exists and score >= 70.
+    // Failed calls count against the cap. The branch handles the full pipeline and returns;
+    // the fixed-ticker path continues below.
+    if (bot.marketSource === "scanner") {
+      const shortlist = getScannerShortlist(bot.protocol);
+      if (shortlist.length === 0) {
+        console.log(`[AiTraderMonitor] scanner: no candidates for ${bot.protocol} at this boundary — skipping bot ${bot.id.slice(0, 8)}`);
+        scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
+        return;
+      }
+
+      // Per-candidate G6: top-level G6 was skipped because bot.timeframe is the stale
+      // previous pick / placeholder. Apply G6 to each candidate's own TF.
+      const eligible = shortlist.filter((c) =>
+        checkCooldownAndCaps(c.timeframe, recentClosed, Date.now()).ok
+      );
+      if (eligible.length === 0) {
+        console.log(`[AiTraderMonitor] scanner: all candidates G6-capped for bot ${bot.id.slice(0, 8)} — rescheduling`);
+        scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
+        return;
+      }
+
+      const MAX_LLM_CALLS = 2;
+      let llmCalls = 0;
+
+      for (let ci = 0; ci < eligible.length; ci++) {
+        if (llmCalls >= MAX_LLM_CALLS) break;
+
+        const candidate = eligible[ci];
+        // Candidates after the first must have score >= 70 to be worth retrying.
+        if (ci > 0 && candidate.score < 70) break;
+
+        // Persist pick + recomputed policyHmac BEFORE building context.
+        const newPolicyHmac = computeBotPolicyHmac(
+          umk,
+          aiTraderPolicyObject({ market: candidate.market, maxLeverage: bot.maxLeverage, allocatedUsdc: bot.allocatedUsdc })
+        );
+        await storage.updateAiTraderBot(bot.id, {
+          market: candidate.market,
+          timeframe: candidate.timeframe,
+          policyHmac: newPolicyHmac,
+        });
+        // CRITICAL money-safety: refresh local copy so buildMarketContext, runDecision,
+        // and executeDecision all operate on the PICKED market, never the stale placeholder.
+        bot = { ...bot, market: candidate.market, timeframe: candidate.timeframe as AiTraderTimeframe, policyHmac: newPolicyHmac };
+        const scannerNote = `Scanner selected: ${candidate.market} ${candidate.timeframe} — setup=${candidate.setup} direction=${candidate.direction} score=${Math.round(candidate.score)} dist=${candidate.necklineDistancePct.toFixed(3)}% parentTrend=${candidate.parentTrend}`;
+        console.log(`[AiTraderMonitor] scanner: picked ${candidate.market} ${candidate.timeframe} (score=${Math.round(candidate.score)}) for bot ${bot.id.slice(0, 8)} [call ${ci + 1}/${MAX_LLM_CALLS}]`);
+
+        await storage.updateAiTraderBot(bot.id, { status: "analyzing" });
+
+        const context = await buildMarketContext({
+          market: bot.market,
+          timeframe: bot.timeframe as AiTraderTimeframe,
+          adapter,
+          bot,
+          recentDecisions: recentClosed.slice(0, 5),
+          agentPublicKey: wallet.agentPublicKey,
+          scannerNote,
+        });
+        if ("stale" in context) {
+          console.warn(`[AiTraderMonitor] scanner: stale context for bot ${bot.id.slice(0, 8)} (${context.reason})`);
+          await storage.updateAiTraderBot(bot.id, { status: "idle" });
+          scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
+          return;
+        }
+
+        llmCalls++;
+        const decision = await runDecision({ bot, apiKey, context, adapter });
+        // Same no-trade taxonomy as the fixed-bot path below; narrowed inline so
+        // TS proves decisionId/clamped exist on the executed branch.
+        const clamped = decision.ok && !decision.rejected ? decision.clamped : null;
+
+        if (decision.ok && clamped && (clamped.action === "long" || clamped.action === "short")) {
+          const markPrice = num(context.contextDigest.price);
+          const exec = await executeDecision({
+            bot: { ...bot, status: "analyzing" },
+            decisionId: decision.decisionId,
+            clamped,
+            adapter,
+            markPrice: markPrice ?? NaN,
+          });
+          if (!exec.ok) {
+            const fresh = await storage.getAiTraderBot(bot.id);
+            if (fresh?.status === "analyzing") {
+              await storage.updateAiTraderBot(bot.id, { status: "idle" });
+            }
+            console.warn(`[AiTraderMonitor] scanner: entry not executed for bot ${bot.id.slice(0, 8)}: ${exec.reason} — ${exec.detail}`);
+            const after = await storage.getAiTraderBot(bot.id);
+            if (after && after.status === "idle" && after.autoNext && after.mode === "auto") {
+              scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
+            }
+            return;
+          }
+          console.log(`[AiTraderMonitor] scanner: bot ${bot.id.slice(0, 8)} entered ${clamped.action} ${bot.market} (${exec.mode})`);
+          return; // position open — 15s loop takes over
+        }
+
+        // No-trade or failed call: reset to idle; loop will try the next eligible candidate.
+        await storage.updateAiTraderBot(bot.id, { status: "idle" });
+      }
+
+      // All eligible candidates tried within the call cap — no entry this boundary.
+      scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
+      return;
+    }
+
+    // Fixed-ticker bot path (scanner bots have already returned above).
     await storage.updateAiTraderBot(bot.id, { status: "analyzing" });
 
     const context = await buildMarketContext({
@@ -1110,7 +1236,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
       // G9 — never decide on stale data; retry at the next boundary.
       console.warn(`[AiTraderMonitor] auto cycle: stale context for bot ${bot.id.slice(0, 8)} (${context.reason})`);
       await storage.updateAiTraderBot(bot.id, { status: "idle" });
-      scheduleAutoNext(bot.id, bot.timeframe);
+      scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
       return;
     }
 
@@ -1119,7 +1245,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
       // Malformed / guardrail-rejected / flat / close-with-no-position — all
       // clean no-trade cycles: back to idle, try again next candle.
       await storage.updateAiTraderBot(bot.id, { status: "idle" });
-      scheduleAutoNext(bot.id, bot.timeframe);
+      scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
       return;
     }
 
@@ -1141,7 +1267,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
       console.warn(`[AiTraderMonitor] auto cycle: entry not executed for bot ${bot.id.slice(0, 8)}: ${exec.reason} — ${exec.detail}`);
       const after = await storage.getAiTraderBot(bot.id);
       if (after && after.status === "idle" && after.autoNext && after.mode === "auto") {
-        scheduleAutoNext(bot.id, bot.timeframe);
+        scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
       }
       return;
     }
@@ -1337,7 +1463,7 @@ export async function reconcileOnStartup(): Promise<void> {
   // idle + mode:'auto' + autoNext before doing anything.
   for (const bot of bots) {
     if (bot.mode === "auto" && bot.autoNext && bot.status !== "paused") {
-      scheduleAutoNext(bot.id, bot.timeframe);
+      scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
     }
   }
 }

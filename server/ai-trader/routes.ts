@@ -47,7 +47,7 @@ import { buildMarketContext, marketToDatafeedTicker } from "./context-builder";
 import { fetchOHLCV } from "../lab/datafeed";
 import { runDecision } from "./decide";
 import { executeDecision, aiTraderPolicyObject } from "./executor";
-import { userInitiatedClose, parseOpenDecision, computeUnrealizedPnl, scheduleAutoNext } from "./monitor";
+import { userInitiatedClose, parseOpenDecision, computeUnrealizedPnl, scheduleAutoNext, nextCycleTimeframe } from "./monitor";
 import { sanitizeGraduationCriteria, canGoLive } from "./graduation";
 import { getScannerStatus } from "./scanner";
 import type { ClampedDecision } from "./guardrails";
@@ -133,7 +133,9 @@ function toBotDto(bot: AiTraderBot): Omit<AiTraderBot, "policyHmac"> {
 // replaces any existing timer for the bot (no duplicates).
 function armAutoNextIfEligible(bot: AiTraderBot): void {
   if (bot.mode === "auto" && bot.autoNext && bot.status === "idle") {
-    scheduleAutoNext(bot.id, bot.timeframe);
+    // Scanner bots always cycle at 15m boundaries; bot.timeframe is just the
+    // last pick's placeholder (a 1h/4h pick would strand the 15m cadence here).
+    scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
   }
 }
 
@@ -205,10 +207,16 @@ async function resolveApiKeyForAnalyze(
 
 const RISK_BAND_BOUNDS = { min: 0.1, max: 3.0 } as const;
 
+// Scanner-bot placeholder market/timeframe (valid on both venues, passes getMarketInfo).
+// Each 15m pick OVERWRITES these before the decision runs — they are never traded.
+const SCANNER_PLACEHOLDER_MARKET = "SOL-PERP";
+const SCANNER_PLACEHOLDER_TIMEFRAME = "15m";
+
 const createBotBodySchema = z
   .object({
-    market: z.string().min(1),
-    timeframe: z.enum(["15m", "1h", "4h", "1d"]),
+    market: z.string().min(1).optional(),
+    timeframe: z.enum(["15m", "1h", "4h", "1d"]).optional(),
+    marketSource: z.enum(["fixed", "scanner"]).default("fixed"),
     mode: z.enum(["suggest", "auto"]).default("suggest"),
     riskProfile: z.enum(["guarded", "degen"]).default("guarded"),
     model: z.string().min(1).default("anthropic/claude-opus-4.8"),
@@ -239,6 +247,15 @@ const createBotBodySchema = z
         path: ["riskMinPct"],
         message: `riskMinPct (${data.riskMinPct}) must be ≤ riskMaxPct (${data.riskMaxPct})`,
       });
+    }
+    // Fixed-ticker bots require market + timeframe explicitly.
+    if (data.marketSource !== "scanner") {
+      if (!data.market) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["market"], message: "market is required for fixed-ticker bots" });
+      }
+      if (!data.timeframe) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["timeframe"], message: "timeframe is required for fixed-ticker bots" });
+      }
     }
   });
 
@@ -277,8 +294,23 @@ export function registerAiTraderRoutes(app: Express): void {
         }
       }
 
-      if (!getMarketInfo(body.market)) {
-        return res.status(400).json({ error: `Unknown market '${body.market}'.` });
+      // WO-B: scanner bots — mode/autoNext overrides + suggest rejection.
+      const isScanner = body.marketSource === "scanner";
+      if (isScanner) {
+        if (body.mode === "suggest") {
+          return res.status(400).json({ error: "scanner_requires_auto: scanner bots must use auto mode" });
+        }
+        // Force auto+autoNext so the bot immediately starts picking from the shortlist.
+        body.mode = "auto";
+        body.autoNext = true;
+      }
+
+      // Resolve market/timeframe: scanner bots use server-provided placeholders.
+      const market = isScanner ? SCANNER_PLACEHOLDER_MARKET : (body.market ?? "");
+      const timeframe = isScanner ? SCANNER_PLACEHOLDER_TIMEFRAME : (body.timeframe ?? "15m");
+
+      if (!getMarketInfo(market)) {
+        return res.status(400).json({ error: `Unknown market '${market}'.` });
       }
       if (!isSelectableModel(body.model)) {
         return res.status(400).json({ error: `Unknown or unsupported model '${body.model}'.` });
@@ -307,17 +339,21 @@ export function registerAiTraderRoutes(app: Express): void {
       if (!umk) return; // getInteractiveUmk already responded 401
 
       const graduationCriteria = sanitizeGraduationCriteria(body.graduationCriteria);
+      // policyHmac is computed over the placeholder market for scanner bots.
+      // runAutoCycle recomputes it each pick BEFORE building context so G15 always
+      // verifies against the actual traded market (not the placeholder).
       const policyHmac = computeBotPolicyHmac(
         umk,
-        aiTraderPolicyObject({ market: body.market, maxLeverage: body.maxLeverage, allocatedUsdc })
+        aiTraderPolicyObject({ market, maxLeverage: body.maxLeverage, allocatedUsdc })
       );
 
       const bot = await storage.createAiTraderBot({
         walletAddress: req.walletAddress,
         protocol,
         protocolSubaccountId: null, // paper mode: no venue subaccount until go-live (plan L664)
-        market: body.market,
-        timeframe: body.timeframe,
+        market,
+        timeframe,
+        marketSource: body.marketSource,
         mode: body.mode,
         riskProfile: body.riskProfile,
         paperMode: true, // WO-7 only ever creates paper bots; go-live is a separate gated flip
@@ -565,6 +601,11 @@ export function registerAiTraderRoutes(app: Express): void {
           sizingMode: z.enum(["discretionary", "risk_based"]).optional(),
           riskMinPct: z.number().min(RISK_BAND_BOUNDS.min).max(RISK_BAND_BOUNDS.max).optional(),
           riskMaxPct: z.number().min(RISK_BAND_BOUNDS.min).max(RISK_BAND_BOUNDS.max).optional(),
+          // WO-B: marketSource switch (fixed ↔ scanner). Rejected while bot has an open
+          // position or is mid-cycle (open/executing/analyzing/proposed) to prevent
+          // mid-trade market switches. Switching does NOT change market/timeframe columns —
+          // those are updated on the next cycle boundary inside runAutoCycle.
+          marketSource: z.enum(["fixed", "scanner"]).optional(),
         })
         .superRefine((data, ctx) => {
           const newMin = data.riskMinPct;
@@ -627,6 +668,17 @@ export function registerAiTraderRoutes(app: Express): void {
         }
       }
 
+      // WO-B: reject marketSource switch while the bot has an open position or is mid-cycle.
+      if (body.marketSource !== undefined && body.marketSource !== bot.marketSource) {
+        const activeStatuses = ["open", "executing", "analyzing", "proposed"];
+        if (activeStatuses.includes(bot.status)) {
+          return res.status(400).json({
+            error: "cannot_switch_market_source_with_position",
+            detail: `Cannot switch marketSource while bot is ${bot.status}. Wait for the cycle to complete or close any open position.`,
+          });
+        }
+      }
+
       const updates: Record<string, unknown> = {};
       if (body.mode !== undefined) updates.mode = body.mode;
       if (body.riskProfile !== undefined) updates.riskProfile = body.riskProfile;
@@ -635,6 +687,7 @@ export function registerAiTraderRoutes(app: Express): void {
       if (body.sizingMode !== undefined) updates.sizingMode = body.sizingMode;
       if (body.riskMinPct !== undefined) updates.riskMinPct = String(body.riskMinPct);
       if (body.riskMaxPct !== undefined) updates.riskMaxPct = String(body.riskMaxPct);
+      if (body.marketSource !== undefined) updates.marketSource = body.marketSource;
 
       if (Object.keys(updates).length === 0) {
         return res.status(400).json({ error: "No mutable fields provided." });

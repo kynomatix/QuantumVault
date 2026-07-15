@@ -798,6 +798,14 @@ export async function ensureSchema() {
       `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS playbook jsonb`,
       `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS playbook_version integer NOT NULL DEFAULT 0`,
       `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS playbook_updated_at timestamp`,
+
+      // --- WO-B: scanner bot mode. ---
+      // 'fixed' (default) preserves today's behaviour byte-for-byte for all existing bots.
+      // 'scanner' makes the bot pick from the shortlist each 15m boundary via runAutoCycle.
+      // market/timeframe stay NOT NULL; scanner bots write the chosen values before each
+      // decision so all downstream readers (monitor 15s loop, executor, UI) work unmodified.
+      // Rollback: DROP COLUMN market_source is safe — every reader treats missing/default as 'fixed'.
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS market_source text NOT NULL DEFAULT 'fixed'`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner

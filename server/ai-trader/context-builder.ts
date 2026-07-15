@@ -33,6 +33,13 @@ export interface BuildMarketContextInput {
    * (empty) account on every venue.
    */
   agentPublicKey: string;
+  /**
+   * WO-B (scanner bots only): a single pre-computed digest line describing
+   * the scanner's selection rationale. Injected verbatim into the user prompt
+   * before the candle blocks and stamped into contextDigest.scannerNote.
+   * Undefined for fixed-ticker bots — context-builder is unchanged for them.
+   */
+  scannerNote?: string;
 }
 
 export type BuildMarketContextResult =
@@ -368,7 +375,7 @@ W/M formations (double bottom/top, when present in this context) mark a complete
 export async function buildMarketContext(
   input: BuildMarketContextInput
 ): Promise<BuildMarketContextResult> {
-  const { market, timeframe, adapter, bot, recentDecisions } = input;
+  const { market, timeframe, adapter, bot, recentDecisions, scannerNote } = input;
 
   const tfMs = TIMEFRAME_MS[timeframe];
   const now = Date.now();
@@ -757,6 +764,11 @@ export async function buildMarketContext(
   if (parentCsv) {
     userSections.push(`## Candles — ${parentTf} parent timeframe (oldest -> newest, CSV)`, parentCsv);
   }
+  // WO-B: scanner bots inject a selection-rationale note so the model knows
+  // this market was chosen by the scanner sweep rather than a user pick.
+  if (scannerNote) {
+    userSections.push(`## Scanner selection note`, scannerNote);
+  }
   const user = userSections.join("\n\n");
 
   const contextDigest = {
@@ -808,6 +820,8 @@ export async function buildMarketContext(
     // (enrichment rule) AND the "no detection" case. Same null convention as htfLevels.
     // Non-null means a qualifying formation was found and the Formation: line is in the prompt.
     wmFormation: wmDigest,
+    // WO-B: present only for scanner bots; undefined/absent for fixed-ticker bots.
+    scannerNote: scannerNote ?? null,
     indicators: {
       ema20,
       ema50,

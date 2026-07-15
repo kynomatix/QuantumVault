@@ -2054,6 +2054,12 @@ export const aiTraderBots = pgTable("ai_trader_bots", {
   playbook: jsonb("playbook"),
   playbookVersion: integer("playbook_version").notNull().default(0),
   playbookUpdatedAt: timestamp("playbook_updated_at"),
+  // WO-B: 'fixed' (existing behaviour) or 'scanner' (the bot picks from the
+  // shortlist each 15m boundary). Default 'fixed' so all existing bots are
+  // byte-identical to today. Scanner bots keep market/timeframe NOT NULL:
+  // creation uses placeholder SOL-PERP/15m; each pick WRITES the chosen
+  // values before the decision runs so all downstream readers work unmodified.
+  marketSource: text("market_source").notNull().default("fixed"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => [
