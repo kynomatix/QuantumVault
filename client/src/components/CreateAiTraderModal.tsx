@@ -250,16 +250,23 @@ export function CreateAiTraderModal({
     !isCreating;
 
   // Derive market count from the most recent sweep entry for the selected protocol.
+  // Entries with marketsScanned === 0 are skipped: 0 means the sweep couldn't scan
+  // (budget exhausted / feeds down / warming up after a restart), NOT that the
+  // exchange has zero markets — showing "Scanning 0 markets" was misleading.
   const scannerMarketCount: number | null = (() => {
     if (!scannerStatus) return null;
     // recentHistory is newest-last; scan from the end for the selected protocol.
     const history = scannerStatus.recentHistory ?? [];
     for (let i = history.length - 1; i >= 0; i--) {
-      if (history[i].protocol === form.protocol) return history[i].marketsScanned;
+      if (history[i].protocol === form.protocol && history[i].marketsScanned > 0) {
+        return history[i].marketsScanned;
+      }
     }
     // Fall back to lastBoundaryStats if it matches the selected protocol.
     const lbs = scannerStatus.lastBoundaryStats;
-    if (lbs && lbs.protocol === form.protocol) return lbs.marketsScanned;
+    if (lbs && lbs.protocol === form.protocol && lbs.marketsScanned > 0) {
+      return lbs.marketsScanned;
+    }
     return null;
   })();
 
@@ -418,7 +425,7 @@ export function CreateAiTraderModal({
             )}
             {isScanner && form.protocol === 'flash' && (
               <p className="text-[11px] text-amber-400/80 leading-relaxed px-0.5">
-                Flash scanner bots run in paper mode only — live trading on Flash is not yet supported.
+                Flash AI Traders stay in paper mode for now — going live with an AI Trader is currently Pacifica-only. Your regular Flash bots are not affected.
               </p>
             )}
           </div>

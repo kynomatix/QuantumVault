@@ -238,6 +238,11 @@ LLM calls, zero venue credits. Gate 2 shadow monitoring runs against this WO alo
      initiations (a `sleep(150)` after each dispatch, not after completion).
    - Sweep budget: if the sweep passes 55s, abort remaining markets, log
      `[Scanner] TIMEOUT: {n} markets skipped`, and publish the candidates found so far.
+   - **AMENDED 2026-07-15:** the 55s budget is **per protocol** (clock resets at the top of each
+     protocol's loop), not one shared sweep clock. A shared clock let a cold Flash scan (~58s)
+     starve Pacifica to 0 markets scanned. Worst-case sweep is now ~110s for 2 protocols — still
+     fine vs the 15m cadence, and `sweepInFlight` prevents overlap. Gate 2's "sweep < 60s" reads
+     as "< 60s per protocol". Do NOT restore a shared clock.
    - Keep top K=3 candidates per protocol per boundary (ranked by score descending). Replace the
      shortlist map wholesale each boundary:
      `Map<protocol, ScannerCandidate[]>` — bounded, no unbounded growth.

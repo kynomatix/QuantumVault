@@ -342,7 +342,6 @@ async function runSweep(): Promise<void> {
     return;
   }
   sweepInFlight = true;
-  const sweepStart = Date.now();
 
   try {
     const now = new Date();
@@ -361,6 +360,14 @@ async function runSweep(): Promise<void> {
 
     for (const protocol of PROTOCOLS) {
       const universe = await buildUniverse(protocol);
+
+      // Per-protocol budget clock. The budget used to be measured from the GLOBAL
+      // sweep start, which let the first protocol (flash) consume the entire 55s on
+      // cold sweeps — pacifica's loop then started with the budget already blown and
+      // skipped every market ("Scanning 0 Pacifica markets" in the create modal).
+      // Each protocol now gets its own SWEEP_BUDGET_MS window; worst case total is
+      // PROTOCOLS.length × 55s ≈ 110s, still far inside the 15m boundary cadence.
+      const protocolStart = Date.now();
 
       for (const tf of boundaryTfs) {
         const tfStart = Date.now();
@@ -455,8 +462,8 @@ async function runSweep(): Promise<void> {
         for (let i = 0; i < universe.length; i++) {
           const market = universe[i];
 
-          // Check global sweep budget first.
-          if (Date.now() - sweepStart > SWEEP_BUDGET_MS) {
+          // Check this protocol's sweep budget first (per-protocol clock — see above).
+          if (Date.now() - protocolStart > SWEEP_BUDGET_MS) {
             marketsSkippedByTimeout += universe.length - i;
             break;
           }
