@@ -1042,6 +1042,8 @@ export async function runAutoCycle(botId: string): Promise<void> {
   const recentClosed = await storage.getRecentClosedDecisions(bot.id, 60);
   const g6 = checkCooldownAndCaps(bot.timeframe, recentClosed, Date.now());
   if (!g6.ok) {
+    // Log the skip — a silent reschedule here made cadence gaps undiagnosable.
+    console.log(`[AiTraderMonitor] auto cycle: bot ${bot.id.slice(0, 8)} skipped (${g6.reason}): ${g6.detail}`);
     scheduleAutoNext(bot.id, bot.timeframe);
     return;
   }

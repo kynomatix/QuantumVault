@@ -47,7 +47,7 @@ import { buildMarketContext, marketToDatafeedTicker } from "./context-builder";
 import { fetchOHLCV } from "../lab/datafeed";
 import { runDecision } from "./decide";
 import { executeDecision, aiTraderPolicyObject } from "./executor";
-import { userInitiatedClose, parseOpenDecision, computeUnrealizedPnl } from "./monitor";
+import { userInitiatedClose, parseOpenDecision, computeUnrealizedPnl, scheduleAutoNext } from "./monitor";
 import { sanitizeGraduationCriteria, canGoLive } from "./graduation";
 import { getScannerStatus } from "./scanner";
 import type { ClampedDecision } from "./guardrails";
@@ -120,6 +120,21 @@ const goLiveInFlight = new Set<string>();
 function toBotDto(bot: AiTraderBot): Omit<AiTraderBot, "policyHmac"> {
   const { policyHmac, ...rest } = bot;
   return rest;
+}
+
+// --- Hands-off cadence arming ------------------------------------------------------------
+// scheduleAutoNext was historically armed ONLY by startup reconciliation and the
+// monitor's post-close/retry paths — so a bot created in (or switched to) Auto
+// after the last deploy never got a candle-boundary timer until the next server
+// restart. Prod symptom: 1h Auto bots silent for hours while one bot (already
+// Auto at boot) ticked hourly. Arm from every route that leaves a bot eligible.
+// Over-applying is safe: runAutoCycle re-reads the bot from the DB and gates on
+// idle + mode:'auto' + autoNext before doing anything, and scheduleAutoNext
+// replaces any existing timer for the bot (no duplicates).
+function armAutoNextIfEligible(bot: AiTraderBot): void {
+  if (bot.mode === "auto" && bot.autoNext && bot.status === "idle") {
+    scheduleAutoNext(bot.id, bot.timeframe);
+  }
 }
 
 async function loadOwnedBot(req: any, res: Response): Promise<AiTraderBot | null> {
@@ -323,6 +338,10 @@ export function registerAiTraderRoutes(app: Express): void {
         riskMinPct: String(body.riskMinPct),
         riskMaxPct: String(body.riskMaxPct),
       });
+
+      // Bots created directly in Auto mode must get their first candle-boundary
+      // timer immediately (previously only a server restart armed it).
+      armAutoNextIfEligible(bot);
 
       res.status(201).json({ bot: toBotDto(bot) });
     } catch (err) {
@@ -624,6 +643,14 @@ export function registerAiTraderRoutes(app: Express): void {
       const updated = await storage.updateAiTraderBot(bot.id, updates as any);
       if (!updated) return res.status(404).json({ error: "Bot not found." });
 
+      // Hands-off cadence must start from HERE, not only from restarts/closes:
+      // scheduleAutoNext was previously armed only by startup reconciliation and
+      // post-close paths, so a bot switched to Auto after the last deploy never
+      // got a timer until the next restart (prod bug: 1h bots silent for hours).
+      // Safe to over-apply — runAutoCycle re-reads the bot and gates on
+      // idle + mode:'auto' + autoNext before doing anything.
+      armAutoNextIfEligible(updated);
+
       res.json({ bot: toBotDto(updated) });
     } catch (err) {
       console.error("[AiTrader] patch error:", err);
@@ -922,6 +949,8 @@ export function registerAiTraderRoutes(app: Express): void {
         return res.status(409).json({ error: `Bot is not paused (status: ${bot.status}).` });
       }
       const updated = await storage.updateAiTraderBot(bot.id, { status: "idle", pauseReason: null });
+      // A resumed Auto bot must re-enter the hands-off cadence right away.
+      if (updated) armAutoNextIfEligible(updated);
       res.json({ bot: updated ? toBotDto(updated) : null });
     } catch (err) {
       console.error("[AiTrader] resume error:", err);
@@ -945,6 +974,8 @@ export function registerAiTraderRoutes(app: Express): void {
         consecutiveLosses: 0,
         trialStartedAt: new Date(),
       });
+      // A restarted-trial Auto bot goes back to idle — re-arm the cadence.
+      if (updated) armAutoNextIfEligible(updated);
       res.json({ bot: updated ? toBotDto(updated) : null });
     } catch (err) {
       console.error("[AiTrader] restart-trial error:", err);
@@ -1198,6 +1229,8 @@ export function registerAiTraderRoutes(app: Express): void {
         status: "idle",
         pauseReason: null,
       });
+      // A live Auto bot re-enters the hands-off cadence immediately.
+      if (updated) armAutoNextIfEligible(updated);
       console.log(`[AiTrader] Bot ${bot.id} (${bot.market}) is LIVE on ${adapter.protocolName} — subaccount=${subaccountId} ${fundingDetail}`);
       res.json({ bot: updated ? toBotDto(updated) : null, live: true, funding: fundingDetail });
     } catch (err: any) {
