@@ -3136,7 +3136,16 @@ export default function AppPage() {
                               <Brain className={`w-6 h-6 ${isBright ? 'text-white' : 'text-primary'}`} />
                             </div>
                             <div>
-                              <h3 className="font-semibold text-base">{aiBot.market}</h3>
+                              {(aiBot as any).marketSource === 'scanner' && aiBot.status !== 'open' ? (
+                                <h3 className="font-semibold text-base text-primary/80" data-testid={`badge-scanner-status-${aiBot.id}`}>Scanning markets…</h3>
+                              ) : (
+                                <h3 className="font-semibold text-base">
+                                  {aiBot.market}
+                                  {(aiBot as any).marketSource === 'scanner' && (
+                                    <span className="ml-1.5 text-xs font-normal text-primary/70">via Scanner</span>
+                                  )}
+                                </h3>
+                              )}
                               <p className="text-sm text-muted-foreground">{aiBot.timeframe} · AI Trader</p>
                             </div>
                           </div>

@@ -42,6 +42,7 @@ type DocSection =
   | 'lab-assistant'
   | 'quantumlab-agent-api'
   | 'ai-trader-overview'
+  | 'ai-trader-scanner'
   | 'ai-trader-trials'
   | 'ai-trader-modes'
   | 'ai-trader-models'
@@ -66,6 +67,7 @@ const navItems: NavItem[] = [
   { id: 'trade-execution', label: 'Trade Execution', icon: Zap },
   { id: 'ai-agents', label: 'AI Agent Integration', icon: Cpu },
   { id: 'ai-trader-overview', label: 'AI Trader', icon: Bot },
+  { id: 'ai-trader-scanner', label: 'Market Scanner', icon: Search },
   { id: 'ai-trader-trials', label: 'Paper Trials & Graduation', icon: TestTube2 },
   { id: 'ai-trader-modes', label: 'Modes & Risk Profiles', icon: SlidersHorizontal },
   { id: 'ai-trader-models', label: 'Models & Costs', icon: DollarSign },
@@ -4018,6 +4020,50 @@ function AiTraderTrialsSection() {
   );
 }
 
+function AiTraderScannerSection() {
+  return (
+    <div>
+      <SectionHeading>Market Scanner</SectionHeading>
+      <Paragraph>
+        By default an AI Trader bot watches one fixed market at a fixed timeframe. <strong>Market Scanner mode</strong> removes both constraints: before each analysis cycle the platform evaluates every market listed on the selected exchange across all four timeframes (15m, 1h, 4h, 1d) and surfaces the market-and-timeframe combination that looks most tradeable. The bot then focuses its full analysis on that candidate and enters if the AI decides.
+      </Paragraph>
+      <Paragraph>
+        The practical difference: a fixed-market bot waits for you to pick a ticker and relies on you timing your entry into that specific market. A scanner bot acts immediately when a high-quality setup appears anywhere on the exchange — you don't pick the market, the platform finds the trade for you.
+      </Paragraph>
+
+      <SubHeading>How It Works</SubHeading>
+      <ul className="space-y-2 mb-6 text-white/70 text-sm leading-relaxed">
+        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span>A background sweep runs continuously, scoring every listed market on multiple quality signals — trend alignment, volatility, funding rate, and other technical factors.</span></li>
+        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span>At analysis time the bot pulls the current top candidate from the shortlist, builds the full market briefing for that market and timeframe, and sends it to the AI as normal.</span></li>
+        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span>If the AI decides to trade, the position is opened on that market at that timeframe. If it decides flat, the next sweep cycle may surface a different candidate.</span></li>
+        <li className="flex gap-2"><span className="text-violet-400 flex-shrink-0">•</span><span>The bot card shows <strong className="text-violet-300">Scanning markets…</strong> when it is between positions. Once a trade is open the card shows the actual market alongside a "via Scanner" label.</span></li>
+      </ul>
+
+      <SubHeading>Differences from a Fixed-Market Bot</SubHeading>
+      <div className="space-y-3 mb-6">
+        {[
+          { label: 'Auto mode only', desc: 'Scanner bots always run in Auto mode — the mode toggle is not available. The scanner only makes sense when the bot acts at each candle without waiting for manual approval.' },
+          { label: 'Auto Next on by default', desc: 'After a position closes the bot returns to scanning immediately. It does not stop and wait.' },
+          { label: 'No ticker or timeframe to pick', desc: 'During setup the market and timeframe selects are replaced by a live status line: "Scanning N markets · 15m / 1h / 4h / 1d". You just set exchange, model, leverage, and allocation.' },
+          { label: 'Flash scanner — paper only', desc: 'Flash scanner bots run in paper mode only. Flash live trading on scanner bots is not yet supported.' },
+        ].map(g => (
+          <div key={g.label} className="flex gap-3 p-3 rounded-lg bg-white/5 border border-white/10">
+            <div className="w-1.5 h-1.5 rounded-full bg-violet-400 flex-shrink-0 mt-2" />
+            <div>
+              <p className="text-sm font-medium text-white/90">{g.label}</p>
+              <p className="text-sm text-white/60 mt-0.5">{g.desc}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <Alert type="info">
+        The scanner is designed for users who want broad market coverage without running many individual bots or managing separate subscriptions for each ticker.
+      </Alert>
+    </div>
+  );
+}
+
 function AiTraderModesSection() {
   return (
     <div>
@@ -4283,6 +4329,7 @@ const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet:
   { id: 'trade-execution', label: 'Trade Execution', snippet: 'How trades are routed from webhook signals through the execution engine, including retries and error handling.', keywords: ['trade execution', 'execution', 'order', 'fill', 'route', 'retry', 'error', 'failed trade', 'slippage', 'entry price', 'size', 'notional', 'fee'] },
   { id: 'ai-agents', label: 'AI Agent Integration', snippet: 'Use AI agents (Claude, GPT, etc.) to send trade signals to QuantumVault via the agent API.', keywords: ['ai', 'agent', 'claude', 'gpt', 'openai', 'llm', 'language model', 'api', 'integration', 'programmatic', 'automated', 'server execution key', 'openclaw', 'mcp server', 'revoke', 'api access', 'sui-perp', 'apt-perp'] },
   { id: 'ai-trader-overview', label: 'AI Trader', snippet: 'Built-in autonomous trading agent. AI model watches the market, decides long/short/flat, and places bracketed orders (entry + SL + TP). Every bot starts in paper mode — no real money until graduation.', keywords: ['ai trader', 'autonomous', 'trading bot', 'ai bot', 'paper mode', 'paper trading', 'decision card', 'rationale', 'flat', 'guardrail', 'bracket', 'stop loss', 'take profit', 'entry', 'candle', 'indicator', 'context', 'confidence', 'openrouter', 'opus', 'claude', 'cot', 'commitment of traders', 'cftc', 'smart money', 'positioning', 'macro bias', 'ema', 'rsi', 'macd', 'bollinger', 'vwap', 'adx', 'obv', 'funding rate', 'open interest', 'risk reward', 'accumulating', 'distributing', 'session', 'trading session', 'weekend', 'asia', 'london', 'new york', 'dow structure', 'swing', 'trend structure', 'uptrend', 'downtrend', 'aligned', 'price levels', 'touch count', 'support', 'resistance', 'double top', 'double bottom', 'wm pattern', 'neckline', 'pattern detection'] },
+  { id: 'ai-trader-scanner', label: 'Market Scanner', snippet: 'Market Scanner mode lets an AI Trader bot find its own trades across all markets and timeframes, instead of watching a single fixed ticker. The bot enters Auto mode and evaluates every market on the selected exchange on 15m, 1h, 4h, and 1d before each decision.', keywords: ['market scanner', 'scanner', 'scan', 'scanning', 'all markets', 'multi market', 'auto select', 'find trade', 'pick market', 'fixed market', 'timeframe sweep', 'flash scanner', 'pacifica scanner', 'scanning markets', 'how to find', 'no ticker'] },
   { id: 'ai-trader-trials', label: 'Paper Trials & Graduation', snippet: 'Every AI Trader bot must pass a 30-day paper trial before live trading unlocks. Criteria: net PnL > 0, profit factor ≥ 1.1, drawdown ≤ 30% mark-to-market. Graduation is an unlock, not an auto-flip.', keywords: ['paper trial', 'graduation', 'graduate', 'paper mode', 'trial period', 'unlock', 'live toggle', 'net pnl', 'profit factor', 'drawdown', 'mark to market', 'slippage penalty', 'simulated', 'restart trial', 'failed trial', 'criteria', '30 days', 'ltf', 'htf', '30 day'] },
   { id: 'ai-trader-modes', label: 'Modes & Risk Profiles', snippet: 'Suggest mode: AI proposes, you approve. Auto mode: AI executes at each candle close. Guarded profile adds daily-loss circuit breaker and consecutive-loss brake. Degen mode runs until allocation is depleted. Risk-Based Sizing optional mode.', keywords: ['suggest mode', 'auto mode', 'guarded', 'degen', 'risk profile', 'circuit breaker', 'daily loss', 'consecutive loss', 'frequency cap', 'auto next', 'ask ai again', 'wait for me', 'execute', 'skip', 'mode switch', 'loss pacing', 'position sizing', 'risk based', 'risk-based', 'sizing mode', 'risk band', 'live equity', 'confidence scaled', 'discretionary', 'stop distance', 'fixed fractional'] },
   { id: 'ai-trader-models', label: 'Models & Costs', snippet: 'Default: Qwen3.7 Max for 15m/1h (96 decisions/day, ~$0.29/day), Opus 4.8 for 4h/1d. Opus on 15m ≈ $9.60/day. Net P&L subtracts cumulative LLM cost — a bot that wins less than its AI bill is not profitable.', keywords: ['model', 'claude', 'opus', 'qwen', 'deepseek', 'openrouter', 'api key', 'cost', 'price', 'per decision', 'tokens', 'llm cost', 'net pnl', 'realized pnl', 'trading fees', 'taker fee', 'pnl definition', 'openrouter key', 'model picker', 'byo key', 'alpha arena', 'decision frequency', 'candles per day'] },
@@ -4345,6 +4392,8 @@ export default function DocsPage() {
         return <AIAgentsSection />;
       case 'ai-trader-overview':
         return <AiTraderOverviewSection />;
+      case 'ai-trader-scanner':
+        return <AiTraderScannerSection />;
       case 'ai-trader-trials':
         return <AiTraderTrialsSection />;
       case 'ai-trader-modes':

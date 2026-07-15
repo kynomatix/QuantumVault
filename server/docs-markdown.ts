@@ -1684,6 +1684,28 @@ The AI returns a structured decision — not prose. It specifies direction, leve
 
 **Flat is a valid decision.** "No trade" is fully supported and common. The bot is evaluated on risk-adjusted return net of fees, not on activity. A flat decision in Auto mode schedules the next analysis at the next candle close and does nothing else.
 
+### Market Scanner
+
+By default an AI Trader bot watches one fixed market at a fixed timeframe. **Market Scanner mode** removes both constraints: before each analysis cycle the platform evaluates every market listed on the selected exchange across all four timeframes (15m, 1h, 4h, 1d) and surfaces the market-and-timeframe combination that looks most tradeable. The bot then focuses its full analysis on that candidate and enters if the AI decides.
+
+The practical difference: a fixed-market bot waits for you to pick a ticker and relies on you timing your entry into that specific market. A scanner bot acts immediately when a high-quality setup appears anywhere on the exchange — you don't pick the market, the platform finds the trade for you.
+
+**How it works:**
+
+- A background sweep runs continuously, scoring every listed market on multiple quality signals (trend alignment, volatility, funding rate, and other technical factors).
+- At analysis time the bot pulls the current top candidate from the shortlist, builds the full market briefing for that market and timeframe, and sends it to the AI as normal.
+- If the AI decides to trade, the position is opened on that market at that timeframe. If it decides flat, the next sweep cycle may surface a different candidate.
+- The bot card shows "Scanning markets…" when it is between positions. Once a trade is open the card shows the actual market alongside a "via Scanner" label.
+
+**Operational differences from a fixed-market bot:**
+
+- Scanner bots always run in **Auto mode** — the mode toggle is not available (the scanner only makes sense when the bot decides without waiting for your approval at each candle).
+- **Auto Next** is on by default so the bot returns to scanning after a position closes.
+- **No ticker or timeframe to pick** — during setup the market and timeframe selects are replaced by a live status line showing how many markets are being scanned. You set exchange, model, leverage, and allocation; the scanner handles the rest.
+- Flash scanner bots run in **paper mode only**. Flash live trading on scanner bots is not yet supported.
+
+The scanner is designed for users who want broad market coverage without running many individual bots or managing separate subscriptions for each ticker.
+
 ### The Decision Card
 
 Each decision renders as a card showing: direction and entry type (e.g. LONG at market), stop-loss price and distance %, take-profit price and distance %, leverage, size as a percentage of allocation, risk/reward ratio, confidence score, and the model's rationale verbatim.

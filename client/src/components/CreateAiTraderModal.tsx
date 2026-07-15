@@ -43,10 +43,23 @@ import {
   Brain,
   FlaskConical,
   Zap,
+  Search,
 } from 'lucide-react';
 import { LlmKeyStatusRow } from '@/components/LlmKeyStatusRow';
 
 const DEGEN_CONFIRM_PHRASE = "send it";
+
+interface ScannerBoundaryStats {
+  protocol: string;
+  timeframe: string;
+  marketsScanned: number;
+}
+
+interface ScannerStatusResponse {
+  lastBoundaryStats: ScannerBoundaryStats | null;
+  recentHistory: ScannerBoundaryStats[];
+  scannerRunning: boolean;
+}
 
 const SELECTABLE_MODELS = [
   { id: "anthropic/claude-opus-4.8",   label: "Claude Opus 4.8",   note: "Deepest judgment — suits 4h/1d conviction calls",            roughCost: "~$0.10/call",  callCostUsd: 0.10 },
@@ -91,6 +104,7 @@ interface CreateAiTraderModalProps {
 
 interface FormState {
   name: string;
+  marketSource: 'fixed' | 'scanner';
   market: string;
   protocol: ProtocolId;
   timeframe: string;
@@ -124,11 +138,12 @@ export function CreateAiTraderModal({
   const [markets, setMarkets] = useState<MarketInfo[]>([]);
   const [isLoadingMarkets, setIsLoadingMarkets] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  // Tracks whether the user has manually chosen a model; if not, timeframe changes drive the default.
   const [userPickedModel, setUserPickedModel] = useState(false);
+  const [scannerStatus, setScannerStatus] = useState<ScannerStatusResponse | null>(null);
 
-  const [form, setForm] = useState<FormState>({
+  const INITIAL_FORM: FormState = {
     name: 'AI Trader — SOL-PERP',
+    marketSource: 'fixed',
     market: 'SOL-PERP',
     protocol: 'pacifica',
     timeframe: '1h',
@@ -149,15 +164,28 @@ export function CreateAiTraderModal({
       minNetPnl: 2.0,
       maxDrawdownPct: 25,
     },
-  });
+  };
 
-  // Auto-update name when market changes
+  const [form, setForm] = useState<FormState>(INITIAL_FORM);
+
+  // Auto-update name when market or marketSource changes
   useEffect(() => {
     setForm(prev => ({
       ...prev,
-      name: `AI Trader — ${prev.market}`,
+      name: prev.marketSource === 'scanner' ? `AI Trader — Market Scanner` : `AI Trader — ${prev.market}`,
     }));
-  }, [form.market]);
+  }, [form.market, form.marketSource]);
+
+  // Fetch scanner status for the market count display
+  useEffect(() => {
+    if (!isOpen || form.marketSource !== 'scanner') return;
+    let cancelled = false;
+    fetch('/api/ai-trader/scanner/status', { credentials: 'include' })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (!cancelled && data) setScannerStatus(data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [isOpen, form.marketSource, form.protocol]);
 
   // Fetch markets for selected exchange
   useEffect(() => {
@@ -200,6 +228,7 @@ export function CreateAiTraderModal({
       graduationCriteria: { ...prev.graduationCriteria, [key]: value },
     }));
 
+  const isScanner = form.marketSource === 'scanner';
   const allocatedNum = parseFloat(form.allocatedUsdc) || 0;
   const degenConfirmed = form.degenConfirm.trim().toLowerCase() === DEGEN_CONFIRM_PHRASE;
   const isDegenMode = form.riskProfile === 'degen';
@@ -214,34 +243,34 @@ export function CreateAiTraderModal({
 
   const canCreate =
     !!form.name.trim() &&
-    !!form.market &&
+    (isScanner || !!form.market) &&
     allocatedNum >= 10 &&
     (!isDegenMode || degenConfirmed) &&
     !riskBandError &&
     !isCreating;
 
+  // Derive market count from the most recent sweep entry for the selected protocol.
+  const scannerMarketCount: number | null = (() => {
+    if (!scannerStatus) return null;
+    // recentHistory is newest-last; scan from the end for the selected protocol.
+    const history = scannerStatus.recentHistory ?? [];
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i].protocol === form.protocol) return history[i].marketsScanned;
+    }
+    // Fall back to lastBoundaryStats if it matches the selected protocol.
+    const lbs = scannerStatus.lastBoundaryStats;
+    if (lbs && lbs.protocol === form.protocol) return lbs.marketsScanned;
+    return null;
+  })();
+
+  const exchangeLabel = form.protocol === 'flash' ? 'Flash' : 'Pacifica';
+
   const handleClose = () => {
     if (isCreating) return;
-    setForm({
-      name: 'AI Trader — SOL-PERP',
-      market: 'SOL-PERP',
-      protocol: 'pacifica',
-      timeframe: '1h',
-      model: 'qwen/qwen3.7-max',
-      maxLeverage: 3,
-      allocatedUsdc: '100',
-      riskProfile: 'guarded',
-      mode: 'suggest',
-      degenConfirm: '',
-      parkWhenIdle: false,
-      autoNext: false,
-      sizingMode: 'discretionary',
-      riskMinPct: 0.5,
-      riskMaxPct: 1.5,
-      graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 2.0, maxDrawdownPct: 25 },
-    });
+    setForm(INITIAL_FORM);
     setAdvancedOpen(false);
     setUserPickedModel(false);
+    setScannerStatus(null);
     onClose();
   };
 
@@ -250,21 +279,24 @@ export function CreateAiTraderModal({
     setIsCreating(true);
     try {
       const body: Record<string, unknown> = {
-        market: form.market,
-        timeframe: form.timeframe,
-        mode: form.mode,
+        marketSource: form.marketSource,
+        mode: isScanner ? 'auto' : form.mode,
         riskProfile: form.riskProfile,
         model: form.model,
         allocatedUsdc: allocatedNum,
         maxLeverage: form.maxLeverage,
         parkWhenIdle: form.parkWhenIdle,
-        autoNext: form.autoNext,
+        autoNext: isScanner ? true : form.autoNext,
         protocol: form.protocol,
         graduationCriteria: form.graduationCriteria,
         sizingMode: form.sizingMode,
         riskMinPct: form.riskMinPct,
         riskMaxPct: form.riskMaxPct,
       };
+      if (!isScanner) {
+        body.market = form.market;
+        body.timeframe = form.timeframe;
+      }
       if (isDegenMode) body.degenConfirm = form.degenConfirm.trim().toLowerCase();
 
       const res = await fetch('/api/ai-trader', {
@@ -319,31 +351,7 @@ export function CreateAiTraderModal({
             />
           </div>
 
-          {/* 2. Market */}
-          <div className="space-y-1.5">
-            <Label htmlFor="ai-trader-market">Market</Label>
-            <Select
-              value={form.market}
-              onValueChange={v => set('market', v)}
-              disabled={isLoadingMarkets}
-            >
-              <SelectTrigger id="ai-trader-market" data-testid="select-ai-trader-market">
-                <SelectValue placeholder={isLoadingMarkets ? 'Loading…' : 'Select market'} />
-              </SelectTrigger>
-              <SelectContent>
-                {markets.map(m => (
-                  <SelectItem key={m.symbol} value={m.symbol} data-testid={`option-market-${m.symbol}`}>
-                    {m.symbol}
-                  </SelectItem>
-                ))}
-                {markets.length === 0 && !isLoadingMarkets && (
-                  <SelectItem value="SOL-PERP" data-testid="option-market-SOL-PERP">SOL-PERP</SelectItem>
-                )}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {/* 3. Exchange */}
+          {/* 2. Exchange */}
           <div className="space-y-1.5">
             <Label htmlFor="ai-trader-exchange">Exchange</Label>
             <Select
@@ -363,29 +371,117 @@ export function CreateAiTraderModal({
             </Select>
           </div>
 
-          {/* 4. Timeframe */}
+          {/* 3. Market source toggle */}
           <div className="space-y-1.5">
-            <Label htmlFor="ai-trader-timeframe">Analysis timeframe</Label>
-            <Select value={form.timeframe} onValueChange={v => {
-              setForm(prev => ({
-                ...prev,
-                timeframe: v,
-                // Follow recommendation on timeframe change unless user already picked a model.
-                model: userPickedModel ? prev.model : recommendedModelId(v),
-              }));
-            }}>
-              <SelectTrigger id="ai-trader-timeframe" data-testid="select-ai-trader-timeframe">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {TIMEFRAMES.map(tf => (
-                  <SelectItem key={tf.value} value={tf.value} data-testid={`option-timeframe-${tf.value}`}>
-                    {tf.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <Label>How to find a market</Label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                data-testid="option-fixed-market"
+                onClick={() => setForm(prev => ({ ...prev, marketSource: 'fixed', mode: 'suggest', autoNext: false }))}
+                className={`p-3 rounded-lg border text-left transition-colors ${
+                  !isScanner
+                    ? 'border-primary/60 bg-primary/10'
+                    : 'border-border/60 bg-muted/30 hover:bg-muted/50'
+                }`}
+              >
+                <p className="text-sm font-medium">Pick a Market</p>
+                <p className="text-xs text-muted-foreground mt-0.5">You choose the ticker and timeframe</p>
+              </button>
+              <button
+                type="button"
+                data-testid="option-market-scanner"
+                onClick={() => setForm(prev => ({
+                  ...prev,
+                  marketSource: 'scanner',
+                  mode: 'auto',
+                  autoNext: true,
+                  model: userPickedModel ? prev.model : recommendedModelId('15m'),
+                }))}
+                className={`p-3 rounded-lg border text-left transition-colors ${
+                  isScanner
+                    ? 'border-primary/60 bg-primary/10'
+                    : 'border-border/60 bg-muted/30 hover:bg-muted/50'
+                }`}
+              >
+                <p className="text-sm font-medium flex items-center gap-1.5">
+                  <Search className="w-3.5 h-3.5 text-primary" />
+                  Market Scanner
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5">Finds trades for you automatically</p>
+              </button>
+            </div>
+            {isScanner && (
+              <p className="text-[11px] text-muted-foreground leading-relaxed px-0.5">
+                Scans every {exchangeLabel} market on all four timeframes and enters when a high-quality setup appears. No ticker or timeframe picking needed.
+              </p>
+            )}
+            {isScanner && form.protocol === 'flash' && (
+              <p className="text-[11px] text-amber-400/80 leading-relaxed px-0.5">
+                Flash scanner bots run in paper mode only — live trading on Flash is not yet supported.
+              </p>
+            )}
           </div>
+
+          {/* 4. Market / Timeframe — shown for fixed; Scanner status line shown for scanner */}
+          {!isScanner ? (
+            <>
+              <div className="space-y-1.5">
+                <Label htmlFor="ai-trader-market">Market</Label>
+                <Select
+                  value={form.market}
+                  onValueChange={v => set('market', v)}
+                  disabled={isLoadingMarkets}
+                >
+                  <SelectTrigger id="ai-trader-market" data-testid="select-ai-trader-market">
+                    <SelectValue placeholder={isLoadingMarkets ? 'Loading…' : 'Select market'} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {markets.map(m => (
+                      <SelectItem key={m.symbol} value={m.symbol} data-testid={`option-market-${m.symbol}`}>
+                        {m.symbol}
+                      </SelectItem>
+                    ))}
+                    {markets.length === 0 && !isLoadingMarkets && (
+                      <SelectItem value="SOL-PERP" data-testid="option-market-SOL-PERP">SOL-PERP</SelectItem>
+                    )}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="ai-trader-timeframe">Analysis timeframe</Label>
+                <Select value={form.timeframe} onValueChange={v => {
+                  setForm(prev => ({
+                    ...prev,
+                    timeframe: v,
+                    model: userPickedModel ? prev.model : recommendedModelId(v),
+                  }));
+                }}>
+                  <SelectTrigger id="ai-trader-timeframe" data-testid="select-ai-trader-timeframe">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {TIMEFRAMES.map(tf => (
+                      <SelectItem key={tf.value} value={tf.value} data-testid={`option-timeframe-${tf.value}`}>
+                        {tf.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </>
+          ) : (
+            <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-primary/5 border border-primary/20 text-sm text-muted-foreground" data-testid="scanner-status-line">
+              <Search className="w-3.5 h-3.5 text-primary flex-shrink-0" />
+              <span>
+                Scanning{' '}
+                <span className="text-foreground font-medium">
+                  {scannerMarketCount != null ? scannerMarketCount : 'all'}
+                </span>
+                {' '}{exchangeLabel} markets · 15m / 1h / 4h / 1d
+              </span>
+            </div>
+          )}
 
           {/* 5. Model & key */}
           <div className="space-y-3">
@@ -505,53 +601,66 @@ export function CreateAiTraderModal({
           </div>
 
           {/* Mode */}
-          <div className="space-y-2">
-            <Label>Mode</Label>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => setForm(prev => ({ ...prev, mode: 'suggest' }))}
-                data-testid="button-mode-suggest"
-                className={`p-3 rounded-lg border text-left transition-colors ${
-                  form.mode === 'suggest'
-                    ? 'border-primary/60 bg-primary/10'
-                    : 'border-border/60 bg-muted/30 hover:bg-muted/50'
-                }`}
-              >
-                <p className="text-sm font-medium">Suggest</p>
-                <p className="text-xs text-muted-foreground mt-0.5">You approve each trade proposal</p>
-              </button>
-              <button
-                type="button"
-                onClick={() => setForm(prev => ({ ...prev, mode: 'auto', autoNext: true }))}
-                data-testid="button-mode-auto"
-                className={`p-3 rounded-lg border text-left transition-colors ${
-                  form.mode === 'auto'
-                    ? 'border-primary/60 bg-primary/10'
-                    : 'border-border/60 bg-muted/30 hover:bg-muted/50'
-                }`}
-              >
-                <p className="text-sm font-medium flex items-center gap-1.5">
-                  <Zap className="w-3.5 h-3.5 text-primary" />
-                  Auto
-                </p>
-                <p className="text-xs text-muted-foreground mt-0.5">Hands-free paper testing — re-analyzes automatically after every close to build a graduation record</p>
-              </button>
-            </div>
-            {form.mode === 'auto' && (
-              <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 p-3">
+          {isScanner ? (
+            <div className="space-y-2">
+              <Label>Mode</Label>
+              <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg border border-primary/30 bg-primary/5" data-testid="scanner-mode-pinned">
+                <Zap className="w-4 h-4 text-primary flex-shrink-0" />
                 <div>
-                  <p className="text-sm font-medium">After-close</p>
-                  <p className="text-xs text-muted-foreground">Ask AI again automatically after each close</p>
+                  <p className="text-sm font-medium">Auto <span className="text-xs font-normal text-muted-foreground">(required for scanner)</span></p>
+                  <p className="text-xs text-muted-foreground mt-0.5">Scanner bots trade immediately when a setup appears — no approval step</p>
                 </div>
-                <Switch
-                  checked={form.autoNext}
-                  onCheckedChange={v => set('autoNext', v)}
-                  data-testid="switch-auto-next"
-                />
               </div>
-            )}
-          </div>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <Label>Mode</Label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setForm(prev => ({ ...prev, mode: 'suggest' }))}
+                  data-testid="button-mode-suggest"
+                  className={`p-3 rounded-lg border text-left transition-colors ${
+                    form.mode === 'suggest'
+                      ? 'border-primary/60 bg-primary/10'
+                      : 'border-border/60 bg-muted/30 hover:bg-muted/50'
+                  }`}
+                >
+                  <p className="text-sm font-medium">Suggest</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">You approve each trade proposal</p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setForm(prev => ({ ...prev, mode: 'auto', autoNext: true }))}
+                  data-testid="button-mode-auto"
+                  className={`p-3 rounded-lg border text-left transition-colors ${
+                    form.mode === 'auto'
+                      ? 'border-primary/60 bg-primary/10'
+                      : 'border-border/60 bg-muted/30 hover:bg-muted/50'
+                  }`}
+                >
+                  <p className="text-sm font-medium flex items-center gap-1.5">
+                    <Zap className="w-3.5 h-3.5 text-primary" />
+                    Auto
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-0.5">Hands-free paper testing — re-analyzes automatically after every close to build a graduation record</p>
+                </button>
+              </div>
+              {form.mode === 'auto' && (
+                <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 p-3">
+                  <div>
+                    <p className="text-sm font-medium">After-close</p>
+                    <p className="text-xs text-muted-foreground">Ask AI again automatically after each close</p>
+                  </div>
+                  <Switch
+                    checked={form.autoNext}
+                    onCheckedChange={v => set('autoNext', v)}
+                    data-testid="switch-auto-next"
+                  />
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Risk profile */}
           <div className="space-y-2">

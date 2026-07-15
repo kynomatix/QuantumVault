@@ -116,6 +116,7 @@ interface AiTraderBot {
   market: string;
   timeframe: string;
   mode: string;
+  marketSource?: string;
   riskProfile: string;
   paperMode: boolean;
   autoNext: boolean;
@@ -813,7 +814,11 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                       )}
                     </SheetTitle>
                     <SheetDescription className="text-xs flex items-center gap-1.5 mt-0.5">
-                      {bot.market} · {bot.timeframe} · {bot.riskProfile === 'degen' ? '🔥 Full Send' : 'Guarded'}
+                      {bot.marketSource === 'scanner' && bot.status !== 'open'
+                        ? <span data-testid={`badge-scanner-status-${bot.id}`} className="flex items-center gap-1">Scanning markets…</span>
+                        : <>{bot.market}{bot.marketSource === 'scanner' && <span className="text-primary/70 font-medium">via Scanner</span>}</>
+                      }
+                      {' · '}{bot.timeframe} · {bot.riskProfile === 'degen' ? '🔥 Full Send' : 'Guarded'}
                     </SheetDescription>
                   </div>
                 </div>
