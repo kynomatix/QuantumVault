@@ -89,6 +89,7 @@ const NON_CRYPTO_PYTH_MAP: Record<string, string> = {
   AAPL: "AAPL",
   AMD: "AMD",
   AMZN: "AMZN",
+  MSTR: "MSTR",
 };
 
 function isNonCryptoSymbol(symbol: string): boolean {
