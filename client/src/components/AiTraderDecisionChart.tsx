@@ -15,7 +15,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { Loader2, AlertCircle, BarChart3 } from 'lucide-react';
+import { Loader2, AlertCircle, BarChart3, Maximize2, Minimize2 } from 'lucide-react';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
 
@@ -154,9 +154,17 @@ export function AiTraderDecisionChart({
   // User-selected chart timeframe (MTF zoom-out); starts on the decision's own
   // timeframe and resets to it whenever the dialog opens for a new decision.
   const [tf, setTf] = useState<ChartTf>(isChartTf(timeframe) ? timeframe : '1h');
+  // Session-only "big chart" toggle — deliberately NOT persisted anywhere
+  // (owner: default small, no extra stored state). Resizing goes through the
+  // container's CSS + the ResizeObserver, so toggling never rebuilds the
+  // chart and the user's scroll/zoom survives.
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
-    if (open) setTf(isChartTf(timeframe) ? timeframe : '1h');
+    if (open) {
+      setTf(isChartTf(timeframe) ? timeframe : '1h');
+      setExpanded(false);
+    }
   }, [open, decisionId, timeframe]);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -244,7 +252,7 @@ export function AiTraderDecisionChart({
 
     const chart = createChart(containerRef.current, {
       width: containerRef.current.clientWidth,
-      height: 360,
+      height: containerRef.current.clientHeight || 360,
       layout: {
         background: { color: 'transparent' },
         textColor: '#9ca3af',
@@ -439,7 +447,10 @@ export function AiTraderDecisionChart({
 
     const ro = new ResizeObserver(() => {
       if (containerRef.current) {
-        chart.applyOptions({ width: containerRef.current.clientWidth });
+        chart.applyOptions({
+          width: containerRef.current.clientWidth,
+          height: containerRef.current.clientHeight || 360,
+        });
       }
     });
     ro.observe(containerRef.current);
@@ -522,7 +533,10 @@ export function AiTraderDecisionChart({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-3xl" data-testid="dialog-ai-trader-chart">
+      <DialogContent
+        className={expanded ? 'sm:max-w-[min(1400px,95vw)]' : 'sm:max-w-3xl'}
+        data-testid="dialog-ai-trader-chart"
+      >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-base">
             <BarChart3 className="w-4 h-4 text-primary" />
@@ -571,6 +585,16 @@ export function AiTraderDecisionChart({
             {!isOpenPosition && exitReasonLabel && (
               <span className="text-[10px] text-muted-foreground">({exitReasonLabel})</span>
             )}
+            <button
+              type="button"
+              onClick={() => setExpanded((e) => !e)}
+              className="ml-1 p-1 rounded text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors"
+              title={expanded ? 'Smaller chart' : 'Bigger chart'}
+              aria-label={expanded ? 'Smaller chart' : 'Bigger chart'}
+              data-testid="button-chart-expand"
+            >
+              {expanded ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+            </button>
           </div>
         </div>
 
@@ -580,7 +604,11 @@ export function AiTraderDecisionChart({
             : 'Hover the chart for open/high/low/close'}
         </div>
 
-        <div className="relative w-full" style={{ height: 360 }} data-testid="container-ai-trader-chart">
+        <div
+          className="relative w-full"
+          style={{ height: expanded ? 'min(62vh, 760px)' : 360 }}
+          data-testid="container-ai-trader-chart"
+        >
           {loading && (
             <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-muted-foreground" data-testid="state-chart-loading">
               <Loader2 className="w-4 h-4 animate-spin" />
