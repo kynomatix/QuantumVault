@@ -445,18 +445,28 @@ export function AiTraderDecisionChart({
     };
     chart.subscribeCrosshairMove(handleCrosshairMove);
 
+    // Resize is deferred to the next animation frame: resizing the chart's
+    // canvases synchronously INSIDE the ResizeObserver callback re-triggers
+    // layout mid-delivery, which the browser reports as an uncaught
+    // "ResizeObserver loop" error event (a non-Error — it tripped the dev
+    // runtime-error overlay when the dialog was expanded).
+    let resizeRaf = 0;
     const ro = new ResizeObserver(() => {
-      if (containerRef.current) {
-        chart.applyOptions({
-          width: containerRef.current.clientWidth,
-          height: containerRef.current.clientHeight || 360,
-        });
-      }
+      cancelAnimationFrame(resizeRaf);
+      resizeRaf = requestAnimationFrame(() => {
+        if (containerRef.current && chartRef.current === chart) {
+          chart.applyOptions({
+            width: containerRef.current.clientWidth,
+            height: containerRef.current.clientHeight || 360,
+          });
+        }
+      });
     });
     ro.observe(containerRef.current);
 
     return () => {
       ro.disconnect();
+      cancelAnimationFrame(resizeRaf);
       chart.unsubscribeCrosshairMove(handleCrosshairMove);
       chart.remove();
       chartRef.current = null;
