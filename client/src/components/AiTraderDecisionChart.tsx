@@ -60,6 +60,14 @@ function isChartTf(v: string): v is ChartTf {
   return (CHART_TIMEFRAMES as readonly string[]).includes(v);
 }
 
+/** A support/resistance level the AI actually saw when it made this decision
+ *  (mapped from the decision's contextDigest.htfLevels by the drawer). */
+export interface AiChartLevel {
+  price: number;
+  kind: 'support' | 'resistance';
+  touches: number;
+}
+
 interface AiTraderDecisionChartProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -79,6 +87,7 @@ interface AiTraderDecisionChartProps {
   markPrice?: number | null;
   unrealizedPnl?: number | null;
   sizeBase?: number | null;
+  aiLevels?: AiChartLevel[];
 }
 
 function toEpochSeconds(v: string | number | null): number | null {
@@ -135,6 +144,7 @@ export function AiTraderDecisionChart({
   markPrice,
   unrealizedPnl,
   sizeBase,
+  aiLevels,
 }: AiTraderDecisionChartProps) {
   const [candles, setCandles] = useState<ChartCandle[]>([]);
   const [loading, setLoading] = useState(false);
@@ -151,6 +161,10 @@ export function AiTraderDecisionChart({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  // Set just before the deep-history backfill replaces the candle state, so the
+  // rebuild restores the user's current view (by time, immune to index shifts
+  // from prepended history) instead of re-running the default trade framing.
+  const preserveViewRef = useRef<{ from: UTCTimestamp; to: UTCTimestamp } | null>(null);
 
   // Fetch candles only — every other value (entry/exit/SL/TP/PnL/exitReason)
   // is passed in as a prop from data the drawer already holds.
@@ -165,23 +179,45 @@ export function AiTraderDecisionChart({
     setLoading(true);
     setError(null);
     setCandles([]);
+    // A fresh load must never restore a view preserved for a previous decision
+    // (rapid close/reopen can leave the ref set if the build effect never ran).
+    preserveViewRef.current = null;
     (async () => {
-      try {
+      const fetchSpan = async (span: 'trade' | 'deep'): Promise<ChartCandle[]> => {
         const res = await fetch(
-          `/api/ai-trader/${botId}/chart?decisionId=${encodeURIComponent(decisionId)}&tf=${encodeURIComponent(tf)}`,
+          `/api/ai-trader/${botId}/chart?decisionId=${encodeURIComponent(decisionId)}&tf=${encodeURIComponent(tf)}&span=${span}`,
           { credentials: 'include', headers: walletAuthHeaders() }
         );
         const data = await safeResponseJson(res);
+        if (!res.ok) throw new Error(data?.error || 'Could not load chart');
+        return Array.isArray(data?.candles) ? data.candles : [];
+      };
+      let fastCount = 0;
+      try {
+        // Stage 1: tight trade window — fast first paint.
+        const fast = await fetchSpan('trade');
         if (cancelled) return;
-        if (!res.ok) {
-          setError(data?.error || 'Could not load chart');
-          return;
-        }
-        setCandles(Array.isArray(data?.candles) ? data.candles : []);
+        fastCount = fast.length;
+        setCandles(fast);
+        setLoading(false);
       } catch (err: any) {
-        if (!cancelled) setError(err?.message || 'Could not load chart');
-      } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setError(err?.message || 'Could not load chart');
+          setLoading(false);
+        }
+        return;
+      }
+      try {
+        // Stage 2: backfill the deep scroll-back history in the background —
+        // usually stitched in before the user starts scrolling left. Failure
+        // is non-fatal: the trade window is already on screen.
+        const deep = await fetchSpan('deep');
+        if (cancelled || deep.length <= fastCount) return;
+        preserveViewRef.current =
+          (chartRef.current?.timeScale().getVisibleRange() as { from: UTCTimestamp; to: UTCTimestamp } | null) ?? null;
+        setCandles(deep);
+      } catch {
+        // keep the fast window
       }
     })();
     return () => {
@@ -302,6 +338,21 @@ export function AiTraderDecisionChart({
       });
     }
 
+    // Support/resistance levels the AI actually saw for THIS decision (from the
+    // decision's stored context). Deliberately dim + dotted, neutral color so
+    // they never compete with SL/TP; axis label off to keep the price axis clean.
+    for (const lvl of aiLevels ?? []) {
+      if (!Number.isFinite(lvl?.price)) continue;
+      series.createPriceLine({
+        price: lvl.price,
+        color: 'rgba(148,163,184,0.65)',
+        lineStyle: LineStyle.Dotted,
+        lineWidth: 1,
+        axisLabelVisible: false,
+        title: `AI ${lvl.kind === 'support' ? 'Sup' : 'Res'}${lvl.touches > 0 ? ` ×${lvl.touches}` : ''}`,
+      });
+    }
+
     const markers: Parameters<typeof series.setMarkers>[0] = [];
     const decidedAtSec = toEpochSeconds(decidedAt);
     if (decidedAtSec !== null) {
@@ -326,10 +377,20 @@ export function AiTraderDecisionChart({
     markers.sort((a, b) => (a.time as number) - (b.time as number));
     series.setMarkers(markers);
 
-    // Default view frames the trade itself — NOT fitContent(): the server now
-    // loads ~900 bars of scroll-back history behind the entry, and fitting all
-    // of it would squash the trade flat. Scroll/pinch left to see the history.
-    if (decidedAtSec !== null && times.length > 0) {
+    // View priority: (1) restore the exact pre-backfill view when the deep
+    // history just stitched in (by time, so prepended bars can't shift it);
+    // (2) default framing on the trade itself — NOT fitContent(), which would
+    // squash the trade flat against ~900 bars of scroll-back history;
+    // (3) fitContent as the last resort when the entry time is unknown.
+    const preservedView = preserveViewRef.current;
+    preserveViewRef.current = null;
+    if (preservedView) {
+      try {
+        chart.timeScale().setVisibleRange(preservedView);
+      } catch {
+        chart.timeScale().fitContent();
+      }
+    } else if (decidedAtSec !== null && times.length > 0) {
       const entryIdx = nearestTimeIndex(times, decidedAtSec);
       const exitIdx = closedAtSec !== null ? nearestTimeIndex(times, closedAtSec) : times.length - 1;
       const from = Math.max(0, entryIdx - 60);
@@ -368,7 +429,7 @@ export function AiTraderDecisionChart({
       seriesRef.current = null;
       setHoverCandle(null);
     };
-  }, [open, loading, error, candles, entryPrice, stopLossPrice, takeProfitPrice, direction, decidedAt, closedAt, realizedPnl, sizeBase, unrealizedPnl]);
+  }, [open, loading, error, candles, entryPrice, stopLossPrice, takeProfitPrice, direction, decidedAt, closedAt, realizedPnl, sizeBase, unrealizedPnl, aiLevels]);
 
   const isOpenPosition = realizedPnl === null;
   const pnlValue = isOpenPosition ? (unrealizedPnl ?? null) : realizedPnl;

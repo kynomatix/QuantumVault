@@ -283,6 +283,10 @@ const CHART_PAD_CANDLES_BEFORE = 900;
 const CHART_PAD_CANDLES_AFTER = 100;
 const CHART_MIN_TOTAL_CANDLES = 1000;
 const CHART_MAX_TOTAL_CANDLES = 2000;
+// span=trade (fast first paint, ~2 OKX pages): tight window around the trade
+// only. The client requests this first, renders, then backfills span=deep.
+const CHART_TRADE_SPAN_PAD = 100;
+const CHART_TRADE_SPAN_MIN = 200;
 
 export function registerAiTraderRoutes(app: Express): void {
   // --- Create -----------------------------------------------------------------------
@@ -1543,9 +1547,19 @@ export function registerAiTraderRoutes(app: Express): void {
       const decidedAtMs = decision.decidedAt ? new Date(decision.decidedAt).getTime() : now;
       const closedAtMs = decision.closedAt ? new Date(decision.closedAt).getTime() : now;
 
-      let startMs = decidedAtMs - CHART_PAD_CANDLES_BEFORE * tfMs;
+      // Two-stage loading: span=trade returns just the window around the trade
+      // (fast — the pre-deep-history sizing); span=deep (default) returns the
+      // full scroll-back window. Client paints trade first, backfills deep.
+      const spanRaw = req.query.span;
+      if (spanRaw !== undefined && spanRaw !== "trade" && spanRaw !== "deep") {
+        return res.status(400).json({ error: "span must be trade or deep" });
+      }
+      const isTradeSpan = spanRaw === "trade";
+
+      const padBefore = isTradeSpan ? CHART_TRADE_SPAN_PAD : CHART_PAD_CANDLES_BEFORE;
+      let startMs = decidedAtMs - padBefore * tfMs;
       let endMs = Math.min(closedAtMs + CHART_PAD_CANDLES_AFTER * tfMs, now);
-      const minSpanMs = CHART_MIN_TOTAL_CANDLES * tfMs;
+      const minSpanMs = (isTradeSpan ? CHART_TRADE_SPAN_MIN : CHART_MIN_TOTAL_CANDLES) * tfMs;
       if (endMs - startMs < minSpanMs) {
         // Extend further back in time (never forward past now) — history lives
         // behind the trade, the trade itself stays near the right edge.

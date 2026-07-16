@@ -67,7 +67,7 @@ import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
 import { useToast } from '@/hooks/use-toast';
 import { AiTraderDecisionCard, violationChipLabels, type AiDecisionRow } from './AiTraderDecisionCard';
-import { AiTraderDecisionChart } from './AiTraderDecisionChart';
+import { AiTraderDecisionChart, type AiChartLevel } from './AiTraderDecisionChart';
 
 const DEGEN_CONFIRM_PHRASE = "send it";
 
@@ -191,6 +191,27 @@ interface ChartTarget {
   markPrice: number | null;
   unrealizedPnl: number | null;
   sizeBase: number | null;
+  /** Support/resistance levels the AI saw for this decision (from contextDigest.htfLevels). */
+  aiLevels?: AiChartLevel[];
+}
+
+/** Maps a decision's stored contextDigest.htfLevels (HtfLevel[] | null) into
+ *  the chart's level-line shape. Returns undefined when absent/malformed so
+ *  the chart simply draws nothing. */
+function mapAiLevels(raw: unknown): AiChartLevel[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: AiChartLevel[] = [];
+  for (const l of raw as any[]) {
+    if (typeof l?.price !== 'number' || !Number.isFinite(l.price)) continue;
+    const defended = typeof l.defendedFromBelow === 'number' ? l.defendedFromBelow : 0;
+    const rejected = typeof l.rejectedFromAbove === 'number' ? l.rejectedFromAbove : 0;
+    out.push({
+      price: l.price,
+      kind: defended >= rejected ? 'support' : 'resistance',
+      touches: typeof l.touchCount === 'number' && Number.isFinite(l.touchCount) ? l.touchCount : 0,
+    });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 function outcomeLabel(outcome: string | null): { label: string; className: string; icon: React.ReactNode } {
@@ -986,6 +1007,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                           markPrice: markPrice,
                           unrealizedPnl: openUnrealizedPnl,
                           sizeBase: openDecision.sizeBase ?? null,
+                          aiLevels: mapAiLevels((openDecision.decision.contextDigest as any)?.htfLevels),
                         })}
                         data-testid="button-view-chart-open-position"
                       >
@@ -1136,6 +1158,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                                   markPrice: null,
                                   unrealizedPnl: null,
                                   sizeBase: null,
+                                  aiLevels: mapAiLevels((d.contextDigest as any)?.htfLevels),
                                 });
                               }}
                               data-testid={`button-view-chart-${d.id}`}
@@ -1758,6 +1781,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
               markPrice={chartTarget?.markPrice ?? null}
               unrealizedPnl={chartTarget?.unrealizedPnl ?? null}
               sizeBase={chartTarget?.sizeBase ?? null}
+              aiLevels={chartTarget?.aiLevels}
             />
           </>
         )}
