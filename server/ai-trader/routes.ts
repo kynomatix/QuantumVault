@@ -287,6 +287,10 @@ const CHART_MAX_TOTAL_CANDLES = 2000;
 // only. The client requests this first, renders, then backfills span=deep.
 const CHART_TRADE_SPAN_PAD = 100;
 const CHART_TRADE_SPAN_MIN = 200;
+// span=tail (live refresh while the chart dialog is open on a still-open
+// trade): only the newest few bars — enough to update the forming candle plus
+// the previous one or two even if a poll was missed. One OKX page, no paging.
+const CHART_TAIL_SPAN_CANDLES = 3;
 
 export function registerAiTraderRoutes(app: Express): void {
   // --- Create -----------------------------------------------------------------------
@@ -1547,14 +1551,40 @@ export function registerAiTraderRoutes(app: Express): void {
       const decidedAtMs = decision.decidedAt ? new Date(decision.decidedAt).getTime() : now;
       const closedAtMs = decision.closedAt ? new Date(decision.closedAt).getTime() : now;
 
-      // Two-stage loading: span=trade returns just the window around the trade
+      // Loading modes: span=trade returns just the window around the trade
       // (fast — the pre-deep-history sizing); span=deep (default) returns the
-      // full scroll-back window. Client paints trade first, backfills deep.
+      // full scroll-back window; span=tail returns only the newest few bars
+      // (the live 10s refresh while the dialog is open on a still-open trade —
+      // one cheap OKX page, never the whole window). Client paints trade first,
+      // backfills deep, then polls tail.
       const spanRaw = req.query.span;
-      if (spanRaw !== undefined && spanRaw !== "trade" && spanRaw !== "deep") {
-        return res.status(400).json({ error: "span must be trade or deep" });
+      if (spanRaw !== undefined && spanRaw !== "trade" && spanRaw !== "deep" && spanRaw !== "tail") {
+        return res.status(400).json({ error: "span must be trade, deep, or tail" });
       }
       const isTradeSpan = spanRaw === "trade";
+
+      if (spanRaw === "tail") {
+        const tailStartMs = now - CHART_TAIL_SPAN_CANDLES * tfMs;
+        const rawTail = await fetchOHLCV(
+          marketToDatafeedTicker(bot.market),
+          chartTf,
+          new Date(tailStartMs).toISOString(),
+          new Date(now).toISOString(),
+          undefined,
+          { skipSpotFallback: true, bypassCache: true }
+        );
+        return res.json({
+          candles: rawTail.map((c) => ({
+            time: Math.floor(c.time / 1000),
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+          })),
+          market: bot.market,
+          timeframe: chartTf,
+        });
+      }
 
       const padBefore = isTradeSpan ? CHART_TRADE_SPAN_PAD : CHART_PAD_CANDLES_BEFORE;
       let startMs = decidedAtMs - padBefore * tfMs;

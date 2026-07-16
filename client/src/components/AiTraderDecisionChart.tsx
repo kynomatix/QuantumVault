@@ -165,6 +165,11 @@ export function AiTraderDecisionChart({
   // rebuild restores the user's current view (by time, immune to index shifts
   // from prepended history) instead of re-running the default trade framing.
   const preserveViewRef = useRef<{ from: UTCTimestamp; to: UTCTimestamp } | null>(null);
+  // Live-refresh bars (10s tail poll while an open trade's chart is on screen),
+  // keyed by candle time. Fed straight into the series via series.update() so
+  // the chart never tears down mid-watch; kept here so a full rebuild (e.g. a
+  // PnL prop tick) can replay them on top of the stale `candles` state.
+  const liveBarsRef = useRef<Map<number, ChartCandle>>(new Map());
 
   // Fetch candles only — every other value (entry/exit/SL/TP/PnL/exitReason)
   // is passed in as a prop from data the drawer already holds.
@@ -182,6 +187,8 @@ export function AiTraderDecisionChart({
     // A fresh load must never restore a view preserved for a previous decision
     // (rapid close/reopen can leave the ref set if the build effect never ran).
     preserveViewRef.current = null;
+    // Live bars belong to the previous decision/timeframe — drop them.
+    liveBarsRef.current = new Map();
     (async () => {
       const fetchSpan = async (span: 'trade' | 'deep'): Promise<ChartCandle[]> => {
         const res = await fetch(
@@ -296,6 +303,17 @@ export function AiTraderDecisionChart({
     });
     series.setData(candles as CandlestickData[]);
     seriesRef.current = series;
+
+    // Replay any live-refresh bars newer than (or updating) the last candle in
+    // state, so a rebuild between polls doesn't wipe the freshest bars.
+    // series.update() only accepts times >= the last set bar — filter to that.
+    const lastBaseTime = candles[candles.length - 1]?.time ?? 0;
+    const replay = [...liveBarsRef.current.values()]
+      .filter((b) => b.time >= lastBaseTime)
+      .sort((a, b) => a.time - b.time);
+    for (const bar of replay) {
+      series.update(bar as CandlestickData);
+    }
 
     // Entry price line — broker-style when open position (WO-8h.1):
     // solid line in direction color, title carries side + size + live P&L.
@@ -430,6 +448,51 @@ export function AiTraderDecisionChart({
       setHoverCandle(null);
     };
   }, [open, loading, error, candles, entryPrice, stopLossPrice, takeProfitPrice, direction, decidedAt, closedAt, realizedPnl, sizeBase, unrealizedPnl, aiLevels]);
+
+  // Live candle refresh: while the dialog is open on a STILL-OPEN trade, poll
+  // the newest few bars every 10s and push them straight into the existing
+  // series (no state change → no chart rebuild, the user's scroll/zoom stays
+  // put). Stops itself when the trade closes, the dialog closes, or the tab is
+  // hidden; errors are silently skipped (next tick retries).
+  const hasCandles = candles.length > 0;
+  useEffect(() => {
+    if (!open || !botId || !decisionId || closedAt !== null || loading || error || !hasCandles) return;
+    let cancelled = false;
+    let inFlight = false;
+    const tick = async () => {
+      if (cancelled || inFlight || document.hidden || !seriesRef.current) return;
+      inFlight = true;
+      try {
+        const res = await fetch(
+          `/api/ai-trader/${botId}/chart?decisionId=${encodeURIComponent(decisionId)}&tf=${encodeURIComponent(tf)}&span=tail`,
+          { credentials: 'include', headers: walletAuthHeaders() }
+        );
+        if (!res.ok) return;
+        const data = await safeResponseJson(res);
+        const bars: ChartCandle[] = Array.isArray(data?.candles) ? data.candles : [];
+        if (cancelled || !seriesRef.current || bars.length === 0) return;
+        // Only bars at/after the newest bar already on the chart — the series
+        // API rejects out-of-order updates, and older bars are already drawn.
+        const lastLive = Math.max(0, ...liveBarsRef.current.keys());
+        const lastBase = candles[candles.length - 1]?.time ?? 0;
+        const floor = Math.max(lastLive, lastBase);
+        for (const bar of bars.sort((a, b) => a.time - b.time)) {
+          if (bar.time < floor) continue;
+          liveBarsRef.current.set(bar.time, bar);
+          seriesRef.current.update(bar as CandlestickData);
+        }
+      } catch {
+        // transient — next tick retries
+      } finally {
+        inFlight = false;
+      }
+    };
+    const id = setInterval(tick, 10_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [open, botId, decisionId, tf, closedAt, loading, error, hasCandles, candles]);
 
   const isOpenPosition = realizedPnl === null;
   const pnlValue = isOpenPosition ? (unrealizedPnl ?? null) : realizedPnl;
