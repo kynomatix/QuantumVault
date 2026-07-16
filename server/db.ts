@@ -8,7 +8,11 @@ if (!process.env.DATABASE_URL) {
 }
 
 const poolSize = parseInt(process.env.DB_POOL_SIZE || "8", 10);
-const connTimeoutMs = parseInt(process.env.DB_CONN_TIMEOUT_MS || "10000", 10);
+// 30s default: prod (2026-07-16) showed new-connection establishment to the DB
+// intermittently exceeding 10s while established connections kept working —
+// a 10s acquire timeout turned every slow handshake into a failed background
+// tick. 30s rides out slow establishment without masking a truly dead DB.
+const connTimeoutMs = parseInt(process.env.DB_CONN_TIMEOUT_MS || "30000", 10);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,

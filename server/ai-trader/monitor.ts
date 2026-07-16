@@ -1551,6 +1551,10 @@ async function tick(): Promise<void> {
     // Bounded retry-with-backoff: a single stale connection eviction should not
     // kill the whole tick.  After the first failure the pool drops the dead
     // connection; the retry lands on a fresh one (or the next open slot).
+    // Backoff grows (3s, 6s) so a transient DB-connectivity blip (prod
+    // 2026-07-16: slow new-connection establishment) is ridden out instead of
+    // burning all attempts in 4.5s. Worst case (~99s with the 30s connect
+    // timeout) stays under TICK_WEDGE_MS so the next tick doesn't override us.
     let bots: AiTraderBot[] | undefined;
     let lastErr: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -1560,7 +1564,7 @@ async function tick(): Promise<void> {
         break;
       } catch (err) {
         lastErr = err;
-        if (attempt < 2) await sleep(1_500);
+        if (attempt < 2) await sleep(3_000 * (attempt + 1));
       }
     }
     if (lastErr !== undefined || bots === undefined) {
