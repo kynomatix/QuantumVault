@@ -2243,6 +2243,11 @@ export class PacificaAdapter implements ProtocolAdapter {
         response = await fetch(url, {
           method: 'GET',
           headers: { 'Content-Type': 'application/json' },
+          // Node fetch has NO default timeout: one stalled connection here hung
+          // forever and wedged every caller awaiting it (incl. the AI Trader
+          // monitor tick, freezing ALL bot monitoring until restart). The signal
+          // also aborts the body read below.
+          signal: AbortSignal.timeout(15_000),
         });
       } finally {
         // Pacifica meters the request whether it succeeds or fails (including
@@ -2568,6 +2573,11 @@ export class PacificaAdapter implements ProtocolAdapter {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        // Generous (money path — aborting an order POST leaves upstream state
+        // ambiguous, which callers already handle), but bounded: a hang here
+        // stranded auto-cycle bots in 'analyzing' forever. 30s is far beyond
+        // any healthy Pacifica response.
+        signal: AbortSignal.timeout(30_000),
       });
     } finally {
       // POSTs also consume credits; charge default cost.

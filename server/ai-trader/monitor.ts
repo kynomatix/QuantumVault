@@ -94,7 +94,19 @@ const PROTECTIVE_CLOSE_MAX_SLIPPAGE_PCT = 1.0;
 
 let tickTimer: NodeJS.Timeout | null = null;
 let sweepTimer: NodeJS.Timeout | null = null;
-let tickInFlight = false;
+/**
+ * Wedge-proof tick guard. A plain boolean froze the ENTIRE monitor in prod:
+ * one venue read that never settled (Pacifica fetch had no timeout) left the
+ * flag stuck true, so every subsequent 15s tick returned immediately — no
+ * SL/TP monitoring, no pendingReconciliation retries, all bots stale until a
+ * restart. Timestamp + generation lets a fresh tick override a wedged one
+ * after TICK_WEDGE_MS; per-bot `botInFlight` guards still prevent the hung
+ * bot itself from being double-processed.
+ */
+let tickStartedAt: number | null = null;
+let tickGeneration = 0;
+/** How long a tick may run before a new tick is allowed to override it. */
+const TICK_WEDGE_MS = 120_000;
 
 /** Bots whose startup reconciliation hit a venue read failure — retried each tick. */
 const pendingReconciliation = new Set<string>();
@@ -102,8 +114,15 @@ const pendingReconciliation = new Set<string>();
 const bracketReplaceAttempted = new Set<string>();
 /** Per-bot auto-next timers (cleared on re-schedule / pause / stop). */
 const autoNextTimers = new Map<string, NodeJS.Timeout>();
-/** Per-bot re-entrancy guard so a slow bot can't be processed by two ticks at once. */
-const botInFlight = new Set<string>();
+/**
+ * Per-bot re-entrancy guard so a slow bot can't be processed by two ticks at
+ * once. Maps botId → claim timestamp: an entry older than BOT_IN_FLIGHT_WEDGE_MS
+ * means the awaiting promise is hung/dead (all venue calls are timeout-bounded,
+ * so a healthy pass finishes in well under a minute) — it is logged loudly and
+ * reclaimed so the bot's SL/TP monitoring resumes instead of silently stopping.
+ */
+const botInFlight = new Map<string, number>();
+const BOT_IN_FLIGHT_WEDGE_MS = 5 * 60_000;
 
 // --- Small helpers -------------------------------------------------------------------
 
@@ -1516,8 +1535,18 @@ export async function monitorBotOnce(bot: AiTraderBot): Promise<void> {
 }
 
 async function tick(): Promise<void> {
-  if (tickInFlight) return;
-  tickInFlight = true;
+  if (tickStartedAt !== null) {
+    const ageMs = Date.now() - tickStartedAt;
+    if (ageMs < TICK_WEDGE_MS) return;
+    // Previous tick is wedged on a hung await. Override it: the bots it
+    // already finished had their botInFlight cleared (finally), and the one
+    // it is stuck on stays guarded by botInFlight, so re-entering is safe.
+    console.error(
+      `[AiTraderMonitor] previous tick wedged for ${Math.round(ageMs / 1000)}s — overriding so monitoring continues (hung bot stays guarded)`
+    );
+  }
+  const gen = ++tickGeneration;
+  tickStartedAt = Date.now();
   try {
     // Bounded retry-with-backoff: a single stale connection eviction should not
     // kill the whole tick.  After the first failure the pool drops the dead
@@ -1539,8 +1568,16 @@ async function tick(): Promise<void> {
       return;
     }
     for (const bot of bots) {
-      if (botInFlight.has(bot.id)) continue;
-      botInFlight.add(bot.id);
+      const claimedAt = botInFlight.get(bot.id);
+      if (claimedAt !== undefined) {
+        const heldMs = Date.now() - claimedAt;
+        if (heldMs < BOT_IN_FLIGHT_WEDGE_MS) continue;
+        console.error(
+          `[AiTraderMonitor] bot ${bot.id.slice(0, 8)} in-flight guard wedged for ${Math.round(heldMs / 1000)}s — reclaiming so monitoring resumes`
+        );
+      }
+      const myClaim = Date.now();
+      botInFlight.set(bot.id, myClaim);
       try {
         if (pendingReconciliation.has(bot.id)) {
           const resolved = await reconcileBotOnStartup(bot);
@@ -1560,11 +1597,15 @@ async function tick(): Promise<void> {
       } catch (err) {
         console.error(`[AiTraderMonitor] tick failed for bot ${bot.id.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
       } finally {
-        botInFlight.delete(bot.id);
+        // Only release our own claim — a hung pass that resumes after its claim
+        // was reclaimed must not delete the newer pass's entry.
+        if (botInFlight.get(bot.id) === myClaim) botInFlight.delete(bot.id);
       }
     }
   } finally {
-    tickInFlight = false;
+    // Only clear our own claim — a wedged tick that finally resumes after an
+    // override must not wipe the newer tick's timestamp.
+    if (gen === tickGeneration) tickStartedAt = null;
   }
 }
 
@@ -1627,7 +1668,8 @@ export function stopAiTraderMonitor(): void {
   if (sweepTimer) clearInterval(sweepTimer);
   tickTimer = null;
   sweepTimer = null;
-  tickInFlight = false;
+  tickStartedAt = null;
+  tickGeneration++;
   for (const t of autoNextTimers.values()) clearTimeout(t);
   autoNextTimers.clear();
   pendingReconciliation.clear();

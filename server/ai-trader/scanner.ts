@@ -159,7 +159,17 @@ const feedHealthMap = new Map<string, { failedAt: number }>();
 // so it MUST NOT be used as the running/stopped sentinel — that was the recurrence bug.
 let scannerRunning = false;
 let scannerTimer: ReturnType<typeof setTimeout> | null = null;
-let sweepInFlight = false;
+/**
+ * Wedge-proof sweep guard (same pattern as the monitor's tick guard — a plain
+ * boolean permanently froze the monitor in prod when one venue call hung).
+ * Timestamp + generation: a sweep older than SWEEP_WEDGE_MS is presumed hung
+ * (all its awaits are timeout-bounded fetches; a healthy sweep is ≤ ~110s) and
+ * a new boundary may override it. Worst case on override is duplicated candle
+ * fetches — the shortlist replace at the end is wholesale, so no corruption.
+ */
+let sweepStartedAt: number | null = null;
+let sweepGeneration = 0;
+const SWEEP_WEDGE_MS = 5 * 60_000;
 
 // ─── Pure helpers (exported for tests) ───────────────────────────────────────
 
@@ -337,11 +347,18 @@ async function buildUniverse(protocol: string): Promise<string[]> {
 // ─── Sweep orchestration ─────────────────────────────────────────────────────
 
 async function runSweep(): Promise<void> {
-  if (sweepInFlight) {
-    console.log("[Scanner] Previous sweep still running — skipping this boundary");
-    return;
+  if (sweepStartedAt !== null) {
+    const ageMs = Date.now() - sweepStartedAt;
+    if (ageMs < SWEEP_WEDGE_MS) {
+      console.log("[Scanner] Previous sweep still running — skipping this boundary");
+      return;
+    }
+    console.error(
+      `[Scanner] previous sweep wedged for ${Math.round(ageMs / 1000)}s — overriding so scanning continues`
+    );
   }
-  sweepInFlight = true;
+  const gen = ++sweepGeneration;
+  sweepStartedAt = Date.now();
 
   try {
     const now = new Date();
@@ -549,7 +566,9 @@ async function runSweep(): Promise<void> {
       `[Scanner] sweep crashed: ${err instanceof Error ? err.message : err}`
     );
   } finally {
-    sweepInFlight = false;
+    // Only clear our own claim — a wedged sweep that resumes after an override
+    // must not wipe the newer sweep's timestamp.
+    if (gen === sweepGeneration) sweepStartedAt = null;
   }
 }
 
@@ -610,7 +629,8 @@ export function stopScanner(): void {
     clearTimeout(scannerTimer);
     scannerTimer = null;
   }
-  sweepInFlight = false;
+  sweepStartedAt = null;
+  sweepGeneration++;
   shortlistMap.clear();
   universeCache.clear();
   feedHealthMap.clear();
