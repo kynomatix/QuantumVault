@@ -614,8 +614,13 @@ export function AiTraderDecisionChart({
             : 'Hover the chart for open/high/low/close'}
         </div>
 
+        {/* overflow-hidden + absolutely-positioned chart mount: the chart's canvas
+            has a fixed pixel width, and if it sits in normal flow it props the
+            dialog's grid track open when collapsing from expanded — the container
+            never shrinks, so the ResizeObserver never tells the chart to scale
+            down. Out-of-flow, the container always tracks the dialog width. */}
         <div
-          className="relative w-full"
+          className="relative w-full overflow-hidden"
           style={{ height: expanded ? 'min(62vh, 760px)' : 360 }}
           data-testid="container-ai-trader-chart"
         >
@@ -636,7 +641,7 @@ export function AiTraderDecisionChart({
               No candle data available for this window.
             </div>
           )}
-          <div ref={containerRef} className="w-full h-full" />
+          <div ref={containerRef} className="absolute inset-0" />
         </div>
       </DialogContent>
     </Dialog>
