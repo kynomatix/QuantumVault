@@ -814,9 +814,9 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                       )}
                     </SheetTitle>
                     <SheetDescription className="text-xs flex items-center gap-1.5 mt-0.5">
-                      {bot.marketSource === 'scanner' && bot.status !== 'open'
+                      {bot.marketSource === 'scanner' && bot.status === 'idle'
                         ? <span data-testid={`badge-scanner-status-${bot.id}`} className="flex items-center gap-1">Scanning markets…</span>
-                        : <>{bot.market}{bot.marketSource === 'scanner' && <span className="text-primary/70 font-medium">via Scanner</span>}</>
+                        : <>{bot.market.replace(/-PERP$/i, '')}{bot.marketSource === 'scanner' && <span className="text-primary/70 font-medium ml-1">via Scanner</span>}</>
                       }
                       {' · '}{bot.timeframe} · {bot.riskProfile === 'degen' ? '🔥 Full Send' : 'Guarded'}
                     </SheetDescription>
@@ -1039,6 +1039,8 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                       ? (raw.rationaleExcerpt ?? null)
                       : (clamped?.rationale ?? null);
                     const violations = violationChipLabels(d.guardrailViolations);
+                    const rowDigestMarket = (d.contextDigest as any)?.market as string | undefined;
+                    const rowMarketLabel = rowDigestMarket ? rowDigestMarket.replace(/-PERP$/i, '') : null;
                     const pnl = Number(d.realizedPnl ?? 0);
                     const hasPnl = d.closedAt && d.outcome === 'executed';
                     return (
@@ -1064,6 +1066,9 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                             </div>
                             {!!bot.paperMode && (
                               <span className="text-[10px] px-1 py-0.5 rounded border border-amber-500/50 text-amber-400 font-medium">PAPER</span>
+                            )}
+                            {bot.marketSource === 'scanner' && rowMarketLabel && (
+                              <span className="text-[10px] font-mono text-muted-foreground/60">{rowMarketLabel}</span>
                             )}
                           </div>
                           <div className="flex items-center gap-2">

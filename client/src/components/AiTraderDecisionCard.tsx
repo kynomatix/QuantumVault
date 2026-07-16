@@ -22,6 +22,7 @@ interface ClampedDecision {
 
 export interface AiDecisionRow {
   id: string;
+  rawDecision: unknown;
   clampedDecision: unknown;
   guardrailViolations: unknown;
   outcome: string | null;
@@ -137,6 +138,8 @@ export function AiTraderDecisionCard({
 
   const actionLabel = clamped?.action?.toUpperCase() ?? '—';
   const price = (decision.contextDigest as any)?.price;
+  const digestMarket = (decision.contextDigest as any)?.market as string | undefined;
+  const marketLabel = digestMarket ? digestMarket.replace(/-PERP$/i, '') : null;
 
   return (
     <div className="rounded-xl border border-border bg-card/60 p-4 space-y-3" data-testid="ai-decision-card">
@@ -153,6 +156,9 @@ export function AiTraderDecisionCard({
             {actionLabel}
             {price && !isFlat ? ` @ $${Number(price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ''}
           </span>
+          {marketLabel && (
+            <span className="text-xs font-mono text-muted-foreground/70" data-testid="badge-decision-market">{marketLabel}</span>
+          )}
         </div>
         <div className="flex items-center gap-1.5">
           {paperMode && (
