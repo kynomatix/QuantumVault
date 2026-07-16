@@ -1032,9 +1032,15 @@ export function scheduleAutoNext(botId: string, timeframe: string): void {
   const delay = (Math.floor(now / tfMs) + 1) * tfMs - now + 2_000;
   const timer = setTimeout(() => {
     autoNextTimers.delete(botId);
-    runAutoCycle(botId).catch((err) =>
-      console.error(`[AiTraderMonitor] auto cycle crashed for bot ${botId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`)
-    );
+    runAutoCycle(botId).catch((err) => {
+      console.error(`[AiTraderMonitor] auto cycle crashed for bot ${botId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
+      // A crash mid-cycle (e.g. a venue outage throwing 504s from context build /
+      // execute) strands the bot in 'analyzing' with NO future timer — frozen until
+      // the next server restart. Queue the same venue-verified reconciliation the
+      // startup path uses; the 15s tick retries it until the venue answers, then
+      // resets the bot to idle (or recovers a real position) and re-arms the cadence.
+      pendingReconciliation.add(botId);
+    });
   }, delay);
   // Don't hold the process open for a bot timer.
   if (typeof timer.unref === "function") timer.unref();
@@ -1538,7 +1544,16 @@ async function tick(): Promise<void> {
       try {
         if (pendingReconciliation.has(bot.id)) {
           const resolved = await reconcileBotOnStartup(bot);
-          if (resolved) pendingReconciliation.delete(bot.id);
+          if (resolved) {
+            pendingReconciliation.delete(bot.id);
+            // Reconciliation can land the bot back on 'idle' — re-arm the hands-off
+            // cadence here or an Auto bot reconciled mid-run sits silent until the
+            // next restart (safe to over-apply: runAutoCycle re-gates on a fresh row).
+            const fresh = await storage.getAiTraderBot(bot.id);
+            if (fresh && fresh.mode === "auto" && fresh.autoNext && fresh.status === "idle") {
+              scheduleAutoNext(fresh.id, nextCycleTimeframe(fresh));
+            }
+          }
           continue;
         }
         await monitorBotOnce(bot);
