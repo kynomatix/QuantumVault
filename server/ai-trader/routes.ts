@@ -47,9 +47,9 @@ import { buildMarketContext, marketToDatafeedTicker } from "./context-builder";
 import { fetchOHLCV } from "../lab/datafeed";
 import { runDecision } from "./decide";
 import { executeDecision, aiTraderPolicyObject } from "./executor";
-import { userInitiatedClose, parseOpenDecision, computeUnrealizedPnl, scheduleAutoNext, nextCycleTimeframe } from "./monitor";
+import { userInitiatedClose, parseOpenDecision, computeUnrealizedPnl, scheduleAutoNext, nextCycleTimeframe, SCANNER_CANDIDATE_MAX_AGE_MS } from "./monitor";
 import { sanitizeGraduationCriteria, canGoLive } from "./graduation";
-import { getScannerStatus } from "./scanner";
+import { getScannerStatus, getScannerShortlist } from "./scanner";
 import type { ClampedDecision } from "./guardrails";
 import { computeConfidenceCalibration } from "./calibration";
 
@@ -769,13 +769,54 @@ export function registerAiTraderRoutes(app: Express): void {
   // --- Analyze (run one decision cycle) ------------------------------------------------
   app.post("/api/ai-trader/:id/analyze", requireWallet, async (req: any, res) => {
     try {
-      const bot = await loadOwnedBot(req, res);
+      let bot = await loadOwnedBot(req, res);
       if (!bot) return;
       if (bot.status === "executing" || bot.status === "analyzing") {
         return res.status(409).json({ error: "An operation is already in flight for this bot." });
       }
       if (bot.status === "open") {
         return res.status(409).json({ error: "This bot already has an open position — close it before analyzing again." });
+      }
+
+      // Scanner bots: manual Ask AI does a FRESH scanner pick instead of re-analyzing
+      // the bot's saved market (which is the SOL-PERP placeholder until the first
+      // auto-cycle pick, or the previous boundary's pick after that). Mirrors the
+      // monitor's boundary pick: same freshness cutoff, top candidate only. G6
+      // cooldowns are deliberately NOT applied here — the manual fixed-ticker path
+      // doesn't apply them either, and the executor still enforces every money-safety
+      // gate if the user chooses to execute. Runs BEFORE key resolution so an empty
+      // shortlist never burns a free-trial call.
+      let scannerNote: string | undefined;
+      if (bot.marketSource === "scanner") {
+        const fresh = getScannerShortlist(bot.protocol).filter(
+          (c) => Date.now() - c.evaluatedAt <= SCANNER_CANDIDATE_MAX_AGE_MS
+        );
+        if (fresh.length === 0) {
+          return res.status(409).json({
+            error: "scanner_no_candidates",
+            detail:
+              "The scanner hasn't found any fresh candidates yet — it sweeps all markets every 15 minutes. Try again in a few minutes.",
+          });
+        }
+        const candidate = fresh[0];
+        // Persist pick + recomputed policyHmac BEFORE building context, exactly like
+        // the monitor path (executor verifies policyHmac on execute).
+        const umkForPick = await getInteractiveUmk(req.walletAddress, res);
+        if (!umkForPick) return; // getInteractiveUmk already responded 401
+        const newPolicyHmac = computeBotPolicyHmac(
+          umkForPick,
+          aiTraderPolicyObject({ market: candidate.market, maxLeverage: bot.maxLeverage, allocatedUsdc: bot.allocatedUsdc })
+        );
+        await storage.updateAiTraderBot(bot.id, {
+          market: candidate.market,
+          timeframe: candidate.timeframe,
+          policyHmac: newPolicyHmac,
+        });
+        // Refresh local copy so buildMarketContext and runDecision operate on the
+        // PICKED market, never the stale placeholder.
+        bot = { ...bot, market: candidate.market, timeframe: candidate.timeframe as AiTraderBot["timeframe"], policyHmac: newPolicyHmac };
+        scannerNote = `Scanner selected: ${candidate.market} ${candidate.timeframe} — setup=${candidate.setup} direction=${candidate.direction} score=${Math.round(candidate.score)} dist=${candidate.necklineDistancePct.toFixed(3)}% parentTrend=${candidate.parentTrend}`;
+        console.log(`[AiTrader] manual analyze: scanner picked ${candidate.market} ${candidate.timeframe} (score=${Math.round(candidate.score)}) for bot ${bot.id.slice(0, 8)}`);
       }
 
       const keyRes = await resolveApiKeyForAnalyze(req.walletAddress, bot, res);
@@ -821,6 +862,7 @@ export function registerAiTraderRoutes(app: Express): void {
           bot,
           recentDecisions,
           agentPublicKey: wallet.agentPublicKey,
+          scannerNote,
         });
         if ("stale" in context) {
           if (keyRes.usedFreeTrial) await storage.decrementAiTraderFreeCalls(req.walletAddress);
@@ -878,6 +920,21 @@ export function registerAiTraderRoutes(app: Express): void {
       const clamped = decision.clampedDecision as ClampedDecision | null;
       if (!clamped || (clamped.action !== "long" && clamped.action !== "short")) {
         return res.status(400).json({ error: "This decision has nothing actionable to execute." });
+      }
+
+      // Market-mismatch gate: scanner bots re-pick their market on every auto-cycle
+      // AND on every manual analyze, so bot.market can change between this proposal
+      // and the user tapping Execute. Executing would target the CURRENT bot.market
+      // with brackets computed for the proposal's market. Deterministic close of
+      // that race (the price-drift check below only catches it heuristically).
+      // Fails open when the digest has no market (older decisions predate the field).
+      const decisionMarket = (decision.contextDigest as any)?.market;
+      if (typeof decisionMarket === "string" && decisionMarket.length > 0 && decisionMarket !== bot.market) {
+        await storage.updateAiTraderDecision(decision.id, { outcome: "expired" });
+        return res.status(409).json({
+          error: "market_changed",
+          detail: `This proposal was for ${decisionMarket}, but the bot has since moved to ${bot.market} — analyze again for a fresh decision.`,
+        });
       }
 
       // Staleness gate (plan L751): N minutes OR ±0.5% price drift since the

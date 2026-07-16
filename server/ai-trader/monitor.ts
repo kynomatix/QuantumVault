@@ -1019,7 +1019,9 @@ export function nextCycleTimeframe(bot: AiTraderBot): string {
 // entries; without this cutoff a bot would burn LLM calls on arbitrarily stale
 // picks (candles stay fresh, so G9 does not catch it). 20 min admits the normal
 // one-boundary lag and rejects anything two or more boundaries old.
-const SCANNER_CANDIDATE_MAX_AGE_MS = 20 * 60_000;
+// Exported: the manual /analyze route (routes.ts) applies the same freshness
+// cutoff when it does its own scanner pick.
+export const SCANNER_CANDIDATE_MAX_AGE_MS = 20 * 60_000;
 
 /** Schedule the next decision cycle at the next candle boundary (+2s settle). */
 export function scheduleAutoNext(botId: string, timeframe: string): void {
