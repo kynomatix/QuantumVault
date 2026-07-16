@@ -595,6 +595,15 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
     : (openUnrealizedPnl !== null && Number(bot?.allocatedUsdc ?? 0) > 0
         ? (openUnrealizedPnl / Number(bot!.allocatedUsdc)) * 100
         : null);
+  // chartTarget is a click-time snapshot, but detail re-polls every 10s — when
+  // the chart dialog is showing the CURRENTLY-open position, pass the live mark
+  // price / unrealized PnL through instead of the snapshot so the dialog's PnL
+  // readout and entry-line label keep ticking while the owner watches.
+  const chartIsLiveOpenPosition =
+    chartTarget != null &&
+    chartTarget.realizedPnl === null &&
+    openDecision != null &&
+    chartTarget.decisionId === openDecision.decision.id;
   // The unresolved decision awaiting user action while status === 'proposed'.
   // NOT the same object as openDecision — parseOpenDecision (server) only ever
   // returns an already-executed, still-open position, so it is always null in
@@ -1778,8 +1787,8 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
               exitReason={chartTarget?.exitReason ?? null}
               decidedAt={chartTarget?.decidedAt ?? null}
               closedAt={chartTarget?.closedAt ?? null}
-              markPrice={chartTarget?.markPrice ?? null}
-              unrealizedPnl={chartTarget?.unrealizedPnl ?? null}
+              markPrice={chartIsLiveOpenPosition ? markPrice : (chartTarget?.markPrice ?? null)}
+              unrealizedPnl={chartIsLiveOpenPosition ? openUnrealizedPnl : (chartTarget?.unrealizedPnl ?? null)}
               sizeBase={chartTarget?.sizeBase ?? null}
               aiLevels={chartTarget?.aiLevels}
             />

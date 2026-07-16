@@ -5,6 +5,7 @@ import {
   LineStyle,
   type IChartApi,
   type ISeriesApi,
+  type IPriceLine,
   type UTCTimestamp,
   type CandlestickData,
 } from 'lightweight-charts';
@@ -170,6 +171,10 @@ export function AiTraderDecisionChart({
   // the chart never tears down mid-watch; kept here so a full rebuild (e.g. a
   // PnL prop tick) can replay them on top of the stale `candles` state.
   const liveBarsRef = useRef<Map<number, ChartCandle>>(new Map());
+  // The entry price line — kept in a ref so live PnL prop ticks can update its
+  // label in place via applyOptions() instead of tearing the chart down (which
+  // would reset the user's scroll/zoom every 10s while they watch a trade).
+  const entryLineRef = useRef<IPriceLine | null>(null);
 
   // Fetch candles only — every other value (entry/exit/SL/TP/PnL/exitReason)
   // is passed in as a prop from data the drawer already holds.
@@ -330,7 +335,7 @@ export function AiTraderDecisionChart({
     const entryTitle = isOpen
       ? `${direction.toUpperCase()}${sizeStr}${pnlStr}`
       : 'Entry';
-    series.createPriceLine({
+    entryLineRef.current = series.createPriceLine({
       price: entryPrice,
       color: entryColor,
       lineStyle: isOpen ? LineStyle.Solid : LineStyle.Dashed,
@@ -445,9 +450,26 @@ export function AiTraderDecisionChart({
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
+      entryLineRef.current = null;
       setHoverCandle(null);
     };
-  }, [open, loading, error, candles, entryPrice, stopLossPrice, takeProfitPrice, direction, decidedAt, closedAt, realizedPnl, sizeBase, unrealizedPnl, aiLevels]);
+    // sizeBase/unrealizedPnl deliberately NOT deps: their ticks update the
+    // entry-line label in place (effect below) — a rebuild here would reset
+    // the user's scroll/zoom on every live PnL refresh.
+  }, [open, loading, error, candles, entryPrice, stopLossPrice, takeProfitPrice, direction, decidedAt, closedAt, realizedPnl, aiLevels]);
+
+  // Live entry-line label refresh (open positions only): the drawer re-polls
+  // PnL every 10s and passes it through — update the label without a rebuild.
+  useEffect(() => {
+    if (!entryLineRef.current || realizedPnl !== null) return;
+    const sizeStr = sizeBase != null ? ' ' + Number(sizeBase).toPrecision(4) : '';
+    const pnlStr = unrealizedPnl != null
+      ? ` ${unrealizedPnl >= 0 ? '+' : '−'}$${Math.abs(unrealizedPnl).toFixed(2)}`
+      : '';
+    entryLineRef.current.applyOptions({
+      title: `${direction.toUpperCase()}${sizeStr}${pnlStr}`,
+    });
+  }, [unrealizedPnl, sizeBase, direction, realizedPnl]);
 
   // Live candle refresh: while the dialog is open on a STILL-OPEN trade, poll
   // the newest few bars every 10s and push them straight into the existing
