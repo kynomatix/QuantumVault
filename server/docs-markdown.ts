@@ -1692,7 +1692,8 @@ The practical difference: a fixed-market bot waits for you to pick a ticker and 
 
 **How it works:**
 
-- A background sweep runs continuously, scoring every listed market on multiple quality signals (trend alignment, volatility, funding rate, and other technical factors).
+- A background sweep runs continuously, looking for one specific, well-defined setup in every listed market: a **double-bottom (W)** or **double-top (M)** pattern that has fully formed and is sitting right at its trigger level. Markets without a live pattern are skipped entirely.
+- Qualifying setups are ranked: closest to the trigger level scores highest, agreement with the bigger-timeframe trend adds points (a setup fighting the bigger trend is rejected outright), and thin weekend sessions score slightly lower. A handful of markets with unreliable price feeds are excluded.
 - At analysis time the bot pulls the current top candidate from the shortlist, builds the full market briefing for that market and timeframe, and sends it to the AI as normal.
 - If the AI decides to trade, the position is opened on that market at that timeframe. If it decides flat, the next sweep cycle may surface a different candidate.
 - The bot card shows "Scanning markets…" when it is between positions. Once a trade is open the card shows the actual market alongside a "via Scanner" label.
