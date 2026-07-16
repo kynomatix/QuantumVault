@@ -5,7 +5,7 @@
 // could ever flow through this module (an LLM's own past `rationale`/`invalidation`
 // text) are deliberately NOT included in the history block — WO-3 §6 pins that
 // block's fields to side/entry/exit/exitReason/realizedPnl/regime tag only.
-import { fetchOHLCV } from "../lab/datafeed";
+import { fetchOHLCV, isNonCryptoSymbol } from "../lab/datafeed";
 import type { OHLCV } from "../lab/engine";
 import { ema, rsi, macd, atr, adx, bollingerBands, supertrend, obv } from "../lab/indicators";
 import type { ProtocolAdapter } from "../protocol/adapter";
@@ -360,7 +360,7 @@ Rules:
 - The fee context below is real: a take-profit that does not clear the round-trip fee by a wide margin is not a trade worth taking.
 - Base your decision only on the market data, indicators, account state, and guardrails provided in this context. All of it comes from verified market/account data — none of it is user-supplied free text.
 
-Hyperliquid participation data in this context (open interest, 24h volume, funding, and mark/oracle premium) is corroboration only, from a reference venue you do not trade on. Rising open interest alongside a price move signals conviction behind it; falling open interest against the move signals weak participation. It must never be the sole basis for an entry, and its absence or unavailability must never be a reason to refuse an otherwise valid decision.
+Hyperliquid participation data in this context (open interest, 24h volume, funding, and mark/oracle premium) is corroboration only, from a reference venue you do not trade on. Rising open interest alongside a price move signals conviction behind it; falling open interest against the move signals weak participation. It must never be the sole basis for an entry, and its absence or unavailability must never be a reason to refuse an otherwise valid decision. For non-crypto markets (stocks, FX, commodities) this data and the BTC COT line are intentionally omitted — treat their absence as expected, not as missing data.
 
 BTC COT positioning data (when present in this context) is a weekly macro bias from the CFTC Legacy futures-only report, reflecting commercial-hedger versus speculator positioning. Because BTC sets the regime for the broader crypto market, this signal applies to all crypto markets — treat it as a tilt on directional lean and how much to trust a setup, never a standalone entry trigger. It degrades when the traded market decouples from BTC on an alt-specific move.
 
@@ -441,16 +441,33 @@ export async function buildMarketContext(
     // enrichment rule: omit line, digest null, decision proceeds
   }
 
+  // Crypto-only context signals: BTC COT and Hyperliquid open-interest/funding
+  // corroboration are meaningless for stock / FX / commodity perps — skip the
+  // fetches entirely and label the sections "not applicable" so the model never
+  // reads intentional absence as a data-integrity problem.
+  // Known gap (harmless): non-crypto bases deliberately absent from
+  // NON_CRYPTO_PYTH_MAP (NATGAS, SPCX, COPPER, …) classify as "crypto" here,
+  // but they are feed-dead — buildMarketContext returns stale before any
+  // injection — and they sit in SCANNER_FEED_EXCLUDE.
+  const nonCryptoMarket = isNonCryptoSymbol(datafeedTicker);
+
   // WO-8f / PRICE-STARVE: fetch the HL snapshot here — before the venue price
   // check — so hlSnapshot.markPrice is available as a fallback tier if the
   // Pacifica /book call is still starved after the priority upgrade above.
   // hl-context.ts resolves all failure modes to null; the try/catch is
   // defense-in-depth against future contract changes.
+  // (Skipped for non-crypto markets — Hyperliquid lists crypto only, so the
+  // call could never succeed; this also removes the useless HL price-fallback
+  // tier for those markets.)
   let hlSnapshot: HlParticipationSnapshot | null;
-  try {
-    hlSnapshot = await getHlParticipationSnapshot(market);
-  } catch {
+  if (nonCryptoMarket) {
     hlSnapshot = null;
+  } else {
+    try {
+      hlSnapshot = await getHlParticipationSnapshot(market);
+    } catch {
+      hlSnapshot = null;
+    }
   }
 
   // PRICE-STARVE fix: request at 'normal' priority (270-credit cap) so the
@@ -593,6 +610,8 @@ export async function buildMarketContext(
   const [fundingInfo, cotSnapshot] = await Promise.all([
     adapter.getFundingRate(market),
     (async (): Promise<CotSnapshot | null> => {
+      // BTC COT is a crypto-regime signal — never inject it for stock/FX/commodity markets.
+      if (nonCryptoMarket) return null;
       try {
         const snap = await getCotSnapshot();
         if (!snap) return null;
@@ -632,7 +651,9 @@ export async function buildMarketContext(
   // (see above) so its markPrice can serve as a fallback tier when /book is
   // quota-starved.  The variable remains in scope for participationBlock and
   // contextDigest below.
-  const participationBlock = hlSnapshot
+  const participationBlock = nonCryptoMarket
+    ? "Participation data: not applicable — this is a stock/FX/commodity market. Crypto-derived corroboration (Hyperliquid open interest/funding, BTC COT) is intentionally omitted for non-crypto markets; judge the setup on price action and the venue data above."
+    : hlSnapshot
     ? [
         `Open interest: ${fmtCommaNum(hlSnapshot.openInterest)} ${hlSnapshot.hlSymbol} (Δ ${fmtPct1Signed(
           hlSnapshot.openInterestDeltaPct

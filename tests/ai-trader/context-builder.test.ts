@@ -10,8 +10,17 @@ import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import type { DowStructureResult } from "../../server/ai-trader/dow-structure";
 
 const fetchOHLCVMock = vi.fn();
+// Faithful stub of datafeed's isNonCryptoSymbol: same base-of-"X/USDT" check
+// against the NON_CRYPTO_PYTH_MAP keys (stocks/FX/commodities). Kept as a
+// static set so this test never imports the real datafeed module.
+const NON_CRYPTO_BASES = new Set([
+  "EURUSD", "USDJPY", "XAU", "XAG", "PLATINUM", "CL", "SP500",
+  "NVDA", "TSLA", "GOOGL", "PLTR", "HOOD", "CRCL",
+  "EUR", "GBP", "USDCNH", "CRUDEOIL", "SPY", "AAPL", "AMD", "AMZN", "MSTR",
+]);
 vi.mock("../../server/lab/datafeed", () => ({
   fetchOHLCV: (...args: unknown[]) => fetchOHLCVMock(...args),
+  isNonCryptoSymbol: (symbol: string) => NON_CRYPTO_BASES.has(symbol.split("/")[0]),
 }));
 
 // WO-8f: hl-context.ts is a separate module with its own dedicated test file
@@ -428,6 +437,41 @@ describe("buildMarketContext (WO-3)", () => {
     const fixtureOldestSerialized = SELECTED_CANDLES_15M[SELECTED_CANDLES_15M.length - 100];
     expect(csvRows[1]).toContain(new Date(fixtureOldestSerialized.time).toISOString().slice(0, 16));
     expect(csvRows[csvRows.length - 1]).toContain(new Date(fixtureNewest.time).toISOString().slice(0, 16));
+  });
+
+  it("non-crypto market (NVDA-PERP): skips HL + COT fetches and injects 'not applicable' instead of 'unavailable'", async () => {
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const adapter = makeAdapter();
+    const result = await buildMarketContext({
+      market: "NVDA-PERP",
+      timeframe: "15m",
+      adapter,
+      bot: makeBot({ market: "NVDA-PERP" }),
+      recentDecisions: RECENT_DECISIONS,
+      agentPublicKey: AGENT_PUBKEY,
+    });
+
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+
+    // Crypto-only signals must not even be fetched for stock/FX/commodity markets.
+    expect(getHlParticipationSnapshotMock).not.toHaveBeenCalled();
+    expect(getCotSnapshotMock).not.toHaveBeenCalled();
+
+    // The prompt says "not applicable" (intentional), never "unavailable this cycle"
+    // (which the model reads as a data-integrity problem and cites in rejections).
+    expect(result.user).toContain("Participation data: not applicable — this is a stock/FX/commodity market.");
+    expect(result.user).not.toContain("Participation data: unavailable this cycle");
+    expect(result.user).not.toContain("BTC positioning (COT, weekly):");
+    expect(result.user).not.toContain("Open interest:");
+    expect(result.user).not.toContain("HL funding:");
+
+    // Venue funding stays — it is the real cost the position pays on any market.
+    expect(result.user).toContain("Funding rate (Pacifica — this is what your position actually pays):");
+
+    // Digest mirrors the omission.
+    expect((result.contextDigest as any).cotSignal).toBeNull();
+    expect((result.contextDigest as any).participation).toBeNull();
   });
 
   it("EMA200 still renders 'n/a' as the fallback when history is genuinely insufficient (<200 bars)", async () => {

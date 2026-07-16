@@ -92,7 +92,7 @@ const NON_CRYPTO_PYTH_MAP: Record<string, string> = {
   MSTR: "MSTR",
 };
 
-function isNonCryptoSymbol(symbol: string): boolean {
+export function isNonCryptoSymbol(symbol: string): boolean {
   const base = symbol.split("/")[0];
   return base in NON_CRYPTO_PYTH_MAP;
 }
