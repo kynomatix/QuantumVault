@@ -51,6 +51,15 @@ interface ChartCandle {
   close: number;
 }
 
+// The platform's four supported AI Trader timeframes — mirrors the server's
+// CHART_TIMEFRAME_MS keys (routes.ts); the chart endpoint 400s on anything else.
+const CHART_TIMEFRAMES = ['15m', '1h', '4h', '1d'] as const;
+type ChartTf = (typeof CHART_TIMEFRAMES)[number];
+
+function isChartTf(v: string): v is ChartTf {
+  return (CHART_TIMEFRAMES as readonly string[]).includes(v);
+}
+
 interface AiTraderDecisionChartProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -117,6 +126,13 @@ export function AiTraderDecisionChart({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hoverCandle, setHoverCandle] = useState<ChartCandle | null>(null);
+  // User-selected chart timeframe (MTF zoom-out); starts on the decision's own
+  // timeframe and resets to it whenever the dialog opens for a new decision.
+  const [tf, setTf] = useState<ChartTf>(isChartTf(timeframe) ? timeframe : '1h');
+
+  useEffect(() => {
+    if (open) setTf(isChartTf(timeframe) ? timeframe : '1h');
+  }, [open, decisionId, timeframe]);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -138,7 +154,7 @@ export function AiTraderDecisionChart({
     (async () => {
       try {
         const res = await fetch(
-          `/api/ai-trader/${botId}/chart?decisionId=${encodeURIComponent(decisionId)}`,
+          `/api/ai-trader/${botId}/chart?decisionId=${encodeURIComponent(decisionId)}&tf=${encodeURIComponent(tf)}`,
           { credentials: 'include', headers: walletAuthHeaders() }
         );
         const data = await safeResponseJson(res);
@@ -157,7 +173,7 @@ export function AiTraderDecisionChart({
     return () => {
       cancelled = true;
     };
-  }, [open, botId, decisionId]);
+  }, [open, botId, decisionId, tf]);
 
   // Build the chart once candles are ready. Torn down and rebuilt whenever
   // the underlying decision data changes, and always removed on unmount.
@@ -344,8 +360,28 @@ export function AiTraderDecisionChart({
         </DialogHeader>
 
         <div className="flex items-center justify-between flex-wrap gap-2 px-0.5">
-          <div className="text-xs text-muted-foreground" data-testid="text-chart-market-timeframe">
-            {market} · {timeframe} · <span className={direction === 'long' ? 'text-emerald-400' : 'text-red-400'}>{direction.toUpperCase()}</span>
+          <div className="flex items-center gap-2">
+            <div className="text-xs text-muted-foreground" data-testid="text-chart-market-timeframe">
+              {market} · <span className={direction === 'long' ? 'text-emerald-400' : 'text-red-400'}>{direction.toUpperCase()}</span>
+            </div>
+            <div className="flex items-center gap-0.5 rounded-md border border-border/50 p-0.5" data-testid="chart-timeframe-switcher">
+              {CHART_TIMEFRAMES.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setTf(t)}
+                  disabled={loading}
+                  className={`text-[10px] font-medium px-1.5 py-0.5 rounded transition-colors ${
+                    tf === t
+                      ? 'bg-primary/15 text-primary'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                  data-testid={`button-chart-tf-${t}`}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
           </div>
           <div className="flex items-center gap-1.5 text-xs">
             <span className="text-[10px] uppercase tracking-wide text-muted-foreground">

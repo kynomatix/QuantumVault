@@ -177,6 +177,8 @@ interface BotDetailResponse {
 // (which the drawer derives from chartTarget !== null / setChartTarget(null)).
 interface ChartTarget {
   decisionId: string;
+  /** The timeframe the AI analyzed for THIS decision (scanner bots hop timeframes). */
+  timeframe?: string;
   direction: 'long' | 'short';
   entryPrice: number;
   exitPrice: number | null;
@@ -971,6 +973,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                         className="h-6 px-2 text-[10px] gap-1"
                         onClick={() => setChartTarget({
                           decisionId: openDecision.decision.id,
+                          timeframe: (openDecision.decision.contextDigest as any)?.timeframe,
                           direction: openDecision.side,
                           entryPrice: openDecision.entryPrice,
                           exitPrice: null,
@@ -1120,6 +1123,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                                 e.stopPropagation();
                                 setChartTarget({
                                   decisionId: d.id,
+                                  timeframe: (d.contextDigest as any)?.timeframe,
                                   direction: resolvedAction === 'short' ? 'short' : 'long',
                                   entryPrice: Number(d.entryPrice),
                                   exitPrice: (d as any).exitPrice != null ? Number((d as any).exitPrice) : null,
@@ -1740,7 +1744,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
               onOpenChange={(o) => { if (!o) setChartTarget(null); }}
               botId={bot.id}
               market={bot.market}
-              timeframe={bot.timeframe}
+              timeframe={chartTarget?.timeframe ?? bot.timeframe}
               decisionId={chartTarget?.decisionId ?? ''}
               direction={chartTarget?.direction ?? 'long'}
               entryPrice={chartTarget?.entryPrice ?? 0}

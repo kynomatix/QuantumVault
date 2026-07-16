@@ -1516,7 +1516,19 @@ export function registerAiTraderRoutes(app: Express): void {
         return res.status(404).json({ error: "Decision not found" });
       }
 
-      const tfMs = CHART_TIMEFRAME_MS[bot.timeframe] ?? CHART_TIMEFRAME_MS["1h"];
+      // Optional user-selected timeframe (MTF zoom-out). Falls back to the
+      // decision's own analyzed timeframe (scanner bots hop timeframes, so the
+      // digest beats bot.timeframe for old rows), then to the bot's timeframe.
+      const tfRaw = req.query.tf;
+      if (tfRaw !== undefined && (typeof tfRaw !== "string" || !(tfRaw in CHART_TIMEFRAME_MS))) {
+        return res.status(400).json({ error: "tf must be one of 15m, 1h, 4h, 1d" });
+      }
+      const digestTf = (decision.contextDigest as any)?.timeframe;
+      const chartTf: string =
+        (typeof tfRaw === "string" && tfRaw) ||
+        (typeof digestTf === "string" && digestTf in CHART_TIMEFRAME_MS ? digestTf : bot.timeframe);
+
+      const tfMs = CHART_TIMEFRAME_MS[chartTf] ?? CHART_TIMEFRAME_MS["1h"];
       const now = Date.now();
       const decidedAtMs = decision.decidedAt ? new Date(decision.decidedAt).getTime() : now;
       const closedAtMs = decision.closedAt ? new Date(decision.closedAt).getTime() : now;
@@ -1537,7 +1549,7 @@ export function registerAiTraderRoutes(app: Express): void {
       // never substitute for OKX SWAP candles on this chart.
       const rawCandles = await fetchOHLCV(
         datafeedTicker,
-        bot.timeframe,
+        chartTf,
         new Date(startMs).toISOString(),
         new Date(endMs).toISOString(),
         undefined,
@@ -1550,7 +1562,7 @@ export function registerAiTraderRoutes(app: Express): void {
         low: c.low,
         close: c.close,
       }));
-      res.json({ candles, market: bot.market, timeframe: bot.timeframe });
+      res.json({ candles, market: bot.market, timeframe: chartTf });
     } catch (err) {
       console.error("[AiTrader] chart error:", err);
       res.status(500).json({ error: "Internal server error" });
