@@ -270,10 +270,19 @@ const CHART_TIMEFRAME_MS: Record<string, number> = {
   "4h": 14_400_000,
   "1d": 86_400_000,
 };
-// Bars of padding on each side of the entry->exit window, and a floor on the total
-// number of bars so a very short (sub-candle) trade still renders a readable chart.
-const CHART_PAD_CANDLES = 100;
-const CHART_MIN_TOTAL_CANDLES = 200;
+// Bars of history loaded BEHIND the entry (scroll-back/zoom-out room), bars kept
+// AFTER the exit, and a floor on the total so a very short trade still renders a
+// real chart. Cost: OKX's history-candles endpoint returns 100 bars per page
+// (limit=300 is ignored there — only /market/candles honors 300), so ~1000 bars
+// is ~10 sequential requests with a 200ms spacer ≈ a few seconds cold-load.
+// The client frames the default view on the trade itself; the extra history is
+// there to scroll/zoom into, not squashed into the first paint.
+// CHART_MAX_TOTAL_CANDLES caps the whole window (anchored at the recent end) so
+// a trade held open for weeks viewed at 15m can't request unbounded history.
+const CHART_PAD_CANDLES_BEFORE = 900;
+const CHART_PAD_CANDLES_AFTER = 100;
+const CHART_MIN_TOTAL_CANDLES = 1000;
+const CHART_MAX_TOTAL_CANDLES = 2000;
 
 export function registerAiTraderRoutes(app: Express): void {
   // --- Create -----------------------------------------------------------------------
@@ -1498,8 +1507,9 @@ export function registerAiTraderRoutes(app: Express): void {
   // Candles only — the client already holds entry/exit/SL/TP/realizedPnl/exitReason
   // from the /history decision rows it keeps in state, so this deliberately does not
   // re-return any of that. Window is the decision's decidedAt->closedAt (or "now" for
-  // the still-open position), padded and floored per CHART_PAD_CANDLES/
-  // CHART_MIN_TOTAL_CANDLES above so a very short trade still renders a real chart.
+  // the still-open position), padded and floored per CHART_PAD_CANDLES_BEFORE/
+  // _AFTER/CHART_MIN_TOTAL_CANDLES above so a very short trade still renders a
+  // real chart and there is deep scroll-back history behind the entry.
   app.get("/api/ai-trader/:id/chart", requireWallet, async (req: any, res) => {
     try {
       const bot = await loadOwnedBot(req, res);
@@ -1533,13 +1543,20 @@ export function registerAiTraderRoutes(app: Express): void {
       const decidedAtMs = decision.decidedAt ? new Date(decision.decidedAt).getTime() : now;
       const closedAtMs = decision.closedAt ? new Date(decision.closedAt).getTime() : now;
 
-      let startMs = decidedAtMs - CHART_PAD_CANDLES * tfMs;
-      let endMs = Math.min(closedAtMs + CHART_PAD_CANDLES * tfMs, now);
+      let startMs = decidedAtMs - CHART_PAD_CANDLES_BEFORE * tfMs;
+      let endMs = Math.min(closedAtMs + CHART_PAD_CANDLES_AFTER * tfMs, now);
       const minSpanMs = CHART_MIN_TOTAL_CANDLES * tfMs;
       if (endMs - startMs < minSpanMs) {
-        const deficit = minSpanMs - (endMs - startMs);
-        startMs -= deficit / 2;
-        endMs = Math.min(endMs + deficit / 2, now);
+        // Extend further back in time (never forward past now) — history lives
+        // behind the trade, the trade itself stays near the right edge.
+        startMs = endMs - minSpanMs;
+      }
+      const maxSpanMs = CHART_MAX_TOTAL_CANDLES * tfMs;
+      if (endMs - startMs > maxSpanMs) {
+        // Cap the window anchored at the recent end: for extreme duration/tf
+        // combos (weeks-open trade viewed at 15m) recent action wins and the
+        // entry may fall off the left edge rather than fetching 60+ pages.
+        startMs = endMs - maxSpanMs;
       }
       endMs = Math.min(endMs, now);
 

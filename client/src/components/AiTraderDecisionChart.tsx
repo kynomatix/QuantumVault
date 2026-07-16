@@ -102,6 +102,20 @@ function snapToNearestTime(times: number[], targetSec: number): number {
   return nearest;
 }
 
+/** Index of the candle whose time is nearest the target epoch-seconds timestamp. */
+function nearestTimeIndex(times: number[], targetSec: number): number {
+  let nearest = 0;
+  let best = Math.abs(times[0] - targetSec);
+  for (let i = 1; i < times.length; i++) {
+    const d = Math.abs(times[i] - targetSec);
+    if (d < best) {
+      best = d;
+      nearest = i;
+    }
+  }
+  return nearest;
+}
+
 export function AiTraderDecisionChart({
   open,
   onOpenChange,
@@ -312,7 +326,18 @@ export function AiTraderDecisionChart({
     markers.sort((a, b) => (a.time as number) - (b.time as number));
     series.setMarkers(markers);
 
-    chart.timeScale().fitContent();
+    // Default view frames the trade itself — NOT fitContent(): the server now
+    // loads ~900 bars of scroll-back history behind the entry, and fitting all
+    // of it would squash the trade flat. Scroll/pinch left to see the history.
+    if (decidedAtSec !== null && times.length > 0) {
+      const entryIdx = nearestTimeIndex(times, decidedAtSec);
+      const exitIdx = closedAtSec !== null ? nearestTimeIndex(times, closedAtSec) : times.length - 1;
+      const from = Math.max(0, entryIdx - 60);
+      const to = Math.min(times.length - 1, Math.max(exitIdx, entryIdx) + 40) + 3;
+      chart.timeScale().setVisibleLogicalRange({ from, to });
+    } else {
+      chart.timeScale().fitContent();
+    }
 
     const handleCrosshairMove = (param: Parameters<Parameters<typeof chart.subscribeCrosshairMove>[0]>[0]) => {
       if (!param.time || !seriesRef.current) {
