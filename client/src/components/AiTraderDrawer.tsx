@@ -1034,7 +1034,11 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     const raw = d.rawDecision as any;
                     // Compressed rows have clamped_decision stripped; action + excerpt live in the stub.
                     const isCompressed = !!raw?.compressed;
-                    const resolvedAction: string = isCompressed ? (raw.action ?? 'flat') : (clamped?.action ?? 'flat');
+                    // Rejected rows have no clamped decision — fall back to the raw
+                    // proposed action so a vetoed short doesn't display as "flat".
+                    const resolvedAction: string = isCompressed
+                      ? (raw.action ?? 'flat')
+                      : (clamped?.action ?? raw?.action ?? 'flat');
                     const resolvedRationale: string | null = isCompressed
                       ? (raw.rationaleExcerpt ?? null)
                       : (clamped?.rationale ?? null);

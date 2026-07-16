@@ -49,11 +49,38 @@ interface AiTraderDecisionCardProps {
 
 /**
  * Server stores guardrailViolations as objects ({rule, code, message, fatal});
- * render the short code as the chip label. Tolerates legacy string entries.
+ * render a human-readable label for the code. Tolerates legacy string entries.
+ * Unknown codes fall back to the code with underscores turned into spaces.
  */
+const VIOLATION_LABELS: Record<string, string> = {
+  rr_below_floor: 'Reward too small for the risk',
+  tp_below_fee_floor: 'Profit target smaller than fees',
+  tp_wrong_side: 'Profit target on wrong side',
+  sl_wrong_side: 'Stop-loss on wrong side',
+  sl_too_tight: 'Stop-loss too tight',
+  sl_too_wide: 'Stop-loss too wide',
+  sl_inside_liquidation: 'Stop-loss past liquidation point',
+  leverage_clamped: 'Leverage capped',
+  size_pct_clamped: 'Size capped',
+  size_quantized_to_zero: 'Size below exchange minimum',
+  risk_capped: 'Risk capped',
+  risk_equity_unavailable: 'Account equity unreadable',
+  risk_params_invalid: 'Invalid risk settings',
+  risk_stop_too_tight_for_slippage: 'Stop too tight for slippage',
+  risk_assert_failed: 'Risk check failed',
+  close_without_position: 'No position to close',
+  missing_required_field: 'Incomplete AI response',
+  bad_entry_price: 'Bad entry price',
+  bad_allocation: 'Bad allocation',
+};
+
 export function violationChipLabels(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
-  return raw.map((v: any) => (typeof v === 'string' ? v : v?.code ?? 'violation'));
+  return raw.map((v: any) => {
+    const code = typeof v === 'string' ? v : v?.code;
+    if (!code) return 'Guardrail check failed';
+    return VIOLATION_LABELS[code] ?? String(code).replace(/_/g, ' ');
+  });
 }
 
 const EXPIRY_MS = 10 * 60 * 1000;
