@@ -30,14 +30,15 @@ export interface CreatorModelCatalog {
 // that later disappears can never surface a 404 inside the picker.
 const CURATED: Omit<SelectableModel, "promptPerM" | "completionPerM">[] = [
   { id: "anthropic/claude-opus-4.8", label: "Claude Opus 4.8", rank: 1, note: "Peak reasoning — best for intricate, multi-condition logic." },
-  { id: "moonshotai/kimi-k2.7-code", label: "Kimi K2.7 Code", rank: 2, note: "Stronger generic-coding benchmarks (thinking model), but slower and less reliable on our custom Pine — expect multi-minute drafts." },
-  { id: "moonshotai/kimi-k2.6", label: "Kimi K2.6", rank: 3, note: "Fast and reliable on our Pine engine — the default drafter inside Auto." },
-  { id: "qwen/qwen3.7-max", label: "Qwen3.7 Max", rank: 4, note: "Strong coding with independent provenance." },
-  { id: "deepseek/deepseek-v4-pro", label: "DeepSeek V4 Pro", rank: 5, note: "Excellent value — capable on most strategies." },
-  { id: "z-ai/glm-5.2", label: "GLM-5.2", rank: 6, note: "Newer GLM with stronger reasoning and clean, well-structured output." },
-  { id: "z-ai/glm-5.1", label: "GLM-5.1", rank: 7, note: "Reliable, well-structured output." },
-  { id: "deepseek/deepseek-v4-flash", label: "DeepSeek V4 Flash", rank: 8, note: "Cheapest and fastest — good for simple ideas." },
-  { id: "minimax/minimax-m3", label: "MiniMax M3", rank: 9, note: "Very large context window." },
+  { id: "moonshotai/kimi-k3", label: "Kimi K3", rank: 2, note: "Top coding benchmarks (thinking model), but pricier and unproven on our custom Pine — expect multi-minute drafts." },
+  { id: "moonshotai/kimi-k2.7-code", label: "Kimi K2.7 Code", rank: 3, note: "Stronger generic-coding benchmarks (thinking model), but slower and less reliable on our custom Pine — expect multi-minute drafts." },
+  { id: "moonshotai/kimi-k2.6", label: "Kimi K2.6", rank: 4, note: "Fast and reliable on our Pine engine — the default drafter inside Auto." },
+  { id: "qwen/qwen3.7-max", label: "Qwen3.7 Max", rank: 5, note: "Strong coding with independent provenance." },
+  { id: "deepseek/deepseek-v4-pro", label: "DeepSeek V4 Pro", rank: 6, note: "Excellent value — capable on most strategies." },
+  { id: "z-ai/glm-5.2", label: "GLM-5.2", rank: 7, note: "Newer GLM with stronger reasoning and clean, well-structured output." },
+  { id: "z-ai/glm-5.1", label: "GLM-5.1", rank: 8, note: "Reliable, well-structured output." },
+  { id: "deepseek/deepseek-v4-flash", label: "DeepSeek V4 Flash", rank: 9, note: "Cheapest and fastest — good for simple ideas." },
+  { id: "minimax/minimax-m3", label: "MiniMax M3", rank: 10, note: "Very large context window." },
 ];
 
 const SELECTABLE_IDS = new Set(CURATED.map((m) => m.id));

@@ -24,7 +24,11 @@ export const CREATOR_MODELS = {
 // longer timeout so the hidden thinking can't crowd out (truncate) the actual answer.
 // Verified live 2026-06-14: kimi-k2.7-code 400s on reasoning-off; with reasoning on it
 // returns valid Pine but spends most of its completion tokens thinking.
-export const REASONING_REQUIRED_MODELS = new Set<string>(['moonshotai/kimi-k2.7-code']);
+// Verified live 2026-07-16: kimi-k3 400s on reasoning-off with the same message.
+export const REASONING_REQUIRED_MODELS = new Set<string>([
+  'moonshotai/kimi-k2.7-code',
+  'moonshotai/kimi-k3',
+]);
 
 export function modelRequiresReasoning(model: string): boolean {
   return REASONING_REQUIRED_MODELS.has(model);
