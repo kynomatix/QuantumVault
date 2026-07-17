@@ -1721,6 +1721,7 @@ Key rules (always active in both risk profiles):
 
 - **Mandatory stop-loss** — Every trade must have a stop-loss on the correct side, within a timeframe-appropriate distance band. No exceptions.
 - **SL verification after entry** — After an entry fills, the bracket (SL + TP) is verified on the exchange with a bounded retry. If the bracket cannot be confirmed, the position is immediately closed at market and the bot pauses. A naked position is never held, even briefly.
+- **Automatic breakeven protection** — Once a trade has travelled 75% of the way to its take-profit, the stop-loss automatically moves to just past entry. From that point the trade can no longer turn into a loss — a stop-out nets a small positive after fees. Always on for every AI bot (paper and live, Scanner included); it only ever tightens, never loosens.
 - **Minimum risk/reward** — TP must deliver at least 1.2× risk after fees. Decisions with poor RR are rejected.
 - **Leverage clamp** — Hard ceiling of 5× in the current version, with a volatility-based smart cap below that.
 - **Stale data = no trade** — If the candle feed is stale or gapped, the bot refuses to call the AI at all and stays flat.
