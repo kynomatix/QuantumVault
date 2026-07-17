@@ -164,6 +164,30 @@ interface OpenPositionView {
   takeProfitPrice: number;
   entryPrice: number;
   decidedAtMs: number;
+  /** Breakeven-protect audit blob — present means the stop was ratcheted to breakeven. */
+  breakevenProtect: BreakevenInfo | null;
+}
+
+/** Shape of clampedDecision.breakevenProtect (server/ai-trader/breakeven.ts). */
+interface BreakevenInfo {
+  originalStopLossPrice: number;
+  movedStopLossPrice: number;
+  movedAt: string;
+  progressAtFire: number;
+}
+
+/** Validates a raw breakevenProtect blob from a decision row; null when absent/malformed. */
+function parseBreakevenInfo(raw: unknown): BreakevenInfo | null {
+  if (raw == null || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const numOk = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
+  if (!numOk(o.originalStopLossPrice) || !numOk(o.movedStopLossPrice)) return null;
+  return {
+    originalStopLossPrice: o.originalStopLossPrice,
+    movedStopLossPrice: o.movedStopLossPrice,
+    movedAt: typeof o.movedAt === 'string' ? o.movedAt : '',
+    progressAtFire: numOk(o.progressAtFire) ? o.progressAtFire : 0.75,
+  };
 }
 
 interface BotDetailResponse {
@@ -193,6 +217,10 @@ interface ChartTarget {
   sizeBase: number | null;
   /** Support/resistance levels the AI saw for this decision (from contextDigest.htfLevels). */
   aiLevels?: AiChartLevel[];
+  /** Breakeven protect: the AI's initial stop placement (null = stop never moved). */
+  originalStopLossPrice?: number | null;
+  /** Breakeven protect: when the stop moved (chart marker). */
+  slMovedAt?: string | number | null;
 }
 
 /** Maps a decision's stored contextDigest.htfLevels (HtfLevel[] | null) into
@@ -988,8 +1016,18 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                       </div>
                     </div>
                     <div className="flex items-center justify-between text-xs">
-                      <span className="text-red-400" data-testid="text-open-position-sl">
+                      <span className="text-red-400 flex items-center gap-1.5 flex-wrap" data-testid="text-open-position-sl">
                         SL ${formatPrice(openDecision.stopLossPrice)}
+                        {openDecision.breakevenProtect && openDecision.breakevenProtect.originalStopLossPrice !== openDecision.stopLossPrice && (
+                          <>
+                            <span className="text-[10px] px-1 py-0.5 rounded border border-violet-500/50 text-violet-400 font-medium" data-testid="badge-open-position-be">
+                              BE
+                            </span>
+                            <span className="text-muted-foreground/60 line-through">
+                              was ${formatPrice(openDecision.breakevenProtect.originalStopLossPrice)}
+                            </span>
+                          </>
+                        )}
                       </span>
                       <span className="text-emerald-400" data-testid="text-open-position-tp">
                         TP ${formatPrice(openDecision.takeProfitPrice)}
@@ -1017,6 +1055,8 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                           unrealizedPnl: openUnrealizedPnl,
                           sizeBase: openDecision.sizeBase ?? null,
                           aiLevels: mapAiLevels((openDecision.decision.contextDigest as any)?.htfLevels),
+                          originalStopLossPrice: openDecision.breakevenProtect?.originalStopLossPrice ?? null,
+                          slMovedAt: openDecision.breakevenProtect?.movedAt || null,
                         })}
                         data-testid="button-view-chart-open-position"
                       >
@@ -1081,6 +1121,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     const rowMarketLabel = rowDigestMarket ? rowDigestMarket.replace(/-PERP$/i, '') : null;
                     const pnl = Number(d.realizedPnl ?? 0);
                     const hasPnl = d.closedAt && d.outcome === 'executed';
+                    const beInfo = isCompressed ? null : parseBreakevenInfo(clamped?.breakevenProtect);
                     return (
                       <div
                         key={d.id}
@@ -1127,6 +1168,13 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                             ))}
                           </div>
                         )}
+                        {beInfo && (
+                          <div className="flex flex-wrap gap-1">
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/10 border border-violet-500/20 text-violet-400" data-testid={`chip-breakeven-${d.id}`}>
+                              SL → breakeven at {Math.round(beInfo.progressAtFire * 100)}% to TP
+                            </span>
+                          </div>
+                        )}
                         {violations.includes('size_quantized_to_zero') && d.outcome === 'rejected_guardrails' && (
                           <p className="text-[10px] text-amber-400/80" data-testid={`hint-size-quantized-to-zero-${d.id}`}>
                             Position too small for the venue minimum — increase the allocation or widen the risk band.
@@ -1168,6 +1216,8 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                                   unrealizedPnl: null,
                                   sizeBase: null,
                                   aiLevels: mapAiLevels((d.contextDigest as any)?.htfLevels),
+                                  originalStopLossPrice: beInfo?.originalStopLossPrice ?? null,
+                                  slMovedAt: beInfo?.movedAt || null,
                                 });
                               }}
                               data-testid={`button-view-chart-${d.id}`}
@@ -1783,6 +1833,8 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
               exitPrice={chartTarget?.exitPrice ?? null}
               stopLossPrice={chartTarget?.stopLossPrice ?? null}
               takeProfitPrice={chartTarget?.takeProfitPrice ?? null}
+              originalStopLossPrice={chartTarget?.originalStopLossPrice ?? null}
+              slMovedAt={chartTarget?.slMovedAt ?? null}
               realizedPnl={chartTarget?.realizedPnl ?? null}
               exitReason={chartTarget?.exitReason ?? null}
               decidedAt={chartTarget?.decidedAt ?? null}

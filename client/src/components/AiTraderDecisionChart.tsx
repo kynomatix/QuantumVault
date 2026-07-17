@@ -79,6 +79,10 @@ interface AiTraderDecisionChartProps {
   exitPrice: number | null;
   stopLossPrice: number | null;
   takeProfitPrice: number | null;
+  /** Breakeven protect: where the AI originally placed the stop (null = stop never moved). */
+  originalStopLossPrice?: number | null;
+  /** Breakeven protect: when the stop was moved (drives the SL→BE marker). */
+  slMovedAt?: string | number | null;
   realizedPnl: number | null;
   exitReason: string | null;
   market: string;
@@ -136,6 +140,8 @@ export function AiTraderDecisionChart({
   exitPrice,
   stopLossPrice,
   takeProfitPrice,
+  originalStopLossPrice,
+  slMovedAt,
   realizedPnl,
   exitReason,
   market,
@@ -350,13 +356,31 @@ export function AiTraderDecisionChart({
       lineWidth: isOpen ? 2 : 1,
       title: entryTitle,
     });
+    // Breakeven protect: when the stop was ratcheted mid-trade, show BOTH
+    // stops — the AI's initial placement (faded) and the moved breakeven stop.
+    const slMoved =
+      stopLossPrice != null &&
+      stopLossPrice > 0 &&
+      originalStopLossPrice != null &&
+      Number.isFinite(originalStopLossPrice) &&
+      originalStopLossPrice > 0 &&
+      Math.abs(originalStopLossPrice - stopLossPrice) / stopLossPrice > 1e-9;
+    if (slMoved) {
+      series.createPriceLine({
+        price: originalStopLossPrice,
+        color: 'rgba(239,83,80,0.45)',
+        lineStyle: LineStyle.SparseDotted,
+        lineWidth: 1,
+        title: 'Initial SL',
+      });
+    }
     if (stopLossPrice != null) {
       series.createPriceLine({
         price: stopLossPrice,
         color: '#ef5350',
         lineStyle: LineStyle.Dashed,
         lineWidth: 1,
-        title: 'SL',
+        title: slMoved ? 'SL → BE' : 'SL',
       });
     }
     if (takeProfitPrice != null) {
@@ -393,6 +417,18 @@ export function AiTraderDecisionChart({
         shape: direction === 'long' ? 'arrowUp' : 'arrowDown',
         color: '#58a6ff',
         text: 'Entry',
+      });
+    }
+    // Breakeven-protect move marker: pinpoints the candle where the stop was
+    // ratcheted to breakeven, so the two SL lines read as before/after.
+    const slMovedAtSec = slMoved ? toEpochSeconds(slMovedAt ?? null) : null;
+    if (slMovedAtSec !== null && times.length > 0) {
+      markers.push({
+        time: snapToNearestTime(times, slMovedAtSec) as UTCTimestamp,
+        position: direction === 'long' ? 'belowBar' : 'aboveBar',
+        shape: 'square',
+        color: '#a78bfa',
+        text: 'SL → BE',
       });
     }
     const closedAtSec = toEpochSeconds(closedAt);
@@ -477,7 +513,7 @@ export function AiTraderDecisionChart({
     // sizeBase/unrealizedPnl deliberately NOT deps: their ticks update the
     // entry-line label in place (effect below) — a rebuild here would reset
     // the user's scroll/zoom on every live PnL refresh.
-  }, [open, loading, error, candles, entryPrice, stopLossPrice, takeProfitPrice, direction, decidedAt, closedAt, realizedPnl, aiLevels]);
+  }, [open, loading, error, candles, entryPrice, stopLossPrice, takeProfitPrice, originalStopLossPrice, slMovedAt, direction, decidedAt, closedAt, realizedPnl, aiLevels]);
 
   // Live entry-line label refresh (open positions only): the drawer re-polls
   // PnL every 10s and passes it through — update the label without a rebuild.
