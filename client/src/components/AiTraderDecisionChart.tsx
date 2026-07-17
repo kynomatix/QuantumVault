@@ -144,6 +144,50 @@ function nearestTimeIndex(times: number[], targetSec: number): number {
   return nearest;
 }
 
+/**
+ * Computes EMA over a closes array.
+ * Returns null for warming-up bars (fewer than `period` bars seen so far).
+ */
+function computeEMA(closes: number[], period: number): (number | null)[] {
+  const result: (number | null)[] = new Array(closes.length).fill(null);
+  if (closes.length < period) return result;
+  const k = 2 / (period + 1);
+  let prev = 0;
+  for (let i = 0; i < period; i++) prev += closes[i];
+  prev /= period;
+  result[period - 1] = prev;
+  for (let i = period; i < closes.length; i++) {
+    prev = closes[i] * k + prev * (1 - k);
+    result[i] = prev;
+  }
+  return result;
+}
+
+/**
+ * Computes Bollinger Bands (SMA basis ± mult × std dev).
+ * Returns nulls for warming-up bars (< period candles).
+ */
+function computeBB(
+  closes: number[],
+  period: number,
+  mult: number,
+): { upper: (number | null)[]; lower: (number | null)[] } {
+  const upper: (number | null)[] = new Array(closes.length).fill(null);
+  const lower: (number | null)[] = new Array(closes.length).fill(null);
+  if (closes.length < period) return { upper, lower };
+  for (let i = period - 1; i < closes.length; i++) {
+    let sum = 0;
+    for (let j = i - period + 1; j <= i; j++) sum += closes[j];
+    const avg = sum / period;
+    let variance = 0;
+    for (let j = i - period + 1; j <= i; j++) variance += (closes[j] - avg) ** 2;
+    const std = Math.sqrt(variance / period);
+    upper[i] = avg + mult * std;
+    lower[i] = avg - mult * std;
+  }
+  return { upper, lower };
+}
+
 export function AiTraderDecisionChart({
   open,
   onOpenChange,
@@ -187,6 +231,13 @@ export function AiTraderDecisionChart({
   // Holds the lightweight-charts Line series for the W/M overlay so we can
   // toggle its visibility without rebuilding the whole chart.
   const formationSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  // EMA + Bollinger Band series — created in the build effect, toggled in the
+  // showPattern effect alongside formationSeriesRef. All start hidden.
+  const ema20Ref   = useRef<ISeriesApi<'Line'> | null>(null);
+  const ema50Ref   = useRef<ISeriesApi<'Line'> | null>(null);
+  const ema200Ref  = useRef<ISeriesApi<'Line'> | null>(null);
+  const bbUpperRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const bbLowerRef = useRef<ISeriesApi<'Line'> | null>(null);
 
   useEffect(() => {
     if (open) {
@@ -567,6 +618,57 @@ export function AiTraderDecisionChart({
       }
     }
 
+    // ── EMAs & Bollinger Bands ────────────────────────────────────────────────
+    // Computed from the loaded candles so no server changes or extra fetches are
+    // needed. All series start hidden and are toggled by the same TA button that
+    // controls the W/M overlay. Labeled with the chart's current timeframe (tf)
+    // so the user always knows which resolution these indicators reflect — if
+    // they've zoomed out to 4h, the EMA 200 shown is the 4h EMA 200.
+    ema20Ref.current = null;
+    ema50Ref.current = null;
+    ema200Ref.current = null;
+    bbUpperRef.current = null;
+    bbLowerRef.current = null;
+    {
+      const closes = candles.map((c) => c.close);
+
+      const makeLine = (
+        values: (number | null)[],
+        color: string,
+        title: string,
+        style: LineStyle,
+      ): ISeriesApi<'Line'> => {
+        const s = chart.addLineSeries({
+          color,
+          lineWidth: 1,
+          lineStyle: style,
+          visible: false,
+          lastValueVisible: false,
+          priceLineVisible: false,
+          crosshairMarkerVisible: false,
+          title,
+        });
+        const data = values
+          .map((v, i) =>
+            v === null ? null : { time: candles[i].time as UTCTimestamp, value: v },
+          )
+          .filter((x): x is { time: UTCTimestamp; value: number } => x !== null);
+        if (data.length > 0) s.setData(data);
+        return s;
+      };
+
+      const ema20Vals  = computeEMA(closes, 20);
+      const ema50Vals  = computeEMA(closes, 50);
+      const ema200Vals = computeEMA(closes, 200);
+      const { upper: bbUp, lower: bbLow } = computeBB(closes, 20, 2);
+
+      ema20Ref.current   = makeLine(ema20Vals,  'rgba(250,204,21,0.70)', `EMA 20 (${tf})`,  LineStyle.Solid);
+      ema50Ref.current   = makeLine(ema50Vals,  'rgba(251,146,60,0.70)', `EMA 50 (${tf})`,  LineStyle.Solid);
+      ema200Ref.current  = makeLine(ema200Vals, 'rgba(167,139,250,0.70)', `EMA 200 (${tf})`, LineStyle.Solid);
+      bbUpperRef.current = makeLine(bbUp,       'rgba(99,179,237,0.45)', `BB+ (${tf})`,     LineStyle.Dashed);
+      bbLowerRef.current = makeLine(bbLow,      'rgba(99,179,237,0.45)', `BB− (${tf})`,     LineStyle.Dashed);
+    }
+
     // View priority: (1) restore the exact pre-backfill view when the deep
     // history just stitched in (by time, so prepended bars can't shift it);
     // (2) default framing on the trade itself — NOT fitContent(), which would
@@ -632,6 +734,11 @@ export function AiTraderDecisionChart({
       seriesRef.current = null;
       entryLineRef.current = null;
       formationSeriesRef.current = null;
+      ema20Ref.current   = null;
+      ema50Ref.current   = null;
+      ema200Ref.current  = null;
+      bbUpperRef.current = null;
+      bbLowerRef.current = null;
       setHoverCandle(null);
     };
     // sizeBase/unrealizedPnl deliberately NOT deps: their ticks update the
@@ -661,10 +768,16 @@ export function AiTraderDecisionChart({
     });
   }, [unrealizedPnl, sizeBase, direction, realizedPnl, pnlView, entryPrice]);
 
-  // Toggle the W/M formation overlay visibility without rebuilding the chart.
+  // Toggle the W/M formation overlay + EMA/BB indicator series visibility
+  // without rebuilding the chart. All TA indicators share one TA button.
   useEffect(() => {
-    if (!formationSeriesRef.current) return;
-    formationSeriesRef.current.applyOptions({ visible: showPattern });
+    const v = { visible: showPattern };
+    formationSeriesRef.current?.applyOptions(v);
+    ema20Ref.current?.applyOptions(v);
+    ema50Ref.current?.applyOptions(v);
+    ema200Ref.current?.applyOptions(v);
+    bbUpperRef.current?.applyOptions(v);
+    bbLowerRef.current?.applyOptions(v);
   }, [showPattern]);
 
   // Live candle refresh: while the dialog is open on a STILL-OPEN trade, poll
