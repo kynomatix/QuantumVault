@@ -358,10 +358,10 @@ export function AiTraderDecisionChart({
     if (stopLossPrice != null) {
       const riskZone = chart.addBaselineSeries({
         baseValue: { type: 'price', price: entryPrice },
-        topFillColor1: 'rgba(129,140,248,0.13)',
-        topFillColor2: 'rgba(129,140,248,0.13)',
-        bottomFillColor1: 'rgba(129,140,248,0.13)',
-        bottomFillColor2: 'rgba(129,140,248,0.13)',
+        topFillColor1: 'rgba(120,84,212,0.15)',
+        topFillColor2: 'rgba(120,84,212,0.15)',
+        bottomFillColor1: 'rgba(120,84,212,0.15)',
+        bottomFillColor2: 'rgba(120,84,212,0.15)',
         topLineColor: 'rgba(0,0,0,0)',
         bottomLineColor: 'rgba(0,0,0,0)',
         lineVisible: false,
