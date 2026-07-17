@@ -986,3 +986,292 @@ describe("tick loop", () => {
     expect(decisionUpdates().some((u) => u.exitReason === "tp")).toBe(true);
   });
 });
+
+// --- Breakeven protect ---------------------------------------------------------------
+
+describe("breakeven protect", () => {
+  const NEW_SL = 150 * 1.0015; // entry 150, long → 150.225
+  const MOVED_AT = new Date(NOW - TF_15M).toISOString(); // 11:45 candle
+
+  /** Open decision whose ratchet has ALREADY fired (stop moved to breakeven). */
+  function makeMovedDecision() {
+    return makeOpenDecision({
+      clampedDecision: {
+        action: "long",
+        sizeBase: 2,
+        marginUsdc: 100,
+        stopLossPrice: NEW_SL,
+        takeProfitPrice: 160,
+        breakevenProtect: {
+          originalStopLossPrice: 145,
+          movedStopLossPrice: NEW_SL,
+          movedAt: MOVED_AT,
+          progressAtFire: 0.8,
+        },
+      },
+    });
+  }
+
+  /** setTpSl mock that echoes the request back as applied (verified success). */
+  const echoSetTpSl = () =>
+    vi.fn(async (p: { stopLossPrice?: number; takeProfitPrice?: number }) => ({
+      success: true,
+      status: "acknowledged",
+      appliedStopLossPrice: p.stopLossPrice ?? null,
+      appliedTakeProfitPrice: p.takeProfitPrice ?? null,
+    }));
+
+  const openPosition = { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150, markPrice: 157, unrealizedPnl: 14, leverage: 2, liquidationPrice: null, marginMode: "cross" as const };
+
+  /** Candles reaching 80% of entry→TP (high 158 of 150→160) without touching a leg. */
+  const progressCandles = () => [
+    candle(ENTRY_CANDLE_OPEN, 150, 151, 149.5, 150.5), // entry candle: ignored
+    candle(ENTRY_CANDLE_OPEN + TF_15M, 150.5, 158, 150.4, 157.5),
+  ];
+
+  it("paper: fires at ≥75% progress and persists the moved stop + audit state", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+
+    await monitorBotOnce(makeBot());
+
+    const du = decisionUpdates();
+    expect(du).toHaveLength(1);
+    expect(du[0].exitReason).toBeUndefined(); // a move, not a close
+    const clamped = du[0].clampedDecision as Record<string, any>;
+    expect(clamped.stopLossPrice).toBeCloseTo(NEW_SL, 8);
+    expect(clamped.takeProfitPrice).toBe(160); // TP untouched
+    expect(clamped.breakevenProtect.originalStopLossPrice).toBe(145);
+    expect(clamped.breakevenProtect.movedStopLossPrice).toBeCloseTo(NEW_SL, 8);
+    expect(clamped.breakevenProtect.progressAtFire).toBeCloseTo(0.8, 6);
+    expect(updateBotMock).not.toHaveBeenCalled(); // still open
+  });
+
+  it("paper: does NOT fire when price already retraced through breakeven", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue([
+      candle(ENTRY_CANDLE_OPEN + TF_15M, 150.5, 158, 150.4, 150.1), // close back below 150.225
+    ]);
+
+    await monitorBotOnce(makeBot());
+
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+  });
+
+  it("paper (segmented): a pre-move dip below the MOVED stop does not false-trigger", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    getDecisionsMock.mockResolvedValue([makeMovedDecision()]);
+    fetchOHLCVMock.mockResolvedValue([
+      // Move candle (11:45): low 148 is below the moved stop 150.225 but above
+      // the original 145 — its extremes predate the move, must not trigger.
+      candle(NOW - TF_15M, 150.5, 158, 148, 157.5),
+      candle(NOW, 157.5, 158, 151, 152), // post-move: above moved stop
+    ]);
+
+    await monitorBotOnce(makeBot());
+
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+  });
+
+  it("paper: a post-move breakeven stop-out closes with POSITIVE PnL and resets the G8 streak", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    getDecisionsMock.mockResolvedValue([makeMovedDecision()]);
+    fetchOHLCVMock.mockResolvedValue([
+      candle(NOW - TF_15M, 150.5, 158, 150.4, 157.5), // move candle: no original-SL touch
+      candle(NOW, 157.5, 157.6, 150.0, 150.3), // post-move: moved stop 150.225 touched
+    ]);
+
+    await monitorBotOnce(makeBot({ consecutiveLosses: 2 }));
+
+    const du = decisionUpdates();
+    expect(du).toHaveLength(1);
+    expect(du[0].exitReason).toBe("sl");
+    const expectedExit = NEW_SL * (1 - PAPER_SLIPPAGE_PER_LEG);
+    expect(Number(du[0].exitPrice)).toBeCloseTo(expectedExit, 6);
+    expect(Number(du[0].realizedPnl)).toBeGreaterThan(0); // the whole point of the buffer
+    // G8: an 'sl' exit that MADE money must reset the streak, not extend it.
+    const update = botUpdates().find((u) => u.consecutiveLosses !== undefined);
+    expect(update?.consecutiveLosses).toBe(0);
+    expect(botUpdates().some((u) => u.status === "idle")).toBe(true);
+  });
+
+  it("live (pacifica): fires venue-first — setTpSl SL+TP together, persists on verified apply", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const setTpSl = echoSetTpSl();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      setTpSl,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+
+    await monitorBotOnce(makeBot({ paperMode: false }));
+
+    expect(setTpSl).toHaveBeenCalledTimes(1);
+    expect(setTpSl.mock.calls[0][0]).toMatchObject({
+      internalSymbol: "SOL-PERP",
+      stopLossPrice: expect.closeTo(NEW_SL, 8),
+      takeProfitPrice: 160, // Pacifica REPLACES the bracket — TP must ride along
+    });
+    const du = decisionUpdates();
+    expect(du).toHaveLength(1);
+    const clamped = du[0].clampedDecision as Record<string, any>;
+    expect(clamped.stopLossPrice).toBeCloseTo(NEW_SL, 8);
+    expect(clamped.breakevenProtect.originalStopLossPrice).toBe(145);
+    expect((adapter as any).cancelTpSlOrders).not.toHaveBeenCalled();
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
+  });
+
+  it("live (flash): sends the tighter SL ONLY (triggers stack) and never cancels", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const setTpSl = echoSetTpSl();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      setTpSl,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+
+    await monitorBotOnce(makeBot({ paperMode: false, protocol: "flash" }));
+
+    expect(setTpSl).toHaveBeenCalledTimes(1);
+    expect(setTpSl.mock.calls[0][0].stopLossPrice).toBeCloseTo(NEW_SL, 8);
+    expect(setTpSl.mock.calls[0][0].takeProfitPrice).toBeUndefined(); // SL-only on Flash
+    expect((adapter as any).cancelTpSlOrders).not.toHaveBeenCalled();
+    expect(decisionUpdates()).toHaveLength(1); // persisted
+  });
+
+  it("live: a venue rejection keeps the OLD stop — nothing persisted, position untouched", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const setTpSl = vi.fn(async () => ({ success: false, status: "rejected", error: "venue said no" }));
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      setTpSl,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+
+    await monitorBotOnce(makeBot({ paperMode: false }));
+
+    expect(setTpSl).toHaveBeenCalledTimes(1);
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+  });
+
+  it("live (pacifica): a dropped SL leg restores the ORIGINAL bracket and does not persist", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const setTpSl = vi.fn()
+      .mockResolvedValueOnce({
+        success: true,
+        status: "acknowledged",
+        appliedStopLossPrice: null,
+        appliedTakeProfitPrice: 160,
+        droppedLegs: [{ leg: "sl", reason: "would trigger immediately" }],
+      })
+      .mockImplementation(async (p: { stopLossPrice?: number; takeProfitPrice?: number }) => ({
+        success: true,
+        status: "acknowledged",
+        appliedStopLossPrice: p.stopLossPrice ?? null,
+        appliedTakeProfitPrice: p.takeProfitPrice ?? null,
+      }));
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      setTpSl,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+
+    await monitorBotOnce(makeBot({ paperMode: false }));
+
+    expect(setTpSl).toHaveBeenCalledTimes(2);
+    // Restore call carries the ORIGINAL bracket.
+    expect(setTpSl.mock.calls[1][0]).toMatchObject({ stopLossPrice: 145, takeProfitPrice: 160 });
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
+  });
+
+  it("live (pacifica): dropped leg + failed restore closes the position (fail closed)", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const setTpSl = vi.fn()
+      .mockResolvedValueOnce({
+        success: true,
+        status: "acknowledged",
+        appliedStopLossPrice: null,
+        appliedTakeProfitPrice: 160,
+        droppedLegs: [{ leg: "sl", reason: "would trigger immediately" }],
+      })
+      .mockResolvedValueOnce({ success: false, status: "rejected", error: "restore failed" });
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      setTpSl,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+
+    await monitorBotOnce(makeBot({ paperMode: false }));
+
+    expect((adapter as any).closePosition).toHaveBeenCalled();
+    expect(botUpdates().some((u) => u.status === "paused" && u.pauseReason === "bracket_failed")).toBe(true);
+  });
+
+  it("live: venue-move retries are bounded per decision", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const setTpSl = vi.fn(async () => ({ success: false, status: "rejected", error: "always no" }));
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      setTpSl,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+    const bot = makeBot({ paperMode: false });
+
+    for (let i = 0; i < 8; i++) await monitorBotOnce(bot);
+
+    expect(setTpSl).toHaveBeenCalledTimes(5); // BREAKEVEN_MAX_MOVE_ATTEMPTS
+  });
+
+  it("live: an unknown venue never moves the stop blind", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const setTpSl = echoSetTpSl();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      setTpSl,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+
+    await monitorBotOnce(makeBot({ paperMode: false, protocol: "drift" }));
+
+    expect(setTpSl).not.toHaveBeenCalled();
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+  });
+
+  it("classifyLiveExit: a fill at the ORIGINAL stop after a move still classifies as 'sl' (Flash stacking)", async () => {
+    const { classifyLiveExit } = await importMonitor();
+    expect(
+      classifyLiveExit({ side: "long", avgExitPrice: 145.03, stopLossPrice: NEW_SL, takeProfitPrice: 160, originalStopLossPrice: 145 })
+    ).toBe("sl");
+    // And a fill at the MOVED stop is 'sl' too.
+    expect(
+      classifyLiveExit({ side: "long", avgExitPrice: 150.2, stopLossPrice: NEW_SL, takeProfitPrice: 160, originalStopLossPrice: 145 })
+    ).toBe("sl");
+  });
+});

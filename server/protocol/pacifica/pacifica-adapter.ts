@@ -994,11 +994,11 @@ export class PacificaAdapter implements ProtocolAdapter {
     // exists and at least one leg was requested. Skips the cancel-only call path
     // (TP=0, SL=0) which is used by /cancel-tpsl to clear existing triggers.
     //
-    // Note: the only callers of setTpSl in the codebase are the user-facing
-    // /set-tpsl and /cancel-tpsl routes. There is no separate strategy-loop
-    // call site that would need its own retry guard — a structured
-    // { success: false } here is observed by the route, surfaced to the user,
-    // and the bot's next strategy tick decides what to do.
+    // Note: callers of setTpSl are the user-facing /set-tpsl and /cancel-tpsl
+    // routes plus the AI Trader monitor (G10 bracket re-place and the
+    // breakeven-protect move). All of them observe the structured
+    // { success: false } / droppedLegs result and apply their own bounded
+    // retry or fail-closed handling — no retry loop belongs here.
     let droppedLegMessage: string | null = null;
     const droppedLegs: Array<{ leg: 'tp' | 'sl'; reason: string }> = [];
     let tpInvalid = false;
