@@ -358,10 +358,10 @@ export function AiTraderDecisionChart({
     if (stopLossPrice != null) {
       const riskZone = chart.addBaselineSeries({
         baseValue: { type: 'price', price: entryPrice },
-        topFillColor1: 'rgba(239,83,80,0.14)',
-        topFillColor2: 'rgba(239,83,80,0.14)',
-        bottomFillColor1: 'rgba(239,83,80,0.14)',
-        bottomFillColor2: 'rgba(239,83,80,0.14)',
+        topFillColor1: 'rgba(129,140,248,0.13)',
+        topFillColor2: 'rgba(129,140,248,0.13)',
+        bottomFillColor1: 'rgba(129,140,248,0.13)',
+        bottomFillColor2: 'rgba(129,140,248,0.13)',
         topLineColor: 'rgba(0,0,0,0)',
         bottomLineColor: 'rgba(0,0,0,0)',
         lineVisible: false,
@@ -374,10 +374,10 @@ export function AiTraderDecisionChart({
     if (takeProfitPrice != null) {
       const rewardZone = chart.addBaselineSeries({
         baseValue: { type: 'price', price: entryPrice },
-        topFillColor1: 'rgba(46,199,164,0.14)',
-        topFillColor2: 'rgba(46,199,164,0.14)',
-        bottomFillColor1: 'rgba(46,199,164,0.14)',
-        bottomFillColor2: 'rgba(46,199,164,0.14)',
+        topFillColor1: 'rgba(56,189,248,0.13)',
+        topFillColor2: 'rgba(56,189,248,0.13)',
+        bottomFillColor1: 'rgba(56,189,248,0.13)',
+        bottomFillColor2: 'rgba(56,189,248,0.13)',
         topLineColor: 'rgba(0,0,0,0)',
         bottomLineColor: 'rgba(0,0,0,0)',
         lineVisible: false,
@@ -388,11 +388,12 @@ export function AiTraderDecisionChart({
       rewardZone.setData(flatSeries(takeProfitPrice));
     }
 
+    // Sky blue = bullish, indigo = bearish — platform color palette.
     const series = chart.addCandlestickSeries({
-      upColor: '#26a69a',
-      downColor: '#ef5350',
-      wickUpColor: '#26a69a',
-      wickDownColor: '#ef5350',
+      upColor: '#38bdf8',
+      downColor: '#818cf8',
+      wickUpColor: '#38bdf8',
+      wickDownColor: '#818cf8',
       borderVisible: false,
     });
     series.setData(candles as CandlestickData[]);
