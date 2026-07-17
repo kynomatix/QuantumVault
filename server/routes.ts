@@ -14315,7 +14315,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
           if (botCtx && wallet?.agentPublicKey) {
             const listAdapter = getAdapterForBot(bot);
-            const liveInfo = await getExchangeAccountInfoForBot(wallet.agentPublicKey, 0, botCtx, listAdapter);
+            // 8s timeout guard: Flash _readRawPositions + getWalletCollateralBalance are
+            // bare Solana RPC calls (no AbortSignal). On first use after a restart, if
+            // Helius is slow they hang indefinitely — causing the whole Promise.all to
+            // exceed the 60s proxy kill threshold (no log line, infinite client spinner).
+            const liveInfo = await Promise.race([
+              getExchangeAccountInfoForBot(wallet.agentPublicKey, 0, botCtx, listAdapter),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error(`[trading-bots] account info timeout bot=${bot.id}`)), 8_000)
+              ),
+            ]);
             const listAdj = await addParkedValueForBotDisplayEquity(bot, listAdapter, liveInfo.totalCollateral, { hasVaultRows: listParkedBotIds.has(bot.id) });
             // Subtract this bot's OWN open per-bot borrow debt (Flash-only) so borrowed
             // USDC sitting in the bot wallet is not counted as the bot's equity/PnL.
