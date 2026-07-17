@@ -468,6 +468,22 @@ export function AiTraderDecisionChart({
         title: 'TP',
       });
     }
+    // Breakeven-protect trigger level: 75% of the way from entry to TP.
+    // Only visible while the ratchet hasn't fired yet — once the SL has been
+    // moved to BE this line is replaced by the "SL → BE" marker and the moved
+    // stop line, so showing it would be redundant clutter.
+    if (!slMoved && takeProfitPrice != null) {
+      const beTriggerPrice = entryPrice + 0.75 * (takeProfitPrice - entryPrice);
+      if (Number.isFinite(beTriggerPrice) && Math.abs(beTriggerPrice - entryPrice) > 1e-9) {
+        series.createPriceLine({
+          price: beTriggerPrice,
+          color: 'rgba(45,212,191,0.55)',
+          lineStyle: LineStyle.SparseDotted,
+          lineWidth: 1,
+          title: 'BE Trigger',
+        });
+      }
+    }
 
     // Support/resistance levels the AI actually saw for THIS decision (from the
     // decision's stored context). Deliberately dim + dotted, neutral color so
