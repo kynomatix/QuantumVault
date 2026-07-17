@@ -474,7 +474,7 @@ export function AiTraderDecisionChart({
     // (index 399) is approximately decidedAt. Approximation is ≤1 bar off for
     // established markets; markers snap to the nearest real candle anyway.
     formationSeriesRef.current = null;
-    if (wmFormation && decidedAtSec !== null) {
+    if (wmFormation && decidedAtSec !== null && times.length > 0) {
       const INDICATOR_BARS = 400;
       const TF_MS: Record<string, number> = {
         '15m': 15 * 60 * 1000,
@@ -484,64 +484,87 @@ export function AiTraderDecisionChart({
       };
       const tfMs = TF_MS[timeframe] ?? TF_MS['1h'];
       const tfSec = tfMs / 1000;
-      const barToSec = (idx: number): UTCTimestamp =>
-        (decidedAtSec - (INDICATOR_BARS - 1 - idx) * tfSec) as UTCTimestamp;
+      // Compute approximate bar time from index, then SNAP to the nearest
+      // actual candle time. Without snapping, a line series data point at a
+      // timestamp not present in the candlestick series causes lightweight-charts
+      // to insert a new empty time slot, visually splitting the candle columns.
+      const barToSnapped = (idx: number): UTCTimestamp => {
+        const rawSec = decidedAtSec - (INDICATOR_BARS - 1 - idx) * tfSec;
+        return snapToNearestTime(times, rawSec) as UTCTimestamp;
+      };
 
-      const e1Sec = barToSec(wmFormation.extreme1.index);
-      const nlSec = barToSec(wmFormation.neckline.index);
-      const e2Sec = barToSec(wmFormation.extreme2.index);
-      const isW = wmFormation.type === 'W';
-      const fColor = isW ? '#34d399' : '#f87171';   // green for W, red for M
+      const e1T = barToSnapped(wmFormation.extreme1.index);
+      const nlT = barToSnapped(wmFormation.neckline.index);
+      const e2T = barToSnapped(wmFormation.extreme2.index);
+      const decidedT = snapToNearestTime(times, decidedAtSec) as UTCTimestamp;
 
-      const fSeries = chart.addLineSeries({
-        color: fColor,
-        lineWidth: 1,
-        lineStyle: LineStyle.Dashed,
-        visible: false,            // toggled in the showPattern effect below
-        lastValueVisible: false,
-        priceLineVisible: false,
-        crosshairMarkerVisible: false,
-      });
-      // Draw the formation path: extreme1 → neckline → extreme2 → (decidedAt @ neckline)
-      // This traces the W or M shape ending with a horizontal dash at the neckline.
-      const fData = [
-        { time: e1Sec,                           value: wmFormation.extreme1.price },
-        { time: nlSec,                           value: wmFormation.neckline.price },
-        { time: e2Sec,                           value: wmFormation.extreme2.price },
-        { time: decidedAtSec as UTCTimestamp,    value: wmFormation.neckline.price },
-      ];
-      fSeries.setData(fData);
-      // Markers: arrows at the two swing extremes (the double bottom/top),
-      // a circle at the intervening neckline pivot.
-      const fMarkers: Parameters<typeof fSeries.setMarkers>[0] = [
-        {
-          time: e1Sec,
-          position: isW ? 'belowBar' : 'aboveBar',
-          shape: isW ? 'arrowUp' : 'arrowDown',
+      // Need 3 distinct snapped times; skip drawing if the chart window doesn't
+      // reach far enough back to resolve the formation.
+      if (new Set([e1T, nlT, e2T]).size >= 3) {
+        const isW = wmFormation.type === 'W';
+        const fColor = isW ? '#34d399' : '#f87171';   // green for W, red for M
+
+        const fSeries = chart.addLineSeries({
           color: fColor,
-          size: 1,
-          text: isW ? 'B1' : 'T1',
-        },
-        {
-          time: nlSec,
-          position: isW ? 'aboveBar' : 'belowBar',
-          shape: 'circle' as const,
-          color: 'rgba(148,163,184,0.9)',
-          size: 0.5,
-          text: 'NL',
-        },
-        {
-          time: e2Sec,
-          position: isW ? 'belowBar' : 'aboveBar',
-          shape: isW ? 'arrowUp' : 'arrowDown',
-          color: fColor,
-          size: 1,
-          text: isW ? 'B2' : 'T2',
-        },
-      ];
-      fMarkers.sort((a, b) => (a.time as number) - (b.time as number));
-      fSeries.setMarkers(fMarkers);
-      formationSeriesRef.current = fSeries;
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          visible: false,            // toggled in the showPattern effect below
+          lastValueVisible: false,
+          priceLineVisible: false,
+          crosshairMarkerVisible: false,
+        });
+        // Draw the formation path: extreme1 → neckline → extreme2 → (decidedAt @ neckline)
+        // This traces the W or M shape ending with a horizontal reach to the entry bar.
+        // All times are snapped to existing candle slots so no empty columns appear.
+        const fData = [
+          { time: e1T,       value: wmFormation.extreme1.price },
+          { time: nlT,       value: wmFormation.neckline.price },
+          { time: e2T,       value: wmFormation.extreme2.price },
+          { time: decidedT,  value: wmFormation.neckline.price },
+        ];
+        fSeries.setData(fData);
+        // Neckline as a horizontal price line on the formation series — hides
+        // automatically when the series visibility is toggled off.
+        fSeries.createPriceLine({
+          price: wmFormation.neckline.price,
+          color: 'rgba(148,163,184,0.55)',
+          lineStyle: LineStyle.Dotted,
+          lineWidth: 1,
+          title: 'Neckline',
+          axisLabelVisible: true,
+        });
+        // Markers: arrows at the two swing extremes (the double bottom/top),
+        // a circle at the intervening neckline pivot.
+        const fMarkers: Parameters<typeof fSeries.setMarkers>[0] = [
+          {
+            time: e1T,
+            position: isW ? 'belowBar' : 'aboveBar',
+            shape: isW ? 'arrowUp' : 'arrowDown',
+            color: fColor,
+            size: 1,
+            text: isW ? 'B1' : 'T1',
+          },
+          {
+            time: nlT,
+            position: isW ? 'aboveBar' : 'belowBar',
+            shape: 'circle' as const,
+            color: 'rgba(148,163,184,0.9)',
+            size: 0.5,
+            text: 'NL',
+          },
+          {
+            time: e2T,
+            position: isW ? 'belowBar' : 'aboveBar',
+            shape: isW ? 'arrowUp' : 'arrowDown',
+            color: fColor,
+            size: 1,
+            text: isW ? 'B2' : 'T2',
+          },
+        ];
+        fMarkers.sort((a, b) => (a.time as number) - (b.time as number));
+        fSeries.setMarkers(fMarkers);
+        formationSeriesRef.current = fSeries;
+      }
     }
 
     // View priority: (1) restore the exact pre-backfill view when the deep
@@ -731,13 +754,13 @@ export function AiTraderDecisionChart({
                 onClick={() => setShowPattern((p) => !p)}
                 className={`text-[10px] font-medium px-1.5 py-0.5 rounded border transition-colors ${
                   showPattern
-                    ? 'bg-primary/15 text-primary border-primary/30'
-                    : 'text-muted-foreground border-border/50 hover:text-foreground'
+                    ? 'bg-sky-500/20 text-sky-400 border-sky-500/40'
+                    : 'text-sky-600/70 border-sky-700/40 hover:text-sky-400 hover:border-sky-500/40'
                 }`}
                 title={`${wmFormation.type === 'W' ? 'W (double bottom)' : 'M (double top)'} pattern overlay`}
                 data-testid="button-chart-pattern"
               >
-                {wmFormation.type} pattern
+                TA
               </button>
             )}
             <div className="flex items-center gap-0.5 rounded-md border border-border/50 p-0.5" data-testid="chart-timeframe-switcher">
