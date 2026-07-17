@@ -70,6 +70,17 @@ export interface AiChartLevel {
   touches: number;
 }
 
+/**
+ * Client-side mirror of WMFormation from wm-detector.ts.
+ * Only the fields needed to render the overlay are included.
+ */
+export interface WMFormationData {
+  type: 'W' | 'M';
+  extreme1: { price: number; index: number };
+  extreme2: { price: number; index: number };
+  neckline: { price: number; index: number };
+}
+
 interface AiTraderDecisionChartProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -94,6 +105,8 @@ interface AiTraderDecisionChartProps {
   unrealizedPnl?: number | null;
   sizeBase?: number | null;
   aiLevels?: AiChartLevel[];
+  /** W/M formation the AI detected for this decision (null = no pattern). */
+  wmFormation?: WMFormationData | null;
 }
 
 function toEpochSeconds(v: string | number | null): number | null {
@@ -153,6 +166,7 @@ export function AiTraderDecisionChart({
   unrealizedPnl,
   sizeBase,
   aiLevels,
+  wmFormation,
 }: AiTraderDecisionChartProps) {
   const [candles, setCandles] = useState<ChartCandle[]>([]);
   const [loading, setLoading] = useState(false);
@@ -168,12 +182,18 @@ export function AiTraderDecisionChart({
   const [expanded, setExpanded] = useState(false);
   // PnL display mode — resets to dollar on each new chart open.
   const [pnlView, setPnlView] = useState<'dollar' | 'percent'>('dollar');
+  // W/M pattern overlay toggle — off by default, resets on each new chart.
+  const [showPattern, setShowPattern] = useState(false);
+  // Holds the lightweight-charts Line series for the W/M overlay so we can
+  // toggle its visibility without rebuilding the whole chart.
+  const formationSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
 
   useEffect(() => {
     if (open) {
       setTf(isChartTf(timeframe) ? timeframe : '1h');
       setExpanded(false);
       setPnlView('dollar');
+      setShowPattern(false);
     }
   }, [open, decisionId, timeframe]);
 
@@ -448,6 +468,82 @@ export function AiTraderDecisionChart({
     markers.sort((a, b) => (a.time as number) - (b.time as number));
     series.setMarkers(markers);
 
+    // ── W/M formation overlay ─────────────────────────────────────────────────
+    // Converts a detector bar-index to an epoch-seconds timestamp.
+    // The detector ran on indicatorCandles (INDICATOR_BARS = 400). The last bar
+    // (index 399) is approximately decidedAt. Approximation is ≤1 bar off for
+    // established markets; markers snap to the nearest real candle anyway.
+    formationSeriesRef.current = null;
+    if (wmFormation && decidedAtSec !== null) {
+      const INDICATOR_BARS = 400;
+      const TF_MS: Record<string, number> = {
+        '15m': 15 * 60 * 1000,
+        '1h':  60 * 60 * 1000,
+        '4h':  4  * 60 * 60 * 1000,
+        '1d':  24 * 60 * 60 * 1000,
+      };
+      const tfMs = TF_MS[timeframe] ?? TF_MS['1h'];
+      const tfSec = tfMs / 1000;
+      const barToSec = (idx: number): UTCTimestamp =>
+        (decidedAtSec - (INDICATOR_BARS - 1 - idx) * tfSec) as UTCTimestamp;
+
+      const e1Sec = barToSec(wmFormation.extreme1.index);
+      const nlSec = barToSec(wmFormation.neckline.index);
+      const e2Sec = barToSec(wmFormation.extreme2.index);
+      const isW = wmFormation.type === 'W';
+      const fColor = isW ? '#34d399' : '#f87171';   // green for W, red for M
+
+      const fSeries = chart.addLineSeries({
+        color: fColor,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        visible: false,            // toggled in the showPattern effect below
+        lastValueVisible: false,
+        priceLineVisible: false,
+        crosshairMarkerVisible: false,
+      });
+      // Draw the formation path: extreme1 → neckline → extreme2 → (decidedAt @ neckline)
+      // This traces the W or M shape ending with a horizontal dash at the neckline.
+      const fData = [
+        { time: e1Sec,                           value: wmFormation.extreme1.price },
+        { time: nlSec,                           value: wmFormation.neckline.price },
+        { time: e2Sec,                           value: wmFormation.extreme2.price },
+        { time: decidedAtSec as UTCTimestamp,    value: wmFormation.neckline.price },
+      ];
+      fSeries.setData(fData);
+      // Markers: arrows at the two swing extremes (the double bottom/top),
+      // a circle at the intervening neckline pivot.
+      const fMarkers: Parameters<typeof fSeries.setMarkers>[0] = [
+        {
+          time: e1Sec,
+          position: isW ? 'belowBar' : 'aboveBar',
+          shape: isW ? 'arrowUp' : 'arrowDown',
+          color: fColor,
+          size: 1,
+          text: isW ? 'B1' : 'T1',
+        },
+        {
+          time: nlSec,
+          position: isW ? 'aboveBar' : 'belowBar',
+          shape: 'circle' as const,
+          color: 'rgba(148,163,184,0.9)',
+          size: 0.5,
+          text: 'NL',
+        },
+        {
+          time: e2Sec,
+          position: isW ? 'belowBar' : 'aboveBar',
+          shape: isW ? 'arrowUp' : 'arrowDown',
+          color: fColor,
+          size: 1,
+          text: isW ? 'B2' : 'T2',
+        },
+      ];
+      fMarkers.sort((a, b) => (a.time as number) - (b.time as number));
+      fSeries.setMarkers(fMarkers);
+      formationSeriesRef.current = fSeries;
+    }
+
     // View priority: (1) restore the exact pre-backfill view when the deep
     // history just stitched in (by time, so prepended bars can't shift it);
     // (2) default framing on the trade itself — NOT fitContent(), which would
@@ -512,12 +608,15 @@ export function AiTraderDecisionChart({
       chartRef.current = null;
       seriesRef.current = null;
       entryLineRef.current = null;
+      formationSeriesRef.current = null;
       setHoverCandle(null);
     };
     // sizeBase/unrealizedPnl deliberately NOT deps: their ticks update the
     // entry-line label in place (effect below) — a rebuild here would reset
     // the user's scroll/zoom on every live PnL refresh.
-  }, [open, loading, error, candles, entryPrice, stopLossPrice, takeProfitPrice, originalStopLossPrice, slMovedAt, direction, decidedAt, closedAt, realizedPnl, aiLevels]);
+    // showPattern deliberately NOT a dep either: the visibility toggle effect
+    // below updates formationSeriesRef.current.applyOptions() in place.
+  }, [open, loading, error, candles, entryPrice, stopLossPrice, takeProfitPrice, originalStopLossPrice, slMovedAt, direction, decidedAt, closedAt, realizedPnl, aiLevels, wmFormation, timeframe]);
 
   // Live entry-line label refresh (open positions only): the drawer re-polls
   // PnL every 10s and passes it through — update the label without a rebuild.
@@ -538,6 +637,12 @@ export function AiTraderDecisionChart({
       title: `${direction.toUpperCase()}${sizeStr}${pnlStr}`,
     });
   }, [unrealizedPnl, sizeBase, direction, realizedPnl, pnlView, entryPrice]);
+
+  // Toggle the W/M formation overlay visibility without rebuilding the chart.
+  useEffect(() => {
+    if (!formationSeriesRef.current) return;
+    formationSeriesRef.current.applyOptions({ visible: showPattern });
+  }, [showPattern]);
 
   // Live candle refresh: while the dialog is open on a STILL-OPEN trade, poll
   // the newest few bars every 10s and push them straight into the existing
@@ -620,6 +725,21 @@ export function AiTraderDecisionChart({
             <div className="text-xs text-muted-foreground" data-testid="text-chart-market-timeframe">
               {market} · <span className={direction === 'long' ? 'text-emerald-400' : 'text-red-400'}>{direction.toUpperCase()}</span>
             </div>
+            {wmFormation && (
+              <button
+                type="button"
+                onClick={() => setShowPattern((p) => !p)}
+                className={`text-[10px] font-medium px-1.5 py-0.5 rounded border transition-colors ${
+                  showPattern
+                    ? 'bg-primary/15 text-primary border-primary/30'
+                    : 'text-muted-foreground border-border/50 hover:text-foreground'
+                }`}
+                title={`${wmFormation.type === 'W' ? 'W (double bottom)' : 'M (double top)'} pattern overlay`}
+                data-testid="button-chart-pattern"
+              >
+                {wmFormation.type} pattern
+              </button>
+            )}
             <div className="flex items-center gap-0.5 rounded-md border border-border/50 p-0.5" data-testid="chart-timeframe-switcher">
               {CHART_TIMEFRAMES.map((t) => (
                 <button

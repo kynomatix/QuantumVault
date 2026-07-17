@@ -223,6 +223,8 @@ interface ChartTarget {
   originalStopLossPrice?: number | null;
   /** Breakeven protect: when the stop moved (chart marker). */
   slMovedAt?: string | number | null;
+  /** W/M formation the AI detected (from contextDigest.wmFormation). */
+  wmFormation?: object | null;
 }
 
 /** Maps a decision's stored contextDigest.htfLevels (HtfLevel[] | null) into
@@ -1060,6 +1062,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                           aiLevels: mapAiLevels((openDecision.decision.contextDigest as any)?.htfLevels),
                           originalStopLossPrice: openDecision.breakevenProtect?.originalStopLossPrice ?? null,
                           slMovedAt: openDecision.breakevenProtect?.movedAt || null,
+                          wmFormation: (openDecision.decision.contextDigest as any)?.wmFormation ?? null,
                         })}
                         data-testid="button-view-chart-open-position"
                       >
@@ -1222,6 +1225,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                                   aiLevels: mapAiLevels((d.contextDigest as any)?.htfLevels),
                                   originalStopLossPrice: beInfo?.originalStopLossPrice ?? null,
                                   slMovedAt: beInfo?.movedAt || null,
+                                  wmFormation: (d.contextDigest as any)?.wmFormation ?? null,
                                 });
                               }}
                               data-testid={`button-view-chart-${d.id}`}
@@ -1847,6 +1851,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
               unrealizedPnl={chartIsLiveOpenPosition ? openUnrealizedPnl : (chartTarget?.unrealizedPnl ?? null)}
               sizeBase={chartTarget?.sizeBase ?? null}
               aiLevels={chartTarget?.aiLevels}
+              wmFormation={chartTarget?.wmFormation as any}
             />
           </>
         )}
