@@ -427,7 +427,7 @@ export function AiTraderDecisionChart({
       ? (direction === 'long' ? '#2ec77e' : '#ef5350')
       : '#58a6ff';
     const sizeStr = isOpen && sizeBase != null
-      ? ' ' + Number(sizeBase).toPrecision(4)
+      ? ' ' + Number(sizeBase).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })
       : '';
     const pnlStr = isOpen && unrealizedPnl != null
       ? ` ${unrealizedPnl >= 0 ? '+' : '−'}$${Math.abs(unrealizedPnl).toFixed(2)}`
@@ -798,7 +798,7 @@ export function AiTraderDecisionChart({
   // pnlView is included so toggling $ ↔ % updates the label in place too.
   useEffect(() => {
     if (!entryLineRef.current || realizedPnl !== null) return;
-    const sizeStr = sizeBase != null ? ' ' + Number(sizeBase).toPrecision(4) : '';
+    const sizeStr = sizeBase != null ? ' ' + Number(sizeBase).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 }) : '';
     let pnlStr = '';
     if (unrealizedPnl != null) {
       if (pnlView === 'percent' && sizeBase != null && entryPrice > 0) {
