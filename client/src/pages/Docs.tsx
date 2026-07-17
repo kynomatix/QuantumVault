@@ -4026,7 +4026,7 @@ function AiTraderScannerSection() {
     <div>
       <SectionHeading>Market Scanner</SectionHeading>
       <Paragraph>
-        By default an AI Trader bot watches one fixed market at a fixed timeframe. <strong>Market Scanner mode</strong> removes both constraints: before each analysis cycle the platform evaluates every market listed on the selected exchange across all four timeframes (15m, 1h, 4h, 1d) and surfaces the market-and-timeframe combination that looks most tradeable. The bot then focuses its full analysis on that candidate and enters if the AI decides.
+        By default an AI Trader bot watches one fixed market at a fixed timeframe. <strong>Market Scanner mode</strong> removes both constraints: before each analysis cycle the platform sweeps every market on the selected exchange across four timeframes (15m, 1h, 4h, 1d), hunting for one specific setup — a <strong>double-bottom (W) or double-top (M)</strong> pattern that has fully formed and is sitting right at its trigger level. Markets without a live W/M pattern are skipped entirely. The best-qualifying candidate is handed to the AI for its full analysis; it enters if the AI decides.
       </Paragraph>
       <Paragraph>
         The practical difference: a fixed-market bot waits for you to pick a ticker and relies on you timing your entry into that specific market. A scanner bot acts immediately when a high-quality setup appears anywhere on the exchange — you don't pick the market, the platform finds the trade for you.
