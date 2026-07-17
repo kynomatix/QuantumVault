@@ -1833,7 +1833,7 @@ async function tick(): Promise<void> {
       // Stale pre-open watchdog (see preOpenFirstSeen above): queue a forced
       // reconciliation for bots stranded mid-cycle so a stuck 'Analyzing…'
       // badge heals at runtime instead of waiting for the next deploy.
-      const preOpen = bot.status === "analyzing" || bot.status === "executing" || bot.status === "proposed";
+      const preOpen = bot.status === "analyzing" || bot.status === "executing";
       if (preOpen) {
         const seen = preOpenFirstSeen.get(bot.id);
         if (!seen || seen.status !== bot.status) {
