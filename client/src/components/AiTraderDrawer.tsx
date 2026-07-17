@@ -719,6 +719,10 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   // WO-8h item 1: net P&L = server-computed lifetimeStats with client fallback.
   const lifetimeStats = (detail as any)?.lifetimeStats ?? null;
   const netPnlAllIn: number = lifetimeStats?.netPnlAllIn ?? (netPnl + (openUnrealizedPnl ?? 0) - totalLlmCost);
+  // The detail endpoint fetches only the last 10 decisions for display, so client-computed
+  // netPnl / totalLlmCost miss anything older. Use server lifetime totals when available.
+  const displayRealized: number = lifetimeStats?.totalRealized ?? netPnl;
+  const displayLlmCost: number = lifetimeStats?.totalLlmCost ?? totalLlmCost;
 
   const degenDaysAlive = bot ? Math.floor((Date.now() - new Date(bot.createdAt ?? Date.now()).getTime()) / 86400000) : 0;
   const degenRemaining = alloc + netPnl;
@@ -1277,7 +1281,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     <TooltipContent className="max-w-[240px] bg-popover border border-border text-xs p-3 space-y-1.5">
                       <div className="flex justify-between gap-4">
                         <span>Closed P&L (fees in)</span>
-                        <span>{netPnl >= 0 ? '+' : ''}${netPnl.toFixed(2)}</span>
+                        <span>{displayRealized >= 0 ? '+' : ''}${displayRealized.toFixed(2)}</span>
                       </div>
                       <div className="flex justify-between gap-4">
                         <span>Live unrealized</span>
@@ -1285,7 +1289,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                       </div>
                       <div className="flex justify-between gap-4">
                         <span>AI spend</span>
-                        <span>−${totalLlmCost.toFixed(4)}</span>
+                        <span>−${displayLlmCost.toFixed(4)}</span>
                       </div>
                     </TooltipContent>
                   </Tooltip>
@@ -1297,7 +1301,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     { label: 'Closed trades', value: String(tradesCount) },
                     { label: 'Max drawdown', value: maxDdPct > 0 ? `${maxDdPct.toFixed(1)}%` : '—' },
                     { label: 'Fees paid', value: `$${totalFees.toFixed(4)}` },
-                    { label: 'AI cost', value: `$${totalLlmCost.toFixed(4)}` },
+                    { label: 'AI cost', value: `$${displayLlmCost.toFixed(4)}` },
                   ].map((item) => (
                     <div key={item.label} className="p-3 rounded-xl bg-muted/30 space-y-0.5">
                       <p className="text-xs text-muted-foreground">{item.label}</p>
