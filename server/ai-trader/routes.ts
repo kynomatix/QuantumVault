@@ -1546,6 +1546,15 @@ export function registerAiTraderRoutes(app: Express): void {
         (typeof tfRaw === "string" && tfRaw) ||
         (typeof digestTf === "string" && digestTf in CHART_TIMEFRAME_MS ? digestTf : bot.timeframe);
 
+      // The decision's own market beats bot.market: scanner bots hop markets,
+      // so for a historical trade bot.market is whatever the bot trades NOW —
+      // fetching those candles would pair one market's bars with another
+      // market's entry/SL/TP lines. Executed rows are never compressed, so the
+      // digest market is always present for any chartable decision.
+      const digestMarket = (decision.contextDigest as any)?.market;
+      const chartMarket: string =
+        typeof digestMarket === "string" && digestMarket.length > 0 ? digestMarket : bot.market;
+
       const tfMs = CHART_TIMEFRAME_MS[chartTf] ?? CHART_TIMEFRAME_MS["1h"];
       const now = Date.now();
       const decidedAtMs = decision.decidedAt ? new Date(decision.decidedAt).getTime() : now;
@@ -1566,7 +1575,7 @@ export function registerAiTraderRoutes(app: Express): void {
       if (spanRaw === "tail") {
         const tailStartMs = now - CHART_TAIL_SPAN_CANDLES * tfMs;
         const rawTail = await fetchOHLCV(
-          marketToDatafeedTicker(bot.market),
+          marketToDatafeedTicker(chartMarket),
           chartTf,
           new Date(tailStartMs).toISOString(),
           new Date(now).toISOString(),
@@ -1581,7 +1590,7 @@ export function registerAiTraderRoutes(app: Express): void {
             low: c.low,
             close: c.close,
           })),
-          market: bot.market,
+          market: chartMarket,
           timeframe: chartTf,
         });
       }
@@ -1604,7 +1613,7 @@ export function registerAiTraderRoutes(app: Express): void {
       }
       endMs = Math.min(endMs, now);
 
-      const datafeedTicker = marketToDatafeedTicker(bot.market);
+      const datafeedTicker = marketToDatafeedTicker(chartMarket);
       // AI Trader only trades perpetual-swap markets; Gate.io spot candles
       // misrepresent the market (lower volume, different price action) and must
       // never substitute for OKX SWAP candles on this chart.
@@ -1623,7 +1632,7 @@ export function registerAiTraderRoutes(app: Express): void {
         low: c.low,
         close: c.close,
       }));
-      res.json({ candles, market: bot.market, timeframe: chartTf });
+      res.json({ candles, market: chartMarket, timeframe: chartTf });
     } catch (err) {
       console.error("[AiTrader] chart error:", err);
       res.status(500).json({ error: "Internal server error" });

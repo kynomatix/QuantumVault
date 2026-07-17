@@ -201,6 +201,8 @@ interface BotDetailResponse {
 // (which the drawer derives from chartTarget !== null / setChartTarget(null)).
 interface ChartTarget {
   decisionId: string;
+  /** The market THIS decision traded (scanner bots hop markets — bot.market is only the current one). */
+  market?: string;
   /** The timeframe the AI analyzed for THIS decision (scanner bots hop timeframes). */
   timeframe?: string;
   direction: 'long' | 'short';
@@ -1041,6 +1043,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                         className="h-6 px-2 text-[10px] gap-1"
                         onClick={() => setChartTarget({
                           decisionId: openDecision.decision.id,
+                          market: (openDecision.decision.contextDigest as any)?.market,
                           timeframe: (openDecision.decision.contextDigest as any)?.timeframe,
                           direction: openDecision.side,
                           entryPrice: openDecision.entryPrice,
@@ -1202,6 +1205,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                                 e.stopPropagation();
                                 setChartTarget({
                                   decisionId: d.id,
+                                  market: rowDigestMarket,
                                   timeframe: (d.contextDigest as any)?.timeframe,
                                   direction: resolvedAction === 'short' ? 'short' : 'long',
                                   entryPrice: Number(d.entryPrice),
@@ -1825,7 +1829,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
               open={chartTarget != null}
               onOpenChange={(o) => { if (!o) setChartTarget(null); }}
               botId={bot.id}
-              market={bot.market}
+              market={chartTarget?.market ?? bot.market}
               timeframe={chartTarget?.timeframe ?? bot.timeframe}
               decisionId={chartTarget?.decisionId ?? ''}
               direction={chartTarget?.direction ?? 'long'}
