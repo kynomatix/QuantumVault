@@ -388,12 +388,12 @@ export function AiTraderDecisionChart({
       rewardZone.setData(flatSeries(takeProfitPrice));
     }
 
-    // Sky blue = bullish, indigo = bearish — platform color palette.
+    // Sky blue = bullish, violet = bearish — platform color palette.
     const series = chart.addCandlestickSeries({
       upColor: '#38bdf8',
-      downColor: '#818cf8',
+      downColor: '#7c3aed',
       wickUpColor: '#38bdf8',
-      wickDownColor: '#818cf8',
+      wickDownColor: '#7c3aed',
       borderVisible: false,
     });
     series.setData(candles as CandlestickData[]);
