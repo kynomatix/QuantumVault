@@ -18,6 +18,7 @@ import { logHermesAuthStatus } from "./pricing/hermes-config.js";
 import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
 import { startTelegramDailySummaryJob } from "./telegram-daily-summary-job";
 import { recordCriticalError, flushErrorLog } from "./error-log";
+import * as os from "node:os";
 
 // Global crash capture for the admin "Errors" panel. Registered at module load so it catches
 // failures from any background job. Both handlers record the error then preserve Node's default
@@ -562,8 +563,34 @@ app.use((req, res, next) => {
     }
   }
 
-  const shutdownHandler = async () => {
-    console.log("[Main] Shutting down...");
+  // Shutdown MUST end in process.exit(). This process runs dozens of setInterval
+  // loops (monitors, scanners, reconcilers, Telegram polling); without an explicit
+  // exit the event loop stays alive forever after SIGTERM, and the old instance
+  // lingers as a zombie next to the replacement — stacking full app instances
+  // (each with a lab child) on the production VM until it is starved. That zombie
+  // pile-up was the root cause of the July 17, 2026 all-AI-Traders outage (DB/OKX
+  // handshake timeouts, lab boot-loop, healthcheck deaths). Never remove the
+  // exit calls or the hard-exit backstop.
+  let shuttingDown = false;
+  const shutdownHandler = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[Main] ${signal} received — shutting down...`);
+    // Backstop: if any cleanup step below hangs, force-exit anyway. unref'd so
+    // it never delays a clean exit.
+    const hardExit = setTimeout(() => {
+      console.error("[Main] Shutdown grace period (10s) expired — forcing exit");
+      process.exit(0);
+    }, 10_000);
+    if (typeof hardExit.unref === "function") hardExit.unref();
+    // Stop the AI Trader monitor FIRST so no tick can start a new venue order
+    // that would be cut mid-flight by the exit below.
+    try {
+      const { stopAiTraderMonitor } = await import("./ai-trader/monitor");
+      stopAiTraderMonitor();
+    } catch (e) {
+      console.warn("[Main] AI Trader monitor stop error (non-fatal):", (e as Error)?.message);
+    }
     try {
       stopLiveDataSpine();
     } catch (e) {
@@ -572,10 +599,32 @@ app.use((req, res, next) => {
     await flushErrorLog().catch(() => {});
     await labSupervisor.shutdown();
     await closePool().catch((e) => console.warn("[Main] Pool close error (non-fatal):", e.message));
-    httpServer.close();
+    try {
+      httpServer.close();
+    } catch {}
+    console.log("[Main] Shutdown complete — exiting");
+    process.exit(0);
   };
-  process.on("SIGTERM", () => shutdownHandler().catch(() => process.exit(1)));
-  process.on("SIGINT", () => shutdownHandler().catch(() => process.exit(1)));
+  process.on("SIGTERM", () => shutdownHandler("SIGTERM").catch(() => process.exit(1)));
+  process.on("SIGINT", () => shutdownHandler("SIGINT").catch(() => process.exit(1)));
+
+  // Resource telemetry: one compact line per minute so a starved VM is visible
+  // in production logs (the July 17 outage had zero memory/load evidence).
+  // unref'd — never keeps a shutting-down process alive.
+  const logResources = () => {
+    try {
+      const m = process.memoryUsage();
+      const mb = (n: number) => Math.round(n / 1048576);
+      const gb = (n: number) => (n / 1073741824).toFixed(2);
+      console.log(
+        `[Resources] rss=${mb(m.rss)}MB heap=${mb(m.heapUsed)}/${mb(m.heapTotal)}MB ext=${mb(m.external)}MB ` +
+        `free=${gb(os.freemem())}/${gb(os.totalmem())}GB load1=${os.loadavg()[0].toFixed(2)}`,
+      );
+    } catch {}
+  };
+  logResources();
+  const resourceTimer = setInterval(logResources, 60_000);
+  if (typeof resourceTimer.unref === "function") resourceTimer.unref();
 
   // Warm the Vault yield-APY cache from the DB last-good rows BEFORE we accept
   // traffic, so the very first vault read returns real numbers instead of the
