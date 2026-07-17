@@ -16,6 +16,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Loader2, AlertCircle, BarChart3, Maximize2, Minimize2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
 
@@ -165,11 +166,14 @@ export function AiTraderDecisionChart({
   // container's CSS + the ResizeObserver, so toggling never rebuilds the
   // chart and the user's scroll/zoom survives.
   const [expanded, setExpanded] = useState(false);
+  // PnL display mode — resets to dollar on each new chart open.
+  const [pnlView, setPnlView] = useState<'dollar' | 'percent'>('dollar');
 
   useEffect(() => {
     if (open) {
       setTf(isChartTf(timeframe) ? timeframe : '1h');
       setExpanded(false);
+      setPnlView('dollar');
     }
   }, [open, decisionId, timeframe]);
 
@@ -517,16 +521,23 @@ export function AiTraderDecisionChart({
 
   // Live entry-line label refresh (open positions only): the drawer re-polls
   // PnL every 10s and passes it through — update the label without a rebuild.
+  // pnlView is included so toggling $ ↔ % updates the label in place too.
   useEffect(() => {
     if (!entryLineRef.current || realizedPnl !== null) return;
     const sizeStr = sizeBase != null ? ' ' + Number(sizeBase).toPrecision(4) : '';
-    const pnlStr = unrealizedPnl != null
-      ? ` ${unrealizedPnl >= 0 ? '+' : '−'}$${Math.abs(unrealizedPnl).toFixed(2)}`
-      : '';
+    let pnlStr = '';
+    if (unrealizedPnl != null) {
+      if (pnlView === 'percent' && sizeBase != null && entryPrice > 0) {
+        const pct = (unrealizedPnl / (entryPrice * Number(sizeBase))) * 100;
+        pnlStr = ` ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+      } else {
+        pnlStr = ` ${unrealizedPnl >= 0 ? '+' : '−'}$${Math.abs(unrealizedPnl).toFixed(2)}`;
+      }
+    }
     entryLineRef.current.applyOptions({
       title: `${direction.toUpperCase()}${sizeStr}${pnlStr}`,
     });
-  }, [unrealizedPnl, sizeBase, direction, realizedPnl]);
+  }, [unrealizedPnl, sizeBase, direction, realizedPnl, pnlView, entryPrice]);
 
   // Live candle refresh: while the dialog is open on a STILL-OPEN trade, poll
   // the newest few bars every 10s and push them straight into the existing
@@ -576,6 +587,20 @@ export function AiTraderDecisionChart({
   const isOpenPosition = realizedPnl === null;
   const pnlValue = isOpenPosition ? (unrealizedPnl ?? null) : realizedPnl;
   const exitReasonLabel = exitReason ? (EXIT_REASON_LABELS[exitReason] ?? exitReason) : null;
+  // % of position notional (entry × size). Available only when sizeBase is
+  // present (open trades). Closed history rows don't carry sizeBase.
+  const canShowPct = pnlValue !== null && sizeBase != null && Number.isFinite(Number(sizeBase)) && entryPrice > 0;
+  const pnlPct = canShowPct
+    ? (pnlValue! / (entryPrice * Number(sizeBase))) * 100
+    : null;
+  // Format the PnL for the header readout.
+  const pnlDisplay = (() => {
+    if (pnlValue === null) return null;
+    if (pnlView === 'percent' && pnlPct !== null) {
+      return `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%`;
+    }
+    return formatUsdSigned(pnlValue);
+  })();
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -618,18 +643,44 @@ export function AiTraderDecisionChart({
             <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
               {isOpenPosition ? 'Unrealized PnL' : 'Realized PnL'}
             </span>
-            {pnlValue !== null ? (
+            {pnlDisplay !== null ? (
               <span
-                className={`font-semibold ${pnlValue >= 0 ? 'text-emerald-400' : 'text-red-400'}`}
+                className={`font-semibold ${pnlValue! >= 0 ? 'text-emerald-400' : 'text-red-400'}`}
                 data-testid="text-chart-pnl"
               >
-                {formatUsdSigned(pnlValue)}
+                {pnlDisplay}
               </span>
             ) : (
               <span className="text-muted-foreground" data-testid="text-chart-pnl">--</span>
             )}
             {!isOpenPosition && exitReasonLabel && (
               <span className="text-[10px] text-muted-foreground">({exitReasonLabel})</span>
+            )}
+            {pnlDisplay !== null && (
+              <div className="flex gap-0.5" data-testid="toggle-pnl-view">
+                <Button
+                  type="button"
+                  variant={pnlView === 'dollar' ? 'default' : 'outline'}
+                  size="sm"
+                  className="h-5 px-2 text-xs"
+                  onClick={() => setPnlView('dollar')}
+                  data-testid="button-pnl-view-dollar"
+                >
+                  $
+                </Button>
+                <Button
+                  type="button"
+                  variant={pnlView === 'percent' ? 'default' : 'outline'}
+                  size="sm"
+                  className="h-5 px-2 text-xs"
+                  disabled={!canShowPct}
+                  onClick={() => setPnlView('percent')}
+                  title={!canShowPct ? 'Not available for closed trades' : undefined}
+                  data-testid="button-pnl-view-percent"
+                >
+                  %
+                </Button>
+              </div>
             )}
             <button
               type="button"
