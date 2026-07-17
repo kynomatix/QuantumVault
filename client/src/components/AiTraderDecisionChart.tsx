@@ -662,11 +662,16 @@ export function AiTraderDecisionChart({
       const ema200Vals = computeEMA(closes, 200);
       const { upper: bbUp, lower: bbLow } = computeBB(closes, 20, 2);
 
-      ema20Ref.current   = makeLine(ema20Vals,  'rgba(250,204,21,0.70)', `EMA 20 (${tf})`,  LineStyle.Solid);
-      ema50Ref.current   = makeLine(ema50Vals,  'rgba(251,146,60,0.70)', `EMA 50 (${tf})`,  LineStyle.Solid);
-      ema200Ref.current  = makeLine(ema200Vals, 'rgba(167,139,250,0.70)', `EMA 200 (${tf})`, LineStyle.Solid);
-      bbUpperRef.current = makeLine(bbUp,       'rgba(99,179,237,0.45)', `BB+ (${tf})`,     LineStyle.Dashed);
-      bbLowerRef.current = makeLine(bbLow,      'rgba(99,179,237,0.45)', `BB− (${tf})`,     LineStyle.Dashed);
+      // System-palette colors — same family as the rest of the UI:
+      //   EMA 20  → cyan-400   (#22d3ee) — fast, energetic
+      //   EMA 50  → indigo-400 (#818cf8) — mid, cool blue-violet
+      //   EMA 200 → purple-400 (#c084fc) — slow, authoritative (distinct from violet-400 BE marker)
+      //   BB      → slate-500  (#64748b) — neutral channel, doesn't compete with EMA lines
+      ema20Ref.current   = makeLine(ema20Vals,  'rgba(34,211,238,0.72)',  `EMA 20 (${tf})`,  LineStyle.Solid);
+      ema50Ref.current   = makeLine(ema50Vals,  'rgba(129,140,248,0.72)', `EMA 50 (${tf})`,  LineStyle.Solid);
+      ema200Ref.current  = makeLine(ema200Vals, 'rgba(192,132,252,0.68)', `EMA 200 (${tf})`, LineStyle.Solid);
+      bbUpperRef.current = makeLine(bbUp,       'rgba(100,116,139,0.55)', `BB+ (${tf})`,     LineStyle.Dashed);
+      bbLowerRef.current = makeLine(bbLow,      'rgba(100,116,139,0.55)', `BB− (${tf})`,     LineStyle.Dashed);
     }
 
     // View priority: (1) restore the exact pre-backfill view when the deep
