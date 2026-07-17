@@ -276,7 +276,9 @@ export class FlashAdapter implements ProtocolAdapter {
   quantizeOrderSize(internalSymbol: string, size: number): number {
     const spec = this._specBySymbol(internalSymbol);
     const lotSize = spec?.lotSize ?? 0.0001;
-    return Math.floor(size / lotSize) * lotSize;
+    // Float-safety epsilon (matches the Pacifica quantizer): without it,
+    // Math.floor(0.3 / 0.1) === 2 drops a clean lot multiple.
+    return Math.floor(size / lotSize + 1e-9) * lotSize;
   }
 
   quantizePrice(internalSymbol: string, price: number): number {

@@ -1092,9 +1092,18 @@ export function registerAiTraderRoutes(app: Express): void {
       if (bot.status !== "paused") {
         return res.status(409).json({ error: `Bot is not paused (status: ${bot.status}).` });
       }
-      const updated = await storage.updateAiTraderBot(bot.id, { status: "idle", pauseReason: null });
-      // A resumed Auto bot must re-enter the hands-off cadence right away.
-      if (updated) armAutoNextIfEligible(updated);
+      // Money-safety: a bot can be paused WITH a still-open position (e.g. a
+      // protective close whose close order failed). Resuming to 'idle' would
+      // leave that position unmonitored AND let auto-next stack a second
+      // entry onto the same market. If an unclosed decision exists, resume
+      // back into 'open' so the monitor picks the position up again.
+      const recentDecisions = await storage.getAiTraderDecisions(bot.id, 10);
+      const openView = parseOpenDecision(recentDecisions);
+      const resumeStatus = openView ? ("open" as const) : ("idle" as const);
+      const updated = await storage.updateAiTraderBot(bot.id, { status: resumeStatus, pauseReason: null });
+      // A resumed Auto bot must re-enter the hands-off cadence right away —
+      // but only when it lands on 'idle'; an 'open' bot re-arms after close.
+      if (updated && resumeStatus === "idle") armAutoNextIfEligible(updated);
       res.json({ bot: updated ? toBotDto(updated) : null });
     } catch (err) {
       console.error("[AiTrader] resume error:", err);

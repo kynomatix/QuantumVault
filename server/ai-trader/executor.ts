@@ -171,12 +171,26 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
   // Already-open guard (architect, WO-5 review): a retried or mis-orchestrated
   // call against a bot that holds (or MAY hold — 'executing' is the crash
   // marker) a position must never stack a second market order on top of it.
-  // G6 only counts CLOSED decisions, so it cannot catch this.
-  if (bot.status === "open" || bot.status === "executing" || bot.status === "proposed") {
+  // G6 only counts CLOSED decisions, so it cannot catch this. Checked against
+  // BOTH the caller's snapshot AND a fresh DB read: callers legitimately force
+  // status 'analyzing' on the snapshot, so the fresh read is what catches an
+  // 'executing'/'open' row written by a concurrent or crashed pass.
+  const freshBot = await storage.getAiTraderBot(bot.id);
+  if (!freshBot) {
     return {
       ok: false,
       reason: "bot_busy",
-      detail: `bot status '${bot.status}' — refusing a new entry while a position is (or may be) open`,
+      detail: "bot row missing on fresh re-read — refusing a new entry",
+    };
+  }
+  const busyStatus = [bot.status, freshBot.status].find(
+    (s) => s === "open" || s === "executing" || s === "proposed"
+  );
+  if (busyStatus) {
+    return {
+      ok: false,
+      reason: "bot_busy",
+      detail: `bot status '${busyStatus}' — refusing a new entry while a position is (or may be) open`,
     };
   }
 

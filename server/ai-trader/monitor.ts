@@ -717,6 +717,17 @@ async function closeLivePositionAndPause(
   adapter: ProtocolAdapter,
   args: { pauseReason: string; exitReason: string; detail: string }
 ): Promise<void> {
+  // Stale-pass guard: a wedged monitor pass that resumes after its botInFlight
+  // claim was reclaimed can reach here with OLD position data. If this
+  // decision was already closed by a newer pass, canceling the bracket now
+  // would strip protection from a NEWER position opened since. Re-read first.
+  const freshDecision = await storage.getAiTraderDecision(view.decision.id);
+  if (!freshDecision || freshDecision.closedAt != null) {
+    console.warn(
+      `[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: skipping protective close — decision ${view.decision.id.slice(0, 8)} already closed (stale pass)`
+    );
+    return;
+  }
   // WO-7.1: subaccountId is always undefined — a sub-provisioned bot signs AS
   // its subaccount (keyTrio.agentPublicKey is the sub pubkey).
   const subaccountId = undefined;
@@ -742,7 +753,39 @@ async function closeLivePositionAndPause(
   }
 
   const order = result.value;
-  const fillPrice = order.success && typeof order.fillPrice === "number" && Number.isFinite(order.fillPrice) ? order.fillPrice : null;
+  if (!order.success) {
+    // FAIL CLOSED: the close order did NOT land, but the bracket was just
+    // canceled above — the position may be sitting NAKED on the venue. Do
+    // NOT record a close (the decision row stays open so the operator and
+    // reconciliation still see a live position). Best-effort: re-place the
+    // original bracket so the position is protected again, then pause loudly.
+    let restoredNote = "bracket restore not attempted (venue lacks setTpSl)";
+    if (typeof adapter.setTpSl === "function") {
+      const restore = await withSigningContext(bot, (keyTrio) =>
+        adapter.setTpSl!({
+          ...keyTrio,
+          internalSymbol: bot.market,
+          stopLossPrice: view.stopLossPrice,
+          takeProfitPrice: view.takeProfitPrice,
+          subaccountId,
+        })
+      );
+      restoredNote =
+        restore.ok && restore.value.success
+          ? "original bracket re-placed"
+          : `bracket restore FAILED (${restore.ok ? restore.value.error ?? "unknown" : restore.detail}) — position may be UNPROTECTED`;
+    }
+    console.error(
+      `[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: PROTECTIVE CLOSE ORDER FAILED (${order.error ?? "no error detail"}); ${restoredNote}`
+    );
+    await pauseBot(
+      bot,
+      args.pauseReason,
+      `${args.detail}; PROTECTIVE CLOSE ORDER FAILED (${order.error ?? "no error detail"}) — position may still be OPEN on the venue; ${restoredNote}; check the venue manually`
+    );
+    return;
+  }
+  const fillPrice = typeof order.fillPrice === "number" && Number.isFinite(order.fillPrice) ? order.fillPrice : null;
   let realizedPnl: number | null = null;
   let feesPaid: number | null = null;
   if (fillPrice !== null && view.entryPrice !== null) {
@@ -877,6 +920,16 @@ async function handleLiveClose(
   adapter: ProtocolAdapter,
   agentPublicKey: string
 ): Promise<void> {
+  // Stale-pass guard (mirrors closeLivePositionAndPause): if a newer pass
+  // already recorded this close, bail before canceling the survivor leg —
+  // it may belong to a NEWER position opened via auto-next since.
+  const freshDecision = await storage.getAiTraderDecision(view.decision.id);
+  if (!freshDecision || freshDecision.closedAt != null) {
+    console.warn(
+      `[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: skipping live-close handling — decision ${view.decision.id.slice(0, 8)} already closed (stale pass)`
+    );
+    return;
+  }
   const subaccountId = undefined; // WO-7.1: reads target the bot's own account directly
 
   let trades: TradeRecord[];
