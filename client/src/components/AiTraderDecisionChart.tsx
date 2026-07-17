@@ -264,6 +264,15 @@ export function AiTraderDecisionChart({
   // label in place via applyOptions() instead of tearing the chart down (which
   // would reset the user's scroll/zoom every 10s while they watch a trade).
   const entryLineRef = useRef<IPriceLine | null>(null);
+  // Price-line + marker refs for the in-place breakeven-protect update effect.
+  // Kept outside the build effect so the BE update can mutate them without
+  // rebuilding the chart (which would reset the user's scroll/zoom).
+  const slLineRef = useRef<IPriceLine | null>(null);
+  const originalSlLineRef = useRef<IPriceLine | null>(null);
+  const beTriggerLineRef = useRef<IPriceLine | null>(null);
+  type ChartMarker = { time: UTCTimestamp; position: 'belowBar' | 'aboveBar'; shape: string; color: string; text: string; size?: number };
+  const markersRef = useRef<ChartMarker[]>([]);
+  const candleTimesRef = useRef<number[]>([]);
 
   // Fetch candles only — every other value (entry/exit/SL/TP/PnL/exitReason)
   // is passed in as a prop from data the drawer already holds.
@@ -349,6 +358,7 @@ export function AiTraderDecisionChart({
     chartRef.current = chart;
 
     const times = candles.map((c) => c.time);
+    candleTimesRef.current = times;
     const flatSeries = (price: number) => candles.map((c) => ({ time: c.time as UTCTimestamp, value: price }));
 
     // Reward/risk zone shading — best-effort, base-library-only (no plugins).
@@ -442,22 +452,26 @@ export function AiTraderDecisionChart({
       originalStopLossPrice > 0 &&
       Math.abs(originalStopLossPrice - stopLossPrice) / stopLossPrice > 1e-9;
     if (slMoved) {
-      series.createPriceLine({
+      originalSlLineRef.current = series.createPriceLine({
         price: originalStopLossPrice,
         color: 'rgba(239,83,80,0.45)',
         lineStyle: LineStyle.SparseDotted,
         lineWidth: 1,
         title: 'Initial SL',
       });
+    } else {
+      originalSlLineRef.current = null;
     }
     if (stopLossPrice != null) {
-      series.createPriceLine({
+      slLineRef.current = series.createPriceLine({
         price: stopLossPrice,
         color: '#ef5350',
         lineStyle: LineStyle.Dashed,
         lineWidth: 1,
         title: slMoved ? 'SL → BE' : 'SL',
       });
+    } else {
+      slLineRef.current = null;
     }
     if (takeProfitPrice != null) {
       series.createPriceLine({
@@ -472,10 +486,11 @@ export function AiTraderDecisionChart({
     // Only visible while the ratchet hasn't fired yet — once the SL has been
     // moved to BE this line is replaced by the "SL → BE" marker and the moved
     // stop line, so showing it would be redundant clutter.
+    beTriggerLineRef.current = null;
     if (!slMoved && takeProfitPrice != null) {
       const beTriggerPrice = entryPrice + 0.75 * (takeProfitPrice - entryPrice);
       if (Number.isFinite(beTriggerPrice) && Math.abs(beTriggerPrice - entryPrice) > 1e-9) {
-        series.createPriceLine({
+        beTriggerLineRef.current = series.createPriceLine({
           price: beTriggerPrice,
           color: 'rgba(45,212,191,0.55)',
           lineStyle: LineStyle.SparseDotted,
@@ -535,6 +550,7 @@ export function AiTraderDecisionChart({
     }
     markers.sort((a, b) => (a.time as number) - (b.time as number));
     series.setMarkers(markers);
+    markersRef.current = markers as ChartMarker[];
 
     // ── W/M formation overlay ─────────────────────────────────────────────────
     // Converts a detector bar-index to an epoch-seconds timestamp.
@@ -755,6 +771,11 @@ export function AiTraderDecisionChart({
       chartRef.current = null;
       seriesRef.current = null;
       entryLineRef.current = null;
+      slLineRef.current = null;
+      originalSlLineRef.current = null;
+      beTriggerLineRef.current = null;
+      markersRef.current = [];
+      candleTimesRef.current = [];
       formationSeriesRef.current = null;
       ema20Ref.current   = null;
       ema50Ref.current   = null;
@@ -768,7 +789,9 @@ export function AiTraderDecisionChart({
     // the user's scroll/zoom on every live PnL refresh.
     // showPattern deliberately NOT a dep either: the visibility toggle effect
     // below updates formationSeriesRef.current.applyOptions() in place.
-  }, [open, loading, error, candles, entryPrice, stopLossPrice, takeProfitPrice, originalStopLossPrice, slMovedAt, direction, decidedAt, closedAt, realizedPnl, aiLevels, wmFormation, timeframe]);
+    // stopLossPrice/originalStopLossPrice/slMovedAt deliberately NOT deps: the
+    // in-place BE-protect effect below mutates the refs without rebuilding.
+  }, [open, loading, error, candles, entryPrice, takeProfitPrice, direction, decidedAt, closedAt, realizedPnl, aiLevels, wmFormation, timeframe]);
 
   // Live entry-line label refresh (open positions only): the drawer re-polls
   // PnL every 10s and passes it through — update the label without a rebuild.
@@ -789,6 +812,71 @@ export function AiTraderDecisionChart({
       title: `${direction.toUpperCase()}${sizeStr}${pnlStr}`,
     });
   }, [unrealizedPnl, sizeBase, direction, realizedPnl, pnlView, entryPrice]);
+
+  // In-place breakeven-protect update: when the ratchet fires mid-trade the
+  // drawer's 10s poll brings back updated stopLossPrice/originalStopLossPrice/
+  // slMovedAt props. Instead of letting those trigger a full chart rebuild (which
+  // resets the user's scroll/zoom — bad for a video), we update the three price
+  // lines and the marker array directly on the existing chart.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+
+    const beActive =
+      stopLossPrice != null &&
+      stopLossPrice > 0 &&
+      originalStopLossPrice != null &&
+      Number.isFinite(originalStopLossPrice) &&
+      originalStopLossPrice > 0 &&
+      Math.abs(originalStopLossPrice - stopLossPrice) / stopLossPrice > 1e-9;
+
+    // 1. Update the current SL line price + label in place.
+    if (slLineRef.current && stopLossPrice != null) {
+      slLineRef.current.applyOptions({
+        price: stopLossPrice,
+        title: beActive ? 'SL → BE' : 'SL',
+      });
+    }
+
+    // 2. Create the faded original-SL ghost line if BE just fired and it didn't
+    //    exist yet (the build effect only creates it when slMoved is already true
+    //    at open time; mid-trade triggers need to create it here).
+    if (beActive && originalStopLossPrice != null && !originalSlLineRef.current) {
+      originalSlLineRef.current = series.createPriceLine({
+        price: originalStopLossPrice,
+        color: 'rgba(239,83,80,0.45)',
+        lineStyle: LineStyle.SparseDotted,
+        lineWidth: 1,
+        title: 'Initial SL',
+      });
+    }
+
+    // 3. Remove the BE trigger dotted line the moment the ratchet fires.
+    if (beActive && beTriggerLineRef.current) {
+      series.removePriceLine(beTriggerLineRef.current);
+      beTriggerLineRef.current = null;
+    }
+
+    // 4. Append the "SL → BE" candle marker to the existing marker array (once).
+    const times = candleTimesRef.current;
+    const slMovedAtSec = toEpochSeconds(slMovedAt ?? null);
+    if (beActive && slMovedAtSec !== null && times.length > 0) {
+      const alreadyAdded = markersRef.current.some((m) => m.text === 'SL → BE');
+      if (!alreadyAdded) {
+        const beMarker: ChartMarker = {
+          time: snapToNearestTime(times, slMovedAtSec) as UTCTimestamp,
+          position: direction === 'long' ? 'belowBar' : 'aboveBar',
+          shape: 'square',
+          color: '#a78bfa',
+          text: 'SL → BE',
+        };
+        const updated = [...markersRef.current, beMarker]
+          .sort((a, b) => (a.time as number) - (b.time as number));
+        markersRef.current = updated;
+        series.setMarkers(updated as any);
+      }
+    }
+  }, [stopLossPrice, originalStopLossPrice, slMovedAt, direction]);
 
   // Toggle the W/M formation overlay + EMA/BB indicator series visibility
   // without rebuilding the chart. All TA indicators share one TA button.
