@@ -391,9 +391,9 @@ export function AiTraderDecisionChart({
     // Sky blue = bullish, violet = bearish — platform color palette.
     const series = chart.addCandlestickSeries({
       upColor: '#38bdf8',
-      downColor: '#7c3aed',
+      downColor: '#7854d4',
       wickUpColor: '#38bdf8',
-      wickDownColor: '#7c3aed',
+      wickDownColor: '#7854d4',
       borderVisible: false,
     });
     series.setData(candles as CandlestickData[]);
