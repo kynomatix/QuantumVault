@@ -323,38 +323,9 @@ export function AiTraderDecisionChart({
         // is non-fatal: the trade window is already on screen.
         const deep = await fetchSpan('deep');
         if (cancelled || deep.length <= fastCount) return;
-        if (seriesRef.current && chartRef.current) {
-          // Chart is already built — update the candlestick series in-place.
-          // setData() replaces the data on the existing series without
-          // destroying the chart instance, so the user's scroll/zoom is
-          // preserved. This prevents the visible "jump" that the old
-          // setCandles() → rebuild path produced.
-          const view = chartRef.current.timeScale().getVisibleRange() as
-            | { from: UTCTimestamp; to: UTCTimestamp }
-            | null;
-          seriesRef.current.setData(deep as CandlestickData[]);
-          // Replay any live bars already polled so they aren't wiped by setData().
-          const lastBase = deep[deep.length - 1]?.time ?? 0;
-          const liveReplay = [...liveBarsRef.current.values()]
-            .filter((b) => b.time >= lastBase)
-            .sort((a, b) => a.time - b.time);
-          for (const bar of liveReplay) {
-            seriesRef.current.update(bar as CandlestickData);
-          }
-          // Update the candle-times snapshot used by the in-place BE marker snap.
-          candleTimesRef.current = deep.map((c) => c.time);
-          // setData() resets the time scale to fitContent — restore the view.
-          if (view) {
-            try { chartRef.current.timeScale().setVisibleRange(view); } catch {}
-          }
-        } else {
-          // Chart not built yet — fall back to the state-update rebuild path.
-          preserveViewRef.current =
-            (chartRef.current?.timeScale().getVisibleRange() as
-              | { from: UTCTimestamp; to: UTCTimestamp }
-              | null) ?? null;
-          setCandles(deep);
-        }
+        preserveViewRef.current =
+          (chartRef.current?.timeScale().getVisibleRange() as { from: UTCTimestamp; to: UTCTimestamp } | null) ?? null;
+        setCandles(deep);
       } catch {
         // keep the fast window
       }
