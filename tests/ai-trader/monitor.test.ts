@@ -985,6 +985,59 @@ describe("tick loop", () => {
     // bot-b still closed despite bot-a's failure.
     expect(decisionUpdates().some((u) => u.exitReason === "tp")).toBe(true);
   });
+
+  it("watchdog: reconciles a paper bot stranded in 'analyzing' past the stale window", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    const stuck = makeBot({ id: "bot-stuck", status: "analyzing", paperMode: true });
+    getActiveBotsMock.mockResolvedValue([stuck]);
+    getDecisionsMock.mockResolvedValue([]);
+    getBotMock.mockResolvedValue({ ...stuck, status: "idle" });
+
+    // First observation: records first-seen, does NOT reconcile.
+    await runMonitorTickOnce();
+    expect(botUpdates().some((u) => u.status === "idle")).toBe(false);
+
+    // Still 'analyzing' 11 minutes later: watchdog queues + resolves it.
+    vi.setSystemTime(NOW + 11 * 60_000);
+    await runMonitorTickOnce();
+    expect(botUpdates().some((u) => u.status === "idle")).toBe(true);
+  });
+
+  it("watchdog: leaves a healthy in-window cycle alone and resets on status change", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    const bot = makeBot({ id: "bot-cycling", status: "analyzing", paperMode: true });
+    getActiveBotsMock.mockResolvedValue([bot]);
+    getDecisionsMock.mockResolvedValue([]);
+
+    await runMonitorTickOnce();
+    // 5 minutes in — inside the window, untouched.
+    vi.setSystemTime(NOW + 5 * 60_000);
+    await runMonitorTickOnce();
+    expect(botUpdates().some((u) => u.status === "idle")).toBe(false);
+
+    // Status advanced to 'executing' — first-seen resets, so even past the
+    // original deadline the bot is NOT reconciled.
+    getActiveBotsMock.mockResolvedValue([{ ...bot, status: "executing" }]);
+    vi.setSystemTime(NOW + 12 * 60_000);
+    await runMonitorTickOnce();
+    expect(botUpdates().some((u) => u.status === "idle")).toBe(false);
+  });
+
+  it("watchdog: an auto bot healed at runtime gets its hands-off cadence re-armed", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    const stuck = makeBot({ id: "bot-auto-stuck", status: "analyzing", paperMode: true, mode: "auto", autoNext: true });
+    getActiveBotsMock.mockResolvedValue([stuck]);
+    getDecisionsMock.mockResolvedValue([]);
+    getBotMock.mockResolvedValue({ ...stuck, status: "idle" });
+
+    await runMonitorTickOnce();
+    vi.setSystemTime(NOW + 11 * 60_000);
+    await runMonitorTickOnce();
+
+    expect(botUpdates().some((u) => u.status === "idle")).toBe(true);
+    // scheduleAutoNext armed a timer for the healed bot (auto+autoNext+idle).
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+  });
 });
 
 // --- Breakeven protect ---------------------------------------------------------------

@@ -137,6 +137,23 @@ const autoNextTimers = new Map<string, NodeJS.Timeout>();
 const botInFlight = new Map<string, number>();
 const BOT_IN_FLIGHT_WEDGE_MS = 5 * 60_000;
 
+/**
+ * Runtime stale pre-open watchdog. A bot stranded in 'analyzing'/'executing'/
+ * 'proposed' at RUNTIME (hung await mid-cycle, an auto-cycle promise that died
+ * without throwing, a manual /analyze whose in-flight work was killed) used to
+ * stay frozen until the next deploy: startup reconciliation was the only
+ * cleanup path and the tick skips non-'open' bots entirely. The tick records
+ * when it FIRST observes a bot in a pre-open status; if the bot is still in
+ * that same status after PRE_OPEN_STALE_MS it is queued for the same
+ * venue-verified reconciliation the startup path uses (paper ⇒ idle, live ⇒
+ * checked against the exchange). A healthy cycle finishes far inside the
+ * window — every venue/datafeed fetch carries a 15–20s abort and the LLM call
+ * a 60s cap — so a bot still 'analyzing' after 10 minutes means the awaiting
+ * promise is hung or dead, mirroring the botInFlight reclaim reasoning above.
+ */
+const preOpenFirstSeen = new Map<string, { status: string; firstSeen: number }>();
+const PRE_OPEN_STALE_MS = 10 * 60_000;
+
 // --- Small helpers -------------------------------------------------------------------
 
 function utcDayStartMs(now: number): number {
@@ -1813,6 +1830,24 @@ async function tick(): Promise<void> {
       return;
     }
     for (const bot of bots) {
+      // Stale pre-open watchdog (see preOpenFirstSeen above): queue a forced
+      // reconciliation for bots stranded mid-cycle so a stuck 'Analyzing…'
+      // badge heals at runtime instead of waiting for the next deploy.
+      const preOpen = bot.status === "analyzing" || bot.status === "executing" || bot.status === "proposed";
+      if (preOpen) {
+        const seen = preOpenFirstSeen.get(bot.id);
+        if (!seen || seen.status !== bot.status) {
+          preOpenFirstSeen.set(bot.id, { status: bot.status, firstSeen: Date.now() });
+        } else if (Date.now() - seen.firstSeen >= PRE_OPEN_STALE_MS && !pendingReconciliation.has(bot.id)) {
+          console.error(
+            `[AiTraderMonitor] bot ${bot.id.slice(0, 8)} stuck in '${bot.status}' for ${Math.round((Date.now() - seen.firstSeen) / 1000)}s — queueing forced reconciliation`
+          );
+          preOpenFirstSeen.delete(bot.id);
+          pendingReconciliation.add(bot.id);
+        }
+      } else {
+        preOpenFirstSeen.delete(bot.id);
+      }
       const claimedAt = botInFlight.get(bot.id);
       if (claimedAt !== undefined) {
         const heldMs = Date.now() - claimedAt;
@@ -1920,6 +1955,7 @@ export function stopAiTraderMonitor(): void {
   pendingReconciliation.clear();
   bracketReplaceAttempted.clear();
   botInFlight.clear();
+  preOpenFirstSeen.clear();
   // Stop the market scanner (shadow-mode; no trading) in lockstep with the monitor
   // so tests and server shutdown always tear down both subsystems together.
   import("./scanner.js").then(({ stopScanner }) => stopScanner()).catch(() => {});
