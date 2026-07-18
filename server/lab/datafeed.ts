@@ -39,6 +39,23 @@ class GatePairNotFoundError extends Error {
   }
 }
 
+/**
+ * Permanent OKX "instrument doesn't exist" (code 51001). Non-retryable:
+ * retrying a delisted/never-listed instId 3× per page with backoff burned
+ * 30-45s of the scanner's sweep budget per missing market, every sweep
+ * (prod incident 2026-07-18: "TIMEOUT: 61 markets skipped").
+ */
+class OkxInstrumentNotFoundError extends Error {
+  constructor(instId: string, detail: string) {
+    super(`OKX instrument not found: ${instId} — ${detail}`);
+    this.name = "OkxInstrumentNotFoundError";
+  }
+}
+
+/** Verbose per-fetch source tracing (set DATAFEED_VERBOSE=1). */
+const DATAFEED_VERBOSE =
+  process.env.DATAFEED_VERBOSE === "1" || process.env.DATAFEED_VERBOSE === "true";
+
 function isValidNumber(v: unknown): v is number {
   if (typeof v === "number") return Number.isFinite(v);
   if (typeof v === "string") return v.length > 0 && Number.isFinite(Number(v));
@@ -150,7 +167,11 @@ async function fetchGateCandles(
       }
       if (!res.ok) {
         const text = await res.text();
-        if (res.status === 400 && (text.includes("INVALID_CURRENCY_PAIR") || text.includes("currency_pair"))) {
+        // INVALID_CURRENCY_PAIR ("ORE_USDT") and INVALID_CURRENCY ("XMR") are
+        // both permanent not-listed errors. The bare INVALID_CURRENCY variant
+        // was previously unmatched → retried forever, never negcached (prod
+        // incident 2026-07-18: XMR burned ~40s of sweep budget every 15m).
+        if (res.status === 400 && (text.includes("INVALID_CURRENCY") || text.includes("currency_pair"))) {
           throw new GatePairNotFoundError(pair, text);
         }
         if (res.status === 400 && text.includes("too broad")) {
@@ -174,6 +195,9 @@ async function fetchGateCandles(
       }
       return json;
     } catch (err: any) {
+      // Permanent not-found — retrying cannot succeed; propagate immediately
+      // so the caller negcaches without burning the retry backoff.
+      if (err instanceof GatePairNotFoundError) throw err;
       if (attempt < MAX_RETRIES - 1) {
         const wait = RETRY_DELAY_MS * (attempt + 1);
         console.log(`[Gate Spot] Fetch error (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message} — retrying in ${wait}ms`);
@@ -495,10 +519,16 @@ async function fetchOkxCandles(
       }
       const json = await res.json();
       if (json.code !== "0") {
+        // 51001 = "Instrument ID ... doesn't exist" — permanent, non-retryable.
+        if (json.code === "51001" || (typeof json.msg === "string" && json.msg.includes("doesn't exist"))) {
+          throw new OkxInstrumentNotFoundError(instId, json.msg || json.code);
+        }
         throw new Error(`OKX API error: ${json.msg || JSON.stringify(json)}`);
       }
       return json.data || [];
     } catch (err: any) {
+      // Permanent not-found — propagate immediately, no retry backoff.
+      if (err instanceof OkxInstrumentNotFoundError) throw err;
       if (attempt < MAX_RETRIES - 1) {
         const wait = RETRY_DELAY_MS * (attempt + 1);
         console.log(`[OKX] Fetch error (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message} — retrying in ${wait}ms`);
@@ -631,6 +661,19 @@ export async function fetchOHLCV(
   const instId = symbolToOkxInstId(symbol);
   let allCandles: OHLCV[] = [];
 
+  // Per-fetch source-chain trace: one compact line showing which sources ran,
+  // what each returned, and where the time went. Emitted for every EMPTY or
+  // SLOW (>10s) network fetch; DATAFEED_VERBOSE=1 emits it for every fetch.
+  const netStart = Date.now();
+  const trace: string[] = [];
+  const emitTrace = (count: number) => {
+    const elapsedMs = Date.now() - netStart;
+    if (!DATAFEED_VERBOSE && count > 0 && elapsedMs <= 10_000) return;
+    const line = `[Datafeed] ${symbol} ${timeframe}: ${trace.join(" ")} total=${(elapsedMs / 1000).toFixed(1)}s candles=${count}`;
+    console.log(line);
+    appendTelemetry(line);
+  };
+
   if (nonCrypto) {
     onProgress?.(`Fetching ${symbol} ${timeframe} from Pyth (non-crypto)...`);
     try {
@@ -638,9 +681,11 @@ export async function fetchOHLCV(
     } catch (err: any) {
       console.log(`[Pyth] Non-crypto fetch failed for ${symbol} ${timeframe}: ${err.message}`);
     }
+    trace.push(`pyth=${allCandles.length}c/${((Date.now() - netStart) / 1000).toFixed(1)}s`);
 
     if (allCandles.length > 0) {
       const deduped = deduplicateCandles(allCandles);
+      emitTrace(deduped.length);
       onProgress?.(`Fetched ${deduped.length} candles for ${symbol} ${timeframe}`);
       saveCandlesToDb(symbol, timeframe, deduped).catch((err) =>
         console.log(`[CandleCache] Background save error: ${err.message}`)
@@ -648,11 +693,13 @@ export async function fetchOHLCV(
       return deduped;
     }
 
+    emitTrace(0);
     onProgress?.(`No candle data available for ${symbol} ${timeframe} from Pyth`);
     return allCandles;
   }
 
-  if (!isNegCached(okxFailedInstruments, instId)) {
+  const okxNegCachedAtEntry = isNegCached(okxFailedInstruments, instId);
+  if (!okxNegCachedAtEntry) {
     const bar = mapTimeframeToOkx(timeframe);
     onProgress?.(`Fetching ${symbol} ${timeframe} from OKX...`);
     console.log(`Fetching OHLCV for ${instId} ${bar} from ${startDate} to ${endDate} via OKX`);
@@ -705,6 +752,13 @@ export async function fetchOHLCV(
 
         await new Promise(resolve => setTimeout(resolve, 200));
       } catch (err: any) {
+        // Instrument doesn't exist on OKX — negcache NOW and stop. The old
+        // path retried 5 more pages with escalating sleeps before negcaching.
+        if (err instanceof OkxInstrumentNotFoundError) {
+          negCache(okxFailedInstruments, instId);
+          console.log(`[OKX] ${instId} does not exist — negcached, falling through to Gate.io spot`);
+          break;
+        }
         consecutiveErrors++;
         console.log(`[OKX] Page fetch error after ${allCandles.length} candles (error ${consecutiveErrors}/5): ${err.message}`);
         if (consecutiveErrors >= 5) {
@@ -718,31 +772,52 @@ export async function fetchOHLCV(
     console.log(`[OKX] Fetch complete: ${allCandles.length} candles over ${page} pages for ${instId} ${bar}`);
 
     if (allCandles.length === 0) {
-      negCache(okxFailedInstruments, instId);
-      console.log(`[OKX] ${instId} not available — will use Gate.io spot fallback for future requests`);
+      if (!isNegCached(okxFailedInstruments, instId)) {
+        negCache(okxFailedInstruments, instId);
+        console.log(`[OKX] ${instId} not available — will use Gate.io spot fallback for future requests`);
+      }
+      trace.push(`okx=0c/${((Date.now() - netStart) / 1000).toFixed(1)}s(unavailable)`);
+    } else {
+      trace.push(`okx=${allCandles.length}c/${((Date.now() - netStart) / 1000).toFixed(1)}s`);
     }
   } else {
     console.log(`[OKX] Skipping ${instId} (recently failed) — trying Gate.io spot`);
+    trace.push("okx=negcached-skip");
   }
 
   if (allCandles.length === 0 && !options?.skipSpotFallback && Date.now() < deadlineAt) {
+    const gateStart = Date.now();
+    const gateNegCachedAtEntry = isNegCached(gateFailedPairs, symbolToGateSpotPair(symbol));
     try {
       allCandles = await fetchAllGateCandles(symbol, timeframe, startMs, endMs, onProgress, deadlineAt);
     } catch (err: any) {
       console.log(`[Gate Spot] Fallback failed for ${symbol} ${timeframe}: ${err.message}`);
     }
+    trace.push(
+      gateNegCachedAtEntry
+        ? "gate=negcached-skip"
+        : `gate=${allCandles.length}c/${((Date.now() - gateStart) / 1000).toFixed(1)}s`,
+    );
   }
 
   if (allCandles.length === 0 && !options?.skipSpotFallback && Date.now() < deadlineAt) {
+    const pythStart = Date.now();
+    const pythNegCachedAtEntry = isNegCached(pythFailedSymbols, symbolToPythId(symbol));
     try {
       allCandles = await fetchAllPythCandles(symbol, timeframe, startMs, endMs, onProgress, deadlineAt);
     } catch (err: any) {
       console.log(`[Pyth] Fallback failed for ${symbol} ${timeframe}: ${err.message}`);
     }
+    trace.push(
+      pythNegCachedAtEntry
+        ? "pyth=negcached-skip"
+        : `pyth=${allCandles.length}c/${((Date.now() - pythStart) / 1000).toFixed(1)}s`,
+    );
   }
 
   if (allCandles.length > 0) {
     const deduped = deduplicateCandles(allCandles);
+    emitTrace(deduped.length);
     onProgress?.(`Fetched ${deduped.length} candles for ${symbol} ${timeframe}`);
 
     saveCandlesToDb(symbol, timeframe, deduped).catch((err) =>
@@ -752,6 +827,7 @@ export async function fetchOHLCV(
     return deduped;
   }
 
+  emitTrace(0);
   onProgress?.(`No candle data available for ${symbol} ${timeframe} from OKX, Gate.io, or Pyth`);
   return allCandles;
 }

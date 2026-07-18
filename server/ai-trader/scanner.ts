@@ -369,6 +369,7 @@ async function runSweep(): Promise<void> {
   }
   const gen = ++sweepGeneration;
   sweepStartedAt = Date.now();
+  const sweepBeganAt = sweepStartedAt;
   // Sweep-global fetch deadline: bounds the WHOLE sweep's network time so a
   // degraded-feed sweep finishes comfortably inside SWEEP_WEDGE_MS and two
   // sweeps can never run concurrently in practice. Each dispatch passes the
@@ -390,6 +391,13 @@ async function runSweep(): Promise<void> {
     // Ensures BTC/USDT 15m candles are fetched exactly once even when both Flash and
     // Pacifica list BTC-PERP (both map to the same datafeed ticker via marketToDatafeedTicker).
     const candleCache = new Map<string, OHLCV[]>();
+
+    // Sweep-level totals for the SWEEP TOTAL summary line (prod diagnosis:
+    // shows at a glance whether the fetch budget starved the scan).
+    let sweepScanned = 0;
+    let sweepSkipped = 0;
+    let sweepErrors = 0;
+    let sweepCandidates = 0;
 
     for (const protocol of PROTOCOLS) {
       const universe = await buildUniverse(protocol);
@@ -566,8 +574,15 @@ async function runSweep(): Promise<void> {
         await Promise.all(pendingPromises);
 
         if (marketsSkippedByTimeout > 0) {
-          console.log(`[Scanner] TIMEOUT: ${marketsSkippedByTimeout} markets skipped`);
+          const timeoutLine = `[Scanner] TIMEOUT: ${marketsSkippedByTimeout} markets skipped (${protocol} ${tf})`;
+          console.log(timeoutLine);
+          appendTelemetry(timeoutLine);
         }
+
+        sweepScanned += marketsScanned;
+        sweepSkipped += marketsSkippedByTimeout;
+        sweepErrors += errorCount;
+        sweepCandidates += tfCandidates.length;
 
         // Accumulate this TF's candidates into the per-protocol pool.
         const pool = allCandidatesByProtocol.get(protocol)!;
@@ -614,6 +629,15 @@ async function runSweep(): Promise<void> {
       all.sort((a, b) => b.score - a.score);
       shortlistMap.set(protocol, all.slice(0, TOP_K));
     }
+
+    // One-line sweep summary: total time vs. fetch budget + starvation signal.
+    const sweepSummary =
+      `[Scanner] SWEEP TOTAL: ${sweepScanned} scanned, ${sweepSkipped} skipped-by-timeout, ` +
+      `${sweepErrors} errors, ${sweepCandidates} candidates in ` +
+      `${((Date.now() - sweepBeganAt) / 1000).toFixed(1)}s ` +
+      `(fetch budget ${SWEEP_FETCH_DEADLINE_TOTAL_MS / 1000}s)`;
+    console.log(sweepSummary);
+    appendTelemetry(sweepSummary);
   } catch (err) {
     console.error(
       `[Scanner] sweep crashed: ${err instanceof Error ? err.message : err}`
