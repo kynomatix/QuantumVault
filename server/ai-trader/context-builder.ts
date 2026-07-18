@@ -16,6 +16,7 @@ import { getSessionContext } from "./session-context";
 import { detectPivots, classifyDow, type DowStructureResult } from "./dow-structure";
 import { detectHTFLevels, type HtfLevel } from "./htf-levels";
 import { detectWM, type WMFormation } from "./wm-detector";
+import { detectActiveRange, type ActiveRange } from "./active-range";
 
 export type AiTraderTimeframe = "15m" | "1h" | "4h" | "1d";
 
@@ -209,6 +210,42 @@ function decisionSide(d: AiTraderDecision): string {
   const clamped = d.clampedDecision as { action?: string } | null | undefined;
   const raw = d.rawDecision as { action?: string } | null | undefined;
   return clamped?.action ?? raw?.action ?? "unknown";
+}
+
+// ─── SL-PLACE Phase A: Active-range prompt helpers ────────────────────────────
+// Kept module-private; consumed only by buildMarketContext.
+
+/** Format an age-in-bars as a human-readable "Xh ago" / "Xm ago" string. */
+function fmtBarsAgo(ageBars: number, tfMs: number): string {
+  if (ageBars === 0) return "current";
+  const totalMs = ageBars * tfMs;
+  const hrs = totalMs / 3_600_000;
+  if (hrs < 1) return `${Math.round(totalMs / 60_000)}m ago`;
+  return `${Number.isInteger(hrs) ? hrs : hrs.toFixed(1)}h ago`;
+}
+
+/** Format a span of bars as "Xh" / "Xm". */
+function fmtSpanBars(bars: number, tfMs: number): string {
+  const hrs = (bars * tfMs) / 3_600_000;
+  if (hrs < 1) return `${Math.round(hrs * 60)}m`;
+  return `${Number.isInteger(hrs) ? hrs : hrs.toFixed(0)}h`;
+}
+
+/**
+ * Render the single-line active-range injection.
+ * Example: "Active range (48 bars, 12h old): high 91.78 (13h ago) · low 89.86 (2h ago) · price at 62% of range."
+ */
+function buildActiveRangeLine(r: ActiveRange, tfMs: number): string {
+  const spanLabel = fmtSpanBars(r.bars, tfMs);
+  const highLabel = fmtBarsAgo(r.ageOfHigh, tfMs);
+  const lowLabel  = fmtBarsAgo(r.ageOfLow,  tfMs);
+  const pct = Math.round(r.pctInRange * 100);
+  return (
+    `Active range (${r.bars} bars, ${spanLabel} old): ` +
+    `high ${fmtPrice(r.high)} (${highLabel}) · ` +
+    `low ${fmtPrice(r.low)} (${lowLabel}) · ` +
+    `price at ${pct}% of range.`
+  );
 }
 
 // ─── Brick 2, Phase 2B: Dow-structure prompt helpers ─────────────────────────
@@ -540,6 +577,25 @@ export async function buildMarketContext(
     // enrichment rule: omit block, digest null, decision proceeds
   }
 
+  // SL-PLACE Phase A: Active-range enrichment (enrichment rule — try/catch omits the line
+  // and stamps null on any error; decision cycle proceeds unaffected). Reuses indicatorCandles
+  // (400-bar selected) and the live adapter price already fetched above — no additional I/O.
+  // Null convention: BOTH the "try/catch error" case AND the "no qualifying range" case
+  // (insufficient data, degenerate range, or invalid ATR) stamp activeRange=null. The range
+  // high/low are RAW extremes — no fractal or touch-count gate — so a lone non-fractal extreme
+  // that HTF-levels would exclude (e.g. the AAVE 91.78 case) still appears here correctly.
+  let activeRangeLine: string | null = null;
+  let activeRangeDigest: ActiveRange | null = null;
+  try {
+    const ar = detectActiveRange(indicatorCandles, price);
+    if (ar !== null) {
+      activeRangeDigest = ar;
+      activeRangeLine = buildActiveRangeLine(ar, tfMs);
+    }
+  } catch {
+    // enrichment rule: omit line, digest null, decision proceeds
+  }
+
   // Brick 3, Phase 3B: W/M formation enrichment (enrichment rule — try/catch omits the line
   // and stamps null on any error; decision cycle proceeds unaffected). Uses indicatorCandles
   // (400-bar selected window) — no additional I/O. Null convention: BOTH the "try/catch error"
@@ -604,6 +660,10 @@ export async function buildMarketContext(
     ...(dowLine !== null ? [dowLine] : []),
     // Brick 4, Phase 4B: HTF levels line (omitted when no levels qualify or on error).
     ...(htfLine !== null ? [htfLine] : []),
+    // SL-PLACE Phase A: Active-range line (omitted when null or on error). Raw walk-back
+    // extremes; no fractal/touch gate, so it captures lone non-fractal highs/lows that
+    // HTF-levels omits. Placed after HTF-levels so the model sees both in proximity.
+    ...(activeRangeLine !== null ? [activeRangeLine] : []),
     // Brick 3, Phase 3B: W/M formation line (omitted when no detection or on error).
     ...(wmLine !== null ? [wmLine] : []),
   ].join("\n");
@@ -845,6 +905,11 @@ export async function buildMarketContext(
     // (enrichment rule) AND the "no detection" case. Same null convention as htfLevels.
     // Non-null means a qualifying formation was found and the Formation: line is in the prompt.
     wmFormation: wmDigest,
+    // SL-PLACE Phase A: Active-range stamp. Null in BOTH the "try/catch error" case
+    // (enrichment rule) AND the "no qualifying range" case (insufficient data, degenerate
+    // range, or invalid ATR). Non-null means the "Active range …" line is in the prompt.
+    // high/low are RAW walk-back extremes; no fractal or touch-count gate was applied.
+    activeRange: activeRangeDigest,
     // WO-B: present only for scanner bots; undefined/absent for fixed-ticker bots.
     scannerNote: scannerNote ?? null,
     indicators: {

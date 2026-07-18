@@ -72,6 +72,14 @@ vi.mock("../../server/ai-trader/wm-detector", () => ({
   detectWM: (...args: unknown[]) => detectWMMock(...args),
 }));
 
+// SL-PLACE Phase A: detectActiveRange is mocked so context-builder tests stay focused on
+// prompt/digest assembly, not walk-back math (covered in tests/ai-trader/active-range.test.ts).
+// Default: returns null so existing tests are unaffected (no Active range line in prompt).
+const detectActiveRangeMock = vi.fn();
+vi.mock("../../server/ai-trader/active-range", () => ({
+  detectActiveRange: (...args: unknown[]) => detectActiveRangeMock(...args),
+}));
+
 // COT-B: realistic fixture — bearish_flip with commIndex 18.50, dumbIndex 81.70.
 // reportDate is 2 days before FIXED_NOW (2026-01-15), so it is well within the 16-day
 // omission threshold and exactly matches the Phase A spec example magnitudes.
@@ -366,6 +374,10 @@ beforeEach(() => {
   // Keeps all pre-existing tests unaffected (snapshot, Dow, HTF, session, etc.).
   detectWMMock.mockReset();
   detectWMMock.mockReturnValue(null);
+  // SL-PLACE Phase A: default = no active range → Active range line absent from prompt.
+  // Keeps all pre-existing tests unaffected (snapshot, Dow, HTF, WM, session, etc.).
+  detectActiveRangeMock.mockReset();
+  detectActiveRangeMock.mockReturnValue(null);
 });
 
 afterEach(() => {
@@ -1407,5 +1419,141 @@ describe("PRICE-STARVE fix — priority + fallback chain", () => {
     if ("stale" in result) {
       expect((result as any).reason).toContain("No live price");
     }
+  });
+});
+
+// ─── SL-PLACE Phase A: Active-range enrichment ────────────────────────────────
+
+describe("buildMarketContext — SL-PLACE Phase A: active-range enrichment", () => {
+  /**
+   * Three cases mirror the null-convention established for htfLevels and wmFormation:
+   *
+   *  1. PRESENT: detectActiveRange returns a non-null ActiveRange →
+   *       "Active range …" line appears in prompt, contextDigest.activeRange is the object.
+   *
+   *  2. ABSENT (null): detectActiveRange returns null →
+   *       no "Active range …" line in prompt, contextDigest.activeRange is null.
+   *
+   *  3. THROWN: detectActiveRange throws →
+   *       enrichment rule: null digest, no line, decision proceeds unaffected.
+   */
+  const ACTIVE_RANGE_FIXTURE = {
+    high: 91.78,
+    low:  89.60,
+    bars: 48,
+    ageOfHigh: 52,   // bars back (corresponds to ~13h on 15m)
+    ageOfLow:   8,   // bars back (corresponds to  ~2h on 15m)
+    pctInRange: 0.62,
+  };
+
+  it("present: injects Active range line into prompt and stamps digest", async () => {
+    detectActiveRangeMock.mockReturnValue(ACTIVE_RANGE_FIXTURE);
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected built context");
+
+    // Prompt must contain the "Active range …" line.
+    expect(result.user).toContain("Active range (");
+    expect(result.user).toContain("high 91.78");
+    expect(result.user).toContain("low 89.60");
+    expect(result.user).toContain("% of range.");
+
+    // Digest must carry the raw ActiveRange object.
+    const d = result.contextDigest as any;
+    expect(d.activeRange).not.toBeNull();
+    expect(d.activeRange.high).toBeCloseTo(91.78, 4);
+    expect(d.activeRange.low).toBeCloseTo(89.60, 4);
+    expect(d.activeRange.bars).toBe(48);
+    expect(d.activeRange.pctInRange).toBeCloseTo(0.62, 4);
+  });
+
+  it("absent: when detectActiveRange returns null, no Active range line and null digest", async () => {
+    detectActiveRangeMock.mockReturnValue(null);
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected built context");
+
+    expect(result.user).not.toContain("Active range (");
+    const d = result.contextDigest as any;
+    expect(d.activeRange).toBeNull();
+  });
+
+  it("thrown: when detectActiveRange throws, decision proceeds and activeRange is null", async () => {
+    detectActiveRangeMock.mockImplementation(() => {
+      throw new Error("simulated detectActiveRange failure");
+    });
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+
+    // Must not throw — enrichment rule: omit, null digest, decision proceeds.
+    await expect(
+      buildMarketContext({
+        market: "SOL-PERP",
+        timeframe: "15m",
+        adapter: makeAdapter(),
+        bot: makeBot(),
+        recentDecisions: [],
+        agentPublicKey: AGENT_PUBKEY,
+      })
+    ).resolves.not.toThrow();
+
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected built context");
+
+    expect(result.user).not.toContain("Active range (");
+    const d = result.contextDigest as any;
+    expect(d.activeRange).toBeNull();
+  });
+
+  it("Active range line appears after HTF levels line when both are present", async () => {
+    // HTF fixture: a single level at price=92.00
+    detectHTFLevelsMock.mockReturnValue({
+      levels: [{
+        price: 92.00, touchCount: 2, barsSinceLastTouch: 10, status: "intact",
+        rejectedFromAbove: 2, defendedFromBelow: 0,
+      }],
+      atr14: 2,
+      clusterThreshold: 1,
+    });
+    detectActiveRangeMock.mockReturnValue(ACTIVE_RANGE_FIXTURE);
+
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter(),
+      bot: makeBot(),
+      recentDecisions: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    if ("stale" in result) throw new Error("expected built context");
+
+    const htfIdx    = result.user.indexOf("HTF level");
+    const rangeIdx  = result.user.indexOf("Active range (");
+    expect(htfIdx).toBeGreaterThanOrEqual(0);
+    expect(rangeIdx).toBeGreaterThan(htfIdx); // Active range line comes AFTER HTF line
   });
 });
