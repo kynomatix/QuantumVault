@@ -180,6 +180,14 @@ const SWEEP_WEDGE_MS = 5 * 60_000;
 const SWEEP_FETCH_DEADLINE_TOTAL_MS = 240_000;
 /** Per-fetch cap within the sweep budget. */
 const SWEEP_PER_FETCH_DEADLINE_MS = 45_000;
+/**
+ * Boot catch-up sweep gate: if the next 15m boundary is closer than this,
+ * skip the catch-up and just wait for the boundary sweep — double-fetching
+ * the whole universe back-to-back wastes datafeed budget for no gain.
+ * Must exceed a healthy full-sweep duration (~106-110s observed) so an
+ * in-flight catch-up never makes the boundary sweep skip on its claim.
+ */
+const BOOT_SWEEP_MIN_LEAD_MS = 150_000;
 
 // ─── Pure helpers (exported for tests) ───────────────────────────────────────
 
@@ -693,6 +701,28 @@ export function startScanner(): void {
   scannerRunning = true;
   console.log("[Scanner] starting (15m boundary sweep — shadow mode, no trading)");
   scheduleNextScan();
+
+  // Boot catch-up sweep: a restart (every deploy) wipes the in-memory shortlist,
+  // and the first boundary sweep can be up to 15 minutes away. During that blind
+  // window every scanner bot's manual Ask AI 409s ("no fresh candidates") and
+  // auto bots skip their boundary pick. Run one immediate sweep to repopulate.
+  // Off-boundary is safe: getBoundaryTfs() always includes "15m", the G9
+  // freshness check passes (the forming bar is by definition fresh), and the
+  // shortlist consumers already tolerate candidates up to one boundary old —
+  // a mid-bar evaluation is no staler than the previous boundary's pick.
+  // Skipped when the boundary sweep is imminent (see BOOT_SWEEP_MIN_LEAD_MS).
+  const tfMs = TIMEFRAME_MS["15m"];
+  const msToBoundary = (Math.floor(Date.now() / tfMs) + 1) * tfMs - Date.now();
+  if (msToBoundary > BOOT_SWEEP_MIN_LEAD_MS) {
+    console.log(
+      `[Scanner] boot catch-up sweep (restart cleared shortlist; next boundary sweep in ${Math.round(msToBoundary / 1000)}s)`
+    );
+    runSweep().catch((err) =>
+      console.error(
+        `[Scanner] boot catch-up sweep crashed: ${err instanceof Error ? err.message : err}`
+      )
+    );
+  }
 }
 
 /**
