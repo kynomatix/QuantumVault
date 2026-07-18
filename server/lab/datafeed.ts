@@ -32,6 +32,58 @@ function negCache(cache: Map<string, number>, key: string): void {
   cache.set(key, Date.now());
 }
 
+// ---------------------------------------------------------------------------
+// OKX source-level circuit breaker.
+//
+// Prod incident 2026-07-18 (part 2): the production deployment's egress IPs
+// cannot reach OKX at all — even majors (SOL/BTC/ETH) fail with network
+// timeouts after ~75-97s each. The per-instrument negcache (30-min TTL) only
+// helps on the SECOND touch, so with ~90 scanner markets the first-touch cost
+// alone exhausts the 240s sweep budget forever ("TIMEOUT: 58 markets skipped").
+//
+// This breaker is SOURCE-level: after N consecutive instruments where OKX
+// itself was unreachable (network failure — NOT "instrument doesn't exist",
+// which proves the API answered), skip OKX entirely for all symbols for a
+// cooldown. After the cooldown, ONE probe fetch is allowed through
+// (half-open): a single failure re-trips immediately, any success resets.
+// ---------------------------------------------------------------------------
+const OKX_SOURCE_BREAKER_THRESHOLD = 3;
+const OKX_SOURCE_BREAKER_COOLDOWN_MS = 15 * 60 * 1000;
+
+let okxSourceConsecutiveFailures = 0;
+let okxSourceDownUntil = 0;
+
+function isOkxSourceDown(): boolean {
+  return Date.now() < okxSourceDownUntil;
+}
+
+function recordOkxSourceSuccess(): void {
+  okxSourceConsecutiveFailures = 0;
+}
+
+function recordOkxSourceFailure(instId: string): void {
+  okxSourceConsecutiveFailures++;
+  if (okxSourceConsecutiveFailures >= OKX_SOURCE_BREAKER_THRESHOLD) {
+    okxSourceDownUntil = Date.now() + OKX_SOURCE_BREAKER_COOLDOWN_MS;
+    // Leave the counter one below the threshold so a single failed half-open
+    // probe after the cooldown re-trips immediately (instead of paying the
+    // full N-symbol penalty again).
+    okxSourceConsecutiveFailures = OKX_SOURCE_BREAKER_THRESHOLD - 1;
+    const msg =
+      `[OKX] SOURCE DOWN: ${OKX_SOURCE_BREAKER_THRESHOLD} consecutive network failures ` +
+      `(last: ${instId}) — skipping OKX for ALL symbols for ` +
+      `${Math.round(OKX_SOURCE_BREAKER_COOLDOWN_MS / 60000)} min; Gate/Pyth fallbacks take over`;
+    console.log(msg);
+    appendTelemetry(msg);
+  }
+}
+
+/** Test-only: reset the OKX source breaker between test cases. */
+export function __testResetOkxSourceBreaker(): void {
+  okxSourceConsecutiveFailures = 0;
+  okxSourceDownUntil = 0;
+}
+
 class GatePairNotFoundError extends Error {
   constructor(pair: string, detail: string) {
     super(`Gate.io pair not found: ${pair} — ${detail}`);
@@ -699,7 +751,8 @@ export async function fetchOHLCV(
   }
 
   const okxNegCachedAtEntry = isNegCached(okxFailedInstruments, instId);
-  if (!okxNegCachedAtEntry) {
+  const okxSourceDownAtEntry = isOkxSourceDown();
+  if (!okxNegCachedAtEntry && !okxSourceDownAtEntry) {
     const bar = mapTimeframeToOkx(timeframe);
     onProgress?.(`Fetching ${symbol} ${timeframe} from OKX...`);
     console.log(`Fetching OHLCV for ${instId} ${bar} from ${startDate} to ${endDate} via OKX`);
@@ -708,6 +761,7 @@ export async function fetchOHLCV(
     let page = 0;
     let emptyPages = 0;
     let consecutiveErrors = 0;
+    let attemptedNetwork = false;
 
     while (currentEndMs > startMs) {
       if (Date.now() >= deadlineAt) {
@@ -717,7 +771,11 @@ export async function fetchOHLCV(
         break;
       }
       try {
+        attemptedNetwork = true;
         const raw = await fetchOkxCandles(instId, bar, currentEndMs);
+        // Any well-formed API response (even empty data / exhausted 429
+        // retries) proves the OKX source is reachable.
+        recordOkxSourceSuccess();
         consecutiveErrors = 0;
 
         if (!raw || raw.length === 0) {
@@ -754,7 +812,9 @@ export async function fetchOHLCV(
       } catch (err: any) {
         // Instrument doesn't exist on OKX — negcache NOW and stop. The old
         // path retried 5 more pages with escalating sleeps before negcaching.
+        // The API answered authoritatively, so the SOURCE is reachable.
         if (err instanceof OkxInstrumentNotFoundError) {
+          recordOkxSourceSuccess();
           negCache(okxFailedInstruments, instId);
           console.log(`[OKX] ${instId} does not exist — negcached, falling through to Gate.io spot`);
           break;
@@ -772,17 +832,27 @@ export async function fetchOHLCV(
     console.log(`[OKX] Fetch complete: ${allCandles.length} candles over ${page} pages for ${instId} ${bar}`);
 
     if (allCandles.length === 0) {
-      if (!isNegCached(okxFailedInstruments, instId)) {
+      // Network-type failure (timeouts/refused — NOT a not-found, which
+      // resets above): count it toward the source-level breaker.
+      if (attemptedNetwork && consecutiveErrors > 0) {
+        recordOkxSourceFailure(instId);
+      }
+      // Only negcache the instrument if we actually reached the network for
+      // it — a deadline hit before the first attempt proves nothing.
+      if (attemptedNetwork && !isNegCached(okxFailedInstruments, instId)) {
         negCache(okxFailedInstruments, instId);
         console.log(`[OKX] ${instId} not available — will use Gate.io spot fallback for future requests`);
       }
-      trace.push(`okx=0c/${((Date.now() - netStart) / 1000).toFixed(1)}s(unavailable)`);
+      trace.push(`okx=0c/${((Date.now() - netStart) / 1000).toFixed(1)}s(${attemptedNetwork ? "unavailable" : "deadline"})`);
     } else {
       trace.push(`okx=${allCandles.length}c/${((Date.now() - netStart) / 1000).toFixed(1)}s`);
     }
-  } else {
+  } else if (okxNegCachedAtEntry) {
     console.log(`[OKX] Skipping ${instId} (recently failed) — trying Gate.io spot`);
     trace.push("okx=negcached-skip");
+  } else {
+    console.log(`[OKX] Skipping ${instId} (source circuit breaker OPEN) — trying Gate.io spot`);
+    trace.push("okx=source-down-skip");
   }
 
   if (allCandles.length === 0 && !options?.skipSpotFallback && Date.now() < deadlineAt) {

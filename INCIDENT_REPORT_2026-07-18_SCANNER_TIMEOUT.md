@@ -156,6 +156,9 @@ source), versus ~30–45 seconds every sweep before.
 - **Pre-existing, unrelated test failures** (documented for completeness; neither file
   imports the changed modules): `tests/vault/borrow-oracle-freshness.test.ts` and
   `tests/recovery/subaccount-lease-recovery.test.ts`.
+  *Update (same day):* both were subsequently diagnosed as **stale tests** (assertions/mocks
+  not updated after earlier production-correct changes), fixed test-side only, and the full
+  regression is green (1905/1905 across all suites).
 
 ## 8. Post-Deploy Verification Plan
 
@@ -174,3 +177,53 @@ Observed in the same production window, tracked separately:
 - Intermittent upstream 429 rate-limiting (partially fed by this retry storm; expected to
   improve with the fix).
 - Occasional database connection-timeout warnings under load.
+
+## 10. Part 2 (post-deploy finding) — OKX unreachable from production egress
+
+**Finding.** The post-deploy verification (§8) surfaced a second, distinct problem. After
+the fix above went live, production logs showed OKX returning **zero candles for major
+pairs** (SOL, BTC, ETH — all indisputably listed on OKX) after **75–97 seconds each**:
+
+```
+[Datafeed] SOL/USDT 15m: okx=0c/84.7s(unavailable) total=84.7s candles=0
+[Datafeed] BTC/USDT 15m: okx=0c/79.1s(unavailable) total=79.1s candles=0
+[Datafeed] ETH/USDT 15m: okx=0c/74.7s(unavailable) total=74.7s candles=0
+[Scanner] TIMEOUT: 58 markets skipped (pacifica 15m)
+[Scanner] SWEEP TOTAL: 3 scanned, 87 skipped-by-timeout, 0 errors, 2 candidates in 279.1s
+```
+
+This is a **network-level failure**, not a "not listed" failure: the production
+deployment's egress IPs cannot reach OKX (OKX blocks/throttles many hosted/US IP ranges),
+while the development environment's egress can. **This is the root of the "prod-only,
+dev perfect" discrepancy** observed throughout the incident.
+
+The Part-1 negative cache does engage on the second touch (`okx=negcached-skip` →
+Gate.io serves the candles), but it is per-instrument with a 30-minute TTL: with ~90
+scanner markets and only ~3 first-touches fitting in the 240s sweep budget, the cache
+can never converge — the sweep pays the ~85s OKX penalty forever.
+
+**Remediation (shipped).** A **source-level circuit breaker** in
+`server/lab/datafeed.ts`: after 3 consecutive instruments where OKX itself is
+unreachable (network failure — *not* "instrument doesn't exist", which proves the API
+answered), OKX is skipped for **all** symbols for a 15-minute cooldown
+(`okx=source-down-skip` in traces; trip logged to console + telemetry as
+`[OKX] SOURCE DOWN`). After the cooldown, exactly one probe fetch is allowed through:
+a single failed probe re-trips immediately; any success resets the breaker. Gate.io
+(and Pyth) fallbacks take over transparently while the breaker is open.
+
+Worst-case damage is now bounded: ~3 × 85s once after each boot, then one ~85s probe
+per 15 minutes — instead of ~85s per market per sweep.
+
+**Verification.** 4 new regression tests (`tests/lab-agent/datafeed-source-breaker.test.ts`)
+pin the invariants: (A) trip after 3 network-failed symbols → zero OKX calls for the next
+symbol while Gate still serves data; (B) not-found responses never count toward the
+breaker; (C) any OKX success resets the streak; (D) half-open probe → single failure
+re-trips immediately. Full lab-agent suite green (341/341); application boots clean.
+Independent architect review: **PASS** (confirmed 429 storms cannot false-trip the breaker,
+concurrency is benign, and half-open cost is bounded at one ~85s probe per 15 min).
+
+**Known limitation (follow-up).** If OKX's blocking mode ever shifts from connection
+timeouts to sustained HTTP 429 responses, the breaker will not open (429-exhausted
+requests return an empty page, which counts as "reachable") and first touches would pay
+~36s of 429 backoff each; only the per-instrument negcache would save the second touch.
+Possible future tweak: count N consecutive 429-exhausted empty returns as a source failure.
