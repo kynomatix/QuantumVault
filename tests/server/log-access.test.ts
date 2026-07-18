@@ -27,6 +27,23 @@ describe("redactSensitive", () => {
       .not.toContain("0123456789abcdef");
   });
 
+  it("redacts connection-string credentials but keeps host/db visible", () => {
+    const out = redactSensitive(
+      "pg error connecting to postgres://quantum_user:sup3rS3cretPW@ep-cool-host.neon.tech/maindb?sslmode=require"
+    );
+    expect(out).not.toContain("sup3rS3cretPW");
+    expect(out).toContain("quantum_user");
+    expect(out).toContain("ep-cool-host.neon.tech/maindb");
+  });
+
+  it("redacts bare JWTs not prefixed by Bearer", () => {
+    const jwt =
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c";
+    const out = redactSensitive(`session dump: { token2: ${jwt} }`);
+    expect(out).not.toContain("SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c");
+    expect(out).toContain("[REDACTED-JWT]");
+  });
+
   it("keeps normal log content intact (tx sigs, wallets, symbols, numbers)", () => {
     const line =
       "2026-07-18T04:00:00Z [Datafeed] SOL/USDT 15m: okx=0c/84.7s(unavailable) total=84.7s candles=0 " +

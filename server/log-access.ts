@@ -58,6 +58,12 @@ const KEY_VALUE_RE =
   /\b(api[_-]?key|apikey|secret|password|passwd|token|auth(?:orization)?|private[_-]?key|session[_-]?id|cookie)\b(["']?\s*[:=]\s*)(["']?)[^\s"'&,;]{6,}/gi;
 // Common API-key shapes (OpenAI/OpenRouter/Stripe-style prefixes).
 const KEY_SHAPE_RE = /\b(sk|rk|pk|sk-or|or)-[A-Za-z0-9\-_]{16,}\b/g;
+// Credentials embedded in connection strings (postgres://user:pass@host/db —
+// the DATABASE_URL shape; pg driver errors can echo connection info).
+const CONN_STRING_RE = /(:\/\/[^\s/:@"']+:)[^\s@"']+(@)/g;
+// Bare JWTs (three base64url segments starting with eyJ) not preceded by
+// "Bearer" — e.g. logged straight out of an error or session object.
+const JWT_RE = /\beyJ[A-Za-z0-9\-_]{8,}\.[A-Za-z0-9\-_]{8,}\.[A-Za-z0-9\-_]{8,}\b/g;
 
 export function redactSensitive(text: string): string {
   let out = text;
@@ -65,6 +71,8 @@ export function redactSensitive(text: string): string {
   out = out.replace(PHRASE_KEY_RE, (_m, key, sep) => `${key}${sep}[REDACTED]`);
   out = out.replace(KEY_VALUE_RE, (_m, key, sep, quote) => `${key}${sep}${quote}[REDACTED]`);
   out = out.replace(KEY_SHAPE_RE, "[REDACTED-KEY]");
+  out = out.replace(CONN_STRING_RE, "$1[REDACTED]$2");
+  out = out.replace(JWT_RE, "[REDACTED-JWT]");
   return out;
 }
 
