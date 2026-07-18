@@ -17,7 +17,7 @@
 //   getScannerStatus()             — full status blob for the telemetry endpoint.
 
 import type { OHLCV } from "../lab/engine";
-import { fetchOHLCV } from "../lab/datafeed";
+import { fetchOHLCV, isNonCryptoMarketOpen } from "../lab/datafeed";
 import { marketToDatafeedTicker } from "./context-builder";
 import { getFlashMarketSpecs } from "../protocol/flash/flash-markets";
 import { getAdapter } from "../protocol/adapter-registry";
@@ -422,6 +422,7 @@ async function runSweep(): Promise<void> {
     let sweepSkipped = 0;
     let sweepErrors = 0;
     let sweepCandidates = 0;
+    let sweepClosed = 0;
 
     for (const protocol of PROTOCOLS) {
       const universe = await buildUniverse(protocol);
@@ -451,6 +452,7 @@ async function runSweep(): Promise<void> {
         let marketsScanned = 0;
         let marketsFresh = 0;
         let marketsSkippedByTimeout = 0;
+        let marketsClosedSkipped = 0;
         let errorCount = 0;
         const tfCandidates: ScannerCandidate[] = [];
 
@@ -466,8 +468,18 @@ async function runSweep(): Promise<void> {
             // Feed health check: skip if recently failed (mirrors datafeed negcaches).
             const health = feedHealthMap.get(ticker);
             if (health && Date.now() - health.failedAt < FEED_HEALTH_TTL_MS) {
-              // Closed-market equities (e.g. AMZN outside NYSE hours) drop out
-              // naturally via the G9 staleness check — correct behaviour per spec.
+              return;
+            }
+
+            // Venue-hours gate: equities outside NYSE hours / FX+metals on the
+            // weekend can produce no FRESH candles — the fetch only burns the
+            // shared Pyth per-IP rate budget (429 retry storms: prod 10:15/10:30
+            // UTC sweeps, 2026-07-18) and its backoff burns our sweep budget.
+            // G9 staleness would drop these candidates anyway; skipping the
+            // fetch changes no decision. Counted separately — a closed venue
+            // must NEVER look like a dead feed or a budget timeout.
+            if (!isNonCryptoMarketOpen(ticker, now)) {
+              marketsClosedSkipped++;
               return;
             }
 
@@ -608,10 +620,11 @@ async function runSweep(): Promise<void> {
           const staggerTicker = marketToDatafeedTicker(market);
           const staggerHealth = feedHealthMap.get(staggerTicker);
           const healthSkipped = !!staggerHealth && Date.now() - staggerHealth.failedAt < FEED_HEALTH_TTL_MS;
+          const venueClosed = !isNonCryptoMarketOpen(staggerTicker, now);
           const fullyCached =
             candleCache.has(`${staggerTicker}:${tf}`) &&
             (!parentTf || candleCache.has(`${staggerTicker}:${parentTf}`));
-          if (!healthSkipped && !fullyCached) {
+          if (!healthSkipped && !venueClosed && !fullyCached) {
             await sleep(FETCH_STAGGER_MS);
           }
         }
@@ -647,10 +660,17 @@ async function runSweep(): Promise<void> {
           appendTelemetry(timeoutLine);
         }
 
+        if (marketsClosedSkipped > 0) {
+          const closedLine = `[Scanner] CLOSED: ${marketsClosedSkipped} markets skipped (${protocol} ${tf}, venue closed)`;
+          console.log(closedLine);
+          appendTelemetry(closedLine);
+        }
+
         sweepScanned += marketsScanned;
         sweepSkipped += marketsSkippedByTimeout;
         sweepErrors += errorCount;
         sweepCandidates += tfCandidates.length;
+        sweepClosed += marketsClosedSkipped;
 
         // Accumulate this TF's candidates into the per-protocol pool.
         const pool = allCandidatesByProtocol.get(protocol)!;
@@ -701,7 +721,7 @@ async function runSweep(): Promise<void> {
     // One-line sweep summary: total time vs. fetch budget + starvation signal.
     const sweepSummary =
       `[Scanner] SWEEP TOTAL: ${sweepScanned} scanned, ${sweepSkipped} skipped-by-timeout, ` +
-      `${sweepErrors} errors, ${sweepCandidates} candidates in ` +
+      `${sweepClosed} venue-closed, ${sweepErrors} errors, ${sweepCandidates} candidates in ` +
       `${((Date.now() - sweepBeganAt) / 1000).toFixed(1)}s ` +
       `(fetch budget ${SWEEP_FETCH_DEADLINE_TOTAL_MS / 1000}s)`;
     console.log(sweepSummary);

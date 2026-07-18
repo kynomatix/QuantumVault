@@ -167,6 +167,103 @@ export function isNonCryptoSymbol(symbol: string): boolean {
   return base in NON_CRYPTO_PYTH_MAP;
 }
 
+// ─── Venue trading-hours gate for non-crypto symbols ─────────────────────────
+//
+// Pyth Benchmarks is the ONLY candle source for non-crypto bases (the
+// "Gate.io fallback" log label is misleading — there is no OKX/Gate path for
+// equities/FX/metals). When the underlying venue is CLOSED (NYSE after-hours,
+// FX weekend) a fetch can return no new candles: it only burns the shared
+// per-IP Pyth rate budget, and its 429 retry backoff (2s/4s/6s) burns the
+// caller's sweep budget. Callers that only care about FRESH candles (the AI
+// Trader scanner) should skip closed markets entirely — stale-market
+// candidates are dropped by the G9 staleness check anyway, so skipping the
+// fetch changes no decision, it just stops paying for the discovery.
+//
+// NOT applied inside fetchOHLCV itself: QuantumLab backtests legitimately
+// pull historical ranges while markets are closed.
+//
+// US market holidays are deliberately not modeled — on a holiday weekday the
+// behaviour degrades to the status quo (fetch, maybe rate-limit, G9 drops).
+
+const EQUITY_PYTH_BASES = new Set([
+  "SP500", "SPY", "NVDA", "TSLA", "GOOGL", "PLTR", "HOOD", "CRCL",
+  "AAPL", "AMD", "AMZN", "MSTR",
+]);
+
+// FX / metals / oil — trade ~24×5, closed only over the weekend. Every key of
+// NON_CRYPTO_PYTH_MAP MUST appear in exactly one of EQUITY_PYTH_BASES or this
+// set (enforced by tests/ai-trader/market-hours.test.ts) so a future equity
+// added to the map can't silently fall through to the 24×5 rule and keep
+// fetching overnight.
+const NONCRYPTO_24X5_BASES = new Set([
+  "EURUSD", "USDJPY", "EUR", "GBP", "USDCNH",
+  "XAU", "XAG", "PLATINUM", "CL", "CRUDEOIL",
+]);
+
+/** Test-only introspection: session classification of every non-crypto base. */
+export function getNonCryptoSessionClassification(): {
+  allBases: string[];
+  equities: string[];
+  fx24x5: string[];
+} {
+  return {
+    allBases: Object.keys(NON_CRYPTO_PYTH_MAP),
+    equities: [...EQUITY_PYTH_BASES],
+    fx24x5: [...NONCRYPTO_24X5_BASES],
+  };
+}
+
+const ET_PARTS_FMT = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  weekday: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+const ET_DOW: Record<string, number> = {
+  Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
+};
+
+function easternParts(now: Date): { dow: number; minutes: number } {
+  let dow = 1;
+  let hour = 0;
+  let minute = 0;
+  for (const p of ET_PARTS_FMT.formatToParts(now)) {
+    if (p.type === "weekday") dow = ET_DOW[p.value] ?? 1;
+    else if (p.type === "hour") hour = Number(p.value) % 24;
+    else if (p.type === "minute") minute = Number(p.value);
+  }
+  return { dow, minutes: hour * 60 + minute };
+}
+
+/**
+ * True when the venue behind a non-crypto symbol is currently trading (so a
+ * candle fetch can yield FRESH bars). Crypto symbols always return true.
+ *
+ * - Equities: NYSE regular session Mon–Fri 09:30–16:00 ET, plus a 30-minute
+ *   grace window after the close so the day's final bars get fetched once
+ *   (and land in the caller's cache) before the gate closes.
+ * - FX / metals / oil (24×5): closed from Fri 17:00 ET to Sun 17:00 ET.
+ */
+export function isNonCryptoMarketOpen(symbol: string, now: Date = new Date()): boolean {
+  const base = stripMultiplierPrefix(symbol.split("/")[0]);
+  if (!(base in NON_CRYPTO_PYTH_MAP)) return true; // crypto trades 24/7
+
+  const { dow, minutes } = easternParts(now);
+
+  if (EQUITY_PYTH_BASES.has(base)) {
+    if (dow === 0 || dow === 6) return false;
+    return minutes >= 9 * 60 + 30 && minutes <= 16 * 60 + 30;
+  }
+
+  // FX / metals / oil weekend closure.
+  if (dow === 6) return false;
+  if (dow === 5 && minutes >= 17 * 60) return false;
+  if (dow === 0 && minutes < 17 * 60) return false;
+  return true;
+}
+
 function symbolToPythId(symbol: string): string {
   const base = stripMultiplierPrefix(symbol.split("/")[0]);
   if (base in NON_CRYPTO_PYTH_MAP) {
@@ -404,7 +501,59 @@ async function fetchAllGateCandles(
   return allCandles;
 }
 
+// ─── Pyth Benchmarks request limiter ─────────────────────────────────────────
+//
+// Prod evidence (2026-07-18 10:30 UTC sweep): the scanner's 3 concurrent
+// dispatch slots all landed on Pyth-routed symbols at once, and all three got
+// HTTP 429 in lockstep — then retried in lockstep (2s/4s/6s), burning up to
+// 12s of sleep PER SYMBOL against the shared per-IP rate budget (Replit
+// egress IPs are shared, so we never have the whole budget to ourselves).
+// Cap concurrent Pyth requests at 2 and space request starts ≥250ms apart so
+// bursts stop tripping the token bucket. OKX/Gate paths are unaffected.
+
+const PYTH_MAX_CONCURRENT = 2;
+const PYTH_MIN_START_SPACING_MS = 250;
+let pythSlotsInUse = 0;
+let pythLastStartAt = 0;
+const pythSlotQueue: Array<() => void> = [];
+
+async function acquirePythSlot(): Promise<void> {
+  while (pythSlotsInUse >= PYTH_MAX_CONCURRENT) {
+    await new Promise<void>((resolve) => pythSlotQueue.push(resolve));
+  }
+  pythSlotsInUse++;
+  // Reserve the start timestamp BEFORE sleeping: two acquirers that both read
+  // a stale pythLastStartAt would otherwise start <250ms apart (best-effort
+  // spacing). Reservation makes spacing strict.
+  const startAt = Math.max(Date.now(), pythLastStartAt + PYTH_MIN_START_SPACING_MS);
+  pythLastStartAt = startAt;
+  const wait = startAt - Date.now();
+  if (wait > 0) {
+    await new Promise((r) => setTimeout(r, wait));
+  }
+}
+
+function releasePythSlot(): void {
+  pythSlotsInUse = Math.max(0, pythSlotsInUse - 1);
+  const next = pythSlotQueue.shift();
+  if (next) next();
+}
+
 async function fetchPythCandles(
+  pythSymbol: string,
+  resolution: string,
+  fromSec: number,
+  toSec: number,
+): Promise<{ t: number[]; o: number[]; h: number[]; l: number[]; c: number[]; v: number[]; s: string } | null> {
+  await acquirePythSlot();
+  try {
+    return await fetchPythCandlesInner(pythSymbol, resolution, fromSec, toSec);
+  } finally {
+    releasePythSlot();
+  }
+}
+
+async function fetchPythCandlesInner(
   pythSymbol: string,
   resolution: string,
   fromSec: number,
