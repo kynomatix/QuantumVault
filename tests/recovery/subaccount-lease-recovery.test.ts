@@ -22,6 +22,14 @@ vi.mock('../../server/session-v3.js', () => ({
 }));
 vi.mock('../../server/protocol/adapter-registry.js', () => ({
   getDefaultAdapter: () => adapter,
+  // CHANGED (stale-test fix, 2026-07-18): commit 295ad338 ("Fix subaccount recovery and
+  // cleanup to ensure protocol safety") changed runLeaseRecoveryOnce from getDefaultAdapter()
+  // to getAdapter(row.protocol) for correct per-protocol routing. The mock only stubbed
+  // getDefaultAdapter, so getAdapter returned undefined → try/catch skipped every row.
+  getAdapter: (protocol: string) => {
+    if (protocol === adapter?.protocolName) return adapter;
+    throw new Error(`[test] no adapter for protocol "${protocol}"`);
+  },
 }));
 
 import { processExpiredReservation, runLeaseRecoveryOnce } from '../../server/subaccount-lease-recovery.js';

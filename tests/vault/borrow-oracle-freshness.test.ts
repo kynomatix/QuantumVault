@@ -273,7 +273,18 @@ describe("borrow oracle registry", () => {
       expect(mint, `allowlisted vault ${vaultId} has NO registry entry`).not.toBeNull();
       const src = getBorrowOracleSource(vaultId, mint!);
       expect(src, `allowlisted vault ${vaultId} does not resolve to an oracle source`).not.toBeNull();
-      expect(src!.feedId.length, `allowlisted vault ${vaultId} has a blank feedId`).toBeGreaterThan(0);
+      // CHANGED (stale-test fix, 2026-07-18): vaults 13 (JupSOL) and 63 (dfdvSOL) use
+      // kind="pyth_sol_proxy" (solFeedId, no feedId). The original assertion unconditionally
+      // read .feedId and crashed with TypeError on these two entries once they were added
+      // to the allowlist in commit 9d9f5c0b. Branch on kind so new oracle kinds are caught.
+      const feedToCheck =
+        src!.kind === "pyth_sol_proxy"
+          ? (src as any).solFeedId
+          : (src as any).feedId;
+      expect(
+        typeof feedToCheck === "string" && feedToCheck.length > 0,
+        `allowlisted vault ${vaultId} (kind=${src!.kind}) has a blank or missing feed id`,
+      ).toBe(true);
     }
   });
 });
