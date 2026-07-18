@@ -30,6 +30,16 @@ pool.on("error", (err) => {
   console.error("[DB Pool] Idle client error (suppressed crash):", err.message);
 });
 
+// Safety net: no single statement may hold a pool connection indefinitely
+// (pool max is 8 — a few stuck statements would starve every DB consumer).
+// 30s matches the acquire timeout above. DATABASE_URL is a direct connection
+// (verified non-pooler), so a session-level SET on connect is safe.
+pool.on("connect", (client) => {
+  client.query("SET statement_timeout = 30000").catch((err) => {
+    console.error("[DB Pool] Failed to set statement_timeout:", err.message);
+  });
+});
+
 setInterval(() => {
   console.log(`[DB Pool] total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount} max=${poolSize}`);
 }, 30_000);

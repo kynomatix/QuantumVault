@@ -191,6 +191,7 @@ async function fetchAllGateCandles(
   startMs: number,
   endMs: number,
   onProgress?: (msg: string) => void,
+  deadlineAt: number = Infinity,
 ): Promise<OHLCV[]> {
   const pair = symbolToGateSpotPair(symbol);
 
@@ -215,6 +216,10 @@ async function fetchAllGateCandles(
   const windowSeconds = tfSeconds * GATE_BATCH_SIZE;
 
   while (currentFrom < endSec) {
+    if (Date.now() >= deadlineAt) {
+      console.log(`[Gate Spot] Fetch deadline reached — stopping with ${allCandles.length} candles for ${pair} ${interval}`);
+      break;
+    }
     const chunkEnd = Math.min(currentFrom + windowSeconds, endSec);
     try {
       const raw = await fetchGateCandles(pair, interval, currentFrom, chunkEnd);
@@ -336,6 +341,7 @@ async function fetchAllPythCandles(
   startMs: number,
   endMs: number,
   onProgress?: (msg: string) => void,
+  deadlineAt: number = Infinity,
 ): Promise<OHLCV[]> {
   const pythSymbol = symbolToPythId(symbol);
 
@@ -363,6 +369,10 @@ async function fetchAllPythCandles(
   const chunkSeconds = tfSeconds * batchSize;
 
   while (currentFrom < endSec) {
+    if (Date.now() >= deadlineAt) {
+      console.log(`[Pyth] Fetch deadline reached — stopping with ${allCandles.length} candles for ${pythSymbol} ${resolution}`);
+      break;
+    }
     const chunkEnd = Math.min(currentFrom + chunkSeconds, endSec);
 
     try {
@@ -557,19 +567,30 @@ export async function fetchOHLCV(
   startDate: string,
   endDate: string,
   onProgress?: (msg: string) => void,
-  options?: { skipSpotFallback?: boolean; bypassCache?: boolean }
+  options?: { skipSpotFallback?: boolean; bypassCache?: boolean; deadlineMs?: number }
 ): Promise<OHLCV[]> {
   timeframe = timeframe.toLowerCase();
   const startMs = new Date(startDate).getTime();
   const endMs = new Date(endDate).getTime();
+  // Optional overall deadline: bounds total time across pagination loops and
+  // source fallbacks. Individual in-flight HTTP calls (each already capped by
+  // AbortSignal.timeout + bounded retries) are allowed to finish past it, so
+  // the effective worst case is deadline + one call chain (~50s).
+  const deadlineAt = options?.deadlineMs ? Date.now() + options.deadlineMs : Infinity;
 
   onProgress?.(`Checking cache for ${symbol} ${timeframe}...`);
   const cached = options?.bypassCache ? null : await getCachedCandles(symbol, timeframe, startMs, endMs);
-  if (cached && cached.length >= 100) {
+  // Range-aware completeness floor: a request spanning only N bars can never
+  // return 100 candles, so short live windows (e.g. an open paper position's
+  // entry→now bracket check) would otherwise bypass the cache on EVERY tick.
+  const requestIntervalMs = getTimeframeSeconds(timeframe) * 1000;
+  const expectedBars = Math.floor((endMs - startMs) / requestIntervalMs);
+  const minCacheBars = Math.min(100, Math.max(1, expectedBars - 1));
+  if (cached && cached.length >= minCacheBars) {
     // For live requests (endMs near now), also require the newest cached candle to be
     // recent enough. Historical backtest ranges (endMs well in the past) always
     // cache-hit unchanged — QuantumLab optimizer depends on this behaviour.
-    const intervalMs = getTimeframeSeconds(timeframe) * 1000;
+    const intervalMs = requestIntervalMs;
     const isLiveRequest = endMs > Date.now() - 2 * intervalMs;
     const newestCachedTs = cached[cached.length - 1].time;
     if (!isLiveRequest || newestCachedTs > endMs - 2 * intervalMs) {
@@ -586,7 +607,7 @@ export async function fetchOHLCV(
   const synthetic = SYNTHETIC_TIMEFRAMES[timeframe];
   if (synthetic) {
     onProgress?.(`Synthesizing ${timeframe} from ${synthetic.source} candles...`);
-    const sourceCandles = await fetchOHLCV(symbol, synthetic.source, startDate, endDate, onProgress);
+    const sourceCandles = await fetchOHLCV(symbol, synthetic.source, startDate, endDate, onProgress, options);
     const targetTfMs = TIMEFRAME_MS[timeframe.toLowerCase()] || 0;
     const aggregated = aggregateCandles(sourceCandles, synthetic.factor, targetTfMs);
     console.log(`[Synthetic] Built ${aggregated.length} ${timeframe} candles from ${sourceCandles.length} ${synthetic.source} candles (aligned to ${targetTfMs}ms boundaries)`);
@@ -608,7 +629,7 @@ export async function fetchOHLCV(
   if (nonCrypto) {
     onProgress?.(`Fetching ${symbol} ${timeframe} from Pyth (non-crypto)...`);
     try {
-      allCandles = await fetchAllPythCandles(symbol, timeframe, startMs, endMs, onProgress);
+      allCandles = await fetchAllPythCandles(symbol, timeframe, startMs, endMs, onProgress, deadlineAt);
     } catch (err: any) {
       console.log(`[Pyth] Non-crypto fetch failed for ${symbol} ${timeframe}: ${err.message}`);
     }
@@ -637,6 +658,10 @@ export async function fetchOHLCV(
     let consecutiveErrors = 0;
 
     while (currentEndMs > startMs) {
+      if (Date.now() >= deadlineAt) {
+        console.log(`[OKX] Fetch deadline reached — stopping with ${allCandles.length} candles for ${instId} ${bar}`);
+        break;
+      }
       try {
         const raw = await fetchOkxCandles(instId, bar, currentEndMs);
         consecutiveErrors = 0;
@@ -693,17 +718,17 @@ export async function fetchOHLCV(
     console.log(`[OKX] Skipping ${instId} (recently failed) — trying Gate.io spot`);
   }
 
-  if (allCandles.length === 0 && !options?.skipSpotFallback) {
+  if (allCandles.length === 0 && !options?.skipSpotFallback && Date.now() < deadlineAt) {
     try {
-      allCandles = await fetchAllGateCandles(symbol, timeframe, startMs, endMs, onProgress);
+      allCandles = await fetchAllGateCandles(symbol, timeframe, startMs, endMs, onProgress, deadlineAt);
     } catch (err: any) {
       console.log(`[Gate Spot] Fallback failed for ${symbol} ${timeframe}: ${err.message}`);
     }
   }
 
-  if (allCandles.length === 0 && !options?.skipSpotFallback) {
+  if (allCandles.length === 0 && !options?.skipSpotFallback && Date.now() < deadlineAt) {
     try {
-      allCandles = await fetchAllPythCandles(symbol, timeframe, startMs, endMs, onProgress);
+      allCandles = await fetchAllPythCandles(symbol, timeframe, startMs, endMs, onProgress, deadlineAt);
     } catch (err: any) {
       console.log(`[Pyth] Fallback failed for ${symbol} ${timeframe}: ${err.message}`);
     }

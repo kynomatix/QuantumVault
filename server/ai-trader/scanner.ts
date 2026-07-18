@@ -170,6 +170,15 @@ let scannerTimer: ReturnType<typeof setTimeout> | null = null;
 let sweepStartedAt: number | null = null;
 let sweepGeneration = 0;
 const SWEEP_WEDGE_MS = 5 * 60_000;
+/**
+ * Total network-fetch budget for one whole sweep (all protocols, all TFs).
+ * Must stay well under SWEEP_WEDGE_MS: 240s deadline + one in-flight call
+ * chain (~50s worst case) ≈ 290s < 300s wedge window, so the wedge override
+ * remains a backstop for truly-hung awaits only — sweeps cannot stack.
+ */
+const SWEEP_FETCH_DEADLINE_TOTAL_MS = 240_000;
+/** Per-fetch cap within the sweep budget. */
+const SWEEP_PER_FETCH_DEADLINE_MS = 45_000;
 
 // ─── Pure helpers (exported for tests) ───────────────────────────────────────
 
@@ -359,6 +368,12 @@ async function runSweep(): Promise<void> {
   }
   const gen = ++sweepGeneration;
   sweepStartedAt = Date.now();
+  // Sweep-global fetch deadline: bounds the WHOLE sweep's network time so a
+  // degraded-feed sweep finishes comfortably inside SWEEP_WEDGE_MS and two
+  // sweeps can never run concurrently in practice. Each dispatch passes the
+  // remaining budget into fetchOHLCV (which cuts pagination/fallbacks at the
+  // deadline); dispatches with <5s remaining are skipped outright.
+  const fetchDeadlineAt = Date.now() + SWEEP_FETCH_DEADLINE_TOTAL_MS;
 
   try {
     const now = new Date();
@@ -420,13 +435,36 @@ async function runSweep(): Promise<void> {
             const endDate = new Date(endMs).toISOString();
 
             let bars: OHLCV[] = [];
+            let fetchDeadlineTruncated = false;
             try {
               const cacheKey = `${ticker}:${tf}`;
               if (candleCache.has(cacheKey)) {
                 bars = candleCache.get(cacheKey)!;
               } else {
-                bars = await fetchOHLCV(ticker, tf, startDate, endDate);
-                candleCache.set(cacheKey, bars);
+                const remainingMs = fetchDeadlineAt - Date.now();
+                if (remainingMs < 5_000) {
+                  // Sweep fetch budget exhausted — skip without marking the
+                  // feed dead (this is our budget, not the feed's fault).
+                  marketsSkippedByTimeout++;
+                  return;
+                }
+                const perFetchDeadlineMs = Math.min(
+                  SWEEP_PER_FETCH_DEADLINE_MS,
+                  remainingMs,
+                );
+                const fetchStartedAt = Date.now();
+                bars = await fetchOHLCV(ticker, tf, startDate, endDate, undefined, {
+                  deadlineMs: perFetchDeadlineMs,
+                });
+                // If the fetch came back EMPTY after running out its deadline,
+                // treat it as a budget timeout, not a dead feed — a truncated
+                // fetch is indistinguishable from a dead feed by bars alone.
+                fetchDeadlineTruncated =
+                  bars.length === 0 &&
+                  Date.now() - fetchStartedAt >= perFetchDeadlineMs - 1_000;
+                if (!fetchDeadlineTruncated) {
+                  candleCache.set(cacheKey, bars);
+                }
               }
             } catch (err) {
               feedHealthMap.set(ticker, { failedAt: Date.now() });
@@ -435,6 +473,12 @@ async function runSweep(): Promise<void> {
             }
 
             if (bars.length === 0) {
+              if (fetchDeadlineTruncated) {
+                // Our sweep budget cut this fetch short — skip WITHOUT the
+                // 30-min feed-dead exclusion; the feed may be perfectly fine.
+                marketsSkippedByTimeout++;
+                return;
+              }
               // Empty = feed dead for this ticker. Mark and skip.
               feedHealthMap.set(ticker, { failedAt: Date.now() });
               return;
@@ -457,13 +501,20 @@ async function runSweep(): Promise<void> {
                 if (candleCache.has(parentCacheKey)) {
                   parentBars = candleCache.get(parentCacheKey)!;
                 } else {
-                  parentBars = await fetchOHLCV(
-                    ticker,
-                    parentTf,
-                    new Date(parentStartMs).toISOString(),
-                    endDate,
-                  );
-                  candleCache.set(parentCacheKey, parentBars);
+                  const remainingMs = fetchDeadlineAt - Date.now();
+                  if (remainingMs < 5_000) {
+                    parentBars = null; // budget exhausted — parent is optional
+                  } else {
+                    parentBars = await fetchOHLCV(
+                      ticker,
+                      parentTf,
+                      new Date(parentStartMs).toISOString(),
+                      endDate,
+                      undefined,
+                      { deadlineMs: Math.min(SWEEP_PER_FETCH_DEADLINE_MS, remainingMs) },
+                    );
+                    candleCache.set(parentCacheKey, parentBars);
+                  }
                 }
               } catch {
                 parentBars = null; // parent fetch failure is non-fatal

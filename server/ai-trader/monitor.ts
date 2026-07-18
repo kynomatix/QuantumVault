@@ -596,7 +596,9 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
       marketToDatafeedTicker(bot.market),
       bot.timeframe,
       new Date(entryCandleOpen).toISOString(),
-      new Date(now).toISOString()
+      new Date(now).toISOString(),
+      undefined,
+      { deadlineMs: 30_000 }
     );
   } catch (err) {
     console.warn(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: candle fetch failed (${err instanceof Error ? err.message : err}) — retrying next tick`);
@@ -1043,7 +1045,9 @@ async function maybeFireLiveBreakeven(
       marketToDatafeedTicker(bot.market),
       bot.timeframe,
       new Date(entryCandleOpen).toISOString(),
-      new Date(now).toISOString()
+      new Date(now).toISOString(),
+      undefined,
+      { deadlineMs: 30_000 }
     );
   } catch (err) {
     console.warn(`[AiTraderMonitor] Breakeven candle fetch failed (${err instanceof Error ? err.message : err}) — retrying next tick`);

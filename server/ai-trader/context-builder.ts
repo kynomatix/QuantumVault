@@ -383,7 +383,9 @@ export async function buildMarketContext(
   const selectedStart = new Date(now - INDICATOR_BARS * tfMs).toISOString();
 
   const datafeedTicker = marketToDatafeedTicker(market);
-  const selectedRaw = await fetchOHLCV(datafeedTicker, timeframe, selectedStart, selectedEnd);
+  const selectedRaw = await fetchOHLCV(datafeedTicker, timeframe, selectedStart, selectedEnd, undefined, {
+    deadlineMs: 45_000,
+  });
   if (selectedRaw.length === 0) {
     return { stale: true, reason: `No ${timeframe} candle data returned for ${market}` };
   }
@@ -412,7 +414,9 @@ export async function buildMarketContext(
     // Brick 2+4: fetch PARENT_INDICATOR_BARS for pivot computation.
     // parentCandles (PARENT_BARS=30) is the CSV render slice only — token economy unchanged.
     const parentStart = new Date(now - PARENT_INDICATOR_BARS * parentTfMs).toISOString();
-    const parentRaw = await fetchOHLCV(datafeedTicker, parentTf, parentStart, selectedEnd);
+    const parentRaw = await fetchOHLCV(datafeedTicker, parentTf, parentStart, selectedEnd, undefined, {
+      deadlineMs: 45_000,
+    });
     parentIndicatorCandles = parentRaw.slice(-PARENT_INDICATOR_BARS);
     parentCandles = parentIndicatorCandles.slice(-PARENT_BARS); // CSV render only
   }
