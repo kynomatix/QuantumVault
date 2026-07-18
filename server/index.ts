@@ -202,6 +202,7 @@ app.use((req, res, next) => {
 // to extract the wallet address for the trusted header.
 import { sessionMiddleware } from "./session";
 import { registerCreatorRoutes } from "./ai-assistant/routes";
+import { registerLogAccessRoutes } from "./log-access";
 
 const labProxy = createProxyMiddleware({
   target: `http://127.0.0.1:5050`,
@@ -395,6 +396,10 @@ app.post("/api/lab/job/:id/cancel", (req: Request, res: Response, next: NextFunc
 // proxy because these routes need the Express session + V3 UMK, which the lab CHILD
 // process does not have. They read the wallet only from the session (never a token).
 registerCreatorRoutes(app, sessionMiddleware as any, () => labSupervisor.labPort);
+
+// Read-only log access for external reviewers/cronjobs (Bearer LOG_READ_TOKEN).
+// GET-only, fail-closed when the token is unset, dedicated token ≠ ADMIN_PASSWORD.
+registerLogAccessRoutes(app);
 
 app.use("/api/lab", (req: Request, res: Response, next: NextFunction) => {
   sessionMiddleware(req, res, (err) => {
