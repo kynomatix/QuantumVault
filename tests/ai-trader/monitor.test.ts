@@ -28,6 +28,7 @@ const getDecisionsMock = vi.fn();
 const getBotMock = vi.fn();
 const getActiveBotsMock = vi.fn();
 const getLlmCiphertextMock = vi.fn();
+const getAiTraderDecisionMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
     getWallet: (...a: unknown[]) => getWalletMock(...a),
@@ -38,6 +39,7 @@ vi.mock("../../server/storage", () => ({
     getAiTraderBot: (...a: unknown[]) => getBotMock(...a),
     getActiveAiTraderBots: (...a: unknown[]) => getActiveBotsMock(...a),
     getWalletLlmApiKeyCiphertext: (...a: unknown[]) => getLlmCiphertextMock(...a),
+    getAiTraderDecision: (...a: unknown[]) => getAiTraderDecisionMock(...a),
   },
 }));
 
@@ -225,9 +227,10 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
   for (const m of [
     getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getDecisionsMock,
-    getBotMock, getActiveBotsMock, getLlmCiphertextMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, healUmkMock,
-    getSessionByWalletMock, restoreSecurityMock, decryptLlmKeyMock, notifyMock, getAdapterMock,
-    fetchOHLCVMock, buildContextMock, runDecisionMock, executeDecisionMock,
+    getBotMock, getActiveBotsMock, getLlmCiphertextMock, getAiTraderDecisionMock, getUmkMock,
+    decryptKeyMock, decryptSubKeyMock, healUmkMock, getSessionByWalletMock, restoreSecurityMock,
+    decryptLlmKeyMock, notifyMock, getAdapterMock, fetchOHLCVMock, buildContextMock,
+    runDecisionMock, executeDecisionMock,
   ]) {
     m.mockReset();
   }
@@ -237,6 +240,10 @@ beforeEach(() => {
   notifyMock.mockResolvedValue(true);
   healUmkMock.mockResolvedValue(undefined);
   restoreSecurityMock.mockResolvedValue(undefined);
+  // Fresh-decision re-read guard (monitor.ts handleLiveClose / closeLivePositionAndPause):
+  // default returns an open (not-yet-closed) decision so the guard proceeds normally.
+  // Tests that need the guard to bail (duplicate-close race) override this directly.
+  getAiTraderDecisionMock.mockImplementation(async () => makeOpenDecision());
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});

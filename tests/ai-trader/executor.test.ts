@@ -17,12 +17,14 @@ const getWalletMock = vi.fn();
 const getRecentClosedMock = vi.fn();
 const updateBotMock = vi.fn();
 const updateDecisionMock = vi.fn();
+const getAiTraderBotMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
     getWallet: (...a: unknown[]) => getWalletMock(...a),
     getRecentClosedDecisions: (...a: unknown[]) => getRecentClosedMock(...a),
     updateAiTraderBot: (...a: unknown[]) => updateBotMock(...a),
     updateAiTraderDecision: (...a: unknown[]) => updateDecisionMock(...a),
+    getAiTraderBot: (...a: unknown[]) => getAiTraderBotMock(...a),
   },
 }));
 
@@ -161,7 +163,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
   callOrder = [];
-  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock]) {
+  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getAiTraderBotMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock]) {
     m.mockReset();
   }
   getRecentClosedMock.mockResolvedValue([]);
@@ -169,6 +171,10 @@ beforeEach(() => {
   updateDecisionMock.mockResolvedValue({});
   notifyMock.mockResolvedValue(true);
   healUmkMock.mockResolvedValue(undefined);
+  // Fresh-read guard (executor.ts): default returns the bot fixture with idle/analyzing
+  // status so all non-busy-guard tests proceed normally. Tests that exercise the
+  // bot_busy or missing-row paths override this mock directly.
+  getAiTraderBotMock.mockImplementation(async () => makeBot());
 });
 
 afterEach(() => {

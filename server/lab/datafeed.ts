@@ -50,7 +50,7 @@ function stripMultiplierPrefix(base: string): string {
 }
 
 function symbolToOkxInstId(symbol: string): string {
-  const base = symbol.split("/")[0];
+  const base = stripMultiplierPrefix(symbol.split("/")[0]);
   return `${base}-USDT-SWAP`;
 }
 
