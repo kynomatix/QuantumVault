@@ -577,11 +577,29 @@ app.use((req, res, next) => {
   // pile-up was the root cause of the July 17, 2026 all-AI-Traders outage (DB/OKX
   // handshake timeouts, lab boot-loop, healthcheck deaths). Never remove the
   // exit calls or the hard-exit backstop.
+  // Death canary: telemetry markers for every process birth and death, so a
+  // future "what killed the app?" question is answerable from the log file
+  // alone. Also critical for readers of the prod log API: publishing snapshots
+  // the workspace INCLUDING logs/telemetry.log, so the prod file starts with
+  // dev-workspace history — these [Boot] env= markers let any reader segment
+  // process generations and tell workspace lines from live deployment lines.
+  const bootEnv = process.env.REPLIT_DEPLOYMENT ? "production" : "workspace";
+  appendTelemetry(`[Boot] pid=${process.pid} env=${bootEnv} node=${process.version}`);
+  process.on("exit", (code) => {
+    // appendTelemetry is fully synchronous (appendFileSync) — safe in 'exit'.
+    appendTelemetry(
+      `[Lifecycle] exit code=${code} pid=${process.pid} uptime=${Math.round(process.uptime())}s`,
+    );
+  });
+
   let shuttingDown = false;
   const shutdownHandler = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[Main] ${signal} received — shutting down...`);
+    appendTelemetry(
+      `[Lifecycle] ${signal} received pid=${process.pid} uptime=${Math.round(process.uptime())}s`,
+    );
     // Backstop: if any cleanup step below hangs, force-exit anyway. unref'd so
     // it never delays a clean exit.
     const hardExit = setTimeout(() => {

@@ -414,8 +414,17 @@ async function runSweep(): Promise<void> {
       // sweep start, which let the first protocol (flash) consume the entire 55s on
       // cold sweeps — pacifica's loop then started with the budget already blown and
       // skipped every market ("Scanning 0 Pacifica markets" in the create modal).
-      // Each protocol now gets its own SWEEP_BUDGET_MS window; worst case total is
-      // PROTOCOLS.length × 55s ≈ 110s, still far inside the 15m boundary cadence.
+      // Each protocol gets its own window, SCALED by how many TFs are due at this
+      // boundary: a flat 55s let the (slow, Pyth-heavy) 15m scan eat the whole
+      // window at :00 boundaries, so 1h/4h logged "0 scanned" while ~100s of the
+      // global 240s budget sat unused (prod evidence: 04:02 and 07:02 SWEEP TOTAL
+      // lines with 98–180 skipped-by-timeout). Cap keeps the worst-case dispatch
+      // total at SWEEP_FETCH_DEADLINE_TOTAL_MS across all protocols, preserving
+      // the ≈290s < 300s wedge-window margin documented on the constant.
+      const protocolBudgetMs = Math.min(
+        SWEEP_BUDGET_MS * boundaryTfs.length,
+        Math.floor(SWEEP_FETCH_DEADLINE_TOTAL_MS / PROTOCOLS.length),
+      );
       const protocolStart = Date.now();
 
       for (const tf of boundaryTfs) {
@@ -548,7 +557,7 @@ async function runSweep(): Promise<void> {
           const market = universe[i];
 
           // Check this protocol's sweep budget first (per-protocol clock — see above).
-          if (Date.now() - protocolStart > SWEEP_BUDGET_MS) {
+          if (Date.now() - protocolStart > protocolBudgetMs) {
             marketsSkippedByTimeout += universe.length - i;
             break;
           }

@@ -24,6 +24,13 @@ const LOG_ROTATED = path.join(LOG_DIR, "telemetry.log.1");
 const MAX_BYTES = 5 * 1024 * 1024; // 5 MB
 
 export function appendTelemetry(line: string): void {
+  // Test processes (vitest) import real modules that call appendTelemetry
+  // (e.g. the datafeed breaker tests exercising fake BRK*/ORETEST symbols).
+  // They share this file with the live app, and external log readers then
+  // misattribute test-generated lines (SOURCE DOWN, probe fetches) as real
+  // app history — this caused a full misdiagnosis of prod on Jul 18, 2026.
+  // Tests must never write to the shared telemetry file.
+  if (process.env.VITEST) return;
   try {
     fs.mkdirSync(LOG_DIR, { recursive: true });
     try {
