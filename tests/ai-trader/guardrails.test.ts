@@ -7,6 +7,7 @@ import {
   estimateLiquidationPrice,
   smartLeverageCap,
   LEVERAGE_HARD_CEILING,
+  SWEEP_BUFFER_ATR,
   type GuardrailInput,
   type GuardrailViolation,
   type TradeDecisionLike,
@@ -503,6 +504,146 @@ describe("G5 — size clamp and quantization", () => {
     const r = applyGuardrails(makeLong(), makeInput({ quantizeOrderSize: () => NaN }));
     expect(r.ok).toBe(false);
     expect(codes(r.violations)).toContain("size_quantized_to_zero");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SL-PLACE Phase B: sl_in_sweep_zone soft flag
+//
+// Buffer for makeInput fixture: timeframe="15m", ATR=0.1 → buffer=0.9×0.1=0.09
+// Entry=100. makeLong SL=98, makeShort SL=102.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("sl_in_sweep_zone (Phase B soft flag)", () => {
+  it("SWEEP_BUFFER_ATR has an entry for every GuardrailTimeframe", () => {
+    const tfs = ["15m", "1h", "4h", "1d"] as const;
+    for (const tf of tfs) {
+      expect(typeof SWEEP_BUFFER_ATR[tf]).toBe("number");
+      expect(SWEEP_BUFFER_ATR[tf]).toBeGreaterThan(0);
+    }
+  });
+
+  it("fires non-fatal for a long when SL is at the range-low boundary", () => {
+    // zone: [98 - 0.09, 98] = [97.91, 98]; SL=98 → in zone
+    const r = applyGuardrails(
+      makeLong({ stopLossPrice: 98 }),
+      makeInput({ activeRangeLow: 98, activeRangeHigh: 105 })
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const v = r.violations.find((v) => v.code === "sl_in_sweep_zone");
+    expect(v).toBeDefined();
+    expect(v?.fatal).toBe(false);
+    expect(v?.rule).toBe("G2");
+  });
+
+  it("fires for a long when SL is inside the zone (not at boundary)", () => {
+    // zone: [97.91, 98]; SL=97.95 → in zone
+    const r = applyGuardrails(
+      makeLong({ stopLossPrice: 97.95 }),
+      makeInput({ activeRangeLow: 98, activeRangeHigh: 105 })
+    );
+    expect(r.ok).toBe(true);
+    expect(codes(r.ok ? r.violations : [])).toContain("sl_in_sweep_zone");
+  });
+
+  it("does NOT fire for a long when SL has sufficient clearance below range low", () => {
+    // zone top = 97.91; SL=97.90 < 97.91 → outside zone
+    const r = applyGuardrails(
+      makeLong({ stopLossPrice: 97.90 }),
+      makeInput({ activeRangeLow: 98, activeRangeHigh: 105 })
+    );
+    expect(r.ok).toBe(true);
+    expect(codes(r.ok ? r.violations : [])).not.toContain("sl_in_sweep_zone");
+  });
+
+  it("fires non-fatal for a short when SL is within the range-high sweep zone", () => {
+    // zone: [102, 102 + 0.09] = [102, 102.09]; SL=102.05 → in zone
+    const r = applyGuardrails(
+      makeShort({ stopLossPrice: 102.05 }),
+      makeInput({ activeRangeHigh: 102, activeRangeLow: 95 })
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const v = r.violations.find((v) => v.code === "sl_in_sweep_zone");
+    expect(v).toBeDefined();
+    expect(v?.fatal).toBe(false);
+    expect(v?.rule).toBe("G2");
+  });
+
+  it("fires for a short when SL is at the range-high zone ceiling", () => {
+    // SL exactly at rangeHigh → start of zone → fires
+    const r = applyGuardrails(
+      makeShort({ stopLossPrice: 102 }),
+      makeInput({ activeRangeHigh: 102, activeRangeLow: 95 })
+    );
+    expect(r.ok).toBe(true);
+    expect(codes(r.ok ? r.violations : [])).toContain("sl_in_sweep_zone");
+  });
+
+  it("does NOT fire for a short when SL has sufficient clearance above range high", () => {
+    // zone ceiling = 102.09; SL=102.10 > 102.09 → outside zone
+    const r = applyGuardrails(
+      makeShort({ stopLossPrice: 102.10 }),
+      makeInput({ activeRangeHigh: 102, activeRangeLow: 95 })
+    );
+    expect(r.ok).toBe(true);
+    expect(codes(r.ok ? r.violations : [])).not.toContain("sl_in_sweep_zone");
+  });
+
+  it("does NOT fire when no active range is provided", () => {
+    const r = applyGuardrails(makeLong(), makeInput());
+    expect(r.ok).toBe(true);
+    expect(codes(r.ok ? r.violations : [])).not.toContain("sl_in_sweep_zone");
+  });
+
+  it("does NOT fire on a wrong-side SL (fatal rejection fires before sweep check)", () => {
+    const r = applyGuardrails(
+      makeLong({ stopLossPrice: 101 }), // SL above entry for long = wrong side
+      makeInput({ activeRangeLow: 98, activeRangeHigh: 105 })
+    );
+    expect(r.ok).toBe(false);
+    expect(codes(r.violations)).toContain("sl_wrong_side");
+    expect(codes(r.violations)).not.toContain("sl_in_sweep_zone");
+  });
+
+  it("does NOT fire when SL is wholly outside the active range (range low below zone floor)", () => {
+    // rangeLow=98, zone=[97.91,98]; SL=95 well below zone floor → not in zone.
+    // Use wide TP (110) to maintain RR ≥ 1.2 with the larger stop distance.
+    const r = applyGuardrails(
+      makeLong({ stopLossPrice: 95, takeProfitPrice: 110 }),
+      makeInput({ activeRangeLow: 98, activeRangeHigh: 105 })
+    );
+    expect(r.ok).toBe(true);
+    expect(codes(r.ok ? r.violations : [])).not.toContain("sl_in_sweep_zone");
+  });
+
+  it("proceeds with a clean ok:true when sl_in_sweep_zone is the only issue", () => {
+    const r = applyGuardrails(
+      makeLong({ stopLossPrice: 97.95 }),
+      makeInput({ activeRangeLow: 98, activeRangeHigh: 105 })
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.violations.every((v) => !v.fatal)).toBe(true);
+    expect(r.violations.some((v) => v.code === "sl_in_sweep_zone")).toBe(true);
+  });
+
+  it("fires in risk_based mode too (sizing mode is orthogonal to the sweep flag)", () => {
+    // Switch to risk_based; the sweep-zone flag is checked before G5 sizing
+    const r = applyGuardrails(
+      makeLong({ stopLossPrice: 97.95, confidence: 7 }),
+      makeInput({
+        activeRangeLow: 98,
+        activeRangeHigh: 105,
+        sizingMode: "risk_based",
+        riskMinPct: 0.5,
+        riskMaxPct: 1.5,
+        currentEquity: 1000,
+      })
+    );
+    expect(r.ok).toBe(true);
+    expect(codes(r.ok ? r.violations : [])).toContain("sl_in_sweep_zone");
   });
 });
 

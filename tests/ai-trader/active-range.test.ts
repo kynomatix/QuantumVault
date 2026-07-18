@@ -513,3 +513,146 @@ describe("detectActiveRange — low spike is captured symmetrically", () => {
     expect(r!.ageOfLow).toBe(1);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SL-PLACE Phase B: drift-escape (second stop condition)
+//
+// Design rationale for fixtures:
+//   A single large price jump raises the gap from prev_close in TR, inflating ATR.
+//   To keep ATR stable at ≈2 while creating drift, price must drift GRADUALLY —
+//   each step=1 unit, intrabar range=2, so TR stays ≈2 and ATR ≈2 throughout.
+//
+//   With ATR≈2, drift threshold = DRIFT_ESCAPE_MULT × 2 = 6×2 = 12.
+//   A bar at close=63 when newest.close=50 → drift=13 > 12 → Escape 2 fires.
+//
+// Fixture: 15 warmup bars at close=63 (ATR→2 at high price), then drift DOWN
+//   63, 62, ..., 51 (13 bars), then newest closed at close=50.
+//   Each step-down TR = max(intrabar=2, gap-to-prev-close=1) = 2.
+//   Walk backward from newest(50): drifts 1, 2, ..., 12 are included (≤12);
+//   at drift=13 (bar at close=63) → Escape 2 fires.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("detectActiveRange — drift escape (Phase B)", () => {
+  /**
+   * Build a downward-drift series where ATR stays ≈2 throughout.
+   *
+   * oldest → newest:
+   *   t=0..14:  warmup at close=HIGH (15 bars, ATR→2)
+   *   t=15..27: gradual drift from HIGH down to HIGH-12 (13 bars, each -1 step)
+   *             Each TR=2 (step=1 ≤ intrabar range=2 → no gap spike).
+   *   t=28:     newest closed at close=NEWEST
+   *   t=29:     FORMING (stripped)
+   *
+   * Walking backward from t=28:
+   *   close ranges from NEWEST+1 to HIGH-12 → drift ≤ 12 → all included
+   *   bar at close=HIGH: drift = |HIGH - NEWEST| = 13 > 12 → Escape 2 fires
+   * Included bars: t=28 down to t=16 (drift bars 51..62) = 13 bars.
+   */
+  function makeDriftSeries(highPrice: number, newestClose: number): OHLCV[] {
+    const bars: OHLCV[] = [];
+    let t = 0;
+    // 15 warmup bars at highPrice → ATR→2
+    for (let i = 0; i < 15; i++) {
+      bars.push({ time: t++ * MS, open: highPrice, high: highPrice + 1, low: highPrice - 1, close: highPrice, volume: 1_000 });
+    }
+    // 13 drift bars: close decreases from highPrice to highPrice-12 (step=1 each)
+    for (let step = 0; step < 13; step++) {
+      const c = highPrice - step;
+      bars.push({ time: t++ * MS, open: c, high: c + 1, low: c - 1, close: c, volume: 1_000 });
+    }
+    // Newest closed bar (one more step below highPrice-12)
+    bars.push({ time: t++ * MS, open: newestClose, high: newestClose + 1, low: newestClose - 1, close: newestClose, volume: 1_000 });
+    // Forming (stripped by detectActiveRange)
+    bars.push({ time: t++ * MS, open: newestClose, high: newestClose + 1, low: newestClose - 1, close: newestClose, volume: 1_000 });
+    return bars;
+  }
+
+  // Upward-drift variant: warmup at LOW, drift UP, newest at HIGH.
+  // Same math — escape fires on bars far from newest.
+  function makeDriftSeriesUp(lowPrice: number, newestClose: number): OHLCV[] {
+    const bars: OHLCV[] = [];
+    let t = 0;
+    for (let i = 0; i < 15; i++) {
+      bars.push({ time: t++ * MS, open: lowPrice, high: lowPrice + 1, low: lowPrice - 1, close: lowPrice, volume: 1_000 });
+    }
+    for (let step = 0; step < 13; step++) {
+      const c = lowPrice + step;
+      bars.push({ time: t++ * MS, open: c, high: c + 1, low: c - 1, close: c, volume: 1_000 });
+    }
+    bars.push({ time: t++ * MS, open: newestClose, high: newestClose + 1, low: newestClose - 1, close: newestClose, volume: 1_000 });
+    bars.push({ time: t++ * MS, open: newestClose, high: newestClose + 1, low: newestClose - 1, close: newestClose, volume: 1_000 });
+    return bars;
+  }
+
+  // Downward drift: warmup at 63, drift to 51, newest=50
+  // Walk-back escape fires at close=63 (drift=13>12).
+  const DOWN_SERIES = makeDriftSeries(63, 50);
+
+  it("fires: steady downward drift without a single wide bar triggers the escape", () => {
+    const r = detectActiveRange(DOWN_SERIES, 50);
+    expect(r).not.toBeNull();
+    // Walk: newest(close=50)→bar27(51)→...→bar16(62) included; bar15(63) escapes
+    expect(r!.bars).toBe(13);
+  });
+
+  it("fires: the drifted-away bars are excluded from the range high", () => {
+    const r = detectActiveRange(DOWN_SERIES, 50);
+    // bar15 (close=63, H=64) excluded → envHigh comes from bar16 (H=63)
+    expect(r!.high).toBeCloseTo(63, 4);
+    expect(r!.high).toBeLessThan(64);
+  });
+
+  it("fires symmetrically for upward drift (price drifted up from oldest to newest)", () => {
+    // warmup at 37, drift up to 49, newest=50; escape fires at close=37 (drift=13>12)
+    const UP_SERIES = makeDriftSeriesUp(37, 50);
+    const r = detectActiveRange(UP_SERIES, 50);
+    expect(r).not.toBeNull();
+    expect(r!.bars).toBe(13);
+    // oldest drift bar (close=37) excluded → envLow from bar16 (low=37)
+    expect(r!.low).toBeCloseTo(37, 4);
+    expect(r!.low).toBeGreaterThan(36);
+  });
+
+  it("boundary: drift exactly = 6×ATR does NOT escape (strict >)", () => {
+    // Build a series where the oldest drift bar has close=62 (drift=12, not > 12 → included)
+    // Use a 12-step drift (not 13) so the oldest bar sits at drift=12 exactly.
+    function makeBoundarySeries(): OHLCV[] {
+      const bars: OHLCV[] = [];
+      let t = 0;
+      const highPrice = 62; // oldest drift bar
+      for (let i = 0; i < 15; i++) {
+        bars.push({ time: t++ * MS, open: highPrice, high: highPrice + 1, low: highPrice - 1, close: highPrice, volume: 1_000 });
+      }
+      // 12 drift bars: 62, 61, ..., 51 (each step=1, so oldest=62, newest drift=51)
+      for (let step = 0; step < 12; step++) {
+        const c = highPrice - step;
+        bars.push({ time: t++ * MS, open: c, high: c + 1, low: c - 1, close: c, volume: 1_000 });
+      }
+      // Newest closed: close=50 (drift from oldest=62 → 12, not > 12)
+      bars.push({ time: t++ * MS, open: 50, high: 51, low: 49, close: 50, volume: 1_000 });
+      bars.push({ time: t++ * MS, open: 50, high: 51, low: 49, close: 50, volume: 1_000 });
+      return bars;
+    }
+    const BOUNDARY = makeBoundarySeries();
+    const r = detectActiveRange(BOUNDARY, 50);
+    expect(r).not.toBeNull();
+    // All drift bars (drift ≤ 12) are included; oldest bar at close=62 has drift=12 → NOT escaped
+    // bars = 15(warmup) + 12(drift) + 1(newest) = 28 closed → all walked = 28
+    expect(r!.bars).toBe(28);
+    expect(r!.high).toBeCloseTo(63, 4); // warmup bar H=63
+  });
+
+  it("does not affect fixtures without meaningful drift (Phase A regression)", () => {
+    // All close=50 → drift always 0 → no escape fires → same result as Phase A
+    const NODRIFT: OHLCV[] = [
+      ...warmup(),
+      flatBar(15),
+      flatBar(16),
+      flatBar(17),
+      flatBar(18), // FORMING
+    ];
+    const r = detectActiveRange(NODRIFT, 50);
+    expect(r).not.toBeNull();
+    expect(r!.bars).toBe(18);
+  });
+});

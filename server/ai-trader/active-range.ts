@@ -18,6 +18,7 @@ import type { OHLCV } from "../lab/engine";
 import { atr } from "../lab/indicators";
 
 export const ACTIVE_RANGE_K = 3; // k multiplier: intrabar range > k×ATR = structural escape
+export const DRIFT_ESCAPE_MULT = 6; // drift escape: |bar.close − newest.close| > 6×ATR = steady drift out of range
 
 export interface ActiveRange {
   /** Raw maximum high of the walk-back span (newest-closed bar included). */
@@ -83,9 +84,16 @@ export function detectActiveRange(
   for (let i = len - 2; i >= floorIdx; i--) {
     const bar = closed[i];
 
-    // Escape: bar's own intrabar volatility crosses the structural-boundary
+    // Escape 1: bar's own intrabar volatility crosses the structural-boundary
     // threshold → stop WITHOUT including this bar.
     if (bar.high - bar.low > threshold) break;
+
+    // Escape 2 (drift): bar's close has drifted more than DRIFT_ESCAPE_MULT×ATR
+    // from the newest-closed bar's close. Catches steady directional drift that
+    // never produces a single wide bar (each bar individually passes the intrabar
+    // check) but whose close is already in a different price regime. Stop WITHOUT
+    // including this bar.
+    if (Math.abs(bar.close - newest.close) > DRIFT_ESCAPE_MULT * atr14) break;
 
     if (bar.high > envHigh) {
       envHigh   = bar.high;

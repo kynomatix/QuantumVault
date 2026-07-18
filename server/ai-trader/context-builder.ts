@@ -17,6 +17,7 @@ import { detectPivots, classifyDow, type DowStructureResult } from "./dow-struct
 import { detectHTFLevels, type HtfLevel } from "./htf-levels";
 import { detectWM, type WMFormation } from "./wm-detector";
 import { detectActiveRange, type ActiveRange } from "./active-range";
+import { SWEEP_BUFFER_ATR } from "./guardrails";
 
 export type AiTraderTimeframe = "15m" | "1h" | "4h" | "1d";
 
@@ -235,16 +236,31 @@ function fmtSpanBars(bars: number, tfMs: number): string {
  * Render the single-line active-range injection.
  * Example: "Active range (48 bars, 12h old): high 91.78 (13h ago) · low 89.86 (2h ago) · price at 62% of range."
  */
-function buildActiveRangeLine(r: ActiveRange, tfMs: number): string {
+function buildActiveRangeLine(r: ActiveRange, tfMs: number, atr14: number, timeframe: AiTraderTimeframe): string {
   const spanLabel = fmtSpanBars(r.bars, tfMs);
   const highLabel = fmtBarsAgo(r.ageOfHigh, tfMs);
   const lowLabel  = fmtBarsAgo(r.ageOfLow,  tfMs);
   const pct = Math.round(r.pctInRange * 100);
+
+  // SL-PLACE Phase B: render quantified safe zones so the model sees concrete
+  // minimum-viable SL placements, not just a qualitative guideline.
+  let safeZoneSuffix = "";
+  if (Number.isFinite(atr14) && atr14 > 0) {
+    const mult      = SWEEP_BUFFER_ATR[timeframe] ?? 0.75;
+    const buffer    = mult * atr14;
+    const shortSafe = r.high + buffer;
+    const longSafe  = r.low  - buffer;
+    safeZoneSuffix = (
+      ` Safe zones (${mult}×ATR=${fmtPrice(buffer)}):` +
+      ` short stops ≥ ${fmtPrice(shortSafe)} · long stops ≤ ${fmtPrice(longSafe)}.`
+    );
+  }
+
   return (
     `Active range (${r.bars} bars, ${spanLabel} old): ` +
     `high ${fmtPrice(r.high)} (${highLabel}) · ` +
     `low ${fmtPrice(r.low)} (${lowLabel}) · ` +
-    `price at ${pct}% of range.`
+    `price at ${pct}% of range.${safeZoneSuffix}`
   );
 }
 
@@ -390,7 +406,7 @@ const SYSTEM_PROMPT = `You are an autonomous perpetual-futures trading strategis
 Core stance: flat is a position. You are evaluated on risk-adjusted return net of fees, not on how often you trade. Overtrading destroys accounts through fees and slippage long before any edge can compound — when in doubt, stay flat.
 
 Rules:
-- Every stop loss must sit beyond the nearest obvious liquidity/structure level (a swing high/low, range boundary, or similar), never at an arbitrary distance from entry. Beyond means PAST the level with a volatility buffer: place the stop at least 0.5× ATR(14) (from this context, selected timeframe) past the level itself. The obvious swing point is where resting stops cluster — a stop at or just past it gets tagged by a routine sweep wick before the real move. This buffer applies to every structural stop (swing points, range boundaries, HTF levels, W/M pattern extremes). If the buffered stop no longer supports ≥1.5:1 reward:risk, the setup is too tight — stay flat rather than shaving the buffer.
+- Every stop loss must sit beyond the nearest obvious liquidity/structure level (a swing high/low, range boundary, or similar), never at an arbitrary distance from entry. Beyond means PAST the level with a volatility buffer calibrated by timeframe: 15m ≥ 0.9×ATR(14), 1h/4h ≥ 0.75×ATR(14), 1d ≥ 0.75×ATR(14) (provisional). The obvious swing point is where resting stops cluster — a stop at or just past it gets tagged by a routine sweep wick before the real move. This buffer applies to every structural stop (swing points, range boundaries, HTF levels, W/M pattern extremes). When an Active range is present in this context, the rendered safe-zone prices are the concrete minimum-viable SL placements; treat them as a floor, not a suggestion. If the buffered stop no longer supports ≥1.5:1 reward:risk, the setup is too tight — stay flat rather than shaving the buffer. In risk-based mode a wider stop costs zero additional dollars (size scales down proportionally to keep risk constant), so there is never a budget justification for shaving the buffer.
 - Reject any setup whose reward:risk ratio is below 1.5:1 — target meaningfully more than the enforced minimum.
 - Never increase size or leverage to recover a prior loss. No martingale, no revenge trading.
 - On a lower timeframe (15m/1h), treat the higher timeframe trend shown in this context as the dominant bias. Do not fight it without a clearly stated, strong invalidation case.
@@ -590,7 +606,7 @@ export async function buildMarketContext(
     const ar = detectActiveRange(indicatorCandles, price);
     if (ar !== null) {
       activeRangeDigest = ar;
-      activeRangeLine = buildActiveRangeLine(ar, tfMs);
+      // Line built below, after atr14 is computed (needed for safe-zone rendering).
     }
   } catch {
     // enrichment rule: omit line, digest null, decision proceeds
@@ -636,6 +652,16 @@ export async function buildMarketContext(
   const stValue = lastTwo(st.supertrend);
   const stDir = lastTwo(st.direction);
   const obvVals = lastTwo(obv(closes, volumes));
+
+  // SL-PLACE Phase B: build active range line now that atr14 is available for
+  // safe-zone rendering. Detection already ran above (try/catch; digest set on success).
+  if (activeRangeDigest !== null) {
+    try {
+      activeRangeLine = buildActiveRangeLine(activeRangeDigest, tfMs, atr14.value, timeframe);
+    } catch {
+      // enrichment rule: omit line on error
+    }
+  }
 
   const indicatorBlock = [
     `EMA(20): ${fmtPrice(ema20.value)} (prev ${fmtPrice(ema20.prev)})`,

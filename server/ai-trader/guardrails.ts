@@ -70,6 +70,13 @@ export interface GuardrailInput {
    * would silently re-inflate risk after a drawdown.
    */
   currentEquity?: number;
+  /**
+   * SL-PLACE Phase B: active-range high/low from the context-builder's detected
+   * range (high and low extracted separately so this module stays import-free).
+   * When both are finite, enables the non-fatal sl_in_sweep_zone soft flag.
+   */
+  activeRangeHigh?: number;
+  activeRangeLow?: number;
 }
 
 export interface GuardrailViolation {
@@ -124,6 +131,19 @@ export type GuardrailResult =
 export const SMART_LEVERAGE_K = 3;
 /** G1 hard leverage ceiling for the MVP — nothing may exceed 5× regardless of config. */
 export const LEVERAGE_HARD_CEILING = 5;
+
+/**
+ * SL-PLACE Phase B: fraction of ATR(14) to buffer PAST the active-range extreme
+ * on the vulnerable side (the zone routinely swept before the real move begins).
+ * Calibrated from Phase 0 sweep-depth analysis at the p75 percentile across
+ * SOL/BTC/ETH/ARB/AAVE on each timeframe. 1d is provisional (no Phase 0 measurement).
+ */
+export const SWEEP_BUFFER_ATR: Record<GuardrailTimeframe, number> = {
+  "15m": 0.9,
+  "1h":  0.75,
+  "4h":  0.75,
+  "1d":  0.75, // provisional — no Phase 0 measurement taken
+};
 /** G3 reward:risk floor (after fees). */
 export const RR_FLOOR = 1.2;
 /** G4: TP distance must be ≥ this multiple of the round-trip taker fee (as a % move). */
@@ -461,6 +481,54 @@ export function applyGuardrails(
   }
 
   if (violations.some((v) => v.fatal)) return { ok: false, violations };
+
+  // ---- SL-PLACE Phase B: sweep-zone soft flag (non-fatal) -------------------------
+  // Fires when the SL sits within SWEEP_BUFFER_ATR × ATR14 of the active-range
+  // extreme on the vulnerable side — the price zone routinely swept by wicks before
+  // the real move. This is advisory only: the cycle is never rejected here.
+  // Guard: slOnCorrectSide must already be true (wrong-side would have rejected above).
+  if (
+    slOnCorrectSide &&
+    typeof input.activeRangeHigh === "number" &&
+    Number.isFinite(input.activeRangeHigh) &&
+    typeof input.activeRangeLow === "number" &&
+    Number.isFinite(input.activeRangeLow) &&
+    Number.isFinite(input.atr14) &&
+    input.atr14 > 0
+  ) {
+    const sweepBuffer = SWEEP_BUFFER_ATR[input.timeframe] * input.atr14;
+    if (side === "long") {
+      // Vulnerable side: range LOW. The sweep zone is [rangeLow − buffer, rangeLow].
+      // SL landing there is at/just past the extreme but within routine wick distance.
+      const zoneFloor   = input.activeRangeLow - sweepBuffer;
+      const zoneCeiling = input.activeRangeLow;
+      if (sl >= zoneFloor && sl <= zoneCeiling) {
+        violations.push(
+          violation(
+            "G2",
+            "sl_in_sweep_zone",
+            `SL ${sl} is within ${SWEEP_BUFFER_ATR[input.timeframe]}×ATR (${sweepBuffer.toFixed(6)}) of the active-range low ${input.activeRangeLow} — routine sweep zone; move stop to ≤ ${(input.activeRangeLow - sweepBuffer).toFixed(6)} for sufficient clearance`,
+            false
+          )
+        );
+      }
+    } else {
+      // Vulnerable side: range HIGH. The sweep zone is [rangeHigh, rangeHigh + buffer].
+      // SL landing there is at/just past the extreme but within routine wick distance.
+      const zoneFloor   = input.activeRangeHigh;
+      const zoneCeiling = input.activeRangeHigh + sweepBuffer;
+      if (sl >= zoneFloor && sl <= zoneCeiling) {
+        violations.push(
+          violation(
+            "G2",
+            "sl_in_sweep_zone",
+            `SL ${sl} is within ${SWEEP_BUFFER_ATR[input.timeframe]}×ATR (${sweepBuffer.toFixed(6)}) of the active-range high ${input.activeRangeHigh} — routine sweep zone; move stop to ≥ ${(input.activeRangeHigh + sweepBuffer).toFixed(6)} for sufficient clearance`,
+            false
+          )
+        );
+      }
+    }
+  }
 
   // ---- G5 (risk_based replacement): confidence-scaled fixed-fractional sizing ------
   // risk-based-sizing-spec Phase A. Replaces ONLY the margin derivation below;
