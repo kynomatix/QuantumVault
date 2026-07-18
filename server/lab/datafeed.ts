@@ -193,6 +193,49 @@ function mapTimeframeToPyth(tf: string): string {
   return map[tf] || "60";
 }
 
+/**
+ * Belt-and-braces bounded fetch. Prod incident 2026-07-18 07:30 UTC: an OKX
+ * candle fetch built with `AbortSignal.timeout(15000)` NEVER settled — no
+ * abort, no error, no retry log — and the never-resolving promise wedged the
+ * AI-trader sweep for 900s until the next boundary's wedge override. Node's
+ * fetch (undici) holds timeout signals weakly enough that under rare
+ * GC/pressure conditions the abort can simply never fire.
+ *
+ * Two independent nets, both with strong references:
+ *  1. A manually-managed AbortController + setTimeout closure (strong refs,
+ *     immune to the signal-GC class). Deliberately NOT cleared on return, so
+ *     a stalled body read (`res.json()` at the call site) is also aborted at
+ *     the deadline; aborting an already-consumed response is a no-op.
+ *  2. A Promise.race hard reject at ms+5s, so this await settles even if the
+ *     abort plumbing itself wedges.
+ *
+ * NOTE: the race (net #2) covers only the header phase — body reads at the
+ * call site (`res.json()`/`res.text()`) are protected only by net #1. The
+ * scanner's sweep-level drain cap is the ultimate guarantor if both fail.
+ */
+async function fetchWithHardTimeout(
+  url: string,
+  ms: number,
+  init?: RequestInit,
+): Promise<Response> {
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms);
+  let raceTimer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      fetch(url, { ...init, signal: controller.signal }),
+      new Promise<never>((_, reject) => {
+        raceTimer = setTimeout(
+          () => reject(new Error(`fetch hard-timeout after ${ms + 5000}ms (abort never fired)`)),
+          ms + 5_000,
+        );
+      }),
+    ]);
+  } finally {
+    if (raceTimer) clearTimeout(raceTimer);
+  }
+}
+
 async function fetchGateCandles(
   pair: string,
   interval: string,
@@ -210,7 +253,7 @@ async function fetchGateCandles(
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+      const res = await fetchWithHardTimeout(url, 15000);
       if (res.status === 429) {
         const wait = RETRY_DELAY_MS * (attempt + 1) * 2;
         console.log(`[Gate Spot] Rate limited, waiting ${wait}ms before retry ${attempt + 1}/${MAX_RETRIES}`);
@@ -378,7 +421,7 @@ async function fetchPythCandles(
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(20000), headers: getHermesHeaders() });
+      const res = await fetchWithHardTimeout(url, 20000, { headers: getHermesHeaders() });
       if ((res.status === 401 || res.status === 403) && !pythBenchmarksAuthWarned) {
         pythBenchmarksAuthWarned = true;
         console.error(
@@ -558,7 +601,7 @@ async function fetchOkxCandles(
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+      const res = await fetchWithHardTimeout(url, 15000);
       if (res.status === 429) {
         const wait = RETRY_DELAY_MS * (attempt + 1) * 2;
         console.log(`[OKX] Rate limited, waiting ${wait}ms before retry ${attempt + 1}/${MAX_RETRIES}`);

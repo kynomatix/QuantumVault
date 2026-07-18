@@ -340,13 +340,24 @@ async function buildUniverse(protocol: string): Promise<string[]> {
       markets = specs.map((s) => s.internalSymbol);
     } else {
       const adapter = getAdapter(protocol);
-      const all = await adapter.getMarkets();
+      // Race against a hard cap: getMarkets() is bounded only by
+      // AbortSignal.timeout inside the adapter — the exact primitive that
+      // failed to fire in the 2026-07-18 hung-fetch incident. If it never
+      // settles, this await would wedge the whole sweep BEFORE the dispatch
+      // loop's own drain cap can protect it. On timeout we throw into the
+      // catch below, which falls back to the stale universe cache.
+      const all = await Promise.race([
+        adapter.getMarkets(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("getMarkets hard-timeout after 20s")), 20_000),
+        ),
+      ]);
       markets = all.filter((m) => m.isActive).map((m) => m.internalSymbol);
     }
   } catch (err) {
-    console.error(
-      `[Scanner] universe build failed for ${protocol}: ${err instanceof Error ? err.message : err}`
-    );
+    const line = `[Scanner] universe build failed for ${protocol}: ${err instanceof Error ? err.message : err}`;
+    console.error(line);
+    appendTelemetry(line);
     // Return stale cache if available, else empty. Never throw.
     const stale = universeCache.get(protocol);
     return stale ? stale.data : [];
@@ -368,12 +379,17 @@ async function runSweep(): Promise<void> {
   if (sweepStartedAt !== null) {
     const ageMs = Date.now() - sweepStartedAt;
     if (ageMs < SWEEP_WEDGE_MS) {
-      console.log("[Scanner] Previous sweep still running — skipping this boundary");
+      const skipLine = `[Scanner] SWEEP SKIP: previous sweep still running (${Math.round(ageMs / 1000)}s) — skipping this boundary`;
+      console.log(skipLine);
+      appendTelemetry(skipLine);
       return;
     }
-    console.error(
-      `[Scanner] previous sweep wedged for ${Math.round(ageMs / 1000)}s — overriding so scanning continues`
-    );
+    // Mirror to telemetry: this fired at 07:45 on 2026-07-18 but only reached
+    // the console, so telemetry showed a sweep vanishing with no exit line and
+    // an external log reader diagnosed a phantom "silent flag clear".
+    const wedgeLine = `[Scanner] SWEEP WEDGE OVERRIDE: previous sweep wedged for ${Math.round(ageMs / 1000)}s — overriding so scanning continues`;
+    console.error(wedgeLine);
+    appendTelemetry(wedgeLine);
   }
   const gen = ++sweepGeneration;
   sweepStartedAt = Date.now();
@@ -562,9 +578,22 @@ async function runSweep(): Promise<void> {
             break;
           }
 
-          // Wait for a semaphore slot (busy-wait in 10ms slices).
+          // Wait for a semaphore slot (busy-wait in 10ms slices). MUST stay
+          // budget-bounded: if all 3 in-flight dispatches hang (2026-07-18: a
+          // single never-settling OKX fetch), an uncapped wait here would spin
+          // forever and the budget check above (only evaluated between
+          // markets) could never fire again.
+          let slotWaitTimedOut = false;
           while (inFlight >= MAX_CONCURRENT_FETCHES) {
+            if (Date.now() - protocolStart > protocolBudgetMs) {
+              slotWaitTimedOut = true;
+              break;
+            }
             await sleep(10);
+          }
+          if (slotWaitTimedOut) {
+            marketsSkippedByTimeout += universe.length - i;
+            break;
           }
           inFlight++;
           const p = dispatchMarket(market).finally(() => { inFlight--; });
@@ -587,8 +616,30 @@ async function runSweep(): Promise<void> {
           }
         }
 
-        // Wait for all in-flight fetches to finish.
-        await Promise.all(pendingPromises);
+        // Wait for all in-flight fetches to finish — but NEVER unboundedly.
+        // Prod incident 2026-07-18 07:30 UTC: one OKX fetch never settled (its
+        // AbortSignal.timeout never fired), this Promise.all waited on it
+        // forever, and the sweep wedged silently for 900s with no exit line.
+        // Cap the drain so the sweep ALWAYS reaches its summary lines; hung
+        // dispatches are abandoned, counted as errors, and reported instead.
+        const drainCapMs = Math.max(
+          15_000,
+          sweepBeganAt + SWEEP_WEDGE_MS - 30_000 - Date.now(),
+        );
+        const drained = await Promise.race([
+          Promise.all(pendingPromises).then(() => true),
+          sleep(drainCapMs).then(() => false),
+        ]);
+        if (!drained) {
+          const hangLine =
+            `[Scanner] SWEEP HANG: ${inFlight} dispatch(es) still unsettled after ` +
+            `${Math.round(drainCapMs / 1000)}s drain cap (${protocol} ${tf}) — abandoning them so the sweep can finish`;
+          console.error(hangLine);
+          appendTelemetry(hangLine);
+          errorCount += inFlight;
+          // Swallow any late rejection from abandoned promises.
+          for (const p of pendingPromises) p.catch(() => {});
+        }
 
         if (marketsSkippedByTimeout > 0) {
           const timeoutLine = `[Scanner] TIMEOUT: ${marketsSkippedByTimeout} markets skipped (${protocol} ${tf})`;
@@ -656,9 +707,13 @@ async function runSweep(): Promise<void> {
     console.log(sweepSummary);
     appendTelemetry(sweepSummary);
   } catch (err) {
-    console.error(
-      `[Scanner] sweep crashed: ${err instanceof Error ? err.message : err}`
-    );
+    // Invariant: no sweep may end without a SWEEP TOTAL or SWEEP ABORT line
+    // reaching telemetry — external log readers only see the telemetry file.
+    const abortLine =
+      `[Scanner] SWEEP ABORT: crashed after ${((Date.now() - sweepBeganAt) / 1000).toFixed(1)}s — ` +
+      `${err instanceof Error ? err.message : err}`;
+    console.error(abortLine);
+    appendTelemetry(abortLine);
   } finally {
     // Only clear our own claim — a wedged sweep that resumes after an override
     // must not wipe the newer sweep's timestamp.
@@ -684,11 +739,11 @@ function scheduleNextScan(): void {
     // even if runSweep() throws synchronously or takes longer than the interval.
     scheduleNextScan();
 
-    runSweep().catch((err) =>
-      console.error(
-        `[Scanner] sweep unhandled crash: ${err instanceof Error ? err.message : err}`
-      )
-    );
+    runSweep().catch((err) => {
+      const line = `[Scanner] SWEEP ABORT: unhandled crash — ${err instanceof Error ? err.message : err}`;
+      console.error(line);
+      appendTelemetry(line);
+    });
   }, delay);
 
   // Don't hold the process open just for the scanner timer.
