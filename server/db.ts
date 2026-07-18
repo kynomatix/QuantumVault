@@ -19,11 +19,14 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: poolSize,
   connectionTimeoutMillis: connTimeoutMs,
-  // 15s: evict idle connections well before Neon's ~30s idle cutoff
-  // (was 120s — that kept stale connections in the pool for 2 minutes after
-  // the provider killed them, causing "Connection terminated" on every use).
+  // 60s: Neon's serverless compute suspends after ~30s of zero connections; we
+  // previously evicted at 15s, meaning nearly every background-tick interval
+  // paid a fresh TLS+auth handshake. Raising to 60s keeps one warm connection
+  // alive across the typical 30–45s quiet gap between background scans and the
+  // keep-warm heartbeat below covers the rest. The Neon idle cutoff is ~300s
+  // on serverless plans, so 60s is safely below that.
   // keepAlive guards against silent TCP drops by intermediate proxies.
-  idleTimeoutMillis: 15_000,
+  idleTimeoutMillis: 60_000,
   keepAlive: true,
 });
 
@@ -41,11 +44,67 @@ pool.on("connect", (client) => {
   });
 });
 
+// ----- keep-warm heartbeat ------------------------------------------------
+// SELECT 1 every 20s keeps at least one connection alive through Neon's idle
+// window so background tasks don't always pay a fresh TLS+auth handshake.
+// Errors are counted (not thrown) so an unresponsive DB never causes an
+// unhandled rejection; the count surfaces in the [DB Pool] telemetry line.
+let _hbFailCount = 0;
 setInterval(() => {
-  const dbLine = `[DB Pool] total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount} max=${poolSize}`;
+  pool.query("SELECT 1").catch(() => { _hbFailCount++; });
+}, 20_000).unref();
+
+// ----- connect-slow visibility --------------------------------------------
+// Record when the pool first has requests waiting on a new connection; the
+// 'connect' event fires when the physical TCP+auth handshake finishes. The
+// delta is a direct measure of Neon handshake latency (the root cause of the
+// 07:31:24Z production cluster — multiple background tasks crashing because
+// fresh-handshake duration exceeded their DB query timeout).
+let _waitingSince: number | null = null;
+setInterval(() => {
+  if (pool.waitingCount > 0 && _waitingSince === null) {
+    _waitingSince = Date.now();
+  } else if (pool.waitingCount === 0) {
+    _waitingSince = null;
+  }
+}, 2_000).unref();
+
+pool.on("connect", () => {
+  if (_waitingSince !== null) {
+    const elapsed = Date.now() - _waitingSince;
+    _waitingSince = null;
+    if (elapsed > 2_000) {
+      const line = `[DB Pool] connect_slow elapsed=${elapsed}ms`;
+      console.warn(line);
+      appendTelemetry(line);
+    }
+  }
+});
+
+// ----- pool telemetry (30s) -----------------------------------------------
+setInterval(() => {
+  const hbPart = _hbFailCount > 0 ? ` hb_fail=${_hbFailCount}` : "";
+  _hbFailCount = 0; // reset window counter after each log
+  const dbLine = `[DB Pool] total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount} max=${poolSize}${hbPart}`;
   console.log(dbLine);
   appendTelemetry(dbLine);
 }, 30_000);
+
+// ----- shared connection-class error classifier ---------------------------
+// Used by background tasks to distinguish Neon handshake/timeout failures
+// (safe to retry once) from query/constraint errors (must not retry).
+export function isConnectionClassError(err: any): boolean {
+  const msg = (err?.message || "") as string;
+  return (
+    msg.includes("Authentication timed out") ||
+    msg.includes("connection timeout") ||
+    msg.includes("Connection terminated") ||
+    msg.includes("timeout exceeded") ||
+    msg.includes("too many clients") ||
+    msg.includes("ECONNRESET") ||
+    msg.includes("ETIMEDOUT")
+  );
+}
 
 export const db = drizzle(pool, { schema });
 

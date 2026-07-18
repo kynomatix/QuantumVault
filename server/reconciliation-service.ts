@@ -1080,6 +1080,21 @@ export async function reconcileBotPosition(
     lastReconcileTime.set(botId, Date.now());
     return { synced: true, discrepancy: hasDiscrepancy };
   } catch (error) {
+    if (isDbTimeout(error)) {
+      // Single retry after 2s on connection-class failures only (Neon handshake
+      // transient — prod 07:31:24Z: "Authentication timed out" hit several bots
+      // simultaneously while the pool itself was healthy). Never retries on
+      // query or constraint errors.
+      await new Promise((r) => setTimeout(r, 2_000));
+      try {
+        const retryResult = await reconcileBotPosition(botId, walletAddress, agentPublicKey, subAccountId, market, botSubaccountPublicKey);
+        console.log(`[Reconcile] Retry succeeded for bot ${botId} after connection error`);
+        return retryResult;
+      } catch (retryErr) {
+        console.error(`[Reconcile] Error for bot ${botId} (after retry):`, retryErr);
+        return { synced: false, discrepancy: false };
+      }
+    }
     console.error(`[Reconcile] Error for bot ${botId}:`, error);
     return { synced: false, discrepancy: false };
   }

@@ -1179,6 +1179,19 @@ export function cleanupExpiredSessions(): void {
 
 setInterval(cleanupExpiredSessions, 60 * 1000);
 
+function isNonceCleanupConnectionError(err: any): boolean {
+  const msg = (err?.message || "") as string;
+  return (
+    msg.includes("timeout exceeded") ||
+    msg.includes("Authentication timed out") ||
+    msg.includes("connection timeout") ||
+    msg.includes("Connection terminated") ||
+    msg.includes("too many clients") ||
+    msg.includes("ECONNRESET") ||
+    msg.includes("ETIMEDOUT")
+  );
+}
+
 export async function cleanupExpiredNonces(): Promise<void> {
   try {
     const count = await storage.cleanupExpiredNonces();
@@ -1186,9 +1199,19 @@ export async function cleanupExpiredNonces(): Promise<void> {
       console.log(`[Security] Cleaned up ${count} expired nonces`);
     }
   } catch (err: any) {
-    const msg = err?.message || "";
-    if (msg.includes("timeout exceeded") || msg.includes("Authentication timed out") || msg.includes("connection timeout") || msg.includes("Connection terminated") || msg.includes("too many clients")) {
-      console.warn('[Security] Nonce cleanup skipped — DB timeout');
+    if (isNonceCleanupConnectionError(err)) {
+      // Single retry after 2s on connection-class errors — covers Neon transient
+      // handshake failures that hit several background tasks at once (prod
+      // 07:31:24Z cluster). Never retries on query/constraint errors.
+      await new Promise((r) => setTimeout(r, 2_000));
+      try {
+        const count = await storage.cleanupExpiredNonces();
+        if (count > 0) {
+          console.log(`[Security] Cleaned up ${count} expired nonces (after retry)`);
+        }
+      } catch (retryErr: any) {
+        console.warn('[Security] Nonce cleanup skipped — DB timeout');
+      }
     } else {
       console.error('[Security] Failed to cleanup expired nonces:', err);
     }

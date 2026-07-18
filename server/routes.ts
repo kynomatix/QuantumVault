@@ -13,7 +13,7 @@ import { sumNetDepositedFromEvents, isVaultInternalEvent } from "./equity-events
 import { recordCriticalError } from "./error-log";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot, type BorrowPosition, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents, marketplaceEquitySnapshots, userApiTokens, labOptimizationRuns } from "@shared/schema";
 import type { Request as ExpressRequest, Response as ExpressResponse, NextFunction } from "express";
-import { db } from "./db";
+import { db, isConnectionClassError } from "./db";
 import { desc, eq, sql, asc, and } from "drizzle-orm";
 import { ZodError } from "zod";
 import { getDefaultAdapter, getAdapterForBot, getAdapter } from './protocol/adapter-registry';
@@ -2296,8 +2296,22 @@ async function runAutoReparkScan(): Promise<void> {
   try {
     due = await storage.claimDueAutoReparkBots();
   } catch (e: any) {
-    console.error(`[AutoRepark] failed to claim due bots: ${e?.message ?? e}`);
-    return;
+    if (isConnectionClassError(e)) {
+      // Single retry after 2s — covers Neon transient handshake failures that
+      // hit several background tasks simultaneously (prod 07:31:24Z cluster).
+      // Never retries on query/constraint errors.
+      await new Promise((r) => setTimeout(r, 2_000));
+      try {
+        due = await storage.claimDueAutoReparkBots();
+        console.log("[AutoRepark] claim retry succeeded after connection error");
+      } catch (e2: any) {
+        console.error(`[AutoRepark] failed to claim due bots: ${e2?.message ?? e2}`);
+        return;
+      }
+    } else {
+      console.error(`[AutoRepark] failed to claim due bots: ${e?.message ?? e}`);
+      return;
+    }
   }
   for (const bot of due) {
     try {
