@@ -527,7 +527,7 @@ describe("sl_in_sweep_zone (Phase B soft flag)", () => {
     // zone: [98 - 0.09, 98] = [97.91, 98]; SL=98 → in zone
     const r = applyGuardrails(
       makeLong({ stopLossPrice: 98 }),
-      makeInput({ activeRangeLow: 98, activeRangeHigh: 105 })
+      makeInput({ activeRange: { high: 105, low: 98 } })
     );
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -541,7 +541,7 @@ describe("sl_in_sweep_zone (Phase B soft flag)", () => {
     // zone: [97.91, 98]; SL=97.95 → in zone
     const r = applyGuardrails(
       makeLong({ stopLossPrice: 97.95 }),
-      makeInput({ activeRangeLow: 98, activeRangeHigh: 105 })
+      makeInput({ activeRange: { high: 105, low: 98 } })
     );
     expect(r.ok).toBe(true);
     expect(codes(r.ok ? r.violations : [])).toContain("sl_in_sweep_zone");
@@ -551,7 +551,7 @@ describe("sl_in_sweep_zone (Phase B soft flag)", () => {
     // zone top = 97.91; SL=97.90 < 97.91 → outside zone
     const r = applyGuardrails(
       makeLong({ stopLossPrice: 97.90 }),
-      makeInput({ activeRangeLow: 98, activeRangeHigh: 105 })
+      makeInput({ activeRange: { high: 105, low: 98 } })
     );
     expect(r.ok).toBe(true);
     expect(codes(r.ok ? r.violations : [])).not.toContain("sl_in_sweep_zone");
@@ -561,7 +561,7 @@ describe("sl_in_sweep_zone (Phase B soft flag)", () => {
     // zone: [102, 102 + 0.09] = [102, 102.09]; SL=102.05 → in zone
     const r = applyGuardrails(
       makeShort({ stopLossPrice: 102.05 }),
-      makeInput({ activeRangeHigh: 102, activeRangeLow: 95 })
+      makeInput({ activeRange: { high: 102, low: 95 } })
     );
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -575,7 +575,7 @@ describe("sl_in_sweep_zone (Phase B soft flag)", () => {
     // SL exactly at rangeHigh → start of zone → fires
     const r = applyGuardrails(
       makeShort({ stopLossPrice: 102 }),
-      makeInput({ activeRangeHigh: 102, activeRangeLow: 95 })
+      makeInput({ activeRange: { high: 102, low: 95 } })
     );
     expect(r.ok).toBe(true);
     expect(codes(r.ok ? r.violations : [])).toContain("sl_in_sweep_zone");
@@ -585,7 +585,7 @@ describe("sl_in_sweep_zone (Phase B soft flag)", () => {
     // zone ceiling = 102.09; SL=102.10 > 102.09 → outside zone
     const r = applyGuardrails(
       makeShort({ stopLossPrice: 102.10 }),
-      makeInput({ activeRangeHigh: 102, activeRangeLow: 95 })
+      makeInput({ activeRange: { high: 102, low: 95 } })
     );
     expect(r.ok).toBe(true);
     expect(codes(r.ok ? r.violations : [])).not.toContain("sl_in_sweep_zone");
@@ -600,7 +600,7 @@ describe("sl_in_sweep_zone (Phase B soft flag)", () => {
   it("does NOT fire on a wrong-side SL (fatal rejection fires before sweep check)", () => {
     const r = applyGuardrails(
       makeLong({ stopLossPrice: 101 }), // SL above entry for long = wrong side
-      makeInput({ activeRangeLow: 98, activeRangeHigh: 105 })
+      makeInput({ activeRange: { high: 105, low: 98 } })
     );
     expect(r.ok).toBe(false);
     expect(codes(r.violations)).toContain("sl_wrong_side");
@@ -612,7 +612,7 @@ describe("sl_in_sweep_zone (Phase B soft flag)", () => {
     // Use wide TP (110) to maintain RR ≥ 1.2 with the larger stop distance.
     const r = applyGuardrails(
       makeLong({ stopLossPrice: 95, takeProfitPrice: 110 }),
-      makeInput({ activeRangeLow: 98, activeRangeHigh: 105 })
+      makeInput({ activeRange: { high: 105, low: 98 } })
     );
     expect(r.ok).toBe(true);
     expect(codes(r.ok ? r.violations : [])).not.toContain("sl_in_sweep_zone");
@@ -621,7 +621,7 @@ describe("sl_in_sweep_zone (Phase B soft flag)", () => {
   it("proceeds with a clean ok:true when sl_in_sweep_zone is the only issue", () => {
     const r = applyGuardrails(
       makeLong({ stopLossPrice: 97.95 }),
-      makeInput({ activeRangeLow: 98, activeRangeHigh: 105 })
+      makeInput({ activeRange: { high: 105, low: 98 } })
     );
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -634,8 +634,7 @@ describe("sl_in_sweep_zone (Phase B soft flag)", () => {
     const r = applyGuardrails(
       makeLong({ stopLossPrice: 97.95, confidence: 7 }),
       makeInput({
-        activeRangeLow: 98,
-        activeRangeHigh: 105,
+        activeRange: { high: 105, low: 98 },
         sizingMode: "risk_based",
         riskMinPct: 0.5,
         riskMaxPct: 1.5,

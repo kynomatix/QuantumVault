@@ -411,6 +411,8 @@ async function finalizeDecision(args: {
     riskMinPct: parseFloat(bot.riskMinPct ?? "0.50"),
     riskMaxPct: parseFloat(bot.riskMaxPct ?? "1.50"),
     currentEquity,
+    // SL-PLACE Phase B: pass active-range from context digest (null-safe).
+    activeRange: digest?.activeRange ?? undefined,
   });
 
   // Outcome: 'flat' is terminal immediately; a guardrail reject is terminal as

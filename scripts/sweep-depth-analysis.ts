@@ -14,9 +14,25 @@
  * Run:  npx tsx scripts/sweep-depth-analysis.ts
  * Opts: --N 50   (rolling range lookback, default 50)
  *       --M 20   (reversal check window in bars, default 20)
+ *
+ * ── Phase B extension: AAVE-Pattern Counter ──────────────────────────────────
+ * Scans ai_trader_decisions for closed SL-exit trades where the stop was placed
+ * inside the active-range sweep zone (contextDigest.activeRange populated) AND
+ * price moved ≥ 1R in the thesis direction after the stop filled — i.e. a
+ * sweep-stop that was a false breakout, not a real reversal.
+ *
+ * Run:  npx tsx scripts/sweep-depth-analysis.ts --aave
+ * Opts: --verbose      (per-decision detail lines)
+ *       --timeframe 1h (filter to one TF)
  */
 
-import { pool } from "../server/db";
+import { pool, db, closePool } from "../server/db";
+import { aiTraderDecisions, aiTraderBots } from "@shared/schema";
+import { eq, and, isNotNull, inArray } from "drizzle-orm";
+import { fetchOHLCV } from "../server/lab/datafeed";
+import { marketToDatafeedTicker } from "../server/ai-trader/context-builder";
+import { SWEEP_BUFFER_ATR } from "../server/ai-trader/guardrails";
+import type { OHLCV } from "../server/lab/engine";
 
 const N_DEFAULT = 50;
 const M_DEFAULT = 20;
@@ -174,4 +190,270 @@ async function main() {
   await pool.end();
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+// ─── AAVE-Pattern Counter (Phase B extension) ─────────────────────────────────
+// Run with: npx tsx scripts/sweep-depth-analysis.ts --aave
+
+const AAVE_MODE  = process.argv.includes("--aave");
+const VERBOSE    = process.argv.includes("--verbose");
+const TF_FILTER  = process.argv.includes("--timeframe")
+  ? process.argv[process.argv.indexOf("--timeframe") + 1]
+  : null;
+
+interface AaveDecisionFields {
+  id:             string;
+  botId:          string;
+  action:         "long" | "short";
+  entryPrice:     number;
+  stopLossPrice:  number;
+  takeProfitPrice: number;
+  decidedAt:      Date;
+  closedAt:       Date;
+  exitReason:     string | null;
+  realizedPnl:    number | null;
+  activeRange:    { high: number; low: number } | null;
+  atr14:          number | null;
+}
+
+function parseAaveDecision(row: {
+  id: string; botId: string | null; entryPrice: string | null;
+  exitReason: string | null; realizedPnl: string | null;
+  rawDecision: unknown; clampedDecision: unknown; contextDigest: unknown;
+  decidedAt: Date | null; closedAt: Date | null;
+}): AaveDecisionFields | null {
+  const entryPrice = parseFloat(row.entryPrice ?? "");
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) return null;
+  if (!row.decidedAt || !row.closedAt || !row.botId) return null;
+  const dec = (row.clampedDecision ?? row.rawDecision) as Record<string, unknown> | null;
+  if (!dec) return null;
+  const action = dec.action as string | undefined ?? (row.rawDecision as any)?.action;
+  if (action !== "long" && action !== "short") return null;
+  const tp = Number(dec.takeProfitPrice ?? (row.rawDecision as any)?.takeProfitPrice);
+  const sl = Number(dec.stopLossPrice   ?? (row.rawDecision as any)?.stopLossPrice);
+  if (!Number.isFinite(tp) || tp <= 0 || !Number.isFinite(sl) || sl <= 0) return null;
+  const digest = row.contextDigest as Record<string, unknown> | null;
+  let activeRange: { high: number; low: number } | null = null;
+  let atr14: number | null = null;
+  if (digest) {
+    const ar = digest.activeRange as Record<string, unknown> | null;
+    if (ar && typeof ar.high === "number" && typeof ar.low === "number" &&
+        Number.isFinite(ar.high) && Number.isFinite(ar.low)) {
+      activeRange = { high: ar.high, low: ar.low };
+    }
+    if (typeof digest.atr14 === "number" && Number.isFinite(digest.atr14)) {
+      atr14 = digest.atr14 as number;
+    }
+  }
+  return {
+    id: row.id, botId: row.botId, action: action as "long" | "short",
+    entryPrice, stopLossPrice: sl, takeProfitPrice: tp,
+    decidedAt: row.decidedAt, closedAt: row.closedAt,
+    exitReason: row.exitReason,
+    realizedPnl: row.realizedPnl !== null ? parseFloat(row.realizedPnl) : null,
+    activeRange, atr14,
+  };
+}
+
+function aaveComputeAtr14(candles: OHLCV[]): number | null {
+  if (candles.length < 14) return null;
+  let atr = 0;
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const tr = i === 0 ? c.high - c.low : Math.max(
+      c.high - c.low,
+      Math.abs(c.high - candles[i - 1].close),
+      Math.abs(c.low  - candles[i - 1].close)
+    );
+    if (i < 13) { atr += tr; }
+    else if (i === 13) { atr = (atr + tr) / 14; }
+    else { atr = (13 * atr + tr) / 14; }
+  }
+  return atr > 0 ? atr : null;
+}
+
+function aaveTfMs(tf: string): number {
+  switch (tf) {
+    case "15m": return 15 * 60_000;
+    case "1h":  return 60 * 60_000;
+    case "4h":  return  4 * 60 * 60_000;
+    case "1d":  return 24 * 60 * 60_000;
+    default:    return 60 * 60_000;
+  }
+}
+
+function f2(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "n/a";
+  return n.toFixed(2);
+}
+
+async function mainAave(): Promise<void> {
+  console.log("=== AAVE-Pattern Counter  SL-PLACE Phase B baseline ===\n");
+  if (TF_FILTER) console.log(`Filtering to timeframe: ${TF_FILTER}\n`);
+
+  if (!process.env.DATABASE_URL) {
+    console.error("DATABASE_URL not set."); process.exit(1);
+  }
+
+  const rawRows = await db.select({
+    id:              aiTraderDecisions.id,
+    botId:           aiTraderDecisions.botId,
+    entryPrice:      aiTraderDecisions.entryPrice,
+    exitReason:      aiTraderDecisions.exitReason,
+    realizedPnl:     aiTraderDecisions.realizedPnl,
+    rawDecision:     aiTraderDecisions.rawDecision,
+    clampedDecision: aiTraderDecisions.clampedDecision,
+    contextDigest:   aiTraderDecisions.contextDigest,
+    decidedAt:       aiTraderDecisions.decidedAt,
+    closedAt:        aiTraderDecisions.closedAt,
+  }).from(aiTraderDecisions).where(and(
+    eq(aiTraderDecisions.outcome,    "executed"),
+    eq(aiTraderDecisions.exitReason, "sl"),
+    isNotNull(aiTraderDecisions.closedAt),
+    isNotNull(aiTraderDecisions.entryPrice),
+  ));
+
+  console.log(`SL-exit closed decisions: ${rawRows.length}`);
+  if (rawRows.length === 0) {
+    console.log("No SL-exit decisions found. Run AI Trader first.");
+    await pool.end(); process.exit(0);
+  }
+
+  const allParsed = rawRows.map((r) => parseAaveDecision(r as any)).filter(Boolean) as AaveDecisionFields[];
+  const withRange = allParsed.filter((d) => d.activeRange !== null);
+  console.log(`Parseable: ${allParsed.length}  With active-range: ${withRange.length}  No-range (skipped): ${allParsed.length - withRange.length}`);
+
+  if (withRange.length === 0) {
+    console.log("\nNo decisions with active-range data yet.");
+    console.log("contextDigest.activeRange is populated from SL-PLACE Phase B onward.");
+    await pool.end(); process.exit(0);
+  }
+
+  const botIds = [...new Set(withRange.map((d) => d.botId))];
+  const botRows = botIds.length === 0 ? [] : await db
+    .select({ id: aiTraderBots.id, market: aiTraderBots.market, timeframe: aiTraderBots.timeframe })
+    .from(aiTraderBots)
+    .where(botIds.length === 1 ? eq(aiTraderBots.id, botIds[0]) : inArray(aiTraderBots.id, botIds));
+  const botMap = new Map(botRows.map((b) => [b.id, { market: b.market, timeframe: b.timeframe }]));
+
+  const candidates = TF_FILTER
+    ? withRange.filter((d) => botMap.get(d.botId)?.timeframe === TF_FILTER)
+    : withRange;
+
+  let noBot = 0, noCandles = 0, noAtr = 0, notInZone = 0, scannedOk = 0;
+  const matches: Array<{
+    market: string; timeframe: string; action: string; sl: number;
+    rangeLow: number; rangeHigh: number; atr14: number; sweepBuffer: number;
+    sweepMult: number; sweepDepth: number; sweepDepthR: number;
+    continueMove: number; continueMoveR: number;
+    exitReason: string | null; realizedPnl: number | null; decisionId: string;
+  }> = [];
+
+  for (const d of candidates) {
+    const bot = botMap.get(d.botId);
+    if (!bot) { noBot++; continue; }
+
+    const ticker   = marketToDatafeedTicker(bot.market);
+    const startIso = new Date(d.decidedAt.getTime() - 14 * aaveTfMs(bot.timeframe)).toISOString();
+    const endIso   = new Date(d.closedAt.getTime()  + 10 * aaveTfMs(bot.timeframe)).toISOString();
+    let candles: OHLCV[] = [];
+    try { candles = await fetchOHLCV(ticker, bot.timeframe, startIso, endIso); } catch { /* skip */ }
+    if (candles.length < 14) { noCandles++; continue; }
+
+    const tf = bot.timeframe as keyof typeof SWEEP_BUFFER_ATR;
+    const sweepMult   = SWEEP_BUFFER_ATR[tf] ?? 0.75;
+    const atr14       = d.atr14 && Number.isFinite(d.atr14) && d.atr14 > 0
+      ? d.atr14 : aaveComputeAtr14(candles);
+    if (!atr14 || atr14 <= 0) { noAtr++; continue; }
+
+    const sweepBuffer = sweepMult * atr14;
+    const oneR        = Math.abs(d.entryPrice - d.stopLossPrice);
+    if (oneR <= 0) { noAtr++; continue; }
+
+    const ar  = d.activeRange!;
+    const sl  = d.stopLossPrice;
+    let inZone = false, sweepDepth = 0;
+
+    if (d.action === "long") {
+      if (sl >= ar.low - sweepBuffer && sl <= ar.low) { inZone = true; sweepDepth = ar.low - sl; }
+    } else {
+      if (sl >= ar.high && sl <= ar.high + sweepBuffer) { inZone = true; sweepDepth = sl - ar.high; }
+    }
+
+    scannedOk++;
+    if (!inZone) { notInZone++; continue; }
+
+    let stopIdx = -1;
+    for (let i = 0; i < candles.length; i++) {
+      if (d.action === "long"  && candles[i].low  <= sl) { stopIdx = i; break; }
+      if (d.action === "short" && candles[i].high >= sl) { stopIdx = i; break; }
+    }
+    if (stopIdx === -1 || stopIdx + 1 >= candles.length) { notInZone++; continue; }
+
+    const after = candles.slice(stopIdx + 1);
+    const continueMove = d.action === "long"
+      ? Math.max(...after.map((c) => c.high)) - sl
+      : sl - Math.min(...after.map((c) => c.low));
+    const continueMoveR = continueMove / oneR;
+
+    if (VERBOSE) {
+      const zoneStr = d.action === "long"
+        ? `rangeLow=${f2(ar.low)} sweepDepth=$${f2(sweepDepth)}`
+        : `rangeHigh=${f2(ar.high)} sweepDepth=$${f2(sweepDepth)}`;
+      console.log(`  [${continueMoveR >= 1 ? "AAVE" : "no-cont"}] ${d.id.slice(0, 8)} ${bot.market} ${bot.timeframe} ${d.action.toUpperCase()}  SL=${f2(sl)}  ${zoneStr}  cont=${f2(continueMove)}=${continueMoveR.toFixed(2)}R`);
+    }
+
+    if (continueMoveR >= 1) {
+      matches.push({
+        market: bot.market, timeframe: bot.timeframe, action: d.action,
+        sl, rangeLow: ar.low, rangeHigh: ar.high, atr14, sweepBuffer, sweepMult,
+        sweepDepth, sweepDepthR: sweepDepth / oneR,
+        continueMove, continueMoveR,
+        exitReason: d.exitReason, realizedPnl: d.realizedPnl, decisionId: d.id,
+      });
+    }
+  }
+
+  console.log(`\n─── Scan Summary ─────────────────────────────────────────────`);
+  console.log(`Candidates:              ${candidates.length}`);
+  console.log(`No bot info:             ${noBot}`);
+  console.log(`Insufficient candles:    ${noCandles}`);
+  console.log(`ATR unavailable:         ${noAtr}`);
+  console.log(`Scanned OK:              ${scannedOk}`);
+  console.log(`In zone, no continuation:${notInZone}`);
+  console.log(`AAVE patterns (≥1R cont):${matches.length}`);
+
+  const sweepTotal = matches.length + notInZone;
+  if (scannedOk > 0) {
+    const sweepPct = sweepTotal / scannedOk;
+    const aavePct  = sweepTotal > 0 ? matches.length / sweepTotal : 0;
+    console.log(`\nOf ${scannedOk} scanned SL decisions:`);
+    console.log(`  ${sweepTotal} (${(sweepPct * 100).toFixed(1)}%) had SL in sweep zone`);
+    if (sweepTotal > 0) {
+      console.log(`  of those, ${matches.length} (${(aavePct * 100).toFixed(1)}%) had ≥1R continuation → AAVE pattern`);
+      console.log(`\nPhase B baseline: aavePct = ${(aavePct * 100).toFixed(1)}%  (n=${sweepTotal})`);
+    }
+  }
+
+  if (matches.length > 0) {
+    const byKey = new Map<string, number>();
+    for (const m of matches) byKey.set(`${m.market}/${m.timeframe}`, (byKey.get(`${m.market}/${m.timeframe}`) ?? 0) + 1);
+    console.log(`\n─── By Market/TF ─────────────────────────────────────────────`);
+    for (const [k, n] of [...byKey.entries()].sort((a, b) => b[1] - a[1])) console.log(`  ${k}: ${n}`);
+    const avgSweepR = matches.reduce((s, m) => s + m.sweepDepthR, 0) / matches.length;
+    const avgContR  = matches.reduce((s, m) => s + m.continueMoveR, 0) / matches.length;
+    console.log(`\n─── Aggregate ────────────────────────────────────────────────`);
+    console.log(`Avg sweep depth: ${avgSweepR.toFixed(3)}R  Avg post-stop cont: ${avgContR.toFixed(2)}R`);
+    console.log(`Total realized PnL: $${f2(matches.reduce((s, m) => s + (m.realizedPnl ?? 0), 0))}`);
+  } else {
+    console.log("\nNo AAVE patterns found. Re-run after more SL-exit data accumulates.");
+  }
+
+  await closePool();
+}
+
+// ─── Entry point ──────────────────────────────────────────────────────────────
+
+if (AAVE_MODE) {
+  mainAave().catch((e) => { console.error(e); process.exit(1); });
+} else {
+  main().catch((e) => { console.error(e); process.exit(1); });
+}

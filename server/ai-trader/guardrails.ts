@@ -71,12 +71,11 @@ export interface GuardrailInput {
    */
   currentEquity?: number;
   /**
-   * SL-PLACE Phase B: active-range high/low from the context-builder's detected
-   * range (high and low extracted separately so this module stays import-free).
-   * When both are finite, enables the non-fatal sl_in_sweep_zone soft flag.
+   * SL-PLACE Phase B: active-range bounds from the context-builder's detected
+   * range. When provided, enables the non-fatal sl_in_sweep_zone soft flag.
+   * The buffer multiplier is looked up from SWEEP_BUFFER_ATR[timeframe].
    */
-  activeRangeHigh?: number;
-  activeRangeLow?: number;
+  activeRange?: { high: number; low: number };
 }
 
 export interface GuardrailViolation {
@@ -489,25 +488,26 @@ export function applyGuardrails(
   // Guard: slOnCorrectSide must already be true (wrong-side would have rejected above).
   if (
     slOnCorrectSide &&
-    typeof input.activeRangeHigh === "number" &&
-    Number.isFinite(input.activeRangeHigh) &&
-    typeof input.activeRangeLow === "number" &&
-    Number.isFinite(input.activeRangeLow) &&
+    input.activeRange !== undefined &&
+    input.activeRange !== null && // null check: digest may supply null at runtime despite TS type
+    Number.isFinite(input.activeRange.high) &&
+    Number.isFinite(input.activeRange.low) &&
     Number.isFinite(input.atr14) &&
     input.atr14 > 0
   ) {
+    const { high: rangeHigh, low: rangeLow } = input.activeRange;
     const sweepBuffer = SWEEP_BUFFER_ATR[input.timeframe] * input.atr14;
     if (side === "long") {
       // Vulnerable side: range LOW. The sweep zone is [rangeLow − buffer, rangeLow].
       // SL landing there is at/just past the extreme but within routine wick distance.
-      const zoneFloor   = input.activeRangeLow - sweepBuffer;
-      const zoneCeiling = input.activeRangeLow;
+      const zoneFloor   = rangeLow - sweepBuffer;
+      const zoneCeiling = rangeLow;
       if (sl >= zoneFloor && sl <= zoneCeiling) {
         violations.push(
           violation(
             "G2",
             "sl_in_sweep_zone",
-            `SL ${sl} is within ${SWEEP_BUFFER_ATR[input.timeframe]}×ATR (${sweepBuffer.toFixed(6)}) of the active-range low ${input.activeRangeLow} — routine sweep zone; move stop to ≤ ${(input.activeRangeLow - sweepBuffer).toFixed(6)} for sufficient clearance`,
+            `SL ${sl} is within ${SWEEP_BUFFER_ATR[input.timeframe]}×ATR (${sweepBuffer.toFixed(6)}) of the active-range low ${rangeLow} — routine sweep zone; move stop to ≤ ${(rangeLow - sweepBuffer).toFixed(6)} for sufficient clearance`,
             false
           )
         );
@@ -515,14 +515,14 @@ export function applyGuardrails(
     } else {
       // Vulnerable side: range HIGH. The sweep zone is [rangeHigh, rangeHigh + buffer].
       // SL landing there is at/just past the extreme but within routine wick distance.
-      const zoneFloor   = input.activeRangeHigh;
-      const zoneCeiling = input.activeRangeHigh + sweepBuffer;
+      const zoneFloor   = rangeHigh;
+      const zoneCeiling = rangeHigh + sweepBuffer;
       if (sl >= zoneFloor && sl <= zoneCeiling) {
         violations.push(
           violation(
             "G2",
             "sl_in_sweep_zone",
-            `SL ${sl} is within ${SWEEP_BUFFER_ATR[input.timeframe]}×ATR (${sweepBuffer.toFixed(6)}) of the active-range high ${input.activeRangeHigh} — routine sweep zone; move stop to ≥ ${(input.activeRangeHigh + sweepBuffer).toFixed(6)} for sufficient clearance`,
+            `SL ${sl} is within ${SWEEP_BUFFER_ATR[input.timeframe]}×ATR (${sweepBuffer.toFixed(6)}) of the active-range high ${rangeHigh} — routine sweep zone; move stop to ≥ ${(rangeHigh + sweepBuffer).toFixed(6)} for sufficient clearance`,
             false
           )
         );

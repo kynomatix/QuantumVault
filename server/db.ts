@@ -107,6 +107,8 @@ export function isConnectionClassError(err: any): boolean {
 }
 
 export const db = drizzle(pool, { schema });
+/** @internal — exported for standalone analysis scripts only; do not import from production code paths. */
+export { pool };
 
 export async function closePool(): Promise<void> {
   await pool.end();
