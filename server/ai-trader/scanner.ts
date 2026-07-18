@@ -24,6 +24,7 @@ import { getAdapter } from "../protocol/adapter-registry";
 import { detectWM } from "./wm-detector";
 import { detectPivots, classifyDow, type DowClassification } from "./dow-structure";
 import { getSessionContext } from "./session-context";
+import { appendTelemetry } from "../telemetry";
 
 // ─── Feed-dead set (module-top const — edit-and-redeploy, no runtime config) ──
 //
@@ -598,10 +599,11 @@ async function runSweep(): Promise<void> {
           .map((c) => `${c.market} ${c.setup} ${Math.round(c.score)}`)
           .join(", ");
         const durationSec = ((tfFinish - tfStart) / 1000).toFixed(1);
-        console.log(
+        const sweepLine =
           `[Scanner] ${protocol} ${tf}: ${marketsScanned} scanned, ${marketsFresh} fresh, ` +
-            `${tfCandidates.length} candidates${tfCandidates.length > 0 ? ` (${candStr})` : ""} in ${durationSec}s`,
-        );
+          `${tfCandidates.length} candidates${tfCandidates.length > 0 ? ` (${candStr})` : ""} in ${durationSec}s`;
+        console.log(sweepLine);
+        appendTelemetry(sweepLine);
       } // end TF loop
     } // end protocol loop
 

@@ -19,6 +19,7 @@ import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
 import { startTelegramDailySummaryJob } from "./telegram-daily-summary-job";
 import { recordCriticalError, flushErrorLog } from "./error-log";
 import * as os from "node:os";
+import { appendTelemetry } from "./telemetry";
 
 // Global crash capture for the admin "Errors" panel. Registered at module load so it catches
 // failures from any background job. Both handlers record the error then preserve Node's default
@@ -616,10 +617,11 @@ app.use((req, res, next) => {
       const m = process.memoryUsage();
       const mb = (n: number) => Math.round(n / 1048576);
       const gb = (n: number) => (n / 1073741824).toFixed(2);
-      console.log(
+      const resourceLine =
         `[Resources] rss=${mb(m.rss)}MB heap=${mb(m.heapUsed)}/${mb(m.heapTotal)}MB ext=${mb(m.external)}MB ` +
-        `free=${gb(os.freemem())}/${gb(os.totalmem())}GB load1=${os.loadavg()[0].toFixed(2)}`,
-      );
+        `free=${gb(os.freemem())}/${gb(os.totalmem())}GB load1=${os.loadavg()[0].toFixed(2)}`;
+      console.log(resourceLine);
+      appendTelemetry(resourceLine);
     } catch {}
   };
   logResources();

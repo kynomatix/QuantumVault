@@ -22,3 +22,6 @@ generated-*
 # Referenced nowhere; churns every dev/build run. Pinned via skip-worktree in
 # scripts/check-og-image.mjs so git ignores it. NEVER touch. See replit.md Directives.
 client/public/opengraph.jpg
+
+# Local telemetry log (size-rotated, never committed)
+logs/

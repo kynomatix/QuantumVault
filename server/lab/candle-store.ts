@@ -2,6 +2,7 @@ import { labCandleCache } from "@shared/schema";
 import { db } from "../db";
 import { eq, and, gte, lte, sql } from "drizzle-orm";
 import type { OHLCV } from "./engine";
+import { appendTelemetry } from "../telemetry";
 
 export async function getCachedCandles(
   symbol: string,
@@ -112,7 +113,9 @@ export async function saveCandlesToDb(
   if (candles.length === 0) return;
   if (activeCandleWrites >= MAX_ACTIVE_CANDLE_WRITES) {
     if (queuedCandleWrites >= MAX_QUEUED_CANDLE_WRITES) {
-      console.log(`[CandleCache] Write queue full — dropping best-effort save of ${candles.length} candles for ${symbol} ${timeframe}`);
+      const wqLine = `[CandleCache] Write queue full — dropping best-effort save of ${candles.length} candles for ${symbol} ${timeframe}`;
+      console.log(wqLine);
+      appendTelemetry(wqLine);
       return;
     }
     queuedCandleWrites++;

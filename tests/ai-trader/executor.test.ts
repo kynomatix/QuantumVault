@@ -225,6 +225,25 @@ describe("executeDecision — entry-shape refusals", () => {
     expect(ok).toMatchObject({ ok: true, mode: "paper" });
   });
 
+  it("fresh-read guard fires on busy FRESH DB row even when caller snapshot says 'analyzing'", async () => {
+    // Pins the write-after-snapshot race: scanner legitimately forces status →
+    // 'analyzing' on its snapshot before calling executeDecision, but a concurrent
+    // or crashed pass may have already flipped the DB row to 'open'/'executing'/
+    // 'proposed'. The fresh re-read at executor.ts:178 must catch this.
+    const { executeDecision } = await importExecutor();
+    for (const freshStatus of ["open", "executing", "proposed"] as const) {
+      getAiTraderBotMock.mockResolvedValueOnce(makeBot({ status: freshStatus }));
+      const r = await executeDecision({
+        bot: makeBot({ status: "analyzing", paperMode: false }),
+        decisionId: "d-fresh",
+        clamped: makeClamped(),
+        adapter: makeAdapter(),
+        markPrice: 150,
+      });
+      expect(r).toMatchObject({ ok: false, reason: "bot_busy" });
+    }
+  });
+
   it("refuses a ClampedDecision with missing/invalid numeric fields", async () => {
     const { executeDecision } = await importExecutor();
     const bad: Partial<ClampedDecision>[] = [

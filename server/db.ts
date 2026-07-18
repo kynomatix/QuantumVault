@@ -2,6 +2,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pkg from "pg";
 const { Pool } = pkg;
 import * as schema from "@shared/schema";
+import { appendTelemetry } from "./telemetry";
 
 if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL must be set");
@@ -41,7 +42,9 @@ pool.on("connect", (client) => {
 });
 
 setInterval(() => {
-  console.log(`[DB Pool] total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount} max=${poolSize}`);
+  const dbLine = `[DB Pool] total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount} max=${poolSize}`;
+  console.log(dbLine);
+  appendTelemetry(dbLine);
 }, 30_000);
 
 export const db = drizzle(pool, { schema });

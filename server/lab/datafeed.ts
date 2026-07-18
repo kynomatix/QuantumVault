@@ -1,6 +1,7 @@
 import type { OHLCV } from "./engine";
 import { getCachedCandles, saveCandlesToDb } from "./candle-store";
 import { getBenchmarksBase, getHermesHeaders } from '../pricing/hermes-config.js';
+import { appendTelemetry } from "../telemetry";
 
 const OKX_BATCH_SIZE = 300;
 const GATE_BATCH_SIZE = 900;
@@ -217,7 +218,9 @@ async function fetchAllGateCandles(
 
   while (currentFrom < endSec) {
     if (Date.now() >= deadlineAt) {
-      console.log(`[Gate Spot] Fetch deadline reached — stopping with ${allCandles.length} candles for ${pair} ${interval}`);
+      const gateDeadlineMsg = `[Gate Spot] Fetch deadline reached — stopping with ${allCandles.length} candles for ${pair} ${interval}`;
+      console.log(gateDeadlineMsg);
+      appendTelemetry(gateDeadlineMsg);
       break;
     }
     const chunkEnd = Math.min(currentFrom + windowSeconds, endSec);
@@ -370,7 +373,9 @@ async function fetchAllPythCandles(
 
   while (currentFrom < endSec) {
     if (Date.now() >= deadlineAt) {
-      console.log(`[Pyth] Fetch deadline reached — stopping with ${allCandles.length} candles for ${pythSymbol} ${resolution}`);
+      const pythDeadlineMsg = `[Pyth] Fetch deadline reached — stopping with ${allCandles.length} candles for ${pythSymbol} ${resolution}`;
+      console.log(pythDeadlineMsg);
+      appendTelemetry(pythDeadlineMsg);
       break;
     }
     const chunkEnd = Math.min(currentFrom + chunkSeconds, endSec);
@@ -659,7 +664,9 @@ export async function fetchOHLCV(
 
     while (currentEndMs > startMs) {
       if (Date.now() >= deadlineAt) {
-        console.log(`[OKX] Fetch deadline reached — stopping with ${allCandles.length} candles for ${instId} ${bar}`);
+        const okxDeadlineMsg = `[OKX] Fetch deadline reached — stopping with ${allCandles.length} candles for ${instId} ${bar}`;
+        console.log(okxDeadlineMsg);
+        appendTelemetry(okxDeadlineMsg);
         break;
       }
       try {
