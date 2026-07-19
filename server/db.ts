@@ -3,6 +3,7 @@ import pkg from "pg";
 const { Pool } = pkg;
 import * as schema from "@shared/schema";
 import { appendTelemetry } from "./telemetry";
+import { formatPoolLoadTags } from "./pool-load";
 
 if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL must be set");
@@ -113,7 +114,7 @@ const INFRA_RECORD_COOLDOWN_MS = 10 * 60 * 1000;
 setInterval(() => {
   const hbPart = _hbFailCount > 0 ? ` hb_fail=${_hbFailCount}` : "";
   _hbFailCount = 0; // reset window counter after each log
-  const dbLine = `[DB Pool] total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount} max=${poolSize}${hbPart}`;
+  const dbLine = `[DB Pool] total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount} max=${poolSize}${hbPart}${formatPoolLoadTags()}`;
   console.log(dbLine);
   appendTelemetry(dbLine);
 

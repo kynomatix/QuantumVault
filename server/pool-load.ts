@@ -6,7 +6,7 @@
 // provable by timing correlation). Subsystems register a cheap snapshot
 // callback here; the heartbeat appends each tag to its telemetry line so a
 // starved pool is attributable at a glance, e.g.:
-//   [DB Pool] total=8 idle=0 waiting=2 max=8 candles=r3/q5,w2/q1
+//   [DB Pool] total=8 idle=0 waiting=2 max=8 candles=r3/rq5/w2/wq1
 //
 // This module deliberately imports nothing so any module (including db.ts
 // itself) can import it without cycles.
