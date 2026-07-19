@@ -3,6 +3,43 @@ import { db, pool } from "../db";
 import { eq, and, gte, lte, sql } from "drizzle-orm";
 import type { OHLCV } from "./engine";
 import { appendTelemetry } from "../telemetry";
+import { registerPoolLoadTag } from "../pool-load";
+
+// ----- candle read bulkhead -------------------------------------------------
+// The scanner, position monitor and Lab all funnel candle-cache DB reads
+// through this module, and in the web process they share ONE pg pool (max 8)
+// with every interactive endpoint (auth, dashboard, positions, bots). During
+// a cold-cache sweep the pre-2026-07-19 code could zombie-hold enough
+// connections to starve the whole pool and 500 the dashboard. The
+// self-cancelling per-query timeout closed the zombie mechanism; this
+// semaphore is the hard guarantee on top: candle READS can never occupy more
+// than MAX_ACTIVE_CANDLE_READS slots, and combined with the write cap below
+// (MAX_ACTIVE_CANDLE_WRITES=2) candle work is bounded to 5 of 8 connections —
+// at least 3 always remain for interactive/auth traffic no matter how cold
+// the cache is. Waiters queue OUTSIDE the pool (no connection held while
+// waiting); deadline-bounded callers (scanner/monitor via fetchOHLCV) simply
+// abandon to a cache MISS if the queue makes them exceed their budget, which
+// degrades to a network fetch — fail-safe, never fail-blocked.
+let activeCandleReads = 0;
+let queuedCandleReads = 0;
+const MAX_ACTIVE_CANDLE_READS = 3;
+
+registerPoolLoadTag("candles", () => ({
+  r: activeCandleReads,
+  rq: queuedCandleReads,
+  w: activeCandleWrites,
+  wq: queuedCandleWrites,
+}));
+
+/** Test/telemetry snapshot of candle-store pool pressure. */
+export function getCandleStoreLoad() {
+  return {
+    activeReads: activeCandleReads,
+    queuedReads: queuedCandleReads,
+    activeWrites: activeCandleWrites,
+    queuedWrites: queuedCandleWrites,
+  };
+}
 
 // Minimal row shape shared by the drizzle path and the raw-client path below.
 type CandleCacheRow = {
@@ -32,6 +69,34 @@ export async function getCachedCandles(
      */
     queryTimeoutMs?: number;
   }
+): Promise<OHLCV[] | null> {
+  // Bulkhead: wait for a read slot BEFORE touching the pool. The wait loop
+  // holds no DB resources, so a burst of cold-cache dispatches queues here
+  // harmlessly instead of stacking connection checkouts.
+  if (activeCandleReads >= MAX_ACTIVE_CANDLE_READS) {
+    queuedCandleReads++;
+    try {
+      while (activeCandleReads >= MAX_ACTIVE_CANDLE_READS) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    } finally {
+      queuedCandleReads--;
+    }
+  }
+  activeCandleReads++;
+  try {
+    return await getCachedCandlesInner(symbol, timeframe, startMs, endMs, opts);
+  } finally {
+    activeCandleReads--;
+  }
+}
+
+async function getCachedCandlesInner(
+  symbol: string,
+  timeframe: string,
+  startMs: number,
+  endMs: number,
+  opts?: { queryTimeoutMs?: number }
 ): Promise<OHLCV[] | null> {
   try {
     let rows: CandleCacheRow[];
