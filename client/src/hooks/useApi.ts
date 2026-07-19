@@ -1,11 +1,15 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
+import { coreFetch } from "@/lib/server-health";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useWallet } from "./useWallet";
 
 // API fetch functions
+// Core dashboard reads (bots, positions, portfolio) go through coreFetch so a
+// degraded server (5xx / network failure) raises the "connection lost" banner
+// instead of the UI silently rendering empty states (2026-07-19 incident).
 async function fetchBots(featured?: boolean) {
   const url = featured ? "/api/bots?featured=true" : "/api/bots";
-  const res = await fetch(url, { credentials: "include" });
+  const res = await coreFetch(url, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch bots");
   return safeResponseJson(res);
 }
@@ -17,13 +21,13 @@ async function fetchSubscriptions(walletAddress: string) {
 }
 
 async function fetchPortfolio(walletAddress: string) {
-  const res = await fetch(`/api/portfolio?wallet=${walletAddress}`, { credentials: "include" });
+  const res = await coreFetch(`/api/portfolio?wallet=${walletAddress}`, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch portfolio");
   return safeResponseJson(res);
 }
 
 async function fetchPositions(walletAddress: string) {
-  const res = await fetch(`/api/positions`, { credentials: "include" });
+  const res = await coreFetch(`/api/positions`, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch positions");
   const data = await safeResponseJson(res);
   return data.positions || [];
@@ -86,7 +90,7 @@ async function fetchHealthMetrics(): Promise<HealthMetrics | null> {
 }
 
 async function fetchTradingBots(walletAddress: string) {
-  const res = await fetch(`/api/trading-bots?wallet=${walletAddress}`, { credentials: "include" });
+  const res = await coreFetch(`/api/trading-bots?wallet=${walletAddress}`, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch trading bots");
   return safeResponseJson(res);
 }

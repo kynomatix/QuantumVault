@@ -858,7 +858,40 @@ export async function fetchOHLCV(
   const deadlineAt = options?.deadlineMs ? Date.now() + options.deadlineMs : Infinity;
 
   onProgress?.(`Checking cache for ${symbol} ${timeframe}...`);
-  const cached = options?.bypassCache ? null : await getCachedCandles(symbol, timeframe, startMs, endMs);
+  // Bound the cache lookup when the caller set a deadline: the deadline clock
+  // starts BEFORE this DB read, so a slow/wedged DB otherwise consumes the
+  // entire fetch budget before any network attempt (2026-07-19 incident:
+  // traces showed okx hitting its 45s deadline 0.4s into the network section
+  // because the cache read ate ~44.6s). A timed-out read is treated as a
+  // cache MISS; the abandoned read settles harmlessly in the background.
+  // Deadline-less callers (Lab backtests) keep waiting unbounded — for them a
+  // slow cache read is still far cheaper than refetching years of candles.
+  const cacheStartedAt = Date.now();
+  let cached: OHLCV[] | null = null;
+  if (!options?.bypassCache) {
+    const cacheRead = getCachedCandles(symbol, timeframe, startMs, endMs);
+    if (Number.isFinite(deadlineAt)) {
+      const cacheBudgetMs = Math.min(5_000, Math.max(1_000, Math.floor((options?.deadlineMs ?? 0) / 4)));
+      let cacheTimer: NodeJS.Timeout | undefined;
+      cached = await Promise.race([
+        cacheRead,
+        new Promise<null>((resolve) => {
+          cacheTimer = setTimeout(() => resolve(null), cacheBudgetMs);
+          cacheTimer.unref?.();
+        }),
+      ]);
+      if (cacheTimer) clearTimeout(cacheTimer);
+      if (cached === null && Date.now() - cacheStartedAt >= cacheBudgetMs) {
+        const slowMsg = `[CandleCache] Slow cache read >${cacheBudgetMs}ms for ${symbol} ${timeframe} — treating as miss`;
+        console.log(slowMsg);
+        appendTelemetry(slowMsg);
+        cacheRead.catch(() => {}); // abandoned read: swallow any late rejection
+      }
+    } else {
+      cached = await cacheRead;
+    }
+  }
+  const cacheReadMs = Date.now() - cacheStartedAt;
   // Range-aware completeness floor: a request spanning only N bars can never
   // return 100 candles, so short live windows (e.g. an open paper position's
   // entry→now bracket check) would otherwise bypass the cache on EVERY tick.
@@ -910,6 +943,10 @@ export async function fetchOHLCV(
   // SLOW (>10s) network fetch; DATAFEED_VERBOSE=1 emits it for every fetch.
   const netStart = Date.now();
   const trace: string[] = [];
+  // Surface pre-network time spent on the DB cache read (>1s only): a wedged
+  // DB consuming the fetch deadline before the network section is otherwise
+  // invisible and gets misattributed to the first source in the trace.
+  if (cacheReadMs > 1_000) trace.push(`cache=${(cacheReadMs / 1000).toFixed(1)}s`);
   const emitTrace = (count: number) => {
     const elapsedMs = Date.now() - netStart;
     if (!DATAFEED_VERBOSE && count > 0 && elapsedMs <= 10_000) return;

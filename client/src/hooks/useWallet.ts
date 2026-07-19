@@ -228,11 +228,17 @@ export function useWallet() {
           try {
             // First, check if server already has a valid session for this wallet
             // This avoids prompting for signature if already authenticated
+            // 15s timeout: this fetch gates the whole connect flow — if the
+            // server is degraded (2026-07-19: wedged DB pool held requests
+            // ~30s before 500ing), an unbounded wait here leaves the user
+            // staring at a dead dashboard with no signature prompt. Timing
+            // out falls through to the normal "not authenticated" path.
             const statusRes = await fetch('/api/auth/status', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               credentials: 'include',
               body: JSON.stringify({ walletAddress: walletToAuth }),
+              signal: AbortSignal.timeout(15_000),
             });
             
             if (statusRes.ok) {
@@ -252,7 +258,10 @@ export function useWallet() {
                 // BEFORE any money action instead of mid-flow.
                 let hasUmkSession = false;
                 try {
-                  const sessRes = await fetch('/api/auth/session', { credentials: 'include' });
+                  const sessRes = await fetch('/api/auth/session', {
+                    credentials: 'include',
+                    signal: AbortSignal.timeout(15_000),
+                  });
                   if (sessRes.ok) {
                     const sessData = await safeResponseJson(sessRes);
                     hasUmkSession = !!sessData.hasSession;

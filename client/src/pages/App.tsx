@@ -1,4 +1,5 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
+import { coreFetch, useServerDegraded } from "@/lib/server-health";
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from 'framer-motion';
@@ -446,6 +447,10 @@ export default function AppPage() {
   const [solBalance, setSolBalance] = useState<number | null>(null);
   const [equityLoading, setEquityLoading] = useState(false);
   const equityInitialLoadDone = useRef(false);
+  // True while core reads (equity, bots, positions) are consistently failing —
+  // drives the "connection lost" banner so a degraded server never masquerades
+  // as an empty account (2026-07-19 incident).
+  const serverDegraded = useServerDegraded();
 
   // "Available" = idle wallet USDC + Vault savings (both spendable on demand).
   // null until the first equity load so we can show the loading placeholder.
@@ -469,7 +474,7 @@ export default function AppPage() {
         setEquityLoading(true);
       }
       try {
-        const res = await fetch('/api/total-equity?includeVault=1', { credentials: 'include', headers: walletAuthHeaders() });
+        const res = await coreFetch('/api/total-equity?includeVault=1', { credentials: 'include', headers: walletAuthHeaders() });
         if (res.ok) {
           const data = await safeResponseJson(res);
           setTotalEquity(data.totalEquity ?? 0);
@@ -2420,6 +2425,24 @@ export default function AppPage() {
         </header>
 
         <main className="p-4 lg:p-6">
+          {serverDegraded && (
+            <div
+              className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3"
+              data-testid="banner-server-degraded"
+            >
+              <p className="text-sm text-amber-200">
+                Connection to the server lost — bots and balances may be missing from this view. Your funds are safe; this is a display issue.
+              </p>
+              <button
+                onClick={handleRefreshAll}
+                disabled={refreshing}
+                className="shrink-0 rounded-md border border-amber-500/40 px-3 py-1.5 text-sm text-amber-200 hover:bg-amber-500/20 disabled:opacity-50"
+                data-testid="button-retry-connection"
+              >
+                {refreshing ? 'Retrying…' : 'Retry'}
+              </button>
+            </div>
+          )}
           <AnimatePresence mode="wait">
             {activeNav === 'vault' && (
               <motion.div

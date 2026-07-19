@@ -1,5 +1,5 @@
 import { labCandleCache } from "@shared/schema";
-import { db } from "../db";
+import { db, pool } from "../db";
 import { eq, and, gte, lte, sql } from "drizzle-orm";
 import type { OHLCV } from "./engine";
 import { appendTelemetry } from "../telemetry";
@@ -179,11 +179,35 @@ export async function getCacheStats(): Promise<{
 }
 
 export async function clearCandleCache(): Promise<number> {
-  // Full-table delete over ~2M rows can exceed the pool's 30s statement_timeout
-  // safety net; this is a rare admin operation, so exempt it for this tx only.
-  return await db.transaction(async (tx) => {
-    await tx.execute(sql`SET LOCAL statement_timeout = 0`);
-    const result = await tx.delete(labCandleCache);
+  // Full-table delete over ~2M rows can exceed BOTH timeouts: the pool's 30s
+  // server-side statement_timeout AND the pool-level 60s client-side
+  // query_timeout (see server/db.ts — added after the 2026-07-19 pool-wedge
+  // incident). This is a rare admin operation, so widen both for this
+  // transaction only: SET LOCAL lifts the server timeout, and a per-query
+  // `query_timeout` override widens the client one to 15 minutes. NOTE: the
+  // override MUST be a truthy finite number — pg reads it as
+  // `config.query_timeout || pool default`, so `0` is silently ignored.
+  // Uses a raw checked-out client because drizzle does not expose per-query
+  // timeout overrides.
+  //
+  // Release discipline: on ANY error, release WITH the error so pg-pool
+  // destroys the client instead of recycling it — after a client-side
+  // timeout the server may still be executing the DELETE on that socket,
+  // and returning a busy client to the pool is exactly the poisoned-client
+  // failure class the 2026-07-19 patch exists to kill.
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL statement_timeout = 0");
+    const result = await client.query({
+      text: "DELETE FROM lab_candle_cache",
+      query_timeout: 15 * 60_000,
+    } as any);
+    await client.query("COMMIT");
+    client.release();
     return result.rowCount ?? 0;
-  });
+  } catch (err) {
+    client.release(err instanceof Error ? err : new Error(String(err)));
+    throw err;
+  }
 }

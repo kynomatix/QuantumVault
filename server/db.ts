@@ -14,11 +14,24 @@ const poolSize = parseInt(process.env.DB_POOL_SIZE || "8", 10);
 // a 10s acquire timeout turned every slow handshake into a failed background
 // tick. 30s rides out slow establishment without masking a truly dead DB.
 const connTimeoutMs = parseInt(process.env.DB_CONN_TIMEOUT_MS || "30000", 10);
+// Client-side query timeout (2026-07-19 incident). The server-side
+// statement_timeout below (30s) only protects while the TCP socket is alive:
+// when a socket to Neon half-dies mid-query, the server's timeout error can
+// never reach us, the checked-out client hangs forever, and the pool
+// permanently drains ([DB Pool] total=8 idle=0 waiting=10 — only a restart
+// recovered). query_timeout is enforced in-process, so it fires even on a
+// dead socket; pg then releases-with-error, which DESTROYS the client and
+// frees the slot → the pool self-heals. 60s is deliberately 2× the
+// statement_timeout: on a healthy socket the server always wins first, so
+// this can only fire on dead sockets (or ops that exempt themselves with a
+// per-query `query_timeout: 0` override — see clearCandleCache).
+const queryTimeoutMs = parseInt(process.env.DB_QUERY_TIMEOUT_MS || "60000", 10);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: poolSize,
   connectionTimeoutMillis: connTimeoutMs,
+  query_timeout: queryTimeoutMs,
   // 60s: Neon's serverless compute suspends after ~30s of zero connections; we
   // previously evicted at 15s, meaning nearly every background-tick interval
   // paid a fresh TLS+auth handshake. Raising to 60s keeps one warm connection
@@ -50,8 +63,11 @@ pool.on("connect", (client) => {
 // Errors are counted (not thrown) so an unresponsive DB never causes an
 // unhandled rejection; the count surfaces in the [DB Pool] telemetry line.
 let _hbFailCount = 0;
+let _hbFailStreak = 0;
 setInterval(() => {
-  pool.query("SELECT 1").catch(() => { _hbFailCount++; });
+  pool.query("SELECT 1")
+    .then(() => { _hbFailStreak = 0; })
+    .catch(() => { _hbFailCount++; _hbFailStreak++; });
 }, 20_000).unref();
 
 // ----- connect-slow visibility --------------------------------------------
@@ -82,12 +98,60 @@ pool.on("connect", () => {
 });
 
 // ----- pool telemetry (30s) -----------------------------------------------
+// Starvation → error_log visibility (2026-07-19 incident): a wedged pool made
+// the whole app unusable while /api/logs/summary reported errorStats:[] —
+// external monitors were structurally blind because infra failures never
+// reached error_log (and the noise denylist there intentionally drops raw
+// "connection timeout" chatter). Record ONE deduped row when the pool has
+// been starved (all clients out + waiters queued) for 60s+, or the keep-warm
+// heartbeat has failed 3+ times in a row. Lazy import avoids a boot-time
+// import cycle (error-log → storage → db). Wording deliberately avoids the
+// error-log noise patterns.
+let _starvedSince: number | null = null;
+let _lastInfraRecordAt = 0;
+const INFRA_RECORD_COOLDOWN_MS = 10 * 60 * 1000;
 setInterval(() => {
   const hbPart = _hbFailCount > 0 ? ` hb_fail=${_hbFailCount}` : "";
   _hbFailCount = 0; // reset window counter after each log
   const dbLine = `[DB Pool] total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount} max=${poolSize}${hbPart}`;
   console.log(dbLine);
   appendTelemetry(dbLine);
+
+  const starved = pool.totalCount >= poolSize && pool.idleCount === 0 && pool.waitingCount > 0;
+  if (!starved) {
+    _starvedSince = null;
+  } else if (_starvedSince === null) {
+    _starvedSince = Date.now();
+  }
+  const starvedForMs = _starvedSince === null ? 0 : Date.now() - _starvedSince;
+  const shouldRecord =
+    (starvedForMs >= 60_000 || _hbFailStreak >= 3) &&
+    Date.now() - _lastInfraRecordAt >= INFRA_RECORD_COOLDOWN_MS;
+  if (shouldRecord) {
+    _lastInfraRecordAt = Date.now();
+    const msg = starvedForMs >= 60_000
+      ? `[DB Pool] starved for ${Math.round(starvedForMs / 1000)}s: all ${poolSize} clients checked out, ${pool.waitingCount} waiting — API reads are failing`
+      : `[DB Pool] keep-warm heartbeat failed ${_hbFailStreak} times in a row — database unreachable or pool wedged`;
+    import("./error-log")
+      .then(({ recordCriticalError }) => {
+        recordCriticalError({
+          category: "server_500",
+          severity: "critical",
+          source: "db-pool",
+          message: msg,
+          fingerprint: "db-pool-starvation",
+          context: {
+            total: pool.totalCount,
+            idle: pool.idleCount,
+            waiting: pool.waitingCount,
+            max: poolSize,
+            hbFailStreak: _hbFailStreak,
+            starvedForMs,
+          },
+        });
+      })
+      .catch(() => {}); // visibility must never break the pool path
+  }
 }, 30_000);
 
 // ----- shared connection-class error classifier ---------------------------

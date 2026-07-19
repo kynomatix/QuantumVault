@@ -495,7 +495,15 @@ async function runSweep(): Promise<void> {
               if (candleCache.has(cacheKey)) {
                 bars = candleCache.get(cacheKey)!;
               } else {
-                const remainingMs = fetchDeadlineAt - Date.now();
+                // Min of BOTH clocks: the global sweep deadline AND this
+                // protocol's own budget window. Guarding on the global clock
+                // alone let a protocol whose window was nearly spent still
+                // dispatch doomed 45s fetches that only died at the
+                // between-markets budget check (2026-07-19 sweep post-mortem).
+                const remainingMs = Math.min(
+                  fetchDeadlineAt - Date.now(),
+                  protocolStart + protocolBudgetMs - Date.now(),
+                );
                 if (remainingMs < 5_000) {
                   // Sweep fetch budget exhausted — skip without marking the
                   // feed dead (this is our budget, not the feed's fault).
@@ -555,7 +563,11 @@ async function runSweep(): Promise<void> {
                 if (candleCache.has(parentCacheKey)) {
                   parentBars = candleCache.get(parentCacheKey)!;
                 } else {
-                  const remainingMs = fetchDeadlineAt - Date.now();
+                  // Min of both clocks — same rationale as the primary fetch guard.
+                  const remainingMs = Math.min(
+                    fetchDeadlineAt - Date.now(),
+                    protocolStart + protocolBudgetMs - Date.now(),
+                  );
                   if (remainingMs < 5_000) {
                     parentBars = null; // budget exhausted — parent is optional
                   } else {
