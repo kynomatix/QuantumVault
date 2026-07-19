@@ -1,5 +1,6 @@
 import { safeResponseJson } from "./safe-fetch";
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
+import { CoreReadError, registerRecoveryListener } from "./server-health";
 
 // The currently connected Solana wallet address, mirrored here so module-level
 // fetch helpers can stamp an `x-wallet-address` header on every authenticated
@@ -70,6 +71,19 @@ export const getQueryFn: <T>(options: {
     return await safeResponseJson(res);
   };
 
+/**
+ * Transient = worth retrying: network failures (fetch TypeError) and 5xx
+ * responses. 4xx (including auth) must NOT retry — the server answered and
+ * meant it. 2026-07-19 incident: `retry: false` turned a 60s DB-pool blip
+ * into a permanently stuck dashboard because failed queries never re-ran.
+ */
+export function isTransientReadError(error: unknown): boolean {
+  if (error instanceof CoreReadError) return error.kind === "server";
+  if (error instanceof TypeError) return true; // fetch network failure
+  if (error instanceof Error) return /^5\d\d:/.test(error.message);
+  return false;
+}
+
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -77,10 +91,27 @@ export const queryClient = new QueryClient({
       refetchInterval: false,
       refetchOnWindowFocus: false,
       staleTime: Infinity,
-      retry: false,
+      // Bounded self-heal for transient failures only (network / 5xx): up to
+      // 2 retries with exponential backoff (~2s, ~4s). Longer outages are
+      // covered by the recovery listener below, which refetches every errored
+      // query the moment a core read succeeds again.
+      retry: (failureCount, error) => failureCount < 2 && isTransientReadError(error),
+      retryDelay: (attempt) => Math.min(2_000 * 2 ** attempt, 10_000),
     },
     mutations: {
       retry: false,
     },
   },
+});
+
+// Self-heal on backend recovery: when server-health flips degraded→healthy or
+// session-expired→valid (driven by the 5s positions poll succeeding), refetch
+// every query stuck in an error state. Without this, non-polling reads
+// (portfolio, bots, subscriptions) that failed during the outage stay failed
+// forever (staleTime: Infinity, no refetch triggers) → empty dashboard until
+// a full page reload.
+registerRecoveryListener(() => {
+  queryClient
+    .refetchQueries({ predicate: (q) => q.state.status === "error" })
+    .catch(() => {});
 });

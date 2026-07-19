@@ -23,6 +23,31 @@ function emit(): void {
   listeners.forEach((l) => l());
 }
 
+// Recovery listeners fire on the degraded→healthy and session-expired→valid
+// transitions (NOT on every success). 2026-07-19 incident follow-up: with
+// `retry: false` + `staleTime: Infinity`, any query that failed during a
+// transient backend outage stayed failed forever — the polling reads (positions)
+// recovered and even cleared the degraded banner, while non-polling reads
+// (portfolio, bots) rendered a permanently empty dashboard. queryClient.ts
+// registers a listener that refetches every errored query on these edges.
+const recoveryListeners = new Set<Listener>();
+
+/** Register a callback fired when the server or session RECOVERS. */
+export function registerRecoveryListener(cb: Listener): () => void {
+  recoveryListeners.add(cb);
+  return () => recoveryListeners.delete(cb);
+}
+
+function emitRecovery(): void {
+  recoveryListeners.forEach((l) => {
+    try {
+      l();
+    } catch {
+      // a broken recovery hook must never break health reporting
+    }
+  });
+}
+
 /**
  * Typed error for core dashboard reads so callers (and React Query error
  * states) can distinguish auth failures from server failures instead of
@@ -56,6 +81,7 @@ export function reportCoreReadSuccess(): void {
   if (degradedSince !== null) {
     degradedSince = null;
     emit();
+    emitRecovery();
   }
 }
 
@@ -72,6 +98,7 @@ export function reportCoreAuthSuccess(): void {
   if (sessionExpiredSince !== null) {
     sessionExpiredSince = null;
     emit();
+    emitRecovery();
   }
 }
 
@@ -80,6 +107,7 @@ export function __resetServerHealthForTests(): void {
   degradedSince = null;
   sessionExpiredSince = null;
   consecutiveFailures = 0;
+  recoveryListeners.clear();
 }
 
 /** Non-hook snapshot readers (usable from plain code and unit tests). */

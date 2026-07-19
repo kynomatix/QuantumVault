@@ -10,6 +10,13 @@ if (!process.env.DATABASE_URL) {
 }
 
 const poolSize = parseInt(process.env.DB_POOL_SIZE || "8", 10);
+// Pool label for telemetry. The QuantumLab child process runs its own copy of
+// this module (own pg.Pool, DB_POOL_SIZE=5) and both processes' stdout are
+// interleaved in deployment logs — unlabeled "[DB Pool]" lines from the two
+// pools read as one incoherent pool (2026-07-19 incident: external reviewers
+// concluded max flapped between 8 and 5). The supervisor sets DB_POOL_NAME=lab.
+const poolName = process.env.DB_POOL_NAME || "web";
+const POOL_TAG = `[DB Pool:${poolName}]`;
 // 30s default: prod (2026-07-16) showed new-connection establishment to the DB
 // intermittently exceeding 10s while established connections kept working —
 // a 10s acquire timeout turned every slow handshake into a failed background
@@ -45,7 +52,7 @@ const pool = new Pool({
 });
 
 pool.on("error", (err) => {
-  console.error("[DB Pool] Idle client error (suppressed crash):", err.message);
+  console.error(`${POOL_TAG} Idle client error (suppressed crash):`, err.message);
 });
 
 // Safety net: no single statement may hold a pool connection indefinitely
@@ -54,7 +61,7 @@ pool.on("error", (err) => {
 // (verified non-pooler), so a session-level SET on connect is safe.
 pool.on("connect", (client) => {
   client.query("SET statement_timeout = 30000").catch((err) => {
-    console.error("[DB Pool] Failed to set statement_timeout:", err.message);
+    console.error(`${POOL_TAG} Failed to set statement_timeout:`, err.message);
   });
 });
 
@@ -91,7 +98,7 @@ pool.on("connect", () => {
     const elapsed = Date.now() - _waitingSince;
     _waitingSince = null;
     if (elapsed > 2_000) {
-      const line = `[DB Pool] connect_slow elapsed=${elapsed}ms`;
+      const line = `${POOL_TAG} connect_slow elapsed=${elapsed}ms`;
       console.warn(line);
       appendTelemetry(line);
     }
@@ -114,7 +121,7 @@ const INFRA_RECORD_COOLDOWN_MS = 10 * 60 * 1000;
 setInterval(() => {
   const hbPart = _hbFailCount > 0 ? ` hb_fail=${_hbFailCount}` : "";
   _hbFailCount = 0; // reset window counter after each log
-  const dbLine = `[DB Pool] total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount} max=${poolSize}${hbPart}${formatPoolLoadTags()}`;
+  const dbLine = `${POOL_TAG} total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount} max=${poolSize}${hbPart}${formatPoolLoadTags()}`;
   console.log(dbLine);
   appendTelemetry(dbLine);
 
@@ -131,8 +138,8 @@ setInterval(() => {
   if (shouldRecord) {
     _lastInfraRecordAt = Date.now();
     const msg = starvedForMs >= 60_000
-      ? `[DB Pool] starved for ${Math.round(starvedForMs / 1000)}s: all ${poolSize} clients checked out, ${pool.waitingCount} waiting — API reads are failing`
-      : `[DB Pool] keep-warm heartbeat failed ${_hbFailStreak} times in a row — database unreachable or pool wedged`;
+      ? `${POOL_TAG} starved for ${Math.round(starvedForMs / 1000)}s: all ${poolSize} clients checked out, ${pool.waitingCount} waiting — API reads are failing`
+      : `${POOL_TAG} keep-warm heartbeat failed ${_hbFailStreak} times in a row — database unreachable or pool wedged`;
     import("./error-log")
       .then(({ recordCriticalError }) => {
         recordCriticalError({
@@ -169,6 +176,30 @@ export function isConnectionClassError(err: any): boolean {
     msg.includes("ECONNRESET") ||
     msg.includes("ETIMEDOUT")
   );
+}
+
+// ----- boot-time pool headroom gate -----------------------------------------
+// 2026-07-19 incident: the staggered-startup jobs in server/index.ts all landed
+// on the pool inside one ~45s window while Neon handshakes were slow; the pool
+// hit total=8 idle=0 waiting=19 and every job (plus all dashboard API reads)
+// failed on acquire timeouts. A fixed stagger cannot survive a slow-handshake
+// day, so deferrable boot work polls this gate first: it resolves when the pool
+// has genuine headroom (no waiters AND a free slot), or after maxWaitMs so a
+// persistently busy pool can never postpone a job forever.
+export async function whenPoolHasHeadroom(maxWaitMs = 180_000): Promise<void> {
+  const started = Date.now();
+  for (;;) {
+    const hasHeadroom =
+      pool.waitingCount === 0 && (pool.idleCount > 0 || pool.totalCount < poolSize);
+    if (hasHeadroom) return;
+    if (Date.now() - started >= maxWaitMs) {
+      console.warn(
+        `${POOL_TAG} headroom gate timed out after ${Math.round((Date.now() - started) / 1000)}s (total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount}) — proceeding anyway`
+      );
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 5_000));
+  }
 }
 
 export const db = drizzle(pool, { schema });

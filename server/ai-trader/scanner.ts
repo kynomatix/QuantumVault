@@ -166,6 +166,7 @@ const feedHealthMap = new Map<string, { failedAt: number }>();
 // so it MUST NOT be used as the running/stopped sentinel — that was the recurrence bug.
 let scannerRunning = false;
 let scannerTimer: ReturnType<typeof setTimeout> | null = null;
+let bootCatchUpTimer: ReturnType<typeof setTimeout> | null = null;
 /**
  * Wedge-proof sweep guard (same pattern as the monitor's tick guard — a plain
  * boolean permanently froze the monitor in prod when one venue call hung).
@@ -202,6 +203,15 @@ const SWEEP_TEARDOWN_ALLOWANCE_MS = 8_000;
  * in-flight catch-up never makes the boundary sweep skip on its claim.
  */
 const BOOT_SWEEP_MIN_LEAD_MS = 150_000;
+/**
+ * How long after startScanner() the boot catch-up sweep may begin. 2026-07-19
+ * incident: the catch-up fired immediately at scanner start (boot+86s) — dead
+ * center of the staggered-startup DB storm — and degraded to "0 scanned,
+ * 89 timeout-skipped" because candle-cache reads waited 46s+ for a pool
+ * connection. The delay (plus the pool-headroom gate at execution time) moves
+ * the sweep past the boot window entirely.
+ */
+const BOOT_SWEEP_DELAY_MS = 120_000;
 
 // ─── Pure helpers (exported for tests) ───────────────────────────────────────
 
@@ -1000,17 +1010,45 @@ export function startScanner(): void {
   // shortlist consumers already tolerate candidates up to one boundary old —
   // a mid-bar evaluation is no staler than the previous boundary's pick.
   // Skipped when the boundary sweep is imminent (see BOOT_SWEEP_MIN_LEAD_MS).
-  const tfMs = TIMEFRAME_MS["15m"];
-  const msToBoundary = (Math.floor(Date.now() / tfMs) + 1) * tfMs - Date.now();
-  if (msToBoundary > BOOT_SWEEP_MIN_LEAD_MS) {
-    console.log(
-      `[Scanner] boot catch-up sweep (restart cleared shortlist; next boundary sweep in ${Math.round(msToBoundary / 1000)}s)`
-    );
-    runSweep().catch((err) =>
-      console.error(
-        `[Scanner] boot catch-up sweep crashed: ${err instanceof Error ? err.message : err}`
-      )
-    );
+  //
+  // 2026-07-19 hardening: the catch-up no longer fires immediately. It waits
+  // BOOT_SWEEP_DELAY_MS (past the staggered-startup window), then waits for DB
+  // pool headroom, then re-checks at execution time that the scanner is still
+  // running, no sweep has already started/completed, and the next boundary is
+  // still far enough away to justify a catch-up at all.
+  bootCatchUpTimer = setTimeout(() => {
+    bootCatchUpTimer = null;
+    void (async () => {
+      // Dynamic import: db.ts starts pool heartbeat intervals at module load,
+      // so a static import here would drag them into every unit-test module
+      // graph that touches the scanner (breaks fake-timer counting).
+      const { whenPoolHasHeadroom } = await import("../db");
+      await whenPoolHasHeadroom();
+      if (!scannerRunning) return;
+      if (sweepStartedAt !== null || telemetryRing.length > 0) {
+        console.log("[Scanner] boot catch-up skipped — a sweep already ran/is running");
+        return;
+      }
+      const tfMs = TIMEFRAME_MS["15m"];
+      const msToBoundary = (Math.floor(Date.now() / tfMs) + 1) * tfMs - Date.now();
+      if (msToBoundary <= BOOT_SWEEP_MIN_LEAD_MS) {
+        console.log(
+          `[Scanner] boot catch-up skipped (next boundary sweep in ${Math.round(msToBoundary / 1000)}s)`
+        );
+        return;
+      }
+      console.log(
+        `[Scanner] boot catch-up sweep (restart cleared shortlist; next boundary sweep in ${Math.round(msToBoundary / 1000)}s)`
+      );
+      runSweep().catch((err) =>
+        console.error(
+          `[Scanner] boot catch-up sweep crashed: ${err instanceof Error ? err.message : err}`
+        )
+      );
+    })();
+  }, BOOT_SWEEP_DELAY_MS);
+  if (typeof (bootCatchUpTimer as any)?.unref === "function") {
+    (bootCatchUpTimer as any).unref();
   }
 }
 
@@ -1025,6 +1063,10 @@ export function stopScanner(): void {
   if (scannerTimer) {
     clearTimeout(scannerTimer);
     scannerTimer = null;
+  }
+  if (bootCatchUpTimer) {
+    clearTimeout(bootCatchUpTimer);
+    bootCatchUpTimer = null;
   }
   sweepStartedAt = null;
   sweepGeneration++;

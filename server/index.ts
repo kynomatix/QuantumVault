@@ -3,7 +3,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { storage } from "./storage";
-import { ensureSchema, checkUmkStorageSecretHealth, logSecurityConfigSummary, closePool } from "./db";
+import { ensureSchema, checkUmkStorageSecretHealth, logSecurityConfigSummary, closePool, whenPoolHasHeadroom } from "./db";
 import { startPeriodicReconciliation } from "./reconciliation-service";
 import { startOrphanedSubaccountCleanup } from "./orphaned-subaccount-cleanup";
 import { startSubaccountLeaseRecoveryJob } from "./subaccount-lease-recovery";
@@ -796,56 +796,86 @@ app.use((req, res, next) => {
         startSubaccountLeaseRecoveryJob();
       }, 30_000);
 
-      // ~45s+: snapshot / retry jobs spread across a 30s window so they don't
-      // all grab DB connections simultaneously. Each job already has its own
-      // internal stagger (initial setTimeout before the first setInterval tick),
-      // but starting them together would synchronise those internal delays.
+      // ~45s+: snapshot / retry jobs. 2026-07-19 incident: these used to be
+      // compressed into a 45-87s window; on a slow-Neon-handshake boot they all
+      // collided, the pool hit total=8 idle=0 waiting=19 for 64s+, and every
+      // job PLUS all dashboard API reads failed on acquire timeouts. Two-layer
+      // fix: (1) the window is now spread across ~45s-5min, heaviest jobs last;
+      // (2) every deferrable initial run first awaits whenPoolHasHeadroom() —
+      // a fixed schedule alone cannot survive a slow-handshake day.
       setTimeout(() => {
-        log('[Staggered startup] Starting PnL snapshot job');
-        startPnlSnapshotJob();
-        log('[Staggered startup] Running Task 119 portfolio backfill (one-shot)');
-        import('./portfolio-snapshot-backfill').then(({ runPortfolioBackfillOnce }) => {
-          runPortfolioBackfillOnce().catch(err => console.error('[PortfolioBackfill] error:', err));
+        whenPoolHasHeadroom().then(() => {
+          log('[Staggered startup] Starting PnL snapshot job');
+          startPnlSnapshotJob();
         });
-        log('[Staggered startup] Starting portfolio snapshot job');
-        startPortfolioSnapshotJob();
       }, 45_000);
 
       setTimeout(() => {
-        log('[Staggered startup] Starting profit share retry job');
-        startProfitShareRetryJob();
-      }, 52_000);
-
-      setTimeout(() => {
-        log('[Staggered startup] Starting referral rewards retry job');
-        startReferralRewardsRetryJob();
-      }, 57_000);
-
-      setTimeout(() => {
-        log('[Staggered startup] Starting Pacifica referral backfill job');
-        startPacificaReferralBackfillJob();
-      }, 62_000);
-
-      setTimeout(() => {
-        log('[Staggered startup] Starting Telegram daily summary job');
-        startTelegramDailySummaryJob();
-      }, 67_000);
-
-      setTimeout(() => {
-        log('[Staggered startup] Starting stats consistency monitor');
-        import('./stats-consistency-monitor').then(({ startStatsConsistencyMonitor }) => {
-          startStatsConsistencyMonitor();
+        whenPoolHasHeadroom().then(() => {
+          log('[Staggered startup] Starting portfolio snapshot job');
+          startPortfolioSnapshotJob();
         });
-      }, 72_000);
+      }, 70_000);
+
+      setTimeout(() => {
+        whenPoolHasHeadroom().then(() => {
+          log('[Staggered startup] Starting profit share retry job');
+          startProfitShareRetryJob();
+        });
+      }, 120_000);
+
+      setTimeout(() => {
+        whenPoolHasHeadroom().then(() => {
+          log('[Staggered startup] Starting referral rewards retry job');
+          startReferralRewardsRetryJob();
+        });
+      }, 135_000);
+
+      setTimeout(() => {
+        whenPoolHasHeadroom().then(() => {
+          log('[Staggered startup] Starting Pacifica referral backfill job');
+          startPacificaReferralBackfillJob();
+        });
+      }, 150_000);
+
+      setTimeout(() => {
+        whenPoolHasHeadroom().then(() => {
+          log('[Staggered startup] Starting Telegram daily summary job');
+          startTelegramDailySummaryJob();
+        });
+      }, 165_000);
+
+      setTimeout(() => {
+        whenPoolHasHeadroom().then(() => {
+          log('[Staggered startup] Starting stats consistency monitor');
+          import('./stats-consistency-monitor').then(({ startStatsConsistencyMonitor }) => {
+            startStatsConsistencyMonitor();
+          });
+        });
+      }, 195_000);
+
+      // ~4min: Task 119 portfolio backfill (one-shot, iterates wallets — the
+      // heaviest boot-time DB consumer; used to fire at +45s inside the storm).
+      setTimeout(() => {
+        whenPoolHasHeadroom().then(() => {
+          log('[Staggered startup] Running Task 119 portfolio backfill (one-shot)');
+          import('./portfolio-snapshot-backfill').then(({ runPortfolioBackfillOnce }) => {
+            runPortfolioBackfillOnce().catch(err => console.error('[PortfolioBackfill] error:', err));
+          });
+        });
+      }, 240_000);
 
       // ~77s: AI Trader monitor (WO-6): startup reconciliation + 15s
       // close-detection tick + graduation sweep. Dynamic import keeps the
-      // ai-trader module graph off the boot critical path.
+      // ai-trader module graph off the boot critical path. Kept early (it
+      // reconciles live positions — trading-relevant) but headroom-gated.
       setTimeout(() => {
-        log('[Staggered startup] Starting AI Trader monitor');
-        import('./ai-trader/monitor').then(({ startAiTraderMonitor }) => {
-          startAiTraderMonitor();
-        }).catch(err => console.error('[AiTraderMonitor] failed to start:', err));
+        whenPoolHasHeadroom().then(() => {
+          log('[Staggered startup] Starting AI Trader monitor');
+          import('./ai-trader/monitor').then(({ startAiTraderMonitor }) => {
+            startAiTraderMonitor();
+          }).catch(err => console.error('[AiTraderMonitor] failed to start:', err));
+        });
       }, 77_000);
 
       // Scanner starts slightly later so the monitor is fully initialised first.
@@ -860,20 +890,23 @@ app.use((req, res, next) => {
 
       // Admin error-log retention: prune on startup, then daily. Bounded table
       // (30d age + hard row cap) so the "Errors" tab never balloons. Fail-safe.
+      // Delete-heavy — pushed to +5min and headroom-gated (was +77s).
       setTimeout(() => {
-        log('[Staggered startup] Starting error-log prune job (daily)');
-        const runPrune = () => {
-          storage.pruneErrors()
-            .then(({ deletedByAge, deletedByCap }) => {
-              if (deletedByAge || deletedByCap) {
-                log(`[ErrorLogPrune] removed ${deletedByAge} by age + ${deletedByCap} by cap`);
-              }
-            })
-            .catch(err => console.error('[ErrorLogPrune] error:', err));
-        };
-        runPrune();
-        setInterval(runPrune, 24 * 60 * 60 * 1000);
-      }, 77_000);
+        whenPoolHasHeadroom().then(() => {
+          log('[Staggered startup] Starting error-log prune job (daily)');
+          const runPrune = () => {
+            storage.pruneErrors()
+              .then(({ deletedByAge, deletedByCap }) => {
+                if (deletedByAge || deletedByCap) {
+                  log(`[ErrorLogPrune] removed ${deletedByAge} by age + ${deletedByCap} by cap`);
+                }
+              })
+              .catch(err => console.error('[ErrorLogPrune] error:', err));
+          };
+          runPrune();
+          setInterval(runPrune, 24 * 60 * 60 * 1000);
+        });
+      }, 300_000);
 
       // Pyth Hermes auth status (one line; warns if unauthenticated past-cutover risk).
       logHermesAuthStatus();
