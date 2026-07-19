@@ -232,6 +232,13 @@ async function executePaperEntry(input: ExecuteDecisionInput, side: PaperSide): 
     entryPrice: entryPrice.toFixed(8),
   });
   await storage.updateAiTraderBot(bot.id, { status: "open", pauseReason: null });
+  await sendTradeNotification(bot.walletAddress, {
+    type: "trade_executed",
+    botName: `AI Trader ${bot.market} (Paper)`,
+    market: bot.market,
+    side: side === "long" ? "LONG" : "SHORT",
+    price: entryPrice,
+  });
   console.log(
     `[AiTrader] Paper entry: bot ${bot.id.slice(0, 8)} ${side} ${bot.market} @ ${entryPrice.toFixed(6)} (mark ${markPrice}, +slippage)`
   );
