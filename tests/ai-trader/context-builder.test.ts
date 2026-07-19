@@ -317,7 +317,9 @@ const SESSION_CTX_NEAR_WEEKLY = {
 // Ordering: L1/H1 = earlier pivots in the 4-pivot alternating sequence;
 //           L2/H2 = more recent (the ones classifyDow uses for >/< comparison).
 //
-// fmtPrice() in context-builder is v.toFixed(2), so assertion strings use that:
+// fmtPrice() in context-builder uses magnitude-scaled decimals: >=1 → 2dp,
+// >=0.01 → 4dp, >=0.0001 → 6dp, below → 8dp. Values >=1 are byte-identical to
+// the old toFixed(2) behaviour. Assertion strings for values >=1 use 2dp:
 //   63200 → "63200.00", 63940 → "63940.00", 63580 → "63580.00", 64230 → "64230.00"
 
 const DOW_RESULT_HHHL: DowStructureResult = {

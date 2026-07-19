@@ -124,7 +124,10 @@ export function marketToDatafeedTicker(market: string): string {
 }
 
 function fmtPrice(v: number): string {
-  return Number.isFinite(v) ? v.toFixed(2) : "n/a";
+  if (!Number.isFinite(v)) return "n/a";
+  const abs = Math.abs(v);
+  const decimals = abs >= 1 ? 2 : abs >= 0.01 ? 4 : abs >= 0.0001 ? 6 : 8;
+  return v.toFixed(decimals);
 }
 
 function fmtPct1(v: number): string {
