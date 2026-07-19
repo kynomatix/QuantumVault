@@ -4,25 +4,73 @@ import { eq, and, gte, lte, sql } from "drizzle-orm";
 import type { OHLCV } from "./engine";
 import { appendTelemetry } from "../telemetry";
 
+// Minimal row shape shared by the drizzle path and the raw-client path below.
+type CandleCacheRow = {
+  time: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+};
+
 export async function getCachedCandles(
   symbol: string,
   timeframe: string,
   startMs: number,
-  endMs: number
+  endMs: number,
+  opts?: {
+    /**
+     * Client-side per-query timeout. Deadline-bounded callers (the AI-trader
+     * scanner) abandon slow cache reads via Promise.race in fetchOHLCV, but
+     * the abandoned drizzle query kept RUNNING on its pool connection for up
+     * to the pool-level 60s query_timeout — during a boundary burst that
+     * zombie-holds connections the sweep itself needs. A positive override
+     * here makes the read self-cancel at the caller's budget instead.
+     * Same pg gotcha as clearCandleCache: the override MUST be a truthy
+     * finite positive number (`0` is silently ignored by pg).
+     */
+    queryTimeoutMs?: number;
+  }
 ): Promise<OHLCV[] | null> {
   try {
-    const rows = await db
-      .select()
-      .from(labCandleCache)
-      .where(
-        and(
-          eq(labCandleCache.symbol, symbol),
-          eq(labCandleCache.timeframe, timeframe),
-          gte(labCandleCache.time, String(startMs)),
-          lte(labCandleCache.time, String(endMs))
+    let rows: CandleCacheRow[];
+    const queryTimeoutMs = opts?.queryTimeoutMs;
+    if (queryTimeoutMs && Number.isFinite(queryTimeoutMs) && queryTimeoutMs > 0) {
+      // Raw checked-out client: drizzle does not expose per-query timeout
+      // overrides. Release discipline mirrors clearCandleCache — on ANY
+      // error release WITH the error so pg-pool destroys the client instead
+      // of recycling a possibly-still-busy socket.
+      const client = await pool.connect();
+      try {
+        const result = await client.query({
+          text:
+            "SELECT time, open, high, low, close, volume FROM lab_candle_cache " +
+            "WHERE symbol = $1 AND timeframe = $2 AND time >= $3 AND time <= $4 " +
+            "ORDER BY time",
+          values: [symbol, timeframe, String(startMs), String(endMs)],
+          query_timeout: Math.max(1, Math.floor(queryTimeoutMs)),
+        } as any);
+        client.release();
+        rows = result.rows as CandleCacheRow[];
+      } catch (err) {
+        client.release(err instanceof Error ? err : new Error(String(err)));
+        throw err;
+      }
+    } else {
+      rows = await db
+        .select()
+        .from(labCandleCache)
+        .where(
+          and(
+            eq(labCandleCache.symbol, symbol),
+            eq(labCandleCache.timeframe, timeframe),
+            gte(labCandleCache.time, String(startMs)),
+            lte(labCandleCache.time, String(endMs))
+          )
         )
-      )
-      .orderBy(labCandleCache.time);
+        .orderBy(labCandleCache.time);
+    }
 
     const tfSeconds = getTimeframeSecondsForCache(timeframe);
     const tfMs = tfSeconds * 1000;

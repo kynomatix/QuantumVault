@@ -1,5 +1,6 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
-import { coreFetch, useServerDegraded } from "@/lib/server-health";
+import { coreFetch, CoreReadError, useServerDegraded, useSessionExpired, reportCoreAuthSuccess } from "@/lib/server-health";
+import { deriveDashboardSectionState, staleDataLabel, type DashboardSectionState } from "@/lib/dashboard-state";
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from 'framer-motion';
@@ -243,6 +244,62 @@ function ReferralOverviewPanel() {
   );
 }
 
+// Explicit status panel for dashboard data sections (2026-07-19 incident):
+// rendered wherever a list would previously fall through to a "No bots yet" /
+// "No open positions" empty state without a successful read. States that can
+// reach here are loading, session-expired, server-unavailable, request-failed
+// (wallet-level states are handled by the full-screen gates before the
+// dashboard renders; 'empty'/'ready'/'stale' are rendered by the caller).
+function SectionStatusPanel({ state, label, onRetry, retrying, onSignIn, signingIn, testId }: {
+  state: DashboardSectionState;
+  label: string;
+  onRetry: () => void;
+  retrying: boolean;
+  onSignIn: () => void;
+  signingIn: boolean;
+  testId: string;
+}) {
+  if (state === 'session-expired' || state === 'auth-failed') {
+    return (
+      <div className="text-center py-8" data-testid={`${testId}-session-expired`}>
+        <Shield className="w-8 h-8 mx-auto mb-2 text-amber-400/70" />
+        <p className="text-amber-200">Session expired</p>
+        <p className="text-xs mt-1 text-muted-foreground">
+          The server can no longer verify this wallet, so your {label} can't be shown.
+          This does not mean your account is empty.
+        </p>
+        <Button variant="outline" size="sm" className="mt-3" onClick={onSignIn} disabled={signingIn} data-testid={`${testId}-button-sign-in`}>
+          {signingIn ? 'Signing In…' : 'Sign In Again'}
+        </Button>
+      </div>
+    );
+  }
+  if (state === 'server-unavailable' || state === 'request-failed') {
+    return (
+      <div className="text-center py-8" data-testid={`${testId}-unavailable`}>
+        <AlertTriangle className="w-8 h-8 mx-auto mb-2 text-amber-400/70" />
+        <p className="text-amber-200">
+          {state === 'server-unavailable' ? "Can't reach the server" : `Couldn't load ${label}`}
+        </p>
+        <p className="text-xs mt-1 text-muted-foreground">
+          Your {label} couldn't be loaded, so nothing is shown here — this is not an empty account.
+        </p>
+        <Button variant="outline" size="sm" className="mt-3" onClick={onRetry} disabled={retrying} data-testid={`${testId}-button-retry`}>
+          {retrying ? 'Retrying…' : 'Retry'}
+        </Button>
+      </div>
+    );
+  }
+  // loading / wallet-connecting / signature-required — a read is (or will be)
+  // in flight; show a spinner, never an empty claim.
+  return (
+    <div className="text-center py-8 text-muted-foreground" data-testid={`${testId}-loading`}>
+      <Loader2 className="w-6 h-6 mx-auto mb-2 animate-spin opacity-70" />
+      <p className="text-sm">Loading {label}…</p>
+    </div>
+  );
+}
+
 export default function AppPage() {
   const [, navigate] = useLocation();
   const { connected, connecting, disconnect, shortenedAddress, balance, balanceLoading, publicKeyString, sessionConnected, referralCode: walletReferralCode, authenticateWallet, authError, retryAuth } = useWallet();
@@ -391,18 +448,25 @@ export default function AppPage() {
     return () => document.removeEventListener('mousedown', handler);
   }, [botSortMenuOpen]);
 
-  // Fetch data using React Query hooks
+  // Fetch data using React Query hooks. Core dashboard reads also expose their
+  // query status: "No bots / No open positions" may only render after an
+  // HTTP 200 for the active wallet (2026-07-19 incident — a failed read must
+  // surface as an explicit error state, never as an empty account).
   const { data: portfolioData } = usePortfolio();
-  const { data: positionsData } = usePositions();
+  const { data: positionsData, isSuccess: positionsLoaded, isError: positionsFailed, dataUpdatedAt: positionsUpdatedAt } = usePositions();
   const { data: subscriptionsData } = useSubscriptions();
   const { data: tradesData, refetch: refetchTrades } = useTrades(10);
   const { data: allTradesData } = useTrades(500);
-  const { data: botsData, refetch: refetchBots } = useTradingBots();
-  const { data: aiTraderBotsData, refetch: refetchAiTraderBots } = useQuery({
-    queryKey: ['/api/ai-trader'],
+  const { data: botsData, refetch: refetchBots, isSuccess: botsLoaded, isError: botsFailed, dataUpdatedAt: botsUpdatedAt } = useTradingBots();
+  const { data: aiTraderBotsData, refetch: refetchAiTraderBots, isSuccess: aiBotsLoaded, isError: aiBotsFailed } = useQuery({
+    // Wallet-scoped key: this cache entry must never survive a wallet switch.
+    queryKey: ['/api/ai-trader', publicKeyString],
     queryFn: async () => {
-      const res = await fetch('/api/ai-trader', { credentials: 'include', headers: walletAuthHeaders() });
-      if (!res.ok) return [] as any[];
+      // coreFetch + throw (was: return [] on any failure, which rendered a
+      // failed read as "no AI bots" — the exact false-empty this incident
+      // fixed). Throwing keeps last-known-good data and flips query.isError.
+      const res = await coreFetch('/api/ai-trader', { credentials: 'include', headers: walletAuthHeaders() });
+      if (!res.ok) throw new CoreReadError('AI Trader bots', res.status);
       return safeResponseJson(res);
     },
     enabled: !!publicKeyString && sessionConnected,
@@ -451,6 +515,53 @@ export default function AppPage() {
   // drives the "connection lost" banner so a degraded server never masquerades
   // as an empty account (2026-07-19 incident).
   const serverDegraded = useServerDegraded();
+  // True once a core read has come back 401/403 for the active wallet — the
+  // express session no longer matches, so authed reads will keep failing until
+  // the user signs in again.
+  const sessionExpired = useSessionExpired();
+
+  // Truthful per-section states: "empty" is only reachable after querySuccess
+  // (an HTTP 200 for this wallet); any failure with cached data → "stale".
+  const sectionState = useCallback(
+    (loaded: boolean, failed: boolean, count: number | undefined): DashboardSectionState =>
+      deriveDashboardSectionState({
+        walletConnected: connected,
+        walletConnecting: connecting,
+        signingInProgress: false,
+        authError,
+        sessionConnected,
+        sessionExpired,
+        serverDegraded,
+        querySuccess: loaded,
+        queryError: failed,
+        isEmpty: (count ?? 0) === 0,
+        hasData: (count ?? 0) > 0,
+      }),
+    [connected, connecting, authError, sessionConnected, sessionExpired, serverDegraded],
+  );
+  const positionsSectionState = sectionState(positionsLoaded, positionsFailed, positionsData?.length);
+  const botsSectionState = sectionState(botsLoaded, botsFailed, botsData?.length);
+  const aiBotsSectionState = sectionState(aiBotsLoaded, aiBotsFailed, ((aiTraderBotsData as any)?.bots ?? []).length);
+  // Newest successful core read — powers the "last saved view" timestamp on
+  // the degraded/session banners.
+  const lastGoodDataAt = Math.max(positionsUpdatedAt || 0, botsUpdatedAt || 0);
+
+  // Real reconnect for an expired session: re-sign (retryAuth re-runs the
+  // signature + /api/wallet/connect), then refetch everything.
+  const [reconnecting, setReconnecting] = useState(false);
+  const handleSessionReconnect = useCallback(async () => {
+    if (reconnecting) return;
+    setReconnecting(true);
+    try {
+      const ok = await retryAuth();
+      if (ok) {
+        reportCoreAuthSuccess();
+        await handleRefreshAll();
+      }
+    } finally {
+      setReconnecting(false);
+    }
+  }, [reconnecting, retryAuth]);
 
   // "Available" = idle wallet USDC + Vault savings (both spendable on demand).
   // null until the first equity load so we can show the loading placeholder.
@@ -2425,13 +2536,37 @@ export default function AppPage() {
         </header>
 
         <main className="p-4 lg:p-6">
-          {serverDegraded && (
+          {sessionExpired ? (
+            <div
+              className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3"
+              data-testid="banner-session-expired"
+            >
+              <p className="text-sm text-amber-200">
+                Your session expired, so the server can no longer verify this wallet.
+                {lastGoodDataAt > 0
+                  ? ` You're seeing your last saved view (${staleDataLabel(lastGoodDataAt)}).`
+                  : ' Live data can\'t be loaded until you sign in again.'}{' '}
+                Sign in again to reconnect.
+              </p>
+              <button
+                onClick={handleSessionReconnect}
+                disabled={reconnecting}
+                className="shrink-0 rounded-md border border-amber-500/40 px-3 py-1.5 text-sm text-amber-200 hover:bg-amber-500/20 disabled:opacity-50"
+                data-testid="button-session-reconnect"
+              >
+                {reconnecting ? 'Signing In…' : 'Sign In Again'}
+              </button>
+            </div>
+          ) : serverDegraded ? (
             <div
               className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3"
               data-testid="banner-server-degraded"
             >
               <p className="text-sm text-amber-200">
-                Connection to the server lost — bots and balances may be missing from this view. Your funds are safe; this is a display issue.
+                Can't reach the server right now, so live balances, bots, and positions can't be loaded.
+                {lastGoodDataAt > 0
+                  ? ` You're seeing your last saved view (${staleDataLabel(lastGoodDataAt)}).`
+                  : ' Nothing below is confirmed empty — it just couldn\'t be loaded.'}
               </p>
               <button
                 onClick={handleRefreshAll}
@@ -2439,10 +2574,10 @@ export default function AppPage() {
                 className="shrink-0 rounded-md border border-amber-500/40 px-3 py-1.5 text-sm text-amber-200 hover:bg-amber-500/20 disabled:opacity-50"
                 data-testid="button-retry-connection"
               >
-                {refreshing ? 'Retrying…' : 'Retry'}
+                {refreshing ? 'Reconnecting…' : 'Reconnect'}
               </button>
             </div>
-          )}
+          ) : null}
           <AnimatePresence mode="wait">
             {activeNav === 'vault' && (
               <motion.div
@@ -2661,12 +2796,22 @@ export default function AppPage() {
                             </div>
                           );
                         })
-                      ) : (
-                        <div className="text-center py-8 text-muted-foreground">
+                      ) : positionsSectionState === 'empty' ? (
+                        <div className="text-center py-8 text-muted-foreground" data-testid="empty-positions">
                           <TrendingUp className="w-8 h-8 mx-auto mb-2 opacity-50" />
                           <p>No open positions</p>
                           <p className="text-xs mt-1">Positions will appear when your bots execute trades</p>
                         </div>
+                      ) : (
+                        <SectionStatusPanel
+                          state={positionsSectionState}
+                          label="positions"
+                          onRetry={handleRefreshAll}
+                          retrying={refreshing}
+                          onSignIn={handleSessionReconnect}
+                          signingIn={reconnecting}
+                          testId="status-positions"
+                        />
                       )}
                     </div>
                   </div>
@@ -2813,12 +2958,22 @@ export default function AppPage() {
                           </div>
                         ));
                         })()
-                      ) : (
-                        <div className="text-center py-6 text-muted-foreground">
+                      ) : botsSectionState === 'empty' ? (
+                        <div className="text-center py-6 text-muted-foreground" data-testid="empty-bots">
                           <Bot className="w-8 h-8 mx-auto mb-2 opacity-50" />
                           <p>No bots yet</p>
                           <p className="text-xs mt-1">Create a TradingView bot to start</p>
                         </div>
+                      ) : (
+                        <SectionStatusPanel
+                          state={botsSectionState}
+                          label="bots"
+                          onRetry={handleRefreshAll}
+                          retrying={refreshing}
+                          onSignIn={handleSessionReconnect}
+                          signingIn={reconnecting}
+                          testId="status-bots"
+                        />
                       )}
                     </div>
                   </div>
@@ -3317,6 +3472,23 @@ export default function AppPage() {
                           <p className="text-sm text-muted-foreground">Buys and sells automatically within a price range, capturing volatility without predicting direction.</p>
                         </div>
                       </div>
+
+                      {/* Truthful state for the bot lists: if neither list has
+                          data and the reads haven't confirmed "empty" with an
+                          HTTP 200, say so explicitly instead of silently
+                          rendering no sections (2026-07-19 incident). */}
+                      {aiBots.length === 0 && (botsData ?? []).length === 0 &&
+                        (botsSectionState !== 'empty' || aiBotsSectionState !== 'empty') && (
+                        <SectionStatusPanel
+                          state={botsSectionState !== 'empty' ? botsSectionState : aiBotsSectionState}
+                          label="bots"
+                          onRetry={handleRefreshAll}
+                          retrying={refreshing}
+                          onSignIn={handleSessionReconnect}
+                          signingIn={reconnecting}
+                          testId="status-mybots"
+                        />
+                      )}
 
                       {/* AI Trader bots */}
                       {activeAiBots.length > 0 && (

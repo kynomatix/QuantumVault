@@ -22,7 +22,13 @@ export type ErrorCategory =
   | "trade_failed"
   | "fund_safety"
   | "webhook_failed"
-  | "security";
+  | "security"
+  // Market-scanner sweep health: blackouts, materially-partial sweeps, budget
+  // overruns, abandoned (hung) dispatches. Deliberately its OWN category so the
+  // crash/server_500 NOISE_PATTERNS denylist (which drops anything matching
+  // /429|rate.?limit/) can never swallow a real scanner incident whose message
+  // happens to mention a rate-limited upstream.
+  | "scanner";
 
 export type ErrorSeverity = "critical" | "error";
 

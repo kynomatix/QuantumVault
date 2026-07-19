@@ -1,16 +1,23 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
-import { coreFetch } from "@/lib/server-health";
+import { coreFetch, CoreReadError } from "@/lib/server-health";
+import { walletAuthHeaders } from "@/lib/queryClient";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useWallet } from "./useWallet";
 
 // API fetch functions
 // Core dashboard reads (bots, positions, portfolio) go through coreFetch so a
 // degraded server (5xx / network failure) raises the "connection lost" banner
-// instead of the UI silently rendering empty states (2026-07-19 incident).
+// and a 401/403 raises the "session expired" state instead of the UI silently
+// rendering empty states (2026-07-19 incident). They also send the explicit
+// x-wallet-address header so the server fail-closes if its session identifies
+// a different wallet than the one active in the UI — a stale cookie must never
+// return another wallet's (or an empty) view as if it were this wallet's data.
 async function fetchBots(featured?: boolean) {
   const url = featured ? "/api/bots?featured=true" : "/api/bots";
-  const res = await coreFetch(url, { credentials: "include" });
-  if (!res.ok) throw new Error("Failed to fetch bots");
+  // Public (unauthenticated) endpoint: its 200s say nothing about the wallet
+  // session, so it must not clear the session-expired latch.
+  const res = await coreFetch(url, { credentials: "include" }, { authed: false });
+  if (!res.ok) throw new CoreReadError("bots", res.status);
   return safeResponseJson(res);
 }
 
@@ -21,14 +28,23 @@ async function fetchSubscriptions(walletAddress: string) {
 }
 
 async function fetchPortfolio(walletAddress: string) {
-  const res = await coreFetch(`/api/portfolio?wallet=${walletAddress}`, { credentials: "include" });
-  if (!res.ok) throw new Error("Failed to fetch portfolio");
+  const res = await coreFetch(`/api/portfolio?wallet=${walletAddress}`, {
+    credentials: "include",
+    headers: walletAuthHeaders(),
+  });
+  if (!res.ok) throw new CoreReadError("portfolio", res.status);
   return safeResponseJson(res);
 }
 
 async function fetchPositions(walletAddress: string) {
-  const res = await coreFetch(`/api/positions`, { credentials: "include" });
-  if (!res.ok) throw new Error("Failed to fetch positions");
+  // Explicit wallet identity: the session cookie alone could be pinned to a
+  // previously connected wallet. The header makes the server fail closed
+  // (403) on any mismatch instead of silently answering for the wrong wallet.
+  const res = await coreFetch(`/api/positions?wallet=${walletAddress}`, {
+    credentials: "include",
+    headers: walletAuthHeaders(),
+  });
+  if (!res.ok) throw new CoreReadError("positions", res.status);
   const data = await safeResponseJson(res);
   return data.positions || [];
 }
@@ -90,8 +106,11 @@ async function fetchHealthMetrics(): Promise<HealthMetrics | null> {
 }
 
 async function fetchTradingBots(walletAddress: string) {
-  const res = await coreFetch(`/api/trading-bots?wallet=${walletAddress}`, { credentials: "include" });
-  if (!res.ok) throw new Error("Failed to fetch trading bots");
+  const res = await coreFetch(`/api/trading-bots?wallet=${walletAddress}`, {
+    credentials: "include",
+    headers: walletAuthHeaders(),
+  });
+  if (!res.ok) throw new CoreReadError("trading bots", res.status);
   return safeResponseJson(res);
 }
 

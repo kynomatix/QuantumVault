@@ -17,7 +17,13 @@
 //   getScannerStatus()             — full status blob for the telemetry endpoint.
 
 import type { OHLCV } from "../lab/engine";
-import { fetchOHLCV, isNonCryptoMarketOpen } from "../lab/datafeed";
+import {
+  fetchOHLCV,
+  isNonCryptoMarketOpen,
+  isAbortError,
+  setDatafeedIncidentReporter,
+} from "../lab/datafeed";
+import { recordCriticalError } from "../error-log";
 import { marketToDatafeedTicker } from "./context-builder";
 import { getFlashMarketSpecs } from "../protocol/flash/flash-markets";
 import { getAdapter } from "../protocol/adapter-registry";
@@ -180,6 +186,14 @@ const SWEEP_WEDGE_MS = 5 * 60_000;
 const SWEEP_FETCH_DEADLINE_TOTAL_MS = 240_000;
 /** Per-fetch cap within the sweep budget. */
 const SWEEP_PER_FETCH_DEADLINE_MS = 45_000;
+/**
+ * After the drain cap expires the TF's AbortController fires; aborted
+ * dispatches then get this long to unwind cleanly (abort checks + the manual
+ * fetch listener make unwind near-instant; this bounds pathological cases —
+ * e.g. a wedged DB write — so the sweep still reaches its summary lines).
+ * Anything unsettled after this window is ABANDONED and reported by name.
+ */
+const SWEEP_TEARDOWN_ALLOWANCE_MS = 8_000;
 /**
  * Boot catch-up sweep gate: if the next 15m boundary is closer than this,
  * skip the catch-up and just wait for the boundary sweep — double-fetching
@@ -423,8 +437,23 @@ async function runSweep(): Promise<void> {
     let sweepErrors = 0;
     let sweepCandidates = 0;
     let sweepClosed = 0;
+    // Formal-incident accounting (feeds the sweep-end error_log verdict).
+    let sweepAttempted = 0;        // markets whose scan this sweep INTENDED
+    let sweepAbandonedCount = 0;   // dispatches still unsettled after abort+teardown
+    let budgetSkippedUnits = 0;    // whole protocol×TF units skipped at the budget gate
+    const sweepAbandonedMarkets: string[] = []; // bounded sample for the error context
 
     for (const protocol of PROTOCOLS) {
+      // Genuine wall-clock gate: once the sweep-global fetch budget is spent,
+      // no further protocol may start dispatching (previously only checked
+      // between markets, so a late protocol still burned real time).
+      if (Date.now() >= fetchDeadlineAt) {
+        budgetSkippedUnits += boundaryTfs.length;
+        const gateLine = `[Scanner] BUDGET GATE: sweep fetch budget exhausted — skipping ${protocol} entirely (${boundaryTfs.length} TF unit(s))`;
+        console.log(gateLine);
+        appendTelemetry(gateLine);
+        continue;
+      }
       const universe = await buildUniverse(protocol);
 
       // Per-protocol budget clock. The budget used to be measured from the GLOBAL
@@ -445,9 +474,19 @@ async function runSweep(): Promise<void> {
       const protocolStart = Date.now();
 
       for (const tf of boundaryTfs) {
+        // Same wall-clock gate per TF: a budget spent mid-protocol must stop
+        // the NEXT timeframe from dispatching, not just the next market.
+        if (Date.now() >= fetchDeadlineAt) {
+          budgetSkippedUnits++;
+          const gateLine = `[Scanner] BUDGET GATE: sweep fetch budget exhausted — skipping ${protocol} ${tf}`;
+          console.log(gateLine);
+          appendTelemetry(gateLine);
+          continue;
+        }
         const tfStart = Date.now();
         const parentTf = PARENT_TF[tf] ?? null;
         const tfMs = TIMEFRAME_MS[tf];
+        sweepAttempted += universe.length;
 
         let marketsScanned = 0;
         let marketsFresh = 0;
@@ -456,9 +495,17 @@ async function runSweep(): Promise<void> {
         let errorCount = 0;
         const tfCandidates: ScannerCandidate[] = [];
 
+        // Real cancellation for this TF's dispatches: when the drain cap
+        // expires, aborting unwinds retries/backoffs/pagination/in-flight
+        // HTTP inside fetchOHLCV instead of leaving them running blind.
+        const tfAbort = new AbortController();
+
         // Concurrency tracking (module-local to each TF scan, not shared across TFs).
         let inFlight = 0;
         const pendingPromises: Promise<void>[] = [];
+        // Names of markets currently in flight — an abandoned dispatch is
+        // reported by NAME, not just a count (formal incident requirement).
+        const inFlightMarkets = new Set<string>();
 
         // Per-market fetch + evaluate, dispatched concurrently (max 3 in flight).
         const dispatchMarket = (market: string): Promise<void> => {
@@ -517,6 +564,7 @@ async function runSweep(): Promise<void> {
                 const fetchStartedAt = Date.now();
                 bars = await fetchOHLCV(ticker, tf, startDate, endDate, undefined, {
                   deadlineMs: perFetchDeadlineMs,
+                  signal: tfAbort.signal,
                 });
                 // If the fetch came back EMPTY after running out its deadline,
                 // treat it as a budget timeout, not a dead feed — a truncated
@@ -529,6 +577,14 @@ async function runSweep(): Promise<void> {
                 }
               }
             } catch (err) {
+              // Cancellation FIRST: a sweep-budget abort is OUR doing, never
+              // the feed's fault — count as a timeout skip, never feed-dead.
+              // Detect via signal state, not err.name: fetchOHLCV's internal
+              // per-call timeout also surfaces as AbortError.
+              if (tfAbort.signal.aborted && isAbortError(err)) {
+                marketsSkippedByTimeout++;
+                return;
+              }
               feedHealthMap.set(ticker, { failedAt: Date.now() });
               errorCount++;
               return;
@@ -577,7 +633,10 @@ async function runSweep(): Promise<void> {
                       new Date(parentStartMs).toISOString(),
                       endDate,
                       undefined,
-                      { deadlineMs: Math.min(SWEEP_PER_FETCH_DEADLINE_MS, remainingMs) },
+                      {
+                        deadlineMs: Math.min(SWEEP_PER_FETCH_DEADLINE_MS, remainingMs),
+                        signal: tfAbort.signal,
+                      },
                     );
                     candleCache.set(parentCacheKey, parentBars);
                   }
@@ -589,7 +648,19 @@ async function runSweep(): Promise<void> {
 
             const candidate = evaluateCandidate(market, protocol, bars, parentBars, tf, now);
             if (candidate) tfCandidates.push(candidate);
-          })();
+          })().catch((err) => {
+            // Dispatches must NEVER reject: a single rejection would blow up
+            // the drain's Promise.all and abort the whole sweep. Anything
+            // reaching here escaped the inner catches (e.g. an evaluator bug).
+            if (tfAbort.signal.aborted && isAbortError(err)) {
+              marketsSkippedByTimeout++;
+              return;
+            }
+            errorCount++;
+            const dispatchErrLine = `[Scanner] DISPATCH ERROR: ${market} ${tf} — ${err instanceof Error ? err.message : err}`;
+            console.error(dispatchErrLine);
+            appendTelemetry(dispatchErrLine);
+          });
         };
 
         // Dispatch loop: max 3 concurrent + ≥150ms stagger between dispatches.
@@ -620,7 +691,11 @@ async function runSweep(): Promise<void> {
             break;
           }
           inFlight++;
-          const p = dispatchMarket(market).finally(() => { inFlight--; });
+          inFlightMarkets.add(market);
+          const p = dispatchMarket(market).finally(() => {
+            inFlight--;
+            inFlightMarkets.delete(market);
+          });
           pendingPromises.push(p);
 
           // ≥150ms stagger between dispatch initiations (spec: sleep after dispatch).
@@ -645,25 +720,51 @@ async function runSweep(): Promise<void> {
         // Prod incident 2026-07-18 07:30 UTC: one OKX fetch never settled (its
         // AbortSignal.timeout never fired), this Promise.all waited on it
         // forever, and the sweep wedged silently for 900s with no exit line.
-        // Cap the drain so the sweep ALWAYS reaches its summary lines; hung
-        // dispatches are abandoned, counted as errors, and reported instead.
-        const drainCapMs = Math.max(
-          15_000,
-          sweepBeganAt + SWEEP_WEDGE_MS - 30_000 - Date.now(),
+        // Drain deadline honours ALL THREE clocks (this protocol's window, the
+        // sweep-global fetch budget, the wedge backstop): previously only the
+        // wedge clock applied, so one hung fetch let the drain legally sit for
+        // ~4 minutes — inside the "240s budget" the summary line claimed.
+        const drainDeadlineAt = Math.min(
+          protocolStart + protocolBudgetMs,
+          fetchDeadlineAt,
+          sweepBeganAt + SWEEP_WEDGE_MS - 30_000,
         );
+        const drainCapMs = Math.max(15_000, drainDeadlineAt - Date.now());
         const drained = await Promise.race([
           Promise.all(pendingPromises).then(() => true),
           sleep(drainCapMs).then(() => false),
         ]);
         if (!drained) {
-          const hangLine =
-            `[Scanner] SWEEP HANG: ${inFlight} dispatch(es) still unsettled after ` +
-            `${Math.round(drainCapMs / 1000)}s drain cap (${protocol} ${tf}) — abandoning them so the sweep can finish`;
-          console.error(hangLine);
-          appendTelemetry(hangLine);
-          errorCount += inFlight;
-          // Swallow any late rejection from abandoned promises.
-          for (const p of pendingPromises) p.catch(() => {});
+          // REAL cancellation (the fix for the 2026-07-19 incident): abort the
+          // TF's signal so every in-flight fetch chain unwinds — retries,
+          // backoff sleeps, pagination, and the HTTP calls themselves.
+          tfAbort.abort();
+          const cancelLine =
+            `[Scanner] SWEEP DRAIN CAP: ${inFlight} dispatch(es) still running after ` +
+            `${Math.round(drainCapMs / 1000)}s (${protocol} ${tf}) — CANCELLING them (abort signal fired)`;
+          console.error(cancelLine);
+          appendTelemetry(cancelLine);
+          // Bounded teardown: aborted dispatches settle near-instantly via the
+          // abort checks; give pathological cases a short window, then abandon.
+          const settledInTime = await Promise.race([
+            Promise.allSettled(pendingPromises).then(() => true),
+            sleep(SWEEP_TEARDOWN_ALLOWANCE_MS).then(() => false),
+          ]);
+          if (!settledInTime) {
+            const abandoned = [...inFlightMarkets];
+            sweepAbandonedCount += abandoned.length;
+            for (const m of abandoned) {
+              if (sweepAbandonedMarkets.length < 20) sweepAbandonedMarkets.push(`${protocol}:${m}:${tf}`);
+            }
+            errorCount += abandoned.length;
+            const hangLine =
+              `[Scanner] SWEEP HANG: ${abandoned.length} dispatch(es) ignored cancellation for ` +
+              `${SWEEP_TEARDOWN_ALLOWANCE_MS / 1000}s (${protocol} ${tf}) — abandoning: ${abandoned.join(", ") || "unknown"}`;
+            console.error(hangLine);
+            appendTelemetry(hangLine);
+            // Swallow any late rejection from abandoned promises.
+            for (const p of pendingPromises) p.catch(() => {});
+          }
         }
 
         if (marketsSkippedByTimeout > 0) {
@@ -731,13 +832,73 @@ async function runSweep(): Promise<void> {
     }
 
     // One-line sweep summary: total time vs. fetch budget + starvation signal.
+    const sweepDurationMs = Date.now() - sweepBeganAt;
     const sweepSummary =
       `[Scanner] SWEEP TOTAL: ${sweepScanned} scanned, ${sweepSkipped} skipped-by-timeout, ` +
-      `${sweepClosed} venue-closed, ${sweepErrors} errors, ${sweepCandidates} candidates in ` +
-      `${((Date.now() - sweepBeganAt) / 1000).toFixed(1)}s ` +
+      `${sweepClosed} venue-closed, ${sweepErrors} errors, ${sweepAbandonedCount} abandoned, ` +
+      `${budgetSkippedUnits} budget-gated units, ${sweepCandidates} candidates in ` +
+      `${(sweepDurationMs / 1000).toFixed(1)}s ` +
       `(fetch budget ${SWEEP_FETCH_DEADLINE_TOTAL_MS / 1000}s)`;
     console.log(sweepSummary);
     appendTelemetry(sweepSummary);
+
+    // ── Formal incident reporting (error_log, category "scanner") ──────────
+    // Telemetry lines are diagnostics; these rows are the ALERTABLE record —
+    // /api/logs/summary surfaces them to the external log-reader cron.
+    const incidentContext: Record<string, unknown> = {
+      pid: process.pid,
+      env: process.env.NODE_ENV || "development",
+      uptimeSec: Math.round(process.uptime()),
+      boundaryTfs,
+      attempted: sweepAttempted,
+      scanned: sweepScanned,
+      skippedByTimeout: sweepSkipped,
+      venueClosed: sweepClosed,
+      errors: sweepErrors,
+      abandoned: sweepAbandonedCount,
+      budgetSkippedUnits,
+      candidates: sweepCandidates,
+      durationMs: sweepDurationMs,
+      ...(sweepAbandonedMarkets.length > 0 ? { abandonedMarkets: sweepAbandonedMarkets } : {}),
+    };
+    if (sweepAttempted > 0 && sweepScanned === 0) {
+      // Blackout: the sweep intended to scan markets and scanned NONE.
+      recordCriticalError({
+        category: "scanner",
+        severity: "critical",
+        source: "scanner-sweep",
+        message: `Scanner blackout: 0 of ${sweepAttempted} markets scanned (${sweepSkipped} timeout-skipped, ${sweepErrors} errors)`,
+        context: incidentContext,
+      });
+    } else if (
+      sweepAbandonedCount > 0 ||
+      budgetSkippedUnits > 0 ||
+      (sweepAttempted > 0 && sweepSkipped >= sweepAttempted * 0.25)
+    ) {
+      // PARTIAL failure — was previously invisible outside telemetry grep.
+      recordCriticalError({
+        category: "scanner",
+        severity: "error",
+        source: "scanner-sweep",
+        message:
+          `Scanner partial sweep: ${sweepScanned}/${sweepAttempted} scanned, ` +
+          `${sweepSkipped} timeout-skipped, ${sweepAbandonedCount} abandoned, ` +
+          `${budgetSkippedUnits} budget-gated unit(s)`,
+        context: incidentContext,
+      });
+    }
+    // Overrun check is INDEPENDENT of the scan-coverage verdict: a sweep can
+    // scan everything yet still prove the budget enforcement is broken.
+    const overrunLimitMs = SWEEP_FETCH_DEADLINE_TOTAL_MS + SWEEP_TEARDOWN_ALLOWANCE_MS + 5_000;
+    if (sweepDurationMs > overrunLimitMs) {
+      recordCriticalError({
+        category: "scanner",
+        severity: "critical",
+        source: "scanner-sweep",
+        message: `Scanner budget overrun: sweep ran ${(sweepDurationMs / 1000).toFixed(1)}s (hard limit ${(overrunLimitMs / 1000).toFixed(0)}s)`,
+        context: incidentContext,
+      });
+    }
   } catch (err) {
     // Invariant: no sweep may end without a SWEEP TOTAL or SWEEP ABORT line
     // reaching telemetry — external log readers only see the telemetry file.
@@ -746,6 +907,18 @@ async function runSweep(): Promise<void> {
       `${err instanceof Error ? err.message : err}`;
     console.error(abortLine);
     appendTelemetry(abortLine);
+    recordCriticalError({
+      category: "scanner",
+      severity: "critical",
+      source: "scanner-sweep",
+      message: `Scanner sweep crashed after ${((Date.now() - sweepBeganAt) / 1000).toFixed(1)}s`,
+      error: err,
+      context: {
+        pid: process.pid,
+        env: process.env.NODE_ENV || "development",
+        uptimeSec: Math.round(process.uptime()),
+      },
+    });
   } finally {
     // Only clear our own claim — a wedged sweep that resumes after an override
     // must not wipe the newer sweep's timestamp.
@@ -796,6 +969,26 @@ export function startScanner(): void {
   if (scannerRunning) return; // already running (singleton guard on the explicit flag)
   scannerRunning = true;
   console.log("[Scanner] starting (15m boundary sweep — shadow mode, no trading)");
+
+  // Datafeed infra incidents (e.g. a slow/wedged candle-cache DB read eating
+  // a fetch budget) get a formal error_log row, not just a telemetry line.
+  // Registered here — NOT at module top — so unit tests importing datafeed
+  // never write error_log rows as a side effect.
+  setDatafeedIncidentReporter((incident) => {
+    recordCriticalError({
+      category: "scanner",
+      severity: "error",
+      source: "datafeed",
+      message: `Datafeed ${incident.kind}: ${incident.symbol} ${incident.timeframe} cache read exceeded ${incident.budgetMs}ms — treated as miss`,
+      context: {
+        ...incident,
+        pid: process.pid,
+        env: process.env.NODE_ENV || "development",
+        uptimeSec: Math.round(process.uptime()),
+      },
+    });
+  });
+
   scheduleNextScan();
 
   // Boot catch-up sweep: a restart (every deploy) wipes the in-memory shortlist,
@@ -828,6 +1021,7 @@ export function startScanner(): void {
  */
 export function stopScanner(): void {
   scannerRunning = false; // primary stop signal — scheduleNextScan() exits on this
+  setDatafeedIncidentReporter(null);
   if (scannerTimer) {
     clearTimeout(scannerTimer);
     scannerTimer = null;

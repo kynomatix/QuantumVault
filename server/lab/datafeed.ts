@@ -290,6 +290,72 @@ function mapTimeframeToPyth(tf: string): string {
   return map[tf] || "60";
 }
 
+// ─── Cooperative cancellation (AbortSignal threading) ────────────────────────
+//
+// Deadline-bounded callers (the AI-trader scanner) pass an AbortSignal in
+// fetchOHLCV options so an expired sweep budget can ACTIVELY cancel in-flight
+// fetch chains instead of merely abandoning their promises (2026-07-19
+// incident: "abandoned" chains kept paginating + retry-sleeping for tens of
+// seconds past the budget, holding datafeed/Pyth/DB capacity).
+//
+// Rules enforced at every catch site below:
+//   1. External abort is checked FIRST in every catch, BEFORE any retry,
+//      negcache, or circuit-breaker accounting — a budget expiry must never
+//      count as an instrument/source failure (it would trip the OKX source
+//      breaker and 30-min negcaches for perfectly healthy feeds).
+//   2. The internal per-request timeout in fetchWithHardTimeout ALSO surfaces
+//      as an AbortError from undici, so cancellation is detected by CHECKING
+//      THE SIGNAL STATE (`signal.aborted`), never by the error's name.
+
+/** True when the given error is a cancellation-style AbortError. */
+export function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === "AbortError";
+}
+
+function makeAbortError(): Error {
+  const e = new Error("Datafeed fetch aborted by caller signal");
+  e.name = "AbortError";
+  return e;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw makeAbortError();
+}
+
+/** Sleep that rejects with AbortError the moment the signal fires. */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  if (signal.aborted) return Promise.reject(makeAbortError());
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(makeAbortError());
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+// Optional incident hook: the main-process scanner registers a reporter so
+// repeated slow candle-cache reads reach the admin error log. The Lab child
+// process never registers one (recordCriticalError lives in the main process),
+// so this stays a no-op there by construction.
+export type DatafeedIncident = {
+  kind: "slow_cache";
+  symbol: string;
+  timeframe: string;
+  budgetMs: number;
+};
+let datafeedIncidentReporter: ((evt: DatafeedIncident) => void) | null = null;
+export function setDatafeedIncidentReporter(
+  fn: ((evt: DatafeedIncident) => void) | null,
+): void {
+  datafeedIncidentReporter = fn;
+}
+
 /**
  * Belt-and-braces bounded fetch. Prod incident 2026-07-18 07:30 UTC: an OKX
  * candle fetch built with `AbortSignal.timeout(15000)` NEVER settled — no
@@ -314,9 +380,18 @@ async function fetchWithHardTimeout(
   url: string,
   ms: number,
   init?: RequestInit,
+  externalSignal?: AbortSignal,
 ): Promise<Response> {
+  throwIfAborted(externalSignal);
   const controller = new AbortController();
   setTimeout(() => controller.abort(), ms);
+  // External cancellation is forwarded via a MANUAL listener with strong refs
+  // — deliberately NOT AbortSignal.any(), which belongs to the same weak-ref
+  // GC class that let AbortSignal.timeout silently never fire (incident above).
+  // Removed in finally so a long-lived sweep signal doesn't accumulate one
+  // listener per request.
+  const onExternalAbort = () => controller.abort();
+  externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
   let raceTimer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([
@@ -330,6 +405,7 @@ async function fetchWithHardTimeout(
     ]);
   } finally {
     if (raceTimer) clearTimeout(raceTimer);
+    externalSignal?.removeEventListener("abort", onExternalAbort);
   }
 }
 
@@ -338,6 +414,7 @@ async function fetchGateCandles(
   interval: string,
   fromSec: number,
   toSec: number,
+  signal?: AbortSignal,
 ): Promise<any[]> {
   const params = new URLSearchParams({
     currency_pair: pair,
@@ -350,11 +427,11 @@ async function fetchGateCandles(
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const res = await fetchWithHardTimeout(url, 15000);
+      const res = await fetchWithHardTimeout(url, 15000, undefined, signal);
       if (res.status === 429) {
         const wait = RETRY_DELAY_MS * (attempt + 1) * 2;
         console.log(`[Gate Spot] Rate limited, waiting ${wait}ms before retry ${attempt + 1}/${MAX_RETRIES}`);
-        await new Promise(resolve => setTimeout(resolve, wait));
+        await abortableSleep(wait, signal);
         continue;
       }
       if (!res.ok) {
@@ -370,8 +447,8 @@ async function fetchGateCandles(
           const halfRange = Math.floor((toSec - fromSec) / 2);
           if (halfRange > 60) {
             console.log(`[Gate Spot] Range too broad, splitting chunk in half (${halfRange}s)`);
-            const firstHalf = await fetchGateCandles(pair, interval, fromSec, fromSec + halfRange);
-            const secondHalf = await fetchGateCandles(pair, interval, fromSec + halfRange, toSec);
+            const firstHalf = await fetchGateCandles(pair, interval, fromSec, fromSec + halfRange, signal);
+            const secondHalf = await fetchGateCandles(pair, interval, fromSec + halfRange, toSec, signal);
             return [...firstHalf, ...secondHalf];
           }
         }
@@ -387,13 +464,15 @@ async function fetchGateCandles(
       }
       return json;
     } catch (err: any) {
+      // Cancellation FIRST — before any retry accounting (rule 1 above).
+      throwIfAborted(signal);
       // Permanent not-found — retrying cannot succeed; propagate immediately
       // so the caller negcaches without burning the retry backoff.
       if (err instanceof GatePairNotFoundError) throw err;
       if (attempt < MAX_RETRIES - 1) {
         const wait = RETRY_DELAY_MS * (attempt + 1);
         console.log(`[Gate Spot] Fetch error (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message} — retrying in ${wait}ms`);
-        await new Promise(resolve => setTimeout(resolve, wait));
+        await abortableSleep(wait, signal);
         continue;
       }
       throw err;
@@ -409,6 +488,7 @@ async function fetchAllGateCandles(
   endMs: number,
   onProgress?: (msg: string) => void,
   deadlineAt: number = Infinity,
+  signal?: AbortSignal,
 ): Promise<OHLCV[]> {
   const pair = symbolToGateSpotPair(symbol);
 
@@ -433,6 +513,7 @@ async function fetchAllGateCandles(
   const windowSeconds = tfSeconds * GATE_BATCH_SIZE;
 
   while (currentFrom < endSec) {
+    throwIfAborted(signal);
     if (Date.now() >= deadlineAt) {
       const gateDeadlineMsg = `[Gate Spot] Fetch deadline reached — stopping with ${allCandles.length} candles for ${pair} ${interval}`;
       console.log(gateDeadlineMsg);
@@ -441,7 +522,7 @@ async function fetchAllGateCandles(
     }
     const chunkEnd = Math.min(currentFrom + windowSeconds, endSec);
     try {
-      const raw = await fetchGateCandles(pair, interval, currentFrom, chunkEnd);
+      const raw = await fetchGateCandles(pair, interval, currentFrom, chunkEnd, signal);
       consecutiveErrors = 0;
 
       if (!raw || raw.length === 0) {
@@ -479,8 +560,10 @@ async function fetchAllGateCandles(
         onProgress?.(`Fetched ${allCandles.length} candles for ${symbol} ${timeframe} from Gate.io spot...`);
       }
 
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await abortableSleep(200, signal);
     } catch (err: any) {
+      // Cancellation FIRST — must never negcache or count as a feed error.
+      throwIfAborted(signal);
       if (err instanceof GatePairNotFoundError) {
         console.log(`[Gate Spot] ${pair} not found on Gate.io spot`);
         negCache(gateFailedPairs, pair);
@@ -492,7 +575,7 @@ async function fetchAllGateCandles(
         console.log(`[Gate Spot] Too many consecutive errors, stopping fetch with ${allCandles.length} candles`);
         break;
       }
-      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * consecutiveErrors));
+      await abortableSleep(RETRY_DELAY_MS * consecutiveErrors, signal);
     }
   }
 
@@ -544,10 +627,15 @@ async function fetchPythCandles(
   resolution: string,
   fromSec: number,
   toSec: number,
+  signal?: AbortSignal,
 ): Promise<{ t: number[]; o: number[]; h: number[]; l: number[]; c: number[]; v: number[]; s: string } | null> {
+  throwIfAborted(signal);
   await acquirePythSlot();
   try {
-    return await fetchPythCandlesInner(pythSymbol, resolution, fromSec, toSec);
+    // Re-check after the (possibly long) slot wait — don't burn a rate-limited
+    // Pyth request on a fetch whose sweep budget already expired.
+    throwIfAborted(signal);
+    return await fetchPythCandlesInner(pythSymbol, resolution, fromSec, toSec, signal);
   } finally {
     releasePythSlot();
   }
@@ -558,6 +646,7 @@ async function fetchPythCandlesInner(
   resolution: string,
   fromSec: number,
   toSec: number,
+  signal?: AbortSignal,
 ): Promise<{ t: number[]; o: number[]; h: number[]; l: number[]; c: number[]; v: number[]; s: string } | null> {
   const params = new URLSearchParams({
     symbol: pythSymbol,
@@ -570,7 +659,7 @@ async function fetchPythCandlesInner(
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const res = await fetchWithHardTimeout(url, 20000, { headers: getHermesHeaders() });
+      const res = await fetchWithHardTimeout(url, 20000, { headers: getHermesHeaders() }, signal);
       if ((res.status === 401 || res.status === 403) && !pythBenchmarksAuthWarned) {
         pythBenchmarksAuthWarned = true;
         console.error(
@@ -581,7 +670,7 @@ async function fetchPythCandlesInner(
       if (res.status === 429) {
         const wait = RETRY_DELAY_MS * (attempt + 1) * 2;
         console.log(`[Pyth] Rate limited, waiting ${wait}ms before retry ${attempt + 1}/${MAX_RETRIES}`);
-        await new Promise(resolve => setTimeout(resolve, wait));
+        await abortableSleep(wait, signal);
         continue;
       }
       if (!res.ok) {
@@ -594,10 +683,12 @@ async function fetchPythCandlesInner(
       }
       return json;
     } catch (err: any) {
+      // Cancellation FIRST — before any retry accounting (rule 1 above).
+      throwIfAborted(signal);
       if (attempt < MAX_RETRIES - 1) {
         const wait = RETRY_DELAY_MS * (attempt + 1);
         console.log(`[Pyth] Fetch error (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message} — retrying in ${wait}ms`);
-        await new Promise(resolve => setTimeout(resolve, wait));
+        await abortableSleep(wait, signal);
         continue;
       }
       throw err;
@@ -613,6 +704,7 @@ async function fetchAllPythCandles(
   endMs: number,
   onProgress?: (msg: string) => void,
   deadlineAt: number = Infinity,
+  signal?: AbortSignal,
 ): Promise<OHLCV[]> {
   const pythSymbol = symbolToPythId(symbol);
 
@@ -640,6 +732,7 @@ async function fetchAllPythCandles(
   const chunkSeconds = tfSeconds * batchSize;
 
   while (currentFrom < endSec) {
+    throwIfAborted(signal);
     if (Date.now() >= deadlineAt) {
       const pythDeadlineMsg = `[Pyth] Fetch deadline reached — stopping with ${allCandles.length} candles for ${pythSymbol} ${resolution}`;
       console.log(pythDeadlineMsg);
@@ -649,14 +742,14 @@ async function fetchAllPythCandles(
     const chunkEnd = Math.min(currentFrom + chunkSeconds, endSec);
 
     try {
-      const data = await fetchPythCandles(pythSymbol, resolution, currentFrom, chunkEnd);
+      const data = await fetchPythCandles(pythSymbol, resolution, currentFrom, chunkEnd, signal);
       consecutiveErrors = 0;
 
       if (!data || data.s === "error") {
         if (isNonCrypto) {
           console.log(`[Pyth] ${pythSymbol} returned error for chunk ${currentFrom}–${chunkEnd} — skipping (non-crypto, limited history)`);
           currentFrom = chunkEnd;
-          await new Promise(resolve => setTimeout(resolve, 200));
+          await abortableSleep(200, signal);
           continue;
         }
         negCache(pythFailedSymbols, pythSymbol);
@@ -710,15 +803,17 @@ async function fetchAllPythCandles(
         onProgress?.(`Fetched ${allCandles.length} candles for ${symbol} ${timeframe} from Pyth...`);
       }
 
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await abortableSleep(200, signal);
     } catch (err: any) {
+      // Cancellation FIRST — must never count toward consecutive-error stops.
+      throwIfAborted(signal);
       consecutiveErrors++;
       console.log(`[Pyth] Page fetch error after ${allCandles.length} candles (error ${consecutiveErrors}/5): ${err.message}`);
       if (consecutiveErrors >= 5) {
         console.log(`[Pyth] Too many consecutive errors, stopping fetch with ${allCandles.length} candles`);
         break;
       }
-      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * consecutiveErrors));
+      await abortableSleep(RETRY_DELAY_MS * consecutiveErrors, signal);
     }
   }
 
@@ -740,7 +835,8 @@ async function fetchOkxCandles(
   instId: string,
   bar: string,
   afterMs?: number,
-  beforeMs?: number
+  beforeMs?: number,
+  signal?: AbortSignal,
 ): Promise<any[]> {
   const params = new URLSearchParams({ instId, bar, limit: String(OKX_BATCH_SIZE) });
   if (afterMs) params.set("after", String(afterMs));
@@ -750,11 +846,11 @@ async function fetchOkxCandles(
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const res = await fetchWithHardTimeout(url, 15000);
+      const res = await fetchWithHardTimeout(url, 15000, undefined, signal);
       if (res.status === 429) {
         const wait = RETRY_DELAY_MS * (attempt + 1) * 2;
         console.log(`[OKX] Rate limited, waiting ${wait}ms before retry ${attempt + 1}/${MAX_RETRIES}`);
-        await new Promise(resolve => setTimeout(resolve, wait));
+        await abortableSleep(wait, signal);
         continue;
       }
       if (!res.ok) {
@@ -771,12 +867,14 @@ async function fetchOkxCandles(
       }
       return json.data || [];
     } catch (err: any) {
+      // Cancellation FIRST — before any retry accounting (rule 1 above).
+      throwIfAborted(signal);
       // Permanent not-found — propagate immediately, no retry backoff.
       if (err instanceof OkxInstrumentNotFoundError) throw err;
       if (attempt < MAX_RETRIES - 1) {
         const wait = RETRY_DELAY_MS * (attempt + 1);
         console.log(`[OKX] Fetch error (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message} — retrying in ${wait}ms`);
-        await new Promise(resolve => setTimeout(resolve, wait));
+        await abortableSleep(wait, signal);
         continue;
       }
       throw err;
@@ -846,9 +944,22 @@ export async function fetchOHLCV(
   startDate: string,
   endDate: string,
   onProgress?: (msg: string) => void,
-  options?: { skipSpotFallback?: boolean; bypassCache?: boolean; deadlineMs?: number }
+  options?: {
+    skipSpotFallback?: boolean;
+    bypassCache?: boolean;
+    deadlineMs?: number;
+    /**
+     * Cooperative cancellation: when the caller aborts (e.g. scanner sweep
+     * budget expiry), the whole fetch chain — retries, backoff sleeps,
+     * pagination, in-flight HTTP — unwinds promptly with an AbortError.
+     * Cancellation NEVER negcaches instruments or trips source breakers.
+     */
+    signal?: AbortSignal;
+  }
 ): Promise<OHLCV[]> {
   timeframe = timeframe.toLowerCase();
+  const signal = options?.signal;
+  throwIfAborted(signal);
   const startMs = new Date(startDate).getTime();
   const endMs = new Date(endDate).getTime();
   // Optional overall deadline: bounds total time across pagination loops and
@@ -869,9 +980,14 @@ export async function fetchOHLCV(
   const cacheStartedAt = Date.now();
   let cached: OHLCV[] | null = null;
   if (!options?.bypassCache) {
-    const cacheRead = getCachedCandles(symbol, timeframe, startMs, endMs);
     if (Number.isFinite(deadlineAt)) {
       const cacheBudgetMs = Math.min(5_000, Math.max(1_000, Math.floor((options?.deadlineMs ?? 0) / 4)));
+      // Self-cancelling read: the per-query timeout makes the DB query
+      // release its pool connection at ~the moment we abandon it, instead of
+      // zombie-holding the connection for the pool-level 60s query_timeout.
+      const cacheRead = getCachedCandles(symbol, timeframe, startMs, endMs, {
+        queryTimeoutMs: cacheBudgetMs + 500,
+      });
       let cacheTimer: NodeJS.Timeout | undefined;
       cached = await Promise.race([
         cacheRead,
@@ -885,10 +1001,15 @@ export async function fetchOHLCV(
         const slowMsg = `[CandleCache] Slow cache read >${cacheBudgetMs}ms for ${symbol} ${timeframe} — treating as miss`;
         console.log(slowMsg);
         appendTelemetry(slowMsg);
+        try {
+          datafeedIncidentReporter?.({ kind: "slow_cache", symbol, timeframe, budgetMs: cacheBudgetMs });
+        } catch {
+          // Reporter must never break the fetch path.
+        }
         cacheRead.catch(() => {}); // abandoned read: swallow any late rejection
       }
     } else {
-      cached = await cacheRead;
+      cached = await getCachedCandles(symbol, timeframe, startMs, endMs);
     }
   }
   const cacheReadMs = Date.now() - cacheStartedAt;
@@ -916,6 +1037,8 @@ export async function fetchOHLCV(
     );
   }
 
+  throwIfAborted(signal);
+
   const synthetic = SYNTHETIC_TIMEFRAMES[timeframe];
   if (synthetic) {
     onProgress?.(`Synthesizing ${timeframe} from ${synthetic.source} candles...`);
@@ -925,6 +1048,7 @@ export async function fetchOHLCV(
     console.log(`[Synthetic] Built ${aggregated.length} ${timeframe} candles from ${sourceCandles.length} ${synthetic.source} candles (aligned to ${targetTfMs}ms boundaries)`);
     onProgress?.(`Synthesized ${aggregated.length} ${timeframe} candles from ${synthetic.source}`);
 
+    throwIfAborted(signal); // aborted fetches never fire background writes
     if (aggregated.length > 0) {
       saveCandlesToDb(symbol, timeframe, aggregated).catch((err) =>
         console.log(`[CandleCache] Background save error: ${err.message}`)
@@ -958,8 +1082,11 @@ export async function fetchOHLCV(
   if (nonCrypto) {
     onProgress?.(`Fetching ${symbol} ${timeframe} from Pyth (non-crypto)...`);
     try {
-      allCandles = await fetchAllPythCandles(symbol, timeframe, startMs, endMs, onProgress, deadlineAt);
+      allCandles = await fetchAllPythCandles(symbol, timeframe, startMs, endMs, onProgress, deadlineAt, signal);
     } catch (err: any) {
+      // Cancellation must escape this swallowing catch — the caller needs to
+      // see the AbortError, and an aborted fetch proves nothing about Pyth.
+      throwIfAborted(signal);
       console.log(`[Pyth] Non-crypto fetch failed for ${symbol} ${timeframe}: ${err.message}`);
     }
     trace.push(`pyth=${allCandles.length}c/${((Date.now() - netStart) / 1000).toFixed(1)}s`);
@@ -968,6 +1095,7 @@ export async function fetchOHLCV(
       const deduped = deduplicateCandles(allCandles);
       emitTrace(deduped.length);
       onProgress?.(`Fetched ${deduped.length} candles for ${symbol} ${timeframe}`);
+      throwIfAborted(signal); // aborted fetches never fire background writes
       saveCandlesToDb(symbol, timeframe, deduped).catch((err) =>
         console.log(`[CandleCache] Background save error: ${err.message}`)
       );
@@ -993,6 +1121,7 @@ export async function fetchOHLCV(
     let attemptedNetwork = false;
 
     while (currentEndMs > startMs) {
+      throwIfAborted(signal);
       if (Date.now() >= deadlineAt) {
         const okxDeadlineMsg = `[OKX] Fetch deadline reached — stopping with ${allCandles.length} candles for ${instId} ${bar}`;
         console.log(okxDeadlineMsg);
@@ -1001,7 +1130,7 @@ export async function fetchOHLCV(
       }
       try {
         attemptedNetwork = true;
-        const raw = await fetchOkxCandles(instId, bar, currentEndMs);
+        const raw = await fetchOkxCandles(instId, bar, currentEndMs, undefined, signal);
         // Any well-formed API response (even empty data / exhausted 429
         // retries) proves the OKX source is reachable.
         recordOkxSourceSuccess();
@@ -1037,8 +1166,11 @@ export async function fetchOHLCV(
           onProgress?.(`Fetched ${allCandles.length} candles for ${symbol} ${timeframe}...`);
         }
 
-        await new Promise(resolve => setTimeout(resolve, 200));
+        await abortableSleep(200, signal);
       } catch (err: any) {
+        // Cancellation FIRST — a budget abort must never negcache the
+        // instrument, count toward consecutive errors, or trip the breaker.
+        throwIfAborted(signal);
         // Instrument doesn't exist on OKX — negcache NOW and stop. The old
         // path retried 5 more pages with escalating sleeps before negcaching.
         // The API answered authoritatively, so the SOURCE is reachable.
@@ -1054,7 +1186,7 @@ export async function fetchOHLCV(
           console.log(`[OKX] Too many consecutive errors, stopping fetch with ${allCandles.length} candles`);
           break;
         }
-        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * consecutiveErrors));
+        await abortableSleep(RETRY_DELAY_MS * consecutiveErrors, signal);
       }
     }
 
@@ -1084,12 +1216,16 @@ export async function fetchOHLCV(
     trace.push("okx=source-down-skip");
   }
 
+  throwIfAborted(signal); // no NEW source attempt after cancellation
+
   if (allCandles.length === 0 && !options?.skipSpotFallback && Date.now() < deadlineAt) {
     const gateStart = Date.now();
     const gateNegCachedAtEntry = isNegCached(gateFailedPairs, symbolToGateSpotPair(symbol));
     try {
-      allCandles = await fetchAllGateCandles(symbol, timeframe, startMs, endMs, onProgress, deadlineAt);
+      allCandles = await fetchAllGateCandles(symbol, timeframe, startMs, endMs, onProgress, deadlineAt, signal);
     } catch (err: any) {
+      // Cancellation must escape this swallowing catch.
+      throwIfAborted(signal);
       console.log(`[Gate Spot] Fallback failed for ${symbol} ${timeframe}: ${err.message}`);
     }
     trace.push(
@@ -1100,11 +1236,14 @@ export async function fetchOHLCV(
   }
 
   if (allCandles.length === 0 && !options?.skipSpotFallback && Date.now() < deadlineAt) {
+    throwIfAborted(signal); // no NEW source attempt after cancellation
     const pythStart = Date.now();
     const pythNegCachedAtEntry = isNegCached(pythFailedSymbols, symbolToPythId(symbol));
     try {
-      allCandles = await fetchAllPythCandles(symbol, timeframe, startMs, endMs, onProgress, deadlineAt);
+      allCandles = await fetchAllPythCandles(symbol, timeframe, startMs, endMs, onProgress, deadlineAt, signal);
     } catch (err: any) {
+      // Cancellation must escape this swallowing catch.
+      throwIfAborted(signal);
       console.log(`[Pyth] Fallback failed for ${symbol} ${timeframe}: ${err.message}`);
     }
     trace.push(
@@ -1119,6 +1258,7 @@ export async function fetchOHLCV(
     emitTrace(deduped.length);
     onProgress?.(`Fetched ${deduped.length} candles for ${symbol} ${timeframe}`);
 
+    throwIfAborted(signal); // aborted fetches never fire background writes
     saveCandlesToDb(symbol, timeframe, deduped).catch((err) =>
       console.log(`[CandleCache] Background save error: ${err.message}`)
     );

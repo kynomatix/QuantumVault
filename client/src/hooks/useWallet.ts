@@ -39,6 +39,11 @@ export function useWallet() {
   const [signingInProgress, setSigningInProgress] = useState(false);
   const [authError, setAuthError] = useState(false);
   const lastConnectedWallet = useRef<string | null>(null);
+  // Which wallet's data currently populates the query cache. Unlike
+  // lastConnectedWallet this survives disconnects, so we can tell a transient
+  // same-wallet drop (keep last-known-good) from a different wallet taking
+  // over (must clear).
+  const lastDataOwnerWallet = useRef<string | null>(null);
   const authAttempted = useRef<Set<string>>(new Set());
   const authSucceeded = useRef<Set<string>>(new Set());
   const authInProgress = useRef<Set<string>>(new Set());
@@ -165,16 +170,20 @@ export function useWallet() {
       setActiveWalletAddress(publicKeyString);
 
       if (publicKeyString && publicKeyString !== lastConnectedWallet.current) {
-        // CRITICAL: Clear all cached queries when switching wallets
-        // This prevents stale data from the previous wallet from being displayed
-        if (lastConnectedWallet.current !== null) {
-          console.log('[Wallet] Wallet changed, clearing query cache');
+        // CRITICAL: Clear all cached queries when a DIFFERENT wallet takes
+        // over. Compared against lastDataOwnerWallet (which survives
+        // disconnects) rather than lastConnectedWallet (nulled on disconnect)
+        // so a disconnect→reconnect with another wallet still clears, while a
+        // transient drop + same-wallet reconnect keeps last-known-good data.
+        if (lastDataOwnerWallet.current !== null && lastDataOwnerWallet.current !== publicKeyString) {
+          console.log('[Wallet] Different wallet connected, clearing query cache');
           queryClient.clear();
           // Drop the "session ready" flag until the NEW wallet re-authenticates.
           // Otherwise effects gated on sessionConnected could run against the
           // previous wallet's server session during the switch window.
           setSessionConnected(false);
         }
+        lastDataOwnerWallet.current = publicKeyString;
         
         // Already authenticated successfully in this session - just restore state
         if (authSucceeded.current.has(publicKeyString)) {
@@ -322,10 +331,15 @@ export function useWallet() {
           setAuthError(true);
         }
       } else if (!publicKeyString) {
-        // Clear query cache when wallet disconnects
-        console.log('[Wallet] Wallet disconnected, clearing query cache');
-        queryClient.clear();
-        
+        // Wallet disconnected. Do NOT wipe the query cache here: on mobile the
+        // Mobile Wallet Adapter drops the public key transiently (every app
+        // switch / page restore), and clearing on each drop erased the user's
+        // last-known-good dashboard before reconnect completed — reads then
+        // raced a half-established session and rendered a false-empty account
+        // (2026-07-19 incident). Cached data stays, marked stale by the UI;
+        // the cache is cleared above the moment a DIFFERENT wallet connects,
+        // and the session flag below prevents any authed use meanwhile.
+        console.log('[Wallet] Wallet disconnected; keeping last-known-good data (marked stale)');
         lastConnectedWallet.current = null;
         setSessionConnected(false);
         setReferralCode(null);
