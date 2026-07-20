@@ -18,6 +18,7 @@ import { logHermesAuthStatus } from "./pricing/hermes-config.js";
 import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
 import { startTelegramDailySummaryJob } from "./telegram-daily-summary-job";
 import { recordCriticalError, flushErrorLog } from "./error-log";
+import { registerRequestTrace, startSelfStats } from "./request-trace";
 import * as os from "node:os";
 import { appendTelemetry } from "./telemetry";
 
@@ -468,6 +469,11 @@ app.use((req, res, next) => {
   next();
 });
 
+// Core-route request tracing (2026-07-20 stuck-dashboard incident): status,
+// duration, aborted flag, hashed wallet into the telemetry log so the next
+// incident window proves whether requests arrived at all.
+registerRequestTrace(app);
+
 (async () => {
   await ensureSchema();
   await checkUmkStorageSecretHealth();
@@ -673,6 +679,11 @@ app.use((req, res, next) => {
     },
     async () => {
       log(`serving on port ${port}`);
+
+      // Once-a-minute server vitals (event-loop lag, sockets, handles, RSS,
+      // in-flight traced requests) — the "server deaf vs client silent"
+      // discriminator for the stuck-dashboard incident. unref'd interval.
+      startSelfStats(httpServer);
 
       // Staggered startup: services start in sequence with delays to avoid RPC rate-limit bursts
 

@@ -9,12 +9,10 @@ import crypto from "crypto";
 import bs58 from "bs58";
 import { Keypair } from "@solana/web3.js";
 
-// Boot id: identifies this server process generation. The in-memory UMK
-// security sessions are wiped on every deploy/restart, so the client's
-// session-probe records this id with each probe — a changed bootId across
-// probes explains "cookie valid but UMK gone" authoritatively (server
-// restarted) instead of guessing (2026-07-20 incident follow-up).
-const SERVER_BOOT_ID = crypto.randomUUID();
+// Boot id lives in server/boot-id.ts so the request-trace lines and
+// /api/auth/session report the SAME process-generation id.
+import { SERVER_BOOT_ID } from "./boot-id";
+import { appendTelemetry } from "./telemetry";
 import { storage, DatabaseStorage } from "./storage";
 import { sumNetDepositedFromEvents, isVaultInternalEvent } from "./equity-events-util";
 import { recordCriticalError } from "./error-log";
@@ -5252,6 +5250,62 @@ export async function registerRoutes(
           userAgent: clip(b.userAgent ?? req.headers["user-agent"], 300),
         }),
       );
+    } catch {
+      // best-effort logging; never let it break the response
+    }
+    res.status(204).end();
+  });
+
+  // Client-state telemetry (2026-07-20 stuck-dashboard incident). The browser
+  // posts bounded heartbeats + state-transition events (wallet drops, probe
+  // verdicts, sessionConnected flips, window errors) so "the browser stopped
+  // sending requests at 10:07" becomes a provable fact instead of a guess.
+  // Public write endpoint, hardened: per-IP + global rate caps (silent 204 on
+  // excess — never an error the client would retry), every field clipped,
+  // log-only (no DB), wallet is a client-shortened form, never full address.
+  const CLIENT_TEL_PER_IP_PER_MIN = 20;
+  const CLIENT_TEL_GLOBAL_PER_MIN = 240;
+  const clientTelPerIp = new Map<string, { count: number; windowStart: number }>();
+  let clientTelGlobal = { count: 0, windowStart: Date.now() };
+  app.post("/api/client-telemetry", (req, res) => {
+    try {
+      const now = Date.now();
+      if (now - clientTelGlobal.windowStart >= 60_000) {
+        clientTelGlobal = { count: 0, windowStart: now };
+      }
+      clientTelGlobal.count++;
+      if (clientTelGlobal.count > CLIENT_TEL_GLOBAL_PER_MIN) return res.status(204).end();
+
+      const ip = req.ip || "unknown";
+      if (clientTelPerIp.size > 500) clientTelPerIp.clear(); // bound memory
+      let bucket = clientTelPerIp.get(ip);
+      if (!bucket || now - bucket.windowStart >= 60_000) {
+        bucket = { count: 0, windowStart: now };
+        clientTelPerIp.set(ip, bucket);
+      }
+      bucket.count++;
+      if (bucket.count > CLIENT_TEL_PER_IP_PER_MIN) return res.status(204).end();
+
+      const clip = (v: unknown, n: number) => (typeof v === "string" ? v.slice(0, n) : "");
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const w = clip(body.w, 12) || "-";
+      const kind = clip(body.kind, 16) || "hb";
+      const hb =
+        body.hb && typeof body.hb === "object"
+          ? JSON.stringify(body.hb).slice(0, 1200)
+          : "";
+      const rawEvents = Array.isArray(body.ev) ? body.ev.slice(0, 60) : [];
+      const evStr = rawEvents
+        .map((e) => {
+          const ev = (e ?? {}) as Record<string, unknown>;
+          const t = Number(ev.t) || 0;
+          const d = clip(ev.d, 200);
+          return `${clip(ev.type, 40)}@${t}${d ? `:${d}` : ""}`;
+        })
+        .join(" | ")
+        .slice(0, 2400);
+      const line = `[ClientTel] w=${w} kind=${kind}${hb ? ` hb=${hb}` : ""}${evStr ? ` ev=${evStr}` : ""}`;
+      appendTelemetry(line);
     } catch {
       // best-effort logging; never let it break the response
     }

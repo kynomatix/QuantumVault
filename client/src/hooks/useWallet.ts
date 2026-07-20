@@ -4,7 +4,8 @@ import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adap
 import { LAMPORTS_PER_SOL } from '@solana/web3.js';
 import bs58 from 'bs58';
 import { queryClient, setActiveWalletAddress } from '@/lib/queryClient';
-import { probeSession, onSessionVerdict } from '@/lib/session-probe';
+import { probeSession, onSessionVerdict, getLastSessionVerdict } from '@/lib/session-probe';
+import { recordClientEvent } from '@/lib/client-telemetry';
 
 export { useConnection };
 
@@ -181,6 +182,11 @@ export function useWallet() {
       // session is still pinned to a previously connected wallet.
       setActiveWalletAddress(publicKeyString);
 
+      // Telemetry breadcrumb: wallet presence transitions (deduped; a mobile
+      // MWA flap shows up as alternating present/absent — a key incident
+      // signature we could never prove from prod before).
+      recordClientEvent('wallet', publicKeyString ? 'present' : 'absent');
+
       if (publicKeyString && publicKeyString !== lastConnectedWallet.current) {
         // CRITICAL: Clear all cached queries when a DIFFERENT wallet takes
         // over. Compared against lastDataOwnerWallet (which survives
@@ -203,6 +209,30 @@ export function useWallet() {
           setSessionConnected(true);
           return;
         }
+
+        // Late-mount seed (2026-07-20 incident): auth refs are PER-HOOK-
+        // INSTANCE, so a component that mounts after connect (route change,
+        // lazy chunk) starts with empty refs and would re-run the whole
+        // probe/connect flow — and, in the stranding variants, could wedge on
+        // the one-attempt guard and hold sessionConnected=false for its
+        // subtree while the app-level instance says true. If the probe layer
+        // already has an authoritative 'valid' verdict for THIS wallet, the
+        // session is established — adopt it instead of re-authenticating.
+        // If the verdict is stale, the next core 401 re-probes and the
+        // verdict listener below corrects the state.
+        {
+          const seeded = getLastSessionVerdict();
+          if (seeded?.kind === 'valid' && seeded.walletAddress === publicKeyString) {
+            authSucceeded.current.add(publicKeyString);
+            authAttempted.current.add(publicKeyString);
+            lastConnectedWallet.current = publicKeyString;
+            setSessionConnected(true);
+            setSessionRecovering(false);
+            recordClientEvent('late-mount-seed', 'valid-verdict');
+            return;
+          }
+        }
+
         
         // Prevent duplicate authentication attempts using multiple guards
         // 1. Check refs (per-wallet tracking)
@@ -392,6 +422,14 @@ export function useWallet() {
     });
     return unsub;
   }, [publicKeyString, sessionConnected]);
+
+  // Telemetry breadcrumb: sessionConnected transitions. Same-value reports
+  // from the many useWallet instances collapse via dedupe; ALTERNATING values
+  // (instances disagreeing) flap through — exactly the per-instance
+  // divergence evidence the stuck-dashboard incident needs.
+  useEffect(() => {
+    recordClientEvent('session-connected', String(sessionConnected));
+  }, [sessionConnected]);
 
   const fetchBalance = useCallback(async () => {
     if (!wallet.publicKey) {

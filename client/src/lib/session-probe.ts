@@ -88,7 +88,15 @@ export function onSessionVerdict(cb: VerdictListener): () => void {
 }
 
 function emitVerdict(v: SessionProbeVerdict): SessionProbeVerdict {
-  lastVerdict = v;
+  // A 'no-wallet' result (transient MWA drop, or a wallet-switch discard of an
+  // in-flight probe) must NOT overwrite a settled 'server-unavailable': that
+  // state is what arms every auto-reprobe hook (backoff, online, focus,
+  // recovery). Overwriting it permanently disarmed them — verified stranding
+  // path in the 2026-07-20 recurrence. The open question "is the server back?"
+  // survives a transient wallet drop.
+  if (!(v.kind === "no-wallet" && lastVerdict?.kind === "server-unavailable")) {
+    lastVerdict = v;
+  }
   verdictListeners.forEach((l) => {
     try {
       l(v);
@@ -104,7 +112,14 @@ function maybeReprobe(_why: string): void {
   // authoritative verdict (valid / signature-required) is settled — a new
   // probe runs only when new evidence (a core 401) or a caller asks for one.
   if (lastVerdict?.kind !== "server-unavailable") return;
-  if (!getActiveWalletAddress()) return;
+  if (!getActiveWalletAddress()) {
+    // Wallet transiently absent (mobile MWA drops the key on app switches).
+    // Keep the retry chain ALIVE: before this, a backoff timer firing during
+    // a drop consumed itself without rescheduling and auto-retry ended
+    // permanently (2026-07-20 recurrence stranding hole).
+    scheduleRetry();
+    return;
+  }
   void probeSession();
 }
 

@@ -39,4 +39,9 @@ window.addEventListener("vite:preloadError", (event) => {
   window.location.reload();
 });
 
+// Client-state telemetry (2026-07-20 stuck-dashboard incident): bounded
+// heartbeats + state-transition events so a silent browser is provable.
+import { initClientTelemetry } from "./lib/client-telemetry";
+initClientTelemetry();
+
 createRoot(document.getElementById("root")!).render(<App />);
