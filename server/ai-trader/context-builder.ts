@@ -5,7 +5,7 @@
 // could ever flow through this module (an LLM's own past `rationale`/`invalidation`
 // text) are deliberately NOT included in the history block — WO-3 §6 pins that
 // block's fields to side/entry/exit/exitReason/realizedPnl/regime tag only.
-import { fetchOHLCV, isNonCryptoSymbol } from "../lab/datafeed";
+import { fetchOHLCV, isNonCryptoSymbol, isCacheDegradedError } from "../lab/datafeed";
 import type { OHLCV } from "../lab/engine";
 import { ema, rsi, macd, atr, adx, bollingerBands, supertrend, obv } from "../lab/indicators";
 import type { ProtocolAdapter } from "../protocol/adapter";
@@ -439,9 +439,21 @@ export async function buildMarketContext(
   const selectedStart = new Date(now - INDICATOR_BARS * tfMs).toISOString();
 
   const datafeedTicker = marketToDatafeedTicker(market);
-  const selectedRaw = await fetchOHLCV(datafeedTicker, timeframe, selectedStart, selectedEnd, undefined, {
-    deadlineMs: 45_000,
-  });
+  let selectedRaw: OHLCV[];
+  try {
+    selectedRaw = await fetchOHLCV(datafeedTicker, timeframe, selectedStart, selectedEnd, undefined, {
+      deadlineMs: 45_000,
+      callerClass: "context",
+    });
+  } catch (err) {
+    // Degraded candle cache (DB pressure): never build a prompt without
+    // data and never trigger a network fallback — report stale, the
+    // decision cycle skips this boundary and retries on the next one.
+    if (isCacheDegradedError(err)) {
+      return { stale: true, reason: `Candle cache degraded (DB pressure) for ${market} ${timeframe}` };
+    }
+    throw err;
+  }
   if (selectedRaw.length === 0) {
     return { stale: true, reason: `No ${timeframe} candle data returned for ${market}` };
   }
@@ -470,11 +482,20 @@ export async function buildMarketContext(
     // Brick 2+4: fetch PARENT_INDICATOR_BARS for pivot computation.
     // parentCandles (PARENT_BARS=30) is the CSV render slice only — token economy unchanged.
     const parentStart = new Date(now - PARENT_INDICATOR_BARS * parentTfMs).toISOString();
-    const parentRaw = await fetchOHLCV(datafeedTicker, parentTf, parentStart, selectedEnd, undefined, {
-      deadlineMs: 45_000,
-    });
-    parentIndicatorCandles = parentRaw.slice(-PARENT_INDICATOR_BARS);
-    parentCandles = parentIndicatorCandles.slice(-PARENT_BARS); // CSV render only
+    try {
+      const parentRaw = await fetchOHLCV(datafeedTicker, parentTf, parentStart, selectedEnd, undefined, {
+        deadlineMs: 45_000,
+        callerClass: "context",
+      });
+      parentIndicatorCandles = parentRaw.slice(-PARENT_INDICATOR_BARS);
+      parentCandles = parentIndicatorCandles.slice(-PARENT_BARS); // CSV render only
+    } catch (err) {
+      // Parent TF is an enrichment: on a degraded cache read proceed without
+      // it (Dow/HTF lines simply omit parent context) rather than failing
+      // the whole decision cycle. Other errors still propagate.
+      if (!isCacheDegradedError(err)) throw err;
+      console.warn(`[ContextBuilder] Parent ${parentTf} candle cache degraded for ${market} — proceeding without parent context`);
+    }
   }
 
   // Brick 2, Phase 2B: Dow structure enrichment (enrichment rule — try/catch omits

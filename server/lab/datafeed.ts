@@ -1,5 +1,11 @@
 import type { OHLCV } from "./engine";
-import { getCachedCandles, saveCandlesToDb } from "./candle-store";
+import {
+  getCachedCandles,
+  saveCandlesToDb,
+  CACHE_BUDGET_ABORT_REASON,
+  type CandleReadCallerClass,
+  type CandleReadPhases,
+} from "./candle-store";
 import { getBenchmarksBase, getHermesHeaders } from '../pricing/hermes-config.js';
 import { appendTelemetry } from "../telemetry";
 
@@ -348,7 +354,40 @@ export type DatafeedIncident = {
   symbol: string;
   timeframe: string;
   budgetMs: number;
+  /** Phase breakdown of the degraded read (which phase ate the budget). */
+  phases?: CandleReadPhases;
 };
+
+/**
+ * Typed degradation for deadline-bounded live callers (scanner/monitors/
+ * context-builder): the candle-cache lookup exceeded its budget. This is NOT
+ * a cache miss — the invocation FAILS: no OKX/Gate/Pyth network fallback (it
+ * would add load exactly while the DB is under pressure), no cache
+ * write-back, no feed negcache. Callers count it separately as DB/cache
+ * degradation and skip/retry on their own schedule. Deadline-less callers
+ * (Lab) never see this error.
+ */
+export class CacheDegradedError extends Error {
+  readonly symbol: string;
+  readonly timeframe: string;
+  readonly budgetMs: number;
+  readonly phases?: CandleReadPhases;
+  constructor(symbol: string, timeframe: string, budgetMs: number, phases?: CandleReadPhases) {
+    super(`Candle cache degraded: ${symbol} ${timeframe} read exceeded ${budgetMs}ms budget`);
+    this.name = "CacheDegradedError";
+    this.symbol = symbol;
+    this.timeframe = timeframe;
+    this.budgetMs = budgetMs;
+    this.phases = phases;
+  }
+}
+
+export function isCacheDegradedError(err: unknown): err is CacheDegradedError {
+  return (
+    err instanceof CacheDegradedError ||
+    (typeof err === "object" && err !== null && (err as any).name === "CacheDegradedError")
+  );
+}
 let datafeedIncidentReporter: ((evt: DatafeedIncident) => void) | null = null;
 export function setDatafeedIncidentReporter(
   fn: ((evt: DatafeedIncident) => void) | null,
@@ -955,6 +994,8 @@ export async function fetchOHLCV(
      * Cancellation NEVER negcaches instruments or trips source breakers.
      */
     signal?: AbortSignal;
+    /** Attribution for candle-read phase telemetry. */
+    callerClass?: CandleReadCallerClass;
   }
 ): Promise<OHLCV[]> {
   timeframe = timeframe.toLowerCase();
@@ -973,43 +1014,84 @@ export async function fetchOHLCV(
   // starts BEFORE this DB read, so a slow/wedged DB otherwise consumes the
   // entire fetch budget before any network attempt (2026-07-19 incident:
   // traces showed okx hitting its 45s deadline 0.4s into the network section
-  // because the cache read ate ~44.6s). A timed-out read is treated as a
-  // cache MISS; the abandoned read settles harmlessly in the background.
-  // Deadline-less callers (Lab backtests) keep waiting unbounded — for them a
-  // slow cache read is still far cheaper than refetching years of candles.
+  // because the cache read ate ~44.6s). A read that exceeds its budget FAILS
+  // the invocation with CacheDegradedError (2026-07-20 incident: treating it
+  // as a miss started a network fetch + full-range cache write-back exactly
+  // while the DB was under pressure). Deadline-less callers (Lab backtests)
+  // keep waiting unbounded — for them a slow cache read is still far cheaper
+  // than refetching years of candles.
   const cacheStartedAt = Date.now();
   let cached: OHLCV[] | null = null;
   if (!options?.bypassCache) {
     if (Number.isFinite(deadlineAt)) {
       const cacheBudgetMs = Math.min(5_000, Math.max(1_000, Math.floor((options?.deadlineMs ?? 0) / 4)));
-      // Self-cancelling read: the per-query timeout makes the DB query
-      // release its pool connection at ~the moment we abandon it, instead of
-      // zombie-holding the connection for the pool-level 60s query_timeout.
-      const cacheRead = getCachedCandles(symbol, timeframe, startMs, endMs, {
-        queryTimeoutMs: cacheBudgetMs + 500,
-      });
-      let cacheTimer: NodeJS.Timeout | undefined;
-      cached = await Promise.race([
-        cacheRead,
-        new Promise<null>((resolve) => {
-          cacheTimer = setTimeout(() => resolve(null), cacheBudgetMs);
-          cacheTimer.unref?.();
-        }),
-      ]);
-      if (cacheTimer) clearTimeout(cacheTimer);
-      if (cached === null && Date.now() - cacheStartedAt >= cacheBudgetMs) {
-        const slowMsg = `[CandleCache] Slow cache read >${cacheBudgetMs}ms for ${symbol} ${timeframe} — treating as miss`;
-        console.log(slowMsg);
-        appendTelemetry(slowMsg);
-        try {
-          datafeedIncidentReporter?.({ kind: "slow_cache", symbol, timeframe, budgetMs: cacheBudgetMs });
-        } catch {
-          // Reporter must never break the fetch path.
+      // Cooperative cancellation through the FULL admission path (2026-07-20
+      // incident): the old Promise.race abandoned the read but left it
+      // running — it could still queue at the semaphore, wait 30s at
+      // pool.connect(), and run its SELECT long after this caller had moved
+      // on. Now one AbortSignal cancels semaphore wait / pool acquisition /
+      // post-acquire promptly; only an already-in-flight SELECT runs to its
+      // own query_timeout (cacheBudgetMs + 500ms), so the worst-case await
+      // here is budget + ~0.5s and NO abandoned work survives this scope.
+      //
+      // Two abort sources share the signal, distinguished by reason:
+      //  - internal budget timer  -> typed CacheDegradedError (fail the
+      //    invocation: no network fallback, no negcache, no cache write)
+      //  - caller signal (sweep teardown) -> plain AbortError (no incident)
+      const budgetCtrl = new AbortController();
+      const budgetTimer = setTimeout(
+        () => budgetCtrl.abort(CACHE_BUDGET_ABORT_REASON),
+        cacheBudgetMs,
+      );
+      budgetTimer.unref?.();
+      const onCallerAbort = () => budgetCtrl.abort();
+      if (signal) {
+        if (signal.aborted) budgetCtrl.abort();
+        else signal.addEventListener("abort", onCallerAbort, { once: true });
+      }
+      let phases: CandleReadPhases | undefined;
+      try {
+        cached = await getCachedCandles(symbol, timeframe, startMs, endMs, {
+          queryTimeoutMs: cacheBudgetMs + 500,
+          signal: budgetCtrl.signal,
+          callerClass: options?.callerClass ?? "scanner",
+          onPhases: (p) => {
+            phases = p;
+          },
+        });
+      } catch (err: any) {
+        if (err?.name === "AbortError") {
+          if (signal?.aborted) {
+            // Caller cancelled (sweep teardown): plain abort, no incident,
+            // no degradation accounting.
+            throw err;
+          }
+          // Budget expiry on a deadline-bounded live caller: typed
+          // degradation. Do NOT reinterpret as a miss.
+          const ph = phases
+            ? ` sem=${phases.semaphoreWaitMs}ms acquire=${phases.poolAcquireMs}ms query=${phases.queryMs}ms`
+            : "";
+          const slowMsg = `[CandleCache] Degraded: read >${cacheBudgetMs}ms for ${symbol} ${timeframe} — failing invocation (no network fallback)${ph}`;
+          console.log(slowMsg);
+          appendTelemetry(slowMsg);
+          try {
+            datafeedIncidentReporter?.({ kind: "slow_cache", symbol, timeframe, budgetMs: cacheBudgetMs, phases });
+          } catch {
+            // Reporter must never break the fetch path.
+          }
+          throw new CacheDegradedError(symbol, timeframe, cacheBudgetMs, phases);
         }
-        cacheRead.catch(() => {}); // abandoned read: swallow any late rejection
+        // Belt-and-braces: getCachedCandles fail-opens non-abort errors to
+        // null itself, but keep the historical miss contract if one escapes.
+        cached = null;
+      } finally {
+        clearTimeout(budgetTimer);
+        if (signal) signal.removeEventListener("abort", onCallerAbort);
       }
     } else {
-      cached = await getCachedCandles(symbol, timeframe, startMs, endMs);
+      cached = await getCachedCandles(symbol, timeframe, startMs, endMs, {
+        callerClass: options?.callerClass ?? "lab",
+      });
     }
   }
   const cacheReadMs = Date.now() - cacheStartedAt;

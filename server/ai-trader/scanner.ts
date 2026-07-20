@@ -21,6 +21,7 @@ import {
   fetchOHLCV,
   isNonCryptoMarketOpen,
   isAbortError,
+  isCacheDegradedError,
   setDatafeedIncidentReporter,
 } from "../lab/datafeed";
 import { recordCriticalError } from "../error-log";
@@ -133,6 +134,9 @@ export interface ScannerBoundaryStats {
   marketsFresh: number;
   marketsSkippedByTimeout: number;
   errorCount: number;
+  /** Reads that failed typed with CacheDegradedError (DB/cache pressure) —
+   * counted separately: NOT feed-dead, NOT a budget timeout, NOT an error. */
+  cacheDegradedCount: number;
   candidateCount: number;
 }
 
@@ -253,6 +257,28 @@ export function getBoundaryTfs(now: Date): string[] {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ─── Sweep fetch-error classification (pure, exported for unit tests) ─────────
+//
+// Ordering is a load-bearing invariant (2026-07-20 incident):
+//   1. Sweep-budget cancellation FIRST — our doing, never the feed's fault.
+//      Detected via the SWEEP signal state, not err.name alone, because
+//      fetchOHLCV's internal per-call timeout also surfaces as AbortError.
+//   2. DB/cache pressure SECOND — a CacheDegradedError says nothing about the
+//      feed. It must NEVER be classified as feed-dead (30-min exclusion would
+//      silently blind that market) and never as a budget timeout or error.
+//   3. Everything else = genuine feed error → 30-min feed-dead exclusion.
+
+export type SweepFetchDisposition = "timeout-skip" | "cache-degraded" | "feed-error";
+
+export function classifySweepFetchError(
+  err: unknown,
+  sweepAborted: boolean,
+): SweepFetchDisposition {
+  if (sweepAborted && isAbortError(err)) return "timeout-skip";
+  if (isCacheDegradedError(err)) return "cache-degraded";
+  return "feed-error";
 }
 
 // ─── Core evaluator (pure, exported for unit tests) ───────────────────────────
@@ -460,6 +486,7 @@ async function runSweep(): Promise<void> {
     let sweepErrors = 0;
     let sweepCandidates = 0;
     let sweepClosed = 0;
+    let sweepCacheDegraded = 0;    // reads failed typed on DB/cache pressure
     // Formal-incident accounting (feeds the sweep-end error_log verdict).
     let sweepAttempted = 0;        // markets whose scan this sweep INTENDED
     let sweepAbandonedCount = 0;   // dispatches still unsettled after abort+teardown
@@ -516,6 +543,7 @@ async function runSweep(): Promise<void> {
         let marketsSkippedByTimeout = 0;
         let marketsClosedSkipped = 0;
         let errorCount = 0;
+        let cacheDegradedCount = 0;
         const tfCandidates: ScannerCandidate[] = [];
 
         // Real cancellation for this TF's dispatches: when the drain cap
@@ -588,6 +616,7 @@ async function runSweep(): Promise<void> {
                 bars = await fetchOHLCV(ticker, tf, startDate, endDate, undefined, {
                   deadlineMs: perFetchDeadlineMs,
                   signal: tfAbort.signal,
+                  callerClass: "scanner",
                 });
                 // If the fetch came back EMPTY after running out its deadline,
                 // treat it as a budget timeout, not a dead feed — a truncated
@@ -600,12 +629,17 @@ async function runSweep(): Promise<void> {
                 }
               }
             } catch (err) {
-              // Cancellation FIRST: a sweep-budget abort is OUR doing, never
-              // the feed's fault — count as a timeout skip, never feed-dead.
-              // Detect via signal state, not err.name: fetchOHLCV's internal
-              // per-call timeout also surfaces as AbortError.
-              if (tfAbort.signal.aborted && isAbortError(err)) {
+              // Ordering rationale lives on classifySweepFetchError (pure,
+              // unit-tested): abort-skip first, cache-degraded second (never
+              // feed-dead — the next boundary retries naturally), genuine
+              // feed error last.
+              const disposition = classifySweepFetchError(err, tfAbort.signal.aborted);
+              if (disposition === "timeout-skip") {
                 marketsSkippedByTimeout++;
+                return;
+              }
+              if (disposition === "cache-degraded") {
+                cacheDegradedCount++;
                 return;
               }
               feedHealthMap.set(ticker, { failedAt: Date.now() });
@@ -659,13 +693,17 @@ async function runSweep(): Promise<void> {
                       {
                         deadlineMs: Math.min(SWEEP_PER_FETCH_DEADLINE_MS, remainingMs),
                         signal: tfAbort.signal,
+                        callerClass: "scanner",
                       },
                     );
                     candleCache.set(parentCacheKey, parentBars);
                   }
                 }
-              } catch {
-                parentBars = null; // parent fetch failure is non-fatal
+              } catch (err) {
+                // Parent fetch failure is non-fatal, but degraded reads are
+                // still counted so DB pressure stays visible in the summary.
+                if (isCacheDegradedError(err)) cacheDegradedCount++;
+                parentBars = null;
               }
             }
 
@@ -675,8 +713,13 @@ async function runSweep(): Promise<void> {
             // Dispatches must NEVER reject: a single rejection would blow up
             // the drain's Promise.all and abort the whole sweep. Anything
             // reaching here escaped the inner catches (e.g. an evaluator bug).
-            if (tfAbort.signal.aborted && isAbortError(err)) {
+            const disposition = classifySweepFetchError(err, tfAbort.signal.aborted);
+            if (disposition === "timeout-skip") {
               marketsSkippedByTimeout++;
+              return;
+            }
+            if (disposition === "cache-degraded") {
+              cacheDegradedCount++;
               return;
             }
             errorCount++;
@@ -808,11 +851,18 @@ async function runSweep(): Promise<void> {
           appendTelemetry(closedLine);
         }
 
+        if (cacheDegradedCount > 0) {
+          const degradedLine = `[Scanner] CACHE DEGRADED: ${cacheDegradedCount} reads failed on DB/cache pressure (${protocol} ${tf}) — no network fallback, retry next boundary`;
+          console.log(degradedLine);
+          appendTelemetry(degradedLine);
+        }
+
         sweepScanned += marketsScanned;
         sweepSkipped += marketsSkippedByTimeout;
         sweepErrors += errorCount;
         sweepCandidates += tfCandidates.length;
         sweepClosed += marketsClosedSkipped;
+        sweepCacheDegraded += cacheDegradedCount;
 
         // Accumulate this TF's candidates into the per-protocol pool.
         const pool = allCandidatesByProtocol.get(protocol)!;
@@ -830,6 +880,7 @@ async function runSweep(): Promise<void> {
           marketsFresh,
           marketsSkippedByTimeout,
           errorCount,
+          cacheDegradedCount,
           candidateCount: tfCandidates.length,
         };
         telemetryRing.push(stats);
@@ -865,6 +916,7 @@ async function runSweep(): Promise<void> {
     const sweepSummary =
       `[Scanner] SWEEP TOTAL: ${sweepScanned} scanned, ${sweepSkipped} skipped-by-timeout, ` +
       `${sweepClosed} venue-closed, ${sweepErrors} errors, ${sweepAbandonedCount} abandoned, ` +
+      `${sweepCacheDegraded} cache-degraded, ` +
       `${budgetSkippedUnits} budget-gated units, ${sweepCandidates} candidates in ` +
       `${(sweepDurationMs / 1000).toFixed(1)}s ` +
       `(fetch budget ${SWEEP_FETCH_DEADLINE_TOTAL_MS / 1000}s)`;
@@ -885,6 +937,7 @@ async function runSweep(): Promise<void> {
       venueClosed: sweepClosed,
       errors: sweepErrors,
       abandoned: sweepAbandonedCount,
+      cacheDegraded: sweepCacheDegraded,
       budgetSkippedUnits,
       candidates: sweepCandidates,
       durationMs: sweepDurationMs,
@@ -1055,28 +1108,52 @@ export function startScanner(): void {
       // Dynamic import: db.ts starts pool heartbeat intervals at module load,
       // so a static import here would drag them into every unit-test module
       // graph that touches the scanner (breaks fake-timer counting).
-      const { whenPoolHasHeadroom } = await import("../db");
-      await whenPoolHasHeadroom();
-      if (!scannerRunning) return;
-      if (sweepStartedAt !== null || telemetryRing.length > 0) {
-        console.log("[Scanner] boot catch-up skipped — a sweep already ran/is running");
-        return;
-      }
-      const tfMs = TIMEFRAME_MS["15m"];
-      const msToBoundary = (Math.floor(Date.now() / tfMs) + 1) * tfMs - Date.now();
-      if (msToBoundary <= BOOT_SWEEP_MIN_LEAD_MS) {
+      const { runSerializedBootWork } = await import("../db");
+      // Serialized boot slot (cap=1 across all heavy startup jobs): the old
+      // whenPoolHasHeadroom() was point-in-time and did not reserve capacity,
+      // so the catch-up could land on the pool together with the stats
+      // monitor / portfolio backfill (2026-07-20 incident). maxWaitMs: a
+      // catch-up that cannot START before the next boundary sweep is
+      // worthless — SKIP it (the boundary sweep repopulates the shortlist);
+      // never run it late. All viability checks re-run INSIDE the slot: the
+      // world may have changed (sweep started, boundary now imminent,
+      // scanner stopped) while we were queued.
+      const tfMsOuter = TIMEFRAME_MS["15m"];
+      const msToBoundaryOuter =
+        (Math.floor(Date.now() / tfMsOuter) + 1) * tfMsOuter - Date.now();
+      const slotBudgetMs = msToBoundaryOuter - BOOT_SWEEP_MIN_LEAD_MS;
+      if (slotBudgetMs <= 0) {
         console.log(
-          `[Scanner] boot catch-up skipped (next boundary sweep in ${Math.round(msToBoundary / 1000)}s)`
+          `[Scanner] boot catch-up skipped (next boundary sweep in ${Math.round(msToBoundaryOuter / 1000)}s)`
         );
         return;
       }
-      console.log(
-        `[Scanner] boot catch-up sweep (restart cleared shortlist; next boundary sweep in ${Math.round(msToBoundary / 1000)}s)`
-      );
-      runSweep().catch((err) =>
-        console.error(
-          `[Scanner] boot catch-up sweep crashed: ${err instanceof Error ? err.message : err}`
-        )
+      await runSerializedBootWork(
+        "scanner-boot-catchup",
+        async () => {
+          if (!scannerRunning) return;
+          if (sweepStartedAt !== null || telemetryRing.length > 0) {
+            console.log("[Scanner] boot catch-up skipped — a sweep already ran/is running");
+            return;
+          }
+          const tfMs = TIMEFRAME_MS["15m"];
+          const msToBoundary = (Math.floor(Date.now() / tfMs) + 1) * tfMs - Date.now();
+          if (msToBoundary <= BOOT_SWEEP_MIN_LEAD_MS) {
+            console.log(
+              `[Scanner] boot catch-up skipped (next boundary sweep in ${Math.round(msToBoundary / 1000)}s)`
+            );
+            return;
+          }
+          console.log(
+            `[Scanner] boot catch-up sweep (restart cleared shortlist; next boundary sweep in ${Math.round(msToBoundary / 1000)}s)`
+          );
+          await runSweep().catch((err) =>
+            console.error(
+              `[Scanner] boot catch-up sweep crashed: ${err instanceof Error ? err.message : err}`
+            )
+          );
+        },
+        { maxWaitMs: slotBudgetMs }
       );
     })();
   }, BOOT_SWEEP_DELAY_MS);

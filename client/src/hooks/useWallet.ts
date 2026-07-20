@@ -4,6 +4,7 @@ import { useWallet as useSolanaWallet, useConnection } from '@solana/wallet-adap
 import { LAMPORTS_PER_SOL } from '@solana/web3.js';
 import bs58 from 'bs58';
 import { queryClient, setActiveWalletAddress } from '@/lib/queryClient';
+import { probeSession, onSessionVerdict } from '@/lib/session-probe';
 
 export { useConnection };
 
@@ -26,8 +27,13 @@ const getReferralCodeFromUrl = (): string | null => {
 };
 
 // Per-wallet auth promise map for single-flight pattern
-// This ensures only one auth attempt per wallet address at a time
-const authPromiseMap = new Map<string, Promise<boolean>>();
+// This ensures only one auth attempt per wallet address at a time.
+// 'deferred' = the server was unavailable during the session probe — the
+// session may be perfectly valid, so nothing failed and no signature was
+// requested; session-probe auto-retries and the verdict listener in the hook
+// completes the connect when the server answers (2026-07-20 incident).
+type AuthFlowOutcome = 'ok' | 'failed' | 'deferred';
+const authPromiseMap = new Map<string, Promise<AuthFlowOutcome>>();
 
 export function useWallet() {
   const wallet = useSolanaWallet();
@@ -38,6 +44,11 @@ export function useWallet() {
   const [referralCode, setReferralCode] = useState<string | null>(null);
   const [signingInProgress, setSigningInProgress] = useState(false);
   const [authError, setAuthError] = useState(false);
+  // True while the session probe says the SERVER is unavailable (network /
+  // 5xx / timeout) during connect — distinct from authError (a failed
+  // signature) and from "signing in". The probe auto-retries with bounded
+  // backoff; when it lands 'valid' the session completes with no signature.
+  const [sessionRecovering, setSessionRecovering] = useState(false);
   const lastConnectedWallet = useRef<string | null>(null);
   // Which wallet's data currently populates the query cache. Unlike
   // lastConnectedWallet this survives disconnects, so we can tell a transient
@@ -144,6 +155,7 @@ export function useWallet() {
     authInProgress.current.delete(walletToAuth);
     authPromiseMap.delete(walletToAuth);
     setAuthError(false);
+    setSessionRecovering(false);
     authInProgress.current.add(walletToAuth);
     authAttempted.current.add(walletToAuth);
     try {
@@ -213,14 +225,16 @@ export function useWallet() {
         const existingPromise = authPromiseMap.get(publicKeyString);
         if (existingPromise) {
           // Wait for existing auth to complete instead of starting new one
-          const success = await existingPromise;
-          if (success) {
+          const outcome = await existingPromise;
+          if (outcome === 'ok') {
             authSucceeded.current.add(publicKeyString);
             lastConnectedWallet.current = publicKeyString;
             setSessionConnected(true);
-          } else {
+          } else if (outcome === 'failed') {
             setAuthError(true);
           }
+          // 'deferred' → server unavailable; the session-probe verdict
+          // listener below completes the connect when the server answers.
           return;
         }
         
@@ -233,86 +247,58 @@ export function useWallet() {
         
         // Create and store the auth promise for single-flight pattern
         const walletToAuth = publicKeyString;
-        const authPromise = (async (): Promise<boolean> => {
+        const authPromise = (async (): Promise<AuthFlowOutcome> => {
           try {
-            // First, check if server already has a valid session for this wallet
-            // This avoids prompting for signature if already authenticated
-            // 15s timeout: this fetch gates the whole connect flow — if the
-            // server is degraded (2026-07-19: wedged DB pool held requests
-            // ~30s before 500ing), an unbounded wait here leaves the user
-            // staring at a dead dashboard with no signature prompt. Timing
-            // out falls through to the normal "not authenticated" path.
-            const statusRes = await fetch('/api/auth/status', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              credentials: 'include',
-              body: JSON.stringify({ walletAddress: walletToAuth }),
-              signal: AbortSignal.timeout(15_000),
-            });
-            
-            if (statusRes.ok) {
-              const statusData = await safeResponseJson(statusRes);
-              if (statusData.authenticated) {
-                // The 7-day express-session cookie is still valid — but that only
-                // proves identity, NOT that the in-memory SECURITY session (the
-                // decrypted UMK every money op needs to sign with the agent key)
-                // still exists. That UMK session lives only in server memory, is
-                // wiped on every deploy/restart, and expires after a 4h TTL. So a
-                // returning user — especially on mobile, where a reconnect is a
-                // fresh tap after the in-memory key is long gone — routinely has a
-                // live cookie + a DEAD UMK. If we trusted the cookie alone we'd
-                // mark the wallet "connected", then fail deep inside a repay/borrow
-                // with "No active session". Confirm the UMK session here; if it's
-                // gone, re-sign ONCE now (a single signature) so the key is ready
-                // BEFORE any money action instead of mid-flow.
-                let hasUmkSession = false;
-                try {
-                  const sessRes = await fetch('/api/auth/session', {
-                    credentials: 'include',
-                    signal: AbortSignal.timeout(15_000),
-                  });
-                  if (sessRes.ok) {
-                    const sessData = await safeResponseJson(sessRes);
-                    hasUmkSession = !!sessData.hasSession;
-                  }
-                } catch {
-                  // Inconclusive check → treat as no UMK and re-sign. Failing toward
-                  // a usable session is safer (one extra signature at worst) than
-                  // fabricating "connected" and stranding the next money op.
-                  hasUmkSession = false;
-                }
+            // ONE authoritative wallet-bound probe (2026-07-20 incident)
+            // replaces the old status+session fetch pair. It distinguishes:
+            //   valid              → cookie AND UMK alive (server auto-restores
+            //                        the UMK from storage where possible) —
+            //                        no signature, just (re)bind the wallet;
+            //   signature-required → the server authoritatively said so
+            //                        (cookie invalid / wallet mismatch / UMK
+            //                        genuinely unrestorable) — re-sign ONCE
+            //                        now so the key is ready BEFORE any money
+            //                        action instead of mid-flow;
+            //   server-unavailable → network / 5xx / timeout says NOTHING
+            //                        about the session. Do NOT request a
+            //                        signature and do NOT fail the connect —
+            //                        the probe auto-retries with bounded
+            //                        backoff and the verdict listener below
+            //                        completes the session when it lands.
+            const verdict = await probeSession();
 
-                if (hasUmkSession) {
-                  // Both tiers alive — skip the signature, just (re)bind the wallet.
-                  const referredByCode = getReferralCodeFromUrl();
-                  const connectRes = await fetch('/api/wallet/connect', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    credentials: 'include',
-                    body: JSON.stringify({ 
-                      walletAddress: walletToAuth,
-                      referredByCode: referredByCode || undefined,
-                    }),
-                  });
-                  
-                  if (connectRes.ok) {
-                    const data = await safeResponseJson(connectRes);
-                    setReferralCode(data.referralCode || null);
-                  }
-                  
-                  return true;
-                }
-                // Cookie alive but UMK gone → fall through to re-sign below.
-                // authenticateWallet also re-binds the wallet (/api/wallet/connect)
-                // on success, so no separate connect call is needed here.
+            if (verdict.kind === 'valid') {
+              // Both tiers alive — skip the signature, just (re)bind the wallet.
+              const referredByCode = getReferralCodeFromUrl();
+              const connectRes = await fetch('/api/wallet/connect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ 
+                  walletAddress: walletToAuth,
+                  referredByCode: referredByCode || undefined,
+                }),
+              });
+              
+              if (connectRes.ok) {
+                const data = await safeResponseJson(connectRes);
+                setReferralCode(data.referralCode || null);
               }
+              
+              return 'ok';
             }
-            
-            // No usable security session — authenticate with one signature.
-            return await authenticateWallet(walletToAuth);
+
+            if (verdict.kind === 'server-unavailable') {
+              return 'deferred';
+            }
+
+            // signature-required (or no-wallet edge) — authenticate with one
+            // signature. authenticateWallet also re-binds the wallet
+            // (/api/wallet/connect) on success.
+            return (await authenticateWallet(walletToAuth)) ? 'ok' : 'failed';
           } catch (error) {
             console.error('Failed to register wallet with session:', error);
-            return false;
+            return 'failed';
           } finally {
             authInProgress.current.delete(walletToAuth);
             authPromiseMap.delete(walletToAuth);
@@ -322,13 +308,23 @@ export function useWallet() {
         // Store the promise BEFORE awaiting so concurrent calls can find it
         authPromiseMap.set(walletToAuth, authPromise);
         
-        const success = await authPromise;
-        if (success) {
+        const outcome = await authPromise;
+        if (outcome === 'ok') {
           authSucceeded.current.add(walletToAuth);
           lastConnectedWallet.current = walletToAuth;
           setSessionConnected(true);
-        } else {
+          setSessionRecovering(false);
+        } else if (outcome === 'failed') {
           setAuthError(true);
+          setSessionRecovering(false);
+        } else {
+          // 'deferred': server unavailable — nothing failed, no signature was
+          // requested. Clear the one-attempt guard so a later probe verdict /
+          // reconnect can rerun the flow (a transient outage must never
+          // become a permanent one-attempt auth deadlock), and surface the
+          // "reconnecting to server" state instead of a sign-in error.
+          authAttempted.current.delete(walletToAuth);
+          setSessionRecovering(true);
         }
       } else if (!publicKeyString) {
         // Wallet disconnected. Do NOT wipe the query cache here: on mobile the
@@ -354,6 +350,48 @@ export function useWallet() {
     
     registerWallet();
   }, [publicKeyString, authenticateWallet]);
+
+  // Session-probe verdict listener (2026-07-20 incident): completes a
+  // deferred connect (server was unavailable during the probe) and guarantees
+  // recovery from a transient outage without a reload or user tap. A
+  // background probe verdict must NEVER auto-fire signMessage (mobile wallets
+  // require a user gesture) — 'signature-required' only surfaces the
+  // gesture-driven sign-in gate.
+  useEffect(() => {
+    const unsub = onSessionVerdict((v) => {
+      const current = publicKeyString;
+      if (!current) return;
+
+      if (v.kind === 'valid' && v.walletAddress === current) {
+        authSucceeded.current.add(current);
+        authAttempted.current.add(current);
+        lastConnectedWallet.current = current;
+        setSessionRecovering(false);
+        setAuthError(false);
+        setSessionConnected(true);
+        return;
+      }
+
+      if (v.kind === 'signature-required' && v.walletAddress === current) {
+        setSessionRecovering(false);
+        // If the connect flow itself is mid-flight it will handle the
+        // signature; and if the session is already established, the
+        // session-expired latch (server-health) drives the reconnect banner.
+        if (!authInProgress.current.has(current) && !sessionConnected) {
+          // Allow a fresh gesture-driven attempt instead of deadlocking on
+          // the one-attempt guard.
+          authAttempted.current.delete(current);
+          setAuthError(true);
+        }
+        return;
+      }
+
+      if (v.kind === 'server-unavailable' && !sessionConnected) {
+        setSessionRecovering(true);
+      }
+    });
+    return unsub;
+  }, [publicKeyString, sessionConnected]);
 
   const fetchBalance = useCallback(async () => {
     if (!wallet.publicKey) {
@@ -396,6 +434,7 @@ export function useWallet() {
     sessionConnected,
     signingInProgress,
     authError,
+    sessionRecovering,
     retryAuth,
     referralCode,
     authenticateWallet,

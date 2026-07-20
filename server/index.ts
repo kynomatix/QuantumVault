@@ -3,7 +3,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { storage } from "./storage";
-import { ensureSchema, checkUmkStorageSecretHealth, logSecurityConfigSummary, closePool, whenPoolHasHeadroom } from "./db";
+import { ensureSchema, checkUmkStorageSecretHealth, logSecurityConfigSummary, closePool, whenPoolHasHeadroom, runSerializedBootWork } from "./db";
 import { startPeriodicReconciliation } from "./reconciliation-service";
 import { startOrphanedSubaccountCleanup } from "./orphaned-subaccount-cleanup";
 import { startSubaccountLeaseRecoveryJob } from "./subaccount-lease-recovery";
@@ -845,23 +845,28 @@ app.use((req, res, next) => {
         });
       }, 165_000);
 
+      // The +195s..+300s jobs (stats monitor initial, portfolio backfill,
+      // error prune) plus the scanner boot catch-up (~+200s) previously each
+      // awaited whenPoolHasHeadroom() independently — a point-in-time check
+      // that does not reserve capacity, so on a slow boot they could all see
+      // headroom in the same instant and land on the pool together
+      // (2026-07-20 incident). Their INITIAL runs are now serialized through
+      // runSerializedBootWork (cap=1); interval reruns stay ungated.
       setTimeout(() => {
-        whenPoolHasHeadroom().then(() => {
+        runSerializedBootWork('stats-consistency-initial', async () => {
           log('[Staggered startup] Starting stats consistency monitor');
-          import('./stats-consistency-monitor').then(({ startStatsConsistencyMonitor }) => {
-            startStatsConsistencyMonitor();
-          });
+          const { startStatsConsistencyMonitor } = await import('./stats-consistency-monitor');
+          await startStatsConsistencyMonitor();
         });
       }, 195_000);
 
       // ~4min: Task 119 portfolio backfill (one-shot, iterates wallets — the
       // heaviest boot-time DB consumer; used to fire at +45s inside the storm).
       setTimeout(() => {
-        whenPoolHasHeadroom().then(() => {
+        runSerializedBootWork('portfolio-backfill', async () => {
           log('[Staggered startup] Running Task 119 portfolio backfill (one-shot)');
-          import('./portfolio-snapshot-backfill').then(({ runPortfolioBackfillOnce }) => {
-            runPortfolioBackfillOnce().catch(err => console.error('[PortfolioBackfill] error:', err));
-          });
+          const { runPortfolioBackfillOnce } = await import('./portfolio-snapshot-backfill');
+          await runPortfolioBackfillOnce().catch(err => console.error('[PortfolioBackfill] error:', err));
         });
       }, 240_000);
 
@@ -892,18 +897,19 @@ app.use((req, res, next) => {
       // (30d age + hard row cap) so the "Errors" tab never balloons. Fail-safe.
       // Delete-heavy — pushed to +5min and headroom-gated (was +77s).
       setTimeout(() => {
-        whenPoolHasHeadroom().then(() => {
+        const runPrune = () =>
+          storage.pruneErrors()
+            .then(({ deletedByAge, deletedByCap }) => {
+              if (deletedByAge || deletedByCap) {
+                log(`[ErrorLogPrune] removed ${deletedByAge} by age + ${deletedByCap} by cap`);
+              }
+            })
+            .catch(err => console.error('[ErrorLogPrune] error:', err));
+        runSerializedBootWork('error-log-prune-initial', async () => {
           log('[Staggered startup] Starting error-log prune job (daily)');
-          const runPrune = () => {
-            storage.pruneErrors()
-              .then(({ deletedByAge, deletedByCap }) => {
-                if (deletedByAge || deletedByCap) {
-                  log(`[ErrorLogPrune] removed ${deletedByAge} by age + ${deletedByCap} by cap`);
-                }
-              })
-              .catch(err => console.error('[ErrorLogPrune] error:', err));
-          };
-          runPrune();
+          await runPrune();
+        }).then(() => {
+          // Daily reruns are steady-state — not boot work, not serialized.
           setInterval(runPrune, 24 * 60 * 60 * 1000);
         });
       }, 300_000);

@@ -178,6 +178,63 @@ export function isConnectionClassError(err: any): boolean {
   );
 }
 
+// ----- lower-tier pool pressure incident (5s sampler) ----------------------
+// 2026-07-20 incident follow-up: the critical starvation row above needs 60s
+// of sustained full starvation, and the 30s snapshot cadence never captured
+// waitingCount > 0 — so a sweep that pinned the pool for "only" tens of
+// seconds left zero formal evidence. This faster sampler records ONE deduped
+// lower-tier row when the pool shows pressure (any waiter queued, or all
+// clients checked out with zero idle) sustained for 10s+. It reads counters
+// only — no DB traffic. Wording deliberately avoids the error-log noise
+// denylist patterns (never says "connection timeout").
+let _pressureSince: number | null = null;
+let _lastPressureRecordAt = 0;
+const PRESSURE_SUSTAIN_MS = 10_000;
+const PRESSURE_RECORD_COOLDOWN_MS = 10 * 60 * 1000;
+setInterval(() => {
+  const pressured =
+    pool.waitingCount > 0 || (pool.totalCount >= poolSize && pool.idleCount === 0);
+  if (!pressured) {
+    _pressureSince = null;
+    return;
+  }
+  if (_pressureSince === null) _pressureSince = Date.now();
+  const pressuredForMs = Date.now() - _pressureSince;
+  if (
+    pressuredForMs >= PRESSURE_SUSTAIN_MS &&
+    Date.now() - _lastPressureRecordAt >= PRESSURE_RECORD_COOLDOWN_MS
+  ) {
+    _lastPressureRecordAt = Date.now();
+    const workload = formatPoolLoadTags().trim();
+    const msg =
+      `${POOL_TAG} pressure sustained ${Math.round(pressuredForMs / 1000)}s: ` +
+      `${pool.waitingCount} waiting, ${pool.idleCount} idle of ${pool.totalCount}/${poolSize} clients` +
+      (workload ? ` — workload ${workload}` : "");
+    const line = `${msg}`;
+    console.warn(line);
+    appendTelemetry(line);
+    import("./error-log")
+      .then(({ recordCriticalError }) => {
+        recordCriticalError({
+          category: "server_500",
+          severity: "error", // lower tier — the 60s starvation row above stays "critical"
+          source: "db-pool",
+          message: msg,
+          fingerprint: "db-pool-pressure",
+          context: {
+            total: pool.totalCount,
+            idle: pool.idleCount,
+            waiting: pool.waitingCount,
+            max: poolSize,
+            pressuredForMs,
+            workloadTags: workload,
+          },
+        });
+      })
+      .catch(() => {}); // visibility must never break the pool path
+  }
+}, 5_000).unref();
+
 // ----- boot-time pool headroom gate -----------------------------------------
 // 2026-07-19 incident: the staggered-startup jobs in server/index.ts all landed
 // on the pool inside one ~45s window while Neon handshakes were slow; the pool
@@ -200,6 +257,60 @@ export async function whenPoolHasHeadroom(maxWaitMs = 180_000): Promise<void> {
     }
     await new Promise((r) => setTimeout(r, 5_000));
   }
+}
+
+// ----- serialized boot-work coordinator -------------------------------------
+// 2026-07-20 incident follow-up: whenPoolHasHeadroom() is a point-in-time
+// check — it does not RESERVE capacity, so several deferred boot jobs could
+// all observe headroom in the same instant and land on the pool together
+// (scanner catch-up ~+200s, stats monitor ~+195s, portfolio backfill ~+240s,
+// error prune ~+300s). This coordinator serializes the heavy INITIAL runs:
+// at most ONE boot job executes at a time, each re-checking headroom right
+// before it starts. Steady-state/interval reruns and boundary sweeps are
+// deliberately NOT routed through it — it exists only to flatten the boot
+// collision window. Jobs may pass maxWaitMs to be SKIPPED (never run) if the
+// slot doesn't free up in time — used by the scanner boot catch-up, which is
+// worthless once the next boundary sweep is imminent anyway.
+let _bootWorkTail: Promise<void> = Promise.resolve();
+export function runSerializedBootWork(
+  tag: string,
+  fn: () => Promise<void>,
+  opts?: { maxWaitMs?: number }
+): Promise<{ ran: boolean }> {
+  return new Promise<{ ran: boolean }>((resolveOuter) => {
+    let skipped = false;
+    let timer: NodeJS.Timeout | null = null;
+    if (opts?.maxWaitMs && Number.isFinite(opts.maxWaitMs) && opts.maxWaitMs > 0) {
+      timer = setTimeout(() => {
+        skipped = true;
+        console.warn(
+          `${POOL_TAG} boot-work "${tag}" skipped — slot not free within ${Math.round(
+            opts.maxWaitMs! / 1000
+          )}s`
+        );
+        resolveOuter({ ran: false });
+      }, opts.maxWaitMs);
+      timer.unref?.();
+    }
+    _bootWorkTail = _bootWorkTail.then(async () => {
+      if (skipped) return;
+      await whenPoolHasHeadroom();
+      if (skipped) return; // budget expired during the headroom wait
+      if (timer) clearTimeout(timer);
+      const started = Date.now();
+      console.log(`${POOL_TAG} boot-work "${tag}" starting`);
+      try {
+        await fn();
+      } catch (err: any) {
+        // A failed boot job must never wedge the chain for the jobs behind it.
+        console.error(`${POOL_TAG} boot-work "${tag}" failed:`, err?.message ?? err);
+      }
+      console.log(
+        `${POOL_TAG} boot-work "${tag}" done in ${Math.round((Date.now() - started) / 1000)}s`
+      );
+      resolveOuter({ ran: true });
+    });
+  });
 }
 
 export const db = drizzle(pool, { schema });

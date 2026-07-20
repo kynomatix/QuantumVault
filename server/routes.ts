@@ -8,6 +8,13 @@ import crypto from "crypto";
 // rows; new writes only ever populate the V3 column.
 import bs58 from "bs58";
 import { Keypair } from "@solana/web3.js";
+
+// Boot id: identifies this server process generation. The in-memory UMK
+// security sessions are wiped on every deploy/restart, so the client's
+// session-probe records this id with each probe — a changed bootId across
+// probes explains "cookie valid but UMK gone" authoritatively (server
+// restarted) instead of guessing (2026-07-20 incident follow-up).
+const SERVER_BOOT_ID = crypto.randomUUID();
 import { storage, DatabaseStorage } from "./storage";
 import { sumNetDepositedFromEvents, isVaultInternalEvent } from "./equity-events-util";
 import { recordCriticalError } from "./error-log";
@@ -5535,6 +5542,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           sessionMissing: true,
           sessionId: null,
           walletAddress: req.walletAddress,
+          bootId: SERVER_BOOT_ID,
           message: 'Session expired. Please reconnect your wallet.',
         });
       }
@@ -5543,6 +5551,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         sessionMissing: false,
         sessionId: result.sessionId,
         walletAddress: result.session.walletAddress,
+        bootId: SERVER_BOOT_ID,
         restored,
       });
     } catch (error) {
@@ -5567,6 +5576,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       res.json({
         authenticated: hasSession,
         walletAddress: hasSession ? sessionWallet : null,
+        bootId: SERVER_BOOT_ID,
       });
     } catch (error) {
       console.error("Auth status check error:", error);

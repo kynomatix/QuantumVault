@@ -303,7 +303,7 @@ function SectionStatusPanel({ state, label, onRetry, retrying, onSignIn, signing
 
 export default function AppPage() {
   const [, navigate] = useLocation();
-  const { connected, connecting, disconnect, shortenedAddress, balance, balanceLoading, publicKeyString, sessionConnected, referralCode: walletReferralCode, authenticateWallet, authError, retryAuth } = useWallet();
+  const { connected, connecting, disconnect, shortenedAddress, balance, balanceLoading, publicKeyString, sessionConnected, referralCode: walletReferralCode, authenticateWallet, authError, sessionRecovering, retryAuth } = useWallet();
   const solanaWallet = useSolanaWallet();
   const { connection } = useConnection();
   const { toast } = useToast();
@@ -580,6 +580,16 @@ export default function AppPage() {
       equityInitialLoadDone.current = false;
       return;
     }
+
+    // Gate every core wallet read on the CONFIRMED session, not just the
+    // on-chain wallet connection (2026-07-20 incident): with connected=true
+    // but sessionConnected=false these reads raced a half-established session,
+    // 401'd, and latched a misleading "session expired" verdict. Keep
+    // last-known-good values (no reset) — the wallet is still connected, the
+    // session is just not confirmed yet; the effect re-runs when it is.
+    if (!sessionConnected) {
+      return;
+    }
     
     const fetchEquityData = async () => {
       if (!equityInitialLoadDone.current) {
@@ -622,7 +632,7 @@ export default function AppPage() {
     fetchOrphanSlots();
     const interval = setInterval(fetchEquityData, 30000);
     return () => clearInterval(interval);
-  }, [connected, publicKeyString]);
+  }, [connected, sessionConnected, publicKeyString]);
 
   // Redirect to landing if wallet not connected
   useEffect(() => {
@@ -2085,6 +2095,20 @@ export default function AppPage() {
                     Disconnect
                   </Button>
                 </div>
+              </>
+            ) : sessionRecovering ? (
+              <>
+                {/* Server unavailable during session check (2026-07-20 incident):
+                    the session may be perfectly valid — never claim it expired
+                    and never ask for a signature here. The probe auto-retries
+                    and this screen resolves itself the moment the server
+                    answers. */}
+                <h1 className="text-3xl font-display font-bold mb-2">Reconnecting…</h1>
+                <p className="text-muted-foreground" data-testid="text-session-recovering">
+                  The server is taking longer than usual to respond. Your wallet
+                  stays connected — we'll finish signing you in automatically as
+                  soon as it's reachable again. No signature needed.
+                </p>
               </>
             ) : (
               <>

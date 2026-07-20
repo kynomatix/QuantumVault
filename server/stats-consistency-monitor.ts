@@ -42,13 +42,22 @@ export async function runStatsConsistencyCheck(): Promise<{
   return { checked: bots.length, drifted, driftedBotIds };
 }
 
-export function startStatsConsistencyMonitor(): void {
-  if (monitorInterval) return;
+/**
+ * Starts the periodic monitor and returns a promise for the INITIAL check so
+ * the boot-work coordinator can serialize it against other startup jobs.
+ * Interval reruns are deliberately not serialized (steady-state load is
+ * light and spread out).
+ */
+export function startStatsConsistencyMonitor(): Promise<void> {
+  if (monitorInterval) return Promise.resolve();
   console.log(`[StatsMonitor] Starting periodic stats consistency monitor (every ${CHECK_INTERVAL_MS / 60_000} minutes)`);
-  runStatsConsistencyCheck().catch((err) => console.error('[StatsMonitor] Initial check failed:', err));
+  const initial = runStatsConsistencyCheck()
+    .then(() => undefined)
+    .catch((err) => console.error('[StatsMonitor] Initial check failed:', err));
   monitorInterval = setInterval(() => {
     runStatsConsistencyCheck().catch((err) => console.error('[StatsMonitor] Periodic check failed:', err));
   }, CHECK_INTERVAL_MS);
+  return initial.then(() => undefined);
 }
 
 export function stopStatsConsistencyMonitor(): void {

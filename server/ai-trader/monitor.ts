@@ -62,7 +62,7 @@ import {
   countsAsSlLoss,
   type BreakevenProtectState,
 } from "./breakeven";
-import { fetchOHLCV } from "../lab/datafeed";
+import { fetchOHLCV, isCacheDegradedError } from "../lab/datafeed";
 import { buildMarketContext, marketToDatafeedTicker, type AiTraderTimeframe } from "./context-builder";
 import { runDecision } from "./decide";
 import { isSelectableModel } from "../ai-assistant/models-catalog";
@@ -598,9 +598,15 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
       new Date(entryCandleOpen).toISOString(),
       new Date(now).toISOString(),
       undefined,
-      { deadlineMs: 30_000 }
+      { deadlineMs: 30_000, callerClass: "paper_monitor" }
     );
   } catch (err) {
+    // CacheDegradedError included by design: fail fast, NO network fallback
+    // and NO bypassCache retry — the next tick re-attempts on its own clock.
+    if (isCacheDegradedError(err)) {
+      console.warn(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: candle cache degraded (DB pressure) — retrying next tick`);
+      return;
+    }
     console.warn(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: candle fetch failed (${err instanceof Error ? err.message : err}) — retrying next tick`);
     return;
   }
@@ -1047,9 +1053,15 @@ async function maybeFireLiveBreakeven(
       new Date(entryCandleOpen).toISOString(),
       new Date(now).toISOString(),
       undefined,
-      { deadlineMs: 30_000 }
+      { deadlineMs: 30_000, callerClass: "live_monitor" }
     );
   } catch (err) {
+    // Degraded cache = fail fast (no network fallback); breakeven is a
+    // ratchet enhancement, the venue-side bracket still protects the position.
+    if (isCacheDegradedError(err)) {
+      console.warn(`[AiTraderMonitor] Breakeven candle cache degraded (DB pressure) — retrying next tick`);
+      return false;
+    }
     console.warn(`[AiTraderMonitor] Breakeven candle fetch failed (${err instanceof Error ? err.message : err}) — retrying next tick`);
     return false;
   }

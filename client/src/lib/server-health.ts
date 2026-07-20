@@ -93,6 +93,58 @@ export function reportCoreAuthFailure(): void {
   }
 }
 
+/**
+ * Auth-rejection arbiter (2026-07-20 incident): a single core 401/403 must
+ * NOT immediately become the global verdict "session expired" — during the
+ * incident, reads racing a half-established session latched the banner while
+ * the 7-day cookie was perfectly valid. When an arbiter is registered
+ * (session-probe.ts does so on load), coreFetch hands it the rejection
+ * evidence instead of latching; the arbiter runs ONE authoritative probe and
+ * only an authoritative invalid result latches (via reportCoreAuthFailure).
+ * With no arbiter registered we keep the old direct latch as the fail-safe.
+ */
+export interface CoreAuthRejectionInfo {
+  endpoint: string;
+  status: number;
+  requestWallet: string | null;
+}
+type AuthRejectionArbiter = (info: CoreAuthRejectionInfo) => void;
+let authRejectionArbiter: AuthRejectionArbiter | null = null;
+export function setAuthRejectionArbiter(cb: AuthRejectionArbiter | null): void {
+  authRejectionArbiter = cb;
+}
+
+function describeEndpoint(input: RequestInfo | URL): string {
+  try {
+    if (typeof input === "string") return input;
+    if (input instanceof URL) return input.pathname;
+    return (input as Request).url ?? String(input);
+  } catch {
+    return "unknown";
+  }
+}
+
+function extractWalletHeader(init?: RequestInit): string | null {
+  const h = init?.headers;
+  if (!h) return null;
+  try {
+    if (typeof Headers !== "undefined" && h instanceof Headers) {
+      return h.get("x-wallet-address");
+    }
+    if (Array.isArray(h)) {
+      const hit = h.find(([k]) => k.toLowerCase() === "x-wallet-address");
+      return hit?.[1] ?? null;
+    }
+    const rec = h as Record<string, string>;
+    for (const k of Object.keys(rec)) {
+      if (k.toLowerCase() === "x-wallet-address") return rec[k];
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /** Report a core authed read that succeeded — session is valid again. */
 export function reportCoreAuthSuccess(): void {
   if (sessionExpiredSince !== null) {
@@ -151,7 +203,17 @@ export async function coreFetch(
     reportCoreReadSuccess();
     if (authed) {
       if (res.status === 401 || res.status === 403) {
-        reportCoreAuthFailure();
+        if (authRejectionArbiter) {
+          // Evidence, not verdict: let the session-probe arbiter decide via
+          // one authoritative probe instead of latching from a stray 401.
+          authRejectionArbiter({
+            endpoint: describeEndpoint(input),
+            status: res.status,
+            requestWallet: extractWalletHeader(init),
+          });
+        } else {
+          reportCoreAuthFailure();
+        }
       } else if (res.ok) {
         reportCoreAuthSuccess();
       }

@@ -13,6 +13,10 @@ export function setActiveWalletAddress(address: string | null): void {
   activeWalletAddress = address;
 }
 
+export function getActiveWalletAddress(): string | null {
+  return activeWalletAddress;
+}
+
 export function walletAuthHeaders(): Record<string, string> {
   return activeWalletAddress ? { "x-wallet-address": activeWalletAddress } : {};
 }
