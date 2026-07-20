@@ -21,20 +21,12 @@ async function fetchBots(featured?: boolean) {
   return safeResponseJson(res);
 }
 
-async function fetchSubscriptions(walletAddress: string) {
-  const res = await fetch(`/api/subscriptions?wallet=${walletAddress}`, { credentials: "include" });
-  if (!res.ok) throw new Error("Failed to fetch subscriptions");
-  return safeResponseJson(res);
-}
-
-async function fetchPortfolio(walletAddress: string) {
-  const res = await coreFetch(`/api/portfolio?wallet=${walletAddress}`, {
-    credentials: "include",
-    headers: walletAuthHeaders(),
-  });
-  if (!res.ok) throw new CoreReadError("portfolio", res.status);
-  return safeResponseJson(res);
-}
+// NOTE: /api/portfolio and /api/subscriptions are LEGACY routes from the old
+// username/password demo system (requireAuth → req.session.userId, which the
+// wallet sign-in flow never sets). They 401 for every wallet user by design.
+// Routing them through coreFetch(authed) falsely latched the "session expired"
+// banner in an unfixable loop (2026-07-20). Their hooks were removed — do not
+// re-add client calls to these endpoints.
 
 async function fetchPositions(walletAddress: string) {
   // Explicit wallet identity: the session cookie alone could be pinned to a
@@ -114,54 +106,11 @@ async function fetchTradingBots(walletAddress: string) {
   return safeResponseJson(res);
 }
 
-async function subscribeToBot(botId: string, walletAddress: string) {
-  const res = await fetch("/api/subscriptions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ botId, walletAddress }),
-    credentials: "include",
-  });
-  if (!res.ok) {
-    const error = await safeResponseJson(res);
-    throw new Error(error.error || "Failed to subscribe");
-  }
-  return safeResponseJson(res);
-}
-
-async function updateSubscriptionStatus(id: string, status: string) {
-  const res = await fetch(`/api/subscriptions/${id}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status }),
-    credentials: "include",
-  });
-  if (!res.ok) throw new Error("Failed to update subscription");
-  return safeResponseJson(res);
-}
-
 // Hooks
 export function useBots(featured?: boolean) {
   return useQuery({
     queryKey: ["bots", featured],
     queryFn: () => fetchBots(featured),
-  });
-}
-
-export function useSubscriptions() {
-  const { publicKeyString, sessionConnected } = useWallet();
-  return useQuery({
-    queryKey: ["subscriptions", publicKeyString],
-    queryFn: () => fetchSubscriptions(publicKeyString!),
-    enabled: !!publicKeyString && sessionConnected,
-  });
-}
-
-export function usePortfolio() {
-  const { publicKeyString, sessionConnected } = useWallet();
-  return useQuery({
-    queryKey: ["portfolio", publicKeyString],
-    queryFn: () => fetchPortfolio(publicKeyString!),
-    enabled: !!publicKeyString && sessionConnected,
   });
 }
 
@@ -231,29 +180,6 @@ export function useLeaderboardSparklines(wallets: string[], range: string = "30d
     queryFn: () => fetchLeaderboardSparklines(wallets, range),
     enabled: wallets.length > 0,
     staleTime: 60_000,
-  });
-}
-
-export function useSubscribeToBot() {
-  const queryClient = useQueryClient();
-  const { publicKeyString } = useWallet();
-  return useMutation({
-    mutationFn: (botId: string) => subscribeToBot(botId, publicKeyString!),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["subscriptions"] });
-      queryClient.invalidateQueries({ queryKey: ["bots"] });
-    },
-  });
-}
-
-export function useUpdateSubscription() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, status }: { id: string; status: string }) =>
-      updateSubscriptionStatus(id, status),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["subscriptions"] });
-    },
   });
 }
 

@@ -8,7 +8,7 @@ import { useLocation } from 'wouter';
 import bs58 from 'bs58';
 import { useWallet } from '@/hooks/useWallet';
 import { isSessionError, showReconnectToast } from '@/lib/reconnect-toast';
-import { useBots, useSubscriptions, usePortfolio, usePositions, useTrades, useLeaderboard, useLeaderboardSparklines, useSubscribeToBot, useUpdateSubscription, usePrices, useTradingBots, useHealthMetrics, useBotHealth, useReconcilePositions, useMarketplace, useMyMarketplaceSubscriptions, useMyPublishedBots, useUnpublishBot, useUnsubscribeFromBot, usePortfolioPerformance, type HealthMetrics, type PublishedBot, type PortfolioPerformanceData } from '@/hooks/useApi';
+import { useBots, usePositions, useTrades, useLeaderboard, useLeaderboardSparklines, usePrices, useTradingBots, useHealthMetrics, useBotHealth, useReconcilePositions, useMarketplace, useMyMarketplaceSubscriptions, useMyPublishedBots, useUnpublishBot, useUnsubscribeFromBot, usePortfolioPerformance, type HealthMetrics, type PublishedBot, type PortfolioPerformanceData } from '@/hooks/useApi';
 import { Sparkline } from '@/components/Sparkline';
 import { useToast } from '@/hooks/use-toast';
 import { useConfirm } from '@/hooks/useConfirm';
@@ -68,6 +68,7 @@ import {
   Code2,
   Vault as VaultIcon,
   Brain,
+  CheckCircle2,
 } from 'lucide-react';
 import {
   AlertDialog,
@@ -452,9 +453,11 @@ export default function AppPage() {
   // query status: "No bots / No open positions" may only render after an
   // HTTP 200 for the active wallet (2026-07-19 incident — a failed read must
   // surface as an explicit error state, never as an empty account).
-  const { data: portfolioData } = usePortfolio();
+  // NOTE: usePortfolio()/useSubscriptions() were removed here (2026-07-20).
+  // They hit LEGACY username/password routes that 401 for every wallet user,
+  // which falsely latched the "session expired" banner in an unfixable loop.
+  // Their data was never rendered anywhere.
   const { data: positionsData, isSuccess: positionsLoaded, isError: positionsFailed, dataUpdatedAt: positionsUpdatedAt } = usePositions();
-  const { data: subscriptionsData } = useSubscriptions();
   const { data: tradesData, refetch: refetchTrades } = useTrades(10);
   const { data: allTradesData } = useTrades(500);
   const { data: botsData, refetch: refetchBots, isSuccess: botsLoaded, isError: botsFailed, dataUpdatedAt: botsUpdatedAt } = useTradingBots();
@@ -480,8 +483,6 @@ export default function AppPage() {
   const { data: pricesData } = usePrices();
   const { data: healthMetrics } = useHealthMetrics();
   const { data: expandedBotHealth, isLoading: healthLoading } = useBotHealth(expandedPositionBotId, !!expandedPositionBotId);
-  const subscribeBot = useSubscribeToBot();
-  const updateSub = useUpdateSubscription();
   const reconcilePositions = useReconcilePositions();
   const { executionEnabled, executionLoading, enableExecution, revokeExecution } = useExecutionAuthorization();
   
