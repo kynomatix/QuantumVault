@@ -180,13 +180,26 @@ let sweepGeneration = 0;
 const SWEEP_WEDGE_MS = 5 * 60_000;
 /**
  * Total network-fetch budget for one whole sweep (all protocols, all TFs).
- * Must stay well under SWEEP_WEDGE_MS: 240s deadline + one in-flight call
- * chain (~50s worst case) ≈ 290s < 300s wedge window, so the wedge override
- * remains a backstop for truly-hung awaits only — sweeps cannot stack.
+ * Must stay well under SWEEP_WEDGE_MS: the enforced sweep envelope is
+ * 240s deadline + 15s drain floor + 8s teardown + 5s margin = 268s
+ * (see overrunLimitMs for the authoritative derivation) < 300s wedge
+ * window, so the wedge override remains a backstop for truly-hung awaits
+ * only — sweeps cannot stack. Abandoned dispatches may settle later in the
+ * background (~50s call-chain tail) but never extend the sweep itself.
  */
 const SWEEP_FETCH_DEADLINE_TOTAL_MS = 240_000;
 /** Per-fetch cap within the sweep budget. */
 const SWEEP_PER_FETCH_DEADLINE_MS = 45_000;
+/**
+ * Minimum drain grace: once a TF's dispatches are in flight, the drain always
+ * waits at least this long for them to settle before firing the abort —
+ * even past the sweep-global fetch deadline. Aborting instantly at the
+ * deadline would abandon healthy near-done fetches and inflate the
+ * timeout-skip counts. This floor is PART of the enforced sweep envelope
+ * (see overrunLimitMs) — only ONE TF can be draining when the deadline
+ * passes, because the TF/market gates stop later units from dispatching.
+ */
+const SWEEP_DRAIN_FLOOR_MS = 15_000;
 /**
  * After the drain cap expires the TF's AbortController fires; aborted
  * dispatches then get this long to unwind cleanly (abort checks + the manual
@@ -677,8 +690,12 @@ async function runSweep(): Promise<void> {
         for (let i = 0; i < universe.length; i++) {
           const market = universe[i];
 
-          // Check this protocol's sweep budget first (per-protocol clock — see above).
-          if (Date.now() - protocolStart > protocolBudgetMs) {
+          // Check BOTH clocks: this protocol's window AND the sweep-global
+          // fetch deadline. Prod 2026-07-20 01:04 sweep: the loop only watched
+          // the protocol clock, so after the global 240s deadline passed it
+          // kept iterating (stagger sleeps + slot waits) for ~13s of pure
+          // grind before the drain even started — pushing the sweep to 278s.
+          if (Date.now() - protocolStart > protocolBudgetMs || Date.now() >= fetchDeadlineAt) {
             marketsSkippedByTimeout += universe.length - i;
             break;
           }
@@ -690,7 +707,9 @@ async function runSweep(): Promise<void> {
           // markets) could never fire again.
           let slotWaitTimedOut = false;
           while (inFlight >= MAX_CONCURRENT_FETCHES) {
-            if (Date.now() - protocolStart > protocolBudgetMs) {
+            // Same both-clocks rule as the loop gate above: a slot wait must
+            // not outlive the sweep-global fetch deadline either.
+            if (Date.now() - protocolStart > protocolBudgetMs || Date.now() >= fetchDeadlineAt) {
               slotWaitTimedOut = true;
               break;
             }
@@ -739,7 +758,7 @@ async function runSweep(): Promise<void> {
           fetchDeadlineAt,
           sweepBeganAt + SWEEP_WEDGE_MS - 30_000,
         );
-        const drainCapMs = Math.max(15_000, drainDeadlineAt - Date.now());
+        const drainCapMs = Math.max(SWEEP_DRAIN_FLOOR_MS, drainDeadlineAt - Date.now());
         const drained = await Promise.race([
           Promise.all(pendingPromises).then(() => true),
           sleep(drainCapMs).then(() => false),
@@ -899,7 +918,21 @@ async function runSweep(): Promise<void> {
     }
     // Overrun check is INDEPENDENT of the scan-coverage verdict: a sweep can
     // scan everything yet still prove the budget enforcement is broken.
-    const overrunLimitMs = SWEEP_FETCH_DEADLINE_TOTAL_MS + SWEEP_TEARDOWN_ALLOWANCE_MS + 5_000;
+    // The limit is the TRUE enforced envelope, term by term:
+    //   fetch deadline (240s): no new dispatches after this — the market loop
+    //     and slot waits gate on it (both-clocks fix, 2026-07-20);
+    //   + drain floor (15s): the ONE in-flight TF still gets its minimum
+    //     settling grace before the abort fires;
+    //   + teardown allowance (8s): aborted dispatches' bounded unwind window;
+    //   + 5s margin: scoring/persist/summary after the last drain.
+    // = 268s. The previous 253s limit omitted the drain floor, so it fired
+    // critical alerts on by-design behaviour (prod 2026-07-20 01:04, 278.3s —
+    // of which ~13s was the real loop-grind bug fixed above, the rest the
+    // unbudgeted drain floor). Anything past THIS limit means an enforcement
+    // gate genuinely failed. Still < the 270s wedge-drain clamp and 300s
+    // wedge window, so sweeps cannot stack.
+    const overrunLimitMs =
+      SWEEP_FETCH_DEADLINE_TOTAL_MS + SWEEP_DRAIN_FLOOR_MS + SWEEP_TEARDOWN_ALLOWANCE_MS + 5_000;
     if (sweepDurationMs > overrunLimitMs) {
       recordCriticalError({
         category: "scanner",
