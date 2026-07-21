@@ -5239,7 +5239,7 @@ export async function registerRoutes(
     try {
       const b = (req.body ?? {}) as Record<string, unknown>;
       const clip = (v: unknown, n: number) =>
-        typeof v === "string" ? v.slice(0, n) : "";
+        typeof v === "string" ? v.replace(/[\r\n\x00-\x1f\x7f]/g, " ").slice(0, n) : "";
       console.error(
         "[CLIENT-ERROR]",
         JSON.stringify({
@@ -5286,7 +5286,7 @@ export async function registerRoutes(
       bucket.count++;
       if (bucket.count > CLIENT_TEL_PER_IP_PER_MIN) return res.status(204).end();
 
-      const clip = (v: unknown, n: number) => (typeof v === "string" ? v.slice(0, n) : "");
+      const clip = (v: unknown, n: number) => (typeof v === "string" ? v.replace(/[\r\n\x00-\x1f\x7f]/g, " ").slice(0, n) : "");
       const body = (req.body ?? {}) as Record<string, unknown>;
       const w = clip(body.w, 12) || "-";
       const kind = clip(body.kind, 16) || "hb";
