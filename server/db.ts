@@ -1091,6 +1091,14 @@ export async function ensureSchema() {
       // decision so all downstream readers (monitor 15s loop, executor, UI) work unmodified.
       // Rollback: DROP COLUMN market_source is safe — every reader treats missing/default as 'fixed'.
       `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS market_source text NOT NULL DEFAULT 'fixed'`,
+
+      // --- WO-21: persistent one-shot flags (portfolio backfill version gate). ---
+      // Own isolated statement per the per-statement isolation rule above.
+      `CREATE TABLE IF NOT EXISTS system_flags (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner
