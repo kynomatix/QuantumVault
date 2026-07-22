@@ -1,6 +1,6 @@
 import { safeResponseJson } from "./safe-fetch";
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
-import { CoreReadError, registerRecoveryListener } from "./server-health";
+import { CoreReadError, CoreReadTimeoutError, registerRecoveryListener } from "./server-health";
 
 // The currently connected Solana wallet address, mirrored here so module-level
 // fetch helpers can stamp an `x-wallet-address` header on every authenticated
@@ -82,6 +82,10 @@ export const getQueryFn: <T>(options: {
  * into a permanently stuck dashboard because failed queries never re-ran.
  */
 export function isTransientReadError(error: unknown): boolean {
+  // WO-20: a hard 15-second deadline timeout is transient server degradation —
+  // old data must stay visible while React Query retries. It must NEVER be
+  // classified as auth failure or empty account.
+  if (error instanceof CoreReadTimeoutError) return true;
   if (error instanceof CoreReadError) return error.kind === "server";
   if (error instanceof TypeError) return true; // fetch network failure
   if (error instanceof Error) return /^5\d\d:/.test(error.message);

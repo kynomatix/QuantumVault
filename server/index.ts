@@ -19,6 +19,7 @@ import { startPortfolioSnapshotJob } from "./portfolio-snapshot-job";
 import { startTelegramDailySummaryJob } from "./telegram-daily-summary-job";
 import { recordCriticalError, flushErrorLog } from "./error-log";
 import { registerRequestTrace, startSelfStats } from "./request-trace";
+import { SERVER_BOOT_ID } from "./boot-id";
 import * as os from "node:os";
 import * as fs from "node:fs";
 import * as nodePath from "node:path";
@@ -185,6 +186,13 @@ declare module "http" {
 // Health check endpoint - must respond quickly for deployment health checks
 app.get("/health", (_req, res) => {
   res.status(200).json({ status: "ok", timestamp: Date.now() });
+});
+
+// Boot-id header: every response carries X-Boot-Id so the client can detect
+// server restarts (changed id) and trigger query recovery automatically.
+app.use((_req, res, next) => {
+  res.set("X-Boot-Id", SERVER_BOOT_ID);
+  next();
 });
 
 // UNIVERSAL early request logging - captures ALL requests before any processing

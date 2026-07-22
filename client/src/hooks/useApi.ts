@@ -1,5 +1,5 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
-import { coreFetch, CoreReadError } from "@/lib/server-health";
+import { coreFetch, coreReadFetch, CoreReadError } from "@/lib/server-health";
 import { walletAuthHeaders } from "@/lib/queryClient";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useWallet } from "./useWallet";
@@ -28,14 +28,16 @@ async function fetchBots(featured?: boolean) {
 // banner in an unfixable loop (2026-07-20). Their hooks were removed — do not
 // re-add client calls to these endpoints.
 
-async function fetchPositions(walletAddress: string) {
+async function fetchPositions(walletAddress: string, signal?: AbortSignal) {
   // Explicit wallet identity: the session cookie alone could be pinned to a
   // previously connected wallet. The header makes the server fail closed
   // (403) on any mismatch instead of silently answering for the wrong wallet.
-  const res = await coreFetch(`/api/positions?wallet=${walletAddress}`, {
-    credentials: "include",
-    headers: walletAuthHeaders(),
-  });
+  const res = await coreReadFetch(
+    "positions",
+    `/api/positions?wallet=${walletAddress}`,
+    { credentials: "include", headers: walletAuthHeaders() },
+    { signal },
+  );
   if (!res.ok) throw new CoreReadError("positions", res.status);
   const data = await safeResponseJson(res);
   return data.positions || [];
@@ -87,21 +89,28 @@ export interface HealthMetrics {
   }>;
 }
 
-async function fetchHealthMetrics(): Promise<HealthMetrics | null> {
-  try {
-    const res = await fetch("/api/health-metrics", { credentials: "include" });
-    if (!res.ok) return null;
-    return safeResponseJson(res);
-  } catch {
-    return null;
-  }
+async function fetchHealthMetrics(signal?: AbortSignal): Promise<HealthMetrics | null> {
+  // Previously swallowed every error and returned null (silent failure).
+  // WO-20: must throw so React Query enters error state (never false-empty).
+  // 404 is the one genuinely-empty case (no Drift account opened yet).
+  const res = await coreReadFetch(
+    "health-metrics",
+    "/api/health-metrics",
+    { credentials: "include", headers: walletAuthHeaders() },
+    { signal },
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) throw new CoreReadError("health-metrics", res.status);
+  return safeResponseJson(res);
 }
 
-async function fetchTradingBots(walletAddress: string) {
-  const res = await coreFetch(`/api/trading-bots?wallet=${walletAddress}`, {
-    credentials: "include",
-    headers: walletAuthHeaders(),
-  });
+async function fetchTradingBots(walletAddress: string, signal?: AbortSignal) {
+  const res = await coreReadFetch(
+    "trading-bots",
+    `/api/trading-bots?wallet=${walletAddress}`,
+    { credentials: "include", headers: walletAuthHeaders() },
+    { signal },
+  );
   if (!res.ok) throw new CoreReadError("trading bots", res.status);
   return safeResponseJson(res);
 }
@@ -118,7 +127,7 @@ export function usePositions() {
   const { publicKeyString, sessionConnected } = useWallet();
   return useQuery({
     queryKey: ["positions", publicKeyString],
-    queryFn: () => fetchPositions(publicKeyString!),
+    queryFn: ({ signal }) => fetchPositions(publicKeyString!, signal),
     enabled: !!publicKeyString && sessionConnected,
     refetchInterval: 5000,
     staleTime: 3000,
@@ -196,7 +205,7 @@ export function useTradingBots() {
   const { publicKeyString, sessionConnected } = useWallet();
   return useQuery({
     queryKey: ["tradingBots", publicKeyString, sessionConnected],
-    queryFn: () => fetchTradingBots(publicKeyString!),
+    queryFn: ({ signal }) => fetchTradingBots(publicKeyString!, signal),
     enabled: !!publicKeyString && sessionConnected,
     refetchOnMount: true,
     staleTime: 10000,
@@ -208,7 +217,7 @@ export function useHealthMetrics() {
   const { publicKeyString, sessionConnected } = useWallet();
   return useQuery({
     queryKey: ["healthMetrics", publicKeyString],
-    queryFn: fetchHealthMetrics,
+    queryFn: ({ signal }) => fetchHealthMetrics(signal),
     enabled: !!publicKeyString && sessionConnected,
     refetchInterval: 15000,
     staleTime: 10000,
