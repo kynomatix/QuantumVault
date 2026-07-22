@@ -22,7 +22,7 @@ import { registerRequestTrace, startSelfStats } from "./request-trace";
 import * as os from "node:os";
 import * as fs from "node:fs";
 import * as nodePath from "node:path";
-import { appendTelemetry } from "./telemetry";
+import { appendTelemetry, appendTelemetrySync, drainQueueSyncForExit, flushTelemetry } from "./telemetry";
 
 // Global crash capture for the admin "Errors" panel. Registered at module load so it catches
 // failures from any background job. Both handlers record the error then preserve Node's default
@@ -689,8 +689,11 @@ registerRequestTrace(app);
   const bootEnv = process.env.REPLIT_DEPLOYMENT ? "production" : "workspace";
   appendTelemetry(`[Boot] pid=${process.pid} env=${bootEnv} node=${process.version}`);
   process.on("exit", (code) => {
-    // appendTelemetry is fully synchronous (appendFileSync) — safe in 'exit'.
-    appendTelemetry(
+    // Drain the async queue first — lines queued since the last drainer flush
+    // would otherwise be silently discarded (async I/O is dead here).
+    drainQueueSyncForExit();
+    // appendTelemetrySync uses appendFileSync — async cannot run in 'exit'.
+    appendTelemetrySync(
       `[Lifecycle] exit code=${code} pid=${process.pid} uptime=${Math.round(process.uptime())}s`,
     );
   });
@@ -730,6 +733,7 @@ registerRequestTrace(app);
       httpServer.close();
     } catch {}
     console.log("[Main] Shutdown complete — exiting");
+    await flushTelemetry(2000).catch(() => {});
     process.exit(0);
   };
   process.on("SIGTERM", () => shutdownHandler("SIGTERM").catch(() => process.exit(1)));
