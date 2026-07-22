@@ -14,12 +14,16 @@
 // WO-20 additions:
 // - CoreReadTimeoutError: a hard 15-second wall-clock deadline for every core
 //   dashboard read. Timeout = transient server degradation (never auth/empty).
-// - coreReadFetch: the budget-enforced wrapper (coreFetch stays unchanged for
-//   callers that don't need the budget). Covers the initial request, the
-//   single 503 retry, its clamped delay, and the retry request.
+// - coreReadJson: the budget-enforced wrapper that consumes the response body
+//   inside the same deadline. coreFetch stays unchanged for callers that don't
+//   need the budget. The deadline covers: initial request, one 503 retry, its
+//   clamped delay, the retry request, and async body consumption.
+// - reportCoreReadTimeoutNow: immediately latches degraded on the FIRST core
+//   timeout (no 2-failure threshold needed for timeouts).
 // - Boot-id tracking: when the server boot identifier changes across responses
 //   the module fires a recovery event, unblocking queries stuck in error state.
 import { useSyncExternalStore } from "react";
+import { safeResponseJson } from "./safe-fetch";
 
 type Listener = () => void;
 
@@ -102,6 +106,27 @@ export function reportCoreReadFailure(): void {
   // Two consecutive failures before flagging: one blip (e.g. a mid-deploy
   // request) should not flash the banner.
   if (consecutiveFailures >= 2 && degradedSince === null) {
+    degradedSince = Date.now();
+    emit();
+  }
+}
+
+/**
+ * Report a core read TIMEOUT for immediate degradation latch.
+ *
+ * Unlike reportCoreReadFailure (which requires 2 consecutive failures before
+ * latching), a genuine timeout from a core health read latches degraded
+ * immediately on the FIRST occurrence. The 2-failure threshold exists to
+ * absorb mid-deploy blips; a 15-second hard timeout is already a strong signal.
+ *
+ * Storm guard: if degradedSince is already set, the emit is skipped so repeated
+ * concurrent timeouts do not create a notification storm.
+ */
+export function reportCoreReadTimeoutNow(): void {
+  // Ensure the threshold counter crosses 2 so any subsequent success fires
+  // recovery correctly (consecutiveFailures > 0 → degradedSince not null).
+  consecutiveFailures = Math.max(consecutiveFailures + 1, 2);
+  if (degradedSince === null) {
     degradedSince = Date.now();
     emit();
   }
@@ -292,33 +317,52 @@ function combineSignals(signals: AbortSignal[]): AbortSignal {
 }
 
 /**
- * Core read wrapper with a hard 15-second wall-clock budget (WO-20).
+ * Result shape returned by coreReadJson. The body is already consumed — no
+ * second `await res.json()` / `await res.text()` call is needed or possible.
+ */
+export interface CoreReadResult<T = unknown> {
+  status: number;
+  ok: boolean;
+  data: T;
+  headers: Headers;
+}
+
+/**
+ * Core read wrapper with a hard 15-second wall-clock budget that covers the
+ * ENTIRE lifecycle: initial fetch, one clamped 503 retry + its delay, and
+ * asynchronous response-body consumption. (WO-20.1 correction: the prior
+ * coreReadFetch cleared the timer before body read, letting a never-settling
+ * body escape the budget permanently.)
  *
  * Contract:
- * - The budget covers the initial request, one 503 retry, its clamped
- *   Retry-After delay, the retry request, and response consumption.
- * - Propagates the query library's cancellation signal (React Query passes
- *   `signal` via the queryFn context). Caller cancellation is preserved as
- *   an AbortError — no health penalty and no degradation latch.
- * - Deadline expiry throws CoreReadTimeoutError (kind="timeout") and counts
- *   toward server degradation — never toward session expiry.
- * - Retry-After is clamped to [0, 5] seconds AND to the remaining budget.
- * - Reads `X-Boot-Id` from every response; a changed id fires emitRecovery().
- * - Health reporting mirrors coreFetch exactly for non-timeout, non-cancel
- *   outcomes.
+ * - The budget is started once and never restarted between stages.
+ * - Deadline expiry at any stage throws CoreReadTimeoutError (kind="timeout").
+ *   The first timeout with coreHealth=true latches degraded immediately via
+ *   reportCoreReadTimeoutNow() — no two-failure threshold.
+ * - Caller cancellation (opts.signal) is preserved as an AbortError — no
+ *   health penalty, no degradation latch, no session-expiry.
+ * - Retry-After is clamped to [0, MAX_RETRY_AFTER_SEC] AND to the remaining
+ *   budget minus 200ms margin for the retry request itself.
+ * - Synchronous JSON.parse cannot be pre-empted: the deadline is checked
+ *   immediately before and immediately after parsing; if parsing itself carries
+ *   elapsed time beyond the deadline the timeout is reported after it completes.
+ * - X-Boot-Id from any response is processed for boot-generation recovery.
+ * - Health reporting (coreHealth option, default true): named account-critical
+ *   reads set coreHealth=true. Peripheral or public reads set coreHealth=false
+ *   to avoid affecting the global health verdict.
  *
- * NEVER use this function for mutations, transaction signing, order broadcasts,
- * position closing, vault actions, borrowing, or any money-changing request.
- * Those must go through apiRequest() or plain fetch() so they are never
- * subject to replay or automatic retry.
+ * NEVER use this for mutations, transaction signing, order broadcasts, vault
+ * actions, borrowing, or any money-changing request. Those must go through
+ * apiRequest() or plain fetch() so they are never subject to replay or retry.
  */
-export async function coreReadFetch(
+export async function coreReadJson<T = unknown>(
   resource: string,
   input: string,
   init: RequestInit | undefined,
-  opts?: { authed?: boolean; signal?: AbortSignal },
-): Promise<Response> {
+  opts?: { authed?: boolean; signal?: AbortSignal; coreHealth?: boolean },
+): Promise<CoreReadResult<T>> {
   const authed = opts?.authed !== false;
+  const coreHealth = opts?.coreHealth !== false; // default true
   const callerSignal = opts?.signal;
   const startMs = Date.now();
 
@@ -334,57 +378,59 @@ export async function coreReadFetch(
 
   const signalsToMerge: AbortSignal[] = [deadlineCtrl.signal];
   if (callerSignal) signalsToMerge.push(callerSignal);
-  const combined = signalsToMerge.length > 1 ? combineSignals(signalsToMerge) : deadlineCtrl.signal;
+  const combined =
+    signalsToMerge.length > 1
+      ? combineSignals(signalsToMerge)
+      : deadlineCtrl.signal;
 
   /** True if OUR deadline fired (not the caller's cancellation). */
   const isDeadline = (): boolean => deadlineCtrl.signal.aborted;
   /** True if the caller cancelled (wallet switch, key change, unmount). */
-  const isCancelled = (): boolean => !!(callerSignal?.aborted && !deadlineCtrl.signal.aborted);
+  const isCancelled = (): boolean =>
+    !!(callerSignal?.aborted && !deadlineCtrl.signal.aborted);
 
-  function applyHealthReporting(res: Response): void {
-    if (res.status >= 500) {
-      reportCoreReadFailure();
-    } else {
-      reportCoreReadSuccess();
-      if (authed) {
-        if (res.status === 401 || res.status === 403) {
-          if (authRejectionArbiter) {
-            authRejectionArbiter({
-              endpoint: input,
-              status: res.status,
-              requestWallet: extractWalletHeader(init),
-            });
-          } else {
-            reportCoreAuthFailure();
+  function applyHealthReporting(status: number, headers: Headers): void {
+    if (coreHealth) {
+      if (status >= 500) {
+        reportCoreReadFailure();
+      } else {
+        reportCoreReadSuccess();
+        if (authed) {
+          if (status === 401 || status === 403) {
+            if (authRejectionArbiter) {
+              authRejectionArbiter({
+                endpoint: input,
+                status,
+                requestWallet: extractWalletHeader(init),
+              });
+            } else {
+              reportCoreAuthFailure();
+            }
+          } else if (status >= 200 && status < 400) {
+            reportCoreAuthSuccess();
           }
-        } else if (res.ok) {
-          reportCoreAuthSuccess();
         }
       }
     }
-    // Boot-id tracking: a changed id triggers recovery for stuck queries.
-    const bootId = res.headers.get("X-Boot-Id");
+    // Boot-id tracking is always active regardless of coreHealth flag.
+    const bootId = headers.get("X-Boot-Id");
     if (bootId) reportBootId(bootId);
   }
 
+  function handleTimeout(): never {
+    if (coreHealth) reportCoreReadTimeoutNow();
+    throw new CoreReadTimeoutError(resource);
+  }
+
   async function doFetch(): Promise<Response> {
-    let res: Response;
     try {
-      res = await fetch(input, { ...init, signal: combined });
+      return await fetch(input, { ...init, signal: combined });
     } catch (err) {
-      if (isDeadline()) {
-        reportCoreReadFailure();
-        throw new CoreReadTimeoutError(resource);
-      }
-      if (isCancelled()) {
-        // Caller cancelled — no health penalty.
-        throw err;
-      }
-      // Genuine network error.
-      reportCoreReadFailure();
+      if (isDeadline()) handleTimeout();
+      if (isCancelled()) throw err; // no health penalty for caller cancel
+      if (coreHealth) reportCoreReadFailure();
       throw err;
     }
-    return res;
   }
 
   let res: Response;
@@ -400,7 +446,7 @@ export async function coreReadFetch(
     const rawRetryAfterSec = parseInt(res.headers.get("Retry-After") ?? "5", 10);
     const elapsedMs = Date.now() - startMs;
     const remainingMs = CORE_READ_BUDGET_MS - elapsedMs;
-    // Clamp Retry-After to [0, 5] seconds and to remaining budget.
+    // Clamp Retry-After to [0, MAX_RETRY_AFTER_SEC] and to remaining budget.
     const cappedSec = Math.max(0, Math.min(rawRetryAfterSec, MAX_RETRY_AFTER_SEC));
     // Reserve a small margin for the retry request itself.
     const delayMs = Math.min(cappedSec * 1000, Math.max(0, remainingMs - 200));
@@ -424,15 +470,10 @@ export async function coreReadFetch(
       });
     } catch {
       clearTimeout(deadlineTimer);
-      if (isDeadline()) {
-        reportCoreReadFailure();
-        throw new CoreReadTimeoutError(resource);
-      }
-      // Caller cancelled during retry delay.
+      if (isDeadline()) handleTimeout();
       throw new DOMException("Request cancelled", "AbortError");
     }
 
-    // Retry request.
     try {
       res = await doFetch();
     } catch (err) {
@@ -441,9 +482,29 @@ export async function coreReadFetch(
     }
   }
 
+  // Body consumption — still under the SAME deadline (the key WO-20.1 fix).
+  // safeResponseJson(res, combined) races res.text() against the combined
+  // signal so a never-settling body stream doesn't escape the budget.
+  let data: unknown;
+  try {
+    data = await safeResponseJson(res, combined);
+  } catch (err) {
+    clearTimeout(deadlineTimer);
+    if (isDeadline()) handleTimeout();
+    if (isCancelled()) throw err; // no health penalty
+    if (coreHealth) reportCoreReadFailure();
+    throw err;
+  }
+
+  // Synchronous JSON.parse inside safeResponseJson cannot be pre-empted, but
+  // check the deadline immediately after it returns so we don't report a false
+  // success when parsing itself ate the remaining budget.
+  const expired = isDeadline();
   clearTimeout(deadlineTimer);
-  applyHealthReporting(res);
-  return res;
+  if (expired) handleTimeout();
+
+  applyHealthReporting(res.status, res.headers);
+  return { status: res.status, ok: res.ok, data: data as T, headers: res.headers };
 }
 
 function subscribe(listener: Listener): () => void {

@@ -1,17 +1,21 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
-import { coreFetch, coreReadFetch, CoreReadError } from "@/lib/server-health";
+import { coreFetch, coreReadJson, CoreReadError } from "@/lib/server-health";
 import { walletAuthHeaders } from "@/lib/queryClient";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useWallet } from "./useWallet";
 
 // API fetch functions
-// Core dashboard reads (bots, positions, portfolio) go through coreFetch so a
-// degraded server (5xx / network failure) raises the "connection lost" banner
+// Core dashboard reads (bots, positions, portfolio) go through coreReadJson so
+// a degraded server (5xx / network failure) raises the "connection lost" banner
 // and a 401/403 raises the "session expired" state instead of the UI silently
 // rendering empty states (2026-07-19 incident). They also send the explicit
 // x-wallet-address header so the server fail-closes if its session identifies
 // a different wallet than the one active in the UI — a stale cookie must never
 // return another wallet's (or an empty) view as if it were this wallet's data.
+//
+// WO-20.1: all 9 account-critical reads now use coreReadJson, which enforces a
+// 15-second budget that covers body consumption (not just the initial request),
+// propagates the React Query cancellation signal, and reports health correctly.
 async function fetchBots(featured?: boolean) {
   const url = featured ? "/api/bots?featured=true" : "/api/bots";
   // Public (unauthenticated) endpoint: its 200s say nothing about the wallet
@@ -32,31 +36,37 @@ async function fetchPositions(walletAddress: string, signal?: AbortSignal) {
   // Explicit wallet identity: the session cookie alone could be pinned to a
   // previously connected wallet. The header makes the server fail closed
   // (403) on any mismatch instead of silently answering for the wrong wallet.
-  const res = await coreReadFetch(
+  const { ok, status, data } = await coreReadJson(
     "positions",
     `/api/positions?wallet=${walletAddress}`,
     { credentials: "include", headers: walletAuthHeaders() },
-    { signal },
+    { signal, coreHealth: true },
   );
-  if (!res.ok) throw new CoreReadError("positions", res.status);
-  const data = await safeResponseJson(res);
-  return data.positions || [];
+  if (!ok) throw new CoreReadError("positions", status);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (data as any).positions || [];
 }
 
 async function reconcilePositions() {
-  const res = await fetch(`/api/positions/reconcile`, { 
-    method: 'POST',
-    credentials: "include" 
+  const res = await fetch(`/api/positions/reconcile`, {
+    method: "POST",
+    credentials: "include",
   });
   if (!res.ok) throw new Error("Failed to reconcile positions");
   return safeResponseJson(res);
 }
 
-async function fetchTrades(walletAddress: string, limit?: number) {
+async function fetchTrades(walletAddress: string, limit?: number, signal?: AbortSignal) {
   const url = limit ? `/api/bot-trades?limit=${limit}` : `/api/bot-trades`;
-  const res = await fetch(url, { credentials: "include" });
-  if (!res.ok) throw new Error("Failed to fetch trades");
-  return safeResponseJson(res);
+  const { ok, status, data } = await coreReadJson(
+    "trades",
+    url,
+    { credentials: "include", headers: walletAuthHeaders() },
+    { signal, coreHealth: true },
+  );
+  if (!ok) throw new CoreReadError("trades", status);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return data as any;
 }
 
 async function fetchLeaderboard(limit?: number) {
@@ -90,29 +100,31 @@ export interface HealthMetrics {
 }
 
 async function fetchHealthMetrics(signal?: AbortSignal): Promise<HealthMetrics | null> {
-  // Previously swallowed every error and returned null (silent failure).
-  // WO-20: must throw so React Query enters error state (never false-empty).
-  // 404 is the one genuinely-empty case (no Drift account opened yet).
-  const res = await coreReadFetch(
+  // 404 = genuinely no Drift account opened yet (not an error, render null).
+  // All other non-ok responses throw so React Query enters error state (never
+  // false-empty). WO-20.1: body consumption is now inside the 15-second budget
+  // via coreReadJson.
+  const { ok, status, data } = await coreReadJson(
     "health-metrics",
     "/api/health-metrics",
     { credentials: "include", headers: walletAuthHeaders() },
-    { signal },
+    { signal, coreHealth: true },
   );
-  if (res.status === 404) return null;
-  if (!res.ok) throw new CoreReadError("health-metrics", res.status);
-  return safeResponseJson(res);
+  if (status === 404) return null;
+  if (!ok) throw new CoreReadError("health-metrics", status);
+  return data as HealthMetrics;
 }
 
 async function fetchTradingBots(walletAddress: string, signal?: AbortSignal) {
-  const res = await coreReadFetch(
+  const { ok, status, data } = await coreReadJson(
     "trading-bots",
     `/api/trading-bots?wallet=${walletAddress}`,
     { credentials: "include", headers: walletAuthHeaders() },
-    { signal },
+    { signal, coreHealth: true },
   );
-  if (!res.ok) throw new CoreReadError("trading bots", res.status);
-  return safeResponseJson(res);
+  if (!ok) throw new CoreReadError("trading bots", status);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return data as any;
 }
 
 // Hooks
@@ -149,7 +161,7 @@ export function useTrades(limit?: number) {
   const { publicKeyString, sessionConnected } = useWallet();
   return useQuery({
     queryKey: ["trades", publicKeyString, limit],
-    queryFn: () => fetchTrades(publicKeyString!, limit),
+    queryFn: ({ signal }) => fetchTrades(publicKeyString!, limit, signal),
     enabled: !!publicKeyString && sessionConnected,
     refetchInterval: 15000,
     staleTime: 10000,
@@ -241,38 +253,43 @@ export interface BotHealthMetrics {
   }>;
 }
 
-async function fetchBotHealth(botId: string): Promise<BotHealthMetrics | null> {
-  try {
-    const res = await fetch(`/api/trading-bots/${botId}/position`, { credentials: "include" });
-    if (!res.ok) return null;
-    const data = await safeResponseJson(res);
-    if (!data.hasPosition) return null;
-    
-    return {
-      healthFactor: data.healthFactor ?? 0,
-      marginRatio: 0,
-      totalCollateral: data.totalCollateral ?? 0,
-      freeCollateral: data.freeCollateral ?? 0,
-      unrealizedPnl: data.unrealizedPnl ?? 0,
-      positions: [{
+async function fetchBotHealth(botId: string, signal?: AbortSignal): Promise<BotHealthMetrics | null> {
+  const { ok, status, data } = await coreReadJson(
+    "bot-health",
+    `/api/trading-bots/${botId}/position`,
+    { credentials: "include", headers: walletAuthHeaders() },
+    { signal, coreHealth: true },
+  );
+  // 404 = bot not found or no position yet — genuine not-found, not an error.
+  if (status === 404) return null;
+  if (!ok) throw new CoreReadError("bot-health", status);
+  const d = data as Record<string, unknown>;
+  if (!d.hasPosition) return null; // position slot exists but is empty
+
+  return {
+    healthFactor: (d.healthFactor as number) ?? 0,
+    marginRatio: 0,
+    totalCollateral: (d.totalCollateral as number) ?? 0,
+    freeCollateral: (d.freeCollateral as number) ?? 0,
+    unrealizedPnl: (d.unrealizedPnl as number) ?? 0,
+    positions: [
+      {
         marketIndex: 0,
-        market: data.market ?? '',
-        baseSize: data.size ?? 0,
+        market: (d.market as string) ?? "",
+        baseSize: (d.size as number) ?? 0,
         notionalValue: 0,
-        liquidationPrice: data.liquidationPrice ?? null,
-        entryPrice: data.avgEntryPrice ?? 0,
-        unrealizedPnl: data.unrealizedPnl ?? 0,
-      }]
-    };
-  } catch {
-    return null;
-  }
+        liquidationPrice: (d.liquidationPrice as number | null) ?? null,
+        entryPrice: (d.avgEntryPrice as number) ?? 0,
+        unrealizedPnl: (d.unrealizedPnl as number) ?? 0,
+      },
+    ],
+  };
 }
 
 export function useBotHealth(botId: string | null, enabled: boolean = false) {
   return useQuery({
     queryKey: ["botHealth", botId],
-    queryFn: () => fetchBotHealth(botId!),
+    queryFn: ({ signal }) => fetchBotHealth(botId!, signal),
     enabled: !!botId && enabled,
     staleTime: 5000,
   });
@@ -300,7 +317,7 @@ export interface PublishedBot {
   profitSharePercent: string;
   publishedAt: string;
   creatorEarnings?: string; // Profit share earnings from subscribers
-  activeProtocol?: 'pacifica' | 'drift' | 'flash' | null;
+  activeProtocol?: "pacifica" | "drift" | "flash" | null;
   creator: {
     displayName: string | null;
     xUsername: string | null;
@@ -314,11 +331,11 @@ export interface PublishedBot {
 // generic toast. Using a real subclass (vs. an `any`-tagged Error) lets
 // `error instanceof SubscribeAuthorizationRequiredError` stay type-safe.
 export class SubscribeAuthorizationRequiredError extends Error {
-  readonly action = 'enable_execution' as const;
+  readonly action = "enable_execution" as const;
   readonly status = 412 as const;
   constructor(message: string) {
     super(message);
-    this.name = 'SubscribeAuthorizationRequiredError';
+    this.name = "SubscribeAuthorizationRequiredError";
   }
 }
 
@@ -334,24 +351,29 @@ export interface MarketplaceSubscription {
   // execution revoked, emergency-stopped, or no V3 key), the subscription is
   // paused with a machine-readable reason so the UI can tell the subscriber
   // exactly why their copy bot stopped trading.
-  status?: 'active' | 'paused' | 'cancelled' | string;
+  status?: "active" | "paused" | "cancelled" | string;
   subscriptionStatusReason?:
-    | 'execution_disabled'
-    | 'emergency_stopped'
-    | 'v3_decrypt_failed'
+    | "execution_disabled"
+    | "emergency_stopped"
+    | "v3_decrypt_failed"
     | string
     | null;
 }
 
 // Marketplace API functions
-async function fetchMarketplace(options?: { search?: string; market?: string; sortBy?: string; limit?: number }): Promise<PublishedBot[]> {
+async function fetchMarketplace(options?: {
+  search?: string;
+  market?: string;
+  sortBy?: string;
+  limit?: number;
+}): Promise<PublishedBot[]> {
   const params = new URLSearchParams();
-  if (options?.search) params.set('search', options.search);
-  if (options?.market) params.set('market', options.market);
-  if (options?.sortBy) params.set('sortBy', options.sortBy);
-  if (options?.limit) params.set('limit', options.limit.toString());
-  
-  const url = `/api/marketplace${params.toString() ? '?' + params.toString() : ''}`;
+  if (options?.search) params.set("search", options.search);
+  if (options?.market) params.set("market", options.market);
+  if (options?.sortBy) params.set("sortBy", options.sortBy);
+  if (options?.limit) params.set("limit", options.limit.toString());
+
+  const url = `/api/marketplace${params.toString() ? "?" + params.toString() : ""}`;
   const res = await fetch(url, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch marketplace");
   return safeResponseJson(res);
@@ -363,19 +385,31 @@ async function fetchPublishedBot(id: string): Promise<PublishedBot> {
   return safeResponseJson(res);
 }
 
-async function fetchMySubscriptions(): Promise<MarketplaceSubscription[]> {
-  const res = await fetch("/api/my-subscriptions", { credentials: "include" });
-  if (!res.ok) throw new Error("Failed to fetch subscriptions");
-  return safeResponseJson(res);
+async function fetchMySubscriptions(signal?: AbortSignal): Promise<MarketplaceSubscription[]> {
+  const { ok, status, data } = await coreReadJson(
+    "subscriptions",
+    "/api/my-subscriptions",
+    { credentials: "include", headers: walletAuthHeaders() },
+    { signal, coreHealth: true },
+  );
+  if (!ok) throw new CoreReadError("subscriptions", status);
+  return data as MarketplaceSubscription[];
 }
 
-async function checkBotPublished(botId: string): Promise<{ published: boolean; publishedBotId?: string }> {
-  const res = await fetch(`/api/trading-bots/${botId}/published`, { credentials: "include" });
+async function checkBotPublished(
+  botId: string,
+): Promise<{ published: boolean; publishedBotId?: string }> {
+  const res = await fetch(`/api/trading-bots/${botId}/published`, {
+    credentials: "include",
+  });
   if (!res.ok) return { published: false };
   return safeResponseJson(res);
 }
 
-async function publishBot(botId: string, data: { name: string; description?: string; profitSharePercent?: number }): Promise<PublishedBot> {
+async function publishBot(
+  botId: string,
+  data: { name: string; description?: string; profitSharePercent?: number },
+): Promise<PublishedBot> {
   const res = await fetch(`/api/trading-bots/${botId}/publish`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -400,7 +434,10 @@ async function unpublishBot(publishedBotId: string): Promise<void> {
   }
 }
 
-async function subscribeToPublishedBot(publishedBotId: string, data: { capitalInvested: number; leverage: number; investmentAmount?: number }): Promise<any> {
+async function subscribeToPublishedBot(
+  publishedBotId: string,
+  data: { capitalInvested: number; leverage: number; investmentAmount?: number },
+): Promise<any> {
   const res = await fetch(`/api/marketplace/${publishedBotId}/subscribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -414,9 +451,9 @@ async function subscribeToPublishedBot(publishedBotId: string, data: { capitalIn
     // are emergency-stopped) because subscriber fan-out now strict-decrypts
     // each subscriber's agent key per signal. Throw an enriched error that
     // the subscribe UI surfaces with an "Enable Execution" prompt.
-    if (res.status === 412 && error?.action === 'enable_execution') {
+    if (res.status === 412 && error?.action === "enable_execution") {
       throw new SubscribeAuthorizationRequiredError(
-        error.error || 'Execution authorization required before subscribing.',
+        error.error || "Execution authorization required before subscribing.",
       );
     }
     throw new Error(error.error || "Failed to subscribe");
@@ -445,9 +482,20 @@ async function unsubscribeFromBot(publishedBotId: string): Promise<UnsubscribeRe
 }
 
 // Marketplace hooks
-export function useMarketplace(options?: { search?: string; market?: string; sortBy?: string; limit?: number }) {
+export function useMarketplace(options?: {
+  search?: string;
+  market?: string;
+  sortBy?: string;
+  limit?: number;
+}) {
   return useQuery({
-    queryKey: ["marketplace", options?.search, options?.market, options?.sortBy, options?.limit],
+    queryKey: [
+      "marketplace",
+      options?.search,
+      options?.market,
+      options?.sortBy,
+      options?.limit,
+    ],
     queryFn: () => fetchMarketplace(options),
     staleTime: 10000,
   });
@@ -465,7 +513,7 @@ export function useMyMarketplaceSubscriptions() {
   const { publicKeyString, sessionConnected } = useWallet();
   return useQuery({
     queryKey: ["myMarketplaceSubscriptions", publicKeyString],
-    queryFn: fetchMySubscriptions,
+    queryFn: ({ signal }) => fetchMySubscriptions(signal),
     enabled: !!publicKeyString && sessionConnected,
   });
 }
@@ -482,8 +530,13 @@ export function useBotPublishedStatus(botId: string | null) {
 export function usePublishBot() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ botId, data }: { botId: string; data: { name: string; description?: string; profitSharePercent?: number } }) =>
-      publishBot(botId, data),
+    mutationFn: ({
+      botId,
+      data,
+    }: {
+      botId: string;
+      data: { name: string; description?: string; profitSharePercent?: number };
+    }) => publishBot(botId, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["marketplace"] });
       queryClient.invalidateQueries({ queryKey: ["myPublishedBots"] });
@@ -509,8 +562,13 @@ export function useUnpublishBot() {
 export function useSubscribeToPublishedBot() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ publishedBotId, data }: { publishedBotId: string; data: { capitalInvested: number; leverage: number; investmentAmount?: number } }) =>
-      subscribeToPublishedBot(publishedBotId, data),
+    mutationFn: ({
+      publishedBotId,
+      data,
+    }: {
+      publishedBotId: string;
+      data: { capitalInvested: number; leverage: number; investmentAmount?: number };
+    }) => subscribeToPublishedBot(publishedBotId, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["marketplace"] });
       queryClient.invalidateQueries({ queryKey: ["myMarketplaceSubscriptions"] });
@@ -531,17 +589,22 @@ export function useUnsubscribeFromBot() {
   });
 }
 
-async function fetchMyPublishedBots(): Promise<PublishedBot[]> {
-  const res = await fetch("/api/marketplace/my-published", { credentials: "include" });
-  if (!res.ok) throw new Error("Failed to fetch my published bots");
-  return safeResponseJson(res);
+async function fetchMyPublishedBots(signal?: AbortSignal): Promise<PublishedBot[]> {
+  const { ok, status, data } = await coreReadJson(
+    "my-published-bots",
+    "/api/marketplace/my-published",
+    { credentials: "include", headers: walletAuthHeaders() },
+    { signal, coreHealth: true },
+  );
+  if (!ok) throw new CoreReadError("my-published-bots", status);
+  return data as PublishedBot[];
 }
 
 export function useMyPublishedBots() {
   const { publicKeyString, sessionConnected } = useWallet();
   return useQuery({
     queryKey: ["myPublishedBots", publicKeyString],
-    queryFn: fetchMyPublishedBots,
+    queryFn: ({ signal }) => fetchMyPublishedBots(signal),
     enabled: !!publicKeyString && sessionConnected,
     staleTime: 10000,
   });
@@ -570,11 +633,13 @@ export interface BotPerformanceData {
 
 export function useBotPerformance(botId: string | null) {
   return useQuery({
-    queryKey: ['/api/marketplace', botId, 'performance'],
+    queryKey: ["/api/marketplace", botId, "performance"],
     queryFn: async (): Promise<BotPerformanceData | null> => {
       if (!botId) return null;
-      const res = await fetch(`/api/marketplace/${botId}/performance`, { credentials: 'include' });
-      if (!res.ok) throw new Error('Failed to fetch performance');
+      const res = await fetch(`/api/marketplace/${botId}/performance`, {
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error("Failed to fetch performance");
       return safeResponseJson(res);
     },
     enabled: !!botId,
@@ -595,21 +660,26 @@ export interface PortfolioPerformanceData {
   chartData: Array<{ date: string; netPnl: number; pnlPercent: number; balance: number }>;
 }
 
-async function fetchPortfolioPerformance(range: string): Promise<PortfolioPerformanceData | null> {
-  try {
-    const res = await fetch(`/api/portfolio-performance?range=${encodeURIComponent(range)}`, { credentials: "include" });
-    if (!res.ok) return null;
-    return safeResponseJson(res);
-  } catch {
-    return null;
-  }
+async function fetchPortfolioPerformance(
+  range: string,
+  signal?: AbortSignal,
+): Promise<PortfolioPerformanceData | null> {
+  const { ok, status, data } = await coreReadJson(
+    "portfolio-performance",
+    `/api/portfolio-performance?range=${encodeURIComponent(range)}`,
+    { credentials: "include", headers: walletAuthHeaders() },
+    { signal, coreHealth: true },
+  );
+  if (status === 404) return null;
+  if (!ok) throw new CoreReadError("portfolio-performance", status);
+  return data as PortfolioPerformanceData;
 }
 
-export function usePortfolioPerformance(range: string = '3m') {
+export function usePortfolioPerformance(range: string = "3m") {
   const { publicKeyString, sessionConnected } = useWallet();
   return useQuery({
     queryKey: ["portfolioPerformance", publicKeyString, range],
-    queryFn: () => fetchPortfolioPerformance(range),
+    queryFn: ({ signal }) => fetchPortfolioPerformance(range, signal),
     enabled: !!publicKeyString && sessionConnected,
     refetchInterval: 30000,
     staleTime: 20000,
@@ -644,21 +714,26 @@ export interface PortfolioBotPerformanceData {
   range: string;
 }
 
-async function fetchPortfolioBotPerformance(range: string): Promise<PortfolioBotPerformanceData | null> {
-  try {
-    const res = await fetch(`/api/portfolio/bot-performance?range=${encodeURIComponent(range)}`, { credentials: "include" });
-    if (!res.ok) return null;
-    return safeResponseJson(res);
-  } catch {
-    return null;
-  }
+async function fetchPortfolioBotPerformance(
+  range: string,
+  signal?: AbortSignal,
+): Promise<PortfolioBotPerformanceData | null> {
+  const { ok, status, data } = await coreReadJson(
+    "portfolio-bot-performance",
+    `/api/portfolio/bot-performance?range=${encodeURIComponent(range)}`,
+    { credentials: "include", headers: walletAuthHeaders() },
+    { signal, coreHealth: true },
+  );
+  if (status === 404) return null;
+  if (!ok) throw new CoreReadError("portfolio-bot-performance", status);
+  return data as PortfolioBotPerformanceData;
 }
 
-export function usePortfolioBotPerformance(range: string = 'all') {
+export function usePortfolioBotPerformance(range: string = "all") {
   const { publicKeyString, sessionConnected } = useWallet();
   return useQuery({
     queryKey: ["portfolioBotPerformance", publicKeyString, range],
-    queryFn: () => fetchPortfolioBotPerformance(range),
+    queryFn: ({ signal }) => fetchPortfolioBotPerformance(range, signal),
     enabled: !!publicKeyString && sessionConnected,
     refetchInterval: 60000,
     staleTime: 30000,

@@ -1,5 +1,5 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
-import { coreFetch, CoreReadError, useServerDegraded, useSessionExpired, reportCoreAuthSuccess } from "@/lib/server-health";
+import { coreReadJson, CoreReadError, useServerDegraded, useSessionExpired, reportCoreAuthSuccess } from "@/lib/server-health";
 import { deriveDashboardSectionState, staleDataLabel, type DashboardSectionState } from "@/lib/dashboard-state";
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useQuery } from "@tanstack/react-query";
@@ -163,13 +163,23 @@ interface ReferralOverviewResponse {
 }
 
 function ReferralOverviewPanel() {
+  const { publicKeyString, sessionConnected } = useWallet();
   const { data, isLoading } = useQuery<ReferralOverviewResponse>({
-    queryKey: ["/api/referrals/overview"],
-    queryFn: async () => {
-      const res = await fetch("/api/referrals/overview", { credentials: "include", headers: walletAuthHeaders() });
-      if (!res.ok) throw new Error("Failed to load referrals overview");
-      return res.json();
+    // Include wallet in key so the cache is not shared across wallet switches.
+    queryKey: ["/api/referrals/overview", publicKeyString],
+    queryFn: async ({ signal }) => {
+      // coreHealth:false — referral 401s must NOT latch the global session-expired
+      // verdict; this read is not account-critical for the health banner.
+      const { ok, data: d } = await coreReadJson(
+        "referrals-overview",
+        "/api/referrals/overview",
+        { credentials: "include", headers: walletAuthHeaders() },
+        { signal, coreHealth: false, authed: false },
+      );
+      if (!ok) throw new Error("Failed to load referrals overview");
+      return d as ReferralOverviewResponse;
     },
+    enabled: !!publicKeyString && sessionConnected,
     refetchInterval: 60000,
   });
 
@@ -464,13 +474,19 @@ export default function AppPage() {
   const { data: aiTraderBotsData, refetch: refetchAiTraderBots, isSuccess: aiBotsLoaded, isError: aiBotsFailed } = useQuery({
     // Wallet-scoped key: this cache entry must never survive a wallet switch.
     queryKey: ['/api/ai-trader', publicKeyString],
-    queryFn: async () => {
-      // coreFetch + throw (was: return [] on any failure, which rendered a
-      // failed read as "no AI bots" — the exact false-empty this incident
-      // fixed). Throwing keeps last-known-good data and flips query.isError.
-      const res = await coreFetch('/api/ai-trader', { credentials: 'include', headers: walletAuthHeaders() });
-      if (!res.ok) throw new CoreReadError('AI Trader bots', res.status);
-      return safeResponseJson(res);
+    queryFn: async ({ signal }) => {
+      // coreReadJson + throw: body consumed inside the 15-second budget (WO-20.1).
+      // Throwing keeps last-known-good data and flips query.isError so the UI
+      // shows a degradation banner instead of an empty "no AI bots" state.
+      const { ok, status, data } = await coreReadJson(
+        'AI Trader bots',
+        '/api/ai-trader',
+        { credentials: 'include', headers: walletAuthHeaders() },
+        { signal, coreHealth: true },
+      );
+      if (!ok) throw new CoreReadError('AI Trader bots', status);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return data as any;
     },
     enabled: !!publicKeyString && sessionConnected,
   });
@@ -591,26 +607,45 @@ export default function AppPage() {
       return;
     }
     
+    // Abort controller ties all fetches in this effect instance to the cleanup
+    // function so wallet-switch / unmount aborts in-flight reads cleanly.
+    const ctrl = new AbortController();
+    // Generation counter prevents a slow response for wallet-A from updating
+    // wallet-B's state after a rapid wallet switch (stale closure guard).
+    let generation = 0;
+
     const fetchEquityData = async () => {
+      const myGen = ++generation;
       if (!equityInitialLoadDone.current) {
         setEquityLoading(true);
       }
       try {
-        const res = await coreFetch('/api/total-equity?includeVault=1', { credentials: 'include', headers: walletAuthHeaders() });
-        if (res.ok) {
-          const data = await safeResponseJson(res);
-          setTotalEquity(data.totalEquity ?? 0);
-          setAgentBalance(data.agentBalance ?? 0);
-          setVaultBalance(data.vaultBalance ?? 0);
-          setExchangeBalance(data.exchangeBalance ?? 0);
-          setMainAccountFreeCollateral(data.mainAccountFreeCollateral ?? 0);
-          setSolBalance(data.solBalance ?? 0);
+        const { ok, data } = await coreReadJson(
+          'total-equity',
+          '/api/total-equity?includeVault=1',
+          { credentials: 'include', headers: walletAuthHeaders() },
+          { signal: ctrl.signal, coreHealth: true },
+        );
+        // Discard result if a newer generation superseded this request.
+        if (myGen !== generation || ctrl.signal.aborted) return;
+        if (ok) {
+          const d = data as Record<string, unknown>;
+          setTotalEquity((d.totalEquity as number) ?? 0);
+          setAgentBalance((d.agentBalance as number) ?? 0);
+          setVaultBalance((d.vaultBalance as number) ?? 0);
+          setExchangeBalance((d.exchangeBalance as number) ?? 0);
+          setMainAccountFreeCollateral((d.mainAccountFreeCollateral as number) ?? 0);
+          setSolBalance((d.solBalance as number) ?? 0);
           equityInitialLoadDone.current = true;
         }
-      } catch (error) {
-        // Network error, keep previous values
+        // !ok: keep previous values; health banner raised by useServerDegraded.
+      } catch {
+        // Timeout, network error, or abort: keep previous values.
+        // Degradation banner is raised by coreReadJson via reportCoreReadTimeoutNow.
       } finally {
-        setEquityLoading(false);
+        // Only clear loading for the current generation to avoid a stale
+        // earlier request clobbering a later one's loading indicator.
+        if (myGen === generation) setEquityLoading(false);
       }
     };
 
@@ -618,12 +653,17 @@ export default function AppPage() {
     // (allocated slots with no bot row). Surfaces the "Recover stranded funds" button.
     const fetchOrphanSlots = async () => {
       try {
-        const res = await fetch('/api/flash/orphaned-wallets', { credentials: 'include', headers: walletAuthHeaders() });
-        if (res.ok) {
-          const data = await safeResponseJson(res);
-          setOrphanSlots(data.orphanSlots ?? 0);
+        const { ok, data } = await coreReadJson(
+          'orphan-wallets',
+          '/api/flash/orphaned-wallets',
+          { credentials: 'include', headers: walletAuthHeaders() },
+          { signal: ctrl.signal, coreHealth: false },
+        );
+        if (ctrl.signal.aborted) return;
+        if (ok) {
+          setOrphanSlots(((data as Record<string, unknown>).orphanSlots as number) ?? 0);
         }
-      } catch (error) {
+      } catch {
         // Network error, keep previous value
       }
     };
@@ -631,7 +671,10 @@ export default function AppPage() {
     fetchEquityData();
     fetchOrphanSlots();
     const interval = setInterval(fetchEquityData, 30000);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      ctrl.abort();
+    };
   }, [connected, sessionConnected, publicKeyString]);
 
   // Redirect to landing if wallet not connected
