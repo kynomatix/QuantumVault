@@ -965,6 +965,17 @@ async function getAllPrices(): Promise<Record<string, number>> {
   return getDefaultAdapter().getAllPrices();
 }
 
+/**
+ * DASH-PRICE-FAILFAST-01 — Synchronous cached-price snapshot for dashboard
+ * display enrichment. Delegates to the adapter's optional getCachedPrices
+ * capability. Never initiates a network request or quota operation; stale
+ * values are permitted (display-only). Returns an empty map when the adapter
+ * has no suitable cache — callers must apply their own conservative fallback.
+ */
+function getCachedDisplayPrices(internalSymbols: string[]): Record<string, number> {
+  return getDefaultAdapter().getCachedPrices?.(internalSymbols) ?? {};
+}
+
 async function forceRefreshPrices(): Promise<Record<string, number>> {
   return getDefaultAdapter().getAllPrices();
 }
@@ -7839,12 +7850,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const bots = await storage.getTradingBots(req.walletAddress!);
       const botMap = new Map(bots.map(b => [b.id, b]));
       
-      let prices: Record<string, number> = {};
-      try {
-        prices = await getAllPrices();
-      } catch (e) {
-        console.log('[Positions] Failed to fetch prices');
-      }
+      // DASH-PRICE-FAILFAST-01: use only the immediate in-memory cached-price
+      // snapshot for the markets that appear in stored positions. Never
+      // initiates a network request, quota operation, or cache refresh.
+      // Stale values are permitted — display-only. Missing prices fall back to
+      // entry-price further below (rawMarkPrice === 0 guard).
+      const positionMarkets = [...new Set(botPositions.map((p) => p.market))];
+      const prices = getCachedDisplayPrices(positionMarkets);
 
       const positions: any[] = [];
 
@@ -14362,10 +14374,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const wallet = await storage.getWallet(req.walletAddress!);
       const listParkedBotIds = await getParkedBotIdSet(req.walletAddress!);
       
-      let prices: Record<string, number> = {};
-      try {
-        prices = await getAllPrices();
-      } catch (e) { /* prices unavailable */ }
+      // DASH-PRICE-FAILFAST-01: use only the immediate in-memory cached-price
+      // snapshot for the markets that belong to the returned bots. Never
+      // initiates a network request, quota operation, or cache refresh.
+      // Stale values are permitted — display-only. Bot equity falls through to
+      // the conservative live-account or realised-PnL path when price absent.
+      const botMarkets = [...new Set(bots.map((b) => b.market))];
+      const prices = getCachedDisplayPrices(botMarkets);
 
       const enrichedBots = await Promise.all(bots.map(async (bot) => {
         const botCtx = getBotSubaccountContext(bot);

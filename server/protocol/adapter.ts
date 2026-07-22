@@ -111,6 +111,20 @@ export interface ProtocolAdapter {
   getMarkets(): Promise<ProtocolMarket[]>;
   getPrice(internalSymbol: string, opts?: { priority?: 'critical' | 'normal' | 'background' }): Promise<number | null>;
   getAllPrices(): Promise<Record<string, number>>;
+  /**
+   * DASH-PRICE-FAILFAST-01 — Synchronous cached-price snapshot for display-only
+   * enrichment on the dashboard request path.
+   *
+   * Contract (callers must rely on these):
+   *   - Returns only finite positive values; stale values are permitted.
+   *   - MUST NOT initiate any async work, network request, or quota operation.
+   *   - MUST NOT mutate cache entries, timestamps, or expiry state.
+   *   - Returns an ordinary Record, never a Promise.
+   *
+   * Optional: adapters without a suitable in-memory cache may omit this method.
+   * Callers fall back to an empty map and use their own conservative fallbacks.
+   */
+  getCachedPrices?(internalSymbols: string[]): Record<string, number>;
   getOrderbook(internalSymbol: string, depth?: number): Promise<OrderbookSnapshot>;
   getFundingRate(internalSymbol: string): Promise<FundingRateInfo>;
   getMaintenanceMarginWeight(internalSymbol: string): number;

@@ -328,6 +328,31 @@ export class PacificaAdapter implements ProtocolAdapter {
     return prices[internalSymbol] ?? null;
   }
 
+  /**
+   * DASH-PRICE-FAILFAST-01 — synchronous cached-price snapshot.
+   *
+   * Reads from the in-memory priceCache without any network access, quota
+   * consumption, or cache mutation. Stale entries are returned as-is — they
+   * are display-only and MUST NOT be used for trading decisions. NaN,
+   * Infinity, and non-positive values are excluded. Safe on the request path.
+   */
+  getCachedPrices(internalSymbols: string[]): Record<string, number> {
+    const result: Record<string, number> = {};
+    const seen = new Set<string>();
+    for (const sym of internalSymbols) {
+      const key = sym.toUpperCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const entry = this.priceCache.get(key);
+      // Stale entries permitted — display-only. Exclude NaN, Infinity, ≤ 0.
+      if (entry !== undefined && Number.isFinite(entry.data) && entry.data > 0) {
+        // Return with the original-case symbol to match database market strings.
+        result[sym] = entry.data;
+      }
+    }
+    return result;
+  }
+
   async getAllPrices(): Promise<Record<string, number>> {
     const result: Record<string, number> = {};
 
