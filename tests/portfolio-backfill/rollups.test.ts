@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import Decimal from "decimal.js";
 
 /**
  * WO-21 Fix B equivalence proof: the new pure `computeSnapshotRollups`
@@ -98,6 +99,22 @@ function oracleRollups(snapshots: RollupSnapshotInput[], raw: RawEvent[]) {
 
 const d = (iso: string) => new Date(iso);
 
+/**
+ * WO-21 addendum: old and new results must be compared after normalization
+ * to the database column scale (decimal(…,6)) — the DB rounds both to six
+ * decimals on write, so equivalence at that scale is the real invariant.
+ */
+function normalizeAtDbScale(
+  rollups: Array<{ id: string; set: Record<string, string> }>,
+) {
+  return rollups.map((r) => ({
+    id: r.id,
+    set: Object.fromEntries(
+      Object.entries(r.set).map(([k, v]) => [k, new Decimal(v).toDecimalPlaces(6).toString()]),
+    ),
+  }));
+}
+
 describe("computeSnapshotRollups — equivalence with old per-row logic", () => {
   it("matches the oracle on a mixed fixture (categories, null txBlockTime, tie case, unsorted input)", () => {
     const raw: RawEvent[] = [
@@ -132,6 +149,7 @@ describe("computeSnapshotRollups — equivalence with old per-row logic", () => 
     const expected = oracleRollups(snapshots, raw);
 
     expect(actual).toEqual(expected);
+    expect(normalizeAtDbScale(actual)).toEqual(normalizeAtDbScale(expected));
     // Sanity: output is ascending by snapshot date (s1, s2, s3, s4).
     expect(actual.map((r) => r.id)).toEqual(["s1", "s2", "s3", "s4"]);
     // Tie event (25 at exactly s3's date) included in s3's cumulative deposits:
@@ -154,6 +172,66 @@ describe("computeSnapshotRollups — equivalence with old per-row logic", () => 
     // Pass events reversed relative to time order.
     const actual = computeSnapshotRollups(snapshots, toClassified(raw));
     expect(actual).toEqual(oracleRollups(snapshots, raw));
+  });
+
+  it("matches the oracle at DB scale under fractional accumulation (float artifacts)", () => {
+    // Repeated small fractional deposits/withdrawals produce float sums like
+    // 0.30000000000000004. Old code re-summed from scratch per snapshot; new
+    // code accumulates incrementally — both must agree once normalized to the
+    // column's six-decimal scale.
+    const raw: RawEvent[] = [];
+    for (let i = 0; i < 30; i++) {
+      raw.push({
+        eventType: i % 3 === 2 ? "agent_withdraw" : "agent_deposit",
+        amount: i % 2 === 0 ? "0.1" : "0.2",
+        txBlockTime: null,
+        createdAt: new Date(Date.UTC(2026, 5, 1, i)), // hourly on 2026-06-01
+      });
+    }
+    const snapshots: RollupSnapshotInput[] = [
+      { id: "n1", snapshotDate: d("2026-06-01T05:30:00Z"), totalBalance: "0.55" },
+      { id: "n2", snapshotDate: d("2026-06-01T14:30:00Z"), totalBalance: "1.15" },
+      { id: "n3", snapshotDate: d("2026-06-02T00:00:00Z"), totalBalance: "2.05" },
+    ];
+
+    const actual = computeSnapshotRollups(snapshots, toClassified(raw));
+    const expected = oracleRollups(snapshots, raw);
+
+    expect(normalizeAtDbScale(actual)).toEqual(normalizeAtDbScale(expected));
+  });
+
+  it("is deterministic for equal event timestamps regardless of input order", () => {
+    // Three events share the EXACT same timestamp. Stable sort keeps caller
+    // order for ties, but the resulting cumulatives must be identical (at DB
+    // scale) no matter how the tied group is permuted — ties can only
+    // reorder additions within one snapshot cutoff group.
+    const t = d("2026-06-01T12:00:00Z");
+    const tied: RawEvent[] = [
+      { eventType: "agent_deposit", amount: "0.1", txBlockTime: t, createdAt: t },
+      { eventType: "agent_withdraw", amount: "0.2", txBlockTime: t, createdAt: t },
+      { eventType: "drift_deposit", amount: "0.3", txBlockTime: t, createdAt: t },
+    ];
+    const snapshots: RollupSnapshotInput[] = [
+      // Snapshot date EXACTLY equals the tied timestamp → all included (tie rule).
+      { id: "t1", snapshotDate: t, totalBalance: "0.05" },
+      { id: "t2", snapshotDate: d("2026-06-02T00:00:00Z"), totalBalance: "0.05" },
+    ];
+
+    const orderings = [
+      [tied[0], tied[1], tied[2]],
+      [tied[2], tied[0], tied[1]],
+      [tied[1], tied[2], tied[0]],
+    ];
+    const results = orderings.map((o) =>
+      normalizeAtDbScale(computeSnapshotRollups(snapshots, toClassified(o))),
+    );
+    expect(results[1]).toEqual(results[0]);
+    expect(results[2]).toEqual(results[0]);
+    expect(results[0]).toEqual(normalizeAtDbScale(oracleRollups(snapshots, tied)));
+    // Tie-included on t1: deposits=0.1, withdrawals=0.2, internal=0.3.
+    expect(results[0][0].set.cumulativeExternalDeposits).toBe("0.1");
+    expect(results[0][0].set.cumulativeExternalWithdrawals).toBe("0.2");
+    expect(results[0][0].set.cumulativeInternalTransfers).toBe("0.3");
   });
 });
 

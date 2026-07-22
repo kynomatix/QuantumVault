@@ -1415,17 +1415,6 @@ export const insertPortfolioDailySnapshotSchema = createInsertSchema(portfolioDa
 export type InsertPortfolioDailySnapshot = z.infer<typeof insertPortfolioDailySnapshotSchema>;
 export type PortfolioDailySnapshot = typeof portfolioDailySnapshots.$inferSelect;
 
-// WO-21: minimal key-value flags for one-shot startup migrations (e.g. the
-// Task 119 portfolio backfill version gate). Server-internal only — never
-// client-written, so no insert schema. Applied to prod via ensureSchema()
-// startup DDL, NOT db:push (known column-drop footgun).
-export const systemFlags = pgTable("system_flags", {
-  key: text("key").primaryKey(),
-  value: text("value").notNull(),
-  updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
-export type SystemFlag = typeof systemFlags.$inferSelect;
-
 export const superteamAgents = pgTable("superteam_agents", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   agentName: text("agent_name").notNull(),

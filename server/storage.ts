@@ -42,7 +42,6 @@ import {
   platformMetrics,
   pendingProfitShares,
   portfolioDailySnapshots,
-  systemFlags,
   type User,
   type InsertUser,
   type Wallet,
@@ -596,10 +595,6 @@ export interface IStorage {
   getPublishedBotEarnings(publishedBotId: string): Promise<number>;
   getWalletsWithTradingBots(): Promise<string[]>;
   getWalletFirstDepositDate(walletAddress: string): Promise<Date | null>;
-
-  // WO-21: persistent one-shot flags (e.g. portfolio backfill version gate).
-  getSystemFlag(key: string): Promise<string | null>;
-  setSystemFlag(key: string, value: string): Promise<void>;
 
   // MLM Referral chain & rewards
   getReferralChain(descendantWallet: string): Promise<ReferralLink[]>;
@@ -4121,20 +4116,6 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(portfolioDailySnapshots.snapshotDate))
       .limit(1);
     return result[0];
-  }
-
-  async getSystemFlag(key: string): Promise<string | null> {
-    const rows = await db.select().from(systemFlags).where(eq(systemFlags.key, key)).limit(1);
-    return rows[0]?.value ?? null;
-  }
-
-  async setSystemFlag(key: string, value: string): Promise<void> {
-    await db.insert(systemFlags)
-      .values({ key, value, updatedAt: new Date() })
-      .onConflictDoUpdate({
-        target: systemFlags.key,
-        set: { value, updatedAt: new Date() },
-      });
   }
 
   async getWalletCumulativeDepositsWithdrawals(

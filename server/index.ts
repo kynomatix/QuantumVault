@@ -979,15 +979,13 @@ registerRequestTrace(app);
         });
       }, 195_000);
 
-      // ~4min: Task 119 portfolio backfill (one-shot, iterates wallets — the
-      // heaviest boot-time DB consumer; used to fire at +45s inside the storm).
-      setTimeout(() => {
-        runSerializedBootWork('portfolio-backfill', async () => {
-          log('[Staggered startup] Running Task 119 portfolio backfill (one-shot)');
-          const { runPortfolioBackfillOnce } = await import('./portfolio-snapshot-backfill');
-          await runPortfolioBackfillOnce().catch(err => console.error('[PortfolioBackfill] error:', err));
-        });
-      }, 240_000);
+      // WO-21: the Task 119 portfolio backfill boot invocation was REMOVED.
+      // Task 119 already recomputed successfully across repeated prod boots;
+      // new snapshots get correct rollups at creation (portfolio-snapshot-job)
+      // and late historical deposits are handled by the deposit reconciler
+      // (recomputeWalletSnapshots). A future formula migration must ship its
+      // own explicitly versioned, cross-process-safe work order — do not
+      // re-add an unconditional boot-time recompute here.
 
       // ~77s: AI Trader monitor (WO-6): startup reconciliation + 15s
       // close-detection tick + graduation sweep. Dynamic import keeps the
