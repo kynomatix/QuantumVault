@@ -73,6 +73,10 @@ vi.mock("../../server/protocol/adapter-registry", () => ({
 const fetchOHLCVMock = vi.fn();
 vi.mock("../../server/lab/datafeed", () => ({
   fetchOHLCV: (...a: unknown[]) => fetchOHLCVMock(...a),
+  // Mirror the real duck-typed guard so production code paths that classify
+  // candle-fetch errors keep working under this mock.
+  isCacheDegradedError: (err: unknown) =>
+    (err as { name?: string } | null)?.name === "CacheDegradedError",
 }));
 
 const buildContextMock = vi.fn();

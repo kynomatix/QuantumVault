@@ -581,6 +581,16 @@ export class FlashAdapter implements ProtocolAdapter {
       }
 
       const signature = await this._send(client, poolConfig, built);
+
+      // Fail-closed landing gate: sendTransactionV3 is fire-and-forget (skipPreflight,
+      // no confirmation). A dropped tx here would otherwise be booked as a fill and
+      // create a phantom DB position that never existed on-chain.
+      const landed = await this._confirmMarketTxLanded(
+        signature,
+        params.reduceOnly ? 'Reduce order' : 'Open order',
+      );
+      if (!landed.ok) return this._reject(landed.error);
+
       return {
         success: true,
         status: 'filled',
@@ -713,6 +723,14 @@ export class FlashAdapter implements ProtocolAdapter {
       }
 
       const signature = await this._send(client, poolConfig, built);
+
+      // Fail-closed landing gate: a dropped close tx booked as a fill is the worst
+      // direction — the caller records a close that never happened and the position
+      // stays open (naked) while the platform believes it is flat. If this gate
+      // fails but the tx actually landed, the reconciler self-heals (external close).
+      const landed = await this._confirmMarketTxLanded(signature, 'Close order');
+      if (!landed.ok) return this._reject(landed.error);
+
       return {
         success: true,
         status: 'filled',
@@ -900,6 +918,46 @@ export class FlashAdapter implements ProtocolAdapter {
     } catch (err: unknown) {
       return this._reject(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  /**
+   * Fail-closed landing confirmation for market open/reduce/close transactions.
+   * The Flash SDK's sendTransactionV3 submits with skipPreflight=true and returns a
+   * signature WITHOUT confirming inclusion, so a dropped or reverted tx would
+   * otherwise be reported as a fill and the caller would book a phantom position
+   * (or phantom close). Polls getSignatureStatuses until the tx is confirmed;
+   * an on-chain error or no definitive status within the window is NOT a fill.
+   * The safe-direction tradeoff: if the tx lands after we report failure, the
+   * caller books nothing and the reconciler converges DB state to the chain.
+   */
+  private async _confirmMarketTxLanded(
+    signature: string,
+    label: string,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const connection = this._getConnection();
+    // ~30s window (20 × 1.5s). Happy path confirms in 1–3 polls; the window must
+    // stay well under the ~60s request-proxy reap so webhook/close routes that
+    // block on this still return a real verdict to the caller.
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try {
+        const st = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+        const info = st?.value?.[0];
+        if (info?.err) {
+          return {
+            ok: false,
+            error: `${label} transaction reverted on-chain (sig ${signature}): ${JSON.stringify(info.err)}`,
+          };
+        }
+        if (info && (info.confirmationStatus === 'confirmed' || info.confirmationStatus === 'finalized')) {
+          return { ok: true };
+        }
+      } catch { /* transient RPC error — keep polling */ }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    return {
+      ok: false,
+      error: `${label} transaction did not confirm on-chain within the verification window (sig ${signature}). Not booked as filled — verify on the exchange before retrying (a late landing is reconciled automatically).`,
+    };
   }
 
   /**
