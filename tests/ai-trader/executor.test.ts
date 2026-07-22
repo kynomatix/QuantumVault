@@ -602,6 +602,44 @@ describe("live execution — failure handling (fail closed)", () => {
     expect(cleanupKey).toHaveBeenCalled();
   });
 
+  it("UNCONFIRMED-LANDING verdict → emergency close + pause even though the probe would read flat (tx may still land)", async () => {
+    // Flash landing-verification timeout: the tx was BROADCAST and may still
+    // land inside the blockhash window (~60–90s). A flat probe at ~30s is NOT
+    // proof of a clean abort — an idle verdict would let auto-next re-enter
+    // while the original tx can still fill → double-open. Must skip the flat
+    // probe entirely and go fail-closed.
+    armLiveAuth();
+    const { UNCONFIRMED_LANDING_VERDICT_TOKEN } = await import("../../server/protocol/tx-verdicts");
+    const getPositionsMock = vi.fn(async () => []); // flat — and must NOT be trusted (or even consulted)
+    const adapter = makeAdapter({
+      placeMarketOrder: vi.fn(async () => ({
+        success: false,
+        status: "rejected" as const,
+        error: `open transaction did not confirm on-chain within the verification window (sig 5Kt429xyz). Not booked as filled. ${UNCONFIRMED_LANDING_VERDICT_TOKEN}`,
+      })),
+      getPositions: getPositionsMock,
+    });
+    const { executeDecision } = await importExecutor();
+    const r = await executeDecision({
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-1",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+    expect(r).toMatchObject({ ok: false, reason: "position_unconfirmed" });
+    expect((r as any).detail).toContain("may still land");
+    // The clean-abort flat probe must be SKIPPED — not run-and-ignored.
+    expect(getPositionsMock).not.toHaveBeenCalled();
+    // Fail-closed destination: reduce-only close attempt + pause + notify.
+    expect((adapter.closePosition as any)).toHaveBeenCalled();
+    expect(updateBotMock).toHaveBeenCalledWith("bot-1111-2222", { status: "paused", pauseReason: "position_unconfirmed" });
+    expect(updateBotMock).not.toHaveBeenCalledWith("bot-1111-2222", { status: "idle" });
+    expect(updateDecisionMock).toHaveBeenCalledWith("d-1", { outcome: "aborted_order" });
+    expect(notifyMock).toHaveBeenCalledWith("WALLET_X", expect.objectContaining({ type: "trade_failed" }));
+    expect(cleanupKey).toHaveBeenCalled();
+  });
+
   it("order rejection with UNPROVABLE flat state → emergency close + pause (fail closed)", async () => {
     armLiveAuth();
     const adapter = makeAdapter({

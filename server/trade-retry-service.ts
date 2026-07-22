@@ -5,6 +5,7 @@ import { getMarketBySymbol } from "./market-liquidity-service";
 import { transferUsdcToWallet, resolveAgentKeypair } from "./agent-wallet";
 import { PublicKey } from "@solana/web3.js";
 import { getDefaultAdapter, getAdapterForBot } from "./protocol/adapter-registry";
+import { isUnconfirmedLandingVerdict } from "./protocol/tx-verdicts";
 import { db } from "./db";
 import { wallets } from "@shared/schema";
 import { eq } from "drizzle-orm";
@@ -262,6 +263,11 @@ const COOLDOWN_DELAY_MS = 2 * 60 * 1000; // 2 minutes cooldown before re-queue
 const MAX_COOLDOWN_RETRIES = 2; // Max times to re-queue after exhausting normal retries
 
 export function isRateLimitError(error: string | Error | unknown): boolean {
+  // HARD EXCLUSION (money-safety): an unconfirmed-landing verdict means the
+  // original tx was broadcast and may still land — auto-retry could double-open.
+  // This must run BEFORE any pattern matching: the base58 signature embedded in
+  // the message can accidentally contain retryable substrings like "429".
+  if (isUnconfirmedLandingVerdict(error)) return false;
   const errorStr = error instanceof Error ? error.message : String(error);
   const lowerError = errorStr.toLowerCase();
   return (
@@ -278,6 +284,9 @@ export function isRateLimitError(error: string | Error | unknown): boolean {
 
 // Transient errors that should be retried (price feed issues, oracle staleness, RPC issues)
 export function isTransientError(error: string | Error | unknown): boolean {
+  // HARD EXCLUSION (money-safety): never auto-retry an unconfirmed-landing
+  // verdict — the original tx may still land (see tx-verdicts.ts).
+  if (isUnconfirmedLandingVerdict(error)) return false;
   const errorStr = error instanceof Error ? error.message : String(error);
   const lowerError = errorStr.toLowerCase();
   return (
@@ -306,6 +315,9 @@ export function isTransientError(error: string | Error | unknown): boolean {
 
 // Check if error is specifically a timeout error (eligible for cooldown re-queue)
 export function isTimeoutError(error: string | Error | unknown): boolean {
+  // HARD EXCLUSION (money-safety): the unconfirmed-landing verdict is not a
+  // cooldown-requeue-eligible timeout — the original tx may still land.
+  if (isUnconfirmedLandingVerdict(error)) return false;
   const errorStr = error instanceof Error ? error.message : String(error);
   const lowerError = errorStr.toLowerCase();
   return (

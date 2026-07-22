@@ -28,6 +28,7 @@ import { resolveAiTraderSubaccountSigner } from "./signing";
 import { sendTradeNotification } from "../notification-service";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import type { ProtocolAdapter } from "../protocol/adapter";
+import { isUnconfirmedLandingVerdict } from "../protocol/tx-verdicts";
 import type { ClampedDecision } from "./guardrails";
 import { paperEntryPrice, type PaperSide } from "./paper-math";
 
@@ -412,6 +413,24 @@ async function executeLiveEntry(
     }
 
     if (!orderResult.success) {
+      // Landing-verification timeout: the order tx was BROADCAST and may still
+      // land inside the blockhash validity window (~60–90s) even though the
+      // adapter could not confirm it. A single flat probe here is NOT proof of
+      // a clean abort, and an idle verdict would let auto-next re-enter while
+      // the original tx can still fill → double-open. Fail closed: reduce-only
+      // emergency close of whatever may exist, pause for human eyes. (Retry
+      // classification also hard-excludes this verdict — see tx-verdicts.ts.)
+      if (isUnconfirmedLandingVerdict(orderResult.error)) {
+        return await emergencyCloseAndPause({
+          input, keyTrio, subaccountId,
+          pauseReason: "position_unconfirmed",
+          failureReason: "position_unconfirmed",
+          detail: `entry order unconfirmed — the transaction may still land, so a flat probe is not proof of a clean abort (${orderResult.error ?? "unknown"})`,
+          entryFillPrice: undefined,
+          sizeBase: n.sizeBase,
+          side,
+        });
+      }
       // Order rejected. Probe once for a position anyway (a venue "failure"
       // response is not proof nothing filled); a confirmed-flat account means
       // a clean abort, anything else falls through to fail-closed handling.

@@ -137,6 +137,7 @@ import {
   FLASH_PRIVILEGE_REFERRAL,
 } from './flash-referral.js';
 import { getPrimaryRpcUrl } from '../../rpc-config.js';
+import { confirmTxLanded } from './flash-confirm.js';
 import { hermesUrl, getHermesHeaders } from '../../pricing/hermes-config.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -925,39 +926,22 @@ export class FlashAdapter implements ProtocolAdapter {
    * The Flash SDK's sendTransactionV3 submits with skipPreflight=true and returns a
    * signature WITHOUT confirming inclusion, so a dropped or reverted tx would
    * otherwise be reported as a fill and the caller would book a phantom position
-   * (or phantom close). Polls getSignatureStatuses until the tx is confirmed;
-   * an on-chain error or no definitive status within the window is NOT a fill.
+   * (or phantom close). Delegates to confirmTxLanded (flash-confirm.ts), which
+   * enforces ONE absolute wall-clock deadline over every RPC call and sleep,
+   * with a hard per-call timeout so a never-settling getSignatureStatuses
+   * request cannot hold this past the window. An on-chain error or no
+   * definitive status by the deadline is NOT a fill.
    * The safe-direction tradeoff: if the tx lands after we report failure, the
    * caller books nothing and the reconciler converges DB state to the chain.
+   * The timeout verdict carries UNCONFIRMED_LANDING_VERDICT_TOKEN so retry
+   * gates hard-exclude it (the tx may still land — auto-retry could double-open).
    */
   private async _confirmMarketTxLanded(
     signature: string,
     label: string,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
-    const connection = this._getConnection();
-    // ~30s window (20 × 1.5s). Happy path confirms in 1–3 polls; the window must
-    // stay well under the ~60s request-proxy reap so webhook/close routes that
-    // block on this still return a real verdict to the caller.
-    for (let attempt = 0; attempt < 20; attempt++) {
-      try {
-        const st = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
-        const info = st?.value?.[0];
-        if (info?.err) {
-          return {
-            ok: false,
-            error: `${label} transaction reverted on-chain (sig ${signature}): ${JSON.stringify(info.err)}`,
-          };
-        }
-        if (info && (info.confirmationStatus === 'confirmed' || info.confirmationStatus === 'finalized')) {
-          return { ok: true };
-        }
-      } catch { /* transient RPC error — keep polling */ }
-      await new Promise((r) => setTimeout(r, 1500));
-    }
-    return {
-      ok: false,
-      error: `${label} transaction did not confirm on-chain within the verification window (sig ${signature}). Not booked as filled — verify on the exchange before retrying (a late landing is reconciled automatically).`,
-    };
+    const result = await confirmTxLanded(this._getConnection(), signature, label);
+    return result.ok ? { ok: true } : { ok: false, error: result.error };
   }
 
   /**
