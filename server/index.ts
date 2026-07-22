@@ -20,6 +20,8 @@ import { startTelegramDailySummaryJob } from "./telegram-daily-summary-job";
 import { recordCriticalError, flushErrorLog } from "./error-log";
 import { registerRequestTrace, startSelfStats } from "./request-trace";
 import * as os from "node:os";
+import * as fs from "node:fs";
+import * as nodePath from "node:path";
 import { appendTelemetry } from "./telemetry";
 
 // Global crash capture for the admin "Errors" panel. Registered at module load so it catches
@@ -197,6 +199,105 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+// ---------------------------------------------------------------------------
+// EARLY PORT BIND (deployment healthcheck fix, 2026-07-22)
+// Full initialization (schema DDL, protocol adapters, lab child, routes)
+// takes ~90s. Replit VM deployments healthcheck GET / from the moment the
+// process starts, and the probe path is NOT configurable — so the port must
+// be bound and `/` must answer 200 immediately, or the publish is declared
+// failed before boot completes (500/connection-refused for the whole window).
+// We bind here at module load. Until the async init below flips
+// `appFullyReady`, the readiness middleware answers `/` (and other page
+// requests) with a lightweight 200 "starting" page and APIs with
+// 503 + Retry-After. /health and /api/health always answer 200 (liveness),
+// with `ready` reporting true readiness for anyone who needs to poll it.
+// ---------------------------------------------------------------------------
+let appFullyReady = false;
+
+app.get("/api/health", (_req, res) => {
+  res.status(200).json({ status: "ok", ready: appFullyReady, timestamp: Date.now() });
+});
+
+const STARTING_PAGE = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="5"><title>QuantumVault — starting…</title>
+<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0a0a0f;color:#e2e8f0;font-family:system-ui,sans-serif}
+.box{text-align:center}.spin{width:28px;height:28px;margin:0 auto 16px;border:3px solid #1e293b;border-top-color:#8b5cf6;border-radius:50%;animation:s .8s linear infinite}
+@keyframes s{to{transform:rotate(360deg)}}p{color:#64748b;font-size:14px}</style></head>
+<body><div class="box"><div class="spin"></div><div>QuantumVault is starting</div><p>This page will refresh automatically.</p></div></body></html>`;
+
+app.use((req, res, next) => {
+  if (appFullyReady) return next();
+  if (req.path.startsWith("/api/")) {
+    res.set("Retry-After", "5");
+    return res.status(503).json({ message: "Server is starting up — please retry shortly" });
+  }
+  if (req.method === "GET" || req.method === "HEAD") {
+    res.set("Cache-Control", "no-store");
+    return res.status(200).type("html").send(STARTING_PAGE);
+  }
+  res.set("Retry-After", "5");
+  return res.status(503).json({ message: "Server is starting up — please retry shortly" });
+});
+
+// PRODUCTION PRE-FLIGHT (guards the early bind below): serveStatic()
+// deliberately throws on a missing/corrupt SPA shell so a broken build never
+// becomes healthy and the platform keeps serving the previous good deployment
+// (see server/static.ts — that guard once ran BEFORE listen()). With the
+// early bind, serveStatic() now runs ~90s AFTER the healthcheck has already
+// passed — a corrupt build could get promoted and then crash-loop. Re-check
+// the same invariant synchronously BEFORE binding: exit(1) now, so the
+// healthcheck rejects the bad build exactly as it did before this change.
+if (process.env.NODE_ENV === "production") {
+  try {
+    let preflightDist = nodePath.resolve(process.cwd(), "dist", "public");
+    if (!fs.existsSync(preflightDist)) {
+      preflightDist = nodePath.resolve(__dirname, "public");
+    }
+    fs.readFileSync(nodePath.resolve(preflightDist, "index.html"), "utf8");
+  } catch (err) {
+    console.error(
+      `[Boot] FATAL: client build missing or corrupt — refusing to bind the port so this build is not promoted: ${(err as Error).message}`,
+    );
+    process.exit(1);
+  }
+}
+
+// Bind the port NOW (module load), before the heavy async init. Node queues
+// incoming connections; no request is processed until the synchronous module
+// scope finishes registering the boot-time responders above. PORT is the only
+// non-firewalled port and serves both the API and the client.
+//
+// EADDRINUSE retry: binding this early races the OLD instance on a restart —
+// its shutdown handler can hold the port for up to ~10s (hard-exit backstop).
+// Before this change the ~90s init masked that overlap. reusePort does not
+// help here (silently ignored on this Node version), so retry for up to 45s,
+// then fail fast like before. Any other listen error stays fatal immediately.
+const port = parseInt(process.env.PORT || "5000", 10);
+const BIND_RETRY_MS = 1_000;
+const BIND_RETRY_LIMIT = 45;
+let bindAttempts = 0;
+const onBindError = (err: NodeJS.ErrnoException) => {
+  if (err.code === "EADDRINUSE" && bindAttempts < BIND_RETRY_LIMIT) {
+    bindAttempts++;
+    console.warn(
+      `[Boot] port ${port} in use (old instance still exiting) — retry ${bindAttempts}/${BIND_RETRY_LIMIT} in ${BIND_RETRY_MS}ms`,
+    );
+    setTimeout(() => {
+      httpServer.listen({ port, host: "0.0.0.0", reusePort: true });
+    }, BIND_RETRY_MS);
+    return;
+  }
+  throw err;
+};
+httpServer.on("error", onBindError);
+httpServer.once("listening", () => {
+  // Restore default fail-fast error behavior once bound.
+  httpServer.removeListener("error", onBindError);
+  log(`port ${port} bound — full initialization continuing in background`);
+});
+httpServer.listen({ port, host: "0.0.0.0", reusePort: true });
 
 // Lab proxy — runs BEFORE the JSON body parser so request bodies are
 // forwarded as-is (no double-parse). Session middleware is applied inline
@@ -555,11 +656,7 @@ registerRequestTrace(app);
     await setupVite(httpServer, app);
   }
 
-  // ALWAYS serve the app on the port specified in the environment variable PORT
-  // Other ports are firewalled. Default to 5000 if not specified.
-  // this serves both the API and the client.
-  // It is the only port that is not firewalled.
-  const port = parseInt(process.env.PORT || "5000", 10);
+  // (The port was already bound at module load — see the EARLY PORT BIND block.)
   // Validate SERVER_EXECUTION_KEY format on startup
   const serverKey = process.env.SERVER_EXECUTION_KEY;
   if (!serverKey) {
@@ -671,13 +768,12 @@ registerRequestTrace(app);
     console.error("[YieldOracle] cache warm failed:", err);
   }
 
-  httpServer.listen(
-    {
-      port,
-      host: "0.0.0.0",
-      reusePort: true,
-    },
-    async () => {
+  // The port was bound at module load (EARLY PORT BIND) so deployment
+  // healthchecks pass during the ~90s init above. At this point all routes,
+  // error handling, and static/vite serving are registered — flip readiness
+  // so the boot-time responder steps aside and real traffic flows.
+  appFullyReady = true;
+  const startBackgroundServices = async () => {
       log(`serving on port ${port}`);
 
       // Once-a-minute server vitals (event-loop lag, sockets, handles, RSS,
@@ -964,6 +1060,8 @@ registerRequestTrace(app);
           }
         }).catch((err) => console.error('[OracleSnapshot] import failed:', err));
       }, 87_000);
-    },
-  );
+  };
+  startBackgroundServices().catch((err) => {
+    console.error("[Startup] background services init failed:", err);
+  });
 })();
