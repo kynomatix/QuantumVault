@@ -353,6 +353,25 @@ export class PacificaAdapter implements ProtocolAdapter {
     return result;
   }
 
+  /**
+   * DASH-PRICE-FAILFAST-02 — Staleness metadata companion.
+   *
+   * Returns the oldest fetchedAt among valid cache entries for the requested
+   * symbols. Pure read — no mutation, no network access, no quota.
+   */
+  getCachedPriceMeta(internalSymbols: string[]): { oldestFetchedAt: number | null } {
+    let oldest: number | null = null;
+    for (const sym of internalSymbols) {
+      const entry = this.priceCache.get(sym.toUpperCase());
+      if (entry !== undefined && Number.isFinite(entry.data) && entry.data > 0) {
+        if (oldest === null || entry.fetchedAt < oldest) {
+          oldest = entry.fetchedAt;
+        }
+      }
+    }
+    return { oldestFetchedAt: oldest };
+  }
+
   async getAllPrices(): Promise<Record<string, number>> {
     const result: Record<string, number> = {};
 

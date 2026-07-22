@@ -976,6 +976,34 @@ function getCachedDisplayPrices(internalSymbols: string[]): Record<string, numbe
   return getDefaultAdapter().getCachedPrices?.(internalSymbols) ?? {};
 }
 
+/** ms — matches PRICE_CACHE_TTL_MS in pacifica-adapter (display-staleness threshold). */
+const PRICE_STALENESS_THRESHOLD_MS = 60_000;
+
+/**
+ * DASH-PRICE-FAILFAST-02 — Synchronous cached-price snapshot with staleness metadata.
+ *
+ * Returns the price map plus:
+ *   pricesAsOf  — ms epoch of the oldest used cached price, or null when no
+ *                 prices were found.
+ *   pricesStale — true when any used price is older than PRICE_STALENESS_THRESHOLD_MS,
+ *                 or when pricesAsOf is null (no prices available).
+ *
+ * The two existing 89eec978 callers use getCachedDisplayPrices (unchanged).
+ * New callers use this helper and add the additive staleness fields to their responses.
+ */
+function getCachedDisplayPricesWithMeta(internalSymbols: string[]): {
+  prices: Record<string, number>;
+  pricesAsOf: number | null;
+  pricesStale: boolean;
+} {
+  const adapter = getDefaultAdapter();
+  const prices = adapter.getCachedPrices?.(internalSymbols) ?? {};
+  const meta = adapter.getCachedPriceMeta?.(internalSymbols) ?? { oldestFetchedAt: null };
+  const pricesAsOf = meta.oldestFetchedAt;
+  const pricesStale = pricesAsOf === null || (Date.now() - pricesAsOf) > PRICE_STALENESS_THRESHOLD_MS;
+  return { prices, pricesAsOf, pricesStale };
+}
+
 async function forceRefreshPrices(): Promise<Record<string, number>> {
   return getDefaultAdapter().getAllPrices();
 }
@@ -7038,10 +7066,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       
       const bots = await storage.getTradingBots(walletAddress);
       
-      let prices: Record<string, number> = {};
-      try {
-        prices = await getAllPrices();
-      } catch (e) { /* prices unavailable */ }
+      // DASH-PRICE-FAILFAST-02: synchronous cached-price snapshot; no network.
+      const botMarketsCap = [...new Set(bots.map((b) => b.market))];
+      const { prices, pricesAsOf: capPricesAsOf, pricesStale: capPricesStale } = getCachedDisplayPricesWithMeta(botMarketsCap);
       
       const botAllocations: Array<{
         botId: string;
@@ -7105,6 +7132,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         allocatedToBot,
         totalEquity,
         botAllocations,
+        pricesAsOf: capPricesAsOf,
+        pricesStale: capPricesStale,
       });
     } catch (error) {
       console.error("Get capital pool error:", error);
@@ -7984,7 +8013,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       let freeCollateral = 0;
       let unrealizedPnl = 0;
       const formattedPositions: any[] = [];
-      const prices = await getAllPrices();
+      // DASH-PRICE-FAILFAST-02: synchronous cached-price snapshot; no network.
+      // bots loaded above covers the same markets as dbPositions for this wallet.
+      const hmMarkets = [...new Set(bots.map((b) => b.market))];
+      const { prices, pricesAsOf: hmPricesAsOf, pricesStale: hmPricesStale } = getCachedDisplayPricesWithMeta(hmMarkets);
 
       const agentAccountInfo = await getExchangeAccountInfo(wallet.agentPublicKey, 0);
       totalCollateral += agentAccountInfo.totalCollateral;
@@ -8049,6 +8081,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         subAccountId: 0,
         isEstimate: true,
         estimateNote: "Health metrics from exchange account data (aggregated across subaccounts)",
+        pricesAsOf: hmPricesAsOf,
+        pricesStale: hmPricesStale,
       });
     } catch (error) {
       console.error("Health metrics error:", error);
@@ -14114,10 +14148,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
       
-      let prices: Record<string, number> = {};
-      try {
-        prices = await getAllPrices();
-      } catch (e) { /* prices unavailable */ }
+      // DASH-PRICE-FAILFAST-02: synchronous cached-price snapshot; no network.
+      const { prices, pricesAsOf: balPricesAsOf, pricesStale: balPricesStale } = getCachedDisplayPricesWithMeta([bot.market]);
 
       const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
       const netDeposited = sumNetDepositedFromEvents(botEvents);
@@ -14149,6 +14181,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         hasOpenPositions,
         subAccountId,
         subaccountExists: netDeposited > 0,
+        pricesAsOf: balPricesAsOf,
+        pricesStale: balPricesStale,
       });
     } catch (error) {
       console.error("Get bot balance error:", error);
@@ -14180,10 +14214,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const overviewQueryAccount = overviewBotCtx ? overviewBotCtx.botPublicKey : wallet.agentPublicKey;
       const overviewQuerySubId = overviewBotCtx ? 0 : subAccountId;
       
-      let prices: Record<string, number> = {};
-      try {
-        prices = await getAllPrices();
-      } catch (e) { /* prices unavailable */ }
+      // DASH-PRICE-FAILFAST-02: synchronous cached-price snapshot; no network.
+      const { prices, pricesAsOf: ovPricesAsOf, pricesStale: ovPricesStale } = getCachedDisplayPricesWithMeta([bot.market]);
 
       const results = await Promise.allSettled([
         getAgentUsdcBalance(wallet.agentPublicKey),
@@ -14360,6 +14392,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         
         // Indicates if some data may be stale due to failed calls
         partialData: failures.length > 0,
+        pricesAsOf: ovPricesAsOf,
+        pricesStale: ovPricesStale,
       });
     } catch (error) {
       console.error("Get bot overview error:", error);
@@ -20700,6 +20734,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // Cheap DB hint so bots with no Vault rows skip the parked-value chain read.
       const teParkedBotIds = await getParkedBotIdSet(req.walletAddress!);
 
+      // DASH-PRICE-FAILFAST-02: hoist synchronous cached-price snapshot out of the
+      // per-bot loop. Used only in the DB-fallback branch (bots without an eqBotCtx).
+      // Stale prices permitted — display-only; staleness marker added to response.
+      const teBotMarkets = [...new Set(bots.map((b) => b.market))];
+      const { prices: teDbPrices, pricesAsOf: tePricesAsOf, pricesStale: tePricesStale } = getCachedDisplayPricesWithMeta(teBotMarkets);
+
       const subaccountBalances: { botId: string; botName: string; subaccountId: number; balance: number }[] = [];
       
       for (const bot of bots) {
@@ -20720,8 +20760,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             const teDebt = await storage.sumOpenBorrowDebtUsdcForBot(req.walletAddress!, bot.id);
             botBalance = teAdj.equityUsdc - teDebt;
           } else {
-            let prices: Record<string, number> = {};
-            try { prices = await getAllPrices(); } catch (e) { /* prices unavailable */ }
+            // teDbPrices hoisted above — synchronous cached-price snapshot, no network.
             const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
             const netDeposited = sumNetDepositedFromEvents(botEvents);
             const position = await storage.getBotPosition(bot.id, bot.market);
@@ -20732,7 +20771,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             if (position) {
               const baseSize = parseFloat(position.baseSize);
               const entryPrice = parseFloat(position.avgEntryPrice);
-              const markPrice = prices[position.market] || entryPrice;
+              const markPrice = teDbPrices[position.market] || entryPrice;
               if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
                 unrealizedPnl = baseSize > 0
                   ? (markPrice - entryPrice) * Math.abs(baseSize)
@@ -20777,6 +20816,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         solBalance,
         botCount: bots.length,
         subaccountBalances,
+        pricesAsOf: tePricesAsOf,
+        pricesStale: tePricesStale,
       });
     } catch (error) {
       console.error("Total equity error:", error);
@@ -21148,13 +21189,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const realizedPnl = parseFloat(position?.realizedPnl || "0");
       const totalFees = parseFloat(position?.totalFees || "0");
       
+      // DASH-PRICE-FAILFAST-02: synchronous cached-price snapshot; no network.
+      const { prices: legPrices, pricesAsOf: legPricesAsOf, pricesStale: legPricesStale } = getCachedDisplayPricesWithMeta([bot.market]);
       let unrealizedPnl = 0;
       if (position) {
-        let prices: Record<string, number> = {};
-        try { prices = await getAllPrices(); } catch (e) { /* */ }
         const baseSize = parseFloat(position.baseSize);
         const entryPrice = parseFloat(position.avgEntryPrice);
-        const markPrice = prices[position.market] || entryPrice;
+        const markPrice = legPrices[position.market] || entryPrice;
         if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
           unrealizedPnl = baseSize > 0
             ? (markPrice - entryPrice) * Math.abs(baseSize)
@@ -21171,6 +21212,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         realizedPnl,
         totalFees,
         tradeCount,
+        pricesAsOf: legPricesAsOf,
+        pricesStale: legPricesStale,
       });
     } catch (error) {
       console.error("Bot balance error:", error);

@@ -125,6 +125,16 @@ export interface ProtocolAdapter {
    * Callers fall back to an empty map and use their own conservative fallbacks.
    */
   getCachedPrices?(internalSymbols: string[]): Record<string, number>;
+  /**
+   * DASH-PRICE-FAILFAST-02 — Staleness metadata companion to getCachedPrices.
+   *
+   * Returns the oldest fetchedAt (ms epoch) across requested symbols that had
+   * a valid cached entry, or null when none did. MUST NOT mutate cache entries.
+   *
+   * Optional: adapters that implement getCachedPrices should also implement
+   * this. Callers fall back to { oldestFetchedAt: null } when absent.
+   */
+  getCachedPriceMeta?(internalSymbols: string[]): { oldestFetchedAt: number | null };
   getOrderbook(internalSymbol: string, depth?: number): Promise<OrderbookSnapshot>;
   getFundingRate(internalSymbol: string): Promise<FundingRateInfo>;
   getMaintenanceMarginWeight(internalSymbol: string): number;
