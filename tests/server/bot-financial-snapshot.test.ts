@@ -39,6 +39,7 @@ import {
   getWalletFinancialSnapshot,
   BoundedPool,
   derivePerBotFinancialDataStatus,
+  mapBotToApiResponse,
   _resetForTest,
   _cacheSize,
   _poolActive,
@@ -2707,5 +2708,658 @@ describe('waiter recovery: waiterCount reaches exactly 0 after cancellations', (
     expect(pool.waiterCount).toBe(0);
     // The waiter's promise resolves, confirming the handoff occurred.
     await w1;
+  });
+});
+
+// ===========================================================================
+// WO-15B.2.3: Hold 1 regression tests — defensive fill status correctness
+// ===========================================================================
+
+describe('Hold 1: live-eligible bot deadline-skip → unavailable (never numeric DB estimate)', () => {
+  // KEY TEST: Phase-1c resolves AFTER deadline. Enrichment succeeded but Phase-2
+  // was skipped. The live-eligible bot must get 'unavailable' + null equity.
+  // Before the fix: _fallbackFinancials with status='unavailable' + enrichmentSucceeded=true
+  // still returned a numeric exchangeBalance. After the fix: the status='unavailable' guard
+  // in _fallbackFinancials short-circuits to null before reaching the DB estimate path.
+  it('live-eligible bot (Phase-2 skipped; enrichment succeeded late) → unavailable, null equity', async () => {
+    vi.useFakeTimers();
+    const W_H1A = 'wallet-hold1-live-enr-late';
+
+    let resolveEnr!: (e: any) => void;
+    (storage.getTradingBotListEnrichment as any).mockReturnValueOnce(
+      new Promise<any>(r => { resolveEnr = r; }),
+    );
+    const bots = makeBots(1);
+    (storage.getTradingBots as any).mockResolvedValueOnce(bots);
+
+    initSnapshotModule(makeDeps({
+      // Bot has a live context → it is live-eligible → goes into liveEligibleBotIds.
+      getBotSubaccountContext: vi.fn().mockReturnValue({ subaccountId: 5 }),
+    }));
+
+    // Start refresh. Phase-1a and Phase-1b resolve immediately (mockResolvedValue).
+    // Phase-1c (enrichment) hangs.
+    const snapP = getWalletFinancialSnapshot(W_H1A);
+
+    // Advance past CALLER_DEADLINE_MS — first caller gets 'unavailable'.
+    // Phase-1c is still pending (the await started before deadline fired, so
+    // _refresh continues waiting for it to resolve or reject).
+    await vi.advanceTimersByTimeAsync(10_100);
+    const snap1 = await snapP;
+    expect(snap1.status).toBe('unavailable');
+
+    // Late-resolve Phase-1c. Date.now() > deadlineAt → Phase-2 guard fires → Phase-2 skipped.
+    // Defensive fill runs. bot-1 is in liveEligibleBotIds → status='unavailable'.
+    // _fallbackFinancials(true, true, {}, 'unavailable') hits the new status-guard → null equity.
+    resolveEnr(makeEnrichment(['bot-1']));
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+
+    // Second caller gets the cached partial snapshot from the resolved inFlight.
+    const snap2 = await getWalletFinancialSnapshot(W_H1A);
+    expect(snap2.status).toBe('partial'); // anyBotUnavailable → partial
+
+    const fin = snap2.perBotFinancials.get('bot-1');
+    expect(fin).toBeDefined();
+    // THE KEY INVARIANT: live-eligible bot must NOT show a numeric DB estimate.
+    // It tried (and was eligible for) the live path; failure → null, never a DB number.
+    expect(fin!.botFinancialStatus).toBe('unavailable');
+    expect(fin!.exchangeBalance).toBeNull();
+    expect(fin!.netPnl).toBeNull();
+  });
+
+  // Counterpart: a DB-only bot in the same deadline-skip scenario gets 'db-only'
+  // and a NUMERIC estimate (the DB path is its intended path).
+  it('DB-only bot (Phase-2 skipped; enrichment succeeded late) → db-only, numeric equity', async () => {
+    vi.useFakeTimers();
+    const W_H1B = 'wallet-hold1-dbonly-enr-late';
+
+    let resolveEnr!: (e: any) => void;
+    (storage.getTradingBotListEnrichment as any).mockReturnValueOnce(
+      new Promise<any>(r => { resolveEnr = r; }),
+    );
+    const bots = makeBots(1);
+    (storage.getTradingBots as any).mockResolvedValueOnce(bots);
+
+    initSnapshotModule(makeDeps({
+      getBotSubaccountContext: vi.fn().mockReturnValue(null), // no live context → DB-only
+    }));
+
+    const snapP = getWalletFinancialSnapshot(W_H1B);
+    await vi.advanceTimersByTimeAsync(10_100);
+    const snap1 = await snapP;
+    expect(snap1.status).toBe('unavailable');
+
+    resolveEnr(makeEnrichment(['bot-1']));
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+
+    const snap2 = await getWalletFinancialSnapshot(W_H1B);
+    expect(snap2.status).toBe('partial'); // anyMainMissing (Phase-2 skipped, no agentBalance)
+
+    const fin = snap2.perBotFinancials.get('bot-1');
+    expect(fin).toBeDefined();
+    // DB-only: planned path was always DB, so the DB estimate is correct and complete.
+    expect(fin!.botFinancialStatus).toBe('db-only');
+    expect(fin!.exchangeBalance).not.toBeNull();
+    expect(typeof fin!.exchangeBalance).toBe('number');
+    expect(fin!.netPnl).not.toBeNull();
+  });
+
+  // A bot with a live context but no agentAddress must get 'unavailable', not 'db-only'.
+  // This exercises the Phase-2 for-loop fix: `fallbackStatus = botCtx && !agentAddress → 'unavailable'`.
+  it('live-eligible bot + null agentAddress → unavailable in Phase-2 for-loop, null equity', async () => {
+    const W_H1C = 'wallet-hold1-no-agent';
+
+    const bots = makeBots(1);
+    (storage.getTradingBots as any).mockResolvedValueOnce(bots);
+    (storage.getWallet as any).mockResolvedValueOnce({ agentPublicKey: null });
+
+    initSnapshotModule(makeDeps({
+      getBotSubaccountContext: vi.fn().mockReturnValue({ subaccountId: 5 }), // has live context
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W_H1C);
+
+    const fin = snap.perBotFinancials.get('bot-1');
+    expect(fin).toBeDefined();
+    // Has a live context → was eligible for live data → agentAddress absent makes it unavailable,
+    // not db-only. The DB estimate would be misleading (the intent was a live read).
+    expect(fin!.botFinancialStatus).toBe('unavailable');
+    expect(fin!.exchangeBalance).toBeNull();
+  });
+});
+
+// ===========================================================================
+// WO-15B.2.3: Hold 2 regression tests — parkedBotIds parameter correctness
+// ===========================================================================
+
+describe('Hold 2: Flash DB-only parked classification via parkedBotIds (hint succeeded)', () => {
+  // When the parked-hint SUCCEEDS and positively identifies a parked row for a
+  // Flash DB-only bot, the DB estimate cannot include the yield-token value.
+  it('Flash DB-only + hint succeeded + vault row for bot → parkedUnavailable=true, null equity', async () => {
+    const W_H2A = 'wallet-hold2-flash-parked-row';
+
+    const flashBots = makeBots(1, { activeProtocol: 'flash' });
+    (storage.getTradingBots as any).mockResolvedValueOnce(flashBots);
+    // Hint succeeds AND identifies this bot as having a parked position.
+    (storage.getVaultPositionsAllScopes as any).mockResolvedValueOnce([
+      { tradingBotId: 'bot-1', token: 'ONyc', amount: 50 },
+    ]);
+    (storage.getTradingBotListEnrichment as any).mockResolvedValueOnce(
+      makeEnrichment(['bot-1']),
+    );
+
+    initSnapshotModule(makeDeps({
+      getBotSubaccountContext: vi.fn().mockReturnValue(null), // DB-only path
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W_H2A);
+
+    expect(snap.parkedHintSucceeded).toBe(true);
+    const fin = snap.perBotFinancials.get('bot-1');
+    expect(fin).toBeDefined();
+    // Hint found a parked row → DB fallback cannot value the yield-token → null.
+    expect(fin!.exchangeBalance).toBeNull();
+    expect(fin!.parkedValueUnavailable).toBe(true);
+    expect(fin!.botFinancialStatus).toBe('unavailable');
+  });
+
+  // When the parked-hint succeeds but finds NO rows for this bot, the DB estimate
+  // is complete (no unaccounted parked funds) → numeric equity is safe.
+  it('Flash DB-only + hint succeeded + no vault rows → db-only numeric estimate', async () => {
+    const W_H2B = 'wallet-hold2-flash-norows';
+
+    const flashBots = makeBots(1, { activeProtocol: 'flash' });
+    (storage.getTradingBots as any).mockResolvedValueOnce(flashBots);
+    // Hint succeeds but finds no rows for any bot.
+    (storage.getVaultPositionsAllScopes as any).mockResolvedValueOnce([]);
+    (storage.getTradingBotListEnrichment as any).mockResolvedValueOnce(
+      makeEnrichment(['bot-1']),
+    );
+
+    initSnapshotModule(makeDeps({
+      getBotSubaccountContext: vi.fn().mockReturnValue(null), // DB-only
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W_H2B);
+
+    expect(snap.parkedHintSucceeded).toBe(true);
+    const fin = snap.perBotFinancials.get('bot-1');
+    expect(fin).toBeDefined();
+    // No parked rows → DB estimate is complete → numeric equity is safe to show.
+    expect(fin!.exchangeBalance).not.toBeNull();
+    expect(typeof fin!.exchangeBalance).toBe('number');
+    expect(fin!.parkedValueUnavailable).toBe(false);
+    expect(fin!.botFinancialStatus).toBe('db-only');
+  });
+
+  // Non-Flash protocols do not support vault parking. Even if a row existed in the
+  // hint result (shouldn't happen in practice), the DB estimate is still trusted.
+  it('non-Flash DB-only + hint succeeded + vault row → db-only unaffected (not parked-capable)', async () => {
+    const W_H2C = 'wallet-hold2-nonflash-row';
+
+    const pacificaBots = makeBots(1, { activeProtocol: 'pacifica' });
+    (storage.getTradingBots as any).mockResolvedValueOnce(pacificaBots);
+    (storage.getVaultPositionsAllScopes as any).mockResolvedValueOnce([
+      { botId: 'bot-1', token: 'ONyc', amount: 50 },
+    ]);
+    (storage.getTradingBotListEnrichment as any).mockResolvedValueOnce(
+      makeEnrichment(['bot-1']),
+    );
+
+    initSnapshotModule(makeDeps({
+      getBotSubaccountContext: vi.fn().mockReturnValue(null), // DB-only
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W_H2C);
+
+    expect(snap.parkedHintSucceeded).toBe(true);
+    const fin = snap.perBotFinancials.get('bot-1');
+    expect(fin).toBeDefined();
+    // Pacifica bots are not parked-capable → row has no effect → DB estimate is safe.
+    expect(fin!.exchangeBalance).not.toBeNull();
+    expect(fin!.parkedValueUnavailable).toBe(false);
+    expect(fin!.botFinancialStatus).toBe('db-only');
+  });
+});
+
+// ===========================================================================
+// WO-15B.2.3: No-stampede — Phase-1a (hanging getTradingBots)
+// ===========================================================================
+
+describe('no-stampede Phase-1a: hanging getTradingBots', () => {
+  const W_NSA = 'wallet-nstampede-1a';
+
+  it('3 concurrent callers while Phase-1a hangs → getTradingBots called once, all time out', async () => {
+    vi.useFakeTimers();
+    // getTradingBots never resolves → inFlight hangs at Phase-1a.
+    (storage.getTradingBots as any).mockReturnValueOnce(new Promise(() => {}));
+
+    initSnapshotModule(makeDeps());
+
+    const p1 = getWalletFinancialSnapshot(W_NSA + '-1');
+    const p2 = getWalletFinancialSnapshot(W_NSA + '-1');
+    const p3 = getWalletFinancialSnapshot(W_NSA + '-1');
+
+    // Only 1 DB call made — callers 2 and 3 joined the inFlight immediately.
+    expect(storage.getTradingBots).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(10_100);
+    const [s1, s2, s3] = await Promise.all([p1, p2, p3]);
+
+    expect(s1.status).toBe('unavailable');
+    expect(s2.status).toBe('unavailable');
+    expect(s3.status).toBe('unavailable');
+    // No stampede: still exactly 1 call.
+    expect(storage.getTradingBots).toHaveBeenCalledTimes(1);
+  });
+
+  it('post-timeout join: new caller after first timeout joins inFlight, no second refresh', async () => {
+    vi.useFakeTimers();
+    const W_PT1A = 'wallet-nstampede-1a-posttimeout';
+
+    let resolveBots!: (bots: any[]) => void;
+    (storage.getTradingBots as any).mockReturnValueOnce(
+      new Promise<any[]>(r => { resolveBots = r; }),
+    );
+    (storage.getTradingBotListEnrichment as any).mockResolvedValue(makeEnrichment([]));
+
+    initSnapshotModule(makeDeps());
+
+    // First caller starts the inFlight.
+    const p1 = getWalletFinancialSnapshot(W_PT1A);
+    expect(storage.getTradingBots).toHaveBeenCalledTimes(1);
+
+    // First caller times out.
+    await vi.advanceTimersByTimeAsync(10_100);
+    const s1 = await p1;
+    expect(s1.status).toBe('unavailable');
+
+    // inFlight is still alive (getTradingBots pending). New caller joins it.
+    const p2 = getWalletFinancialSnapshot(W_PT1A);
+    // INVARIANT: no new getTradingBots call — new caller joins existing inFlight.
+    expect(storage.getTradingBots).toHaveBeenCalledTimes(1);
+
+    // Resolve the original inFlight.
+    resolveBots([]);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+
+    const s2 = await p2;
+    // p2 gets the cached partial (agentBalance/etc may be null since Phase-2 ran at t>deadline).
+    expect(['fresh', 'partial']).toContain(s2.status);
+    // Still only 1 call — no duplicate refresh ever spawned.
+    expect(storage.getTradingBots).toHaveBeenCalledTimes(1);
+  });
+
+  it('controlled reject: getTradingBots rejects → all callers get unavailable', async () => {
+    const W_REJ1A = 'wallet-nstampede-1a-reject';
+    (storage.getTradingBots as any).mockRejectedValueOnce(new Error('db-down'));
+
+    initSnapshotModule(makeDeps());
+
+    const p1 = getWalletFinancialSnapshot(W_REJ1A);
+    const p2 = getWalletFinancialSnapshot(W_REJ1A);
+
+    const [s1, s2] = await Promise.all([p1, p2]);
+
+    expect(s1.status).toBe('unavailable');
+    expect(s2.status).toBe('unavailable');
+    // Only one attempt (inFlight shared between both callers).
+    expect(storage.getTradingBots).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ===========================================================================
+// WO-15B.2.3: No-stampede — Phase-1b (additional cases)
+// ===========================================================================
+
+describe('no-stampede Phase-1b: hanging getVaultPositionsAllScopes (additional cases)', () => {
+  it('3 concurrent callers time out while Phase-1b hangs → no duplicate vault calls', async () => {
+    vi.useFakeTimers();
+    const W_NSB1 = 'wallet-nstampede-1b-timeout';
+
+    (storage.getTradingBots as any).mockResolvedValue(makeBots(0));
+    // Phase-1b hangs.
+    (storage.getVaultPositionsAllScopes as any).mockReturnValueOnce(new Promise(() => {}));
+
+    initSnapshotModule(makeDeps());
+
+    const p1 = getWalletFinancialSnapshot(W_NSB1);
+    // Flush Phase-1a (resolves immediately).
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    // Phase-1b in progress (called once).
+    expect(storage.getVaultPositionsAllScopes).toHaveBeenCalledTimes(1);
+
+    const p2 = getWalletFinancialSnapshot(W_NSB1);
+    const p3 = getWalletFinancialSnapshot(W_NSB1);
+    // Still one call — all join the same inFlight.
+    expect(storage.getVaultPositionsAllScopes).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(10_100);
+    const [s1, s2, s3] = await Promise.all([p1, p2, p3]);
+
+    expect(s1.status).toBe('unavailable');
+    expect(s2.status).toBe('unavailable');
+    expect(s3.status).toBe('unavailable');
+    expect(storage.getVaultPositionsAllScopes).toHaveBeenCalledTimes(1);
+  });
+
+  it('post-timeout join Phase-1b: new caller after first timeout joins existing inFlight', async () => {
+    vi.useFakeTimers();
+    const W_NSB2 = 'wallet-nstampede-1b-posttimeout';
+
+    (storage.getTradingBots as any).mockResolvedValue(makeBots(0));
+    (storage.getTradingBotListEnrichment as any).mockResolvedValue(makeEnrichment([]));
+
+    let resolveHint!: (rows: any[]) => void;
+    (storage.getVaultPositionsAllScopes as any).mockReturnValueOnce(
+      new Promise<any[]>(r => { resolveHint = r; }),
+    );
+
+    initSnapshotModule(makeDeps());
+
+    const p1 = getWalletFinancialSnapshot(W_NSB2);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(storage.getVaultPositionsAllScopes).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(10_100);
+    const s1 = await p1;
+    expect(s1.status).toBe('unavailable');
+
+    // New caller after timeout — inFlight still alive (Phase-1b still pending).
+    const p2 = getWalletFinancialSnapshot(W_NSB2);
+    // No new vault call — joins existing inFlight.
+    expect(storage.getVaultPositionsAllScopes).toHaveBeenCalledTimes(1);
+
+    resolveHint([]);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+
+    const s2 = await p2;
+    expect(['fresh', 'partial']).toContain(s2.status);
+    expect(storage.getVaultPositionsAllScopes).toHaveBeenCalledTimes(1);
+  });
+
+  it('controlled reject Phase-1b: getVaultPositionsAllScopes rejects → snapshot partial (not unavailable)', async () => {
+    const W_NSB3 = 'wallet-nstampede-1b-reject';
+
+    (storage.getTradingBots as any).mockResolvedValue(makeBots(0));
+    (storage.getVaultPositionsAllScopes as any).mockRejectedValueOnce(new Error('hint-fail'));
+
+    initSnapshotModule(makeDeps());
+
+    const p1 = getWalletFinancialSnapshot(W_NSB3);
+    const p2 = getWalletFinancialSnapshot(W_NSB3);
+
+    const [s1, s2] = await Promise.all([p1, p2]);
+
+    // Phase-1b rejection means parkedHintSucceeded=false → snapshot is partial, not unavailable.
+    // (Phase-1c and Phase-2 still run.)
+    expect(s1.status).toBe('partial');
+    expect(s2.status).toBe('partial');
+    expect(storage.getVaultPositionsAllScopes).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ===========================================================================
+// WO-15B.2.3: No-stampede — Phase-1c (additional cases)
+// ===========================================================================
+
+describe('no-stampede Phase-1c: hanging getTradingBotListEnrichment (additional cases)', () => {
+  it('3 concurrent callers time out while Phase-1c hangs → no duplicate enrichment calls', async () => {
+    vi.useFakeTimers();
+    const W_NSC1 = 'wallet-nstampede-1c-timeout';
+
+    (storage.getTradingBots as any).mockResolvedValue(makeBots(0));
+    (storage.getVaultPositionsAllScopes as any).mockResolvedValue([]);
+    (storage.getTradingBotListEnrichment as any).mockReturnValueOnce(new Promise(() => {}));
+
+    initSnapshotModule(makeDeps());
+
+    const p1 = getWalletFinancialSnapshot(W_NSC1);
+    for (let i = 0; i < 15; i++) await Promise.resolve();
+    expect(storage.getTradingBotListEnrichment).toHaveBeenCalledTimes(1);
+
+    const p2 = getWalletFinancialSnapshot(W_NSC1);
+    const p3 = getWalletFinancialSnapshot(W_NSC1);
+    expect(storage.getTradingBotListEnrichment).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(10_100);
+    const [s1, s2, s3] = await Promise.all([p1, p2, p3]);
+
+    expect(s1.status).toBe('unavailable');
+    expect(s2.status).toBe('unavailable');
+    expect(s3.status).toBe('unavailable');
+    expect(storage.getTradingBotListEnrichment).toHaveBeenCalledTimes(1);
+  });
+
+  it('post-timeout join Phase-1c: new caller after first timeout joins existing inFlight', async () => {
+    vi.useFakeTimers();
+    const W_NSC2 = 'wallet-nstampede-1c-posttimeout';
+
+    (storage.getTradingBots as any).mockResolvedValue(makeBots(0));
+    (storage.getVaultPositionsAllScopes as any).mockResolvedValue([]);
+
+    let resolveEnr!: (e: any) => void;
+    (storage.getTradingBotListEnrichment as any).mockReturnValueOnce(
+      new Promise<any>(r => { resolveEnr = r; }),
+    );
+
+    initSnapshotModule(makeDeps());
+
+    const p1 = getWalletFinancialSnapshot(W_NSC2);
+    for (let i = 0; i < 15; i++) await Promise.resolve();
+    expect(storage.getTradingBotListEnrichment).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(10_100);
+    const s1 = await p1;
+    expect(s1.status).toBe('unavailable');
+
+    // inFlight still alive (Phase-1c still pending). New caller joins it.
+    const p2 = getWalletFinancialSnapshot(W_NSC2);
+    expect(storage.getTradingBotListEnrichment).toHaveBeenCalledTimes(1);
+
+    resolveEnr(makeEnrichment([]));
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+
+    const s2 = await p2;
+    expect(['fresh', 'partial']).toContain(s2.status);
+    expect(storage.getTradingBotListEnrichment).toHaveBeenCalledTimes(1);
+  });
+
+  it('controlled reject Phase-1c: getTradingBotListEnrichment rejects → snapshot partial', async () => {
+    const W_NSC3 = 'wallet-nstampede-1c-reject';
+
+    (storage.getTradingBots as any).mockResolvedValue(makeBots(0));
+    (storage.getTradingBotListEnrichment as any).mockRejectedValueOnce(new Error('enr-fail'));
+
+    initSnapshotModule(makeDeps());
+
+    const p1 = getWalletFinancialSnapshot(W_NSC3);
+    const p2 = getWalletFinancialSnapshot(W_NSC3);
+
+    const [s1, s2] = await Promise.all([p1, p2]);
+
+    // enrichmentSucceeded=false → partial (Phase-2 still runs for main-account).
+    expect(s1.status).toBe('partial');
+    expect(s2.status).toBe('partial');
+    expect(storage.getTradingBotListEnrichment).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ===========================================================================
+// WO-15B.2.3: Snapshot-level waiter recovery
+// ===========================================================================
+
+describe('snapshot-level waiter recovery: post-timeout caller sees cached partial', () => {
+  it('after inFlight completes to partial, a new caller gets the cached partial (no re-refresh)', async () => {
+    vi.useFakeTimers();
+    const W_WR = 'wallet-waiter-recovery';
+
+    let resolveEnr!: (e: any) => void;
+    (storage.getTradingBotListEnrichment as any).mockReturnValueOnce(
+      new Promise<any>(r => { resolveEnr = r; }),
+    );
+    // Ensure Phase-2 main-account call rejects → snapshot will be partial after completion.
+    (storage.getTradingBots as any).mockResolvedValue(makeBots(0));
+    initSnapshotModule(makeDeps({
+      getAgentUsdcBalance: vi.fn().mockRejectedValue(new Error('rpc-fail')),
+    }));
+
+    // First caller starts inFlight. It times out while Phase-1c is pending.
+    const p1 = getWalletFinancialSnapshot(W_WR);
+    for (let i = 0; i < 15; i++) await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(10_100);
+    const s1 = await p1;
+    expect(s1.status).toBe('unavailable');
+
+    // Resolve Phase-1c → inFlight continues, completes with 'partial'.
+    resolveEnr(makeEnrichment([]));
+    for (let i = 0; i < 25; i++) await Promise.resolve();
+
+    // A new caller after inFlight settled sees the cached partial — no new refresh.
+    const callsBefore = (storage.getTradingBots as any).mock.calls.length;
+    const s2 = await getWalletFinancialSnapshot(W_WR);
+
+    expect(['partial', 'fresh']).toContain(s2.status);
+    // No new refresh was kicked off.
+    expect((storage.getTradingBots as any).mock.calls.length).toBe(callsBefore);
+  });
+});
+
+// ===========================================================================
+// WO-15B.2.3: mapBotToApiResponse parity — pure function, no network
+// ===========================================================================
+
+describe('mapBotToApiResponse (pure route-mapper, no network)', () => {
+  function makeBot(overrides: Record<string, unknown> = {}): any {
+    return {
+      id: 'bot-test',
+      name: 'Test Bot',
+      market: 'SOL-PERP',
+      walletAddress: 'wallet-test',
+      activeProtocol: 'pacifica',
+      protocolSubaccountId: 'sub-42',
+      driftSubaccountId: 0,
+      subaccountAuthMode: null,
+      subaccountStatus: null,
+      botSubaccountKeyEncryptedV3: null,
+      botSubaccountKeyEncrypted: null,
+      ...overrides,
+    };
+  }
+
+  function makeFullEnrichment(botId: string): any {
+    return {
+      tradeCounts: new Map([[botId, 7]]),
+      positions: new Map([[botId, [{
+        market: 'SOL-PERP',
+        baseSize: '0.5',
+        avgEntryPrice: '160',
+        realizedPnl: '42',
+        totalFees: '3',
+      }]]]),
+      publishedBotMap: new Map([[botId, { id: 'pb-1', isActive: true }]]),
+      equityAgg: new Map([[botId, { netDeposited: 500, totalDeposits: 600 }]]),
+      borrowDebts: new Map([[botId, 25]]),
+    };
+  }
+
+  const TS = 1_700_000_000_000;
+
+  it('enrichmentSucceeded=true → all enrichment fields populated from enrichment data', () => {
+    const bot = makeBot();
+    const fin: any = {
+      exchangeBalance: 950,
+      netPnl: 50,
+      netPnlPercent: 0.1,
+      borrowDebtUsdc: 25,
+      parkedValueUsdc: 0,
+      parkedValueIncluded: false,
+      parkedValueUnavailable: false,
+      liveDataAvailable: true,
+      botFinancialStatus: 'live',
+    };
+    const enr = makeFullEnrichment('bot-test');
+
+    const result = mapBotToApiResponse(bot, fin, enr, true, 'fresh', TS);
+
+    expect(result.actualTradeCount).toBe(7);
+    expect(result.realizedPnl).toBe('42');
+    expect(result.totalFees).toBe('3');
+    expect(result.exchangeBalance).toBe(950);
+    expect(result.borrowDebtUsdc).toBe(25);
+    expect(result.netDeposited).toBe(500);
+    expect(result.netPnl).toBe(50);
+    expect(result.netPnlPercent).toBe(0.1);
+    expect(result.isPublished).toBe(true);
+    expect(result.publishedBotId).toBe('pb-1');
+    expect(result.botSubaccountIdentifier).toBe('sub-42');
+    expect(result.botFinancialStatus).toBe('live');
+    expect(result.financialDataStatus).toBe('fresh');
+    expect(result.financialDataObservedAt).toBe(TS);
+  });
+
+  it('enrichmentSucceeded=false → all enrichment-sourced fields are null', () => {
+    const bot = makeBot({ protocolSubaccountId: null });
+    const fin: any = {
+      exchangeBalance: null,
+      netPnl: null,
+      netPnlPercent: null,
+      borrowDebtUsdc: null,
+      parkedValueUsdc: 0,
+      parkedValueIncluded: false,
+      parkedValueUnavailable: false,
+      liveDataAvailable: false,
+      botFinancialStatus: 'unavailable',
+    };
+    const emptyEnr: any = {
+      tradeCounts: new Map(),
+      positions: new Map(),
+      publishedBotMap: new Map(),
+      equityAgg: new Map(),
+      borrowDebts: new Map(),
+    };
+
+    const result = mapBotToApiResponse(bot, fin, emptyEnr, false, 'partial', TS);
+
+    // Enrichment-sourced fields must be null (not zero) when enrichment failed.
+    expect(result.actualTradeCount).toBeNull();
+    expect(result.realizedPnl).toBeNull();
+    expect(result.totalFees).toBeNull();
+    expect(result.netDeposited).toBeNull();
+    expect(result.isPublished).toBeNull();
+    expect(result.publishedBotId).toBeNull();
+    // Bot-supplied fields forwarded.
+    expect(result.botSubaccountIdentifier).toBeNull();
+    expect(result.botFinancialStatus).toBe('unavailable');
+    expect(result.financialDataStatus).toBe('unavailable');
+  });
+
+  it('botFinancialStatus and financialDataStatus derived correctly for db-only partial snapshot', () => {
+    const bot = makeBot();
+    const fin: any = {
+      exchangeBalance: 300,
+      netPnl: 10,
+      netPnlPercent: 0.03,
+      borrowDebtUsdc: 0,
+      parkedValueUsdc: 0,
+      parkedValueIncluded: false,
+      parkedValueUnavailable: false,
+      liveDataAvailable: false,
+      botFinancialStatus: 'db-only',
+    };
+    const enr = makeFullEnrichment('bot-test');
+
+    // Snapshot is 'partial' (main-account failure), enrichment succeeded, bot is db-only.
+    // Per-bot status should be 'fresh' — a partial wallet-level result does NOT mislabel
+    // an individually healthy bot as unavailable.
+    const result = mapBotToApiResponse(bot, fin, enr, true, 'partial', TS);
+
+    expect(result.botFinancialStatus).toBe('db-only');
+    expect(result.financialDataStatus).toBe('fresh');
+    expect(result.exchangeBalance).toBe(300);
+    // Enrichment fields populated correctly.
+    expect(result.actualTradeCount).toBe(7);
+    expect(result.netDeposited).toBe(500);
   });
 });

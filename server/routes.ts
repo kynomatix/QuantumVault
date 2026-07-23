@@ -29,7 +29,7 @@ import { resolveAgentKeypair } from './agent-wallet';
 import { FLASH_BOT_WALLET_SOL_SEED } from './protocol/flash/flash-constants';
 import { reconcileWalletDeposits } from './deposit-reconciler';
 import { publicPortfolioHandler } from './public-portfolio';
-import { initSnapshotModule, getWalletFinancialSnapshot, derivePerBotFinancialDataStatus } from './bot-financial-snapshot';
+import { initSnapshotModule, getWalletFinancialSnapshot, derivePerBotFinancialDataStatus, mapBotToApiResponse } from './bot-financial-snapshot';
 
 function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
@@ -14484,48 +14484,20 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // WO-15B.2 item 5: when enrichment failed, batch-derived fields are null
       // (not zero) — deposit basis, trade counts, PnL, debt, publication are
       // all unknown. Per-bot financials (live balance, borrow debt) already
-      // carry null when enrichment failed; route nulls the remaining DB fields.
+      // carry null when enrichment failed; mapBotToApiResponse handles nulling.
       const ens = snapshot.enrichmentSucceeded;
+      const snapshotStatusTyped = snapshot.status as 'fresh' | 'partial' | 'stale';
 
-      const enrichedBots = snapshot.bots.map((bot) => {
-        const fin = snapshot.perBotFinancials.get(bot.id);
-        const eq = ens ? snapshot.enrichment.equityAgg.get(bot.id) : undefined;
-        const positions = ens ? (snapshot.enrichment.positions.get(bot.id) ?? []) : [];
-        // Exact-market match only — never fall back to another market's row.
-        const position = positions.find(p => (p as any).market === bot.market) ?? null;
-        const publishedBot = ens ? (snapshot.enrichment.publishedBotMap.get(bot.id) ?? null) : null;
-
-        return {
-          ...bot,
-          // null when enrichment failed — zero when enrichment succeeded but bot has no rows.
-          // (successful-empty parity: new bots have zero history, not unknown history)
-          actualTradeCount: ens ? (snapshot.enrichment.tradeCounts.get(bot.id) ?? 0) : null,
-          realizedPnl: ens ? ((position as any)?.realizedPnl ?? '0') : null,
-          totalFees: ens ? ((position as any)?.totalFees ?? '0') : null,
-          exchangeBalance: fin?.exchangeBalance ?? null,
-          // null when enrichment failed (debt unknown, not zero).
-          borrowDebtUsdc: fin?.borrowDebtUsdc ?? null,
-          // null when enrichment failed (deposit basis unknown); zero for a new bot.
-          netDeposited: ens ? (eq?.netDeposited ?? 0) : null,
-          netPnl: fin?.netPnl ?? null,
-          netPnlPercent: fin?.netPnlPercent ?? null,
-          // null when enrichment failed (publication state unknown).
-          isPublished: ens ? (!!publishedBot && (publishedBot as any).isActive) : null,
-          publishedBotId: ens ? ((publishedBot as any)?.id || null) : null,
-          botSubaccountIdentifier: bot.protocolSubaccountId || null,
-          botFinancialStatus: fin?.botFinancialStatus ?? 'db-only',
-          // Per-bot status: independent of main-account failures. A wallet-level
-          // 'partial' (agentBalance=null) must NOT mislabel a healthy bot 'unavailable'.
-          // Only the bot's own live call failure, enrichment failure, or parked
-          // uncertainty makes the bot unavailable. Stale propagates from the wallet.
-          financialDataStatus: derivePerBotFinancialDataStatus(
-            fin,
-            snapshot.status as 'fresh' | 'partial' | 'stale',
-            ens,
-          ),
-          financialDataObservedAt: snapshot.observedAt,
-        };
-      });
+      const enrichedBots = snapshot.bots.map((bot) =>
+        mapBotToApiResponse(
+          bot,
+          snapshot.perBotFinancials.get(bot.id),
+          snapshot.enrichment,
+          ens,
+          snapshotStatusTyped,
+          snapshot.observedAt,
+        )
+      );
 
       res.json(enrichedBots);
     } catch (error) {

@@ -489,6 +489,7 @@ function _fallbackFinancials(
   prices: Record<string, number>,
   enrichmentSucceeded: boolean,
   parkedHintSucceeded: boolean,
+  parkedBotIds: Set<string>,
   status: 'db-only' | 'unavailable',
 ): BotFinancialData {
   if (!enrichmentSucceeded) {
@@ -505,15 +506,38 @@ function _fallbackFinancials(
     };
   }
   const borrowDebtUsdc = enrichment.borrowDebts.get(bot.id) ?? 0;
+
+  // A bot marked 'unavailable' must never emit a numeric DB estimate as equity,
+  // even when enrichment data is present. The DB estimate is only safe when the
+  // DB path was intentional ('db-only'). Live-eligible bots skipped by the
+  // deadline, adapter-resolution failures, and any other unavailable path all
+  // belong here — they tried (or were eligible to try) the live path and failed.
+  if (status === 'unavailable') {
+    return {
+      exchangeBalance: null,
+      netPnl: null,
+      netPnlPercent: null,
+      borrowDebtUsdc,
+      parkedValueUsdc: 0,
+      parkedValueIncluded: false,
+      parkedValueUnavailable: false,
+      liveDataAvailable: false,
+      botFinancialStatus: 'unavailable',
+    };
+  }
+
   const fallback = _dbFallback(bot, enrichment, prices);
 
-  // DB-only Flash bots can have parked funds in the vault.  When the parked-
-  // hint read failed we cannot confirm whether parked rows exist — the DB
-  // estimate is therefore incomplete and must not be presented as the full
-  // equity number.  Non-Flash protocols do not support vault parking, so they
-  // are unaffected regardless of parkedHintSucceeded.
-  const botMightHaveParkedFunds = (bot as any).activeProtocol === 'flash';
-  const parkedUnavailable = botMightHaveParkedFunds && !parkedHintSucceeded;
+  // DB-only Flash bots can have parked funds in the vault. The DB fallback
+  // cannot value parked yield-tokens, so the estimate is incomplete whenever:
+  //   (a) the parked-hint read failed (parkedHintSucceeded=false) — we cannot
+  //       confirm whether parked rows exist for this bot; OR
+  //   (b) the hint succeeded BUT positively identified a row for this bot —
+  //       the DB fallback has no way to value the parked asset/yield.
+  // Non-Flash protocols do not support vault parking, so they are unaffected.
+  const botIsParkedCapable = (bot as any).activeProtocol === 'flash';
+  const parkedUnavailable = botIsParkedCapable &&
+    (!parkedHintSucceeded || parkedBotIds.has(bot.id));
 
   if (parkedUnavailable) {
     return {
@@ -529,7 +553,7 @@ function _fallbackFinancials(
     };
   }
 
-  // enrichmentSucceeded=true, parked hint ok (or non-Flash) here.
+  // status='db-only', enrichmentSucceeded=true, parked hint ok (or non-Flash).
   // A bot with no equityAgg row is a new bot with zero history — legitimately 0.
   // Null applies only when enrichment itself failed (handled above).
   return {
@@ -541,7 +565,7 @@ function _fallbackFinancials(
     parkedValueIncluded: false,
     parkedValueUnavailable: false,
     liveDataAvailable: false,
-    botFinancialStatus: status,
+    botFinancialStatus: 'db-only',
   };
 }
 
@@ -640,6 +664,38 @@ async function _refresh(
   const pool = entry.pool;
   const agentAddress: string | null = (wallet as any)?.agentPublicKey ?? null;
 
+  // -------------------------------------------------------------------------
+  // Pre-classify bot live-eligibility (synchronous, no network calls).
+  //
+  // Computed BEFORE the Phase-2 deadline guard so that the defensive fill
+  // after the guard can assign the correct fallback status even when Phase-2
+  // is skipped entirely (deadline elapsed before Phase-2 started).
+  //
+  // A bot is live-eligible when it has a non-null live context (from
+  // getBotSubaccountContext) and is not a Flash alias. Flash alias bots are
+  // excluded because they deliberately use the main-account's data.
+  //
+  // Note: agentAddress may be null even for live-eligible bots. Those bots
+  // would have been attempted via the live path but failed immediately (no
+  // agent key → can't read). They must report 'unavailable', not 'db-only'.
+  //
+  // A live-eligible bot NOT enriched by Phase-2 (e.g. deadline fired before
+  // Phase-2, or agentAddress absent) must report 'unavailable' to prevent a
+  // numeric DB estimate from being presented as current venue data.
+  // -------------------------------------------------------------------------
+  const liveEligibleBotIds = new Set<string>();
+  for (const bot of bots) {
+    // Alias check mirrors Phase-2: alias requires agentAddress to be non-null.
+    const isAlias =
+      (bot as any).activeProtocol === 'flash' &&
+      agentAddress !== null &&
+      (bot as any).protocolSubaccountId === agentAddress;
+    if (isAlias) continue;
+    if (deps.getBotSubaccountContext(bot)) {
+      liveEligibleBotIds.add(bot.id);
+    }
+  }
+
   // Mutable locals; wrappers write here before returning.
   let agentBalance: number | null = null;
   let solBalance: number | null = null;
@@ -725,8 +781,12 @@ async function _refresh(
       // Bots with no live context get DB-based fallback immediately (no pool slot).
       const botCtx = deps.getBotSubaccountContext(bot);
       if (!botCtx || !agentAddress) {
+        // 'db-only': planned path was always DB-only (no live context at all).
+        // 'unavailable': live context exists but agentAddress absent — was
+        //   eligible for live data but the key required to read it is missing.
+        const fallbackStatus = (botCtx && !agentAddress) ? 'unavailable' : 'db-only';
         perBotFinancials.set(botId, _fallbackFinancials(
-          bot, enrichment, prices, enrichmentSucceeded, parkedHintSucceeded, 'db-only',
+          bot, enrichment, prices, enrichmentSucceeded, parkedHintSucceeded, parkedBotIds, fallbackStatus,
         ));
         continue;
       }
@@ -737,7 +797,7 @@ async function _refresh(
         botAdapter = deps.getAdapterForBot(bot);
       } catch {
         perBotFinancials.set(botId, _fallbackFinancials(
-          bot, enrichment, prices, enrichmentSucceeded, parkedHintSucceeded, 'unavailable',
+          bot, enrichment, prices, enrichmentSucceeded, parkedHintSucceeded, parkedBotIds, 'unavailable',
         ));
         continue;
       }
@@ -830,11 +890,19 @@ async function _refresh(
   } // end Phase-2 deadline guard
 
   // Defensive fill: any bot not written by a wrapper (or Phase-2 skipped
-  // entirely due to deadline) gets DB fallback.
+  // entirely due to deadline) gets an appropriate fallback.
+  //
+  // Planned path classification uses the pre-computed liveEligibleBotIds:
+  //   - live-eligible bot not enriched by Phase-2 → 'unavailable': its DB
+  //     estimate must NOT be presented as current venue data. The fact that
+  //     Phase-2 did not run does not convert it into a genuine DB-only bot.
+  //   - genuinely DB-only bot (no live context, Flash alias, etc.) → 'db-only':
+  //     the DB estimate is the intended path and is safe to present.
   for (const bot of bots) {
     if (!perBotFinancials.has(bot.id)) {
+      const status = liveEligibleBotIds.has(bot.id) ? 'unavailable' : 'db-only';
       perBotFinancials.set(bot.id, _fallbackFinancials(
-        bot, enrichment, prices, enrichmentSucceeded, parkedHintSucceeded, 'db-only',
+        bot, enrichment, prices, enrichmentSucceeded, parkedHintSucceeded, parkedBotIds, status,
       ));
     }
   }
@@ -1114,4 +1182,64 @@ export function derivePerBotFinancialDataStatus(
   if (!enrichmentSucceeded) return 'unavailable';
   if (fin?.parkedValueUnavailable) return 'unavailable';
   return 'fresh';
+}
+
+// ---------------------------------------------------------------------------
+// Route-mapper helper (pure, exported for testing)
+// ---------------------------------------------------------------------------
+
+/**
+ * Map a single TradingBot to its GET /api/trading-bots API response shape.
+ *
+ * Pure function: no side effects, no network calls, fully deterministic for
+ * a given set of inputs. Extracted from the inline route mapper for testability;
+ * behavior is identical to the previous inline implementation.
+ *
+ * @param bot            The raw TradingBot row from storage.
+ * @param fin            Per-bot financial data from the snapshot (undefined when absent).
+ * @param enrichment     Batch enrichment from the snapshot.
+ * @param enrichmentSucceeded  Whether the enrichment read succeeded.
+ * @param snapshotStatus The wallet-level snapshot status (fresh|partial|stale).
+ * @param observedAt     Snapshot observation timestamp (null when unavailable).
+ */
+export function mapBotToApiResponse(
+  bot: TradingBot,
+  fin: BotFinancialData | undefined,
+  enrichment: BotListEnrichment,
+  enrichmentSucceeded: boolean,
+  snapshotStatus: 'fresh' | 'partial' | 'stale',
+  observedAt: number | null,
+): Record<string, unknown> {
+  const ens = enrichmentSucceeded;
+  const eq = ens ? enrichment.equityAgg.get(bot.id) : undefined;
+  const positions = ens ? (enrichment.positions.get(bot.id) ?? []) : [];
+  const position = (positions as any[]).find((p: any) => p.market === bot.market) ?? null;
+  const publishedBot = ens ? (enrichment.publishedBotMap.get(bot.id) ?? null) : null;
+
+  return {
+    ...bot,
+    // null when enrichment failed — zero when enrichment succeeded but bot has no rows.
+    // (successful-empty parity: new bots have zero history, not unknown history)
+    actualTradeCount: ens ? (enrichment.tradeCounts.get(bot.id) ?? 0) : null,
+    realizedPnl: ens ? ((position as any)?.realizedPnl ?? '0') : null,
+    totalFees: ens ? ((position as any)?.totalFees ?? '0') : null,
+    exchangeBalance: fin?.exchangeBalance ?? null,
+    // null when enrichment failed (debt unknown, not zero).
+    borrowDebtUsdc: fin?.borrowDebtUsdc ?? null,
+    // null when enrichment failed (deposit basis unknown); zero for a new bot.
+    netDeposited: ens ? (eq?.netDeposited ?? 0) : null,
+    netPnl: fin?.netPnl ?? null,
+    netPnlPercent: fin?.netPnlPercent ?? null,
+    // null when enrichment failed (publication state unknown).
+    isPublished: ens ? (!!publishedBot && (publishedBot as any).isActive) : null,
+    publishedBotId: ens ? ((publishedBot as any)?.id || null) : null,
+    botSubaccountIdentifier: bot.protocolSubaccountId || null,
+    botFinancialStatus: fin?.botFinancialStatus ?? 'db-only',
+    // Per-bot status: independent of main-account failures. A wallet-level
+    // 'partial' (agentBalance=null) must NOT mislabel a healthy bot 'unavailable'.
+    // Only the bot's own live call failure, enrichment failure, or parked
+    // uncertainty makes the bot unavailable. Stale propagates from the wallet.
+    financialDataStatus: derivePerBotFinancialDataStatus(fin, snapshotStatus, ens),
+    financialDataObservedAt: observedAt,
+  };
 }
