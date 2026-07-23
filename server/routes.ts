@@ -14424,13 +14424,20 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     try {
       const snapshot = await getWalletFinancialSnapshot(req.walletAddress!);
 
+      // WO-15B.1: unavailable means no trustworthy bot list → 503.
+      if (snapshot.status === 'unavailable') {
+        return res.status(503).json({
+          error: 'Financial data temporarily unavailable',
+          financialDataStatus: 'unavailable',
+        });
+      }
+
       const enrichedBots = snapshot.bots.map((bot) => {
         const fin = snapshot.perBotFinancials.get(bot.id);
         const eq = snapshot.enrichment.equityAgg.get(bot.id);
         const positions = snapshot.enrichment.positions.get(bot.id) ?? [];
-        const position = positions.find(p => (p as any).market === bot.market)
-          ?? positions[0]
-          ?? null;
+        // Exact-market match only — never fall back to another market's row.
+        const position = positions.find(p => (p as any).market === bot.market) ?? null;
         const publishedBot = snapshot.enrichment.publishedBotMap.get(bot.id) ?? null;
 
         return {
@@ -20674,7 +20681,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       const snapshot = await getWalletFinancialSnapshot(req.walletAddress!);
 
-      const subaccountBalances: { botId: string; botName: string; subaccountId: number; balance: number }[] = [];
+      // WO-15B.1: unavailable means no trustworthy data → 503.
+      if (snapshot.status === 'unavailable') {
+        return res.status(503).json({
+          error: 'Financial data temporarily unavailable',
+          financialDataStatus: 'unavailable',
+        });
+      }
+
+      const subaccountBalances: { botId: string; botName: string; subaccountId: number; balance: number | null }[] = [];
 
       for (const bot of snapshot.bots) {
         const fin = snapshot.perBotFinancials.get(bot.id);
@@ -20682,25 +20697,40 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           botId: bot.id,
           botName: bot.name,
           subaccountId: (bot as any).driftSubaccountId ?? 0,
-          balance: fin?.exchangeBalance ?? 0,
+          // null when both live and DB paths unavailable; routes must not substitute 0.
+          balance: fin?.exchangeBalance ?? null,
         });
       }
 
-      const totalBotBalances = subaccountBalances.reduce((sum, b) => sum + b.balance, 0);
-      const mainAccountEquity = snapshot.mainAccount?.totalCollateral ?? 0;
-      const mainAccountFreeCollateral = snapshot.mainAccount?.freeCollateral ?? 0;
-      const vaultBalance = includeVault ? snapshot.vaultBalance : 0;
+      // Null-safe aggregation: individual null bot balances treated as 0 for sum.
+      const totalBotBalances = subaccountBalances.reduce(
+        (sum, b) => sum + (b.balance ?? 0), 0,
+      );
 
-      const inTrading = mainAccountEquity + totalBotBalances;
+      // WO-15B.1: unavailable main-account fields stay null, not zero.
+      const mainAccountEquity: number | null = snapshot.mainAccount?.totalCollateral ?? null;
+      const mainAccountFreeCollateral: number | null = snapshot.mainAccount?.freeCollateral ?? null;
+      // Vault balance: null when venue call failed; suppress unless ?includeVault=1.
+      const vaultBalance: number | null = includeVault ? snapshot.vaultBalance : 0;
+
+      // Derived totals are null when any required input is null.
+      const inTrading: number | null =
+        mainAccountEquity !== null ? mainAccountEquity + totalBotBalances : null;
       // Vault savings are spendable on demand, so they count toward equity. 0 unless
       // ?includeVault=1; keeps Available + In Trading = Total Equity consistent.
-      const totalEquity = snapshot.agentBalance + vaultBalance + inTrading;
+      const totalEquity: number | null =
+        snapshot.agentBalance !== null && inTrading !== null
+          ? snapshot.agentBalance + (vaultBalance ?? 0) + inTrading
+          : null;
 
       console.log(
-        `[total-equity] agent=$${snapshot.agentBalance.toFixed(2)} vault=$${vaultBalance.toFixed(2)}` +
-        ` mainAcct=$${mainAccountEquity.toFixed(2)} bots=$${totalBotBalances.toFixed(2)}` +
-        ` inTrading=$${inTrading.toFixed(2)} mainFree=$${mainAccountFreeCollateral.toFixed(2)}` +
-        ` total=$${totalEquity.toFixed(2)} status=${snapshot.status}`,
+        `[total-equity] agent=${snapshot.agentBalance ?? 'null'}` +
+        ` vault=${vaultBalance ?? 'null'}` +
+        ` mainAcct=${mainAccountEquity ?? 'null'}` +
+        ` bots=${totalBotBalances.toFixed(2)}` +
+        ` inTrading=${inTrading ?? 'null'}` +
+        ` mainFree=${mainAccountFreeCollateral ?? 'null'}` +
+        ` total=${totalEquity ?? 'null'} status=${snapshot.status}`,
       );
 
       res.json({
@@ -20712,6 +20742,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         mainAccountFreeCollateral,
         totalEquity,
         solBalance: snapshot.solBalance,
+        // Bot count is accurate whenever the stored bot list succeeded.
         botCount: snapshot.bots.length,
         subaccountBalances,
         pricesAsOf: snapshot.pricesAsOf,
