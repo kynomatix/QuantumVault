@@ -414,7 +414,11 @@ export const equityEvents = pgTable("equity_events", {
   // don't double-count them as profit.
   txBlockTime: timestamp("tx_block_time"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => ([
+  // WO-15A: supports batch financial-enrichment per-bot GROUP BY queries.
+  // Rollback: DROP INDEX IF EXISTS idx_equity_events_bot_created
+  index("idx_equity_events_bot_created").on(table.tradingBotId, table.createdAt),
+]));
 
 export const insertEquityEventSchema = createInsertSchema(equityEvents).omit({
   id: true,

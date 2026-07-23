@@ -1091,6 +1091,11 @@ export async function ensureSchema() {
       // decision so all downstream readers (monitor 15s loop, executor, UI) work unmodified.
       // Rollback: DROP COLUMN market_source is safe — every reader treats missing/default as 'fixed'.
       `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS market_source text NOT NULL DEFAULT 'fixed'`,
+
+      // --- WO-15A: batch financial-enrichment index on equity_events. ---
+      // Additive: never changes any row or constraint. Idempotent CREATE INDEX IF NOT EXISTS.
+      // Rollback: DROP INDEX IF EXISTS idx_equity_events_bot_created
+      `CREATE INDEX IF NOT EXISTS idx_equity_events_bot_created ON equity_events(trading_bot_id, created_at DESC)`,
     ];
     // Fault-isolate EACH migration. These statements are written to be
     // idempotent, but some still throw on re-run with an error their inner

@@ -1,9 +1,9 @@
-import { eq, ne, desc, asc, sql, and, or, ilike, gte, lte, lt, inArray, isNotNull, isNull } from "drizzle-orm";
+import { eq, ne, desc, asc, sql, and, or, ilike, gte, lte, lt, inArray, notInArray, isNotNull, isNull } from "drizzle-orm";
 import { createHash, randomBytes } from "crypto";
 import { vaultLockKey as computeVaultLockKey } from "./vault/scope";
 import { db } from "./db";
 import Decimal from "decimal.js";
-import { sumNetDepositedFromEvents } from "./equity-events-util";
+import { sumNetDepositedFromEvents, VAULT_INTERNAL_EVENT_TYPES } from "./equity-events-util";
 import {
   users,
   wallets,
@@ -172,6 +172,24 @@ export type ErrorStatRow = {
   rows: number;
   occurrences: number;
   unresolved: number;
+};
+
+/**
+ * WO-15A: batch financial-enrichment result keyed by trading-bot ID.
+ * Returned by getTradingBotListEnrichment; consumed by the route slice (WO-15B/15C).
+ * All maps are absent-key = zero/undefined (never contain another wallet's data).
+ */
+export type BotListEnrichment = {
+  /** Canonical trade count per bot (getCanonicalBotTradeCount semantics, phantom-dup excluded). */
+  tradeCounts: Map<string, number>;
+  /** All bot_positions rows per bot (unique per bot+market; slice by bot.market in route). */
+  positions: Map<string, BotPosition[]>;
+  /** Published-bot row per bot (unique by schema; absent = not published). */
+  publishedBotMap: Map<string, PublishedBot>;
+  /** Net-deposited (signed external sum) + totalDeposits (positive external sum) per bot. */
+  equityAgg: Map<string, { netDeposited: number; totalDeposits: number }>;
+  /** Open USDC borrow debt in USD per bot (sumOpenBorrowDebtUsdcForBot semantics). */
+  borrowDebts: Map<string, number>;
 };
 
 export interface IStorage {
@@ -656,6 +674,25 @@ export interface IStorage {
   incrementAiTraderFreeCalls(walletAddress: string, limit: number): Promise<number | null>;
   /** Refunds one free trial when a claimed call never actually reached the LLM (e.g. stale-context abort). Floors at 0. */
   decrementAiTraderFreeCalls(walletAddress: string): Promise<void>;
+
+  /**
+   * WO-15A: Batch financial-enrichment for a list of trading bots.
+   *
+   * Executes exactly FIVE set-based DB queries for any non-empty botIds list —
+   * one per dataset — regardless of how many bots are requested. Empty input
+   * returns empty maps with zero queries. All queries are scoped to both
+   * walletAddress and botIds; no cross-wallet rows can enter any result map.
+   *
+   * Reproduces the per-bot semantics of:
+   *   - getCanonicalBotTradeCount (incl. phantom-dup-close exclusion)
+   *   - sumNetDepositedFromEvents + totalDeposits (VAULT_INTERNAL_EVENT_TYPES excluded)
+   *   - sumOpenBorrowDebtUsdcForBot (BigInt arithmetic, USDC-only, open status)
+   *   - getPublishedBotByTradingBotId (unique-by-schema, no tie-breaking needed)
+   *   - getBotPosition (all markets returned; caller picks bot.market)
+   *
+   * Do NOT wire into routes until WO-15B/15C.
+   */
+  getTradingBotListEnrichment(walletAddress: string, botIds: string[]): Promise<BotListEnrichment>;
 }
 
 // Raw SQL predicate that is TRUE for a "phantom duplicate" close row: a
@@ -4717,6 +4754,156 @@ export class DatabaseStorage implements IStorage {
     await db.update(wallets)
       .set({ aiTraderFreeCallsUsed: sql`GREATEST(${wallets.aiTraderFreeCallsUsed} - 1, 0)` })
       .where(eq(wallets.address, walletAddress));
+  }
+
+  // ---------------------------------------------------------------------------
+  // WO-15A: Batch financial enrichment
+  // ---------------------------------------------------------------------------
+  async getTradingBotListEnrichment(walletAddress: string, botIds: string[]): Promise<BotListEnrichment> {
+    const empty: BotListEnrichment = {
+      tradeCounts: new Map(),
+      positions: new Map(),
+      publishedBotMap: new Map(),
+      equityAgg: new Map(),
+      borrowDebts: new Map(),
+    };
+    // Deduplicate before querying; empty input produces zero queries.
+    const dedupedIds = [...new Set(botIds)];
+    if (dedupedIds.length === 0) return empty;
+
+    // --- Query 1: canonical trade counts ---
+    // Reproduces getCanonicalBotTradeCount exactly: pnl IS NOT NULL, terminal
+    // statuses, phantom-dup-close exclusion. One GROUP BY replaces N per-bot calls.
+    const tradeCountRows = await db
+      .select({
+        botId: botTrades.tradingBotId,
+        tradeCount: sql<number>`COUNT(*)::int`,
+      })
+      .from(botTrades)
+      .where(and(
+        inArray(botTrades.tradingBotId, dedupedIds),
+        eq(botTrades.walletAddress, walletAddress),
+        isNotNull(botTrades.pnl),
+        sql`${botTrades.status} IN ('executed','liquidated','recovered')`,
+        notPhantomDupClose(),
+      ))
+      .groupBy(botTrades.tradingBotId);
+
+    const tradeCounts = new Map<string, number>();
+    for (const row of tradeCountRows) {
+      tradeCounts.set(row.botId, Number(row.tradeCount ?? 0));
+    }
+
+    // --- Query 2: bot position rows (all markets per bot) ---
+    // unique(tradingBotId, market) ensures one row per market; caller picks bot.market.
+    const positionRows = await db
+      .select()
+      .from(botPositions)
+      .where(and(
+        inArray(botPositions.tradingBotId, dedupedIds),
+        eq(botPositions.walletAddress, walletAddress),
+      ));
+
+    const positions = new Map<string, BotPosition[]>();
+    for (const row of positionRows) {
+      const arr = positions.get(row.tradingBotId) ?? [];
+      arr.push(row);
+      positions.set(row.tradingBotId, arr);
+    }
+
+    // --- Query 3: published-bot rows ---
+    // published_bots.trading_bot_id has a UNIQUE constraint → at most 1 row per
+    // bot → the map is deterministic with no tie-breaking logic required.
+    const publishedRows = await db
+      .select()
+      .from(publishedBots)
+      .where(and(
+        inArray(publishedBots.tradingBotId, dedupedIds),
+        eq(publishedBots.creatorWalletAddress, walletAddress),
+      ));
+
+    const publishedBotMap = new Map<string, PublishedBot>();
+    for (const row of publishedRows) {
+      publishedBotMap.set(row.tradingBotId, row);
+    }
+
+    // --- Query 4: equity aggregation ---
+    // Reproduces sumNetDepositedFromEvents + totalDeposits per bot in SQL.
+    // VAULT_INTERNAL_EVENT_TYPES is imported directly from the authoritative
+    // utility — never a second hard-coded list — so any future additions to the
+    // set are automatically reflected here without drift.
+    const internalTypesArr = [...VAULT_INTERNAL_EVENT_TYPES];
+    const equityRows = await db
+      .select({
+        botId: equityEvents.tradingBotId,
+        netDeposited: sql<string>`SUM(
+          CASE WHEN ${notInArray(equityEvents.eventType, internalTypesArr)}
+            THEN CAST(${equityEvents.amount} AS numeric)
+            ELSE 0::numeric
+          END
+        )::text`,
+        totalDeposits: sql<string>`SUM(
+          CASE WHEN ${notInArray(equityEvents.eventType, internalTypesArr)}
+                 AND CAST(${equityEvents.amount} AS numeric) > 0
+            THEN CAST(${equityEvents.amount} AS numeric)
+            ELSE 0::numeric
+          END
+        )::text`,
+      })
+      .from(equityEvents)
+      .where(and(
+        isNotNull(equityEvents.tradingBotId),
+        inArray(equityEvents.tradingBotId as any, dedupedIds),
+        eq(equityEvents.walletAddress, walletAddress),
+      ))
+      .groupBy(equityEvents.tradingBotId);
+
+    const equityAgg = new Map<string, { netDeposited: number; totalDeposits: number }>();
+    for (const row of equityRows) {
+      if (!row.botId) continue;
+      const nd = parseFloat(row.netDeposited ?? '0');
+      const td = parseFloat(row.totalDeposits ?? '0');
+      equityAgg.set(row.botId, {
+        netDeposited: Number.isFinite(nd) ? nd : 0,
+        totalDeposits: Number.isFinite(td) ? td : 0,
+      });
+    }
+
+    // --- Query 5: open USDC borrow debt ---
+    // Reproduces sumOpenBorrowDebtUsdcForBot semantics exactly: BigInt arithmetic
+    // on the raw integer text field, USDC-only, open status (not closed/failed).
+    const borrowRows = await db
+      .select({
+        tradingBotId: borrowPositions.tradingBotId,
+        debtAmountRaw: borrowPositions.debtAmountRaw,
+        debtAssetKey: borrowPositions.debtAssetKey,
+      })
+      .from(borrowPositions)
+      .where(and(
+        isNotNull(borrowPositions.tradingBotId),
+        inArray(borrowPositions.tradingBotId as any, dedupedIds),
+        eq(borrowPositions.walletAddress, walletAddress),
+        ne(borrowPositions.status, 'closed'),
+        ne(borrowPositions.status, 'failed'),
+      ));
+
+    const borrowDebts = new Map<string, number>();
+    const rawByBot = new Map<string, bigint>();
+    for (const r of borrowRows) {
+      if (!r.tradingBotId) continue;
+      if (String(r.debtAssetKey).toLowerCase() !== 'usdc') continue;
+      try {
+        const v = BigInt(r.debtAmountRaw);
+        if (v > BigInt(0)) {
+          rawByBot.set(r.tradingBotId, (rawByBot.get(r.tradingBotId) ?? BigInt(0)) + v);
+        }
+      } catch { /* debtAmountRaw is always a valid integer string on valid rows */ }
+    }
+    for (const [botId, totalRaw] of rawByBot) {
+      borrowDebts.set(botId, new Decimal(totalRaw.toString()).div(1_000_000).toNumber());
+    }
+
+    return { tradeCounts, positions, publishedBotMap, equityAgg, borrowDebts };
   }
 }
 
