@@ -965,6 +965,176 @@ describe("startup reconciliation", () => {
   });
 });
 
+// --- Unconfirmed-landing reconciliation (FLASH-LATE-LANDING-01) ------------------------
+
+describe("unconfirmed-landing reconciliation", () => {
+  /** Quarantined bot as the executor leaves it (bot row written LAST → updatedAt = window start). */
+  function makeQuarantinedBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
+    return makeBot({
+      status: "paused",
+      pauseReason: "position_unconfirmed",
+      paperMode: false,
+      updatedAt: new Date(NOW - 60_000), // quarantined 1 min ago — inside the 5-min window
+      ...overrides,
+    });
+  }
+  const unconfirmedRow = (overrides: Partial<Record<string, unknown>> = {}) =>
+    makeOpenDecision({ id: "dec-u", outcome: "unconfirmed_landing", ...overrides });
+
+  it("monitorBotOnce routes a quarantined bot to the reconciler (tick pickup) and never treats the pause as inert", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const getPositions = vi.fn(async () => []);
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions }));
+    getDecisionsMock.mockResolvedValue([unconfirmedRow()]);
+
+    await monitorBotOnce(makeQuarantinedBot());
+
+    expect(getPositions).toHaveBeenCalledTimes(1); // venue actually consulted every tick
+  });
+
+  it("reconcileBotOnStartup routes the quarantined state to the reconciler (survives restarts)", async () => {
+    const { reconcileBotOnStartup } = await importMonitor();
+    armLiveAuth();
+    const getPositions = vi.fn(async () => []);
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions }));
+    getDecisionsMock.mockResolvedValue([unconfirmedRow()]);
+
+    const resolved = await reconcileBotOnStartup(makeQuarantinedBot());
+
+    expect(resolved).toBe(true); // clean pending inside the window
+    expect(getPositions).toHaveBeenCalledTimes(1);
+  });
+
+  it("flat INSIDE the window → pending: touches NOTHING (a bot-row write would restart the window)", async () => {
+    const { reconcileUnconfirmedLanding } = await importMonitor();
+    armLiveAuth();
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions: vi.fn(async () => []) }));
+    getDecisionsMock.mockResolvedValue([unconfirmedRow()]);
+
+    const resolved = await reconcileUnconfirmedLanding(makeQuarantinedBot());
+
+    expect(resolved).toBe(true);
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(notifyMock).not.toHaveBeenCalled();
+  });
+
+  it("venue read FAILURE → still pending (false): a failed read is never proof of flatness, no writes, no expiry", async () => {
+    const { reconcileUnconfirmedLanding } = await importMonitor();
+    armLiveAuth();
+    getAdapterMock.mockReturnValue(makeAdapter({
+      getPositions: vi.fn(async () => { throw new Error("venue down"); }),
+    }));
+    // Even PAST the window a failed read must not expire the quarantine.
+    const resolved = await reconcileUnconfirmedLanding(
+      makeQuarantinedBot({ updatedAt: new Date(NOW - 10 * 60_000) })
+    );
+
+    expect(resolved).toBe(false);
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(notifyMock).not.toHaveBeenCalled();
+  });
+
+  it("position LANDED + bracket rests → adopt: decision → executed with VENUE entry price, bot → open", async () => {
+    const { reconcileUnconfirmedLanding } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [
+        { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.1, markPrice: 150, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
+      ]),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([unconfirmedRow()]);
+
+    const resolved = await reconcileUnconfirmedLanding(makeQuarantinedBot());
+
+    expect(resolved).toBe(true);
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
+    expect(updateDecisionMock).toHaveBeenCalledWith("dec-u", { outcome: "executed", entryPrice: "150.10000000" });
+    expect(botUpdates().some((u) => u.status === "open" && u.pauseReason === null)).toBe(true);
+  });
+
+  it("position LANDED + bracket missing → completes it (setTpSl + re-verify) before promoting to open", async () => {
+    const { reconcileUnconfirmedLanding } = await importMonitor();
+    armLiveAuth();
+    const stopOrders = vi.fn()
+      .mockResolvedValueOnce([]) // missing on check
+      .mockResolvedValueOnce([{ order_id: "st-9", symbol: "SOL-PERP" }]); // rests after set
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [
+        { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.1, markPrice: 150, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
+      ]),
+      getOpenStopOrders: stopOrders,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([unconfirmedRow()]);
+
+    const resolved = await reconcileUnconfirmedLanding(makeQuarantinedBot());
+
+    expect(resolved).toBe(true);
+    expect((adapter as any).setTpSl).toHaveBeenCalledTimes(1);
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
+    expect(botUpdates().some((u) => u.status === "open")).toBe(true);
+  });
+
+  it("position LANDED but bracket UNRESTORABLE → protective close + pause bracket_failed (never idle, never naked)", async () => {
+    const { reconcileUnconfirmedLanding } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [
+        { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.1, markPrice: 150, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
+      ]),
+      getOpenStopOrders: vi.fn(async () => []), // never rests
+      setTpSl: vi.fn(async () => ({ success: false, status: "rejected", error: "nope" })),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([unconfirmedRow()]);
+    // closeLivePositionAndPause re-reads the decision for its stale-pass guard.
+    getAiTraderDecisionMock.mockResolvedValue(unconfirmedRow({ outcome: "executed" }));
+
+    const resolved = await reconcileUnconfirmedLanding(makeQuarantinedBot());
+
+    expect(resolved).toBe(true);
+    // Entry recorded HONESTLY (it filled) before the protective close.
+    expect(updateDecisionMock).toHaveBeenCalledWith("dec-u", { outcome: "executed", entryPrice: "150.10000000" });
+    expect((adapter as any).closePosition).toHaveBeenCalledTimes(1);
+    expect(botUpdates().some((u) => u.status === "paused" && u.pauseReason === "bracket_failed")).toBe(true);
+    expect(botUpdates().some((u) => u.status === "idle")).toBe(false);
+  });
+
+  it("flat PAST the window on a successful read → terminal clean abort: aborted_order + expired pause + ONE notify", async () => {
+    const { reconcileUnconfirmedLanding } = await importMonitor();
+    armLiveAuth();
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions: vi.fn(async () => []) }));
+    getDecisionsMock.mockResolvedValue([unconfirmedRow()]);
+
+    const resolved = await reconcileUnconfirmedLanding(
+      makeQuarantinedBot({ updatedAt: new Date(NOW - 6 * 60_000) }) // 6 min > 5-min window
+    );
+
+    expect(resolved).toBe(true);
+    expect(updateDecisionMock).toHaveBeenCalledWith("dec-u", { outcome: "aborted_order" });
+    expect(botUpdates().some((u) => u.status === "paused" && u.pauseReason === "position_unconfirmed_expired")).toBe(true);
+    expect(notifyMock).toHaveBeenCalledTimes(1);
+    expect(notifications()[0]).toMatchObject({ type: "trade_failed" });
+  });
+
+  it("expired pause is NOT re-recognized (anti-repeat): monitorBotOnce leaves it alone, no venue read, no 2nd notify", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const getPositions = vi.fn(async () => []);
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions }));
+
+    await monitorBotOnce(makeQuarantinedBot({ pauseReason: "position_unconfirmed_expired" }));
+
+    expect(getPositions).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(notifyMock).not.toHaveBeenCalled();
+  });
+});
+
 // --- Tick loop plumbing ---------------------------------------------------------------
 
 describe("tick loop", () => {

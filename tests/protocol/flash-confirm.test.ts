@@ -174,9 +174,11 @@ describe("confirmTxLanded — hard wall-clock deadline", () => {
 
 describe("unconfirmed verdict — retry classification hard exclusion", () => {
   function unconfirmedMessage(sig: string): string {
+    // Mirrors the production wording in flash-confirm.ts (kept in sync).
     return (
       `open transaction did not confirm on-chain within the verification window (sig ${sig}). ` +
-      `Not booked as filled — verify on the exchange before retrying (a late landing is reconciled automatically). ` +
+      `Not booked as filled. AI Trader entries are quarantined and reconciled automatically against the venue; ` +
+      `for any other path, verify on the exchange before retrying — a late landing is NOT auto-reconciled there. ` +
       UNCONFIRMED_LANDING_VERDICT_TOKEN
     );
   }
@@ -186,6 +188,48 @@ describe("unconfirmed verdict — retry classification hard exclusion", () => {
     expect(isTransientError(msg)).toBe(false);
     expect(isRateLimitError(msg)).toBe(false);
     expect(isTimeoutError(msg)).toBe(false);
+  });
+
+  it("categorizeError → UNCONFIRMED, retryable:false — checked BEFORE every retryable pattern", async () => {
+    const { categorizeError } = await import("../../server/trade-retry-service");
+    const verdict = categorizeError(unconfirmedMessage(SIG));
+    expect(verdict).toMatchObject({ category: "UNCONFIRMED", retryable: false });
+    // Error instances too.
+    expect(categorizeError(new Error(unconfirmedMessage(SIG)))).toMatchObject({
+      category: "UNCONFIRMED",
+      retryable: false,
+    });
+  });
+
+  it("categorizeError: '429'-in-signature collision never classifies RATE_LIMIT", async () => {
+    const { categorizeError } = await import("../../server/trade-retry-service");
+    const collisionSig = "3xY429AbCdEfGhJkLmNpQrStUvWxYz1234567890BcDeFgHiJkLmNoP";
+    const msg = unconfirmedMessage(collisionSig);
+    expect(msg).toContain("429");
+    const verdict = categorizeError(msg);
+    expect(verdict.category).toBe("UNCONFIRMED");
+    expect(verdict.retryable).toBe(false);
+  });
+
+  it("categorizeError: verdict embedding timeout wording still classifies UNCONFIRMED, never TIMEOUT", async () => {
+    const { categorizeError } = await import("../../server/trade-retry-service");
+    // The verdict message itself contains 'did not confirm ... window' and can
+    // wrap venue noise like 'timed out' — the token must win over all of it.
+    const msg = unconfirmedMessage(SIG) + " (upstream: request timed out)";
+    const verdict = categorizeError(msg);
+    expect(verdict.category).toBe("UNCONFIRMED");
+    expect(verdict.retryable).toBe(false);
+  });
+
+  it("isCollateralRetryError: preserves the webhook collateral-retry gate but hard-excludes the verdict", async () => {
+    const { isCollateralRetryError } = await import("../../server/trade-retry-service");
+    // Original inline behavior preserved:
+    expect(isCollateralRetryError("Error: InsufficientCollateral")).toBe(true);
+    expect(isCollateralRetryError("custom program error: 6010")).toBe(true);
+    expect(isCollateralRetryError("price band exceeded")).toBe(false);
+    // Verdict is excluded even if the message ALSO matches a collateral pattern:
+    expect(isCollateralRetryError(unconfirmedMessage(SIG) + " InsufficientCollateral")).toBe(false);
+    expect(isCollateralRetryError(new Error(unconfirmedMessage(SIG)))).toBe(false);
   });
 
   it("survives the base58 '429'-in-signature collision (would otherwise classify rate-limit)", () => {

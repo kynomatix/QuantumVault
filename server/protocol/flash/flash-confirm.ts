@@ -29,8 +29,12 @@
 import type { Connection } from "@solana/web3.js";
 import { UNCONFIRMED_LANDING_VERDICT_TOKEN } from "../tx-verdicts";
 
-/** ~30s total window: well under the ~60s request-proxy reap so webhook/close
- * routes that block on this still return a real verdict to the caller. */
+/** ~30s total window for the CONFIRMATION STEP ONLY (chosen to sit well under
+ * the ~60s request-proxy reap so webhook/close routes that block on this still
+ * return a real verdict to the caller). It does NOT bound the tx itself: a tx
+ * that misses this window can still land later, inside the ~60–90s blockhash
+ * validity window — which is exactly why the timeout verdict below is
+ * UNCONFIRMED (quarantine + reconcile), never a definitive failure. */
 export const CONFIRM_WINDOW_MS = 30_000;
 export const CONFIRM_POLL_INTERVAL_MS = 1_500;
 /** Hard cap on any single getSignatureStatuses call. */
@@ -118,7 +122,8 @@ export async function confirmTxLanded(
     unconfirmed: true,
     error:
       `${label} transaction did not confirm on-chain within the verification window (sig ${signature}). ` +
-      `Not booked as filled — verify on the exchange before retrying (a late landing is reconciled automatically). ` +
+      `Not booked as filled. AI Trader entries are quarantined and reconciled automatically against the venue; ` +
+      `for any other path, verify on the exchange before retrying — a late landing is NOT auto-reconciled there. ` +
       UNCONFIRMED_LANDING_VERDICT_TOKEN,
   };
 }

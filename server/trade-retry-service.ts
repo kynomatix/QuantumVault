@@ -363,16 +363,40 @@ export type ErrorCategory =
   | 'RPC'          // RPC connection issues - transient, retryable
   | 'MARGIN'       // Insufficient margin/balance - usually non-retryable
   | 'PROTOCOL'     // Drift protocol errors - usually non-retryable
+  | 'UNCONFIRMED'  // Unconfirmed-landing verdict - tx may still land, NEVER retryable
   | 'UNKNOWN';     // Unknown errors
 
+/**
+ * Shared collateral-retry predicate for the webhook auto-retry gates
+ * (routes.ts). Preserves the original inline check EXACTLY (case-sensitive
+ * raw-string matches for 'InsufficientCollateral' / error code '6010'), but
+ * hard-excludes the unconfirmed-landing verdict FIRST: an unconfirmed entry
+ * tx may still land, so retrying it — even under a collateral heading — can
+ * double-open (see tx-verdicts.ts).
+ */
+export function isCollateralRetryError(error: string | Error | unknown): boolean {
+  if (isUnconfirmedLandingVerdict(error)) return false;
+  const errorStr = error instanceof Error ? error.message : String(error ?? '');
+  return errorStr.includes('InsufficientCollateral') || errorStr.includes('6010');
+}
+
 // Categorize an error for clear logging
-// Priority: TIMEOUT > ORACLE > RPC > RATE_LIMIT > MARGIN > PROTOCOL > UNKNOWN
-// Timeout is checked first because it's eligible for cooldown re-queue
+// Priority: UNCONFIRMED > TIMEOUT > ORACLE > RPC > RATE_LIMIT > MARGIN > PROTOCOL > UNKNOWN
+// UNCONFIRMED is checked first as a hard exclusion: the verdict message embeds
+// venue/RPC noise (timeouts, 429 fragments, even a signature that happens to
+// contain '429') that would otherwise match a retryable category below — and
+// this verdict must NEVER classify as retryable (the tx may still land).
+// Timeout is checked next because it's eligible for cooldown re-queue
 export function categorizeError(error: string | Error | unknown): { category: ErrorCategory; emoji: string; retryable: boolean } {
   const errorStr = error instanceof Error ? error.message : String(error);
   const lowerError = errorStr.toLowerCase();
   
-  // TIMEOUT: Check first - eligible for cooldown re-queue (highest priority)
+  // UNCONFIRMED: hard exclusion before every other pattern (money-safety).
+  if (isUnconfirmedLandingVerdict(error)) {
+    return { category: 'UNCONFIRMED', emoji: '🚫', retryable: false };
+  }
+
+  // TIMEOUT: eligible for cooldown re-queue (highest retryable priority)
   if (isTimeoutError(error)) {
     return { category: 'TIMEOUT', emoji: '⏱️', retryable: true };
   }

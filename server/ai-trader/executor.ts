@@ -417,19 +417,36 @@ async function executeLiveEntry(
       // land inside the blockhash validity window (~60–90s) even though the
       // adapter could not confirm it. A single flat probe here is NOT proof of
       // a clean abort, and an idle verdict would let auto-next re-enter while
-      // the original tx can still fill → double-open. Fail closed: reduce-only
-      // emergency close of whatever may exist, pause for human eyes. (Retry
-      // classification also hard-excludes this verdict — see tx-verdicts.ts.)
+      // the original tx can still fill → double-open. An IMMEDIATE emergency
+      // close is equally useless: if the entry has not landed yet, the venue
+      // reads flat and closePosition() is a no-op — then the entry lands later
+      // into a paused, unmonitored bot. Instead, persist an explicit
+      // uncertain-entry state (decision outcome 'unconfirmed_landing' + bot
+      // paused/position_unconfirmed) as the durable marker; the monitor's
+      // reconcileUnconfirmedLanding() keeps probing the venue and either
+      // brackets a late-landing position, protectively closes it, or expires
+      // the marker after a conservative flat window. (Retry classification
+      // also hard-excludes this verdict — see tx-verdicts.ts.)
       if (isUnconfirmedLandingVerdict(orderResult.error)) {
-        return await emergencyCloseAndPause({
-          input, keyTrio, subaccountId,
-          pauseReason: "position_unconfirmed",
-          failureReason: "position_unconfirmed",
-          detail: `entry order unconfirmed — the transaction may still land, so a flat probe is not proof of a clean abort (${orderResult.error ?? "unknown"})`,
-          entryFillPrice: undefined,
-          sizeBase: n.sizeBase,
-          side,
+        await storage.updateAiTraderDecision(decisionId, { outcome: "unconfirmed_landing" });
+        // Bot row write LAST: its updatedAt is the reconciliation window start.
+        await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "position_unconfirmed" });
+        await sendTradeNotification(bot.walletAddress, {
+          type: "trade_failed",
+          botName: `AI Trader ${bot.market}`,
+          market: bot.market,
+          side: side === "long" ? "LONG" : "SHORT",
+          error:
+            `Entry order was broadcast but its on-chain landing could not be confirmed. ` +
+            `The bot is quarantined from new entries while automatic reconciliation keeps checking the venue — ` +
+            `a late-landing position will be stop-protected or safely closed. ` +
+            `If reconciliation cannot settle it within a few minutes you'll get a final alert; verify the exchange before resuming.`,
         });
+        return {
+          ok: false,
+          reason: "position_unconfirmed",
+          detail: `entry order unconfirmed — the transaction may still land, so a flat probe is not proof of a clean abort; persisted 'unconfirmed_landing' for monitor reconciliation (${orderResult.error ?? "unknown"})`,
+        };
       }
       // Order rejected. Probe once for a position anyway (a venue "failure"
       // response is not proof nothing filled); a confirmed-flat account means
@@ -448,6 +465,11 @@ async function executeLiveEntry(
       }
       // Can't prove we're flat — treat like an unconfirmed position: try to
       // close whatever might exist, pause for human eyes.
+      // NOTE: because pauseReason is 'position_unconfirmed', bots paused here
+      // (and at the no-position-appeared site below) are ALSO picked up by
+      // reconcileUnconfirmedLanding every tick — intentional: flat bots get a
+      // clean expiry, and a position that shows up late gets adopted or
+      // orphan-flattened instead of sitting naked.
       return await emergencyCloseAndPause({
         input, keyTrio, subaccountId,
         pauseReason: "position_unconfirmed",

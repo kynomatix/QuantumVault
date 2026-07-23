@@ -602,15 +602,17 @@ describe("live execution — failure handling (fail closed)", () => {
     expect(cleanupKey).toHaveBeenCalled();
   });
 
-  it("UNCONFIRMED-LANDING verdict → emergency close + pause even though the probe would read flat (tx may still land)", async () => {
+  it("UNCONFIRMED-LANDING verdict → QUARANTINE (no close, no probe): persist unconfirmed_landing + pause for reconciliation", async () => {
     // Flash landing-verification timeout: the tx was BROADCAST and may still
     // land inside the blockhash window (~60–90s). A flat probe at ~30s is NOT
-    // proof of a clean abort — an idle verdict would let auto-next re-enter
-    // while the original tx can still fill → double-open. Must skip the flat
-    // probe entirely and go fail-closed.
+    // proof of a clean abort, and an emergency close against a flat venue is a
+    // NO-OP — if the entry lands right after it, the bot is paused with a
+    // NAKED position nobody monitors. Correct behavior: touch NOTHING on the
+    // venue, persist the honest 'unconfirmed_landing' state, pause, and let
+    // the monitor's reconciler settle it against reality.
     armLiveAuth();
     const { UNCONFIRMED_LANDING_VERDICT_TOKEN } = await import("../../server/protocol/tx-verdicts");
-    const getPositionsMock = vi.fn(async () => []); // flat — and must NOT be trusted (or even consulted)
+    const getPositionsMock = vi.fn(async () => []); // flat — and must NOT be consulted
     const adapter = makeAdapter({
       placeMarketOrder: vi.fn(async () => ({
         success: false,
@@ -629,13 +631,23 @@ describe("live execution — failure handling (fail closed)", () => {
     });
     expect(r).toMatchObject({ ok: false, reason: "position_unconfirmed" });
     expect((r as any).detail).toContain("may still land");
+    expect((r as any).detail).toContain("unconfirmed_landing");
     // The clean-abort flat probe must be SKIPPED — not run-and-ignored.
     expect(getPositionsMock).not.toHaveBeenCalled();
-    // Fail-closed destination: reduce-only close attempt + pause + notify.
-    expect((adapter.closePosition as any)).toHaveBeenCalled();
+    // NO venue write of any kind: a close against a flat venue is a no-op that
+    // manufactures the naked-position window.
+    expect((adapter.closePosition as any)).not.toHaveBeenCalled();
+    // Honest persisted state for the reconciler to key on.
+    expect(updateDecisionMock).toHaveBeenCalledWith("d-1", { outcome: "unconfirmed_landing" });
+    expect(updateDecisionMock).not.toHaveBeenCalledWith("d-1", expect.objectContaining({ outcome: "aborted_order" }));
+    // Bot row write LAST (its updatedAt anchors the reconciler's landing window).
     expect(updateBotMock).toHaveBeenCalledWith("bot-1111-2222", { status: "paused", pauseReason: "position_unconfirmed" });
     expect(updateBotMock).not.toHaveBeenCalledWith("bot-1111-2222", { status: "idle" });
-    expect(updateDecisionMock).toHaveBeenCalledWith("d-1", { outcome: "aborted_order" });
+    const decisionCallOrder = updateDecisionMock.mock.invocationCallOrder[0];
+    const botCallOrder = updateBotMock.mock.invocationCallOrder[updateBotMock.mock.invocationCallOrder.length - 1];
+    expect(decisionCallOrder).toBeLessThan(botCallOrder);
+    // Exactly ONE notification.
+    expect(notifyMock).toHaveBeenCalledTimes(1);
     expect(notifyMock).toHaveBeenCalledWith("WALLET_X", expect.objectContaining({ type: "trade_failed" }));
     expect(cleanupKey).toHaveBeenCalled();
   });

@@ -102,6 +102,15 @@ const MALFUNCTION_TRADES_PER_DAY = 20;
 const EXIT_CLASSIFY_TOLERANCE_PCT = 0.5;
 /** Slippage cap forwarded to protective closePosition calls. */
 const PROTECTIVE_CLOSE_MAX_SLIPPAGE_PCT = 1.0;
+/**
+ * How long an unconfirmed-landing entry keeps being reconciled against the
+ * venue before a SUCCESSFUL flat read is accepted as terminal. Conservative:
+ * the Solana blockhash validity window is ~60–90s; 5 minutes covers RPC lag,
+ * venue indexing delay and clock slop. Measured from the bot row's updatedAt
+ * (the quarantine write is the LAST write while pending — any bot-row update
+ * would restart the window, so the pending path never touches the row).
+ */
+const UNCONFIRMED_LANDING_WINDOW_MS = 5 * 60_000;
 
 // --- Module state --------------------------------------------------------------------
 
@@ -1655,10 +1664,188 @@ async function markUnfinishedDecisionsCrashed(botId: string): Promise<void> {
 }
 
 /**
+ * Reconcile a quarantined unconfirmed-landing entry (bot paused with
+ * pauseReason 'position_unconfirmed', decision outcome 'unconfirmed_landing')
+ * against venue reality. The executor persists this state INSTEAD of an
+ * immediate emergency close, because a close fired while the venue still
+ * reads flat is a no-op — the entry tx can land AFTER it, leaving a naked
+ * position on a paused, unmonitored bot. This function runs every tick (and
+ * at startup) until the state settles one of three ways:
+ *
+ *   1. Position appears → adopt it: verify/complete the bracket (startup
+ *      pattern), then promote decision → 'executed' (venue entry price) and
+ *      bot → 'open'. Bracket unrestorable ⇒ protective close + pause
+ *      'bracket_failed' (never idle).
+ *   2. SUCCESSFUL flat read after the window → terminal clean abort:
+ *      decision → 'aborted_order', bot pauseReason → 'position_unconfirmed_expired'
+ *      (the flip is the anti-repeat guard — this state is no longer
+ *      recognized here), ONE final notification.
+ *   3. Venue read FAILED, or flat but still inside the window → stay pending
+ *      untouched. A read error is never proof of flatness, and the pending
+ *      path never writes the bot row (updateAiTraderBot bumps updatedAt,
+ *      which would restart the window).
+ *
+ * Returns true when this pass reached a verdict or is cleanly pending;
+ * false ⇒ venue read failed (caller may queue a reconciliation retry).
+ */
+export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boolean> {
+  // Unreachable for paper bots (the executor's unconfirmed branch is
+  // live-only), but fail safe rather than loop on venue reads forever.
+  if (bot.paperMode) {
+    await markUnfinishedDecisionsCrashed(bot.id);
+    await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "position_unconfirmed_expired" });
+    return true;
+  }
+
+  let adapter: ProtocolAdapter;
+  try {
+    adapter = getAdapter(bot.protocol);
+  } catch (err) {
+    console.error(`[AiTraderMonitor] unconfirmed-landing: no adapter for '${bot.protocol}' (bot ${bot.id.slice(0, 8)}): ${err instanceof Error ? err.message : err}`);
+    return false;
+  }
+  const wallet = await storage.getWallet(bot.walletAddress);
+  if (!wallet?.agentPublicKey) {
+    console.error(`[AiTraderMonitor] unconfirmed-landing: bot ${bot.id.slice(0, 8)} wallet has no agentPublicKey`);
+    return false;
+  }
+  const readAccount = liveReadAccount(bot, wallet.agentPublicKey);
+  const subaccountId = undefined;
+
+  let positions: ProtocolPosition[];
+  try {
+    positions = await adapter.getPositions(readAccount, subaccountId);
+  } catch (err) {
+    // A failed read is NOT proof of flatness — stay pending, retry next tick.
+    console.warn(`[AiTraderMonitor] unconfirmed-landing: getPositions failed for bot ${bot.id.slice(0, 8)} (${err instanceof Error ? err.message : err}) — still pending`);
+    return false;
+  }
+  const position = matchPosition(positions, bot.market);
+  const decisions = await storage.getAiTraderDecisions(bot.id, 10);
+  const row = decisions.find((d) => d.outcome === "unconfirmed_landing" && !d.closedAt) ?? null;
+
+  if (position) {
+    // The broadcast entry DID land. Adopt it under the recorded decision.
+    const view = row ? parseOpenDecision([{ ...row, outcome: "executed" }]) : parseOpenDecision(decisions);
+    if (!view) {
+      // A position we cannot attribute to a usable decision row: fail closed —
+      // flatten (same as the startup orphan path).
+      console.error(`[AiTraderMonitor] unconfirmed-landing: bot ${bot.id.slice(0, 8)} position landed with NO usable decision row — closing for safety`);
+      const res = await withSigningContext(bot, (keyTrio) =>
+        adapter.closePosition({ ...keyTrio, internalSymbol: bot.market, subaccountId: undefined, maxSlippagePct: PROTECTIVE_CLOSE_MAX_SLIPPAGE_PCT })
+      );
+      if (row) await storage.updateAiTraderDecision(row.id, { outcome: "aborted_order" });
+      await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "reconcile_orphan_position" });
+      await sendTradeNotification(bot.walletAddress, {
+        type: "trade_failed",
+        botName: botLabel(bot),
+        market: bot.market,
+        error: res.ok && res.value.success
+          ? "A late-landing entry could not be matched to its decision record; the position was closed and the bot paused."
+          : "A late-landing entry could not be matched to its decision record and COULD NOT be closed — check the venue.",
+      });
+      return true;
+    }
+    const adoptedView: OpenDecisionView = { ...view, entryPrice: position.entryPrice };
+
+    // Complete the bracket before promoting (the entry landed with no TP/SL).
+    if (typeof adapter.setTpSl !== "function" || typeof adapter.getOpenStopOrders !== "function") {
+      await storage.updateAiTraderDecision(view.decision.id, {
+        outcome: "executed",
+        entryPrice: position.entryPrice.toFixed(8),
+      });
+      await closeLivePositionAndPause(bot, adoptedView, adapter, {
+        pauseReason: "bracket_failed",
+        exitReason: "circuit_breaker",
+        detail: "unconfirmed-landing reconcile: entry landed but the adapter cannot guarantee a bracket (G10) — position closed",
+      });
+      return true;
+    }
+    let bracketOk = false;
+    try {
+      const resting = await adapter.getOpenStopOrders(readAccount, subaccountId, bot.market);
+      bracketOk = resting.length > 0;
+    } catch {
+      bracketOk = false;
+    }
+    if (!bracketOk) {
+      const placed = await withSigningContext(bot, (keyTrio) =>
+        adapter.setTpSl!({
+          ...keyTrio,
+          internalSymbol: bot.market,
+          stopLossPrice: view.stopLossPrice,
+          takeProfitPrice: view.takeProfitPrice,
+          subaccountId,
+        })
+      );
+      let verified = false;
+      if (placed.ok && placed.value.success) {
+        try {
+          const after = await adapter.getOpenStopOrders(readAccount, subaccountId, bot.market);
+          verified = after.length > 0;
+        } catch {
+          verified = false;
+        }
+      }
+      if (!verified) {
+        // Record the entry HONESTLY (it filled) before the protective close so
+        // the close books against an executed decision, then pause — never idle.
+        await storage.updateAiTraderDecision(view.decision.id, {
+          outcome: "executed",
+          entryPrice: position.entryPrice.toFixed(8),
+        });
+        await closeLivePositionAndPause(bot, adoptedView, adapter, {
+          pauseReason: "bracket_failed",
+          exitReason: "circuit_breaker",
+          detail: "unconfirmed-landing reconcile: entry landed but the bracket could not be restored — position closed for safety (G10)",
+        });
+        return true;
+      }
+    }
+
+    // Bracket confirmed: promote to a clean monitored 'open' state.
+    await storage.updateAiTraderDecision(view.decision.id, {
+      outcome: "executed",
+      entryPrice: position.entryPrice.toFixed(8),
+    });
+    await storage.updateAiTraderBot(bot.id, { status: "open", pauseReason: null });
+    console.log(`[AiTraderMonitor] unconfirmed-landing: bot ${bot.id.slice(0, 8)} late entry ADOPTED — decision ${view.decision.id.slice(0, 8)} → executed @ ${position.entryPrice}, bot → open (bracket verified)`);
+    return true;
+  }
+
+  // Flat on a SUCCESSFUL read. Only a read that provably worked can expire the
+  // quarantine; measure from the quarantine write (bot updatedAt).
+  const windowStartMs = bot.updatedAt ? new Date(bot.updatedAt).getTime() : 0;
+  if (Date.now() - windowStartMs < UNCONFIRMED_LANDING_WINDOW_MS) {
+    return true; // still inside the landing window — pending, touch nothing
+  }
+  if (row) {
+    await storage.updateAiTraderDecision(row.id, { outcome: "aborted_order" });
+  }
+  await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "position_unconfirmed_expired" });
+  await sendTradeNotification(bot.walletAddress, {
+    type: "trade_failed",
+    botName: botLabel(bot),
+    market: bot.market,
+    error:
+      `An entry order that could not be confirmed has now stayed flat on the venue past the landing window — treated as a clean abort. ` +
+      `The bot remains paused; verify the exchange, then resume it when you're satisfied.`,
+  });
+  console.log(`[AiTraderMonitor] unconfirmed-landing: bot ${bot.id.slice(0, 8)} flat past window → expired (aborted_order)`);
+  return true;
+}
+
+/**
  * Resolve one bot's crash-marker status against reality. Returns true when
  * resolved (false ⇒ venue read failed; caller keeps it pending for retry).
  */
 export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> {
+  // A quarantined unconfirmed-landing entry survives restarts via its
+  // persisted state (paused/position_unconfirmed + 'unconfirmed_landing'
+  // decision row) — route it to its dedicated reconciler.
+  if (bot.status === "paused" && bot.pauseReason === "position_unconfirmed") {
+    return reconcileUnconfirmedLanding(bot);
+  }
   const preOpen = bot.status === "executing" || bot.status === "analyzing" || bot.status === "proposed";
   if (!preOpen && bot.status !== "open") return true;
 
@@ -1838,6 +2025,12 @@ export async function reconcileOnStartup(): Promise<void> {
 
 /** One monitoring pass for a single bot (exported for tests). */
 export async function monitorBotOnce(bot: AiTraderBot): Promise<void> {
+  // Quarantined unconfirmed-landing entries are actively reconciled every
+  // tick — the pause is a quarantine from NEW entries, not from monitoring.
+  if (bot.status === "paused" && bot.pauseReason === "position_unconfirmed") {
+    await reconcileUnconfirmedLanding(bot);
+    return;
+  }
   if (bot.status !== "open") return;
   const decisions = await storage.getAiTraderDecisions(bot.id, 10);
   const view = parseOpenDecision(decisions);

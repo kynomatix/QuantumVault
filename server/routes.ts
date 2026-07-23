@@ -1585,7 +1585,7 @@ import { classifySignal } from "./trading/signal-classifier";
 import { registerTelegramMiniAppRoutes } from "./telegram-mini-app";
 import { registerAiTraderRoutes } from "./ai-trader/routes";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, healExecutionUmkFromStorage, restoreWalletSecurityFromStorage, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, decryptBotSubaccountKey, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3, rebindRetainedKeyToBotUuidV3, decryptMnemonic, deriveBotKeypairFromAgentSeed, BOT_DERIVATION_PATH_VERSION } from "./session-v3";
-import { queueTradeRetry, isRateLimitError, isTransientError, getQueueStatus, registerRoutingCallback, cancelRetryJobsForBot } from "./trade-retry-service";
+import { queueTradeRetry, isRateLimitError, isTransientError, isCollateralRetryError, getQueueStatus, registerRoutingCallback, cancelRetryJobsForBot } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { DOCS_MARKDOWN } from "./docs-markdown";
 
@@ -18726,9 +18726,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         console.log(`[Webhook] TRADE FAILURE CONTEXT: freeCollateral=$${freeCollateral.toFixed(2)}, maxTradeableValue=$${maxTradeableValue.toFixed(2)}, tradeAmountUsd=$${tradeAmountUsd.toFixed(2)}, finalContractSize=${finalContractSize}, oraclePrice=$${oraclePrice.toFixed(2)}, notional=$${(finalContractSize * oraclePrice).toFixed(2)}`);
         
         // Check if this is a transient error (rate limit, price feed, oracle) or temporary collateral issue - queue for automatic retry
+        // (isCollateralRetryError hard-excludes the unconfirmed-landing verdict — the tx may still land)
         const errorToCheck = orderResult.error || '';
         const isTransient = isTransientError(errorToCheck);
-        const isCollateralError = errorToCheck.includes('InsufficientCollateral') || errorToCheck.includes('6010');
+        const isCollateralError = isCollateralRetryError(errorToCheck);
         console.log(`[Webhook] Retry eligibility: isTransient=${isTransient}, isCollateralError=${isCollateralError}, error="${errorToCheck.slice(0, 100)}..."`);
         
         // Also retry on InsufficientCollateral - sometimes it's a temporary condition due to oracle price spikes
@@ -19965,9 +19966,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         console.log(`[User Webhook] Trade failed: ${orderResult.error}`);
         
         // Check if this is a transient error (rate limit, timeout, price feed) - queue for automatic retry
+        // (isCollateralRetryError hard-excludes the unconfirmed-landing verdict — the tx may still land)
         const errorToCheck = orderResult.error || '';
         const isTransient = isTransientError(errorToCheck);
-        const isCollateralError = errorToCheck.includes('InsufficientCollateral') || errorToCheck.includes('6010');
+        const isCollateralError = isCollateralRetryError(errorToCheck);
         console.log(`[User Webhook] Retry eligibility: isTransient=${isTransient}, isCollateralError=${isCollateralError}, error="${errorToCheck.slice(0, 100)}..."`);
         
         if (isTransient || isCollateralError) {
