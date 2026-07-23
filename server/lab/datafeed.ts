@@ -1060,13 +1060,19 @@ export async function fetchOHLCV(
           },
         });
       } catch (err: any) {
-        if (err?.name === "AbortError") {
-          if (signal?.aborted) {
-            // Caller cancelled (sweep teardown): plain abort, no incident,
-            // no degradation accounting.
-            throw err;
-          }
-          // Budget expiry on a deadline-bounded live caller: typed
+        // Signal-state is authoritative — check state before error name so a
+        // query that rejects with a plain Error after a signal fired is still
+        // classified by that signal's outcome, not by the error's name.
+        if (signal?.aborted) {
+          // Caller cancelled (sweep teardown): plain abort, no incident,
+          // no degradation accounting.
+          if (err?.name === "AbortError") throw err;
+          throw makeAbortError();
+        }
+        if (budgetCtrl.signal.aborted || err?.name === "AbortError") {
+          // Budget expiry: budgetCtrl fired (regardless of what the query
+          // threw — signal state wins), OR the inner AbortError surfaced
+          // from the candle-store's budget-abort path. Either way: typed
           // degradation. Do NOT reinterpret as a miss.
           const ph = phases
             ? ` sem=${phases.semaphoreWaitMs}ms acquire=${phases.poolAcquireMs}ms query=${phases.queryMs}ms`
@@ -1081,9 +1087,22 @@ export async function fetchOHLCV(
           }
           throw new CacheDegradedError(symbol, timeframe, cacheBudgetMs, phases);
         }
-        // Belt-and-braces: getCachedCandles fail-opens non-abort errors to
-        // null itself, but keep the historical miss contract if one escapes.
-        cached = null;
+        // Operational error (pool checkout failure, SQL/query timeout,
+        // connection error) that reached us before either signal fired.
+        // Any cache-read operational failure is degradation — never a miss
+        // that would start a network fallback while the DB is degraded.
+        const phOp = phases
+          ? ` sem=${phases.semaphoreWaitMs}ms acquire=${phases.poolAcquireMs}ms query=${phases.queryMs}ms`
+          : "";
+        const opMsg = `[CandleCache] Degraded (cache read error): ${symbol} ${timeframe}${phOp}: ${err?.message ?? String(err)}`;
+        console.log(opMsg);
+        appendTelemetry(opMsg);
+        try {
+          datafeedIncidentReporter?.({ kind: "slow_cache", symbol, timeframe, budgetMs: cacheBudgetMs, phases });
+        } catch {
+          // Reporter must never break the fetch path.
+        }
+        throw new CacheDegradedError(symbol, timeframe, cacheBudgetMs, phases);
       } finally {
         clearTimeout(budgetTimer);
         if (signal) signal.removeEventListener("abort", onCallerAbort);

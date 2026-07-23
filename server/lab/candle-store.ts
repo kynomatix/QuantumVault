@@ -259,14 +259,28 @@ export async function getCachedCandles(
     finish(result === null ? "miss" : "hit");
     return result;
   } catch (err: any) {
+    // Signal-state is authoritative: even a non-AbortError exception must be
+    // reclassified as the governing signal's outcome if that signal has
+    // already fired (e.g. a query that rejects with a plain Error after the
+    // budget signal fired is still a deadline, not an operational failure).
+    if (isSignalAborted(signal)) {
+      finish(abortOutcome());
+      throw makeAbortError(signal!.reason);
+    }
     if (err?.name === "AbortError") {
       finish(abortOutcome());
       throw err; // typed cancellation propagates to fetchOHLCV's classifier
     }
-    // Fail-open (historical contract): a non-abort read error is a cache
-    // miss — deadline-less callers (Lab) fall through to the network.
+    // Operational error (pool checkout failure, query timeout, connection
+    // error, post-query processing error). Record it, then:
+    //  - Deadline-bounded callers (signal present): re-throw so the datafeed
+    //    boundary converts it to CacheDegradedError — operational failures
+    //    are degradation, never a miss that permits network fallback.
+    //  - Deadline-less callers (Lab): fail-open to null so a miss triggers a
+    //    cheaper network refetch rather than a fatal failure.
     console.log(`[CandleCache] Read error: ${err?.message ?? err}`);
     finish("query_error");
+    if (signal) throw err;
     return null;
   } finally {
     activeCandleReads--;

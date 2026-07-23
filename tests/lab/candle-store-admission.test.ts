@@ -157,6 +157,55 @@ describe("getCachedCandles — cancellation-aware admission", () => {
     expect(release).toHaveBeenCalledWith();
   });
 
+  it("F (WO-10): pool checkout fails with non-AbortError, signal present and not yet aborted → re-throws (not null); semaphore decremented; outcome=query_error", async () => {
+    // Verifies: operational failures (pool, connection, query-timeout) are
+    // re-thrown for deadline-bounded callers instead of being swallowed to null.
+    const checkoutErr = new Error("Pool checkout timeout");
+    fakePool.connect.mockRejectedValueOnce(checkoutErr);
+    const ctrl = new AbortController(); // signal present but NOT aborted
+    let phases: CandleReadPhases | undefined;
+
+    await expect(read(ctrl.signal, (p) => (phases = p))).rejects.toThrow("Pool checkout timeout");
+    expect(phases?.outcome).toBe("query_error");
+    // Semaphore must be released (counter returns to zero).
+    expect(getCandleStoreLoad().activeReads).toBe(0);
+    // Pool was contacted exactly once (checkout was attempted).
+    expect(fakePool.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("G (WO-10): budget signal fires while query pending, query then rejects with plain Error → AbortError (signal-state wins); client released-with-error", async () => {
+    // Verifies: a non-AbortError exception is reclassified as the governing
+    // signal's outcome when that signal has already fired — the error name is
+    // NOT authoritative once the signal state is known.
+    const release = vi.fn();
+    const queryDef = deferred<{ rows: unknown[] }>();
+    fakePool.connect.mockResolvedValueOnce({
+      release,
+      query: vi.fn().mockReturnValueOnce(queryDef.promise),
+    });
+    const ctrl = new AbortController();
+    let phases: CandleReadPhases | undefined;
+
+    const p = read(ctrl.signal, (ph) => (phases = ph));
+    p.catch(() => {}); // suppress unhandled-rejection before expect() adds its handler
+    await tick(); // SELECT is now in-flight
+
+    // Fire the budget signal FIRST, then reject the query with a plain Error.
+    ctrl.abort(CACHE_BUDGET_ABORT_REASON);
+    queryDef.reject(new Error("DB reset connection"));
+    await tick();
+
+    // The caller must see AbortError (signal-state wins over error name).
+    await expect(p).rejects.toMatchObject({ name: "AbortError" });
+    expect(phases?.outcome).toBe("deadline");
+    // The query failed, so the client must be released WITH an error so
+    // pg-pool destroys the suspect connection instead of recycling it.
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledWith(expect.any(Error));
+    // Semaphore must be decremented.
+    expect(getCandleStoreLoad().activeReads).toBe(0);
+  });
+
   it("E: signal-free reads keep the historical contract — empty result is a miss, client released", async () => {
     const release = vi.fn();
     fakePool.connect.mockResolvedValueOnce({

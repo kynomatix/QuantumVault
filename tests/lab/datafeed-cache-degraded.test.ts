@@ -91,6 +91,68 @@ describe("fetchOHLCV — slow cache under a deadline", () => {
     expect(mockSave).not.toHaveBeenCalled();
   });
 
+  it("WO-10: budget fires during cache read, query then rejects with plain Error (non-AbortError) → CacheDegradedError (signal-state wins), no providers, no write", async () => {
+    // The budget timer fires while getCachedCandles is pending. The inner
+    // candle-store code re-throws with a non-AbortError because the query
+    // rejected with a plain Error after the budget signal fired. The
+    // datafeed catch must check budgetCtrl.signal.aborted (state-first) and
+    // convert to CacheDegradedError — NOT interpret the non-AbortError as a
+    // miss that allows network fallback.
+    let rejectQuery!: (e: Error) => void;
+    mockGetCached.mockImplementation(
+      () =>
+        new Promise<null>((_res, rej) => {
+          rejectQuery = rej;
+        }),
+    );
+
+    const p = runFetch(4_000);
+    p.catch(() => {});
+
+    // Advance past the 1000ms cache budget to fire budgetCtrl.
+    await vi.advanceTimersByTimeAsync(1_100);
+
+    // Now reject the pending getCachedCandles with a plain Error — simulating
+    // what candle-store does when the query rejects with a non-AbortError
+    // after the signal has fired.
+    rejectQuery(new Error("DB reset connection"));
+    await vi.advanceTimersByTimeAsync(10);
+
+    let caught: unknown;
+    try {
+      await p;
+    } catch (err) {
+      caught = err;
+    }
+    expect(isCacheDegradedError(caught)).toBe(true);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockSave).not.toHaveBeenCalled();
+  });
+
+  it("WO-10: operational cache-read error before budget fires (pool/SQL/connection failure) → CacheDegradedError, no providers, no write", async () => {
+    // getCachedCandles rejects immediately with an operational error (not an
+    // AbortError, budget not yet expired). Datafeed must classify this as
+    // degradation — never a miss — so it does not start OKX/Gate/Pyth calls
+    // or a cache write-back while the DB is degraded.
+    mockGetCached.mockImplementation(() =>
+      Promise.reject(new Error("Pool checkout timeout")),
+    );
+
+    const p = runFetch(4_000);
+    p.catch(() => {});
+    await vi.advanceTimersByTimeAsync(10); // let rejection propagate
+
+    let caught: unknown;
+    try {
+      await p;
+    } catch (err) {
+      caught = err;
+    }
+    expect(isCacheDegradedError(caught)).toBe(true);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockSave).not.toHaveBeenCalled();
+  });
+
   it("caller abort (sweep teardown) → plain AbortError, NOT CacheDegradedError", async () => {
     const ctrl = new AbortController();
     const p = runFetch(60_000, ctrl.signal); // budget far away; caller cancels first
