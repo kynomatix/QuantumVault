@@ -640,15 +640,101 @@ describe("live execution — failure handling (fail closed)", () => {
     // Honest persisted state for the reconciler to key on.
     expect(updateDecisionMock).toHaveBeenCalledWith("d-1", { outcome: "unconfirmed_landing" });
     expect(updateDecisionMock).not.toHaveBeenCalledWith("d-1", expect.objectContaining({ outcome: "aborted_order" }));
-    // Bot row write LAST (its updatedAt anchors the reconciler's landing window).
+    // Bot quarantine write FIRST (WO 01.1 crash-consistency: its updatedAt
+    // anchors the landing window AND a crash between the two writes must leave
+    // the recognized paused/position_unconfirmed state, never a bare
+    // 'executing' bot whose decision already says unconfirmed_landing).
     expect(updateBotMock).toHaveBeenCalledWith("bot-1111-2222", { status: "paused", pauseReason: "position_unconfirmed" });
     expect(updateBotMock).not.toHaveBeenCalledWith("bot-1111-2222", { status: "idle" });
     const decisionCallOrder = updateDecisionMock.mock.invocationCallOrder[0];
     const botCallOrder = updateBotMock.mock.invocationCallOrder[updateBotMock.mock.invocationCallOrder.length - 1];
-    expect(decisionCallOrder).toBeLessThan(botCallOrder);
+    expect(botCallOrder).toBeLessThan(decisionCallOrder);
     // Exactly ONE notification.
     expect(notifyMock).toHaveBeenCalledTimes(1);
     expect(notifyMock).toHaveBeenCalledWith("WALLET_X", expect.objectContaining({ type: "trade_failed" }));
+    expect(cleanupKey).toHaveBeenCalled();
+  });
+
+  it("WO 01.1: bot quarantine write REJECTS → no unconfirmed_landing decision write, no idle, no venue touch; error propagates", async () => {
+    // Crash point 1 (before either quarantine write lands): if the bot write
+    // itself fails, NOTHING may be persisted for this state — the decision
+    // must NOT carry 'unconfirmed_landing' (that would recreate the old
+    // decision-first partial state), no idle verdict may be written, and the
+    // venue must not be touched. The 'executing' crash marker remains and the
+    // storage error propagates to the caller's existing crash handling.
+    armLiveAuth();
+    const { UNCONFIRMED_LANDING_VERDICT_TOKEN } = await import("../../server/protocol/tx-verdicts");
+    const getPositionsMock = vi.fn(async () => []);
+    const adapter = makeAdapter({
+      placeMarketOrder: vi.fn(async () => ({
+        success: false,
+        status: "rejected" as const,
+        error: `open transaction did not confirm on-chain within the verification window (sig 5Kt429xyz). Not booked as filled. ${UNCONFIRMED_LANDING_VERDICT_TOKEN}`,
+      })),
+      getPositions: getPositionsMock,
+    });
+    updateBotMock.mockImplementation(async (_id: string, updates: Record<string, unknown>) => {
+      if (updates?.pauseReason === "position_unconfirmed") throw new Error("db down");
+      return {};
+    });
+    const { executeDecision } = await importExecutor();
+    await expect(
+      executeDecision({
+        bot: makeBot({ paperMode: false }),
+        decisionId: "d-1",
+        clamped: makeClamped(),
+        adapter,
+        markPrice: 150,
+      })
+    ).rejects.toThrow("db down");
+    expect(updateDecisionMock).not.toHaveBeenCalledWith("d-1", expect.objectContaining({ outcome: "unconfirmed_landing" }));
+    expect(updateBotMock).not.toHaveBeenCalledWith("bot-1111-2222", { status: "idle" });
+    expect(getPositionsMock).not.toHaveBeenCalled();
+    expect((adapter.closePosition as any)).not.toHaveBeenCalled();
+    // Key material still zeroed on the throw path.
+    expect(cleanupKey).toHaveBeenCalled();
+  });
+
+  it("WO 01.1: decision write REJECTS after the bot write → quarantine stays, no rollback to idle, no venue touch", async () => {
+    // Crash point 2 (after the bot write, before the decision write): the
+    // durable quarantine already exists, so the executor must NOT roll the
+    // bot back or touch the venue — the reconciler treats the missing
+    // unconfirmed row as unattributed (position ⇒ orphan flatten; flat expiry
+    // just flips the pauseReason). The call still completes its quarantine
+    // contract: one notification, position_unconfirmed result.
+    armLiveAuth();
+    const { UNCONFIRMED_LANDING_VERDICT_TOKEN } = await import("../../server/protocol/tx-verdicts");
+    const getPositionsMock = vi.fn(async () => []);
+    const adapter = makeAdapter({
+      placeMarketOrder: vi.fn(async () => ({
+        success: false,
+        status: "rejected" as const,
+        error: `open transaction did not confirm on-chain within the verification window (sig 5Kt429xyz). Not booked as filled. ${UNCONFIRMED_LANDING_VERDICT_TOKEN}`,
+      })),
+      getPositions: getPositionsMock,
+    });
+    updateDecisionMock.mockImplementation(async (_id: string, updates: Record<string, unknown>) => {
+      if (updates?.outcome === "unconfirmed_landing") throw new Error("db blip");
+      return {};
+    });
+    const { executeDecision } = await importExecutor();
+    const r = await executeDecision({
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-1",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+    expect(r).toMatchObject({ ok: false, reason: "position_unconfirmed" });
+    // Quarantine persisted BEFORE the failing decision write…
+    expect(updateBotMock).toHaveBeenCalledWith("bot-1111-2222", { status: "paused", pauseReason: "position_unconfirmed" });
+    // …and never rolled back or downgraded afterwards.
+    expect(updateBotMock).not.toHaveBeenCalledWith("bot-1111-2222", { status: "idle" });
+    const lastBotWrite = updateBotMock.mock.calls[updateBotMock.mock.calls.length - 1][1] as Record<string, unknown>;
+    expect(lastBotWrite).toEqual({ status: "paused", pauseReason: "position_unconfirmed" });
+    expect(getPositionsMock).not.toHaveBeenCalled();
+    expect((adapter.closePosition as any)).not.toHaveBeenCalled();
+    expect(notifyMock).toHaveBeenCalledTimes(1);
     expect(cleanupKey).toHaveBeenCalled();
   });
 

@@ -1860,6 +1860,42 @@ export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> 
     return true;
   }
 
+  // Partial-quarantine recovery (WO 01.1): a crash between the executor's two
+  // quarantine writes can leave status 'executing' while the most recent
+  // unclosed decision already carries 'unconfirmed_landing' (the old
+  // decision-first write order created exactly this window). The generic
+  // pre-open path below would flat-read → idle (and startup could arm
+  // auto-next) while the broadcast tx can still land — the no-re-entry
+  // invariant this state exists to protect. Re-quarantine FIRST: the fresh
+  // bot write re-anchors a conservative five-minute window, then route
+  // straight into the dedicated reconciler. Deliberately scoped to
+  // 'executing' only — an unconfirmed broadcast can only originate after the
+  // executor persisted 'executing', so analyzing/proposed keep the existing
+  // crash handling untouched.
+  if (bot.status === "executing") {
+    // Fail closed on the detection read: if we cannot rule the partial state
+    // out, the generic flat→idle path below is exactly the unsafe outcome —
+    // keep the bot pending for retry instead (same contract as a venue read
+    // failure).
+    let recent: AiTraderDecision[];
+    try {
+      recent = await storage.getAiTraderDecisions(bot.id, 10);
+    } catch (err) {
+      console.warn(`[AiTraderMonitor] reconcile: decision read failed for bot ${bot.id.slice(0, 8)} (${err instanceof Error ? err.message : err}) — will retry`);
+      return false;
+    }
+    const latestUnclosed = recent.find((d) => !d.closedAt) ?? null;
+    if (latestUnclosed?.outcome === "unconfirmed_landing") {
+      const requarantined = await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "position_unconfirmed" });
+      console.warn(
+        `[AiTraderMonitor] reconcile: bot ${bot.id.slice(0, 8)} 'executing' with an 'unconfirmed_landing' decision (partial quarantine write) — re-quarantined, routing to unconfirmed-landing reconciler`
+      );
+      if (!requarantined) return true; // bot row vanished mid-flight — nothing to reconcile
+      // Never the generic executing→idle path, never aborted_crash for this row.
+      return reconcileUnconfirmedLanding(requarantined);
+    }
+  }
+
   const adapter = getAdapter(bot.protocol);
   const wallet = await storage.getWallet(bot.walletAddress);
   if (!wallet?.agentPublicKey) {
@@ -2014,10 +2050,25 @@ export async function reconcileOnStartup(): Promise<void> {
   // halt every hands-off bot until its next manual close. Scheduling is safe
   // to over-apply — runAutoCycle re-reads the bot and gates on
   // idle + mode:'auto' + autoNext before doing anything.
+  //
+  // WO 01.1: bots whose SNAPSHOT status was a pre-open transient
+  // (executing/analyzing/proposed) may have been re-quarantined or paused by
+  // the reconciliation pass above — arming from the stale snapshot would put
+  // a timer on a quarantined bot. Re-read just that small set and gate on the
+  // post-reconciliation row; all other bots arm from the snapshot as before.
   for (const bot of bots) {
-    if (bot.mode === "auto" && bot.autoNext && bot.status !== "paused") {
-      scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
+    if (bot.mode !== "auto" || !bot.autoNext) continue;
+    const wasPreOpenTransient = bot.status === "executing" || bot.status === "analyzing" || bot.status === "proposed";
+    let effective: AiTraderBot | undefined = bot;
+    if (wasPreOpenTransient) {
+      try {
+        effective = await storage.getAiTraderBot(bot.id);
+      } catch {
+        continue; // can't prove post-reconciliation state — don't arm
+      }
     }
+    if (!effective || effective.status === "paused" || effective.mode !== "auto" || !effective.autoNext) continue;
+    scheduleAutoNext(effective.id, nextCycleTimeframe(effective));
   }
 }
 

@@ -933,9 +933,127 @@ describe("startup reconciliation", () => {
     expect(vi.getTimerCount()).toBe(1);
   });
 
+  it("WO 01.1: recovers the decision-first partial state (executing + unconfirmed_landing) → re-quarantine + dedicated reconciler, never idle/aborted_crash", async () => {
+    // Crash point 4 (restart from the OLD decision-first partial write): bot
+    // still 'executing', decision already 'unconfirmed_landing'. The generic
+    // pre-open flat path would set idle while the broadcast tx can still
+    // land. Required: re-persist paused/position_unconfirmed with a FRESH
+    // updatedAt window anchor, route into reconcileUnconfirmedLanding, and a
+    // flat read inside that fresh window stays pending (no expiry writes).
+    const { reconcileBotOnStartup } = await importMonitor();
+    armLiveAuth();
+    const getPositions = vi.fn(async () => []); // provably flat
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions }));
+    getDecisionsMock.mockResolvedValue([
+      makeOpenDecision({ id: "dec-u", outcome: "unconfirmed_landing" }),
+    ]);
+    // Stale bot row: last touched 10 min ago. If the code measured the window
+    // from THIS row instead of the fresh re-quarantine write, the flat read
+    // would (wrongly) expire the quarantine.
+    const staleBot = makeBot({ status: "executing", paperMode: false, updatedAt: new Date(NOW - 10 * 60_000) });
+    updateBotMock.mockImplementation(async (_id: string, updates: Record<string, unknown>) => ({
+      ...staleBot,
+      ...updates,
+      updatedAt: new Date(NOW), // storage bumps updatedAt on every write
+    }));
+
+    const resolved = await reconcileBotOnStartup(staleBot);
+
+    expect(resolved).toBe(true);
+    // Re-quarantined, then routed through the dedicated reconciler (venue probed).
+    expect(botUpdates().some((u) => u.status === "paused" && u.pauseReason === "position_unconfirmed")).toBe(true);
+    expect(getPositions).toHaveBeenCalledTimes(1);
+    // Never the generic executing→idle path, never aborted_crash on this row.
+    expect(botUpdates().some((u) => u.status === "idle")).toBe(false);
+    expect(decisionUpdates().some((u) => u.outcome === "aborted_crash")).toBe(false);
+    // Fresh window anchor: flat inside the window stays PENDING — no expiry.
+    expect(decisionUpdates().some((u) => u.outcome === "aborted_order")).toBe(false);
+    expect(botUpdates().some((u) => u.pauseReason === "position_unconfirmed_expired")).toBe(false);
+  });
+
+  it("WO 01.1: the same partial state WITH a landed position takes the existing adoption path — no second entry", async () => {
+    const { reconcileBotOnStartup } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [
+        { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.3, markPrice: 150.2, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
+      ]),
+      // Bracket already rests — clean adoption.
+      getOpenStopOrders: vi.fn(async () => [{ order_id: "st-9", symbol: "SOL-PERP" }]),
+      placeMarketOrder: vi.fn(async () => { throw new Error("must never place a second entry"); }),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([
+      makeOpenDecision({ id: "dec-u", outcome: "unconfirmed_landing" }),
+    ]);
+    const staleBot = makeBot({ status: "executing", paperMode: false, updatedAt: new Date(NOW - 10 * 60_000) });
+    updateBotMock.mockImplementation(async (_id: string, updates: Record<string, unknown>) => ({
+      ...staleBot,
+      ...updates,
+      updatedAt: new Date(NOW),
+    }));
+
+    const resolved = await reconcileBotOnStartup(staleBot);
+
+    expect(resolved).toBe(true);
+    // Late entry adopted under its recorded decision: executed @ venue price, bot open.
+    expect(decisionUpdates().some((u) => u.outcome === "executed")).toBe(true);
+    expect(botUpdates().some((u) => u.status === "open")).toBe(true);
+    // Never a second entry, never a close of the adopted position.
+    expect((adapter as any).placeMarketOrder).not.toHaveBeenCalled();
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
+    expect(decisionUpdates().some((u) => u.outcome === "aborted_crash")).toBe(false);
+  });
+
+  it("WO 01.1: startup auto-next arms from the POST-reconciliation state — a re-quarantined bot gets no timer", async () => {
+    // Crash point 6: the snapshot row says 'executing' (not paused), so the
+    // old snapshot-based arming loop would put a timer on a bot that the
+    // reconciliation pass above just re-quarantined.
+    const { reconcileOnStartup } = await importMonitor();
+    armLiveAuth();
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions: vi.fn(async () => []) }));
+    const snapshotBot = makeBot({
+      id: "bot-requar", status: "executing", paperMode: false, mode: "auto", autoNext: true,
+      updatedAt: new Date(NOW - 10 * 60_000),
+    });
+    getActiveBotsMock.mockResolvedValue([snapshotBot]);
+    getDecisionsMock.mockResolvedValue([
+      makeOpenDecision({ id: "dec-u", botId: "bot-requar", outcome: "unconfirmed_landing" }),
+    ]);
+    updateBotMock.mockImplementation(async (_id: string, updates: Record<string, unknown>) => ({
+      ...snapshotBot,
+      ...updates,
+      updatedAt: new Date(NOW),
+    }));
+    // Post-reconciliation fresh read: the bot is quarantined.
+    getBotMock.mockResolvedValue({ ...snapshotBot, status: "paused", pauseReason: "position_unconfirmed" });
+
+    await reconcileOnStartup();
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("WO 01.1: a transient-status bot that reconciled back to idle still re-arms auto-next (fresh read, not snapshot)", async () => {
+    const { reconcileOnStartup } = await importMonitor();
+    armLiveAuth();
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions: vi.fn(async () => []) }));
+    const snapshotBot = makeBot({ id: "bot-crash", status: "executing", paperMode: false, mode: "auto", autoNext: true });
+    getActiveBotsMock.mockResolvedValue([snapshotBot]);
+    // Ordinary crash marker: null-outcome decision → generic recovery to idle.
+    getDecisionsMock.mockResolvedValue([makeOpenDecision({ id: "dec-crash", botId: "bot-crash", outcome: null })]);
+    getBotMock.mockResolvedValue({ ...snapshotBot, status: "idle" });
+
+    await reconcileOnStartup();
+
+    // Existing crash behavior retained (idle + aborted_crash) AND the timer arms.
+    expect(updateDecisionMock).toHaveBeenCalledWith("dec-crash", { outcome: "aborted_crash" });
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
   it("returns false (retry signal) when the venue read fails — never assumes flat", async () => {
     const { reconcileBotOnStartup } = await importMonitor();
     armLiveAuth();
+    getDecisionsMock.mockResolvedValue([]); // no partial-quarantine state
     getAdapterMock.mockReturnValue(makeAdapter({
       getPositions: vi.fn(async () => { throw new Error("venue down"); }),
     }));

@@ -428,9 +428,29 @@ async function executeLiveEntry(
       // the marker after a conservative flat window. (Retry classification
       // also hard-excludes this verdict — see tx-verdicts.ts.)
       if (isUnconfirmedLandingVerdict(orderResult.error)) {
-        await storage.updateAiTraderDecision(decisionId, { outcome: "unconfirmed_landing" });
-        // Bot row write LAST: its updatedAt is the reconciliation window start.
+        // BOT quarantine write FIRST (crash-consistency, WO 01.1): its
+        // updatedAt anchors the five-minute reconciliation window, and
+        // bot-first ordering guarantees a crash between the two writes leaves
+        // paused/position_unconfirmed — a state both the tick loop and startup
+        // route into reconcileUnconfirmedLanding(). The old decision-first
+        // order could die mid-way leaving 'executing' + 'unconfirmed_landing',
+        // which generic startup recovery would flat-read → idle → auto-next
+        // re-entry while the broadcast tx can still land. If THIS write
+        // throws, nothing has been written: the 'executing' crash marker
+        // stays and the error propagates through existing behavior.
         await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "position_unconfirmed" });
+        try {
+          await storage.updateAiTraderDecision(decisionId, { outcome: "unconfirmed_landing" });
+        } catch (err) {
+          // The quarantine is already durable — never roll the bot back, never
+          // set idle, never touch the venue. The reconciler treats a missing
+          // 'unconfirmed_landing' row as unattributed: a landed position fails
+          // closed (orphan flatten) and a flat expiry just flips the
+          // pauseReason, so proceeding to notify + return is safe.
+          console.error(
+            `[AiTrader] unconfirmed-landing: decision write failed AFTER quarantine for bot ${bot.id.slice(0, 8)} — leaving paused/position_unconfirmed (${err instanceof Error ? err.message : err})`
+          );
+        }
         await sendTradeNotification(bot.walletAddress, {
           type: "trade_failed",
           botName: `AI Trader ${bot.market}`,
