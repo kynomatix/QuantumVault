@@ -29,7 +29,7 @@ import { resolveAgentKeypair } from './agent-wallet';
 import { FLASH_BOT_WALLET_SOL_SEED } from './protocol/flash/flash-constants';
 import { reconcileWalletDeposits } from './deposit-reconciler';
 import { publicPortfolioHandler } from './public-portfolio';
-import { initSnapshotModule, getWalletFinancialSnapshot } from './bot-financial-snapshot';
+import { initSnapshotModule, getWalletFinancialSnapshot, derivePerBotFinancialDataStatus } from './bot-financial-snapshot';
 
 function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
@@ -14497,15 +14497,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
         return {
           ...bot,
-          // null when enrichment failed — not zero (unknown, not empty).
-          actualTradeCount: ens ? (snapshot.enrichment.tradeCounts.get(bot.id) ?? null) : null,
-          realizedPnl: ens ? ((position as any)?.realizedPnl ?? null) : null,
-          totalFees: ens ? ((position as any)?.totalFees ?? null) : null,
+          // null when enrichment failed — zero when enrichment succeeded but bot has no rows.
+          // (successful-empty parity: new bots have zero history, not unknown history)
+          actualTradeCount: ens ? (snapshot.enrichment.tradeCounts.get(bot.id) ?? 0) : null,
+          realizedPnl: ens ? ((position as any)?.realizedPnl ?? '0') : null,
+          totalFees: ens ? ((position as any)?.totalFees ?? '0') : null,
           exchangeBalance: fin?.exchangeBalance ?? null,
           // null when enrichment failed (debt unknown, not zero).
           borrowDebtUsdc: fin?.borrowDebtUsdc ?? null,
-          // null when enrichment failed (deposit basis unknown).
-          netDeposited: ens ? (eq?.netDeposited ?? null) : null,
+          // null when enrichment failed (deposit basis unknown); zero for a new bot.
+          netDeposited: ens ? (eq?.netDeposited ?? 0) : null,
           netPnl: fin?.netPnl ?? null,
           netPnlPercent: fin?.netPnlPercent ?? null,
           // null when enrichment failed (publication state unknown).
@@ -14513,7 +14514,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           publishedBotId: ens ? ((publishedBot as any)?.id || null) : null,
           botSubaccountIdentifier: bot.protocolSubaccountId || null,
           botFinancialStatus: fin?.botFinancialStatus ?? 'db-only',
-          financialDataStatus: snapshot.status,
+          // Per-bot status: independent of main-account failures. A wallet-level
+          // 'partial' (agentBalance=null) must NOT mislabel a healthy bot 'unavailable'.
+          // Only the bot's own live call failure, enrichment failure, or parked
+          // uncertainty makes the bot unavailable. Stale propagates from the wallet.
+          financialDataStatus: derivePerBotFinancialDataStatus(
+            fin,
+            snapshot.status as 'fresh' | 'partial' | 'stale',
+            ens,
+          ),
           financialDataObservedAt: snapshot.observedAt,
         };
       });

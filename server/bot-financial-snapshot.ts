@@ -488,6 +488,7 @@ function _fallbackFinancials(
   enrichment: BotListEnrichment,
   prices: Record<string, number>,
   enrichmentSucceeded: boolean,
+  parkedHintSucceeded: boolean,
   status: 'db-only' | 'unavailable',
 ): BotFinancialData {
   if (!enrichmentSucceeded) {
@@ -505,9 +506,32 @@ function _fallbackFinancials(
   }
   const borrowDebtUsdc = enrichment.borrowDebts.get(bot.id) ?? 0;
   const fallback = _dbFallback(bot, enrichment, prices);
-  // enrichmentSucceeded=true here (we returned early above for the false case).
+
+  // DB-only Flash bots can have parked funds in the vault.  When the parked-
+  // hint read failed we cannot confirm whether parked rows exist — the DB
+  // estimate is therefore incomplete and must not be presented as the full
+  // equity number.  Non-Flash protocols do not support vault parking, so they
+  // are unaffected regardless of parkedHintSucceeded.
+  const botMightHaveParkedFunds = (bot as any).activeProtocol === 'flash';
+  const parkedUnavailable = botMightHaveParkedFunds && !parkedHintSucceeded;
+
+  if (parkedUnavailable) {
+    return {
+      exchangeBalance: null,
+      netPnl: null,
+      netPnlPercent: null,
+      borrowDebtUsdc,
+      parkedValueUsdc: 0,
+      parkedValueIncluded: false,
+      parkedValueUnavailable: true,
+      liveDataAvailable: false,
+      botFinancialStatus: 'unavailable',
+    };
+  }
+
+  // enrichmentSucceeded=true, parked hint ok (or non-Flash) here.
   // A bot with no equityAgg row is a new bot with zero history — legitimately 0.
-  // Null applies only when enrichment itself failed (handled by the early return).
+  // Null applies only when enrichment itself failed (handled above).
   return {
     exchangeBalance: fallback?.exchangeBalance ?? 0,
     netPnl: fallback?.netPnl ?? 0,
@@ -546,50 +570,47 @@ async function _refresh(
   ]);
 
   // -------------------------------------------------------------------------
-  // Phase 1b: Parked-position hint — tracked separately from Phase-1a so its
-  // failure is distinguishable from "no parked rows" (successful empty).
-  // A failure marks the snapshot partial; we pass hasVaultRows:undefined to
-  // addParkedValue (force real check) rather than falsely passing false.
+  // Phase 1b: Parked-position hint. Awaited WITHOUT a deadline race so the
+  // underlying DB call settles naturally, preserving no-stampede parity with
+  // Phase-1a. Callers that time out at CALLER_DEADLINE_MS leave entry.inFlight
+  // alive — a subsequent caller joining the in-flight finds getVaultPositions
+  // already in-progress and issues zero duplicate calls.
+  // Deadline is checked BEFORE invoking: if Phase-1a settled after VENUE_DEADLINE
+  // has elapsed, Phase-1b is skipped entirely rather than launching more work.
   // -------------------------------------------------------------------------
   let parkedHintSucceeded = true;
   let parkedHintRows: any[] = [];
-  try {
-    const hintRemaining = deadlineAt - Date.now();
-    const hintResult = await _raceDeadline(
-      storage.getVaultPositionsAllScopes(walletAddress),
-      hintRemaining > 0 ? hintRemaining : 0,
-    );
-    if (hintResult === DEADLINE_SENTINEL) {
+  if (Date.now() < deadlineAt) {
+    try {
+      parkedHintRows = await storage.getVaultPositionsAllScopes(walletAddress);
+    } catch {
       parkedHintSucceeded = false;
-    } else {
-      parkedHintRows = hintResult as any[];
     }
-  } catch {
-    parkedHintSucceeded = false;
+  } else {
+    parkedHintSucceeded = false; // deadline exceeded before Phase-1b; skip to avoid new work
   }
 
   // -------------------------------------------------------------------------
-  // Phase 1c: Batch enrichment (best-effort — failure explicitly tracked).
+  // Phase 1c: Batch enrichment. Awaited WITHOUT a deadline race (no-stampede
+  // parity). Deadline checked BEFORE invoking — skipped if Phase-1b settled
+  // after the absolute deadline.
   // When enrichment fails, deposit basis, trade counts, debt, publication
   // state are all unknown. Routes must propagate null rather than zero.
   // -------------------------------------------------------------------------
   let enrichment: BotListEnrichment;
   let enrichmentSucceeded = true;
-  try {
-    const enrichRemaining = deadlineAt - Date.now();
-    const er = await _raceDeadline(
-      storage.getTradingBotListEnrichment(walletAddress, bots.map((b: any) => b.id)),
-      enrichRemaining > 0 ? enrichRemaining : 0,
-    );
-    if (er === DEADLINE_SENTINEL) {
+  if (Date.now() < deadlineAt) {
+    try {
+      enrichment = await storage.getTradingBotListEnrichment(
+        walletAddress, bots.map((b: any) => b.id),
+      );
+    } catch {
       enrichment = _emptyEnrichment();
       enrichmentSucceeded = false;
-    } else {
-      enrichment = er;
     }
-  } catch {
+  } else {
     enrichment = _emptyEnrichment();
-    enrichmentSucceeded = false;
+    enrichmentSucceeded = false; // deadline exceeded before Phase-1c; skip to avoid new work
   }
 
   const parkedBotIds = new Set<string>();
@@ -626,164 +647,194 @@ async function _refresh(
   let vaultBalance: number | null = null;
   const perBotFinancials = new Map<string, BotFinancialData>();
 
-  const wrappers: Promise<void>[] = [];
+  // -------------------------------------------------------------------------
+  // Phase 2: Venue enrichment — only when deadline has not elapsed after
+  // Phase-1. Skipping ensures no pool slots are consumed and no venue calls
+  // are started when Phase-1 settled late. perBotFinancials stays empty and
+  // is populated entirely by the defensive fill below (DB fallback).
+  // -------------------------------------------------------------------------
+  if (Date.now() < deadlineAt) {
+    const wrappers: Promise<void>[] = [];
 
-  // --- Main-account: four independent ops (one slot each) ---
-  if (agentAddress) {
-    wrappers.push((async () => {
-      await _waitAndRun(pool, deadlineAt, async () => {
-        agentBalance = await deps.getAgentUsdcBalance(agentAddress!);
-      });
-    })());
+    // --- Main-account: four independent ops (one slot each) ---
+    if (agentAddress) {
+      wrappers.push((async () => {
+        await _waitAndRun(pool, deadlineAt, async () => {
+          agentBalance = await deps.getAgentUsdcBalance(agentAddress!);
+        });
+      })());
 
-    wrappers.push((async () => {
-      await _waitAndRun(pool, deadlineAt, async () => {
-        solBalance = await deps.getAgentSolBalance(agentAddress!);
-      });
-    })());
+      wrappers.push((async () => {
+        await _waitAndRun(pool, deadlineAt, async () => {
+          solBalance = await deps.getAgentSolBalance(agentAddress!);
+        });
+      })());
 
-    wrappers.push((async () => {
-      await _waitAndRun(pool, deadlineAt, async () => {
-        const info = await deps.getExchangeAccountInfo(agentAddress!, 0);
-        mainAccount = {
-          totalCollateral: (info as any).totalCollateral ?? 0,
-          freeCollateral: (info as any).freeCollateral ?? 0,
-        };
-      });
-    })());
+      wrappers.push((async () => {
+        await _waitAndRun(pool, deadlineAt, async () => {
+          const info = await deps.getExchangeAccountInfo(agentAddress!, 0);
+          mainAccount = {
+            totalCollateral: (info as any).totalCollateral ?? 0,
+            freeCollateral: (info as any).freeCollateral ?? 0,
+          };
+        });
+      })());
 
-    wrappers.push((async () => {
-      await _waitAndRun(pool, deadlineAt, async () => {
-        vaultBalance = await deps.accountVaultRoutableValueUsdc(walletAddress, agentAddress!);
-      });
-    })());
-  }
-
-  // --- Per-bot: two sequential ops within a bot; bots are concurrent ---
-  for (const bot of bots) {
-    const botId = bot.id;
-
-    // When enrichment failed, deposit basis and debt are unknown (null).
-    const eq = enrichmentSucceeded ? enrichment.equityAgg.get(botId) : undefined;
-    const netDeposited: number | null = enrichmentSucceeded ? (eq?.netDeposited ?? 0) : null;
-    const totalDeposits: number | null = enrichmentSucceeded ? (eq?.totalDeposits ?? 0) : null;
-    const borrowDebtUsdc: number | null = enrichmentSucceeded
-      ? (enrichment.borrowDebts.get(botId) ?? 0)
-      : null;
-
-    // Flash double-count: bot wallet IS the agent wallet — skip live call.
-    const isFlashAgentAlias =
-      (bot as any).activeProtocol === 'flash' &&
-      agentAddress !== null &&
-      (bot as any).protocolSubaccountId === agentAddress;
-
-    if (isFlashAgentAlias) {
-      perBotFinancials.set(botId, {
-        exchangeBalance: 0,
-        netPnl: netDeposited !== null ? -netDeposited : null,
-        netPnlPercent: (netDeposited !== null && totalDeposits !== null && totalDeposits > 0)
-          ? (-netDeposited / totalDeposits) * 100
-          : null,
-        borrowDebtUsdc,
-        parkedValueUsdc: 0,
-        parkedValueIncluded: false,
-        parkedValueUnavailable: false,
-        liveDataAvailable: false,
-        botFinancialStatus: 'db-only',
-      });
-      continue;
+      wrappers.push((async () => {
+        await _waitAndRun(pool, deadlineAt, async () => {
+          vaultBalance = await deps.accountVaultRoutableValueUsdc(walletAddress, agentAddress!);
+        });
+      })());
     }
 
-    // Bots with no live context get DB-based fallback immediately (no pool slot).
-    const botCtx = deps.getBotSubaccountContext(bot);
-    if (!botCtx || !agentAddress) {
-      perBotFinancials.set(botId, _fallbackFinancials(
-        bot, enrichment, prices, enrichmentSucceeded, 'db-only',
-      ));
-      continue;
-    }
+    // --- Per-bot: two sequential ops within a bot; bots are concurrent ---
+    for (const bot of bots) {
+      const botId = bot.id;
 
-    // Resolve adapter ONLY after confirming we need the live path.
-    let botAdapter: unknown;
-    try {
-      botAdapter = deps.getAdapterForBot(bot);
-    } catch {
-      perBotFinancials.set(botId, _fallbackFinancials(
-        bot, enrichment, prices, enrichmentSucceeded, 'unavailable',
-      ));
-      continue;
-    }
+      // When enrichment failed, deposit basis and debt are unknown (null).
+      const eq = enrichmentSucceeded ? enrichment.equityAgg.get(botId) : undefined;
+      const netDeposited: number | null = enrichmentSucceeded ? (eq?.netDeposited ?? 0) : null;
+      const totalDeposits: number | null = enrichmentSucceeded ? (eq?.totalDeposits ?? 0) : null;
+      const borrowDebtUsdc: number | null = enrichmentSucceeded
+        ? (enrichment.borrowDebts.get(botId) ?? 0)
+        : null;
 
-    // Pipeline within this bot: Op1 → Op2 sequential; this wrapper runs
-    // concurrently with all other bot wrappers and main-account wrappers.
-    wrappers.push((async () => {
-      // Op 1: exchange account info (1 pool slot)
-      let liveInfo: any = null;
-      const op1ok = await _waitAndRun(pool, deadlineAt, async () => {
-        liveInfo = await deps.getExchangeAccountInfoForBot(
-          agentAddress!, 0, botCtx, botAdapter,
-        );
-      });
+      // Flash double-count: bot wallet IS the agent wallet — skip live call.
+      const isFlashAgentAlias =
+        (bot as any).activeProtocol === 'flash' &&
+        agentAddress !== null &&
+        (bot as any).protocolSubaccountId === agentAddress;
 
-      if (!op1ok || !liveInfo) {
-        // Deadline fired or live call threw — null balance, never DB estimate.
+      if (isFlashAgentAlias) {
         perBotFinancials.set(botId, {
-          exchangeBalance: null,
-          netPnl: null,
-          netPnlPercent: null,
+          exchangeBalance: 0,
+          netPnl: netDeposited !== null ? -netDeposited : null,
+          netPnlPercent: (netDeposited !== null && totalDeposits !== null && totalDeposits > 0)
+            ? (-netDeposited / totalDeposits) * 100
+            : null,
           borrowDebtUsdc,
           parkedValueUsdc: 0,
           parkedValueIncluded: false,
           parkedValueUnavailable: false,
           liveDataAvailable: false,
-          botFinancialStatus: 'unavailable',
+          botFinancialStatus: 'db-only',
         });
-        return;
+        continue;
       }
 
-      // Op 2: parked vault value (1 pool slot, best-effort)
-      let adj: any = null;
-      await _waitAndRun(pool, deadlineAt, async () => {
-        adj = await deps.addParkedValueForBotDisplayEquity(
-          bot, botAdapter, (liveInfo as any).totalCollateral,
-          // When hint failed, do not pass hasVaultRows:false — that would
-          // incorrectly skip the real check. Pass undefined to force it.
-          parkedHintSucceeded ? { hasVaultRows: parkedBotIds.has(botId) } : undefined,
-        );
-      });
+      // Bots with no live context get DB-based fallback immediately (no pool slot).
+      const botCtx = deps.getBotSubaccountContext(bot);
+      if (!botCtx || !agentAddress) {
+        perBotFinancials.set(botId, _fallbackFinancials(
+          bot, enrichment, prices, enrichmentSucceeded, parkedHintSucceeded, 'db-only',
+        ));
+        continue;
+      }
 
-      // adj may be null if Op2 timed out — fall back to raw collateral.
-      const equityBase: number = adj?.equityUsdc ?? (liveInfo as any).totalCollateral;
-      const adjustedDebt = borrowDebtUsdc ?? 0;
-      const botBalance = equityBase - adjustedDebt;
-      // netPnl is null whenever deposit basis is unknown (enrichment failed).
-      const netPnl = netDeposited !== null ? botBalance - netDeposited : null;
-      const netPnlPercent = (netPnl !== null && totalDeposits !== null && totalDeposits > 0)
-        ? (netPnl / totalDeposits) * 100
-        : null;
+      // Resolve adapter ONLY after confirming we need the live path.
+      let botAdapter: unknown;
+      try {
+        botAdapter = deps.getAdapterForBot(bot);
+      } catch {
+        perBotFinancials.set(botId, _fallbackFinancials(
+          bot, enrichment, prices, enrichmentSucceeded, parkedHintSucceeded, 'unavailable',
+        ));
+        continue;
+      }
 
-      perBotFinancials.set(botId, {
-        exchangeBalance: botBalance,
-        netPnl,
-        netPnlPercent,
-        borrowDebtUsdc,
-        parkedValueUsdc: adj?.parkedValueUsdc ?? 0,
-        parkedValueIncluded: adj?.parkedValueIncluded ?? false,
-        parkedValueUnavailable: adj?.parkedValueUnavailable ?? (adj === null),
-        liveDataAvailable: true,
-        botFinancialStatus: 'live',
-      });
-    })());
-  }
+      // Pipeline within this bot: Op1 → Op2 sequential; this wrapper runs
+      // concurrently with all other bot wrappers and main-account wrappers.
+      wrappers.push((async () => {
+        // Op 1: exchange account info (1 pool slot)
+        let liveInfo: any = null;
+        const op1ok = await _waitAndRun(pool, deadlineAt, async () => {
+          liveInfo = await deps.getExchangeAccountInfoForBot(
+            agentAddress!, 0, botCtx, botAdapter,
+          );
+        });
 
-  // Run all wrappers concurrently — they share the two-slot pool.
-  await Promise.all(wrappers);
+        if (!op1ok || !liveInfo) {
+          // Deadline fired or live call threw — null balance, never DB estimate.
+          perBotFinancials.set(botId, {
+            exchangeBalance: null,
+            netPnl: null,
+            netPnlPercent: null,
+            borrowDebtUsdc,
+            parkedValueUsdc: 0,
+            parkedValueIncluded: false,
+            parkedValueUnavailable: false,
+            liveDataAvailable: false,
+            botFinancialStatus: 'unavailable',
+          });
+          return;
+        }
 
-  // Defensive fill: any bot not written by a wrapper gets DB fallback.
+        // Op 2: parked vault value (1 pool slot, best-effort)
+        let adj: any = null;
+        await _waitAndRun(pool, deadlineAt, async () => {
+          adj = await deps.addParkedValueForBotDisplayEquity(
+            bot, botAdapter, (liveInfo as any).totalCollateral,
+            // When hint failed, do not pass hasVaultRows:false — that would
+            // incorrectly skip the real check. Pass undefined to force it.
+            parkedHintSucceeded ? { hasVaultRows: parkedBotIds.has(botId) } : undefined,
+          );
+        });
+
+        // adj may be null (Op2 timed out) or adj.parkedValueUnavailable=true
+        // (Op2 settled but parked value is uncertain). In either case, returning
+        // raw collateral as the full equity number is misleading — parked funds
+        // may exist that are not reflected in totalCollateral. Return null
+        // so callers know the equity figure is incomplete.
+        const parkedUnavailable = adj === null || (adj as any).parkedValueUnavailable;
+        if (parkedUnavailable) {
+          perBotFinancials.set(botId, {
+            exchangeBalance: null,
+            netPnl: null,
+            netPnlPercent: null,
+            borrowDebtUsdc,
+            parkedValueUsdc: adj?.parkedValueUsdc ?? 0,
+            parkedValueIncluded: adj?.parkedValueIncluded ?? false,
+            parkedValueUnavailable: true,
+            liveDataAvailable: adj !== null, // Op2 settled but uncertain
+            botFinancialStatus: 'unavailable',
+          });
+          return;
+        }
+
+        // adj settled with known parked value.
+        const equityBase: number = (adj as any).equityUsdc;
+        const adjustedDebt = borrowDebtUsdc ?? 0;
+        const botBalance = equityBase - adjustedDebt;
+        // netPnl is null whenever deposit basis is unknown (enrichment failed).
+        const netPnl = netDeposited !== null ? botBalance - netDeposited : null;
+        const netPnlPercent = (netPnl !== null && totalDeposits !== null && totalDeposits > 0)
+          ? (netPnl / totalDeposits) * 100
+          : null;
+
+        perBotFinancials.set(botId, {
+          exchangeBalance: botBalance,
+          netPnl,
+          netPnlPercent,
+          borrowDebtUsdc,
+          parkedValueUsdc: (adj as any).parkedValueUsdc,
+          parkedValueIncluded: (adj as any).parkedValueIncluded,
+          parkedValueUnavailable: false,
+          liveDataAvailable: true,
+          botFinancialStatus: 'live',
+        });
+      })());
+    }
+
+    // Run all wrappers concurrently — they share the two-slot pool.
+    await Promise.all(wrappers);
+  } // end Phase-2 deadline guard
+
+  // Defensive fill: any bot not written by a wrapper (or Phase-2 skipped
+  // entirely due to deadline) gets DB fallback.
   for (const bot of bots) {
     if (!perBotFinancials.has(bot.id)) {
       perBotFinancials.set(bot.id, _fallbackFinancials(
-        bot, enrichment, prices, enrichmentSucceeded, 'db-only',
+        bot, enrichment, prices, enrichmentSucceeded, parkedHintSucceeded, 'db-only',
       ));
     }
   }
@@ -1032,4 +1083,35 @@ export function _poolActive(walletAddress: string): number {
 export function _waiterCount(walletAddress: string): number {
   if (process.env.NODE_ENV !== 'test') return -1;
   return _cache.get(walletAddress)?.pool.waiterCount ?? 0;
+}
+
+// ---------------------------------------------------------------------------
+// Per-bot financialDataStatus derivation (exported for route + test use)
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive an honest per-bot financialDataStatus from the bot's own outcome,
+ * independently of wallet-level main-account failures.
+ *
+ * Rules (in priority order):
+ *  1. Stale snapshot → every bot is stale (last-known-good data).
+ *  2. Bot's own live call failed → unavailable for that bot.
+ *  3. Batch enrichment failed → unavailable (deposit basis / trade counts unknown).
+ *  4. Parked value uncertain for this bot → unavailable.
+ *  5. Otherwise → fresh (main-account failures do NOT mislabel healthy bots).
+ *
+ * 'unavailable' at the wallet level is never reached here — callers return 503
+ * before calling this. 'partial' at the wallet level (e.g. agentBalance=null)
+ * does NOT propagate to individual bots whose own data is fully intact.
+ */
+export function derivePerBotFinancialDataStatus(
+  fin: BotFinancialData | undefined,
+  snapshotStatus: 'fresh' | 'partial' | 'stale',
+  enrichmentSucceeded: boolean,
+): 'fresh' | 'stale' | 'unavailable' {
+  if (snapshotStatus === 'stale') return 'stale';
+  if (fin?.botFinancialStatus === 'unavailable') return 'unavailable';
+  if (!enrichmentSucceeded) return 'unavailable';
+  if (fin?.parkedValueUnavailable) return 'unavailable';
+  return 'fresh';
 }
