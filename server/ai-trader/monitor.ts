@@ -1917,7 +1917,37 @@ export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> 
 
   if (!position) {
     if (preOpen) {
-      // Provably flat: the crash happened before (or the order never filled).
+      // WO 01.2: for 'executing' bots, apply the same 5-minute grace window
+      // used by the dedicated unconfirmed-landing reconciler before accepting
+      // a flat venue read as a clean abort. If the bot-quarantine write failed
+      // (crash point 1 from WO 01.1), the bot remains 'executing' with no
+      // unconfirmed_landing decision but with the broadcast tx still
+      // potentially in-flight. A single flat read here is NOT proof of a clean
+      // abort. Measure from bot.updatedAt (the executor's last write before the
+      // quarantine attempt); if that timestamp is missing or non-finite, fail
+      // closed — the tx window is unknown so we cannot safely declare a clean
+      // abort. Only after the 5-minute window has elapsed may the existing
+      // aborted_crash+idle path run. analyzing/proposed bots are never the
+      // result of a broadcast-then-failed-quarantine so they skip this check.
+      if (bot.status === "executing") {
+        const ts = bot.updatedAt instanceof Date ? bot.updatedAt.getTime() : NaN;
+        if (!Number.isFinite(ts)) {
+          console.warn(
+            `[AiTraderMonitor] reconcile: bot ${bot.id.slice(0, 8)} 'executing' flat but updatedAt is missing/invalid — staying pending (fail closed)`
+          );
+          return false;
+        }
+        const ageMs = Date.now() - ts;
+        if (ageMs < UNCONFIRMED_LANDING_WINDOW_MS) {
+          console.log(
+            `[AiTraderMonitor] reconcile: bot ${bot.id.slice(0, 8)} 'executing' flat inside ${UNCONFIRMED_LANDING_WINDOW_MS / 1000}s grace window (age ${Math.round(ageMs / 1000)}s) — staying pending`
+          );
+          return false;
+        }
+        // Grace period elapsed — fall through to existing crash recovery.
+      }
+      // Provably flat past the grace window: the crash happened before
+      // (or the order never filled / the landing window has safely elapsed).
       await markUnfinishedDecisionsCrashed(bot.id);
       await storage.updateAiTraderBot(bot.id, { status: "idle" });
       console.log(`[AiTraderMonitor] reconcile: live bot ${bot.id.slice(0, 8)} '${bot.status}' flat → idle (aborted_crash)`);
@@ -2067,7 +2097,10 @@ export async function reconcileOnStartup(): Promise<void> {
         continue; // can't prove post-reconciliation state — don't arm
       }
     }
-    if (!effective || effective.status === "paused" || effective.mode !== "auto" || !effective.autoNext) continue;
+    // WO 01.2: gate on exactly 'idle' — never arm for executing, analyzing,
+    // proposed, open, or paused. runAutoCycle is defense-in-depth, but a
+    // timer on a non-idle bot is wasteful and obscures monitoring signals.
+    if (!effective || effective.status !== "idle" || effective.mode !== "auto" || !effective.autoNext) continue;
     scheduleAutoNext(effective.id, nextCycleTimeframe(effective));
   }
 }

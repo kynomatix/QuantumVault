@@ -849,8 +849,8 @@ describe("startup reconciliation", () => {
     armLiveAuth();
     getAdapterMock.mockReturnValue(makeAdapter({ getPositions: vi.fn(async () => []) }));
     getDecisionsMock.mockResolvedValue([makeOpenDecision({ id: "dec-crash", outcome: null })]);
-
-    const resolved = await reconcileBotOnStartup(makeBot({ status: "executing", paperMode: false }));
+    // updatedAt well outside the 5-min grace window (WO 01.2).
+    const resolved = await reconcileBotOnStartup(makeBot({ status: "executing", paperMode: false, updatedAt: new Date(NOW - 10 * 60_000) }));
 
     expect(resolved).toBe(true);
     expect(updateDecisionMock).toHaveBeenCalledWith("dec-crash", { outcome: "aborted_crash" });
@@ -1037,7 +1037,8 @@ describe("startup reconciliation", () => {
     const { reconcileOnStartup } = await importMonitor();
     armLiveAuth();
     getAdapterMock.mockReturnValue(makeAdapter({ getPositions: vi.fn(async () => []) }));
-    const snapshotBot = makeBot({ id: "bot-crash", status: "executing", paperMode: false, mode: "auto", autoNext: true });
+    // updatedAt outside the 5-min window so the flat read triggers existing crash recovery (WO 01.2).
+    const snapshotBot = makeBot({ id: "bot-crash", status: "executing", paperMode: false, mode: "auto", autoNext: true, updatedAt: new Date(NOW - 10 * 60_000) });
     getActiveBotsMock.mockResolvedValue([snapshotBot]);
     // Ordinary crash marker: null-outcome decision → generic recovery to idle.
     getDecisionsMock.mockResolvedValue([makeOpenDecision({ id: "dec-crash", botId: "bot-crash", outcome: null })]);
@@ -1048,6 +1049,121 @@ describe("startup reconciliation", () => {
     // Existing crash behavior retained (idle + aborted_crash) AND the timer arms.
     expect(updateDecisionMock).toHaveBeenCalledWith("dec-crash", { outcome: "aborted_crash" });
     expect(vi.getTimerCount()).toBe(1);
+  });
+
+  // --- WO 01.2 tests: grace window for executing + flat (bot-quarantine-write-failed path) ---
+
+  it("WO 01.2: executing + unresolved decision + flat + INSIDE grace window → stays pending, zero writes", async () => {
+    // Bot-quarantine write failed after executor broadcast → bot stays 'executing'.
+    // A fast restart probes the venue, reads flat, but the tx is still in-flight.
+    // Inside the 5-min window: no bot or decision writes, return false.
+    const { reconcileBotOnStartup } = await importMonitor();
+    armLiveAuth();
+    getDecisionsMock.mockResolvedValue([makeOpenDecision({ id: "dec-null", outcome: null })]);
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions: vi.fn(async () => []) }));
+    // 2 min ago — firmly inside the 5-min window.
+    const bot = makeBot({ status: "executing", paperMode: false, updatedAt: new Date(NOW - 2 * 60_000) });
+
+    const resolved = await reconcileBotOnStartup(bot);
+
+    expect(resolved).toBe(false);
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+  });
+
+  it("WO 01.2: startup reconcileOnStartup with inside-window executing bot → no timer armed", async () => {
+    // Even if mode=auto+autoNext, a bot kept pending (return false) must not
+    // receive an auto-next timer.
+    const { reconcileOnStartup } = await importMonitor();
+    armLiveAuth();
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions: vi.fn(async () => []) }));
+    const snapshotBot = makeBot({
+      id: "bot-grace",
+      status: "executing",
+      paperMode: false,
+      mode: "auto",
+      autoNext: true,
+      updatedAt: new Date(NOW - 2 * 60_000), // inside window
+    });
+    getActiveBotsMock.mockResolvedValue([snapshotBot]);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision({ id: "dec-g", botId: "bot-grace", outcome: null })]);
+    // Fresh read after reconciliation: still executing/pending (not idle).
+    getBotMock.mockResolvedValue({ ...snapshotBot, status: "executing" });
+
+    await reconcileOnStartup();
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("WO 01.2: executing + flat + PAST the grace window → existing aborted_crash+idle path runs", async () => {
+    const { reconcileBotOnStartup } = await importMonitor();
+    armLiveAuth();
+    getDecisionsMock.mockResolvedValue([makeOpenDecision({ id: "dec-old", outcome: null })]);
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions: vi.fn(async () => []) }));
+    // 10 min ago — well outside the 5-min window.
+    const bot = makeBot({ status: "executing", paperMode: false, updatedAt: new Date(NOW - 10 * 60_000) });
+
+    const resolved = await reconcileBotOnStartup(bot);
+
+    expect(resolved).toBe(true);
+    expect(updateDecisionMock).toHaveBeenCalledWith("dec-old", { outcome: "aborted_crash" });
+    expect(botUpdates().some((u) => u.status === "idle")).toBe(true);
+  });
+
+  it("WO 01.2: executing + flat + MISSING updatedAt → fail closed, stays pending, zero writes", async () => {
+    const { reconcileBotOnStartup } = await importMonitor();
+    armLiveAuth();
+    getDecisionsMock.mockResolvedValue([makeOpenDecision({ id: "dec-ts", outcome: null })]);
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions: vi.fn(async () => []) }));
+    // No updatedAt — type-cast to satisfy TS in the fixture; production AiTraderBot always has it.
+    const bot = makeBot({ status: "executing", paperMode: false, updatedAt: undefined as unknown as Date });
+
+    const resolved = await reconcileBotOnStartup(bot);
+
+    expect(resolved).toBe(false);
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+  });
+
+  it("WO 01.2: venue-read failure on executing bot → stays pending (pre-existing contract, preserved)", async () => {
+    const { reconcileBotOnStartup } = await importMonitor();
+    armLiveAuth();
+    getDecisionsMock.mockResolvedValue([makeOpenDecision({ id: "dec-vf", outcome: null })]);
+    getAdapterMock.mockReturnValue(makeAdapter({
+      getPositions: vi.fn(async () => { throw new Error("rpc timeout"); }),
+    }));
+    const bot = makeBot({ status: "executing", paperMode: false, updatedAt: new Date(NOW - 2 * 60_000) });
+
+    const resolved = await reconcileBotOnStartup(bot);
+
+    expect(resolved).toBe(false);
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+  });
+
+  it("WO 01.2: position appears inside the grace window → existing adoption path, no second entry", async () => {
+    // The tx landed despite the failed quarantine write. Adoption path must
+    // bracket and promote to 'open' — never place a second entry.
+    const { reconcileBotOnStartup } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [
+        { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.5, markPrice: 150.4, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
+      ]),
+      getOpenStopOrders: vi.fn(async () => [{ order_id: "st-adopts", symbol: "SOL-PERP" }]),
+      placeMarketOrder: vi.fn(async () => { throw new Error("must not place a second entry"); }),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision({ id: "dec-adopt", outcome: null })]);
+    const bot = makeBot({ status: "executing", paperMode: false, updatedAt: new Date(NOW - 2 * 60_000) });
+
+    const resolved = await reconcileBotOnStartup(bot);
+
+    expect(resolved).toBe(true);
+    expect(decisionUpdates().some((u) => u.outcome === "executed")).toBe(true);
+    expect(botUpdates().some((u) => u.status === "open")).toBe(true);
+    expect((adapter as any).placeMarketOrder).not.toHaveBeenCalled();
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
   });
 
   it("returns false (retry signal) when the venue read fails — never assumes flat", async () => {
