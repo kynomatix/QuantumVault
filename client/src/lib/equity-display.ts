@@ -1,6 +1,13 @@
 /**
  * Pure display helpers for equity and bot financial fields.
  * No React imports — fully testable in Node / vitest without a DOM.
+ *
+ * IMPORTANT — financialDataStatus vs botFinancialStatus
+ * ──────────────────────────────────────────────────────
+ * Every helper that takes a status argument expects `financialDataStatus`
+ * (the server's freshness verdict: 'fresh' | 'stale' | 'unavailable').
+ * Do NOT pass `botFinancialStatus` (the data-source path: 'live' | 'db-only') —
+ * that field is never 'unavailable' and will silently disable suppression.
  */
 
 /**
@@ -18,12 +25,15 @@ export function fmtBalance(v: number | null): string {
  * Format a bot's net PnL for display.
  * Returns null when the value is genuinely unknown (caller should show '–').
  * Known zero is returned as "+$0.00".
+ *
+ * @param financialDataStatus  Pass `bot.financialDataStatus` (freshness verdict),
+ *                             NOT `bot.botFinancialStatus` (source path).
  */
 export function fmtBotPnl(
   netPnl: number | null | undefined,
-  botFinancialStatus?: string | null,
+  financialDataStatus?: string | null,
 ): string | null {
-  if (botFinancialStatus === 'unavailable') return null;
+  if (financialDataStatus === 'unavailable') return null;
   const v = netPnl ?? null;
   if (v === null) return null;
   return `${v >= 0 ? '+' : ''}$${v.toFixed(2)}`;
@@ -32,13 +42,15 @@ export function fmtBotPnl(
 /**
  * Format a bot's net PnL percentage.
  * Returns null when unavailable or when netDeposited ≤ 0 (no basis to show %).
+ *
+ * @param financialDataStatus  Pass `bot.financialDataStatus` (freshness verdict).
  */
 export function fmtBotPnlPercent(
   netPnlPercent: number | null | undefined,
   netDeposited: number | null | undefined,
-  botFinancialStatus?: string | null,
+  financialDataStatus?: string | null,
 ): string | null {
-  if (botFinancialStatus === 'unavailable') return null;
+  if (financialDataStatus === 'unavailable') return null;
   const pct = netPnlPercent ?? null;
   const dep = netDeposited ?? null;
   if (pct === null || dep === null || dep <= 0) return null;
@@ -48,14 +60,16 @@ export function fmtBotPnlPercent(
 /**
  * Format a bot's trade count.
  * Returns null when the value is genuinely unknown (caller should show '–').
- * Known zero is returned as the number 0.
+ * Known zero is returned as 0.
+ *
+ * @param financialDataStatus  Pass `bot.financialDataStatus` (freshness verdict).
  */
 export function fmtBotTradeCount(
   actualTradeCount: number | null | undefined,
   statsTotalTrades: number | undefined,
-  botFinancialStatus?: string | null,
+  financialDataStatus?: string | null,
 ): number | null {
-  if (botFinancialStatus === 'unavailable') return null;
+  if (financialDataStatus === 'unavailable') return null;
   const v = actualTradeCount ?? statsTotalTrades ?? null;
   return v;
 }
@@ -65,28 +79,42 @@ export function fmtBotTradeCount(
  *
  * Returns:
  *  'published'   — known true, show "Published" badge
- *  'unpublished' — known false and bot can be published, show CTA
- *  'unknown'     — financial status unavailable, suppress both CTA and badge
+ *  'unpublished' — known false, show publish CTA (caller applies botType guard)
+ *  'unknown'     — financialDataStatus is unavailable, suppress both CTA and badge
  *
- * Grid bots cannot be published so they always resolve to 'unpublished'
- * (which the caller should suppress the CTA for, as the botType guard already does).
+ * @param financialDataStatus  Pass `bot.financialDataStatus` (freshness verdict).
  */
 export function botPublishState(
   isPublished: boolean | null | undefined,
   botType: string | null | undefined,
-  botFinancialStatus?: string | null,
+  financialDataStatus?: string | null,
 ): 'published' | 'unpublished' | 'unknown' {
-  if (botFinancialStatus === 'unavailable') return 'unknown';
+  if (financialDataStatus === 'unavailable') return 'unknown';
   if (isPublished === null || isPublished === undefined) return 'unknown';
   return isPublished ? 'published' : 'unpublished';
 }
 
 /**
- * True when a bot's snapshot data is unavailable (not merely db-only or live).
+ * True when a bot's financial data is reported stale by the server.
+ * Stale bots should retain known values but must show an explicit visual marker.
+ * Note: 'stale' ≠ 'unavailable' — stale bots still render their numbers.
+ *
+ * @param financialDataStatus  Pass `bot.financialDataStatus` (freshness verdict).
+ */
+export function isBotStale(
+  financialDataStatus: string | null | undefined,
+): boolean {
+  return financialDataStatus === 'stale';
+}
+
+/**
+ * True when a bot's snapshot data is unavailable (not merely stale or db-only).
  * When true, numeric financial fields must not be rendered as zero or false.
+ *
+ * @param financialDataStatus  Pass `bot.financialDataStatus` (freshness verdict).
  */
 export function isBotFinancialUnavailable(
-  bot: { botFinancialStatus?: string | null },
+  financialDataStatus: string | null | undefined,
 ): boolean {
-  return bot.botFinancialStatus === 'unavailable';
+  return financialDataStatus === 'unavailable';
 }

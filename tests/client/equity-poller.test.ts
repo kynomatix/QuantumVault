@@ -14,6 +14,12 @@
  *  8. Explicit null fields reported as null (never coerced to 0 inside the poller).
  *  9. Explicit zero fields reported as 0 (zero is valid, not Unavailable).
  * 10. 503 / throw: onResult called with ok=false; no concurrent request started.
+ *
+ * WO-15C.1 regression invariants (Defect 1, Defect 3):
+ * 11. dataStatus 'stale' from server propagated verbatim (Defect 1).
+ * 12. observedAt ISO string from server propagated verbatim (Defect 1).
+ * 13. dataStatus null when server omits the field — no coercion (Defect 1).
+ * 14. manualRefresh() after stop() is a no-op — does NOT start a new fetch (Defect 3).
  */
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -29,6 +35,8 @@ function makeSnapshot(overrides: Partial<EquitySnapshot> = {}): EquitySnapshot {
     exchangeBalance: 300,
     mainAccountFreeCollateral: 0,
     solBalance: 0.1,
+    dataStatus: null,
+    observedAt: null,
     ...overrides,
   };
 }
@@ -347,5 +355,72 @@ describe('EquityPoller', () => {
     poller.stop(); // abort before settlement
     await vi.advanceTimersByTimeAsync(60_000); // well past POLL_MS
     expect(timerFired).toBe(false);
+  });
+
+  // ── Invariant 11 (WO-15C.1 Defect 1) ─────────────────────────────────────
+  it('dataStatus "stale" from server is propagated verbatim into snapshot', async () => {
+    const snap = makeSnapshot({ dataStatus: 'stale', observedAt: '2026-07-23T10:00:00.000Z' });
+    const results: EquityPollResult[] = [];
+    const poller = new EquityPoller(immediateFetch(snap), r => results.push(r), 30_000);
+    poller.start();
+    await flushMicrotasks();
+    poller.stop();
+
+    expect(results).toHaveLength(1);
+    expect(results[0].ok).toBe(true);
+    // The poller must NOT infer freshness — server verdict propagated as-is.
+    expect(results[0].snapshot?.dataStatus).toBe('stale');
+  });
+
+  // ── Invariant 12 (WO-15C.1 Defect 1) ─────────────────────────────────────
+  it('observedAt ISO string from server is propagated verbatim into snapshot', async () => {
+    const ts = '2026-07-23T10:00:00.000Z';
+    const snap = makeSnapshot({ dataStatus: 'stale', observedAt: ts });
+    const results: EquityPollResult[] = [];
+    const poller = new EquityPoller(immediateFetch(snap), r => results.push(r), 30_000);
+    poller.start();
+    await flushMicrotasks();
+    poller.stop();
+
+    expect(results[0].snapshot?.observedAt).toBe(ts);
+  });
+
+  // ── Invariant 13 (WO-15C.1 Defect 1) ─────────────────────────────────────
+  it('dataStatus null when server omits the field — no coercion to "fresh" or "stale"', async () => {
+    const snap = makeSnapshot({ dataStatus: null, observedAt: null });
+    const results: EquityPollResult[] = [];
+    const poller = new EquityPoller(immediateFetch(snap), r => results.push(r), 30_000);
+    poller.start();
+    await flushMicrotasks();
+    poller.stop();
+
+    expect(results[0].snapshot?.dataStatus).toBeNull();
+    expect(results[0].snapshot?.observedAt).toBeNull();
+  });
+
+  // ── Invariant 14 (WO-15C.1 Defect 3) ─────────────────────────────────────
+  it('manualRefresh() after stop() is a no-op — does not start a new fetch', async () => {
+    let callCount = 0;
+    const { fetchFn } = pendingFetch();
+    const wrappedFetch = (signal: AbortSignal) => {
+      callCount++;
+      return fetchFn(signal);
+    };
+    const results: EquityPollResult[] = [];
+    const poller = new EquityPoller(wrappedFetch, r => results.push(r), 30_000);
+    poller.start();          // fetch[0] starts
+    expect(callCount).toBe(1);
+
+    poller.stop();           // abort fetch[0], set stopped=true
+    await flushMicrotasks();
+
+    // manualRefresh() after stop MUST be silently ignored.
+    poller.manualRefresh();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    // No additional fetch should have started.
+    expect(callCount).toBe(1);
+    expect(results).toHaveLength(0); // aborted result suppressed
   });
 });

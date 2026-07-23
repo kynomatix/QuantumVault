@@ -108,7 +108,10 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
     if (isOpen) {
       setBalanceLoading(true);
       Promise.all([
-        fetch('/api/total-equity', { credentials: 'include', headers: walletAuthHeaders() }).then(res => res.ok ? safeResponseJson(res) : Promise.reject()),
+        // One-shot affordability read — bounded to 8 s to match the core-read budget.
+        // Intentional carve-out from the dashboard equity coordinator: this is a single
+        // read triggered by modal open, not a polling system (Defect 7).
+        fetch('/api/total-equity', { credentials: 'include', headers: walletAuthHeaders(), signal: AbortSignal.timeout(8_000) }).then(res => res.ok ? safeResponseJson(res) : Promise.reject()),
         fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders() }).then(res => res.ok ? safeResponseJson(res) : Promise.reject())
       ])
         .then(([equityData, balanceData]) => {
@@ -314,8 +317,9 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
 
       // Refresh both balance sources in parallel so SOL gating and USDC gating
       // stay coherent (the user's main wallet just paid SOL fees for this tx).
+      // Bounded post-deposit affordability refresh — 8 s, matches core-read budget (Defect 7).
       const [equityRes, balanceRes] = await Promise.all([
-        fetch('/api/total-equity', { credentials: 'include', headers: walletAuthHeaders() }),
+        fetch('/api/total-equity', { credentials: 'include', headers: walletAuthHeaders(), signal: AbortSignal.timeout(8_000) }),
         fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders() }),
       ]);
       if (equityRes.ok) {

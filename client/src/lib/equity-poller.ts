@@ -1,15 +1,21 @@
 /**
  * EquityPoller — completion-based, no-overlap equity polling coordinator.
  *
- * Guarantees:
+ * Invariants:
  *  - At most one request in flight at any time (inFlight guard).
  *  - Next poll fires POLL_MS after the current request SETTLES (not after start).
  *  - stop() / manualRefresh() abort the in-flight request and cancel the timer.
- *  - manualRefresh() cancels any pending request and starts a new one immediately.
- *  - A late result from an aborted request is never delivered to onResult.
+ *  - manualRefresh() replaces any in-flight request; guarantees at most one.
+ *  - A late result from an aborted request is NEVER delivered to onResult.
+ *  - After stop() all further _run() calls are no-ops (stopped flag).
+ *    This prevents a stopped old-wallet coordinator from being restarted
+ *    through a stale pollerRef.current reference (Defect 3).
  *
- * Injectable fetchFn and POLL_MS make the class fully testable with vitest fake timers.
+ * Injectable fetchFn and POLL_MS make the class fully testable with fake timers.
  */
+
+/** Status as reported by the server — authoritative freshness verdict. */
+export type EquityDataStatus = 'fresh' | 'stale';
 
 export interface EquitySnapshot {
   totalEquity: number | null;
@@ -18,6 +24,18 @@ export interface EquitySnapshot {
   exchangeBalance: number | null;
   mainAccountFreeCollateral: number | null;
   solBalance: number | null;
+  /**
+   * Server-reported freshness verdict ('fresh' | 'stale').
+   * null when the server did not include the field (treat as unknown).
+   * Stale MUST be propagated to the display even when all numeric fields
+   * are non-null — do not infer freshness from the absence of null numbers.
+   */
+  dataStatus: EquityDataStatus | null;
+  /**
+   * Server-reported ISO 8601 timestamp of when the snapshot was observed.
+   * Used for stale-indicator tooltips.  null when absent.
+   */
+  observedAt: string | null;
 }
 
 export interface EquityPollResult {
@@ -32,6 +50,8 @@ export class EquityPoller {
   private abortCtrl: AbortController | null = null;
   private timerId: ReturnType<typeof setTimeout> | null = null;
   private inFlight = false;
+  /** Set permanently by stop(); prevents _run() after the coordinator is retired. */
+  private stopped = false;
 
   constructor(
     private readonly fetchFn: EquityFetchFn,
@@ -44,17 +64,24 @@ export class EquityPoller {
     this._run();
   }
 
-  /** Cancel in-flight request and pending timer. Safe to call multiple times. */
+  /**
+   * Permanently retire this coordinator.  All further _run() calls — including
+   * those triggered by manualRefresh() through a stale pollerRef — are no-ops.
+   * Safe to call multiple times.
+   */
   stop(): void {
+    this.stopped = true;
     this._cancel();
   }
 
   /**
-   * Trigger an immediate refresh.  If a request is already in flight it is
-   * aborted and replaced — guaranteeing at most one request at a time.  The
-   * completion-based timer restarts 30 s after this request settles.
+   * Trigger an immediate refresh.  If the coordinator has been stopped (e.g.
+   * wallet switched, unmounted) this is a guaranteed no-op.  Otherwise the
+   * in-flight request is aborted and replaced; the 30-s timer restarts after
+   * this request settles.
    */
   manualRefresh(): void {
+    if (this.stopped) return;
     this._cancel();
     this._run();
   }
@@ -72,7 +99,8 @@ export class EquityPoller {
   }
 
   private async _run(): Promise<void> {
-    if (this.inFlight) return; // no-overlap guard
+    if (this.stopped) return;   // retired coordinator — do nothing
+    if (this.inFlight) return;  // no-overlap guard
     this.inFlight = true;
     const ctrl = new AbortController();
     this.abortCtrl = ctrl;
@@ -91,11 +119,13 @@ export class EquityPoller {
       if (!ctrl.signal.aborted) {
         this.inFlight = false;
         this.abortCtrl = null;
-        // Completion-based: next poll fires POLL_MS after THIS request settles.
-        this.timerId = setTimeout(() => {
-          this.timerId = null;
-          this._run();
-        }, this.POLL_MS);
+        if (!this.stopped) {
+          // Completion-based: next poll fires POLL_MS after THIS request settles.
+          this.timerId = setTimeout(() => {
+            this.timerId = null;
+            this._run();
+          }, this.POLL_MS);
+        }
       }
     }
   }
