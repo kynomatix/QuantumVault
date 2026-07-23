@@ -167,6 +167,96 @@ export function reconcileRefreshedBalance(
   return Math.max(prev, refreshed);
 }
 
+// ── SOL bot-creation requirement reconciliation (WO-15C.4) ────────────────────
+
+/**
+ * Local mirror of the server's `botCreationSolRequirement` payload.
+ * `deficit` and `canCreate` are DERIVED fields — every helper below recomputes
+ * them from `required`/`current` and never trusts them from a wire snapshot
+ * (a stale response may carry internally inconsistent derived fields).
+ */
+export interface SolRequirementState {
+  required: number;
+  current: number;
+  deficit: number;
+  canCreate: boolean;
+}
+
+/**
+ * Sub-lamport float dust is not a real deficit: 1 lamport = 1e-9 SOL, so any
+ * residual below this cannot be deposited or spent and must not keep a
+ * "deposit X SOL" CTA alive after an exact-deficit deposit confirms.
+ */
+const SOL_DEFICIT_EPSILON = 1e-9;
+
+/** Recompute the derived fields from grounded required/current values. */
+function buildSolRequirement(required: number, current: number): SolRequirementState {
+  const rawDeficit = required - current;
+  const deficit = rawDeficit > SOL_DEFICIT_EPSILON ? rawDeficit : 0;
+  return { required, current, deficit, canCreate: deficit === 0 };
+}
+
+/**
+ * Validate an untrusted SOL-requirement snapshot (wire payload or local state).
+ * Accepts only an object with finite, non-negative numeric `required` and
+ * `current` (explicit zero is valid). Derived fields are recomputed, never
+ * trusted. Anything malformed → null (fail safe: no CTA is fabricated).
+ */
+export function normalizeSolRequirement(raw: unknown): SolRequirementState | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const { required, current } = raw as Record<string, unknown>;
+  if (typeof required !== 'number' || !Number.isFinite(required) || required < 0) return null;
+  if (typeof current !== 'number' || !Number.isFinite(current) || current < 0) return null;
+  return buildSolRequirement(required, current);
+}
+
+/**
+ * Confirmed-SOL-deposit optimistic transition (WO-15C.4).
+ * Called immediately after the SOL deposit transaction is CONFIRMED on-chain to
+ * eliminate the just-funded deficit before the deposit action can re-enable.
+ * - Known previous state → current + exact confirmed amount, deficit/canCreate
+ *   recomputed (both inputs are grounded: prev was server-reported, the amount
+ *   is the exact on-chain transfer).
+ * - Missing/malformed previous state → null (never fabricate a balance).
+ * - Malformed confirmed amount (non-finite/negative) → previous state
+ *   re-normalized but NOT advanced (fail safe).
+ */
+export function applyConfirmedSolDeposit(
+  prev: SolRequirementState | null,
+  confirmedAmount: number,
+): SolRequirementState | null {
+  const base = normalizeSolRequirement(prev);
+  if (base === null) return null;
+  if (typeof confirmedAmount !== 'number' || !Number.isFinite(confirmedAmount) || confirmedAmount < 0) {
+    return base;
+  }
+  return buildSolRequirement(base.required, base.current + confirmedAmount);
+}
+
+/**
+ * Post-SOL-deposit refresh reconciliation (WO-15C.4, stale-read guard).
+ * The bounded refresh runs seconds after an on-chain-confirmed deposit, so the
+ * server may still serve a snapshot that predates the deposit.
+ * - refreshed malformed/absent → keep prev (a failed read never erases the
+ *   confirmed optimistic state; null prev stays null).
+ * - prev null → adopt the (validated, recomputed) refreshed snapshot.
+ * - both known → current = max(prev.current, refreshed.current): a stale lower
+ *   read must never resurrect the already-eliminated deficit; a genuinely
+ *   higher balance is adopted. `required` comes from the refreshed snapshot
+ *   (server-authoritative), and deficit/canCreate are recomputed — derived
+ *   fields from the wire are never trusted.
+ */
+export function reconcileRefreshedSolRequirement(
+  prev: SolRequirementState | null,
+  refreshedRaw: unknown,
+): SolRequirementState | null {
+  const refreshed = normalizeSolRequirement(refreshedRaw);
+  const base = normalizeSolRequirement(prev);
+  if (refreshed === null) return base;
+  if (base === null) return refreshed;
+  return buildSolRequirement(refreshed.required, Math.max(base.current, refreshed.current));
+}
+
 // ── Balance formatting ────────────────────────────────────────────────────────
 
 /**

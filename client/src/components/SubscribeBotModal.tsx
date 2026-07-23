@@ -4,7 +4,10 @@ import {
   computeUsdcDeficit,
   applyConfirmedDeposit,
   reconcileRefreshedBalance,
+  applyConfirmedSolDeposit,
+  reconcileRefreshedSolRequirement,
   fmtBalance,
+  type SolRequirementState,
 } from "@/lib/equity-display";
 import { walletAuthHeaders } from "@/lib/queryClient";
 import { useState, useEffect } from 'react';
@@ -96,12 +99,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
   const [availableBalance, setAvailableBalance] = useState<number | null>(null);
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [disclaimerOpen, setDisclaimerOpen] = useState(false);
-  const [solRequirement, setSolRequirement] = useState<{
-    required: number;
-    current: number;
-    deficit: number;
-    canCreate: boolean;
-  } | null>(null);
+  const [solRequirement, setSolRequirement] = useState<SolRequirementState | null>(null);
   const [isDepositingSol, setIsDepositingSol] = useState(false);
   const [isDepositingUsdc, setIsDepositingUsdc] = useState(false);
 
@@ -230,7 +228,8 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
     }
 
     const amount = solRequirement.deficit;
-    
+
+    let solDepositSucceeded = false;
     setIsDepositingSol(true);
     try {
       const response = await fetch('/api/agent/deposit-sol', {
@@ -258,17 +257,20 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
         lastValidBlockHeight,
       });
 
+      // Deposit is CONFIRMED on-chain — record success BEFORE any read-only
+      // work so no later refresh failure can reach the transaction-failure
+      // handler below (WO-15C.4).
+      solDepositSucceeded = true;
       toast({ title: 'SOL deposited successfully!' });
-      
-      const balanceRes = await fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders(), signal: AbortSignal.timeout(8_000) });
-      if (balanceRes.ok) {
-        const data = await safeResponseJson(balanceRes);
-        if (data.botCreationSolRequirement) {
-          setSolRequirement(data.botCreationSolRequirement);
-        }
-      }
-      
+      // Confirmed-state transition: eliminate the just-funded deficit
+      // IMMEDIATELY, before the deposit action can re-enable.
+      // Known previous state → current + exact confirmed amount (deficit → 0,
+      // canCreate recomputed). Missing/malformed previous state → stays null
+      // (never fabricate; the deposit CTA stays hidden).
+      setSolRequirement(prev => applyConfirmedSolDeposit(prev, amount));
     } catch (error: any) {
+      // Only transaction-phase failures (deposit request, signing, submission,
+      // confirmation — all pre-confirmation) reach this handler.
       console.error('SOL deposit failed:', error);
       toast({ 
         title: 'SOL Deposit Failed', 
@@ -276,7 +278,37 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
         variant: 'destructive' 
       });
     } finally {
-      setIsDepositingSol(false);
+      // Duplicate-submission guard: on success, keep the deposit action
+      // suppressed (isDepositingSol stays true) until the bounded refresh
+      // below settles. Only the failure path releases the button here.
+      if (!solDepositSucceeded) {
+        setIsDepositingSol(false);
+      }
+    }
+
+    if (solDepositSucceeded) {
+      // Best-effort post-confirmation refresh — isolated from the transaction
+      // outcome. The deposit is already confirmed above; a timeout, non-200, or
+      // network failure here must NEVER fall into the transaction-failure
+      // handler, NEVER show "SOL Deposit Failed", and NEVER re-offer the same
+      // deposit. The read is bounded to 8 s so the busy flag can never stay
+      // pending forever.
+      try {
+        const balanceRes = await fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders(), signal: AbortSignal.timeout(8_000) });
+        if (balanceRes.ok) {
+          const data = await safeResponseJson(balanceRes);
+          // Stale-read guard: a snapshot that predates the just-confirmed
+          // deposit must never lower the confirmed SOL balance or resurrect
+          // the eliminated deficit; a genuinely higher balance is adopted and
+          // deficit/canCreate are recomputed from the reconciled state.
+          setSolRequirement(prev => reconcileRefreshedSolRequirement(prev, data.botCreationSolRequirement));
+        }
+      } catch {
+        // Best-effort: deposit already confirmed; refresh failure is informational only.
+      } finally {
+        // Refresh settled (success, failure, or 8 s timeout) — release the action.
+        setIsDepositingSol(false);
+      }
     }
   };
   
@@ -371,9 +403,10 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
         }
         if (balanceRes.ok) {
           const data = await safeResponseJson(balanceRes);
-          if (data.botCreationSolRequirement) {
-            setSolRequirement(data.botCreationSolRequirement);
-          }
+          // Same stale-read guard as the SOL handler (WO-15C.4): this refresh
+          // can also land seconds after a confirmed SOL deposit and must never
+          // resurrect the eliminated SOL deficit with a stale snapshot.
+          setSolRequirement(prev => reconcileRefreshedSolRequirement(prev, data.botCreationSolRequirement));
         }
       } catch {
         // Best-effort: deposit already confirmed; refresh failure is informational only.
