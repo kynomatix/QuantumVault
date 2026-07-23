@@ -1,6 +1,8 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { coreReadJson, CoreReadError, useServerDegraded, useSessionExpired, reportCoreAuthSuccess } from "@/lib/server-health";
 import { deriveDashboardSectionState, staleDataLabel, type DashboardSectionState } from "@/lib/dashboard-state";
+import { EquityPoller, type EquityPollResult, type EquitySnapshot } from "@/lib/equity-poller";
+import { fmtBalance, fmtBotPnl, fmtBotPnlPercent, fmtBotTradeCount, botPublishState } from "@/lib/equity-display";
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from 'framer-motion';
@@ -527,7 +529,13 @@ export default function AppPage() {
   const [vaultBalance, setVaultBalance] = useState<number | null>(null);
   const [solBalance, setSolBalance] = useState<number | null>(null);
   const [equityLoading, setEquityLoading] = useState(false);
+  // True when the displayed equity values are from a prior successful read because
+  // the latest automatic or manual read failed or returned partial null fields.
+  const [equityStale, setEquityStale] = useState(false);
   const equityInitialLoadDone = useRef(false);
+  // Single coordinator for all equity reads — prevents concurrent requests from
+  // setInterval ticks, manual refresh, and post-recovery refreshes.
+  const pollerRef = useRef<EquityPoller | null>(null);
   // True while core reads (equity, bots, positions) are consistently failing —
   // drives the "connection lost" banner so a degraded server never masquerades
   // as an empty account (2026-07-19 incident).
@@ -607,46 +615,58 @@ export default function AppPage() {
       return;
     }
     
-    // Abort controller ties all fetches in this effect instance to the cleanup
-    // function so wallet-switch / unmount aborts in-flight reads cleanly.
+    // ctrl is used only for fetchOrphanSlots; equity polling has its own
+    // per-request AbortControllers managed inside EquityPoller.
     const ctrl = new AbortController();
-    // Generation counter prevents a slow response for wallet-A from updating
-    // wallet-B's state after a rapid wallet switch (stale closure guard).
-    let generation = 0;
 
-    const fetchEquityData = async () => {
-      const myGen = ++generation;
-      if (!equityInitialLoadDone.current) {
-        setEquityLoading(true);
+    // ── Equity coordinator ────────────────────────────────────────────────────
+    // Per-field null-safe update: keep the prior known value when the server
+    // returns null for a field (partial enrichment / live-data unavailable).
+    // This prevents a degraded read from silently zeroing out known-good balances.
+    const handleEquityResult = (result: EquityPollResult) => {
+      const s = result.snapshot;
+      if (result.ok && s !== null) {
+        if (s.totalEquity !== null) setTotalEquity(s.totalEquity);
+        if (s.agentBalance !== null) setAgentBalance(s.agentBalance);
+        if (s.vaultBalance !== null) setVaultBalance(s.vaultBalance);
+        if (s.exchangeBalance !== null) setExchangeBalance(s.exchangeBalance);
+        if (s.mainAccountFreeCollateral !== null) setMainAccountFreeCollateral(s.mainAccountFreeCollateral);
+        if (s.solBalance !== null) setSolBalance(s.solBalance);
+        // Mark stale when the response was partial (any primary field null).
+        setEquityStale(s.totalEquity === null || s.agentBalance === null);
+        equityInitialLoadDone.current = true;
+      } else {
+        // Failed or all-null read: retain prior values intact.
+        // Mark stale only if we had prior data — no prior data stays null → "Unavailable".
+        if (equityInitialLoadDone.current) setEquityStale(true);
+        // Health banner is raised by coreReadJson via reportCoreReadTimeoutNow /
+        // useServerDegraded; we must not clear balances or imply session expiry.
       }
-      try {
-        const { ok, data } = await coreReadJson(
-          'total-equity',
-          '/api/total-equity?includeVault=1',
-          { credentials: 'include', headers: walletAuthHeaders() },
-          { signal: ctrl.signal, coreHealth: true },
-        );
-        // Discard result if a newer generation superseded this request.
-        if (myGen !== generation || ctrl.signal.aborted) return;
-        if (ok) {
-          const d = data as Record<string, unknown>;
-          setTotalEquity((d.totalEquity as number) ?? 0);
-          setAgentBalance((d.agentBalance as number) ?? 0);
-          setVaultBalance((d.vaultBalance as number) ?? 0);
-          setExchangeBalance((d.exchangeBalance as number) ?? 0);
-          setMainAccountFreeCollateral((d.mainAccountFreeCollateral as number) ?? 0);
-          setSolBalance((d.solBalance as number) ?? 0);
-          equityInitialLoadDone.current = true;
-        }
-        // !ok: keep previous values; health banner raised by useServerDegraded.
-      } catch {
-        // Timeout, network error, or abort: keep previous values.
-        // Degradation banner is raised by coreReadJson via reportCoreReadTimeoutNow.
-      } finally {
-        // Only clear loading for the current generation to avoid a stale
-        // earlier request clobbering a later one's loading indicator.
-        if (myGen === generation) setEquityLoading(false);
-      }
+      setEquityLoading(false);
+    };
+
+    const fetchEquityFn = async (signal: AbortSignal): Promise<EquitySnapshot | null> => {
+      const { ok, data } = await coreReadJson(
+        'total-equity',
+        '/api/total-equity?includeVault=1',
+        { credentials: 'include', headers: walletAuthHeaders() },
+        { signal, coreHealth: true },
+      );
+      if (!ok) return null;
+      const d = data as Record<string, unknown>;
+      // Preserve null from the server; never coerce undefined/null → 0.
+      const num = (k: string): number | null => {
+        const v = d[k];
+        return typeof v === 'number' ? v : null;
+      };
+      return {
+        totalEquity: num('totalEquity'),
+        agentBalance: num('agentBalance'),
+        vaultBalance: num('vaultBalance'),
+        exchangeBalance: num('exchangeBalance'),
+        mainAccountFreeCollateral: num('mainAccountFreeCollateral'),
+        solBalance: num('solBalance'),
+      };
     };
 
     // Cheap DB-only check for funds stranded in orphaned Flash per-bot wallets
@@ -668,11 +688,13 @@ export default function AppPage() {
       }
     };
 
-    fetchEquityData();
+    if (!equityInitialLoadDone.current) setEquityLoading(true);
+    const poller = new EquityPoller(fetchEquityFn, handleEquityResult);
+    pollerRef.current = poller;
     fetchOrphanSlots();
-    const interval = setInterval(fetchEquityData, 30000);
+    poller.start();
     return () => {
-      clearInterval(interval);
+      poller.stop();
       ctrl.abort();
     };
   }, [connected, sessionConnected, publicKeyString]);
@@ -987,18 +1009,9 @@ export default function AppPage() {
         refetchMyPublishedBots?.().catch(() => null),
       ].filter(Boolean);
       
-      // Refresh equity data
-      const equityPromise = safeFetchJson('/api/total-equity?includeVault=1')
-        .then(data => {
-          if (data) {
-            setTotalEquity(data.totalEquity ?? 0);
-            setAgentBalance(data.agentBalance ?? 0);
-            setVaultBalance(data.vaultBalance ?? 0);
-            setExchangeBalance(data.exchangeBalance ?? 0);
-            setMainAccountFreeCollateral(data.mainAccountFreeCollateral ?? 0);
-            setSolBalance(data.solBalance ?? 0);
-          }
-        });
+      // Route equity refresh through the coordinator so it cannot overlap
+      // the automatic poll or any other concurrent refresh.
+      pollerRef.current?.manualRefresh();
       
       // Refresh settings
       const settingsPromise = safeFetchJson('/api/wallet/settings')
@@ -1027,7 +1040,7 @@ export default function AppPage() {
           }
         });
       
-      await Promise.all([...refreshPromises, equityPromise, settingsPromise, agentKeyPromise]);
+      await Promise.all([...refreshPromises, settingsPromise, agentKeyPromise]);
       
       toast({ title: 'Refreshed', description: 'All data updated' });
     } catch (error) {
@@ -1824,17 +1837,8 @@ export default function AppPage() {
       setAgentBalance((prev) => (prev ?? 0) + withdrawAmount);
 
       await new Promise(r => setTimeout(r, 5000));
-      try {
-        const eqRes = await fetch('/api/total-equity?includeVault=1', { credentials: 'include', headers: walletAuthHeaders() });
-        if (eqRes.ok) {
-          const eqData = await safeResponseJson(eqRes);
-          setTotalEquity(eqData.totalEquity ?? 0);
-          setAgentBalance(eqData.agentBalance ?? 0);
-          setVaultBalance(eqData.vaultBalance ?? 0);
-          setExchangeBalance(eqData.exchangeBalance ?? 0);
-          setMainAccountFreeCollateral(eqData.mainAccountFreeCollateral ?? 0);
-        }
-      } catch {}
+      // Route through the coordinator — prevents a concurrent automatic poll.
+      pollerRef.current?.manualRefresh();
     } catch (error: any) {
       console.error('Recovery error:', error);
       toast({
@@ -1865,21 +1869,15 @@ export default function AppPage() {
         title: data.totalUsdc > 0 ? 'Funds Recovered!' : 'Recovery Complete',
         description: data.message,
       });
-      // Re-check orphan slots and refresh balances.
+      // Re-check orphan slots and route equity refresh through the coordinator.
       try {
         const orphanRes = await fetch('/api/flash/orphaned-wallets', { credentials: 'include', headers: walletAuthHeaders() });
         if (orphanRes.ok) {
           const orphanData = await safeResponseJson(orphanRes);
           setOrphanSlots(orphanData.orphanSlots ?? 0);
         }
-        const eqRes = await fetch('/api/total-equity?includeVault=1', { credentials: 'include', headers: walletAuthHeaders() });
-        if (eqRes.ok) {
-          const eqData = await safeResponseJson(eqRes);
-          setTotalEquity(eqData.totalEquity ?? 0);
-          setAgentBalance(eqData.agentBalance ?? 0);
-          setVaultBalance(eqData.vaultBalance ?? 0);
-        }
       } catch {}
+      pollerRef.current?.manualRefresh();
     } catch (error: any) {
       console.error('Stranded recovery error:', error);
       toast({
@@ -2247,23 +2245,23 @@ export default function AppPage() {
                   </div>
                   <div className="p-2 rounded-lg bg-background/50 text-center">
                     <p className="text-xs text-muted-foreground">Total Equity</p>
-                    <p className="text-lg font-semibold font-mono text-primary" data-testid="text-total-equity">
-                      {equityLoading ? '...' : totalEquity !== null ? `$${totalEquity.toFixed(2)}` : '$0.00'}
+                    <p className={`text-lg font-semibold font-mono ${equityStale ? 'text-amber-400/80' : 'text-primary'}`} data-testid="text-total-equity">
+                      {equityLoading ? '...' : fmtBalance(totalEquity)}
                     </p>
                   </div>
                   <div className="px-3 py-2 space-y-2 border-t border-border/30 mt-2">
                     <div className="flex justify-between text-xs">
                       <span className="text-muted-foreground">Available</span>
                       <span
-                        className="font-mono text-primary"
+                        className={`font-mono ${equityStale ? 'text-amber-400/80' : 'text-primary'}`}
                         data-testid="text-main-account"
                         title={vaultBalance && vaultBalance >= 0.01 ? `$${(agentBalance ?? 0).toFixed(2)} wallet + $${vaultBalance.toFixed(2)} Vault savings` : undefined}
-                      >${availableBalance !== null ? availableBalance.toFixed(2) : '0.00'}</span>
+                      >{availableBalance !== null ? `$${availableBalance.toFixed(2)}` : 'Unavailable'}</span>
                     </div>
                     <div className="flex justify-between text-xs items-center">
                       <span className="text-muted-foreground">In Trading</span>
                       <div className="flex items-center gap-2">
-                        <span className="font-mono text-emerald-400" data-testid="text-in-trading">${exchangeBalance?.toFixed(2) ?? '0.00'}</span>
+                        <span className="font-mono text-emerald-400" data-testid="text-in-trading">{exchangeBalance !== null ? `$${exchangeBalance.toFixed(2)}` : 'Unavailable'}</span>
                         {mainAccountFreeCollateral > 0.01 && (
                           <button
                             onClick={() => setShowRecoverDialog(true)}
@@ -2317,23 +2315,23 @@ export default function AppPage() {
                   </div>
                   <div className="p-2 rounded-lg bg-background/50 text-center">
                     <p className="text-xs text-muted-foreground">Total Equity</p>
-                    <p className="text-lg font-semibold font-mono text-primary" data-testid="text-total-equity-mobile">
-                      {equityLoading ? '...' : totalEquity !== null ? `$${totalEquity.toFixed(2)}` : '$0.00'}
+                    <p className={`text-lg font-semibold font-mono ${equityStale ? 'text-amber-400/80' : 'text-primary'}`} data-testid="text-total-equity-mobile">
+                      {equityLoading ? '...' : fmtBalance(totalEquity)}
                     </p>
                   </div>
                   <div className="px-3 py-2 space-y-2 border-t border-border/30 mt-2">
                     <div className="flex justify-between text-xs">
                       <span className="text-muted-foreground">Available</span>
                       <span
-                        className="font-mono text-primary"
+                        className={`font-mono ${equityStale ? 'text-amber-400/80' : 'text-primary'}`}
                         data-testid="text-main-account-mobile"
                         title={vaultBalance && vaultBalance >= 0.01 ? `$${(agentBalance ?? 0).toFixed(2)} wallet + $${vaultBalance.toFixed(2)} Vault savings` : undefined}
-                      >${availableBalance !== null ? availableBalance.toFixed(2) : '0.00'}</span>
+                      >{availableBalance !== null ? `$${availableBalance.toFixed(2)}` : 'Unavailable'}</span>
                     </div>
                     <div className="flex justify-between text-xs items-center">
                       <span className="text-muted-foreground">In Trading</span>
                       <div className="flex items-center gap-2">
-                        <span className="font-mono text-emerald-400" data-testid="text-in-trading-mobile">${exchangeBalance?.toFixed(2) ?? '0.00'}</span>
+                        <span className="font-mono text-emerald-400" data-testid="text-in-trading-mobile">{exchangeBalance !== null ? `$${exchangeBalance.toFixed(2)}` : 'Unavailable'}</span>
                         {mainAccountFreeCollateral > 0.01 && (
                           <button
                             onClick={() => setShowRecoverDialog(true)}
@@ -2987,7 +2985,12 @@ export default function AppPage() {
                               </div>
                             );
                           }
-                          return sortedBots.map((bot: TradingBot) => (
+                          return sortedBots.map((bot: TradingBot) => {
+                            const _bfs = (bot as any).botFinancialStatus;
+                            const _tc = fmtBotTradeCount((bot as any).actualTradeCount, (bot.stats as any)?.totalTrades, _bfs);
+                            const _pnl = fmtBotPnl((bot as any).netPnl, _bfs);
+                            const _pct = fmtBotPnlPercent((bot as any).netPnlPercent, (bot as any).netDeposited, _bfs);
+                            return (
                           <div 
                             key={bot.id} 
                             className="p-3 rounded-xl bg-muted/30 hover:bg-muted/50 transition-colors cursor-pointer" 
@@ -3013,18 +3016,16 @@ export default function AppPage() {
                               <span className={`w-2 h-2 rounded-full ${bot.isActive ? 'bg-emerald-400' : 'bg-yellow-400'}`} />
                             </div>
                             <div className="flex items-center justify-between text-xs">
-                              <span className="text-muted-foreground">{(bot as any).actualTradeCount ?? (bot.stats as any)?.totalTrades ?? 0} trades</span>
-                              <span className={((bot as any).netPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                                {((bot as any).netPnl ?? 0) >= 0 ? '+' : ''}${((bot as any).netPnl ?? 0).toFixed(2)}
-                                {((bot as any).netDeposited ?? 0) > 0 && (
-                                  <span className="ml-1">
-                                    ({((bot as any).netPnlPercent ?? 0).toFixed(1)}%)
-                                  </span>
-                                )}
+                              <span className="text-muted-foreground">{_tc !== null ? `${_tc} trades` : '–'}</span>
+                              <span className={_pnl !== null ? ((bot as any).netPnl >= 0 ? 'text-emerald-400' : 'text-red-400') : 'text-muted-foreground'}>
+                                {_pnl !== null ? (
+                                  <>{_pnl}{_pct && <span className="ml-1">({_pct})</span>}</>
+                                ) : '–'}
                               </span>
                             </div>
                           </div>
-                        ));
+                            );
+                          });
                         })()
                       ) : botsSectionState === 'empty' ? (
                         <div className="text-center py-6 text-muted-foreground" data-testid="empty-bots">
@@ -3253,6 +3254,12 @@ export default function AppPage() {
                     const position = positionsData?.find((p: any) => p.botId === bot.id);
                     const hasPosition = position && Math.abs(position.baseAssetAmount) > 0.0001;
                     const unrealizedPnl = position?.unrealizedPnl ?? 0;
+                    // Null-safe display helpers — must not coerce null to 0 or false.
+                    const _bfs = (bot as any).botFinancialStatus;
+                    const _tc = fmtBotTradeCount((bot as any).actualTradeCount, (bot.stats as any)?.totalTrades, _bfs);
+                    const _pnl = fmtBotPnl((bot as any).netPnl, _bfs);
+                    const _pct = fmtBotPnlPercent((bot as any).netPnlPercent, (bot as any).netDeposited, _bfs);
+                    const _publishState = botPublishState((bot as any).isPublished, (bot as any).botType, _bfs);
                     return (
                       <div
                         key={bot.id}
@@ -3310,7 +3317,7 @@ export default function AppPage() {
                         )}
                         <div className="grid grid-cols-3 gap-3 text-center">
                           <div className="p-2.5 rounded-lg bg-muted/30">
-                            <p className="text-lg font-bold">{(bot as any).actualTradeCount ?? (bot.stats as any)?.totalTrades ?? 0}</p>
+                            <p className="text-lg font-bold">{_tc !== null ? _tc : '–'}</p>
                             <p className="text-xs text-muted-foreground">Trades</p>
                           </div>
                           <div className="p-2.5 rounded-lg bg-muted/30">
@@ -3318,18 +3325,18 @@ export default function AppPage() {
                             <p className="text-xs text-muted-foreground">Leverage</p>
                           </div>
                           <div className="p-2.5 rounded-lg bg-muted/30">
-                            <p className={`text-lg font-bold ${((bot as any).netPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                              {((bot as any).netPnl ?? 0) >= 0 ? '+' : ''}${((bot as any).netPnl ?? 0).toFixed(2)}
+                            <p className={`text-lg font-bold ${_pnl !== null ? ((bot as any).netPnl >= 0 ? 'text-emerald-400' : 'text-red-400') : 'text-muted-foreground'}`}>
+                              {_pnl !== null ? _pnl : '–'}
                             </p>
-                            {((bot as any).netDeposited ?? 0) > 0 && (
-                              <p className={`text-xs font-medium ${((bot as any).netPnlPercent ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                {((bot as any).netPnlPercent ?? 0) >= 0 ? '+' : ''}{((bot as any).netPnlPercent ?? 0).toFixed(1)}%
+                            {_pct !== null && (
+                              <p className={`text-xs font-medium ${(bot as any).netPnlPercent >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                {_pct}
                               </p>
                             )}
                             <p className="text-xs text-muted-foreground">Net P&L</p>
                           </div>
                         </div>
-                        {!(bot as any).isPublished && (bot as any).botType !== 'grid' && (
+                        {_publishState === 'unpublished' && (bot as any).botType !== 'grid' && (
                           <Button
                             variant="outline"
                             size="sm"
@@ -3345,7 +3352,7 @@ export default function AppPage() {
                             Publish to Marketplace
                           </Button>
                         )}
-                        {(bot as any).isPublished && (
+                        {_publishState === 'published' && (
                           <div className="mt-4 px-3 py-2 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center gap-2 text-sm text-primary">
                             <Store className="w-4 h-4" />
                             Published
