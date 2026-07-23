@@ -29,6 +29,7 @@ import { resolveAgentKeypair } from './agent-wallet';
 import { FLASH_BOT_WALLET_SOL_SEED } from './protocol/flash/flash-constants';
 import { reconcileWalletDeposits } from './deposit-reconciler';
 import { publicPortfolioHandler } from './public-portfolio';
+import { initSnapshotModule, getWalletFinancialSnapshot } from './bot-financial-snapshot';
 
 function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
@@ -5262,6 +5263,20 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  // WO-15B: Initialize the shared per-wallet financial snapshot module with
+  // route-local helpers (injected to avoid circular imports).
+  initSnapshotModule({
+    getCachedPricesMeta: getCachedDisplayPricesWithMeta,
+    getExchangeAccountInfoForBot,
+    addParkedValueForBotDisplayEquity,
+    getExchangeAccountInfo,
+    getAgentUsdcBalance: (addr) => getAgentUsdcBalance(addr),
+    getAgentSolBalance: (addr) => getAgentSolBalance(addr),
+    accountVaultRoutableValueUsdc,
+    getBotSubaccountContext,
+    getAdapterForBot,
+  });
+
   // Trust proxy for secure cookies behind Replit's reverse proxy
   if (process.env.NODE_ENV === "production") {
     app.set('trust proxy', 1);
@@ -14403,102 +14418,39 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
   // Trading bot CRUD routes
   app.get("/api/trading-bots", requireWallet, async (req, res) => {
+    // WO-15B: shared per-wallet financial snapshot (batch DB + bounded venue).
+    // DASH-PRICE-FAILFAST-01 preserved: getCachedPricesMeta is synchronous,
+    // stale-ok, no network. Per-bot DB fan-out eliminated via enrichment batch.
     try {
-      const bots = await storage.getTradingBots(req.walletAddress!);
-      const wallet = await storage.getWallet(req.walletAddress!);
-      const listParkedBotIds = await getParkedBotIdSet(req.walletAddress!);
-      
-      // DASH-PRICE-FAILFAST-01: use only the immediate in-memory cached-price
-      // snapshot for the markets that belong to the returned bots. Never
-      // initiates a network request, quota operation, or cache refresh.
-      // Stale values are permitted — display-only. Bot equity falls through to
-      // the conservative live-account or realised-PnL path when price absent.
-      const botMarkets = [...new Set(bots.map((b) => b.market))];
-      const prices = getCachedDisplayPrices(botMarkets);
+      const snapshot = await getWalletFinancialSnapshot(req.walletAddress!);
 
-      const enrichedBots = await Promise.all(bots.map(async (bot) => {
-        const botCtx = getBotSubaccountContext(bot);
-        const [tradeCount, position, publishedBot] = await Promise.all([
-          storage.getCanonicalBotTradeCount(bot.id),
-          storage.getBotPosition(bot.id, bot.market),
-          storage.getPublishedBotByTradingBotId(bot.id),
-        ]);
-        
-        let netDeposited = 0;
-        let totalDeposits = 0;
-        let botBalance = 0;
-        let netPnl = 0;
-        let netPnlPercent = 0;
-        let botBorrowDebtUsdc = 0;
-        
-        try {
-          const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
-          netDeposited = sumNetDepositedFromEvents(botEvents);
-          totalDeposits = botEvents.reduce((sum, e) => {
-            if (isVaultInternalEvent(e.eventType)) return sum;
-            const amt = parseFloat(e.amount || '0');
-            return amt > 0 ? sum + amt : sum;
-          }, 0);
+      const enrichedBots = snapshot.bots.map((bot) => {
+        const fin = snapshot.perBotFinancials.get(bot.id);
+        const eq = snapshot.enrichment.equityAgg.get(bot.id);
+        const positions = snapshot.enrichment.positions.get(bot.id) ?? [];
+        const position = positions.find(p => (p as any).market === bot.market)
+          ?? positions[0]
+          ?? null;
+        const publishedBot = snapshot.enrichment.publishedBotMap.get(bot.id) ?? null;
 
-          if (botCtx && wallet?.agentPublicKey) {
-            const listAdapter = getAdapterForBot(bot);
-            // 8s timeout guard: Flash _readRawPositions + getWalletCollateralBalance are
-            // bare Solana RPC calls (no AbortSignal). On first use after a restart, if
-            // Helius is slow they hang indefinitely — causing the whole Promise.all to
-            // exceed the 60s proxy kill threshold (no log line, infinite client spinner).
-            const liveInfo = await Promise.race([
-              getExchangeAccountInfoForBot(wallet.agentPublicKey, 0, botCtx, listAdapter),
-              new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error(`[trading-bots] account info timeout bot=${bot.id}`)), 8_000)
-              ),
-            ]);
-            const listAdj = await addParkedValueForBotDisplayEquity(bot, listAdapter, liveInfo.totalCollateral, { hasVaultRows: listParkedBotIds.has(bot.id) });
-            // Subtract this bot's OWN open per-bot borrow debt (Flash-only) so borrowed
-            // USDC sitting in the bot wallet is not counted as the bot's equity/PnL.
-            botBorrowDebtUsdc = await storage.sumOpenBorrowDebtUsdcForBot(req.walletAddress!, bot.id);
-            botBalance = listAdj.equityUsdc - botBorrowDebtUsdc;
-            netPnl = botBalance - netDeposited;
-            netPnlPercent = totalDeposits > 0 ? (netPnl / totalDeposits) * 100 : 0;
-          } else {
-            const realizedPnl = parseFloat(position?.realizedPnl || '0');
-            const totalFees = parseFloat(position?.totalFees || '0');
-            
-            let unrealizedPnl = 0;
-            if (position) {
-              const baseSize = parseFloat(position.baseSize);
-              const entryPrice = parseFloat(position.avgEntryPrice);
-              const markPrice = prices[position.market] || entryPrice;
-              if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
-                unrealizedPnl = baseSize > 0
-                  ? (markPrice - entryPrice) * Math.abs(baseSize)
-                  : (entryPrice - markPrice) * Math.abs(baseSize);
-              }
-            }
-            
-            botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
-            netPnl = botBalance - netDeposited;
-            netPnlPercent = totalDeposits > 0 ? (netPnl / totalDeposits) * 100 : 0;
-          }
-        } catch (err) {
-          console.warn(`[trading-bots] Failed to calculate net PnL for bot ${bot.id}:`, err);
-        }
-        
         return {
           ...bot,
-          actualTradeCount: tradeCount,
-          realizedPnl: position?.realizedPnl || "0",
-          totalFees: position?.totalFees || "0",
-          exchangeBalance: botBalance,
-          borrowDebtUsdc: botBorrowDebtUsdc,
-          netDeposited,
-          netPnl,
-          netPnlPercent,
-          isPublished: !!publishedBot && publishedBot.isActive,
-          publishedBotId: publishedBot?.id || null,
+          actualTradeCount: snapshot.enrichment.tradeCounts.get(bot.id) ?? 0,
+          realizedPnl: (position as any)?.realizedPnl || "0",
+          totalFees: (position as any)?.totalFees || "0",
+          exchangeBalance: fin?.exchangeBalance ?? null,
+          borrowDebtUsdc: fin?.borrowDebtUsdc ?? 0,
+          netDeposited: eq?.netDeposited ?? 0,
+          netPnl: fin?.netPnl ?? null,
+          netPnlPercent: fin?.netPnlPercent ?? null,
+          isPublished: !!publishedBot && (publishedBot as any).isActive,
+          publishedBotId: (publishedBot as any)?.id || null,
           botSubaccountIdentifier: bot.protocolSubaccountId || null,
+          financialDataStatus: snapshot.status,
+          financialDataObservedAt: snapshot.observedAt,
         };
-      }));
-      
+      });
+
       res.json(enrichedBots);
     } catch (error) {
       console.error("Get trading bots error:", error);
@@ -20709,117 +20661,63 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   });
 
   app.get("/api/total-equity", requireWallet, async (req, res) => {
+    // WO-15B: shared per-wallet financial snapshot (batch DB + bounded venue).
+    // DASH-PRICE-FAILFAST-02 preserved: getCachedPricesMeta is synchronous,
+    // stale-ok, no network. Per-bot DB fan-out eliminated via enrichment batch.
     try {
-      const wallet = await storage.getWallet(req.walletAddress!);
-      const bots = await storage.getTradingBots(req.walletAddress!);
-      const agentAddress = wallet?.agentPublicKey;
-
       // The dashboard passes ?includeVault=1 so "Available" can show idle wallet
-      // USDC + account-scope Vault savings — the Vault is spendable on demand
-      // (auto-unparks to fund trades / repay / new bots), so it IS available
-      // balance. Only that caller pays the extra on-chain Vault reads; other
-      // pollers (e.g. Subscribe modal) are unchanged. Fail-closed: the helper
-      // only ever understates (returns $0 on read failure), never overstates.
+      // USDC + account-scope Vault savings — spendable on demand. Only that caller
+      // pays the extra on-chain read; the snapshot always carries vaultBalance but
+      // the route suppresses it based on the query param so non-dashboard pollers
+      // (e.g. Subscribe modal) see vaultBalance=0 as before.
       const includeVault = req.query.includeVault === "1" || req.query.includeVault === "true";
 
-      const [agentBalance, solBalance, aggregateAccountInfo, vaultBalance] = await Promise.all([
-        agentAddress ? getAgentUsdcBalance(agentAddress) : Promise.resolve(0),
-        agentAddress ? getAgentSolBalance(agentAddress) : Promise.resolve(0),
-        agentAddress ? getExchangeAccountInfo(agentAddress, 0) : Promise.resolve({ totalCollateral: 0, freeCollateral: 0 }),
-        includeVault && agentAddress
-          ? accountVaultRoutableValueUsdc(req.walletAddress!, agentAddress)
-          : Promise.resolve(0),
-      ]);
-      
-      const aggregateExchangeEquity = aggregateAccountInfo.totalCollateral;
-
-      // Cheap DB hint so bots with no Vault rows skip the parked-value chain read.
-      const teParkedBotIds = await getParkedBotIdSet(req.walletAddress!);
-
-      // DASH-PRICE-FAILFAST-02: hoist synchronous cached-price snapshot out of the
-      // per-bot loop. Used only in the DB-fallback branch (bots without an eqBotCtx).
-      // Stale prices permitted — display-only; staleness marker added to response.
-      const teBotMarkets = [...new Set(bots.map((b) => b.market))];
-      const { prices: teDbPrices, pricesAsOf: tePricesAsOf, pricesStale: tePricesStale } = getCachedDisplayPricesWithMeta(teBotMarkets);
+      const snapshot = await getWalletFinancialSnapshot(req.walletAddress!);
 
       const subaccountBalances: { botId: string; botName: string; subaccountId: number; balance: number }[] = [];
-      
-      for (const bot of bots) {
-        let botBalance = 0;
-        try {
-          const eqBotCtx = getBotSubaccountContext(bot);
-          if (bot.activeProtocol === 'flash' && agentAddress && bot.protocolSubaccountId === agentAddress) {
-            // Legacy Flash bot whose "subaccount" IS the agent wallet — counting it
-            // here would double-count the agent balance (already in agentBalance).
-            botBalance = 0;
-          } else if (eqBotCtx) {
-            const teAdapter = getAdapterForBot(bot);
-            const liveInfo = await getExchangeAccountInfoForBot('', 0, eqBotCtx, teAdapter);
-            // Match /api/trading-bots: the bot's parked Vault value IS its equity,
-            // and its OWN open per-bot borrow debt is a liability — subtract it so
-            // borrowed USDC sitting in the bot wallet never reads as equity/profit.
-            const teAdj = await addParkedValueForBotDisplayEquity(bot, teAdapter, liveInfo.totalCollateral, { hasVaultRows: teParkedBotIds.has(bot.id) });
-            const teDebt = await storage.sumOpenBorrowDebtUsdcForBot(req.walletAddress!, bot.id);
-            botBalance = teAdj.equityUsdc - teDebt;
-          } else {
-            // teDbPrices hoisted above — synchronous cached-price snapshot, no network.
-            const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
-            const netDeposited = sumNetDepositedFromEvents(botEvents);
-            const position = await storage.getBotPosition(bot.id, bot.market);
-            const realizedPnl = parseFloat(position?.realizedPnl || '0');
-            const totalFees = parseFloat(position?.totalFees || '0');
-            
-            let unrealizedPnl = 0;
-            if (position) {
-              const baseSize = parseFloat(position.baseSize);
-              const entryPrice = parseFloat(position.avgEntryPrice);
-              const markPrice = teDbPrices[position.market] || entryPrice;
-              if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
-                unrealizedPnl = baseSize > 0
-                  ? (markPrice - entryPrice) * Math.abs(baseSize)
-                  : (entryPrice - markPrice) * Math.abs(baseSize);
-              }
-            }
-            
-            botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
-          }
-        } catch (err) {
-          console.warn(`[total-equity] Failed to calc bot balance for ${bot.id}:`, err);
-        }
-        
+
+      for (const bot of snapshot.bots) {
+        const fin = snapshot.perBotFinancials.get(bot.id);
         subaccountBalances.push({
           botId: bot.id,
           botName: bot.name,
-          subaccountId: bot.driftSubaccountId ?? 0,
-          balance: botBalance,
+          subaccountId: (bot as any).driftSubaccountId ?? 0,
+          balance: fin?.exchangeBalance ?? 0,
         });
       }
-      
+
       const totalBotBalances = subaccountBalances.reduce((sum, b) => sum + b.balance, 0);
-      const mainAccountEquity = aggregateExchangeEquity;
-      const mainAccountFreeCollateral = aggregateAccountInfo.freeCollateral ?? 0;
-      
+      const mainAccountEquity = snapshot.mainAccount?.totalCollateral ?? 0;
+      const mainAccountFreeCollateral = snapshot.mainAccount?.freeCollateral ?? 0;
+      const vaultBalance = includeVault ? snapshot.vaultBalance : 0;
+
       const inTrading = mainAccountEquity + totalBotBalances;
       // Vault savings are spendable on demand, so they count toward equity. 0 unless
-      // ?includeVault=1 (only the dashboard pays the read); keeps Available + In
-      // Trading = Total Equity consistent once Available folds in the Vault too.
-      const totalEquity = agentBalance + vaultBalance + inTrading;
-      
-      console.log(`[total-equity] agent=$${agentBalance.toFixed(2)} vault=$${vaultBalance.toFixed(2)} mainAcct=$${mainAccountEquity.toFixed(2)} bots=$${totalBotBalances.toFixed(2)} inTrading=$${inTrading.toFixed(2)} mainFree=$${mainAccountFreeCollateral.toFixed(2)} total=$${totalEquity.toFixed(2)}`);
-      
-      res.json({ 
-        agentBalance,
+      // ?includeVault=1; keeps Available + In Trading = Total Equity consistent.
+      const totalEquity = snapshot.agentBalance + vaultBalance + inTrading;
+
+      console.log(
+        `[total-equity] agent=$${snapshot.agentBalance.toFixed(2)} vault=$${vaultBalance.toFixed(2)}` +
+        ` mainAcct=$${mainAccountEquity.toFixed(2)} bots=$${totalBotBalances.toFixed(2)}` +
+        ` inTrading=$${inTrading.toFixed(2)} mainFree=$${mainAccountFreeCollateral.toFixed(2)}` +
+        ` total=$${totalEquity.toFixed(2)} status=${snapshot.status}`,
+      );
+
+      res.json({
+        agentBalance: snapshot.agentBalance,
         // Account-scope Vault value foldable into "Available". 0 unless ?includeVault=1.
         vaultBalance,
         exchangeBalance: inTrading,
         mainAccountBalance: mainAccountEquity,
         mainAccountFreeCollateral,
         totalEquity,
-        solBalance,
-        botCount: bots.length,
+        solBalance: snapshot.solBalance,
+        botCount: snapshot.bots.length,
         subaccountBalances,
-        pricesAsOf: tePricesAsOf,
-        pricesStale: tePricesStale,
+        pricesAsOf: snapshot.pricesAsOf,
+        pricesStale: snapshot.pricesStale,
+        financialDataStatus: snapshot.status,
+        financialDataObservedAt: snapshot.observedAt,
       });
     } catch (error) {
       console.error("Total equity error:", error);
