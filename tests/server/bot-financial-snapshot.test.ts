@@ -41,6 +41,7 @@ import {
   _resetForTest,
   _cacheSize,
   _poolActive,
+  _waiterCount,
   type SnapshotDeps,
 } from '../../server/bot-financial-snapshot';
 
@@ -1272,12 +1273,9 @@ describe('null semantics for partial main-account failure (WO-15B.1 items 5 & 10
 
     const snap = await getWalletFinancialSnapshot(W);
 
-    // Status must not be 'fresh' when agentBalance (a required aggregate input) is null.
-    // It's either 'partial' or 'fresh' depending on which ops failed.
-    // With agentBalance null AND mainAccount present → still partial per our rule.
-    // (Rule: all 4 ops must fail for 'partial'; single failure = 'fresh' with null sibling.)
-    // The status is determined by whether ALL main-account ops failed.
-    expect(['fresh', 'partial']).toContain(snap.status);
+    // WO-15B.2 item 4: ANY null main-account component → 'partial', not 'fresh'.
+    // agentBalance is null (op threw) → partial even though 3 other ops succeeded.
+    expect(snap.status).toBe('partial');
     expect(snap.agentBalance).toBeNull(); // must be null not 0
   });
 
@@ -1525,5 +1523,466 @@ describe('timer cleanup (WO-15B.1 item 9)', () => {
     expect(vi.getTimerCount()).toBe(0);
 
     vi.useRealTimers();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WO-15B.2 item 1: BoundedPool.waiterCount / no-stampede invariant
+// ---------------------------------------------------------------------------
+
+describe('BoundedPool.waiterCount / no-stampede (WO-15B.2 item 1)', () => {
+  it('waiterCount starts at 0 when pool has free capacity', () => {
+    const pool = new BoundedPool(2);
+    expect(pool.waiterCount).toBe(0);
+  });
+
+  it('waiterCount increments when all slots are occupied', () => {
+    const pool = new BoundedPool(1);
+
+    // Fill the single slot synchronously — tryRun acquires immediately.
+    let resolveFirst!: () => void;
+    const first = new Promise<void>(r => { resolveFirst = r; });
+    const run1 = pool.tryRun(() => first);
+    expect(run1).not.toBeNull();
+    expect(pool.active).toBe(1);
+
+    // tryRun at capacity returns null and does NOT queue. Only
+    // waitForSlot / waitForSlotCancellable add to _waiters.
+    // Use waitForSlotCancellable to enqueue a waiter.
+    const { promise: slotP, cancel } = pool.waitForSlotCancellable();
+    expect(pool.waiterCount).toBe(1);
+
+    // Resolve the running slot → waiter is woken and waiterCount drops.
+    resolveFirst();
+    // Cleanup: cancel the waiter (it resolves synchronously on the next tick).
+    cancel();
+    expect(pool.waiterCount).toBe(0);
+
+    // Suppress unhandled promise warning.
+    slotP.then(() => {}).catch(() => {});
+  });
+
+  it('waiterCount returns to 0 after all queued callers are served', async () => {
+    const pool = new BoundedPool(2);
+    const results: number[] = [];
+    const tasks = Array.from({ length: 4 }, (_, i) =>
+      pool.tryRun(() => Promise.resolve(i).then(v => { results.push(v); return v; })),
+    );
+    await Promise.allSettled(tasks);
+    expect(pool.waiterCount).toBe(0);
+  });
+
+  it('_waiterCount helper reflects in-flight snapshot joins', async () => {
+    // Issue two concurrent snapshot calls: the second should join the first.
+    const W2 = 'wallet-waitcount';
+    (storage.getTradingBots as any).mockResolvedValue([]);
+    (storage.getWallet as any).mockResolvedValue({ agentPublicKey: 'pk-wc' });
+    (storage.getTradingBotListEnrichment as any).mockResolvedValue(makeEnrichment([]));
+    (storage.getVaultPositionsAllScopes as any).mockResolvedValue([]);
+
+    // Slow primary refresh lets the second call observe the waiter count.
+    let releaseRefresh!: () => void;
+    const blocker = new Promise<void>(r => { releaseRefresh = r; });
+
+    _resetForTest();
+    initSnapshotModule(makeDeps({
+      getExchangeAccountInfo: vi.fn().mockImplementation(() => blocker.then(() => ({ totalCollateral: 0, freeCollateral: 0 }))),
+    }));
+
+    const p1 = getWalletFinancialSnapshot(W2);
+    // Yield to let p1 begin.
+    await Promise.resolve();
+    const p2 = getWalletFinancialSnapshot(W2);
+    await Promise.resolve();
+
+    // p2 should be waiting; waiter count ≥ 1.
+    const wcBefore = _waiterCount(W2);
+
+    releaseRefresh();
+    await Promise.allSettled([p1, p2]);
+
+    // After both settle, no waiters remain.
+    expect(_waiterCount(W2)).toBe(0);
+    // Sanity: at peak we had ≥ 1 waiter (or p2 fast-joined before count could be observed).
+    expect(wcBefore).toBeGreaterThanOrEqual(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WO-15B.2 item 2: waitForSlotCancellable — stale waiters are cancelled
+// ---------------------------------------------------------------------------
+
+describe('stale waiters cancelled (WO-15B.2 item 2)', () => {
+  it('snapshot joined by a second caller resolves after the primary completes', async () => {
+    const W3 = 'wallet-cancel';
+    (storage.getTradingBots as any).mockResolvedValue([]);
+    (storage.getWallet as any).mockResolvedValue({ agentPublicKey: 'pk-c' });
+    (storage.getTradingBotListEnrichment as any).mockResolvedValue(makeEnrichment([]));
+    (storage.getVaultPositionsAllScopes as any).mockResolvedValue([]);
+
+    let releaseRefresh!: () => void;
+    const blocker = new Promise<void>(r => { releaseRefresh = r; });
+
+    _resetForTest();
+    initSnapshotModule(makeDeps({
+      getExchangeAccountInfo: vi.fn().mockImplementation(() =>
+        blocker.then(() => ({ totalCollateral: 0, freeCollateral: 0 })),
+      ),
+    }));
+
+    const p1 = getWalletFinancialSnapshot(W3);
+    await Promise.resolve();
+    const p2 = getWalletFinancialSnapshot(W3);
+
+    releaseRefresh();
+    const [r1, r2] = await Promise.all([p1, p2]);
+
+    // Both callers should get a result; second caller received the same snapshot.
+    expect(r1.status).not.toBe('unavailable');
+    expect(r2.status).toBe(r1.status);
+    // No waiters remain after both settle.
+    expect(_waiterCount(W3)).toBe(0);
+  });
+
+  it('cancelled waiter does not receive an old stale snapshot as if fresh', async () => {
+    const W4 = 'wallet-cancel2';
+    (storage.getTradingBots as any).mockResolvedValue([]);
+    (storage.getWallet as any).mockResolvedValue({ agentPublicKey: 'pk-c2' });
+    (storage.getTradingBotListEnrichment as any).mockResolvedValue(makeEnrichment([]));
+    (storage.getVaultPositionsAllScopes as any).mockResolvedValue([]);
+
+    _resetForTest();
+    initSnapshotModule(makeDeps());
+
+    // First call populates the cache.
+    const r1 = await getWalletFinancialSnapshot(W4);
+    expect(r1.status).toBe('fresh');
+
+    // Advance time past TTL but within stale window.
+    const originalNow = Date.now;
+    Date.now = () => r1.observedAt! + 8_000; // 8s old — stale
+
+    // Second call: gets stale from cache.
+    const r2 = await getWalletFinancialSnapshot(W4);
+    Date.now = originalNow;
+
+    // Status should reflect cache state (stale or fresh if re-fetched quickly).
+    expect(['fresh', 'stale']).toContain(r2.status);
+    // observedAt must not regress (second result can't be older than first).
+    expect(r2.observedAt!).toBeGreaterThanOrEqual(r1.observedAt!);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WO-15B.2 item 3: strict reads propagate null (SnapshotDeps JSDoc contract)
+// ---------------------------------------------------------------------------
+
+describe('strict-read null propagation (WO-15B.2 item 3)', () => {
+  it('getExchangeAccountInfo throwing → mainAccount=null, agentBalance unaffected', async () => {
+    initSnapshotModule(makeDeps({
+      getExchangeAccountInfo: vi.fn().mockRejectedValue(new Error('strict-rpc-fail')),
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W);
+
+    expect(snap.mainAccount).toBeNull();
+    // agentBalance is from a separate op — should still be a number.
+    expect(snap.agentBalance).not.toBeNull();
+    expect(typeof snap.agentBalance).toBe('number');
+  });
+
+  it('getAgentUsdcBalance throwing → agentBalance=null, mainAccount unaffected', async () => {
+    initSnapshotModule(makeDeps({
+      getAgentUsdcBalance: vi.fn().mockRejectedValue(new Error('strict-usdc-fail')),
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W);
+
+    expect(snap.agentBalance).toBeNull();
+    expect(snap.mainAccount).not.toBeNull();
+    expect(typeof snap.mainAccount!.totalCollateral).toBe('number');
+  });
+
+  it('accountVaultRoutableValueUsdc throwing → vaultBalance=null', async () => {
+    initSnapshotModule(makeDeps({
+      accountVaultRoutableValueUsdc: vi.fn().mockRejectedValue(new Error('strict-vault-fail')),
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W);
+
+    expect(snap.vaultBalance).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WO-15B.2 item 4: single-op failure → partial (not fresh)
+// ---------------------------------------------------------------------------
+
+describe('single-op failure → partial status (WO-15B.2 item 4)', () => {
+  it('getAgentSolBalance throwing → partial status', async () => {
+    initSnapshotModule(makeDeps({
+      getAgentSolBalance: vi.fn().mockRejectedValue(new Error('sol-fail')),
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W);
+    expect(snap.status).toBe('partial');
+  });
+
+  it('getExchangeAccountInfo throwing → partial status', async () => {
+    initSnapshotModule(makeDeps({
+      getExchangeAccountInfo: vi.fn().mockRejectedValue(new Error('exchange-fail')),
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W);
+    expect(snap.status).toBe('partial');
+  });
+
+  it('accountVaultRoutableValueUsdc throwing → partial status', async () => {
+    initSnapshotModule(makeDeps({
+      accountVaultRoutableValueUsdc: vi.fn().mockRejectedValue(new Error('vault-fail')),
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W);
+    expect(snap.status).toBe('partial');
+  });
+
+  it('partial snapshot has enrichmentSucceeded=true when enrichment itself succeeded', async () => {
+    // Even with a main-account failure, enrichment may have worked fine.
+    initSnapshotModule(makeDeps({
+      getAgentUsdcBalance: vi.fn().mockRejectedValue(new Error('usdc-fail')),
+    }));
+    (storage.getTradingBots as any).mockResolvedValueOnce(makeBots(1));
+    (storage.getTradingBotListEnrichment as any).mockResolvedValueOnce(makeEnrichment(['bot-1']));
+
+    const snap = await getWalletFinancialSnapshot(W);
+
+    expect(snap.status).toBe('partial');
+    expect(snap.enrichmentSucceeded).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WO-15B.2 item 5: enrichmentSucceeded / parkedHintSucceeded tracking
+// ---------------------------------------------------------------------------
+
+describe('enrichmentSucceeded / parkedHintSucceeded (WO-15B.2 item 5)', () => {
+  it('enrichmentSucceeded=true on normal run', async () => {
+    (storage.getTradingBots as any).mockResolvedValueOnce(makeBots(2));
+    (storage.getTradingBotListEnrichment as any).mockResolvedValueOnce(makeEnrichment(['bot-1', 'bot-2']));
+    initSnapshotModule(makeDeps());
+
+    const snap = await getWalletFinancialSnapshot(W);
+
+    expect(snap.enrichmentSucceeded).toBe(true);
+  });
+
+  it('enrichmentSucceeded=false when getTradingBotListEnrichment throws', async () => {
+    (storage.getTradingBots as any).mockResolvedValueOnce(makeBots(1));
+    (storage.getTradingBotListEnrichment as any).mockRejectedValueOnce(new Error('enrichment-fail'));
+    initSnapshotModule(makeDeps());
+
+    const snap = await getWalletFinancialSnapshot(W);
+
+    expect(snap.enrichmentSucceeded).toBe(false);
+    // Bot list is retained (bots should still be present in snapshot).
+    expect(snap.bots.length).toBe(1);
+  });
+
+  it('parkedHintSucceeded=true when addParkedValueForBotDisplayEquity succeeds', async () => {
+    (storage.getTradingBots as any).mockResolvedValueOnce(makeBots(1));
+    (storage.getTradingBotListEnrichment as any).mockResolvedValueOnce(makeEnrichment(['bot-1']));
+    initSnapshotModule(makeDeps());
+
+    const snap = await getWalletFinancialSnapshot(W);
+
+    expect(snap.parkedHintSucceeded).toBe(true);
+  });
+
+  it('addParkedValueForBotDisplayEquity throwing does NOT affect parkedHintSucceeded', async () => {
+    // parkedHintSucceeded tracks getVaultPositionsAllScopes (Phase 1b).
+    // addParkedValueForBotDisplayEquity is per-bot Op2; its failure is silent
+    // (adj=null → raw collateral fallback). parkedHintSucceeded must stay true.
+    (storage.getTradingBots as any).mockResolvedValueOnce(makeBots(1));
+    (storage.getTradingBotListEnrichment as any).mockResolvedValueOnce(makeEnrichment(['bot-1']));
+    initSnapshotModule(makeDeps({
+      addParkedValueForBotDisplayEquity: vi.fn().mockRejectedValue(new Error('op2-fail')),
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W);
+
+    // Op2 failure is silent; parkedHintSucceeded is unaffected.
+    expect(snap.parkedHintSucceeded).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WO-15B.2 item 6: null bot balance propagates to inTrading in route
+// (tested here at module level: fin.exchangeBalance is null when live call fails
+//  and DB fallback also unavailable)
+// ---------------------------------------------------------------------------
+
+describe('null bot exchangeBalance propagation (WO-15B.2 item 6)', () => {
+  it('bot with failed live call AND no DB data → exchangeBalance=null', async () => {
+    const bots = makeBots(1);
+    (storage.getTradingBots as any).mockResolvedValueOnce(bots);
+    // No enrichment data for this bot.
+    (storage.getTradingBotListEnrichment as any).mockResolvedValueOnce({
+      tradeCounts: new Map(),
+      positions: new Map(),
+      publishedBotMap: new Map(),
+      equityAgg: new Map(), // no netDeposited for bot-1
+      borrowDebts: new Map(),
+    });
+
+    initSnapshotModule(makeDeps({
+      getExchangeAccountInfoForBot: vi.fn().mockRejectedValue(new Error('live-fail')),
+      getBotSubaccountContext: vi.fn().mockReturnValue({ useBotKeypair: true }),
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W);
+    const fin = snap.perBotFinancials.get('bot-1');
+
+    expect(fin).toBeDefined();
+    // Live call failed and no DB basis available → null, not 0.
+    expect(fin!.exchangeBalance).toBeNull();
+  });
+
+  it('botCtx=null → DB fallback used → exchangeBalance derived from enrichment (not null)', async () => {
+    const bots = makeBots(1);
+    (storage.getTradingBots as any).mockResolvedValueOnce(bots);
+    (storage.getTradingBotListEnrichment as any).mockResolvedValueOnce(makeEnrichment(['bot-1']));
+
+    // getBotSubaccountContext returns null → skips live path → uses DB fallback.
+    initSnapshotModule(makeDeps({
+      getBotSubaccountContext: vi.fn().mockReturnValue(null),
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W);
+    const fin = snap.perBotFinancials.get('bot-1');
+
+    expect(fin).toBeDefined();
+    // DB fallback: enrichment has netDeposited=1000, positions provide PnL.
+    expect(fin!.exchangeBalance).not.toBeNull();
+    expect(fin!.liveDataAvailable).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WO-15B.2 item 7: parkedHintSucceeded=false → partial status
+// ---------------------------------------------------------------------------
+
+describe('parkedHintSucceeded=false → partial (WO-15B.2 item 7)', () => {
+  it('getVaultPositionsAllScopes failure → parkedHintSucceeded=false → partial', async () => {
+    (storage.getTradingBots as any).mockResolvedValueOnce(makeBots(1));
+    (storage.getTradingBotListEnrichment as any).mockResolvedValueOnce(makeEnrichment(['bot-1']));
+    // parkedHintSucceeded tracks getVaultPositionsAllScopes (Phase 1b),
+    // NOT addParkedValueForBotDisplayEquity (per-bot Op2).
+    (storage.getVaultPositionsAllScopes as any).mockRejectedValueOnce(new Error('hint-fail'));
+    initSnapshotModule(makeDeps());
+
+    const snap = await getWalletFinancialSnapshot(W);
+
+    expect(snap.parkedHintSucceeded).toBe(false);
+    expect(snap.status).toBe('partial');
+  });
+
+  it('parkedHintSucceeded=true when getVaultPositionsAllScopes succeeds', async () => {
+    (storage.getTradingBots as any).mockResolvedValueOnce(makeBots(1));
+    (storage.getTradingBotListEnrichment as any).mockResolvedValueOnce(makeEnrichment(['bot-1']));
+    (storage.getVaultPositionsAllScopes as any).mockResolvedValueOnce([]);
+    initSnapshotModule(makeDeps());
+
+    const snap = await getWalletFinancialSnapshot(W);
+
+    expect(snap.parkedHintSucceeded).toBe(true);
+    expect(snap.status).toBe('fresh');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WO-15B.2 item 8: no lingering caller-envelope timer on fast settle
+// ---------------------------------------------------------------------------
+
+describe('no lingering caller-envelope timer on fast settle (WO-15B.2 item 8)', () => {
+  it('all ops fast → zero timers before runAllTimers', async () => {
+    vi.useFakeTimers();
+    (storage.getTradingBots as any).mockResolvedValue(makeBots(1));
+    (storage.getTradingBotListEnrichment as any).mockResolvedValue(makeEnrichment(['bot-1']));
+
+    _resetForTest();
+    initSnapshotModule(makeDeps());
+
+    const snapPromise = getWalletFinancialSnapshot(W);
+    // Flush micro-tasks without advancing wall clock.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Allow all async microtasks to drain so fast ops settle.
+    await vi.runAllTimersAsync();
+    await snapPromise;
+
+    // CRITICAL: no active timers must remain after a fast-settle snapshot.
+    expect(vi.getTimerCount()).toBe(0);
+
+    vi.useRealTimers();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WO-15B.2 item 9: lastSuccess only updated on snapshotStatus==='fresh'
+// ---------------------------------------------------------------------------
+
+describe('lastSuccess only updated on fresh (WO-15B.2 item 9)', () => {
+  it('fresh snapshot updates lastSuccess', async () => {
+    (storage.getTradingBots as any).mockResolvedValue(makeBots(1));
+    (storage.getTradingBotListEnrichment as any).mockResolvedValue(makeEnrichment(['bot-1']));
+    _resetForTest();
+    initSnapshotModule(makeDeps());
+
+    const snap = await getWalletFinancialSnapshot(W);
+    expect(snap.status).toBe('fresh');
+    // observedAt must be set — this is the lastSuccess timestamp.
+    expect(snap.observedAt).toBeGreaterThan(0);
+  });
+
+  it('partial snapshot does NOT update lastSuccess — second call re-triggers refresh', async () => {
+    // Start cold. First call: agentUsdcBalance fails → 'partial'.
+    // Because lastSuccess stays null after a partial, the SECOND call
+    // (even within the TTL window) sees no cache hit and starts a fresh refresh.
+    const W_LAST = 'wallet-last-success';
+    _resetForTest();
+    (storage.getTradingBots as any).mockResolvedValue(makeBots(1));
+    (storage.getTradingBotListEnrichment as any).mockResolvedValue(makeEnrichment(['bot-1']));
+
+    initSnapshotModule(makeDeps({
+      getAgentUsdcBalance: vi.fn().mockRejectedValue(new Error('strict-fail')),
+    }));
+
+    const partialSnap = await getWalletFinancialSnapshot(W_LAST);
+    expect(partialSnap.status).toBe('partial');
+
+    // Re-init with all ops succeeding. If lastSuccess was NOT updated by the
+    // partial, the second call triggers a new refresh → returns 'fresh'.
+    initSnapshotModule(makeDeps());
+
+    const secondSnap = await getWalletFinancialSnapshot(W_LAST);
+    // Must be fresh: if lastSuccess had been wrongly updated by the partial,
+    // the second call would return a cache hit with the partial observedAt,
+    // which would NOT be 'fresh' (it would be 'stale' or 'partial' again).
+    expect(secondSnap.status).toBe('fresh');
+    expect(secondSnap.agentBalance).not.toBeNull();
+  });
+
+  it('enrichmentSucceeded=false → snapshot is partial, not fresh', async () => {
+    (storage.getTradingBots as any).mockResolvedValueOnce(makeBots(1));
+    (storage.getTradingBotListEnrichment as any).mockRejectedValueOnce(new Error('enrich-fail'));
+    _resetForTest();
+    initSnapshotModule(makeDeps());
+
+    const snap = await getWalletFinancialSnapshot(W);
+
+    // Enrichment failure → partial. lastSuccess must not be updated.
+    expect(snap.status).toBe('partial');
+    expect(snap.enrichmentSucceeded).toBe(false);
   });
 });

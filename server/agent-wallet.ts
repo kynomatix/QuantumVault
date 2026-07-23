@@ -144,6 +144,20 @@ export async function getAgentUsdcBalance(agentPublicKey: string): Promise<numbe
   }
 }
 
+/**
+ * Strict display-read variant: throws on RPC failure instead of returning 0.
+ * Successful zero (e.g. ATA not yet initialized) is a valid result.
+ * Used ONLY by initSnapshotModule. Do NOT call from trade/funding/safety paths.
+ */
+export async function getAgentUsdcBalanceStrict(agentPublicKey: string): Promise<number> {
+  const connection = getConnection();
+  const agentPubkey = new PublicKey(agentPublicKey);
+  const usdcMint = new PublicKey(USDC_MINT);
+  const agentAta = getAssociatedTokenAddressSync(usdcMint, agentPubkey);
+  const accountInfo = await connection.getTokenAccountBalance(agentAta);
+  return accountInfo.value.uiAmount || 0;
+}
+
 export async function getAgentSolBalance(agentPublicKey: string): Promise<number> {
   const connection = getConnection();
   const agentPubkey = new PublicKey(agentPublicKey);
@@ -154,6 +168,18 @@ export async function getAgentSolBalance(agentPublicKey: string): Promise<number
   } catch (error) {
     return 0;
   }
+}
+
+/**
+ * Strict display-read variant: throws on RPC failure instead of returning 0.
+ * Successful zero balance is a valid result.
+ * Used ONLY by initSnapshotModule. Do NOT call from trade/funding/safety paths.
+ */
+export async function getAgentSolBalanceStrict(agentPublicKey: string): Promise<number> {
+  const connection = getConnection();
+  const agentPubkey = new PublicKey(agentPublicKey);
+  const balance = await connection.getBalance(agentPubkey);
+  return balance / LAMPORTS_PER_SOL;
 }
 
 export async function buildSolTransferToAgentTransaction(

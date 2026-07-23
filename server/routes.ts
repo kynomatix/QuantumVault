@@ -1542,7 +1542,7 @@ async function settleAllPnl(
 }
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
-import { getAgentUsdcBalance, getAgentSolBalance, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
+import { getAgentUsdcBalance, getAgentSolBalance, getAgentUsdcBalanceStrict, getAgentSolBalanceStrict, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
 import { getBestQuote } from "./swap/index.js";
 import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, valueVaultRowsForWallet, sumVaultPositionValueUsdc, type VaultPositionView, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
 import { cancelAutoRepark } from "./vault/auto-repark";
@@ -5263,16 +5263,65 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  // WO-15B / WO-15B.2: Strict display-read wrappers used exclusively by the
+  // snapshot module (initSnapshotModule below). These propagate errors instead
+  // of catching internally, so the snapshot module can distinguish a genuine
+  // zero balance from an RPC/adapter failure. The existing fail-open helpers
+  // (getExchangeAccountInfo, getAgentUsdcBalance, etc.) are unchanged and
+  // must NOT be replaced in any trade, funding, safety, or auth path.
+  async function _getExchangeAccountInfoStrict(
+    walletAddress: string,
+    subAccountId = 0,
+    adapter = getDefaultAdapter(),
+  ) {
+    const info = await adapter.getAccountInfo(walletAddress, _subIdStr(subAccountId));
+    return _mapAccountInfoToDrift(info);
+  }
+
+  async function _getExchangeAccountInfoForBotStrict(
+    agentPublicKey: string,
+    subAccountId: number,
+    botCtx: any,
+    adapter = getDefaultAdapter(),
+  ) {
+    if (botCtx) {
+      const info = await adapter.getAccountInfo(botCtx.botPublicKey);
+      return _mapAccountInfoToDrift(info);
+    }
+    return _getExchangeAccountInfoStrict(agentPublicKey, subAccountId, adapter);
+  }
+
+  async function _accountVaultRoutableValueUsdcStrict(
+    walletAddress: string,
+    agentPublicKey: string,
+  ): Promise<number> {
+    const views = await getVaultPositionViews(walletAddress, agentPublicKey, null);
+    let total = 0;
+    for (const v of views) {
+      if (
+        v.onChainAmount > 0 &&
+        v.currentValueUsdc != null &&
+        v.currentValueUsdc > 0 &&
+        getYieldAssetByKey(v.assetKey) != null
+      ) {
+        total += v.currentValueUsdc;
+      }
+    }
+    return total;
+  }
+
   // WO-15B: Initialize the shared per-wallet financial snapshot module with
   // route-local helpers (injected to avoid circular imports).
+  // WO-15B.2: Strict variants used for display reads so RPC failures surface
+  // as null rather than silently becoming zero.
   initSnapshotModule({
     getCachedPricesMeta: getCachedDisplayPricesWithMeta,
-    getExchangeAccountInfoForBot,
+    getExchangeAccountInfoForBot: _getExchangeAccountInfoForBotStrict,
     addParkedValueForBotDisplayEquity,
-    getExchangeAccountInfo,
-    getAgentUsdcBalance: (addr) => getAgentUsdcBalance(addr),
-    getAgentSolBalance: (addr) => getAgentSolBalance(addr),
-    accountVaultRoutableValueUsdc,
+    getExchangeAccountInfo: _getExchangeAccountInfoStrict,
+    getAgentUsdcBalance: getAgentUsdcBalanceStrict,
+    getAgentSolBalance: getAgentSolBalanceStrict,
+    accountVaultRoutableValueUsdc: _accountVaultRoutableValueUsdcStrict,
     getBotSubaccountContext,
     getAdapterForBot,
   });
@@ -14432,27 +14481,38 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         });
       }
 
+      // WO-15B.2 item 5: when enrichment failed, batch-derived fields are null
+      // (not zero) — deposit basis, trade counts, PnL, debt, publication are
+      // all unknown. Per-bot financials (live balance, borrow debt) already
+      // carry null when enrichment failed; route nulls the remaining DB fields.
+      const ens = snapshot.enrichmentSucceeded;
+
       const enrichedBots = snapshot.bots.map((bot) => {
         const fin = snapshot.perBotFinancials.get(bot.id);
-        const eq = snapshot.enrichment.equityAgg.get(bot.id);
-        const positions = snapshot.enrichment.positions.get(bot.id) ?? [];
+        const eq = ens ? snapshot.enrichment.equityAgg.get(bot.id) : undefined;
+        const positions = ens ? (snapshot.enrichment.positions.get(bot.id) ?? []) : [];
         // Exact-market match only — never fall back to another market's row.
         const position = positions.find(p => (p as any).market === bot.market) ?? null;
-        const publishedBot = snapshot.enrichment.publishedBotMap.get(bot.id) ?? null;
+        const publishedBot = ens ? (snapshot.enrichment.publishedBotMap.get(bot.id) ?? null) : null;
 
         return {
           ...bot,
-          actualTradeCount: snapshot.enrichment.tradeCounts.get(bot.id) ?? 0,
-          realizedPnl: (position as any)?.realizedPnl || "0",
-          totalFees: (position as any)?.totalFees || "0",
+          // null when enrichment failed — not zero (unknown, not empty).
+          actualTradeCount: ens ? (snapshot.enrichment.tradeCounts.get(bot.id) ?? null) : null,
+          realizedPnl: ens ? ((position as any)?.realizedPnl ?? null) : null,
+          totalFees: ens ? ((position as any)?.totalFees ?? null) : null,
           exchangeBalance: fin?.exchangeBalance ?? null,
-          borrowDebtUsdc: fin?.borrowDebtUsdc ?? 0,
-          netDeposited: eq?.netDeposited ?? 0,
+          // null when enrichment failed (debt unknown, not zero).
+          borrowDebtUsdc: fin?.borrowDebtUsdc ?? null,
+          // null when enrichment failed (deposit basis unknown).
+          netDeposited: ens ? (eq?.netDeposited ?? null) : null,
           netPnl: fin?.netPnl ?? null,
           netPnlPercent: fin?.netPnlPercent ?? null,
-          isPublished: !!publishedBot && (publishedBot as any).isActive,
-          publishedBotId: (publishedBot as any)?.id || null,
+          // null when enrichment failed (publication state unknown).
+          isPublished: ens ? (!!publishedBot && (publishedBot as any).isActive) : null,
+          publishedBotId: ens ? ((publishedBot as any)?.id || null) : null,
           botSubaccountIdentifier: bot.protocolSubaccountId || null,
+          botFinancialStatus: fin?.botFinancialStatus ?? 'db-only',
           financialDataStatus: snapshot.status,
           financialDataObservedAt: snapshot.observedAt,
         };
@@ -20702,32 +20762,43 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         });
       }
 
-      // Null-safe aggregation: individual null bot balances treated as 0 for sum.
-      const totalBotBalances = subaccountBalances.reduce(
-        (sum, b) => sum + (b.balance ?? 0), 0,
-      );
+      // WO-15B.2 item 6: null bot balance propagates — any null means inTrading=null.
+      // A bot whose live call failed has exchangeBalance=null, which must not be
+      // silently zeroed when summing: that would report a false lower inTrading.
+      const hasNullBotBalance = subaccountBalances.some(b => b.balance === null);
+      const totalBotBalances: number | null = hasNullBotBalance
+        ? null
+        : subaccountBalances.reduce((sum, b) => sum + b.balance!, 0);
 
       // WO-15B.1: unavailable main-account fields stay null, not zero.
       const mainAccountEquity: number | null = snapshot.mainAccount?.totalCollateral ?? null;
       const mainAccountFreeCollateral: number | null = snapshot.mainAccount?.freeCollateral ?? null;
-      // Vault balance: null when venue call failed; suppress unless ?includeVault=1.
+
+      // WO-15B.2 item 6: null vault propagates to totalEquity when includeVault=true.
+      // When includeVault=false, deliberate suppression to 0 remains compatible.
       const vaultBalance: number | null = includeVault ? snapshot.vaultBalance : 0;
 
       // Derived totals are null when any required input is null.
+      // inTrading is null if mainAccount failed OR any bot balance is null.
       const inTrading: number | null =
-        mainAccountEquity !== null ? mainAccountEquity + totalBotBalances : null;
+        mainAccountEquity !== null && totalBotBalances !== null
+          ? mainAccountEquity + totalBotBalances
+          : null;
+
       // Vault savings are spendable on demand, so they count toward equity. 0 unless
       // ?includeVault=1; keeps Available + In Trading = Total Equity consistent.
+      // When includeVault=true, null vault forces totalEquity null (not zero'd).
+      const vaultForTotal: number | null = includeVault ? snapshot.vaultBalance : 0;
       const totalEquity: number | null =
-        snapshot.agentBalance !== null && inTrading !== null
-          ? snapshot.agentBalance + (vaultBalance ?? 0) + inTrading
+        snapshot.agentBalance !== null && inTrading !== null && vaultForTotal !== null
+          ? snapshot.agentBalance + vaultForTotal + inTrading
           : null;
 
       console.log(
         `[total-equity] agent=${snapshot.agentBalance ?? 'null'}` +
         ` vault=${vaultBalance ?? 'null'}` +
         ` mainAcct=${mainAccountEquity ?? 'null'}` +
-        ` bots=${totalBotBalances.toFixed(2)}` +
+        ` bots=${totalBotBalances != null ? totalBotBalances.toFixed(2) : 'null'}` +
         ` inTrading=${inTrading ?? 'null'}` +
         ` mainFree=${mainAccountFreeCollateral ?? 'null'}` +
         ` total=${totalEquity ?? 'null'} status=${snapshot.status}`,

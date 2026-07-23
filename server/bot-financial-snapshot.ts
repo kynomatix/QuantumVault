@@ -1,5 +1,5 @@
 /**
- * WO-15B / WO-15B.1: Per-wallet financial snapshot module.
+ * WO-15B / WO-15B.1 / WO-15B.2: Per-wallet financial snapshot module.
  *
  * Provides a shared, cached, deadline-bounded per-wallet enrichment layer for
  * both GET /api/trading-bots and GET /api/total-equity. Replaces the previous
@@ -13,17 +13,25 @@
  *   - 10-second wall-clock deadline over all venue work AND Phase-1 DB reads.
  *   - Caller envelope: each caller waits at most CALLER_DEADLINE_MS regardless
  *     of how long the underlying in-flight promise runs; the underlying stays
- *     tracked (no-stampede invariant).
+ *     tracked (no-stampede invariant). The caller-envelope timer is cleared
+ *     immediately when the underlying settles early (no lingering timers).
  *   - Slots released only on underlying settlement, never on the caller deadline.
+ *   - Stale waiters cancelled on deadline; they do not consume future wake-ups.
  *   - Snapshots are immutable once returned: no closure can mutate a published
  *     snapshot's maps or values after _refresh returns.
- *   - Enrichment failure is non-fatal: the bot list is preserved.
  *   - LRU cache, max 100 wallet entries; in-flight entries are never evicted.
  *   - Stale-on-failure: last successful snapshot survives 60 s after observedAt,
  *     evaluated at actual response time (not pre-await).
+ *   - Only a fully-fresh (snapshotStatus === 'fresh') snapshot replaces the
+ *     last-known-good used for stale fallback. Partial results do not overwrite.
  *   - status:'unavailable' is truthfully propagated; routes return 503.
- *   - status:'partial' when the bot list is good but main-account venue data
- *     is fully unavailable; total-equity aggregates are null, not zero.
+ *   - status:'partial' when ANY required main-account component is null, or when
+ *     enrichment or parked-hint reads failed. Batch-derived fields are null (not
+ *     zero) when enrichment is unavailable; deposit basis unknown → no PnL.
+ *   - Parked-hint failure is tracked separately from successful empty results;
+ *     snapshot is marked partial, not silently clean.
+ *   - Per-bot financialStatus distinguishes 'live', 'db-only', and 'unavailable'.
+ *   - Failed live venue reads are null/unavailable, never DB estimates as current.
  */
 
 import { storage } from './storage';
@@ -44,7 +52,11 @@ export type SnapshotDeps = {
     pricesAsOf: number | null;
     pricesStale: boolean;
   };
-  /** Per-bot account info via venue adapter. Fail-open (returns zeros). */
+  /**
+   * Per-bot account info via venue adapter.
+   * STRICT: must throw on RPC/adapter failure (no internal catch).
+   * Successful zero balance is a valid result and must NOT throw.
+   */
   getExchangeAccountInfoForBot(
     agentPublicKey: string,
     subAccountId: number,
@@ -71,7 +83,10 @@ export type SnapshotDeps = {
     parkedValueIncluded: boolean;
     parkedValueUnavailable: boolean;
   }>;
-  /** Main-account exchange info (account-model subaccount 0). Fail-open. */
+  /**
+   * Main-account exchange info (account-model subaccount 0).
+   * STRICT: must throw on RPC/adapter failure (no internal catch).
+   */
   getExchangeAccountInfo(
     walletAddress: string,
     subAccountId?: number,
@@ -80,9 +95,20 @@ export type SnapshotDeps = {
     freeCollateral: number;
     usdcBalance?: number;
   }>;
+  /**
+   * STRICT: must throw on RPC failure (no internal catch).
+   * Successful zero (e.g. ATA not yet initialized) is a valid result.
+   */
   getAgentUsdcBalance(agentAddress: string): Promise<number>;
+  /**
+   * STRICT: must throw on RPC failure (no internal catch).
+   * Successful zero is a valid result.
+   */
   getAgentSolBalance(agentAddress: string): Promise<number>;
-  /** Account-scope Vault yield value (routable on demand). Fail-open. */
+  /**
+   * Account-scope Vault yield value (routable on demand).
+   * STRICT: must throw on failure (no internal catch).
+   */
   accountVaultRoutableValueUsdc(
     walletAddress: string,
     agentAddress: string,
@@ -96,18 +122,28 @@ export type SnapshotDeps = {
 export type BotFinancialData = {
   /** Computed bot equity (live or DB-based). null only if both paths unavailable. */
   exchangeBalance: number | null;
-  /** netPnl = exchangeBalance – netDeposited. null when exchangeBalance is null. */
+  /** netPnl = exchangeBalance – netDeposited. null when exchangeBalance or deposit basis unknown. */
   netPnl: number | null;
-  /** Percent relative to totalDeposits. null when exchangeBalance is null. */
+  /** Percent relative to totalDeposits. null when exchangeBalance or deposit basis unknown. */
   netPnlPercent: number | null;
-  /** Open USDC borrow debt (from batch enrichment; always non-null). */
-  borrowDebtUsdc: number;
+  /**
+   * Open USDC borrow debt (from batch enrichment).
+   * null when enrichment failed (debt unknown — not zero).
+   */
+  borrowDebtUsdc: number | null;
   /** USD value of tokens parked in Vault (Flash per-bot only). 0 if unavailable. */
   parkedValueUsdc: number;
   parkedValueIncluded: boolean;
   parkedValueUnavailable: boolean;
   /** True when exchangeBalance came from a live venue call (not DB fallback). */
   liveDataAvailable: boolean;
+  /**
+   * Per-bot read status:
+   *   'live'        — live venue data successfully retrieved.
+   *   'db-only'     — intentional DB-only path (Flash alias, no live context).
+   *   'unavailable' — live was attempted but timed out or failed.
+   */
+  botFinancialStatus: 'live' | 'db-only' | 'unavailable';
 };
 
 /** Full wallet-level snapshot consumed by both routes. */
@@ -120,6 +156,17 @@ export type WalletFinancialSnapshot = {
   bots: TradingBot[];
   wallet: Awaited<ReturnType<typeof storage.getWallet>>;
   enrichment: BotListEnrichment;
+  /**
+   * True when batch enrichment succeeded. False means tradeCounts, positions,
+   * publishedBotMap, equityAgg, borrowDebts are empty/unknown — routes must
+   * not substitute zero for those fields.
+   */
+  enrichmentSucceeded: boolean;
+  /**
+   * True when the parked-position hint DB read succeeded.
+   * False means we don't know which bots have parked rows; snapshot is partial.
+   */
+  parkedHintSucceeded: boolean;
   perBotFinancials: Map<string, BotFinancialData>;
   /** Main-account exchange equity/collateral. null if venue unavailable. */
   mainAccount: { totalCollateral: number; freeCollateral: number } | null;
@@ -145,6 +192,10 @@ export type WalletFinancialSnapshot = {
  * response-deadline race does NOT release slots; future snapshots that see a
  * full pool fail-closed/defer rather than stacking unlimited new work on top
  * of stuck underlying calls.
+ *
+ * waitForSlotCancellable() returns a { promise, cancel } pair so that callers
+ * whose deadline fires can unregister their waiter immediately, preventing
+ * stale waiters from consuming future slot wake-ups.
  */
 export class BoundedPool {
   private _active = 0;
@@ -157,6 +208,8 @@ export class BoundedPool {
 
   get active(): number { return this._active; }
   get available(): number { return this.capacity - this._active; }
+  /** Number of pending waiters (for testing). */
+  get waiterCount(): number { return this._waiters.length; }
 
   /**
    * Acquire a slot if available and run fn(). Slot released on fn's settlement.
@@ -177,6 +230,31 @@ export class BoundedPool {
   waitForSlot(): Promise<void> {
     if (this._active < this.capacity) return Promise.resolve();
     return new Promise<void>((resolve) => { this._waiters.push(resolve); });
+  }
+
+  /**
+   * Returns a cancellable slot-wait: { promise, cancel }.
+   *
+   * If the caller's deadline fires before the slot opens, call cancel() to
+   * remove the waiter from the queue so it does not consume the next wake-up.
+   * Resolves immediately (cancel is a no-op) when a slot is already available.
+   */
+  waitForSlotCancellable(): { promise: Promise<void>; cancel: () => void } {
+    if (this._active < this.capacity) {
+      return { promise: Promise.resolve(), cancel: () => {} };
+    }
+    let resolve!: () => void;
+    const promise = new Promise<void>(r => {
+      resolve = r;
+      this._waiters.push(resolve);
+    });
+    return {
+      promise,
+      cancel: () => {
+        const idx = this._waiters.indexOf(resolve);
+        if (idx >= 0) this._waiters.splice(idx, 1);
+      },
+    };
   }
 
   private _release(): void {
@@ -201,6 +279,8 @@ type SnapshotData = {
   bots: TradingBot[];
   wallet: Awaited<ReturnType<typeof storage.getWallet>>;
   enrichment: BotListEnrichment;
+  enrichmentSucceeded: boolean;
+  parkedHintSucceeded: boolean;
   /** Immutable after _refresh returns: wrappers write before they exit. */
   perBotFinancials: Map<string, BotFinancialData>;
   mainAccount: { totalCollateral: number; freeCollateral: number } | null;
@@ -211,12 +291,17 @@ type SnapshotData = {
   pricesAsOf: number | null;
   pricesStale: boolean;
   observedAt: number;
-  /** 'partial' when bot list succeeded but all main-account venue calls failed. */
+  /**
+   * 'partial' when ANY required main-account component is null, or when
+   * enrichment or parked-hint reads failed. Only 'fresh' snapshots may
+   * replace lastSuccess used for stale fallback.
+   */
   snapshotStatus: 'fresh' | 'partial';
 };
 
 type CacheEntry = {
   walletAddress: string;
+  /** Only updated by a snapshotStatus==='fresh' result. */
   lastSuccess: SnapshotData | null;
   inFlight: Promise<SnapshotData> | null;
   lruTimestamp: number;
@@ -239,11 +324,6 @@ export function initSnapshotModule(deps: SnapshotDeps): void {
 // Small utilities
 // ---------------------------------------------------------------------------
 
-/** Promise that resolves after `ms` milliseconds (setTimeout-based → fake-timer compatible). */
-function _sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 /**
  * Race `p` against a deadline. Clears the timer if `p` settles first.
  * DOES NOT release pool slots — that is BoundedPool's responsibility.
@@ -257,7 +337,7 @@ function _raceDeadline<T>(
   const deadlineP = new Promise<typeof DEADLINE_SENTINEL>(resolve => {
     timer = setTimeout(() => resolve(DEADLINE_SENTINEL), remainingMs);
   });
-  // Clear the timer whenever p settles (resolve or reject) so no timer accumulates.
+  // Clear the timer whenever p settles (resolve or reject) so no timer lingers.
   p.then(() => clearTimeout(timer), () => clearTimeout(timer));
   return Promise.race([p, deadlineP]);
 }
@@ -270,6 +350,9 @@ function _raceDeadline<T>(
  *               fn settled (fn's underlying op may still be running —
  *               it holds its slot until it settles naturally).
  *
+ * Timed-out waiters are cancelled immediately so they do not consume future
+ * slot wake-ups and do not starve subsequent refreshes.
+ *
  * The slot is ALWAYS released when fn's underlying promise settles regardless
  * of whether _waitAndRun already returned false due to the deadline.
  */
@@ -278,8 +361,8 @@ async function _waitAndRun(
   deadlineAt: number,
   fn: () => Promise<void>,
 ): Promise<boolean> {
-  // Retry loop handles the rare race where waitForSlot resolves but another
-  // concurrent wrapper steals the slot before tryRun.
+  // Retry loop handles the rare race where a cancellable wait resolves but
+  // another concurrent wrapper steals the slot before tryRun.
   while (true) {
     const remaining = deadlineAt - Date.now();
     if (remaining <= 0) return false;
@@ -297,10 +380,15 @@ async function _waitAndRun(
       continue;
     }
 
-    // Pool full — wait for a slot to open.
-    const slotOrDeadline = await _raceDeadline(pool.waitForSlot(), remaining);
-    if (slotOrDeadline === DEADLINE_SENTINEL) return false;
-    // A slot opened. Loop back to tryRun.
+    // Pool full — use cancellable wait so timed-out waiters are removed.
+    const remaining2 = deadlineAt - Date.now();
+    const { promise: slotP, cancel: cancelWaiter } = pool.waitForSlotCancellable();
+    const slotOrDeadline = await _raceDeadline(slotP, remaining2);
+    if (slotOrDeadline === DEADLINE_SENTINEL) {
+      cancelWaiter(); // remove stale waiter from the queue immediately
+      return false;
+    }
+    // A slot opened — loop back to tryRun.
   }
 }
 
@@ -383,11 +471,31 @@ function _dbFallback(
   }
 }
 
+/**
+ * DB-only financial fallback for bots that either have no live context or
+ * whose live call failed. When enrichmentSucceeded is false, deposit basis
+ * is unknown and all batch-derived fields are null.
+ */
 function _fallbackFinancials(
   bot: TradingBot,
   enrichment: BotListEnrichment,
   prices: Record<string, number>,
+  enrichmentSucceeded: boolean,
+  status: 'db-only' | 'unavailable',
 ): BotFinancialData {
+  if (!enrichmentSucceeded) {
+    return {
+      exchangeBalance: null,
+      netPnl: null,
+      netPnlPercent: null,
+      borrowDebtUsdc: null,
+      parkedValueUsdc: 0,
+      parkedValueIncluded: false,
+      parkedValueUnavailable: false,
+      liveDataAvailable: false,
+      botFinancialStatus: status,
+    };
+  }
   const borrowDebtUsdc = enrichment.borrowDebts.get(bot.id) ?? 0;
   const fallback = _dbFallback(bot, enrichment, prices);
   return {
@@ -399,6 +507,7 @@ function _fallbackFinancials(
     parkedValueIncluded: false,
     parkedValueUnavailable: false,
     liveDataAvailable: false,
+    botFinancialStatus: status,
   };
 }
 
@@ -421,34 +530,67 @@ async function _refresh(
     Promise.all([
       storage.getTradingBots(walletAddress),
       storage.getWallet(walletAddress),
-      storage.getVaultPositionsAllScopes(walletAddress).catch(() => [] as any[]),
     ]),
     phase1Remaining,
   );
   if (phase1Result === DEADLINE_SENTINEL) {
     throw new Error('[bot-financial-snapshot] Phase-1 DB deadline exceeded');
   }
-  const [bots, wallet, parkedHintRows] = phase1Result;
+  const [bots, wallet] = phase1Result;
 
   // -------------------------------------------------------------------------
-  // Phase 1b: Batch enrichment (best-effort — non-fatal)
+  // Phase 1b: Parked-position hint — tracked separately from Phase-1a so its
+  // failure is distinguishable from "no parked rows" (successful empty).
+  // A failure marks the snapshot partial; we pass hasVaultRows:undefined to
+  // addParkedValue (force real check) rather than falsely passing false.
+  // -------------------------------------------------------------------------
+  let parkedHintSucceeded = true;
+  let parkedHintRows: any[] = [];
+  try {
+    const hintRemaining = deadlineAt - Date.now();
+    const hintResult = await _raceDeadline(
+      storage.getVaultPositionsAllScopes(walletAddress),
+      hintRemaining > 0 ? hintRemaining : 0,
+    );
+    if (hintResult === DEADLINE_SENTINEL) {
+      parkedHintSucceeded = false;
+    } else {
+      parkedHintRows = hintResult as any[];
+    }
+  } catch {
+    parkedHintSucceeded = false;
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 1c: Batch enrichment (best-effort — failure explicitly tracked).
+  // When enrichment fails, deposit basis, trade counts, debt, publication
+  // state are all unknown. Routes must propagate null rather than zero.
   // -------------------------------------------------------------------------
   let enrichment: BotListEnrichment;
+  let enrichmentSucceeded = true;
   try {
     const enrichRemaining = deadlineAt - Date.now();
     const er = await _raceDeadline(
       storage.getTradingBotListEnrichment(walletAddress, bots.map((b: any) => b.id)),
-      enrichRemaining,
+      enrichRemaining > 0 ? enrichRemaining : 0,
     );
-    enrichment = er === DEADLINE_SENTINEL ? _emptyEnrichment() : er;
+    if (er === DEADLINE_SENTINEL) {
+      enrichment = _emptyEnrichment();
+      enrichmentSucceeded = false;
+    } else {
+      enrichment = er;
+    }
   } catch {
     enrichment = _emptyEnrichment();
+    enrichmentSucceeded = false;
   }
 
   const parkedBotIds = new Set<string>();
-  for (const r of parkedHintRows as any[]) {
-    const id = (r as any).tradingBotId;
-    if (id) parkedBotIds.add(id);
+  if (parkedHintSucceeded) {
+    for (const r of parkedHintRows) {
+      const id = (r as any).tradingBotId;
+      if (id) parkedBotIds.add(id);
+    }
   }
 
   const botMarkets = [...new Set(bots.map((b: any) => b.market as string))];
@@ -460,8 +602,12 @@ async function _refresh(
   // Architecture: each external call is exactly ONE pool slot. Main-account
   // has four independent ops; per-bot has two sequential ops (but different
   // bots overlap). All wrapper promises are launched concurrently and compete
-  // for the shared two-slot pool. Wrappers are responsible for writing results
-  // before returning — no closure mutates state after _refresh returns.
+  // for the shared two-slot pool. Wrappers write results before returning —
+  // no closure mutates state after _refresh returns.
+  //
+  // When enrichment failed: borrowDebt and deposit basis are null (unknown).
+  // netPnl is null whenever deposit basis is unknown (prevents false profit).
+  // When a live bot call fails: exchangeBalance is null (not DB estimate).
   // -------------------------------------------------------------------------
   const pool = entry.pool;
   const agentAddress: string | null = (wallet as any)?.agentPublicKey ?? null;
@@ -509,10 +655,14 @@ async function _refresh(
   // --- Per-bot: two sequential ops within a bot; bots are concurrent ---
   for (const bot of bots) {
     const botId = bot.id;
-    const eq = enrichment.equityAgg.get(botId);
-    const netDeposited = eq?.netDeposited ?? 0;
-    const totalDeposits = eq?.totalDeposits ?? 0;
-    const borrowDebtUsdc = enrichment.borrowDebts.get(botId) ?? 0;
+
+    // When enrichment failed, deposit basis and debt are unknown (null).
+    const eq = enrichmentSucceeded ? enrichment.equityAgg.get(botId) : undefined;
+    const netDeposited: number | null = enrichmentSucceeded ? (eq?.netDeposited ?? 0) : null;
+    const totalDeposits: number | null = enrichmentSucceeded ? (eq?.totalDeposits ?? 0) : null;
+    const borrowDebtUsdc: number | null = enrichmentSucceeded
+      ? (enrichment.borrowDebts.get(botId) ?? 0)
+      : null;
 
     // Flash double-count: bot wallet IS the agent wallet — skip live call.
     const isFlashAgentAlias =
@@ -523,13 +673,16 @@ async function _refresh(
     if (isFlashAgentAlias) {
       perBotFinancials.set(botId, {
         exchangeBalance: 0,
-        netPnl: -netDeposited,
-        netPnlPercent: totalDeposits > 0 ? (-netDeposited / totalDeposits) * 100 : 0,
+        netPnl: netDeposited !== null ? -netDeposited : null,
+        netPnlPercent: (netDeposited !== null && totalDeposits !== null && totalDeposits > 0)
+          ? (-netDeposited / totalDeposits) * 100
+          : null,
         borrowDebtUsdc,
         parkedValueUsdc: 0,
         parkedValueIncluded: false,
         parkedValueUnavailable: false,
         liveDataAvailable: false,
+        botFinancialStatus: 'db-only',
       });
       continue;
     }
@@ -537,7 +690,9 @@ async function _refresh(
     // Bots with no live context get DB-based fallback immediately (no pool slot).
     const botCtx = deps.getBotSubaccountContext(bot);
     if (!botCtx || !agentAddress) {
-      perBotFinancials.set(botId, _fallbackFinancials(bot, enrichment, prices));
+      perBotFinancials.set(botId, _fallbackFinancials(
+        bot, enrichment, prices, enrichmentSucceeded, 'db-only',
+      ));
       continue;
     }
 
@@ -546,11 +701,13 @@ async function _refresh(
     try {
       botAdapter = deps.getAdapterForBot(bot);
     } catch {
-      perBotFinancials.set(botId, _fallbackFinancials(bot, enrichment, prices));
+      perBotFinancials.set(botId, _fallbackFinancials(
+        bot, enrichment, prices, enrichmentSucceeded, 'unavailable',
+      ));
       continue;
     }
 
-    // Pipeline within this bot: Op1 → Op2 sequential; but this wrapper runs
+    // Pipeline within this bot: Op1 → Op2 sequential; this wrapper runs
     // concurrently with all other bot wrappers and main-account wrappers.
     wrappers.push((async () => {
       // Op 1: exchange account info (1 pool slot)
@@ -562,8 +719,18 @@ async function _refresh(
       });
 
       if (!op1ok || !liveInfo) {
-        // Deadline fired or live call failed — use DB fallback.
-        perBotFinancials.set(botId, _fallbackFinancials(bot, enrichment, prices));
+        // Deadline fired or live call threw — null balance, never DB estimate.
+        perBotFinancials.set(botId, {
+          exchangeBalance: null,
+          netPnl: null,
+          netPnlPercent: null,
+          borrowDebtUsdc,
+          parkedValueUsdc: 0,
+          parkedValueIncluded: false,
+          parkedValueUnavailable: false,
+          liveDataAvailable: false,
+          botFinancialStatus: 'unavailable',
+        });
         return;
       }
 
@@ -572,50 +739,67 @@ async function _refresh(
       await _waitAndRun(pool, deadlineAt, async () => {
         adj = await deps.addParkedValueForBotDisplayEquity(
           bot, botAdapter, (liveInfo as any).totalCollateral,
-          { hasVaultRows: parkedBotIds.has(botId) },
+          // When hint failed, do not pass hasVaultRows:false — that would
+          // incorrectly skip the real check. Pass undefined to force it.
+          parkedHintSucceeded ? { hasVaultRows: parkedBotIds.has(botId) } : undefined,
         );
       });
 
       // adj may be null if Op2 timed out — fall back to raw collateral.
       const equityBase: number = adj?.equityUsdc ?? (liveInfo as any).totalCollateral;
-      const botBalance = equityBase - borrowDebtUsdc;
-      const netPnl = botBalance - netDeposited;
+      const adjustedDebt = borrowDebtUsdc ?? 0;
+      const botBalance = equityBase - adjustedDebt;
+      // netPnl is null whenever deposit basis is unknown (enrichment failed).
+      const netPnl = netDeposited !== null ? botBalance - netDeposited : null;
+      const netPnlPercent = (netPnl !== null && totalDeposits !== null && totalDeposits > 0)
+        ? (netPnl / totalDeposits) * 100
+        : null;
+
       perBotFinancials.set(botId, {
         exchangeBalance: botBalance,
         netPnl,
-        netPnlPercent: totalDeposits > 0 ? (netPnl / totalDeposits) * 100 : 0,
+        netPnlPercent,
         borrowDebtUsdc,
         parkedValueUsdc: adj?.parkedValueUsdc ?? 0,
         parkedValueIncluded: adj?.parkedValueIncluded ?? false,
         parkedValueUnavailable: adj?.parkedValueUnavailable ?? (adj === null),
         liveDataAvailable: true,
+        botFinancialStatus: 'live',
       });
     })());
   }
 
   // Run all wrappers concurrently — they share the two-slot pool.
-  // Each wrapper exits at or shortly after deadlineAt; no wrapper runs forever.
   await Promise.all(wrappers);
 
   // Defensive fill: any bot not written by a wrapper gets DB fallback.
   for (const bot of bots) {
     if (!perBotFinancials.has(bot.id)) {
-      perBotFinancials.set(bot.id, _fallbackFinancials(bot, enrichment, prices));
+      perBotFinancials.set(bot.id, _fallbackFinancials(
+        bot, enrichment, prices, enrichmentSucceeded, 'db-only',
+      ));
     }
   }
 
-  // Determine snapshot quality. 'partial' when all main-account venue calls
-  // failed despite an agent address being present.
-  const hasAnyMainAccountData =
-    agentBalance !== null || solBalance !== null ||
-    mainAccount !== null || vaultBalance !== null;
+  // Determine snapshot quality.
+  // 'partial' when ANY required main-account component is null (not only when
+  // all fail), OR when enrichment/parked-hint reads failed.
+  const anyMainMissing =
+    agentAddress !== null && (
+      agentBalance === null || solBalance === null ||
+      mainAccount === null || vaultBalance === null
+    );
   const snapshotStatus: 'fresh' | 'partial' =
-    (agentAddress && !hasAnyMainAccountData) ? 'partial' : 'fresh';
+    (anyMainMissing || !enrichmentSucceeded || !parkedHintSucceeded)
+      ? 'partial'
+      : 'fresh';
 
   return {
     bots,
     wallet,
     enrichment,
+    enrichmentSucceeded,
+    parkedHintSucceeded,
     perBotFinancials,
     mainAccount,
     agentBalance,
@@ -651,8 +835,9 @@ function _emptyEnrichment(): BotListEnrichment {
  * Return the current financial snapshot for a wallet.
  *
  * Status semantics:
- *   'fresh':       Computed within the last 5 s; all bot-list data is current.
- *   'partial':     Fresh bot list but all main-account venue calls failed.
+ *   'fresh':       Computed within the last 5 s; all required components present.
+ *   'partial':     Fresh bot list but at least one main-account venue component
+ *                  null, OR enrichment/parked-hint reads failed.
  *   'stale':       Refresh failed; returning last-known-good (≤ 60 s old at
  *                  actual response time).
  *   'unavailable': No viable snapshot. Routes MUST return HTTP 503.
@@ -660,7 +845,16 @@ function _emptyEnrichment(): BotListEnrichment {
  * The caller envelope is CALLER_DEADLINE_MS (10 s). A never-settling Phase-1
  * DB promise will not block either route beyond that window. The underlying
  * inFlight promise continues to run and is tracked in the cache entry so no
- * replacement refresh is started (no-stampede invariant).
+ * replacement refresh is started (no-stampede invariant). After timeout,
+ * subsequent callers join the still-in-flight underlying promise at zero
+ * additional DB cost.
+ *
+ * The caller-envelope timer is cleared immediately when the refresh settles
+ * early so no lingering timers accumulate after fast completions.
+ *
+ * Only a fully-fresh (snapshotStatus === 'fresh') refresh result updates the
+ * last-known-good cache entry; partial results do not overwrite a previous
+ * fully-good snapshot.
  */
 export async function getWalletFinancialSnapshot(
   walletAddress: string,
@@ -682,14 +876,25 @@ export async function getWalletFinancialSnapshot(
   }
 
   // Helper: race the result promise against the caller deadline and fall back.
+  // The caller-envelope timer is cleared immediately when the underlying settles
+  // first so it does not linger after fast completions.
   const awaitWithCallerDeadline = async (
     p: Promise<SnapshotData>,
   ): Promise<WalletFinancialSnapshot> => {
+    // Initialized to no-op so it is always callable after the race regardless
+    // of whether the Promise constructor callback ran (avoids TS post-await
+    // narrowing problems with `(() => void) | null`).
+    let clearCallerTimer: () => void = () => {};
     const outcome = await Promise.race([
       p.then(data => ({ type: 'ok' as const, data }))
        .catch(() => ({ type: 'err' as const })),
-      _sleep(CALLER_DEADLINE_MS).then(() => ({ type: 'timeout' as const })),
+      new Promise<{ type: 'timeout' }>(resolve => {
+        const t = setTimeout(() => resolve({ type: 'timeout' }), CALLER_DEADLINE_MS);
+        clearCallerTimer = () => clearTimeout(t);
+      }),
     ]);
+    // Always clear the caller timer when outcome is known (fast or timeout).
+    clearCallerTimer();
     if (outcome.type === 'ok') return _wrap(outcome.data);
     // Use Date.now() at actual response time for the 60-second stale window.
     return _fallbackToStale(entry, Date.now());
@@ -705,9 +910,13 @@ export async function getWalletFinancialSnapshot(
   entry.inFlight = inFlight;
 
   // Hook: update cache when the underlying settles (regardless of caller deadline).
+  // Only a fully-fresh result replaces lastSuccess; partial results do not
+  // overwrite a previous good snapshot used for stale fallback.
   inFlight.then(
     (data) => {
-      entry.lastSuccess = data;
+      if (data.snapshotStatus === 'fresh') {
+        entry.lastSuccess = data;
+      }
       entry.inFlight = null;
       entry.lruTimestamp = Date.now();
     },
@@ -735,6 +944,8 @@ function _wrap(data: SnapshotData, statusOverride?: 'stale'): WalletFinancialSna
     bots: data.bots,
     wallet: data.wallet,
     enrichment: data.enrichment,
+    enrichmentSucceeded: data.enrichmentSucceeded,
+    parkedHintSucceeded: data.parkedHintSucceeded,
     perBotFinancials: data.perBotFinancials,
     mainAccount: data.mainAccount,
     agentBalance: data.agentBalance,
@@ -754,6 +965,8 @@ function _unavailable(): WalletFinancialSnapshot {
     bots: [],
     wallet: undefined,
     enrichment: _emptyEnrichment(),
+    enrichmentSucceeded: false,
+    parkedHintSucceeded: false,
     perBotFinancials: new Map(),
     mainAccount: null,
     agentBalance: null,
@@ -786,4 +999,10 @@ export function _cacheSize(): number {
 export function _poolActive(walletAddress: string): number {
   if (process.env.NODE_ENV !== 'test') return -1;
   return _cache.get(walletAddress)?.pool.active ?? 0;
+}
+
+/** Pool waiter count for a wallet. Returns -1 outside NODE_ENV=test. */
+export function _waiterCount(walletAddress: string): number {
+  if (process.env.NODE_ENV !== 'test') return -1;
+  return _cache.get(walletAddress)?.pool.waiterCount ?? 0;
 }
