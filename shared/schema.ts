@@ -417,7 +417,7 @@ export const equityEvents = pgTable("equity_events", {
 }, (table) => ([
   // WO-15A: supports batch financial-enrichment per-bot GROUP BY queries.
   // Rollback: DROP INDEX IF EXISTS idx_equity_events_bot_created
-  index("idx_equity_events_bot_created").on(table.tradingBotId, table.createdAt),
+  index("idx_equity_events_bot_created").on(table.tradingBotId, table.createdAt.desc()),
 ]));
 
 export const insertEquityEventSchema = createInsertSchema(equityEvents).omit({

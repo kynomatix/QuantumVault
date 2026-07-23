@@ -4770,6 +4770,11 @@ export class DatabaseStorage implements IStorage {
     // Deduplicate before querying; empty input produces zero queries.
     const dedupedIds = [...new Set(botIds)];
     if (dedupedIds.length === 0) return empty;
+    // Defense-in-depth: a Set over the deduplicated IDs lets each result-population
+    // loop reject any row whose bot ID was not in the caller's requested set, even if
+    // the DB returned it due to a bug or a leaky mock. SQL wallet predicates are the
+    // primary scope guard; this is a secondary application-layer filter.
+    const requestedIdSet = new Set(dedupedIds);
 
     // --- Query 1: canonical trade counts ---
     // Reproduces getCanonicalBotTradeCount exactly: pnl IS NOT NULL, terminal
@@ -4791,6 +4796,7 @@ export class DatabaseStorage implements IStorage {
 
     const tradeCounts = new Map<string, number>();
     for (const row of tradeCountRows) {
+      if (!requestedIdSet.has(row.botId)) continue;
       tradeCounts.set(row.botId, Number(row.tradeCount ?? 0));
     }
 
@@ -4806,6 +4812,8 @@ export class DatabaseStorage implements IStorage {
 
     const positions = new Map<string, BotPosition[]>();
     for (const row of positionRows) {
+      if (!requestedIdSet.has(row.tradingBotId)) continue;
+      if (row.walletAddress !== walletAddress) continue;
       const arr = positions.get(row.tradingBotId) ?? [];
       arr.push(row);
       positions.set(row.tradingBotId, arr);
@@ -4824,6 +4832,8 @@ export class DatabaseStorage implements IStorage {
 
     const publishedBotMap = new Map<string, PublishedBot>();
     for (const row of publishedRows) {
+      if (!requestedIdSet.has(row.tradingBotId)) continue;
+      if (row.creatorWalletAddress !== walletAddress) continue;
       publishedBotMap.set(row.tradingBotId, row);
     }
 
@@ -4860,7 +4870,7 @@ export class DatabaseStorage implements IStorage {
 
     const equityAgg = new Map<string, { netDeposited: number; totalDeposits: number }>();
     for (const row of equityRows) {
-      if (!row.botId) continue;
+      if (!row.botId || !requestedIdSet.has(row.botId)) continue;
       const nd = parseFloat(row.netDeposited ?? '0');
       const td = parseFloat(row.totalDeposits ?? '0');
       equityAgg.set(row.botId, {
@@ -4890,7 +4900,7 @@ export class DatabaseStorage implements IStorage {
     const borrowDebts = new Map<string, number>();
     const rawByBot = new Map<string, bigint>();
     for (const r of borrowRows) {
-      if (!r.tradingBotId) continue;
+      if (!r.tradingBotId || !requestedIdSet.has(r.tradingBotId)) continue;
       if (String(r.debtAssetKey).toLowerCase() !== 'usdc') continue;
       try {
         const v = BigInt(r.debtAmountRaw);

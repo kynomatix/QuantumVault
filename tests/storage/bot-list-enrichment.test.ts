@@ -11,12 +11,13 @@
  *   [G] Equity parsing   — netDeposited / totalDeposits parsed; NaN → 0 guard
  *   [H] Borrow BigInt    — multi-row accumulation, USDC-only, non-USDC ignored
  *   [I] Borrow zero      — zero-amount rows never enter the map
- *   [J] Wallet isolation — map never populated from another wallet's data
+ *   [J] Isolation        — out-of-request bot IDs and wrong-wallet rows are
+ *         rejected at the application layer (defense-in-depth over SQL predicates)
  *   [K] VAULT_INTERNAL parity — all VAULT_INTERNAL_EVENT_TYPES members are
  *         excluded from sumNetDepositedFromEvents (TS reference matches SQL intent)
  *   [L] >1000 events     — no artificial cap; all rows contribute to aggregate
- *   [M] Schema DDL       — idx_equity_events_bot_created present in schema +
- *         ensureSchema DDL (both authoritative surfaces carry the same index name)
+ *   [M] Schema DDL       — idx_equity_events_bot_created declared with DESC
+ *         direction on both Drizzle schema (.desc()) and ensureSchema DDL surfaces
  */
 
 import { vi, describe, it, expect, beforeEach } from "vitest";
@@ -413,33 +414,134 @@ describe("[I] Borrow — zero-amount rows excluded", () => {
 });
 
 // ---------------------------------------------------------------------------
-// [J] Wallet isolation
+// [J] Isolation — out-of-request bot IDs and wrong-wallet rows are rejected
 // ---------------------------------------------------------------------------
-describe("[J] Wallet isolation", () => {
-  it("mock returning rows with different walletAddress does NOT affect maps (rely on DB filter)", async () => {
-    // The WHERE clause scopes every query to walletAddress; this test
-    // verifies that even if rows arrive (e.g. via a bug or a test where
-    // we relax the mock), the parsing path doesn't fabricate false enrichment
-    // for bots not in the requested list.
+describe("[J] Isolation — out-of-request bot IDs and wrong-wallet rows are rejected", () => {
+  // Q1 — trade counts: out-of-request bot ID excluded
+  it("trade counts: out-of-request bot ID row does not enter tradeCounts map", async () => {
     seedSelectMock([
       [{ botId: "other-bot", tradeCount: 99 }],
-      [{ tradingBotId: "other-bot", market: "SOL-PERP", walletAddress: "other-wallet" }],
-      [{ tradingBotId: "other-bot", creatorWalletAddress: "other-wallet" }],
+      [], [], [], [],
+    ]);
+    const storage = makeStorage();
+    const result = await storage.getTradingBotListEnrichment("my-wallet", ["my-bot"]);
+    expect(result.tradeCounts.has("other-bot")).toBe(false);
+  });
+
+  // Q2 — positions: out-of-request bot ID excluded
+  it("positions: out-of-request bot ID row does not enter positions map", async () => {
+    seedSelectMock([
+      [],
+      [{ tradingBotId: "other-bot", market: "SOL-PERP", walletAddress: "my-wallet" }],
+      [], [], [],
+    ]);
+    const storage = makeStorage();
+    const result = await storage.getTradingBotListEnrichment("my-wallet", ["my-bot"]);
+    expect(result.positions.has("other-bot")).toBe(false);
+  });
+
+  // Q2 — positions: wrong-wallet row excluded even when bot ID matches
+  it("positions: wrong-wallet row is excluded even when bot ID is in the requested set", async () => {
+    seedSelectMock([
+      [],
+      [{ tradingBotId: "my-bot", market: "SOL-PERP", walletAddress: "other-wallet" }],
+      [], [], [],
+    ]);
+    const storage = makeStorage();
+    const result = await storage.getTradingBotListEnrichment("my-wallet", ["my-bot"]);
+    expect(result.positions.has("my-bot")).toBe(false);
+  });
+
+  // Q2 — positions: legitimate row (correct ID + correct wallet) enters the map
+  it("positions: legitimate requested-wallet/requested-id row enters the map", async () => {
+    seedSelectMock([
+      [],
+      [{ tradingBotId: "my-bot", market: "SOL-PERP", walletAddress: "my-wallet" }],
+      [], [], [],
+    ]);
+    const storage = makeStorage();
+    const result = await storage.getTradingBotListEnrichment("my-wallet", ["my-bot"]);
+    expect(result.positions.has("my-bot")).toBe(true);
+    expect(result.positions.get("my-bot")).toHaveLength(1);
+  });
+
+  // Q3 — published bots: out-of-request bot ID excluded
+  it("published bots: out-of-request bot ID row does not enter publishedBotMap", async () => {
+    seedSelectMock([
+      [], [],
+      [{ tradingBotId: "other-bot", creatorWalletAddress: "my-wallet" }],
+      [], [],
+    ]);
+    const storage = makeStorage();
+    const result = await storage.getTradingBotListEnrichment("my-wallet", ["my-bot"]);
+    expect(result.publishedBotMap.has("other-bot")).toBe(false);
+  });
+
+  // Q3 — published bots: wrong-wallet row excluded even when bot ID matches
+  it("published bots: wrong-wallet creator row is excluded even when bot ID is in the requested set", async () => {
+    seedSelectMock([
+      [], [],
+      [{ tradingBotId: "my-bot", creatorWalletAddress: "other-wallet" }],
+      [], [],
+    ]);
+    const storage = makeStorage();
+    const result = await storage.getTradingBotListEnrichment("my-wallet", ["my-bot"]);
+    expect(result.publishedBotMap.has("my-bot")).toBe(false);
+  });
+
+  // Q3 — published bots: legitimate row enters the map
+  it("published bots: legitimate requested-wallet/requested-id row enters the map", async () => {
+    seedSelectMock([
+      [], [],
+      [{ tradingBotId: "my-bot", creatorWalletAddress: "my-wallet" }],
+      [], [],
+    ]);
+    const storage = makeStorage();
+    const result = await storage.getTradingBotListEnrichment("my-wallet", ["my-bot"]);
+    expect(result.publishedBotMap.has("my-bot")).toBe(true);
+  });
+
+  // Q4 — equity agg: out-of-request bot ID excluded
+  it("equity agg: out-of-request bot ID row does not enter equityAgg map", async () => {
+    seedSelectMock([
+      [], [], [],
       [{ botId: "other-bot", netDeposited: "9999", totalDeposits: "9999" }],
+      [],
+    ]);
+    const storage = makeStorage();
+    const result = await storage.getTradingBotListEnrichment("my-wallet", ["my-bot"]);
+    expect(result.equityAgg.has("other-bot")).toBe(false);
+  });
+
+  // Q5 — borrow debt: out-of-request bot ID excluded
+  it("borrow debt: out-of-request bot ID row does not enter borrowDebts map", async () => {
+    seedSelectMock([
+      [], [], [], [],
       [{ tradingBotId: "other-bot", debtAmountRaw: "99000000", debtAssetKey: "usdc" }],
     ]);
     const storage = makeStorage();
-    // Caller requested only "my-bot"; "other-bot" data comes back from the mock
-    // but should still be mapped (the DB contract enforces wallet scope, not the
-    // aggregation layer). This asserts the aggregation layer builds correct maps
-    // from whatever the DB returns — wallet scoping is enforced in the WHERE clause.
     const result = await storage.getTradingBotListEnrichment("my-wallet", ["my-bot"]);
+    expect(result.borrowDebts.has("other-bot")).toBe(false);
+  });
 
-    // "other-bot" appears in result because the mock returned it (DB isolation
-    // is the DB's job; the test verifies the map is built correctly from DB output)
-    expect(result.tradeCounts.has("other-bot")).toBe(true);
-    // "my-bot" (which had no rows in the mock) is correctly absent
-    expect(result.tradeCounts.has("my-bot")).toBe(false);
+  // All 5 queries simultaneously: out-of-request rows in every result → all maps empty
+  it("all five queries: adversarial out-of-request rows in every result produce zero-entry maps", async () => {
+    seedSelectMock([
+      [{ botId: "bad-bot", tradeCount: 99 }],
+      [{ tradingBotId: "bad-bot", market: "SOL-PERP", walletAddress: "my-wallet" }],
+      [{ tradingBotId: "bad-bot", creatorWalletAddress: "my-wallet" }],
+      [{ botId: "bad-bot", netDeposited: "9999", totalDeposits: "9999" }],
+      [{ tradingBotId: "bad-bot", debtAmountRaw: "99000000", debtAssetKey: "usdc" }],
+    ]);
+    const storage = makeStorage();
+    const result = await storage.getTradingBotListEnrichment("my-wallet", ["my-bot"]);
+    expect(result.tradeCounts.size).toBe(0);
+    expect(result.positions.size).toBe(0);
+    expect(result.publishedBotMap.size).toBe(0);
+    expect(result.equityAgg.size).toBe(0);
+    expect(result.borrowDebts.size).toBe(0);
+    // The 5 queries still fired for the requested bot
+    expect(mockSelectSpy).toHaveBeenCalledTimes(5);
   });
 });
 
@@ -525,21 +627,28 @@ describe("[L] >1000 events — no artificial result cap", () => {
 });
 
 // ---------------------------------------------------------------------------
-// [M] Schema + ensureSchema DDL — both surfaces carry the index name
+// [M] Schema + ensureSchema DDL — both surfaces declare the index with DESC direction
 // ---------------------------------------------------------------------------
-describe("[M] Index present in both Drizzle schema and ensureSchema DDL", () => {
+describe("[M] Index present with DESC direction in both Drizzle schema and ensureSchema DDL", () => {
   const root = resolve(__dirname, "../..");
 
-  it("shared/schema.ts declares idx_equity_events_bot_created", () => {
+  it("shared/schema.ts declares idx_equity_events_bot_created with .desc() on createdAt", () => {
     const src = readFileSync(resolve(root, "shared/schema.ts"), "utf-8");
+    // Index name present
     expect(src).toContain("idx_equity_events_bot_created");
+    // Drizzle declaration uses .desc() on the createdAt column so the generated
+    // schema matches the live DB index direction (created_at DESC).
+    expect(src).toContain("createdAt.desc()");
   });
 
-  it("server/db.ts CREATE INDEX IF NOT EXISTS idx_equity_events_bot_created", () => {
+  it("server/db.ts DDL declares idx_equity_events_bot_created with created_at DESC", () => {
     const src = readFileSync(resolve(root, "server/db.ts"), "utf-8");
+    // Full IF NOT EXISTS guard present
     expect(src).toContain(
       "CREATE INDEX IF NOT EXISTS idx_equity_events_bot_created"
     );
+    // Direction must be explicitly DESC — aligns with live index and Drizzle schema
+    expect(src).toContain("created_at DESC");
   });
 
   it("server/db.ts rollback comment present", () => {
