@@ -154,8 +154,14 @@ export async function getAgentUsdcBalanceStrict(agentPublicKey: string): Promise
   const agentPubkey = new PublicKey(agentPublicKey);
   const usdcMint = new PublicKey(USDC_MINT);
   const agentAta = getAssociatedTokenAddressSync(usdcMint, agentPubkey);
-  const accountInfo = await connection.getTokenAccountBalance(agentAta);
-  return accountInfo.value.uiAmount || 0;
+  // getAccountInfo returning null means the ATA was never initialised — that is
+  // a legitimate zero balance, NOT an RPC error. Any throw from getAccountInfo
+  // propagates as an RPC transport failure (fail closed). We never inspect the
+  // error message to classify the failure — only the null return value matters.
+  const ataInfo = await connection.getAccountInfo(agentAta);
+  if (ataInfo === null) return 0;
+  const tokenBalance = await connection.getTokenAccountBalance(agentAta);
+  return tokenBalance.value.uiAmount || 0;
 }
 
 export async function getAgentSolBalance(agentPublicKey: string): Promise<number> {

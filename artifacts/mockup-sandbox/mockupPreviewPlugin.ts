@@ -59,10 +59,10 @@ export function mockupPreviewPlugin(): Plugin {
   }
 
   async function discoverComponents(): Promise<Array<DiscoveredComponent>> {
-    const files = await glob(`${MOCKUPS_DIR}/**/*.tsx`, {
+    const files = (await glob(`${MOCKUPS_DIR}/**/*.tsx`, {
       cwd: root,
       ignore: ["**/_*/**", "**/_*.tsx"],
-    });
+    })).sort(); // sort for deterministic output across OS file systems
 
     return files.map((f) => ({
       globKey: "./" + f.slice("src/".length),

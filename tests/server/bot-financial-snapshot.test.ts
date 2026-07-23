@@ -1904,24 +1904,25 @@ describe('parkedHintSucceeded=false → partial (WO-15B.2 item 7)', () => {
 // ---------------------------------------------------------------------------
 
 describe('no lingering caller-envelope timer on fast settle (WO-15B.2 item 8)', () => {
-  it('all ops fast → zero timers before runAllTimers', async () => {
+  it('caller-envelope timer cleared before any timer drain when ops settle via microtasks', async () => {
     vi.useFakeTimers();
     (storage.getTradingBots as any).mockResolvedValue(makeBots(1));
     (storage.getTradingBotListEnrichment as any).mockResolvedValue(makeEnrichment(['bot-1']));
 
     _resetForTest();
-    initSnapshotModule(makeDeps());
+    // No live bot context → only main-account ops run, all via mockResolvedValue.
+    initSnapshotModule(makeDeps({ getBotSubaccountContext: vi.fn().mockReturnValue(null) }));
 
-    const snapPromise = getWalletFinancialSnapshot(W);
-    // Flush micro-tasks without advancing wall clock.
-    await Promise.resolve();
-    await Promise.resolve();
+    // Await through microtasks only — no runAllTimers / advanceTimersByTime.
+    // All deps resolve via mockResolvedValue (immediate microtasks), so the
+    // in-flight settles before any setTimeout fires. clearCallerTimer() must
+    // execute as part of that microtask chain.
+    // If any timer were still live after this await, getTimerCount() > 0 and
+    // the assertion below catches the leak WITHOUT runAllTimers masking it.
+    const snap = await getWalletFinancialSnapshot(W);
 
-    // Allow all async microtasks to drain so fast ops settle.
-    await vi.runAllTimersAsync();
-    await snapPromise;
-
-    // CRITICAL: no active timers must remain after a fast-settle snapshot.
+    expect(snap.status).toBe('fresh');
+    // CRITICAL: no active timers must remain without any explicit timer drain.
     expect(vi.getTimerCount()).toBe(0);
 
     vi.useRealTimers();
@@ -1945,10 +1946,11 @@ describe('lastSuccess only updated on fresh (WO-15B.2 item 9)', () => {
     expect(snap.observedAt).toBeGreaterThan(0);
   });
 
-  it('partial snapshot does NOT update lastSuccess — second call re-triggers refresh', async () => {
+  it('partial snapshot does NOT update lastSuccess — refresh after partial TTL is fresh', async () => {
     // Start cold. First call: agentUsdcBalance fails → 'partial'.
-    // Because lastSuccess stays null after a partial, the SECOND call
-    // (even within the TTL window) sees no cache hit and starts a fresh refresh.
+    // Because lastSuccess stays null after a partial, once the short partial
+    // cache (FRESH_TTL_MS = 5 s) expires the next call triggers a full fresh
+    // refresh and gets a fully-good snapshot.
     const W_LAST = 'wallet-last-success';
     _resetForTest();
     (storage.getTradingBots as any).mockResolvedValue(makeBots(1));
@@ -1961,16 +1963,23 @@ describe('lastSuccess only updated on fresh (WO-15B.2 item 9)', () => {
     const partialSnap = await getWalletFinancialSnapshot(W_LAST);
     expect(partialSnap.status).toBe('partial');
 
-    // Re-init with all ops succeeding. If lastSuccess was NOT updated by the
-    // partial, the second call triggers a new refresh → returns 'fresh'.
-    initSnapshotModule(makeDeps());
+    // Advance time past FRESH_TTL_MS (5 s) so the lastPartial cache expires.
+    // lastSuccess is still null — no good snapshot to serve as stale fallback.
+    const origNow = Date.now;
+    Date.now = () => partialSnap.observedAt! + 6_000;
+    try {
+      // Re-init with all ops succeeding. The partial cache has expired, so the
+      // second call triggers a new refresh → returns 'fresh'.
+      // If lastSuccess had been wrongly set by the partial, this would return
+      // a 'stale' hit — which would NOT be 'fresh'.
+      initSnapshotModule(makeDeps());
 
-    const secondSnap = await getWalletFinancialSnapshot(W_LAST);
-    // Must be fresh: if lastSuccess had been wrongly updated by the partial,
-    // the second call would return a cache hit with the partial observedAt,
-    // which would NOT be 'fresh' (it would be 'stale' or 'partial' again).
-    expect(secondSnap.status).toBe('fresh');
-    expect(secondSnap.agentBalance).not.toBeNull();
+      const secondSnap = await getWalletFinancialSnapshot(W_LAST);
+      expect(secondSnap.status).toBe('fresh');
+      expect(secondSnap.agentBalance).not.toBeNull();
+    } finally {
+      Date.now = origNow;
+    }
   });
 
   it('enrichmentSucceeded=false → snapshot is partial, not fresh', async () => {
@@ -1984,5 +1993,282 @@ describe('lastSuccess only updated on fresh (WO-15B.2 item 9)', () => {
     // Enrichment failure → partial. lastSuccess must not be updated.
     expect(snap.status).toBe('partial');
     expect(snap.enrichmentSucceeded).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WO-15B.2.1 item 1/2: Phase-1a no-stampede
+// Two concurrent callers share one in-flight; getTradingBots called once.
+// ---------------------------------------------------------------------------
+
+describe('Phase-1a no-stampede: concurrent callers share in-flight (item 1/2)', () => {
+  const W_NS = 'wallet-no-stampede';
+
+  it('two concurrent callers share one getTradingBots call', async () => {
+    (storage.getTradingBots as any).mockResolvedValue(makeBots(1));
+    (storage.getTradingBotListEnrichment as any).mockResolvedValue(makeEnrichment(['bot-1']));
+    initSnapshotModule(makeDeps());
+
+    const [snap1, snap2] = await Promise.all([
+      getWalletFinancialSnapshot(W_NS),
+      getWalletFinancialSnapshot(W_NS),
+    ]);
+
+    // Concurrent callers must join the same in-flight: only ONE DB call.
+    expect(storage.getTradingBots).toHaveBeenCalledTimes(1);
+    expect(snap1.status).toBe('fresh');
+    expect(snap2.status).toBe('fresh');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WO-15B.2.1 item 3: successful-empty parity
+// enrichmentSucceeded=true + no equityAgg row → exchangeBalance=0 (not null).
+// ---------------------------------------------------------------------------
+
+describe('successful-empty parity: missing equityAgg row → zero not null (item 3)', () => {
+  const W_SE = 'wallet-successful-empty';
+
+  it('new bot with no equityAgg row gets zero exchange balance, snapshot is fresh', async () => {
+    (storage.getTradingBots as any).mockResolvedValue(makeBots(1));
+    // Enrichment returns successfully but with EMPTY maps — no entry for bot-1.
+    (storage.getTradingBotListEnrichment as any).mockResolvedValue(makeEnrichment([]));
+    initSnapshotModule(makeDeps({
+      // No live context → DB-only path via _fallbackFinancials (enrichmentSucceeded=true).
+      getBotSubaccountContext: vi.fn().mockReturnValue(null),
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W_SE);
+
+    // Enrichment succeeded: empty equityAgg → new bot with zero history.
+    // exchangeBalance/netPnl/netPnlPercent must be 0, NOT null.
+    expect(snap.status).toBe('fresh');
+    const botData = snap.perBotFinancials.get('bot-1');
+    expect(botData?.exchangeBalance).toBe(0);
+    expect(botData?.netPnl).toBe(0);
+    expect(botData?.netPnlPercent).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WO-15B.2.1 item 4: per-bot unavailable → snapshot partial
+// anyBotUnavailable=true propagates into snapshotStatus.
+// ---------------------------------------------------------------------------
+
+describe('per-bot unavailable propagates to snapshot status (item 4)', () => {
+  const W_PBU = 'wallet-per-bot-unavailable';
+
+  it('bot whose live exchange info fails → botFinancialStatus=unavailable → snapshot partial', async () => {
+    (storage.getTradingBots as any).mockResolvedValue(makeBots(1));
+    (storage.getTradingBotListEnrichment as any).mockResolvedValue(makeEnrichment(['bot-1']));
+    initSnapshotModule(makeDeps({
+      // Provide a live context so the live path is attempted.
+      getBotSubaccountContext: vi.fn().mockReturnValue({ subaccountId: 0 }),
+      getAdapterForBot: vi.fn().mockReturnValue({}),
+      // Live call fails → op1ok=false → botFinancialStatus='unavailable'.
+      getExchangeAccountInfoForBot: vi.fn().mockRejectedValue(new Error('venue-down')),
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W_PBU);
+
+    // Main-account ops all succeed; only the per-bot live call fails.
+    // Before fix: snapshot was 'fresh' (anyMainMissing was only checking main-account).
+    // After fix: anyBotUnavailable=true → 'partial'.
+    expect(snap.status).toBe('partial');
+    const botData = snap.perBotFinancials.get('bot-1');
+    expect(botData?.botFinancialStatus).toBe('unavailable');
+  });
+
+  it('bot with unavailable parked value → parkedValueUnavailable=true → snapshot partial', async () => {
+    const W_PPU = 'wallet-per-bot-parked-uncertain';
+    (storage.getTradingBots as any).mockResolvedValue(makeBots(1));
+    (storage.getTradingBotListEnrichment as any).mockResolvedValue(makeEnrichment(['bot-1']));
+    initSnapshotModule(makeDeps({
+      getBotSubaccountContext: vi.fn().mockReturnValue({ subaccountId: 0 }),
+      getAdapterForBot: vi.fn().mockReturnValue({}),
+      getExchangeAccountInfoForBot: vi.fn().mockResolvedValue(LIVE_INFO),
+      // Op2 (parked value) fails → adj=null → parkedValueUnavailable=true.
+      addParkedValueForBotDisplayEquity: vi.fn().mockRejectedValue(new Error('vault-down')),
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W_PPU);
+
+    expect(snap.status).toBe('partial');
+    const botData = snap.perBotFinancials.get('bot-1');
+    expect(botData?.parkedValueUnavailable).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WO-15B.2.1 item 5: null agentAddress → partial (not fresh)
+// agentAddress === null is itself a missing condition.
+// ---------------------------------------------------------------------------
+
+describe('null agentAddress → snapshot is partial (item 5)', () => {
+  const W_NA = 'wallet-no-agent';
+
+  it('wallet with null agentPublicKey → snapshot is partial', async () => {
+    (storage.getWallet as any).mockResolvedValue({ agentPublicKey: null });
+    (storage.getTradingBots as any).mockResolvedValue([]);
+    initSnapshotModule(makeDeps());
+
+    const snap = await getWalletFinancialSnapshot(W_NA);
+
+    // Before fix: anyMainMissing = agentAddress !== null && (...) → false when null.
+    // After fix:  anyMainMissing = agentAddress === null || (...) → true → partial.
+    expect(snap.status).toBe('partial');
+    expect(snap.agentBalance).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WO-15B.2.1 item 6: 5 s partial result cache
+// Partial snapshots are cached for FRESH_TTL_MS (5 s) to avoid stampede.
+// ---------------------------------------------------------------------------
+
+describe('5 s partial result cache (item 6)', () => {
+  const W_PC = 'wallet-partial-cache';
+  const W_PCE = 'wallet-partial-cache-expired';
+
+  it('second call within TTL reuses lastPartial without re-querying DB', async () => {
+    (storage.getTradingBots as any).mockResolvedValue(makeBots(0));
+    initSnapshotModule(makeDeps({
+      getAgentUsdcBalance: vi.fn().mockRejectedValue(new Error('rpc-fail')),
+    }));
+
+    const snap1 = await getWalletFinancialSnapshot(W_PC);
+    expect(snap1.status).toBe('partial');
+
+    // Reset mock call counts; switch to all-succeeding deps.
+    // Within FRESH_TTL_MS, the lastPartial cache must serve without new DB work.
+    vi.clearAllMocks();
+    (storage.getTradingBots as any).mockResolvedValue(makeBots(0));
+    initSnapshotModule(makeDeps());
+
+    const snap2 = await getWalletFinancialSnapshot(W_PC);
+    // Served from lastPartial cache — no new DB calls and still partial.
+    expect(storage.getTradingBots).not.toHaveBeenCalled();
+    expect(snap2.status).toBe('partial');
+  });
+
+  it('after FRESH_TTL_MS expires the partial cache is bypassed and a fresh run starts', async () => {
+    const origNow = Date.now;
+    const t0 = origNow();
+    Date.now = () => t0;
+    try {
+      (storage.getTradingBots as any).mockResolvedValue(makeBots(0));
+      initSnapshotModule(makeDeps({
+        getAgentUsdcBalance: vi.fn().mockRejectedValue(new Error('rpc-fail')),
+      }));
+
+      const snap1 = await getWalletFinancialSnapshot(W_PCE);
+      expect(snap1.status).toBe('partial');
+
+      // Advance clock past FRESH_TTL_MS (5 s).
+      Date.now = () => t0 + 6_000;
+
+      vi.clearAllMocks();
+      (storage.getTradingBots as any).mockResolvedValue(makeBots(0));
+      initSnapshotModule(makeDeps()); // all deps now succeed
+
+      const snap2 = await getWalletFinancialSnapshot(W_PCE);
+      // Expired partial → new refresh → fresh result.
+      expect(storage.getTradingBots).toHaveBeenCalledTimes(1);
+      expect(snap2.status).toBe('fresh');
+    } finally {
+      Date.now = origNow;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WO-15B.2.1 item 7: BoundedPool.waiterCount is exact after all releases
+// ---------------------------------------------------------------------------
+
+describe('BoundedPool waiterCount is zero after all waiters dequeued (item 7)', () => {
+  it('all waiters are dequeued exactly once per slot release', async () => {
+    const pool = new BoundedPool(2);
+
+    // Fill both slots with manually-controlled promises.
+    let release1!: () => void;
+    let release2!: () => void;
+    pool.tryRun(() => new Promise<void>(r => { release1 = r; }));
+    pool.tryRun(() => new Promise<void>(r => { release2 = r; }));
+    expect(pool.active).toBe(2);
+
+    // Queue two waiters — pool is at capacity.
+    const w1 = pool.waitForSlot();
+    const w2 = pool.waitForSlot();
+    expect(pool.waiterCount).toBe(2);
+
+    // Release both slots → both waiters dequeued via _release → _waiters.shift().
+    release1();
+    release2();
+    await w1;
+    await w2;
+
+    // INVARIANT: no dangling waiter entries after all releases.
+    expect(pool.waiterCount).toBe(0);
+  });
+
+  it('cancelled waiter is removed from the queue immediately', async () => {
+    const pool = new BoundedPool(1);
+
+    let release1!: () => void;
+    pool.tryRun(() => new Promise<void>(r => { release1 = r; }));
+
+    const { promise: w1, cancel: cancel1 } = pool.waitForSlotCancellable();
+    const { promise: _w2, cancel: cancel2 } = pool.waitForSlotCancellable();
+    expect(pool.waiterCount).toBe(2);
+
+    cancel1();
+    expect(pool.waiterCount).toBe(1);
+
+    cancel2();
+    expect(pool.waiterCount).toBe(0);
+
+    // Release the slot — no waiter to notify (both cancelled).
+    release1();
+    // w1 and _w2 never resolve (they were cancelled; promise hangs — that is fine
+    // for this test since we are only asserting waiterCount semantics).
+    void w1;
+    expect(pool.waiterCount).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WO-15B.2.1 item 8: strict USDC balance injection contract
+// Zero is legitimate (absent ATA); throw is an RPC error → partial.
+// ---------------------------------------------------------------------------
+
+describe('getAgentUsdcBalance: zero vs throw semantics (item 8)', () => {
+  const W_ATA = 'wallet-ata-zero';
+  const W_RPC = 'wallet-rpc-throw';
+
+  it('balance of 0 → agentBalance is 0 and snapshot is fresh (absent ATA is legitimate)', async () => {
+    (storage.getTradingBots as any).mockResolvedValue([]);
+    initSnapshotModule(makeDeps({
+      getAgentUsdcBalance: vi.fn().mockResolvedValue(0),
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W_ATA);
+
+    // 0 is a valid balance (new wallet with no USDC / no ATA yet).
+    // It must NOT be treated as null or cause a partial status.
+    expect(snap.agentBalance).toBe(0);
+    expect(snap.status).toBe('fresh');
+  });
+
+  it('thrown RPC error → agentBalance is null and snapshot is partial', async () => {
+    (storage.getTradingBots as any).mockResolvedValue([]);
+    initSnapshotModule(makeDeps({
+      getAgentUsdcBalance: vi.fn().mockRejectedValue(new Error('getAccountInfo failed')),
+    }));
+
+    const snap = await getWalletFinancialSnapshot(W_RPC);
+
+    // Transport failure → cannot trust the balance → null → partial.
+    expect(snap.agentBalance).toBeNull();
+    expect(snap.status).toBe('partial');
   });
 });

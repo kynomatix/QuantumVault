@@ -303,6 +303,12 @@ type CacheEntry = {
   walletAddress: string;
   /** Only updated by a snapshotStatus==='fresh' result. */
   lastSuccess: SnapshotData | null;
+  /**
+   * Last partial result. Cached for FRESH_TTL_MS so repeated callers within 5 s
+   * reuse it instead of re-running DB/RPC work. Does NOT update lastSuccess (the
+   * stale-fallback anchor). Cleared when a fresh result arrives.
+   */
+  lastPartial: SnapshotData | null;
   inFlight: Promise<SnapshotData> | null;
   lruTimestamp: number;
   /** Persists across refreshes to track never-settling venue promises. */
@@ -419,6 +425,7 @@ function _getOrCreate(walletAddress: string): CacheEntry | null {
   const entry: CacheEntry = {
     walletAddress,
     lastSuccess: null,
+    lastPartial: null,
     inFlight: null,
     lruTimestamp: Date.now(),
     pool: new BoundedPool(2),
@@ -498,10 +505,13 @@ function _fallbackFinancials(
   }
   const borrowDebtUsdc = enrichment.borrowDebts.get(bot.id) ?? 0;
   const fallback = _dbFallback(bot, enrichment, prices);
+  // enrichmentSucceeded=true here (we returned early above for the false case).
+  // A bot with no equityAgg row is a new bot with zero history — legitimately 0.
+  // Null applies only when enrichment itself failed (handled by the early return).
   return {
-    exchangeBalance: fallback?.exchangeBalance ?? null,
-    netPnl: fallback?.netPnl ?? null,
-    netPnlPercent: fallback?.netPnlPercent ?? null,
+    exchangeBalance: fallback?.exchangeBalance ?? 0,
+    netPnl: fallback?.netPnl ?? 0,
+    netPnlPercent: fallback?.netPnlPercent ?? 0,
     borrowDebtUsdc,
     parkedValueUsdc: 0,
     parkedValueIncluded: false,
@@ -523,20 +533,17 @@ async function _refresh(
   const deadlineAt = Date.now() + VENUE_DEADLINE_MS;
 
   // -------------------------------------------------------------------------
-  // Phase 1a: Bot list + wallet (authoritative — throws on failure/timeout)
+  // Phase 1a: Bot list + wallet. Awaited WITHOUT a deadline race so the
+  // underlying DB calls settle naturally, preserving the no-stampede contract:
+  // when callers time out at CALLER_DEADLINE_MS (awaitWithCallerDeadline),
+  // entry.inFlight continues and is reused by subsequent callers — no duplicate
+  // DB calls. Throws on genuine DB failure; VENUE_DEADLINE_MS still bounds all
+  // Phase-2 venue/RPC calls via _waitAndRun.
   // -------------------------------------------------------------------------
-  const phase1Remaining = deadlineAt - Date.now();
-  const phase1Result = await _raceDeadline(
-    Promise.all([
-      storage.getTradingBots(walletAddress),
-      storage.getWallet(walletAddress),
-    ]),
-    phase1Remaining,
-  );
-  if (phase1Result === DEADLINE_SENTINEL) {
-    throw new Error('[bot-financial-snapshot] Phase-1 DB deadline exceeded');
-  }
-  const [bots, wallet] = phase1Result;
+  const [bots, wallet] = await Promise.all([
+    storage.getTradingBots(walletAddress),
+    storage.getWallet(walletAddress),
+  ]);
 
   // -------------------------------------------------------------------------
   // Phase 1b: Parked-position hint — tracked separately from Phase-1a so its
@@ -784,13 +791,23 @@ async function _refresh(
   // Determine snapshot quality.
   // 'partial' when ANY required main-account component is null (not only when
   // all fail), OR when enrichment/parked-hint reads failed.
+  // Absent agent address is itself a partial condition: no on-chain data can be
+  // read without it. When present, every main-account component must succeed.
   const anyMainMissing =
-    agentAddress !== null && (
-      agentBalance === null || solBalance === null ||
-      mainAccount === null || vaultBalance === null
-    );
+    agentAddress === null ||
+    agentBalance === null || solBalance === null ||
+    mainAccount === null || vaultBalance === null;
+  // Per-bot failures propagate: any bot with unavailable live balance or uncertain
+  // parked value makes the wallet snapshot partial (caller cannot trust that data).
+  const anyBotUnavailable = [...perBotFinancials.values()].some(
+    f => f.botFinancialStatus === 'unavailable',
+  );
+  const anyBotParkedUncertain = [...perBotFinancials.values()].some(
+    f => f.parkedValueUnavailable,
+  );
   const snapshotStatus: 'fresh' | 'partial' =
-    (anyMainMissing || !enrichmentSucceeded || !parkedHintSucceeded)
+    (anyMainMissing || !enrichmentSucceeded || !parkedHintSucceeded ||
+     anyBotUnavailable || anyBotParkedUncertain)
       ? 'partial'
       : 'fresh';
 
@@ -875,6 +892,13 @@ export async function getWalletFinancialSnapshot(
     return _wrap(entry.lastSuccess);
   }
 
+  // Short-lived partial cache hit (same 5 s window as fresh TTL). Reuses the
+  // last partial result to avoid duplicate DB/RPC work within the window.
+  // Does NOT affect lastSuccess (the stale-fallback anchor for the 60 s window).
+  if (entry.lastPartial && now - entry.lastPartial.observedAt < FRESH_TTL_MS) {
+    return _wrap(entry.lastPartial);
+  }
+
   // Helper: race the result promise against the caller deadline and fall back.
   // The caller-envelope timer is cleared immediately when the underlying settles
   // first so it does not linger after fast completions.
@@ -916,6 +940,9 @@ export async function getWalletFinancialSnapshot(
     (data) => {
       if (data.snapshotStatus === 'fresh') {
         entry.lastSuccess = data;
+        entry.lastPartial = null; // fresh result supersedes any cached partial
+      } else {
+        entry.lastPartial = data; // cache partial for FRESH_TTL_MS (see below)
       }
       entry.inFlight = null;
       entry.lruTimestamp = Date.now();
