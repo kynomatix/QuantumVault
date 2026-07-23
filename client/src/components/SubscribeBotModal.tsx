@@ -1,4 +1,5 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
+import { normalizeAgentBalance } from "@/lib/equity-display";
 import { walletAuthHeaders } from "@/lib/queryClient";
 import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
@@ -115,7 +116,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
         fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders() }).then(res => res.ok ? safeResponseJson(res) : Promise.reject())
       ])
         .then(([equityData, balanceData]) => {
-          setAvailableBalance(equityData.agentBalance ?? 0);
+          setAvailableBalance(normalizeAgentBalance(equityData.agentBalance));
           if (balanceData.botCreationSolRequirement) {
             setSolRequirement(balanceData.botCreationSolRequirement);
           }
@@ -286,6 +287,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
     // this is well within precision and avoids float-drift mismatches.
     const amount = Math.ceil(usdcDeficit * 100) / 100;
 
+    let depositSucceeded = false;
     setIsDepositingUsdc(true);
     try {
       const response = await fetch('/api/agent/deposit', {
@@ -314,25 +316,11 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
       });
 
       toast({ title: `Deposited $${amount.toFixed(2)} USDC successfully` });
-
-      // Refresh both balance sources in parallel so SOL gating and USDC gating
-      // stay coherent (the user's main wallet just paid SOL fees for this tx).
-      // Bounded post-deposit affordability refresh — 8 s, matches core-read budget (Defect 7).
-      const [equityRes, balanceRes] = await Promise.all([
-        fetch('/api/total-equity', { credentials: 'include', headers: walletAuthHeaders(), signal: AbortSignal.timeout(8_000) }),
-        fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders() }),
-      ]);
-      if (equityRes.ok) {
-        const data = await safeResponseJson(equityRes);
-        setAvailableBalance(data.agentBalance ?? 0);
-      }
-      if (balanceRes.ok) {
-        const data = await safeResponseJson(balanceRes);
-        if (data.botCreationSolRequirement) {
-          setSolRequirement(data.botCreationSolRequirement);
-        }
-      }
+      // Deposit confirmed and success toast shown — mark as succeeded so the
+      // best-effort refresh below runs and any refresh failure stays isolated.
+      depositSucceeded = true;
     } catch (error: any) {
+      // Only deposit-phase failures (pre-toast) reach this handler.
       console.error('USDC deposit failed:', error);
       toast({
         title: 'USDC Deposit Failed',
@@ -341,6 +329,31 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
       });
     } finally {
       setIsDepositingUsdc(false);
+    }
+
+    if (depositSucceeded) {
+      // Best-effort post-deposit affordability refresh — isolated from the deposit outcome.
+      // The deposit is already confirmed above; a timeout or network failure here must
+      // NEVER fall into the deposit-failure handler, NEVER show "USDC Deposit Failed",
+      // and NEVER encourage a duplicate deposit.  Bounded to 8 s to match core-read budget.
+      try {
+        const [equityRes, balanceRes] = await Promise.all([
+          fetch('/api/total-equity', { credentials: 'include', headers: walletAuthHeaders(), signal: AbortSignal.timeout(8_000) }),
+          fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders() }),
+        ]);
+        if (equityRes.ok) {
+          const data = await safeResponseJson(equityRes);
+          setAvailableBalance(normalizeAgentBalance(data.agentBalance));
+        }
+        if (balanceRes.ok) {
+          const data = await safeResponseJson(balanceRes);
+          if (data.botCreationSolRequirement) {
+            setSolRequirement(data.botCreationSolRequirement);
+          }
+        }
+      } catch {
+        // Best-effort: deposit already confirmed; refresh failure is informational only.
+      }
     }
   };
 

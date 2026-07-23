@@ -17,9 +17,12 @@
  *
  * WO-15C.1 regression invariants (Defect 1, Defect 3):
  * 11. dataStatus 'stale' from server propagated verbatim (Defect 1).
- * 12. observedAt ISO string from server propagated verbatim (Defect 1).
+ * 12. observedAt numeric epoch-ms from server propagated verbatim (Defect 2 WO-15C.2).
  * 13. dataStatus null when server omits the field — no coercion (Defect 1).
  * 14. manualRefresh() after stop() is a no-op — does NOT start a new fetch (Defect 3).
+ *
+ * WO-15C.2 regression invariants:
+ * 15. dataStatus 'partial' propagated verbatim — snapshot delivers 'partial' to caller.
  */
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -359,7 +362,7 @@ describe('EquityPoller', () => {
 
   // ── Invariant 11 (WO-15C.1 Defect 1) ─────────────────────────────────────
   it('dataStatus "stale" from server is propagated verbatim into snapshot', async () => {
-    const snap = makeSnapshot({ dataStatus: 'stale', observedAt: '2026-07-23T10:00:00.000Z' });
+    const snap = makeSnapshot({ dataStatus: 'stale', observedAt: 1753258800000 });
     const results: EquityPollResult[] = [];
     const poller = new EquityPoller(immediateFetch(snap), r => results.push(r), 30_000);
     poller.start();
@@ -372,17 +375,23 @@ describe('EquityPoller', () => {
     expect(results[0].snapshot?.dataStatus).toBe('stale');
   });
 
-  // ── Invariant 12 (WO-15C.1 Defect 1) ─────────────────────────────────────
-  it('observedAt ISO string from server is propagated verbatim into snapshot', async () => {
-    const ts = '2026-07-23T10:00:00.000Z';
-    const snap = makeSnapshot({ dataStatus: 'stale', observedAt: ts });
+  // ── Invariant 12 (WO-15C.2 Defect 2) ─────────────────────────────────────
+  // The real server wire type is numeric epoch-ms, not an ISO string.
+  // The poller propagates observedAt verbatim from the fetchFn's EquitySnapshot;
+  // normalization from raw server JSON happens in fetchEquityFn (App.tsx) via
+  // parseObservedAt.  Tests MUST use the numeric contract to prove the chain works.
+  it('observedAt numeric epoch-ms from server is propagated verbatim into snapshot', async () => {
+    const epoch = 1753258800000; // 2026-07-23T09:00:00.000Z
+    const snap = makeSnapshot({ dataStatus: 'stale', observedAt: epoch });
     const results: EquityPollResult[] = [];
     const poller = new EquityPoller(immediateFetch(snap), r => results.push(r), 30_000);
     poller.start();
     await flushMicrotasks();
     poller.stop();
 
-    expect(results[0].snapshot?.observedAt).toBe(ts);
+    expect(results[0].snapshot?.observedAt).toBe(epoch);
+    // Confirm it is numeric (not a string) — this is the real server contract.
+    expect(typeof results[0].snapshot?.observedAt).toBe('number');
   });
 
   // ── Invariant 13 (WO-15C.1 Defect 1) ─────────────────────────────────────
@@ -422,5 +431,23 @@ describe('EquityPoller', () => {
     // No additional fetch should have started.
     expect(callCount).toBe(1);
     expect(results).toHaveLength(0); // aborted result suppressed
+  });
+
+  // ── Invariant 15 (WO-15C.2 Defect 1) ─────────────────────────────────────
+  // 'partial' is a recognized status that the poller must propagate verbatim.
+  // It must NOT be coerced to null or to 'stale'.
+  it('dataStatus "partial" from server is propagated verbatim into snapshot', async () => {
+    const epoch = 1753258800000;
+    const snap = makeSnapshot({ dataStatus: 'partial', observedAt: epoch });
+    const results: EquityPollResult[] = [];
+    const poller = new EquityPoller(immediateFetch(snap), r => results.push(r), 30_000);
+    poller.start();
+    await flushMicrotasks();
+    poller.stop();
+
+    expect(results).toHaveLength(1);
+    expect(results[0].ok).toBe(true);
+    expect(results[0].snapshot?.dataStatus).toBe('partial');
+    expect(results[0].snapshot?.observedAt).toBe(epoch);
   });
 });

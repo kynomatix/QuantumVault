@@ -27,6 +27,15 @@
  * 20. availableBalance null when either component is null (Defect 4)
  * 21. availableBalance uses exact vault value when vault=0 (Defect 4)
  * 22. bot null PnL always sorts last regardless of asc/desc direction (Defect 6)
+ *
+ * WO-15C.2 regression invariants (Defects 1–6):
+ * 23. parseFinancialDataStatus: only 'fresh'|'partial'|'stale' accepted; else null (Defect 1)
+ * 24. isEquityDegraded: only 'fresh' returns false; all others (incl. 'partial') degrade (Defect 1)
+ * 25. isBotStale: 'partial' treated as degraded — returns true (Defect 1)
+ * 26. parseObservedAt: finite numeric epoch returned as-is; ISO string accepted; malformed → null (Defect 2)
+ * 27. isWalletTransition: A→B true; same-wallet false; first-connect false; disconnect false (Defect 3)
+ * 28. computeAvailableBalance: null when either component null; sum otherwise (Defect 4 — account level)
+ * 29. normalizeAgentBalance: null/non-numeric → null; explicit zero → 0 (Defect 4 — modal level)
  */
 
 import { describe, it, expect } from 'vitest';
@@ -38,6 +47,12 @@ import {
   botPublishState,
   isBotStale,
   isBotFinancialUnavailable,
+  parseFinancialDataStatus,
+  isEquityDegraded,
+  parseObservedAt,
+  computeAvailableBalance,
+  isWalletTransition,
+  normalizeAgentBalance,
 } from '@/lib/equity-display';
 
 // ── fmtBalance ────────────────────────────────────────────────────────────────
@@ -281,11 +296,15 @@ describe('botPublishState', () => {
   });
 });
 
-// ── isBotStale (WO-15C.1 Defect 5) ───────────────────────────────────────────
+// ── isBotStale (WO-15C.1 Defect 5, WO-15C.2 Defect 1) ───────────────────────
 
 describe('isBotStale', () => {
-  it('returns true only for "stale"', () => {
+  it('returns true for "stale"', () => {
     expect(isBotStale('stale')).toBe(true);
+  });
+
+  it('returns true for "partial" — partial is degraded, values shown with stale marker', () => {
+    expect(isBotStale('partial')).toBe(true);
   });
 
   it('returns false for "fresh"', () => {
@@ -448,5 +467,225 @@ describe('bot sort: null PnL always last', () => {
     // null-bot must be LAST, not between neg-bot and pos-bot
     expect(sorted[2].name).toBe('null-bot');
     expect(sorted[0].name).toBe('neg-bot');
+  });
+});
+
+// ══ WO-15C.2 helper tests ════════════════════════════════════════════════════
+
+// ── parseFinancialDataStatus (Defect 1) ───────────────────────────────────────
+
+describe('parseFinancialDataStatus — status contract parsing (Defect 1)', () => {
+  it('"fresh" → "fresh"', () => {
+    expect(parseFinancialDataStatus('fresh')).toBe('fresh');
+  });
+
+  it('"partial" → "partial" (WO-15C.2 new status)', () => {
+    expect(parseFinancialDataStatus('partial')).toBe('partial');
+  });
+
+  it('"stale" → "stale"', () => {
+    expect(parseFinancialDataStatus('stale')).toBe('stale');
+  });
+
+  it('null → null (server omitted the field)', () => {
+    expect(parseFinancialDataStatus(null)).toBeNull();
+  });
+
+  it('undefined → null', () => {
+    expect(parseFinancialDataStatus(undefined)).toBeNull();
+  });
+
+  it('unrecognized string → null (not a valid verdict)', () => {
+    expect(parseFinancialDataStatus('live')).toBeNull();
+    expect(parseFinancialDataStatus('unavailable')).toBeNull();
+    expect(parseFinancialDataStatus('db-only')).toBeNull();
+    expect(parseFinancialDataStatus('')).toBeNull();
+  });
+
+  it('number → null (wrong type)', () => {
+    expect(parseFinancialDataStatus(1)).toBeNull();
+  });
+});
+
+// ── isEquityDegraded (Defect 1) — partial-with-all-numbers regression ─────────
+
+describe('isEquityDegraded — only "fresh" clears degraded state (Defect 1)', () => {
+  /**
+   * REGRESSION TEST — would fail against 20fcec57.
+   *
+   * 20fcec57 used: `setEquityStale(s.dataStatus === 'stale')`
+   * A server response with financialDataStatus='partial' and all numeric fields
+   * populated would have returned dataStatus='partial' from the snapshot, and
+   * `'partial' === 'stale'` evaluates to false — so the stale indicator was cleared
+   * even though the server explicitly said the data was not fresh.
+   *
+   * With the fix, isEquityDegraded('partial') === true so the indicator stays visible.
+   */
+  it('partial with all numbers still degraded — regression test against 20fcec57', () => {
+    // This is the stale-indicator decision for a fully-populated but partial snapshot.
+    // 20fcec57: setEquityStale('partial' === 'stale') → false → WRONG (cleared indicator).
+    // WO-15C.2:  isEquityDegraded('partial')         → true  → CORRECT (stays visible).
+    expect(isEquityDegraded('partial')).toBe(true);
+  });
+
+  it('"fresh" → false (only verdict that clears the degraded marker)', () => {
+    expect(isEquityDegraded('fresh')).toBe(false);
+  });
+
+  it('"stale" → true', () => {
+    expect(isEquityDegraded('stale')).toBe(true);
+  });
+
+  it('null (field absent) → true (unknown ≠ fresh)', () => {
+    expect(isEquityDegraded(null)).toBe(true);
+  });
+});
+
+// ── parseObservedAt (Defect 2) ────────────────────────────────────────────────
+
+describe('parseObservedAt — numeric epoch-ms normalization (Defect 2)', () => {
+  it('finite numeric epoch-ms returned as-is (real server wire type)', () => {
+    expect(parseObservedAt(1753258800000)).toBe(1753258800000);
+  });
+
+  it('zero is a valid epoch (Unix epoch start)', () => {
+    expect(parseObservedAt(0)).toBe(0);
+  });
+
+  it('valid ISO string converted to numeric epoch (compatibility path)', () => {
+    const iso = '2026-07-23T09:00:00.000Z';
+    expect(parseObservedAt(iso)).toBe(Date.parse(iso));
+    expect(typeof parseObservedAt(iso)).toBe('number');
+  });
+
+  it('malformed string → null', () => {
+    expect(parseObservedAt('not-a-date')).toBeNull();
+    expect(parseObservedAt('')).toBeNull();
+  });
+
+  it('null → null', () => {
+    expect(parseObservedAt(null)).toBeNull();
+  });
+
+  it('undefined → null', () => {
+    expect(parseObservedAt(undefined)).toBeNull();
+  });
+
+  it('NaN → null (not finite)', () => {
+    expect(parseObservedAt(NaN)).toBeNull();
+  });
+
+  it('Infinity → null (not finite)', () => {
+    expect(parseObservedAt(Infinity)).toBeNull();
+  });
+
+  it('boolean → null (wrong type)', () => {
+    expect(parseObservedAt(true)).toBeNull();
+    expect(parseObservedAt(false)).toBeNull();
+  });
+
+  it('object → null (wrong type)', () => {
+    expect(parseObservedAt({})).toBeNull();
+  });
+});
+
+// ── isWalletTransition (Defect 3) ─────────────────────────────────────────────
+
+describe('isWalletTransition — A→B detection before session gate (Defect 3)', () => {
+  it('A→B: prev known and differs from next → true (equity must be cleared)', () => {
+    expect(isWalletTransition('wallet-A', 'wallet-B')).toBe(true);
+  });
+
+  it('same-wallet reconnect: prev === next → false (retain last-known-good)', () => {
+    expect(isWalletTransition('wallet-A', 'wallet-A')).toBe(false);
+  });
+
+  it('first connect: prev null → false (no prior equity to clear)', () => {
+    expect(isWalletTransition(null, 'wallet-A')).toBe(false);
+  });
+
+  it('disconnect: next null → false (disconnect branch handles clearing)', () => {
+    expect(isWalletTransition('wallet-A', null)).toBe(false);
+  });
+
+  it('disconnect: next undefined → false', () => {
+    expect(isWalletTransition('wallet-A', undefined)).toBe(false);
+  });
+
+  it('both null → false (no transition)', () => {
+    expect(isWalletTransition(null, null)).toBe(false);
+  });
+
+  it('prev null, next empty string → false (empty string is falsy, not a wallet)', () => {
+    expect(isWalletTransition(null, '')).toBe(false);
+  });
+});
+
+// ── computeAvailableBalance (Defect 4 — account level) ───────────────────────
+
+describe('computeAvailableBalance — null-safe sum (Defect 4)', () => {
+  it('both known → sum', () => {
+    expect(computeAvailableBalance(500, 200)).toBe(700);
+  });
+
+  it('both zero → 0 (valid known sum)', () => {
+    expect(computeAvailableBalance(0, 0)).toBe(0);
+  });
+
+  it('agentBalance null → null (unknown component, never fake a sum)', () => {
+    expect(computeAvailableBalance(null, 200)).toBeNull();
+  });
+
+  it('vaultBalance null → null (unknown component)', () => {
+    expect(computeAvailableBalance(500, null)).toBeNull();
+  });
+
+  it('both null → null', () => {
+    expect(computeAvailableBalance(null, null)).toBeNull();
+  });
+
+  it('vault zero + known agent → valid sum (vault=0 is explicit, not unknown)', () => {
+    expect(computeAvailableBalance(500, 0)).toBe(500);
+  });
+
+  it('agent zero + known vault → valid sum', () => {
+    expect(computeAvailableBalance(0, 200)).toBe(200);
+  });
+});
+
+// ── normalizeAgentBalance (Defect 4 — modal level) ────────────────────────────
+
+describe('normalizeAgentBalance — null-truthful modal balance (Defect 4)', () => {
+  it('explicit numeric zero is valid — returns 0 not null', () => {
+    expect(normalizeAgentBalance(0)).toBe(0);
+    expect(normalizeAgentBalance(0)).not.toBeNull();
+  });
+
+  it('positive finite number returned as-is', () => {
+    expect(normalizeAgentBalance(500)).toBe(500);
+    expect(normalizeAgentBalance(0.01)).toBe(0.01);
+  });
+
+  it('null → null: regression against ?? 0 coercion in 20fcec57', () => {
+    // 20fcec57: setAvailableBalance(equityData.agentBalance ?? 0) → 0
+    // WO-15C.2: normalizeAgentBalance(null) → null (truthful: balance unknown)
+    expect(normalizeAgentBalance(null)).toBeNull();
+    expect(normalizeAgentBalance(null)).not.toBe(0);
+  });
+
+  it('undefined → null', () => {
+    expect(normalizeAgentBalance(undefined)).toBeNull();
+  });
+
+  it('string "100" → null (non-numeric server field)', () => {
+    expect(normalizeAgentBalance('100')).toBeNull();
+  });
+
+  it('NaN → null (not finite)', () => {
+    expect(normalizeAgentBalance(NaN)).toBeNull();
+  });
+
+  it('Infinity → null (not finite)', () => {
+    expect(normalizeAgentBalance(Infinity)).toBeNull();
   });
 });

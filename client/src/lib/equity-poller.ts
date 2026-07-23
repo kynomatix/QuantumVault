@@ -9,13 +9,21 @@
  *  - A late result from an aborted request is NEVER delivered to onResult.
  *  - After stop() all further _run() calls are no-ops (stopped flag).
  *    This prevents a stopped old-wallet coordinator from being restarted
- *    through a stale pollerRef.current reference (Defect 3).
+ *    through a stale pollerRef.current reference (WO-15C Defect 3).
  *
  * Injectable fetchFn and POLL_MS make the class fully testable with fake timers.
  */
 
-/** Status as reported by the server — authoritative freshness verdict. */
-export type EquityDataStatus = 'fresh' | 'stale';
+/**
+ * Server freshness verdict for the total-equity snapshot.
+ * - 'fresh'   — all data current; client may clear the degraded indicator.
+ * - 'partial' — some fields populated but not all sources responded; degraded.
+ * - 'stale'   — data is from a prior snapshot; degraded.
+ *
+ * Only 'fresh' may clear the stale/degraded marker.  Every other verdict,
+ * including null (field absent) and any unrecognized string, stays degraded.
+ */
+export type EquityDataStatus = 'fresh' | 'partial' | 'stale';
 
 export interface EquitySnapshot {
   totalEquity: number | null;
@@ -25,17 +33,20 @@ export interface EquitySnapshot {
   mainAccountFreeCollateral: number | null;
   solBalance: number | null;
   /**
-   * Server-reported freshness verdict ('fresh' | 'stale').
-   * null when the server did not include the field (treat as unknown).
-   * Stale MUST be propagated to the display even when all numeric fields
-   * are non-null — do not infer freshness from the absence of null numbers.
+   * Server-reported freshness verdict.  Parsed from `financialDataStatus` in the
+   * response body by `parseFinancialDataStatus`.  null when absent or unrecognized.
+   *
+   * Only 'fresh' clears the client stale indicator.  'partial', 'stale', null, and
+   * any unrecognized value must all keep the degraded state visible.
    */
   dataStatus: EquityDataStatus | null;
   /**
-   * Server-reported ISO 8601 timestamp of when the snapshot was observed.
-   * Used for stale-indicator tooltips.  null when absent.
+   * Server-reported observation time as a numeric epoch-ms value.
+   * Parsed from `financialDataObservedAt` (authoritative wire type: number).
+   * ISO strings are accepted for compatibility.  Malformed or absent → null.
+   * Use `new Date(observedAt)` to render a human-readable time.
    */
-  observedAt: string | null;
+  observedAt: number | null;
 }
 
 export interface EquityPollResult {

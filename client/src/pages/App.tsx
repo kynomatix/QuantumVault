@@ -2,7 +2,19 @@ import { safeResponseJson } from "@/lib/safe-fetch";
 import { coreReadJson, CoreReadError, useServerDegraded, useSessionExpired, reportCoreAuthSuccess } from "@/lib/server-health";
 import { deriveDashboardSectionState, staleDataLabel, type DashboardSectionState } from "@/lib/dashboard-state";
 import { EquityPoller, type EquityPollResult, type EquitySnapshot } from "@/lib/equity-poller";
-import { fmtBalance, fmtBotPnl, fmtBotPnlPercent, fmtBotTradeCount, botPublishState, isBotStale } from "@/lib/equity-display";
+import {
+  fmtBalance,
+  fmtBotPnl,
+  fmtBotPnlPercent,
+  fmtBotTradeCount,
+  botPublishState,
+  isBotStale,
+  parseFinancialDataStatus,
+  parseObservedAt,
+  isEquityDegraded,
+  computeAvailableBalance,
+  isWalletTransition,
+} from "@/lib/equity-display";
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from 'framer-motion';
@@ -531,11 +543,12 @@ export default function AppPage() {
   const [solBalance, setSolBalance] = useState<number | null>(null);
   const [equityLoading, setEquityLoading] = useState(false);
   // True when the displayed equity values are from a prior successful read because
-  // the server reported the snapshot as stale, or the latest read failed.
+  // the server reported the snapshot as stale or partial, or the latest read failed.
   const [equityStale, setEquityStale] = useState(false);
-  // ISO 8601 timestamp from the server's last successful snapshot — used for the
-  // stale-indicator tooltip so the user can see how fresh the data is.
-  const [equityObservedAt, setEquityObservedAt] = useState<string | null>(null);
+  // Numeric epoch-ms timestamp from the server's last successful snapshot —
+  // used for the stale-indicator tooltip so the user can see how fresh the data is.
+  // Wire type is numeric (financialDataObservedAt is epoch-ms), not ISO string.
+  const [equityObservedAt, setEquityObservedAt] = useState<number | null>(null);
   const equityInitialLoadDone = useRef(false);
   // Tracks the wallet address for which equity state was last cleared/loaded.
   // Used to detect direct A→B wallet switches and clear A's values before B renders.
@@ -598,10 +611,7 @@ export default function AppPage() {
   // "Available" = idle wallet USDC + Vault savings (both spendable on demand).
   // null when EITHER component is unknown — adding an unknown Vault as zero would
   // fabricate a false "Available" number.  Explicit Vault zero is valid and renders.
-  const availableBalance =
-    agentBalance === null || vaultBalance === null
-      ? null
-      : agentBalance + vaultBalance;
+  const availableBalance = computeAvailableBalance(agentBalance, vaultBalance);
 
   // Fetch total equity, agent balance, and exchange balance together
   useEffect(() => {
@@ -622,22 +632,18 @@ export default function AppPage() {
       return;
     }
 
-    // Gate every core wallet read on the CONFIRMED session, not just the
-    // on-chain wallet connection (2026-07-20 incident): with connected=true
-    // but sessionConnected=false these reads raced a half-established session,
-    // 401'd, and latched a misleading "session expired" verdict. Keep
-    // last-known-good values (no reset) — the wallet is still connected, the
-    // session is just not confirmed yet; the effect re-runs when it is.
-    if (!sessionConnected) {
-      return;
-    }
-
-    // ── Wallet isolation (Defect 2) ───────────────────────────────────────────
-    // Direct A→B wallet switch with sessionConnected=true: clear A's equity values
-    // BEFORE B's first read so wallet B never inherits A's balances even when B's
-    // initial request fails.  The equityWalletRef tracks the last wallet for which
-    // we loaded equity state; a mismatch means the wallet just changed.
-    if (publicKeyString && equityWalletRef.current !== null && equityWalletRef.current !== publicKeyString) {
+    // ── Wallet isolation (WO-15C.2 Defect 3) ─────────────────────────────────
+    // MUST be checked BEFORE the sessionConnected gate: a direct A→B wallet switch
+    // typically enters sessionConnected=false first (session not yet confirmed for B),
+    // so waiting until after the gate means A's equity values remain visible under B's
+    // address until B's session is established.  Checking here clears them immediately.
+    //
+    // isWalletTransition(prev, next):
+    //   - A→B (prev known, differs from next) → true  → clear A's state NOW
+    //   - Same-wallet reconnect (prev === next) → false → retain last-known-good
+    //   - First connect (prev null)            → false → nothing to clear yet
+    //   - Disconnect (next null)               → never reached (handled above)
+    if (isWalletTransition(equityWalletRef.current, publicKeyString)) {
       setTotalEquity(null);
       setAgentBalance(null);
       setVaultBalance(null);
@@ -650,6 +656,16 @@ export default function AppPage() {
       equityInitialLoadDone.current = false;
     }
     if (publicKeyString) equityWalletRef.current = publicKeyString;
+
+    // Gate every core wallet read on the CONFIRMED session, not just the
+    // on-chain wallet connection (2026-07-20 incident): with connected=true
+    // but sessionConnected=false these reads raced a half-established session,
+    // 401'd, and latched a misleading "session expired" verdict. Keep
+    // last-known-good values for this wallet (no reset) — the wallet is still
+    // connected, the session is just not confirmed yet; the effect re-runs when it is.
+    if (!sessionConnected) {
+      return;
+    }
 
     // ctrl is used only for fetchOrphanSlots; equity polling has its own
     // per-request AbortControllers managed inside EquityPoller.
@@ -668,9 +684,9 @@ export default function AppPage() {
         if (s.exchangeBalance !== null) setExchangeBalance(s.exchangeBalance);
         if (s.mainAccountFreeCollateral !== null) setMainAccountFreeCollateral(s.mainAccountFreeCollateral);
         if (s.solBalance !== null) setSolBalance(s.solBalance);
-        // Defect 1: use the SERVER's freshness verdict, not inference from null fields.
-        // A fully-populated snapshot that the server flagged as stale MUST remain stale.
-        setEquityStale(s.dataStatus === 'stale');
+        // Only 'fresh' clears the degraded indicator — 'partial', 'stale', null, and
+        // unrecognized values all stay degraded.  Use the server's verdict verbatim.
+        setEquityStale(isEquityDegraded(s.dataStatus));
         if (s.observedAt !== null) setEquityObservedAt(s.observedAt);
         equityInitialLoadDone.current = true;
       } else {
@@ -697,10 +713,6 @@ export default function AppPage() {
         const v = d[k];
         return typeof v === 'number' ? v : null;
       };
-      const str = (k: string): string | null => {
-        const v = d[k];
-        return typeof v === 'string' ? v : null;
-      };
       return {
         totalEquity: num('totalEquity'),
         agentBalance: num('agentBalance'),
@@ -708,10 +720,11 @@ export default function AppPage() {
         exchangeBalance: num('exchangeBalance'),
         mainAccountFreeCollateral: num('mainAccountFreeCollateral'),
         solBalance: num('solBalance'),
-        // Defect 1: capture server freshness verdict and observation timestamp.
-        // 'stale' must be propagated even when all numeric fields are non-null.
-        dataStatus: (str('financialDataStatus') as 'fresh' | 'stale') ?? null,
-        observedAt: str('financialDataObservedAt'),
+        // Use pure helpers so App and tests share the same normalization path.
+        // dataStatus: only 'fresh'|'partial'|'stale' recognized; anything else → null.
+        // observedAt: server emits numeric epoch-ms (authoritative); ISO string accepted.
+        dataStatus: parseFinancialDataStatus(d['financialDataStatus']),
+        observedAt: parseObservedAt(d['financialDataObservedAt']),
       };
     };
 
