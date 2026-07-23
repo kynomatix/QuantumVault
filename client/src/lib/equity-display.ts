@@ -115,6 +115,58 @@ export function normalizeAgentBalance(raw: unknown): number | null {
   return null;
 }
 
+/**
+ * USDC shortfall between entered capital and the known available balance.
+ * - Unknown (null) balance → 0 (no deficit is surfaced; deposit CTA stays
+ *   hidden and the subscribe action is separately disabled on null balance —
+ *   an unknown balance must never fabricate a "deposit $X" prompt).
+ * - Known balance → max(0, entered - available).
+ */
+export function computeUsdcDeficit(
+  enteredCapital: number,
+  availableBalance: number | null,
+): number {
+  return enteredCapital > 0 && availableBalance !== null
+    ? Math.max(0, enteredCapital - availableBalance)
+    : 0;
+}
+
+/**
+ * Confirmed-deposit optimistic transition (WO-15C.3 Defect 2).
+ * Called immediately after the deposit transaction is CONFIRMED on-chain to
+ * eliminate the stale shortfall before the deposit action can re-enable.
+ * - Known previous balance → prev + confirmedAmount (both values are grounded:
+ *   prev was server-reported, confirmedAmount is the exact on-chain transfer).
+ * - Unknown previous balance → stays null (never fabricate; the caller keeps
+ *   the deposit action suppressed until a bounded refresh establishes truth).
+ */
+export function applyConfirmedDeposit(
+  prev: number | null,
+  confirmedAmount: number,
+): number | null {
+  return prev === null ? null : prev + confirmedAmount;
+}
+
+/**
+ * Post-deposit refresh reconciliation (WO-15C.3 Defect 2, stale-read guard).
+ * The refresh runs seconds after an on-chain-confirmed deposit, so a server
+ * read may still be serving a snapshot that predates the deposit.
+ * - refreshed null → keep prev (a failed/absent read never erases the
+ *   confirmed optimistic value, and null stays null).
+ * - prev null → adopt refreshed (the bounded refresh establishes the balance).
+ * - both known → max(prev, refreshed): a stale lower read must never
+ *   resurrect the already-eliminated shortfall and re-open a duplicate-deposit
+ *   window; a higher server read (e.g. concurrent income) is adopted.
+ */
+export function reconcileRefreshedBalance(
+  prev: number | null,
+  refreshed: number | null,
+): number | null {
+  if (refreshed === null) return prev;
+  if (prev === null) return refreshed;
+  return Math.max(prev, refreshed);
+}
+
 // ── Balance formatting ────────────────────────────────────────────────────────
 
 /**

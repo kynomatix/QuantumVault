@@ -1,5 +1,11 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
-import { normalizeAgentBalance } from "@/lib/equity-display";
+import {
+  normalizeAgentBalance,
+  computeUsdcDeficit,
+  applyConfirmedDeposit,
+  reconcileRefreshedBalance,
+  fmtBalance,
+} from "@/lib/equity-display";
 import { walletAuthHeaders } from "@/lib/queryClient";
 import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
@@ -113,7 +119,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
         // Intentional carve-out from the dashboard equity coordinator: this is a single
         // read triggered by modal open, not a polling system (Defect 7).
         fetch('/api/total-equity', { credentials: 'include', headers: walletAuthHeaders(), signal: AbortSignal.timeout(8_000) }).then(res => res.ok ? safeResponseJson(res) : Promise.reject()),
-        fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders() }).then(res => res.ok ? safeResponseJson(res) : Promise.reject())
+        fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders(), signal: AbortSignal.timeout(8_000) }).then(res => res.ok ? safeResponseJson(res) : Promise.reject())
       ])
         .then(([equityData, balanceData]) => {
           setAvailableBalance(normalizeAgentBalance(equityData.agentBalance));
@@ -155,9 +161,9 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
   // USDC capital top-up: when user enters more capital than their agent wallet has,
   // surface the shortfall so they can deposit it in one click instead of failing on
   // submit. Mirrors the SOL gas top-up flow above.
-  const usdcDeficit = enteredCapital > 0 && availableBalance !== null
-    ? Math.max(0, enteredCapital - availableBalance)
-    : 0;
+  // Unknown (null) balance yields 0 — no deposit CTA is fabricated; the subscribe
+  // action is separately disabled while the balance is unknown.
+  const usdcDeficit = computeUsdcDeficit(enteredCapital, availableBalance);
   // Require deficit >= 1 cent so floating-point dust (e.g. balance 12.3449 vs entered
   // 12.34) doesn't surface a useless "deposit $0.00" warning.
   const needsUsdcDeposit = usdcDeficit >= 0.01 && enteredCapital >= 10;
@@ -254,7 +260,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
 
       toast({ title: 'SOL deposited successfully!' });
       
-      const balanceRes = await fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders() });
+      const balanceRes = await fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders(), signal: AbortSignal.timeout(8_000) });
       if (balanceRes.ok) {
         const data = await safeResponseJson(balanceRes);
         if (data.botCreationSolRequirement) {
@@ -319,6 +325,12 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
       // Deposit confirmed and success toast shown — mark as succeeded so the
       // best-effort refresh below runs and any refresh failure stays isolated.
       depositSucceeded = true;
+      // Confirmed-state transition (WO-15C.3 Defect 2): eliminate the stale
+      // shortfall IMMEDIATELY, before the deposit action can re-enable.
+      // Known previous balance → prev + exact confirmed amount (deficit → 0).
+      // Unknown previous balance → stays null (deposit CTA stays hidden and the
+      // busy flag below keeps the action suppressed until the bounded refresh).
+      setAvailableBalance(prev => applyConfirmedDeposit(prev, amount));
     } catch (error: any) {
       // Only deposit-phase failures (pre-toast) reach this handler.
       console.error('USDC deposit failed:', error);
@@ -328,22 +340,34 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
         variant: 'destructive',
       });
     } finally {
-      setIsDepositingUsdc(false);
+      // Duplicate-submission guard (WO-15C.3 Defect 2): on success, keep the
+      // deposit action suppressed (isDepositingUsdc stays true) until the bounded
+      // refresh below settles and local state safely reflects the confirmed
+      // outcome. Only the failure path releases the button here.
+      if (!depositSucceeded) {
+        setIsDepositingUsdc(false);
+      }
     }
 
     if (depositSucceeded) {
       // Best-effort post-deposit affordability refresh — isolated from the deposit outcome.
       // The deposit is already confirmed above; a timeout or network failure here must
       // NEVER fall into the deposit-failure handler, NEVER show "USDC Deposit Failed",
-      // and NEVER encourage a duplicate deposit.  Bounded to 8 s to match core-read budget.
+      // and NEVER encourage a duplicate deposit.  BOTH reads are bounded to 8 s so the
+      // refresh (and the busy flag) can never stay pending forever.
       try {
         const [equityRes, balanceRes] = await Promise.all([
           fetch('/api/total-equity', { credentials: 'include', headers: walletAuthHeaders(), signal: AbortSignal.timeout(8_000) }),
-          fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders() }),
+          fetch('/api/agent/balance', { credentials: 'include', headers: walletAuthHeaders(), signal: AbortSignal.timeout(8_000) }),
         ]);
         if (equityRes.ok) {
           const data = await safeResponseJson(equityRes);
-          setAvailableBalance(normalizeAgentBalance(data.agentBalance));
+          const refreshed = normalizeAgentBalance(data.agentBalance);
+          // Stale-read guard: a refresh snapshot that predates the just-confirmed
+          // deposit must never lower the balance back below the confirmed value
+          // and resurrect the shortfall (reconcileRefreshedBalance takes the max;
+          // a null read keeps the confirmed value; null stays null otherwise).
+          setAvailableBalance(prev => reconcileRefreshedBalance(prev, refreshed));
         }
         if (balanceRes.ok) {
           const data = await safeResponseJson(balanceRes);
@@ -353,6 +377,9 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
         }
       } catch {
         // Best-effort: deposit already confirmed; refresh failure is informational only.
+      } finally {
+        // Refresh settled (success, failure, or 8 s timeout) — release the action.
+        setIsDepositingUsdc(false);
       }
     }
   };
@@ -532,7 +559,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
                 </p>
                 <p className="text-xs text-muted-foreground">
                   This subscription needs ${enteredCapital.toFixed(2)} USDC.
-                  Your agent wallet has ${(availableBalance ?? 0).toFixed(2)} USDC.
+                  Your agent wallet has {fmtBalance(availableBalance)} USDC.
                 </p>
                 <p className="text-xs text-yellow-400/80" data-testid="text-usdc-deficit">
                   Please deposit at least <span className="font-semibold">${usdcDeficit.toFixed(2)} USDC</span> to your agent wallet.
@@ -644,7 +671,9 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
             <p className="text-xs text-muted-foreground flex items-center gap-1">
               <Wallet className="w-3 h-3" />
               {balanceLoading ? 'Loading balance...' : (
-                <>Available in agent wallet: <span className="font-medium">${availableBalance?.toFixed(2) ?? '0.00'}</span></>
+                // WO-15C.3 Defect 1: unknown balance renders "Unavailable", never
+                // "$0.00". Explicit zero still renders "$0.00" (fmtBalance).
+                <>Available in agent wallet: <span className="font-medium" data-testid="text-available-balance">{fmtBalance(availableBalance)}</span></>
               )}
             </p>
           </div>
