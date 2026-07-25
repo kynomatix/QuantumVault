@@ -1636,18 +1636,20 @@ describe("AIT-CADENCE-SELF-HEAL-01: idle-bot cadence audit", () => {
     let releaseCycle!: (v: unknown) => void;
     getBotMock.mockImplementation(() => new Promise((res) => { releaseCycle = res; }));
     await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
-    expect(vi.getTimerCount()).toBe(0); // consumed; cycle in-flight
+    // The auto-next timer was consumed; the AIT-CYCLE-OBSERVABILITY-01 watchdog
+    // is now live (unref'd, but still counted by vi.getTimerCount).
+    expect(vi.getTimerCount()).toBe(1); // watchdog only; cycle in-flight
 
-    // Audit repairs with a future timer only — it never calls runAutoCycle.
+    // Audit repairs with a future boundary timer — it never calls runAutoCycle.
     await runMonitorTickOnce();
-    expect(vi.getTimerCount()).toBe(1);
+    expect(vi.getTimerCount()).toBe(2); // watchdog + audit-armed auto-next timer
     expect(getBotMock).toHaveBeenCalledTimes(1); // still only the in-flight cycle's read
 
     // Release the hung cycle as non-idle → it exits at the fresh-row gate
-    // without touching the audit's timer.
+    // without touching the audit's timer; settle() clears the watchdog.
     releaseCycle({ ...bot, status: "analyzing" });
     await vi.advanceTimersByTimeAsync(0);
-    expect(vi.getTimerCount()).toBe(1); // exactly one future timer survives
+    expect(vi.getTimerCount()).toBe(1); // exactly one future timer survives (audit-armed)
   });
 
   it("shutdown: stopAiTraderMonitor clears audit-armed timers", async () => {
@@ -1659,6 +1661,253 @@ describe("AIT-CADENCE-SELF-HEAL-01: idle-bot cadence audit", () => {
 
     stopAiTraderMonitor();
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+// --- AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability -----------------------
+
+describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
+  /** Full auth + flat-decision setup so runAutoCycle reaches the LLM phase and returns flat. */
+  function armFlatCycle(botId = "bot-obs-1234") {
+    const bot = makeBot({ id: botId, status: "idle", mode: "auto", autoNext: true, graduationState: "graduated" });
+    getBotMock.mockResolvedValue(bot);
+    getAdapterMock.mockReturnValue(makeAdapter());
+    getWalletMock.mockResolvedValue({ address: "WALLET_X", agentPublicKey: AGENT_PUBKEY, agentPrivateKeyEncryptedV3: "v3" });
+    getSessionByWalletMock.mockReturnValue({ session: { umk: Buffer.from("umk") } });
+    getLlmCiphertextMock.mockResolvedValue("ct");
+    decryptLlmKeyMock.mockReturnValue(Buffer.from("sk"));
+    buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "d-obs", decision: {}, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
+    return bot;
+  }
+
+  /** Only the observability lines emitted by the new wrapper. */
+  const obsTelLines = () =>
+    appendTelemetryMock.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith("[AIT-OBS]"));
+  const startLines = () => obsTelLines().filter((l) => l.includes("cycle_start"));
+  const slowLines  = () => obsTelLines().filter((l) => l.includes("cycle_slow"));
+  const endLines   = () => obsTelLines().filter((l) => l.includes("cycle_end"));
+
+  it("flat cycle: emits exactly one start and one terminal; content has cycleId/tf/exit/phase and no secret fields", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    armFlatCycle("bot-obs-1234");
+
+    scheduleAutoNext("bot-obs-1234", "15m");
+    expect(obsTelLines()).toHaveLength(0); // nothing before the timer fires
+
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    expect(startLines()).toHaveLength(1);
+    expect(endLines()).toHaveLength(1);
+    expect(slowLines()).toHaveLength(0);
+
+    const start = startLines()[0];
+    expect(start).toContain("cid=bot-obs-"); // 8-char prefix, not the full id
+    expect(start).toContain("tf=15m");
+    expect(start).toContain("ts=");
+    expect(start).not.toContain("WALLET_X");
+    expect(start).not.toContain("bot-obs-1234"); // full id must never appear
+
+    const end = endLines()[0];
+    expect(end).toContain("exit=flat");
+    expect(end).toContain("phase=llm");
+    expect(end).toContain("elapsed_ms=");
+    expect(end).not.toContain("WALLET_X");
+    expect(end).not.toContain("bot-obs-1234");
+  });
+
+  it("fast settlement: advancing past 60 s produces no slow line (watchdog cleared on settle)", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    armFlatCycle();
+
+    scheduleAutoNext("bot-obs-1234", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000); // cycle settles
+
+    expect(endLines()).toHaveLength(1);
+    appendTelemetryMock.mockClear(); // reset so we only see post-settle calls
+
+    await vi.advanceTimersByTimeAsync(60_000); // would fire watchdog if not cleared
+
+    expect(slowLines()).toHaveLength(0);
+    expect(endLines()).toHaveLength(0); // no second terminal
+  });
+
+  it("never-settling cycle: emits exactly one slow line at 60 s; no terminal until released", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    let releaseCycle!: (v: unknown) => void;
+    getBotMock.mockImplementation(() => new Promise((res) => { releaseCycle = res; }));
+
+    scheduleAutoNext("bot-obs-slow", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000); // timer fires; cycle hangs at bot read
+
+    expect(startLines()).toHaveLength(1);
+    expect(endLines()).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(60_000); // watchdog fires
+
+    expect(slowLines()).toHaveLength(1);
+    expect(slowLines()[0]).toContain("cycle_slow");
+    expect(slowLines()[0]).toContain("phase=initial");
+    expect(slowLines()[0]).toContain("elapsed_ms=");
+    expect(endLines()).toHaveLength(0); // still in flight
+
+    // Advancing more must NOT produce a second slow line
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(slowLines()).toHaveLength(1);
+    expect(endLines()).toHaveLength(0);
+
+    // Release: bot resolves to non-idle → status gate returns immediately
+    releaseCycle(makeBot({ id: "bot-obs-slow", status: "open" }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(endLines()).toHaveLength(1);
+    expect(slowLines()).toHaveLength(1); // still exactly one slow line
+  });
+
+  it("releasing a hung cycle: clears watchdog; emits exactly one terminal; total obs = 3 lines", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    let releaseCycle!: (v: unknown) => void;
+    getBotMock.mockImplementation(() => new Promise((res) => { releaseCycle = res; }));
+
+    scheduleAutoNext("bot-obs-rel", "15m");
+    // Advance past both the timer fire and the 60 s watchdog in one step
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000 + 60_000);
+    expect(slowLines()).toHaveLength(1);
+    expect(endLines()).toHaveLength(0);
+
+    releaseCycle(null); // null → !bot → returns immediately (status_gate)
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(endLines()).toHaveLength(1);
+    expect(endLines()[0]).toContain("exit=status_gate");
+    // Total: 1 start + 1 slow + 1 terminal — exactly 3
+    expect(obsTelLines()).toHaveLength(3);
+  });
+
+  it("thrown cycle: terminal has exit=thrown; no raw error text in telemetry; console.error called; pendingReconciliation wired", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    const rawMsg = "simulated-db-crash: very secret details at line 999";
+    getBotMock.mockRejectedValue(new Error(rawMsg));
+
+    scheduleAutoNext("bot-obs-throw", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    expect(startLines()).toHaveLength(1);
+    expect(endLines()).toHaveLength(1);
+    expect(endLines()[0]).toContain("exit=thrown");
+    // Raw error text must never appear in the telemetry line
+    expect(endLines()[0]).not.toContain("simulated-db-crash");
+    expect(endLines()[0]).not.toContain("secret details");
+    // Existing catch behaviour preserved: console.error called
+    expect(console.error).toHaveBeenCalled();
+    // Exactly one terminal — no second line from a duplicate settle()
+    expect(endLines()).toHaveLength(1);
+  });
+
+  it("status-gate path: terminal exit=status_gate, phase=initial", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    // Bot not idle+auto+autoNext → status gate inside runAutoCycle
+    getBotMock.mockResolvedValue(makeBot({ status: "open", mode: "auto", autoNext: true }));
+
+    scheduleAutoNext("bot-obs-gate", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    expect(endLines()).toHaveLength(1);
+    expect(endLines()[0]).toContain("exit=status_gate");
+    expect(endLines()[0]).toContain("phase=initial");
+  });
+
+  it("adapter-missing path: terminal exit=adapter_missing, phase=initial", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    getBotMock.mockResolvedValue(makeBot({ id: "bot-obs-noadp", status: "idle", mode: "auto", autoNext: true }));
+    getAdapterMock.mockImplementation(() => { throw new Error("no adapter registered for 'pacifica'"); });
+
+    scheduleAutoNext("bot-obs-noadp", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    expect(endLines()).toHaveLength(1);
+    expect(endLines()[0]).toContain("exit=adapter_missing");
+    expect(endLines()[0]).toContain("phase=initial");
+    // Raw adapter error text must not appear
+    expect(endLines()[0]).not.toContain("no adapter");
+  });
+
+  it("stale-context path: terminal exit=stale_data, phase=context; no raw reason leaked", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    const bot = makeBot({ id: "bot-obs-stale", status: "idle", mode: "auto", autoNext: true, graduationState: "graduated" });
+    getBotMock.mockResolvedValue(bot);
+    getAdapterMock.mockReturnValue(makeAdapter());
+    getWalletMock.mockResolvedValue({ address: "WALLET_X", agentPublicKey: AGENT_PUBKEY });
+    getSessionByWalletMock.mockReturnValue({ session: { umk: Buffer.from("umk") } });
+    getLlmCiphertextMock.mockResolvedValue("ct");
+    decryptLlmKeyMock.mockReturnValue(Buffer.from("sk"));
+    buildContextMock.mockResolvedValue({ stale: true, reason: "price-too-old-RAWLEAK" });
+
+    scheduleAutoNext("bot-obs-stale", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    expect(endLines()).toHaveLength(1);
+    expect(endLines()[0]).toContain("exit=stale_data");
+    expect(endLines()[0]).toContain("phase=context");
+    expect(endLines()[0]).not.toContain("RAWLEAK");
+  });
+
+  it("successful entry path: terminal exit=entry_open, phase=execution", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    const bot = makeBot({ id: "bot-obs-entry", status: "idle", mode: "auto", autoNext: true, graduationState: "graduated" });
+    getBotMock.mockResolvedValue(bot);
+    getAdapterMock.mockReturnValue(makeAdapter());
+    getWalletMock.mockResolvedValue({ address: "WALLET_X", agentPublicKey: AGENT_PUBKEY });
+    getSessionByWalletMock.mockReturnValue({ session: { umk: Buffer.from("umk") } });
+    getLlmCiphertextMock.mockResolvedValue("ct");
+    decryptLlmKeyMock.mockReturnValue(Buffer.from("sk"));
+    buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
+    const clamped = { action: "long", sizeBase: 2, marginUsdc: 100, stopLossPrice: 145, takeProfitPrice: 160 };
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "dec-obs", decision: {}, clamped, rejected: false, violations: [], latencyMs: 5 });
+    executeDecisionMock.mockResolvedValue({ ok: true, mode: "paper", entryPrice: 150 });
+
+    scheduleAutoNext("bot-obs-entry", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    expect(endLines()).toHaveLength(1);
+    expect(endLines()[0]).toContain("exit=entry_open");
+    expect(endLines()[0]).toContain("phase=execution");
+  });
+
+  it("instrumentation adds zero lines before timer fires and no extra storage/network calls beyond runAutoCycle itself", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    armFlatCycle();
+
+    scheduleAutoNext("bot-obs-1234", "15m");
+
+    // Nothing emitted before the boundary
+    expect(obsTelLines()).toHaveLength(0);
+    expect(appendTelemetryMock).not.toHaveBeenCalled();
+    expect(getBotMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    // Exactly start + terminal; no extra storage calls from the wrapper
+    expect(obsTelLines()).toHaveLength(2);
+    // Wrapper itself added only 2 telemetry calls; runAutoCycle's own behaviour
+    // (storage reads, mock calls) is unaffected
+    expect(getBotMock).toHaveBeenCalledTimes(1);
+    expect(buildContextMock).toHaveBeenCalledTimes(1);
+    expect(runDecisionMock).toHaveBeenCalledTimes(1);
+    expect(executeDecisionMock).not.toHaveBeenCalled(); // flat → no execute
+  });
+
+  it("existing AIT-CADENCE-SELF-HEAL-01 tests unaffected: audit fires only its own telemetry, not OBS lines", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    const bot = makeBot({ id: "bot-idle-auto", status: "idle", mode: "auto", autoNext: true });
+    getActiveBotsMock.mockResolvedValue([bot]);
+
+    await runMonitorTickOnce();
+
+    // The audit may emit its own appendTelemetry line, but no [AIT-OBS] lines
+    // are produced by the audit alone (those only come from scheduled timer fires).
+    expect(obsTelLines()).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(1); // audit-armed timer present
   });
 });
 

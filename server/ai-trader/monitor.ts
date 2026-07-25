@@ -137,6 +137,13 @@ const pendingReconciliation = new Set<string>();
 const bracketReplaceAttempted = new Set<string>();
 /** Per-bot auto-next timers (cleared on re-schedule / pause / stop). */
 const autoNextTimers = new Map<string, NodeJS.Timeout>();
+
+// AIT-CYCLE-OBSERVABILITY-01: per-bot in-flight cycle observability state.
+// Only one scheduled cycle per bot at a time (the timer entry is deleted before
+// runAutoCycle is invoked, ensuring no overlap). Key = botId.
+type CyclePhase = "initial" | "preflight" | "context" | "llm" | "execution" | "reschedule";
+interface CycleObs { id: string; phase: CyclePhase; exitReason: string; }
+const _cycleObs = new Map<string, CycleObs>();
 /**
  * Per-bot re-entrancy guard so a slow bot can't be processed by two ticks at
  * once. Maps botId → claim timestamp: an entry older than BOT_IN_FLIGHT_WEDGE_MS
@@ -1387,7 +1394,39 @@ export function scheduleAutoNext(botId: string, timeframe: string): void {
   const delay = (Math.floor(now / tfMs) + 1) * tfMs - now + 2_000;
   const timer = setTimeout(() => {
     autoNextTimers.delete(botId);
-    runAutoCycle(botId).catch((err) => {
+    // AIT-CYCLE-OBSERVABILITY-01: scheduled-cycle observability wrapper.
+    // Owned exclusively by this timer callback; direct runAutoCycle calls
+    // remain unobserved by design (see WO requirement 9).
+    const cycleStart = Date.now();
+    const cycleId = `${botId.slice(0, 8)}-${cycleStart}`;
+    const obs: CycleObs = { id: cycleId, phase: "initial", exitReason: "status_gate" };
+    _cycleObs.set(botId, obs);
+    appendTelemetry(`[AIT-OBS] cycle_start cid=${cycleId} tf=${timeframe} ts=${cycleStart}`);
+    // Unref'd slow-cycle watchdog: fires once at 60 s if the cycle is still
+    // unsettled; it never cancels, retries or mutates anything.
+    let settled = false;
+    const watchdog = setTimeout(() => {
+      if (!settled) {
+        appendTelemetry(
+          `[AIT-OBS] cycle_slow cid=${cycleId} elapsed_ms=${Date.now() - cycleStart} phase=${obs.phase}`
+        );
+      }
+    }, 60_000);
+    if (typeof watchdog.unref === "function") watchdog.unref();
+    const settle = (exitOverride?: string): void => {
+      if (settled) return; // guard: exactly one terminal line per cycle
+      settled = true;
+      clearTimeout(watchdog);
+      if (_cycleObs.get(botId) === obs) _cycleObs.delete(botId);
+      appendTelemetry(
+        `[AIT-OBS] cycle_end cid=${cycleId} elapsed_ms=${Date.now() - cycleStart} phase=${obs.phase} exit=${exitOverride ?? obs.exitReason}`
+      );
+    };
+    runAutoCycle(botId).then(() => {
+      settle();
+    }).catch((err) => {
+      settle("thrown");
+      // Preserve existing catch behaviour byte-for-byte in effect.
       console.error(`[AiTraderMonitor] auto cycle crashed for bot ${botId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
       // A crash mid-cycle (e.g. a venue outage throwing 504s from context build /
       // execute) strands the bot in 'analyzing' with NO future timer — frozen until
@@ -1410,18 +1449,23 @@ export function scheduleAutoNext(botId: string, timeframe: string): void {
  * session UMK (unrestorable ⇒ pause 'reauth_required' + Telegram nudge).
  */
 export async function runAutoCycle(botId: string): Promise<void> {
+  // AIT-CYCLE-OBSERVABILITY-01: if invoked by the scheduled-timer wrapper the
+  // obs entry is present; direct/manual callers leave it undefined (no-ops below).
+  const _obs = _cycleObs.get(botId);
   let bot = await storage.getAiTraderBot(botId);
-  if (!bot) return;
+  if (!bot) return; // exitReason stays "status_gate" (default)
   if (bot.status !== "idle" || bot.mode !== "auto" || !bot.autoNext) return;
 
   let adapter: ProtocolAdapter;
   try {
     adapter = getAdapter(bot.protocol);
   } catch (err) {
+    if (_obs) _obs.exitReason = "adapter_missing";
     console.error(`[AiTraderMonitor] auto cycle: no adapter for '${bot.protocol}' — skipping`);
     return;
   }
 
+  if (_obs) _obs.phase = "preflight";
   // Cheap gates BEFORE LLM spend (G6 + always-on ceiling).
   const recentClosed = await storage.getRecentClosedDecisions(bot.id, 60);
   // Scanner bots skip the top-level G6 check — bot.timeframe is the stale previous pick /
@@ -1429,6 +1473,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
   if (bot.marketSource !== "scanner") {
     const g6 = checkCooldownAndCaps(bot.timeframe, recentClosed, Date.now());
     if (!g6.ok) {
+      if (_obs) _obs.exitReason = "gate_skip";
       // Log the skip — a silent reschedule here made cadence gaps undiagnosable.
       console.log(`[AiTraderMonitor] auto cycle: bot ${bot.id.slice(0, 8)} skipped (${g6.reason}): ${g6.detail}`);
       scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
@@ -1438,12 +1483,14 @@ export async function runAutoCycle(botId: string): Promise<void> {
   const dayStart = utcDayStartMs(Date.now());
   const closedToday = recentClosed.filter((d) => d.closedAt && new Date(d.closedAt).getTime() >= dayStart);
   if (closedToday.length >= MALFUNCTION_TRADES_PER_DAY) {
+    if (_obs) _obs.exitReason = "paused";
     await pauseBot(bot, "malfunction_ceiling", `closed ${closedToday.length} trades today (ceiling ${MALFUNCTION_TRADES_PER_DAY}) — pausing before next cycle`);
     return;
   }
 
   const wallet = await storage.getWallet(bot.walletAddress);
   if (!wallet?.agentPublicKey) {
+    if (_obs) _obs.exitReason = "gate_skip";
     console.error(`[AiTraderMonitor] auto cycle: wallet has no agentPublicKey for bot ${bot.id.slice(0, 8)} — skipping`);
     scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
     return;
@@ -1459,11 +1506,13 @@ export async function runAutoCycle(botId: string): Promise<void> {
   }
   const umk = getSessionByWalletAddress(bot.walletAddress)?.session?.umk;
   if (!umk) {
+    if (_obs) _obs.exitReason = "paused";
     await pauseBot(bot, "reauth_required", "session locked — reconnect your wallet in the app so the bot can keep trading hands-off");
     return;
   }
   const ciphertext = await storage.getWalletLlmApiKeyCiphertext(bot.walletAddress);
   if (!ciphertext) {
+    if (_obs) _obs.exitReason = "paused";
     await pauseBot(bot, "no_api_key", "no LLM API key on file — add an OpenRouter key in the app to resume");
     return;
   }
@@ -1471,6 +1520,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
   // hand-inserted sentinel like 'manual/canary') to OpenRouter — it 400s every
   // candle. Pause with an honest reason instead of burning cycles.
   if (!isSelectableModel(bot.model)) {
+    if (_obs) _obs.exitReason = "paused";
     await pauseBot(bot, "unsupported_model", `model '${bot.model}' isn't available for AI analysis — recreate the bot with a supported model`);
     return;
   }
@@ -1478,6 +1528,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
   try {
     keyBuf = decryptLlmApiKeyV3(umk, ciphertext, bot.walletAddress);
   } catch (err) {
+    if (_obs) _obs.exitReason = "paused";
     await pauseBot(bot, "reauth_required", "stored LLM API key could not be decrypted — reconnect your wallet and re-save the key");
     return;
   }
@@ -1493,6 +1544,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
     if (bot.marketSource === "scanner") {
       const shortlist = getScannerShortlist(bot.protocol);
       if (shortlist.length === 0) {
+        if (_obs) _obs.exitReason = "gate_skip";
         console.log(`[AiTraderMonitor] scanner: no candidates for ${bot.protocol} at this boundary — skipping bot ${bot.id.slice(0, 8)}`);
         scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
         return;
@@ -1507,6 +1559,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
         checkCooldownAndCaps(c.timeframe, recentClosed, Date.now()).ok
       );
       if (eligible.length === 0) {
+        if (_obs) _obs.exitReason = "gate_skip";
         console.log(`[AiTraderMonitor] scanner: all candidates G6-capped or stale for bot ${bot.id.slice(0, 8)} — rescheduling`);
         scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
         return;
@@ -1540,6 +1593,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
 
         await storage.updateAiTraderBot(bot.id, { status: "analyzing" });
 
+        if (_obs) { _obs.phase = "context"; _obs.exitReason = "stale_data"; }
         const context = await buildMarketContext({
           market: bot.market,
           timeframe: bot.timeframe as AiTraderTimeframe,
@@ -1550,12 +1604,14 @@ export async function runAutoCycle(botId: string): Promise<void> {
           scannerNote,
         });
         if ("stale" in context) {
+          // exitReason already "stale_data"
           console.warn(`[AiTraderMonitor] scanner: stale context for bot ${bot.id.slice(0, 8)} (${context.reason})`);
           await storage.updateAiTraderBot(bot.id, { status: "idle" });
           scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
           return;
         }
 
+        if (_obs) { _obs.phase = "llm"; _obs.exitReason = "flat"; }
         llmCalls++;
         const decision = await runDecision({ bot, apiKey, context, adapter });
         // Same no-trade taxonomy as the fixed-bot path below; narrowed inline so
@@ -1563,6 +1619,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
         const clamped = decision.ok && !decision.rejected ? decision.clamped : null;
 
         if (decision.ok && clamped && (clamped.action === "long" || clamped.action === "short")) {
+          if (_obs) { _obs.phase = "execution"; _obs.exitReason = "exec_rejected"; }
           const markPrice = num(context.contextDigest.price);
           const exec = await executeDecision({
             bot: { ...bot, status: "analyzing" },
@@ -1572,6 +1629,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
             markPrice: markPrice ?? NaN,
           });
           if (!exec.ok) {
+            // exitReason stays "exec_rejected"
             const fresh = await storage.getAiTraderBot(bot.id);
             if (fresh?.status === "analyzing") {
               await storage.updateAiTraderBot(bot.id, { status: "idle" });
@@ -1583,6 +1641,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
             }
             return;
           }
+          if (_obs) _obs.exitReason = "entry_open";
           console.log(`[AiTraderMonitor] scanner: bot ${bot.id.slice(0, 8)} entered ${clamped.action} ${bot.market} (${exec.mode})`);
           return; // position open — 15s loop takes over
         }
@@ -1592,6 +1651,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
       }
 
       // All eligible candidates tried within the call cap — no entry this boundary.
+      if (_obs) _obs.exitReason = "flat";
       scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
       return;
     }
@@ -1599,6 +1659,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
     // Fixed-ticker bot path (scanner bots have already returned above).
     await storage.updateAiTraderBot(bot.id, { status: "analyzing" });
 
+    if (_obs) { _obs.phase = "context"; _obs.exitReason = "stale_data"; }
     const context = await buildMarketContext({
       market: bot.market,
       timeframe: bot.timeframe as AiTraderTimeframe,
@@ -1609,21 +1670,25 @@ export async function runAutoCycle(botId: string): Promise<void> {
     });
     if ("stale" in context) {
       // G9 — never decide on stale data; retry at the next boundary.
+      // exitReason already "stale_data"
       console.warn(`[AiTraderMonitor] auto cycle: stale context for bot ${bot.id.slice(0, 8)} (${context.reason})`);
       await storage.updateAiTraderBot(bot.id, { status: "idle" });
       scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
       return;
     }
 
+    if (_obs) { _obs.phase = "llm"; _obs.exitReason = "flat"; }
     const decision = await runDecision({ bot, apiKey, context, adapter });
     if (!decision.ok || decision.rejected || !decision.clamped || (decision.clamped.action !== "long" && decision.clamped.action !== "short")) {
       // Malformed / guardrail-rejected / flat / close-with-no-position — all
       // clean no-trade cycles: back to idle, try again next candle.
+      // exitReason stays "flat"
       await storage.updateAiTraderBot(bot.id, { status: "idle" });
       scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
       return;
     }
 
+    if (_obs) { _obs.phase = "execution"; _obs.exitReason = "exec_rejected"; }
     const markPrice = num(context.contextDigest.price);
     const exec = await executeDecision({
       bot: { ...bot, status: "analyzing" },
@@ -1646,6 +1711,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
       }
       return;
     }
+    if (_obs) _obs.exitReason = "entry_open";
     console.log(`[AiTraderMonitor] auto cycle: bot ${bot.id.slice(0, 8)} entered ${decision.clamped.action} ${bot.market} (${exec.mode})`);
     // Position now open — the 15s loop takes over; next auto cycle fires after the close.
   } finally {
@@ -2350,6 +2416,7 @@ export function stopAiTraderMonitor(): void {
   bracketReplaceAttempted.clear();
   botInFlight.clear();
   preOpenFirstSeen.clear();
+  _cycleObs.clear();
   // Stop the market scanner (shadow-mode; no trading) in lockstep with the monitor
   // so tests and server shutdown always tear down both subsystems together.
   import("./scanner.js").then(({ stopScanner }) => stopScanner()).catch(() => {});
