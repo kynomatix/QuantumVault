@@ -1865,7 +1865,14 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
           const updated = await storage.updateBorrowOperation(opId, {
             step: "loop_sig_writeahead",
             appendTxSignature: info.signature,
-            mergeMetadata: { blockhash: info.blockhash, lastValidBlockHeight: info.lastValidBlockHeight },
+            mergeMetadata: {
+              blockhash: info.blockhash,
+              lastValidBlockHeight: info.lastValidBlockHeight,
+              // Explicit identity for the hop-close provenance check: lets the
+              // resume path verify this specific tx without confusing an
+              // ATA-prep sig (which is appended first) with the close tx.
+              closeTxSignature: info.signature,
+            },
           });
           if (!updated) throw new Error("write-ahead signature persist failed — refusing to broadcast");
         },
@@ -2027,6 +2034,80 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
 }
 
 // --- HOP (P4: fully unwind one pair, re-loop onto a better allowlisted pair) ------
+
+// -- Hop-close provenance helpers (exported for unit tests) ----------------------
+
+/**
+ * Resolve the specific Loop Close transaction signature from a close-attempt
+ * operation record. Returns null when the record is malformed or the step is
+ * not "loop_sig_writeahead".
+ *
+ * Resolution precedence (most to least authoritative):
+ *  1. meta.closeTxSignature — written explicitly in the write-ahead hook by
+ *     new close attempts; unambiguously identifies the close tx regardless of
+ *     how many signatures the txSignatures array carries.
+ *  2. txSignatures[last] — ordering invariant for legacy records that predate
+ *     the explicit meta field: the ATA-prep signature (if any) is appended
+ *     BEFORE the write-ahead hook fires, so the close sig is always last.
+ *
+ * Fail closed: any record where neither source yields a non-empty string
+ * returns null; callers must not treat the attempt as proven.
+ *
+ * @internal exported for unit tests only — not a public API surface.
+ */
+export function pickCloseTxSig(co: {
+  step: string | null;
+  txSignatures: unknown[] | null;
+  metadata: Record<string, unknown> | null | undefined;
+}): string | null {
+  if (co.step !== "loop_sig_writeahead") return null;
+  // Prefer the explicit identity written atomically with the write-ahead sig.
+  const meta = (co.metadata ?? {}) as Record<string, unknown>;
+  if (typeof meta.closeTxSignature === "string" && meta.closeTxSignature.length > 0) {
+    return meta.closeTxSignature;
+  }
+  // Legacy fallback: the close write-ahead sig is always the last element in the
+  // txSignatures array (ATA-prep sigs, if any, are appended before it).
+  const sigs = Array.isArray(co.txSignatures)
+    ? (co.txSignatures as unknown[]).filter((s): s is string => typeof s === "string")
+    : [];
+  if (sigs.length === 0) return null; // malformed — fail closed
+  return sigs[sigs.length - 1];
+}
+
+/**
+ * Verify whether the main Loop Close transaction for a crash-window close-
+ * attempt op actually landed on-chain, without risk of confusing an earlier
+ * ATA-prep transaction with the close tx.
+ *
+ * Returns:
+ *  "landed"       — the close tx is confirmed/finalized with no error.
+ *  "not_landed"   — tx not found, expired, or errored; close did not happen.
+ *  "malformed"    — cannot identify the close sig; callers must fail closed.
+ *  "unverifiable" — RPC threw; retry later (resumable state).
+ *
+ * @internal exported for unit tests only — not a public API surface.
+ */
+export async function verifyCloseTxLanded(
+  co: {
+    step: string | null;
+    txSignatures: unknown[] | null;
+    metadata: Record<string, unknown> | null | undefined;
+  },
+  connection: Pick<Connection, "getSignatureStatuses">,
+): Promise<"landed" | "not_landed" | "malformed" | "unverifiable"> {
+  const closeTxSig = pickCloseTxSig(co);
+  if (!closeTxSig) return "malformed";
+  try {
+    const result = await connection.getSignatureStatuses([closeTxSig], { searchTransactionHistory: true });
+    const st = result.value[0];
+    const ok =
+      !!st && !st.err && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized");
+    return ok ? "landed" : "not_landed";
+  } catch {
+    return "unverifiable";
+  }
+}
 
 export interface LoopHopParams {
   walletAddress: string;
@@ -2411,23 +2492,27 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
             provenClose = co;
             break;
           }
-          const sigs = Array.isArray(co.txSignatures) ? co.txSignatures : [];
-          if (co.step === "loop_sig_writeahead" && sigs.length > 0) {
-            let landed = false;
-            try {
-              const statuses = await hopConnection.getSignatureStatuses(sigs, { searchTransactionHistory: true });
-              landed = statuses.value.some(
-                (st) => !!st && !st.err && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized"),
-              );
-            } catch {
-              writeaheadUnverifiable = true; // decide on a later tick
-              continue;
-            }
-            if (landed) {
+          if (co.step === "loop_sig_writeahead") {
+            // Resolve the single close-tx sig (NOT the whole txSignatures array).
+            // verifyCloseTxLanded uses pickCloseTxSig which:
+            //  • prefers meta.closeTxSignature (written atomically by new write-ahead hooks),
+            //  • falls back to txSignatures[last] (ordering invariant for legacy records: the
+            //    ATA-prep sig, if present, is appended BEFORE the write-ahead hook fires, so
+            //    the close sig is always the final element),
+            //  • returns "malformed" if neither yields a non-empty string (fail closed).
+            const verdict = await verifyCloseTxLanded(co, hopConnection);
+            if (verdict === "landed") {
               provenClose = co;
               break;
             }
-            // Sig never landed → this attempt's tx died; keep scanning older ones.
+            if (verdict === "unverifiable") {
+              writeaheadUnverifiable = true; // decide on a later tick
+              continue;
+            }
+            if (verdict === "malformed") {
+              continue; // can't identify the close sig — fail closed, scan older attempts
+            }
+            // "not_landed": this attempt's tx expired/failed — scan older attempts.
           }
         }
         if (!provenClose) {
