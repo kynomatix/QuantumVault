@@ -65,6 +65,19 @@ vi.mock("../../server/session-v3", () => ({
   computeBotPolicyHmac: vi.fn(() => "hmac-scanner-recomputed"),
 }));
 
+// AIT-CADENCE-SELF-HEAL-01: appendTelemetry is a VITEST no-op in the real
+// module, so the audit/startup diagnostics are asserted through this mock.
+// importOriginal spread keeps every other telemetry export real for any
+// transitive importer.
+const appendTelemetryMock = vi.fn();
+vi.mock("../../server/telemetry", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../server/telemetry")>();
+  return {
+    ...actual,
+    appendTelemetry: (...a: unknown[]) => appendTelemetryMock(...a),
+  };
+});
+
 const notifyMock = vi.fn();
 vi.mock("../../server/notification-service", () => ({
   sendTradeNotification: (...a: unknown[]) => notifyMock(...a),
@@ -234,7 +247,7 @@ beforeEach(() => {
     getBotMock, getActiveBotsMock, getLlmCiphertextMock, getAiTraderDecisionMock, getUmkMock,
     decryptKeyMock, decryptSubKeyMock, healUmkMock, getSessionByWalletMock, restoreSecurityMock,
     decryptLlmKeyMock, notifyMock, getAdapterMock, fetchOHLCVMock, buildContextMock,
-    runDecisionMock, executeDecisionMock,
+    runDecisionMock, executeDecisionMock, appendTelemetryMock,
   ]) {
     m.mockReset();
   }
@@ -1452,6 +1465,200 @@ describe("tick loop", () => {
     expect(botUpdates().some((u) => u.status === "idle")).toBe(true);
     // scheduleAutoNext armed a timer for the healed bot (auto+autoNext+idle).
     expect(vi.getTimerCount()).toBeGreaterThan(0);
+  });
+});
+
+// --- AIT-CADENCE-SELF-HEAL-01: tick audit restores missing auto-next timers -----------
+
+describe("AIT-CADENCE-SELF-HEAL-01: idle-bot cadence audit", () => {
+  const idleAutoBot = (overrides: Partial<AiTraderBot> = {}) =>
+    makeBot({ id: "bot-idle-auto", status: "idle", mode: "auto", autoNext: true, ...overrides });
+
+  const telemetryLines = () => appendTelemetryMock.mock.calls.map((c) => String(c[0]));
+  // NOTE: the startup diagnostic also mentions "tick audit", so the repair
+  // filter keys on the repair-specific phrase.
+  const repairLines = () => telemetryLines().filter((l) => l.includes("restored missing auto-next timer"));
+  const startupLines = () => telemetryLines().filter((l) => l.includes("bot-list read failed"));
+
+  it("startup bot-list read failure: no timers armed + one bounded diagnostic; the first healthy tick restores exactly one future timer", async () => {
+    const { reconcileOnStartup, runMonitorTickOnce } = await importMonitor();
+    getActiveBotsMock.mockRejectedValueOnce(new Error("Connection terminated due to connection timeout"));
+
+    await reconcileOnStartup();
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(startupLines()).toHaveLength(1);
+    // Fixed-string diagnostic: no error text, wallet or bot identifiers.
+    expect(startupLines()[0]).not.toContain("Connection terminated");
+    expect(startupLines()[0]).not.toContain("WALLET_X");
+
+    // Next tick reads the bot list successfully → audit restores the cadence.
+    getActiveBotsMock.mockResolvedValue([idleAutoBot()]);
+    await runMonitorTickOnce();
+
+    expect(vi.getTimerCount()).toBe(1);
+    expect(repairLines()).toHaveLength(1);
+    // Bot-ID prefix (8 chars) only — never the full id, never the wallet.
+    expect(repairLines()[0]).toContain("bot-idle");
+    expect(repairLines()[0]).not.toContain("bot-idle-auto");
+    expect(repairLines()[0]).not.toContain("WALLET_X");
+    expect(repairLines()[0]).toContain("tf=15m");
+  });
+
+  it("repeated healthy ticks are idempotent: one timer, boundary never moves, telemetry emitted once", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    getActiveBotsMock.mockResolvedValue([idleAutoBot()]);
+
+    await runMonitorTickOnce();
+    expect(vi.getTimerCount()).toBe(1);
+    expect(repairLines()).toHaveLength(1);
+
+    await runMonitorTickOnce();
+    await runMonitorTickOnce();
+
+    // A bot that owns a timer is never touched: no re-arm, no re-emission.
+    expect(vi.getTimerCount()).toBe(1);
+    expect(repairLines()).toHaveLength(1);
+
+    // The single timer fires exactly once at the ORIGINAL boundary (+2s).
+    // runAutoCycle's fresh-row gate sees 'open' → exits without rescheduling.
+    getBotMock.mockResolvedValue(idleAutoBot({ status: "open" }));
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    expect(getBotMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("state exclusions: open/paused/proposed/analyzing/executing, manual mode and autoNext:false bots are never armed", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    // The 'open' bot runs real paper monitoring — give it a decision + a
+    // candle that touches neither leg so the pass is a no-op.
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue([
+      candle(ENTRY_CANDLE_OPEN + TF_15M, 150, 151, 149.9, 150.5),
+    ]);
+    getActiveBotsMock.mockResolvedValue([
+      makeBot({ id: "bot-x-open", status: "open", mode: "auto", autoNext: true }),
+      makeBot({ id: "bot-x-paused", status: "paused", mode: "auto", autoNext: true }),
+      makeBot({ id: "bot-x-proposed", status: "proposed", mode: "auto", autoNext: true }),
+      makeBot({ id: "bot-x-analyzing", status: "analyzing", mode: "auto", autoNext: true }),
+      makeBot({ id: "bot-x-executing", status: "executing", mode: "auto", autoNext: true }),
+      makeBot({ id: "bot-x-manual", status: "idle", mode: "manual", autoNext: true }),
+      makeBot({ id: "bot-x-noauto", status: "idle", mode: "auto", autoNext: false }),
+    ]);
+
+    await runMonitorTickOnce();
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(repairLines()).toHaveLength(0);
+  });
+
+  it("pending reconciliation wins: the audit never competes; the reconciliation branch arms exactly one timer", async () => {
+    const { reconcileOnStartup, runMonitorTickOnce } = await importMonitor();
+    const bot = makeBot({ id: "bot-pending", status: "analyzing", paperMode: true, mode: "auto", autoNext: true });
+    getActiveBotsMock.mockResolvedValue([bot]);
+    // Startup per-bot reconcile throws → bot lands in pendingReconciliation.
+    getDecisionsMock.mockRejectedValueOnce(new Error("db hiccup"));
+
+    await reconcileOnStartup();
+    expect(vi.getTimerCount()).toBe(0);
+    // The bot-LIST read succeeded — the startup diagnostic must NOT fire.
+    expect(startupLines()).toHaveLength(0);
+
+    // Tick: the pendingReconciliation branch resolves the bot to idle and
+    // re-arms via its own path — the audit is bypassed by the `continue`.
+    getDecisionsMock.mockResolvedValue([]);
+    getBotMock.mockResolvedValue({ ...bot, status: "idle" });
+    await runMonitorTickOnce();
+
+    expect(vi.getTimerCount()).toBe(1);
+    expect(repairLines()).toHaveLength(0); // armed by reconciliation, not the audit
+
+    // Follow-up tick with the timer live: audit stays hands-off.
+    getActiveBotsMock.mockResolvedValue([{ ...bot, status: "idle" }]);
+    await runMonitorTickOnce();
+    expect(vi.getTimerCount()).toBe(1);
+    expect(repairLines()).toHaveLength(0);
+  });
+
+  it("paper self-heal: open-with-no-decision heals to idle this tick; the NEXT tick arms exactly one timer", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    const bot = makeBot({ id: "bot-paper-heal", status: "open", paperMode: true, mode: "auto", autoNext: true });
+    getActiveBotsMock.mockResolvedValue([bot]);
+    getDecisionsMock.mockResolvedValue([]); // 'open' with no open decision row
+
+    // Tick 1: snapshot says 'open' → audit ineligible; monitorBotOnce heals to idle.
+    await runMonitorTickOnce();
+    expect(botUpdates().some((u) => u.status === "idle")).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Tick 2: fresh list reads 'idle' → audit restores the cadence.
+    getActiveBotsMock.mockResolvedValue([{ ...bot, status: "idle" }]);
+    await runMonitorTickOnce();
+    expect(vi.getTimerCount()).toBe(1);
+    expect(repairLines()).toHaveLength(1);
+  });
+
+  it("adapter-resolution loss: the consumed timer is restored on the next tick — never an immediate cycle", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    const bot = idleAutoBot({ id: "bot-adapterless" });
+    getActiveBotsMock.mockResolvedValue([bot]);
+
+    await runMonitorTickOnce(); // audit arms
+    expect(vi.getTimerCount()).toBe(1);
+
+    // Timer fires; runAutoCycle re-reads the still-idle bot but the adapter
+    // cannot resolve → the exit consumes the timer without replacing it.
+    getBotMock.mockResolvedValue(bot);
+    getAdapterMock.mockImplementation(() => {
+      throw new Error("no adapter registered for 'pacifica'");
+    });
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Next tick: audit re-arms a FUTURE boundary timer; no LLM/decision work runs.
+    await runMonitorTickOnce();
+    expect(vi.getTimerCount()).toBe(1);
+    expect(repairLines()).toHaveLength(2); // two genuine repairs, one per loss
+    expect(runDecisionMock).not.toHaveBeenCalled();
+    expect(executeDecisionMock).not.toHaveBeenCalled();
+  });
+
+  it("timer-callback in-flight window: audit adds only a next-boundary timer; the hung cycle never doubles up", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    const bot = idleAutoBot({ id: "bot-window" });
+    getActiveBotsMock.mockResolvedValue([bot]);
+
+    await runMonitorTickOnce(); // arm
+    expect(vi.getTimerCount()).toBe(1);
+
+    // Freeze runAutoCycle in-flight: the timer callback has already deleted
+    // the map entry, but the cycle's first read never settles.
+    let releaseCycle!: (v: unknown) => void;
+    getBotMock.mockImplementation(() => new Promise((res) => { releaseCycle = res; }));
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    expect(vi.getTimerCount()).toBe(0); // consumed; cycle in-flight
+
+    // Audit repairs with a future timer only — it never calls runAutoCycle.
+    await runMonitorTickOnce();
+    expect(vi.getTimerCount()).toBe(1);
+    expect(getBotMock).toHaveBeenCalledTimes(1); // still only the in-flight cycle's read
+
+    // Release the hung cycle as non-idle → it exits at the fresh-row gate
+    // without touching the audit's timer.
+    releaseCycle({ ...bot, status: "analyzing" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(1); // exactly one future timer survives
+  });
+
+  it("shutdown: stopAiTraderMonitor clears audit-armed timers", async () => {
+    const { runMonitorTickOnce, stopAiTraderMonitor } = await importMonitor();
+    getActiveBotsMock.mockResolvedValue([idleAutoBot()]);
+
+    await runMonitorTickOnce();
+    expect(vi.getTimerCount()).toBe(1);
+
+    stopAiTraderMonitor();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

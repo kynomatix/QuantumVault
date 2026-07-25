@@ -36,6 +36,7 @@
 // must never block an emergency close.
 
 import { storage } from "../storage";
+import { appendTelemetry } from "../telemetry";
 import { getAdapter } from "../protocol/adapter-registry";
 import {
   getUmkForWebhook,
@@ -2061,6 +2062,15 @@ export async function reconcileOnStartup(): Promise<void> {
     bots = await storage.getActiveAiTraderBots();
   } catch (err) {
     console.error(`[AiTraderMonitor] startup reconciliation: getActiveAiTraderBots failed: ${err instanceof Error ? err.message : err}`);
+    // AIT-CADENCE-SELF-HEAL-01: this early return skips the auto-next arming
+    // loop below — a prod incident (2026-07-25) left every idle auto bot
+    // silent for hours because nothing later restored the timers, and the
+    // failure was invisible through the logs API (console-only). The tick
+    // audit now self-heals the timers; this line makes the trigger visible.
+    // Fixed string by design — no error text, ids or secret material.
+    appendTelemetry(
+      "[AiTraderMonitor] startup reconciliation: bot-list read failed — auto-next arming skipped; tick audit will restore timers"
+    );
     return;
   }
   for (const bot of bots) {
@@ -2218,6 +2228,44 @@ async function tick(): Promise<void> {
             }
           }
           continue;
+        }
+        // AIT-CADENCE-SELF-HEAL-01: idle-bot cadence audit. Three known paths
+        // strand an idle auto bot with NO auto-next timer: (1) startup
+        // reconciliation's bot-list read fails and its arming loop never runs
+        // (prod 2026-07-25 — four-hour silent stall), (2) a runAutoCycle exit
+        // consumes the fired timer without replacing it (e.g. adapter
+        // resolution failure), (3) the paper open-with-no-decision self-heal
+        // lands the bot on 'idle' without re-arming. monitorBotOnce ignores
+        // non-open bots, so nothing else would ever restore the cadence.
+        //
+        // Restore scheduler ownership from the bot list this tick already
+        // holds — no extra DB query, no second cadence mechanism. Eligibility
+        // is strict: exactly idle + auto + autoNext, not pending
+        // reconciliation (that branch `continue`s above), and no live timer.
+        // A bot that already owns a timer is never touched, so repeated ticks
+        // are idempotent and never move a scheduled boundary.
+        //
+        // Concurrency (timer fired, map entry deleted, runAutoCycle still
+        // in-flight): the audit only arms the NEXT candle boundary via
+        // scheduleAutoNext — it never invokes runAutoCycle directly, so no
+        // immediate second cycle is possible. runAutoCycle re-gates on a
+        // fresh DB row, and any legitimate reschedule from the in-flight
+        // cycle replaces the audit's timer through clearAutoNext — at most
+        // one future timer per bot survives.
+        if (
+          bot.status === "idle" &&
+          bot.mode === "auto" &&
+          bot.autoNext === true &&
+          !autoNextTimers.has(bot.id)
+        ) {
+          scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
+          if (autoNextTimers.has(bot.id)) {
+            // A timer was genuinely armed (unknown timeframe no-ops above).
+            // Bounded: emits only on a real repair, never on healthy ticks.
+            appendTelemetry(
+              `[AiTraderMonitor] tick audit: restored missing auto-next timer for bot ${bot.id.slice(0, 8)} tf=${nextCycleTimeframe(bot)}`
+            );
+          }
         }
         await monitorBotOnce(bot);
       } catch (err) {
