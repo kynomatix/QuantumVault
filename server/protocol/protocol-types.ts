@@ -231,6 +231,15 @@ export interface AccountInfo {
   unrealizedPnl: number;
   availableMargin: number;
   maintenanceMargin: number;
+  /**
+   * True maintenance-margin requirement (liquidation floor), when the venue
+   * exposes it (Pacifica: cross_mmr). Distinct from `maintenanceMargin`,
+   * which Pacifica maps to total_margin_used (INITIAL margin) — that value
+   * hits zero-available long before liquidation and must not be used for
+   * liquidation-distance health. Optional: adapters without a real MMR
+   * leave it undefined and consumers fall back to the legacy calc.
+   */
+  maintenanceMarginRequired?: number;
   feeTier?: string;
   subaccountId?: string;
   exists?: boolean;

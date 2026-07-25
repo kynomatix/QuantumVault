@@ -613,6 +613,9 @@ export class PacificaAdapter implements ProtocolAdapter {
     const availableMargin = parseFloat(response.available_to_spend);
     const maintenanceMargin = parseFloat(response.total_margin_used);
     const unrealizedPnl = equity - balance;
+    // cross_mmr is the TRUE maintenance-margin requirement (liquidation when
+    // equity < cross_mmr). total_margin_used is INITIAL margin — much higher.
+    const crossMmr = parseFloat(response.cross_mmr);
 
     return {
       equity,
@@ -620,6 +623,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       unrealizedPnl,
       availableMargin,
       maintenanceMargin,
+      maintenanceMarginRequired: Number.isFinite(crossMmr) ? crossMmr : undefined,
       feeTier: String(response.fee_level),
       subaccountId: response.subaccount_id,
       exists: true,

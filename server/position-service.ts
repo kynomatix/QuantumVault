@@ -22,6 +22,7 @@ async function fetchPerpPositions(agentPublicKey: string, subaccountId: number, 
       unrealizedPnlPercent: p.entryPrice > 0
         ? ((p.markPrice - p.entryPrice) / p.entryPrice) * 100 * (p.baseSize >= 0 ? 1 : -1)
         : 0,
+      liquidationPrice: p.liquidationPrice ?? null,
     })), fetchFailed: false };
   } catch (err) {
     console.log(`[PositionService] fetchPerpPositions failed: ${err instanceof Error ? err.message : err}`);
@@ -37,6 +38,7 @@ async function fetchDriftAccountInfo(agentPublicKey: string, subaccountId: numbe
       totalCollateral: info.equity,
       freeCollateral: info.availableMargin,
       marginUsed: info.maintenanceMargin,
+      maintenanceMarginRequired: info.maintenanceMarginRequired,
       unrealizedPnl: info.unrealizedPnl,
     };
   } catch {
@@ -62,6 +64,8 @@ export interface OnChainPosition {
   markPrice: number;
   unrealizedPnl: number;
   unrealizedPnlPercent: number;
+  /** Venue-reported liquidation price, when the adapter provides it. */
+  liquidationPrice?: number | null;
 }
 
 export interface PositionData {
@@ -132,6 +136,7 @@ export class PositionService {
             unrealizedPnlPercent: p.entryPrice > 0 && p.baseSize !== 0
               ? ((p.unrealizedPnl / (Math.abs(p.baseSize) * p.entryPrice)) * 100)
               : 0,
+            liquidationPrice: p.liquidationPrice ?? null,
           })), fetchFailed: false };
         } catch (err) {
           console.log(`[PositionService] bot subaccount getPosition failed: ${err instanceof Error ? err.message : err}`);
@@ -193,10 +198,18 @@ export class PositionService {
             ? await fetchDriftAccountInfo(botSubaccountPublicKey, 0, adapter)
             : await fetchDriftAccountInfo(agentPublicKey, subAccountId, adapter);
           
-          // Health Factor = (freeCollateral / totalCollateral) * 100
-          // This matches Drift's approach: 100% when fully free, lower as margin is used
+          // Health Factor — distance to LIQUIDATION, not to "no free margin".
+          // Preferred: (equity - maintenanceMarginRequired) / equity, when the
+          // venue exposes a true MMR (Pacifica cross_mmr). A fully-margined
+          // account (available=0) can still be far from liquidation; the old
+          // freeCollateral/totalCollateral calc showed 0% in that state, which
+          // read as "liquidation imminent" when it wasn't.
           let healthFactor = 100;
-          if (accountInfo.totalCollateral > 0) {
+          const mmr = accountInfo.maintenanceMarginRequired;
+          if (typeof mmr === 'number' && Number.isFinite(mmr) && mmr > 0 && accountInfo.totalCollateral > 0) {
+            healthFactor = Math.max(0, Math.min(100, ((accountInfo.totalCollateral - mmr) / accountInfo.totalCollateral) * 100));
+          } else if (accountInfo.totalCollateral > 0) {
+            // Legacy fallback (Drift/Flash: no separate MMR exposed)
             healthFactor = Math.max(0, Math.min(100, (accountInfo.freeCollateral / accountInfo.totalCollateral) * 100));
           } else if (accountInfo.totalCollateral <= 0 && hasPosition) {
             healthFactor = 0; // Negative collateral = critical
@@ -217,7 +230,14 @@ export class PositionService {
           const posSide = (onChainPos && Math.abs(onChainSize) > 0.0001) ? onChainPos.side : (dbSize > 0 ? 'LONG' : 'SHORT');
           const posMarkPrice = (onChainPos && Math.abs(onChainSize) > 0.0001) ? onChainPos.markPrice : (dbPosition ? parseFloat(dbPosition.avgEntryPrice) : 0);
 
-          if (Math.abs(posSize) > 0.0001 && posMarkPrice > 0) {
+          // Prefer the venue's OWN liquidation price when the adapter provides
+          // it (Pacifica does). The local estimate below conflates "no free
+          // initial margin" with "at liquidation" (freeCollateral<=0 returned
+          // liq = current mark price — alarming and wrong).
+          const venueLiqPrice = (onChainPos && Math.abs(onChainSize) > 0.0001) ? onChainPos.liquidationPrice : null;
+          if (typeof venueLiqPrice === 'number' && Number.isFinite(venueLiqPrice) && venueLiqPrice > 0) {
+            liquidationPrice = venueLiqPrice;
+          } else if (Math.abs(posSize) > 0.0001 && posMarkPrice > 0) {
             if (accountInfo.freeCollateral <= 0) {
               liquidationPrice = posMarkPrice;
             } else {

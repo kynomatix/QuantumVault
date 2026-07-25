@@ -65,6 +65,32 @@ const RECONCILE_INTERVAL_MS = 60 * 1000; // 60 seconds
 let reconcileInterval: NodeJS.Timeout | null = null;
 const lastReconcileTime = new Map<string, number>();
 
+// ── Phantom-close corroboration state ────────────────────────────────────
+// A single empty-but-successful getPositions read once booked a phantom
+// external_close with a fabricated market-price PnL (the venue read glitched
+// while the position was actually still open). Estimation-based closes (no
+// fill evidence) now require the position to read empty across at least two
+// reconcile ticks spanning ESTIMATION_CORROBORATION_MS, plus a final fresh
+// re-read immediately before booking. Fill-backed closes and liquidation
+// (equity+balance≈0) remain immediate — they carry their own evidence.
+// Key: `${botId}:${normalizedMarket}` → first-empty-sighting epoch ms.
+const estimationCloseFirstSeen = new Map<string, number>();
+const ESTIMATION_CORROBORATION_MS = 90 * 1000; // ≥2 ticks at 60s cadence
+const ESTIMATION_CANDIDATE_TTL_MS = 30 * 60 * 1000;
+const ESTIMATION_CANDIDATE_MAX = 500;
+
+function estimationCloseKey(botId: string, market: string): string {
+  return `${botId}:${normalizeMarket(market)}`;
+}
+
+/** Bounded-cache guard: drop stale candidates so deleted bots can't leak entries. */
+function pruneEstimationCandidates(nowMs: number): void {
+  if (estimationCloseFirstSeen.size < ESTIMATION_CANDIDATE_MAX) return;
+  for (const [key, ts] of estimationCloseFirstSeen) {
+    if (nowMs - ts > ESTIMATION_CANDIDATE_TTL_MS) estimationCloseFirstSeen.delete(key);
+  }
+}
+
 interface CloseDetectionResult {
   detected: boolean;
   reason: 'tpsl' | 'liquidation' | 'external_close';
@@ -93,11 +119,16 @@ async function detectOnChainClose(
   dbPosition: { baseSize: string; avgEntryPrice: string; realizedPnl?: string; totalFees?: string; lastTradeId?: string | null; lastTradeAt?: Date | null },
   botSubaccountPublicKey?: string,
   adapter: ProtocolAdapter = getDefaultAdapter(),
+  /** Numeric subaccount ID for the legacy Drift-style path (no botSubaccountPublicKey).
+   * Used ONLY by the corroboration confirm re-read so it queries the SAME scope
+   * the caller's original positions read used. */
+  positionSubAccountId?: number,
 ): Promise<CloseDetectionResult> {
   const noDetection: CloseDetectionResult = { detected: false, reason: 'external_close' };
 
   try {
     const normalizedMarket = normalizeMarket(market);
+    const corroborationKey = estimationCloseKey(botId, market);
     const dbBaseSize = parseFloat(dbPosition.baseSize);
     const entryPrice = parseFloat(dbPosition.avgEntryPrice);
     const positionSide = dbBaseSize > 0 ? 'long' : 'short';
@@ -228,6 +259,8 @@ async function detectOnChainClose(
         } catch { /* non-critical */ }
       }
 
+      // Fill-backed close: real venue evidence, no corroboration needed.
+      estimationCloseFirstSeen.delete(corroborationKey);
       return {
         detected: true,
         reason: closeReason,
@@ -288,6 +321,9 @@ async function detectOnChainClose(
 
       if (accountInfo.equity < 1 && accountInfo.balance < 1) {
         console.log(`[Reconcile] Likely liquidation for bot ${botId} (no closing trades): equity=$${accountInfo.equity.toFixed(2)}, balance=$${accountInfo.balance.toFixed(2)}`);
+        // Liquidation carries its own evidence (equity AND balance ≈ 0) —
+        // it is not gated on the estimation corroboration window.
+        estimationCloseFirstSeen.delete(corroborationKey);
         return {
           detected: true,
           reason: 'liquidation',
@@ -302,6 +338,52 @@ async function detectOnChainClose(
         console.log(`[Reconcile] No closing fills for bot ${botId} ${market} but position is only ${(positionAgeMs / 1000).toFixed(0)}s old — treating as propagation lag, preserving DB position`);
         return noDetection;
       }
+
+      // ── Phantom-close corroboration gate ─────────────────────────────
+      // Everything past this point books a close from ESTIMATION only (no
+      // fill evidence, account healthy). A single transient empty-but-
+      // successful positions read must never be enough: require the empty
+      // state to persist across ≥2 reconcile ticks spanning
+      // ESTIMATION_CORROBORATION_MS, then re-read positions one final time
+      // immediately before booking. Fail closed on any doubt.
+      const nowMs = Date.now();
+      const firstEmptySeenAt = estimationCloseFirstSeen.get(corroborationKey);
+      if (firstEmptySeenAt === undefined) {
+        pruneEstimationCandidates(nowMs);
+        estimationCloseFirstSeen.set(corroborationKey, nowMs);
+        console.log(`[Reconcile] Estimation-close candidate for bot ${botId} ${market}: first empty sighting recorded — awaiting corroboration (${ESTIMATION_CORROBORATION_MS / 1000}s) before booking`);
+        return noDetection;
+      }
+      if (nowMs - firstEmptySeenAt < ESTIMATION_CORROBORATION_MS) {
+        console.log(`[Reconcile] Estimation-close candidate for bot ${botId} ${market}: ${((nowMs - firstEmptySeenAt) / 1000).toFixed(0)}s since first empty sighting — still awaiting corroboration`);
+        return noDetection;
+      }
+      // Final confirm: one more positions re-read before booking. NOTE: on
+      // Pacifica this may be served from the adapter's ~10s positions cache
+      // (same cache key as the caller's read moments ago), so it is NOT
+      // guaranteed independent — the real corroboration is the ≥2 reconcile
+      // ticks above (60s apart, each a genuinely fresh venue read). If the
+      // position is visible again, the earlier empty reads were transient —
+      // reset the candidate. If the re-read throws, fail closed, retry next tick.
+      try {
+        // Match the caller's read scope exactly: bot-subaccount key reads take
+        // no subaccount ID; the legacy Drift path passes the numeric subaccount.
+        const confirmPositions = botSubaccountPublicKey
+          ? await adapter.getPositions(botSubaccountPublicKey)
+          : await adapter.getPositions(agentPublicKey, positionSubAccountId !== undefined ? _subIdStr(positionSubAccountId) : undefined);
+        const stillOpen = confirmPositions.find(p =>
+          normalizeMarket(p.internalSymbol) === normalizedMarket && Math.abs(p.baseSize) > 0.0001
+        );
+        if (stillOpen) {
+          estimationCloseFirstSeen.delete(corroborationKey);
+          console.warn(`[Reconcile] PHANTOM CLOSE AVERTED for bot ${botId} ${market}: confirm re-read shows position still open (size=${stillOpen.baseSize}) after ${((nowMs - firstEmptySeenAt) / 1000).toFixed(0)}s of empty sightings — earlier reads were transient`);
+          return noDetection;
+        }
+      } catch (confirmErr) {
+        console.log(`[Reconcile] Estimation-close confirm re-read failed for bot ${botId} ${market} — failing closed, retrying next tick: ${confirmErr instanceof Error ? confirmErr.message : confirmErr}`);
+        return noDetection;
+      }
+      estimationCloseFirstSeen.delete(corroborationKey);
 
       const tpPriceAbs = Number(riskConfig?.takeProfitPrice || 0);
       const slPriceAbs = Number(riskConfig?.stopLossPrice || 0);
@@ -827,10 +909,17 @@ export async function reconcileBotPosition(
     const dbBaseSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;
     const onChainBaseSize = onChainPos?.baseAssetAmount || 0;
     const onChainHasRealPosition = onChainPos && Math.abs(onChainBaseSize) > 0.0001;
-    
+
+    if (onChainHasRealPosition) {
+      // Position visible on the venue — any pending estimation-close candidate
+      // was a transient empty read. Reset so a later real close starts a fresh
+      // corroboration window instead of inheriting a stale first-sighting.
+      estimationCloseFirstSeen.delete(estimationCloseKey(botId, market));
+    }
+
     if (Math.abs(dbBaseSize) > 0.0001 && !onChainHasRealPosition) {
       const closeDetection = await detectOnChainClose(
-        botId, agentPublicKey, market, dbPosition!, botSubaccountPublicKey, adapter
+        botId, agentPublicKey, market, dbPosition!, botSubaccountPublicKey, adapter, subAccountId
       );
 
       if (closeDetection.detected) {
