@@ -72,6 +72,7 @@ import type {
 import { mapPacificaSide, mapToProtocolSide } from './pacifica-types.js';
 import { pacificaQuota, QuotaExhaustedError, type RequestPriority } from './pacifica-quota.js';
 import { pacificaCache } from './pacifica-cache.js';
+import { appendTelemetry } from '../../telemetry.js';
 
 const MAX_MARKET_CACHE_SIZE = 200;
 const MARKET_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -2196,6 +2197,78 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   /**
+   * fetch() bounded by BOTH a soft AbortSignal timeout and a hard
+   * Promise.race deadline (2026-07-24 prod incident, second occurrence of
+   * this failure mode): Node/undici can wedge in socket states where
+   * AbortSignal.timeout NEVER fires, leaving the fetch promise pending
+   * forever. The hard deadline abandons the request (any late response is
+   * discarded) and rejects, so callers — and the dedup layer above them —
+   * are guaranteed to settle.
+   */
+  private async fetchBounded(
+    url: string,
+    init: RequestInit,
+    softMs: number,
+    hardMs: number,
+    label: string,
+  ): Promise<Response> {
+    const fetchPromise = fetch(url, { ...init, signal: AbortSignal.timeout(softMs) });
+    // Abandoned after the hard cap — must never surface as an unhandled rejection.
+    fetchPromise.catch(() => {});
+    let hardTimer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        fetchPromise,
+        new Promise<never>((_, reject) => {
+          hardTimer = setTimeout(() => {
+            const msg =
+              `[PacificaAdapter] HARD-TIMEOUT ${label} after ${hardMs}ms — ` +
+              `AbortSignal.timeout(${softMs}ms) never fired (wedged socket); abandoning request`;
+            console.error(msg);
+            appendTelemetry(msg);
+            reject(new Error(msg));
+          }, hardMs);
+          hardTimer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (hardTimer) clearTimeout(hardTimer);
+    }
+  }
+
+  /**
+   * Bound a body read (response.json()/text()) with a hard deadline. The soft
+   * AbortSignal normally aborts body reads too, but this incident proved the
+   * abort can fail to fire on a wedged socket — and a socket can wedge AFTER
+   * headers arrive. get() is backstopped by the cache-layer hard settle cap,
+   * but post() does NOT go through dedup, so an unbounded body read there
+   * could hang a money-path caller indefinitely.
+   */
+  private async readBodyBounded<T>(read: Promise<T>, ms: number, label: string): Promise<T> {
+    // Abandoned after the deadline — must never surface as an unhandled rejection.
+    read.catch(() => {});
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        read,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            const msg =
+              `[PacificaAdapter] HARD-TIMEOUT ${label} body read after ${ms}ms ` +
+              `(socket wedged after headers); abandoning read`;
+            console.error(msg);
+            appendTelemetry(msg);
+            reject(new Error(msg));
+          }, ms);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
    * GET request with credit-budget control, response cache, and in-flight dedup.
    *
    * Layered behavior (caller transparent):
@@ -2284,15 +2357,18 @@ export class PacificaAdapter implements ProtocolAdapter {
 
       let response: Response;
       try {
-        response = await fetch(url, {
-          method: 'GET',
-          headers: { 'Content-Type': 'application/json' },
-          // Node fetch has NO default timeout: one stalled connection here hung
-          // forever and wedged every caller awaiting it (incl. the AI Trader
-          // monitor tick, freezing ALL bot monitoring until restart). The signal
-          // also aborts the body read below.
-          signal: AbortSignal.timeout(15_000),
-        });
+        // Node fetch has NO default timeout: one stalled connection here hung
+        // forever and wedged every caller awaiting it (incl. the AI Trader
+        // monitor tick, freezing ALL bot monitoring until restart). The soft
+        // signal also aborts the body read below; the hard cap catches wedged
+        // sockets where the abort itself never fires.
+        response = await this.fetchBounded(
+          url,
+          { method: 'GET', headers: { 'Content-Type': 'application/json' } },
+          15_000,
+          20_000,
+          `GET ${path}`,
+        );
       } finally {
         // Pacifica meters the request whether it succeeds or fails (including
         // 4xx/5xx), so always record the spend.
@@ -2613,29 +2689,39 @@ export class PacificaAdapter implements ProtocolAdapter {
 
     let response: Response;
     try {
-      response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        // Generous (money path — aborting an order POST leaves upstream state
-        // ambiguous, which callers already handle), but bounded: a hang here
-        // stranded auto-cycle bots in 'analyzing' forever. 30s is far beyond
-        // any healthy Pacifica response.
-        signal: AbortSignal.timeout(30_000),
-      });
+      // Generous (money path — aborting an order POST leaves upstream state
+      // ambiguous, which callers already handle), but bounded: a hang here
+      // stranded auto-cycle bots in 'analyzing' forever. 30s is far beyond
+      // any healthy Pacifica response; the 40s hard cap catches wedged
+      // sockets where the abort never fires.
+      response = await this.fetchBounded(
+        url,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+        30_000,
+        40_000,
+        `POST ${path}`,
+      );
     } finally {
       // POSTs also consume credits; charge default cost.
       pacificaQuota.record(path);
     }
 
     if (!response.ok) {
-      const errorBody = await response.text().catch(() => '');
+      const errorBody = await this.readBodyBounded(
+        response.text(),
+        10_000,
+        `POST ${path} error-body`,
+      ).catch(() => '');
       throw new Error(
         `PacificaAdapter POST ${path}: ${response.status} ${response.statusText} — ${errorBody}`,
       );
     }
 
-    const json = await response.json();
+    const json = await this.readBodyBounded(response.json(), 10_000, `POST ${path}`);
     const data = this.unwrapEnvelope(json);
 
     // Invalidate caches whose contents are mutated by this write so that the

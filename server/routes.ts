@@ -20457,8 +20457,32 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
   app.get("/api/prices", async (req, res) => {
     try {
-      const prices = await getAllPrices();
-      res.json(prices);
+      // 2026-07-24 prod incident: getAllPrices() joined a wedged in-flight
+      // /book promise and hung past the proxy reap for 13+ hours — every
+      // price-driven surface went dark ("$--", $0.00 PnL). The adapter now
+      // guarantees settlement, but this display route must NEVER hang
+      // regardless: race the live sweep against a short deadline and fall
+      // back to the cached snapshot (stale-ok, display-only).
+      const DEADLINE_MS = 10_000;
+      let deadlineTimer: NodeJS.Timeout | undefined;
+      const deadline = new Promise<null>((resolve) => {
+        deadlineTimer = setTimeout(() => resolve(null), DEADLINE_MS);
+        deadlineTimer.unref?.();
+      });
+      const sweep = getAllPrices();
+      // The sweep may settle (or reject) after we've already responded.
+      sweep.catch(() => {});
+      // A rejecting sweep also falls back to the cached snapshot (display
+      // route: stale prices beat a 500).
+      const result = await Promise.race([sweep, deadline]).catch(() => null);
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      if (result !== null) {
+        return res.json(result);
+      }
+      console.warn(`[prices] live sweep exceeded ${DEADLINE_MS}ms or failed — serving cached snapshot`);
+      const markets = await getAllPerpMarkets(false).catch(() => []);
+      const cached = getCachedDisplayPrices(markets.map((m) => m.symbol));
+      res.json(cached);
     } catch (error) {
       console.error("Get prices error:", error);
       res.status(500).json({ error: "Failed to fetch prices" });

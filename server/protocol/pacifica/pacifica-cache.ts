@@ -18,11 +18,32 @@
  * we'll need a shared cache (e.g. Redis) — that is Phase C work, not this PR.
  */
 
+import { appendTelemetry } from '../../telemetry';
+
 interface CacheEntry {
   data: any;
   fetchedAt: number;
   expiresAt: number;
 }
+
+/**
+ * Hard settle cap for in-flight producers (2026-07-24 prod incident).
+ *
+ * A Pacifica /book fetch hung forever DESPITE its AbortSignal.timeout —
+ * Node/undici can wedge in socket states where the abort never fires. The
+ * dedup entry for that key then never cleaned up (cleanup runs on settle),
+ * and every subsequent caller joined the dead promise: /api/prices hung for
+ * 13+ hours, the price cache expired, and the whole dashboard went dark
+ * ("$--" prices, $0.00 PnL / bot equity).
+ *
+ * This cap guarantees the shared in-flight promise ALWAYS settles: if the
+ * producer has not settled within HARD_SETTLE_MS, the shared promise rejects
+ * for all joiners and the entry is removed so the next caller starts fresh.
+ * Generous by design — every legitimate path through the adapter (quota wait
+ * ≤8s + hard fetch cap 20s + body read) finishes well under it, so this only
+ * ever fires on a genuinely wedged producer.
+ */
+const HARD_SETTLE_MS = 60_000;
 
 /**
  * TTL configuration per endpoint, in milliseconds.
@@ -69,6 +90,7 @@ class PacificaCache {
   private hits = 0;
   private misses = 0;
   private dedupedJoins = 0;
+  private hardCapReleases = 0;
 
   ttlFor(path: string): number {
     const cleanPath = path.split('?')[0];
@@ -133,7 +155,27 @@ class PacificaCache {
       this.dedupedJoins += 1;
       return existing as Promise<T>;
     }
-    const promise = producer().finally(() => {
+    const produced = producer();
+    // If the hard cap fires, the abandoned producer may still settle later —
+    // its rejection must never surface as an unhandled rejection.
+    produced.catch(() => {});
+    let hardTimer: NodeJS.Timeout | undefined;
+    const promise = Promise.race([
+      produced,
+      new Promise<never>((_, reject) => {
+        hardTimer = setTimeout(() => {
+          this.hardCapReleases += 1;
+          const msg =
+            `[pacifica-cache] in-flight ${key} exceeded ${HARD_SETTLE_MS}ms hard cap ` +
+            `(producer never settled — wedged socket?); releasing all waiters`;
+          console.error(msg);
+          appendTelemetry(msg);
+          reject(new Error(msg));
+        }, HARD_SETTLE_MS);
+        hardTimer.unref?.();
+      }),
+    ]).finally(() => {
+      if (hardTimer) clearTimeout(hardTimer);
       this.inflight.delete(key);
     });
     this.inflight.set(key, promise);
@@ -156,6 +198,7 @@ class PacificaCache {
     hits: number;
     misses: number;
     dedupedJoins: number;
+    hardCapReleases: number;
     hitRatePct: number;
   } {
     const total = this.hits + this.misses;
@@ -165,6 +208,7 @@ class PacificaCache {
       hits: this.hits,
       misses: this.misses,
       dedupedJoins: this.dedupedJoins,
+      hardCapReleases: this.hardCapReleases,
       hitRatePct: total > 0 ? Math.round((this.hits / total) * 100) : 0,
     };
   }
@@ -173,6 +217,7 @@ class PacificaCache {
     this.hits = 0;
     this.misses = 0;
     this.dedupedJoins = 0;
+    this.hardCapReleases = 0;
   }
 }
 
