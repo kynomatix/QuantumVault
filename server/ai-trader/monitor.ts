@@ -139,11 +139,33 @@ const bracketReplaceAttempted = new Set<string>();
 const autoNextTimers = new Map<string, NodeJS.Timeout>();
 
 // AIT-CYCLE-OBSERVABILITY-01: per-bot in-flight cycle observability state.
-// Only one scheduled cycle per bot at a time (the timer entry is deleted before
-// runAutoCycle is invoked, ensuring no overlap). Key = botId.
-type CyclePhase = "initial" | "preflight" | "context" | "llm" | "execution" | "reschedule";
-interface CycleObs { id: string; phase: CyclePhase; exitReason: string; }
+// The autoNextTimers entry is deleted at the START of the callback (before
+// runAutoCycle is called), so the timer itself does not overlap. However, a
+// slow cycle can remain in-flight while the cadence-audit arms a new boundary
+// timer — that new timer may fire and produce a second, concurrent obs entry
+// for the same bot. Each obs carries its own closure-owned identity and settle
+// idempotency guard; _cycleObs holds only the LATEST obs per bot (for
+// runAutoCycle to look up), while _allActiveObs retains every in-flight obs
+// for shutdown cleanup. Key = botId.
+type CyclePhase = "initial" | "preflight" | "context" | "llm" | "execution";
+type CycleExitReason =
+  | "status_gate" | "adapter_missing" | "gate_skip" | "paused"
+  | "stale_data"
+  | "llm_timeout" | "llm_gateway" | "llm_malformed"
+  | "guardrail_rejected" | "flat" | "close_no_position"
+  | "exec_rejected" | "entry_open" | "thrown" | "unclassified";
+interface CycleObs {
+  id: string;
+  phase: CyclePhase;
+  exitReason: CycleExitReason;
+  /** Unref'd 60 s watchdog handle; cleared on settle or shutdown. */
+  watchdog: NodeJS.Timeout | null;
+  /** Set by stopAiTraderMonitor so late-settling promises emit no stale lines. */
+  stopped: boolean;
+}
 const _cycleObs = new Map<string, CycleObs>();
+/** All in-flight obs for every bot — used by shutdown to clear every watchdog. */
+const _allActiveObs = new Set<CycleObs>();
 /**
  * Per-bot re-entrancy guard so a slow bot can't be processed by two ticks at
  * once. Maps botId → claim timestamp: an entry older than BOT_IN_FLIGHT_WEDGE_MS
@@ -1394,32 +1416,36 @@ export function scheduleAutoNext(botId: string, timeframe: string): void {
   const delay = (Math.floor(now / tfMs) + 1) * tfMs - now + 2_000;
   const timer = setTimeout(() => {
     autoNextTimers.delete(botId);
-    // AIT-CYCLE-OBSERVABILITY-01: scheduled-cycle observability wrapper.
-    // Owned exclusively by this timer callback; direct runAutoCycle calls
-    // remain unobserved by design (see WO requirement 9).
+    // AIT-CYCLE-OBSERVABILITY-01: per-cycle observability closure. Each timer
+    // callback owns its obs entry; direct runAutoCycle calls are unobserved.
     const cycleStart = Date.now();
     const cycleId = `${botId.slice(0, 8)}-${cycleStart}`;
-    const obs: CycleObs = { id: cycleId, phase: "initial", exitReason: "status_gate" };
+    const obs: CycleObs = { id: cycleId, phase: "initial", exitReason: "status_gate", watchdog: null, stopped: false };
     _cycleObs.set(botId, obs);
+    _allActiveObs.add(obs);
     appendTelemetry(`[AIT-OBS] cycle_start cid=${cycleId} tf=${timeframe} ts=${cycleStart}`);
-    // Unref'd slow-cycle watchdog: fires once at 60 s if the cycle is still
-    // unsettled; it never cancels, retries or mutates anything.
+    // Unref'd slow-cycle watchdog: fires once at 60 s if still unsettled.
+    // Never cancels, retries, or mutates trading state.
     let settled = false;
-    const watchdog = setTimeout(() => {
-      if (!settled) {
+    obs.watchdog = setTimeout(() => {
+      if (!settled && !obs.stopped) {
         appendTelemetry(
           `[AIT-OBS] cycle_slow cid=${cycleId} elapsed_ms=${Date.now() - cycleStart} phase=${obs.phase}`
         );
       }
     }, 60_000);
-    if (typeof watchdog.unref === "function") watchdog.unref();
-    const settle = (exitOverride?: string): void => {
-      if (settled) return; // guard: exactly one terminal line per cycle
+    if (typeof obs.watchdog.unref === "function") obs.watchdog.unref();
+    const settle = (exitOverride?: CycleExitReason): void => {
+      if (settled || obs.stopped) return; // guard: one terminal per cycle; none after stop
       settled = true;
-      clearTimeout(watchdog);
+      clearTimeout(obs.watchdog ?? undefined);
+      _allActiveObs.delete(obs);
       if (_cycleObs.get(botId) === obs) _cycleObs.delete(botId);
+      // rearmed: a future cadence timer exists at settlement time. May have been armed
+      // by this cycle or by a concurrent callback for the same bot (overlap window).
+      const rearmed = autoNextTimers.has(botId);
       appendTelemetry(
-        `[AIT-OBS] cycle_end cid=${cycleId} elapsed_ms=${Date.now() - cycleStart} phase=${obs.phase} exit=${exitOverride ?? obs.exitReason}`
+        `[AIT-OBS] cycle_end cid=${cycleId} elapsed_ms=${Date.now() - cycleStart} phase=${obs.phase} exit=${exitOverride ?? obs.exitReason} rearmed=${rearmed}`
       );
     };
     runAutoCycle(botId).then(() => {
@@ -1611,7 +1637,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
           return;
         }
 
-        if (_obs) { _obs.phase = "llm"; _obs.exitReason = "flat"; }
+        if (_obs) { _obs.phase = "llm"; _obs.exitReason = "unclassified"; }
         llmCalls++;
         const decision = await runDecision({ bot, apiKey, context, adapter });
         // Same no-trade taxonomy as the fixed-bot path below; narrowed inline so
@@ -1646,12 +1672,26 @@ export async function runAutoCycle(botId: string): Promise<void> {
           return; // position open — 15s loop takes over
         }
 
-        // No-trade or failed call: reset to idle; loop will try the next eligible candidate.
+        // No-trade or failed call — classify truthfully before trying the next candidate.
+        if (_obs) {
+          if (!decision.ok) {
+            _obs.exitReason = decision.reason === "timeout" ? "llm_timeout"
+              : decision.reason === "gateway" ? "llm_gateway"
+              : "llm_malformed";
+          } else if (decision.rejected) {
+            _obs.exitReason = "guardrail_rejected";
+          } else if (clamped?.action === "flat") {
+            _obs.exitReason = "flat";
+          } else {
+            _obs.exitReason = clamped ? "close_no_position" : "unclassified";
+          }
+        }
         await storage.updateAiTraderBot(bot.id, { status: "idle" });
       }
 
       // All eligible candidates tried within the call cap — no entry this boundary.
-      if (_obs) _obs.exitReason = "flat";
+      // exitReason already reflects the last candidate's outcome from the
+      // per-iteration classification above; do not overwrite with a blanket "flat".
       scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
       return;
     }
@@ -1677,12 +1717,25 @@ export async function runAutoCycle(botId: string): Promise<void> {
       return;
     }
 
-    if (_obs) { _obs.phase = "llm"; _obs.exitReason = "flat"; }
+    if (_obs) { _obs.phase = "llm"; _obs.exitReason = "unclassified"; }
     const decision = await runDecision({ bot, apiKey, context, adapter });
     if (!decision.ok || decision.rejected || !decision.clamped || (decision.clamped.action !== "long" && decision.clamped.action !== "short")) {
-      // Malformed / guardrail-rejected / flat / close-with-no-position — all
-      // clean no-trade cycles: back to idle, try again next candle.
-      // exitReason stays "flat"
+      // Classify the actual no-trade outcome before the common return so the
+      // terminal line is truthful (ok:false=timeout/gateway/malformed,
+      // rejected=guardrail, flat action=flat, other action=close_no_position).
+      if (_obs) {
+        if (!decision.ok) {
+          _obs.exitReason = decision.reason === "timeout" ? "llm_timeout"
+            : decision.reason === "gateway" ? "llm_gateway"
+            : "llm_malformed";
+        } else if (decision.rejected) {
+          _obs.exitReason = "guardrail_rejected";
+        } else if (decision.clamped?.action === "flat") {
+          _obs.exitReason = "flat";
+        } else {
+          _obs.exitReason = decision.clamped ? "close_no_position" : "unclassified";
+        }
+      }
       await storage.updateAiTraderBot(bot.id, { status: "idle" });
       scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
       return;
@@ -2416,6 +2469,14 @@ export function stopAiTraderMonitor(): void {
   bracketReplaceAttempted.clear();
   botInFlight.clear();
   preOpenFirstSeen.clear();
+  // Clear every outstanding observability watchdog so no stale slow/terminal
+  // lines can fire after shutdown. _allActiveObs covers overlapping in-flight
+  // cycles that are no longer the latest entry in _cycleObs.
+  for (const obs of _allActiveObs) {
+    if (obs.watchdog !== null) clearTimeout(obs.watchdog);
+    obs.stopped = true;
+  }
+  _allActiveObs.clear();
   _cycleObs.clear();
   // Stop the market scanner (shadow-mode; no trading) in lockstep with the monitor
   // so tests and server shutdown always tear down both subsystems together.

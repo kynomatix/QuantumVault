@@ -1909,6 +1909,215 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     expect(obsTelLines()).toHaveLength(0);
     expect(vi.getTimerCount()).toBe(1); // audit-armed timer present
   });
+
+  // --- LLM failure taxonomy: ok:false must never be reported as flat -----------
+
+  it("ok:false reason=timeout → exit=llm_timeout (never flat)", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    armFlatCycle("bot-obs-timeout");
+    runDecisionMock.mockResolvedValue({ ok: false, reason: "timeout", detail: "G12 60 s budget exceeded" });
+
+    scheduleAutoNext("bot-obs-timeout", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    expect(endLines()).toHaveLength(1);
+    expect(endLines()[0]).toContain("exit=llm_timeout");
+    expect(endLines()[0]).not.toContain("exit=flat");
+    expect(endLines()[0]).toContain("phase=llm");
+  });
+
+  it("ok:false reason=gateway → exit=llm_gateway (never flat)", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    armFlatCycle("bot-obs-gw");
+    runDecisionMock.mockResolvedValue({ ok: false, reason: "gateway", detail: "502 from provider" });
+
+    scheduleAutoNext("bot-obs-gw", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    expect(endLines()).toHaveLength(1);
+    expect(endLines()[0]).toContain("exit=llm_gateway");
+    expect(endLines()[0]).not.toContain("exit=flat");
+    expect(endLines()[0]).toContain("phase=llm");
+  });
+
+  it("ok:false reason=malformed → exit=llm_malformed (never flat)", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    armFlatCycle("bot-obs-malformed");
+    runDecisionMock.mockResolvedValue({ ok: false, reason: "malformed", detail: "zod parse failed after retry" });
+
+    scheduleAutoNext("bot-obs-malformed", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    expect(endLines()).toHaveLength(1);
+    expect(endLines()[0]).toContain("exit=llm_malformed");
+    expect(endLines()[0]).not.toContain("exit=flat");
+    expect(endLines()[0]).toContain("phase=llm");
+  });
+
+  it("guardrail rejection → exit=guardrail_rejected (never flat)", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    armFlatCycle("bot-obs-guardrail");
+    runDecisionMock.mockResolvedValue({
+      ok: true, decisionId: "dec-rej", decision: {}, clamped: null,
+      rejected: true, violations: [{ code: "G1", detail: "max leverage exceeded" }], latencyMs: 10,
+    });
+
+    scheduleAutoNext("bot-obs-guardrail", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    expect(endLines()).toHaveLength(1);
+    expect(endLines()[0]).toContain("exit=guardrail_rejected");
+    expect(endLines()[0]).not.toContain("exit=flat");
+    expect(endLines()[0]).toContain("phase=llm");
+  });
+
+  it("executeDecision ok:false → exit=exec_rejected", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    const bot = makeBot({ id: "bot-obs-execrej", status: "idle", mode: "auto", autoNext: true, graduationState: "graduated" });
+    getBotMock.mockResolvedValue(bot);
+    getAdapterMock.mockReturnValue(makeAdapter());
+    getWalletMock.mockResolvedValue({ address: "WALLET_X", agentPublicKey: AGENT_PUBKEY });
+    getSessionByWalletMock.mockReturnValue({ session: { umk: Buffer.from("umk") } });
+    getLlmCiphertextMock.mockResolvedValue("ct");
+    decryptLlmKeyMock.mockReturnValue(Buffer.from("sk"));
+    buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
+    const clamped = { action: "long", sizeBase: 2, marginUsdc: 100, stopLossPrice: 145, takeProfitPrice: 160 };
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "dec-execrej", decision: {}, clamped, rejected: false, violations: [], latencyMs: 5 });
+    executeDecisionMock.mockResolvedValue({ ok: false, reason: "rejected", detail: "position size below venue minimum" });
+
+    scheduleAutoNext("bot-obs-execrej", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    expect(endLines()).toHaveLength(1);
+    expect(endLines()[0]).toContain("exit=exec_rejected");
+    expect(endLines()[0]).toContain("phase=execution");
+  });
+
+  // --- rearmed field -----------------------------------------------------------
+
+  it("flat/stale paths that reschedule emit rearmed=true in the terminal line", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    armFlatCycle("bot-obs-rearmed");
+    // runDecisionMock returns flat (from armFlatCycle) → scheduleAutoNext called inside runAutoCycle
+
+    scheduleAutoNext("bot-obs-rearmed", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    expect(endLines()).toHaveLength(1);
+    expect(endLines()[0]).toContain("rearmed=true");
+  });
+
+  it("paused path emits rearmed=false (no future timer set by paused exit)", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    const bot = makeBot({ id: "bot-obs-paused", status: "idle", mode: "auto", autoNext: true });
+    getBotMock.mockResolvedValue(bot);
+    getAdapterMock.mockReturnValue(makeAdapter());
+    getWalletMock.mockResolvedValue({ address: "WALLET_X", agentPublicKey: AGENT_PUBKEY });
+    getSessionByWalletMock.mockReturnValue({ session: { umk: Buffer.from("umk") } });
+    // No LLM ciphertext → bot pauses with no_api_key (no scheduleAutoNext call)
+    getLlmCiphertextMock.mockResolvedValue(null);
+
+    scheduleAutoNext("bot-obs-paused", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    expect(endLines()).toHaveLength(1);
+    expect(endLines()[0]).toContain("exit=paused");
+    expect(endLines()[0]).toContain("rearmed=false");
+  });
+
+  it("thrown path emits rearmed=false (pendingReconciliation instead of timer)", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    getBotMock.mockRejectedValue(new Error("venue-outage"));
+
+    scheduleAutoNext("bot-obs-thrown-rearmed", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    expect(endLines()).toHaveLength(1);
+    expect(endLines()[0]).toContain("exit=thrown");
+    expect(endLines()[0]).toContain("rearmed=false");
+  });
+
+  // --- Overlapping cycles: coherent independent identities ---------------------
+
+  it("overlapping cycles for the same bot: independent cids, phases, and terminal lines; rearmed read from timer map without cross-cycle mutation", async () => {
+    const { scheduleAutoNext, runMonitorTickOnce } = await importMonitor();
+
+    // Cycle 1: timer fires, cycle hangs indefinitely at bot read
+    let releaseCycle1!: (v: unknown) => void;
+    getBotMock.mockImplementationOnce(() => new Promise((res) => { releaseCycle1 = res; }));
+
+    scheduleAutoNext("bot-obs-overlap", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    // Only one start line at this point — extract cid1 from it directly.
+    expect(startLines()).toHaveLength(1);
+    const cid1 = startLines()[0].match(/cid=(\S+)/)?.[1];
+    expect(cid1).toBeTruthy();
+    expect(endLines()).toHaveLength(0); // cycle 1 in-flight
+
+    // Cadence audit arms cycle 2's timer; cycle 2 runs fast (flat, resolves immediately)
+    const botFast = makeBot({ id: "bot-obs-overlap", status: "idle", mode: "auto", autoNext: true, graduationState: "graduated" });
+    getActiveBotsMock.mockResolvedValue([botFast]);
+    getBotMock.mockResolvedValue(botFast);
+    getAdapterMock.mockReturnValue(makeAdapter());
+    getWalletMock.mockResolvedValue({ address: "WALLET_X", agentPublicKey: AGENT_PUBKEY });
+    getSessionByWalletMock.mockReturnValue({ session: { umk: Buffer.from("umk") } });
+    getLlmCiphertextMock.mockResolvedValue("ct");
+    decryptLlmKeyMock.mockReturnValue(Buffer.from("sk"));
+    buildContextMock.mockResolvedValue({ system: "s", user: "u", contextDigest: { price: 100 } });
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "d2", decision: {}, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
+
+    await runMonitorTickOnce(); // arms cycle 2 boundary timer
+    // Advance to fire cycle 2's timer — cycle 1 is still hanging
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    const cid2 = startLines().find((l) => !l.includes(cid1!))?.match(/cid=(\S+)/)?.[1];
+    expect(cid2).toBeTruthy();
+    expect(cid1).not.toEqual(cid2);
+
+    // Cycle 2 should have settled (fast flat)
+    const end2 = endLines().find((l) => l.includes(cid2!));
+    expect(end2).toBeTruthy();
+    // Cycle 1 has not yet settled
+    const end1 = endLines().find((l) => l.includes(cid1!));
+    expect(end1).toBeFalsy();
+
+    // Release cycle 1 → status gate (non-idle bot)
+    releaseCycle1(makeBot({ id: "bot-obs-overlap", status: "open" }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    const end1After = endLines().find((l) => l.includes(cid1!));
+    expect(end1After).toBeTruthy();
+    expect(end1After).toContain("exit=status_gate");
+    // rearmed on cycle 1's terminal is read from the timer map at settlement time
+    // (no cross-cycle mutation: the flag comes from autoNextTimers.has, not from cycle 2's state)
+    expect(end1After).toMatch(/rearmed=(true|false)/);
+  });
+
+  // --- Shutdown cleanup --------------------------------------------------------
+
+  it("stopAiTraderMonitor clears the outstanding 60 s watchdog; advancing time afterward emits no stale slow or terminal line", async () => {
+    const { scheduleAutoNext, stopAiTraderMonitor } = await importMonitor();
+
+    // Hang the cycle so the watchdog is armed but has not fired yet
+    getBotMock.mockImplementation(() => new Promise(() => {})); // never resolves
+
+    scheduleAutoNext("bot-obs-stop", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000); // timer fires; watchdog armed; cycle hangs
+
+    expect(startLines()).toHaveLength(1);
+    expect(endLines()).toHaveLength(0);
+    appendTelemetryMock.mockClear();
+
+    // Stop the monitor — must clear the watchdog and mark obs stopped
+    stopAiTraderMonitor();
+
+    // Advancing past the 60 s watchdog must produce no slow or terminal line
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(slowLines()).toHaveLength(0);
+    expect(endLines()).toHaveLength(0);
+    expect(appendTelemetryMock).not.toHaveBeenCalled();
+  });
 });
 
 // --- Breakeven protect ---------------------------------------------------------------
