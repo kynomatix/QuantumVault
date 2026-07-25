@@ -20459,30 +20459,57 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     try {
       // 2026-07-24 prod incident: getAllPrices() joined a wedged in-flight
       // /book promise and hung past the proxy reap for 13+ hours — every
-      // price-driven surface went dark ("$--", $0.00 PnL). The adapter now
-      // guarantees settlement, but this display route must NEVER hang
-      // regardless: race the live sweep against a short deadline and fall
-      // back to the cached snapshot (stale-ok, display-only).
-      const DEADLINE_MS = 10_000;
+      // price-driven surface went dark ("$--", $0.00 PnL).
+      //
+      // Fix contract:
+      //   1. getAllPrices() is single-flight: concurrent callers join the
+      //      one owned sweep rather than each starting a new one. A consumer
+      //      that times out below still holds a reference to the running
+      //      sweep; the sweep continues and the next poll joins it.
+      //   2. The consumer deadline is a display-layer guard only. After it
+      //      fires the fallback is PURELY IN-MEMORY (getCachedMarketSymbols +
+      //      getCachedPrices). No network request, no registry refresh, no DB.
+      //   3. If the in-memory price cache is cold (nothing usable) we return a
+      //      truthful 503 rather than an empty {} that causes prices and
+      //      unrealised PnL to appear as genuine zero.
+      const CONSUMER_DEADLINE_MS = 10_000;
       let deadlineTimer: NodeJS.Timeout | undefined;
       const deadline = new Promise<null>((resolve) => {
-        deadlineTimer = setTimeout(() => resolve(null), DEADLINE_MS);
+        deadlineTimer = setTimeout(() => resolve(null), CONSUMER_DEADLINE_MS);
         deadlineTimer.unref?.();
       });
-      const sweep = getAllPrices();
-      // The sweep may settle (or reject) after we've already responded.
+
+      const adapter = getDefaultAdapter();
+      // Single-flight: join an existing owned sweep if one is running.
+      const sweep = adapter.getAllPrices();
+      // Suppress unhandled rejection for this consumer's reference if the
+      // consumer deadline fires before the sweep settles. The owned sweep
+      // inside the adapter continues regardless and will be joined by the
+      // next caller.
       sweep.catch(() => {});
-      // A rejecting sweep also falls back to the cached snapshot (display
-      // route: stale prices beat a 500).
+
       const result = await Promise.race([sweep, deadline]).catch(() => null);
       if (deadlineTimer) clearTimeout(deadlineTimer);
+
       if (result !== null) {
         return res.json(result);
       }
-      console.warn(`[prices] live sweep exceeded ${DEADLINE_MS}ms or failed — serving cached snapshot`);
-      const markets = await getAllPerpMarkets(false).catch(() => []);
-      const cached = getCachedDisplayPrices(markets.map((m) => m.symbol));
-      res.json(cached);
+
+      // Consumer deadline fired. Serve purely from the in-memory snapshot —
+      // no network, no registry refresh, no DB query.
+      const symbols = adapter.getCachedMarketSymbols?.() ?? [];
+      const cached = adapter.getCachedPrices?.(symbols) ?? {};
+      const cacheSize = Object.keys(cached).length;
+
+      if (cacheSize === 0) {
+        // Cold cache: returning {} would make every price appear as genuine
+        // zero ($0.00 PnL). Return a truthful unavailable signal instead.
+        appendTelemetry('[prices] consumer timeout: cold cache — serving 503 unavailable');
+        return res.status(503).json({ error: 'prices temporarily unavailable', degraded: true });
+      }
+
+      appendTelemetry(`[prices] consumer timeout: serving ${cacheSize} stale cached prices`);
+      return res.json(cached);
     } catch (error) {
       console.error("Get prices error:", error);
       res.status(500).json({ error: "Failed to fetch prices" });

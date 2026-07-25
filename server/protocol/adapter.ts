@@ -135,6 +135,13 @@ export interface ProtocolAdapter {
    * this. Callers fall back to { oldestFetchedAt: null } when absent.
    */
   getCachedPriceMeta?(internalSymbols: string[]): { oldestFetchedAt: number | null };
+  /**
+   * In-memory market symbol list. Pure read — no network, no quota.
+   * Used by the /api/prices fallback to enumerate cached prices without
+   * any upstream work after a consumer deadline fires.
+   * Optional: absent on adapters that do not maintain an internal market cache.
+   */
+  getCachedMarketSymbols?(): string[];
   getOrderbook(internalSymbol: string, depth?: number): Promise<OrderbookSnapshot>;
   getFundingRate(internalSymbol: string): Promise<FundingRateInfo>;
   getMaintenanceMarginWeight(internalSymbol: string): number;

@@ -159,6 +159,10 @@ export class PacificaAdapter implements ProtocolAdapter {
   // each firing their own (which would yield duplicate POSTs and racy flag
   // writes). Keyed on agent public key (the user's Pacifica main wallet).
   private enrollmentInFlight: Map<string, Promise<{ builderApproved: boolean; referralClaimed: boolean }>> = new Map();
+  // Single-flight ownership for the full-market price sweep. At most one
+  // sweep runs at a time; concurrent callers join this promise rather than
+  // starting a replacement. Cleared in .finally() when the sweep settles.
+  private _sweepOwner: Promise<Record<string, number>> | null = null;
 
   constructor(config?: Partial<PacificaAdapterConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -373,7 +377,37 @@ export class PacificaAdapter implements ProtocolAdapter {
     return { oldestFetchedAt: oldest };
   }
 
-  async getAllPrices(): Promise<Record<string, number>> {
+  /**
+   * In-memory market symbol list. Pure read — no network, no quota.
+   * Used by the /api/prices fallback to enumerate cached prices without any
+   * upstream work after a consumer deadline fires.
+   */
+  getCachedMarketSymbols(): string[] {
+    const markets = this.marketCache?.data;
+    if (!markets) return [];
+    return markets.map((m) => m.internalSymbol);
+  }
+
+  getAllPrices(): Promise<Record<string, number>> {
+    // NOT async: must return the stored Promise instance directly so all
+    // concurrent callers get the SAME object reference (async functions always
+    // allocate a new Promise wrapper, breaking the identity guarantee).
+    //
+    // Single-flight: join the running sweep rather than starting a replacement.
+    // Timed-out display consumers (e.g. /api/prices with a 10 s deadline) fall
+    // back to getCachedPrices(); the owned sweep continues and future callers
+    // join it. A new sweep starts only once the owned one has fully settled.
+    if (this._sweepOwner !== null) {
+      return this._sweepOwner;
+    }
+    const sweep = this._runAllPrices().finally(() => {
+      this._sweepOwner = null;
+    });
+    this._sweepOwner = sweep;
+    return sweep;
+  }
+
+  private async _runAllPrices(): Promise<Record<string, number>> {
     const result: Record<string, number> = {};
 
     const markets = this.marketCache?.data || [];
@@ -2212,18 +2246,31 @@ export class PacificaAdapter implements ProtocolAdapter {
     hardMs: number,
     label: string,
   ): Promise<Response> {
-    const fetchPromise = fetch(url, { ...init, signal: AbortSignal.timeout(softMs) });
-    // Abandoned after the hard cap — must never surface as an unhandled rejection.
+    // Use an explicit AbortController so abort() is driven by a JS-level
+    // setTimeout rather than the system-managed AbortSignal.timeout(). In
+    // the 2026-07-24 prod incident AbortSignal.timeout never fired on a
+    // wedged socket; a plain setTimeout always fires regardless of socket
+    // state because it runs entirely in the JS event loop.
+    const controller = new AbortController();
+    const softTimer = setTimeout(() => controller.abort(), softMs);
+    const fetchPromise = fetch(url, { ...init, signal: controller.signal });
+    // Suppress: once the hard cap has moved on, we do not want an unhandled
+    // rejection if the late fetch eventually settles.
     fetchPromise.catch(() => {});
+
     let hardTimer: NodeJS.Timeout | undefined;
     try {
       return await Promise.race([
         fetchPromise,
         new Promise<never>((_, reject) => {
           hardTimer = setTimeout(() => {
+            // Belt-and-suspenders: the soft timer should already have called
+            // abort(). If the socket is wedged and the soft abort did not
+            // propagate, re-request abort here before rejecting.
+            controller.abort();
             const msg =
               `[PacificaAdapter] HARD-TIMEOUT ${label} after ${hardMs}ms — ` +
-              `AbortSignal.timeout(${softMs}ms) never fired (wedged socket); abandoning request`;
+              `abort signal did not propagate (wedged socket); abort re-requested`;
             console.error(msg);
             appendTelemetry(msg);
             reject(new Error(msg));
@@ -2232,6 +2279,10 @@ export class PacificaAdapter implements ProtocolAdapter {
         }),
       ]);
     } finally {
+      // Cancel both timers. Do NOT call controller.abort() here on the normal
+      // success path — the caller still needs to read the response body;
+      // aborting after headers arrive would corrupt the body stream.
+      clearTimeout(softTimer);
       if (hardTimer) clearTimeout(hardTimer);
     }
   }
@@ -2387,13 +2438,18 @@ export class PacificaAdapter implements ProtocolAdapter {
             return stale.data;
           }
         }
-        const errorBody = await response.text().catch(() => '');
+        // Bound the error-body read: the soft AbortSignal controls the header
+        // phase but may not propagate to the body on a wedged socket.
+        const errorBody = await this.readBodyBounded(
+          response.text(), 10_000, `GET ${path} error-body`,
+        ).catch(() => '');
         throw new Error(
           `PacificaAdapter GET ${path}: ${response.status} ${response.statusText} — ${errorBody}`,
         );
       }
 
-      const json = await response.json();
+      // Bound the success-body read for the same reason.
+      const json = await this.readBodyBounded(response.json(), 10_000, `GET ${path}`);
       const data = this.unwrapEnvelope(json);
       pacificaCache.set(cacheKey, path, data);
       return data;
@@ -2689,39 +2745,29 @@ export class PacificaAdapter implements ProtocolAdapter {
 
     let response: Response;
     try {
-      // Generous (money path — aborting an order POST leaves upstream state
-      // ambiguous, which callers already handle), but bounded: a hang here
-      // stranded auto-cycle bots in 'analyzing' forever. 30s is far beyond
-      // any healthy Pacifica response; the 40s hard cap catches wedged
-      // sockets where the abort never fires.
-      response = await this.fetchBounded(
-        url,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        },
-        30_000,
-        40_000,
-        `POST ${path}`,
-      );
+      response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        // Generous (money path — aborting an order POST leaves upstream state
+        // ambiguous, which callers already handle), but bounded: a hang here
+        // stranded auto-cycle bots in 'analyzing' forever. 30s is far beyond
+        // any healthy Pacifica response.
+        signal: AbortSignal.timeout(30_000),
+      });
     } finally {
       // POSTs also consume credits; charge default cost.
       pacificaQuota.record(path);
     }
 
     if (!response.ok) {
-      const errorBody = await this.readBodyBounded(
-        response.text(),
-        10_000,
-        `POST ${path} error-body`,
-      ).catch(() => '');
+      const errorBody = await response.text().catch(() => '');
       throw new Error(
         `PacificaAdapter POST ${path}: ${response.status} ${response.statusText} — ${errorBody}`,
       );
     }
 
-    const json = await this.readBodyBounded(response.json(), 10_000, `POST ${path}`);
+    const json = await response.json();
     const data = this.unwrapEnvelope(json);
 
     // Invalidate caches whose contents are mutated by this write so that the
