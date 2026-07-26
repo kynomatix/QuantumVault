@@ -508,16 +508,32 @@ export async function buildWithdrawSolFromAgentTransaction(
   userWalletAddress: string,
   encryptedPrivateKey: Uint8Array,
   amountSol: number,
-): Promise<{ transaction: string; blockhash: string; lastValidBlockHeight: number; message: string }> {
+): Promise<{
+  transaction: string;
+  blockhash: string;
+  lastValidBlockHeight: number;
+  message: string;
+  /** Deterministic base58 signature embedded in the signed transaction (fee payer = agent). */
+  signature: string;
+  /** Exact positive safe-integer lamports encoded in the SystemProgram transfer. */
+  lamports: number;
+}> {
+  // Validate BEFORE touching keys, building, signing, or any RPC call.
+  if (!Number.isFinite(amountSol) || amountSol <= 0) {
+    throw new Error('Invalid withdraw amount: must be a finite positive SOL amount');
+  }
+  const lamports = Math.round(amountSol * LAMPORTS_PER_SOL);
+  if (lamports <= 0) {
+    throw new Error('Invalid withdraw amount: rounds to zero lamports');
+  }
+  if (!Number.isSafeInteger(lamports)) {
+    throw new Error('Invalid withdraw amount: exceeds safe lamport range');
+  }
+
   const connection = getConnection();
   const agentPubkey = new PublicKey(agentPublicKey);
   const userPubkey = new PublicKey(userWalletAddress);
   const agentKeypair = resolveAgentKeypair(encryptedPrivateKey);
-  
-  const lamports = Math.round(amountSol * LAMPORTS_PER_SOL);
-  if (lamports <= 0) {
-    throw new Error('Invalid withdraw amount');
-  }
   
   const transaction = new Transaction();
   
@@ -535,7 +551,15 @@ export async function buildWithdrawSolFromAgentTransaction(
   transaction.recentBlockhash = blockhash;
   
   transaction.sign(agentKeypair);
-  
+
+  // The fee payer's ed25519 signature is fixed the moment signing completes —
+  // it IS the transaction's on-chain signature no matter who broadcasts the
+  // bytes or when. Surfacing it lets callers write it ahead of any broadcast.
+  if (!transaction.signature) {
+    throw new Error('Signing produced no signature');
+  }
+  const signature = bs58.encode(transaction.signature);
+
   const serializedTx = transaction.serialize().toString('base64');
   
   return {
@@ -543,6 +567,8 @@ export async function buildWithdrawSolFromAgentTransaction(
     blockhash,
     lastValidBlockHeight,
     message: `Withdraw ${amountSol} SOL from agent wallet`,
+    signature,
+    lamports,
   };
 }
 
@@ -624,6 +650,155 @@ export async function executeAgentSolWithdraw(
   } catch (error: any) {
     return { success: false, error: error.message || 'Unknown error' };
   }
+}
+
+/**
+ * WO2B2A — durable native-SOL withdrawal primitive (NOT wired to any route yet).
+ *
+ * Write-ahead payload handed to the durability callback after signing and
+ * strictly before broadcast. The signature is the deterministic fee-payer
+ * signature embedded in the already-signed transaction bytes; lamports is the
+ * exact integer encoded in the SystemProgram transfer.
+ */
+export interface DurableSolWithdrawPrecommit {
+  signature: string;
+  blockhash: string;
+  lastValidBlockHeight: number;
+  lamports: number;
+}
+
+/**
+ * Mutually exclusive terminal states of the durable withdrawal:
+ * - 'confirmed'      — broadcast + clean confirmation; funds moved.
+ * - 'failed_on_chain'— transaction landed and FAILED on-chain (definite, not
+ *                      ambiguous); signature is authoritative.
+ * - 'ambiguous'      — the signed bytes may or may not land: send exception,
+ *                      RPC signature mismatch, or confirmation read failure
+ *                      AFTER the durability precommit. Carries the precomputed
+ *                      signature so recovery can reconcile by on-chain status.
+ * - 'not_broadcast'  — validation/build/callback failure BEFORE any send:
+ *                      definitely never broadcast, and this executor never
+ *                      will. Deliberately carries NO signature — there is no
+ *                      authoritative broadcast identity to act on.
+ */
+export type DurableSolWithdrawResult =
+  | { state: 'confirmed'; signature: string; lamports: number }
+  | { state: 'failed_on_chain'; signature: string; lamports: number; error: string }
+  | { state: 'ambiguous'; signature: string; lamports: number; error: string }
+  | { state: 'not_broadcast'; error: string };
+
+/**
+ * Durable agent SOL withdrawal: build + sign, persist the precomputed
+ * signature via the REQUIRED durability callback, then broadcast the exact
+ * signed bytes at most once.
+ *
+ * Invariants:
+ * - The callback runs exactly once, after signing, strictly before broadcast.
+ *   If it rejects, NOTHING was sent and nothing ever will be by this call.
+ * - After callback success the already-signed bytes are sent exactly once
+ *   (confirmed preflight). No rebuild, no re-sign, no internal retry — a
+ *   retry with a fresh blockhash would mint a SECOND spendable transaction.
+ * - The RPC-echoed signature must equal the precomputed one; any deviation is
+ *   treated as ambiguous for the precomputed signature and NEVER triggers a
+ *   replacement send.
+ * - Confirmation runs against the exact blockhash window the tx was signed
+ *   for. A confirmed on-chain error is a DEFINITE failure; a confirmation
+ *   transport failure is ambiguous.
+ *
+ * This primitive reads no balances/operations/positions and emits no equity
+ * events — the caller owns ledger semantics.
+ */
+export async function executeAgentSolWithdrawDurable(
+  agentPublicKey: string,
+  encryptedPrivateKey: Uint8Array,
+  userWalletAddress: string,
+  amountSol: number,
+  persistPrecommit: (precommit: DurableSolWithdrawPrecommit) => Promise<void>,
+): Promise<DurableSolWithdrawResult> {
+  const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+  if (typeof persistPrecommit !== 'function') {
+    return { state: 'not_broadcast', error: 'durability callback is required' };
+  }
+
+  let build: Awaited<ReturnType<typeof buildWithdrawSolFromAgentTransaction>>;
+  try {
+    build = await buildWithdrawSolFromAgentTransaction(
+      agentPublicKey,
+      userWalletAddress,
+      encryptedPrivateKey,
+      amountSol,
+    );
+  } catch (error) {
+    return { state: 'not_broadcast', error: `build failed: ${msg(error)}` };
+  }
+
+  const { signature: expectedSignature, blockhash, lastValidBlockHeight, lamports } = build;
+  const rawTx = Buffer.from(build.transaction, 'base64');
+
+  try {
+    await persistPrecommit({ signature: expectedSignature, blockhash, lastValidBlockHeight, lamports });
+  } catch (error) {
+    return { state: 'not_broadcast', error: `durability callback rejected: ${msg(error)}` };
+  }
+
+  // Beyond this point the precommitted signature governs: every failure is
+  // ambiguous (bytes may have reached the network) except a confirmed
+  // on-chain error, which is definite.
+  const connection = getConnection();
+
+  let returnedSignature: string;
+  try {
+    returnedSignature = await connection.sendRawTransaction(rawTx, {
+      skipPreflight: false,
+      preflightCommitment: 'confirmed',
+    });
+  } catch (error) {
+    return {
+      state: 'ambiguous',
+      signature: expectedSignature,
+      lamports,
+      error: `send failed after durability precommit: ${msg(error)}`,
+    };
+  }
+
+  if (returnedSignature !== expectedSignature) {
+    // Protocol anomaly. The bytes we handed over carry expectedSignature, so
+    // that is the only identity worth reconciling — and we must NEVER answer
+    // this with a second send.
+    return {
+      state: 'ambiguous',
+      signature: expectedSignature,
+      lamports,
+      error: `RPC returned signature ${returnedSignature} but the signed transaction embeds ${expectedSignature}; treating broadcast as ambiguous`,
+    };
+  }
+
+  let confirmation: Awaited<ReturnType<Connection['confirmTransaction']>>;
+  try {
+    confirmation = await connection.confirmTransaction(
+      { signature: expectedSignature, blockhash, lastValidBlockHeight },
+      'confirmed',
+    );
+  } catch (error) {
+    return {
+      state: 'ambiguous',
+      signature: expectedSignature,
+      lamports,
+      error: `confirmation failed: ${msg(error)}`,
+    };
+  }
+
+  if (confirmation.value.err) {
+    return {
+      state: 'failed_on_chain',
+      signature: expectedSignature,
+      lamports,
+      error: `Transaction failed on-chain: ${JSON.stringify(confirmation.value.err)}`,
+    };
+  }
+
+  return { state: 'confirmed', signature: expectedSignature, lamports };
 }
 
 // Transfer USDC from agent wallet to any Solana wallet (for profit sharing)
