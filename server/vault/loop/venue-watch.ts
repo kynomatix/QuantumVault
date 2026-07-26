@@ -3,7 +3,7 @@
  *
  * Samples the main SOL borrow market of venues we do NOT loop on yet, so the
  * owner's rates dialog can show what borrowing SOL costs elsewhere (Kamino,
- * Save, Loopscale, ...) next to our live Jupiter Lend vaults. This NEVER feeds
+ * Save, ...) next to our live Jupiter Lend vaults. This NEVER feeds
  * the picker, sizing, or any money path — the loop still only opens on
  * `LOOP_VAULT_ALLOWLIST` vaults.
  *
@@ -36,19 +36,16 @@ interface VenueWatchEntry {
 /**
  * Pinned from yields.llama.fi (main SOL market per venue).
  *
- * Loopscale (pinned 2026-07-06): pool 6b824912 is present in the DeFiLlama
- * pools API but absent from the lendBorrow API (no borrow-side data exposed).
- * Their API is also Cloudflare-protected with no public subdomain.
- * Shown as a fixed-note row so the table remains complete.
+ * Every entry here MUST have its pool UUID present in the lendBorrow API —
+ * a pool that only exists in the pools API renders permanently all-null.
+ * (Loopscale was removed 2026-07-26 for exactly that reason: pool 6b824912
+ * exists in the pools API but exposes no borrow-side data in lendBorrow, and
+ * their own API is Cloudflare-gated. Re-add only with a lendBorrow-backed
+ * UUID.)
  */
 const VENUE_WATCH_REGISTRY: readonly VenueWatchEntry[] = [
   { venue: "Kamino", llamaPool: "525b2dab-ea6a-4cbc-a07f-84ce561d1f83" },
   { venue: "Save",   llamaPool: "1170b465-309b-4026-b10d-abdf7b1ac369" },
-  {
-    venue: "Loopscale",
-    llamaPool: "6b824912-fb93-469c-ab3c-8cdcf7bb13a8",
-    note: "Fixed-rate order-book · borrow rate not publicly exposed",
-  },
 ] as const;
 
 export interface VenueSolBorrowReading {
