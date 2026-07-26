@@ -1204,15 +1204,18 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
           return { success: false, error: `Loop Open failed: ${msg}` };
         }
         if (loopOpenWriteaheadRecorded(opNow)) {
-          // WO1-C1 (SL-08): the main-open tx MAY be in flight — keep the row
-          // pending and PRESERVE the selector-eligible step + exact signature
-          // evidence. Record the failure text only; never overwrite with a
-          // generic unexpected-error step (the strict F4 selector rejects it,
-          // wedging automatic recovery). The reconciler resolves this from
-          // its exact recorded signature later.
-          if (opNow.status === "pending" && opNow.step) {
-            await failOp(opId, opNow.step, msg);
-          }
+          // WO1-C2 (SL-08): the main-open tx MAY be in flight — keep the row
+          // pending and do NOT mutate the op row AT ALL: no failed status, no
+          // step write, no error-only update. The reload above is only a
+          // SNAPSHOT and the borrow lock is only an in-process serializer: a
+          // sibling deployment (blue/green overlap) can finalize this op as
+          // succeeded between our reload and any write here, and a catch-side
+          // write would overwrite that terminal result. The selector-eligible
+          // step + exact signature evidence are already durable from the
+          // write-ahead; the reconciler classifies them on the next retry.
+          console.warn(
+            `[loop-executor] open outer-catch: op ${opId} carries main-open write-ahead evidence — leaving the durable record untouched (row ${lifecyclePositionId} stays pending): ${msg}`,
+          );
           return { success: false, error: `Loop Open failed: ${msg}` };
         }
         await restoreLoopPendingRow(lifecyclePositionId, lifecycleWasReuse);

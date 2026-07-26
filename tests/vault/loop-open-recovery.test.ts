@@ -1440,7 +1440,7 @@ describe("executeLoopOpen — outer-catch lifecycle repair", () => {
     expect(failWrites).toHaveLength(0);
   });
 
-  it("WO1-C1 fail closed: reloaded op carries write-ahead evidence → row NOT restored, step PRESERVED (never unexpected_error)", async () => {
+  it("WO1-C2 fail closed: reloaded op carries write-ahead evidence → op row NEVER mutated (no failed/step/error write), row stays pending", async () => {
     wirePipeline({ altThrows: true });
     vi.mocked(storage.getBorrowOperationById as any).mockResolvedValue(
       makeOpenOp({ sigs: [OPEN_SIG], meta: openMeta({ openTxSignature: OPEN_SIG }), step: "loop_sig_writeahead" }),
@@ -1450,11 +1450,17 @@ describe("executeLoopOpen — outer-catch lifecycle repair", () => {
 
     expect(res.success).toBe(false);
     expect(storage.updateBorrowPosition).not.toHaveBeenCalledWith("row-1", { status: "failed" }, "pending");
-    // Failure text recorded WITHOUT clobbering the selector-eligible step…
-    expect(storage.updateBorrowOperation).toHaveBeenCalledWith(
-      "open-op-1",
-      expect.objectContaining({ status: "failed", step: "loop_sig_writeahead" }),
-    );
+    // WO1-C2: the borrow lock is only an IN-PROCESS serializer — a sibling
+    // deployment may finalize this op concurrently, so the catch must not
+    // write the op row AT ALL: no failed status, no error-only update.
+    const catchSideWrites = vi
+      .mocked(storage.updateBorrowOperation as any)
+      .mock.calls.filter(
+        (c: unknown[]) =>
+          c[0] === "open-op-1" &&
+          ((c[1] as any)?.status === "failed" || (c[1] as any)?.error !== undefined),
+      );
+    expect(catchSideWrites).toHaveLength(0);
     // …and the generic step never touches an evidence-bearing record.
     expect(storage.updateBorrowOperation).not.toHaveBeenCalledWith(
       "open-op-1",
@@ -1472,7 +1478,13 @@ describe("executeLoopOpen — outer-catch lifecycle repair", () => {
     expect(first.success).toBe(false);
     expect(first.error).toMatch(/finalize CAS write lost DB/);
     expect(s.op.step).toBe("loop_sig_writeahead");
-    expect(s.op.status).toBe("failed"); // failure recorded — step untouched
+    // WO1-C2: the catch leaves the evidence-bearing op row COMPLETELY
+    // untouched — still pending, no failed write anywhere.
+    expect(s.op.status).toBe("pending");
+    const failedWrites = vi
+      .mocked(storage.updateBorrowOperation as any)
+      .mock.calls.filter((c: unknown[]) => (c[1] as any)?.status === "failed");
+    expect(failedWrites).toHaveLength(0);
     expect(s.op.metadata.openTxSignature).toBe(OPEN_SIG);
     expect(s.op.txSignatures[s.op.txSignatures.length - 1]).toBe(OPEN_SIG);
     expect(s.row.status).toBe("pending"); // never restored while the tx may land
@@ -1489,6 +1501,39 @@ describe("executeLoopOpen — outer-catch lifecycle repair", () => {
     expect(executeAgentInstructionsConfirmOnly).toHaveBeenCalledTimes(1); // ZERO rebroadcasts
     expect(storage.createBorrowPosition).toHaveBeenCalledTimes(1); // no second row
     expect(storage.createEquityEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it("WO1-C2 sibling-interleaving: catch reload sees pending write-ahead, sibling finalizes succeeded BEFORE any catch write → terminal result untouched", async () => {
+    const s = wireStatefulOpenLifecycle();
+    s.armFinalizeCasThrow();
+    const SIBLING_RESULT = { signature: OPEN_SIG, borrowPositionId: "row-1", finalizedBy: "sibling-deploy" };
+    // The catch's reload returns a STALE pending snapshot while the durable
+    // truth flips to a sibling finalizer's succeeded terminal state before
+    // any catch-side write could land (blue/green overlap — the borrow lock
+    // is only an in-process serializer).
+    vi.mocked(storage.getBorrowOperationById as any).mockImplementationOnce(async () => {
+      const stale = JSON.parse(JSON.stringify(s.op)); // pending + write-ahead evidence
+      s.op.status = "succeeded";
+      s.op.step = "opened";
+      s.op.result = SIBLING_RESULT;
+      return stale;
+    });
+
+    const first = await executeLoopOpen(openParams);
+
+    expect(first.success).toBe(false);
+    // The sibling's terminal finalization is sacrosanct: no failed overwrite,
+    // no step regression, result untouched.
+    expect(s.op.status).toBe("succeeded");
+    expect(s.op.step).toBe("opened");
+    expect(s.op.result).toEqual(SIBLING_RESULT);
+    const catchWrites = vi
+      .mocked(storage.updateBorrowOperation as any)
+      .mock.calls.filter(
+        (c: unknown[]) => (c[1] as any)?.status === "failed" || (c[1] as any)?.error !== undefined,
+      );
+    expect(catchWrites).toHaveLength(0);
+    expect(executeAgentInstructionsConfirmOnly).toHaveBeenCalledTimes(1);
   });
 
   it("WO1-C1: preserved provenance + still-valid then unverifiable status → retry stays BLOCKED, row pending, no restore", async () => {
