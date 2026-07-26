@@ -1546,6 +1546,7 @@ import { getAgentUsdcBalance, getAgentSolBalance, getAgentUsdcBalanceStrict, get
 import { getBestQuote } from "./swap/index.js";
 import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, valueVaultRowsForWallet, sumVaultPositionValueUsdc, type VaultPositionView, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
 import { cancelAutoRepark } from "./vault/auto-repark";
+import { assessResetBlockers } from "./vault/reset-blockers";
 import { getCollateralStakingApyMap } from "./vault/collateral-apy";
 import { getEnabledYieldAssets, getYieldAssetByKey, getDetectableYieldAssets } from "./vault/yield-assets";
 import { getYieldTableCached } from "./vault/yield-oracle";
@@ -6905,6 +6906,25 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       progress.push("Drift account verified clean");
       log("Drift account is clean, proceeding with agent wallet reset");
 
+      // WO2B1 checkpoint 1 (pre-transfer): the agent key being retired owns
+      // every vault borrow/loop position and signs every resumable borrow
+      // operation. Fail CLOSED before any funds move — active or unreadable
+      // vault state aborts the reset with nothing transferred and no
+      // key/mnemonic mutation. Coarse verdict only: no row ids, types, or
+      // amounts may leak into the response.
+      const preTransferAssessment = await assessResetBlockers(userWallet);
+      if (preTransferAssessment.blocked) {
+        log(`Reset blocked pre-transfer (${preTransferAssessment.reason})`);
+        return res.status(409).json({
+          error: "reset-blocked",
+          phase: "pre-transfer",
+          message:
+            preTransferAssessment.reason === "vault_state_unreadable"
+              ? "Could not verify your vault borrow/loop state, so the reset was not started. Nothing was transferred and your agent key is unchanged. Please try again shortly."
+              : "You have active vault borrow or loop activity tied to this agent wallet. Close or resolve it first — nothing was transferred and your agent key is unchanged.",
+        });
+      }
+
       // Step 2: Check agent wallet balances
       const usdcBalance = await getAgentUsdcBalance(agentPubKey);
       const solBalance = await getAgentSolBalance(agentPubKey);
@@ -6959,6 +6979,24 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           log(`SOL withdrawal error (non-critical): ${e.message}`);
           progress.push(`SOL withdrawal error (non-critical): Small amount may remain`);
         }
+      }
+
+      // WO2B1 checkpoint 2 (pre-key-rotation): re-assess AFTER the transfer
+      // phase and immediately before the first persistent mnemonic/key
+      // mutation. Vault state that appeared mid-reset — or a failed read —
+      // must leave the EXISTING key authoritative: no mnemonic storage, no
+      // public-key or encrypted-key replacement, no bot-subaccount clearing.
+      // Completed transfers above are deliberately NOT rolled back, and the
+      // decrypted-key cleanup in the finally below still runs exactly once.
+      const preRotationAssessment = await assessResetBlockers(userWallet);
+      if (preRotationAssessment.blocked) {
+        log(`Reset blocked pre-key-rotation (${preRotationAssessment.reason})`);
+        return res.status(409).json({
+          error: "reset-blocked",
+          phase: "pre-key-rotation",
+          message:
+            "Reset stopped before key rotation: vault borrow/loop activity appeared (or could not be verified) after funds were moved. Completed transfers are not rolled back, and your existing agent key remains authoritative — no new key or mnemonic was stored. Resolve the vault activity and run the reset again.",
+        });
       }
 
       // Step 5: Generate new agent wallet with mnemonic
