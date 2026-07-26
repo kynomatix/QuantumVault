@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  LOOP_HOP_RECOVERY_POLICY,
   LOOP_RISK_POLICY,
   LOOP_VAULT_ALLOWLIST,
   computeLoopTargetLeverage,
@@ -225,53 +226,69 @@ describe("computeLoopTargetLeverage", () => {
 });
 
 // ---------------------------------------------------------------------------
-// P4 HOP — recoverHopSolReturned (money-safety: never guess the returned SOL)
+// P4 HOP (WO2A) — recovery budgets + close-output attribution selector.
+// The selector accepts ONLY close-attributable inputs; the whole-wallet delta
+// fallback is deliberately GONE (it attributed out-of-band credits to the hop).
 // ---------------------------------------------------------------------------
+describe("LOOP_HOP_RECOVERY_POLICY", () => {
+  it("pins the WO2A automatic-recovery budgets (6h post-close age, 3 broadcast attempts)", () => {
+    expect(LOOP_HOP_RECOVERY_POLICY.maxAutomaticPostCloseAgeMs).toBe(6 * 60 * 60 * 1000);
+    expect(LOOP_HOP_RECOVERY_POLICY.maxOpenBroadcastAttempts).toBe(3);
+  });
+});
+
 describe("recoverHopSolReturned", () => {
-  it("prefers the close leg's own figure when present and positive (string or bigint)", () => {
-    expect(recoverHopSolReturned({ closeSolReturnedRaw: "1500" })).toEqual({ ok: true, solReturnedRaw: 1500n });
-    expect(recoverHopSolReturned({ closeSolReturnedRaw: 900n })).toEqual({ ok: true, solReturnedRaw: 900n });
+  it("exact confirmed close output wins (string or bigint) and is labelled 'exact'", () => {
+    expect(recoverHopSolReturned({ exactCloseOutputRaw: "1500" }))
+      .toEqual({ ok: true, solReturnedRaw: 1500n, source: "exact" });
+    expect(recoverHopSolReturned({ exactCloseOutputRaw: 900n }))
+      .toEqual({ ok: true, solReturnedRaw: 900n, source: "exact" });
   });
 
-  it("trusts the figure even when a baseline is also available (figure wins)", () => {
-    const r = recoverHopSolReturned({ closeSolReturnedRaw: "1000", baselineRaw: 5n, agentLamportsNowRaw: 999999n });
-    expect(r).toEqual({ ok: true, solReturnedRaw: 1000n });
+  it("exact wins even when the floor is also present", () => {
+    const r = recoverHopSolReturned({ exactCloseOutputRaw: "1000", attributableFloorRaw: "999999" });
+    expect(r).toEqual({ ok: true, solReturnedRaw: 1000n, source: "exact" });
   });
 
-  it("falls back to the STRICT delta vs the PERSISTED pre-close baseline when no figure", () => {
-    const r = recoverHopSolReturned({ closeSolReturnedRaw: null, baselineRaw: 1000n, agentLamportsNowRaw: 1600n });
-    expect(r).toEqual({ ok: true, solReturnedRaw: 600n });
+  it("no exact figure → the SAME proven close's persisted floor, labelled 'conservative_floor'", () => {
+    expect(recoverHopSolReturned({ attributableFloorRaw: "700" }))
+      .toEqual({ ok: true, solReturnedRaw: 700n, source: "conservative_floor" });
+    expect(recoverHopSolReturned({ exactCloseOutputRaw: null, attributableFloorRaw: 42n }))
+      .toEqual({ ok: true, solReturnedRaw: 42n, source: "conservative_floor" });
   });
 
-  it("uses the delta path when the figure is present-but-unusable (unparseable or ≤0)", () => {
-    expect(recoverHopSolReturned({ closeSolReturnedRaw: "not-a-number", baselineRaw: 100n, agentLamportsNowRaw: 450n }))
-      .toEqual({ ok: true, solReturnedRaw: 350n });
-    expect(recoverHopSolReturned({ closeSolReturnedRaw: "0", baselineRaw: 100n, agentLamportsNowRaw: 450n }))
-      .toEqual({ ok: true, solReturnedRaw: 350n });
-    expect(recoverHopSolReturned({ closeSolReturnedRaw: -5n, baselineRaw: 100n, agentLamportsNowRaw: 450n }))
-      .toEqual({ ok: true, solReturnedRaw: 350n });
-  });
-
-  it("FAILS CLOSED when no figure and no persisted baseline (cannot size the reopen)", () => {
-    const r = recoverHopSolReturned({ closeSolReturnedRaw: null, baselineRaw: null, agentLamportsNowRaw: 1600n });
+  it("a MALFORMED exact fails closed — never silently downgrades to the floor", () => {
+    // A present-but-corrupt exact figure is a record-integrity red flag; using
+    // the floor here would hide it.
+    const r = recoverHopSolReturned({ exactCloseOutputRaw: "not-a-number", attributableFloorRaw: "500" });
     expect(r.ok).toBe(false);
   });
 
-  it("FAILS CLOSED when the current balance is unreadable (never a fresh guess)", () => {
-    const r = recoverHopSolReturned({ closeSolReturnedRaw: null, baselineRaw: 1000n, agentLamportsNowRaw: null });
-    expect(r.ok).toBe(false);
+  it("a nonpositive exact fails closed (nothing attributable to re-loop)", () => {
+    expect(recoverHopSolReturned({ exactCloseOutputRaw: "0" }).ok).toBe(false);
+    expect(recoverHopSolReturned({ exactCloseOutputRaw: -5n, attributableFloorRaw: "500" }).ok).toBe(false);
   });
 
-  it("FAILS CLOSED when the delta is zero or negative (no measurable SOL yet)", () => {
-    expect(recoverHopSolReturned({ closeSolReturnedRaw: null, baselineRaw: 1000n, agentLamportsNowRaw: 1000n }).ok).toBe(false);
-    expect(recoverHopSolReturned({ closeSolReturnedRaw: null, baselineRaw: 1000n, agentLamportsNowRaw: 400n }).ok).toBe(false);
+  it("a malformed or nonpositive floor fails closed (never guesses)", () => {
+    expect(recoverHopSolReturned({ attributableFloorRaw: "garbage" }).ok).toBe(false);
+    expect(recoverHopSolReturned({ attributableFloorRaw: "0" }).ok).toBe(false);
+    expect(recoverHopSolReturned({ attributableFloorRaw: -1n }).ok).toBe(false);
   });
 
-  it("a fresh POST-close baseline (≈ now) fails closed rather than sizing the reopen to ~0", () => {
-    // Simulates the bug the fix prevents: reading the baseline AFTER the close so
-    // now − baseline ≈ 0. Must fail closed, never return a near-zero solReturned.
-    const postClose = 1600n;
-    const r = recoverHopSolReturned({ closeSolReturnedRaw: null, baselineRaw: postClose, agentLamportsNowRaw: postClose });
+  it("empty strings are ABSENT (fall through), not malformed", () => {
+    expect(recoverHopSolReturned({ exactCloseOutputRaw: "", attributableFloorRaw: "700" }))
+      .toEqual({ ok: true, solReturnedRaw: 700n, source: "conservative_floor" });
+    expect(recoverHopSolReturned({ exactCloseOutputRaw: "", attributableFloorRaw: "" }).ok).toBe(false);
+  });
+
+  it("FAILS CLOSED with neither input — and accepts no wallet-balance inputs at all", () => {
+    const r = recoverHopSolReturned({});
     expect(r.ok).toBe(false);
+    // Compile-time + runtime guard that the delta fallback stayed dead: the
+    // input type has exactly the two close-attributable fields.
+    const legacyShaped = { closeSolReturnedRaw: "1500", baselineRaw: 5n, agentLamportsNowRaw: 999n };
+    // @ts-expect-error — legacy wallet-delta inputs must not typecheck
+    const r2 = recoverHopSolReturned(legacyShaped);
+    expect(r2.ok).toBe(false);
   });
 });

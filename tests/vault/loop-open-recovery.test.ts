@@ -38,6 +38,10 @@ vi.mock("../../server/storage", () => ({
     createBorrowPosition: vi.fn(),
     updateBorrowPosition: vi.fn(),
     createEquityEvent: vi.fn(),
+    // WO2A hop single-flight / finalize surface
+    claimLoopHopOpenAttempt: vi.fn(),
+    clearLoopHopActiveChild: vi.fn(),
+    finalizeLoopHopParent: vi.fn(),
   },
 }));
 
@@ -100,6 +104,8 @@ vi.mock("../../server/vault/loop/loop-risk-policy", () => ({
   LOOP_VAULT_ALLOWLIST: { 47: { collateralSymbol: "JupSOL" }, 4: { collateralSymbol: "JitoSOL" } },
   LOOP_ALLOCATION_POLICY: { rateStalenessMs: 60_000, hopMinCarryGainApy: 0.005 },
   LOOP_RISK_POLICY: { maxLeverage: 4, minNetCarryApy: 0.005 },
+  // WO2A budgets — REAL values so budget-gate behavior matches production.
+  LOOP_HOP_RECOVERY_POLICY: { maxAutomaticPostCloseAgeMs: 6 * 60 * 60 * 1000, maxOpenBroadcastAttempts: 3 },
   computeLoopTargetLeverage: vi.fn(),
   evaluateLoopOpenRequest: vi.fn(),
   recoverHopSolReturned: vi.fn(),
@@ -872,6 +878,10 @@ describe("executeLoopHop — child open reconciliation", () => {
         preCloseAgentLamports: "5000000000",
         solReturnedLamports: "2000000000",
         closeSignature: "hopCloseSig111111111111111111111111111111111111111",
+        // WO2A: recent proven-close time — keeps the automatic budget gate
+        // OPEN for these WO1 scenarios (parking is covered in
+        // loop-hop-recovery.test.ts).
+        closeDoneAt: new Date(Date.now() - 60_000).toISOString(),
         openAttempts: 1,
         ...(metaExtra ?? {}),
       },
@@ -900,6 +910,34 @@ describe("executeLoopHop — child open reconciliation", () => {
     );
   }
 
+  beforeEach(() => {
+    // WO2A machinery defaults for the legacy WO1 scenarios.
+    // Phase-2 head re-reads the parent row by id — without it every hop
+    // resumes as "record could not be re-read".
+    vi.mocked(storage.getBorrowOperationById as any).mockImplementation(async (id: string) =>
+      id === "hop-op-1" ? hopOp() : undefined,
+    );
+    // Fresh attempts go through the atomic slot claim; the legacy child
+    // (:open:1) was already reconciled by Phase 2a, so a new claim numbers 2.
+    vi.mocked(storage.claimLoopHopOpenAttempt as any).mockImplementation(
+      async (_opId: string, vaultId: number) => ({
+        adopted: false,
+        activeOpenClientRequestId: `${HOP_CRID}:open:2`,
+        activeOpenVaultId: vaultId,
+        openAttempts: 2,
+      }),
+    );
+    vi.mocked(storage.clearLoopHopActiveChild as any).mockResolvedValue(true);
+    vi.mocked(storage.finalizeLoopHopParent as any).mockImplementation(
+      async (_id: string, _guard: any, patch: any) => ({
+        ...hopOp(),
+        status: patch.status,
+        step: patch.step ?? "close_done",
+        result: patch.result ?? null,
+      }),
+    );
+  });
+
   it("SL-10: completed child open + parent crash before 'opened' → ADOPT, zero broadcasts", async () => {
     wireHop(
       makeOpenOp({
@@ -921,9 +959,11 @@ describe("executeLoopHop — child open reconciliation", () => {
     expect(res.openSignature).toBe(OPEN_SIG);
     expect(res.solReturnedLamports).toBe("2000000000");
     expect(res.realizedCostLamports).toBe("100000000"); // 2.0 − 1.9 SOL overhead
-    // Parent terminalized from the child's ORIGINAL records…
-    expect(storage.updateBorrowOperation).toHaveBeenCalledWith(
+    // Parent terminalized from the child's ORIGINAL records — via the WO2A
+    // CAS finalize (a rival that finalized first must win, never two writes).
+    expect(storage.finalizeLoopHopParent).toHaveBeenCalledWith(
       "hop-op-1",
+      expect.anything(), // CAS guard
       expect.objectContaining({
         status: "succeeded",
         step: "opened",
@@ -967,8 +1007,9 @@ describe("executeLoopHop — child open reconciliation", () => {
     //           be 140_000_000 — the child's own persisted values must win.
     expect(res.predictedCostLamports).toBe("124000000");
     expect(res.realizedCostLamports).toBe("100000000");
-    expect(storage.updateBorrowOperation).toHaveBeenCalledWith(
+    expect(storage.finalizeLoopHopParent).toHaveBeenCalledWith(
       "hop-op-1",
+      expect.anything(), // CAS guard
       expect.objectContaining({
         result: expect.objectContaining({
           adoptedFromChildRecovery: true,
@@ -1008,6 +1049,7 @@ describe("executeLoopHop — child open reconciliation", () => {
       .mocked(storage.updateBorrowOperation as any)
       .mock.calls.filter((c: unknown[]) => c[0] === "hop-op-1" && (c[1] as any)?.status === "succeeded");
     expect(succeededWrites).toHaveLength(0);
+    expect(storage.finalizeLoopHopParent).not.toHaveBeenCalled(); // WO2A: no CAS finalize either
     expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
     expect(storage.createBorrowOperation).not.toHaveBeenCalled();
   });
@@ -1062,6 +1104,7 @@ describe("executeLoopHop — child open reconciliation", () => {
       .mocked(storage.updateBorrowOperation as any)
       .mock.calls.filter((c: unknown[]) => c[0] === "hop-op-1" && (c[1] as any)?.status === "succeeded");
     expect(succeededWrites).toHaveLength(0);
+    expect(storage.finalizeLoopHopParent).not.toHaveBeenCalled(); // WO2A: no CAS finalize either
     expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
   });
 
@@ -1099,8 +1142,9 @@ describe("executeLoopHop — child open reconciliation", () => {
       "child-1",
       expect.objectContaining({ status: "succeeded" }),
     );
-    expect(storage.updateBorrowOperation).toHaveBeenCalledWith(
+    expect(storage.finalizeLoopHopParent).toHaveBeenCalledWith(
       "hop-op-1",
+      expect.anything(), // CAS guard
       expect.objectContaining({ status: "succeeded", step: "opened" }),
     );
     expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
@@ -1123,6 +1167,22 @@ describe("executeLoopHop — child open reconciliation", () => {
       clientRequestId: childCrid,
     });
     let rowState: any = makePendingRow({ id: "newrow-1", vaultId: 47, nftId: "777" });
+    // WO2A: stateful parent CAS — the SECOND finalize must LOSE (row already
+    // terminal) and the loser must report the winner's durable truth.
+    let parentState: any = hopOp();
+    vi.mocked(storage.getBorrowOperationById as any).mockImplementation(async () => parentState);
+    vi.mocked(storage.finalizeLoopHopParent as any).mockImplementation(
+      async (_id: string, _guard: any, patch: any) => {
+        if (parentState.status !== "pending") return undefined; // CAS loss
+        parentState = {
+          ...parentState,
+          status: patch.status,
+          step: patch.step ?? parentState.step,
+          result: patch.result ?? null,
+        };
+        return parentState;
+      },
+    );
     vi.mocked(storage.getBorrowOperationByClientRequestId as any).mockImplementation(
       async (_w: string, crid: string) => {
         if (crid === HOP_CRID) return hopOp();

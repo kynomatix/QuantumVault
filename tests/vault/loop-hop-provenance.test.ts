@@ -26,6 +26,11 @@ vi.mock("../../server/storage", () => ({
     updateBorrowOperation: vi.fn().mockResolvedValue({ id: "hop-op-id" }),
     createBorrowOperation: vi.fn(),
     getBorrowPositionsByWallet: vi.fn(),
+    // WO2A surface: parent reload + single-flight slot + CAS finalize.
+    getBorrowOperationById: vi.fn(),
+    claimLoopHopOpenAttempt: vi.fn(),
+    clearLoopHopActiveChild: vi.fn(),
+    finalizeLoopHopParent: vi.fn(),
   },
 }));
 
@@ -43,6 +48,8 @@ vi.mock("../../server/vault/loop/loop-risk-policy", () => ({
   LOOP_VAULT_ALLOWLIST: { 47: { collateralSymbol: "JupSOL" } },
   LOOP_ALLOCATION_POLICY: { hopMinCarryGainApy: 0.005 },
   LOOP_RISK_POLICY: { maxLeverage: 4, minNetCarryApy: 0.005 },
+  // WO2A budgets — REAL values so budget-gate behavior matches production.
+  LOOP_HOP_RECOVERY_POLICY: { maxAutomaticPostCloseAgeMs: 6 * 60 * 60 * 1000, maxOpenBroadcastAttempts: 3 },
   computeLoopTargetLeverage: vi.fn(),
   evaluateLoopOpenRequest: vi.fn(),
   recoverHopSolReturned: vi.fn(),

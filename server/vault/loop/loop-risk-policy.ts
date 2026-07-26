@@ -470,61 +470,99 @@ export function evaluateLoopOpenRequest(input: LoopOpenPolicyInput): LoopPolicyD
 }
 
 // ---------------------------------------------------------------------------
-// P4 HOP — returned-SOL reconstruction after the close leg
+// P4 HOP — returned-SOL attribution after the close leg (WO2A)
 // ---------------------------------------------------------------------------
+
+/**
+ * WO2A recovery budgets for the durable loop-hop parent state machine. Lives
+ * beside LOOP_ALLOCATION_POLICY so every hop knob is in one place.
+ */
+export const LOOP_HOP_RECOVERY_POLICY = {
+  /**
+   * Automatic recovery may keep re-driving a mid-flight hop (close done,
+   * re-open pending) only while the proven close is younger than this,
+   * measured STRICTLY GREATER-THAN from the immutable `closeDoneAt` — never
+   * from parent row timestamps (updatedAt moves on every breadcrumb write,
+   * which would reset the clock forever). Older ⇒ the parent PARKS for manual
+   * resume: after six hours the carry decision that justified the hop is
+   * stale, and blindly re-levering is no longer clearly the owner's intent.
+   */
+  maxAutomaticPostCloseAgeMs: 6 * 60 * 60 * 1000,
+  /**
+   * Hard cap on open-leg broadcast attempts. Counts ONLY distinct numbered
+   * open children with durable main-open write-ahead evidence — a child that
+   * provably never broadcast (numbered-but-absent, preflight-declined, or
+   * policy-denied pre-broadcast) consumes no budget. At the cap the parent
+   * PARKS: a fourth blind broadcast is more likely to repeat a structural
+   * failure than to heal one.
+   */
+  maxOpenBroadcastAttempts: 3,
+} as const;
+
+/** How a recovered close output was attributed. */
+export type HopSolReturnedSource = "exact" | "conservative_floor";
+
 export type HopSolReturnedResult =
-  | { ok: true; solReturnedRaw: bigint }
+  | { ok: true; solReturnedRaw: bigint; source: HopSolReturnedSource }
   | { ok: false; reason: string };
 
 /**
- * Reconstruct the lamports the close leg of a hop returned to the agent wallet,
- * so the re-loop can be sized. Money-safety rules (architect review, P4):
+ * WO2A pure attribution selector for the SOL a hop's close leg returned.
  *
- *   1. PREFER the close op's own reported figure (`closeSolReturnedRaw`) — it is
- *      the exact confirmed delta the close executor measured.
- *   2. Otherwise fall back to the STRICT on-chain delta `now − baseline`, where
- *      `baselineRaw` is the PERSISTED PRE-close reading. Never a fresh
- *      (post-close) baseline: after the unwind, `now − now ≈ 0` would size the
- *      re-loop to nothing and strand the returned SOL un-levered.
- *   3. Fail closed (never guess): a missing/zero/negative figure, a missing
- *      persisted baseline, or an unreadable current balance all STOP the hop
- *      resumably — the SOL is safe in the agent wallet, retry once measurable.
+ * Accepts ONLY close-attributable inputs, in strict preference order:
  *
- * Pure and side-effect free so it can be unit-tested directly; the executor
- * supplies the strict reads.
+ *   1. `exactCloseOutputRaw` — the exact confirmed output the close executor
+ *      measured for the PROVEN close. Always wins when present.
+ *   2. `attributableFloorRaw` — the same proven close's pre-broadcast
+ *      conservative floor (minOut − flashRepay − fee headroom), labelled
+ *      `conservative_floor` so downstream accounting knows it understates.
+ *
+ * Deliberately REMOVED: the whole-wallet delta fallback. A wallet-balance
+ * delta attributes out-of-band credits/debits (user deposits, unrelated ops,
+ * out-of-band closes) to the hop and re-levers money the hop never touched.
+ * This selector does not accept wallet-balance or baseline inputs at all.
+ *
+ * Fail closed: a missing, empty, nonpositive or malformed value never guesses
+ * and never silently downgrades (a present-but-corrupt exact figure is a
+ * record-integrity red flag, not a reason to use the floor).
  */
 export function recoverHopSolReturned(input: {
-  /** `solReturnedLamports` from the close leg / its persisted op result. */
-  closeSolReturnedRaw?: string | bigint | null;
-  /** Persisted PRE-close agent-wallet lamports (write-ahead baseline). */
-  baselineRaw?: bigint | null;
-  /** Current strict agent-wallet lamports; null = unreadable (fail closed). */
-  agentLamportsNowRaw?: bigint | null;
+  /** Exact confirmed close output (lamports) from the PROVEN close's own record. */
+  exactCloseOutputRaw?: string | bigint | null;
+  /** The SAME proven close's persisted pre-broadcast attribution floor (lamports). */
+  attributableFloorRaw?: string | bigint | null;
 }): HopSolReturnedResult {
-  // 1. Trust the close leg's own figure when present and positive.
-  const fig = input.closeSolReturnedRaw;
-  if (fig != null && fig !== "") {
-    let parsed: bigint | null = null;
+  const parseStrict = (v: string | bigint): bigint | null => {
     try {
-      parsed = typeof fig === "bigint" ? fig : BigInt(fig);
+      return typeof v === "bigint" ? v : BigInt(v);
     } catch {
-      parsed = null;
+      return null;
     }
-    if (parsed != null && parsed > 0n) return { ok: true, solReturnedRaw: parsed };
-    // A present-but-unusable figure (unparseable / ≤0) falls through to the
-    // delta path rather than being trusted.
+  };
+
+  const exact = input.exactCloseOutputRaw;
+  if (exact != null && exact !== "") {
+    const parsed = parseStrict(exact);
+    if (parsed == null) {
+      return { ok: false, reason: "exact close output is malformed — refusing to guess or downgrade to the floor" };
+    }
+    if (parsed <= 0n) {
+      return { ok: false, reason: "exact close output is nonpositive — nothing attributable to re-loop" };
+    }
+    return { ok: true, solReturnedRaw: parsed, source: "exact" };
   }
 
-  // 2. Strict delta vs the PERSISTED pre-close baseline.
-  if (input.baselineRaw == null) {
-    return { ok: false, reason: "no persisted pre-close baseline to measure the returned SOL against" };
+  const floor = input.attributableFloorRaw;
+  if (floor != null && floor !== "") {
+    const parsed = parseStrict(floor);
+    if (parsed == null) {
+      return { ok: false, reason: "attributable floor is malformed — refusing to guess" };
+    }
+    if (parsed <= 0n) {
+      return { ok: false, reason: "attributable floor is nonpositive — nothing attributable to re-loop" };
+    }
+    return { ok: true, solReturnedRaw: parsed, source: "conservative_floor" };
   }
-  if (input.agentLamportsNowRaw == null) {
-    return { ok: false, reason: "current agent-wallet balance is unreadable" };
-  }
-  const delta = input.agentLamportsNowRaw - input.baselineRaw;
-  if (delta <= 0n) {
-    return { ok: false, reason: "no positive SOL delta since the pre-close baseline yet" };
-  }
-  return { ok: true, solReturnedRaw: delta };
+
+  return { ok: false, reason: "no exact close output and no persisted attributable floor — fail closed" };
 }

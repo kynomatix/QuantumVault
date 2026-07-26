@@ -326,6 +326,8 @@ export interface LoopAllocationTickResult {
   failed: number;
   journaled: number;
   skipped: number;
+  /** WO2A: hops parked this pass (automatic recovery budget exhausted). */
+  parked: number;
 }
 
 const symbolFor = (vaultId: number): string =>
@@ -336,7 +338,7 @@ const symbolFor = (vaultId: number): string =>
  * Never throws — every failure is isolated, logged, journaled.
  */
 export async function runLoopAllocationTick(deps: LoopAllocationTickDeps): Promise<LoopAllocationTickResult> {
-  const result: LoopAllocationTickResult = { evaluated: 0, acted: 0, failed: 0, journaled: 0, skipped: 0 };
+  const result: LoopAllocationTickResult = { evaluated: 0, acted: 0, failed: 0, journaled: 0, skipped: 0, parked: 0 };
 
   // 1) Sample + persist fresh rates FIRST (fail-soft — a sampling outage
   //    degrades to the staleness gate below, never to stale decisions).
@@ -373,6 +375,12 @@ export async function runLoopAllocationTick(deps: LoopAllocationTickDeps): Promi
         op.borrowPositionId ??
         null;
       if (sourceId) hopInFlightPositionIds.add(sourceId);
+      if (op.status !== "pending") {
+        // WO2A: getPendingHops excludes parked/terminal rows; seeing one here
+        // means the query and this pass disagree — still resume (the executor's
+        // own doors decide safely), but shout so the drift gets noticed.
+        console.warn(`[LoopAllocationTick] pending-hop sweep saw non-pending op ${op.id} (status=${op.status})`);
+      }
       try {
         if (!op.clientRequestId) continue;
         const toVaultId = Number(m.toVaultId);
@@ -394,9 +402,49 @@ export async function runLoopAllocationTick(deps: LoopAllocationTickDeps): Promi
             targetVaultId: toVaultId,
             clientRequestId: op.clientRequestId,
             policyReason: (typeof m.policyReason === "string" ? m.policyReason : undefined) ?? "resume",
+            // WO2A: sweep-driven resumes are AUTOMATIC — budget-gated, may park.
+            mode: "automatic",
           });
           if (res.success) result.acted++;
-          else if (res.resumable !== true) result.failed++;
+          else if (res.parked === true) {
+            result.parked++;
+            // Journal + Telegram once. At-most-once holds because the sweep
+            // query excludes parked rows: the pass that parks it is the only
+            // pass that ever sees this result for this op.
+            const reasonText = `hop parked for manual resume (${res.parkReason ?? "recovery budget exceeded"})`;
+            try {
+              await deps.persistDecision({
+                walletAddress: op.walletAddress,
+                borrowPositionId: sourceId,
+                vaultId: toVaultId,
+                tick: "allocation",
+                action: "hop",
+                fraction: null,
+                reason: reasonText,
+                details: {
+                  intent: "hop",
+                  executed: false,
+                  parked: true,
+                  parkReason: res.parkReason ?? null,
+                  clientRequestId: op.clientRequestId,
+                  solReturnedLamports: res.solReturnedLamports ?? null,
+                },
+              });
+              result.journaled++;
+            } catch (e) {
+              console.error(`[LoopAllocationTick] park journal write failed for op ${op.id}:`, e);
+            }
+            await deps
+              .notify(op.walletAddress, {
+                symbol: symbolFor(toVaultId),
+                action: "hop",
+                ok: false,
+                reason: reasonText,
+                detail:
+                  "automatic retries stopped; the unwound SOL is safe in the agent wallet — resume the hop from the admin surface",
+              })
+              .catch(() => {});
+          } else if (res.resumable !== true) result.failed++;
         } finally {
           // Zeroize key material even on throw (mirrors the per-row finally).
           signer.cleanup();
@@ -671,6 +719,10 @@ async function processAllocationCandidate(
           targetVaultId: toVaultId,
           clientRequestId,
           policyReason: intentRes.reason,
+          // WO2A: tick-driven hops are AUTOMATIC — budget-gated, may park
+          // (fresh hops park only in pathological cases; the sweep handles
+          // journal+notify for parks on resume passes).
+          mode: "automatic",
         });
         ok = res.success;
         // A hop reports both legs; prefer the re-open sig, else the close sig.

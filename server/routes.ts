@@ -23587,43 +23587,85 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     }
   });
 
-  // DEV/TEST: manually trigger a loop hop for a specific position.
-  // Bypasses the carry-gain threshold so you can test the hop plumbing
-  // end-to-end without waiting for a 2pp spread to materialise.
+  // ADMIN: manually trigger OR resume a loop hop for a specific position.
+  // A FRESH trigger still passes the executor's carry-gain gate (nothing here
+  // bypasses policy). Pass the `clientRequestId` of an existing hop op to
+  // RESUME it instead: WO2A manual mode skips the automatic-recovery budgets
+  // (never the money-safety rails) and may drive one more attempt even on a
+  // PARKED hop. A resume never supplies new sizing or a new recovery list —
+  // the persisted op's own target and authorization are used.
   // Requires execution to be enabled on the wallet (uses the same
   // resolveLoopSafetySigner path the automatic allocation tick uses).
   app.post("/api/admin/loop/hop", requireAdminAuth, async (req, res) => {
-    const { borrowPositionId, targetVaultId } = req.body ?? {};
+    const { borrowPositionId, targetVaultId, clientRequestId } = req.body ?? {};
     if (!borrowPositionId || typeof borrowPositionId !== "string") {
       return res.status(400).json({ error: "borrowPositionId required" });
     }
+    const resumeCrid = typeof clientRequestId === "string" && clientRequestId.trim() ? clientRequestId.trim() : null;
     const tvId = Number(targetVaultId);
-    if (!Number.isInteger(tvId) || tvId <= 0) {
-      return res.status(400).json({ error: "targetVaultId must be a positive integer" });
-    }
-    if (!LOOP_VAULT_ALLOWLIST[tvId]) {
-      return res.status(400).json({ error: `Vault ${tvId} is not on the loop allowlist` });
+    if (!resumeCrid) {
+      if (!Number.isInteger(tvId) || tvId <= 0) {
+        return res.status(400).json({ error: "targetVaultId must be a positive integer" });
+      }
+      if (!LOOP_VAULT_ALLOWLIST[tvId]) {
+        return res.status(400).json({ error: `Vault ${tvId} is not on the loop allowlist` });
+      }
     }
     try {
       const position = await storage.getBorrowPosition(borrowPositionId);
       if (!position) return res.status(404).json({ error: "Position not found" });
-      if (position.status !== "open") return res.status(400).json({ error: `Position is ${position.status}, not open` });
       if (position.kind !== "loop") return res.status(400).json({ error: "Position is not a loop position" });
+      // A resume's source is often already CLOSED (that is the point) — only a
+      // FRESH hop requires an open source position.
+      if (!resumeCrid && position.status !== "open") {
+        return res.status(400).json({ error: `Position is ${position.status}, not open` });
+      }
+
+      let execCrid: string;
+      let execTarget: number;
+      if (resumeCrid) {
+        const opRow = await storage.getBorrowOperationByClientRequestId(position.walletAddress, resumeCrid);
+        if (!opRow || opRow.operationType !== "loop_hop") {
+          return res.status(404).json({ error: "No loop_hop operation with that clientRequestId for this wallet" });
+        }
+        const om = (opRow.metadata ?? {}) as Record<string, any>;
+        const opSource =
+          (typeof om.sourceBorrowPositionId === "string" ? om.sourceBorrowPositionId : null) ??
+          opRow.borrowPositionId ??
+          null;
+        if (opSource !== borrowPositionId) {
+          return res.status(400).json({ error: "clientRequestId belongs to a different position" });
+        }
+        const persistedTarget = Number(om.toVaultId);
+        if (!Number.isInteger(persistedTarget) || persistedTarget <= 0) {
+          return res.status(400).json({ error: "Hop record has no persisted target vault — cannot resume" });
+        }
+        if (targetVaultId != null && Number(targetVaultId) !== persistedTarget) {
+          return res.status(400).json({
+            error: `targetVaultId does not match the hop record (persisted target is ${persistedTarget}; omit targetVaultId to resume)`,
+          });
+        }
+        execCrid = resumeCrid;
+        execTarget = persistedTarget;
+      } else {
+        execCrid = `admin-hop-${borrowPositionId}-${tvId}-${Date.now()}`;
+        execTarget = tvId;
+      }
 
       const signer = await resolveLoopSafetySigner(position.walletAddress);
       if (!signer) {
         return res.status(403).json({ error: "Cannot resolve signer — execution may be disabled for this wallet" });
       }
       try {
-        const clientRequestId = `admin-hop-${borrowPositionId}-${tvId}-${Date.now()}`;
         const result = await executeLoopHop({
           walletAddress: position.walletAddress,
           agentPublicKey: signer.agentPublicKey,
           agentSecretKey: signer.secretKey,
           borrowPositionId,
-          targetVaultId: tvId,
-          clientRequestId,
-          policyReason: "admin manual trigger",
+          targetVaultId: execTarget,
+          clientRequestId: execCrid,
+          policyReason: resumeCrid ? "admin manual resume" : "admin manual trigger",
+          mode: "manual",
         });
         res.json(result);
       } finally {

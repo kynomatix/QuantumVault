@@ -663,6 +663,8 @@ describe("runLoopAllocationTick", () => {
     expect(calls.hops[0].targetVaultId).toBe(5);
     expect(calls.hops[0].borrowPositionId).toBe("row-1");
     expect(calls.hops[0].policyReason).toBe("hop_carry_favorable");
+    // WO2A: per-row (policy-driven) hops are AUTOMATIC — budget-gated, may park.
+    expect(calls.hops[0].mode).toBe("automatic");
     expect(calls.relevers).toHaveLength(0);
     expect(calls.unwinds).toHaveLength(0);
     expect(calls.decisions[0].action).toBe("hop");
@@ -760,5 +762,124 @@ describe("runLoopAllocationTick", () => {
     const r2 = await runLoopAllocationTick(terminal.deps);
     expect(r2.acted).toBe(0);
     expect(r2.failed).toBe(1);
+  });
+});
+
+// ─── WO2A: parked hops in the resume sweep ───────────────────────────────────
+
+describe("runLoopAllocationTick — parked hops (WO2A)", () => {
+  it("a PARKED hop is counted parked (never failed), journaled once and notified once; sweep resumes are automatic-mode", async () => {
+    const hopCalls: Array<Record<string, unknown>> = [];
+    const { deps, calls } = makeDeps({
+      getPendingHops: async () => [makeHopOp()],
+      listActivePositions: async () => [],
+      executeHop: async (params) => {
+        hopCalls.push(params as unknown as Record<string, unknown>);
+        return {
+          success: false,
+          parked: true,
+          parkReason: "post_close_age_exceeded",
+          solReturnedLamports: "2000000000",
+        };
+      },
+    });
+
+    const res = await runLoopAllocationTick(deps);
+
+    expect(res.parked).toBe(1);
+    expect(res.failed).toBe(0); // parked is a HOLD for a human, not a failure
+    expect(res.acted).toBe(0);
+    expect(res.journaled).toBe(1);
+    expect(hopCalls).toHaveLength(1);
+    expect(hopCalls[0].mode).toBe("automatic");
+
+    // Journal row carries the full park provenance for the admin surface.
+    expect(calls.decisions).toHaveLength(1);
+    const d = calls.decisions[0];
+    expect(d.action).toBe("hop");
+    expect(d.tick).toBe("allocation");
+    expect(d.borrowPositionId).toBe("row-1");
+    expect(d.vaultId).toBe(5);
+    expect(String(d.reason)).toContain("parked for manual resume");
+    expect(String(d.reason)).toContain("post_close_age_exceeded");
+    expect(d.details).toMatchObject({
+      intent: "hop",
+      executed: false,
+      parked: true,
+      parkReason: "post_close_age_exceeded",
+      clientRequestId: "creq-1",
+      solReturnedLamports: "2000000000",
+    });
+
+    // One not-ok Telegram alert pointing the owner at the manual resume.
+    expect(calls.notifications).toHaveLength(1);
+    expect(calls.notifications[0]).toMatchObject({ action: "hop", ok: false });
+    expect(String(calls.notifications[0].reason)).toContain("parked for manual resume");
+    expect(String(calls.notifications[0].detail)).toContain("admin surface");
+  });
+
+  it("a park-journal write failure never blocks the Telegram alert; the park is still counted", async () => {
+    const { deps, calls } = makeDeps({
+      getPendingHops: async () => [makeHopOp()],
+      listActivePositions: async () => [],
+      executeHop: async () => ({ success: false, parked: true, parkReason: "open_broadcast_budget_exhausted" }),
+      persistDecision: async () => {
+        throw new Error("db down");
+      },
+    });
+
+    const res = await runLoopAllocationTick(deps);
+
+    expect(res.parked).toBe(1);
+    expect(res.journaled).toBe(0);
+    expect(res.failed).toBe(0);
+    expect(calls.notifications).toHaveLength(1);
+    expect(String(calls.notifications[0].reason)).toContain("open_broadcast_budget_exhausted");
+  });
+
+  it("a notify rejection is swallowed — the park is still journaled and counted", async () => {
+    const { deps, calls } = makeDeps({
+      getPendingHops: async () => [makeHopOp()],
+      listActivePositions: async () => [],
+      executeHop: async () => ({ success: false, parked: true, parkReason: "close_done_time_unknown" }),
+      notify: async () => {
+        throw new Error("telegram down");
+      },
+    });
+
+    const res = await runLoopAllocationTick(deps);
+
+    expect(res.parked).toBe(1);
+    expect(res.journaled).toBe(1);
+    expect(res.failed).toBe(0);
+    expect(calls.decisions).toHaveLength(1);
+  });
+
+  it("a non-pending row from the sweep query is loudly warned about but STILL resumed (the executor's doors decide)", async () => {
+    const warns: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...a: unknown[]) => {
+      warns.push(a.map(String).join(" "));
+    };
+    try {
+      const hopCalls: Array<Record<string, unknown>> = [];
+      const { deps } = makeDeps({
+        getPendingHops: async () => [makeHopOp({ status: "parked" })],
+        listActivePositions: async () => [],
+        executeHop: async (params) => {
+          hopCalls.push(params as unknown as Record<string, unknown>);
+          // Real executor door: automatic mode refuses a parked op.
+          return { success: false, parked: true, parkReason: "post_close_age_exceeded" };
+        },
+      });
+
+      const res = await runLoopAllocationTick(deps);
+
+      expect(warns.some((w) => w.includes("non-pending"))).toBe(true);
+      expect(hopCalls).toHaveLength(1); // still handed to the executor
+      expect(res.failed).toBe(0);
+    } finally {
+      console.warn = origWarn;
+    }
   });
 });

@@ -77,11 +77,13 @@ import {
   evaluateLoopOpenRequest,
   recoverHopSolReturned,
   LOOP_ALLOCATION_POLICY,
+  LOOP_HOP_RECOVERY_POLICY,
   LOOP_RISK_POLICY,
   LOOP_VAULT_ALLOWLIST,
+  type HopSolReturnedSource,
   type LoopPolicyReason,
 } from "./loop-risk-policy";
-import { getFreshLoopRates, sampleAndPersistLoopRates, netCarryAt, pickBestLoopVault, LOOP_RATE_REGISTRY, type FreshLoopRate } from "./loop-rate-oracle";
+import { getFreshLoopRates, sampleAndPersistLoopRates, netCarryAt, LOOP_RATE_REGISTRY, type FreshLoopRate } from "./loop-rate-oracle";
 import type { BorrowPosition, BorrowOperation } from "@shared/schema";
 
 // --- Constants ---------------------------------------------------------------
@@ -2204,6 +2206,37 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
           error: "Loop Close: the swap's worst-case output would not cover the debt repayment (slippage/depeg). Nothing was moved — retry with market calm or higher slippage.",
         };
       }
+
+      // WO2A: persist THIS close's conservative attribution floor BEFORE any
+      // broadcast. If the tx later lands but its exact output goes unmeasured
+      // (crash window / ambiguous-but-cleared), recovery sizes the re-loop from
+      // this floor — the close's OWN worst case (minOut − flashRepay − fee
+      // headroom) — never from a whole-wallet balance delta, which would
+      // attribute out-of-band credits/debits to the hop. Both writes are
+      // return-checked: no durable floor ⇒ no broadcast.
+      const attributableFloor = computeCloseAttributableFloor(minOut, flashRepay);
+      if (attributableFloor <= 0n) {
+        await failOp(opId, "attributable_floor_nonpositive", `minOut ${minOut} - flashRepay ${flashRepay} - headroom ${LOOP_FEE_HEADROOM_LAMPORTS} <= 0`);
+        return {
+          success: false,
+          error: "Loop Close: the swap's worst-case output leaves no attributable margin over the debt repayment. Nothing was moved — retry with market calm or lower slippage.",
+        };
+      }
+      const floorPersisted = await storage.updateBorrowOperation(opId, {
+        mergeMetadata: {
+          closeMinOutRaw: minOut.toString(),
+          closeFlashRepayRaw: flashRepay.toString(),
+          attributableFloorRaw: attributableFloor.toString(),
+        },
+      });
+      if (!floorPersisted) {
+        await failOp(opId, "floor_persist_failed", "attribution-floor write did not persist — refusing to broadcast");
+        return {
+          success: false,
+          error: "Loop Close: could not durably record the attribution floor. Nothing was moved — retry.",
+        };
+      }
+
       const swapResp = await jupSwapIxs(quote, agentPublicKey);
       if ((swapResp.setupInstructions || []).length > 0) {
         await failOp(opId, "swap_setup_ixs", `Swap returned ${swapResp.setupInstructions.length} setup ix(s).`);
@@ -2527,6 +2560,171 @@ export async function verifyCloseTxLanded(
   }
 }
 
+// -- WO2A hop-recovery helpers (exported for unit tests) --------------------------
+
+/**
+ * Conservative attribution floor for a close leg, computed from ITS OWN quote:
+ * worst-case swap output (minOut) minus the flash repayment minus fee headroom.
+ * This is the least SOL the close can return to the agent wallet if its tx
+ * lands, so a figureless recovery may size the re-loop from it without ever
+ * consulting wallet balances. Clamped at 0 — callers must treat a nonpositive
+ * floor as un-broadcastable (fail closed pre-broadcast).
+ *
+ * @internal exported for unit tests only — not a public API surface.
+ */
+export function computeCloseAttributableFloor(minOutRaw: bigint, flashRepayRaw: bigint): bigint {
+  const floor = minOutRaw - flashRepayRaw - BigInt(LOOP_FEE_HEADROOM_LAMPORTS);
+  return floor > 0n ? floor : 0n;
+}
+
+/**
+ * Verify a RAW signature string landed (confirmed/finalized, no error).
+ * Unlike verifyCloseTxLanded this takes the signature directly — needed when
+ * the close attempt is still in memory (direct path) or when a SUCCEEDED close
+ * op recorded its sig in result/metadata but its step moved past
+ * "loop_sig_writeahead" (pickCloseTxSig deliberately refuses those steps).
+ * NULL status = "not_landed" (searchTransactionHistory makes absence strong
+ * evidence, and callers only ever SKIP attribution on not_landed — they never
+ * book success from it); RPC failure = "unverifiable".
+ *
+ * @internal exported for unit tests only — not a public API surface.
+ */
+export async function verifyRawSigLanded(
+  signature: string | null | undefined,
+  connection: Pick<Connection, "getSignatureStatuses">,
+): Promise<"landed" | "not_landed" | "unverifiable"> {
+  if (typeof signature !== "string" || signature.length === 0) return "not_landed";
+  try {
+    const res = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+    const st = res.value[0];
+    const ok = !!st && !st.err && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized");
+    return ok ? "landed" : "not_landed";
+  } catch {
+    return "unverifiable";
+  }
+}
+
+/**
+ * WO2A broadcast-budget basis: count numbered open children that carry durable
+ * MAIN-OPEN write-ahead evidence (loopOpenWriteaheadRecorded — metadata merges
+ * survive later step overwrites, so a failed child that once broadcast still
+ * counts). Children that provably never broadcast (row absent, preflight-
+ * declined, policy-denied pre-broadcast) consume no budget.
+ *
+ * @internal exported for unit tests only — not a public API surface.
+ */
+export async function countHopBroadcastAttempts(
+  walletAddress: string,
+  parentClientRequestId: string,
+  openAttempts: number,
+): Promise<number> {
+  let count = 0;
+  for (let n = 1; n <= openAttempts; n++) {
+    const child = await storage.getBorrowOperationByClientRequestId(walletAddress, `${parentClientRequestId}:open:${n}`);
+    if (child && child.operationType === "loop_open" && loopOpenWriteaheadRecorded(child)) count++;
+  }
+  return count;
+}
+
+/** Outcome of scanning a hop's own close children for attribution proof (WO2A). */
+export type OlderCloseRecovery =
+  | {
+      kind: "recovered";
+      raw: bigint;
+      source: HopSolReturnedSource;
+      signature: string | null;
+      /** The proven close child — its updatedAt anchors closeDoneAt on a resume. */
+      provenOp: BorrowOperation;
+    }
+  /** An own close PROVABLY landed but carries no exact figure and no floor (legacy/corrupt record) — resumable, never terminal, never sized. */
+  | { kind: "proven_unattributable"; provenOp: BorrowOperation }
+  /** RPC could not verify at least one candidate — resumable, retry later. */
+  | { kind: "unverifiable" }
+  /** No own close attempt proves this hop moved money. */
+  | { kind: "none" };
+
+/**
+ * WO2A: walk this hop's OWN numbered close children (newest → oldest) for
+ * close-output attribution proof. Rules:
+ *  - SUCCEEDED child with the selfHeal marker → SKIP: it was stamped WITHOUT a
+ *    transaction (position found already flat), so it is never proof that THIS
+ *    hop's close moved money.
+ *  - SUCCEEDED child with an exact result figure → exact. A malformed exact is
+ *    proven_unattributable: it IS our close (success paths CAS-close the
+ *    position first), but the record is corrupt — fail closed resumable rather
+ *    than guessing or silently downgrading to the floor.
+ *  - SUCCEEDED figureless child (ambiguous-but-cleared) → its own persisted
+ *    floor, but ONLY once its recorded signed tx is verified LANDED (probe-flat
+ *    alone can also mean "our tx expired AND someone closed it out-of-band").
+ *    Not-landed → skip; landed with no floor → proven_unattributable.
+ *  - Crash-window child (step loop_sig_writeahead) → verifyCloseTxLanded;
+ *    landed → its floor (no exact was ever measured); landed with no floor →
+ *    proven_unattributable; not_landed/malformed → keep scanning older.
+ *  - Any RPC-unverifiable candidate keeps the hop resumable (never guess).
+ * A position closes at most once, so the first proven child decides.
+ *
+ * @internal exported for unit tests only — not a public API surface.
+ */
+export async function recoverFromOlderProvenClose(
+  walletAddress: string,
+  closeCridFor: (n: number) => string,
+  fromAttempt: number,
+  connection: Pick<Connection, "getSignatureStatuses">,
+): Promise<OlderCloseRecovery> {
+  let sawUnverifiable = false;
+  for (let n = fromAttempt; n >= 1; n--) {
+    const co = await storage.getBorrowOperationByClientRequestId(walletAddress, closeCridFor(n));
+    if (!co) continue;
+    const coMeta = (co.metadata ?? {}) as Record<string, any>;
+    const r = (co.result ?? {}) as Record<string, any>;
+    const floorRaw = typeof coMeta.attributableFloorRaw === "string" ? coMeta.attributableFloorRaw : null;
+
+    if (co.status === "succeeded") {
+      if (coMeta.selfHeal === true) continue;
+      const exact = typeof r.solReturnedLamports === "string" && r.solReturnedLamports ? r.solReturnedLamports : null;
+      if (exact) {
+        const rec = recoverHopSolReturned({ exactCloseOutputRaw: exact });
+        if (rec.ok) {
+          const sig = typeof r.signature === "string" && r.signature ? r.signature : null;
+          return { kind: "recovered", raw: rec.solReturnedRaw, source: rec.source, signature: sig, provenOp: co };
+        }
+        return { kind: "proven_unattributable", provenOp: co };
+      }
+      const sig =
+        typeof r.signature === "string" && r.signature
+          ? r.signature
+          : typeof coMeta.closeTxSignature === "string" && coMeta.closeTxSignature
+            ? (coMeta.closeTxSignature as string)
+            : null;
+      if (!sig) continue; // figureless AND signatureless success — cannot prove it moved money
+      const verdict = await verifyRawSigLanded(sig, connection);
+      if (verdict === "unverifiable") {
+        sawUnverifiable = true;
+        continue;
+      }
+      if (verdict !== "landed") continue;
+      const rec = recoverHopSolReturned({ attributableFloorRaw: floorRaw });
+      if (rec.ok) return { kind: "recovered", raw: rec.solReturnedRaw, source: rec.source, signature: sig, provenOp: co };
+      return { kind: "proven_unattributable", provenOp: co };
+    }
+
+    if (co.step === "loop_sig_writeahead") {
+      const verdict = await verifyCloseTxLanded(co, connection);
+      if (verdict === "landed") {
+        const rec = recoverHopSolReturned({ attributableFloorRaw: floorRaw });
+        if (rec.ok) return { kind: "recovered", raw: rec.solReturnedRaw, source: rec.source, signature: pickCloseTxSig(co), provenOp: co };
+        return { kind: "proven_unattributable", provenOp: co };
+      }
+      if (verdict === "unverifiable") {
+        sawUnverifiable = true;
+        continue;
+      }
+      // not_landed / malformed → keep scanning older attempts
+    }
+  }
+  return sawUnverifiable ? { kind: "unverifiable" } : { kind: "none" };
+}
+
 /**
  * Resolve the specific MAIN Loop Open transaction signature from an open-
  * attempt operation record (F4 open recovery). Same fail-closed discipline as
@@ -2654,6 +2852,13 @@ export interface LoopHopParams {
   clientRequestId: string;
   /** Free-form policy audit string (e.g. the allocation reason that triggered it). */
   policyReason?: string;
+  /**
+   * WO2A recovery mode. "automatic" (default — allocation tick / resume sweep)
+   * enforces LOOP_HOP_RECOVERY_POLICY and PARKS the hop when a budget is
+   * exceeded; "manual" (admin resume) may drive exactly one more attempt per
+   * invocation even on a parked or budget-exhausted parent.
+   */
+  mode?: "automatic" | "manual";
 }
 
 export interface LoopHopResult {
@@ -2683,6 +2888,12 @@ export interface LoopHopResult {
   alreadyCompleted?: boolean;
   /** True = this clientRequestId terminally failed BEFORE any money moved; use a fresh one. */
   terminal?: boolean;
+  /** WO2A: true = the hop exceeded its automatic recovery budget (or was already parked) and waits for MANUAL resume. */
+  parked?: boolean;
+  /** WO2A: why the hop parked (open_broadcast_budget_exhausted | post_close_age_exceeded | close_done_time_unknown). */
+  parkReason?: string;
+  /** WO2A: how the recovered close output was attributed. */
+  principalSource?: HopSolReturnedSource;
   error?: string;
 }
 
@@ -2803,6 +3014,21 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
     }
   }
 
+  // WO2A door: automatic recovery must NEVER re-drive a PARKED hop — parked
+  // means the automatic budget was already exhausted and a human explicitly
+  // owns the next attempt. Defense in depth: the resume sweep's query also
+  // excludes parked rows, so this door only fires on a direct automatic call.
+  const mode: "automatic" | "manual" = params.mode === "manual" ? "manual" : "automatic";
+  if (op && op.status === "parked" && mode !== "manual") {
+    const metaParked = (op.metadata ?? {}) as Record<string, any>;
+    return {
+      success: false,
+      parked: true,
+      parkReason: typeof metaParked.parkReason === "string" ? metaParked.parkReason : "parked",
+      error: "This hop is parked for manual resume. Automatic recovery will not touch it — resume it explicitly from the admin surface.",
+    };
+  }
+
   let fromVaultId: number;
   if (op) {
     // RESUME: trust the source vault recorded at creation (the source position
@@ -2856,6 +3082,14 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
   }
   let closeSignature: string | undefined = typeof meta.closeSignature === "string" ? meta.closeSignature : undefined;
   let targetLeverage: number | null = typeof meta.targetLeverage === "number" ? meta.targetLeverage : null;
+  // WO2A attribution/budget state. principalSource travels with solReturned;
+  // closeDoneAt is IMMUTABLE once merged (first proof wins) and is the ONLY
+  // basis for the post-close age budget — never parent row timestamps, which
+  // move on every breadcrumb write and would reset the clock forever.
+  let principalSource: HopSolReturnedSource | null =
+    meta.principalSource === "exact" || meta.principalSource === "conservative_floor" ? meta.principalSource : null;
+  let closeDoneAtCandidate: string | null = null;
+  const closeCridFor = (n: number) => `${params.clientRequestId}:close:${n}`;
 
   try {
     // ---- PHASE 1: PRE-CLOSE GATE + CLOSE (skipped once solReturned is known) ----
@@ -2868,7 +3102,6 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
       // its own crid; executeLoopClose re-reads live state and self-heals if the
       // position is already flat, so retries progress instead of deadlocking.
       const priorCloseAttempts = Number(meta.closeAttempts ?? 0);
-      const closeCridFor = (n: number) => `${params.clientRequestId}:close:${n}`;
 
       // The persisted pre-close SOL baseline is the durable marker that the gate
       // already passed and the close leg is in play. Its PRESENCE means we must
@@ -2917,6 +3150,16 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
               gateGainApy: gate.gainApy,
               gateFromCarryApy: gate.fromCarryApy,
               gateToCarryApy: gate.toCarryApy,
+              // WO2A: the ONLY destinations a recovery pass may open on,
+              // persisted AT the gate that authorized the hop: the requested
+              // target (gate-approved) and the original source (it was already
+              // levered pre-hop and passed the source-side gate — restoring it
+              // is never a new bet). pickBestLoopVault is deliberately NOT
+              // consulted at recovery time: "best" then is a NEW allocation
+              // decision nobody authorized. NOTE for future HOLD-style
+              // callers: persist [target] only — a hop is the only flow whose
+              // source re-lever is pre-authorized.
+              authorizedRecoveryVaultIds: [targetVaultId, fromVaultId],
             },
           });
           // The persisted baseline is how a no-figure close path (self-heal /
@@ -2968,96 +3211,129 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
         }
         closeSignature = close.signature;
 
-        // Measure solReturned via the shared money-safety helper: prefer the
-        // close's own figure; otherwise the STRICT delta vs the write-ahead
-        // baseline (valid here — baseline was read pre-close this same pass).
-        let nowRaw: bigint | null = null;
-        if (!close.solReturnedLamports) {
-          try {
-            nowRaw = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, NATIVE_SOL_MINT)).amountRaw);
-          } catch {
-            nowRaw = null;
-          }
-        }
-        const rec = recoverHopSolReturned({
-          closeSolReturnedRaw: close.solReturnedLamports ?? null,
-          baselineRaw: baseline,
-          agentLamportsNowRaw: nowRaw,
-        });
-        if (!rec.ok) {
-          return {
-            success: false,
-            resumable: true,
-            ...(closeSignature ? { closeSignature } : {}),
-            error: "The unwind landed but the returned SOL could not be measured yet. Your funds are safe. Wait a minute and retry.",
-          };
-        }
-        solReturned = rec.solReturnedRaw;
-      } else {
-        // RESUME after a crash: the source is no longer open. "Closed" ALONE is
-        // NOT proof that OUR unwind ran — a position closed OUTSIDE this hop (a
-        // user close, a safety unwind) also reads closed, and consuming the
-        // delta-vs-baseline would then re-lever funds this hop never touched.
-        // Require close-leg PROVENANCE: one of our OWN close attempts must have
-        // either succeeded (every success path CAS-closes the position BEFORE it
-        // marks its op succeeded) or be sitting in the narrow post-broadcast crash
-        // window (step loop_sig_writeahead WITH a recorded signature — that tx is
-        // what closed the position). A failed / pre-broadcast close op is NOT
-        // proof (those paths always leave the position open).
-        let provenClose:
-          | NonNullable<Awaited<ReturnType<typeof storage.getBorrowOperationByClientRequestId>>>
-          | null = null;
-        // A crash-window op recorded a broadcast signature but never marked
-        // succeeded. A recorded sig only proves BROADCAST — if that tx expired
-        // without landing AND the position was then closed out-of-band, trusting
-        // the sig alone would re-lever the user's proceeds. So the writeahead
-        // clause must confirm the sig actually LANDED on-chain. If the RPC can't
-        // tell us, we neither re-lever nor terminal — stay resumable, re-check.
-        const hopConnection = getServerConnection();
-        let writeaheadUnverifiable = false;
-        for (let n = priorCloseAttempts; n >= 1; n--) {
-          const co = await storage.getBorrowOperationByClientRequestId(walletAddress, closeCridFor(n));
-          if (!co) continue;
-          if (co.status === "succeeded") {
-            // Every success path CAS-closes the position BEFORE marking the op
-            // succeeded → definitive proof our unwind ran.
-            provenClose = co;
-            break;
-          }
-          if (co.step === "loop_sig_writeahead") {
-            // Resolve the single close-tx sig (NOT the whole txSignatures array).
-            // verifyCloseTxLanded uses pickCloseTxSig which:
-            //  • prefers meta.closeTxSignature (written atomically by new write-ahead hooks),
-            //  • falls back to txSignatures[last] (ordering invariant for legacy records: the
-            //    ATA-prep sig, if present, is appended BEFORE the write-ahead hook fires, so
-            //    the close sig is always the final element),
-            //  • returns "malformed" if neither yields a non-empty string (fail closed).
-            const verdict = await verifyCloseTxLanded(co, hopConnection);
-            if (verdict === "landed") {
-              provenClose = co;
-              break;
-            }
-            if (verdict === "unverifiable") {
-              writeaheadUnverifiable = true; // decide on a later tick
-              continue;
-            }
-            if (verdict === "malformed") {
-              continue; // can't identify the close sig — fail closed, scan older attempts
-            }
-            // "not_landed": this attempt's tx expired/failed — scan older attempts.
-          }
-        }
-        if (!provenClose) {
-          if (writeaheadUnverifiable) {
-            // A crash-window close sig exists but the RPC could not confirm whether
-            // it landed. Refuse to re-lever (could seize an out-of-band close) and
-            // refuse to terminal (could de-lever a real own-close) — resumable.
+        // WO2A close-output attribution (direct path): exact figure first;
+        // else THIS close's own pre-broadcast floor — but only once its signed
+        // tx provably landed; a signatureless self-heal is NOT proof this hop
+        // moved money and may only recover through an OLDER proven own-close.
+        // Whole-wallet balance deltas are gone: they attribute out-of-band
+        // credits/debits to the hop and re-lever money it never touched.
+        if (close.solReturnedLamports) {
+          const rec = recoverHopSolReturned({ exactCloseOutputRaw: close.solReturnedLamports });
+          if (!rec.ok) {
             return {
               success: false,
               resumable: true,
+              ...(closeSignature ? { closeSignature } : {}),
+              error: "The unwind landed but its reported output is unreadable. Your funds are safe. Wait a minute and retry.",
+            };
+          }
+          solReturned = rec.solReturnedRaw;
+          principalSource = rec.source;
+          closeDoneAtCandidate = new Date().toISOString();
+        } else if (close.signature) {
+          // Ambiguous-but-cleared: the close verified the position flat but
+          // could not measure the returned SOL. Probe-flat ALONE also matches
+          // "our tx expired AND someone closed it out-of-band", so the floor
+          // may size the re-loop ONLY once this attempt's own tx is confirmed.
+          const verdict = await verifyRawSigLanded(close.signature, getServerConnection());
+          if (verdict !== "landed") {
+            // Fresh broadcast — a not-yet-visible sig may still land. Never
+            // terminalize here; the resume path re-checks once settled.
+            return {
+              success: false,
+              resumable: true,
+              ...(closeSignature ? { closeSignature } : {}),
               error: "Could not yet confirm on-chain whether the unwind landed. Your funds are safe. Wait a minute and retry.",
             };
           }
+          const closeOpRow = await storage.getBorrowOperationByClientRequestId(walletAddress, closeCridFor(closeAttempt));
+          const closeOpMeta = (closeOpRow?.metadata ?? {}) as Record<string, any>;
+          const rec = recoverHopSolReturned({
+            attributableFloorRaw: typeof closeOpMeta.attributableFloorRaw === "string" ? closeOpMeta.attributableFloorRaw : null,
+          });
+          if (!rec.ok) {
+            return {
+              success: false,
+              resumable: true,
+              ...(closeSignature ? { closeSignature } : {}),
+              error: "The unwind landed but carries no exact output and no recorded attribution floor. Your funds are safe; this hop needs a manual look.",
+            };
+          }
+          solReturned = rec.solReturnedRaw;
+          principalSource = rec.source;
+          closeDoneAtCandidate = new Date().toISOString();
+        } else {
+          // Signatureless self-heal success: the position was found already
+          // flat, and NO transaction backs this attempt. Only an EARLIER
+          // numbered close child of THIS hop can prove the unwind was ours.
+          const older = await recoverFromOlderProvenClose(walletAddress, closeCridFor, closeAttempt - 1, getServerConnection());
+          if (older.kind === "recovered") {
+            solReturned = older.raw;
+            principalSource = older.source;
+            if (!closeSignature && older.signature) closeSignature = older.signature;
+            const provenAt = older.provenOp.updatedAt instanceof Date
+              ? older.provenOp.updatedAt.getTime()
+              : Date.parse(String(older.provenOp.updatedAt));
+            closeDoneAtCandidate = Number.isFinite(provenAt) ? new Date(provenAt).toISOString() : null;
+          } else if (older.kind === "unverifiable") {
+            return {
+              success: false,
+              resumable: true,
+              error: "Could not yet confirm on-chain whether an earlier unwind attempt landed. Your funds are safe. Wait a minute and retry.",
+            };
+          } else if (older.kind === "proven_unattributable") {
+            return {
+              success: false,
+              resumable: true,
+              error: "The unwind provably ran but its output cannot be attributed (no exact figure and no recorded floor). Your funds are safe; this hop needs a manual look.",
+            };
+          } else {
+            await failOp(opId, "closed_outside_hop", "position already flat and no own close attempt proves this hop moved money");
+            return {
+              success: false,
+              error: "Hop aborted: the position was closed outside this hop, so there is nothing to re-loop. Your funds are safe in your account.",
+            };
+          }
+        }
+      } else {
+        // RESUME after a crash: the source is no longer open. "Closed" ALONE is
+        // NOT proof that OUR unwind ran — a position closed OUTSIDE this hop (a
+        // user close, a safety unwind) also reads closed, and attributing
+        // anything to it would re-lever funds this hop never touched. WO2A:
+        // recoverFromOlderProvenClose walks our OWN numbered close children for
+        // proof — an exact figure, else the proven child's own persisted floor
+        // (verified-landed first) — and SELF-HEAL successes are EXCLUDED as
+        // proof (they were stamped without a transaction; treating them as
+        // proven was the old code's bug class). No wallet-delta fallback
+        // exists anymore, so an unproven close can never seize out-of-band
+        // funds.
+        const older = await recoverFromOlderProvenClose(
+          walletAddress,
+          closeCridFor,
+          priorCloseAttempts,
+          getServerConnection(),
+        );
+        if (older.kind === "unverifiable") {
+          // A candidate close sig exists but the RPC could not confirm whether
+          // it landed. Refuse to re-lever (could seize an out-of-band close)
+          // and refuse to terminal (could de-lever a real own-close).
+          return {
+            success: false,
+            resumable: true,
+            error: "Could not yet confirm on-chain whether the unwind landed. Your funds are safe. Wait a minute and retry.",
+          };
+        }
+        if (older.kind === "proven_unattributable") {
+          // Our close provably landed, but its record carries no exact figure
+          // and no floor (legacy/corrupt). Sizing from ANY other source would
+          // guess — stay resumable for a manual look, never terminal.
+          return {
+            success: false,
+            resumable: true,
+            error: "The unwind provably ran but its output cannot be attributed (no exact figure and no recorded floor). Your funds are safe; this hop needs a manual look.",
+          };
+        }
+        if (older.kind === "none") {
           // Nothing this hop did closed the position → re-levering would seize
           // funds the user (or a safety unwind) deliberately took out. Terminal:
           // failing the op frees the position from hopInFlightPositionIds so the
@@ -3068,51 +3344,53 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
             error: "Hop aborted: the position was closed outside this hop, so there is nothing to re-loop. Your funds are safe in your account.",
           };
         }
-        // Provenance holds → recover the returned SOL from the close op's own
-        // result, else the STRICT delta vs the PERSISTED pre-close baseline —
-        // never a fresh (post-close) baseline, and never re-gate (that would
-        // falsely decline a hop whose funds have already moved).
-        const r = (provenClose.result ?? {}) as Record<string, any>;
-        if (!closeSignature && typeof r.signature === "string") closeSignature = r.signature;
-        const closeFig = typeof r.solReturnedLamports === "string" ? r.solReturnedLamports : null;
-        // Only read the live balance when we must fall back to the delta path
-        // (baseline present but no close figure); never a fresh read otherwise.
-        let nowRaw: bigint | null = null;
-        if (!closeFig && baseline !== null) {
-          try {
-            nowRaw = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, NATIVE_SOL_MINT)).amountRaw);
-          } catch {
-            nowRaw = null;
-          }
-        }
-        const rec = recoverHopSolReturned({
-          closeSolReturnedRaw: closeFig,
-          baselineRaw: baseline,
-          agentLamportsNowRaw: nowRaw,
-        });
-        if (!rec.ok) {
-          // Money is back in the agent wallet but not yet measurable — resumable.
-          return {
-            success: false,
-            resumable: true,
-            ...(closeSignature ? { closeSignature } : {}),
-            error: "The unwind landed but the returned SOL could not be measured yet. Your funds are safe. Wait a minute and retry.",
-          };
-        }
-        solReturned = rec.solReturnedRaw;
+        solReturned = older.raw;
+        principalSource = older.source;
+        if (!closeSignature && older.signature) closeSignature = older.signature;
+        // WO2A: the age budget anchors on the PROVEN close child's own terminal
+        // write time (its updatedAt) — never this parent's timestamps.
+        const provenAt = older.provenOp.updatedAt instanceof Date
+          ? older.provenOp.updatedAt.getTime()
+          : Date.parse(String(older.provenOp.updatedAt));
+        closeDoneAtCandidate = Number.isFinite(provenAt) ? new Date(provenAt).toISOString() : null;
       }
 
-      await storage.updateBorrowOperation(opId, {
+      // WO2A: return-checked close_done persist. Also merges principalSource
+      // and the IMMUTABLE closeDoneAt (merged only when absent — first proof
+      // wins; a later resume must never slide the budget clock forward).
+      const closeDoneMerge: Record<string, unknown> = {
+        solReturnedLamports: solReturned.toString(),
+        ...(principalSource ? { principalSource } : {}),
+        ...(closeSignature ? { closeSignature } : {}),
+      };
+      const existingCloseDoneAt = typeof meta.closeDoneAt === "string" && meta.closeDoneAt ? meta.closeDoneAt : null;
+      if (!existingCloseDoneAt && closeDoneAtCandidate) closeDoneMerge.closeDoneAt = closeDoneAtCandidate;
+      const closeDonePersisted = await storage.updateBorrowOperation(opId, {
         step: "close_done",
-        mergeMetadata: {
-          solReturnedLamports: solReturned.toString(),
-          ...(closeSignature ? { closeSignature } : {}),
-        },
+        mergeMetadata: closeDoneMerge,
       });
+      if (!closeDonePersisted) {
+        // The attribution crumb is what lets every later pass (and the budget
+        // clock) trust solReturned without re-deriving it — refuse to proceed
+        // to the open leg until it is durable.
+        return {
+          success: false,
+          resumable: true,
+          ...(closeSignature ? { closeSignature } : {}),
+          error: "Could not durably record the unwind result. Your funds are safe. Wait a minute and retry.",
+        };
+      }
     } else if (solReturned !== null && op.step !== "close_done" && op.step !== "opened") {
       // Defensive: solReturned crumb exists but the step wasn't advanced — treat
       // as close_done (the close provably happened) and proceed to re-open.
-      await storage.updateBorrowOperation(opId, { step: "close_done" });
+      const stepAdvanced = await storage.updateBorrowOperation(opId, { step: "close_done" });
+      if (!stepAdvanced) {
+        return {
+          success: false,
+          resumable: true,
+          error: "Could not advance the hop record. Your funds are safe. Wait a minute and retry.",
+        };
+      }
     }
 
     // ---- PHASE 2: RE-OPEN (size from the real solReturned; fallback + resume) ----
@@ -3125,15 +3403,41 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
       };
     }
 
-    // ---- PHASE 2a: RECONCILE ANY PRIOR CHILD OPEN ATTEMPT (F4/SL-10) ---------
-    // Runs BEFORE the destination preflight / current-rate fallback (which may
-    // legitimately refuse a FRESH open but must never block recovery) and
-    // BEFORE a new attempt is numbered. A prior child that broadcast — or
-    // LANDED — is resolved from ITS OWN durable records; it is never
-    // superseded while unproven and never re-opened with this retry's sizing.
+    // WO2A: re-read the parent once — the close leg may have merged crumbs
+    // this pass, and the active-child slot, budgets and authorization list
+    // must be judged from what is DURABLE, never a stale pre-close load.
+    const parentNow = await storage.getBorrowOperationById(opId);
+    if (!parentNow) {
+      return {
+        success: false,
+        resumable: true,
+        solReturnedLamports: solReturned.toString(),
+        ...(closeSignature ? { closeSignature } : {}),
+        error: "The hop record could not be re-read. Your funds are safe. Retry shortly.",
+      };
+    }
+    const metaNow = (parentNow.metadata ?? {}) as Record<string, any>;
+    if (principalSource === null && (metaNow.principalSource === "exact" || metaNow.principalSource === "conservative_floor")) {
+      principalSource = metaNow.principalSource;
+    }
+    const activeSlotCrid =
+      typeof metaNow.activeOpenClientRequestId === "string" && metaNow.activeOpenClientRequestId
+        ? (metaNow.activeOpenClientRequestId as string)
+        : null;
+    // Set when the persisted slot turns out to be a crash-orphan (claimed, but
+    // its child op was never created — provably nothing broadcast under it):
+    // the fresh flow below must REUSE that crid, never mint a rival beside it.
+    let slotOrphanToReuse: { crid: string; vaultId: number | null } | null = null;
+
+    // ---- PHASE 2a: RECONCILE ANY PRIOR CHILD OPEN ATTEMPT (F4/SL-10/WO2A) ----
+    // Runs BEFORE the budget gate (a prior child that LANDED must be adopted,
+    // never parked away from) and BEFORE a new attempt is numbered. A prior
+    // child that broadcast — or LANDED — is resolved from ITS OWN durable
+    // records; it is never superseded while unproven and never re-opened with
+    // this retry's sizing.
     const solRecovered = solReturned;
-    const priorOpenAttempts = Number(meta.openAttempts ?? 0);
-    if (priorOpenAttempts > 0) {
+    const priorOpenAttempts = Number(metaNow.openAttempts ?? 0);
+    if (activeSlotCrid || priorOpenAttempts > 0) {
       // SL-10 lock discipline: the whole child scan + reconcile + adoption is
       // serialized under the SAME borrow-lock key the open path's recovery
       // gate uses — a concurrent executeLoopOpen or a concurrent retry of this
@@ -3142,28 +3446,66 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
       // winner's terminal write instead of a stale pending shape. The lock is
       // RELEASED before the fresh-attempt flow below: executeLoopOpen acquires
       // the same key itself and withBorrowLock is NOT reentrant.
-      const reopenVaultCandidate = Number(meta.reopenVaultId);
+      const reopenVaultCandidate = Number(metaNow.reopenVaultId);
       const phase2aLockVault =
         Number.isInteger(reopenVaultCandidate) && reopenVaultCandidate > 0
           ? reopenVaultCandidate
           : targetVaultId;
       const phase2a = await withBorrowLock(
         borrowLockKey(walletAddress, null, phase2aLockVault),
-        async (): Promise<LoopHopResult | null> => {
-      // Newest→oldest: the attempt counter is merged BEFORE the child op row
-      // is created, so the newest numbered crid may have no op at all (crash
-      // in that gap ⇒ provably nothing broadcast under it) — fall back to the
-      // newest attempt that recorded one. At most ONE child can be unresolved:
-      // a new number is only issued after the previous child is proven dead.
+        async (): Promise<LoopHopResult | { slotOrphan: { crid: string; vaultId: number | null } } | null> => {
+      // WO2A slot-first: the persisted active-child slot IS the single-flight
+      // record — resolve it before any legacy numbered scan.
       let child: BorrowOperation | null = null;
-      for (let n = priorOpenAttempts; n >= 1; n--) {
-        const c = await storage.getBorrowOperationByClientRequestId(
-          walletAddress,
-          `${params.clientRequestId}:open:${n}`,
-        );
+      let slotChildCrid: string | null = null;
+      if (activeSlotCrid) {
+        const c = await storage.getBorrowOperationByClientRequestId(walletAddress, activeSlotCrid);
         if (c && c.operationType === "loop_open") {
           child = c;
-          break;
+          slotChildCrid = activeSlotCrid;
+        } else if (!c) {
+          // Slot claimed but its child op was never created (crash in the
+          // claim→create gap): provably nothing was broadcast under that crid.
+          // Signal the fresh flow to REUSE it — the slot stays claimed.
+          // (Returned rather than written to the captured `let`: CFA can't see
+          // closure writes, and the outer reads would narrow to `never`.)
+          return {
+            slotOrphan: {
+              crid: activeSlotCrid,
+              vaultId:
+                Number.isInteger(Number(metaNow.activeOpenVaultId)) && Number(metaNow.activeOpenVaultId) > 0
+                  ? Number(metaNow.activeOpenVaultId)
+                  : null,
+            },
+          };
+        } else {
+          // The slot's crid resolves to a non-open op — corrupt linkage; a
+          // human look beats guessing which record to trust.
+          return {
+            success: false,
+            resumable: true,
+            solReturnedLamports: solRecovered.toString(),
+            ...(closeSignature ? { closeSignature } : {}),
+            error: "The hop's recovery slot points at an unexpected record. Your funds are safe. Retry with the same request to resume.",
+          };
+        }
+      }
+      if (!child) {
+        // Legacy rows (pre-slot): newest→oldest — the attempt counter was
+        // merged BEFORE the child op row was created, so the newest numbered
+        // crid may have no op at all (crash in that gap ⇒ provably nothing
+        // broadcast under it) — fall back to the newest attempt that recorded
+        // one. At most ONE child can be unresolved: a new number was only
+        // issued after the previous child was proven dead.
+        for (let n = priorOpenAttempts; n >= 1; n--) {
+          const c = await storage.getBorrowOperationByClientRequestId(
+            walletAddress,
+            `${params.clientRequestId}:open:${n}`,
+          );
+          if (c && c.operationType === "loop_open") {
+            child = c;
+            break;
+          }
         }
       }
       if (child) {
@@ -3205,24 +3547,52 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
           const realized = overheadL > 0n ? overheadL : 0n;
           const predicted =
             BigInt(Math.max(0, Math.round((2 * childSlipBps) / 10000 * Number(solRecovered) * childLev))) + realized;
-          await storage.updateBorrowOperation(opId, {
-            status: "succeeded",
-            step: "opened",
-            borrowPositionId: adoptedRowId,
-            result: {
+          // WO2A: adoption finalizes via CAS — guarded on the slot crid when
+          // the child came from the slot, and on an EMPTY slot for legacy
+          // children (a sibling's live claim wins; we re-read and report).
+          const finalized = await storage.finalizeLoopHopParent(
+            opId,
+            slotChildCrid
+              ? { expectedActiveOpenClientRequestId: slotChildCrid }
+              : { requireNoActiveChild: true },
+            {
+              status: "succeeded",
+              step: "opened",
               borrowPositionId: adoptedRowId,
-              closeSignature: closeSignature ?? null,
-              openSignature,
-              solReturnedLamports: solRecovered.toString(),
-              principalLamports: childPrincipal.toString(),
-              predictedCostLamports: predicted.toString(),
-              realizedCostLamports: realized.toString(),
-              fromVaultId,
-              toVaultId: childVaultId,
-              reversed: childVaultId === fromVaultId,
-              adoptedFromChildRecovery: true,
+              clearActiveChild: true,
+              result: {
+                borrowPositionId: adoptedRowId,
+                closeSignature: closeSignature ?? null,
+                openSignature,
+                solReturnedLamports: solRecovered.toString(),
+                principalLamports: childPrincipal.toString(),
+                predictedCostLamports: predicted.toString(),
+                realizedCostLamports: realized.toString(),
+                ...(principalSource ? { principalSource } : {}),
+                fromVaultId,
+                toVaultId: childVaultId,
+                reversed: childVaultId === fromVaultId,
+                adoptedFromChildRecovery: true,
+              },
             },
-          });
+          );
+          if (!finalized) {
+            // CAS lost: a sibling finalized/parked/claimed first. Report the
+            // durable truth instead of double-finalizing.
+            const now = await storage.getBorrowOperationById(opId);
+            if (now && (now.status === "succeeded" || now.status === "completed")) {
+              const r2 = (now.result ?? {}) as Record<string, any>;
+              return {
+                success: true,
+                alreadyCompleted: true,
+                ...(typeof r2.borrowPositionId === "string" ? { borrowPositionId: r2.borrowPositionId } : {}),
+                ...(typeof r2.closeSignature === "string" ? { closeSignature: r2.closeSignature } : {}),
+                ...(typeof r2.openSignature === "string" ? { openSignature: r2.openSignature } : {}),
+                ...(typeof r2.solReturnedLamports === "string" ? { solReturnedLamports: r2.solReturnedLamports } : {}),
+              };
+            }
+            return childResumable("The hop record changed underneath this adoption.");
+          }
           return {
             success: true,
             ...(adoptedRowId ? { borrowPositionId: adoptedRowId } : {}),
@@ -3286,6 +3656,14 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
               "Hop child open provably never broadcast — superseded by a fresh numbered attempt.",
             );
           }
+          if (slotChildCrid) {
+            // WO2A: the dead child still occupies the slot — release it (CAS)
+            // so the fresh flow below claims a NEW numbered attempt.
+            const cleared = await storage.clearLoopHopActiveChild(opId, slotChildCrid);
+            if (!cleared) {
+              return childResumable("The recovery slot changed underneath this cleanup.");
+            }
+          }
           // fall through to the normal fresh-attempt flow below
         } else {
           // Ambiguous: write-ahead recorded, outcome unproven — resolve from
@@ -3327,6 +3705,13 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
             return childResumable(`A previous re-open attempt is still unresolved: ${outcome.reason}`);
           }
           // "restored": the dead attempt was repaired — a fresh attempt is safe.
+          if (slotChildCrid) {
+            // WO2A: same slot release as the proven-dead branch above.
+            const cleared = await storage.clearLoopHopActiveChild(opId, slotChildCrid);
+            if (!cleared) {
+              return childResumable("The recovery slot changed underneath this cleanup.");
+            }
+          }
         }
       }
       // No child op recorded at all (the counter ran ahead of op creation —
@@ -3335,56 +3720,342 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
       return null;
         },
       );
-      if (phase2a) return phase2a;
+      if (phase2a && "slotOrphan" in phase2a) {
+        // Outer-scope assignment on purpose — TS control-flow analysis only
+        // trusts writes it can see from the read sites in THIS scope.
+        slotOrphanToReuse = phase2a.slotOrphan;
+      } else if (phase2a) {
+        return phase2a;
+      }
     }
 
-    // Preflight the target to learn the exact overhead (NFT mint rent + missing
-    // ATA rents + fee headroom); the true principal is solReturned − overhead.
-    let chosenVaultId = targetVaultId;
-    let pf = await executeLoopOpen({
-      walletAddress,
-      agentPublicKey,
-      agentSecretKey,
-      vaultId: chosenVaultId,
-      principalLamports: solReturned,
-      slippageBps,
-      preflightOnly: true,
-      callerHoldsBorrowLock: false,
-    });
-    if (!pf.success || !pf.preflight) {
-      // Target unopenable at this size → fall back to the best openable pair
-      // (may be the ORIGINAL — a reversing hop is still fund-safe).
-      const allowIds = Object.keys(LOOP_VAULT_ALLOWLIST).map(Number);
-      const rates = await getFreshLoopRates(LOOP_ALLOCATION_POLICY.rateStalenessMs).catch(() => null);
-      const best = rates ? pickBestLoopVault(rates, allowIds) : null;
-      if (best && best.vaultId !== chosenVaultId) {
-        chosenVaultId = best.vaultId;
-        targetLeverage = best.targetLeverage;
-        pf = await executeLoopOpen({
-          walletAddress,
-          agentPublicKey,
-          agentSecretKey,
-          vaultId: chosenVaultId,
-          principalLamports: solReturned,
-          slippageBps,
-          preflightOnly: true,
-          callerHoldsBorrowLock: false,
-        });
+    // ---- WO2A BUDGET GATE (automatic mode only; strictly AFTER Phase 2a) ----
+    // Phase 2a already ran: budgets must never park a hop whose prior child
+    // actually LANDED (that child gets adopted above, not counted against a
+    // budget). Manual mode skips the gate — the operator owns the decision —
+    // and a manual failure simply leaves the row as it was.
+    if (mode === "automatic") {
+      const broadcastAttempts = await countHopBroadcastAttempts(
+        walletAddress,
+        params.clientRequestId,
+        Number(metaNow.openAttempts ?? 0),
+      );
+      let closeDoneAtMs: number | null = null;
+      const closeDoneAtStr =
+        typeof metaNow.closeDoneAt === "string" && metaNow.closeDoneAt ? metaNow.closeDoneAt : closeDoneAtCandidate;
+      if (closeDoneAtStr) {
+        const t = Date.parse(closeDoneAtStr);
+        if (Number.isFinite(t)) closeDoneAtMs = t;
       }
-      if (!pf.success || !pf.preflight) {
+      if (closeDoneAtMs === null) {
+        // Legacy rows (close_done written before WO2A): backfill the immutable
+        // anchor from the newest SUCCEEDED non-self-heal close child's own
+        // terminal write time. Self-heal successes are excluded — they carry
+        // no transaction and may long postdate the real unwind.
+        const nClose = Number(metaNow.closeAttempts ?? 0);
+        for (let n = nClose; n >= 1; n--) {
+          const co = await storage.getBorrowOperationByClientRequestId(walletAddress, closeCridFor(n));
+          if (!co || co.status !== "succeeded") continue;
+          if (((co.metadata ?? {}) as Record<string, any>).selfHeal === true) continue;
+          const t = co.updatedAt instanceof Date ? co.updatedAt.getTime() : Date.parse(String(co.updatedAt));
+          if (Number.isFinite(t)) {
+            closeDoneAtMs = t;
+            await storage.updateBorrowOperation(opId, {
+              mergeMetadata: { closeDoneAt: new Date(t).toISOString() },
+            });
+          }
+          break;
+        }
+      }
+      const attemptsExhausted = broadcastAttempts >= LOOP_HOP_RECOVERY_POLICY.maxOpenBroadcastAttempts;
+      const ageExceeded =
+        closeDoneAtMs === null ||
+        Date.now() - closeDoneAtMs > LOOP_HOP_RECOVERY_POLICY.maxAutomaticPostCloseAgeMs;
+      if (attemptsExhausted || ageExceeded) {
+        const parkReason = attemptsExhausted
+          ? "open_broadcast_budget_exhausted"
+          : closeDoneAtMs === null
+            ? "close_done_time_unknown"
+            : "post_close_age_exceeded";
+        // Park via CAS from pending only. The active-child slot (if any) is
+        // deliberately NOT cleared — a manual resume reconciles it first.
+        const parkedOk = await storage.finalizeLoopHopParent(
+          opId,
+          { expectedStatus: "pending" },
+          {
+            status: "parked",
+            step: "parked",
+            mergeMetadata: {
+              parkedAt: new Date().toISOString(),
+              parkReason,
+              parkPrincipalLamports: solReturned.toString(),
+              ...(principalSource ? { parkPrincipalSource: principalSource } : {}),
+              parkBroadcastAttempts: broadcastAttempts,
+              parkOpenAttempts: Number(metaNow.openAttempts ?? 0),
+              parkCloseAttempts: Number(metaNow.closeAttempts ?? 0),
+            },
+          },
+        );
+        if (!parkedOk) {
+          const now = await storage.getBorrowOperationById(opId);
+          if (now && (now.status === "succeeded" || now.status === "completed")) {
+            const r2 = (now.result ?? {}) as Record<string, any>;
+            return {
+              success: true,
+              alreadyCompleted: true,
+              ...(typeof r2.borrowPositionId === "string" ? { borrowPositionId: r2.borrowPositionId } : {}),
+              ...(typeof r2.closeSignature === "string" ? { closeSignature: r2.closeSignature } : {}),
+              ...(typeof r2.openSignature === "string" ? { openSignature: r2.openSignature } : {}),
+              ...(typeof r2.solReturnedLamports === "string" ? { solReturnedLamports: r2.solReturnedLamports } : {}),
+            };
+          }
+          if (now && now.status === "parked") {
+            const mp = (now.metadata ?? {}) as Record<string, any>;
+            return {
+              success: false,
+              parked: true,
+              parkReason: typeof mp.parkReason === "string" ? mp.parkReason : parkReason,
+              solReturnedLamports: solReturned.toString(),
+              ...(closeSignature ? { closeSignature } : {}),
+              error: "This hop was parked by a concurrent attempt. Resume it manually from the admin surface.",
+            };
+          }
+          return {
+            success: false,
+            resumable: true,
+            solReturnedLamports: solReturned.toString(),
+            ...(closeSignature ? { closeSignature } : {}),
+            error: "The hop record changed while parking it. Retry shortly.",
+          };
+        }
         return {
           success: false,
-          resumable: true,
+          parked: true,
+          parkReason,
           solReturnedLamports: solReturned.toString(),
+          ...(principalSource ? { principalSource } : {}),
           ...(closeSignature ? { closeSignature } : {}),
-          error: `${pf.error || "Could not size a re-loop."} Your unwound SOL is safe in your account and will be re-looped on the next attempt.`,
+          error: `Hop parked for manual resume (${parkReason.split("_").join(" ")}). The unwound SOL stays safe in the agent wallet; resume from the admin surface when ready.`,
         };
       }
     }
 
-    const overhead = BigInt(Math.max(0, Math.round(pf.preflight.requiredLamports))) - solReturned;
-    const principal = solReturned - (overhead > 0n ? overhead : 0n);
-    if (principal <= 0n) {
+    // ---- FRESH RE-OPEN ATTEMPT (WO2A: authorized destinations + atomic slot) ----
+    // Recovery may open ONLY on pre-authorized destinations: the list persisted
+    // at gate time (legacy rows: the equally-pre-close [target, source] pair
+    // from creation). pickBestLoopVault is NOT consulted — "best right now" is
+    // a NEW allocation decision nobody authorized. At most ONE fallback per
+    // pass, shared by the preflight-failure and policy-deny triggers.
+    const authorizedRecoveryVaultIds: number[] = (
+      Array.isArray(metaNow.authorizedRecoveryVaultIds)
+        ? (metaNow.authorizedRecoveryVaultIds as unknown[]).map(Number)
+        : [Number(metaNow.toVaultId ?? targetVaultId), Number(metaNow.fromVaultId ?? fromVaultId)]
+    ).filter(
+      (v, i, arr) => Number.isInteger(v) && v > 0 && !!LOOP_VAULT_ALLOWLIST[v] && arr.indexOf(v) === i,
+    );
+    let fallbackUsed = false;
+
+    type OpenAttemptOutcome =
+      | { kind: "opened"; open: LoopOpenResult; slotCrid: string; vaultId: number; principal: bigint; overhead: bigint }
+      | { kind: "preflight_failed"; error?: string }
+      | { kind: "principal_too_small" }
+      | { kind: "open_failed"; open: LoopOpenResult; slotCrid: string; vaultId: number }
+      | { kind: "blocked"; result: LoopHopResult };
+
+    const preflightOn = (vaultId: number) =>
+      executeLoopOpen({
+        walletAddress,
+        agentPublicKey,
+        agentSecretKey,
+        vaultId,
+        principalLamports: solReturned!,
+        slippageBps,
+        preflightOnly: true,
+        callerHoldsBorrowLock: false,
+      });
+
+    // Exact overhead (NFT mint rent + missing ATA rents + fee headroom) from
+    // the preflight; the true principal is solReturned − overhead.
+    const sizeFrom = (pf: LoopOpenResult): { principal: bigint; overhead: bigint } | null => {
+      if (!pf.preflight) return null;
+      const overheadRaw = BigInt(Math.max(0, Math.round(pf.preflight.requiredLamports))) - solReturned!;
+      const overhead = overheadRaw > 0n ? overheadRaw : 0n;
+      const principal = solReturned! - overhead;
+      return principal <= 0n ? null : { principal, overhead };
+    };
+
+    const durableTruthOrResumable = async (why: string): Promise<LoopHopResult> => {
+      const now = await storage.getBorrowOperationById(opId);
+      if (now && (now.status === "succeeded" || now.status === "completed")) {
+        const r2 = (now.result ?? {}) as Record<string, any>;
+        return {
+          success: true,
+          alreadyCompleted: true,
+          ...(typeof r2.borrowPositionId === "string" ? { borrowPositionId: r2.borrowPositionId } : {}),
+          ...(typeof r2.closeSignature === "string" ? { closeSignature: r2.closeSignature } : {}),
+          ...(typeof r2.openSignature === "string" ? { openSignature: r2.openSignature } : {}),
+          ...(typeof r2.solReturnedLamports === "string" ? { solReturnedLamports: r2.solReturnedLamports } : {}),
+        };
+      }
+      if (now && now.status === "parked") {
+        const mp = (now.metadata ?? {}) as Record<string, any>;
+        return {
+          success: false,
+          parked: true,
+          parkReason: typeof mp.parkReason === "string" ? mp.parkReason : "parked",
+          solReturnedLamports: solReturned!.toString(),
+          ...(closeSignature ? { closeSignature } : {}),
+          error: "This hop was parked by a concurrent attempt. Resume it manually from the admin surface.",
+        };
+      }
+      return {
+        success: false,
+        resumable: true,
+        solReturnedLamports: solReturned!.toString(),
+        ...(closeSignature ? { closeSignature } : {}),
+        error: `${why} Your funds are safe. Retry shortly.`,
+      };
+    };
+
+    const runOpenAttempt = async (vaultIdWanted: number, presetSlotCrid: string | null): Promise<OpenAttemptOutcome> => {
+      let vaultId = vaultIdWanted;
+      let pf = await preflightOn(vaultId);
+      if (!pf.success || !pf.preflight) return { kind: "preflight_failed", error: pf.error };
+      let sized = sizeFrom(pf);
+      if (!sized) return { kind: "principal_too_small" };
+      let slotCrid: string;
+      if (presetSlotCrid) {
+        // Crash-orphan slot: reuse the SAME durable crid — nothing was ever
+        // broadcast under it, and reusing it preserves single-flight.
+        slotCrid = presetSlotCrid;
+      } else {
+        const claim = await storage.claimLoopHopOpenAttempt(opId, vaultId);
+        if (!claim) {
+          return {
+            kind: "blocked",
+            result: await durableTruthOrResumable("The hop record changed underneath this attempt."),
+          };
+        }
+        slotCrid = claim.activeOpenClientRequestId;
+        if (claim.adopted) {
+          // The slot was already claimed by another attempt. A live rival
+          // child means a process is mid-open: reconciliation belongs to
+          // Phase 2a on the NEXT pass — NEVER broadcast a rival beside it.
+          const rival = await storage.getBorrowOperationByClientRequestId(walletAddress, slotCrid);
+          if (rival) {
+            return {
+              kind: "blocked",
+              result: {
+                success: false,
+                resumable: true,
+                solReturnedLamports: solReturned!.toString(),
+                ...(closeSignature ? { closeSignature } : {}),
+                error: "Another attempt is already re-opening this hop. Retry shortly to reconcile it.",
+              },
+            };
+          }
+          // Adopted a crash-orphan slot mid-pass: honor ITS pinned vault (the
+          // durable intent) — re-preflight and re-size when it differs.
+          if (claim.activeOpenVaultId != null && claim.activeOpenVaultId !== vaultId) {
+            vaultId = claim.activeOpenVaultId;
+            pf = await preflightOn(vaultId);
+            if (!pf.success || !pf.preflight) {
+              return {
+                kind: "blocked",
+                result: {
+                  success: false,
+                  resumable: true,
+                  solReturnedLamports: solReturned!.toString(),
+                  ...(closeSignature ? { closeSignature } : {}),
+                  error: `${pf.error || "Could not size a re-loop on the pinned recovery vault."} Your unwound SOL is safe; retry shortly.`,
+                },
+              };
+            }
+            sized = sizeFrom(pf);
+            if (!sized) return { kind: "principal_too_small" };
+          }
+        }
+      }
+      const open = await executeLoopOpen({
+        walletAddress,
+        agentPublicKey,
+        agentSecretKey,
+        vaultId,
+        principalLamports: sized.principal,
+        slippageBps,
+        clientRequestId: slotCrid,
+        callerHoldsBorrowLock: false,
+      });
+      if (!open.success) return { kind: "open_failed", open, slotCrid, vaultId };
+      return { kind: "opened", open, slotCrid, vaultId, principal: sized.principal, overhead: sized.overhead };
+    };
+
+    let chosenVaultId = slotOrphanToReuse?.vaultId ?? authorizedRecoveryVaultIds[0] ?? targetVaultId;
+    let outcome = await runOpenAttempt(chosenVaultId, slotOrphanToReuse?.crid ?? null);
+
+    if (outcome.kind === "preflight_failed" && !fallbackUsed) {
+      // Target unopenable at this size → at most ONE fallback, and only to the
+      // other pre-authorized destination (typically the ORIGINAL pair —
+      // restoring it is never a new bet; a reversing hop is still fund-safe).
+      const next = authorizedRecoveryVaultIds.find((v) => v !== chosenVaultId);
+      if (next != null) {
+        if (slotOrphanToReuse) {
+          // The orphan slot pins a different vault; release it (CAS) before
+          // re-targeting so no rival crid can coexist with it.
+          const cleared = await storage.clearLoopHopActiveChild(opId, slotOrphanToReuse.crid);
+          if (!cleared) {
+            return await durableTruthOrResumable("The recovery slot changed underneath this retry.");
+          }
+          slotOrphanToReuse = null;
+        }
+        fallbackUsed = true;
+        chosenVaultId = next;
+        // The fallback pair's own target leverage is unknown here — keep the
+        // cost estimate honest instead of pricing it with the old target's.
+        targetLeverage = null;
+        outcome = await runOpenAttempt(chosenVaultId, null);
+      }
+    }
+
+    if (outcome.kind === "open_failed" && !fallbackUsed) {
+      // Policy-deny fallback: ONLY when the child provably never broadcast
+      // (denies happen pre-sign) — a signed or ambiguous failure must stay on
+      // its numbered crid for Phase 2a to reconcile on the next pass.
+      const denied =
+        Array.isArray(outcome.open.policyReasons) &&
+        outcome.open.policyReasons.some((r) => r.severity === "deny") &&
+        !outcome.open.signature;
+      if (denied) {
+        const childAfterDeny = await storage.getBorrowOperationByClientRequestId(walletAddress, outcome.slotCrid);
+        const provablyNeverBroadcast =
+          !childAfterDeny || (childAfterDeny.status === "failed" && !loopOpenWriteaheadRecorded(childAfterDeny));
+        // Hoist out of the closure: narrowing on a `let` union doesn't
+        // propagate into callbacks.
+        const deniedVaultId = outcome.vaultId;
+        const next = authorizedRecoveryVaultIds.find((v) => v !== deniedVaultId);
+        if (provablyNeverBroadcast && next != null) {
+          const cleared = await storage.clearLoopHopActiveChild(opId, outcome.slotCrid);
+          if (cleared) {
+            fallbackUsed = true;
+            chosenVaultId = next;
+            targetLeverage = null;
+            outcome = await runOpenAttempt(chosenVaultId, null);
+          }
+        }
+      }
+    }
+
+    if (outcome.kind === "blocked") return outcome.result;
+    if (outcome.kind === "preflight_failed") {
+      return {
+        success: false,
+        resumable: true,
+        solReturnedLamports: solReturned.toString(),
+        ...(closeSignature ? { closeSignature } : {}),
+        error: `${outcome.error || "Could not size a re-loop."} Your unwound SOL is safe in your account and will be re-looped on the next attempt.`,
+      };
+    }
+    if (outcome.kind === "principal_too_small") {
       return {
         success: false,
         resumable: true,
@@ -3393,28 +4064,15 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
         error: `The unwound SOL (${lamportsToSol(solReturned)} SOL) is too small to cover account rent and fees for a re-loop. It stays safe in your account.`,
       };
     }
-
-    const attempt = Number(meta.openAttempts ?? 0) + 1;
-    await storage.updateBorrowOperation(opId, { mergeMetadata: { openAttempts: attempt, reopenVaultId: chosenVaultId } });
-    const open = await executeLoopOpen({
-      walletAddress,
-      agentPublicKey,
-      agentSecretKey,
-      vaultId: chosenVaultId,
-      principalLamports: principal,
-      slippageBps,
-      clientRequestId: `${params.clientRequestId}:open:${attempt}`,
-      callerHoldsBorrowLock: false,
-    });
-    if (!open.success) {
-      // The SOL is intact in the agent wallet; the op stays at close_done.
+    if (outcome.kind === "open_failed") {
+      // The SOL is intact in the agent wallet; the op stays at close_done and
+      // the numbered child stays in the slot for Phase 2a to reconcile.
       return {
         success: false,
         resumable: true,
         solReturnedLamports: solReturned.toString(),
         ...(closeSignature ? { closeSignature } : {}),
-        ...(open.gasShortfall ? {} : {}),
-        error: `${open.error || "Re-loop open failed."} Your unwound SOL is safe. Retry to finish the hop.`,
+        error: `${outcome.open.error || "Re-loop open failed."} Your unwound SOL is safe. Retry to finish the hop.`,
       };
     }
 
@@ -3423,36 +4081,49 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
     const effLev = targetLeverage ?? 1;
     const predictedCost =
       BigInt(Math.max(0, Math.round((2 * slippageBps) / 10000 * Number(solReturned) * effLev))) +
-      (overhead > 0n ? overhead : 0n);
-    const realizedCost = solReturned - principal;
+      outcome.overhead;
+    const realizedCost = solReturned - outcome.principal;
 
-    await storage.updateBorrowOperation(opId, {
-      status: "succeeded",
-      step: "opened",
-      borrowPositionId: open.borrowPositionId ?? borrowPositionId,
-      result: {
-        borrowPositionId: open.borrowPositionId ?? null,
-        closeSignature: closeSignature ?? null,
-        openSignature: open.signature ?? null,
-        solReturnedLamports: solReturned.toString(),
-        principalLamports: principal.toString(),
-        predictedCostLamports: predictedCost.toString(),
-        realizedCostLamports: realizedCost.toString(),
-        fromVaultId,
-        toVaultId: chosenVaultId,
-        reversed: chosenVaultId === fromVaultId,
+    // WO2A: finalize via CAS on the slot this attempt owns — a rival that
+    // finalized/parked first wins, and the durable truth is reported instead
+    // of a second terminal write (double-equity risk).
+    const finalized = await storage.finalizeLoopHopParent(
+      opId,
+      { expectedActiveOpenClientRequestId: outcome.slotCrid },
+      {
+        status: "succeeded",
+        step: "opened",
+        borrowPositionId: outcome.open.borrowPositionId ?? borrowPositionId,
+        clearActiveChild: true,
+        result: {
+          borrowPositionId: outcome.open.borrowPositionId ?? null,
+          closeSignature: closeSignature ?? null,
+          openSignature: outcome.open.signature ?? null,
+          solReturnedLamports: solReturned.toString(),
+          principalLamports: outcome.principal.toString(),
+          predictedCostLamports: predictedCost.toString(),
+          realizedCostLamports: realizedCost.toString(),
+          ...(principalSource ? { principalSource } : {}),
+          fromVaultId,
+          toVaultId: outcome.vaultId,
+          reversed: outcome.vaultId === fromVaultId,
+        },
       },
-    });
+    );
+    if (!finalized) {
+      return await durableTruthOrResumable("The hop record changed underneath this attempt's finalize.");
+    }
 
     return {
       success: true,
-      borrowPositionId: open.borrowPositionId,
+      borrowPositionId: outcome.open.borrowPositionId,
       closeSignature,
-      openSignature: open.signature,
+      openSignature: outcome.open.signature,
       solReturnedLamports: solReturned.toString(),
       predictedCostLamports: predictedCost.toString(),
       realizedCostLamports: realizedCost.toString(),
-      ...(chosenVaultId === fromVaultId
+      ...(principalSource ? { principalSource } : {}),
+      ...(outcome.vaultId === fromVaultId
         ? { verifyWarning: "The target pair was no longer openable, so the SOL was re-looped onto the original pair (your funds are safe)." }
         : {}),
     };

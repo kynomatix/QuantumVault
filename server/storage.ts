@@ -421,6 +421,26 @@ export interface IStorage {
   getBorrowOperationById(id: string): Promise<BorrowOperation | undefined>;
   getBorrowOperationByClientRequestId(walletAddress: string, clientRequestId: string): Promise<BorrowOperation | undefined>;
   getPendingLoopHopOperations(): Promise<BorrowOperation[]>;
+  claimLoopHopOpenAttempt(parentOpId: string, requestedVaultId: number): Promise<{
+    adopted: boolean;
+    activeOpenClientRequestId: string;
+    activeOpenVaultId: number | null;
+    openAttempts: number;
+  } | undefined>;
+  clearLoopHopActiveChild(parentOpId: string, expectedActiveOpenClientRequestId: string): Promise<boolean>;
+  finalizeLoopHopParent(
+    parentOpId: string,
+    guard: { expectedActiveOpenClientRequestId?: string; requireNoActiveChild?: boolean; expectedStatus?: string },
+    patch: {
+      status: string;
+      step?: string | null;
+      error?: string | null;
+      borrowPositionId?: string | null;
+      mergeMetadata?: Record<string, unknown>;
+      result?: Record<string, unknown> | null;
+      clearActiveChild?: boolean;
+    },
+  ): Promise<BorrowOperation | undefined>;
   sumOpenBorrowDebtUsdc(walletAddress: string): Promise<number>;
 
   // Fixed Yield vault: PT holdings (cost-basis + maturity bookkeeping cache).
@@ -2549,7 +2569,9 @@ export class DatabaseStorage implements IStorage {
   // a hop interrupted mid-flight (after the close, before the re-open) always
   // resumes from its step breadcrumb — the SOL is sitting in the agent wallet
   // and must be re-looped, never stranded. Terminal rows (succeeded/failed) are
-  // excluded so the sweep is idempotent.
+  // excluded so the sweep is idempotent. WO2A: 'parked' rows are ALSO excluded —
+  // a parked hop exceeded its automatic recovery budget and waits for a manual
+  // resume; re-enrolling it here would defeat the park.
   async getPendingLoopHopOperations(): Promise<BorrowOperation[]> {
     return await db.select().from(borrowOperations)
       .where(and(
@@ -2557,8 +2579,140 @@ export class DatabaseStorage implements IStorage {
         ne(borrowOperations.status, 'succeeded'),
         ne(borrowOperations.status, 'completed'),
         ne(borrowOperations.status, 'failed'),
+        ne(borrowOperations.status, 'parked'),
       ))
       .orderBy(asc(borrowOperations.createdAt));
+  }
+
+  // WO2A: atomically claim (or adopt) the SINGLE active open child of a hop
+  // parent. One guarded UPDATE — the CTE row-locks the parent, and the SET is
+  // a no-op returning the EXISTING slot when one is already claimed, so two
+  // racing processes can never both mint a fresh child crid. Claiming also
+  // advances `openAttempts` and pins `activeOpenVaultId` + `reopenVaultId`
+  // (Phase 2a lock-key continuity) in the same write. Only callable while the
+  // parent is still drivable (pending, or parked for a manual resume);
+  // returns undefined when the parent is terminal/missing/not a hop.
+  async claimLoopHopOpenAttempt(parentOpId: string, requestedVaultId: number): Promise<{
+    adopted: boolean;
+    activeOpenClientRequestId: string;
+    activeOpenVaultId: number | null;
+    openAttempts: number;
+  } | undefined> {
+    const result: any = await db.execute(sql`
+      WITH prev AS (
+        SELECT id, client_request_id,
+               COALESCE(metadata->>'activeOpenClientRequestId', '') AS prev_active,
+               COALESCE(NULLIF(metadata->>'openAttempts', '')::int, 0) AS prev_attempts
+        FROM borrow_operations
+        WHERE id = ${parentOpId}
+          AND operation_type = 'loop_hop'
+          AND status IN ('pending', 'parked')
+          AND client_request_id IS NOT NULL
+        FOR UPDATE
+      )
+      UPDATE borrow_operations b
+      SET metadata = CASE
+            WHEN prev.prev_active <> '' THEN b.metadata
+            ELSE COALESCE(b.metadata, '{}'::jsonb) || jsonb_build_object(
+              'openAttempts', prev.prev_attempts + 1,
+              'activeOpenClientRequestId', prev.client_request_id || ':open:' || (prev.prev_attempts + 1)::text,
+              'activeOpenVaultId', ${requestedVaultId}::int,
+              'reopenVaultId', ${requestedVaultId}::int
+            )
+          END,
+          updated_at = NOW()
+      FROM prev
+      WHERE b.id = prev.id
+      RETURNING (prev.prev_active <> '') AS adopted,
+                b.metadata->>'activeOpenClientRequestId' AS active_crid,
+                NULLIF(b.metadata->>'activeOpenVaultId', '')::int AS active_vault,
+                COALESCE(NULLIF(b.metadata->>'openAttempts', '')::int, 0) AS open_attempts
+    `);
+    const row = result?.rows?.[0];
+    if (!row || typeof row.active_crid !== 'string' || !row.active_crid) return undefined;
+    return {
+      adopted: row.adopted === true,
+      activeOpenClientRequestId: row.active_crid,
+      activeOpenVaultId: row.active_vault == null ? null : Number(row.active_vault),
+      openAttempts: Number(row.open_attempts ?? 0),
+    };
+  }
+
+  // WO2A: CAS-release a hop parent's active-child slot. Removes ONLY the two
+  // slot keys (`activeOpenClientRequestId`, `activeOpenVaultId`) — deliberately
+  // keeps `reopenVaultId` so the Phase 2a lock key stays stable — and only when
+  // the slot still holds the expected crid on a still-drivable parent. False =
+  // the slot changed underneath the caller (sibling raced); never force it.
+  async clearLoopHopActiveChild(parentOpId: string, expectedActiveOpenClientRequestId: string): Promise<boolean> {
+    const result: any = await db.execute(sql`
+      UPDATE borrow_operations
+      SET metadata = (metadata - 'activeOpenClientRequestId') - 'activeOpenVaultId',
+          updated_at = NOW()
+      WHERE id = ${parentOpId}
+        AND operation_type = 'loop_hop'
+        AND status IN ('pending', 'parked')
+        AND metadata->>'activeOpenClientRequestId' = ${expectedActiveOpenClientRequestId}
+      RETURNING id
+    `);
+    return (result?.rows?.length ?? 0) > 0;
+  }
+
+  // WO2A: guarded terminal/park write for a hop parent. Every finalize (adopt,
+  // fresh-open success, park) goes through this CAS so a raced sibling can
+  // never double-finalize or resurrect a parent: the guard always excludes
+  // already-terminal rows, optionally pins the exact current status, and
+  // optionally pins the active-child slot (expected crid, or expressly empty).
+  // `clearActiveChild` drops the two slot keys in the same atomic write;
+  // `mergeMetadata` uses the same jsonb `||` semantics as updateBorrowOperation.
+  // Returns the updated row, or undefined when the CAS lost.
+  async finalizeLoopHopParent(
+    parentOpId: string,
+    guard: {
+      expectedActiveOpenClientRequestId?: string;
+      requireNoActiveChild?: boolean;
+      expectedStatus?: string;
+    },
+    patch: {
+      status: string;
+      step?: string | null;
+      error?: string | null;
+      borrowPositionId?: string | null;
+      mergeMetadata?: Record<string, unknown>;
+      result?: Record<string, unknown> | null;
+      clearActiveChild?: boolean;
+    },
+  ): Promise<BorrowOperation | undefined> {
+    const conds = [
+      eq(borrowOperations.id, parentOpId),
+      eq(borrowOperations.operationType, 'loop_hop'),
+      ne(borrowOperations.status, 'succeeded'),
+      ne(borrowOperations.status, 'completed'),
+      ne(borrowOperations.status, 'failed'),
+    ];
+    if (guard.expectedStatus !== undefined) {
+      conds.push(eq(borrowOperations.status, guard.expectedStatus));
+    }
+    if (guard.expectedActiveOpenClientRequestId !== undefined) {
+      conds.push(sql`${borrowOperations.metadata}->>'activeOpenClientRequestId' = ${guard.expectedActiveOpenClientRequestId}`);
+    }
+    if (guard.requireNoActiveChild) {
+      conds.push(sql`COALESCE(${borrowOperations.metadata}->>'activeOpenClientRequestId', '') = ''`);
+    }
+    let metaExpr = sql`COALESCE(${borrowOperations.metadata}, '{}'::jsonb)`;
+    if (patch.clearActiveChild) {
+      metaExpr = sql`((${metaExpr} - 'activeOpenClientRequestId') - 'activeOpenVaultId')`;
+    }
+    if (patch.mergeMetadata !== undefined) {
+      metaExpr = sql`${metaExpr} || ${JSON.stringify(patch.mergeMetadata)}::jsonb`;
+    }
+    const sets: Record<string, unknown> = { status: patch.status, updatedAt: new Date() };
+    if (patch.step !== undefined) sets.step = patch.step;
+    if (patch.error !== undefined) sets.error = patch.error;
+    if (patch.borrowPositionId !== undefined) sets.borrowPositionId = patch.borrowPositionId;
+    if (patch.result !== undefined) sets.result = patch.result;
+    if (patch.clearActiveChild || patch.mergeMetadata !== undefined) sets.metadata = metaExpr;
+    const rows = await db.update(borrowOperations).set(sets as any).where(and(...conds)).returning();
+    return rows[0];
   }
 
   // --- Fixed Yield vault positions -----------------------------------------
