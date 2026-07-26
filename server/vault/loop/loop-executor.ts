@@ -1184,17 +1184,38 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
       //  - no write-ahead recorded  → the FATAL hook never persisted, so the
       //    tx was never broadcast → restore. The ATA-prep sig never counts.
       if (lifecyclePositionId) {
+        let opNow: BorrowOperation | null | undefined;
+        let reloadOk = false;
         try {
-          const opNow = await storage.getBorrowOperationById(opId);
-          if (opNow && !loopOpenWriteaheadRecorded(opNow)) {
-            await restoreLoopPendingRow(lifecyclePositionId, lifecycleWasReuse);
-          }
+          opNow = await storage.getBorrowOperationById(opId);
+          reloadOk = true;
         } catch (repairErr) {
           console.warn(
             `[loop-executor] open outer-catch: could not reload op ${opId} to prove pre-broadcast state — row ${lifecyclePositionId} stays pending (fail closed):`,
             repairErr,
           );
         }
+        if (!reloadOk || !opNow) {
+          // WO1-C1 (SL-08): nothing about the durable record is PROVEN — fail
+          // closed WITHOUT touching its step or provenance. A later retry
+          // reloads and classifies the ORIGINAL record; a generic failure
+          // step written here would make a written-ahead attempt permanently
+          // unclassifiable (strict selector fails → blocked → manual review).
+          return { success: false, error: `Loop Open failed: ${msg}` };
+        }
+        if (loopOpenWriteaheadRecorded(opNow)) {
+          // WO1-C1 (SL-08): the main-open tx MAY be in flight — keep the row
+          // pending and PRESERVE the selector-eligible step + exact signature
+          // evidence. Record the failure text only; never overwrite with a
+          // generic unexpected-error step (the strict F4 selector rejects it,
+          // wedging automatic recovery). The reconciler resolves this from
+          // its exact recorded signature later.
+          if (opNow.status === "pending" && opNow.step) {
+            await failOp(opId, opNow.step, msg);
+          }
+          return { success: false, error: `Loop Open failed: ${msg}` };
+        }
+        await restoreLoopPendingRow(lifecyclePositionId, lifecycleWasReuse);
       }
       await failOp(opId, "unexpected_error", msg);
       return { success: false, error: `Loop Open failed: ${msg}` };
@@ -3151,11 +3172,15 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
           ...(closeSignature ? { closeSignature } : {}),
           error: `${why} Your funds are safe. Retry with the same request to resume.`,
         });
-        // Adopt = terminalize THIS hop from the child's ORIGINAL records. The
-        // cost crumbs are rebuilt from the child's own persisted principal and
-        // leverage — never this retry's sizing — mirroring the normal path's
-        // formulas (realized = rent/fee overhead proxy; predicted = both legs'
-        // slippage on the whole notional + overhead).
+        // Adopt = terminalize THIS hop from the child's ORIGINAL records ONLY:
+        // its persisted principal, leverage, slippage, vault and row identity.
+        // A resumed retry may carry DIFFERENT sizing, so no current-retry
+        // value (slippage/target leverage/rates) or default may leak into the
+        // adopted accounting (WO1-C1). Missing or malformed durable fields ⇒
+        // null ⇒ the parent stays RESUMABLE — never guessed-succeeded, and
+        // nothing is broadcast. Formulas mirror the normal path (realized =
+        // rent/fee overhead proxy; predicted = both legs' slippage on the
+        // whole notional + overhead) evaluated with the CHILD's own values.
         const adoptChild = async (
           openSignature: string | null,
           adoptedRowId: string | null,
@@ -3168,16 +3193,19 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
             return null;
           }
           if (!Number.isInteger(childVaultId) || childVaultId <= 0 || childPrincipal <= 0n) return null;
+          if (!adoptedRowId) return null; // row identity must be the child's own
+          const childLev = Number(childMeta.leverage);
+          if (!Number.isFinite(childLev) || childLev < 1) return null;
+          const childSlipBps = childMeta.slippageBps == null ? NaN : Number(childMeta.slippageBps);
+          if (!Number.isFinite(childSlipBps) || childSlipBps < 0) return null;
           const overheadL = solRecovered - childPrincipal;
           const realized = overheadL > 0n ? overheadL : 0n;
-          const childLev = Number(childMeta.leverage);
-          const effL = Number.isFinite(childLev) && childLev >= 1 ? childLev : (targetLeverage ?? 1);
           const predicted =
-            BigInt(Math.max(0, Math.round((2 * slippageBps) / 10000 * Number(solRecovered) * effL))) + realized;
+            BigInt(Math.max(0, Math.round((2 * childSlipBps) / 10000 * Number(solRecovered) * childLev))) + realized;
           await storage.updateBorrowOperation(opId, {
             status: "succeeded",
             step: "opened",
-            borrowPositionId: adoptedRowId ?? borrowPositionId,
+            borrowPositionId: adoptedRowId,
             result: {
               borrowPositionId: adoptedRowId,
               closeSignature: closeSignature ?? null,

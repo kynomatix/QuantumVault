@@ -943,6 +943,128 @@ describe("executeLoopHop — child open reconciliation", () => {
     expect(storage.createBorrowOperation).not.toHaveBeenCalled();
   });
 
+  it("WO1-C1: adoption accounting uses the CHILD's persisted leverage + slippage — never this retry's values", async () => {
+    // Child persisted leverage 2 / slippage 30bps; the resumed hop context
+    // carries slippage 50bps (and would default target leverage differently).
+    wireHop(
+      makeOpenOp({
+        id: "child-1",
+        sigs: [OPEN_SIG],
+        meta: openMeta({ openTxSignature: OPEN_SIG, principalLamports: "1900000000", leverage: 2, slippageBps: 30 }),
+        step: "final_read",
+        status: "succeeded",
+        borrowPositionId: "newrow-1",
+        clientRequestId: childCrid,
+        result: { signature: OPEN_SIG },
+      }),
+    );
+
+    const res = await executeLoopHop(hopParams);
+
+    expect(res.success).toBe(true);
+    // predicted = round((2×30bps)/10000 × 2.0 SOL × lev 2) + realized(0.1 SOL)
+    //           = 24_000_000 + 100_000_000. With the retry's 50bps it would
+    //           be 140_000_000 — the child's own persisted values must win.
+    expect(res.predictedCostLamports).toBe("124000000");
+    expect(res.realizedCostLamports).toBe("100000000");
+    expect(storage.updateBorrowOperation).toHaveBeenCalledWith(
+      "hop-op-1",
+      expect.objectContaining({
+        result: expect.objectContaining({
+          adoptedFromChildRecovery: true,
+          predictedCostLamports: "124000000",
+          realizedCostLamports: "100000000",
+        }),
+      }),
+    );
+    expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
+  });
+
+  it("WO1-C1: malformed durable child leverage AND slippage → parent RESUMABLE, never guessed-succeeded, zero broadcasts", async () => {
+    wireHop(
+      makeOpenOp({
+        id: "child-1",
+        sigs: [OPEN_SIG],
+        meta: openMeta({
+          openTxSignature: OPEN_SIG,
+          principalLamports: "1900000000",
+          leverage: "banana",
+          slippageBps: "nope",
+        }),
+        step: "final_read",
+        status: "succeeded",
+        borrowPositionId: "newrow-1",
+        clientRequestId: childCrid,
+        result: { signature: OPEN_SIG },
+      }),
+    );
+
+    const res = await executeLoopHop(hopParams);
+
+    expect(res.success).toBe(false);
+    expect((res as any).resumable).toBe(true);
+    expect(res.error).toMatch(/unreadable|refusing/);
+    const succeededWrites = vi
+      .mocked(storage.updateBorrowOperation as any)
+      .mock.calls.filter((c: unknown[]) => c[0] === "hop-op-1" && (c[1] as any)?.status === "succeeded");
+    expect(succeededWrites).toHaveLength(0);
+    expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
+    expect(storage.createBorrowOperation).not.toHaveBeenCalled();
+  });
+
+  it("WO1-C1: MISSING durable child slippage → parent RESUMABLE (no fallback to the retry's slippage)", async () => {
+    const meta = openMeta({ openTxSignature: OPEN_SIG, principalLamports: "1900000000", leverage: 2 });
+    delete (meta as any).slippageBps;
+    wireHop(
+      makeOpenOp({
+        id: "child-1",
+        sigs: [OPEN_SIG],
+        meta,
+        step: "final_read",
+        status: "succeeded",
+        borrowPositionId: "newrow-1",
+        clientRequestId: childCrid,
+        result: { signature: OPEN_SIG },
+      }),
+    );
+
+    const res = await executeLoopHop(hopParams);
+
+    expect(res.success).toBe(false);
+    expect((res as any).resumable).toBe(true);
+    expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
+  });
+
+  it("WO1-C1: NEGATIVE durable child leverage or slippage → parent RESUMABLE, zero broadcasts", async () => {
+    const childOf = (metaOverrides: Record<string, unknown>) =>
+      makeOpenOp({
+        id: "child-1",
+        sigs: [OPEN_SIG],
+        meta: openMeta({ openTxSignature: OPEN_SIG, principalLamports: "1900000000", ...metaOverrides }),
+        step: "final_read",
+        status: "succeeded",
+        borrowPositionId: "newrow-1",
+        clientRequestId: childCrid,
+        result: { signature: OPEN_SIG },
+      });
+
+    wireHop(childOf({ leverage: -2, slippageBps: 30 }));
+    const negLev = await executeLoopHop(hopParams);
+    expect(negLev.success).toBe(false);
+    expect((negLev as any).resumable).toBe(true);
+
+    wireHop(childOf({ leverage: 2, slippageBps: -5 }));
+    const negSlip = await executeLoopHop(hopParams);
+    expect(negSlip.success).toBe(false);
+    expect((negSlip as any).resumable).toBe(true);
+
+    const succeededWrites = vi
+      .mocked(storage.updateBorrowOperation as any)
+      .mock.calls.filter((c: unknown[]) => c[0] === "hop-op-1" && (c[1] as any)?.status === "succeeded");
+    expect(succeededWrites).toHaveLength(0);
+    expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
+  });
+
   it("ambiguous child whose tx LANDED → finalize child, then adopt (no re-open)", async () => {
     const child = makeOpenOp({
       id: "child-1",
@@ -1182,6 +1304,82 @@ describe("executeLoopOpen — outer-catch lifecycle repair", () => {
     return connection;
   }
 
+  /**
+   * WO1-C1 harness: FULL pipeline with STATEFUL op/row stores so a first call
+   * and a later retry see each other's durable writes exactly like the DB.
+   * The exec mock runs the real write-ahead hook, then reports success with
+   * the exact main-open signature.
+   */
+  function wireStatefulOpenLifecycle() {
+    const conn = wirePipeline();
+    let opState: any = null;
+    let rowState: any = null;
+    let throwOpenCasOnce = false;
+    vi.mocked(storage.createBorrowOperation as any).mockImplementation(async (rec: any) => {
+      opState = {
+        ...makeOpenOp({ sigs: [], meta: rec.metadata ?? openMeta(), step: rec.step ?? "initialized" }),
+        status: "pending",
+        borrowPositionId: null,
+        clientRequestId: rec.clientRequestId ?? null,
+      };
+      return opState;
+    });
+    vi.mocked(storage.createBorrowPosition as any).mockImplementation(async () => {
+      rowState = makePendingRow();
+      return rowState;
+    });
+    vi.mocked(storage.updateBorrowOperation as any).mockImplementation(async (id: string, patch: any) => {
+      if (!opState || id !== opState.id) return { id };
+      if (patch.status) opState.status = patch.status;
+      if (patch.step) opState.step = patch.step;
+      if (patch.error) opState.error = patch.error;
+      if (patch.result) opState.result = patch.result;
+      if (Object.prototype.hasOwnProperty.call(patch, "borrowPositionId")) opState.borrowPositionId = patch.borrowPositionId;
+      if (patch.appendTxSignature) opState.txSignatures = [...(opState.txSignatures ?? []), patch.appendTxSignature];
+      if (patch.mergeMetadata) opState.metadata = { ...(opState.metadata ?? {}), ...patch.mergeMetadata };
+      return opState;
+    });
+    vi.mocked(storage.updateBorrowPosition as any).mockImplementation(
+      async (id: string, patch: any, expected?: string) => {
+        if (throwOpenCasOnce && patch?.status === "open") {
+          throwOpenCasOnce = false;
+          throw new Error("finalize CAS write lost DB");
+        }
+        if (!rowState || id !== rowState.id) return null;
+        if (expected && rowState.status !== expected) return null;
+        rowState = { ...rowState, ...patch };
+        return rowState;
+      },
+    );
+    vi.mocked(storage.getBorrowOperationById as any).mockImplementation(async (id: string) =>
+      opState && id === opState.id ? opState : undefined,
+    );
+    vi.mocked(storage.getBorrowOperationByClientRequestId as any).mockImplementation(
+      async (_w: string, crid: string) => (opState && opState.clientRequestId === crid ? opState : null),
+    );
+    vi.mocked(storage.getBorrowPositions as any).mockImplementation(async () => (rowState ? [rowState] : []));
+    vi.mocked(storage.getBorrowOperations as any).mockImplementation(async () => (opState ? [opState] : []));
+    vi.mocked(storage.getBorrowPosition as any).mockImplementation(async (_w: string, id: string) =>
+      rowState && id === rowState.id ? rowState : null,
+    );
+    vi.mocked(executeAgentInstructionsConfirmOnly as any).mockImplementation(async (args: any) => {
+      await args.onBeforeBroadcast?.({ signature: OPEN_SIG, blockhash: "bh", lastValidBlockHeight: 999_999 });
+      return { success: true, signature: OPEN_SIG, onChainFailed: false };
+    });
+    return {
+      conn,
+      get op() {
+        return opState;
+      },
+      get row() {
+        return rowState;
+      },
+      armFinalizeCasThrow() {
+        throwOpenCasOnce = true;
+      },
+    };
+  }
+
   afterAll(() => {
     vi.unstubAllGlobals();
   });
@@ -1226,7 +1424,7 @@ describe("executeLoopOpen — outer-catch lifecycle repair", () => {
     expect(storage.updateBorrowPosition).toHaveBeenCalledWith("row-1", { status: "failed" }, "pending");
   });
 
-  it("fail closed: op reload fails → row stays pending (no blind restore), op still terminalized", async () => {
+  it("WO1-C1 fail closed: op reload fails → row stays pending AND the op's step/provenance are NEVER overwritten", async () => {
     wirePipeline({ altThrows: true });
     vi.mocked(storage.getBorrowOperationById as any).mockRejectedValue(new Error("db read down"));
 
@@ -1234,13 +1432,15 @@ describe("executeLoopOpen — outer-catch lifecycle repair", () => {
 
     expect(res.success).toBe(false);
     expect(storage.updateBorrowPosition).not.toHaveBeenCalledWith("row-1", { status: "failed" }, "pending");
-    expect(storage.updateBorrowOperation).toHaveBeenCalledWith(
-      "open-op-1",
-      expect.objectContaining({ status: "failed", step: "unexpected_error" }),
-    );
+    // An UNPROVEN durable record is untouched — a later retry must be able to
+    // classify the ORIGINAL step + signature evidence.
+    const failWrites = vi
+      .mocked(storage.updateBorrowOperation as any)
+      .mock.calls.filter((c: unknown[]) => c[0] === "open-op-1" && (c[1] as any)?.status === "failed");
+    expect(failWrites).toHaveLength(0);
   });
 
-  it("fail closed: reloaded op carries write-ahead evidence → row is NOT restored", async () => {
+  it("WO1-C1 fail closed: reloaded op carries write-ahead evidence → row NOT restored, step PRESERVED (never unexpected_error)", async () => {
     wirePipeline({ altThrows: true });
     vi.mocked(storage.getBorrowOperationById as any).mockResolvedValue(
       makeOpenOp({ sigs: [OPEN_SIG], meta: openMeta({ openTxSignature: OPEN_SIG }), step: "loop_sig_writeahead" }),
@@ -1250,6 +1450,97 @@ describe("executeLoopOpen — outer-catch lifecycle repair", () => {
 
     expect(res.success).toBe(false);
     expect(storage.updateBorrowPosition).not.toHaveBeenCalledWith("row-1", { status: "failed" }, "pending");
+    // Failure text recorded WITHOUT clobbering the selector-eligible step…
+    expect(storage.updateBorrowOperation).toHaveBeenCalledWith(
+      "open-op-1",
+      expect.objectContaining({ status: "failed", step: "loop_sig_writeahead" }),
+    );
+    // …and the generic step never touches an evidence-bearing record.
+    expect(storage.updateBorrowOperation).not.toHaveBeenCalledWith(
+      "open-op-1",
+      expect.objectContaining({ step: "unexpected_error" }),
+    );
+  });
+
+  it("WO1-C1 regression: write-ahead persisted → finalize throws → retry reconciles the ORIGINAL row, NO second broadcast", async () => {
+    const s = wireStatefulOpenLifecycle();
+    s.armFinalizeCasThrow();
+
+    const first = await executeLoopOpen(openParams);
+
+    // The failure preserved the selector-eligible provenance verbatim.
+    expect(first.success).toBe(false);
+    expect(first.error).toMatch(/finalize CAS write lost DB/);
+    expect(s.op.step).toBe("loop_sig_writeahead");
+    expect(s.op.status).toBe("failed"); // failure recorded — step untouched
+    expect(s.op.metadata.openTxSignature).toBe(OPEN_SIG);
+    expect(s.op.txSignatures[s.op.txSignatures.length - 1]).toBe(OPEN_SIG);
+    expect(s.row.status).toBe("pending"); // never restored while the tx may land
+    expect(executeAgentInstructionsConfirmOnly).toHaveBeenCalledTimes(1);
+
+    // Later retry: the exact written-ahead signature is now CONFIRMED.
+    s.conn.getSignatureStatuses.mockResolvedValue({ value: [{ confirmationStatus: "finalized" }] });
+    const retry = await executeLoopOpen(openParams);
+
+    expect(retry.success).toBe(true);
+    expect(retry.signature).toBe(OPEN_SIG);
+    expect(s.row.status).toBe("open"); // ORIGINAL row finalized
+    expect(s.op.status).toBe("succeeded");
+    expect(executeAgentInstructionsConfirmOnly).toHaveBeenCalledTimes(1); // ZERO rebroadcasts
+    expect(storage.createBorrowPosition).toHaveBeenCalledTimes(1); // no second row
+    expect(storage.createEquityEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it("WO1-C1: preserved provenance + still-valid then unverifiable status → retry stays BLOCKED, row pending, no restore", async () => {
+    const s = wireStatefulOpenLifecycle();
+    s.armFinalizeCasThrow();
+    await executeLoopOpen(openParams);
+    expect(s.op.step).toBe("loop_sig_writeahead");
+
+    // still_valid: null status, height inside lvbh+30 window
+    s.conn.getSignatureStatuses.mockResolvedValue({ value: [null] });
+    s.conn.getBlockHeight.mockResolvedValue(1_000_009);
+    const blocked1 = await executeLoopOpen(openParams);
+    expect(blocked1.success).toBe(false);
+    expect(blocked1.error).toMatch(/still unresolved/);
+
+    // unverifiable: RPC failure
+    s.conn.getSignatureStatuses.mockRejectedValue(new Error("rpc down"));
+    const blocked2 = await executeLoopOpen(openParams);
+    expect(blocked2.success).toBe(false);
+    expect(blocked2.error).toMatch(/still unresolved/);
+
+    expect(s.row.status).toBe("pending");
+    expect(executeAgentInstructionsConfirmOnly).toHaveBeenCalledTimes(1); // never rebroadcast
+  });
+
+  it("WO1-C1: op reload FAILS after write-ahead → record untouched; NEXT retry classifies the original and recovers", async () => {
+    const s = wireStatefulOpenLifecycle();
+    s.armFinalizeCasThrow();
+    // The outer catch's own reload fails ONCE (first classification attempt).
+    vi.mocked(storage.getBorrowOperationById as any).mockImplementationOnce(async () => {
+      throw new Error("db read down");
+    });
+
+    const first = await executeLoopOpen(openParams);
+
+    expect(first.success).toBe(false);
+    // Fail closed: NOTHING was written to the op — status still pending,
+    // step + signature evidence exactly as the write-ahead hook left them.
+    expect(s.op.status).toBe("pending");
+    expect(s.op.step).toBe("loop_sig_writeahead");
+    expect(s.op.metadata.openTxSignature).toBe(OPEN_SIG);
+    expect(s.row.status).toBe("pending");
+
+    // Recovery: reload works again and the signature is confirmed.
+    s.conn.getSignatureStatuses.mockResolvedValue({ value: [{ confirmationStatus: "finalized" }] });
+    const retry = await executeLoopOpen(openParams);
+
+    expect(retry.success).toBe(true);
+    expect(retry.signature).toBe(OPEN_SIG);
+    expect(s.row.status).toBe("open");
+    expect(executeAgentInstructionsConfirmOnly).toHaveBeenCalledTimes(1); // no rebroadcast
+    expect(storage.createEquityEvent).toHaveBeenCalledTimes(1);
   });
 
   it("regression: exec returns no-signature failure → existing exec_failed restore path unchanged", async () => {
