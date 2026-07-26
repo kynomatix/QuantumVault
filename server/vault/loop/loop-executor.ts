@@ -2472,30 +2472,28 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
  * operation record. Returns null when the record is malformed or the step
  * carries no provable close identity.
  *
- * Step gating (WO2A-C1):
- *  - "loop_sig_writeahead" — crash window between the write-ahead persist and
- *    any later step write. Explicit meta key OR the legacy last-entry rule.
- *  - "close_ambiguous_not_landed" / "close_ambiguous_unreadable" — failOp
- *    OVERWRITES the step on ambiguous outcomes AFTER the write-ahead already
- *    persisted. The explicit meta.closeTxSignature survives that overwrite
- *    (metadata merges are never dropped by failOp), so it stays selectable —
- *    but ONLY via the explicit key. Without it, the step gate alone can no
- *    longer prove which txSignatures entry is the close (both ambiguous steps
- *    shipped together with the explicit key, so a keyless ambiguous record is
- *    corrupt, not legacy) — fail closed.
- *  - Any other step → null (pre-broadcast records may carry ONLY an ATA-prep
- *    signature; promoting it is the exact bug class this selector prevents).
+ * Selector ordering (WO2A-C2 — identity evidence BEFORE any lifecycle-step
+ * restriction):
+ *  1. meta.closeTxSignature PRESENT — written atomically by the write-ahead
+ *     hook; metadata merges survive every later step overwrite (failOp
+ *     ambiguous overwrites, unexpected_error, any future step). The identity
+ *     is therefore step-INDEPENDENT: accepted at ANY current step, but ONLY
+ *     as a non-empty string exactly equal to the FINAL raw txSignatures
+ *     entry. A malformed or mismatched explicit identity returns null
+ *     IMMEDIATELY and NEVER falls back to any array entry (an inconsistent
+ *     record proves nothing).
+ *  2. meta.closeTxSignature genuinely ABSENT — legacy record predating the
+ *     explicit field. The last-entry ordering invariant (the ATA-prep
+ *     signature, if any, is appended BEFORE the write-ahead hook fires, so
+ *     the close sig is always last) is trustworthy ONLY inside the crash
+ *     window itself: valid ONLY at "loop_sig_writeahead" with a non-empty
+ *     final raw entry. Keyless records at ANY other step → null (pre-
+ *     broadcast records may carry ONLY an ATA-prep signature; promoting it
+ *     is the exact bug class this selector prevents).
  *
- * Resolution precedence (most to least authoritative):
- *  1. meta.closeTxSignature — written explicitly in the write-ahead hook by
- *     new close attempts; unambiguously identifies the close tx regardless of
- *     how many signatures the txSignatures array carries. Accepted ONLY as a
- *     non-empty string exactly equal to the FINAL raw txSignatures entry; a
- *     malformed or mismatched explicit key NEVER falls back to any entry.
- *  2. txSignatures[last] — ordering invariant for legacy records that predate
- *     the explicit meta field: the ATA-prep signature (if any) is appended
- *     BEFORE the write-ahead hook fires, so the close sig is always last.
- *     Valid ONLY at "loop_sig_writeahead".
+ * The former C1 two-step ambiguous allowlist is REMOVED: ambiguous records
+ * flow through the general explicit-key rule above (a keyless ambiguous
+ * record is corrupt, not legacy — it still fails closed via rule 2).
  *
  * Fail closed: any record where neither source yields a non-empty string
  * returns null; callers must not treat the attempt as proven.
@@ -2507,8 +2505,8 @@ export function pickCloseTxSig(co: {
   txSignatures: unknown[] | null;
   metadata: Record<string, unknown> | null | undefined;
 }): string | null {
-  const ambiguousStep = co.step === "close_ambiguous_not_landed" || co.step === "close_ambiguous_unreadable";
-  if (co.step !== "loop_sig_writeahead" && !ambiguousStep) return null;
+  // WO2A-C2: inspect the record's identity evidence (final RAW txSignatures
+  // entry + explicit meta-key presence) BEFORE any lifecycle-step restriction.
 
   // Identify the final RAW entry of the txSignatures array — do NOT filter
   // through to an earlier element when the trailing entry is malformed.
@@ -2523,10 +2521,14 @@ export function pickCloseTxSig(co: {
   const hasExplicit = Object.prototype.hasOwnProperty.call(meta, "closeTxSignature");
 
   if (hasExplicit) {
-    // New path: explicit identity written atomically by the write-ahead hook.
-    // Accept it ONLY when it is a non-empty string AND matches the final array
-    // entry exactly.  Any deviation is an inconsistent record — fail closed
-    // without querying or proving any transaction:
+    // Explicit identity: step-INDEPENDENT (the write-ahead hook wrote it
+    // atomically with the final array entry; metadata merges survive every
+    // later step overwrite, so it outlives failOp's unexpected_error and
+    // ambiguous overwrites alike). Accept ONLY a non-empty string that
+    // matches the final RAW array entry exactly. Any deviation is an
+    // inconsistent record — fail closed IMMEDIATELY, without querying or
+    // proving any transaction and WITHOUT ever falling back to an array
+    // entry:
     //   • empty / non-string explicit  → the identity itself is malformed.
     //   • lastSig is null              → trailing entry is malformed; cannot cross-check.
     //   • explicit !== lastSig         → identity and array disagree; fail closed.
@@ -2537,15 +2539,15 @@ export function pickCloseTxSig(co: {
     return explicit;
   }
 
-  // Legacy fallback: the explicit identity key is genuinely absent. Valid
-  // ONLY at the crash-window step — the ambiguous steps postdate the explicit
-  // key (failOp overwrote the step AFTER the write-ahead hook merged
-  // closeTxSignature), so an ambiguous record WITHOUT the key is corrupt.
-  // Never promote txSignatures[last] for it.
-  if (ambiguousStep) return null;
+  // Legacy fallback: the explicit identity key is genuinely absent. The
+  // last-entry ordering invariant is trustworthy ONLY inside the crash
+  // window itself — every other keyless step fails closed. (WO2A-C2 removed
+  // the C1 two-ambiguous-step allowlist: ambiguous records prove identity
+  // via the explicit key or not at all.)
+  if (co.step !== "loop_sig_writeahead") return null;
   // Ordering invariant: the close write-ahead sig is always the FINAL entry in
   // txSignatures (any ATA-prep sig is appended before the write-ahead hook fires).
-  // If the trailing entry is not a valid string, the record is malformed.
+  // If the trailing entry is not a valid non-empty string, the record is malformed.
   return lastSig;
 }
 
@@ -2610,8 +2612,8 @@ export function computeCloseAttributableFloor(minOutRaw: bigint, flashRepayRaw: 
  * Verify a RAW signature string landed (confirmed/finalized, no error).
  * Unlike verifyCloseTxLanded this takes the signature directly — needed when
  * the close attempt is still in memory (direct path) or when a SUCCEEDED close
- * op recorded its sig in result/metadata but its step moved past the
- * selector-valid steps (pickCloseTxSig deliberately refuses those).
+ * op recorded its sig in result/metadata (the succeeded branch trusts its own
+ * recorded sig without the selector's final-entry cross-check).
  *
  * WO2A-C1 verdict table (uncertainty is NEVER a landing verdict):
  *  "landed"       — confirmed/finalized with no error.
@@ -2695,13 +2697,15 @@ export type OlderCloseRecovery =
  *    floor, but ONLY once its recorded signed tx is verified LANDED (probe-flat
  *    alone can also mean "our tx expired AND someone closed it out-of-band").
  *    Not-landed → skip; landed with no floor → proven_unattributable.
- *  - NON-SUCCEEDED child (crash-window step loop_sig_writeahead, or a failOp
- *    ambiguous overwrite close_ambiguous_not_landed/_unreadable whose explicit
- *    closeTxSignature survived — WO2A-C1) → verifyCloseTxLanded; landed → ONLY
- *    that child's own persisted floor (no exact was ever measured); landed
- *    with no floor → proven_unattributable; not_landed/malformed → keep
- *    scanning older. The selector decides which records still carry a provable
- *    close identity — steps without one cost no RPC call.
+ *  - NON-SUCCEEDED child → verifyCloseTxLanded; the selector decides which
+ *    records still carry a provable close identity (WO2A-C2: a surviving
+ *    explicit closeTxSignature matching the final raw entry proves identity
+ *    at ANY step — unexpected_error and the failOp ambiguous overwrites
+ *    included; keyless records only at crash-window loop_sig_writeahead).
+ *    Landed → ONLY that child's own persisted floor (no exact was ever
+ *    measured); landed with no floor → proven_unattributable;
+ *    not_landed/malformed → keep scanning older. Records without a provable
+ *    identity cost no RPC call.
  *  - Only loop_close children are inspected (WO2A-C1): a foreign op type under
  *    a close crid is corrupt linkage, never close proof.
  *  - Any unverifiable candidate (null status, nonterminal status, RPC failure)
@@ -2759,10 +2763,11 @@ export async function recoverFromOlderProvenClose(
 
     // Non-succeeded child (failed / still-pending): its close tx may have
     // landed anyway. The selector inside verifyCloseTxLanded decides which
-    // records still carry a provable close identity — the crash-window step
-    // AND the two failOp ambiguous overwrites via the surviving explicit key
-    // (WO2A-C1). "malformed" covers everything else (pre-broadcast steps,
-    // keyless ambiguous records) without an RPC call → keep scanning older.
+    // records still carry a provable close identity — ANY step whose
+    // surviving explicit key matches the final raw entry (WO2A-C2), plus
+    // keyless crash-window records. "malformed" covers everything else
+    // (keyless post-write-ahead steps, mismatched or malformed identities)
+    // without an RPC call → keep scanning older.
     const verdict = await verifyCloseTxLanded(co, connection);
     if (verdict === "landed") {
       const rec = recoverHopSolReturned({ attributableFloorRaw: floorRaw });

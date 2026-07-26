@@ -258,6 +258,63 @@ describe("pickCloseTxSig", () => {
     });
     expect(pickCloseTxSig(op)).toBeNull();
   });
+
+  // --- WO2A-C2: explicit identity is step-INDEPENDENT ------------------------
+
+  it("C2: explicit key matching last entry at 'unexpected_error' → returns it (identity survives the failOp overwrite)", () => {
+    const op = makeOp({
+      sigs: [ATA_PREP_SIG, CLOSE_SIG],
+      meta: { closeTxSignature: CLOSE_SIG },
+      step: "unexpected_error",
+    });
+    expect(pickCloseTxSig(op)).toBe(CLOSE_SIG);
+  });
+
+  it("C2: explicit key matching last entry at an arbitrary future post-write-ahead step → returns it", () => {
+    const op = makeOp({
+      sigs: [CLOSE_SIG],
+      meta: { closeTxSignature: CLOSE_SIG },
+      step: "close_confirm_timeout_some_future_step",
+    });
+    expect(pickCloseTxSig(op)).toBe(CLOSE_SIG);
+  });
+
+  it("C2: explicit key matching last entry even with a NULL step → returns it (identity evidence precedes any step restriction)", () => {
+    const op = { step: null, txSignatures: [ATA_PREP_SIG, CLOSE_SIG], metadata: { closeTxSignature: CLOSE_SIG } };
+    expect(pickCloseTxSig(op)).toBe(CLOSE_SIG);
+  });
+
+  it("C2: MISMATCHED explicit key at 'unexpected_error' → null immediately, never falls back to the last entry", () => {
+    const op = makeOp({
+      sigs: [ATA_PREP_SIG, CLOSE_SIG],
+      meta: { closeTxSignature: OTHER_SIG },
+      step: "unexpected_error",
+    });
+    expect(pickCloseTxSig(op)).toBeNull();
+  });
+
+  it("C2: explicit key at 'unexpected_error' but malformed trailing entry → null (cannot cross-check; ATA-prep is never promoted)", () => {
+    const op = makeOp({
+      sigs: [ATA_PREP_SIG, 42],
+      meta: { closeTxSignature: CLOSE_SIG },
+      step: "unexpected_error",
+    });
+    expect(pickCloseTxSig(op)).toBeNull();
+  });
+
+  it("C2: malformed explicit key (empty string) at 'unexpected_error' → null, no fallback", () => {
+    const op = makeOp({
+      sigs: [ATA_PREP_SIG, CLOSE_SIG],
+      meta: { closeTxSignature: "" },
+      step: "unexpected_error",
+    });
+    expect(pickCloseTxSig(op)).toBeNull();
+  });
+
+  it("C2: KEYLESS 'unexpected_error' stays malformed → null (legacy last-entry rule remains crash-window-only)", () => {
+    const op = makeOp({ sigs: [ATA_PREP_SIG, CLOSE_SIG], step: "unexpected_error" });
+    expect(pickCloseTxSig(op)).toBeNull();
+  });
 });
 
 // ============================================================================
@@ -386,6 +443,70 @@ describe("verifyCloseTxLanded", () => {
 
   it("WO#6 – non-string trailing array entry → malformed, no RPC", async () => {
     const op = makeOp({ sigs: [CLOSE_SIG, null] }); // null last
+    const conn = { getSignatureStatuses: vi.fn() };
+    expect(await verifyCloseTxLanded(op, conn as any)).toBe("malformed");
+    expect(conn.getSignatureStatuses).not.toHaveBeenCalled();
+  });
+
+  // --- WO2A-C2: explicit identity verifiable at ANY step ----------------------
+
+  it("C2 – 'unexpected_error' record with matching explicit key: probes EXACTLY the close sig; finalized → landed", async () => {
+    const op = makeOp({
+      sigs: [ATA_PREP_SIG, CLOSE_SIG],
+      meta: { closeTxSignature: CLOSE_SIG },
+      step: "unexpected_error",
+    });
+    const conn = makeConnection((sigs) => {
+      expect(sigs).toEqual([CLOSE_SIG]); // never the ATA-prep sig
+      return [{ confirmationStatus: "finalized" }];
+    });
+    expect(await verifyCloseTxLanded(op, conn as any)).toBe("landed");
+    expect(conn.getSignatureStatuses).toHaveBeenCalledOnce();
+  });
+
+  it("C2 – 'unexpected_error' + explicit key, NULL status → unverifiable (uncertainty, never absence)", async () => {
+    const op = makeOp({
+      sigs: [CLOSE_SIG],
+      meta: { closeTxSignature: CLOSE_SIG },
+      step: "unexpected_error",
+    });
+    const conn = makeConnection(() => [null]);
+    expect(await verifyCloseTxLanded(op, conn as any)).toBe("unverifiable");
+  });
+
+  it("C2 – 'unexpected_error' + explicit key, 'processed' status → unverifiable (nonterminal, not a verdict)", async () => {
+    const op = makeOp({
+      sigs: [CLOSE_SIG],
+      meta: { closeTxSignature: CLOSE_SIG },
+      step: "unexpected_error",
+    });
+    const conn = makeConnection(() => [{ confirmationStatus: "processed" }]);
+    expect(await verifyCloseTxLanded(op, conn as any)).toBe("unverifiable");
+  });
+
+  it("C2 – 'unexpected_error' + explicit key, RPC throws → unverifiable", async () => {
+    const op = makeOp({
+      sigs: [CLOSE_SIG],
+      meta: { closeTxSignature: CLOSE_SIG },
+      step: "unexpected_error",
+    });
+    const conn = { getSignatureStatuses: vi.fn().mockRejectedValueOnce(new Error("RPC timeout")) };
+    expect(await verifyCloseTxLanded(op, conn as any)).toBe("unverifiable");
+  });
+
+  it("C2 – 'unexpected_error' + MISMATCHED explicit key → malformed, ZERO RPC calls (ATA-prep sig never probed)", async () => {
+    const op = makeOp({
+      sigs: [ATA_PREP_SIG, OTHER_SIG],
+      meta: { closeTxSignature: CLOSE_SIG },
+      step: "unexpected_error",
+    });
+    const conn = { getSignatureStatuses: vi.fn() };
+    expect(await verifyCloseTxLanded(op, conn as any)).toBe("malformed");
+    expect(conn.getSignatureStatuses).not.toHaveBeenCalled();
+  });
+
+  it("C2 – KEYLESS 'unexpected_error' → malformed, zero RPC (no legacy fallback outside the crash window)", async () => {
+    const op = makeOp({ sigs: [ATA_PREP_SIG, CLOSE_SIG], step: "unexpected_error" });
     const conn = { getSignatureStatuses: vi.fn() };
     expect(await verifyCloseTxLanded(op, conn as any)).toBe("malformed");
     expect(conn.getSignatureStatuses).not.toHaveBeenCalled();

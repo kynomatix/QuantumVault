@@ -677,6 +677,144 @@ describe("recoverFromOlderProvenClose", () => {
     expect(await recoverFromOlderProvenClose(WALLET, cridFor, 2, connWith())).toEqual({ kind: "none" });
     expect(await recoverFromOlderProvenClose(WALLET, cridFor, 0, connWith())).toEqual({ kind: "none" });
   });
+
+  // --- WO2A-C2: explicit identity proves a close at ANY step ------------------
+
+  it("failed child at 'unexpected_error' whose surviving explicit sig LANDED (finalized) → ONLY its own persisted floor (WO2A-C2)", async () => {
+    wireCloses({
+      [cridFor(2)]: closeChild({
+        id: "c2",
+        status: "failed",
+        step: "unexpected_error",
+        meta: { closeTxSignature: OLD_CLOSE_SIG, attributableFloorRaw: "1100000000" },
+        sigs: [OLD_CLOSE_SIG],
+      }),
+      // An OLDER attempt with a DIFFERENT floor must never contribute — the
+      // first proven child decides with ITS OWN floor, nothing else.
+      [cridFor(1)]: closeChild({
+        id: "c1",
+        status: "failed",
+        step: "unexpected_error",
+        meta: { closeTxSignature: OLD_CLOSE_SIG, attributableFloorRaw: "9900000000" },
+        sigs: [OLD_CLOSE_SIG],
+      }),
+    });
+    const conn = connWith({ statuses: [{ confirmationStatus: "finalized" }] });
+    const out = await recoverFromOlderProvenClose(WALLET, cridFor, 2, conn);
+    expect(out).toMatchObject({ kind: "recovered", raw: 1_100_000_000n, source: "conservative_floor" });
+    expect((out as any).provenOp.id).toBe("c2");
+    expect(conn.getSignatureStatuses).toHaveBeenCalledTimes(1); // scan stops at the first proven child
+  });
+
+  it("'unexpected_error' child with matching explicit key, CONFIRMED status → floor recovery (WO2A-C2)", async () => {
+    wireCloses({
+      [cridFor(1)]: closeChild({
+        id: "c1",
+        status: "failed",
+        step: "unexpected_error",
+        meta: { closeTxSignature: OLD_CLOSE_SIG, attributableFloorRaw: "1050000000" },
+        sigs: [OLD_CLOSE_SIG],
+      }),
+    });
+    const out = await recoverFromOlderProvenClose(
+      WALLET,
+      cridFor,
+      1,
+      connWith({ statuses: [{ confirmationStatus: "confirmed" }] }),
+    );
+    expect(out).toMatchObject({ kind: "recovered", raw: 1_050_000_000n, source: "conservative_floor" });
+  });
+
+  it("'unexpected_error' child, NULL status → unverifiable: stays resumable, can never become closed_outside_hop (WO2A-C2)", async () => {
+    wireCloses({
+      [cridFor(1)]: closeChild({
+        id: "c1",
+        status: "failed",
+        step: "unexpected_error",
+        meta: { closeTxSignature: OLD_CLOSE_SIG, attributableFloorRaw: "1100000000" },
+        sigs: [OLD_CLOSE_SIG],
+      }),
+    });
+    expect(await recoverFromOlderProvenClose(WALLET, cridFor, 1, connWith({ statuses: [null] }))).toEqual({
+      kind: "unverifiable",
+    });
+  });
+
+  it("'unexpected_error' child, merely 'processed' status → unverifiable (WO2A-C2)", async () => {
+    wireCloses({
+      [cridFor(1)]: closeChild({
+        id: "c1",
+        status: "failed",
+        step: "unexpected_error",
+        meta: { closeTxSignature: OLD_CLOSE_SIG, attributableFloorRaw: "1100000000" },
+        sigs: [OLD_CLOSE_SIG],
+      }),
+    });
+    expect(
+      await recoverFromOlderProvenClose(WALLET, cridFor, 1, connWith({ statuses: [{ confirmationStatus: "processed" }] })),
+    ).toEqual({ kind: "unverifiable" });
+  });
+
+  it("'unexpected_error' child, RPC failure → unverifiable (WO2A-C2)", async () => {
+    wireCloses({
+      [cridFor(1)]: closeChild({
+        id: "c1",
+        status: "failed",
+        step: "unexpected_error",
+        meta: { closeTxSignature: OLD_CLOSE_SIG, attributableFloorRaw: "1100000000" },
+        sigs: [OLD_CLOSE_SIG],
+      }),
+    });
+    expect(await recoverFromOlderProvenClose(WALLET, cridFor, 1, connWith({ statuses: new Error("rpc") }))).toEqual({
+      kind: "unverifiable",
+    });
+  });
+
+  it("'unexpected_error' child with MISMATCHED explicit key → none, ZERO RPC; the earlier prep signature is never promoted (WO2A-C2)", async () => {
+    wireCloses({
+      [cridFor(1)]: closeChild({
+        id: "c1",
+        status: "failed",
+        step: "unexpected_error",
+        meta: { closeTxSignature: CLOSE_SIG, attributableFloorRaw: "1100000000" }, // disagrees with the array
+        sigs: [OPEN_SIG_1, OLD_CLOSE_SIG],
+      }),
+    });
+    const conn = connWith();
+    expect(await recoverFromOlderProvenClose(WALLET, cridFor, 1, conn)).toEqual({ kind: "none" });
+    expect(conn.getSignatureStatuses).not.toHaveBeenCalled();
+  });
+
+  it("KEYLESS 'unexpected_error' child stays malformed → none, no RPC (WO2A-C2)", async () => {
+    wireCloses({
+      [cridFor(1)]: closeChild({
+        id: "c1",
+        status: "failed",
+        step: "unexpected_error",
+        meta: { attributableFloorRaw: "1100000000" }, // no explicit key
+        sigs: [OLD_CLOSE_SIG],
+      }),
+    });
+    const conn = connWith();
+    expect(await recoverFromOlderProvenClose(WALLET, cridFor, 1, conn)).toEqual({ kind: "none" });
+    expect(conn.getSignatureStatuses).not.toHaveBeenCalled();
+  });
+
+  it("KEYLESS crash-window child keeps the legacy last-entry rule: probes the LAST sig, landed → its floor (WO2A-C2)", async () => {
+    wireCloses({
+      [cridFor(1)]: closeChild({
+        id: "c1",
+        status: "pending",
+        step: "loop_sig_writeahead",
+        meta: { attributableFloorRaw: "1250000000" }, // legacy: no explicit key
+        sigs: [OPEN_SIG_1, OLD_CLOSE_SIG],
+      }),
+    });
+    const conn = connWith({ statuses: [{ confirmationStatus: "finalized" }] });
+    const out = await recoverFromOlderProvenClose(WALLET, cridFor, 1, conn);
+    expect(out).toMatchObject({ kind: "recovered", raw: 1_250_000_000n, source: "conservative_floor" });
+    expect(conn.getSignatureStatuses).toHaveBeenCalledWith([OLD_CLOSE_SIG], expect.anything());
+  });
 });
 
 // ============================================================================
@@ -907,6 +1045,45 @@ describe("executeLoopHop — parked door", () => {
       .mocked(storage.updateBorrowOperation as any)
       .mock.calls.filter((c: any[]) => c[1] && "status" in c[1]);
     expect(statusWrites).toHaveLength(0);
+    expect(storage.finalizeLoopHopParent).not.toHaveBeenCalled();
+  });
+
+  it("a FAILED manual resume that STARTED parked leaves the durable parent parked — and still outside automatic eligibility (WO2A-C2)", async () => {
+    const parent = hopOp(
+      { parkReason: "open_broadcast_budget_exhausted", parkedAt: new Date().toISOString() },
+      { status: "parked", step: "parked" },
+    );
+    wire({ [HOP_CRID]: parent }, parent);
+
+    // Phase 1: manual resume passes the door, then fails benignly downstream.
+    const manual = await executeLoopHop({ ...hopParams, mode: "manual" } as any);
+    expect((manual as any).parked).toBeUndefined();
+    expect((manual as any).resumable).toBe(true);
+    expect(manual.success).toBe(false);
+    // The failed manual attempt must never flip `status` — the park is durable.
+    const statusWritesManual = vi
+      .mocked(storage.updateBorrowOperation as any)
+      .mock.calls.filter((c: any[]) => c[1] && "status" in c[1]);
+    expect(statusWritesManual).toHaveLength(0);
+    expect(storage.finalizeLoopHopParent).not.toHaveBeenCalled();
+
+    // Phase 2: with the durable row still parked, an AUTOMATIC pass must
+    // refuse at the door — the failed manual attempt re-opened nothing.
+    vi.mocked(storage.updateBorrowOperation as any).mockClear();
+    vi.mocked(storage.getBorrowOperationById as any).mockClear();
+    const parkedTruth = hopOp(
+      { parkReason: "open_broadcast_budget_exhausted", parkedAt: new Date().toISOString() },
+      { status: "parked", step: "parked" },
+    );
+    wire({ [HOP_CRID]: parkedTruth }, parkedTruth);
+
+    const auto = await executeLoopHop(hopParams);
+    expect(auto.success).toBe(false);
+    expect((auto as any).parked).toBe(true);
+    expect((auto as any).parkReason).toBe("open_broadcast_budget_exhausted");
+    expect((auto as any).parkedByThisInvocation).toBeUndefined();
+    expect(storage.getBorrowOperationById).not.toHaveBeenCalled();
+    expect(storage.updateBorrowOperation).not.toHaveBeenCalled();
     expect(storage.finalizeLoopHopParent).not.toHaveBeenCalled();
   });
 });
