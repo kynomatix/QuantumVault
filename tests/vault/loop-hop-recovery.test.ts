@@ -18,7 +18,7 @@
  * preamble that proved sufficient in loop-open-recovery.test.ts (WO1).
  */
 
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Module mocks — hoisted before imports by vitest.
@@ -385,16 +385,19 @@ describe("verifyRawSigLanded", () => {
     );
   });
 
-  it("null status → not_landed (searchTransactionHistory makes absence strong)", async () => {
-    expect(await verifyRawSigLanded(CLOSE_SIG, connWith({ statuses: [null] }))).toBe("not_landed");
+  it("null status → unverifiable (WO2A-C1: index lag can hide a landed tx — uncertainty, never absence)", async () => {
+    expect(await verifyRawSigLanded(CLOSE_SIG, connWith({ statuses: [null] }))).toBe("unverifiable");
   });
 
-  it("errored or merely processed status → not_landed", async () => {
+  it("errored status → not_landed (atomic tx landed with an error: provably nothing moved)", async () => {
     expect(
       await verifyRawSigLanded(CLOSE_SIG, connWith({ statuses: [{ confirmationStatus: "finalized", err: { x: 1 } }] })),
     ).toBe("not_landed");
+  });
+
+  it("merely processed status → unverifiable (WO2A-C1: nonterminal is not yet a verdict either way)", async () => {
     expect(await verifyRawSigLanded(CLOSE_SIG, connWith({ statuses: [{ confirmationStatus: "processed" }] }))).toBe(
-      "not_landed",
+      "unverifiable",
     );
   });
 
@@ -518,7 +521,27 @@ describe("recoverFromOlderProvenClose", () => {
     });
   });
 
-  it("figureless success whose sig did NOT land is skipped (probe-flat alone is not proof) → none", async () => {
+  it("figureless success whose sig landed WITH an on-chain error is skipped (provably nothing moved) → none", async () => {
+    wireCloses({
+      [cridFor(1)]: closeChild({
+        id: "c1",
+        meta: { attributableFloorRaw: "1500000000" },
+        result: { signature: OLD_CLOSE_SIG },
+      }),
+    });
+    expect(
+      await recoverFromOlderProvenClose(
+        WALLET,
+        cridFor,
+        1,
+        connWith({ statuses: [{ confirmationStatus: "finalized", err: { x: 1 } }] }),
+      ),
+    ).toEqual({
+      kind: "none",
+    });
+  });
+
+  it("figureless success with a NULL status is uncertainty, not absence → unverifiable (WO2A-C1)", async () => {
     wireCloses({
       [cridFor(1)]: closeChild({
         id: "c1",
@@ -527,7 +550,88 @@ describe("recoverFromOlderProvenClose", () => {
       }),
     });
     expect(await recoverFromOlderProvenClose(WALLET, cridFor, 1, connWith({ statuses: [null] }))).toEqual({
-      kind: "none",
+      kind: "unverifiable",
+    });
+  });
+
+  it("a non-loop_close op under a close crid is corrupt linkage → skipped without RPC (WO2A-C1)", async () => {
+    // Even a figure-bearing foreign op must never prove a close.
+    wireCloses({
+      [cridFor(1)]: {
+        ...deadOpenChild(1),
+        result: { solReturnedLamports: "1700000000", signature: OLD_CLOSE_SIG },
+      },
+    });
+    const conn = connWith();
+    expect(await recoverFromOlderProvenClose(WALLET, cridFor, 1, conn)).toEqual({ kind: "none" });
+    expect(conn.getSignatureStatuses).not.toHaveBeenCalled();
+  });
+
+  it("failed child at close_ambiguous_not_landed whose surviving explicit sig LANDED → its floor sizes the recovery (WO2A-C1)", async () => {
+    wireCloses({
+      [cridFor(1)]: closeChild({
+        id: "c1",
+        status: "failed",
+        step: "close_ambiguous_not_landed",
+        meta: { closeTxSignature: OLD_CLOSE_SIG, attributableFloorRaw: "1300000000" },
+        sigs: [OLD_CLOSE_SIG],
+      }),
+    });
+    const out = await recoverFromOlderProvenClose(
+      WALLET,
+      cridFor,
+      1,
+      connWith({ statuses: [{ confirmationStatus: "finalized" }] }),
+    );
+    expect(out).toMatchObject({ kind: "recovered", raw: 1_300_000_000n, source: "conservative_floor" });
+  });
+
+  it("failed child at close_ambiguous_unreadable whose surviving explicit sig LANDED → floor recovery (WO2A-C1)", async () => {
+    wireCloses({
+      [cridFor(1)]: closeChild({
+        id: "c1",
+        status: "failed",
+        step: "close_ambiguous_unreadable",
+        meta: { closeTxSignature: OLD_CLOSE_SIG, attributableFloorRaw: "1200000000" },
+        sigs: [OLD_CLOSE_SIG],
+      }),
+    });
+    const out = await recoverFromOlderProvenClose(
+      WALLET,
+      cridFor,
+      1,
+      connWith({ statuses: [{ confirmationStatus: "confirmed" }] }),
+    );
+    expect(out).toMatchObject({ kind: "recovered", raw: 1_200_000_000n, source: "conservative_floor" });
+  });
+
+  it("ambiguous-step child WITHOUT the explicit key is unselectable (no legacy fallback) → none, no RPC (WO2A-C1)", async () => {
+    wireCloses({
+      [cridFor(1)]: closeChild({
+        id: "c1",
+        status: "failed",
+        step: "close_ambiguous_not_landed",
+        meta: { attributableFloorRaw: "1300000000" }, // key missing → corrupt, fail closed
+        sigs: [OLD_CLOSE_SIG],
+      }),
+    });
+    const conn = connWith();
+    expect(await recoverFromOlderProvenClose(WALLET, cridFor, 1, conn)).toEqual({ kind: "none" });
+    expect(conn.getSignatureStatuses).not.toHaveBeenCalled();
+  });
+
+  it("ambiguous-step child with NULL status stays uncertainty → unverifiable, hop resumable (WO2A-C1)", async () => {
+    wireCloses({
+      [cridFor(1)]: closeChild({
+        id: "c1",
+        status: "failed",
+        step: "close_ambiguous_not_landed",
+        meta: { closeTxSignature: OLD_CLOSE_SIG, attributableFloorRaw: "1300000000" },
+        sigs: [OLD_CLOSE_SIG],
+      }),
+    });
+    expect(await recoverFromOlderProvenClose(WALLET, cridFor, 1, connWith({ statuses: [null] }))).toEqual({
+      kind: "unverifiable",
     });
   });
 
@@ -589,6 +693,9 @@ describe("executeLoopHop — budget gate", () => {
     expect(res.success).toBe(false);
     expect((res as any).parked).toBe(true);
     expect((res as any).parkReason).toBe("post_close_age_exceeded");
+    // WO2A-C1: this invocation WON the pending→parked CAS — it alone carries
+    // the journal/notify authorization flag.
+    expect((res as any).parkedByThisInvocation).toBe(true);
     expect(res.solReturnedLamports).toBe("2000000000");
     expect(storage.finalizeLoopHopParent).toHaveBeenCalledWith(
       "hop-1",
@@ -669,6 +776,9 @@ describe("executeLoopHop — budget gate", () => {
 
     expect((res as any).parked).toBe(true);
     expect(res.error).toMatch(/parked by a concurrent attempt/);
+    // WO2A-C1: the rival won the CAS — this invocation must NOT carry the
+    // journal/notify flag (it is reporting the SAME park a second time).
+    expect((res as any).parkedByThisInvocation).toBeUndefined();
   });
 
   it("park CAS loss where a rival SUCCEEDED first → reports alreadyCompleted with the rival's records", async () => {
@@ -690,6 +800,63 @@ describe("executeLoopHop — budget gate", () => {
     expect(res.borrowPositionId).toBe("row-9");
     expect(res.openSignature).toBe(OPEN_SIG_1);
   });
+
+  it("Phase 2a adoption of a SUCCEEDED slot child pre-empts exhausted budgets (landed money is never parked away from)", async () => {
+    const slotCrid = `${HOP_CRID}:open:${ATTEMPT_BUDGET}`;
+    const parent = hopOp({
+      openAttempts: ATTEMPT_BUDGET, // broadcast budget exhausted
+      activeOpenClientRequestId: slotCrid,
+      activeOpenVaultId: 47,
+      closeDoneAt: new Date(Date.now() - AGE_BUDGET_MS - 60 * 60_000).toISOString(), // age budget exhausted
+    });
+    const succeededChild = {
+      ...deadOpenChild(ATTEMPT_BUDGET),
+      status: "succeeded",
+      step: "opened",
+      borrowPositionId: "adopted-row-1",
+      metadata: {
+        kind: "loop",
+        vaultId: 47,
+        principalLamports: "1900000000",
+        leverage: 2,
+        slippageBps: 50,
+        openTxSignature: OPEN_SIG_1,
+      },
+      result: { signature: OPEN_SIG_1, borrowPositionId: "adopted-row-1" },
+    };
+    wire({ [HOP_CRID]: parent, [slotCrid]: succeededChild }, parent);
+
+    const res = await executeLoopHop(hopParams);
+
+    // Phase 2a runs BEFORE the budget gate: the landed child is adopted as
+    // success — never parked away from, nothing new broadcast.
+    expect(res.success).toBe(true);
+    expect(res.borrowPositionId).toBe("adopted-row-1");
+    expect(res.openSignature).toBe(OPEN_SIG_1);
+    expect(storage.finalizeLoopHopParent).toHaveBeenCalledWith(
+      "hop-1",
+      { expectedActiveOpenClientRequestId: slotCrid },
+      expect.objectContaining({ status: "succeeded", borrowPositionId: "adopted-row-1" }),
+    );
+    const parkWrites = vi
+      .mocked(storage.finalizeLoopHopParent as any)
+      .mock.calls.filter((c: any[]) => c[2]?.status === "parked");
+    expect(parkWrites).toHaveLength(0);
+    expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
+  });
+
+  it("an already-attributed resume NEVER rewrites closeDoneAt (the budget anchor is immutable)", async () => {
+    const parent = hopOp(); // closeDoneAt + solReturned + closeSignature already persisted
+    wire({ [HOP_CRID]: parent }, parent);
+
+    const res = await executeLoopHop(hopParams);
+
+    expect((res as any).resumable).toBe(true); // benign preflight failure (null config)
+    const closeDoneAtWrites = vi
+      .mocked(storage.updateBorrowOperation as any)
+      .mock.calls.filter((c: any[]) => c[1]?.mergeMetadata && "closeDoneAt" in c[1].mergeMetadata);
+    expect(closeDoneAtWrites).toHaveLength(0);
+  });
 });
 
 // ============================================================================
@@ -709,6 +876,9 @@ describe("executeLoopHop — parked door", () => {
     expect(res.success).toBe(false);
     expect((res as any).parked).toBe(true);
     expect((res as any).parkReason).toBe("open_broadcast_budget_exhausted");
+    // WO2A-C1: the parked-door refusal reports an EXISTING park — never the
+    // journal/notify authorization.
+    expect((res as any).parkedByThisInvocation).toBeUndefined();
     expect(res.error).toMatch(/parked for manual resume/i);
     expect(storage.getBorrowOperationById).not.toHaveBeenCalled();
     expect(storage.updateBorrowOperation).not.toHaveBeenCalled();
@@ -730,6 +900,14 @@ describe("executeLoopHop — parked door", () => {
     expect((res as any).resumable).toBe(true);
     expect(res.error).toMatch(/Could not size a re-loop|config/i);
     expect(storage.updateBorrowOperation).toHaveBeenCalledWith("hop-1", expect.objectContaining({ step: "close_done" }));
+    // WO2A-C1: a FAILED manual resume must leave the op PARKED — the step
+    // re-anchor is metadata only; no write may flip `status` (else the
+    // automatic sweep would resume a hop the operator parked).
+    const statusWrites = vi
+      .mocked(storage.updateBorrowOperation as any)
+      .mock.calls.filter((c: any[]) => c[1] && "status" in c[1]);
+    expect(statusWrites).toHaveLength(0);
+    expect(storage.finalizeLoopHopParent).not.toHaveBeenCalled();
   });
 });
 
@@ -957,5 +1135,104 @@ describe("executeLoopHop — resume attribution (no solReturned crumb)", () => {
     expect((res as any).resumable).toBe(true);
     expect(res.error).toMatch(/Could not yet confirm/);
     expect(routeMocks.getLoopVaultConfig).not.toHaveBeenCalled();
+  });
+});
+
+// ============================================================================
+// I. Policy-deny fallback boundary (WO2A-C1 cell 8)
+//
+// Drives the REAL executeLoopOpen deep enough to hit its policy gate: the
+// preflight (which returns BEFORE the gate) passes, then the real attempt is
+// denied pre-broadcast by the depeg check — jupQuote is served by a stubbed
+// global fetch whose outAmount makes the market rate deviate wildly from the
+// stake-pool rate. Deny ⇒ no signature ⇒ child provably never broadcast.
+// ============================================================================
+
+describe("executeLoopHop — policy-deny fallback boundary (WO2A-C1)", () => {
+  const SLOT_CRID_1 = `${HOP_CRID}:open:1`;
+
+  /** Stub global fetch for jupQuote; deny = depeg (outAmount enormous). */
+  function stubQuoteFetch({ otherAmountThreshold = "999999999999999", outAmount = "999999999999999" } = {}) {
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({ outAmount, otherAmountThreshold }),
+      text: async () => JSON.stringify({ outAmount, otherAmountThreshold }),
+    }));
+    vi.stubGlobal("fetch", fetchSpy);
+    return fetchSpy;
+  }
+
+  function primeOpenableTarget() {
+    routeMocks.getLoopVaultConfig.mockImplementation(async (v: number) => (v === 47 ? CFG_47 : null));
+    vi.mocked(getFreshLoopRates as any).mockResolvedValue(profitableRates());
+    vi.mocked(storage.createBorrowOperation as any).mockResolvedValue({ id: "deny-child-1" });
+    vi.mocked(storage.claimLoopHopOpenAttempt as any).mockResolvedValue({
+      adopted: false,
+      activeOpenClientRequestId: SLOT_CRID_1,
+      activeOpenVaultId: 47,
+      openAttempts: 1,
+    });
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("pre-broadcast policy deny (no signature, no child record) → slot cleared via CAS, exactly ONE authorized fallback", async () => {
+    const parent = hopOp();
+    wire({ [HOP_CRID]: parent }, parent); // slot crid resolves to nothing → provably never broadcast
+    primeOpenableTarget();
+    stubQuoteFetch(); // depeg → deny
+
+    const res = await executeLoopHop(hopParams);
+
+    // Denied child's slot was released with the EXACT crid guard…
+    expect(storage.clearLoopHopActiveChild).toHaveBeenCalledTimes(1);
+    expect(storage.clearLoopHopActiveChild).toHaveBeenCalledWith("hop-1", SLOT_CRID_1);
+    // …then exactly ONE fallback ran (vault 4 preflight → null config → fail),
+    // and fallbackUsed prevents any third attempt.
+    expect(routeMocks.getLoopVaultConfig).toHaveBeenCalledWith(47);
+    expect(routeMocks.getLoopVaultConfig).toHaveBeenCalledWith(4);
+    expect(storage.claimLoopHopOpenAttempt).toHaveBeenCalledTimes(1); // fallback died at preflight, before any claim
+    expect(storage.createBorrowOperation).toHaveBeenCalledTimes(1); // only the denied child was ever created
+    expect((res as any).resumable).toBe(true);
+    expect(res.success).toBe(false);
+    expect((res as any).parked).toBeUndefined();
+    expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled(); // nothing broadcast anywhere
+  });
+
+  it("deny but the child carries write-ahead evidence → NO slot clear, NO fallback (Phase 2a owns it next pass)", async () => {
+    const parent = hopOp();
+    // The slot crid resolves to a failed child WITH openTxSignature: the deny
+    // verdict cannot prove it never broadcast — must stay on its crid.
+    wire({ [HOP_CRID]: parent, [SLOT_CRID_1]: deadOpenChild(1) }, parent);
+    primeOpenableTarget();
+    stubQuoteFetch(); // depeg → deny
+
+    const res = await executeLoopHop(hopParams);
+
+    expect(storage.clearLoopHopActiveChild).not.toHaveBeenCalled();
+    expect(routeMocks.getLoopVaultConfig).not.toHaveBeenCalledWith(4); // no fallback attempt
+    expect(res.success).toBe(false);
+    expect((res as any).resumable).toBe(true);
+    expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
+  });
+
+  it("non-deny open failure (unusable quote, no policyReasons) → NO fallback, NO slot clear (resumable)", async () => {
+    const parent = hopOp();
+    wire({ [HOP_CRID]: parent }, parent);
+    primeOpenableTarget();
+    stubQuoteFetch({ otherAmountThreshold: "0" }); // minOut 0 → quote_failed, not a policy deny
+
+    const res = await executeLoopHop(hopParams);
+
+    expect(storage.clearLoopHopActiveChild).not.toHaveBeenCalled();
+    expect(routeMocks.getLoopVaultConfig).not.toHaveBeenCalledWith(4);
+    expect(storage.claimLoopHopOpenAttempt).toHaveBeenCalledTimes(1);
+    expect(res.success).toBe(false);
+    expect((res as any).resumable).toBe(true);
+    expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
   });
 });

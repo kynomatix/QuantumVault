@@ -23612,7 +23612,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
     }
     try {
-      const position = await storage.getBorrowPosition(borrowPositionId);
+      // WO2A-C1: admin-only unscoped lookup — this endpoint holds no wallet;
+      // the row's own walletAddress scopes every read below it.
+      const position = await storage.getBorrowPositionByIdAdmin(borrowPositionId);
       if (!position) return res.status(404).json({ error: "Position not found" });
       if (position.kind !== "loop") return res.status(400).json({ error: "Position is not a loop position" });
       // A resume's source is often already CLOSED (that is the point) — only a

@@ -2469,16 +2469,33 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
 
 /**
  * Resolve the specific Loop Close transaction signature from a close-attempt
- * operation record. Returns null when the record is malformed or the step is
- * not "loop_sig_writeahead".
+ * operation record. Returns null when the record is malformed or the step
+ * carries no provable close identity.
+ *
+ * Step gating (WO2A-C1):
+ *  - "loop_sig_writeahead" — crash window between the write-ahead persist and
+ *    any later step write. Explicit meta key OR the legacy last-entry rule.
+ *  - "close_ambiguous_not_landed" / "close_ambiguous_unreadable" — failOp
+ *    OVERWRITES the step on ambiguous outcomes AFTER the write-ahead already
+ *    persisted. The explicit meta.closeTxSignature survives that overwrite
+ *    (metadata merges are never dropped by failOp), so it stays selectable —
+ *    but ONLY via the explicit key. Without it, the step gate alone can no
+ *    longer prove which txSignatures entry is the close (both ambiguous steps
+ *    shipped together with the explicit key, so a keyless ambiguous record is
+ *    corrupt, not legacy) — fail closed.
+ *  - Any other step → null (pre-broadcast records may carry ONLY an ATA-prep
+ *    signature; promoting it is the exact bug class this selector prevents).
  *
  * Resolution precedence (most to least authoritative):
  *  1. meta.closeTxSignature — written explicitly in the write-ahead hook by
  *     new close attempts; unambiguously identifies the close tx regardless of
- *     how many signatures the txSignatures array carries.
+ *     how many signatures the txSignatures array carries. Accepted ONLY as a
+ *     non-empty string exactly equal to the FINAL raw txSignatures entry; a
+ *     malformed or mismatched explicit key NEVER falls back to any entry.
  *  2. txSignatures[last] — ordering invariant for legacy records that predate
  *     the explicit meta field: the ATA-prep signature (if any) is appended
  *     BEFORE the write-ahead hook fires, so the close sig is always last.
+ *     Valid ONLY at "loop_sig_writeahead".
  *
  * Fail closed: any record where neither source yields a non-empty string
  * returns null; callers must not treat the attempt as proven.
@@ -2490,7 +2507,8 @@ export function pickCloseTxSig(co: {
   txSignatures: unknown[] | null;
   metadata: Record<string, unknown> | null | undefined;
 }): string | null {
-  if (co.step !== "loop_sig_writeahead") return null;
+  const ambiguousStep = co.step === "close_ambiguous_not_landed" || co.step === "close_ambiguous_unreadable";
+  if (co.step !== "loop_sig_writeahead" && !ambiguousStep) return null;
 
   // Identify the final RAW entry of the txSignatures array — do NOT filter
   // through to an earlier element when the trailing entry is malformed.
@@ -2519,7 +2537,12 @@ export function pickCloseTxSig(co: {
     return explicit;
   }
 
-  // Legacy fallback: the explicit identity key is genuinely absent.
+  // Legacy fallback: the explicit identity key is genuinely absent. Valid
+  // ONLY at the crash-window step — the ambiguous steps postdate the explicit
+  // key (failOp overwrote the step AFTER the write-ahead hook merged
+  // closeTxSignature), so an ambiguous record WITHOUT the key is corrupt.
+  // Never promote txSignatures[last] for it.
+  if (ambiguousStep) return null;
   // Ordering invariant: the close write-ahead sig is always the FINAL entry in
   // txSignatures (any ATA-prep sig is appended before the write-ahead hook fires).
   // If the trailing entry is not a valid string, the record is malformed.
@@ -2531,11 +2554,16 @@ export function pickCloseTxSig(co: {
  * attempt op actually landed on-chain, without risk of confusing an earlier
  * ATA-prep transaction with the close tx.
  *
- * Returns:
- *  "landed"       — the close tx is confirmed/finalized with no error.
- *  "not_landed"   — tx not found, expired, or errored; close did not happen.
+ * Returns (WO2A-C1 verdict table — uncertainty is NEVER a landing verdict):
+ *  "landed"       — confirmed/finalized with no error.
+ *  "not_landed"   — the tx landed WITH an on-chain error: atomic tx ⇒ the
+ *                   close provably did not move money.
  *  "malformed"    — cannot identify the close sig; callers must fail closed.
- *  "unverifiable" — RPC threw; retry later (resumable state).
+ *  "unverifiable" — null status (index lag can hide a landed tx even with
+ *                   searchTransactionHistory), a nonterminal status
+ *                   ("processed" or unknown), or an RPC failure. Callers must
+ *                   stay resumable: never authorize the floor from it, never
+ *                   terminalize the parent as closed_outside_hop from it.
  *
  * @internal exported for unit tests only — not a public API surface.
  */
@@ -2552,9 +2580,10 @@ export async function verifyCloseTxLanded(
   try {
     const result = await connection.getSignatureStatuses([closeTxSig], { searchTransactionHistory: true });
     const st = result.value[0];
-    const ok =
-      !!st && !st.err && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized");
-    return ok ? "landed" : "not_landed";
+    if (st == null) return "unverifiable";
+    if (st.err) return "not_landed";
+    if (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized") return "landed";
+    return "unverifiable"; // "processed" / other nonterminal — not yet a verdict either way
   } catch {
     return "unverifiable";
   }
@@ -2581,11 +2610,18 @@ export function computeCloseAttributableFloor(minOutRaw: bigint, flashRepayRaw: 
  * Verify a RAW signature string landed (confirmed/finalized, no error).
  * Unlike verifyCloseTxLanded this takes the signature directly — needed when
  * the close attempt is still in memory (direct path) or when a SUCCEEDED close
- * op recorded its sig in result/metadata but its step moved past
- * "loop_sig_writeahead" (pickCloseTxSig deliberately refuses those steps).
- * NULL status = "not_landed" (searchTransactionHistory makes absence strong
- * evidence, and callers only ever SKIP attribution on not_landed — they never
- * book success from it); RPC failure = "unverifiable".
+ * op recorded its sig in result/metadata but its step moved past the
+ * selector-valid steps (pickCloseTxSig deliberately refuses those).
+ *
+ * WO2A-C1 verdict table (uncertainty is NEVER a landing verdict):
+ *  "landed"       — confirmed/finalized with no error.
+ *  "not_landed"   — the tx landed WITH an on-chain error (atomic ⇒ nothing
+ *                   moved), or the input carries no signature at all.
+ *  "unverifiable" — null status (index lag can hide a landed tx even with
+ *                   searchTransactionHistory), a nonterminal status
+ *                   ("processed" or unknown), or an RPC failure. Callers must
+ *                   stay resumable — never book success, never authorize a
+ *                   floor, never terminalize from it.
  *
  * @internal exported for unit tests only — not a public API surface.
  */
@@ -2597,8 +2633,10 @@ export async function verifyRawSigLanded(
   try {
     const res = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
     const st = res.value[0];
-    const ok = !!st && !st.err && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized");
-    return ok ? "landed" : "not_landed";
+    if (st == null) return "unverifiable";
+    if (st.err) return "not_landed";
+    if (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized") return "landed";
+    return "unverifiable"; // "processed" / other nonterminal — not yet a verdict either way
   } catch {
     return "unverifiable";
   }
@@ -2657,10 +2695,18 @@ export type OlderCloseRecovery =
  *    floor, but ONLY once its recorded signed tx is verified LANDED (probe-flat
  *    alone can also mean "our tx expired AND someone closed it out-of-band").
  *    Not-landed → skip; landed with no floor → proven_unattributable.
- *  - Crash-window child (step loop_sig_writeahead) → verifyCloseTxLanded;
- *    landed → its floor (no exact was ever measured); landed with no floor →
- *    proven_unattributable; not_landed/malformed → keep scanning older.
- *  - Any RPC-unverifiable candidate keeps the hop resumable (never guess).
+ *  - NON-SUCCEEDED child (crash-window step loop_sig_writeahead, or a failOp
+ *    ambiguous overwrite close_ambiguous_not_landed/_unreadable whose explicit
+ *    closeTxSignature survived — WO2A-C1) → verifyCloseTxLanded; landed → ONLY
+ *    that child's own persisted floor (no exact was ever measured); landed
+ *    with no floor → proven_unattributable; not_landed/malformed → keep
+ *    scanning older. The selector decides which records still carry a provable
+ *    close identity — steps without one cost no RPC call.
+ *  - Only loop_close children are inspected (WO2A-C1): a foreign op type under
+ *    a close crid is corrupt linkage, never close proof.
+ *  - Any unverifiable candidate (null status, nonterminal status, RPC failure)
+ *    keeps the hop resumable — uncertainty never authorizes the floor and
+ *    never lets the scan fall through to a closed_outside_hop terminal.
  * A position closes at most once, so the first proven child decides.
  *
  * @internal exported for unit tests only — not a public API surface.
@@ -2675,6 +2721,9 @@ export async function recoverFromOlderProvenClose(
   for (let n = fromAttempt; n >= 1; n--) {
     const co = await storage.getBorrowOperationByClientRequestId(walletAddress, closeCridFor(n));
     if (!co) continue;
+    // WO2A-C1: only loop_close children can prove the unwind was ours. A
+    // foreign op type under a close crid is corrupt linkage — skip it.
+    if (co.operationType !== "loop_close") continue;
     const coMeta = (co.metadata ?? {}) as Record<string, any>;
     const r = (co.result ?? {}) as Record<string, any>;
     const floorRaw = typeof coMeta.attributableFloorRaw === "string" ? coMeta.attributableFloorRaw : null;
@@ -2708,19 +2757,23 @@ export async function recoverFromOlderProvenClose(
       return { kind: "proven_unattributable", provenOp: co };
     }
 
-    if (co.step === "loop_sig_writeahead") {
-      const verdict = await verifyCloseTxLanded(co, connection);
-      if (verdict === "landed") {
-        const rec = recoverHopSolReturned({ attributableFloorRaw: floorRaw });
-        if (rec.ok) return { kind: "recovered", raw: rec.solReturnedRaw, source: rec.source, signature: pickCloseTxSig(co), provenOp: co };
-        return { kind: "proven_unattributable", provenOp: co };
-      }
-      if (verdict === "unverifiable") {
-        sawUnverifiable = true;
-        continue;
-      }
-      // not_landed / malformed → keep scanning older attempts
+    // Non-succeeded child (failed / still-pending): its close tx may have
+    // landed anyway. The selector inside verifyCloseTxLanded decides which
+    // records still carry a provable close identity — the crash-window step
+    // AND the two failOp ambiguous overwrites via the surviving explicit key
+    // (WO2A-C1). "malformed" covers everything else (pre-broadcast steps,
+    // keyless ambiguous records) without an RPC call → keep scanning older.
+    const verdict = await verifyCloseTxLanded(co, connection);
+    if (verdict === "landed") {
+      const rec = recoverHopSolReturned({ attributableFloorRaw: floorRaw });
+      if (rec.ok) return { kind: "recovered", raw: rec.solReturnedRaw, source: rec.source, signature: pickCloseTxSig(co), provenOp: co };
+      return { kind: "proven_unattributable", provenOp: co };
     }
+    if (verdict === "unverifiable") {
+      sawUnverifiable = true;
+      continue;
+    }
+    // not_landed / malformed → keep scanning older attempts
   }
   return sawUnverifiable ? { kind: "unverifiable" } : { kind: "none" };
 }
@@ -2892,6 +2945,15 @@ export interface LoopHopResult {
   parked?: boolean;
   /** WO2A: why the hop parked (open_broadcast_budget_exhausted | post_close_age_exceeded | close_done_time_unknown). */
   parkReason?: string;
+  /**
+   * WO2A-C1: true ONLY on the invocation that WON the pending→parked CAS —
+   * the single caller allowed to journal/notify this park. Every other parked
+   * result (rival parked first, parked-door refusal, durable-truth re-read)
+   * reports the SAME park a second time; journaling those would double-alert.
+   * Cross-process truthful because the flag rides the CAS outcome itself,
+   * never sweep-query timing.
+   */
+  parkedByThisInvocation?: boolean;
   /** WO2A: how the recovered close output was attributed. */
   principalSource?: HopSolReturnedSource;
   error?: string;
@@ -3831,6 +3893,9 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
         return {
           success: false,
           parked: true,
+          // This invocation WON the pending→parked CAS — it alone may be
+          // journaled/notified by the caller (WO2A-C1).
+          parkedByThisInvocation: true,
           parkReason,
           solReturnedLamports: solReturned.toString(),
           ...(principalSource ? { principalSource } : {}),

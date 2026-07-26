@@ -778,8 +778,11 @@ describe("runLoopAllocationTick — parked hops (WO2A)", () => {
         return {
           success: false,
           parked: true,
+          // WO2A-C1: only the CAS winner carries the journal/notify flag.
+          parkedByThisInvocation: true,
           parkReason: "post_close_age_exceeded",
           solReturnedLamports: "2000000000",
+          principalSource: "conservative_floor",
         };
       },
     });
@@ -809,6 +812,9 @@ describe("runLoopAllocationTick — parked hops (WO2A)", () => {
       parkReason: "post_close_age_exceeded",
       clientRequestId: "creq-1",
       solReturnedLamports: "2000000000",
+      // WO2A-C1: how the parked principal was attributed rides the journal —
+      // the admin resume surface must know exact vs conservative floor.
+      principalSource: "conservative_floor",
     });
 
     // One not-ok Telegram alert pointing the owner at the manual resume.
@@ -822,7 +828,12 @@ describe("runLoopAllocationTick — parked hops (WO2A)", () => {
     const { deps, calls } = makeDeps({
       getPendingHops: async () => [makeHopOp()],
       listActivePositions: async () => [],
-      executeHop: async () => ({ success: false, parked: true, parkReason: "open_broadcast_budget_exhausted" }),
+      executeHop: async () => ({
+        success: false,
+        parked: true,
+        parkedByThisInvocation: true,
+        parkReason: "open_broadcast_budget_exhausted",
+      }),
       persistDecision: async () => {
         throw new Error("db down");
       },
@@ -841,7 +852,12 @@ describe("runLoopAllocationTick — parked hops (WO2A)", () => {
     const { deps, calls } = makeDeps({
       getPendingHops: async () => [makeHopOp()],
       listActivePositions: async () => [],
-      executeHop: async () => ({ success: false, parked: true, parkReason: "close_done_time_unknown" }),
+      executeHop: async () => ({
+        success: false,
+        parked: true,
+        parkedByThisInvocation: true,
+        parkReason: "close_done_time_unknown",
+      }),
       notify: async () => {
         throw new Error("telegram down");
       },
@@ -853,6 +869,29 @@ describe("runLoopAllocationTick — parked hops (WO2A)", () => {
     expect(res.journaled).toBe(1);
     expect(res.failed).toBe(0);
     expect(calls.decisions).toHaveLength(1);
+  });
+
+  it("a parked result WITHOUT parkedByThisInvocation (rival won the park CAS) is counted but NEVER journaled or notified", async () => {
+    const { deps, calls } = makeDeps({
+      getPendingHops: async () => [makeHopOp()],
+      listActivePositions: async () => [],
+      // No flag: a rival process won the pending→parked CAS; this invocation
+      // is reporting the SAME park a second time (WO2A-C1).
+      executeHop: async () => ({
+        success: false,
+        parked: true,
+        parkReason: "post_close_age_exceeded",
+        solReturnedLamports: "2000000000",
+      }),
+    });
+
+    const res = await runLoopAllocationTick(deps);
+
+    expect(res.parked).toBe(1);
+    expect(res.journaled).toBe(0);
+    expect(res.failed).toBe(0);
+    expect(calls.decisions).toHaveLength(0);
+    expect(calls.notifications).toHaveLength(0);
   });
 
   it("a non-pending row from the sweep query is loudly warned about but STILL resumed (the executor's doors decide)", async () => {

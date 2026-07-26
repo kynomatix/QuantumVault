@@ -408,42 +408,52 @@ export async function runLoopAllocationTick(deps: LoopAllocationTickDeps): Promi
           if (res.success) result.acted++;
           else if (res.parked === true) {
             result.parked++;
-            // Journal + Telegram once. At-most-once holds because the sweep
-            // query excludes parked rows: the pass that parks it is the only
-            // pass that ever sees this result for this op.
-            const reasonText = `hop parked for manual resume (${res.parkReason ?? "recovery budget exceeded"})`;
-            try {
-              await deps.persistDecision({
-                walletAddress: op.walletAddress,
-                borrowPositionId: sourceId,
-                vaultId: toVaultId,
-                tick: "allocation",
-                action: "hop",
-                fraction: null,
-                reason: reasonText,
-                details: {
-                  intent: "hop",
-                  executed: false,
-                  parked: true,
-                  parkReason: res.parkReason ?? null,
-                  clientRequestId: op.clientRequestId,
-                  solReturnedLamports: res.solReturnedLamports ?? null,
-                },
-              });
-              result.journaled++;
-            } catch (e) {
-              console.error(`[LoopAllocationTick] park journal write failed for op ${op.id}:`, e);
+            // WO2A-C1: journal + Telegram ONLY on the invocation that WON the
+            // pending→parked CAS. Query exclusion alone is not enough across
+            // processes — two sweeps can both see the row pending, both call
+            // the executor, and both get a parked result back; only the CAS
+            // winner's carries parkedByThisInvocation. Every other parked
+            // result (rival won, parked-door refusal on a status race) is the
+            // SAME park reported again — journaling it would double-alert.
+            if (res.parkedByThisInvocation === true) {
+              const reasonText = `hop parked for manual resume (${res.parkReason ?? "recovery budget exceeded"})`;
+              try {
+                await deps.persistDecision({
+                  walletAddress: op.walletAddress,
+                  borrowPositionId: sourceId,
+                  vaultId: toVaultId,
+                  tick: "allocation",
+                  action: "hop",
+                  fraction: null,
+                  reason: reasonText,
+                  details: {
+                    intent: "hop",
+                    executed: false,
+                    parked: true,
+                    parkReason: res.parkReason ?? null,
+                    clientRequestId: op.clientRequestId,
+                    solReturnedLamports: res.solReturnedLamports ?? null,
+                    // WO2A-C1: how the parked principal was attributed
+                    // (exact | conservative_floor) — the admin resume surface
+                    // needs to know whether the figure is exact or a floor.
+                    principalSource: res.principalSource ?? null,
+                  },
+                });
+                result.journaled++;
+              } catch (e) {
+                console.error(`[LoopAllocationTick] park journal write failed for op ${op.id}:`, e);
+              }
+              await deps
+                .notify(op.walletAddress, {
+                  symbol: symbolFor(toVaultId),
+                  action: "hop",
+                  ok: false,
+                  reason: reasonText,
+                  detail:
+                    "automatic retries stopped; the unwound SOL is safe in the agent wallet — resume the hop from the admin surface",
+                })
+                .catch(() => {});
             }
-            await deps
-              .notify(op.walletAddress, {
-                symbol: symbolFor(toVaultId),
-                action: "hop",
-                ok: false,
-                reason: reasonText,
-                detail:
-                  "automatic retries stopped; the unwound SOL is safe in the agent wallet — resume the hop from the admin surface",
-              })
-              .catch(() => {});
           } else if (res.resumable !== true) result.failed++;
         } finally {
           // Zeroize key material even on throw (mirrors the per-row finally).

@@ -215,6 +215,49 @@ describe("pickCloseTxSig", () => {
     const op = { step: null, txSignatures: [CLOSE_SIG], metadata: null };
     expect(pickCloseTxSig(op)).toBeNull();
   });
+
+  // --- WO2A-C1: failOp ambiguous overwrites keep the EXPLICIT key selectable --
+
+  it("ambiguous step close_ambiguous_not_landed: explicit key matching last entry → returns it", () => {
+    const op = makeOp({
+      sigs: [ATA_PREP_SIG, CLOSE_SIG],
+      meta: { closeTxSignature: CLOSE_SIG },
+      step: "close_ambiguous_not_landed",
+    });
+    expect(pickCloseTxSig(op)).toBe(CLOSE_SIG);
+  });
+
+  it("ambiguous step close_ambiguous_unreadable: explicit key matching last entry → returns it", () => {
+    const op = makeOp({
+      sigs: [CLOSE_SIG],
+      meta: { closeTxSignature: CLOSE_SIG },
+      step: "close_ambiguous_unreadable",
+    });
+    expect(pickCloseTxSig(op)).toBe(CLOSE_SIG);
+  });
+
+  it("ambiguous step WITHOUT the explicit key → null (legacy last-entry rule is crash-window-only)", () => {
+    const op = makeOp({ sigs: [ATA_PREP_SIG, CLOSE_SIG], step: "close_ambiguous_not_landed" });
+    expect(pickCloseTxSig(op)).toBeNull();
+  });
+
+  it("ambiguous step with MISMATCHED explicit key → null (never falls back to any entry)", () => {
+    const op = makeOp({
+      sigs: [ATA_PREP_SIG, OTHER_SIG],
+      meta: { closeTxSignature: CLOSE_SIG },
+      step: "close_ambiguous_unreadable",
+    });
+    expect(pickCloseTxSig(op)).toBeNull();
+  });
+
+  it("ambiguous step with empty-string explicit key → null (malformed identity, fail closed)", () => {
+    const op = makeOp({
+      sigs: [ATA_PREP_SIG, CLOSE_SIG],
+      meta: { closeTxSignature: "" },
+      step: "close_ambiguous_not_landed",
+    });
+    expect(pickCloseTxSig(op)).toBeNull();
+  });
 });
 
 // ============================================================================
@@ -223,14 +266,15 @@ describe("pickCloseTxSig", () => {
 
 describe("verifyCloseTxLanded", () => {
 
-  // WO acceptance 1: ATA-prep confirmed, close null/expired → not proven.
-  it("WO#1 – ATA-prep confirmed, close sig null/expired → not_landed, only close sig checked", async () => {
+  // WO acceptance 1 (revised by WO2A-C1): a NULL status is uncertainty — index
+  // lag can hide a landed tx — so it must never read as strong absence.
+  it("WO#1 (C1) – ATA-prep confirmed, close sig status null → unverifiable, only close sig checked", async () => {
     const op = makeOp({ sigs: [ATA_PREP_SIG, CLOSE_SIG] }); // no meta (legacy)
     const conn = makeConnection((sigs) => {
       expect(sigs).toEqual([CLOSE_SIG]); // only the close sig — not ATA_PREP_SIG
-      return [null]; // not found / expired
+      return [null]; // not found (yet) — uncertainty, not absence
     });
-    expect(await verifyCloseTxLanded(op, conn as any)).toBe("not_landed");
+    expect(await verifyCloseTxLanded(op, conn as any)).toBe("unverifiable");
     expect(conn.getSignatureStatuses).toHaveBeenCalledOnce();
   });
 
@@ -257,10 +301,25 @@ describe("verifyCloseTxLanded", () => {
     expect(await verifyCloseTxLanded(op, conn as any)).toBe("not_landed");
   });
 
-  it("WO#3 – 'processed' without error is not enough → not_landed", async () => {
+  it("WO#3b (C1) – 'processed' without error is nonterminal → unverifiable (not a verdict either way)", async () => {
     const op = makeOp({ sigs: [CLOSE_SIG] });
     const conn = makeConnection(() => [{ confirmationStatus: "processed" }]);
-    expect(await verifyCloseTxLanded(op, conn as any)).toBe("not_landed");
+    expect(await verifyCloseTxLanded(op, conn as any)).toBe("unverifiable");
+  });
+
+  // WO2A-C1: failOp's ambiguous overwrite must not orphan a provable close —
+  // the surviving explicit key stays verifiable end-to-end.
+  it("C1 – ambiguous-step record with explicit key: probes exactly the close sig and can prove landing", async () => {
+    const op = makeOp({
+      sigs: [ATA_PREP_SIG, CLOSE_SIG],
+      meta: { closeTxSignature: CLOSE_SIG },
+      step: "close_ambiguous_not_landed",
+    });
+    const conn = makeConnection((sigs) => {
+      expect(sigs).toEqual([CLOSE_SIG]);
+      return [{ confirmationStatus: "finalized" }];
+    });
+    expect(await verifyCloseTxLanded(op, conn as any)).toBe("landed");
   });
 
   // WO acceptance 4: RPC throws → unverifiable.
@@ -446,13 +505,13 @@ describe("executeLoopHop — caller-level provenance boundary", () => {
   }
 
   // ---------------------------------------------------------------------------
-  // WO-caller#1:
-  //   ATA-prep sig is confirmed on-chain; main-close sig is null (not found).
-  //   Assertion boundary: the caller must NOT re-lever, must return unsuccessful,
-  //   and must NOT set alreadyCompleted or borrowPositionId (no open ran).
-  //   The RPC stub asserts that ONLY the close sig is checked — not ATA_SIG_C.
+  // WO-caller#1 (revised by WO2A-C1):
+  //   ATA-prep sig is confirmed on-chain; main-close sig status is NULL.
+  //   Null is UNCERTAINTY (index lag can hide a landed tx) — the caller must
+  //   stay RESUMABLE: no re-lever, no closed_outside_hop terminal, no
+  //   alreadyCompleted/borrowPositionId. Only the close sig may be queried.
   // ---------------------------------------------------------------------------
-  it("WO-caller#1: ATA-prep confirmed + close unlanded → close not proven, no re-lever, unsuccessful", async () => {
+  it("WO-caller#1 (C1): ATA-prep confirmed + close status null → uncertainty: resumable, no re-lever, never terminal", async () => {
     setupStorageResume();
 
     const mockConn = {
@@ -461,21 +520,57 @@ describe("executeLoopHop — caller-level provenance boundary", () => {
         // If ATA_SIG_C appeared here, the provenance check is still broken.
         expect(sigs).not.toContain(ATA_SIG_C);
         expect(sigs).toEqual([CLOSE_SIG_C]);
-        return { value: [null] }; // null = not found / unlanded
+        return { value: [null] }; // null = not found YET — uncertainty
       }),
     };
     vi.mocked(getServerConnection as any).mockReturnValue(mockConn);
 
     const result = await executeLoopHop(hopParams);
 
-    // Close not proven → closed_outside_hop terminal.
     expect(result.success).toBe(false);
+    // C1: uncertainty keeps the hop RESUMABLE — never a terminal verdict.
+    expect((result as any).resumable).toBe(true);
     // Must not have re-levered: no new position was opened.
     expect(result.borrowPositionId).toBeUndefined();
     // Must not look like a normal idempotent-complete.
     expect((result as any).alreadyCompleted).toBeUndefined();
+    // No terminal write: the op must NOT be failed as closed_outside_hop.
+    expect(storage.updateBorrowOperation).not.toHaveBeenCalledWith(
+      "hop-op-id",
+      expect.objectContaining({ status: "failed" }),
+    );
     // The status RPC was called exactly once (for the single close attempt).
     expect(mockConn.getSignatureStatuses).toHaveBeenCalledOnce();
+  });
+
+  // ---------------------------------------------------------------------------
+  // WO-caller#1b (WO2A-C1):
+  //   The close tx LANDED WITH an on-chain error — atomic tx ⇒ provably our
+  //   close never moved money. With no other candidate, the position being
+  //   closed means someone ELSE closed it → closed_outside_hop terminal is
+  //   the CORRECT verdict here (this pins the boundary WO-caller#1 used to
+  //   mis-pin via null).
+  // ---------------------------------------------------------------------------
+  it("WO-caller#1b (C1): close landed WITH on-chain error → provably not ours → closed_outside_hop terminal", async () => {
+    setupStorageResume();
+
+    const mockConn = {
+      getSignatureStatuses: vi.fn().mockImplementation(async (sigs: string[]) => {
+        expect(sigs).toEqual([CLOSE_SIG_C]);
+        return { value: [{ confirmationStatus: "finalized", err: { InstructionError: [0, "Custom"] } }] };
+      }),
+    };
+    vi.mocked(getServerConnection as any).mockReturnValue(mockConn);
+
+    const result = await executeLoopHop(hopParams);
+
+    expect(result.success).toBe(false);
+    expect((result as any).resumable).toBeUndefined();
+    expect(result.borrowPositionId).toBeUndefined();
+    expect(storage.updateBorrowOperation).toHaveBeenCalledWith(
+      "hop-op-id",
+      expect.objectContaining({ status: "failed", step: "closed_outside_hop" }),
+    );
   });
 
   // ---------------------------------------------------------------------------

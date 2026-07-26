@@ -404,6 +404,10 @@ export interface IStorage {
   // these readers expose the DB-cache/audit rows for display and the exposure
   // builder. No writers here — borrow/repay money paths are gated on owner go-ahead.
   getBorrowPosition(walletAddress: string, id: string): Promise<BorrowPosition | undefined>;
+  // ADMIN-ONLY (WO2A-C1): cross-wallet lookup by primary key. The admin hop
+  // surface receives only a position id (no wallet); every tenant-facing path
+  // must keep using the wallet-scoped getBorrowPosition above.
+  getBorrowPositionByIdAdmin(id: string): Promise<BorrowPosition | undefined>;
   // kind defaults to 'borrow': classic borrow surfaces never see SOL-loop rows.
   // The loop engine passes kind:'loop' explicitly.
   getBorrowPositions(walletAddress: string, tradingBotId?: string | null, kind?: string): Promise<BorrowPosition[]>;
@@ -2296,6 +2300,17 @@ export class DatabaseStorage implements IStorage {
   async getBorrowPosition(walletAddress: string, id: string): Promise<BorrowPosition | undefined> {
     const result = await db.select().from(borrowPositions)
       .where(and(eq(borrowPositions.walletAddress, walletAddress), eq(borrowPositions.id, id)))
+      .limit(1);
+    return result[0];
+  }
+
+  // ADMIN-ONLY (WO2A-C1): deliberately NOT wallet-scoped — the admin hop
+  // endpoint holds a position id but no wallet, and derives the wallet FROM
+  // this row for every subsequent wallet-scoped read. Never call from
+  // tenant-facing paths; use getBorrowPosition(walletAddress, id) there.
+  async getBorrowPositionByIdAdmin(id: string): Promise<BorrowPosition | undefined> {
+    const result = await db.select().from(borrowPositions)
+      .where(eq(borrowPositions.id, id))
       .limit(1);
     return result[0];
   }
