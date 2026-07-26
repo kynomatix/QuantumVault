@@ -496,6 +496,51 @@ async function failOp(opId: string, step: string, error: string): Promise<void> 
   }
 }
 
+/**
+ * Restore a PENDING loop position row after its open attempt is PROVEN dead
+ * (never broadcast, failed on-chain atomically, or expired past its blockhash
+ * window). Reused rows go back to the reusable `closed` pool with zeroed
+ * amounts; fresh rows become `failed`. CAS-guarded on `pending` — can never
+ * clobber a row that moved on (e.g. a concurrent reconcile finalized it open).
+ * Returns true only when THIS call performed the restore.
+ */
+async function restoreLoopPendingRow(positionId: string, wasReuse: boolean): Promise<boolean> {
+  try {
+    const updated = wasReuse
+      ? await storage.updateBorrowPosition(
+          positionId,
+          { status: "closed", collateralAmountRaw: "0", debtAmountRaw: "0" },
+          "pending",
+        )
+      : await storage.updateBorrowPosition(positionId, { status: "failed" }, "pending");
+    return !!updated;
+  } catch (e) {
+    console.warn(`[loop-executor] could not restore loop position row ${positionId}:`, e);
+    return false;
+  }
+}
+
+/**
+ * TRUE when the durable loop_open record carries ANY evidence that the FATAL
+ * main-open write-ahead hook persisted: the write-ahead step itself, the
+ * ambiguous terminal marker (only reachable AFTER a signature came back, which
+ * requires the write-ahead persist), or the metadata keys the hook merges
+ * atomically with the step. The hook throws when its persist fails and the
+ * broadcast is aborted — so the ABSENCE of every one of these on a RELOADED
+ * record proves the main open tx was never sent. The ATA-prep signature never
+ * counts as evidence. Callers treat "recorded" as "may have broadcast" and
+ * must NOT restore the position row in that case.
+ */
+function loopOpenWriteaheadRecorded(op: Pick<BorrowOperation, "step" | "metadata">): boolean {
+  const meta = (op.metadata ?? {}) as Record<string, unknown>;
+  return (
+    op.step === "loop_sig_writeahead" ||
+    op.step === "open_ambiguous" ||
+    Object.prototype.hasOwnProperty.call(meta, "openTxSignature") ||
+    Object.prototype.hasOwnProperty.call(meta, "lastValidBlockHeight")
+  );
+}
+
 /** Best-effort equity event — audit trail only, never fails the money op. */
 async function recordLoopEquityEvent(p: {
   walletAddress: string;
@@ -686,6 +731,25 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
     return { success: false, error: `Vault ${vaultId} is not on the loop launch allowlist.` };
   }
 
+  // --- F4 RECOVERY GATE (SL-07) ----------------------------------------------
+  // A stuck PENDING row for this (wallet, vault) is reconciled BEFORE any
+  // fresh-open gate below (config read, carry/leverage policy, sizing): the
+  // recovery of an attempt that already broadcast must never depend on
+  // TODAY'S profitability or this retry's parameters. Same lock dispatch as
+  // runOpen itself (the borrow lock is NOT reentrant — inline when the caller
+  // already holds the key); runOpen's active-row check stays unchanged below
+  // as the race-closing recheck.
+  const recoveryGate = () =>
+    reconcilePendingLoopOpenForVault({
+      walletAddress,
+      vaultId,
+      clientRequestId: params.clientRequestId ?? null,
+    });
+  const recoveryBlock = params.callerHoldsBorrowLock
+    ? await recoveryGate()
+    : await withBorrowLock(borrowLockKey(walletAddress, null, vaultId), recoveryGate);
+  if (recoveryBlock) return recoveryBlock;
+
   const borrowRoute = new JupiterLendBorrowRoute();
   const cfg = await borrowRoute.getLoopVaultConfig(vaultId);
   if (!cfg) return { success: false, error: `Could not read loop vault ${vaultId} config — refusing (fail closed).` };
@@ -864,6 +928,14 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
       throw e;
     }
 
+    // F5 lifecycle context (SL-08): the outer catch below can only repair a
+    // stranded PENDING row if it knows which row this attempt created/claimed
+    // and its restore semantics. Plain locals — a throw at ANY later line
+    // (even the op-row link write itself, which is what strands an UNLINKED
+    // row) still has the exact row id in hand.
+    let lifecyclePositionId: string | null = null;
+    let lifecycleWasReuse = false;
+
     try {
       // Prep tx (one-time per wallet): create missing token accounts.
       if (prepIxs.length > 0) {
@@ -981,6 +1053,8 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
           return { success: false, error: "Loop Open: position row changed underneath us — retry. Nothing was moved." };
         }
         position = updated;
+        lifecyclePositionId = position.id;
+        lifecycleWasReuse = true;
       } else {
         position = await storage.createBorrowPosition({
           walletAddress,
@@ -997,24 +1071,14 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
           status: "pending",
           kind: "loop",
         });
+        lifecyclePositionId = position.id;
+        lifecycleWasReuse = false;
       }
       await storage.updateBorrowOperation(opId, { borrowPositionId: position.id });
 
       // Restore helper for provably-nothing-moved failures.
       const restorePositionRow = async () => {
-        try {
-          if (reuseCandidate) {
-            await storage.updateBorrowPosition(
-              position.id,
-              { status: "closed", collateralAmountRaw: "0", debtAmountRaw: "0" },
-              "pending",
-            );
-          } else {
-            await storage.updateBorrowPosition(position.id, { status: "failed" }, "pending");
-          }
-        } catch (e) {
-          console.warn(`[loop-executor] could not restore position row ${position.id}:`, e);
-        }
+        await restoreLoopPendingRow(position.id, !!reuseCandidate);
       };
 
       // The atomic sandwich — verbatim probe order.
@@ -1043,7 +1107,14 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
           const updated = await storage.updateBorrowOperation(opId, {
             step: "loop_sig_writeahead",
             appendTxSignature: info.signature,
-            mergeMetadata: { blockhash: info.blockhash, lastValidBlockHeight: info.lastValidBlockHeight },
+            mergeMetadata: {
+              blockhash: info.blockhash,
+              lastValidBlockHeight: info.lastValidBlockHeight,
+              // F4: exact main-open tx identity — same fail-closed contract
+              // as closeTxSignature on the close leg (pickOpenTxSig cross-
+              // checks it against the FINAL txSignatures entry).
+              openTxSignature: info.signature,
+            },
           });
           if (!updated) throw new Error("write-ahead signature persist failed — refusing to broadcast");
         },
@@ -1103,6 +1174,28 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      // F5 (SL-08): a throw AFTER the position row was created/claimed but
+      // provably BEFORE the main open tx could have been broadcast must not
+      // strand the row as a permanent pending blocker. Restore is gated on
+      // the RELOADED durable op record — never in-memory reasoning alone:
+      //  - reload fails             → fail closed (row stays pending);
+      //  - write-ahead recorded     → the tx MAY be in flight → keep pending
+      //    (the F4 reconciler resolves it from its exact signature later);
+      //  - no write-ahead recorded  → the FATAL hook never persisted, so the
+      //    tx was never broadcast → restore. The ATA-prep sig never counts.
+      if (lifecyclePositionId) {
+        try {
+          const opNow = await storage.getBorrowOperationById(opId);
+          if (opNow && !loopOpenWriteaheadRecorded(opNow)) {
+            await restoreLoopPendingRow(lifecyclePositionId, lifecycleWasReuse);
+          }
+        } catch (repairErr) {
+          console.warn(
+            `[loop-executor] open outer-catch: could not reload op ${opId} to prove pre-broadcast state — row ${lifecyclePositionId} stays pending (fail closed):`,
+            repairErr,
+          );
+        }
+      }
       await failOp(opId, "unexpected_error", msg);
       return { success: false, error: `Loop Open failed: ${msg}` };
     }
@@ -1194,13 +1287,19 @@ async function finalizeLoopOpen(p: {
     },
   });
 
-  await recordLoopEquityEvent({
-    walletAddress: p.walletAddress,
-    eventType: "loop_open",
-    amountLamports: p.principalLamports,
-    txSignature: p.signature,
-    notes: `Opened ${p.cfg.collateralSymbol} loop: ${lamportsToSol(p.principalLamports)} SOL principal at ${p.leverage}x`,
-  });
+  // Equity event ONLY on CAS win. Losing the pending→open CAS means another
+  // finalizer (a concurrent reconcile in a sibling process — e.g. blue/green
+  // deploy overlap) already owned this exact open and recorded its event;
+  // firing again would double-count the principal in loop accounting.
+  if (opened) {
+    await recordLoopEquityEvent({
+      walletAddress: p.walletAddress,
+      eventType: "loop_open",
+      amountLamports: p.principalLamports,
+      txSignature: p.signature,
+      notes: `Opened ${p.cfg.collateralSymbol} loop: ${lamportsToSol(p.principalLamports)} SOL principal at ${p.leverage}x`,
+    });
+  }
 
   return {
     success: true,
@@ -1211,6 +1310,280 @@ async function finalizeLoopOpen(p: {
     observedDebtRaw: observedDebtRaw.toString(),
     ...(verifyWarning ? { verifyWarning } : {}),
   };
+}
+
+// --- OPEN RECOVERY (F4/F5: SL-07/08/10) ----------------------------------------
+
+type LoopOpenReconcileOutcome =
+  | { outcome: "finalized_open"; result: LoopOpenResult }
+  | { outcome: "restored" }
+  | { outcome: "blocked"; reason: string };
+
+/**
+ * Reconcile ONE ambiguous/stuck loop-open attempt from its DURABLE records +
+ * on-chain truth. Money invariants:
+ *  - NEVER clears a pending row while the recorded open tx could still land
+ *    (still-valid / RPC-unverifiable / malformed provenance ⇒ blocked).
+ *  - Adopting a LANDED open finalizes from the ORIGINAL op/row values
+ *    (principal, leverage, flash, minOut, nftId) — never a retry's parameters,
+ *    and never guesses: any unparseable original ⇒ blocked.
+ *  - Restores ONLY on proof the tx is dead: provably never broadcast (no
+ *    write-ahead record — the hook is FATAL), confirmed on-chain failure
+ *    (atomic ⇒ nothing moved), or expiry past lastValidBlockHeight + buffer
+ *    read from a LIVE block height.
+ * Double-finalize is impossible: finalizeLoopOpen's row CAS (pending→open)
+ * precedes the op's succeeded write, succeeded ops are adopted—not re-run—by
+ * every caller, and finalize itself never broadcasts anything.
+ * The caller must hold the borrow lock for this (wallet, vault) key.
+ *
+ * @internal exported for unit tests only — not a public API surface.
+ */
+export async function reconcileAmbiguousLoopOpen(p: {
+  op: BorrowOperation;
+  position: BorrowPosition;
+  walletAddress: string;
+  connection: Pick<Connection, "getSignatureStatuses" | "getBlockHeight">;
+  borrowRoute: JupiterLendBorrowRoute;
+}): Promise<LoopOpenReconcileOutcome> {
+  const { op, position } = p;
+  const meta = (op.metadata ?? {}) as Record<string, unknown>;
+  const wasReuse = meta.reuseNftId != null;
+  const restoreBlocked: LoopOpenReconcileOutcome = {
+    outcome: "blocked",
+    reason: "its position row could not be restored (state changed underneath the repair — will re-check).",
+  };
+
+  // (a) Steps that already PROVED the tx dead (their own row-restore is
+  // best-effort and may have failed mid-crash) — just re-run the restore.
+  if (
+    op.status === "failed" &&
+    (op.step === "tx_failed_onchain" ||
+      op.step === "exec_failed" ||
+      op.step === "reconciled_tx_failed_onchain" ||
+      op.step === "reconciled_tx_expired" ||
+      op.step === "pre_broadcast_reconciled")
+  ) {
+    return (await restoreLoopPendingRow(position.id, wasReuse)) ? { outcome: "restored" } : restoreBlocked;
+  }
+
+  // (b) No write-ahead record ⇒ the main open tx was provably never broadcast
+  // (the FATAL hook persists step+signature or the send is aborted).
+  if (!loopOpenWriteaheadRecorded(op)) {
+    if (!(await restoreLoopPendingRow(position.id, wasReuse))) return restoreBlocked;
+    if (op.status === "pending") {
+      await failOp(
+        op.id,
+        "pre_broadcast_reconciled",
+        "Open reconciled: main open tx provably never broadcast (no write-ahead record). Row restored.",
+      );
+    }
+    return { outcome: "restored" };
+  }
+
+  // (c) Broadcast window: resolve from the EXACT recorded signature only.
+  const verdict = await verifyOpenTxLanded(op, p.connection);
+  if (verdict === "malformed") {
+    return {
+      outcome: "blocked",
+      reason: "its transaction provenance is malformed — refusing to guess (manual review required).",
+    };
+  }
+  if (verdict === "still_valid") {
+    return {
+      outcome: "blocked",
+      reason: "its open transaction may still land (not provably expired) — waiting for on-chain resolution.",
+    };
+  }
+  if (verdict === "unverifiable") {
+    return {
+      outcome: "blocked",
+      reason: "the RPC could not verify its open transaction — will re-check on the next attempt.",
+    };
+  }
+
+  if (verdict === "onchain_failed" || verdict === "expired") {
+    if (!(await restoreLoopPendingRow(position.id, wasReuse))) return restoreBlocked;
+    const step = verdict === "expired" ? "reconciled_tx_expired" : "reconciled_tx_failed_onchain";
+    const note =
+      verdict === "expired"
+        ? "Open reconciled: recorded open tx expired past lastValidBlockHeight without landing. Row restored."
+        : "Open reconciled: recorded open tx failed on-chain (atomic — nothing moved). Row restored.";
+    if (op.status === "pending") {
+      await failOp(op.id, step, note);
+    } else {
+      try {
+        await storage.updateBorrowOperation(op.id, { step });
+      } catch {
+        /* breadcrumb only — the restore already succeeded */
+      }
+    }
+    return { outcome: "restored" };
+  }
+
+  // verdict === "landed": finalize from the ORIGINAL durable values only.
+  const sig = pickOpenTxSig(op);
+  if (!sig) {
+    return {
+      outcome: "blocked",
+      reason: "its transaction provenance is malformed — refusing to guess (manual review required).",
+    };
+  }
+  const vaultId = Number(meta.vaultId);
+  const nftId = Number(position.venuePositionId);
+  const leverage = Number(meta.leverage);
+  let flashLamports: bigint;
+  let minOut: bigint;
+  let principalLamports: bigint;
+  try {
+    flashLamports = BigInt(String(meta.flashLamports));
+    minOut = BigInt(String(position.collateralAmountRaw));
+    principalLamports = BigInt(String(meta.principalLamports));
+  } catch {
+    return {
+      outcome: "blocked",
+      reason: "its open LANDED but the original amounts are unreadable — manual review required (never finalizing from guesses).",
+    };
+  }
+  if (
+    !Number.isInteger(vaultId) ||
+    vaultId <= 0 ||
+    String(position.venueVaultId) !== String(vaultId) ||
+    !Number.isInteger(nftId) ||
+    nftId <= 0 ||
+    flashLamports <= 0n ||
+    minOut <= 0n ||
+    principalLamports <= 0n ||
+    !Number.isFinite(leverage) ||
+    leverage < 1
+  ) {
+    return {
+      outcome: "blocked",
+      reason: "its open LANDED but the original records are inconsistent — manual review required (never finalizing from guesses).",
+    };
+  }
+  const cfg = await p.borrowRoute.getLoopVaultConfig(vaultId).catch(() => null);
+  if (!cfg) {
+    return {
+      outcome: "blocked",
+      reason: "its open LANDED but the vault config is unreadable right now — will finalize on the next attempt.",
+    };
+  }
+  const result = await finalizeLoopOpen({
+    opId: op.id,
+    position,
+    cfg,
+    borrowRoute: p.borrowRoute,
+    walletAddress: p.walletAddress,
+    vaultId,
+    nftId,
+    flashLamports,
+    minOut,
+    principalLamports,
+    leverage,
+    signature: sig,
+    preRead: null,
+  });
+  return { outcome: "finalized_open", result };
+}
+
+/**
+ * F4 recovery gate for executeLoopOpen (SL-07): when THIS (wallet, vault) has
+ * a stuck PENDING loop row, reconcile it BEFORE any fresh-open gate runs.
+ *
+ * Returns null when the fresh open may proceed (no pending row, or the dead
+ * attempt's row was just restored); otherwise the LoopOpenResult to surface —
+ * the fail-closed refusal (row kept pending), or, for the EXACT idempotent
+ * retry of an attempt that actually landed, its adopted success result.
+ *
+ * The op is established ONLY by position link or exact client request id —
+ * never by loose vault scans or timestamps; zero or 2+ candidates ⇒ blocked.
+ */
+async function reconcilePendingLoopOpenForVault(args: {
+  walletAddress: string;
+  vaultId: number;
+  clientRequestId: string | null;
+}): Promise<LoopOpenResult | null> {
+  const { walletAddress, vaultId } = args;
+
+  let pendingScan: BorrowPosition | undefined;
+  try {
+    const rows = await storage.getBorrowPositions(walletAddress, null, "loop");
+    pendingScan = rows.find((r) => String(r.venueVaultId) === String(vaultId) && r.status === "pending");
+  } catch {
+    // Rows unreadable: let the normal open flow surface the read failure.
+    return null;
+  }
+  if (!pendingScan) return null;
+  const pendingRow = pendingScan;
+
+  const blocked = (reason: string): LoopOpenResult => ({
+    success: false,
+    error: `A previous loop open attempt on vault ${vaultId} is still unresolved (position ${pendingRow.id}): ${reason}`,
+  });
+
+  // Establish the EXACT associated operation — link or exact crid only.
+  let op: BorrowOperation | null = null;
+  try {
+    if (args.clientRequestId) {
+      const byCrid = await storage.getBorrowOperationByClientRequestId(walletAddress, args.clientRequestId);
+      if (byCrid && byCrid.operationType === "loop_open" && byCrid.borrowPositionId === pendingRow.id) {
+        if (byCrid.status === "succeeded" || byCrid.status === "completed") {
+          // Idempotent retry of an attempt that already finished — adopt its
+          // durable result verbatim; never open again under the same crid.
+          // (Row still pending here = finalize's tolerated lost-CAS corner.)
+          const r = (byCrid.result ?? {}) as Record<string, unknown>;
+          return {
+            success: true,
+            borrowPositionId: pendingRow.id,
+            ...(Number.isInteger(Number(pendingRow.venuePositionId)) && Number(pendingRow.venuePositionId) > 0
+              ? { venuePositionId: Number(pendingRow.venuePositionId) }
+              : {}),
+            ...(typeof r.signature === "string" && r.signature ? { signature: r.signature } : {}),
+            ...(typeof r.observedCollateralRaw === "string" ? { observedCollateralRaw: r.observedCollateralRaw } : {}),
+            ...(typeof r.observedDebtRaw === "string" ? { observedDebtRaw: r.observedDebtRaw } : {}),
+            ...(typeof r.verifyWarning === "string" ? { verifyWarning: r.verifyWarning } : {}),
+          };
+        }
+        op = byCrid;
+      }
+    }
+    if (!op) {
+      const linked = (await storage.getBorrowOperations(walletAddress, pendingRow.id)).filter(
+        (o) => o.operationType === "loop_open" && o.status !== "succeeded" && o.status !== "completed",
+      );
+      if (linked.length === 1) {
+        op = linked[0];
+      } else if (linked.length > 1) {
+        return blocked(
+          `${linked.length} unresolved operations reference it — cannot prove which one owns it (manual review required).`,
+        );
+      }
+    }
+  } catch {
+    op = null;
+  }
+  if (!op) {
+    return blocked("no single operation could be proven for it — it is never guessed at or cleared (manual review required).");
+  }
+
+  const outcome = await reconcileAmbiguousLoopOpen({
+    op,
+    position: pendingRow,
+    walletAddress,
+    connection: getServerConnection(),
+    borrowRoute: new JupiterLendBorrowRoute(),
+  });
+  if (outcome.outcome === "restored") return null; // row repaired → fresh open proceeds
+  if (outcome.outcome === "finalized_open") {
+    if (args.clientRequestId && op.clientRequestId === args.clientRequestId) {
+      return outcome.result; // this request IS that attempt — idempotent adopt
+    }
+    return {
+      success: false,
+      error: `A previous loop open on vault ${vaultId} actually LANDED and has just been reconciled (position ${pendingRow.id}). Close it before opening a new one.`,
+    };
+  }
+  return blocked(outcome.reason);
 }
 
 // --- LST DEPOSIT → SOL → OPEN ------------------------------------------------
@@ -2130,6 +2503,120 @@ export async function verifyCloseTxLanded(
   }
 }
 
+/**
+ * Resolve the specific MAIN Loop Open transaction signature from an open-
+ * attempt operation record (F4 open recovery). Same fail-closed discipline as
+ * pickCloseTxSig above.
+ *
+ * Valid ONLY for the two lifecycle steps a loop_open op can durably carry
+ * AFTER the write-ahead persisted:
+ *  - "loop_sig_writeahead" — crash window between the FATAL write-ahead
+ *    persist and any later step write;
+ *  - "open_ambiguous"      — the ambiguous branch's terminal marker, written
+ *    exclusively after the executor returned WITH a signature (a hook failure
+ *    aborts the broadcast and surfaces NO signature → step "exec_failed").
+ * Any other step fails closed WITHOUT touching RPC: pre-write-ahead records
+ * (e.g. "atas_prepared") may carry ONLY the ATA-prep signature in
+ * txSignatures, and promoting that to the main-open identity is the exact
+ * bug class this selector exists to prevent.
+ *
+ * Precedence:
+ *  1. meta.openTxSignature — merged atomically by the write-ahead hook; must
+ *     exactly equal the FINAL raw txSignatures entry or the record is
+ *     inconsistent (fail closed).
+ *  2. txSignatures[last]   — legacy records that predate the explicit key;
+ *     the ATA-prep sig (when present) is appended BEFORE the write-ahead
+ *     fires, so the main open sig is always LAST. A malformed trailing entry
+ *     fails closed — never "skip back" to an earlier entry.
+ *
+ * @internal exported for unit tests only — not a public API surface.
+ */
+export function pickOpenTxSig(oo: {
+  step: string | null;
+  txSignatures: unknown[] | null;
+  metadata: Record<string, unknown> | null | undefined;
+}): string | null {
+  if (oo.step !== "loop_sig_writeahead" && oo.step !== "open_ambiguous") return null;
+
+  const arr = Array.isArray(oo.txSignatures) ? oo.txSignatures : [];
+  const rawLast = arr.length > 0 ? arr[arr.length - 1] : undefined;
+  const lastSig = typeof rawLast === "string" && rawLast.length > 0 ? rawLast : null;
+
+  const meta = (oo.metadata ?? {}) as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(meta, "openTxSignature")) {
+    const explicit = meta.openTxSignature;
+    if (typeof explicit !== "string" || explicit.length === 0) return null;
+    if (lastSig === null || explicit !== lastSig) return null;
+    return explicit;
+  }
+  return lastSig;
+}
+
+export type LoopOpenTxVerdict =
+  | "landed" //          confirmed/finalized without error — adopt & finalize
+  | "onchain_failed" //  landed WITH an error: atomic tx ⇒ nothing moved — restorable
+  | "expired" //         provably dead past lastValidBlockHeight + buffer — restorable
+  | "still_valid" //     may still land (or expiry unprovable) — keep pending
+  | "unverifiable" //    RPC failure — keep pending, re-check later
+  | "malformed"; //      provenance unusable — fail closed, never guess
+
+/** Same +30 safety buffer as the executor's own in-flight confirm loop. */
+const OPEN_EXPIRY_BLOCK_BUFFER = 30;
+
+/**
+ * Verify the main Loop Open tx of a crash-window/ambiguous open attempt.
+ * A NULL signature status is NOT proof of expiry (RPC index lag / still in
+ * flight): "expired" additionally requires a VALID recorded
+ * lastValidBlockHeight AND a successful LIVE block-height read strictly past
+ * it + OPEN_EXPIRY_BLOCK_BUFFER. Missing/malformed expiry metadata or any RPC
+ * failure stays ambiguous — callers keep the row pending, never restore.
+ *
+ * @internal exported for unit tests only — not a public API surface.
+ */
+export async function verifyOpenTxLanded(
+  oo: {
+    step: string | null;
+    txSignatures: unknown[] | null;
+    metadata: Record<string, unknown> | null | undefined;
+  },
+  connection: Pick<Connection, "getSignatureStatuses" | "getBlockHeight">,
+): Promise<LoopOpenTxVerdict> {
+  const sig = pickOpenTxSig(oo);
+  if (!sig) return "malformed";
+
+  let st: { err: unknown; confirmationStatus?: string | null } | null | undefined;
+  try {
+    const res = await connection.getSignatureStatuses([sig], { searchTransactionHistory: true });
+    st = res.value[0];
+  } catch {
+    return "unverifiable";
+  }
+
+  if (st) {
+    if (st.err) return "onchain_failed";
+    if (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized") return "landed";
+    return "still_valid"; // "processed" — not final enough to adopt, not proof of death
+  }
+
+  const meta = (oo.metadata ?? {}) as Record<string, unknown>;
+  const lvbhRaw = meta.lastValidBlockHeight;
+  const lvbh =
+    typeof lvbhRaw === "number"
+      ? lvbhRaw
+      : typeof lvbhRaw === "string" && lvbhRaw.trim() !== ""
+        ? Number(lvbhRaw)
+        : NaN;
+  if (!Number.isFinite(lvbh) || lvbh <= 0) return "still_valid"; // expiry unprovable → ambiguous
+
+  let height: number;
+  try {
+    height = await connection.getBlockHeight("confirmed");
+  } catch {
+    return "unverifiable";
+  }
+  return height > lvbh + OPEN_EXPIRY_BLOCK_BUFFER ? "expired" : "still_valid";
+}
+
 export interface LoopHopParams {
   walletAddress: string;
   agentPublicKey: string;
@@ -2612,6 +3099,212 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
         ...(closeSignature ? { closeSignature } : {}),
         error: "Hop is mid-flight but the unwound SOL is not yet measurable. Your funds are safe. Retry shortly.",
       };
+    }
+
+    // ---- PHASE 2a: RECONCILE ANY PRIOR CHILD OPEN ATTEMPT (F4/SL-10) ---------
+    // Runs BEFORE the destination preflight / current-rate fallback (which may
+    // legitimately refuse a FRESH open but must never block recovery) and
+    // BEFORE a new attempt is numbered. A prior child that broadcast — or
+    // LANDED — is resolved from ITS OWN durable records; it is never
+    // superseded while unproven and never re-opened with this retry's sizing.
+    const solRecovered = solReturned;
+    const priorOpenAttempts = Number(meta.openAttempts ?? 0);
+    if (priorOpenAttempts > 0) {
+      // SL-10 lock discipline: the whole child scan + reconcile + adoption is
+      // serialized under the SAME borrow-lock key the open path's recovery
+      // gate uses — a concurrent executeLoopOpen or a concurrent retry of this
+      // hop must never race this child to a double finalize (double equity
+      // event). The child op is read INSIDE the lock so a lock-waiter sees the
+      // winner's terminal write instead of a stale pending shape. The lock is
+      // RELEASED before the fresh-attempt flow below: executeLoopOpen acquires
+      // the same key itself and withBorrowLock is NOT reentrant.
+      const reopenVaultCandidate = Number(meta.reopenVaultId);
+      const phase2aLockVault =
+        Number.isInteger(reopenVaultCandidate) && reopenVaultCandidate > 0
+          ? reopenVaultCandidate
+          : targetVaultId;
+      const phase2a = await withBorrowLock(
+        borrowLockKey(walletAddress, null, phase2aLockVault),
+        async (): Promise<LoopHopResult | null> => {
+      // Newest→oldest: the attempt counter is merged BEFORE the child op row
+      // is created, so the newest numbered crid may have no op at all (crash
+      // in that gap ⇒ provably nothing broadcast under it) — fall back to the
+      // newest attempt that recorded one. At most ONE child can be unresolved:
+      // a new number is only issued after the previous child is proven dead.
+      let child: BorrowOperation | null = null;
+      for (let n = priorOpenAttempts; n >= 1; n--) {
+        const c = await storage.getBorrowOperationByClientRequestId(
+          walletAddress,
+          `${params.clientRequestId}:open:${n}`,
+        );
+        if (c && c.operationType === "loop_open") {
+          child = c;
+          break;
+        }
+      }
+      if (child) {
+        const childMeta = (child.metadata ?? {}) as Record<string, unknown>;
+        const childResumable = (why: string): LoopHopResult => ({
+          success: false,
+          resumable: true,
+          solReturnedLamports: solRecovered.toString(),
+          ...(closeSignature ? { closeSignature } : {}),
+          error: `${why} Your funds are safe. Retry with the same request to resume.`,
+        });
+        // Adopt = terminalize THIS hop from the child's ORIGINAL records. The
+        // cost crumbs are rebuilt from the child's own persisted principal and
+        // leverage — never this retry's sizing — mirroring the normal path's
+        // formulas (realized = rent/fee overhead proxy; predicted = both legs'
+        // slippage on the whole notional + overhead).
+        const adoptChild = async (
+          openSignature: string | null,
+          adoptedRowId: string | null,
+        ): Promise<LoopHopResult | null> => {
+          const childVaultId = Number(childMeta.vaultId);
+          let childPrincipal: bigint;
+          try {
+            childPrincipal = BigInt(String(childMeta.principalLamports));
+          } catch {
+            return null;
+          }
+          if (!Number.isInteger(childVaultId) || childVaultId <= 0 || childPrincipal <= 0n) return null;
+          const overheadL = solRecovered - childPrincipal;
+          const realized = overheadL > 0n ? overheadL : 0n;
+          const childLev = Number(childMeta.leverage);
+          const effL = Number.isFinite(childLev) && childLev >= 1 ? childLev : (targetLeverage ?? 1);
+          const predicted =
+            BigInt(Math.max(0, Math.round((2 * slippageBps) / 10000 * Number(solRecovered) * effL))) + realized;
+          await storage.updateBorrowOperation(opId, {
+            status: "succeeded",
+            step: "opened",
+            borrowPositionId: adoptedRowId ?? borrowPositionId,
+            result: {
+              borrowPositionId: adoptedRowId,
+              closeSignature: closeSignature ?? null,
+              openSignature,
+              solReturnedLamports: solRecovered.toString(),
+              principalLamports: childPrincipal.toString(),
+              predictedCostLamports: predicted.toString(),
+              realizedCostLamports: realized.toString(),
+              fromVaultId,
+              toVaultId: childVaultId,
+              reversed: childVaultId === fromVaultId,
+              adoptedFromChildRecovery: true,
+            },
+          });
+          return {
+            success: true,
+            ...(adoptedRowId ? { borrowPositionId: adoptedRowId } : {}),
+            closeSignature,
+            ...(openSignature ? { openSignature } : {}),
+            solReturnedLamports: solRecovered.toString(),
+            predictedCostLamports: predicted.toString(),
+            realizedCostLamports: realized.toString(),
+            ...(childVaultId === fromVaultId
+              ? { verifyWarning: "The target pair was no longer openable, so the SOL was re-looped onto the original pair (your funds are safe)." }
+              : {}),
+          };
+        };
+
+        if (child.status === "succeeded" || child.status === "completed") {
+          // SL-10 crash shape: the child open COMPLETED but the parent hop
+          // never persisted "opened" — adopt it; NEVER broadcast another open.
+          const r = (child.result ?? {}) as Record<string, unknown>;
+          const adopted = await adoptChild(
+            typeof r.signature === "string" && r.signature ? r.signature : null,
+            child.borrowPositionId ?? null,
+          );
+          return (
+            adopted ??
+            childResumable(
+              "A previous re-open attempt already succeeded but its records are unreadable — refusing to guess its amounts.",
+            )
+          );
+        }
+
+        const childProvenDead =
+          child.status === "failed" &&
+          (child.step === "tx_failed_onchain" ||
+            child.step === "exec_failed" ||
+            child.step === "reconciled_tx_failed_onchain" ||
+            child.step === "reconciled_tx_expired" ||
+            child.step === "pre_broadcast_reconciled");
+
+        if (childProvenDead || !loopOpenWriteaheadRecorded(child)) {
+          // Provably dead or provably never broadcast: repair its linked row
+          // if one is still stuck pending, terminalize a dangling pending
+          // child, then a FRESH numbered attempt below is safe.
+          if (child.borrowPositionId) {
+            let childRow: BorrowPosition | undefined;
+            try {
+              childRow = await storage.getBorrowPosition(walletAddress, child.borrowPositionId);
+            } catch {
+              childRow = undefined;
+            }
+            if (childRow && childRow.status === "pending") {
+              const repaired = await restoreLoopPendingRow(childRow.id, childMeta.reuseNftId != null);
+              if (!repaired) {
+                return childResumable("A previous re-open attempt's position row could not be repaired yet.");
+              }
+            }
+          }
+          if (child.status === "pending") {
+            await failOp(
+              child.id,
+              "pre_broadcast_reconciled",
+              "Hop child open provably never broadcast — superseded by a fresh numbered attempt.",
+            );
+          }
+          // fall through to the normal fresh-attempt flow below
+        } else {
+          // Ambiguous: write-ahead recorded, outcome unproven — resolve from
+          // the child's exact recorded signature before anything fresh.
+          if (!child.borrowPositionId) {
+            return childResumable(
+              "A previous re-open attempt broadcast a transaction but is not linked to its position row — refusing to guess.",
+            );
+          }
+          let childRow: BorrowPosition | undefined;
+          try {
+            childRow = await storage.getBorrowPosition(walletAddress, child.borrowPositionId);
+          } catch {
+            childRow = undefined;
+          }
+          if (!childRow) {
+            return childResumable("A previous re-open attempt's position row could not be loaded.");
+          }
+          const outcome = await reconcileAmbiguousLoopOpen({
+            op: child,
+            position: childRow,
+            walletAddress,
+            connection: getServerConnection(),
+            borrowRoute: new JupiterLendBorrowRoute(),
+          });
+          if (outcome.outcome === "finalized_open") {
+            const adopted = await adoptChild(
+              outcome.result.signature ?? null,
+              outcome.result.borrowPositionId ?? child.borrowPositionId,
+            );
+            return (
+              adopted ??
+              childResumable(
+                "A previous re-open attempt LANDED and was finalized, but its records are unreadable for the hop summary.",
+              )
+            );
+          }
+          if (outcome.outcome === "blocked") {
+            return childResumable(`A previous re-open attempt is still unresolved: ${outcome.reason}`);
+          }
+          // "restored": the dead attempt was repaired — a fresh attempt is safe.
+        }
+      }
+      // No child op recorded at all (the counter ran ahead of op creation —
+      // nothing was ever broadcast under those crids), or the prior child was
+      // proven dead / never-broadcast and repaired above: fresh attempt safe.
+      return null;
+        },
+      );
+      if (phase2a) return phase2a;
     }
 
     // Preflight the target to learn the exact overhead (NFT mint rent + missing
