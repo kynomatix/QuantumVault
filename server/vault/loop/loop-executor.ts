@@ -2061,18 +2061,39 @@ export function pickCloseTxSig(co: {
   metadata: Record<string, unknown> | null | undefined;
 }): string | null {
   if (co.step !== "loop_sig_writeahead") return null;
-  // Prefer the explicit identity written atomically with the write-ahead sig.
+
+  // Identify the final RAW entry of the txSignatures array — do NOT filter
+  // through to an earlier element when the trailing entry is malformed.
+  // A non-string or empty trailing entry means the record itself is malformed;
+  // quietly skipping it could silently promote an earlier ATA-prep signature
+  // into the close-sig position, re-introducing the exact bug this fix closes.
+  const arr = Array.isArray(co.txSignatures) ? co.txSignatures : [];
+  const rawLast = arr.length > 0 ? arr[arr.length - 1] : undefined;
+  const lastSig = typeof rawLast === "string" && rawLast.length > 0 ? rawLast : null;
+
   const meta = (co.metadata ?? {}) as Record<string, unknown>;
-  if (typeof meta.closeTxSignature === "string" && meta.closeTxSignature.length > 0) {
-    return meta.closeTxSignature;
+  const hasExplicit = Object.prototype.hasOwnProperty.call(meta, "closeTxSignature");
+
+  if (hasExplicit) {
+    // New path: explicit identity written atomically by the write-ahead hook.
+    // Accept it ONLY when it is a non-empty string AND matches the final array
+    // entry exactly.  Any deviation is an inconsistent record — fail closed
+    // without querying or proving any transaction:
+    //   • empty / non-string explicit  → the identity itself is malformed.
+    //   • lastSig is null              → trailing entry is malformed; cannot cross-check.
+    //   • explicit !== lastSig         → identity and array disagree; fail closed.
+    const explicit = meta.closeTxSignature;
+    if (typeof explicit !== "string" || explicit.length === 0) return null;
+    if (lastSig === null) return null;
+    if (explicit !== lastSig) return null;
+    return explicit;
   }
-  // Legacy fallback: the close write-ahead sig is always the last element in the
-  // txSignatures array (ATA-prep sigs, if any, are appended before it).
-  const sigs = Array.isArray(co.txSignatures)
-    ? (co.txSignatures as unknown[]).filter((s): s is string => typeof s === "string")
-    : [];
-  if (sigs.length === 0) return null; // malformed — fail closed
-  return sigs[sigs.length - 1];
+
+  // Legacy fallback: the explicit identity key is genuinely absent.
+  // Ordering invariant: the close write-ahead sig is always the FINAL entry in
+  // txSignatures (any ATA-prep sig is appended before the write-ahead hook fires).
+  // If the trailing entry is not a valid string, the record is malformed.
+  return lastSig;
 }
 
 /**
