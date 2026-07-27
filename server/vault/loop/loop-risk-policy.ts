@@ -162,6 +162,18 @@ export const LOOP_ALLOCATION_POLICY = {
    */
   hopMinCarryGainApy: 0.02,
   /**
+   * WO3 HOLD→best rotation: minimum improvement (fraction APY) the best
+   * ALTERNATIVE loop must clear over the best NO-SWITCH action on a HOLD
+   * position — the source's own re-lever when that is eligible, else plain
+   * holding — before the brain rotates the collateral onto the other pair.
+   * STRICTLY greater-than. A rotation pays the same two full-notional swaps
+   * a levered hop does (close leg LST→SOL + open leg SOL→LST), so the bar
+   * deliberately matches `hopMinCarryGainApy`. Same "simple switching-cost
+   * cover, not a cost model" philosophy as `minEvGapApy` — keeps the brain
+   * auditable.
+   */
+  holdRotationMinGainApy: 0.02,
+  /**
    * Unwind to HOLD when the levered net carry falls below this floor even if
    * the EV gap alone would not trigger (paying to stay levered is never worth
    * it). Matches the safety tick's bleed-stopper threshold.

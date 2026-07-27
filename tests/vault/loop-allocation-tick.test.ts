@@ -1102,3 +1102,198 @@ describe("runLoopAllocationTick — WO2B2C-A2 coordination-deferred sources", ()
     expect(res2.skipped).toBeGreaterThanOrEqual(1); // non-deferred in-flight row keeps the full skip
   });
 });
+
+// ─── WO3: HOLD → best-LST rotation cells ────────────────────────────────────
+
+describe("runLoopAllocationTick — WO3 HOLD rotation cells", () => {
+  // Source vault 4 cannot loop on these rates (carry < 0 at 3.7x) → the
+  // no-switch benchmark is plain holding (3.00%). Vault 5 loops at ~8.13%,
+  // a +5.13pp marginal gain — above the 2pp rotation bar.
+  const rotationRates = () =>
+    new Map([
+      [4, makeRate(4, 0.03, 0.05)],
+      [5, makeRate(5, 0.03, 0.011)],
+    ]);
+
+  it("HOLD row with a full streak rotates: expectedSourceMode 'holding', hold audit trail journaled, rotation success copy", async () => {
+    const { deps, calls } = makeDeps({
+      listActivePositions: async () => [makeRow({ debtAmountRaw: "0" })],
+      getFreshRates: async () => rotationRates(),
+      getRecentDecisions: async () => priorHopRows(5, 2),
+    });
+    const res = await runLoopAllocationTick(deps);
+
+    expect(res.acted).toBe(1);
+    expect(calls.hops).toHaveLength(1);
+    expect(calls.hops[0].targetVaultId).toBe(5);
+    expect(calls.hops[0].expectedSourceMode).toBe("holding");
+
+    const d = calls.decisions[0];
+    expect(d.action).toBe("hop");
+    expect(d.reason).toBe("hold_rotation_favorable"); // the brain's own reason, journaled verbatim
+    expect(d.details.intent).toBe("hop");
+    expect(d.details.executed).toBe(true);
+    expect(d.details.hopTargetVaultId).toBe(5);
+    // The full hold-decision audit trail travels with the journal row.
+    expect(d.details.holdCurrentHoldApy).toBeCloseTo(0.03, 8);
+    expect(d.details.holdDefaultIntent).toBe("stay_hold");
+    expect(d.details.holdSourceReleverEligible).toBe(false);
+    expect(d.details.holdNoSwitchBenchmarkApy).toBeCloseTo(0.03, 8);
+    expect(d.details.holdAltVaultId).toBe(5);
+    expect(d.details.holdAltLoopApy).toBeCloseTo(0.0813, 6);
+    expect(d.details.holdMarginalSwitchGainApy).toBeCloseTo(0.0513, 6);
+    expect(d.details.holdRotationThresholdApy).toBeCloseTo(0.02, 8);
+    expect(d.details.closeSignaturePresent).toBe(true);
+    expect(d.details.openSignaturePresent).toBe(true);
+    expect(d.details.newBorrowPositionId).toBe("NEW_LOOP");
+
+    expect(calls.notifications).toHaveLength(1);
+    const n = calls.notifications[0];
+    expect(n.action).toBe("hop");
+    expect(n.ok).toBe(true);
+    const reason = String(n.reason);
+    expect(reason).toContain("rotated JupSOL → JitoSOL");
+    expect(reason).toContain("+5.13pp");
+    expect(reason).toContain("keeping the hold");
+    expect(reason).toContain("threshold 2.00pp");
+  });
+
+  it("LEVERED hop cell is untouched: no expectedSourceMode key, no rotation copy", async () => {
+    const { deps, calls } = makeDeps({
+      listActivePositions: async () => [makeRow()],
+      getFreshRates: async () =>
+        new Map([
+          [4, makeRate(4, 0.06, 0.05)],
+          [5, makeRate(5, 0.09, 0.05)],
+        ]),
+      getRecentDecisions: async () => priorHopRows(5, 2),
+    });
+    const res = await runLoopAllocationTick(deps);
+
+    expect(res.acted).toBe(1);
+    expect(calls.hops).toHaveLength(1);
+    expect(calls.hops[0].targetVaultId).toBe(5);
+    expect("expectedSourceMode" in calls.hops[0]).toBe(false);
+    expect(String(calls.notifications[0].reason ?? "")).not.toContain("rotated");
+  });
+
+  it("rotation hysteresis: a flapping yield leader never rotates (journal only)", async () => {
+    const { deps, calls } = makeDeps({
+      listActivePositions: async () => [makeRow({ debtAmountRaw: "0" })],
+      getFreshRates: async () => rotationRates(),
+      getRecentDecisions: async () => [...priorHopRows(42, 1), ...priorHopRows(5, 1)],
+    });
+    const res = await runLoopAllocationTick(deps);
+
+    expect(res.acted).toBe(0);
+    expect(calls.hops).toHaveLength(0);
+    expect(calls.decisions[0].details.intent).toBe("hop");
+    expect(calls.decisions[0].details.hopTargetVaultId).toBe(5);
+  });
+
+  it("stay_hold rows journal the full rotation math (thin marginal gain)", async () => {
+    const { deps, calls } = makeDeps({
+      listActivePositions: async () => [makeRow({ debtAmountRaw: "0" })],
+      getFreshRates: async () =>
+        new Map([
+          [4, makeRate(4, 0.03, 0.05)],
+          [5, makeRate(5, 0.03, 0.028)], // alt ≈ 3.54%, marginal +0.54pp < 2pp
+        ]),
+      getRecentDecisions: async () => [],
+    });
+    const res = await runLoopAllocationTick(deps);
+
+    expect(res.acted).toBe(0);
+    expect(calls.hops).toHaveLength(0);
+    expect(calls.decisions[0].reason).toBe("stay_hold");
+    expect(calls.decisions[0].details.holdAltVaultId).toBe(5);
+    expect(calls.decisions[0].details.holdMarginalSwitchGainApy).toBeCloseTo(0.0054, 6);
+  });
+
+  it("HOLD row with an unreadable current vault journals rates_unreadable with null hold facts", async () => {
+    const { deps, calls } = makeDeps({
+      listActivePositions: async () => [makeRow({ debtAmountRaw: "0" })],
+      getFreshRates: async () => new Map([[5, makeRate(5, 0.05, 0.011)]]), // vault 4 missing
+      getRecentDecisions: async () => [],
+    });
+    const res = await runLoopAllocationTick(deps);
+
+    expect(res.acted).toBe(0);
+    expect(calls.decisions[0].reason).toBe("rates_unreadable");
+    expect("holdCurrentHoldApy" in (calls.decisions[0].details as Record<string, unknown>)).toBe(true);
+    expect(calls.decisions[0].details.holdCurrentHoldApy ?? null).toBeNull();
+  });
+
+  it("rotation DECLINE copy: policy-denied hop notifies 'declined before any funds moved… position is unchanged'", async () => {
+    const { deps, calls } = makeDeps({
+      listActivePositions: async () => [makeRow({ debtAmountRaw: "0" })],
+      getFreshRates: async () => rotationRates(),
+      getRecentDecisions: async () => priorHopRows(5, 2),
+      executeHop: async () => ({
+        success: false,
+        policyDenied: true,
+        error: "Hop declined: the best rotation target is now vault 42. Your position is unchanged.",
+      }),
+    });
+    const res = await runLoopAllocationTick(deps);
+
+    expect(res.acted).toBe(0);
+    expect(calls.decisions[0].details.executed).toBe(false);
+    expect(calls.notifications).toHaveLength(1);
+    expect(calls.notifications[0].ok).toBe(false);
+    const detail = String(calls.notifications[0].detail);
+    expect(detail).toContain("declined before any funds moved");
+    expect(detail).toContain("JupSOL position is unchanged");
+  });
+
+  it("rotation RESUMABLE failure: notify suppressed, journal marks recovery in progress", async () => {
+    const { deps, calls } = makeDeps({
+      listActivePositions: async () => [makeRow({ debtAmountRaw: "0" })],
+      getFreshRates: async () => rotationRates(),
+      getRecentDecisions: async () => priorHopRows(5, 2),
+      executeHop: async () => ({ success: false, resumable: true, error: "unwind did not complete" }),
+    });
+    const res = await runLoopAllocationTick(deps);
+
+    // The tick's pass-counter is legacy accounting (any !success increments it);
+    // WO3's user-facing surfaces are the journal + notification, pinned below.
+    expect(res.failed).toBe(1);
+    expect(calls.notifications).toHaveLength(0); // no scary alert mid-recovery
+    expect(calls.decisions[0].details.hopRecovery).toBe("in_progress");
+    expect(calls.decisions[0].details.closeSignaturePresent).toBe(false);
+  });
+
+  it("rotation PARKED: notified only when parked by THIS invocation, journaled either way", async () => {
+    const parkedNow = makeDeps({
+      listActivePositions: async () => [makeRow({ debtAmountRaw: "0" })],
+      getFreshRates: async () => rotationRates(),
+      getRecentDecisions: async () => priorHopRows(5, 2),
+      executeHop: async () => ({
+        success: false,
+        parked: true,
+        parkReason: "close_attempt_budget_exhausted",
+        parkedByThisInvocation: true,
+        error: "parked",
+      }),
+    });
+    await runLoopAllocationTick(parkedNow.deps);
+    expect(parkedNow.calls.decisions[0].details.hopParked).toBe(true);
+    expect(parkedNow.calls.notifications).toHaveLength(1);
+
+    const parkedEarlier = makeDeps({
+      listActivePositions: async () => [makeRow({ debtAmountRaw: "0" })],
+      getFreshRates: async () => rotationRates(),
+      getRecentDecisions: async () => priorHopRows(5, 2),
+      executeHop: async () => ({
+        success: false,
+        parked: true,
+        parkReason: "close_attempt_budget_exhausted",
+        parkedByThisInvocation: false,
+        error: "parked",
+      }),
+    });
+    await runLoopAllocationTick(parkedEarlier.deps);
+    expect(parkedEarlier.calls.decisions[0].details.hopParked).toBe(true);
+    expect(parkedEarlier.calls.notifications).toHaveLength(0); // duplicate-alert suppression
+  });
+});

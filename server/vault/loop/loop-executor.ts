@@ -85,6 +85,9 @@ import {
   type LoopPolicyReason,
 } from "./loop-risk-policy";
 import { getFreshLoopRates, sampleAndPersistLoopRates, netCarryAt, LOOP_RATE_REGISTRY, type FreshLoopRate } from "./loop-rate-oracle";
+// WO3: ONE shared brain for HOLD-source decisions — the tick decides with it
+// and the close-time guard re-verifies with it (never a second derivation).
+import { decideHoldAllocationTarget } from "./loop-hold-allocation";
 import type { BorrowPosition, BorrowOperation } from "@shared/schema";
 
 // --- Constants ---------------------------------------------------------------
@@ -748,9 +751,15 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
       vaultId,
       clientRequestId: params.clientRequestId ?? null,
     });
-  const recoveryBlock = params.callerHoldsBorrowLock
-    ? await recoveryGate()
-    : await withBorrowLock(borrowLockKey(walletAddress, null, vaultId), recoveryGate);
+  // WO3 (reviewer fix): a PREFLIGHT is genuinely read-only — never run the
+  // recovery reconciler from it (reconciliation can mutate ops/positions/
+  // equity). Unresolved pending state instead fails the preflight CLOSED at
+  // runOpen's active-row check below, with zero writes and zero broadcasts.
+  const recoveryBlock = params.preflightOnly
+    ? null
+    : params.callerHoldsBorrowLock
+      ? await recoveryGate()
+      : await withBorrowLock(borrowLockKey(walletAddress, null, vaultId), recoveryGate);
   if (recoveryBlock) return recoveryBlock;
 
   const borrowRoute = new JupiterLendBorrowRoute();
@@ -2048,7 +2057,277 @@ export interface LoopCloseResult {
   gasShortfall?: LoopGasShortfall;
 }
 
+/**
+ * WO3 — module-private hop-close guard (checkpoints A/B). Delivered as a
+ * SECOND parameter to the internal close so the public LoopCloseParams
+ * surface (routes) can never carry — or forge — hop authorization.
+ */
+interface HopCloseGuardParams {
+  /** The loop_hop PARENT op that authorization facts are persisted onto. */
+  parentOpId: string;
+  fromVaultId: number;
+  targetVaultId: number;
+  /** Caller expectation; the guard classifies from the LIVE read regardless. */
+  expectedSourceMode: "holding" | "levered";
+  /** Outer read-only rotation preflight proof — REQUIRED for a HOLD source. */
+  holdPreflight: HoldRotationPreflightProof | null;
+  /**
+   * Execution-time fresh rate map, resolved BEFORE the close lock (with the
+   * one on-demand sample retry). The in-lock guard validates PURELY on this —
+   * it never fetches rates itself, so a stalled rate read can never extend
+   * how long the source position lock (shared with the safety delever) is held.
+   */
+  rates: LoopRatesForGuard;
+  /**
+   * STRICT pre-close SOL baseline (lamports), read immediately BEFORE the
+   * close lock. Checkpoint B persists it verbatim in its ONE atomic write.
+   */
+  preCloseBaselineRaw: string;
+}
+
+/** Execution-time rate map shape the pre-lock hop resolution hands the guard. */
+type LoopRatesForGuard = Awaited<ReturnType<typeof getFreshLoopRates>>;
+
+/** Proof payload produced by preflightHoldRotation (read-only, no lock, no writes). */
+interface HoldRotationPreflightProof {
+  provisionalFloorRaw: string;
+  preflightRequiredLamports: number;
+  sizedPrincipalRaw: string;
+  sizedOverheadRaw: string;
+}
+
+/** What checkpoint A authorizes and checkpoint B persists. */
+interface HopGuardAuth {
+  liveSourceMode: "holding" | "levered";
+  /** IMMUTABLE once persisted — the ONLY vaults recovery may re-open on. */
+  authorizedRecoveryVaultIds: number[];
+  targetLeverage: number | null;
+  /** Gate/decision facts merged verbatim into the parent op metadata. */
+  gateFacts: Record<string, unknown>;
+}
+
+/** Internal close result: LoopCloseResult + the guard's verdict channels. */
+interface LoopCloseInternalResult extends LoopCloseResult {
+  /**
+   * Checkpoint A/B POLICY decline — provably nothing broadcast. The outer hop
+   * terminals its parent (policyDenied), mirroring the legacy pre-close gate.
+   */
+  guardDeclined?: true;
+  guardDeclineCode?: string;
+  /**
+   * The authorization could not be made durable (strict baseline read or the
+   * atomic parent write failed) AFTER checks passed — still nothing broadcast,
+   * but the outer hop must stay RESUMABLE: a retry re-runs the full gate.
+   */
+  guardWriteFailed?: true;
+}
+
+/**
+ * WO3 checkpoint A — runs INSIDE the close's single position lock, against
+ * the SAME live health read that sizes the close. Classifies the source by
+ * LIVE mode and authorizes the hop:
+ *  - LIVE levered → the legacy execution-time carry gate (evaluateHopCarryGain);
+ *    recovery may restore EITHER side ([target, source] — the source was
+ *    levered pre-hop, restoring it is never a new bet).
+ *  - LIVE hold → requires the outer preflight proof AND re-runs the SHARED
+ *    rotation brain (decideHoldAllocationTarget) on the pre-lock-resolved
+ *    execution-time rate map: it must still
+ *    pick exactly THIS target with intent 'hop'. Recovery may open the TARGET
+ *    only, unless the source's own re-lever independently cleared its gate at
+ *    this same decision point ([target, source]).
+ * Every unreadable input declines (fail closed). NEVER takes a lock of its
+ * own — withBorrowLock is a promise-chain serializer and NOT reentrant — and
+ * performs NO venue/rate I/O: every guard input arrives resolved pre-lock.
+ */
+async function evaluateHopGuardCheckpointA(
+  guard: HopCloseGuardParams,
+  liveDebt: bigint,
+  liveCol: bigint,
+): Promise<{ ok: true; auth: HopGuardAuth } | { ok: false; code: string; error: string }> {
+  // The flat case cannot reach here (the close self-heals and returns first).
+  // Dust debt (0 < debt ≤ dust) classifies HOLD for GATING while the close
+  // still flash-repays it — deliberately different from isHoldExit (debt ≤ 0),
+  // which sizes the flash leg. Never conflate the two.
+  const liveSourceMode: "holding" | "levered" = liveDebt > DEFAULT_SOL_DEBT_DUST_RAW ? "levered" : "holding";
+  void liveCol; // classification needs only the debt side; collateral > dust is implied here
+
+  if (liveSourceMode === "levered") {
+    const gate = evaluateHopCarryGain(guard.rates, guard.fromVaultId, guard.targetVaultId);
+    if (!gate.ok) {
+      return { ok: false, code: "carry_gate_failed", error: gate.reason ?? "hop no longer beats the carry threshold" };
+    }
+    return {
+      ok: true,
+      auth: {
+        liveSourceMode,
+        authorizedRecoveryVaultIds: [guard.targetVaultId, guard.fromVaultId],
+        targetLeverage: gate.toLeverage,
+        gateFacts: {
+          gateGainApy: gate.gainApy,
+          gateFromCarryApy: gate.fromCarryApy,
+          gateToCarryApy: gate.toCarryApy,
+        },
+      },
+    };
+  }
+
+  // HOLD source — the rotation path is only authorized when the outer
+  // read-only preflight proved the re-open side first.
+  if (guard.expectedSourceMode !== "holding" || !guard.holdPreflight) {
+    return {
+      ok: false,
+      code: "hold_preflight_missing",
+      error: "the source is unlevered but this hop carries no rotation preflight proof — re-run it as a rotation",
+    };
+  }
+  const allowedVaultIds = Object.keys(LOOP_VAULT_ALLOWLIST).map(Number);
+  // Reviewer fix: the rate map (with its one on-demand sample retry) was
+  // resolved BEFORE the close lock. The shared brain re-runs PURELY on those
+  // captured facts — no rate-table or venue I/O ever happens in-lock.
+  const decision = decideHoldAllocationTarget({
+    currentVaultId: guard.fromVaultId,
+    rates: guard.rates,
+    allowedVaultIds,
+  });
+  if (decision.intent !== "hop" || decision.altVaultId !== guard.targetVaultId) {
+    return {
+      ok: false,
+      code: "hold_rotation_gate_failed",
+      error:
+        decision.intent === "hop"
+          ? `the best rotation target is now vault ${decision.altVaultId} — this hop's target no longer wins`
+          : "the rotation no longer clears its threshold at execution time",
+    };
+  }
+  return {
+    ok: true,
+    auth: {
+      liveSourceMode,
+      authorizedRecoveryVaultIds: decision.sourceReleverEligible
+        ? [guard.targetVaultId, guard.fromVaultId]
+        : [guard.targetVaultId],
+      targetLeverage: decision.altTargetLeverage,
+      gateFacts: {
+        holdCurrentHoldApy: decision.currentHoldApy,
+        holdSourceLoopApy: decision.sourceLoopApy,
+        holdSourceReleverEligible: decision.sourceReleverEligible,
+        holdDefaultIntent: decision.defaultIntent,
+        holdNoSwitchBenchmarkApy: decision.noSwitchBenchmarkApy,
+        holdAltLoopApy: decision.altLoopApy,
+        holdMarginalSwitchGainApy: decision.marginalSwitchGainApy,
+        holdRotationThresholdName: decision.thresholdName,
+        holdRotationThresholdApy: decision.thresholdApy,
+      },
+    },
+  };
+}
+
+/**
+ * WO3 checkpoint B — final floor check + the ONE atomic authorization write
+ * on the PARENT hop op, immediately before anything position-moving. On any
+ * failure the CLOSE op is failed (this attempt is spent) and NOTHING has
+ * broadcast; `guardDeclined` maps to a terminal policy decline outer-side,
+ * `guardWriteFailed` keeps the parent resumable (retry re-runs the full gate).
+ */
+async function commitHopGuardAuthorization(
+  guard: HopCloseGuardParams,
+  auth: HopGuardAuth,
+  closeOpId: string,
+  attributableFloor: bigint,
+): Promise<{ ok: true } | { ok: false; result: LoopCloseInternalResult }> {
+  // B1 (HOLD only): the close's FINAL attribution floor must not regress below
+  // the floor the rotation was preflighted and target-sized against — a
+  // shrunken worst-case unwind output invalidates the sizing proof.
+  if (auth.liveSourceMode === "holding" && guard.holdPreflight) {
+    let provisional: bigint | null = null;
+    try {
+      provisional = BigInt(guard.holdPreflight.provisionalFloorRaw);
+    } catch {
+      provisional = null;
+    }
+    if (provisional === null || attributableFloor < provisional) {
+      await failOp(
+        closeOpId,
+        "hop_hold_floor_regressed",
+        `final floor ${attributableFloor} < preflighted floor ${guard.holdPreflight.provisionalFloorRaw}`,
+      );
+      return {
+        ok: false,
+        result: {
+          success: false,
+          guardDeclined: true,
+          guardDeclineCode: "hop_hold_floor_regressed",
+          error: "the unwind's worst-case output slipped below what the rotation was sized against",
+        },
+      };
+    }
+  }
+
+  // B2: the STRICT pre-close SOL baseline was read immediately BEFORE the
+  // close lock (reviewer fix — the in-lock guard performs no venue I/O);
+  // persist the captured value verbatim. Post-WO3 it is crash-COORDINATION
+  // evidence only (its presence marks "gate passed, close in play") — it is
+  // never compared against later balances to reconstruct solReturned or size
+  // the re-open (recoverHopSolReturned accepts exact output / own floor only).
+  const baseline = BigInt(guard.preCloseBaselineRaw);
+
+  // B3: ONE atomic parent write (return-checked). Until this lands the parent
+  // carries NO baseline, gate facts or recovery authorization — a crash or
+  // failed write simply re-gates on the next attempt.
+  const persisted = await storage.updateBorrowOperation(guard.parentOpId, {
+    step: "pre_gated",
+    mergeMetadata: {
+      preCloseAgentLamports: baseline.toString(),
+      expectedSourceMode: guard.expectedSourceMode,
+      liveSourceMode: auth.liveSourceMode,
+      ...(auth.targetLeverage != null ? { targetLeverage: auth.targetLeverage } : {}),
+      ...auth.gateFacts,
+      ...(guard.holdPreflight
+        ? {
+            holdPreflightProvisionalFloorRaw: guard.holdPreflight.provisionalFloorRaw,
+            holdPreflightRequiredLamports: guard.holdPreflight.preflightRequiredLamports,
+            holdPreflightSizedPrincipalRaw: guard.holdPreflight.sizedPrincipalRaw,
+            holdPreflightSizedOverheadRaw: guard.holdPreflight.sizedOverheadRaw,
+            holdFinalFloorRaw: attributableFloor.toString(),
+          }
+        : {}),
+      // WO2A/WO3: the ONLY destinations a recovery pass may open on, persisted
+      // AT the gate that authorized the hop. pickBestLoopVault is deliberately
+      // NOT consulted at recovery time: "best" then is a NEW allocation
+      // decision nobody authorized. Levered sources authorize [target, source];
+      // HOLD rotations authorize [target] only, plus the source iff its own
+      // re-lever independently cleared its gate at this decision point.
+      authorizedRecoveryVaultIds: auth.authorizedRecoveryVaultIds,
+    },
+  });
+  if (!persisted) {
+    await failOp(closeOpId, "hop_gate_persist_failed", "authorization write did not persist — refusing to broadcast");
+    return {
+      ok: false,
+      result: {
+        success: false,
+        guardWriteFailed: true,
+        error: "Could not durably record the hop authorization. Nothing was moved — retry shortly.",
+      },
+    };
+  }
+  return { ok: true };
+}
+
 export async function executeLoopClose(params: LoopCloseParams): Promise<LoopCloseResult> {
+  return executeLoopCloseInternal(params, null);
+}
+
+/**
+ * Internal close. `hopGuard` (WO3) is non-null ONLY when executeLoopHop drives
+ * a fresh, not-yet-authorized close: the guard then runs checkpoint A after
+ * the live read and checkpoint B right before broadcast, INSIDE this close's
+ * single position lock. Public callers can never reach it (see the wrapper).
+ */
+async function executeLoopCloseInternal(
+  params: LoopCloseParams,
+  hopGuard: HopCloseGuardParams | null,
+): Promise<LoopCloseInternalResult> {
   const { walletAddress, agentPublicKey, agentSecretKey, borrowPositionId } = params;
   const slippageBps = params.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
 
@@ -2120,6 +2399,18 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
     const isHoldExit = liveDebt <= 0n;
     // Flash 2% over live debt; repay MAX takes only what is owed, surplus rides back.
     const flashRepay = isHoldExit ? 0n : (liveDebt * CLOSE_FLASH_BUFFER_NUM) / CLOSE_FLASH_BUFFER_DEN;
+
+    // ---- WO3 hop-guard checkpoint A (inline in THIS lock — never nested) ----
+    // A-declines happen BEFORE the close op row is created: the attempt spends
+    // no close crid and provably broadcasts nothing.
+    let guardAuth: HopGuardAuth | null = null;
+    if (hopGuard) {
+      const verdict = await evaluateHopGuardCheckpointA(hopGuard, liveDebt, liveCol);
+      if (!verdict.ok) {
+        return { success: false, guardDeclined: true, guardDeclineCode: verdict.code, error: verdict.error };
+      }
+      guardAuth = verdict.auth;
+    }
 
     let opId: string;
     try {
@@ -2236,6 +2527,14 @@ export async function executeLoopClose(params: LoopCloseParams): Promise<LoopClo
           success: false,
           error: "Loop Close: could not durably record the attribution floor. Nothing was moved — retry.",
         };
+      }
+
+      // ---- WO3 hop-guard checkpoint B: final floor check + ONE atomic
+      // authorization write on the PARENT — the last stop before anything
+      // position-moving is assembled or broadcast.
+      if (hopGuard && guardAuth) {
+        const committed = await commitHopGuardAuthorization(hopGuard, guardAuth, opId, attributableFloor);
+        if (!committed.ok) return committed.result;
       }
 
       const swapResp = await jupSwapIxs(quote, agentPublicKey);
@@ -2918,6 +3217,15 @@ export interface LoopHopParams {
    * invocation even on a parked or budget-exhausted parent.
    */
   mode?: "automatic" | "manual";
+  /**
+   * WO3: what the CALLER believes the source position is. 'holding' routes the
+   * fresh path through the read-only rotation preflight + the HOLD rotation
+   * guard; 'levered' (and omitted — legacy callers) keeps the carry-gate path.
+   * Persisted in parent metadata at creation; the close-time guard classifies
+   * from the LIVE read regardless, so a stale expectation can only DECLINE
+   * (fail closed), never mis-authorize.
+   */
+  expectedSourceMode?: "holding" | "levered";
 }
 
 export interface LoopHopResult {
@@ -3016,12 +3324,13 @@ export const HOP_DEFER_SOL_WITHDRAW_UNREADABLE_MESSAGE =
  * to still beat the current pair by more than `hopMinCarryGainApy`. Fail closed
  * on any unreadable input — an unmeasurable edge is NOT an edge.
  */
-async function evaluateHopCarryGain(
+function evaluateHopCarryGain(
+  rates: LoopRatesForGuard,
   fromVaultId: number,
   toVaultId: number,
-): Promise<{ ok: boolean; gainApy: number | null; fromCarryApy: number | null; toCarryApy: number | null; toLeverage: number | null; reason?: string }> {
-  const fromRate = await resolveFreshLoopRate(fromVaultId);
-  const toRate = await resolveFreshLoopRate(toVaultId);
+): { ok: boolean; gainApy: number | null; fromCarryApy: number | null; toCarryApy: number | null; toLeverage: number | null; reason?: string } {
+  const fromRate = rates.get(fromVaultId) ?? null;
+  const toRate = rates.get(toVaultId) ?? null;
   if (!fromRate) return { ok: false, gainApy: null, fromCarryApy: null, toCarryApy: null, toLeverage: null, reason: "current pair rates unreadable" };
   if (!toRate) return { ok: false, gainApy: null, fromCarryApy: null, toCarryApy: null, toLeverage: null, reason: "target pair rates unreadable" };
 
@@ -3057,20 +3366,116 @@ async function evaluateHopCarryGain(
 }
 
 /**
+ * WO3 — READ-ONLY rotation preflight for an expected-HOLD hop source. Proves
+ * the WHOLE rotation is worth attempting BEFORE anything closes:
+ *   live source read → worst-case unwind output (LST→SOL quote minus the dust
+ *   flash repay, sized EXACTLY like the close will) → provisional attribution
+ *   floor → REAL executeLoopOpen preflight on the target at that floor →
+ *   re-open sizing (principal = floor − overhead, the same arithmetic as the
+ *   hop's sizeFrom) → a SECOND preflight at the SIZED principal, which drives
+ *   the target's dynamic-leverage derivation and min-borrow check through the
+ *   REAL open path (no duplicated math to drift).
+ * NO lock is held here (the open preflight briefly takes the TARGET vault's
+ * own lock internally; the SOURCE lock is only taken later by the close) and
+ * NOTHING is written — a failed preflight declines the hop with the position
+ * untouched.
+ */
+async function preflightHoldRotation(args: {
+  walletAddress: string;
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  fromVaultId: number;
+  targetVaultId: number;
+  sourceNftId: number;
+  slippageBps: number;
+}): Promise<{ ok: true; proof: HoldRotationPreflightProof } | { ok: false; error: string }> {
+  try {
+    const borrowRoute = new JupiterLendBorrowRoute();
+    const cfg = await borrowRoute.getLoopVaultConfig(args.fromVaultId);
+    if (!cfg) return { ok: false, error: `could not read source vault ${args.fromVaultId} config (fail closed).` };
+    const live = await borrowRoute.readLoopLivePositionHealth(args.fromVaultId, args.sourceNftId);
+    if (!live) return { ok: false, error: "could not read the live source position (fail closed)." };
+    const liveDebt = BigInt(live.debtRaw);
+    const liveCol = BigInt(live.collateralRaw);
+    if (liveCol <= DEFAULT_LST_COLLATERAL_DUST_RAW) {
+      return { ok: false, error: "the source position has no collateral to rotate." };
+    }
+    // Dust debt still flash-repays on the close (isHoldExit is debt ≤ 0) —
+    // mirror that sizing exactly so the provisional floor matches the real one.
+    const flashRepay = liveDebt <= 0n ? 0n : (liveDebt * CLOSE_FLASH_BUFFER_NUM) / CLOSE_FLASH_BUFFER_DEN;
+    const quote = await jupQuote(cfg.collateralMint, WSOL_MINT, liveCol, args.slippageBps);
+    const minOut = BigInt(quote.otherAmountThreshold);
+    if (liveDebt > 0n && minOut <= liveDebt) {
+      return { ok: false, error: "the worst-case unwind output would not cover the residual debt repayment." };
+    }
+    const provisionalFloor = computeCloseAttributableFloor(minOut, flashRepay);
+    if (provisionalFloor <= 0n) {
+      return { ok: false, error: "the worst-case unwind output leaves no margin to re-open with." };
+    }
+    const preflightAt = (principalLamports: bigint) =>
+      executeLoopOpen({
+        walletAddress: args.walletAddress,
+        agentPublicKey: args.agentPublicKey,
+        agentSecretKey: args.agentSecretKey,
+        vaultId: args.targetVaultId,
+        principalLamports,
+        slippageBps: args.slippageBps,
+        preflightOnly: true,
+        callerHoldsBorrowLock: false,
+      });
+    const pf = await preflightAt(provisionalFloor);
+    if (!pf.success || !pf.preflight) {
+      return { ok: false, error: pf.error ?? "the target vault failed its open preflight." };
+    }
+    const overheadRaw = BigInt(Math.max(0, Math.round(pf.preflight.requiredLamports))) - provisionalFloor;
+    const overhead = overheadRaw > 0n ? overheadRaw : 0n;
+    const sizedPrincipal = provisionalFloor - overhead;
+    if (sizedPrincipal <= 0n) {
+      return { ok: false, error: "the rotation proceeds would not cover the open's rent+fee overhead." };
+    }
+    // Prove min-borrow + dynamic-leverage policy AT the sized principal via
+    // the real open path (its preflight enforces both before returning).
+    const pf2 = await preflightAt(sizedPrincipal);
+    if (!pf2.success || !pf2.preflight) {
+      return { ok: false, error: pf2.error ?? "the sized principal no longer clears the target's open policy." };
+    }
+    return {
+      ok: true,
+      proof: {
+        provisionalFloorRaw: provisionalFloor.toString(),
+        preflightRequiredLamports: pf.preflight.requiredLamports,
+        sizedPrincipalRaw: sizedPrincipal.toString(),
+        sizedOverheadRaw: overhead.toString(),
+      },
+    };
+  } catch (e) {
+    return { ok: false, error: `rotation preflight failed: ${e instanceof Error ? e.message : String(e)} (fail closed).` };
+  }
+}
+
+/**
  * P4 HOP (plan §4.4/§5): fully unwind the current loop pair to SOL and re-loop
  * that SOL onto a BETTER allowlisted pair. NOT atomic in one transaction — a
  * loop tx is already 1215/1232 bytes, so a close+open in one tx is impossible.
  * Instead each leg is INDIVIDUALLY atomic and the whole hop is CRASH-RESUMABLE
  * through a durable op row, so funds are never stranded:
  *
- *  - PRE-CLOSE (no money moved): re-gate the carry edge at EXECUTION time
- *    (fresh reads) — if the target no longer beats the current pair by
- *    `hopMinCarryGainApy`, decline cleanly (policyDenied, nothing closed).
- *    Record the pre-close agent SOL baseline. → step `pre_gated`.
+ *  - PRE-CLOSE (no money moved): for an expected-HOLD source (WO3 rotation),
+ *    a READ-ONLY preflight first proves the whole rotation is worth attempting
+ *    (worst-case unwind quote → provisional floor → REAL target open preflight
+ *    → sizing) — no lock, no writes. The execution-time rate map and STRICT
+ *    pre-close SOL baseline are ALSO resolved pre-lock. Then executeLoopClose
+ *    runs the hop guard INSIDE its position lock: checkpoint A re-validates
+ *    PURELY on those captured facts (LIVE-levered: carry edge; LIVE-hold: the
+ *    shared rotation brain must still pick THIS target), and checkpoint B
+ *    persists the baseline + gate facts + authorizedRecoveryVaultIds in ONE
+ *    atomic parent write immediately before the close broadcasts. A decline
+ *    is clean (policyDenied, nothing closed). → step `pre_gated`.
  *  - CLOSE: full unwind to SOL via executeLoopClose (its own lock + op + swap
- *    reconcile). solReturned = its reported figure, ELSE the STRICT balance
- *    delta vs the pre-close baseline (self-heal / ambiguous-clear paths report
- *    no figure). → step `close_done`, solReturned persisted.
+ *    reconcile). solReturned = its exact reported figure, else THIS close's
+ *    own pre-broadcast attribution floor once its tx provably landed. The
+ *    pre-close baseline is crash-coordination evidence ONLY — never a sizing
+ *    input for the re-open. → step `close_done`, solReturned persisted.
  *  - RE-OPEN: size the principal from the REAL solReturned exactly like the
  *    deposit-open path (preflight → overhead → principal = solReturned −
  *    overhead), open on the target. If the target is unopenable at this size,
@@ -3159,6 +3564,22 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
     if (fromVaultId === targetVaultId) {
       return { success: false, error: "Hop target is the same pair as the current position — nothing to do." };
     }
+    // WO3: persist the caller's source-mode expectation at creation. Legacy
+    // callers (no param) derive it from the source row's recorded debt —
+    // unparseable rows default to 'levered' (the stricter legacy gate; a
+    // truly-HOLD source would then decline at the guard and the next tick
+    // re-drives it as a rotation — fail closed, never mis-authorize).
+    const expectedSourceModeFresh: "holding" | "levered" =
+      params.expectedSourceMode ??
+      (() => {
+        try {
+          return BigInt(String(loaded.loaded.pos.debtAmountRaw ?? "0")) <= DEFAULT_SOL_DEBT_DUST_RAW
+            ? ("holding" as const)
+            : ("levered" as const);
+        } catch {
+          return "levered" as const;
+        }
+      })();
     try {
       op = await storage.createBorrowOperation({
         walletAddress,
@@ -3173,6 +3594,7 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
           toVaultId: targetVaultId,
           slippageBps,
           sourceBorrowPositionId: borrowPositionId,
+          expectedSourceMode: expectedSourceModeFresh,
           ...(params.policyReason ? { policyReason: params.policyReason } : {}),
         },
       });
@@ -3216,10 +3638,14 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
       const priorCloseAttempts = Number(meta.closeAttempts ?? 0);
 
       // The persisted pre-close SOL baseline is the durable marker that the gate
-      // already passed and the close leg is in play. Its PRESENCE means we must
-      // NOT re-gate or re-read the baseline on resume: after the close, a fresh
-      // read is post-close (overstated), and a rate that has since drifted would
-      // falsely decline a hop whose funds have already moved.
+      // already passed and the close leg is in play. Since WO3 it is READ pre-
+      // lock (alongside the rate map and rotation preflight) and written by the
+      // close-time guard (checkpoint B) in ONE atomic parent write with the
+      // gate facts and recovery authorization. Its
+      // PRESENCE means we must NOT re-gate or re-read the baseline on resume:
+      // after the close, a fresh read is post-close (overstated), and a rate
+      // that has since drifted would falsely decline a hop whose funds have
+      // already moved.
       let baseline: bigint | null = null;
       try {
         if (typeof meta.preCloseAgentLamports === "string") baseline = BigInt(meta.preCloseAgentLamports);
@@ -3232,10 +3658,12 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
       // This survives executeLoopClose's own crash window — position closed but
       // its op not yet marked succeeded — where blindly re-invoking it would fail
       // loadOpenLoopPosition and stall the hop forever.
-      const sourceStillOpen = (await loadOpenLoopPosition(walletAddress, borrowPositionId)).ok;
+      const sourceLoadedRes = await loadOpenLoopPosition(walletAddress, borrowPositionId);
+      const sourceStillOpen = sourceLoadedRes.ok;
 
       if (sourceStillOpen) {
         // Money has NOT moved yet.
+        let hopGuard: HopCloseGuardParams | null = null;
         if (baseline === null) {
           // WO2B2C reciprocal withdraw↔hop gate — GENUINELY FRESH hops only:
           // no pre-close baseline, no close-attempt write-ahead, no recorded
@@ -3295,55 +3723,127 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
               };
             }
           }
-          // FRESH: execution-time carry re-gate — a decline is clean and terminal
-          // for THIS attempt (nothing has moved).
-          const gate = await evaluateHopCarryGain(fromVaultId, targetVaultId);
-          if (!gate.ok) {
-            await failOp(opId, "carry_gate_failed", gate.reason ?? "hop no longer beats the carry threshold");
+          // WO3: every gate INPUT (rate map, rotation preflight, strict SOL
+          // baseline) is resolved BELOW, pre-lock; the gate itself (LIVE-levered
+          // carry re-gate / LIVE-hold rotation re-verification) validates those
+          // captured facts INSIDE
+          // executeLoopClose's single position lock (checkpoint A), and the
+          // strict pre-close baseline + gate facts + authorizedRecoveryVaultIds
+          // are persisted there in ONE atomic parent write (checkpoint B)
+          // immediately before the close broadcasts. Nothing gate-related is
+          // written HERE: until checkpoint B lands the parent carries no
+          // authorization and every retry re-runs the full gate; once it lands
+          // (or any close evidence exists), resumes skip re-gating entirely —
+          // rates that drift after money moves must never strand the hop.
+          let expectedSourceMode: "holding" | "levered";
+          if (meta.expectedSourceMode === "holding" || meta.expectedSourceMode === "levered") {
+            expectedSourceMode = meta.expectedSourceMode;
+          } else if (sourceLoadedRes.ok) {
+            // Legacy parent (pre-WO3): derive from the source row's recorded
+            // debt; the guard re-classifies from the LIVE read anyway.
+            let recordedDebt: bigint | null = null;
+            try {
+              recordedDebt = BigInt(String(sourceLoadedRes.loaded.pos.debtAmountRaw ?? "0"));
+            } catch {
+              recordedDebt = null;
+            }
+            expectedSourceMode =
+              recordedDebt !== null && recordedDebt <= DEFAULT_SOL_DEBT_DUST_RAW ? "holding" : "levered";
+          } else {
+            expectedSourceMode = "levered";
+          }
+
+          // Reviewer fix (spec: no guard I/O behind the close lock): the rate
+          // map, the HOLD rotation preflight, and the STRICT SOL baseline are
+          // ALL resolved HERE — before executeLoopClose acquires its position
+          // lock. The 60s safety delever shares that lock and must never queue
+          // behind a stalled venue read; the in-lock guard (checkpoints A/B)
+          // validates and persists PURELY from these captured facts.
+          let executionRates: LoopRatesForGuard | null = null;
+          try {
+            const staleness = LOOP_ALLOCATION_POLICY.rateStalenessMs;
+            const allowedVaultIds = Object.keys(LOOP_VAULT_ALLOWLIST).map(Number);
+            let rates = await getFreshLoopRates(staleness);
+            const incomplete =
+              expectedSourceMode === "levered"
+                ? !rates.get(fromVaultId) || !rates.get(targetVaultId)
+                : (() => {
+                    const d = decideHoldAllocationTarget({ currentVaultId: fromVaultId, rates, allowedVaultIds });
+                    return d.reason === "rates_unreadable" || d.altVaultId === null;
+                  })();
+            if (incomplete) {
+              // Right-after-boot table gap: sample ONCE on demand and re-read
+              // (same fallback shape as resolveFreshLoopRate), then fail closed.
+              await sampleAndPersistLoopRates();
+              rates = await getFreshLoopRates(staleness);
+            }
+            executionRates = rates;
+          } catch (e) {
+            console.error(`[LoopHop] execution-time rate resolution failed for hop ${fromVaultId}→${targetVaultId}:`, e);
+            executionRates = null;
+          }
+          if (executionRates === null) {
+            // Unreadable required facts fail closed BEFORE any close attempt,
+            // with the same terminal codes the in-lock guard uses.
+            const code = expectedSourceMode === "holding" ? "hold_rotation_rates_unreadable" : "carry_gate_failed";
+            const why =
+              expectedSourceMode === "holding"
+                ? "rotation rates are unreadable at execution time"
+                : "pair rates are unreadable at execution time";
+            await failOp(opId, code, why);
             return {
               success: false,
               policyDenied: true,
-              error: `Hop declined: ${gate.reason ?? "the better pair no longer beats the current one by enough to justify the switch"}. Your position is unchanged.`,
+              error: `Hop declined: ${why}. Your position is unchanged.`,
             };
           }
-          targetLeverage = gate.toLeverage;
 
-          // Write-ahead a genuine PRE-close SOL baseline (STRICT read → fail
-          // closed): the self-heal / ambiguous-clear close paths report no
-          // returned figure, so we reconstruct solReturned from this baseline.
-          baseline = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, NATIVE_SOL_MINT)).amountRaw);
-          const baselinePersisted = await storage.updateBorrowOperation(opId, {
-            step: "pre_gated",
-            mergeMetadata: {
-              preCloseAgentLamports: baseline.toString(),
-              ...(targetLeverage != null ? { targetLeverage } : {}),
-              gateGainApy: gate.gainApy,
-              gateFromCarryApy: gate.fromCarryApy,
-              gateToCarryApy: gate.toCarryApy,
-              // WO2A: the ONLY destinations a recovery pass may open on,
-              // persisted AT the gate that authorized the hop: the requested
-              // target (gate-approved) and the original source (it was already
-              // levered pre-hop and passed the source-side gate — restoring it
-              // is never a new bet). pickBestLoopVault is deliberately NOT
-              // consulted at recovery time: "best" then is a NEW allocation
-              // decision nobody authorized. NOTE for future HOLD-style
-              // callers: persist [target] only — a hop is the only flow whose
-              // source re-lever is pre-authorized.
-              authorizedRecoveryVaultIds: [targetVaultId, fromVaultId],
-            },
-          });
-          // The persisted baseline is how a no-figure close path (self-heal /
-          // ambiguous-clear) reconstructs solReturned on resume. If it did not
-          // persist, a post-close crash would leave the hop resumable forever
-          // (funds safe in wallet, never re-looped) — refuse to close until it's
-          // durable.
-          if (!baselinePersisted) {
+          let holdPreflight: HoldRotationPreflightProof | null = null;
+          if (expectedSourceMode === "holding") {
+            // READ-ONLY rotation preflight — no lock, no writes. Prove the
+            // whole rotation is worth attempting BEFORE anything closes; a
+            // decline here is clean and terminal for this attempt.
+            const pf = await preflightHoldRotation({
+              walletAddress,
+              agentPublicKey,
+              agentSecretKey,
+              fromVaultId,
+              targetVaultId,
+              sourceNftId: sourceLoadedRes.ok ? sourceLoadedRes.loaded.nftId : 0,
+              slippageBps,
+            });
+            if (!pf.ok) {
+              await failOp(opId, "hold_rotation_preflight_failed", pf.error);
+              return {
+                success: false,
+                policyDenied: true,
+                error: `Hop declined: ${pf.error} Your position is unchanged.`,
+              };
+            }
+            holdPreflight = pf.proof;
+          }
+          // STRICT pre-close SOL baseline — the LAST pre-lock read. Checkpoint
+          // B persists it verbatim; a failed read refuses to enter the close
+          // at all (resumable — a retry re-runs the full gate).
+          let preCloseBaseline: bigint;
+          try {
+            preCloseBaseline = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, NATIVE_SOL_MINT)).amountRaw);
+          } catch {
             return {
               success: false,
               resumable: true,
-              error: "Could not record the pre-unwind baseline. Your funds are safe. Wait a minute and retry.",
+              error: "Could not read the pre-unwind baseline. Nothing was moved — your funds are safe. Retry shortly.",
             };
           }
+          hopGuard = {
+            parentOpId: opId,
+            fromVaultId,
+            targetVaultId,
+            expectedSourceMode,
+            holdPreflight,
+            rates: executionRates,
+            preCloseBaselineRaw: preCloseBaseline.toString(),
+          };
         }
 
         // CLOSE — full unwind to SOL (its own lock + op + swap reconcile).
@@ -3361,17 +3861,32 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
             error: "Could not record the unwind attempt. Your funds are safe. Wait a minute and retry.",
           };
         }
-        const close = await executeLoopClose({
-          walletAddress,
-          agentPublicKey,
-          agentSecretKey,
-          borrowPositionId,
-          slippageBps,
-          clientRequestId: closeCridFor(closeAttempt),
-        });
+        const close = await executeLoopCloseInternal(
+          {
+            walletAddress,
+            agentPublicKey,
+            agentSecretKey,
+            borrowPositionId,
+            slippageBps,
+            clientRequestId: closeCridFor(closeAttempt),
+          },
+          hopGuard,
+        );
         if (!close.success) {
-          // The unwind did not complete: the source position is still open (or
-          // unresolved). Nothing to re-open yet — resumable, funds intact.
+          if (close.guardDeclined) {
+            // WO3 checkpoint A/B policy decline: PROVABLY nothing broadcast
+            // (the guard declines strictly before assembly/broadcast) —
+            // terminal for this attempt, like the legacy pre-close decline.
+            await failOp(opId, close.guardDeclineCode ?? "hop_gate_declined", close.error ?? "hop authorization declined");
+            return {
+              success: false,
+              policyDenied: true,
+              error: `Hop declined: ${close.error ?? "the move no longer clears its execution-time threshold"}. Your position is unchanged.`,
+            };
+          }
+          // guardWriteFailed and every other close failure: the source is
+          // still open (or unresolved). Nothing to re-open yet — resumable,
+          // funds intact.
           return {
             success: false,
             resumable: true,
@@ -3589,6 +4104,12 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
     const metaNow = (parentNow.metadata ?? {}) as Record<string, any>;
     if (principalSource === null && (metaNow.principalSource === "exact" || metaNow.principalSource === "conservative_floor")) {
       principalSource = metaNow.principalSource;
+    }
+    // WO3: the gate-approved target leverage is persisted by the close-time
+    // guard (checkpoint B) — adopt it here for cost prediction when this
+    // invocation ran the guarded close itself (resumes pick it up at entry).
+    if (targetLeverage === null && typeof metaNow.targetLeverage === "number") {
+      targetLeverage = metaNow.targetLeverage;
     }
     const activeSlotCrid =
       typeof metaNow.activeOpenClientRequestId === "string" && metaNow.activeOpenClientRequestId

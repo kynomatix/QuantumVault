@@ -1536,8 +1536,12 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
     const res = await executeLoopHop(hopParams);
 
     expect((res as any).coordinationDeferred).toBeUndefined();
-    expect(getFreshLoopRates).toHaveBeenCalled(); // past the gate, into the carry re-gate
-    expect((res as any).policyDenied).toBe(true); // clean decline (rates unreadable here)
+    // Past the gate, into the WO3 pre-close guard path: this debt-less source
+    // row derives a HOLD expectation, so the rotation preflight runs — and
+    // fails closed at the unreadable source vault config (clean pre-close
+    // decline, nothing broadcast).
+    expect(routeMocks.getLoopVaultConfig).toHaveBeenCalledWith(4);
+    expect((res as any).policyDenied).toBe(true);
   });
 
   it("an UNKNOWN withdraw status blocks — allowlist semantics, only proven-terminal passes", async () => {
@@ -1575,7 +1579,9 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
     const res = await executeLoopHop(hopParams);
 
     expect((res as any).coordinationDeferred).toBeUndefined();
-    expect(getFreshLoopRates).toHaveBeenCalled();
+    // Advanced past the gate into the WO3 pre-close guard (rotation preflight
+    // for this debt-less fixture) — the non-withdraw rows never blocked it.
+    expect(routeMocks.getLoopVaultConfig).toHaveBeenCalledWith(4);
   });
 
   it("READ FAILURE: an unreadable scan defers FAIL-CLOSED — resumable, zero writes, parent stays pending", async () => {
@@ -1630,8 +1636,12 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
 
     expect((second as any).coordinationDeferred).toBeUndefined();
     expect(storage.createBorrowOperation).toHaveBeenCalledTimes(1); // adopted, never duplicated
-    expect(getFreshLoopRates).toHaveBeenCalled(); // past the gate on retry
-    expect((second as any).policyDenied).toBe(true); // clean downstream decline (rates unreadable here)
+    // Past the gate on retry, into the WO3 pre-close guard: the adopted parent
+    // recorded a HOLD source expectation at creation (debt-less fixture), so
+    // the rotation preflight runs and declines cleanly at the unreadable
+    // source vault config.
+    expect(routeMocks.getLoopVaultConfig).toHaveBeenCalledWith(4);
+    expect((second as any).policyDenied).toBe(true); // clean downstream decline
   });
 
   it("BYPASS solReturned crumb: PHASE 1 (and the gate) skipped — recovery continues despite a pending withdrawal", async () => {
@@ -1687,7 +1697,9 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
 
     expect(walletWideScans()).toHaveLength(0); // a close may be in flight — never defer
     expect((res as any).coordinationDeferred).toBeUndefined();
-    expect(getFreshLoopRates).toHaveBeenCalled(); // fell through to the EXISTING carry re-gate
+    // Fell through to the WO3 fresh gate (no baseline ⇒ every retry re-gates):
+    // the debt-less fixture derives HOLD, so the rotation preflight ran.
+    expect(routeMocks.getLoopVaultConfig).toHaveBeenCalledWith(4);
   });
 
   it("BYPASS source no longer open: the closed-source recovery path owns it — no scan, no defer", async () => {

@@ -41,6 +41,9 @@ import { sendLoopSafetyNotification, type LoopSafetyNotification } from "../../n
 import { DEFAULT_SOL_DEBT_DUST_RAW } from "../borrow-engine-core";
 import { getFreshLoopRates, LOOP_CARRY_REFERENCE_LEVERAGE, netCarryAt, pickBestLoopVault, sampleAndPersistLoopRates, type FreshLoopRate, type LoopRateReading } from "./loop-rate-oracle";
 import { computeLoopTargetLeverage, LOOP_ALLOCATION_POLICY, LOOP_VAULT_ALLOWLIST } from "./loop-risk-policy";
+// WO3: ONE shared brain for HOLD-row decisions — this tick decides with it and
+// the hop executor's close-time guard re-verifies with the SAME helper.
+import { decideHoldAllocationTarget, type HoldAllocationDecision } from "./loop-hold-allocation";
 import type { LoopSafetySigner } from "./loop-safety-tick";
 import {
   executeLoopRelever,
@@ -580,52 +583,95 @@ async function processAllocationCandidate(
     levered = false;
   }
 
-  let intentRes = decideAllocationIntent({
-    levered,
-    stakingApy: rate?.stakingApy ?? null,
-    borrowApr: rate?.borrowApr ?? null,
-    leverage,
-  });
-  if (target.leverage === null && intentRes.intent === "relever") {
-    // FAIL CLOSED: no computable target → a HOLD row STAYS unlevered, however
-    // favorable the EV gap looks (reachable when the LT is unreadable in the
-    // sample — carry alone must never size a levered position).
-    intentRes = {
-      intent: "none",
-      reason: `no_target_${target.reason ?? "unknown"}`,
-      evGapApy: intentRes.evGapApy,
-      netCarryApy: intentRes.netCarryApy,
-    };
-  }
-
-  // WO2B2C-A1: source pinned by a coordination-deferred hop — a rival RELEVER
-  // is suppressed (folded to a journaled no-op); only the safety unwind may
-  // proceed past this point. Hop promotion below is gated the same way.
-  if (safetyUnwindOnly && intentRes.intent === "relever") {
-    intentRes = {
-      intent: "none",
-      reason: "relever_suppressed_hop_deferred",
-      evGapApy: intentRes.evGapApy,
-      netCarryApy: intentRes.netCarryApy,
-    };
-  }
-
-  // HOP (P4, plan §4.4): only for a position the single-pair brain decided to
-  // KEEP levered (reason 'stay_levered'). Unwind ALWAYS dominates — never hop a
-  // bleeding loop. If a better allowlisted pair clears the (higher) hop bar,
-  // promote 'none/stay_levered' → 'hop'.
+  // WO3: intent derivation splits by persisted mode. LEVERED rows keep the
+  // legacy single-pair brain + hop promotion VERBATIM; HOLD rows run the ONE
+  // shared rotation brain (decideHoldAllocationTarget — the same helper the
+  // hop executor's in-lock guard re-runs at checkpoint A, so this tick can
+  // never authorize a rotation the executor would compute differently).
+  let intentRes: AllocationIntentResult;
   let hopTarget: HopTargetResult | null = null;
-  if (!safetyUnwindOnly && levered && intentRes.intent === "none" && intentRes.reason === "stay_levered") {
-    const allowedVaultIds = Object.keys(LOOP_VAULT_ALLOWLIST).map(Number);
-    hopTarget = decideHopTarget({ currentVaultId: vaultId, rates, allowedVaultIds });
-    if (hopTarget.targetVaultId !== null) {
-      intentRes = {
-        intent: "hop",
-        reason: "hop_carry_favorable",
-        evGapApy: intentRes.evGapApy,
-        netCarryApy: intentRes.netCarryApy,
-      };
+  let holdDecision: HoldAllocationDecision | null = null;
+
+  if (levered) {
+    intentRes = decideAllocationIntent({
+      levered,
+      stakingApy: rate?.stakingApy ?? null,
+      borrowApr: rate?.borrowApr ?? null,
+      leverage,
+    });
+
+    // HOP (P4, plan §4.4): only for a position the single-pair brain decided to
+    // KEEP levered (reason 'stay_levered'). Unwind ALWAYS dominates — never hop a
+    // bleeding loop. If a better allowlisted pair clears the (higher) hop bar,
+    // promote 'none/stay_levered' → 'hop'.
+    if (!safetyUnwindOnly && intentRes.intent === "none" && intentRes.reason === "stay_levered") {
+      const allowedVaultIds = Object.keys(LOOP_VAULT_ALLOWLIST).map(Number);
+      hopTarget = decideHopTarget({ currentVaultId: vaultId, rates, allowedVaultIds });
+      if (hopTarget.targetVaultId !== null) {
+        intentRes = {
+          intent: "hop",
+          reason: "hop_carry_favorable",
+          evGapApy: intentRes.evGapApy,
+          netCarryApy: intentRes.netCarryApy,
+        };
+      }
     }
+  } else {
+    // HOLD row (WO3). The shared helper folds in the legacy relever gate
+    // (identical ev-gap math, 'ev_gap_favorable'/'stay_hold'/'rates_unreadable'
+    // reasons preserved verbatim), the no-target fail-closed rule (no
+    // computable source target ⇒ sourceLoopApy null ⇒ never relever), AND the
+    // rotation comparison against the best NO-SWITCH benchmark. Note a HOLD
+    // row whose own pair has no computable target can still ROTATE — that is
+    // exactly the trapped-in-a-dead-pair case rotation exists for.
+    holdDecision = decideHoldAllocationTarget({
+      currentVaultId: vaultId,
+      rates,
+      allowedVaultIds: Object.keys(LOOP_VAULT_ALLOWLIST).map(Number),
+    });
+    // Journal continuity: evGapApy keeps its legacy meaning (levered-minus-
+    // hold edge on the SOURCE pair — sourceLoopApy − currentHoldApy is the
+    // same (L−1)(s−b) quantity) and netCarryApy is the source's carry at its
+    // own dynamic target; both null when the source cannot re-lever.
+    const evGapApy =
+      holdDecision.sourceLoopApy !== null && holdDecision.currentHoldApy !== null
+        ? holdDecision.sourceLoopApy - holdDecision.currentHoldApy
+        : null;
+    const netCarryApy = holdDecision.sourceLoopApy;
+    if (holdDecision.intent === "hop" && holdDecision.altVaultId !== null) {
+      intentRes = { intent: "hop", reason: holdDecision.reason, evGapApy, netCarryApy };
+      // Rotation rows reuse the SAME hop journal fields as levered hops —
+      // hopTargetVaultId is the target-scoped hysteresis streak key either
+      // way. The "current" side of the comparison is the best NO-SWITCH
+      // benchmark (re-lever when eligible, else plain holding).
+      hopTarget = {
+        targetVaultId: holdDecision.altVaultId,
+        targetLeverage: holdDecision.altTargetLeverage,
+        targetNetCarryApy: holdDecision.altLoopApy,
+        currentNetCarryApy: holdDecision.noSwitchBenchmarkApy,
+        carryGainApy: holdDecision.marginalSwitchGainApy,
+        reason: "hop_carry_favorable",
+      };
+    } else if (holdDecision.intent === "relever") {
+      intentRes = { intent: "relever", reason: holdDecision.reason, evGapApy, netCarryApy };
+    } else {
+      intentRes = { intent: "none", reason: holdDecision.reason, evGapApy, netCarryApy };
+    }
+  }
+
+  // WO2B2C-A1 + WO3: source pinned by a coordination-deferred hop — rival
+  // actions are suppressed (folded to journaled no-ops); only the safety
+  // unwind may proceed past this point. Levered hop promotion is already
+  // gated above; this folds a HOLD row's relever OR rotation. The relever
+  // reason string stays pinned verbatim ('relever_suppressed_hop_deferred').
+  if (safetyUnwindOnly && (intentRes.intent === "relever" || intentRes.intent === "hop")) {
+    intentRes = {
+      intent: "none",
+      reason: `${intentRes.intent}_suppressed_hop_deferred`,
+      evGapApy: intentRes.evGapApy,
+      netCarryApy: intentRes.netCarryApy,
+    };
+    hopTarget = null;
   }
 
   const journalAction = intentRes.intent === "unwind" ? "unwind_to_hold" : intentRes.intent;
@@ -653,6 +699,24 @@ async function processAllocationCandidate(
           hopTargetNetCarryApy: hopTarget.targetNetCarryApy,
           hopCurrentNetCarryApy: hopTarget.currentNetCarryApy,
           hopCarryGainApy: hopTarget.carryGainApy,
+        }
+      : {}),
+    // WO3 rotation audit facts (HOLD rows only): the full benchmark set the
+    // shared brain compared, journaled on EVERY hold decision — rotate,
+    // relever and stay-hold alike — so declined/near-miss rotations are
+    // auditable, not just executed ones.
+    ...(holdDecision
+      ? {
+          holdCurrentHoldApy: holdDecision.currentHoldApy,
+          holdSourceTargetLeverage: holdDecision.sourceTargetLeverage,
+          holdSourceLoopApy: holdDecision.sourceLoopApy,
+          holdSourceReleverEligible: holdDecision.sourceReleverEligible,
+          holdDefaultIntent: holdDecision.defaultIntent,
+          holdNoSwitchBenchmarkApy: holdDecision.noSwitchBenchmarkApy,
+          holdAltVaultId: holdDecision.altVaultId,
+          holdAltLoopApy: holdDecision.altLoopApy,
+          holdMarginalSwitchGainApy: holdDecision.marginalSwitchGainApy,
+          holdRotationThresholdApy: holdDecision.thresholdApy,
         }
       : {}),
   };
@@ -747,6 +811,10 @@ async function processAllocationCandidate(
   let verifyWarning: string | undefined;
   let selfHeal = false;
   let policyDenied = false;
+  // WO3 Build 5: hop outcome shape for rotation journal facts + copy.
+  let hopParked = false;
+  let hopResumable = false;
+  let hopRes: LoopHopResult | null = null;
   try {
     if (intentRes.intent === "unwind") {
       const res = await deps.executeUnwindToHold({
@@ -780,6 +848,11 @@ async function processAllocationCandidate(
           // (fresh hops park only in pathological cases; the sweep handles
           // journal+notify for parks on resume passes).
           mode: "automatic",
+          // WO3: a HOLD-source rotation routes the executor through the
+          // read-only rotation preflight + the close-time HOLD guard. Levered
+          // ticks pass NO expectation (legacy carry-gate path; the guard
+          // classifies from the live read regardless).
+          ...(levered ? {} : { expectedSourceMode: "holding" as const }),
         });
         ok = res.success;
         // A hop reports both legs; prefer the re-open sig, else the close sig.
@@ -787,6 +860,9 @@ async function processAllocationCandidate(
         errorText = res.error;
         verifyWarning = res.verifyWarning;
         policyDenied = !ok && res.policyDenied === true;
+        hopParked = !ok && res.parked === true;
+        hopResumable = !ok && !hopParked && res.resumable === true;
+        hopRes = res;
       }
     } else {
       const res = await deps.executeRelever({
@@ -828,15 +904,64 @@ async function processAllocationCandidate(
     ...(verifyWarning ? { verifyWarning } : {}),
     ...(policyDenied ? { policyDenied: true } : {}),
     ...(errorText ? { error: errorText.slice(0, 500) } : {}),
+    // WO3 Build 5 (records): hop outcome facts — new position id, per-leg
+    // signature presence, and the truthful mid-flight state. A post-close
+    // resumable result is RECOVERY IN PROGRESS, never a completed hop.
+    ...(hopRes
+      ? {
+          closeSignaturePresent: hopRes.closeSignature != null,
+          openSignaturePresent: hopRes.openSignature != null,
+          ...(hopRes.borrowPositionId ? { newBorrowPositionId: hopRes.borrowPositionId } : {}),
+          ...(hopParked ? { hopParked: true } : {}),
+          ...(hopResumable ? { hopRecovery: "in_progress" } : {}),
+        }
+      : {}),
   });
 
-  await deps
-    .notify(row.walletAddress, {
-      symbol: symbolFor(vaultId),
-      action: journalAction as "relever" | "unwind_to_hold",
-      ok,
-      reason: intentRes.reason,
-      detail: ok ? null : (errorText ?? "unknown error"),
-    })
-    .catch(() => {});
+  // WO3 Build 5 (reports): LEVERED hops keep the legacy notification behavior
+  // verbatim. HOLD rotations get truthful state copy:
+  //  - success REASON names source → destination + measured marginal edge and
+  //    threshold (the success template renders reason, not detail);
+  //  - pre-close decline says the position is unchanged;
+  //  - post-close resumable is journaled as recovery-in-progress and emits NO
+  //    generic alert (that template suggests manual unwinding — misleading
+  //    mid-rotation; automatic recovery owns this state);
+  //  - parked notifies ONLY from the invocation that won the park CAS
+  //    (parkedByThisInvocation) — any other parked echo would double-alert,
+  //    and the WO2A parking notification stays authoritative.
+  let notifyReason = intentRes.reason;
+  let notifyDetail: string | null = ok ? null : (errorText ?? "unknown error");
+  let skipNotify = false;
+  if (holdDecision !== null && journalAction === "hop") {
+    const fromSym = symbolFor(vaultId);
+    const toSym = hopTarget?.targetVaultId != null ? symbolFor(hopTarget.targetVaultId) : "the better pair";
+    const edgePp =
+      holdDecision.marginalSwitchGainApy !== null ? (holdDecision.marginalSwitchGainApy * 100).toFixed(2) : null;
+    const thresholdPp = (holdDecision.thresholdApy * 100).toFixed(2);
+    const overBase = holdDecision.defaultIntent === "relever" ? "re-levering in place" : "keeping the hold";
+    if (ok) {
+      notifyReason = `rotated ${fromSym} → ${toSym}${edgePp !== null ? `, +${edgePp}pp APY vs ${overBase} (threshold ${thresholdPp}pp)` : ""}`;
+    } else if (policyDenied) {
+      notifyDetail = `the ${fromSym} → ${toSym} rotation was declined before any funds moved — your ${fromSym} position is unchanged`;
+    } else if (hopParked) {
+      if (hopRes?.parkedByThisInvocation === true) {
+        notifyDetail = `the ${fromSym} → ${toSym} rotation needs attention: automatic retries stopped and the unwound SOL is reserved safely in the agent wallet until an operator resumes it`;
+      } else {
+        skipNotify = true;
+      }
+    } else if (hopResumable) {
+      skipNotify = true;
+    }
+  }
+  if (!skipNotify) {
+    await deps
+      .notify(row.walletAddress, {
+        symbol: symbolFor(vaultId),
+        action: journalAction as "relever" | "unwind_to_hold" | "hop",
+        ok,
+        reason: notifyReason,
+        detail: notifyDetail,
+      })
+      .catch(() => {});
+  }
 }
