@@ -1,15 +1,16 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { walletAuthHeaders } from "@/lib/queryClient";
 import {
-  beginWithdraw,
-  driveWithdraw,
-  readActiveRecord,
+  coordinateWithdraw,
+  coordinateCheckRetry,
+  coordinateCleanupMalformed,
+  readActiveRecordForDisplay,
   solNumberToLamports,
   lamportsToSolDisplay,
   MIN_WITHDRAW_LAMPORTS,
   type DurableWithdrawRecord,
-  type DriveOutcome,
-} from '@/lib/agent-sol-withdraw-coordinator';
+  type CoordinatorOutcome,
+} from '@/lib/agent-sol-withdraw-client';
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import { motion } from 'framer-motion';
 import { useWallet } from '@/hooks/useWallet';
@@ -307,6 +308,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
   // record that could not be read (preserved, never auto-deleted).
   const [activeSolWithdraw, setActiveSolWithdraw] = useState<DurableWithdrawRecord | null>(null);
   const [solWithdrawRecordBroken, setSolWithdrawRecordBroken] = useState(false);
+  const [solWithdrawCleaningUp, setSolWithdrawCleaningUp] = useState(false);
 
   const fetchUserSolBalance = async () => {
     if (!solanaWallet.publicKey) return;
@@ -463,21 +465,16 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
     }
   };
 
-  // [WO2B2D:WALLET-MGMT-BEGIN] Durable server-executed SOL withdrawal.
-  // The browser never decodes, signs, sends, or confirms a transaction here:
-  // one wallet-scoped request record (UUID + exact lamports) is persisted and
-  // read back BEFORE the first request, then the SAME request is replayed
-  // until the server answers with a matched terminal outcome. This surface
-  // also completes loop-origin records — the shared coordinator writes the
-  // loop ledger debit itself on success. Nothing fires automatically on
-  // mount; the resume row only offers an explicit Check / Retry.
+  // [C1:WALLET-MGMT-BEGIN] Durable server-executed SOL withdrawal.
+  // All coordinator actions run under the exclusive Web Lock; no low-level
+  // begin/drive/finalize helpers are called directly from this surface.
   const refreshActiveSolWithdraw = () => {
     if (!publicKeyString) {
       setActiveSolWithdraw(null);
       setSolWithdrawRecordBroken(false);
       return;
     }
-    const read = readActiveRecord(window.localStorage, publicKeyString);
+    const read = readActiveRecordForDisplay(publicKeyString);
     setActiveSolWithdraw(read.status === 'active' ? read.record : null);
     setSolWithdrawRecordBroken(read.status === 'invalid' || read.status === 'unreadable');
   };
@@ -486,7 +483,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publicKeyString]);
 
-  const applySolWithdrawOutcome = async (out: DriveOutcome) => {
+  const applySolWithdrawOutcome = async (out: CoordinatorOutcome) => {
     refreshActiveSolWithdraw();
     switch (out.outcome) {
       case 'success':
@@ -502,7 +499,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
         toast({ title: 'SOL Withdrawal Failed', description: out.message, variant: 'destructive' });
         break;
       case 'pending':
-        toast({ title: 'Withdrawal in progress', description: 'The server is still processing it. Use Check / Retry to finish — the same request is resumed, never duplicated.' });
+        toast({ title: 'Withdrawal in progress', description: 'The server is still processing it. Use Check / Retry — the same request is resumed, never duplicated.' });
         break;
       case 'manual_review':
         toast({ title: 'Withdrawal needs manual review', description: out.message, variant: 'destructive' });
@@ -510,25 +507,26 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       case 'auth':
         toast({ title: 'Session expired', description: 'Reconnect your wallet, then press Check / Retry.', variant: 'destructive' });
         break;
-      case 'stale_record':
-        toast({ title: 'Showing the current withdrawal', description: out.message });
+      case 'coordination_unavailable':
+        toast({ title: 'Withdrawal coordination unavailable', description: out.message, variant: 'destructive' });
+        break;
+      case 'blocked_invalid_record':
+        toast({ title: 'A stored withdrawal record needs cleanup', description: 'Use the cleanup button below before starting a new withdrawal.', variant: 'destructive' });
+        break;
+      case 'no_active_record':
+        refreshActiveSolWithdraw();
         break;
       default:
-        toast({ title: 'Withdrawal not confirmed yet', description: `${out.message} The request is kept — press Check / Retry.`, variant: 'destructive' });
+        toast({ title: 'Withdrawal not confirmed yet', description: `${(out as { message?: string }).message ?? ''} The request is kept — press Check / Retry.`, variant: 'destructive' });
     }
   };
 
   /** Explicit Check / Retry for the stored request (never automatic). */
   const handleDriveSolWithdraw = async () => {
     if (!publicKeyString) return;
-    const read = readActiveRecord(window.localStorage, publicKeyString);
-    if (read.status !== 'active') {
-      refreshActiveSolWithdraw();
-      return;
-    }
     setSolWithdrawing(true);
     try {
-      const out = await driveWithdraw(window.localStorage, read.record, { headers: walletAuthHeaders() });
+      const out = await coordinateCheckRetry(publicKeyString, { headers: walletAuthHeaders() });
       await applySolWithdrawOutcome(out);
     } finally {
       setSolWithdrawing(false);
@@ -549,43 +547,44 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       toast({ title: 'Enter a valid amount', variant: 'destructive' });
       return;
     }
-
     if (agentWallet && amount > (agentWallet.solBalance - 0.005)) {
       toast({ title: 'Insufficient SOL (keep 0.005 SOL for gas)', variant: 'destructive' });
       return;
     }
-
     const lamports = solNumberToLamports(amount);
     if (lamports === null || lamports < MIN_WITHDRAW_LAMPORTS) {
       toast({ title: 'Amount too small or not representable', variant: 'destructive' });
       return;
     }
-
     setSolWithdrawing(true);
     try {
-      const begun = beginWithdraw(window.localStorage, publicKeyString, lamports, 'wallet_mgmt');
-      if (begun.status === 'persist_failed') {
-        toast({ title: 'Could not save the withdrawal request', description: 'Nothing was sent. Free some browser storage, then try again.', variant: 'destructive' });
-        return;
-      }
-      if (begun.status === 'blocked_invalid_record') {
-        refreshActiveSolWithdraw();
-        toast({ title: 'A stored withdrawal record needs review', description: 'It was preserved; no new withdrawal was started.', variant: 'destructive' });
-        return;
-      }
-      if (begun.status === 'invalid_amount') {
-        toast({ title: 'Invalid amount', variant: 'destructive' });
-        return;
-      }
-      // 'created' or adoption of an existing record — drive the SAME request.
-      setActiveSolWithdraw(begun.record);
-      const out = await driveWithdraw(window.localStorage, begun.record, { headers: walletAuthHeaders() });
+      const out = await coordinateWithdraw(publicKeyString, lamports, 'wallet_management', { headers: walletAuthHeaders() });
       await applySolWithdrawOutcome(out);
     } finally {
       setSolWithdrawing(false);
     }
   };
-  // [WO2B2D:WALLET-MGMT-END]
+
+  const handleCleanupMalformedSolRecord = async () => {
+    if (!publicKeyString) return;
+    setSolWithdrawCleaningUp(true);
+    try {
+      const out = await coordinateCleanupMalformed(publicKeyString);
+      refreshActiveSolWithdraw();
+      if (out.outcome === 'cleaned') {
+        toast({ title: 'Stored record cleared', description: 'The malformed record was removed. You may start a new withdrawal.' });
+      } else if (out.outcome === 'nothing_to_clean' || out.outcome === 'valid_record_kept') {
+        refreshActiveSolWithdraw();
+      } else if (out.outcome === 'coordination_unavailable') {
+        toast({ title: 'Cleanup unavailable', description: out.message, variant: 'destructive' });
+      } else {
+        toast({ title: 'Cleanup could not complete', description: (out as { message: string }).message, variant: 'destructive' });
+      }
+    } finally {
+      setSolWithdrawCleaningUp(false);
+    }
+  };
+  // [C1:WALLET-MGMT-END]
 
   const handleSolDeposit = async () => {
     const amount = parseFloat(solDepositAmount);
@@ -1524,7 +1523,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                   {activeSolWithdraw ? (
                     <>
                       <p className="text-xs text-muted-foreground">
-                        A withdrawal of <span className="font-medium text-foreground tabular-nums">{lamportsToSolDisplay(activeSolWithdraw.lamports)} SOL</span>
+                        A withdrawal of <span className="font-medium text-foreground tabular-nums">{lamportsToSolDisplay(activeSolWithdraw.amountLamports)} SOL</span>
                         {activeSolWithdraw.origin === 'loop_return' ? ' (loop proceeds)' : ''} is in progress. Retrying is safe — the same request is resumed, never duplicated.
                       </p>
                       <Button
@@ -1539,9 +1538,21 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                       </Button>
                     </>
                   ) : (
-                    <p className="text-xs text-muted-foreground">
-                      A stored withdrawal record could not be read. It was preserved for review — contact support before starting a new SOL withdrawal.
-                    </p>
+                    <div className="space-y-2">
+                      <p className="text-xs text-muted-foreground">
+                        A stored withdrawal record could not be read. It was preserved for review — use the cleanup button below before starting a new SOL withdrawal.
+                      </p>
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        className="w-full"
+                        disabled={solWithdrawCleaningUp}
+                        onClick={() => void handleCleanupMalformedSolRecord()}
+                        data-testid="button-sol-withdraw-cleanup"
+                      >
+                        {solWithdrawCleaningUp ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Clear Stored Record'}
+                      </Button>
+                    </div>
                   )}
                 </div>
               )}

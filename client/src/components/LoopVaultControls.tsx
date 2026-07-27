@@ -12,21 +12,21 @@ import { safeResponseJson } from "@/lib/safe-fetch";
 import { getSessionId, toRawBaseUnits, rawToDecimalString } from "@/lib/lending-format";
 import { confirmTransactionWithFallback } from "@/lib/solana-utils";
 import {
-  beginWithdraw,
-  driveWithdraw,
-  readActiveRecord,
-  deriveAvailability,
-  recordLoopCloseCredit,
-  noteMissingCloseSignature,
+  coordinateWithdraw,
+  coordinateCheckRetry,
+  coordinateCleanupMalformed,
+  coordinateLoopReturn,
+  readActiveRecordForDisplay,
+  readLedgerViewForDisplay,
   migrateLegacyPendingReturn,
   computeReturnLamports,
   maxSendableLamportsFromSol,
   lamportsToSolDisplay,
   MIN_WITHDRAW_LAMPORTS,
   type DurableWithdrawRecord,
-  type DriveOutcome,
+  type CoordinatorOutcome,
   type LedgerView,
-} from "@/lib/agent-sol-withdraw-coordinator";
+} from "@/lib/agent-sol-withdraw-client";
 import { SolGasShortfallDialog } from "@/components/SolGasShortfallDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -308,22 +308,20 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
     },
   });
 
-  // [WO2B2D:LOOP-RETURN-BEGIN] Durable server-executed "Return to Wallet".
-  // Stranded-proceeds ledger (wallet-scoped, survives reloads, cross-tab
-  // safe). ONLY SOL that a close/unwind actually returned — as reported by
-  // the server and keyed by that op's tx signature — may ever be offered
-  // back to the user. Never derived from the wallet balance, so the agent's
-  // own gas float can never show up here. Availability is a BigInt sum over
-  // append-only entries; conflicts surface as anomalies, never overwrites.
+  // [C1:LOOP-RETURN-BEGIN] Durable server-executed "Return to Wallet".
+  // All coordinator actions run under the exclusive Web Lock; no low-level
+  // begin/drive/finalize helpers are called directly from this surface.
+  // ONLY SOL that a close/unwind actually returned — keyed by tx signature —
+  // may ever enter the ledger. Availability is a BigInt sum; a negative
+  // balance or any anomaly/malformed key blocks NEW request creation (not
+  // Check/Retry of an active record).
   const [returnLedger, setReturnLedger] = useState<LedgerView | null>(null);
   const [activeReturn, setActiveReturn] = useState<DurableWithdrawRecord | null>(null);
   const [returnRecordBroken, setReturnRecordBroken] = useState(false);
-  // Ref (not state) guard: closes the sub-second window where an auto-return
-  // is in flight but `busy` reads stale in a manual click's closure — a
-  // double-send would eat the agent's gas float. MUST be declared BEFORE the
-  // `!statusQuery.data` early return below — a hook after a conditional
-  // return crashes the whole page ("Rendered more hooks than during the
-  // previous render") the moment the status query resolves.
+  const [loopReturnCleaningUp, setLoopReturnCleaningUp] = useState(false);
+  // Ref guard: prevents double-fire within the same tab before the lock is
+  // acquired. MUST be declared BEFORE any conditional return — a hook after
+  // a conditional return crashes the whole page.
   const returningRef = useRef(false);
   const refreshReturnLedger = () => {
     if (!publicKeyString) {
@@ -332,17 +330,15 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
       setReturnRecordBroken(false);
       return;
     }
-    setReturnLedger(deriveAvailability(window.localStorage, publicKeyString));
-    const read = readActiveRecord(window.localStorage, publicKeyString);
+    setReturnLedger(readLedgerViewForDisplay(publicKeyString));
+    const read = readActiveRecordForDisplay(publicKeyString);
     setActiveReturn(read.status === "active" ? read.record : null);
     setReturnRecordBroken(read.status === "invalid" || read.status === "unreadable");
   };
   useEffect(() => {
     // Storage-only on mount/wallet switch: fold the legacy pending-return
-    // value into one deterministic ledger credit (old key removed only after
-    // the credit is read back; invalid values are preserved with a visible
-    // anomaly). NO money call ever fires from mount.
-    if (publicKeyString) migrateLegacyPendingReturn(window.localStorage, publicKeyString);
+    // value into one deterministic ledger credit. No money call ever fires.
+    if (publicKeyString) migrateLegacyPendingReturn(publicKeyString);
     refreshReturnLedger();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publicKeyString, open]);
@@ -478,19 +474,24 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
   const RETURN_RESERVE_SOL = 0.006;
   const availableReturnLamports = returnLedger?.availableLamports ?? 0n;
   const manualReturnLamports = activeReturn
-    ? BigInt(activeReturn.lamports)
+    ? BigInt(activeReturn.amountLamports)
     : computeReturnLamports(availableReturnLamports, maxSendableLamportsFromSol(agentSol, RETURN_RESERVE_SOL));
+  /** Ledger is blocked for NEW loop_return creation; Check/Retry is unaffected. */
+  const ledgerIsBlocked = !!(
+    returnLedger?.storageUnreadable ||
+    (returnLedger?.malformedKeys?.length ?? 0) > 0 ||
+    (returnLedger?.anomalies?.length ?? 0) > 0 ||
+    returnLedger?.negative
+  );
 
-  const applyReturnOutcome = (out: DriveOutcome, opts: { auto: boolean }) => {
+  const applyReturnOutcome = (out: CoordinatorOutcome, opts: { auto: boolean }) => {
     refreshReturnLedger();
     if (out.outcome === "success") {
-      toast({ title: `Returned ${lamportsToSolDisplay(out.lamports)} SOL to your wallet` });
+      toast({ title: `Returned ${lamportsToSolDisplay(out.amountLamports)} SOL to your wallet` });
     } else if (out.outcome === "success_unfinalized") {
       toast({ title: "Return completed", description: out.message });
     } else if (out.outcome === "terminal_failure") {
       toast({ title: "SOL return failed", description: out.message, variant: "destructive" });
-    } else if (out.outcome === "stale_record") {
-      toast({ title: "Showing the current return", description: out.message });
     } else if (out.outcome === "auth") {
       showReconnectToast({
         toast,
@@ -498,29 +499,33 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
         title: "SOL return needs your session",
         retry: () => void driveReturn({ auto: false }),
       });
+    } else if (out.outcome === "coordination_unavailable") {
+      toast({ title: "Return coordination unavailable", description: out.message, variant: "destructive" });
+    } else if (out.outcome === "missing_sig_noted") {
+      toast({ title: "Proceeds recorded for review", description: out.message, variant: "destructive" });
+    } else if (out.outcome === "blocked_by_ledger" || out.outcome === "blocked_invalid_record") {
+      if (!opts.auto) {
+        toast({ title: "Return blocked", description: out.message, variant: "destructive" });
+      }
+      // Auto path: recovery row shows the state — no duplicate toast.
+    } else if (out.outcome === "no_funds_available" || out.outcome === "no_active_record") {
+      refreshReturnLedger();
     } else if (opts.auto) {
-      // The close itself succeeded — don't scare the user. The recovery row
-      // shows the SOL with a Check / Retry button resuming the SAME request.
       toast({
         title: "SOL is waiting to return",
         description: "Sending the proceeds didn't finish. Use the recovery row below — the same request is resumed, never duplicated.",
       });
     } else {
-      toast({ title: "Return not confirmed yet", description: `${out.message} The request is kept — retry below.`, variant: "destructive" });
+      toast({ title: "Return not confirmed yet", description: `${(out as { message?: string }).message ?? ""} The request is kept — retry below.`, variant: "destructive" });
     }
   };
 
   /** Explicit Check / Retry of the wallet's single durable return request. */
   const driveReturn = async (opts: { auto: boolean }) => {
     if (!publicKeyString) return;
-    const read = readActiveRecord(window.localStorage, publicKeyString);
-    if (read.status !== "active") {
-      refreshReturnLedger();
-      return;
-    }
     setBusy("withdraw-sol");
     try {
-      const out = await driveWithdraw(window.localStorage, read.record, { headers: walletAuthHeaders() });
+      const out = await coordinateCheckRetry(publicKeyString, { headers: walletAuthHeaders() });
       applyReturnOutcome(out, opts);
     } finally {
       setBusy(null);
@@ -528,53 +533,24 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
     }
   };
 
-  // Begin (or adopt) the durable return request, then drive it once. The
-  // record (UUID + exact lamports) is persisted and read back BEFORE any
-  // request is made; a negative ledger blocks new auto-returns outright.
+  // Create (or adopt) a durable return request, capped by ledger availability
+  // and the agent's current gas balance. Ledger blockers are checked inside
+  // the coordinator lock; a negative/anomalous ledger returns blocked_by_ledger.
   const startReturn = async (opts: { auto: boolean }) => {
     if (!publicKeyString) return;
     if (returningRef.current) return;
     returningRef.current = true;
     setBusy("withdraw-sol");
     try {
-      const ledger = deriveAvailability(window.localStorage, publicKeyString);
-      if (ledger.negative) {
-        refreshReturnLedger();
-        toast({
-          title: "Return paused",
-          description: `Local records show ${lamportsToSolDisplay(ledger.deficitLamports)} SOL more returned than tracked. Nothing was adjusted — the discrepancy stays visible for review.`,
-          variant: "destructive",
-        });
-        return;
-      }
-      const existing = readActiveRecord(window.localStorage, publicKeyString);
-      if (existing.status === "active") {
-        const out = await driveWithdraw(window.localStorage, existing.record, { headers: walletAuthHeaders() });
-        applyReturnOutcome(out, opts);
-        return;
-      }
-      if (existing.status === "invalid" || existing.status === "unreadable") {
-        refreshReturnLedger();
-        toast({ title: "A stored withdrawal record needs review", description: "It was preserved; no new return was started.", variant: "destructive" });
-        return;
-      }
       const fresh = opts.auto ? await balanceQuery.refetch() : null;
-      const cap = maxSendableLamportsFromSol(opts.auto ? (fresh?.data?.solBalance ?? null) : agentSol, RETURN_RESERVE_SOL);
-      const amt = computeReturnLamports(ledger.availableLamports, cap);
+      const capSol = opts.auto ? (fresh?.data?.solBalance ?? null) : agentSol;
+      const cap = maxSendableLamportsFromSol(capSol, RETURN_RESERVE_SOL);
+      const amt = computeReturnLamports(availableReturnLamports, cap);
       if (amt < MIN_WITHDRAW_LAMPORTS) {
         refreshReturnLedger();
-        return; // stays tracked; the recovery row offers it
-      }
-      const begun = beginWithdraw(window.localStorage, publicKeyString, amt, "loop_return");
-      if (begun.status !== "created" && begun.status !== "active_exists") {
-        refreshReturnLedger();
-        if (begun.status === "persist_failed") {
-          toast({ title: "Could not save the return request", description: "Nothing was sent. Free some browser storage, then retry.", variant: "destructive" });
-        }
         return;
       }
-      refreshReturnLedger();
-      const out = await driveWithdraw(window.localStorage, begun.record, { headers: walletAuthHeaders() });
+      const out = await coordinateWithdraw(publicKeyString, amt, "loop_return", { headers: walletAuthHeaders() });
       applyReturnOutcome(out, opts);
     } finally {
       returningRef.current = false;
@@ -583,43 +559,43 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
     }
   };
 
-  // Auto-return EXACTLY what the close/unwind reported it credited
-  // (solReturnedLamports), keyed by that op's tx signature. The credit is
-  // recorded AND read back before any return leaves; no signature → the
-  // proceeds are surfaced as a visible anomaly instead of guessed.
+  // Auto-return EXACTLY what the close/unwind reported it credited. The credit
+  // is recorded inside the coordinator's exclusive lock before any request is
+  // made; a missing signature is noted as a visible anomaly.
   const autoReturnProceeds = async (proceedsLamports?: string, opSig?: string) => {
     if (!publicKeyString) return;
     let proceeds = 0n;
-    try {
-      proceeds = BigInt(proceedsLamports ?? "0");
-    } catch {
-      proceeds = 0n;
-    }
+    try { proceeds = BigInt(proceedsLamports ?? "0"); } catch { proceeds = 0n; }
     if (proceeds <= 0n) return;
-    if (typeof opSig !== "string" || opSig.length === 0) {
-      noteMissingCloseSignature(window.localStorage, publicKeyString, proceeds, `close-${Date.now()}`);
-      refreshReturnLedger();
-      toast({
-        title: "Proceeds recorded for review",
-        description: "The close reported SOL proceeds without a transaction signature; nothing was auto-sent.",
-        variant: "destructive",
-      });
-      return;
-    }
-    const credited = recordLoopCloseCredit(window.localStorage, publicKeyString, opSig, proceeds);
-    if (credited !== "ok" && credited !== "already") {
-      refreshReturnLedger();
-      toast({
-        title: "SOL is waiting in the agent wallet",
-        description: "Recording the proceeds locally didn't stick; nothing was auto-sent. Free some browser storage, then use Return to Wallet.",
-        variant: "destructive",
-      });
-      return;
-    }
+    const out = await coordinateLoopReturn(
+      publicKeyString,
+      typeof opSig === "string" && opSig.length > 0 ? opSig : undefined,
+      proceeds,
+      { headers: walletAuthHeaders() },
+    );
+    applyReturnOutcome(out, { auto: true });
     refreshReturnLedger();
-    await startReturn({ auto: true });
+    refresh();
   };
-  // [WO2B2D:LOOP-RETURN-END]
+
+  const handleCleanupMalformedReturnRecord = async () => {
+    if (!publicKeyString) return;
+    setLoopReturnCleaningUp(true);
+    try {
+      const out = await coordinateCleanupMalformed(publicKeyString);
+      refreshReturnLedger();
+      if (out.outcome === "cleaned") {
+        toast({ title: "Record cleared", description: "The malformed return record was removed." });
+      } else if (out.outcome === "coordination_unavailable") {
+        toast({ title: "Cleanup unavailable", description: out.message, variant: "destructive" });
+      } else if (out.outcome !== "nothing_to_clean" && out.outcome !== "valid_record_kept") {
+        toast({ title: "Cleanup could not complete", description: (out as { message: string }).message, variant: "destructive" });
+      }
+    } finally {
+      setLoopReturnCleaningUp(false);
+    }
+  };
+  // [C1:LOOP-RETURN-END]
 
   const runConfirmed = (key: string, fn: () => void) => {
     if (confirmAction !== key) {
@@ -1069,29 +1045,44 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
                       </>
                     )}
                   </p>
-                  {!returnLedger?.negative && !returnRecordBroken && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="shrink-0"
-                      disabled={!!busy || (!activeReturn && manualReturnLamports < MIN_WITHDRAW_LAMPORTS)}
-                      onClick={() => void (activeReturn ? driveReturn({ auto: false }) : startReturn({ auto: false }))}
-                      data-testid="button-loop-withdraw-sol"
-                    >
-                      {busy === "withdraw-sol" ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <>
-                          <ArrowUpFromLine className="h-3.5 w-3.5 mr-1" />
-                          {activeReturn ? "Check / Retry" : "Return to Wallet"}
-                        </>
-                      )}
-                    </Button>
-                  )}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="shrink-0"
+                    disabled={!!busy || (!activeReturn && (manualReturnLamports < MIN_WITHDRAW_LAMPORTS || ledgerIsBlocked))}
+                    onClick={() => void (activeReturn ? driveReturn({ auto: false }) : startReturn({ auto: false }))}
+                    data-testid="button-loop-withdraw-sol"
+                  >
+                    {busy === "withdraw-sol" ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <>
+                        <ArrowUpFromLine className="h-3.5 w-3.5 mr-1" />
+                        {activeReturn ? "Check / Retry" : "Return to Wallet"}
+                      </>
+                    )}
+                  </Button>
                 </div>
                 {returnRecordBroken && (
-                  <p className="text-[11px] text-red-500">
-                    A stored withdrawal record could not be read; it was preserved for review.
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="text-[11px] text-red-500 flex-1 min-w-0">
+                      A stored withdrawal record could not be read; it was preserved for review.
+                    </p>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      className="h-7 text-xs shrink-0"
+                      disabled={loopReturnCleaningUp}
+                      onClick={() => void handleCleanupMalformedReturnRecord()}
+                      data-testid="button-loop-return-cleanup"
+                    >
+                      {loopReturnCleaningUp ? <Loader2 className="h-3 w-3 animate-spin" /> : "Clear Record"}
+                    </Button>
+                  </div>
+                )}
+                {(returnLedger?.malformedKeys?.length ?? 0) > 0 && (
+                  <p className="text-[11px] text-amber-500" data-testid="text-loop-return-malformed">
+                    {returnLedger!.malformedKeys.length} unreadable ledger {returnLedger!.malformedKeys.length === 1 ? "entry needs" : "entries need"} review.
                   </p>
                 )}
                 {(returnLedger?.anomalies.length ?? 0) > 0 && (
