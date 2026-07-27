@@ -16,9 +16,9 @@ import {
   coordinateCheckRetry,
   coordinateCleanupMalformed,
   coordinateLoopReturn,
+  coordinateMigrateLegacy,
   readActiveRecordForDisplay,
   readLedgerViewForDisplay,
-  migrateLegacyPendingReturn,
   computeReturnLamports,
   maxSendableLamportsFromSol,
   lamportsToSolDisplay,
@@ -337,8 +337,9 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
   };
   useEffect(() => {
     // Storage-only on mount/wallet switch: fold the legacy pending-return
-    // value into one deterministic ledger credit. No money call ever fires.
-    if (publicKeyString) migrateLegacyPendingReturn(publicKeyString);
+    // value into one deterministic ledger credit under the exclusive lock so
+    // concurrent tab mounts cannot produce duplicate credits. No money call fires.
+    if (publicKeyString) void coordinateMigrateLegacy(publicKeyString);
     refreshReturnLedger();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publicKeyString, open]);
@@ -562,16 +563,20 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
   // Auto-return EXACTLY what the close/unwind reported it credited. The credit
   // is recorded inside the coordinator's exclusive lock before any request is
   // made; a missing signature is noted as a visible anomaly.
+  // The fresh balance caps the send to the sendable amount (0.006 SOL reserve).
   const autoReturnProceeds = async (proceedsLamports?: string, opSig?: string) => {
     if (!publicKeyString) return;
     let proceeds = 0n;
     try { proceeds = BigInt(proceedsLamports ?? "0"); } catch { proceeds = 0n; }
     if (proceeds <= 0n) return;
+    // Refetch balance inside the lock path to avoid using a stale agentSol.
+    const freshBalance = await balanceQuery.refetch();
+    const capLamports = maxSendableLamportsFromSol(freshBalance.data?.solBalance ?? null, RETURN_RESERVE_SOL);
     const out = await coordinateLoopReturn(
       publicKeyString,
       typeof opSig === "string" && opSig.length > 0 ? opSig : undefined,
       proceeds,
-      { headers: walletAuthHeaders() },
+      { headers: walletAuthHeaders(), capLamports },
     );
     applyReturnOutcome(out, { auto: true });
     refreshReturnLedger();
@@ -1024,19 +1029,26 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
                 append-only ledger), an in-flight durable return, or a visible
                 bookkeeping anomaly. Never balance-derived — the agent
                 wallet's own gas float must never look like a user balance. --- */}
-            {(availableReturnLamports > 0n || activeReturn || returnLedger?.negative || returnRecordBroken || (returnLedger?.anomalies.length ?? 0) > 0) && (
+            {(availableReturnLamports > 0n || activeReturn || returnLedger?.negative || returnRecordBroken ||
+              (returnLedger?.anomalies.length ?? 0) > 0 || returnLedger?.storageUnreadable ||
+              (returnLedger?.malformedKeys?.length ?? 0) > 0) && (
               <div className="rounded-lg border border-border/60 bg-muted/20 p-3 space-y-2">
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-[11px] text-muted-foreground flex-1" data-testid="text-loop-spare-sol">
                     {activeReturn ? (
                       <>
-                        A return of <span className="font-medium text-foreground tabular-nums">{lamportsToSolDisplay(activeReturn.lamports)} SOL</span> is
+                        A return of <span className="font-medium text-foreground tabular-nums">{lamportsToSolDisplay(activeReturn.amountLamports)} SOL</span> is
                         in progress. Retrying is safe — the same request is resumed, never duplicated.
                       </>
                     ) : returnLedger?.negative ? (
                       <>
                         Local records show <span className="font-medium text-foreground tabular-nums">{lamportsToSolDisplay(returnLedger.deficitLamports)} SOL</span> more
                         returned than tracked. Auto-return is paused; nothing was adjusted.
+                        {returnLedger.debitRequestIds.length > 0 && (
+                          <span className="block text-[10px] text-muted-foreground/70 mt-0.5 truncate" data-testid="text-loop-deficit-ids">
+                            {returnLedger.debitRequestIds.slice(0, 3).map(id => id.slice(0, 13)).join(", ")}{returnLedger.debitRequestIds.length > 3 ? "…" : ""}
+                          </span>
+                        )}
                       </>
                     ) : (
                       <>

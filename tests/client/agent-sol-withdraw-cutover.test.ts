@@ -1,14 +1,19 @@
 /**
- * WO2B2DC1 — Cutover verification for agent-sol-withdraw-client.ts
+ * WO2B2DC2 — Cutover verification for agent-sol-withdraw-client.ts
  *
  * Covers: exact key names / field names / origins (no provisional variants);
  * HTTP 200-only success; pending / re-key / manual_review classification;
  * ledger blockers (all four types) block NEW loop_return but not Check/Retry;
  * malformed debit in malformedKeys; negative deficit + debit request IDs;
- * cleanup paths (persist fail / remove fail / success); two-concurrent same-
- * credit race under sequential lock; lock unavailable = zero money effects;
- * file-system scanner checks; finalization mismatch preservation; persistence-
- * before-request; replay; adoption; migration; idempotency.
+ * cleanup paths (persist fail / remove fail / success); truly concurrent same-
+ * credit race under real queued exclusive lock; lock unavailable = zero money
+ * effects; file-system scanner checks; finalization mismatch preservation;
+ * persistence-before-request; replay; adoption; migration; idempotency;
+ * stale amount binds inside lock; balance cap (capLamports) option; hostile
+ * ledger validation (cross-prefix / suffix mismatch); withdraw_conflict terminal
+ * clear; UUID/min/round-trip record validation; insecure random blocked; cleanup
+ * evidence non-blocking; coordinateMigrateLegacy locked; debit-persist and
+ * clear-failure one-debit invariants.
  */
 
 import { readFileSync, readdirSync, statSync } from 'fs';
@@ -20,6 +25,7 @@ import {
   coordinateCheckRetry,
   coordinateCleanupMalformed,
   coordinateLoopReturn,
+  coordinateMigrateLegacy,
   readActiveRecordForDisplay,
   readLedgerViewForDisplay,
   migrateLegacyPendingReturn,
@@ -105,6 +111,22 @@ function useLockThrows() {
   installFakeLock(async () => { throw new DOMException('Lock request failed', 'NotSupportedError'); });
 }
 
+/**
+ * A real single-slot queued exclusive lock — second caller's fn() does NOT
+ * start until the first caller's fn() fully resolves. Used for concurrent tests.
+ */
+function makeSingleQueuedExclusiveLock(): { request: (name: string, opts: unknown, fn: () => Promise<unknown>) => Promise<unknown> } {
+  let chain: Promise<unknown> = Promise.resolve();
+  return {
+    request: (_name: string, _opts: unknown, fn: () => Promise<unknown>): Promise<unknown> => {
+      const result = chain.then(() => fn());
+      // Chain absorbs errors so the next queued caller can still run.
+      chain = result.then(() => {}, () => {});
+      return result;
+    },
+  };
+}
+
 // ─── Fetch mock helpers ───────────────────────────────────────────────────────
 
 type MockResp = { status: number; json: () => Promise<unknown> };
@@ -139,11 +161,16 @@ function failedBody(r: DurableWithdrawRecord) {
   return { state: 'failed', terminal: true, clientRequestId: r.clientRequestId, error: 'Withdrawal failed.' };
 }
 
-/** Directly place a record in storage for test setup (bypasses lock). */
+/**
+ * Directly place a record in storage for test setup (bypasses lock).
+ * Default clientRequestId is crypto.randomUUID() to satisfy the UUID-form
+ * validation added in C2; override with a specific UUID if the test needs
+ * to check the exact value.
+ */
 function placeRecord(s: FakeStorage, overrides: Partial<DurableWithdrawRecord> & { amountLamports: string }): DurableWithdrawRecord {
   const rec: DurableWithdrawRecord = {
     version: 1,
-    clientRequestId: `crid-test-${Math.random().toString(36).slice(2)}`,
+    clientRequestId: crypto.randomUUID(),
     walletAddress: WALLET,
     origin: 'wallet_management',
     createdAt: new Date().toISOString(),
@@ -466,7 +493,7 @@ describe('F — malformed debit included in malformedKeys', () => {
     s.put(creditKey(WALLET, creditSig), JSON.stringify({
       v: 1, kind: 'credit', source: 'loop_close', sig: creditSig, lamports: '10000', at: new Date().toISOString(),
     } satisfies LedgerEntry));
-    // Malformed debit (wrong JSON structure)
+    // Malformed debit (wrong JSON structure — missing requestId)
     s.put(debitKey(WALLET, 'malformed-req'), '{"v":1,"kind":"debit","lamports":"not-a-number"}');
     const ledger = readLedgerViewForDisplay(WALLET, s);
     expect(ledger.malformedKeys).toHaveLength(1);
@@ -488,7 +515,7 @@ describe('G — negative deficit and debit request IDs', () => {
     s.put(creditKey(WALLET, sig1), JSON.stringify({
       v: 1, kind: 'credit', source: 'loop_close', sig: sig1, lamports: '1000', at: new Date().toISOString(),
     } satisfies LedgerEntry));
-    // debit 1 = 3000 lamports
+    // debit 1 = 2000 lamports
     s.put(debitKey(WALLET, 'req-A'), JSON.stringify({
       v: 1, kind: 'debit', requestId: 'req-A', origin: 'loop_return', lamports: '2000', at: new Date().toISOString(),
     } satisfies LedgerEntry));
@@ -558,7 +585,7 @@ describe('I — coordinateCleanupMalformed', () => {
     // anomaly evidence persisted (something in anomaly prefix)
     const anomalyKey = s.allKeys().find(k => k.startsWith(`qv-loop-return-anomaly:v1:${WALLET}:`));
     expect(anomalyKey).toBeDefined();
-    // zero network calls
+    // zero network calls (cleanup is storage-only — fetchImpl not in opts type)
     const sets = s.ops.filter(o => o.op === 'set');
     expect(sets.length).toBeGreaterThan(0); // anomaly written, not just removed
   });
@@ -583,52 +610,71 @@ describe('I — coordinateCleanupMalformed', () => {
     expect(s.raw(requestKey(WALLET))).not.toBeNull();
   });
 
-  it('cleanup makes zero fetch calls', async () => {
+  it('cleanup is storage-only (fetchImpl not in opts type)', async () => {
     const s = new FakeStorage();
     s.put(requestKey(WALLET), 'INVALID');
-    const { fn, calls } = capturedFetch([]);
-    await coordinateCleanupMalformed(WALLET, { storage: s, fetchImpl: fn });
-    expect(calls).toHaveLength(0);
+    // coordinateCleanupMalformed opts has no fetchImpl — the function never calls fetch.
+    const out = await coordinateCleanupMalformed(WALLET, { storage: s });
+    expect(out.outcome).toBe('cleaned');
+    expect(s.raw(requestKey(WALLET))).toBeNull();
   });
 });
 
-// ─── J: Two concurrent same-credit (sequential lock simulation) ───────────────
+// ─── J: Truly concurrent two-tab (real queued exclusive lock) ─────────────────
 
-describe('J — two tabs same-credit: one fetch, one debit, zero residual availability', () => {
-  it('second coordinateLoopReturn with same sig sees zero available after first succeeds', async () => {
-    const creditSig = 'sig-joint-x1';
-    const proceeds = 5_000_000n;
+describe('J — truly concurrent two-tab: one credit, one fetch, one debit, zero availability', () => {
+  it('second caller is NOT in lock body while first holds fetch gate; one credit, one debit', async () => {
+    const lock = makeSingleQueuedExclusiveLock();
+    setGlobalNavigator({ locks: lock });
 
-    // Use a simulated sequential lock: first caller runs to completion, then second.
-    let firstRecord: DurableWithdrawRecord | null = null;
     const s = new FakeStorage();
+    const creditSig = 'sig-conc-j1';
+    const proceeds = 5_000_000n;
+    // Pre-seed the credit so it's available when the first caller's lock body starts.
+    s.put(creditKey(WALLET, creditSig), JSON.stringify({
+      v: 1, kind: 'credit', source: 'loop_close', sig: creditSig, lamports: String(proceeds), at: new Date().toISOString(),
+    } satisfies LedgerEntry));
+
     let fetchCount = 0;
+    let releaseFetch!: () => void;
+    const fetchGate = new Promise<void>(r => { releaseFetch = r; });
+    let firstRecord: DurableWithdrawRecord | null = null;
 
     const fetchImpl = async () => {
       fetchCount++;
-      if (firstRecord === null) {
-        firstRecord = JSON.parse(s.raw(requestKey(WALLET))!) as DurableWithdrawRecord;
-      }
+      if (!firstRecord) firstRecord = JSON.parse(s.raw(requestKey(WALLET))!) as DurableWithdrawRecord;
+      await fetchGate; // hold until explicitly released
       return mkRes(200, successBody(firstRecord!));
     };
 
-    // First call: credit recorded, record created, fetched, debit written.
-    const out1 = await coordinateLoopReturn(WALLET, creditSig, proceeds, { storage: s, fetchImpl });
+    // Launch CONCURRENTLY — neither is awaited before the other is started.
+    const p1 = coordinateLoopReturn(WALLET, creditSig, proceeds, { storage: s, fetchImpl });
+    const p2 = coordinateLoopReturn(WALLET, creditSig, proceeds, { storage: s, fetchImpl });
+
+    // Yield to microtasks: p1's lock body runs and suspends at fetchGate.
+    // p2 is queued on the lock chain and has NOT entered its body.
+    await new Promise(r => setTimeout(r, 10));
+
+    // p1 has fetched (fetchCount=1), p2 has NOT entered the lock body yet.
+    expect(fetchCount).toBe(1);
+
+    // Release p1's fetch gate → p1 finishes → chain unblocks → p2 enters.
+    releaseFetch();
+
+    const [out1, out2] = await Promise.all([p1, p2]);
+
     expect(out1.outcome).toBe('success');
-    expect(fetchCount).toBe(1);
-
-    // Second call: same sig (credit already), re-derives ledger inside lock.
-    // Debit from first success consumed the credit → available = 0.
-    const out2 = await coordinateLoopReturn(WALLET, creditSig, proceeds, { storage: s, fetchImpl });
+    // p2 entered the lock AFTER p1's debit was written → available = 0.
     expect(out2.outcome).toBe('no_funds_available');
-    // No second fetch fired.
+    // Still only one fetch total.
     expect(fetchCount).toBe(1);
 
-    // Ledger: one credit, one debit, balance = 0.
     const ledger = readLedgerViewForDisplay(WALLET, s);
     expect(ledger.creditLamports).toBe(proceeds);
     expect(ledger.debitLamports).toBe(proceeds);
     expect(ledger.availableLamports).toBe(0n);
+
+    useSequentialLock();
   });
 });
 
@@ -761,31 +807,34 @@ describe('L — scanner / file-system checks', () => {
     expect(helperContent).not.toContain('sendTransaction');
     expect(helperContent).not.toContain('confirmTransaction');
   });
+
+  it('LoopVaultControls uses activeReturn.amountLamports not activeReturn.lamports in JSX', () => {
+    const lvc = readFileSync(join(process.cwd(), 'client/src/components/LoopVaultControls.tsx'), 'utf8');
+    // Must not use the old .lamports field accessor in JSX context (after closing paren = not amountLamports)
+    expect(lvc).not.toMatch(/activeReturn\.lamports[^A]/);
+    // Must use the correct field name
+    expect(lvc).toContain('activeReturn.amountLamports');
+  });
+
+  it('LoopVaultControls recovery row condition includes storageUnreadable and malformedKeys checks', () => {
+    const lvc = readFileSync(join(process.cwd(), 'client/src/components/LoopVaultControls.tsx'), 'utf8');
+    expect(lvc).toContain('storageUnreadable');
+    expect(lvc).toContain('malformedKeys');
+  });
+
+  it('LoopVaultControls imports coordinateMigrateLegacy not migrateLegacyPendingReturn for the mount call', () => {
+    const lvc = readFileSync(join(process.cwd(), 'client/src/components/LoopVaultControls.tsx'), 'utf8');
+    expect(lvc).toContain('coordinateMigrateLegacy');
+    // coordinateMigrateLegacy should be called in the mount effect
+    expect(lvc).toContain('void coordinateMigrateLegacy(');
+  });
 });
 
 // ─── M: Finalization mismatch preservation ────────────────────────────────────
 
 describe('M — finalization mismatch: replacement / same-ID-diff-amount never clears', () => {
   it('success while slot holds a DIFFERENT record → success_unfinalized with anomaly', async () => {
-    const s = new FakeStorage();
-    // Place record A in the slot
-    const recA = placeRecord(s, { amountLamports: String(AM) });
-    // The server returns success for A, but before finalization we swap in record B
-    // We test this by using a custom fetchImpl that swaps the record mid-flight
-    const recB = placeRecord(s, { amountLamports: String(AM * 2n), clientRequestId: 'crid-B' });
-    // Restore A for the fetch so the server matches A, but slot holds B
-    s.put(requestKey(WALLET), JSON.stringify(recA));
-
-    const { fn } = capturedFetch([mkRes(200, successBody(recA))]);
-    // Read A, drive it to success. After response received, re-place B in slot to simulate race.
-    // We can't easily inject mid-flight storage mutation, so instead we test the finalize guard
-    // by having the slot hold B when finalize runs.
-    // We simulate by directly placing B in the slot BEFORE calling coordinateCheckRetry,
-    // but coordinateWithdraw reads the slot first, gets A, then on finalize re-reads and finds B.
-    // To do this cleanly: place A first, call coordinateCheckRetry.
-    // Inside the lock, coordinateCheckRetry reads slot → A, drives → success,
-    // then on finalize re-reads slot → should still be A.
-    // The race scenario: we can test by having fetchImpl mutate storage:
+    // Place A, server responds success for A, but B is in the slot when finalize runs.
     const s2 = new FakeStorage();
     const recA2 = placeRecord(s2, { amountLamports: String(AM) });
     const recB2: DurableWithdrawRecord = {
@@ -848,7 +897,9 @@ describe('N — prior retained cells', () => {
 
   it('adoption: coordinateWithdraw drives existing active record instead of creating new', async () => {
     const s = new FakeStorage();
-    const existing = placeRecord(s, { amountLamports: String(AM * 2n), clientRequestId: 'existing-crid' });
+    // Use a UUID-form ID so readRecordFromStorage accepts it as active.
+    const existingCrid = crypto.randomUUID();
+    const existing = placeRecord(s, { amountLamports: String(AM * 2n), clientRequestId: existingCrid });
     const crids: string[] = [];
     const fn = async (_url: string, init: RequestInit) => {
       const body = JSON.parse(init.body as string);
@@ -857,7 +908,7 @@ describe('N — prior retained cells', () => {
     };
     const out = await coordinateWithdraw(WALLET, AM, 'wallet_management', { storage: s, fetchImpl: fn });
     expect(out.outcome).toBe('success');
-    expect(crids[0]).toBe('existing-crid'); // drove the EXISTING record, not a new one
+    expect(crids[0]).toBe(existingCrid); // drove the EXISTING record, not a new one
   });
 
   it('migration: legacy pending-return value becomes ledger credit, old key removed', () => {
@@ -907,5 +958,578 @@ describe('N — prior retained cells', () => {
     const ledger = readLedgerViewForDisplay(WALLET, s);
     expect(ledger.creditLamports).toBe(0n);
     expect(ledger.anomalies.length).toBeGreaterThan(0);
+  });
+});
+
+// ─── O: Stale amount binds to ledger availability inside the lock ─────────────
+
+describe('O — coordinateWithdraw loop_return: stale amount binds to ledger availability', () => {
+  it('proposed > available → effective amount capped at available (not proposed)', async () => {
+    const s = new FakeStorage();
+    const creditSig = 'sig-cap-o1';
+    const available = 3_000_000n;
+    const proposed = 8_000_000n; // intentionally larger than available
+    s.put(creditKey(WALLET, creditSig), JSON.stringify({
+      v: 1, kind: 'credit', source: 'loop_close', sig: creditSig, lamports: String(available), at: new Date().toISOString(),
+    } satisfies LedgerEntry));
+    let capturedLamports: string | null = null;
+    const out = await coordinateWithdraw(WALLET, proposed, 'loop_return', {
+      storage: s,
+      fetchImpl: async () => {
+        const rec = JSON.parse(s.raw(requestKey(WALLET))!) as DurableWithdrawRecord;
+        capturedLamports = rec.amountLamports;
+        return mkRes(200, successBody(rec));
+      },
+    });
+    expect(out.outcome).toBe('success');
+    expect(capturedLamports).toBe('3000000'); // capped at available, not proposed
+    if (out.outcome === 'success') expect(out.amountLamports).toBe('3000000');
+  });
+
+  it('proposed === available → sends exact amount unchanged', async () => {
+    const s = new FakeStorage();
+    const sig = 'sig-exact-o2';
+    const amount = 5_000_000n;
+    s.put(creditKey(WALLET, sig), JSON.stringify({
+      v: 1, kind: 'credit', source: 'loop_close', sig, lamports: String(amount), at: new Date().toISOString(),
+    } satisfies LedgerEntry));
+    let capturedLamports: string | null = null;
+    const out = await coordinateWithdraw(WALLET, amount, 'loop_return', {
+      storage: s,
+      fetchImpl: async () => {
+        const rec = JSON.parse(s.raw(requestKey(WALLET))!) as DurableWithdrawRecord;
+        capturedLamports = rec.amountLamports;
+        return mkRes(200, successBody(rec));
+      },
+    });
+    expect(out.outcome).toBe('success');
+    expect(capturedLamports).toBe(String(amount));
+  });
+
+  it('proposed > 0 but availability consumed → no_funds_available, zero fetch', async () => {
+    const s = new FakeStorage();
+    // No credits in ledger → available = 0
+    const { fn, calls } = capturedFetch([]);
+    const out = await coordinateWithdraw(WALLET, AM, 'loop_return', { storage: s, fetchImpl: fn });
+    expect(out.outcome).toBe('no_funds_available');
+    expect(calls).toHaveLength(0);
+  });
+});
+
+// ─── P: Truly concurrent coordinateWithdraw loop_return ──────────────────────
+
+describe('P — concurrent coordinateWithdraw loop_return: stale amount, one fetch, one debit', () => {
+  it('two concurrent calls: first succeeds, second sees zero availability (no fetch)', async () => {
+    const lock = makeSingleQueuedExclusiveLock();
+    setGlobalNavigator({ locks: lock });
+
+    const s = new FakeStorage();
+    const creditSig = 'sig-conc-p2';
+    const proceeds = 5_000_000n;
+    s.put(creditKey(WALLET, creditSig), JSON.stringify({
+      v: 1, kind: 'credit', source: 'loop_close', sig: creditSig, lamports: String(proceeds), at: new Date().toISOString(),
+    } satisfies LedgerEntry));
+
+    let fetchCount = 0;
+    let releaseFetch!: () => void;
+    const fetchGate = new Promise<void>(r => { releaseFetch = r; });
+    let firstRecord: DurableWithdrawRecord | null = null;
+
+    const fetchImpl = async () => {
+      fetchCount++;
+      if (!firstRecord) firstRecord = JSON.parse(s.raw(requestKey(WALLET))!) as DurableWithdrawRecord;
+      await fetchGate;
+      return mkRes(200, successBody(firstRecord!));
+    };
+
+    // Both propose the full amount; after lock wait, second sees 0 available.
+    const p1 = coordinateWithdraw(WALLET, proceeds, 'loop_return', { storage: s, fetchImpl });
+    const p2 = coordinateWithdraw(WALLET, proceeds, 'loop_return', { storage: s, fetchImpl });
+
+    await new Promise(r => setTimeout(r, 10));
+    expect(fetchCount).toBe(1); // only p1's fetch has fired
+
+    releaseFetch();
+    const [out1, out2] = await Promise.all([p1, p2]);
+
+    expect(out1.outcome).toBe('success');
+    expect(out2.outcome).toBe('no_funds_available');
+    expect(fetchCount).toBe(1); // still exactly one fetch
+
+    useSequentialLock();
+  });
+});
+
+// ─── Q: Balance cap for coordinateLoopReturn ─────────────────────────────────
+
+describe('Q — coordinateLoopReturn capLamports option', () => {
+  it('cap < available: credit fully persisted; only cap amount is sent', async () => {
+    const s = new FakeStorage();
+    const sig = 'sig-cap-q1';
+    const proceeds = 5_000_000n;
+    const cap = 3_000_000n; // less than proceeds
+    let capturedLamports: string | null = null;
+    const out = await coordinateLoopReturn(WALLET, sig, proceeds, {
+      storage: s,
+      capLamports: cap,
+      fetchImpl: async () => {
+        const rec = JSON.parse(s.raw(requestKey(WALLET))!) as DurableWithdrawRecord;
+        capturedLamports = rec.amountLamports;
+        return mkRes(200, successBody(rec));
+      },
+    });
+    expect(out.outcome).toBe('success');
+    expect(capturedLamports).toBe('3000000'); // capped at cap
+    // Credit fully recorded, debit only for cap
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.creditLamports).toBe(proceeds);
+    expect(ledger.debitLamports).toBe(cap);
+    expect(ledger.availableLamports).toBe(proceeds - cap); // remainder still available
+  });
+
+  it('cap = 0 → credit retained, no fetch fired', async () => {
+    const s = new FakeStorage();
+    const sig = 'sig-cap-q2';
+    const proceeds = 5_000_000n;
+    const { fn, calls } = capturedFetch([]);
+    const out = await coordinateLoopReturn(WALLET, sig, proceeds, {
+      storage: s,
+      capLamports: 0n,
+      fetchImpl: fn,
+    });
+    expect(out.outcome).toBe('no_funds_available');
+    expect(calls).toHaveLength(0);
+    // Credit is retained for manual return later
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.creditLamports).toBe(proceeds);
+    expect(ledger.debitLamports).toBe(0n);
+  });
+
+  it('cap negative → credit retained, no fetch fired', async () => {
+    const s = new FakeStorage();
+    const sig = 'sig-cap-q3';
+    const proceeds = 5_000_000n;
+    const { fn, calls } = capturedFetch([]);
+    const out = await coordinateLoopReturn(WALLET, sig, proceeds, {
+      storage: s,
+      capLamports: -1n,
+      fetchImpl: fn,
+    });
+    expect(out.outcome).toBe('no_funds_available');
+    expect(calls).toHaveLength(0);
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.creditLamports).toBe(proceeds); // retained
+  });
+
+  it('no cap option → sends full available amount', async () => {
+    const s = new FakeStorage();
+    const sig = 'sig-cap-q4';
+    const proceeds = 5_000_000n;
+    let capturedLamports: string | null = null;
+    const out = await coordinateLoopReturn(WALLET, sig, proceeds, {
+      storage: s,
+      fetchImpl: async () => {
+        const rec = JSON.parse(s.raw(requestKey(WALLET))!) as DurableWithdrawRecord;
+        capturedLamports = rec.amountLamports;
+        return mkRes(200, successBody(rec));
+      },
+    });
+    expect(out.outcome).toBe('success');
+    expect(capturedLamports).toBe('5000000'); // full available (no cap)
+  });
+});
+
+// ─── R: Hostile ledger validation (cross-prefix / suffix mismatch) ────────────
+
+describe('R — hostile ledger validation: cross-prefix and suffix-mismatched entries → malformedKeys', () => {
+  it('debit-kind entry at credit-prefix key → malformedKeys (kind mismatch), not summed', () => {
+    const s = new FakeStorage();
+    s.put(creditKey(WALLET, 'bad-kind'), JSON.stringify({
+      v: 1, kind: 'debit', requestId: 'bad-kind', origin: 'loop_return', lamports: '5000', at: new Date().toISOString(),
+    } as LedgerEntry));
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.malformedKeys.length).toBeGreaterThan(0);
+    expect(ledger.creditLamports).toBe(0n);
+    expect(ledger.debitLamports).toBe(0n);
+  });
+
+  it('credit entry with sig different from key suffix → malformedKeys (suffix mismatch)', () => {
+    const s = new FakeStorage();
+    // Key has suffix 'key-sig', but entry.sig is 'different-sig'
+    s.put(creditKey(WALLET, 'key-sig'), JSON.stringify({
+      v: 1, kind: 'credit', source: 'loop_close', sig: 'different-sig', lamports: '5000', at: new Date().toISOString(),
+    } as LedgerEntry));
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.malformedKeys.length).toBeGreaterThan(0);
+    expect(ledger.creditLamports).toBe(0n);
+  });
+
+  it('debit entry with requestId different from key suffix → malformedKeys', () => {
+    const s = new FakeStorage();
+    s.put(debitKey(WALLET, 'req-key'), JSON.stringify({
+      v: 1, kind: 'debit', requestId: 'req-other', origin: 'loop_return', lamports: '5000', at: new Date().toISOString(),
+    } as LedgerEntry));
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.malformedKeys.length).toBeGreaterThan(0);
+    expect(ledger.debitLamports).toBe(0n);
+  });
+
+  it('debit entry with non-loop_return origin → malformedKeys', () => {
+    const s = new FakeStorage();
+    s.put(debitKey(WALLET, 'req-wm'), JSON.stringify({
+      v: 1, kind: 'debit', requestId: 'req-wm', origin: 'wallet_management', lamports: '5000', at: new Date().toISOString(),
+    } as LedgerEntry));
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.malformedKeys.length).toBeGreaterThan(0);
+    expect(ledger.debitLamports).toBe(0n);
+  });
+
+  it('debit entry with zero lamports → malformedKeys (zero debit is invalid)', () => {
+    const s = new FakeStorage();
+    s.put(debitKey(WALLET, 'req-zero'), JSON.stringify({
+      v: 1, kind: 'debit', requestId: 'req-zero', origin: 'loop_return', lamports: '0', at: new Date().toISOString(),
+    } as LedgerEntry));
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.malformedKeys.length).toBeGreaterThan(0);
+    expect(ledger.debitLamports).toBe(0n);
+  });
+
+  it('anomaly-kind entry at credit-prefix key → malformedKeys, NOT counted as anomaly', () => {
+    const s = new FakeStorage();
+    s.put(creditKey(WALLET, 'not-an-anomaly'), JSON.stringify({
+      v: 1, kind: 'anomaly', code: 'test_code', detail: 'test', at: new Date().toISOString(),
+    } as LedgerEntry));
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.malformedKeys.length).toBeGreaterThan(0);
+    expect(ledger.creditLamports).toBe(0n);
+    expect(ledger.anomalies).toHaveLength(0); // not counted (wrong prefix)
+  });
+
+  it('anomaly entry at anomaly-prefix with wrong code in suffix → malformedKeys', () => {
+    const s = new FakeStorage();
+    const k = anomalyKeyFor(WALLET, 'real_code', 'seed');
+    // Tamper: put an entry with different code than what the key encodes
+    s.put(k, JSON.stringify({
+      v: 1, kind: 'anomaly', code: 'tampered_code', detail: 'test', at: new Date().toISOString(),
+    } as LedgerEntry));
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.malformedKeys.length).toBeGreaterThan(0);
+    expect(ledger.anomalies).toHaveLength(0);
+  });
+
+  it('valid credit co-exists with cross-prefix entry; only valid credit is summed', () => {
+    const s = new FakeStorage();
+    const sig = 'sig-valid-r';
+    s.put(creditKey(WALLET, sig), JSON.stringify({
+      v: 1, kind: 'credit', source: 'loop_close', sig, lamports: '10000', at: new Date().toISOString(),
+    } as LedgerEntry));
+    // Cross-prefix: debit-kind at credit-prefix
+    s.put(creditKey(WALLET, 'cross-kind'), JSON.stringify({
+      v: 1, kind: 'debit', requestId: 'cross-kind', origin: 'loop_return', lamports: '9999', at: new Date().toISOString(),
+    } as LedgerEntry));
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.creditLamports).toBe(10000n); // only valid credit counted
+    expect(ledger.debitLamports).toBe(0n);
+    expect(ledger.malformedKeys).toHaveLength(1);
+  });
+});
+
+// ─── S: withdraw_conflict terminal behavior ───────────────────────────────────
+
+describe('S — withdraw_conflict is terminal: clear + no debit + fresh-ID guidance', () => {
+  it('withdraw_conflict on exact ID → terminal_failure cleared, no debit, fresh-ID hint in message', async () => {
+    const s = new FakeStorage();
+    const rec = placeRecord(s, { amountLamports: String(AM), origin: 'loop_return' });
+    const conflictBody = {
+      state: 'failed', terminal: true, clientRequestId: rec.clientRequestId,
+      error: 'The slot is occupied.', step: 'withdraw_conflict',
+    };
+    const { fn } = capturedFetch([mkRes(400, conflictBody)]);
+    const out = await coordinateCheckRetry(WALLET, { storage: s, fetchImpl: fn });
+    expect(out.outcome).toBe('terminal_failure');
+    if (out.outcome === 'terminal_failure') {
+      expect(out.cleared).toBe(true);
+      // Message must include fresh-ID guidance
+      const msg = out.message.toLowerCase();
+      expect(msg).toMatch(/fresh|new|cleanup|slot/);
+    }
+    // Record cleared
+    expect(s.raw(requestKey(WALLET))).toBeNull();
+    // No debit written (terminal failure, not success)
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.debitLamports).toBe(0n);
+  });
+
+  it('withdraw_conflict on mismatched ID → mismatched (not terminal), record retained', async () => {
+    const s = new FakeStorage();
+    placeRecord(s, { amountLamports: String(AM) });
+    const conflictBody = {
+      state: 'failed', terminal: true, clientRequestId: 'completely-different-id',
+      error: 'Slot occupied.', step: 'withdraw_conflict',
+    };
+    const { fn } = capturedFetch([mkRes(400, conflictBody)]);
+    const out = await coordinateCheckRetry(WALLET, { storage: s, fetchImpl: fn });
+    // Mismatched ID → mismatched, not terminal_failure
+    expect(out.outcome).toBe('mismatched');
+    // Record retained
+    expect(s.raw(requestKey(WALLET))).not.toBeNull();
+  });
+
+  it('standard terminal failure (no step field) also clears the record', async () => {
+    const s = new FakeStorage();
+    const rec = placeRecord(s, { amountLamports: String(AM) });
+    const { fn } = capturedFetch([mkRes(400, failedBody(rec))]);
+    const out = await coordinateCheckRetry(WALLET, { storage: s, fetchImpl: fn });
+    expect(out.outcome).toBe('terminal_failure');
+    if (out.outcome === 'terminal_failure') expect(out.cleared).toBe(true);
+    expect(s.raw(requestKey(WALLET))).toBeNull();
+  });
+});
+
+// ─── T: UUID / min-lamports / round-trip validation; insecure random blocked ─
+
+describe('T — record validation: UUID form, min-lamports, round-trip; insecure random → null', () => {
+  it('stored record with non-UUID clientRequestId treated as no active record', async () => {
+    const s = new FakeStorage();
+    const rec: DurableWithdrawRecord = {
+      version: 1, clientRequestId: 'crid-not-a-uuid', // fails UUID validation
+      walletAddress: WALLET, amountLamports: String(AM), origin: 'wallet_management',
+      createdAt: new Date().toISOString(),
+    };
+    s.put(requestKey(WALLET), JSON.stringify(rec));
+    const { fn, calls } = capturedFetch([]);
+    const out = await coordinateCheckRetry(WALLET, { storage: s, fetchImpl: fn });
+    // Invalid record → no active record (treated as invalid)
+    expect(out.outcome).toBe('no_active_record');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('stored record with amountLamports below MIN_WITHDRAW_LAMPORTS treated as invalid', async () => {
+    const s = new FakeStorage();
+    const rec: DurableWithdrawRecord = {
+      version: 1, clientRequestId: crypto.randomUUID(),
+      walletAddress: WALLET, amountLamports: '100', // below MIN (1000)
+      origin: 'wallet_management', createdAt: new Date().toISOString(),
+    };
+    s.put(requestKey(WALLET), JSON.stringify(rec));
+    const { fn, calls } = capturedFetch([]);
+    const out = await coordinateCheckRetry(WALLET, { storage: s, fetchImpl: fn });
+    expect(out.outcome).toBe('no_active_record');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('record created by coordinator has UUID v4-form clientRequestId', async () => {
+    const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const s = new FakeStorage();
+    let capturedId = '';
+    await coordinateWithdraw(WALLET, AM, 'wallet_management', {
+      storage: s,
+      fetchImpl: async () => {
+        const rec = JSON.parse(s.raw(requestKey(WALLET))!) as DurableWithdrawRecord;
+        capturedId = rec.clientRequestId;
+        return mkRes(200, successBody(rec));
+      },
+    });
+    expect(UUID_V4_RE.test(capturedId)).toBe(true);
+  });
+
+  it('when crypto is absent → persist_failed, zero fetch, zero storage write', async () => {
+    const origCrypto = (globalThis as { crypto?: Crypto }).crypto;
+    Object.defineProperty(globalThis, 'crypto', { value: undefined, configurable: true, writable: true });
+    try {
+      const s = new FakeStorage();
+      const { fn, calls } = capturedFetch([]);
+      const out = await coordinateWithdraw(WALLET, AM, 'wallet_management', { storage: s, fetchImpl: fn });
+      expect(out.outcome).toBe('persist_failed');
+      expect(calls).toHaveLength(0);
+      expect(s.raw(requestKey(WALLET))).toBeNull();
+    } finally {
+      Object.defineProperty(globalThis, 'crypto', { value: origCrypto, configurable: true, writable: true });
+    }
+  });
+});
+
+// ─── U: Cleanup evidence is non-blocking ─────────────────────────────────────
+
+describe('U — malformed_record_cleaned evidence does not block future loop returns', () => {
+  it('after successful cleanup, loop return proceeds without blocked_by_ledger', async () => {
+    const s = new FakeStorage();
+    // Place a malformed record and clean it
+    s.put(requestKey(WALLET), '{ malformed garbage }');
+    const cleanOut = await coordinateCleanupMalformed(WALLET, { storage: s });
+    expect(cleanOut.outcome).toBe('cleaned');
+
+    // Evidence is present
+    const ledger1 = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger1.anomalies.some(a => a.code === 'malformed_record_cleaned')).toBe(true);
+
+    // Now seed a credit and run a loop return — cleanup evidence must NOT block
+    const sig = 'sig-post-cleanup';
+    const proceeds = 5_000_000n;
+    s.put(creditKey(WALLET, sig), JSON.stringify({
+      v: 1, kind: 'credit', source: 'loop_close', sig, lamports: String(proceeds), at: new Date().toISOString(),
+    } satisfies LedgerEntry));
+    const out = await coordinateLoopReturn(WALLET, sig, proceeds, {
+      storage: s,
+      fetchImpl: async () => {
+        const rec = JSON.parse(s.raw(requestKey(WALLET))!) as DurableWithdrawRecord;
+        return mkRes(200, successBody(rec));
+      },
+    });
+    // Must NOT be blocked by the cleanup evidence
+    expect(out.outcome).toBe('success');
+  });
+
+  it('other anomaly codes (non-cleanup) still block new loop_return', async () => {
+    const s = new FakeStorage();
+    writeAnomaly(s, WALLET, 'entry_conflict', 'some-seed', { note: 'real conflict' });
+    const { fn, calls } = capturedFetch([]);
+    const out = await coordinateWithdraw(WALLET, AM, 'loop_return', { storage: s, fetchImpl: fn });
+    expect(out.outcome).toBe('blocked_by_ledger');
+    expect(calls).toHaveLength(0);
+  });
+});
+
+// ─── V: coordinateMigrateLegacy (locked migration) ───────────────────────────
+
+describe('V — coordinateMigrateLegacy: async locked wrapper for migrateLegacyPendingReturn', () => {
+  it('migrates legacy value under lock and returns migrated status', async () => {
+    const s = new FakeStorage();
+    s.put(legacyPendingReturnKey(WALLET), '0.5'); // 0.5 SOL
+    const result = await coordinateMigrateLegacy(WALLET, s);
+    expect(result.status).toBe('migrated');
+    if (result.status === 'migrated') expect(result.lamports).toBe('500000000');
+    expect(s.raw(legacyPendingReturnKey(WALLET))).toBeNull();
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.creditLamports).toBe(500_000_000n);
+  });
+
+  it('no legacy key → returns none', async () => {
+    const s = new FakeStorage();
+    const result = await coordinateMigrateLegacy(WALLET, s);
+    expect(result.status).toBe('none');
+  });
+
+  it('concurrent calls under real queued lock: exactly one credit written (idempotent)', async () => {
+    const lock = makeSingleQueuedExclusiveLock();
+    setGlobalNavigator({ locks: lock });
+
+    const s = new FakeStorage();
+    s.put(legacyPendingReturnKey(WALLET), '0.5');
+
+    const [r1, r2] = await Promise.all([
+      coordinateMigrateLegacy(WALLET, s),
+      coordinateMigrateLegacy(WALLET, s),
+    ]);
+
+    // One of them migrated; the other found the key already gone
+    expect([r1.status, r2.status]).toContain('migrated');
+    expect(s.raw(legacyPendingReturnKey(WALLET))).toBeNull();
+    // Exactly one credit entry (idempotent second call: 'already')
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.creditLamports).toBe(500_000_000n);
+
+    useSequentialLock();
+  });
+
+  it('lock unavailable → returns none (idempotent; will succeed on next call)', async () => {
+    useLockUnavailable();
+    const s = new FakeStorage();
+    s.put(legacyPendingReturnKey(WALLET), '0.1');
+    const result = await coordinateMigrateLegacy(WALLET, s);
+    // Lock unavailable → none (the value stays in place for the next call)
+    expect(result.status).toBe('none');
+    useSequentialLock();
+  });
+});
+
+// ─── W: Debit-persist-failure then same-ID one debit ─────────────────────────
+
+describe('W — debit-persist-failure then retry: exactly one debit, not two', () => {
+  it('first call: server success + debit write fails → success_unfinalized; retry: same ID, one debit', async () => {
+    const s = new FakeStorage();
+    const creditSig = 'sig-dbpf-w1';
+    const proceeds = 5_000_000n;
+    s.put(creditKey(WALLET, creditSig), JSON.stringify({
+      v: 1, kind: 'credit', source: 'loop_close', sig: creditSig, lamports: String(proceeds), at: new Date().toISOString(),
+    } satisfies LedgerEntry));
+
+    let firstRec: DurableWithdrawRecord | null = null;
+
+    // First call: server returns success, but debit writes fail
+    const out1 = await coordinateLoopReturn(WALLET, creditSig, proceeds, {
+      storage: s,
+      fetchImpl: async () => {
+        firstRec = JSON.parse(s.raw(requestKey(WALLET))!) as DurableWithdrawRecord;
+        s.failSetFor = (k) => k.startsWith('qv-loop-return-debit:');
+        return mkRes(200, successBody(firstRec!));
+      },
+    });
+    expect(out1.outcome).toBe('success_unfinalized');
+    if (out1.outcome === 'success_unfinalized') expect(out1.reason).toBe('debit_persist_failed');
+
+    // Record NOT cleared (debit failed)
+    expect(s.raw(requestKey(WALLET))).not.toBeNull();
+
+    // Restore normal writes
+    s.failSetFor = null;
+
+    // Retry (same record ID): server returns success again, debit is now 'already' (idempotent)
+    const out2 = await coordinateCheckRetry(WALLET, {
+      storage: s,
+      fetchImpl: async () => mkRes(200, successBody(firstRec!)),
+    });
+    expect(out2.outcome).toBe('success');
+
+    // Exactly one debit
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.debitLamports).toBe(proceeds);
+    expect(ledger.debitRequestIds).toHaveLength(1);
+    expect(ledger.debitRequestIds[0]).toBe(firstRec!.clientRequestId);
+  });
+});
+
+// ─── X: Clear-failure then same-ID one debit ─────────────────────────────────
+
+describe('X — clear-failure then retry: record stays but debit is idempotent', () => {
+  it('first call: debit ok + clear fails → success_unfinalized; retry: same ID, one debit total', async () => {
+    const s = new FakeStorage();
+    const creditSig = 'sig-clf-x1';
+    const proceeds = 5_000_000n;
+    s.put(creditKey(WALLET, creditSig), JSON.stringify({
+      v: 1, kind: 'credit', source: 'loop_close', sig: creditSig, lamports: String(proceeds), at: new Date().toISOString(),
+    } satisfies LedgerEntry));
+
+    let firstRec: DurableWithdrawRecord | null = null;
+
+    // First call: debit succeeds, record clear fails
+    const out1 = await coordinateLoopReturn(WALLET, creditSig, proceeds, {
+      storage: s,
+      fetchImpl: async () => {
+        firstRec = JSON.parse(s.raw(requestKey(WALLET))!) as DurableWithdrawRecord;
+        s.failRemoveFor = (k) => k === requestKey(WALLET);
+        return mkRes(200, successBody(firstRec!));
+      },
+    });
+    expect(out1.outcome).toBe('success_unfinalized');
+    if (out1.outcome === 'success_unfinalized') expect(out1.reason).toBe('clear_failed');
+
+    // Record still present (remove failed)
+    expect(s.raw(requestKey(WALLET))).not.toBeNull();
+
+    // Restore normal removes
+    s.failRemoveFor = null;
+
+    // Retry: drives same record; server returns success; debit is 'already' → still one debit
+    const out2 = await coordinateCheckRetry(WALLET, {
+      storage: s,
+      fetchImpl: async () => mkRes(200, successBody(firstRec!)),
+    });
+    expect(out2.outcome).toBe('success');
+
+    // Still exactly one debit (idempotent)
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.debitLamports).toBe(proceeds);
+    expect(ledger.debitRequestIds).toHaveLength(1);
   });
 });

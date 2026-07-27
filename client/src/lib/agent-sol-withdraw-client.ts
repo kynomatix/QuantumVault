@@ -1,41 +1,37 @@
 /**
- * WO2B2DC1 — Canonical client coordinator for agent-wallet SOL withdrawals.
+ * WO2B2DC2 — Canonical client coordinator for agent-wallet SOL withdrawals.
  *
- * Both client surfaces that return agent-wallet SOL to the user's wallet
- * (Wallet Management "Withdraw SOL" and the SOL Loop "Return to Wallet")
- * drive the SAME wallet-scoped durable request record through the
- * server-executed withdrawal endpoint. The browser never decodes, signs,
- * sends, or confirms a withdrawal transaction, and never calls the
- * neutralized legacy confirm endpoint.
+ * Both client surfaces (Wallet Management "Withdraw SOL" and SOL Loop
+ * "Return to Wallet") drive the same wallet-scoped durable request record
+ * through the server-executed withdrawal endpoint. The browser never decodes,
+ * signs, sends, or confirms a withdrawal transaction.
+ *
+ * Changes from C1 → C2:
+ *  - Stale-amount correction: coordinateWithdraw for loop_return binds the
+ *    proposed amount to min(proposed, current ledger availability) inside the
+ *    lock before creating a record.
+ *  - Balance-as-cap restored: coordinateLoopReturn accepts opts.capLamports;
+ *    credit is persisted before cap lookup; cap=0 retains credit with zero fetch.
+ *  - withdraw_conflict is now terminal (clear + no debit), not a permanent blocker.
+ *  - Ledger validation: every entry is validated against its key prefix AND
+ *    suffix (sig/requestId must match). Cross-prefix, suffix mismatch, wrong
+ *    origin, zero debit lamports → malformedKeys, not summed.
+ *  - Record validation: UUID v4 form, amount >= MIN_WITHDRAW_LAMPORTS, exact
+ *    SOL round-trip. genClientRequestId returns null when no secure source.
+ *  - Cleanup evidence (malformed_record_cleaned) is non-blocking for future
+ *    loop returns.
+ *  - Legacy migration runs under the exclusive wallet lock (coordinateMigrateLegacy).
  *
  * Durability contract:
- *  - A request record is persisted AND read back BEFORE the first request.
- *    Retries replay the same clientRequestId + exact amountLamports.
- *  - HTTP 200 + success:true + state:'succeeded' + exact-ID + exact-lamports
- *    is the ONLY success shape. Any success-shaped body on a non-200 status
- *    retains the record, writes no debit, and clears nothing.
- *  - Terminal failure (state:'failed' + terminal:true + exact-ID) is the
- *    ONLY clear other than success; it does not write a debit.
- *  - All other responses (auth/network/parse/mismatch/pending/unknown) retain.
+ *  - Record persisted AND read back BEFORE first fetch. Retries replay same ID+lamports.
+ *  - HTTP 200 + success:true + state:'succeeded' + exact-ID + exact-lamports = only success.
+ *  - Terminal failure (state:'failed' + terminal:true + exact-ID) = only clear (no debit).
+ *  - All other responses retain.
  *
- * Web Locks serialization:
- *  - All coordinator actions that read/create/drive/finalize the request or
- *    append ledger entries go through the exclusive lock
- *    qv-agent-sol-withdraw:v1:<walletAddress>:lock.
- *  - If navigator.locks is unavailable or acquisition throws → fail closed
- *    with outcome 'coordination_unavailable' and zero money effects.
- *  - No fallback to localStorage lease, version CAS, or BroadcastChannel.
- *
- * Ledger blockers:
- *  - Any anomaly, malformed key, unreadable storage, or negative balance
- *    blocks creating a NEW loop_return request.
- *  - These blockers NEVER prevent Check/Retry of an existing valid request.
- *
- * Finalization:
- *  - Compares the complete stored record (version + clientRequestId +
- *    walletAddress + amountLamports + origin) — not just the ID.
- *    A superseded/replacement record is preserved with an anomaly; the
- *    outcome is never falsely reported as 'cleared'.
+ * Web Locks:
+ *  - All mutations go through qv-agent-sol-withdraw:v1:<wallet>:lock (exclusive).
+ *  - Unavailable or throws → coordination_unavailable, zero money effects.
+ *  - No fallback (no CAS, no BroadcastChannel, no lease).
  */
 
 // ─── Types & constants ──────────────────────────────────────────────────────
@@ -74,12 +70,12 @@ export interface LedgerView {
   negative: boolean;
   deficitLamports: bigint;
   anomalies: Array<{ key: string; code: string; detail: string }>;
-  /** Keys holding unparseable or foreign payloads — surfaced, never deleted. */
+  /** Keys holding unparseable or cross-prefix/suffix-mismatched payloads — surfaced, never deleted. */
   malformedKeys: string[];
-  /** Debit request IDs parsed from debit entries (for deficit display). */
+  /** Debit request IDs parsed from valid debit entries (for deficit display). */
   debitRequestIds: string[];
   entries: Array<{ key: string; entry: LedgerEntry }>;
-  /** True when the storage enumeration or a key read failed entirely. */
+  /** True when storage enumeration or a key read failed entirely. */
   storageUnreadable: boolean;
 }
 
@@ -95,7 +91,6 @@ export type CoordinatorOutcome =
   | { outcome: 'terminal_failure'; cleared: boolean; message: string }
   | { outcome: 'pending'; message: string; signature: string | null }
   | { outcome: 'manual_review'; message: string; signature: string | null }
-  | { outcome: 'conflict'; message: string }
   | { outcome: 'mismatched'; message: string }
   | { outcome: 'auth'; message: string }
   | { outcome: 'network'; message: string }
@@ -228,16 +223,29 @@ export function maxSendableLamportsFromSol(
   return BigInt(lam);
 }
 
-function genClientRequestId(): string {
-  const c: Crypto | undefined = (globalThis as { crypto?: Crypto }).crypto;
-  if (c && typeof c.randomUUID === 'function') return c.randomUUID();
-  const bytes = new Uint8Array(16);
-  if (c && typeof c.getRandomValues === 'function') c.getRandomValues(bytes);
-  else for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const h = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+/** UUID v4 regex — the only form generated by crypto.randomUUID / crypto.getRandomValues. */
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const isUuidV4Form = (s: string): boolean => UUID_V4_RE.test(s);
+
+/**
+ * Returns a UUID v4 string using only secure platform randomness.
+ * Returns null if neither crypto.randomUUID nor crypto.getRandomValues is available —
+ * callers MUST fail closed (no persist, no fetch) in this case.
+ */
+function genClientRequestId(): string | null {
+  const c = (globalThis as { crypto?: Crypto }).crypto;
+  if (!c) return null;
+  if (typeof c.randomUUID === 'function') return c.randomUUID();
+  if (typeof c.getRandomValues === 'function') {
+    const bytes = new Uint8Array(16);
+    c.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const h = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+  }
+  return null; // No secure randomness — caller must fail closed.
 }
 
 const nowIso = (): string => new Date().toISOString();
@@ -275,7 +283,7 @@ function safeRemoveVerified(storage: StorageLike, key: string): boolean {
   return back.ok && back.value === null;
 }
 
-// ─── Append-only ledger ──────────────────────────────────────────────────────
+// ─── Ledger entry parsing ────────────────────────────────────────────────────
 
 function parseEntry(raw: string): LedgerEntry | null {
   try {
@@ -318,6 +326,75 @@ function entryEquivalent(a: LedgerEntry, b: LedgerEntry): boolean {
   }
   return false;
 }
+
+// ─── Ledger entry validation (prefix + suffix + identity binding) ────────────
+
+/**
+ * Validates that a parsed LedgerEntry is consistent with its storage key:
+ *  - Credit-prefix keys must hold credit entries; loop_close sig must match
+ *    key suffix exactly; lamports must be positive. Legacy migration uses the
+ *    deterministic suffix 'legacy_migration' and may have zero lamports.
+ *  - Debit-prefix keys must hold debit entries with positive lamports,
+ *    loop_return origin, and requestId exactly matching the key suffix.
+ *  - Anomaly-prefix keys must hold anomaly entries whose suffix is
+ *    code:8hexchars (fnv1a hash).
+ *
+ * Returns false for cross-prefix kind, suffix mismatch, wrong origin/amount —
+ * these go to malformedKeys and are never summed.
+ */
+function validateLedgerEntry(
+  key: string,
+  entry: LedgerEntry,
+  walletAddress: string,
+): boolean {
+  const cp = creditPrefix(walletAddress);
+  const dp = debitPrefix(walletAddress);
+  const ap = anomalyPrefix(walletAddress);
+
+  if (key.startsWith(cp)) {
+    if (entry.kind !== 'credit') return false;
+    const suffix = key.slice(cp.length);
+    if (entry.source === 'loop_close') {
+      if (!entry.sig || entry.sig.trim().length === 0) return false;
+      if (suffix !== entry.sig) return false; // key suffix must match sig exactly
+      if (!isDigits(entry.lamports) || BigInt(entry.lamports) <= 0n) return false;
+    } else if (entry.source === 'legacy_migration') {
+      if (suffix !== 'legacy_migration') return false; // deterministic, single key per wallet
+      if (!isDigits(entry.lamports)) return false; // zero allowed for 0-SOL legacy
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  if (key.startsWith(dp)) {
+    if (entry.kind !== 'debit') return false;
+    const suffix = key.slice(dp.length);
+    if (!entry.requestId || entry.requestId.trim().length === 0) return false;
+    if (suffix !== entry.requestId) return false; // key suffix must match requestId exactly
+    if (entry.origin !== 'loop_return') return false;
+    if (!isDigits(entry.lamports) || BigInt(entry.lamports) <= 0n) return false;
+    return true;
+  }
+
+  if (key.startsWith(ap)) {
+    if (entry.kind !== 'anomaly') return false;
+    const suffix = key.slice(ap.length);
+    if (!entry.code || entry.code.length === 0) return false;
+    // suffix must be code:fnv1a_hash where fnv1a_hash is exactly 8 lowercase hex chars
+    const lastColon = suffix.lastIndexOf(':');
+    if (lastColon < 0) return false;
+    const codePart = suffix.slice(0, lastColon);
+    const hashPart = suffix.slice(lastColon + 1);
+    if (codePart !== entry.code) return false;
+    if (!/^[0-9a-f]{8}$/.test(hashPart)) return false;
+    return true;
+  }
+
+  return false; // Unknown prefix — should not reach here under normal operation.
+}
+
+// ─── Append-only ledger ──────────────────────────────────────────────────────
 
 export function putLedgerEntry(
   storage: StorageLike,
@@ -382,8 +459,9 @@ function deriveAvailabilityInternal(
     if (!raw.ok) { storageUnreadable = true; continue; }
     if (raw.value === null) continue;
     const entry = parseEntry(raw.value);
-    if (!entry) {
-      malformedKeys.push(key); // malformed debit stays in malformedKeys, never omitted
+    // Reject cross-prefix/suffix-mismatched entries as malformed (not just unparseable).
+    if (!entry || !validateLedgerEntry(key, entry, walletAddress)) {
+      malformedKeys.push(key);
       continue;
     }
     entries.push({ key, entry });
@@ -417,14 +495,16 @@ function readRecordFromStorage(
     const r = JSON.parse(read.value) as DurableWithdrawRecord;
     const idOk =
       typeof r.clientRequestId === 'string' &&
-      r.clientRequestId.trim().length >= 1 &&
-      r.clientRequestId.trim().length <= 128 &&
-      r.clientRequestId === r.clientRequestId.trim();
+      isUuidV4Form(r.clientRequestId);
     const originOk = r.origin === 'wallet_management' || r.origin === 'loop_return';
+    const lamOk =
+      isDigits(r.amountLamports) &&
+      BigInt(r.amountLamports) >= MIN_WITHDRAW_LAMPORTS &&
+      lamportsRoundTripExactly(r.amountLamports);
     if (
       r && typeof r === 'object' && r.version === 1 && idOk &&
-      r.walletAddress === walletAddress && isDigits(r.amountLamports) &&
-      BigInt(r.amountLamports) > 0n && originOk && typeof r.createdAt === 'string'
+      r.walletAddress === walletAddress && lamOk && originOk &&
+      typeof r.createdAt === 'string'
     ) {
       return { status: 'active', record: r };
     }
@@ -446,7 +526,6 @@ function writeRecordToStorage(
 type Classified =
   | { kind: 'matched_success'; signature: string | null }
   | { kind: 'matched_terminal_failure'; message: string }
-  | { kind: 'conflict'; message: string }
   | { kind: 'pending'; message: string; signature: string | null }
   | { kind: 'manual_review'; message: string; signature: string | null }
   | { kind: 'mismatched'; message: string }
@@ -455,12 +534,12 @@ type Classified =
 
 /**
  * Status-aware classification. HTTP 200 + success:true + state:'succeeded' +
- * exact clientRequestId + exact withdrawnLamports is the ONLY success shape.
- * A success-shaped body on any non-200 status RETAINS the record.
+ * exact clientRequestId + exact withdrawnLamports = the ONLY success shape.
+ * Success-shaped body on non-200 retains the record.
  *
- * Pending requires pending:true + exact ID on expected 202 / 400 / 409 status.
- * Terminal failure (state:'failed' + terminal:true + exact ID) clears on any
- * status.
+ * Any exact-ID terminal failure (state:'failed' + terminal:true), including
+ * step:'withdraw_conflict', is matched_terminal_failure — the record is cleared,
+ * no debit is written, and the message includes fresh-ID guidance.
  */
 function classifyHttpResponse(
   status: number,
@@ -476,11 +555,13 @@ function classifyHttpResponse(
   const b = body as Record<string, unknown>;
   const crid = typeof b.clientRequestId === 'string' ? b.clientRequestId : null;
 
-  // Terminal failure — any status, exact ID.
+  // Terminal failure — any status, exact ID. Includes withdraw_conflict.
   if (b.state === 'failed' && b.terminal === true && crid === record.clientRequestId) {
-    const msg = capText(b.error ?? 'The withdrawal failed; no funds were moved.');
-    if (b.step === 'withdraw_conflict') return { kind: 'conflict', message: msg };
-    return { kind: 'matched_terminal_failure', message: msg };
+    const baseMsg = capText(b.error ?? 'The withdrawal failed; no funds were moved.');
+    const freshIdNote = b.step === 'withdraw_conflict'
+      ? ' Use a fresh request ID for the next attempt — the cleanup button frees the slot.'
+      : '';
+    return { kind: 'matched_terminal_failure', message: baseMsg + freshIdNote };
   }
 
   // Success — ONLY on HTTP 200 with full shape match.
@@ -511,7 +592,7 @@ function classifyHttpResponse(
       return { kind: 'manual_review', message: msg, signature: sig };
     }
     if (status === 400) {
-      // Re-key: preserve the truthful server error text.
+      // Re-key: preserve the truthful server error text verbatim.
       const msg = capText(b.error ?? b.message ?? 'The request needs to be re-sent with a new key; retrying is safe.');
       return { kind: 'pending', message: msg, signature: sig };
     }
@@ -521,7 +602,7 @@ function classifyHttpResponse(
     }
   }
 
-  // ID mismatch with a non-empty crid.
+  // Mismatched ID (non-empty crid that differs from ours).
   if (crid !== null && crid !== record.clientRequestId) {
     return {
       kind: 'mismatched',
@@ -532,16 +613,10 @@ function classifyHttpResponse(
   return { kind: 'unknown', message: capText(b.error ?? b.message ?? 'Unrecognized server response.') };
 }
 
-// ─── Finalization (complete record) ─────────────────────────────────────────
+// ─── Finalization (complete record comparison) ───────────────────────────────
 
 type FinalizeResult = 'cleared' | 'superseded' | 'clear_failed';
 
-/**
- * Compares the COMPLETE stored record (version + clientRequestId + walletAddress
- * + amountLamports + origin — createdAt excluded) before removing. A different
- * or unreadable stored record is NEVER deleted; a first-write-wins anomaly is
- * written and 'superseded' is returned.
- */
 function finalizeRecord(
   storage: StorageLike,
   record: DurableWithdrawRecord,
@@ -582,12 +657,20 @@ function finalizeRecord(
 
 // ─── Ledger blocker check ────────────────────────────────────────────────────
 
+/**
+ * Anomaly codes written by successful explicit cleanup. These represent audit
+ * evidence, not unresolved accounting errors, so they do NOT block new
+ * loop_return request creation.
+ */
+const NON_BLOCKING_ANOMALY_CODES = new Set(['malformed_record_cleaned']);
+
 function ledgerBlocksNewLoopReturn(
   view: LedgerView,
 ): { blocked: false } | { blocked: true; reason: string } {
   if (view.storageUnreadable) return { blocked: true, reason: 'storage_unreadable' };
   if (view.malformedKeys.length > 0) return { blocked: true, reason: 'malformed_entries' };
-  if (view.anomalies.length > 0) return { blocked: true, reason: 'anomalies_present' };
+  const blockingAnomalies = view.anomalies.filter(a => !NON_BLOCKING_ANOMALY_CODES.has(a.code));
+  if (blockingAnomalies.length > 0) return { blocked: true, reason: 'anomalies_present' };
   if (view.negative) return { blocked: true, reason: 'negative_balance' };
   return { blocked: false };
 }
@@ -650,7 +733,7 @@ async function innerDrive(
 
   switch (c.kind) {
     case 'matched_success': {
-      // For loop_return origin: write debit BEFORE finalization.
+      // For loop_return: write debit BEFORE finalization.
       if (record.origin === 'loop_return') {
         const entry: LedgerEntry = {
           v: 1, kind: 'debit', requestId: record.clientRequestId,
@@ -698,12 +781,6 @@ async function innerDrive(
         message: c.message,
       };
     }
-    case 'conflict': {
-      writeAnomaly(storage, record.walletAddress, 'withdraw_conflict', `${record.clientRequestId}|conflict`, {
-        requestId: record.clientRequestId, message: c.message,
-      });
-      return { outcome: 'conflict', message: c.message };
-    }
     case 'mismatched': {
       writeAnomaly(storage, record.walletAddress, 'response_mismatch', `${record.clientRequestId}|${c.message.slice(0, 40)}`, {
         requestId: record.clientRequestId, message: c.message,
@@ -740,7 +817,7 @@ async function withWalletLock<T>(
   if (!locks) {
     return {
       outcome: 'coordination_unavailable',
-      message: 'Your browser does not support the Web Locks API. Update your browser or use a different one to perform SOL withdrawals.',
+      message: 'Your browser does not support the Web Locks API. Update your browser or use a different one.',
     };
   }
   try {
@@ -757,6 +834,13 @@ async function withWalletLock<T>(
 
 export interface CoordinatorOpts extends FetchOpts {
   storage?: StorageLike;
+  /**
+   * Optional balance cap for coordinateLoopReturn (in lamports).
+   *  - Provided and positive: send min(ledger_availability, capLamports).
+   *  - Provided and <= 0: credit retained for manual recovery, zero withdrawal fetches.
+   *  - Omitted: uncapped (all ledger availability sent).
+   */
+  capLamports?: bigint | null;
 }
 
 function resolveStorage(opts?: CoordinatorOpts): StorageLike {
@@ -767,9 +851,15 @@ function resolveStorage(opts?: CoordinatorOpts): StorageLike {
 
 /**
  * Create (or adopt) + drive the wallet's single durable withdrawal request.
- * For 'loop_return' origin: also checks ledger blockers before creating a new
- * request. An existing valid record is ALWAYS adopted and driven first,
- * regardless of origin — the slot holds one request at a time.
+ *
+ * Order inside the lock:
+ *  1. Adopt any existing valid record first — regardless of origin or proposed amount.
+ *  2. If invalid/unreadable record: blocked_invalid_record.
+ *  3. No record + loop_return: re-derive availability, apply blockers, bind effective
+ *     amount to min(proposed, available). If effective < MIN: no_funds_available, zero fetches.
+ *  4. No record + wallet_management: use proposed amount as-is.
+ *  5. Validate effective amount, generate secure ID (fail closed if unavailable),
+ *     persist record, drive.
  */
 export async function coordinateWithdraw(
   walletAddress: string,
@@ -778,20 +868,15 @@ export async function coordinateWithdraw(
   opts?: CoordinatorOpts,
 ): Promise<CoordinatorOutcome> {
   if (!walletAddress) return { outcome: 'invalid_amount', reason: 'no_wallet', message: 'No wallet address.' };
-  if (amountLamports < MIN_WITHDRAW_LAMPORTS) {
-    return { outcome: 'invalid_amount', reason: 'below_min', message: 'Amount below the server minimum.' };
-  }
-  const lamStr = amountLamports.toString();
-  if (!lamportsRoundTripExactly(lamStr)) {
-    return { outcome: 'invalid_amount', reason: 'not_representable', message: 'Amount cannot be represented exactly.' };
+  if (amountLamports <= 0n) {
+    return { outcome: 'invalid_amount', reason: 'not_positive', message: 'Amount must be positive.' };
   }
 
   const storage = resolveStorage(opts);
   const lockResult = await withWalletLock(walletAddress, async (): Promise<CoordinatorOutcome> => {
-    // Re-read inside the lock.
+    // 1. Adopt any existing valid record before any new-record validation.
     const existing = readRecordFromStorage(storage, walletAddress);
     if (existing.status === 'active') {
-      // Adopt existing record — drive it, do not overwrite with the input amount.
       return innerDrive(storage, existing.record, opts);
     }
     if (existing.status === 'invalid' || existing.status === 'unreadable') {
@@ -805,7 +890,9 @@ export async function coordinateWithdraw(
         message: 'A stored withdrawal record could not be read; it was preserved. Use the cleanup action before starting a new withdrawal.',
       };
     }
-    // No existing record.
+
+    // 2. No existing record. For loop_return: re-derive and stale-amount correct.
+    let effectiveLamports = amountLamports;
     if (origin === 'loop_return') {
       const ledger = deriveAvailabilityInternal(storage, walletAddress);
       const block = ledgerBlocksNewLoopReturn(ledger);
@@ -817,9 +904,36 @@ export async function coordinateWithdraw(
             '. Resolve the issue shown in the recovery row before starting a new return.',
         };
       }
+      const available = ledger.availableLamports;
+      if (available <= 0n) {
+        return { outcome: 'no_funds_available', message: 'No positive ledger availability; nothing to return.' };
+      }
+      // Bind to current availability — prevents stale proposed amount from exceeding what's tracked.
+      effectiveLamports = amountLamports < available ? amountLamports : available;
     }
+
+    // 3. Validate effective amount.
+    if (effectiveLamports < MIN_WITHDRAW_LAMPORTS) {
+      return origin === 'loop_return'
+        ? { outcome: 'no_funds_available', message: 'Available amount is below the server minimum.' }
+        : { outcome: 'invalid_amount', reason: 'below_min', message: 'Amount below the server minimum.' };
+    }
+    const lamStr = effectiveLamports.toString();
+    if (!lamportsRoundTripExactly(lamStr)) {
+      return { outcome: 'invalid_amount', reason: 'not_representable', message: 'Amount cannot be represented exactly.' };
+    }
+
+    // 4. Secure ID — fail closed if unavailable.
+    const id = genClientRequestId();
+    if (id === null) {
+      return {
+        outcome: 'persist_failed',
+        message: 'Secure randomness is unavailable in this environment; no withdrawal was started. Use a modern browser.',
+      };
+    }
+
     const record: DurableWithdrawRecord = {
-      version: 1, clientRequestId: genClientRequestId(),
+      version: 1, clientRequestId: id,
       walletAddress, amountLamports: lamStr, origin, createdAt: nowIso(),
     };
     if (!writeRecordToStorage(storage, record)) {
@@ -835,7 +949,7 @@ export async function coordinateWithdraw(
 
 /**
  * Drive the wallet's existing durable request without creating a new one.
- * Both surfaces use this for Check / Retry.
+ * Used for Check / Retry on both surfaces. Never consults ledger blockers.
  */
 export async function coordinateCheckRetry(
   walletAddress: string,
@@ -854,9 +968,11 @@ export async function coordinateCheckRetry(
 }
 
 /**
- * Cleanup a malformed (unreadable) request record under the exclusive lock:
- * persist bounded evidence under the anomaly prefix, then remove and verify.
- * Makes ZERO network calls. If evidence persist or removal fails, retains.
+ * Cleanup a malformed (unreadable/invalid) request record under the exclusive lock.
+ * Persists bounded evidence under the anomaly prefix (non-blocking code), then
+ * removes and verifies. Makes ZERO network calls. Retains on any failure.
+ * Successful cleanup evidence (malformed_record_cleaned) does NOT block future
+ * loop returns — it is append-only audit evidence, not an unresolved anomaly.
  */
 export async function coordinateCleanupMalformed(
   walletAddress: string,
@@ -870,7 +986,7 @@ export async function coordinateCleanupMalformed(
     if (read.status === 'active') return { outcome: 'valid_record_kept' };
 
     const rawValue = read.status === 'invalid' ? read.raw : '(unreadable)';
-    // Persist bounded evidence under anomaly prefix.
+    // Persist bounded evidence (non-blocking code — does not block future loop returns).
     const evidenceKey = anomalyKeyFor(walletAddress, 'malformed_record_cleaned', rawValue);
     const evidence: LedgerEntry = {
       v: 1, kind: 'anomaly', code: 'malformed_record_cleaned',
@@ -884,7 +1000,6 @@ export async function coordinateCleanupMalformed(
         message: 'Could not persist cleanup evidence; the malformed record was retained.',
       };
     }
-    // Verify evidence is readable.
     const evidenceBack = safeGet(storage, evidenceKey);
     if (!evidenceBack.ok || evidenceBack.value === null) {
       return {
@@ -892,7 +1007,6 @@ export async function coordinateCleanupMalformed(
         message: 'Cleanup evidence did not read back; the malformed record was retained.',
       };
     }
-    // Remove and verify.
     if (!safeRemoveVerified(storage, requestKey(walletAddress))) {
       return {
         outcome: 'remove_failed_retained',
@@ -905,12 +1019,13 @@ export async function coordinateCleanupMalformed(
 }
 
 /**
- * Loop close/unwind continuation: record the signature-keyed credit (if sig
- * provided), re-derive state, adopt an existing request or create at most one
- * new one (subject to ledger blockers), then drive. A second tab waiting on
- * the same lock re-derives after the first; if the first's matched success
- * consumed the credit (debit written), the waiter's available balance is 0
- * and no new request is created.
+ * Loop close/unwind continuation. All steps under the exclusive lock:
+ *  1. Record credit (sig-keyed) before any balance/availability lookup.
+ *  2. Credit-key conflict → blocked_by_ledger (even if anomaly write fails).
+ *  3. Re-derive ledger. Adopt existing valid record (bypasses blockers).
+ *  4. Check ledger blockers.
+ *  5. Apply opts.capLamports: send min(available, cap). Cap <= 0 retains credit.
+ *  6. Create record and drive.
  */
 export async function coordinateLoopReturn(
   walletAddress: string,
@@ -922,7 +1037,7 @@ export async function coordinateLoopReturn(
   const storage = resolveStorage(opts);
 
   const lockResult = await withWalletLock(walletAddress, async (): Promise<CoordinatorOutcome> => {
-    // 1. Record the credit if a valid signature and positive proceeds.
+    // 1. Record credit under the lock BEFORE balance lookup.
     if (proceedsLamports > 0n) {
       if (typeof sig === 'string' && sig.trim().length > 0) {
         const entry: LedgerEntry = {
@@ -935,16 +1050,20 @@ export async function coordinateLoopReturn(
             message: 'Could not record the SOL proceeds credit. The funds are in the agent wallet; use Return to Wallet to recover them.',
           };
         }
-        // 'ok' | 'already' | 'conflict' — proceed; if conflict an anomaly was written.
+        if (put === 'conflict') {
+          // Conflict blocks even if anomaly write cannot persist.
+          return {
+            outcome: 'blocked_by_ledger',
+            reason: 'credit_conflict',
+            message: 'A conflicting entry exists for this close signature. The recovery row shows available actions.',
+          };
+        }
+        // 'ok' | 'already' — proceed.
       } else {
-        // Missing signature: record anomaly, no credit.
         writeAnomaly(
           storage, walletAddress, 'credit_missing_sig',
           `close-${proceedsLamports.toString()}|${Date.now()}`,
-          {
-            lamports: proceedsLamports.toString(),
-            note: 'Close/unwind reported SOL proceeds without a tx signature; credit not recorded.',
-          },
+          { lamports: proceedsLamports.toString(), note: 'Close/unwind reported SOL proceeds without a tx signature.' },
         );
         return {
           outcome: 'missing_sig_noted',
@@ -953,10 +1072,10 @@ export async function coordinateLoopReturn(
       }
     }
 
-    // 2. Re-derive inside the lock (second tab sees the debit the first tab wrote).
+    // 2. Re-derive inside the lock (second tab sees the debit the first wrote).
     const ledger = deriveAvailabilityInternal(storage, walletAddress);
 
-    // 3. Adopt any existing valid request first (bypasses ledger blockers).
+    // 3. Adopt any existing valid request (bypasses ledger blockers).
     const existing = readRecordFromStorage(storage, walletAddress);
     if (existing.status === 'active') {
       return innerDrive(storage, existing.record, opts);
@@ -967,13 +1086,10 @@ export async function coordinateLoopReturn(
           raw: capText(existing.raw, 200), note: 'Malformed record preserved; cleanup required.',
         });
       }
-      return {
-        outcome: 'blocked_invalid_record',
-        message: 'A stored withdrawal record could not be read; use the cleanup action.',
-      };
+      return { outcome: 'blocked_invalid_record', message: 'A stored withdrawal record could not be read; use the cleanup action.' };
     }
 
-    // 4. Check ledger blockers for creating a new request.
+    // 4. Check ledger blockers for new request creation.
     const block = ledgerBlocksNewLoopReturn(ledger);
     if (block.blocked) {
       return {
@@ -983,8 +1099,16 @@ export async function coordinateLoopReturn(
       };
     }
 
-    // 5. Cap-only sizing: ledger availability caps the amount; balance is NOT a source.
-    const amt = ledger.availableLamports;
+    // 5. Apply balance cap, then size.
+    let amt = ledger.availableLamports;
+    const capLamports = opts?.capLamports;
+    if (capLamports != null) {
+      if (capLamports <= 0n) {
+        // Cap is zero or negative — insufficient balance; credit is retained for manual return.
+        return { outcome: 'no_funds_available', message: 'Insufficient agent balance for the reserve; SOL credit retained for manual return.' };
+      }
+      if (amt > capLamports) amt = capLamports;
+    }
     if (amt < MIN_WITHDRAW_LAMPORTS) {
       return { outcome: 'no_funds_available', message: 'Nothing to return yet.' };
     }
@@ -993,16 +1117,17 @@ export async function coordinateLoopReturn(
       return { outcome: 'invalid_amount', reason: 'not_representable', message: 'Amount cannot be represented exactly.' };
     }
 
-    // 6. Create and drive.
+    // 6. Secure ID and create.
+    const id = genClientRequestId();
+    if (id === null) {
+      return { outcome: 'persist_failed', message: 'Secure randomness unavailable; return not started.' };
+    }
     const record: DurableWithdrawRecord = {
-      version: 1, clientRequestId: genClientRequestId(),
+      version: 1, clientRequestId: id,
       walletAddress, amountLamports: lamStr, origin: 'loop_return', createdAt: nowIso(),
     };
     if (!writeRecordToStorage(storage, record)) {
-      return {
-        outcome: 'persist_failed',
-        message: 'Could not save the return request. Free some browser storage, then retry.',
-      };
+      return { outcome: 'persist_failed', message: 'Could not save the return request. Free some browser storage, then retry.' };
     }
     return innerDrive(storage, record, opts);
   });
@@ -1026,14 +1151,12 @@ export function readLedgerViewForDisplay(
   return deriveAvailabilityInternal(storage ?? window.localStorage, walletAddress);
 }
 
-// ─── Storage-only legacy migration (no lock — idempotent, mount-safe) ────────
+// ─── Legacy migration ─────────────────────────────────────────────────────────
 
 /**
  * One-time deterministic migration of the legacy wallet-scoped numeric
- * pending-return value into an append-only ledger credit. The credit is
- * persisted and read back BEFORE the old key is removed; invalid/negative/
- * empty/non-finite state is preserved with a visible anomaly — never guessed.
- * Safe to call without the lock on mount: credit key is per-sig/deterministic.
+ * pending-return value. Exported for direct testing; production surfaces
+ * should call coordinateMigrateLegacy to run it under the exclusive lock.
  */
 export function migrateLegacyPendingReturn(
   walletAddress: string,
@@ -1069,4 +1192,26 @@ export function migrateLegacyPendingReturn(
   if (put === 'conflict') return { status: 'conflict_preserved', raw };
   if (!safeRemoveVerified(st, oldKey)) return { status: 'migrated_key_stuck', lamports: String(lam) };
   return { status: 'migrated', lamports: String(lam) };
+}
+
+/**
+ * Locked version of migrateLegacyPendingReturn. Call this from mount effects
+ * so concurrent tab mounts cannot produce duplicate credits.
+ * If the lock is unavailable, returns { status: 'none' } — the operation is
+ * idempotent and will succeed on the next call (deterministic credit key).
+ */
+export async function coordinateMigrateLegacy(
+  walletAddress: string,
+  storage?: StorageLike,
+): Promise<LegacyMigrationResult> {
+  if (!walletAddress) return { status: 'none' };
+  const st = storage ?? window.localStorage;
+  const lockResult = await withWalletLock(walletAddress, async (): Promise<LegacyMigrationResult> =>
+    migrateLegacyPendingReturn(walletAddress, st)
+  );
+  // Lock unavailable — skip; idempotent, will succeed on next mount call.
+  if (lockResult && typeof lockResult === 'object' && 'outcome' in lockResult) {
+    return { status: 'none' };
+  }
+  return lockResult as LegacyMigrationResult;
 }
