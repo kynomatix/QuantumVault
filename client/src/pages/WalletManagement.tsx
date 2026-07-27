@@ -1,5 +1,15 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { walletAuthHeaders } from "@/lib/queryClient";
+import {
+  beginWithdraw,
+  driveWithdraw,
+  readActiveRecord,
+  solNumberToLamports,
+  lamportsToSolDisplay,
+  MIN_WITHDRAW_LAMPORTS,
+  type DurableWithdrawRecord,
+  type DriveOutcome,
+} from '@/lib/agent-sol-withdraw-coordinator';
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import { motion } from 'framer-motion';
 import { useWallet } from '@/hooks/useWallet';
@@ -292,6 +302,11 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
 
   const [solWithdrawAmount, setSolWithdrawAmount] = useState('');
   const [solWithdrawing, setSolWithdrawing] = useState(false);
+  // Durable server-executed SOL withdrawal: the wallet's single in-flight
+  // request record (shared with the SOL Loop surface) + a flag for a stored
+  // record that could not be read (preserved, never auto-deleted).
+  const [activeSolWithdraw, setActiveSolWithdraw] = useState<DurableWithdrawRecord | null>(null);
+  const [solWithdrawRecordBroken, setSolWithdrawRecordBroken] = useState(false);
 
   const fetchUserSolBalance = async () => {
     if (!solanaWallet.publicKey) return;
@@ -448,7 +463,87 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
     }
   };
 
+  // [WO2B2D:WALLET-MGMT-BEGIN] Durable server-executed SOL withdrawal.
+  // The browser never decodes, signs, sends, or confirms a transaction here:
+  // one wallet-scoped request record (UUID + exact lamports) is persisted and
+  // read back BEFORE the first request, then the SAME request is replayed
+  // until the server answers with a matched terminal outcome. This surface
+  // also completes loop-origin records — the shared coordinator writes the
+  // loop ledger debit itself on success. Nothing fires automatically on
+  // mount; the resume row only offers an explicit Check / Retry.
+  const refreshActiveSolWithdraw = () => {
+    if (!publicKeyString) {
+      setActiveSolWithdraw(null);
+      setSolWithdrawRecordBroken(false);
+      return;
+    }
+    const read = readActiveRecord(window.localStorage, publicKeyString);
+    setActiveSolWithdraw(read.status === 'active' ? read.record : null);
+    setSolWithdrawRecordBroken(read.status === 'invalid' || read.status === 'unreadable');
+  };
+  useEffect(() => {
+    refreshActiveSolWithdraw();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [publicKeyString]);
+
+  const applySolWithdrawOutcome = async (out: DriveOutcome) => {
+    refreshActiveSolWithdraw();
+    switch (out.outcome) {
+      case 'success':
+        toast({ title: 'SOL Withdrawal Confirmed!', description: out.message });
+        setSolWithdrawAmount('');
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        await Promise.all([fetchUserSolBalance(), fetchAgentBalance()]);
+        break;
+      case 'success_unfinalized':
+        toast({ title: 'Withdrawal completed', description: out.message });
+        break;
+      case 'terminal_failure':
+        toast({ title: 'SOL Withdrawal Failed', description: out.message, variant: 'destructive' });
+        break;
+      case 'pending':
+        toast({ title: 'Withdrawal in progress', description: 'The server is still processing it. Use Check / Retry to finish — the same request is resumed, never duplicated.' });
+        break;
+      case 'manual_review':
+        toast({ title: 'Withdrawal needs manual review', description: out.message, variant: 'destructive' });
+        break;
+      case 'auth':
+        toast({ title: 'Session expired', description: 'Reconnect your wallet, then press Check / Retry.', variant: 'destructive' });
+        break;
+      case 'stale_record':
+        toast({ title: 'Showing the current withdrawal', description: out.message });
+        break;
+      default:
+        toast({ title: 'Withdrawal not confirmed yet', description: `${out.message} The request is kept — press Check / Retry.`, variant: 'destructive' });
+    }
+  };
+
+  /** Explicit Check / Retry for the stored request (never automatic). */
+  const handleDriveSolWithdraw = async () => {
+    if (!publicKeyString) return;
+    const read = readActiveRecord(window.localStorage, publicKeyString);
+    if (read.status !== 'active') {
+      refreshActiveSolWithdraw();
+      return;
+    }
+    setSolWithdrawing(true);
+    try {
+      const out = await driveWithdraw(window.localStorage, read.record, { headers: walletAuthHeaders() });
+      await applySolWithdrawOutcome(out);
+    } finally {
+      setSolWithdrawing(false);
+    }
+  };
+
   const handleSolWithdraw = async () => {
+    if (!publicKeyString) {
+      toast({ title: 'Wallet not connected', variant: 'destructive' });
+      return;
+    }
+    if (activeSolWithdraw) {
+      toast({ title: 'A withdrawal is already in progress', description: 'Finish it with Check / Retry below before starting a new one.' });
+      return;
+    }
     const amount = parseFloat(solWithdrawAmount);
     if (!amount || amount <= 0) {
       toast({ title: 'Enter a valid amount', variant: 'destructive' });
@@ -460,62 +555,37 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       return;
     }
 
+    const lamports = solNumberToLamports(amount);
+    if (lamports === null || lamports < MIN_WITHDRAW_LAMPORTS) {
+      toast({ title: 'Amount too small or not representable', variant: 'destructive' });
+      return;
+    }
+
     setSolWithdrawing(true);
     try {
-      const response = await fetch('/api/agent/withdraw-sol', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount }),
-        credentials: 'include',
-      });
-
-      if (!response.ok) {
-        const error = await safeResponseJson(response);
-        throw new Error(error.error || 'SOL withdrawal failed');
+      const begun = beginWithdraw(window.localStorage, publicKeyString, lamports, 'wallet_mgmt');
+      if (begun.status === 'persist_failed') {
+        toast({ title: 'Could not save the withdrawal request', description: 'Nothing was sent. Free some browser storage, then try again.', variant: 'destructive' });
+        return;
       }
-
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight, message } = await safeResponseJson(response);
-
-      const txBytes = Uint8Array.from(atob(serializedTx), c => c.charCodeAt(0));
-      const signature = await connection.sendRawTransaction(txBytes);
-
-      toast({
-        title: 'Transaction Submitted',
-        description: 'Confirming SOL withdrawal...'
-      });
-
-      await confirmTransactionWithFallback(connection, {
-        signature,
-        blockhash,
-        lastValidBlockHeight,
-      });
-
-      await fetch('/api/agent/confirm-sol-withdraw', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount, txSignature: signature }),
-        credentials: 'include',
-      });
-
-      toast({
-        title: 'SOL Withdrawal Confirmed!',
-        description: message || `Withdrew ${amount} SOL to your wallet`
-      });
-
-      setSolWithdrawAmount('');
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      await Promise.all([fetchUserSolBalance(), fetchAgentBalance()]);
-    } catch (error: any) {
-      console.error('SOL withdraw error:', error);
-      toast({
-        title: 'SOL Withdrawal Failed',
-        description: error.message || 'Please try again',
-        variant: 'destructive'
-      });
+      if (begun.status === 'blocked_invalid_record') {
+        refreshActiveSolWithdraw();
+        toast({ title: 'A stored withdrawal record needs review', description: 'It was preserved; no new withdrawal was started.', variant: 'destructive' });
+        return;
+      }
+      if (begun.status === 'invalid_amount') {
+        toast({ title: 'Invalid amount', variant: 'destructive' });
+        return;
+      }
+      // 'created' or adoption of an existing record — drive the SAME request.
+      setActiveSolWithdraw(begun.record);
+      const out = await driveWithdraw(window.localStorage, begun.record, { headers: walletAuthHeaders() });
+      await applySolWithdrawOutcome(out);
     } finally {
       setSolWithdrawing(false);
     }
   };
+  // [WO2B2D:WALLET-MGMT-END]
 
   const handleSolDeposit = async () => {
     const amount = parseFloat(solDepositAmount);
@@ -1448,6 +1518,33 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
                   <><ArrowUpFromLine className="w-5 h-5 mr-2" /> Withdraw SOL</>
                 )}
               </Button>
+
+              {(activeSolWithdraw || solWithdrawRecordBroken) && (
+                <div className="rounded-lg border border-orange-500/30 bg-orange-500/5 p-3 space-y-2" data-testid="row-sol-withdraw-resume">
+                  {activeSolWithdraw ? (
+                    <>
+                      <p className="text-xs text-muted-foreground">
+                        A withdrawal of <span className="font-medium text-foreground tabular-nums">{lamportsToSolDisplay(activeSolWithdraw.lamports)} SOL</span>
+                        {activeSolWithdraw.origin === 'loop_return' ? ' (loop proceeds)' : ''} is in progress. Retrying is safe — the same request is resumed, never duplicated.
+                      </p>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="w-full"
+                        disabled={solWithdrawing}
+                        onClick={handleDriveSolWithdraw}
+                        data-testid="button-sol-withdraw-resume"
+                      >
+                        {solWithdrawing ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Check / Retry withdrawal'}
+                      </Button>
+                    </>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      A stored withdrawal record could not be read. It was preserved for review — contact support before starting a new SOL withdrawal.
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </DialogContent>

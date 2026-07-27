@@ -11,6 +11,22 @@ import { walletAuthHeaders } from "@/lib/queryClient";
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { getSessionId, toRawBaseUnits, rawToDecimalString } from "@/lib/lending-format";
 import { confirmTransactionWithFallback } from "@/lib/solana-utils";
+import {
+  beginWithdraw,
+  driveWithdraw,
+  readActiveRecord,
+  deriveAvailability,
+  recordLoopCloseCredit,
+  noteMissingCloseSignature,
+  migrateLegacyPendingReturn,
+  computeReturnLamports,
+  maxSendableLamportsFromSol,
+  lamportsToSolDisplay,
+  MIN_WITHDRAW_LAMPORTS,
+  type DurableWithdrawRecord,
+  type DriveOutcome,
+  type LedgerView,
+} from "@/lib/agent-sol-withdraw-coordinator";
 import { SolGasShortfallDialog } from "@/components/SolGasShortfallDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -292,12 +308,16 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
     },
   });
 
-  // Stranded-proceeds tracker (wallet-scoped, survives reloads). ONLY SOL that
-  // a close/unwind actually returned — as reported by the server — may ever be
-  // offered back to the user. Never derived from the wallet balance, so the
-  // agent's own gas float can never show up here.
-  const pendingKey = `qv-loop-pending-return:${publicKeyString ?? "unknown"}`;
-  const [pendingReturnSol, setPendingReturnSol] = useState(0);
+  // [WO2B2D:LOOP-RETURN-BEGIN] Durable server-executed "Return to Wallet".
+  // Stranded-proceeds ledger (wallet-scoped, survives reloads, cross-tab
+  // safe). ONLY SOL that a close/unwind actually returned — as reported by
+  // the server and keyed by that op's tx signature — may ever be offered
+  // back to the user. Never derived from the wallet balance, so the agent's
+  // own gas float can never show up here. Availability is a BigInt sum over
+  // append-only entries; conflicts surface as anomalies, never overwrites.
+  const [returnLedger, setReturnLedger] = useState<LedgerView | null>(null);
+  const [activeReturn, setActiveReturn] = useState<DurableWithdrawRecord | null>(null);
+  const [returnRecordBroken, setReturnRecordBroken] = useState(false);
   // Ref (not state) guard: closes the sub-second window where an auto-return
   // is in flight but `busy` reads stale in a manual click's closure — a
   // double-send would eat the agent's gas float. MUST be declared BEFORE the
@@ -305,28 +325,27 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
   // return crashes the whole page ("Rendered more hooks than during the
   // previous render") the moment the status query resolves.
   const returningRef = useRef(false);
-  const readStoredPending = () => {
-    try {
-      const v = Number(localStorage.getItem(pendingKey) ?? "0");
-      return Number.isFinite(v) && v > 0 ? v : 0;
-    } catch {
-      return 0;
+  const refreshReturnLedger = () => {
+    if (!publicKeyString) {
+      setReturnLedger(null);
+      setActiveReturn(null);
+      setReturnRecordBroken(false);
+      return;
     }
+    setReturnLedger(deriveAvailability(window.localStorage, publicKeyString));
+    const read = readActiveRecord(window.localStorage, publicKeyString);
+    setActiveReturn(read.status === "active" ? read.record : null);
+    setReturnRecordBroken(read.status === "invalid" || read.status === "unreadable");
   };
   useEffect(() => {
-    setPendingReturnSol(readStoredPending());
+    // Storage-only on mount/wallet switch: fold the legacy pending-return
+    // value into one deterministic ledger credit (old key removed only after
+    // the credit is read back; invalid values are preserved with a visible
+    // anomaly). NO money call ever fires from mount.
+    if (publicKeyString) migrateLegacyPendingReturn(window.localStorage, publicKeyString);
+    refreshReturnLedger();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingKey]);
-  const updatePendingReturn = (sol: number) => {
-    const v = Math.max(0, Math.round(sol * 1e4) / 1e4);
-    setPendingReturnSol(v);
-    try {
-      if (v > 0) localStorage.setItem(pendingKey, String(v));
-      else localStorage.removeItem(pendingKey);
-    } catch {
-      /* storage unavailable — state still shows it this session */
-    }
-  };
+  }, [publicKeyString, open]);
 
   // LST retry handle persistence (wallet-scoped, survives reloads). Once the
   // user's LST transfer lands in the internal wallet, this handle is the ONLY
@@ -427,7 +446,10 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
       // for other operations stays put. If this leg fails, nothing is lost:
       // the tracked amount shows in the recovery row.
       if (key.startsWith("close-") || key.startsWith("unwind-")) {
-        void autoReturnProceeds(typeof data.solReturnedLamports === "string" ? data.solReturnedLamports : undefined);
+        void autoReturnProceeds(
+          typeof data.solReturnedLamports === "string" ? data.solReturnedLamports : undefined,
+          typeof data.signature === "string" ? data.signature : undefined,
+        );
       }
     } catch (e: any) {
       if (isSessionError(e)) {
@@ -447,88 +469,157 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
   };
 
   // Send loop proceeds sitting in the internal gas wallet back to the user's
-  // wallet. The tx is agent-signed server-side; the client just submits +
-  // confirms it, then records the equity event (same flow as the wallet page).
-  // Amounts are ALWAYS the exact tracked proceeds — never a balance sweep, so
-  // SOL the agent wallet holds for other operations is never touched.
+  // wallet via the durable server-executed withdrawal — the client never
+  // decodes, signs, sends, or confirms a transaction. Amounts are ALWAYS the
+  // ledger-tracked proceeds — never a balance sweep; the live balance only
+  // CAPS the send (it can never create availability).
   const agentSol = balanceQuery.data?.solBalance ?? null;
-  const round4 = (n: number) => Math.floor(n * 1e4) / 1e4;
   // The withdraw route keeps a 0.005 SOL reserve; leave a hair extra for fees.
-  const maxSendable = (sol: number | null) => (sol !== null ? Math.max(0, round4(sol - 0.006)) : 0);
-  const returnSpareSol = async (amount: number, opts: { auto?: boolean; pendingOnSuccess: number }) => {
-    if (amount <= 0) return;
+  const RETURN_RESERVE_SOL = 0.006;
+  const availableReturnLamports = returnLedger?.availableLamports ?? 0n;
+  const manualReturnLamports = activeReturn
+    ? BigInt(activeReturn.lamports)
+    : computeReturnLamports(availableReturnLamports, maxSendableLamportsFromSol(agentSol, RETURN_RESERVE_SOL));
+
+  const applyReturnOutcome = (out: DriveOutcome, opts: { auto: boolean }) => {
+    refreshReturnLedger();
+    if (out.outcome === "success") {
+      toast({ title: `Returned ${lamportsToSolDisplay(out.lamports)} SOL to your wallet` });
+    } else if (out.outcome === "success_unfinalized") {
+      toast({ title: "Return completed", description: out.message });
+    } else if (out.outcome === "terminal_failure") {
+      toast({ title: "SOL return failed", description: out.message, variant: "destructive" });
+    } else if (out.outcome === "stale_record") {
+      toast({ title: "Showing the current return", description: out.message });
+    } else if (out.outcome === "auth") {
+      showReconnectToast({
+        toast,
+        retryAuth,
+        title: "SOL return needs your session",
+        retry: () => void driveReturn({ auto: false }),
+      });
+    } else if (opts.auto) {
+      // The close itself succeeded — don't scare the user. The recovery row
+      // shows the SOL with a Check / Retry button resuming the SAME request.
+      toast({
+        title: "SOL is waiting to return",
+        description: "Sending the proceeds didn't finish. Use the recovery row below — the same request is resumed, never duplicated.",
+      });
+    } else {
+      toast({ title: "Return not confirmed yet", description: `${out.message} The request is kept — retry below.`, variant: "destructive" });
+    }
+  };
+
+  /** Explicit Check / Retry of the wallet's single durable return request. */
+  const driveReturn = async (opts: { auto: boolean }) => {
+    if (!publicKeyString) return;
+    const read = readActiveRecord(window.localStorage, publicKeyString);
+    if (read.status !== "active") {
+      refreshReturnLedger();
+      return;
+    }
+    setBusy("withdraw-sol");
+    try {
+      const out = await driveWithdraw(window.localStorage, read.record, { headers: walletAuthHeaders() });
+      applyReturnOutcome(out, opts);
+    } finally {
+      setBusy(null);
+      refresh();
+    }
+  };
+
+  // Begin (or adopt) the durable return request, then drive it once. The
+  // record (UUID + exact lamports) is persisted and read back BEFORE any
+  // request is made; a negative ledger blocks new auto-returns outright.
+  const startReturn = async (opts: { auto: boolean }) => {
+    if (!publicKeyString) return;
     if (returningRef.current) return;
     returningRef.current = true;
     setBusy("withdraw-sol");
     try {
-      const res = await fetch("/api/agent/withdraw-sol", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
-        body: JSON.stringify({ amount }),
-      });
-      const data = await safeResponseJson(res);
-      if (!res.ok) throw new Error(data?.error || "SOL return failed");
-      const { transaction: serializedTx, blockhash, lastValidBlockHeight } = data;
-      const txBytes = Uint8Array.from(atob(serializedTx), (c) => c.charCodeAt(0));
-      const signature = await connection.sendRawTransaction(txBytes);
-      await confirmTransactionWithFallback(connection, { signature, blockhash, lastValidBlockHeight });
-      await fetch("/api/agent/confirm-sol-withdraw", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json", ...walletAuthHeaders() },
-        body: JSON.stringify({ amount, txSignature: signature }),
-      });
-      toast({ title: `Returned ${amount.toFixed(4)} SOL to your wallet` });
-      updatePendingReturn(opts.pendingOnSuccess);
-    } catch (e: any) {
-      if (isSessionError(e)) {
-        showReconnectToast({
-          toast,
-          retryAuth,
-          title: "SOL return failed",
-          retry: () => void returnSpareSol(amount, opts),
-        });
-      } else if (opts.auto) {
-        // The close itself succeeded — don't scare the user. The recovery
-        // row shows the SOL with a Return to Wallet button.
+      const ledger = deriveAvailability(window.localStorage, publicKeyString);
+      if (ledger.negative) {
+        refreshReturnLedger();
         toast({
-          title: "SOL is waiting to return",
-          description: "Sending the proceeds to your wallet didn't go through. Use Return to Wallet below.",
+          title: "Return paused",
+          description: `Local records show ${lamportsToSolDisplay(ledger.deficitLamports)} SOL more returned than tracked. Nothing was adjusted — the discrepancy stays visible for review.`,
+          variant: "destructive",
         });
-      } else {
-        toast({ title: "SOL return failed", description: e?.message || String(e), variant: "destructive" });
+        return;
       }
+      const existing = readActiveRecord(window.localStorage, publicKeyString);
+      if (existing.status === "active") {
+        const out = await driveWithdraw(window.localStorage, existing.record, { headers: walletAuthHeaders() });
+        applyReturnOutcome(out, opts);
+        return;
+      }
+      if (existing.status === "invalid" || existing.status === "unreadable") {
+        refreshReturnLedger();
+        toast({ title: "A stored withdrawal record needs review", description: "It was preserved; no new return was started.", variant: "destructive" });
+        return;
+      }
+      const fresh = opts.auto ? await balanceQuery.refetch() : null;
+      const cap = maxSendableLamportsFromSol(opts.auto ? (fresh?.data?.solBalance ?? null) : agentSol, RETURN_RESERVE_SOL);
+      const amt = computeReturnLamports(ledger.availableLamports, cap);
+      if (amt < MIN_WITHDRAW_LAMPORTS) {
+        refreshReturnLedger();
+        return; // stays tracked; the recovery row offers it
+      }
+      const begun = beginWithdraw(window.localStorage, publicKeyString, amt, "loop_return");
+      if (begun.status !== "created" && begun.status !== "active_exists") {
+        refreshReturnLedger();
+        if (begun.status === "persist_failed") {
+          toast({ title: "Could not save the return request", description: "Nothing was sent. Free some browser storage, then retry.", variant: "destructive" });
+        }
+        return;
+      }
+      refreshReturnLedger();
+      const out = await driveWithdraw(window.localStorage, begun.record, { headers: walletAuthHeaders() });
+      applyReturnOutcome(out, opts);
     } finally {
       returningRef.current = false;
       setBusy(null);
       refresh();
     }
   };
+
   // Auto-return EXACTLY what the close/unwind reported it credited
-  // (solReturnedLamports). No proceeds -> nothing moves; the agent wallet's
-  // own gas float is invisible to this path by construction.
-  const autoReturnProceeds = async (proceedsLamports?: string) => {
-    let proceeds = 0;
+  // (solReturnedLamports), keyed by that op's tx signature. The credit is
+  // recorded AND read back before any return leaves; no signature → the
+  // proceeds are surfaced as a visible anomaly instead of guessed.
+  const autoReturnProceeds = async (proceedsLamports?: string, opSig?: string) => {
+    if (!publicKeyString) return;
+    let proceeds = 0n;
     try {
-      proceeds = Number(BigInt(proceedsLamports ?? "0")) / 1e9;
+      proceeds = BigInt(proceedsLamports ?? "0");
     } catch {
-      proceeds = 0;
+      proceeds = 0n;
     }
-    const tracked = round4(proceeds);
-    if (tracked <= 0) return;
-    // ACCUMULATE onto any prior stranded proceeds (read from storage, not the
-    // possibly-stale state closure) — overwriting would invisibly strand the
-    // earlier failed return. Track BEFORE sending so a failed send still shows.
-    const newPending = Math.round((readStoredPending() + tracked) * 1e4) / 1e4;
-    updatePendingReturn(newPending);
-    const fresh = await balanceQuery.refetch();
-    const amount = Math.min(newPending, maxSendable(fresh.data?.solBalance ?? null));
-    if (amount <= 0) return; // stays tracked; the recovery row offers it
-    await returnSpareSol(amount, { auto: true, pendingOnSuccess: newPending - amount });
+    if (proceeds <= 0n) return;
+    if (typeof opSig !== "string" || opSig.length === 0) {
+      noteMissingCloseSignature(window.localStorage, publicKeyString, proceeds, `close-${Date.now()}`);
+      refreshReturnLedger();
+      toast({
+        title: "Proceeds recorded for review",
+        description: "The close reported SOL proceeds without a transaction signature; nothing was auto-sent.",
+        variant: "destructive",
+      });
+      return;
+    }
+    const credited = recordLoopCloseCredit(window.localStorage, publicKeyString, opSig, proceeds);
+    if (credited !== "ok" && credited !== "already") {
+      refreshReturnLedger();
+      toast({
+        title: "SOL is waiting in the agent wallet",
+        description: "Recording the proceeds locally didn't stick; nothing was auto-sent. Free some browser storage, then use Return to Wallet.",
+        variant: "destructive",
+      });
+      return;
+    }
+    refreshReturnLedger();
+    await startReturn({ auto: true });
   };
-  // Manual recovery send: capped by what the withdraw route will allow now.
-  const manualReturnSol = Math.min(pendingReturnSol, maxSendable(agentSol));
+  // [WO2B2D:LOOP-RETURN-END]
 
   const runConfirmed = (key: string, fn: () => void) => {
     if (confirmAction !== key) {
@@ -953,37 +1044,61 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
               </Button>
             </div>
 
-            {/* --- Recovery row: only appears when TRACKED loop proceeds are
-                stranded in the gas wallet (an auto-return after close/unwind
-                failed). Never balance-derived — the agent wallet's own gas
-                float must never look like a user balance. --- */}
-            {pendingReturnSol > 0 && (
-              <div className="rounded-lg border border-border/60 bg-muted/20 p-3 flex items-center justify-between gap-2">
-                <p className="text-[11px] text-muted-foreground flex-1" data-testid="text-loop-spare-sol">
-                  <span className="font-medium text-foreground tabular-nums">{pendingReturnSol.toFixed(4)} SOL</span> from loop
-                  operations is ready to go back to your wallet.
-                </p>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="shrink-0"
-                  disabled={!!busy || manualReturnSol <= 0}
-                  onClick={() =>
-                    void returnSpareSol(manualReturnSol, {
-                      pendingOnSuccess: pendingReturnSol - manualReturnSol,
-                    })
-                  }
-                  data-testid="button-loop-withdraw-sol"
-                >
-                  {busy === "withdraw-sol" ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <>
-                      <ArrowUpFromLine className="h-3.5 w-3.5 mr-1" />
-                      Return to Wallet
-                    </>
+            {/* --- Recovery row: only appears for TRACKED loop proceeds (the
+                append-only ledger), an in-flight durable return, or a visible
+                bookkeeping anomaly. Never balance-derived — the agent
+                wallet's own gas float must never look like a user balance. --- */}
+            {(availableReturnLamports > 0n || activeReturn || returnLedger?.negative || returnRecordBroken || (returnLedger?.anomalies.length ?? 0) > 0) && (
+              <div className="rounded-lg border border-border/60 bg-muted/20 p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-[11px] text-muted-foreground flex-1" data-testid="text-loop-spare-sol">
+                    {activeReturn ? (
+                      <>
+                        A return of <span className="font-medium text-foreground tabular-nums">{lamportsToSolDisplay(activeReturn.lamports)} SOL</span> is
+                        in progress. Retrying is safe — the same request is resumed, never duplicated.
+                      </>
+                    ) : returnLedger?.negative ? (
+                      <>
+                        Local records show <span className="font-medium text-foreground tabular-nums">{lamportsToSolDisplay(returnLedger.deficitLamports)} SOL</span> more
+                        returned than tracked. Auto-return is paused; nothing was adjusted.
+                      </>
+                    ) : (
+                      <>
+                        <span className="font-medium text-foreground tabular-nums">{lamportsToSolDisplay(availableReturnLamports > 0n ? availableReturnLamports : 0n)} SOL</span> from
+                        loop operations is ready to go back to your wallet.
+                      </>
+                    )}
+                  </p>
+                  {!returnLedger?.negative && !returnRecordBroken && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="shrink-0"
+                      disabled={!!busy || (!activeReturn && manualReturnLamports < MIN_WITHDRAW_LAMPORTS)}
+                      onClick={() => void (activeReturn ? driveReturn({ auto: false }) : startReturn({ auto: false }))}
+                      data-testid="button-loop-withdraw-sol"
+                    >
+                      {busy === "withdraw-sol" ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <>
+                          <ArrowUpFromLine className="h-3.5 w-3.5 mr-1" />
+                          {activeReturn ? "Check / Retry" : "Return to Wallet"}
+                        </>
+                      )}
+                    </Button>
                   )}
-                </Button>
+                </div>
+                {returnRecordBroken && (
+                  <p className="text-[11px] text-red-500">
+                    A stored withdrawal record could not be read; it was preserved for review.
+                  </p>
+                )}
+                {(returnLedger?.anomalies.length ?? 0) > 0 && (
+                  <p className="text-[11px] text-amber-500" data-testid="text-loop-return-anomalies">
+                    {returnLedger!.anomalies.length} bookkeeping {returnLedger!.anomalies.length === 1 ? "entry needs" : "entries need"} review — nothing is auto-adjusted.
+                  </p>
+                )}
               </div>
             )}
 
