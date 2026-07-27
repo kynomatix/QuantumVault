@@ -200,12 +200,26 @@ export async function classifyWithdrawSignature(
   return { verdict: 'still_valid' };
 }
 
-/** Signature evidence = ANY persisted trace of a write-ahead, however partial. */
-function hasSignatureEvidence(op: BorrowOperationRow): boolean {
+/**
+ * WO2B2C-A2 — broadcast-identity evidence = ANY persisted trace of a
+ * write-ahead, however partial: a txSignatures entry, the metadata signature
+ * pin, the blockhash pin, or the lastValidBlockHeight pin. The precommit
+ * writes all of these atomically, so a partial set is an anomaly this machine
+ * never wrote — and an anomaly must be treated as evidence (fail closed:
+ * signed bytes may exist). This definition MUST stay identical to the DB-side
+ * requireNoSignature predicates in storage.transitionAgentSolWithdraw — the
+ * classifier and the atomic guard enforce the same widened set, so a row one
+ * layer calls evidence-bearing can never be terminalized by the other.
+ */
+export function hasBroadcastIdentityEvidence(op: BorrowOperationRow): boolean {
   const sigs = Array.isArray(op.txSignatures) ? op.txSignatures : [];
   if (sigs.length > 0) return true;
   const meta = (op.metadata ?? {}) as Record<string, unknown>;
-  return meta.withdrawTxSignature !== undefined;
+  return (
+    meta.withdrawTxSignature !== undefined ||
+    meta.withdrawBlockhash !== undefined ||
+    meta.withdrawLastValidBlockHeight !== undefined
+  );
 }
 
 /**
@@ -456,7 +470,7 @@ export async function handleAgentSolWithdraw(
       return pending202('Could not load the withdrawal state; retry with the same clientRequestId.');
     }
     if (fresh.status === 'pending') {
-      if (hasSignatureEvidence(fresh)) {
+      if (hasBroadcastIdentityEvidence(fresh)) {
         const prov = selectWithdrawProvenance(fresh);
         return pending202(
           'A broadcast for this withdrawal is being reconciled; retry with the same clientRequestId.',
@@ -545,7 +559,7 @@ export async function handleAgentSolWithdraw(
     if (!fresh || fresh.walletAddress !== walletAddress) {
       return pending202('Nothing was broadcast, but the withdrawal state could not be loaded; retry with the same clientRequestId.');
     }
-    if (hasSignatureEvidence(fresh)) {
+    if (hasBroadcastIdentityEvidence(fresh)) {
       // A write-ahead exists: this attempt lost the race to a sibling that
       // owns a (possible) broadcast. Reconcile the persisted signature —
       // never terminalize a row that may own live bytes.
@@ -649,7 +663,7 @@ export async function handleAgentSolWithdraw(
       // Statuses this machine never writes — fail closed, no writes.
       return manualReview();
     }
-    if (hasSignatureEvidence(op)) {
+    if (hasBroadcastIdentityEvidence(op)) {
       return await reconcile(op);
     }
     // Clean pending adopt (e.g. crash before the write-ahead): resume below.
@@ -884,7 +898,34 @@ export const SOL_WITHDRAW_ABANDONED_AFTER_MS = 15 * 60 * 1000;
 export const SOL_WITHDRAW_SWEEP_LIMIT = 25;
 /** Persisted op.error for sweep-terminalized pre-broadcast rows (operator text). */
 export const SOL_WITHDRAW_ABANDONED_ERROR =
-  'Abandoned before broadcast: still pending with zero signature evidence after the staleness window; terminalized by the background recovery sweep. No funds moved.';
+  'Abandoned before broadcast: still pending with a coherent intent and zero broadcast-identity evidence after the staleness window; terminalized by the background recovery sweep. No funds moved.';
+
+/**
+ * WO2B2C-A2 — sweep-side intent coherence: a clean-pending row may be
+ * terminalized ONLY when the FRESH row's pinned intent is fully coherent —
+ * a clientRequestId, a positive parseable requestedLamports, a destination
+ * that is the row's own wallet, and the signer (source agent) pin. These are
+ * exactly the pins persisted at intent creation; anything else is an anomaly
+ * this machine never wrote, and anomalies stay pending for manual review.
+ */
+export function hasCoherentWithdrawIntent(op: BorrowOperationRow): boolean {
+  const crid = op.clientRequestId;
+  if (typeof crid !== 'string' || crid.trim().length === 0) return false;
+  const meta = (op.metadata ?? {}) as Record<string, unknown>;
+  if (typeof meta.requestedLamports !== 'string' || meta.requestedLamports.length === 0) return false;
+  let requestedLamports: bigint;
+  try {
+    requestedLamports = BigInt(meta.requestedLamports);
+  } catch {
+    return false;
+  }
+  if (requestedLamports <= 0n) return false;
+  const dest = meta.destinationWallet;
+  if (typeof dest !== 'string' || dest.length === 0 || dest !== op.walletAddress) return false;
+  const src = meta.sourceAgentPublicKey;
+  if (typeof src !== 'string' || src.length === 0) return false;
+  return true;
+}
 
 export interface SolWithdrawSweepResult {
   scanned: number;
@@ -907,10 +948,14 @@ export interface SolWithdrawSweepResult {
  * primitives, and it is safe to run concurrently with live handlers and with
  * rival sweep instances:
  *
- *  - Signature evidence present → the SHARED reconcile core (exact-signature
- *    classification; locked exactly-once finalize; signature-bound failure
- *    CAS). Malformed/partial evidence stays pending for manual review.
- *  - ZERO signature evidence on a stale, freshly re-read 'pending' row →
+ *  - Broadcast-identity evidence present (ANY of: a txSignatures entry, the
+ *    signature pin, the blockhash pin, the lastValidBlockHeight pin — the
+ *    WIDENED A2 definition, identical to the DB guard's predicate set) → the
+ *    SHARED reconcile core (exact-signature classification; locked
+ *    exactly-once finalize; signature-bound failure CAS). Malformed/partial
+ *    evidence stays pending for manual review.
+ *  - ZERO broadcast-identity evidence on a stale, freshly re-read 'pending'
+ *    row whose pinned intent is fully COHERENT (hasCoherentWithdrawIntent) →
  *    provably pre-broadcast; terminalized via the atomic no-signature CAS
  *    (`requireNoSignature` re-proves emptiness INSIDE the guarded UPDATE). A
  *    live handler that just precommitted flips the CAS false (lost race,
@@ -978,7 +1023,7 @@ export async function sweepAbandonedSolWithdrawals(now: Date = new Date()): Prom
         result.skipped++;
         continue;
       }
-      if (hasSignatureEvidence(fresh)) {
+      if (hasBroadcastIdentityEvidence(fresh)) {
         const outcome = await reconcilePersistedWithdrawSignature(fresh);
         switch (outcome.kind) {
           case 'finalized':
@@ -1006,8 +1051,19 @@ export async function sweepAbandonedSolWithdrawals(now: Date = new Date()): Prom
         }
         continue;
       }
+      if (!hasCoherentWithdrawIntent(fresh)) {
+        // A2: an anomalous intent (missing/blank clientRequestId, non-positive
+        // or unparseable requestedLamports, a destination that is not the
+        // row's own wallet, or a missing signer pin) is a row this machine
+        // never wrote. NEVER terminalize it — manual review, zero writes;
+        // later rows keep processing.
+        console.warn(`[SolWithdrawSweep] op ${fresh.id} clean-pending but intent incoherent — manual review`);
+        result.manualReview++;
+        continue;
+      }
       // Provably pre-broadcast: stale + freshly-read 'pending' + ZERO
-      // signature evidence. Terminalize via the existing atomic CAS.
+      // broadcast-identity evidence + coherent pinned intent. Terminalize via
+      // the existing atomic CAS.
       const ok = await storage.transitionAgentSolWithdraw({
         operationId: fresh.id,
         walletAddress: fresh.walletAddress,

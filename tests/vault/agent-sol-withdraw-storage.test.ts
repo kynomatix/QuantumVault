@@ -14,7 +14,9 @@
  *    2^53 float trap); write-ahead appends signature + broadcast identity +
  *    re-asserted pins in ONE update with step withdraw_sig_writeahead.
  *  - transitionAgentSolWithdraw — single guarded UPDATE; requireNoSignature
- *    adds BOTH no-evidence predicates; requireSignature binds to the exact
+ *    adds the FOUR widened (WO2B2C-A2) no-evidence predicates — signature
+ *    pin, blockhash pin, lastValidBlockHeight pin, empty txSignatures —
+ *    identical to hasBroadcastIdentityEvidence; requireSignature binds to the exact
  *    persisted signature; false (no write matched) when the guard misses.
  *  - finalizeAgentSolWithdrawSuccess — same lock discipline; provenance
  *    re-verified INSIDE the lock (malformed → not_finalized, ZERO writes);
@@ -662,7 +664,7 @@ describe("[4] transitionAgentSolWithdraw", () => {
     expect(Object.keys(sets).sort()).toEqual(["step", "updatedAt"]);
   });
 
-  it("requireNoSignature adds BOTH no-evidence predicates (metadata sig null AND empty txSignatures)", async () => {
+  it("requireNoSignature adds ALL FOUR widened no-evidence predicates (signature pin, blockhash pin, lastValidBlockHeight pin, empty txSignatures)", async () => {
     const log = primeTransition([{ id: OP_ID }]);
     const storage = makeStorage();
     await storage.transitionAgentSolWithdraw({
@@ -674,7 +676,29 @@ describe("[4] transitionAgentSolWithdraw", () => {
     });
     const where = probe(findCall(log, "where").args[0]);
     expect(where).toContain("withdrawTxSignature");
+    expect(where).toContain("withdrawBlockhash");
+    expect(where).toContain("withdrawLastValidBlockHeight");
     expect(where).toContain("jsonb_array_length");
+  });
+
+  it("A2: the DB guard INDEPENDENTLY refuses cleanup when any broadcast-identity breadcrumb matches (widened WHERE matches zero rows → false, no write)", async () => {
+    // A blockhash-only anomaly means the widened predicate set matches no row:
+    // the UPDATE returns nothing and the guard answers false — refusal happens
+    // at the database, regardless of what any orchestration-layer classifier
+    // concluded about the same row.
+    const log = primeTransition([]);
+    const storage = makeStorage();
+    const ok = await storage.transitionAgentSolWithdraw({
+      operationId: OP_ID,
+      walletAddress: WALLET,
+      toStatus: "failed",
+      step: "withdraw_prebroadcast_failed",
+      requireNoSignature: true,
+    });
+    expect(ok).toBe(false);
+    const where = probe(findCall(log, "where").args[0]);
+    expect(where).toContain("withdrawBlockhash");
+    expect(where).toContain("withdrawLastValidBlockHeight");
   });
 
   it("requireSignature binds the guard to the exact persisted signature", async () => {

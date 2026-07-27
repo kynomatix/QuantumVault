@@ -6053,16 +6053,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // unassessed for a full hour (rates sample inside the tick itself).
   setTimeout(runAllocationPass, 60 * 1000);
 
-  // WO2B2C-A1: background recovery for ABANDONED durable SOL withdrawals.
+  // WO2B2C-A1/A2: background recovery for ABANDONED durable SOL withdrawals.
   // Bounded, oldest-first, read-and-CAS only — it NEVER decrypts keys, builds,
-  // signs, or broadcasts. Signature-bearing rows reconcile through the exact
-  // handler verdict machinery (landed → finalize; failed/expired → terminal);
-  // provably pre-broadcast rows (zero signature evidence after the staleness
-  // window) terminalize via the guarded no-signature CAS. This unwedges the
-  // reciprocal withdraw↔hop gate when a pending intent is orphaned. No boot
-  // pass on purpose (boot-storm rules); the first interval fire is plenty.
+  // signs, or broadcasts. Broadcast-identity-bearing rows reconcile through
+  // the exact handler verdict machinery (landed → finalize; failed/expired →
+  // terminal); provably pre-broadcast rows (coherent pinned intent, zero
+  // broadcast-identity evidence after the staleness window) terminalize via
+  // the guarded no-signature CAS. This unwedges the reciprocal withdraw↔hop
+  // gate when a pending intent is orphaned.
   let solWithdrawSweepInFlight = false;
-  setInterval(() => {
+  const runSolWithdrawSweepPass = () => {
     if (solWithdrawSweepInFlight) return;
     solWithdrawSweepInFlight = true;
     sweepAbandonedSolWithdrawals()
@@ -6077,7 +6077,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       .finally(() => {
         solWithdrawSweepInFlight = false;
       });
-  }, 10 * 60 * 1000);
+  };
+  setInterval(runSolWithdrawSweepPass, 10 * 60 * 1000);
+  // WO2B2C-A2: ONE delayed, jittered startup pass (30–60s) so a restart never
+  // leaves an orphaned intent wedging the withdraw↔hop gate for a full
+  // interval. The jitter spreads blue/green boots apart, and the in-flight
+  // guard plus the sweep's row-level CAS make any residual overlap harmless.
+  // A single bounded read+CAS pass this late sits outside the boot-storm
+  // window (no heavy work at module load).
+  setTimeout(runSolWithdrawSweepPass, 30_000 + Math.floor(Math.random() * 30_001));
 
   // Emergency admin stop - immediately disables all execution for a wallet
   // Requires ADMIN_SECRET environment variable for authorization

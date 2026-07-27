@@ -2794,8 +2794,13 @@ export class DatabaseStorage implements IStorage {
   // Single guarded UPDATE (atomic): a transition applies only while the row
   // is still the pending agent_sol_withdraw op of this wallet, with optional
   // signature predicates:
-  // - requireNoSignature: only if NO signature evidence exists — used by the
-  //   pre-broadcast terminalizers so they can never race the write-ahead.
+  // - requireNoSignature: only if NO broadcast-identity evidence exists — used
+  //   by the pre-broadcast terminalizers so they can never race the
+  //   write-ahead. WO2B2C-A2: the predicate set is the WIDENED definition
+  //   (txSignatures entries, signature pin, blockhash pin, lastValidBlockHeight
+  //   pin — `->` not `->>` so an explicit JSON null still counts as evidence)
+  //   and MUST stay identical to hasBroadcastIdentityEvidence in
+  //   server/vault/agent-sol-withdraw.ts.
   // - requireSignature: only if the persisted write-ahead signature is exactly
   //   the given one — post-broadcast verdicts bind to the broadcast identity.
   // Returns false when the guard didn't match; callers must re-read the row
@@ -2818,7 +2823,9 @@ export class DatabaseStorage implements IStorage {
       eq(borrowOperations.status, 'pending'),
     ];
     if (p.requireNoSignature) {
-      conds.push(sql`(${borrowOperations.metadata}->>'withdrawTxSignature') IS NULL`);
+      conds.push(sql`(${borrowOperations.metadata}->'withdrawTxSignature') IS NULL`);
+      conds.push(sql`(${borrowOperations.metadata}->'withdrawBlockhash') IS NULL`);
+      conds.push(sql`(${borrowOperations.metadata}->'withdrawLastValidBlockHeight') IS NULL`);
       conds.push(sql`jsonb_array_length(COALESCE(${borrowOperations.txSignatures}, '[]'::jsonb)) = 0`);
     }
     if (p.requireSignature !== undefined) {

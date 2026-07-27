@@ -1,5 +1,5 @@
 /**
- * tests/vault/agent-sol-withdraw-sweep.test.ts — WO2B2C-A1
+ * tests/vault/agent-sol-withdraw-sweep.test.ts — WO2B2C-A1/A2
  *
  * Pins sweepAbandonedSolWithdrawals: the bounded background recovery for
  * abandoned durable SOL withdrawals.
@@ -7,10 +7,15 @@
  *  - READ-AND-CAS ONLY: across EVERY path the sweep never decrypts keys,
  *    never touches the durable executor, never precommits a signature —
  *    proven by spies on the full signing/broadcast surface.
- *  - Only stale, freshly re-read 'pending' rows with ZERO signature evidence
- *    are terminalized, via the existing atomic no-signature CAS
- *    (requireNoSignature) with the fixed operator error text.
- *  - Signature-bearing rows route through the SHARED reconcile core:
+ *  - Only stale, freshly re-read 'pending' rows with ZERO broadcast-identity
+ *    evidence (A2-widened: txSignatures entry, signature pin, blockhash pin,
+ *    lastValidBlockHeight pin — ALL absent) AND a fully COHERENT pinned
+ *    intent (crid; positive requestedLamports; destination = the row's own
+ *    wallet; signer pin) are terminalized, via the existing atomic
+ *    no-signature CAS (requireNoSignature) with the fixed operator error
+ *    text. Partial breadcrumbs and incoherent intents are ANOMALIES: manual
+ *    review, zero writes, zero RPC — later rows keep processing.
+ *  - Broadcast-identity-bearing rows route through the SHARED reconcile core:
  *    landed → locked exactly-once finalize (idempotent via
  *    already_succeeded); onchain_failed/expired → signature-bound terminal
  *    CAS; still_valid/unverifiable → best-effort breadcrumb, row stays
@@ -79,7 +84,7 @@ const SIG = "5sweepSigBase58XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
 const LVBH = 500;
 
 let opSeq = 0;
-/** Clean pending intent: ZERO signature evidence. */
+/** Clean pending intent: ZERO broadcast-identity evidence, fully COHERENT pins. */
 function cleanOp(over: Record<string, unknown> = {}) {
   return {
     id: `op-${++opSeq}`,
@@ -177,6 +182,119 @@ describe("sweepAbandonedSolWithdrawals — worklist bounds and ordering", () => 
     expect(res.errors).toBe(1);
     expect(res.scanned).toBe(0);
     expect(storage.transitionAgentSolWithdraw).not.toHaveBeenCalled();
+  });
+});
+
+// ─── WO2B2C-A2: widened broadcast-identity evidence + coherent-intent gate ──
+describe("sweepAbandonedSolWithdrawals — A2 widened evidence + coherent intent", () => {
+  it("BLOCKHASH-ONLY breadcrumb is EVIDENCE: manual review, ZERO transition calls, ZERO RPC", async () => {
+    primeRows([
+      cleanOp({
+        metadata: {
+          requestedLamports: "47500000",
+          destinationWallet: WALLET,
+          sourceAgentPublicKey: "AGENTPK",
+          withdrawBlockhash: "BHonlyXXXXXXXXXXXXXXXXXXXXXXXXXX",
+        },
+      }),
+    ]);
+    const res = await sweepAbandonedSolWithdrawals(NOW);
+    expect(res.manualReview).toBe(1);
+    expect(res.terminalizedAbandoned).toBe(0);
+    expect(storage.transitionAgentSolWithdraw).not.toHaveBeenCalled(); // ZERO writes of ANY kind
+    expect(getSignatureStatusStrict).not.toHaveBeenCalled(); // no RPC — nothing to classify
+    expectNeverTouchedSigningSurface();
+  });
+
+  it("LASTVALIDBLOCKHEIGHT-ONLY breadcrumb is EVIDENCE: manual review, zero writes, zero RPC", async () => {
+    primeRows([
+      cleanOp({
+        metadata: {
+          requestedLamports: "47500000",
+          destinationWallet: WALLET,
+          sourceAgentPublicKey: "AGENTPK",
+          withdrawLastValidBlockHeight: LVBH,
+        },
+      }),
+    ]);
+    const res = await sweepAbandonedSolWithdrawals(NOW);
+    expect(res.manualReview).toBe(1);
+    expect(res.terminalizedAbandoned).toBe(0);
+    expect(storage.transitionAgentSolWithdraw).not.toHaveBeenCalled();
+    expect(getSignatureStatusStrict).not.toHaveBeenCalled();
+    expectNeverTouchedSigningSurface();
+  });
+
+  it("EXPLICIT-NULL signature pin is EVIDENCE (JS `!== undefined` ↔ SQL `->` IS NULL parity): manual review, zero writes", async () => {
+    primeRows([
+      cleanOp({
+        metadata: {
+          requestedLamports: "47500000",
+          destinationWallet: WALLET,
+          sourceAgentPublicKey: "AGENTPK",
+          withdrawTxSignature: null,
+        },
+      }),
+    ]);
+    const res = await sweepAbandonedSolWithdrawals(NOW);
+    expect(res.manualReview).toBe(1);
+    expect(storage.transitionAgentSolWithdraw).not.toHaveBeenCalled();
+    expect(getSignatureStatusStrict).not.toHaveBeenCalled();
+    expectNeverTouchedSigningSurface();
+  });
+
+  const INCOHERENT: Array<[string, Record<string, unknown>]> = [
+    ["missing clientRequestId", { clientRequestId: null }],
+    ["blank clientRequestId", { clientRequestId: "   " }],
+    [
+      "zero requestedLamports",
+      { metadata: { requestedLamports: "0", destinationWallet: WALLET, sourceAgentPublicKey: "AGENTPK" } },
+    ],
+    [
+      "unparseable requestedLamports",
+      { metadata: { requestedLamports: "47.5e6", destinationWallet: WALLET, sourceAgentPublicKey: "AGENTPK" } },
+    ],
+    [
+      "destination is NOT the row's wallet",
+      {
+        metadata: {
+          requestedLamports: "47500000",
+          destinationWallet: "SomeOtherWalletBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+          sourceAgentPublicKey: "AGENTPK",
+        },
+      },
+    ],
+    [
+      "missing sourceAgentPublicKey pin",
+      { metadata: { requestedLamports: "47500000", destinationWallet: WALLET } },
+    ],
+  ];
+  it.each(INCOHERENT)(
+    "INCOHERENT INTENT (%s): manual review, ZERO writes — never reaches the no-signature CAS",
+    async (_label, over) => {
+      primeRows([cleanOp(over)]);
+      const res = await sweepAbandonedSolWithdrawals(NOW);
+      expect(res.manualReview).toBe(1);
+      expect(res.terminalizedAbandoned).toBe(0);
+      expect(storage.transitionAgentSolWithdraw).not.toHaveBeenCalled();
+      expect(getSignatureStatusStrict).not.toHaveBeenCalled();
+      expectNeverTouchedSigningSurface();
+    },
+  );
+
+  it("ANOMALY DOES NOT WEDGE THE PASS: incoherent row → manual review; the LATER coherent row still terminalizes", async () => {
+    const bad = cleanOp({
+      metadata: { requestedLamports: "0", destinationWallet: WALLET, sourceAgentPublicKey: "AGENTPK" },
+    });
+    const good = cleanOp();
+    primeRows([bad, good]);
+    const res = await sweepAbandonedSolWithdrawals(NOW);
+    expect(res.manualReview).toBe(1);
+    expect(res.terminalizedAbandoned).toBe(1);
+    const noSig = noSigTerminalizations();
+    expect(noSig).toHaveLength(1);
+    expect(noSig[0][0].operationId).toBe(good.id);
+    expectNeverTouchedSigningSurface();
   });
 });
 

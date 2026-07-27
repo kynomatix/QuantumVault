@@ -2961,30 +2961,48 @@ export interface LoopHopResult {
    */
   parkedByThisInvocation?: boolean;
   /**
-   * WO2B2C(-A1): true = a FRESH hop (durable parent persisted; zero close
-   * evidence) deferred because this wallet has an unfinished durable SOL
-   * withdrawal, or because that could not be verified (fail closed). Nothing
-   * was gated, read strictly, written, or broadcast — retry the SAME
-   * clientRequestId once the withdrawal reaches a terminal status.
+   * WO2B2C-A2: true = a FRESH hop (durable parent persisted; zero close
+   * evidence) deferred for cross-op coordination: this wallet has an
+   * unfinished durable SOL withdrawal, or that could not be verified (fail
+   * closed). Nothing was gated, read strictly, written, or broadcast — retry
+   * the SAME clientRequestId once the withdrawal reaches a terminal status.
    *
    * CONTRACT (pinned by tests): a coordination-deferred result is EXACTLY
-   *   { success: false, resumable: true, deferredForSolWithdraw: true,
+   *   { success: false, resumable: true, coordinationDeferred: true,
+   *     coordinationReason: 'sol_withdraw_in_flight'
+   *                       | 'sol_withdraw_state_unreadable',
    *     error: HOP_DEFER_SOL_WITHDRAW_PENDING_MESSAGE
    *          | HOP_DEFER_SOL_WITHDRAW_UNREADABLE_MESSAGE }
-   * — no other fields, and the error is ALWAYS one of the two fixed sanitized
+   * — no other fields. coordinationDeferred + coordinationReason are the
+   * NORMATIVE machine-readable fields (the obsolete deferredForSolWithdraw
+   * flag is REMOVED), and the error is ALWAYS one of the two fixed sanitized
    * messages (never interpolated scan/DB/status text).
    */
-  deferredForSolWithdraw?: boolean;
+  coordinationDeferred?: boolean;
+  coordinationReason?: HopCoordinationReason;
   /** WO2A: how the recovered close output was attributed. */
   principalSource?: HopSolReturnedSource;
   error?: string;
 }
 
 /**
- * WO2B2C-A1 — the ONLY two error texts a coordination-deferred hop may carry.
- * Fixed, fully sanitized wording: raw scan errors and DB status strings never
- * reach the caller (executor/DB/RPC text is an internal detail and can leak
- * infrastructure identifiers). Tests pin these verbatim.
+ * WO2B2C-A2 — the normative machine-readable reason on a coordination-deferred
+ * hop result. Exactly two values, distinguishing a KNOWN in-flight agent SOL
+ * withdrawal from withdrawal state that could not be read (fail closed).
+ * Consumers must branch on coordinationDeferred/coordinationReason, never on
+ * the human-readable error text.
+ */
+export type HopCoordinationReason = 'sol_withdraw_in_flight' | 'sol_withdraw_state_unreadable';
+export const HOP_COORDINATION_REASON_WITHDRAW_IN_FLIGHT: HopCoordinationReason =
+  'sol_withdraw_in_flight';
+export const HOP_COORDINATION_REASON_WITHDRAW_UNREADABLE: HopCoordinationReason =
+  'sol_withdraw_state_unreadable';
+
+/**
+ * WO2B2C-A1/A2 — the ONLY two error texts a coordination-deferred hop may
+ * carry. Fixed, fully sanitized wording: raw scan errors and DB status strings
+ * never reach the caller (executor/DB/RPC text is an internal detail and can
+ * leak infrastructure identifiers). Tests pin these verbatim.
  */
 export const HOP_DEFER_SOL_WITHDRAW_PENDING_MESSAGE =
   "A SOL withdrawal for this wallet is still settling. The hop deferred before any carry check, balance read, or close attempt — your position is unchanged. Retry with the same request id once the withdrawal finishes.";
@@ -3258,7 +3276,8 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
               return {
                 success: false,
                 resumable: true,
-                deferredForSolWithdraw: true,
+                coordinationDeferred: true,
+                coordinationReason: HOP_COORDINATION_REASON_WITHDRAW_UNREADABLE,
                 error: HOP_DEFER_SOL_WITHDRAW_UNREADABLE_MESSAGE,
               };
             }
@@ -3270,7 +3289,8 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
               return {
                 success: false,
                 resumable: true,
-                deferredForSolWithdraw: true,
+                coordinationDeferred: true,
+                coordinationReason: HOP_COORDINATION_REASON_WITHDRAW_IN_FLIGHT,
                 error: HOP_DEFER_SOL_WITHDRAW_PENDING_MESSAGE,
               };
             }

@@ -923,16 +923,17 @@ describe("runLoopAllocationTick — parked hops (WO2A)", () => {
   });
 });
 
-// ─── WO2B2C-A1: coordination-deferred sources ────────────────────────────────
-// A pending hop that came back deferredForSolWithdraw pinned its SOURCE for
+// ─── WO2B2C-A2: coordination-deferred sources ────────────────────────────────
+// A pending hop that came back coordinationDeferred pinned its SOURCE for
 // rival suppression (no new hop, no relever) but the source MUST stay eligible
 // for the autonomous safety unwind through the FULL existing machinery.
 
-describe("runLoopAllocationTick — WO2B2C-A1 coordination-deferred sources", () => {
+describe("runLoopAllocationTick — WO2B2C-A2 coordination-deferred sources", () => {
   const DEFERRED = {
     success: false,
     resumable: true,
-    deferredForSolWithdraw: true,
+    coordinationDeferred: true,
+    coordinationReason: "sol_withdraw_in_flight",
     error: "A SOL withdrawal for this wallet is still settling. (fixed wording)",
   } as any;
 
@@ -1042,5 +1043,62 @@ describe("runLoopAllocationTick — WO2B2C-A1 coordination-deferred sources", ()
     expect(hopCalls).toHaveLength(0); // resume never reached the executor
     expect(calls.unwinds).toHaveLength(0); // and the row kept the full skip
     expect(res.skipped).toBeGreaterThanOrEqual(1);
+  });
+
+  it("OBSOLETE A1 FLAG IGNORED: a rogue deferredForSolWithdraw:true result is NOT deferred — plain conservative skip, no safety-unwind carve-out", async () => {
+    const { deps, calls } = deferredHopDeps({
+      // Legacy-shaped result: only the OBSOLETE flag, no coordinationDeferred.
+      executeHop: async () =>
+        ({ success: false, resumable: true, deferredForSolWithdraw: true, error: "legacy shape" }) as any,
+      getFreshRates: async () => new Map([[4, makeRate(4, 0.04, 0.08)]]),
+      getRecentDecisions: async () => priorRows("unwind", 2),
+    });
+    const res = await runLoopAllocationTick(deps);
+    expect(calls.unwinds).toHaveLength(0); // carve-out NOT granted
+    expect(calls.relevers).toHaveLength(0);
+    expect(res.skipped).toBeGreaterThanOrEqual(1); // full conservative skip
+    expect(res.acted).toBe(0);
+  });
+
+  it("E2E SEQUENCE: tick1 defers + safety-unwinds; tick2 the withdrawal resolved — resume-only hop succeeds with the ORIGINAL op's crid, the now-HOLD source is never seized or relevered", async () => {
+    // The SAME durable pending-hop row spans both ticks.
+    const pendingOp = makeHopOp({ status: "pending" });
+
+    // TICK 1: withdraw in flight → resume comes back coordinationDeferred;
+    // the carry-inverted source still unwinds through the FULL machinery.
+    const tick1 = deferredHopDeps({
+      getPendingHops: async () => [pendingOp],
+      getFreshRates: async () => new Map([[4, makeRate(4, 0.04, 0.08)]]),
+      getRecentDecisions: async () => priorRows("unwind", 2),
+    });
+    const res1 = await runLoopAllocationTick(tick1.deps);
+    expect(tick1.hopCalls).toHaveLength(1); // the deferred resume attempt only
+    expect(tick1.hopCalls[0].clientRequestId).toBe(pendingOp.clientRequestId);
+    expect(tick1.calls.unwinds).toHaveLength(1); // safety unwind executed
+    expect(tick1.calls.relevers).toHaveLength(0);
+    expect(res1.acted).toBe(1);
+
+    // TICK 2: withdrawal resolved — the executor now succeeds. The source sits
+    // at HOLD (post-unwind) with a fat relever gap on the table: the tick must
+    // resume ONLY (original crid), never seize or re-lever the HOLD funds.
+    const hop2Calls: any[] = [];
+    const tick2 = deferredHopDeps({
+      getPendingHops: async () => [pendingOp],
+      executeHop: async (p: any) => {
+        hop2Calls.push(p);
+        return { success: true } as any;
+      },
+      listActivePositions: async () => [makeRow({ debtAmountRaw: "0" })],
+      // Big gap: (3.7−1)·(0.09−0.05) ≈ 0.108 — far above the relever bar.
+      getFreshRates: async () => new Map([[4, makeRate(4, 0.09, 0.05)]]),
+      getRecentDecisions: async () => priorRows("relever", 2),
+    });
+    const res2 = await runLoopAllocationTick(tick2.deps);
+    expect(hop2Calls).toHaveLength(1); // resume only — no rival action
+    expect(hop2Calls[0].clientRequestId).toBe(pendingOp.clientRequestId); // ORIGINAL intent resumed
+    expect(res2.acted).toBe(1); // the resumed hop's success is the tick's only action
+    expect(tick2.calls.unwinds).toHaveLength(0);
+    expect(tick2.calls.relevers).toHaveLength(0); // HOLD funds untouched
+    expect(res2.skipped).toBeGreaterThanOrEqual(1); // non-deferred in-flight row keeps the full skip
   });
 });

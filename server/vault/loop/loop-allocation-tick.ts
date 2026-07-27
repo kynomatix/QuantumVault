@@ -462,7 +462,11 @@ export async function runLoopAllocationTick(deps: LoopAllocationTickDeps): Promi
                 .catch(() => {});
             }
           } else {
-            if (res.deferredForSolWithdraw === true && sourceId) {
+            // WO2B2C-A2: keyed on the NORMATIVE coordinationDeferred field —
+            // the obsolete deferredForSolWithdraw flag is gone and must never
+            // be honored again (a rogue truthy legacy field gets the plain
+            // conservative skip, not the safety-unwind carve-out).
+            if (res.coordinationDeferred === true && sourceId) {
               coordinationDeferredSourceIds.add(sourceId);
             }
             if (res.resumable !== true) result.failed++;
