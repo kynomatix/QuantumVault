@@ -552,6 +552,10 @@ describe("executeLoopHop — caller-level provenance boundary", () => {
     clientRequestId: HOP_CRID,
     metadata: {
       fromVaultId: FROM_VAULT,
+      // Durable identity — every real parent gets these at creation; the
+      // strict hop-identity gate rejects rows missing them.
+      sourceBorrowPositionId: POS_ID,
+      toVaultId: TARGET_VAULT,
       closeAttempts: 1,                      // one close attempt already recorded
       preCloseAgentLamports: "5000000000",   // baseline persisted → gate skipped
     },
