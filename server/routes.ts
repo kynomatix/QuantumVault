@@ -1543,7 +1543,7 @@ async function settleAllPnl(
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, getAgentUsdcBalanceStrict, getAgentSolBalanceStrict, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
-import { handleAgentSolWithdraw, handleConfirmSolWithdraw } from "./vault/agent-sol-withdraw";
+import { handleAgentSolWithdraw, handleConfirmSolWithdraw, sweepAbandonedSolWithdrawals } from "./vault/agent-sol-withdraw";
 import { getBestQuote } from "./swap/index.js";
 import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, valueVaultRowsForWallet, sumVaultPositionValueUsdc, type VaultPositionView, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
 import { cancelAutoRepark } from "./vault/auto-repark";
@@ -6052,6 +6052,32 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // One early pass shortly after boot so a restart never leaves positions
   // unassessed for a full hour (rates sample inside the tick itself).
   setTimeout(runAllocationPass, 60 * 1000);
+
+  // WO2B2C-A1: background recovery for ABANDONED durable SOL withdrawals.
+  // Bounded, oldest-first, read-and-CAS only — it NEVER decrypts keys, builds,
+  // signs, or broadcasts. Signature-bearing rows reconcile through the exact
+  // handler verdict machinery (landed → finalize; failed/expired → terminal);
+  // provably pre-broadcast rows (zero signature evidence after the staleness
+  // window) terminalize via the guarded no-signature CAS. This unwedges the
+  // reciprocal withdraw↔hop gate when a pending intent is orphaned. No boot
+  // pass on purpose (boot-storm rules); the first interval fire is plenty.
+  let solWithdrawSweepInFlight = false;
+  setInterval(() => {
+    if (solWithdrawSweepInFlight) return;
+    solWithdrawSweepInFlight = true;
+    sweepAbandonedSolWithdrawals()
+      .then((r) => {
+        if (r.scanned > 0) {
+          console.log(
+            `[SolWithdrawSweep] scanned=${r.scanned} finalized=${r.finalized} alreadySucceeded=${r.alreadySucceeded} reconciledFailed=${r.reconciledFailed} terminalizedAbandoned=${r.terminalizedAbandoned} stillPending=${r.stillPending} manualReview=${r.manualReview} raceLost=${r.raceLost} skipped=${r.skipped} errors=${r.errors}`,
+          );
+        }
+      })
+      .catch((e) => console.error('[SolWithdrawSweep] pass error:', e))
+      .finally(() => {
+        solWithdrawSweepInFlight = false;
+      });
+  }, 10 * 60 * 1000);
 
   // Emergency admin stop - immediately disables all execution for a wallet
   // Requires ADMIN_SECRET environment variable for authorization

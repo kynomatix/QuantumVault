@@ -922,3 +922,125 @@ describe("runLoopAllocationTick — parked hops (WO2A)", () => {
     }
   });
 });
+
+// ─── WO2B2C-A1: coordination-deferred sources ────────────────────────────────
+// A pending hop that came back deferredForSolWithdraw pinned its SOURCE for
+// rival suppression (no new hop, no relever) but the source MUST stay eligible
+// for the autonomous safety unwind through the FULL existing machinery.
+
+describe("runLoopAllocationTick — WO2B2C-A1 coordination-deferred sources", () => {
+  const DEFERRED = {
+    success: false,
+    resumable: true,
+    deferredForSolWithdraw: true,
+    error: "A SOL withdrawal for this wallet is still settling. (fixed wording)",
+  } as any;
+
+  function deferredHopDeps(overrides: Partial<LoopAllocationTickDeps> = {}) {
+    // NOTE: overriding executeHop bypasses the harness's calls.hops recording
+    // (it lives in the DEFAULT impl), so the helper records resume-executor
+    // invocations itself.
+    const hopCalls: any[] = [];
+    const made = makeDeps({
+      getPendingHops: async () => [makeHopOp({ status: "pending" })],
+      executeHop: async (p: any) => {
+        hopCalls.push(p);
+        return DEFERRED;
+      },
+      ...overrides,
+    });
+    return { ...made, hopCalls };
+  }
+
+  it("SAFETY UNWIND STAYS ELIGIBLE: carry-inverted source with a deferred hop unwinds through the FULL machinery (streak+claim+signer)", async () => {
+    const { deps, calls, hopCalls } = deferredHopDeps({
+      // borrowApr > stakingApy at every leverage → carry_inverted.
+      getFreshRates: async () => new Map([[4, makeRate(4, 0.04, 0.08)]]),
+      getRecentDecisions: async () => priorRows("unwind", 2),
+    });
+    const res = await runLoopAllocationTick(deps);
+    expect(hopCalls).toHaveLength(1); // the resume attempt ONLY — no rival hop
+    expect(calls.unwinds).toHaveLength(1);
+    expect(calls.relevers).toHaveLength(0);
+    expect(calls.claims).toHaveLength(1); // cooldown claim still gates
+    expect(res.acted).toBe(1);
+    // Journaled truthfully with the suppression marker.
+    const journaled = calls.decisions.find((d) => d.action === "unwind_to_hold");
+    expect(journaled).toBeDefined();
+    expect(journaled!.details.hopCoordinationDeferred).toBe(true);
+  });
+
+  it("HYSTERESIS STILL GATES: deferred source, carry inverted, NO streak → journals, does not act", async () => {
+    const { deps, calls } = deferredHopDeps({
+      getFreshRates: async () => new Map([[4, makeRate(4, 0.04, 0.08)]]),
+      getRecentDecisions: async () => [], // streak building
+    });
+    const res = await runLoopAllocationTick(deps);
+    expect(calls.unwinds).toHaveLength(0);
+    expect(res.acted).toBe(0);
+    expect(calls.decisions.some((d) => d.details.hysteresis === "building")).toBe(true);
+  });
+
+  it("RIVAL HOP SUPPRESSED: healthy stay_levered source with a deferred hop never promotes a new hop, even with a better pair on the table", async () => {
+    const { deps, calls, hopCalls } = deferredHopDeps({
+      // Current pair healthy; vault 5 hugely better → the normal brain would
+      // promote stay_levered → hop.
+      getFreshRates: async () =>
+        new Map([
+          [4, makeRate(4, 0.06, 0.05)],
+          [5, makeRate(5, 0.09, 0.04)],
+        ]),
+      getRecentDecisions: async () => priorHopRows(5, 2),
+    });
+    const res = await runLoopAllocationTick(deps);
+    expect(hopCalls).toHaveLength(1); // resume only — promotion suppressed
+    expect(calls.unwinds).toHaveLength(0);
+    expect(calls.relevers).toHaveLength(0);
+    expect(res.acted).toBe(0);
+    const journaled = calls.decisions[0];
+    expect(journaled.details.intent).toBe("none");
+    expect(journaled.details.hopCoordinationDeferred).toBe(true);
+  });
+
+  it("RIVAL RELEVER SUPPRESSED: HOLD source with a fat EV gap journals relever_suppressed_hop_deferred and touches nothing", async () => {
+    const { deps, calls } = deferredHopDeps({
+      listActivePositions: async () => [makeRow({ debtAmountRaw: "0" })],
+      // Big gap: (3.7−1)·(0.09−0.05) ≈ 0.108 — far above the relever bar.
+      getFreshRates: async () => new Map([[4, makeRate(4, 0.09, 0.05)]]),
+      getRecentDecisions: async () => priorRows("relever", 2),
+    });
+    const res = await runLoopAllocationTick(deps);
+    expect(calls.relevers).toHaveLength(0);
+    expect(res.acted).toBe(0);
+    expect(calls.claims).toHaveLength(0); // folded to none BEFORE claim/signer
+    expect(calls.signerRequests).toHaveLength(1); // the resume's signer only
+    const journaled = calls.decisions[0];
+    expect(journaled.reason).toBe("relever_suppressed_hop_deferred");
+    expect(journaled.details.executed).toBe(false);
+    expect(journaled.details.hopCoordinationDeferred).toBe(true);
+  });
+
+  it("NON-DEFERRED pending hop keeps the FULL conservative skip (no unwind even when carry is inverted)", async () => {
+    const { deps, calls } = deferredHopDeps({
+      executeHop: async () => ({ success: false, resumable: true }) as any,
+      getFreshRates: async () => new Map([[4, makeRate(4, 0.04, 0.08)]]),
+      getRecentDecisions: async () => priorRows("unwind", 2),
+    });
+    const res = await runLoopAllocationTick(deps);
+    expect(calls.unwinds).toHaveLength(0);
+    expect(res.skipped).toBeGreaterThanOrEqual(1);
+    expect(res.acted).toBe(0);
+  });
+
+  it("SIGNER-UNAVAILABLE resume is NOT marked deferred: the executor never ran, so the full skip is preserved", async () => {
+    const { deps, calls, hopCalls } = deferredHopDeps({
+      resolveSigner: async () => null,
+      getFreshRates: async () => new Map([[4, makeRate(4, 0.04, 0.08)]]),
+      getRecentDecisions: async () => priorRows("unwind", 2),
+    });
+    const res = await runLoopAllocationTick(deps);
+    expect(hopCalls).toHaveLength(0); // resume never reached the executor
+    expect(calls.unwinds).toHaveLength(0); // and the row kept the full skip
+    expect(res.skipped).toBeGreaterThanOrEqual(1);
+  });
+});

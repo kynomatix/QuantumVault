@@ -209,6 +209,108 @@ function hasSignatureEvidence(op: BorrowOperationRow): boolean {
 }
 
 /**
+ * WO2B2C-A1 — SHARED signature-reconciliation core (POST handler + recovery
+ * sweep). Pure orchestration over the EXISTING primitives: provenance
+ * selection, strict signature classification, locked exactly-once
+ * finalization, and the guarded pending-only transition. It NEVER builds,
+ * signs, or broadcasts, and malformed/partial persisted provenance yields
+ * 'manual_review' with ZERO writes and ZERO RPC — signed bytes may exist, so
+ * nothing may be terminalized automatically.
+ *
+ * The handler maps these outcomes onto its pre-A1 response bodies
+ * byte-for-byte; the sweep maps them onto counters.
+ */
+export type WithdrawReconcileOutcome =
+  | { kind: 'manual_review' }
+  | { kind: 'finalized'; operation: BorrowOperationRow; signature: string }
+  | { kind: 'already_succeeded'; operation: BorrowOperationRow; signature: string }
+  | { kind: 'finalize_record_pending'; signature: string }
+  | { kind: 'finalize_malformed'; signature: string }
+  | { kind: 'finalize_lost'; signature: string }
+  | { kind: 'terminal_failed'; step: 'withdraw_failed_onchain' | 'withdraw_expired'; signature: string }
+  | { kind: 'record_failed'; signature: string }
+  | { kind: 'transition_lost'; signature: string }
+  | { kind: 'pending_still_valid'; signature: string }
+  | { kind: 'pending_unverifiable'; signature: string };
+
+export async function reconcilePersistedWithdrawSignature(
+  op: BorrowOperationRow,
+): Promise<WithdrawReconcileOutcome> {
+  const prov = selectWithdrawProvenance(op);
+  if (!prov.valid) {
+    // Malformed persisted provenance: fail CLOSED. Zero RPC probes, zero
+    // writes, and NEVER an automatic mark-failed — signed bytes may exist.
+    return { kind: 'manual_review' };
+  }
+  const verdict = await classifyWithdrawSignature(prov.signature, prov.lastValidBlockHeight);
+  if (verdict.verdict === 'landed') {
+    let fin: Awaited<ReturnType<typeof storage.finalizeAgentSolWithdrawSuccess>>;
+    try {
+      fin = await storage.finalizeAgentSolWithdrawSuccess({
+        operationId: op.id,
+        walletAddress: op.walletAddress,
+        expectedSignature: prov.signature,
+      });
+    } catch {
+      // The transfer landed; recording rolls forward on a later retry.
+      return { kind: 'finalize_record_pending', signature: prov.signature };
+    }
+    if (fin.outcome === 'finalized') {
+      return { kind: 'finalized', operation: fin.operation, signature: prov.signature };
+    }
+    if (fin.outcome === 'already_succeeded') {
+      return { kind: 'already_succeeded', operation: fin.operation, signature: prov.signature };
+    }
+    if (fin.reason === 'malformed_provenance') {
+      return { kind: 'finalize_malformed', signature: prov.signature };
+    }
+    return { kind: 'finalize_lost', signature: prov.signature };
+  }
+  if (verdict.verdict === 'onchain_failed' || verdict.verdict === 'expired') {
+    const step = verdict.verdict === 'onchain_failed' ? 'withdraw_failed_onchain' : 'withdraw_expired';
+    const error =
+      verdict.verdict === 'onchain_failed'
+        ? truncate(verdict.error)
+        : `Blockhash window expired without the transaction landing (checked strictly beyond lastValidBlockHeight + ${SOL_WITHDRAW_EXPIRY_SLACK_BLOCKS} blocks).`;
+    let ok: boolean;
+    try {
+      ok = await storage.transitionAgentSolWithdraw({
+        operationId: op.id,
+        walletAddress: op.walletAddress,
+        toStatus: 'failed',
+        step,
+        error,
+        requireSignature: prov.signature,
+      });
+    } catch {
+      return { kind: 'record_failed', signature: prov.signature };
+    }
+    if (!ok) return { kind: 'transition_lost', signature: prov.signature };
+    return { kind: 'terminal_failed', step, signature: prov.signature };
+  }
+  // still_valid | unverifiable — breadcrumb is best-effort.
+  const step = verdict.verdict === 'still_valid' ? 'withdraw_still_valid' : 'withdraw_unverifiable';
+  try {
+    await storage.transitionAgentSolWithdraw({
+      operationId: op.id,
+      walletAddress: op.walletAddress,
+      step,
+      mergeMetadata: {
+        lastReconcileVerdict: verdict.verdict,
+        lastReconcileAt: new Date().toISOString(),
+      },
+      requireSignature: prov.signature,
+    });
+  } catch {
+    // best-effort breadcrumb only
+  }
+  return {
+    kind: verdict.verdict === 'still_valid' ? 'pending_still_valid' : 'pending_unverifiable',
+    signature: prov.signature,
+  };
+}
+
+/**
  * Client-safe terminal-failure text keyed by persisted step. The persisted
  * op.error keeps the detailed cause for operators; API bodies must never
  * replay raw DB/RPC/executor text (WO Build 8.3 / matrix #14). Every status
@@ -391,58 +493,42 @@ export async function handleAgentSolWithdraw(
   };
 
   const reconcile = async (op: BorrowOperationRow): Promise<WithdrawHandlerResult> => {
-    const prov = selectWithdrawProvenance(op);
-    if (!prov.valid) {
-      // Malformed persisted provenance: fail CLOSED. Zero RPC probes, zero
-      // writes, and NEVER an automatic mark-failed — signed bytes may exist.
-      return manualReview();
+    // WO2B2C-A1: delegates to the SHARED core (also used by the recovery
+    // sweep); this mapping preserves the handler's pre-A1 response bodies
+    // byte-for-byte (the state/route suites pin them).
+    const outcome = await reconcilePersistedWithdrawSignature(op);
+    switch (outcome.kind) {
+      case 'manual_review':
+        return manualReview();
+      case 'finalized':
+      case 'already_succeeded':
+        return succeeded200(outcome.operation, outcome.signature);
+      case 'finalize_record_pending':
+        return pending202(
+          'The transfer landed but recording it has not completed; retry with the same clientRequestId to finish.',
+          outcome.signature,
+        );
+      case 'finalize_malformed':
+        return manualReview(outcome.signature);
+      case 'finalize_lost':
+        return await reloadAndResolve(op.id);
+      case 'record_failed':
+        return pending202('The withdrawal outcome is known but recording it failed; retry with the same clientRequestId.', outcome.signature);
+      case 'transition_lost':
+        return await reloadAndResolve(op.id);
+      case 'terminal_failed':
+        return terminalFailed(outcome.step, clientSafeFailureMessage(outcome.step), outcome.signature);
+      case 'pending_still_valid':
+        return pending202(
+          'The withdrawal transaction is still within its validity window; retry shortly with the same clientRequestId.',
+          outcome.signature,
+        );
+      case 'pending_unverifiable':
+        return pending202(
+          'The withdrawal broadcast could not be verified yet; retry with the same clientRequestId.',
+          outcome.signature,
+        );
     }
-    const verdict = await classifyWithdrawSignature(prov.signature, prov.lastValidBlockHeight);
-    if (verdict.verdict === 'landed') {
-      return await finalizeLanded(op.id, prov.signature);
-    }
-    if (verdict.verdict === 'onchain_failed' || verdict.verdict === 'expired') {
-      const step = verdict.verdict === 'onchain_failed' ? 'withdraw_failed_onchain' : 'withdraw_expired';
-      const error =
-        verdict.verdict === 'onchain_failed'
-          ? truncate(verdict.error)
-          : `Blockhash window expired without the transaction landing (checked strictly beyond lastValidBlockHeight + ${SOL_WITHDRAW_EXPIRY_SLACK_BLOCKS} blocks).`;
-      const ok = await tryTransition({
-        operationId: op.id,
-        walletAddress,
-        toStatus: 'failed',
-        step,
-        error,
-        requireSignature: prov.signature,
-      });
-      if (ok === 'error') {
-        return pending202('The withdrawal outcome is known but recording it failed; retry with the same clientRequestId.', prov.signature);
-      }
-      if (!ok) return await reloadAndResolve(op.id);
-      return terminalFailed(step, clientSafeFailureMessage(step), prov.signature);
-    }
-    // still_valid | unverifiable — breadcrumb is best-effort, answer is 202.
-    const step = verdict.verdict === 'still_valid' ? 'withdraw_still_valid' : 'withdraw_unverifiable';
-    try {
-      await storage.transitionAgentSolWithdraw({
-        operationId: op.id,
-        walletAddress,
-        step,
-        mergeMetadata: {
-          lastReconcileVerdict: verdict.verdict,
-          lastReconcileAt: new Date().toISOString(),
-        },
-        requireSignature: prov.signature,
-      });
-    } catch {
-      // best-effort breadcrumb only
-    }
-    return pending202(
-      verdict.verdict === 'still_valid'
-        ? 'The withdrawal transaction is still within its validity window; retry shortly with the same clientRequestId.'
-        : 'The withdrawal broadcast could not be verified yet; retry with the same clientRequestId.',
-      prov.signature,
-    );
   };
 
   const resolveNotBroadcast = async (
@@ -782,4 +868,160 @@ export async function handleConfirmSolWithdraw(
     return { http: 404, body: { error: 'No SOL withdrawal found for this clientRequestId' } };
   }
   return storedStateResponse(op);
+}
+
+// ————————————————————————————————————————————————————————————————
+// WO2B2C-A1 — background recovery sweep for ABANDONED durable withdrawals
+// ————————————————————————————————————————————————————————————————
+
+/**
+ * A pending row untouched for this long is eligible for the sweep. Handler
+ * breadcrumbs (still_valid / unverifiable) bump updatedAt, so a row that is
+ * being actively reconciled never looks abandoned. Not a monetary constant.
+ */
+export const SOL_WITHDRAW_ABANDONED_AFTER_MS = 15 * 60 * 1000;
+/** Per-pass row cap — bounded work, oldest first; the next pass continues. */
+export const SOL_WITHDRAW_SWEEP_LIMIT = 25;
+/** Persisted op.error for sweep-terminalized pre-broadcast rows (operator text). */
+export const SOL_WITHDRAW_ABANDONED_ERROR =
+  'Abandoned before broadcast: still pending with zero signature evidence after the staleness window; terminalized by the background recovery sweep. No funds moved.';
+
+export interface SolWithdrawSweepResult {
+  scanned: number;
+  finalized: number;
+  alreadySucceeded: number;
+  reconciledFailed: number;
+  terminalizedAbandoned: number;
+  stillPending: number;
+  manualReview: number;
+  raceLost: number;
+  skipped: number;
+  errors: number;
+}
+
+/**
+ * Bounded recovery for durable SOL withdrawals whose owning request died.
+ *
+ * READ-AND-CAS ONLY. This sweep NEVER decrypts keys, builds, signs, or
+ * broadcasts — it exclusively drives rows to truth through the existing
+ * primitives, and it is safe to run concurrently with live handlers and with
+ * rival sweep instances:
+ *
+ *  - Signature evidence present → the SHARED reconcile core (exact-signature
+ *    classification; locked exactly-once finalize; signature-bound failure
+ *    CAS). Malformed/partial evidence stays pending for manual review.
+ *  - ZERO signature evidence on a stale, freshly re-read 'pending' row →
+ *    provably pre-broadcast; terminalized via the atomic no-signature CAS
+ *    (`requireNoSignature` re-proves emptiness INSIDE the guarded UPDATE). A
+ *    live handler that just precommitted flips the CAS false (lost race,
+ *    no-op here); a handler that precommits AFTER we terminalize is refused
+ *    by the precommit's own pending-only guard — in both orders exactly one
+ *    side wins and a row that may own broadcastable bytes is never failed.
+ *  - Non-'pending' non-terminal statuses (nothing this machine writes) are
+ *    counted for manual review and NEVER touched.
+ *
+ * Rows are processed oldest-first with per-row error isolation.
+ */
+export async function sweepAbandonedSolWithdrawals(now: Date = new Date()): Promise<SolWithdrawSweepResult> {
+  const result: SolWithdrawSweepResult = {
+    scanned: 0,
+    finalized: 0,
+    alreadySucceeded: 0,
+    reconciledFailed: 0,
+    terminalizedAbandoned: 0,
+    stillPending: 0,
+    manualReview: 0,
+    raceLost: 0,
+    skipped: 0,
+    errors: 0,
+  };
+  const cutoffMs = now.getTime() - SOL_WITHDRAW_ABANDONED_AFTER_MS;
+  let rows: BorrowOperationRow[];
+  try {
+    rows = await storage.getStaleAgentSolWithdrawOperations({
+      updatedBefore: new Date(cutoffMs),
+      limit: SOL_WITHDRAW_SWEEP_LIMIT,
+    });
+  } catch (e) {
+    console.error('[SolWithdrawSweep] worklist query failed:', errMsg(e));
+    result.errors++;
+    return result;
+  }
+  for (const stale of rows) {
+    result.scanned++;
+    try {
+      // Fresh re-read: the worklist snapshot may lag a live handler. Every
+      // decision below is made on the FRESH row, and every write goes through
+      // the existing atomic guards, so staleness can only cost a lost race.
+      const fresh = await storage.getBorrowOperationById(stale.id);
+      if (!fresh || fresh.operationType !== AGENT_SOL_WITHDRAW_OP_TYPE) {
+        result.skipped++;
+        continue;
+      }
+      if (TERMINAL_OPERATION_STATUSES.has(String(fresh.status ?? ''))) {
+        result.skipped++;
+        continue;
+      }
+      if (fresh.status !== 'pending') {
+        // A status this machine never writes: surface it, never touch it.
+        console.warn(`[SolWithdrawSweep] op ${fresh.id} has unexpected status '${fresh.status}' — manual review`);
+        result.manualReview++;
+        continue;
+      }
+      const updatedAtMs =
+        fresh.updatedAt instanceof Date
+          ? fresh.updatedAt.getTime()
+          : new Date(fresh.updatedAt as unknown as string).getTime();
+      if (!Number.isFinite(updatedAtMs) || updatedAtMs >= cutoffMs) {
+        // Went active again between worklist and re-read (or the timestamp is
+        // unreadable) — not provably abandoned this pass. Touch nothing.
+        result.skipped++;
+        continue;
+      }
+      if (hasSignatureEvidence(fresh)) {
+        const outcome = await reconcilePersistedWithdrawSignature(fresh);
+        switch (outcome.kind) {
+          case 'finalized':
+            result.finalized++;
+            break;
+          case 'already_succeeded':
+            result.alreadySucceeded++;
+            break;
+          case 'terminal_failed':
+            result.reconciledFailed++;
+            break;
+          case 'manual_review':
+          case 'finalize_malformed':
+            result.manualReview++;
+            break;
+          case 'transition_lost':
+          case 'finalize_lost':
+            result.raceLost++;
+            break;
+          default:
+            // finalize_record_pending | record_failed | pending_still_valid |
+            // pending_unverifiable — row stays pending; a later pass retries.
+            result.stillPending++;
+            break;
+        }
+        continue;
+      }
+      // Provably pre-broadcast: stale + freshly-read 'pending' + ZERO
+      // signature evidence. Terminalize via the existing atomic CAS.
+      const ok = await storage.transitionAgentSolWithdraw({
+        operationId: fresh.id,
+        walletAddress: fresh.walletAddress,
+        toStatus: 'failed',
+        step: 'withdraw_prebroadcast_failed',
+        error: SOL_WITHDRAW_ABANDONED_ERROR,
+        requireNoSignature: true,
+      });
+      if (ok) result.terminalizedAbandoned++;
+      else result.raceLost++;
+    } catch (e) {
+      result.errors++;
+      console.error(`[SolWithdrawSweep] row ${stale.id} failed (isolated):`, errMsg(e));
+    }
+  }
+  return result;
 }

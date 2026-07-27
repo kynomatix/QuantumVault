@@ -431,6 +431,7 @@ export interface IStorage {
   transitionAgentSolWithdraw(p: { operationId: string; walletAddress: string; toStatus?: string; step: string; error?: string | null; mergeMetadata?: Record<string, unknown>; result?: Record<string, unknown> | null; requireNoSignature?: boolean; requireSignature?: string }): Promise<boolean>;
   finalizeAgentSolWithdrawSuccess(p: { operationId: string; walletAddress: string; expectedSignature: string }): Promise<AgentSolWithdrawFinalizeOutcome>;
   getPendingLoopHopOperations(): Promise<BorrowOperation[]>;
+  getStaleAgentSolWithdrawOperations(p: { updatedBefore: Date; limit: number }): Promise<BorrowOperation[]>;
   claimLoopHopOpenAttempt(parentOpId: string, requestedVaultId: number): Promise<{
     adopted: boolean;
     activeOpenClientRequestId: string;
@@ -2940,6 +2941,22 @@ export class DatabaseStorage implements IStorage {
         ne(borrowOperations.status, 'parked'),
       ))
       .orderBy(asc(borrowOperations.createdAt));
+  }
+
+  // WO2B2C-A1: bounded, oldest-first worklist for the abandoned-SOL-withdraw
+  // recovery sweep. NON-terminal = outside the explicit terminal allowlist —
+  // unknown statuses are INCLUDED so the sweep can surface them for manual
+  // review; the sweep itself only ever terminalizes clean 'pending' rows.
+  async getStaleAgentSolWithdrawOperations(p: { updatedBefore: Date; limit: number }): Promise<BorrowOperation[]> {
+    const limit = Math.max(1, Math.min(Math.floor(p.limit), 200));
+    return await db.select().from(borrowOperations)
+      .where(and(
+        eq(borrowOperations.operationType, AGENT_SOL_WITHDRAW_OP_TYPE),
+        notInArray(borrowOperations.status, [...AGENT_SOL_WITHDRAW_TERMINAL_STATUSES]),
+        lt(borrowOperations.updatedAt, p.updatedBefore),
+      ))
+      .orderBy(asc(borrowOperations.createdAt))
+      .limit(limit);
   }
 
   // WO2A: atomically claim (or adopt) the SINGLE active open child of a hop

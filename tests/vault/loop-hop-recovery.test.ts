@@ -137,6 +137,8 @@ import {
   countHopBroadcastAttempts,
   recoverFromOlderProvenClose,
   executeLoopHop,
+  HOP_DEFER_SOL_WITHDRAW_PENDING_MESSAGE,
+  HOP_DEFER_SOL_WITHDRAW_UNREADABLE_MESSAGE,
 } from "../../server/vault/loop/loop-executor";
 import { storage } from "../../server/storage";
 import {
@@ -1490,7 +1492,9 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
     expect((res as any).policyDenied).toBeUndefined();
     expect((res as any).parked).toBeUndefined();
     expect((res as any).terminal).toBeUndefined();
-    expect(res.error).toMatch(/SOL withdrawal .* still settling/i);
+    // A1 contract: the error is the FIXED sanitized constant — never
+    // interpolated status text.
+    expect(res.error).toBe(HOP_DEFER_SOL_WITHDRAW_PENDING_MESSAGE);
     // Durable parent FIRST (our half of the create-then-scan Dekker property)…
     expect(storage.createBorrowOperation).toHaveBeenCalledTimes(1);
     expect(storage.createBorrowOperation).toHaveBeenCalledWith(
@@ -1578,8 +1582,9 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
     expect(res.success).toBe(false);
     expect((res as any).deferredForSolWithdraw).toBe(true);
     expect((res as any).resumable).toBe(true);
-    expect(res.error).toMatch(/Could not verify/i);
-    expect(res.error).toMatch(/pg pool drained/);
+    // A1 contract: fixed sanitized wording — the raw scan error must NOT leak.
+    expect(res.error).toBe(HOP_DEFER_SOL_WITHDRAW_UNREADABLE_MESSAGE);
+    expect(res.error).not.toContain("pg pool drained");
     expect(getFreshLoopRates).not.toHaveBeenCalled();
     expect(getAgentTokenBalanceRawStrict).not.toHaveBeenCalled();
     expect(storage.updateBorrowOperation).not.toHaveBeenCalled();
@@ -1688,5 +1693,68 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
 
     expect(walletWideScans()).toHaveLength(0);
     expect((res as any).deferredForSolWithdraw).toBeUndefined();
+  });
+
+  // ——— WO2B2C-A1: exact coordination-deferred result contract ———
+
+  it("A1 CONTRACT (blocker path): result is EXACTLY {success,resumable,deferredForSolWithdraw,error} with the fixed pending message", async () => {
+    primeFreshHop();
+    vi.mocked(storage.getBorrowOperations as any).mockResolvedValue([wdOp("pending")]);
+
+    const res = await executeLoopHop(hopParams);
+
+    expect(Object.keys(res as any).sort()).toEqual([
+      "deferredForSolWithdraw",
+      "error",
+      "resumable",
+      "success",
+    ]);
+    expect(res).toEqual({
+      success: false,
+      resumable: true,
+      deferredForSolWithdraw: true,
+      error: HOP_DEFER_SOL_WITHDRAW_PENDING_MESSAGE,
+    });
+  });
+
+  it("A1 CONTRACT (unreadable path): same exact shape with the fixed unreadable message", async () => {
+    primeFreshHop();
+    vi.mocked(storage.getBorrowOperations as any).mockRejectedValue(new Error("boom"));
+
+    const res = await executeLoopHop(hopParams);
+
+    expect(Object.keys(res as any).sort()).toEqual([
+      "deferredForSolWithdraw",
+      "error",
+      "resumable",
+      "success",
+    ]);
+    expect(res).toEqual({
+      success: false,
+      resumable: true,
+      deferredForSolWithdraw: true,
+      error: HOP_DEFER_SOL_WITHDRAW_UNREADABLE_MESSAGE,
+    });
+  });
+
+  it("A1 SANITIZATION: infrastructure identifiers in the scan failure (and blocker statuses) can never reach the result", async () => {
+    primeFreshHop();
+    const leaky = new Error("pg://svc_user:hunter2@10.0.0.7:5432/prod SELECT * FROM wallets — connection reset");
+    vi.mocked(storage.getBorrowOperations as any).mockRejectedValue(leaky);
+
+    const res = await executeLoopHop(hopParams);
+
+    expect((res as any).deferredForSolWithdraw).toBe(true);
+    expect(res.error).toBe(HOP_DEFER_SOL_WITHDRAW_UNREADABLE_MESSAGE);
+    expect(res.error).not.toContain("hunter2");
+    expect(res.error).not.toContain("10.0.0.7");
+    expect(res.error).not.toContain("SELECT");
+
+    // The blocker-status echo is equally banned (fixed wording only).
+    vi.mocked(storage.getBorrowOperations as any).mockResolvedValue([wdOp("reconciling_v9")]);
+    const res2 = await executeLoopHop(hopParams);
+    expect((res2 as any).deferredForSolWithdraw).toBe(true);
+    expect(res2.error).toBe(HOP_DEFER_SOL_WITHDRAW_PENDING_MESSAGE);
+    expect(res2.error).not.toContain("reconciling_v9");
   });
 });

@@ -366,6 +366,13 @@ export async function runLoopAllocationTick(deps: LoopAllocationTickDeps): Promi
   // tick (the hop's clientRequestId is timestamp-based, so a fresh decision would
   // otherwise mint a rival op once the 30-min claim cooldown lapses).
   const hopInFlightPositionIds = new Set<string>();
+  // WO2B2C-A1: sources whose pending hop came back COORDINATION-DEFERRED this
+  // sweep (writeless defer for a non-terminal SOL withdrawal). These rows stay
+  // suppressed for rival hop/relever work but MUST remain eligible for the
+  // autonomous safety unwind — a bleeding loop cannot wait out a stuck
+  // withdrawal intent. Hops that never reached the executor (no signer,
+  // malformed metadata) are NOT marked and keep the conservative full skip.
+  const coordinationDeferredSourceIds = new Set<string>();
   try {
     const pendingHops = await deps.getPendingHops();
     for (const op of pendingHops) {
@@ -454,7 +461,12 @@ export async function runLoopAllocationTick(deps: LoopAllocationTickDeps): Promi
                 })
                 .catch(() => {});
             }
-          } else if (res.resumable !== true) result.failed++;
+          } else {
+            if (res.deferredForSolWithdraw === true && sourceId) {
+              coordinationDeferredSourceIds.add(sourceId);
+            }
+            if (res.resumable !== true) result.failed++;
+          }
         } finally {
           // Zeroize key material even on throw (mirrors the per-row finally).
           signer.cleanup();
@@ -482,7 +494,21 @@ export async function runLoopAllocationTick(deps: LoopAllocationTickDeps): Promi
     // A position with a hop already in flight this tick was handled by the
     // resume sweep above — never open a second, competing action on it.
     if (hopInFlightPositionIds.has(row.id)) {
-      result.skipped++;
+      if (!coordinationDeferredSourceIds.has(row.id)) {
+        result.skipped++;
+        continue;
+      }
+      // WO2B2C-A1: the pending hop deferred WRITELESSLY for a SOL withdrawal,
+      // so this source is still a live, possibly-bleeding loop. Run the normal
+      // brain in safety-unwind-only mode: carry_inverted / carry_below_floor
+      // may act through the FULL existing machinery (hysteresis streak,
+      // cooldown claim, signer); relever and hop promotion stay suppressed.
+      try {
+        await processAllocationCandidate(row, rates, deps, result, { safetyUnwindOnly: true });
+      } catch (e) {
+        result.failed++;
+        console.error(`[LoopAllocationTick] row ${row.id} failed unexpectedly:`, e);
+      }
       continue;
     }
     try {
@@ -506,7 +532,9 @@ async function processAllocationCandidate(
   rates: Map<number, FreshLoopRate>,
   deps: LoopAllocationTickDeps,
   result: LoopAllocationTickResult,
+  constraints?: { safetyUnwindOnly?: boolean },
 ): Promise<void> {
+  const safetyUnwindOnly = constraints?.safetyUnwindOnly === true;
   const vaultId = Number(row.venueVaultId);
   if (!Number.isInteger(vaultId) || vaultId <= 0) {
     result.skipped++;
@@ -566,12 +594,24 @@ async function processAllocationCandidate(
     };
   }
 
+  // WO2B2C-A1: source pinned by a coordination-deferred hop — a rival RELEVER
+  // is suppressed (folded to a journaled no-op); only the safety unwind may
+  // proceed past this point. Hop promotion below is gated the same way.
+  if (safetyUnwindOnly && intentRes.intent === "relever") {
+    intentRes = {
+      intent: "none",
+      reason: "relever_suppressed_hop_deferred",
+      evGapApy: intentRes.evGapApy,
+      netCarryApy: intentRes.netCarryApy,
+    };
+  }
+
   // HOP (P4, plan §4.4): only for a position the single-pair brain decided to
   // KEEP levered (reason 'stay_levered'). Unwind ALWAYS dominates — never hop a
   // bleeding loop. If a better allowlisted pair clears the (higher) hop bar,
   // promote 'none/stay_levered' → 'hop'.
   let hopTarget: HopTargetResult | null = null;
-  if (levered && intentRes.intent === "none" && intentRes.reason === "stay_levered") {
+  if (!safetyUnwindOnly && levered && intentRes.intent === "none" && intentRes.reason === "stay_levered") {
     const allowedVaultIds = Object.keys(LOOP_VAULT_ALLOWLIST).map(Number);
     hopTarget = decideHopTarget({ currentVaultId: vaultId, rates, allowedVaultIds });
     if (hopTarget.targetVaultId !== null) {
@@ -596,6 +636,9 @@ async function processAllocationCandidate(
     borrowApr: rate?.borrowApr ?? null,
     evGapApy: intentRes.evGapApy,
     netCarryApy: intentRes.netCarryApy,
+    // WO2B2C-A1: truthful audit marker — this row was evaluated under
+    // safety-unwind-only suppression (its pending hop is coordination-deferred).
+    ...(safetyUnwindOnly ? { hopCoordinationDeferred: true } : {}),
     // HOP audit facts (present only when this tick's intent is a hop). The
     // hopTargetVaultId is ALSO the hysteresis key: the streak only counts prior
     // rows that hopped toward the SAME target.

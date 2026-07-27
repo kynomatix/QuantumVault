@@ -2961,17 +2961,35 @@ export interface LoopHopResult {
    */
   parkedByThisInvocation?: boolean;
   /**
-   * WO2B2C: true = a FRESH hop (durable parent persisted; zero close evidence)
-   * deferred because this wallet has an unfinished durable SOL withdrawal, or
-   * because that could not be verified (fail closed). Nothing was gated, read
-   * strictly, written, or broadcast — retry the SAME clientRequestId once the
-   * withdrawal reaches a terminal status.
+   * WO2B2C(-A1): true = a FRESH hop (durable parent persisted; zero close
+   * evidence) deferred because this wallet has an unfinished durable SOL
+   * withdrawal, or because that could not be verified (fail closed). Nothing
+   * was gated, read strictly, written, or broadcast — retry the SAME
+   * clientRequestId once the withdrawal reaches a terminal status.
+   *
+   * CONTRACT (pinned by tests): a coordination-deferred result is EXACTLY
+   *   { success: false, resumable: true, deferredForSolWithdraw: true,
+   *     error: HOP_DEFER_SOL_WITHDRAW_PENDING_MESSAGE
+   *          | HOP_DEFER_SOL_WITHDRAW_UNREADABLE_MESSAGE }
+   * — no other fields, and the error is ALWAYS one of the two fixed sanitized
+   * messages (never interpolated scan/DB/status text).
    */
   deferredForSolWithdraw?: boolean;
   /** WO2A: how the recovered close output was attributed. */
   principalSource?: HopSolReturnedSource;
   error?: string;
 }
+
+/**
+ * WO2B2C-A1 — the ONLY two error texts a coordination-deferred hop may carry.
+ * Fixed, fully sanitized wording: raw scan errors and DB status strings never
+ * reach the caller (executor/DB/RPC text is an internal detail and can leak
+ * infrastructure identifiers). Tests pin these verbatim.
+ */
+export const HOP_DEFER_SOL_WITHDRAW_PENDING_MESSAGE =
+  "A SOL withdrawal for this wallet is still settling. The hop deferred before any carry check, balance read, or close attempt — your position is unchanged. Retry with the same request id once the withdrawal finishes.";
+export const HOP_DEFER_SOL_WITHDRAW_UNREADABLE_MESSAGE =
+  "Could not verify that no SOL withdrawal is in flight for this wallet. The hop deferred before any carry check, balance read, or close attempt — your position is unchanged. Retry with the same request id.";
 
 /**
  * Execution-time carry re-gate for a hop: recompute BOTH pairs' net carry at
@@ -3231,19 +3249,29 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
                   !TERMINAL_OPERATION_STATUSES.has(String(o.status ?? "")),
               );
             } catch (e) {
+              // A1: raw cause goes to server logs ONLY — the result carries
+              // the fixed sanitized message (contract-pinned, no interpolation).
+              console.warn(
+                `[LoopHop] withdraw-gate scan unreadable for ${walletAddress} — deferring fresh hop:`,
+                e instanceof Error ? e.message : e,
+              );
               return {
                 success: false,
                 resumable: true,
                 deferredForSolWithdraw: true,
-                error: `Could not verify that no SOL withdrawal is in flight for this wallet (${e instanceof Error ? e.message : "operation scan failed"}). The hop deferred before any carry check, balance read, or close attempt — your position is unchanged. Retry with the same request id.`,
+                error: HOP_DEFER_SOL_WITHDRAW_UNREADABLE_MESSAGE,
               };
             }
             if (withdrawBlocker) {
+              // A1: the blocker's status echoes in server logs ONLY.
+              console.log(
+                `[LoopHop] fresh hop deferred for ${walletAddress}: withdraw op ${withdrawBlocker.id} non-terminal (status '${withdrawBlocker.status}')`,
+              );
               return {
                 success: false,
                 resumable: true,
                 deferredForSolWithdraw: true,
-                error: `A SOL withdrawal for this wallet is still settling (status '${withdrawBlocker.status}'). The hop deferred before any funds moved — your position is unchanged. Retry with the same request id once the withdrawal finishes.`,
+                error: HOP_DEFER_SOL_WITHDRAW_PENDING_MESSAGE,
               };
             }
           }
