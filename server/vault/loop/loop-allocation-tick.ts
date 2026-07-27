@@ -714,8 +714,11 @@ async function processAllocationCandidate(
           holdDefaultIntent: holdDecision.defaultIntent,
           holdNoSwitchBenchmarkApy: holdDecision.noSwitchBenchmarkApy,
           holdAltVaultId: holdDecision.altVaultId,
+          holdAltSymbol: holdDecision.altSymbol,
+          holdAltTargetLeverage: holdDecision.altTargetLeverage,
           holdAltLoopApy: holdDecision.altLoopApy,
           holdMarginalSwitchGainApy: holdDecision.marginalSwitchGainApy,
+          holdRotationThresholdName: holdDecision.thresholdName,
           holdRotationThresholdApy: holdDecision.thresholdApy,
         }
       : {}),

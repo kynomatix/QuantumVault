@@ -132,7 +132,7 @@ import {
   recoverHopSolReturned,
 } from "../../server/vault/loop/loop-risk-policy";
 import { hasIntentStreak } from "../../server/vault/loop/loop-allocation-tick";
-import { computeCloseAttributableFloor, executeLoopHop } from "../../server/vault/loop/loop-executor";
+import { computeCloseAttributableFloor, executeLoopDeleverToHold, executeLoopHop } from "../../server/vault/loop/loop-executor";
 import { storage } from "../../server/storage";
 import {
   getServerConnection,
@@ -971,36 +971,145 @@ describe("executeLoopHop — WO3 HOLD rotation guard", () => {
     expect(keys[keys.length - 1]).toBe(sourceKey);
   });
 
-  it("15b (reviewer). a STALLED execution-time rate read blocks NOTHING: no lock is held while it hangs, so the safety delever can run", async () => {
+  it("15b (reviewer). REAL safety delever executor: completes while hop guard I/O is stalled PRE-lock, queues only while the guarded close OWNS the source lock, completes after controlled release", async () => {
     primeRotation();
     stubHopFetch();
+    const sourceKey = `${WALLET}::4`;
+    const waitFor = async (cond: () => boolean) => {
+      const t0 = Date.now();
+      while (!cond()) {
+        if (Date.now() - t0 > 4000) throw new Error("waitFor timeout");
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    };
+    const sourceLockCalls = () =>
+      vi.mocked(withBorrowLock as any).mock.calls.filter((c: any[]) => c[0] === sourceKey).length;
+
+    // Stall the hop's PRE-lock rate resolution.
     let releaseRates!: () => void;
-    const gate = new Promise<void>((r) => (releaseRates = r));
-    const rows = eligibleRates();
+    const ratesGate = new Promise<void>((r) => (releaseRates = r));
+    const rows = rotationRates();
     vi.mocked(getFreshLoopRates as any).mockImplementation(async () => {
-      await gate;
+      await ratesGate;
       return rows;
     });
+    // Live-read schedule: call 1 = delever #1 (self-heal), call 2 = hop
+    // preflight, call 3 = the close's IN-LOCK read (stalls until released),
+    // later calls (delever #2) fall back to primeRotation's default.
+    let releaseCloseRead!: () => void;
+    const closeReadGate = new Promise<void>((r) => (releaseCloseRead = r));
+    routeMocks.readLoopLivePositionHealth
+      .mockImplementationOnce(async () => liveHealth("0", "5000000000"))
+      .mockImplementationOnce(async () => liveHealth("0", "5000000000"))
+      .mockImplementationOnce(async () => {
+        await closeReadGate;
+        return liveHealth("0", "5000000000");
+      });
+
+    const deleverParams = {
+      walletAddress: WALLET,
+      agentPublicKey: AGENT_PK,
+      agentSecretKey: new Uint8Array(64),
+      borrowPositionId: SRC_POS,
+      policyReason: "test_safety",
+    } as any;
 
     const hop = executeLoopHop(hopParamsHold as any);
-    await new Promise((r) => setTimeout(r, 25)); // let the hop reach the stalled read
+    await new Promise((r) => setTimeout(r, 25)); // hop parked on the stalled rate read
+    expect(sourceLockCalls()).toBe(0); // hop holds NOTHING while its guard I/O hangs
 
-    // While rates hang: ZERO borrow-lock acquisitions anywhere — the source
-    // key is free, which is exactly what lets the 60s safety delever acquire
-    // it and complete while this hop is still waiting on the rate table.
-    expect(vi.mocked(withBorrowLock as any).mock.calls).toHaveLength(0);
-    const sourceKey = `${WALLET}::4`;
-    let safetyRan = false;
-    await withBorrowLock(sourceKey, async () => {
-      safetyRan = true; // stand-in for executeLoopDeleverToHold's acquisition
-    });
-    expect(safetyRan).toBe(true);
+    // Phase 1: the REAL delever executor acquires the REAL source mutex and
+    // COMPLETES (zero-debt self-heal, no transaction) while the hop stalls.
+    const d1 = await executeLoopDeleverToHold(deleverParams);
+    expect(d1.success).toBe(true);
+    expect((d1 as any).selfHeal).toBe(true);
 
+    // Phase 2: release rates; the hop runs its preflight and enters the close,
+    // which now OWNS the source lock (stalled on its in-lock live read).
     releaseRates();
-    const res = await hop;
-    expect((res as any).policyDenied).toBeUndefined(); // proceeds normally post-release
-    const keys = vi.mocked(withBorrowLock as any).mock.calls.map((c: any[]) => c[0]);
-    expect(keys.filter((k: string) => k === sourceKey).length).toBeGreaterThan(0);
+    await waitFor(() => sourceLockCalls() >= 2); // d1 + the hop's close
+    let d2Done = false;
+    const d2 = executeLoopDeleverToHold(deleverParams).then((res) => {
+      d2Done = true;
+      return res;
+    });
+    await new Promise((r) => setTimeout(r, 75));
+    expect(d2Done).toBe(false); // QUEUED behind the close's held source lock
+
+    releaseCloseRead(); // controlled release — the close finishes its attempt
+    const hopRes = await hop;
+    const d2Res = await d2;
+    expect(d2Done).toBe(true); // delever completed only after the lock freed
+    expect(d2Res.success).toBe(true);
+    expect((d2Res as any).selfHeal).toBe(true);
+    expect((hopRes as any).success).toBe(false); // harness stops at venue legs
+    expect((hopRes as any).policyDenied).toBeUndefined();
+  });
+
+  it("15c (reviewer). two genuinely PARALLEL fresh calls for one parent: ONE durable parent truth, at most one close child per attempt slot, at most one position-moving broadcast", async () => {
+    stubHopFetch();
+    routeMocks.getLoopVaultConfig.mockImplementation(async (v: number) => (v === 4 ? CFG4 : v === 5 ? CFG5 : null));
+    routeMocks.readLoopLivePositionHealth.mockResolvedValue(liveHealth("0", "5000000000"));
+    vi.mocked(getFreshLoopRates as any).mockResolvedValue(rotationRates());
+    vi.mocked(storage.getBorrowPosition as any).mockResolvedValue(srcPos());
+    // Stateful storage emulation of the UNIQUE index on clientRequestId —
+    // parent AND children — plus metadata merge on updates.
+    const rowsByCrid = new Map<string, any>();
+    let parentCreates = 0;
+    vi.mocked(storage.getBorrowOperationByClientRequestId as any).mockImplementation(
+      async (_w: string, crid: string) => rowsByCrid.get(crid) ?? null,
+    );
+    vi.mocked(storage.createBorrowOperation as any).mockImplementation(async (p: any) => {
+      const crid = p.clientRequestId;
+      if (crid && rowsByCrid.has(crid)) {
+        const err: any = new Error("duplicate key value violates unique constraint");
+        err.code = "23505";
+        throw err;
+      }
+      if (p.operationType === "loop_hop") parentCreates++;
+      const row = {
+        id: p.operationType === "loop_hop" ? PARENT_ID : `child-${crid}`,
+        txSignatures: [],
+        result: null,
+        error: null,
+        ...p,
+      };
+      if (crid) rowsByCrid.set(crid, row);
+      return row;
+    });
+    vi.mocked(storage.updateBorrowOperation as any).mockImplementation(async (id: string, patch: any) => {
+      for (const row of rowsByCrid.values()) {
+        if (row.id === id) {
+          if (patch.status) row.status = patch.status;
+          if (patch.step) row.step = patch.step;
+          if (patch.mergeMetadata) row.metadata = { ...(row.metadata ?? {}), ...patch.mergeMetadata };
+          if (patch.metadata) row.metadata = patch.metadata;
+          return row;
+        }
+      }
+      return { id };
+    });
+
+    const [a, b] = await Promise.all([
+      executeLoopHop(hopParamsHold as any),
+      executeLoopHop(hopParamsHold as any),
+    ]);
+
+    // ONE durable parent truth: exactly one loop_hop insert ever landed, and
+    // the loser adopted it via the unique-violation path.
+    expect(parentCreates).toBe(1);
+    // At most one close child exists for attempt slot 1 (per-attempt crid +
+    // unique index — the second in-lock caller's create is refused).
+    const closeRows = [...rowsByCrid.values()].filter((r) => r.operationType === "loop_close");
+    expect(closeRows.length).toBeLessThanOrEqual(1);
+    // …therefore at most one position-moving close broadcast is possible.
+    expect(vi.mocked(executeAgentInstructionsConfirmOnly as any).mock.calls.length).toBeLessThanOrEqual(1);
+    // Neither caller threw; the harness venue legs refuse, so neither reports
+    // a (fake) success.
+    for (const r of [a, b]) {
+      expect(r).toBeTruthy();
+      expect((r as any).success).toBe(false);
+    }
   });
 
   it("19b (reviewer). preflight against a target with UNRESOLVED pending open state fails CLOSED with ZERO reconciliation writes", async () => {
@@ -1132,5 +1241,162 @@ describe("executeLoopHop — WO3 HOLD rotation guard", () => {
       .mock.calls.filter((c: any[]) => c[1]?.mergeMetadata && "authorizedRecoveryVaultIds" in c[1].mergeMetadata);
     expect(destinationWrites).toHaveLength(0);
     expect(attemptWrites()[0][1].mergeMetadata.closeAttempts).toBe(2);
+  });
+
+  // ==========================================================================
+  // Corrective pass — retry identity binding + authorization audit facts
+  // ==========================================================================
+
+  const mismatchParent = (over?: { status?: string; toVaultId?: number; source?: string }) =>
+    ({
+      id: PARENT_ID,
+      walletAddress: WALLET,
+      operationType: "loop_hop",
+      status: over?.status ?? "pending",
+      step: "initialized",
+      borrowPositionId: over?.source ?? SRC_POS,
+      clientRequestId: CRID,
+      txSignatures: [],
+      result: null,
+      error: null,
+      metadata: {
+        kind: "loop",
+        fromVaultId: 4,
+        toVaultId: over?.toVaultId ?? 5,
+        slippageBps: 300,
+        sourceBorrowPositionId: over?.source ?? SRC_POS,
+        expectedSourceMode: "holding",
+      },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }) as any;
+
+  it("20a (corrective). retry with a MISMATCHED SOURCE fails closed BEFORE any read/lock/write — fixed sanitized terminal result, zero side effects", async () => {
+    vi.mocked(storage.getBorrowOperationByClientRequestId as any).mockResolvedValue(
+      mismatchParent({ source: "other-pos-9" }),
+    );
+    const fetchSpy = stubHopFetch();
+
+    const res = await executeLoopHop(hopParamsHold as any);
+
+    expect(res.success).toBe(false);
+    expect((res as any).terminal).toBe(true);
+    expect(res.error).toContain("bound to a different hop");
+    // Sanitized: no identifiers echoed back.
+    expect(res.error).not.toContain("other-pos-9");
+    // ZERO side effects of ANY kind — not even the source-position read.
+    expect(storage.createBorrowOperation).not.toHaveBeenCalled();
+    expect(storage.updateBorrowOperation).not.toHaveBeenCalled();
+    expect(storage.getBorrowPosition).not.toHaveBeenCalled();
+    expect(withBorrowLock).not.toHaveBeenCalled();
+    expect(getFreshLoopRates).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
+  });
+
+  it("20b (corrective). retry with a MISMATCHED TARGET fails closed identically — even against a SUCCEEDED parent (identity outranks completion adoption)", async () => {
+    vi.mocked(storage.getBorrowOperationByClientRequestId as any).mockResolvedValue(
+      mismatchParent({ toVaultId: 42, status: "succeeded" }),
+    );
+    const fetchSpy = stubHopFetch();
+
+    const res = await executeLoopHop(hopParamsHold as any);
+
+    expect(res.success).toBe(false);
+    expect((res as any).terminal).toBe(true);
+    expect((res as any).alreadyCompleted).toBeUndefined(); // NOT adopted as complete
+    expect(res.error).toContain("bound to a different hop");
+    expect(storage.createBorrowOperation).not.toHaveBeenCalled();
+    expect(storage.updateBorrowOperation).not.toHaveBeenCalled();
+    expect(storage.getBorrowPosition).not.toHaveBeenCalled();
+    expect(withBorrowLock).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
+  });
+
+  it("20c (corrective). unique-insert-race ADOPTION applies the same identity binding: a rival parent with a different target is refused with zero further side effects", async () => {
+    primeRotation();
+    stubHopFetch();
+    const rival = mismatchParent({ toVaultId: 42 });
+    rival.id = "rival-parent-1";
+    let rivalLanded = false;
+    vi.mocked(storage.getBorrowOperationByClientRequestId as any).mockImplementation(async () =>
+      rivalLanded ? rival : null,
+    );
+    vi.mocked(storage.createBorrowOperation as any).mockImplementation(async (p: any) => {
+      if (p.operationType === "loop_hop") {
+        rivalLanded = true; // the rival's insert won the unique race
+        const err: any = new Error("duplicate key value violates unique constraint");
+        err.code = "23505";
+        throw err;
+      }
+      return { id: "child-x", txSignatures: [], result: null, error: null, ...p };
+    });
+
+    const res = await executeLoopHop(hopParamsHold as any);
+
+    expect(res.success).toBe(false);
+    expect((res as any).terminal).toBe(true);
+    expect(res.error).toContain("bound to a different hop");
+    // After the refused adoption: no writes, no locks, no guard I/O, nothing.
+    expect(storage.updateBorrowOperation).not.toHaveBeenCalled();
+    expect(withBorrowLock).not.toHaveBeenCalled();
+    expect(getFreshLoopRates).not.toHaveBeenCalled();
+    expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
+    expect(preGatedWrites()).toHaveLength(0);
+  });
+
+  it("20d (corrective). MATCHING retry identity is unchanged: an existing pending parent with the same source+target proceeds normally", async () => {
+    primeRotation();
+    stubHopFetch();
+    const parent = mismatchParent(); // source SRC_POS, target 5 — matches params
+    vi.mocked(storage.getBorrowOperationByClientRequestId as any).mockResolvedValue(parent);
+    vi.mocked(storage.getBorrowOperationById as any).mockImplementation(async (id: string) =>
+      id === PARENT_ID ? parent : undefined,
+    );
+
+    const res = await executeLoopHop(hopParamsHold as any);
+
+    // Proceeds past the binding gate into the normal pipeline (guard I/O ran).
+    expect((res as any).terminal).not.toBe(true);
+    expect(getFreshLoopRates).toHaveBeenCalled();
+    expect(storage.createBorrowOperation).not.toHaveBeenCalledWith(
+      expect.objectContaining({ operationType: "loop_hop" }),
+    );
+  });
+
+  it("21 (corrective). HOLD authorization write carries the COMPLETE shared-brain audit facts: alt identity, alt leverage, threshold name + value", async () => {
+    primeRotation();
+    stubHopFetch();
+
+    await executeLoopHop(hopParamsHold as any);
+
+    const pg = preGatedWrites();
+    expect(pg.length).toBe(1);
+    const flat = JSON.stringify(pg[0][1]);
+    expect(flat).toContain('"holdAltVaultId":5');
+    expect(flat).toContain('"holdAltSymbol":"JitoSOL"');
+    expect(flat).toContain('"holdAltTargetLeverage":3.7');
+    expect(flat).toContain('"holdRotationThresholdName":"holdRotationMinGainApy"');
+    expect(flat).toContain(`"holdRotationThresholdApy":${LOOP_ALLOCATION_POLICY.holdRotationMinGainApy}`);
+  });
+
+  it("22 (corrective). LEVERED authorization write records the hop threshold name + value alongside the measured edge", async () => {
+    primeRotation({ rates: eligibleRates(), liveDebt: "5000000000" });
+    vi.mocked(storage.getBorrowPosition as any).mockResolvedValue(
+      srcPos({ debtAmountRaw: "5000000000", policyState: "levered" }),
+    );
+    // Worst-case swap output must cover the flash repay (debt + buffer) so the
+    // close reaches checkpoint B (the write under test) before assembly.
+    stubHopFetch({ quoteMinOuts: ["6000000000"] });
+
+    await executeLoopHop({ ...hopParamsHold, expectedSourceMode: "levered" } as any);
+
+    const pg = preGatedWrites();
+    expect(pg.length).toBe(1);
+    const flat = JSON.stringify(pg[0][1]);
+    expect(flat).toContain('"gateGainApy":');
+    expect(flat).toContain('"gateThresholdName":"hopMinCarryGainApy"');
+    expect(flat).toContain(`"gateThresholdApy":${LOOP_ALLOCATION_POLICY.hopMinCarryGainApy}`);
   });
 });

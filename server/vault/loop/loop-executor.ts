@@ -2166,6 +2166,10 @@ async function evaluateHopGuardCheckpointA(
           gateGainApy: gate.gainApy,
           gateFromCarryApy: gate.fromCarryApy,
           gateToCarryApy: gate.toCarryApy,
+          // Audit metadata only: the threshold the measured edge was compared
+          // against (name + value), persisted alongside the edge itself.
+          gateThresholdName: "hopMinCarryGainApy" as const,
+          gateThresholdApy: LOOP_ALLOCATION_POLICY.hopMinCarryGainApy,
         },
       },
     };
@@ -2215,6 +2219,11 @@ async function evaluateHopGuardCheckpointA(
         holdNoSwitchBenchmarkApy: decision.noSwitchBenchmarkApy,
         holdAltLoopApy: decision.altLoopApy,
         holdMarginalSwitchGainApy: decision.marginalSwitchGainApy,
+        // Audit metadata only: complete the shared-brain fact set (explicit
+        // nulls preserved) so the authorization row is self-describing.
+        holdAltVaultId: decision.altVaultId,
+        holdAltSymbol: decision.altSymbol,
+        holdAltTargetLeverage: decision.altTargetLeverage,
         holdRotationThresholdName: decision.thresholdName,
         holdRotationThresholdApy: decision.thresholdApy,
       },
@@ -3506,6 +3515,40 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
   if (op && op.operationType !== "loop_hop") {
     return { success: false, error: "This request id was already used by a different operation." };
   }
+  // IDENTITY BINDING: bind the durable parent's identity (source position +
+  // target vault, recorded at creation) to THIS call's supplied identity
+  // BEFORE any terminal adoption, read, write, lock, child creation, or
+  // money/RPC work. A retry whose identity differs from the durable parent
+  // fails closed with a fixed sanitized result and ZERO side effects —
+  // resuming under a different source/target would misread state and could
+  // re-open toward a destination nobody authorized. A legacy row missing the
+  // metadata source falls back to the op row's own borrowPositionId column;
+  // an identity field that cannot be read at all is left to the existing
+  // fail-closed resume guards downstream (they refuse without it anyway).
+  const hopIdentityMismatch = (o: { borrowPositionId?: string | null; metadata?: unknown }): boolean => {
+    const m = (o.metadata ?? {}) as Record<string, any>;
+    const durableSource =
+      typeof m.sourceBorrowPositionId === "string" && m.sourceBorrowPositionId.length > 0
+        ? m.sourceBorrowPositionId
+        : typeof o.borrowPositionId === "string" && o.borrowPositionId.length > 0
+          ? o.borrowPositionId
+          : null;
+    const tv = Number(m.toVaultId);
+    const durableTarget = Number.isInteger(tv) && tv > 0 ? tv : null;
+    return (
+      (durableSource !== null && durableSource !== borrowPositionId) ||
+      (durableTarget !== null && durableTarget !== targetVaultId)
+    );
+  };
+  const HOP_IDENTITY_MISMATCH_RESULT: LoopHopResult = {
+    success: false,
+    terminal: true,
+    error:
+      "This request id is already bound to a different hop (different source position or target vault). Nothing was done — use a fresh request id for a new hop.",
+  };
+  if (op && hopIdentityMismatch(op)) {
+    return HOP_IDENTITY_MISMATCH_RESULT;
+  }
   if (op && (op.status === "succeeded" || op.status === "completed")) {
     const r = (op.result ?? {}) as Record<string, any>;
     return {
@@ -3603,6 +3646,16 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
         op = await storage.getBorrowOperationByClientRequestId(walletAddress, params.clientRequestId);
       }
       if (!op) throw e;
+      // Race-adopted parent: a rival create won the unique insert. The adopted
+      // row must pass the SAME identity binding as a plain retry — adopt only
+      // a parent whose durable source/target match this call; otherwise fail
+      // closed with the same fixed result and no further side effects.
+      if (op.operationType !== "loop_hop") {
+        return { success: false, error: "This request id was already used by a different operation." };
+      }
+      if (hopIdentityMismatch(op)) {
+        return HOP_IDENTITY_MISMATCH_RESULT;
+      }
     }
   }
   const opId = op.id;

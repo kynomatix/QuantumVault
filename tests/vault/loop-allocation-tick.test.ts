@@ -1142,6 +1142,9 @@ describe("runLoopAllocationTick — WO3 HOLD rotation cells", () => {
     expect(d.details.holdAltVaultId).toBe(5);
     expect(d.details.holdAltLoopApy).toBeCloseTo(0.0813, 6);
     expect(d.details.holdMarginalSwitchGainApy).toBeCloseTo(0.0513, 6);
+    expect(d.details.holdAltSymbol).toBe("JupSOL"); // makeRate's fixture symbol
+    expect(d.details.holdAltTargetLeverage).toBeCloseTo(3.7, 8);
+    expect(d.details.holdRotationThresholdName).toBe("holdRotationMinGainApy");
     expect(d.details.holdRotationThresholdApy).toBeCloseTo(0.02, 8);
     expect(d.details.closeSignaturePresent).toBe(true);
     expect(d.details.openSignaturePresent).toBe(true);
@@ -1207,7 +1210,10 @@ describe("runLoopAllocationTick — WO3 HOLD rotation cells", () => {
     expect(calls.hops).toHaveLength(0);
     expect(calls.decisions[0].reason).toBe("stay_hold");
     expect(calls.decisions[0].details.holdAltVaultId).toBe(5);
+    expect(calls.decisions[0].details.holdAltSymbol).toBe("JupSOL");
+    expect(calls.decisions[0].details.holdAltTargetLeverage).toBeCloseTo(3.7, 8);
     expect(calls.decisions[0].details.holdMarginalSwitchGainApy).toBeCloseTo(0.0054, 6);
+    expect(calls.decisions[0].details.holdRotationThresholdName).toBe("holdRotationMinGainApy");
   });
 
   it("HOLD row with an unreadable current vault journals rates_unreadable with null hold facts", async () => {
@@ -1222,6 +1228,15 @@ describe("runLoopAllocationTick — WO3 HOLD rotation cells", () => {
     expect(calls.decisions[0].reason).toBe("rates_unreadable");
     expect("holdCurrentHoldApy" in (calls.decisions[0].details as Record<string, unknown>)).toBe(true);
     expect(calls.decisions[0].details.holdCurrentHoldApy ?? null).toBeNull();
+    // The completed fact set journals EXPLICIT nulls — the keys are present
+    // even when no alternative exists (self-describing audit rows).
+    const dd = calls.decisions[0].details as Record<string, unknown>;
+    for (const k of ["holdAltSymbol", "holdAltTargetLeverage", "holdRotationThresholdName"]) {
+      expect(k in dd).toBe(true);
+    }
+    expect(dd.holdAltSymbol ?? null).toBeNull();
+    expect(dd.holdAltTargetLeverage ?? null).toBeNull();
+    expect(dd.holdRotationThresholdName).toBe("holdRotationMinGainApy");
   });
 
   it("rotation DECLINE copy: policy-denied hop notifies 'declined before any funds moved… position is unchanged'", async () => {
