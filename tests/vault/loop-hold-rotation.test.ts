@@ -136,6 +136,7 @@ import { computeCloseAttributableFloor, executeLoopDeleverToHold, executeLoopHop
 import { storage } from "../../server/storage";
 import {
   getServerConnection,
+  executeAgentInstructions,
   executeAgentInstructionsConfirmOnly,
   executeAgentSwap,
   getAgentTokenBalanceRawStrict,
@@ -1046,11 +1047,34 @@ describe("executeLoopHop — WO3 HOLD rotation guard", () => {
     expect((hopRes as any).policyDenied).toBeUndefined();
   });
 
-  it("15c (reviewer). two genuinely PARALLEL fresh calls for one parent: ONE durable parent truth, at most one close child per attempt slot, at most one position-moving broadcast", async () => {
-    stubHopFetch();
-    routeMocks.getLoopVaultConfig.mockImplementation(async (v: number) => (v === 4 ? CFG4 : v === 5 ? CFG5 : null));
-    routeMocks.readLoopLivePositionHealth.mockResolvedValue(liveHealth("0", "5000000000"));
-    vi.mocked(getFreshLoopRates as any).mockResolvedValue(rotationRates());
+  it("15c (reviewer). two genuinely PARALLEL fresh calls for one parent: exactly ONE durable parent, exactly ONE contested close child, exactly ONE position-moving broadcast, no rival authorization", async () => {
+    primeRotation(); // full valid HOLD fixture — the winner MUST reach assembly+broadcast
+    // VALID swap instructions: the winner must get all the way to a real
+    // assembly + broadcast attempt, not die at "swap instructions unavailable".
+    stubHopFetch({ swapBody: VALID_SWAP_BODY });
+    // The close leg broadcasts through executeAgentInstructions (write-ahead +
+    // realized-delta primitive). Refuse pre-signature so the attempt is a
+    // clean, countable broadcast entry with no landing.
+    vi.mocked(executeAgentInstructions as any).mockResolvedValue({
+      success: false,
+      onChainFailed: false,
+      signature: undefined,
+      error: "broadcast refused (test)",
+    });
+    // Two-caller barrier at the shared PRE-lock rate read: neither caller may
+    // proceed to the attempt write / close until BOTH have loaded the parent
+    // and captured priorCloseAttempts=0 — guaranteeing the close children
+    // genuinely CONTEST the same attempt slot (same per-attempt crid).
+    let arrived = 0;
+    let releaseBoth!: () => void;
+    const barrier = new Promise<void>((r) => (releaseBoth = r));
+    const rows = rotationRates();
+    vi.mocked(getFreshLoopRates as any).mockImplementation(async () => {
+      arrived++;
+      if (arrived >= 2) releaseBoth();
+      await barrier;
+      return rows;
+    });
     vi.mocked(storage.getBorrowPosition as any).mockResolvedValue(srcPos());
     // Stateful storage emulation of the UNIQUE index on clientRequestId —
     // parent AND children — plus metadata merge on updates.
@@ -1095,21 +1119,34 @@ describe("executeLoopHop — WO3 HOLD rotation guard", () => {
       executeLoopHop(hopParamsHold as any),
     ]);
 
-    // ONE durable parent truth: exactly one loop_hop insert ever landed, and
-    // the loser adopted it via the unique-violation path.
+    // ONE durable parent truth: exactly one loop_hop insert ever landed; the
+    // loser adopted it via the unique-violation path.
     expect(parentCreates).toBe(1);
-    // At most one close child exists for attempt slot 1 (per-attempt crid +
-    // unique index — the second in-lock caller's create is refused).
+    // Exactly ONE contested close child: both callers computed the SAME
+    // per-attempt crid (barrier pinned priorCloseAttempts=0 for both), so the
+    // unique index admitted exactly one loop_close row.
     const closeRows = [...rowsByCrid.values()].filter((r) => r.operationType === "loop_close");
-    expect(closeRows.length).toBeLessThanOrEqual(1);
-    // …therefore at most one position-moving close broadcast is possible.
-    expect(vi.mocked(executeAgentInstructionsConfirmOnly as any).mock.calls.length).toBeLessThanOrEqual(1);
-    // Neither caller threw; the harness venue legs refuse, so neither reports
-    // a (fake) success.
+    expect(closeRows).toHaveLength(1);
+    expect(closeRows[0].clientRequestId).toBe(`${CRID}:close:1`);
+    // Exactly ONE position-moving broadcast: the winner drove valid close
+    // assembly through to the (harness-refused) broadcast entry; the rival
+    // never reached assembly.
+    expect(vi.mocked(executeAgentInstructions as any).mock.calls).toHaveLength(1);
+    expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
+    // Exactly ONE authorization (checkpoint B) — the rival wrote none.
+    expect(preGatedWrites()).toHaveLength(1);
+    // Coherent durable results: neither threw, neither claims success (the
+    // winner's broadcast is refused by the harness → resumable; the rival is
+    // refused by the duplicate close crid), and exactly one of the two is the
+    // duplicate-submission refusal.
     for (const r of [a, b]) {
       expect(r).toBeTruthy();
       expect((r as any).success).toBe(false);
     }
+    const dupRefusals = [a, b].filter((r) => String((r as any).error ?? "").includes("already submitted"));
+    expect(dupRefusals).toHaveLength(1);
+    const winner = [a, b].find((r) => !String((r as any).error ?? "").includes("already submitted"))!;
+    expect((winner as any).resumable).toBe(true);
   });
 
   it("19b (reviewer). preflight against a target with UNRESOLVED pending open state fails CLOSED with ZERO reconciliation writes", async () => {
@@ -1363,6 +1400,102 @@ describe("executeLoopHop — WO3 HOLD rotation guard", () => {
     expect(storage.createBorrowOperation).not.toHaveBeenCalledWith(
       expect.objectContaining({ operationType: "loop_hop" }),
     );
+  });
+
+  const expectIdentityRejection = (res: any) => {
+    expect(res.success).toBe(false);
+    expect(res.terminal).toBe(true);
+    expect(res.error).toContain("bound to a different hop");
+    expect(res.alreadyCompleted).toBeUndefined();
+    expect(storage.createBorrowOperation).not.toHaveBeenCalled();
+    expect(storage.updateBorrowOperation).not.toHaveBeenCalled();
+    expect(storage.getBorrowPosition).not.toHaveBeenCalled();
+    expect(withBorrowLock).not.toHaveBeenCalled();
+    expect(getFreshLoopRates).not.toHaveBeenCalled();
+    expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
+  };
+
+  it("20e (corrective). MALFORMED TERMINAL parents fail closed BEFORE adoption: a succeeded parent with NO readable identity is rejected, never adopted as complete", async () => {
+    const parent = mismatchParent({ status: "succeeded" });
+    parent.metadata = { kind: "loop" }; // no sourceBorrowPositionId, no toVaultId
+    parent.borrowPositionId = null; // legacy fallback also absent
+    parent.result = { borrowPositionId: "new-pos-x", closeSignature: "sig" };
+    vi.mocked(storage.getBorrowOperationByClientRequestId as any).mockResolvedValue(parent);
+    const fetchSpy = stubHopFetch();
+    const res = await executeLoopHop(hopParamsHold as any);
+    expectIdentityRejection(res);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("20f (corrective). malformed FAILED and PARKED parents are equally rejected pre-adoption (empty-string source / null metadata)", async () => {
+    for (const shape of [
+      { status: "failed", mutate: (p: any) => ((p.metadata.sourceBorrowPositionId = ""), (p.borrowPositionId = "")) },
+      { status: "parked", mutate: (p: any) => ((p.metadata = null), (p.borrowPositionId = undefined)) },
+    ]) {
+      vi.clearAllMocks();
+      const parent = mismatchParent({ status: shape.status });
+      shape.mutate(parent);
+      vi.mocked(storage.getBorrowOperationByClientRequestId as any).mockResolvedValue(parent);
+      const res = await executeLoopHop(hopParamsHold as any);
+      expectIdentityRejection(res);
+    }
+  });
+
+  it("20g (corrective). EVERY malformed durable-target shape is rejected: absent, coercible string, non-integer, zero, negative", async () => {
+    for (const tv of [undefined, "5", 5.5, 0, -3] as any[]) {
+      vi.clearAllMocks();
+      const parent = mismatchParent();
+      if (tv === undefined) delete parent.metadata.toVaultId;
+      else parent.metadata.toVaultId = tv;
+      vi.mocked(storage.getBorrowOperationByClientRequestId as any).mockResolvedValue(parent);
+      const res = await executeLoopHop(hopParamsHold as any);
+      expectIdentityRejection(res);
+    }
+  });
+
+  it("20h (corrective). unique-race ADOPTION of a rival with a MALFORMED identity is refused with zero further side effects", async () => {
+    primeRotation();
+    stubHopFetch();
+    const rival = mismatchParent();
+    rival.id = "rival-parent-2";
+    delete rival.metadata.toVaultId; // malformed, not merely different
+    let rivalLanded = false;
+    vi.mocked(storage.getBorrowOperationByClientRequestId as any).mockImplementation(async () =>
+      rivalLanded ? rival : null,
+    );
+    vi.mocked(storage.createBorrowOperation as any).mockImplementation(async (p: any) => {
+      if (p.operationType === "loop_hop") {
+        rivalLanded = true;
+        const err: any = new Error("duplicate key value violates unique constraint");
+        err.code = "23505";
+        throw err;
+      }
+      return { id: "child-x", txSignatures: [], result: null, error: null, ...p };
+    });
+    const res = await executeLoopHop(hopParamsHold as any);
+    expect(res.success).toBe(false);
+    expect((res as any).terminal).toBe(true);
+    expect(res.error).toContain("bound to a different hop");
+    expect(storage.updateBorrowOperation).not.toHaveBeenCalled();
+    expect(withBorrowLock).not.toHaveBeenCalled();
+    expect(getFreshLoopRates).not.toHaveBeenCalled();
+    expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
+    expect(preGatedWrites()).toHaveLength(0);
+  });
+
+  it("20i (corrective). VALID LEGACY fallback: a parent missing the metadata source but carrying a valid non-empty row source (and a real integer target) proceeds normally", async () => {
+    primeRotation();
+    stubHopFetch();
+    const parent = mismatchParent(); // borrowPositionId column = SRC_POS, toVaultId = 5
+    delete parent.metadata.sourceBorrowPositionId; // legacy row shape
+    vi.mocked(storage.getBorrowOperationByClientRequestId as any).mockResolvedValue(parent);
+    vi.mocked(storage.getBorrowOperationById as any).mockImplementation(async (id: string) =>
+      id === PARENT_ID ? parent : undefined,
+    );
+    const res = await executeLoopHop(hopParamsHold as any);
+    expect((res as any).terminal).not.toBe(true);
+    expect(res.error ?? "").not.toContain("bound to a different hop");
+    expect(getFreshLoopRates).toHaveBeenCalled(); // passed the gate into the pipeline
   });
 
   it("21 (corrective). HOLD authorization write carries the COMPLETE shared-brain audit facts: alt identity, alt leverage, threshold name + value", async () => {

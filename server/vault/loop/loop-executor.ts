@@ -3522,9 +3522,13 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
   // fails closed with a fixed sanitized result and ZERO side effects —
   // resuming under a different source/target would misread state and could
   // re-open toward a destination nobody authorized. A legacy row missing the
-  // metadata source falls back to the op row's own borrowPositionId column;
-  // an identity field that cannot be read at all is left to the existing
-  // fail-closed resume guards downstream (they refuse without it anyway).
+  // metadata source falls back to the op row's own borrowPositionId column,
+  // which must itself be a valid non-empty value. This gate is STRICTLY
+  // fail-closed: an identity that is absent, empty, malformed, of the wrong
+  // type (including a numeric string where a real integer is required),
+  // non-positive, or different from the supplied parameters is a REJECTION —
+  // never a fall-through — because completed/failed-pre-close/parked parents
+  // return from this function before the downstream resume guards ever run.
   const hopIdentityMismatch = (o: { borrowPositionId?: string | null; metadata?: unknown }): boolean => {
     const m = (o.metadata ?? {}) as Record<string, any>;
     const durableSource =
@@ -3532,12 +3536,16 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
         ? m.sourceBorrowPositionId
         : typeof o.borrowPositionId === "string" && o.borrowPositionId.length > 0
           ? o.borrowPositionId
-          : null;
-    const tv = Number(m.toVaultId);
-    const durableTarget = Number.isInteger(tv) && tv > 0 ? tv : null;
+          : null; // absent/empty/malformed on BOTH → reject below
+    const durableTarget =
+      typeof m.toVaultId === "number" && Number.isInteger(m.toVaultId) && m.toVaultId > 0
+        ? m.toVaultId
+        : null; // absent, malformed, non-integer, non-positive, or coercible string → reject below
     return (
-      (durableSource !== null && durableSource !== borrowPositionId) ||
-      (durableTarget !== null && durableTarget !== targetVaultId)
+      durableSource === null ||
+      durableSource !== borrowPositionId ||
+      durableTarget === null ||
+      durableTarget !== targetVaultId
     );
   };
   const HOP_IDENTITY_MISMATCH_RESULT: LoopHopResult = {
