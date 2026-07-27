@@ -1542,7 +1542,8 @@ async function settleAllPnl(
 }
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
-import { getAgentUsdcBalance, getAgentSolBalance, getAgentUsdcBalanceStrict, getAgentSolBalanceStrict, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, buildWithdrawSolFromAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
+import { getAgentUsdcBalance, getAgentSolBalance, getAgentUsdcBalanceStrict, getAgentSolBalanceStrict, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
+import { handleAgentSolWithdraw, handleConfirmSolWithdraw } from "./vault/agent-sol-withdraw";
 import { getBestQuote } from "./swap/index.js";
 import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, valueVaultRowsForWallet, sumVaultPositionValueUsdc, type VaultPositionView, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
 import { cancelAutoRepark } from "./vault/auto-repark";
@@ -14056,81 +14057,28 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     }
   });
 
+  // WO2B2B: durable server-executed SOL withdrawal. The server builds, signs,
+  // write-aheads the signature, broadcasts at most once per clientRequestId,
+  // and records success + the equity event atomically. NEVER returns
+  // transaction bytes (the legacy browser-broadcast flow is gone).
   app.post("/api/agent/withdraw-sol", requireWallet, async (req, res) => {
     try {
-      const { amount } = req.body;
-      if (!amount || amount <= 0) {
-        return res.status(400).json({ error: "Valid amount required" });
-      }
-
-      const wallet = await storage.getWallet(req.walletAddress!);
-      if (!wallet) {
-        return res.status(404).json({ error: "Wallet not found" });
-      }
-      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
-        return res.status(400).json({ error: "Agent wallet not initialized" });
-      }
-
-      const solBalance = await getAgentSolBalance(wallet.agentPublicKey);
-      const SOL_RESERVE = 0.005;
-      
-      if (amount > (solBalance - SOL_RESERVE)) {
-        return res.status(400).json({ error: "Insufficient SOL balance (must keep 0.005 SOL reserve for gas)" });
-      }
-
-      const umkResult = await getUmkForWebhook(req.walletAddress!);
-      if (!umkResult) {
-        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
-      }
-      const agentKeyResult = await decryptAgentKeyStrict(req.walletAddress!, umkResult.umk, wallet, wallet.agentPublicKey);
-      if (!agentKeyResult) {
-        umkResult.cleanup();
-        return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
-      }
-      try {
-        const txData = await buildWithdrawSolFromAgentTransaction(
-          wallet.agentPublicKey,
-          req.walletAddress!,
-          agentKeyResult.secretKey,
-          amount
-        );
-
-        res.json(txData);
-      } finally {
-        agentKeyResult.cleanup();
-        umkResult.cleanup();
-      }
+      const out = await handleAgentSolWithdraw(req.walletAddress!, req.body);
+      res.status(out.http).json(out.body);
     } catch (error) {
-      console.error("Build agent SOL withdraw error:", error);
+      console.error("Agent SOL withdraw error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
 
+  // WO2B2B: legacy confirm endpoint NEUTRALIZED — the durable withdraw route
+  // records the equity event atomically with success, so client-supplied
+  // {amount, txSignature} bodies can no longer create ledger entries. With a
+  // clientRequestId this reports stored state (zero writes); otherwise 410.
   app.post("/api/agent/confirm-sol-withdraw", requireWallet, async (req, res) => {
     try {
-      const { amount, txSignature } = req.body;
-      if (!amount || amount <= 0) {
-        return res.status(400).json({ error: "Valid amount required" });
-      }
-      if (!txSignature || typeof txSignature !== 'string' || txSignature.length < 20) {
-        return res.status(400).json({ error: "Valid transaction signature required" });
-      }
-
-      const existingEvents = await storage.getEquityEvents(req.walletAddress!, 100);
-      if (existingEvents.some(e => e.txSignature === txSignature)) {
-        return res.json({ success: true, duplicate: true });
-      }
-
-      await storage.createEquityEvent({
-        walletAddress: req.walletAddress!,
-        eventType: 'sol_withdraw',
-        amount: String(-amount),
-        assetType: 'SOL',
-        txSignature,
-        notes: 'SOL withdraw from agent wallet',
-      });
-
-      res.json({ success: true });
+      const out = await handleConfirmSolWithdraw(req.walletAddress!, req.body);
+      res.status(out.http).json(out.body);
     } catch (error) {
       console.error("Confirm SOL withdraw error:", error);
       res.status(500).json({ error: "Internal server error" });

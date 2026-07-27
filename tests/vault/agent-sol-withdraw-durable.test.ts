@@ -1,17 +1,30 @@
 /**
- * tests/vault/agent-sol-withdraw-durable.test.ts — WO2B2A
+ * tests/vault/agent-sol-withdraw-durable.test.ts — WO2B2A + WO2B2B
  *
- * Pins the durable native-SOL withdrawal primitive in server/agent-wallet.ts:
+ * Pins the durable native-SOL withdrawal primitives in server/agent-wallet.ts:
  *
- *  - buildWithdrawSolFromAgentTransaction: deterministic base58 signature
- *    extracted from the REAL signed bytes, exact safe-integer lamports as
- *    encoded in the transfer instruction, zero broadcasts, and numeric-edge
- *    rejection BEFORE any RPC call.
- *  - executeAgentSolWithdrawDurable: durability callback exactly once after
- *    signing and strictly before send; exact-byte single broadcast with
- *    confirmed preflight; mutually exclusive result states (confirmed /
- *    failed_on_chain / ambiguous / not_broadcast) with the precomputed
- *    signature governing every post-precommit failure; no internal retry.
+ *  - buildWithdrawSolFromAgentTransaction (LEGACY): deterministic base58
+ *    signature extracted from the REAL signed bytes, exact safe-integer
+ *    lamports, zero broadcasts, numeric-edge rejection BEFORE any RPC call,
+ *    and a byte-shape pin: exactly ONE instruction (SystemProgram.transfer),
+ *    NO memo — unchanged from its historical shape.
+ *  - buildWithdrawSolLamportsFromAgentTransaction (WO2B2B): exact raw-lamport
+ *    input (no float round-tripping), REQUIRED domain-separated memo as a
+ *    second instruction, deterministic signature, zero broadcasts, and
+ *    rejection of every non-positive/non-safe-integer lamport edge and every
+ *    empty/oversized memo BEFORE any RPC call.
+ *  - Domain separation: two different clientRequestIds can NEVER share signed
+ *    bytes/signatures even with identical amount/destination/blockhash; the
+ *    same clientRequestId under the same blockhash reproduces the same
+ *    signature.
+ *  - executeAgentSolWithdrawDurable (WO2B2B signature): raw lamports +
+ *    clientRequestId; validates the clientRequestId BEFORE building (raw
+ *    length ≤ 128, nonempty after trim); durability callback exactly once
+ *    after signing and strictly before send; exact-byte single broadcast with
+ *    confirmed preflight; memo instruction present in the broadcast bytes;
+ *    mutually exclusive result states (confirmed / failed_on_chain /
+ *    ambiguous / not_broadcast) with the precomputed signature governing
+ *    every post-precommit failure; no internal retry.
  *  - executeAgentSolWithdraw (existing Reset executor) remains independently
  *    callable with unchanged semantics.
  *
@@ -44,6 +57,9 @@ import { Keypair, Transaction, SystemInstruction } from "@solana/web3.js";
 import bs58 from "bs58";
 import {
   buildWithdrawSolFromAgentTransaction,
+  buildWithdrawSolLamportsFromAgentTransaction,
+  buildAgentSolWithdrawMemo,
+  SOL_WITHDRAW_MEMO_PROGRAM_ID,
   executeAgentSolWithdrawDurable,
   executeAgentSolWithdraw,
   type DurableSolWithdrawPrecommit,
@@ -59,6 +75,8 @@ const BLOCKHASH = bs58.encode(Buffer.alloc(32, 7));
 const LVBH = 1234;
 const AMOUNT_SOL = 0.0475;
 const EXPECTED_LAMPORTS = 47_500_000;
+const CRID = "wo2b2b-test-crid-1";
+const MEMO = `qv:agent_sol_withdraw:${CRID}`;
 
 function primeClean() {
   connMock.getLatestBlockhash.mockResolvedValue({ blockhash: BLOCKHASH, lastValidBlockHeight: LVBH });
@@ -76,7 +94,19 @@ beforeEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// Builder — deterministic signature, exact lamports, zero sends
+// Memo identity helper
+// ---------------------------------------------------------------------------
+
+describe("buildAgentSolWithdrawMemo", () => {
+  it("produces the pinned domain-separated identity string", () => {
+    expect(buildAgentSolWithdrawMemo(CRID)).toBe(`qv:agent_sol_withdraw:${CRID}`);
+    expect(buildAgentSolWithdrawMemo("other")).toBe("qv:agent_sol_withdraw:other");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LEGACY builder — deterministic signature, exact lamports, zero sends,
+// and the historical byte shape: ONE instruction, NO memo.
 // ---------------------------------------------------------------------------
 
 describe("buildWithdrawSolFromAgentTransaction (extended result)", () => {
@@ -88,6 +118,10 @@ describe("buildWithdrawSolFromAgentTransaction (extended result)", () => {
     expect(tx.signature).not.toBeNull();
     expect(bs58.encode(tx.signature!)).toBe(res.signature);
     expect(tx.verifySignatures()).toBe(true);
+
+    // LEGACY shape pin: exactly one instruction, NO memo (WO2B2B adds the
+    // memo ONLY to the raw-lamport durable builder).
+    expect(tx.instructions).toHaveLength(1);
 
     // Exact lamports as ENCODED in the transfer instruction.
     const decoded = SystemInstruction.decodeTransfer(tx.instructions[0]);
@@ -138,11 +172,102 @@ describe("buildWithdrawSolFromAgentTransaction (extended result)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Durable executor
+// WO2B2B raw-lamport builder — exact integer lamports, REQUIRED memo,
+// domain separation, zero sends.
+// ---------------------------------------------------------------------------
+
+describe("buildWithdrawSolLamportsFromAgentTransaction (WO2B2B)", () => {
+  it("encodes the exact raw lamports plus a memo instruction carrying the domain-separated identity, without broadcasting", async () => {
+    const res = await buildWithdrawSolLamportsFromAgentTransaction(
+      AGENT_PK, USER_PK, SECRET, EXPECTED_LAMPORTS, MEMO,
+    );
+
+    const tx = Transaction.from(Buffer.from(res.transaction, "base64"));
+    expect(bs58.encode(tx.signature!)).toBe(res.signature);
+    expect(tx.verifySignatures()).toBe(true);
+
+    // Shape pin: transfer FIRST, memo SECOND, nothing else.
+    expect(tx.instructions).toHaveLength(2);
+    const decoded = SystemInstruction.decodeTransfer(tx.instructions[0]);
+    expect(Number(decoded.lamports)).toBe(EXPECTED_LAMPORTS);
+    expect(decoded.fromPubkey.toBase58()).toBe(AGENT_PK);
+    expect(decoded.toPubkey.toBase58()).toBe(USER_PK);
+
+    const memoIx = tx.instructions[1];
+    expect(memoIx.programId.toBase58()).toBe(SOL_WITHDRAW_MEMO_PROGRAM_ID);
+    expect(memoIx.keys).toHaveLength(0);
+    expect(Buffer.from(memoIx.data).toString("utf8")).toBe(MEMO);
+
+    expect(res.lamports).toBe(EXPECTED_LAMPORTS);
+    expect(res.blockhash).toBe(BLOCKHASH);
+    expect(res.lastValidBlockHeight).toBe(LVBH);
+
+    expect(connMock.sendRawTransaction).not.toHaveBeenCalled();
+    expect(connMock.confirmTransaction).not.toHaveBeenCalled();
+  });
+
+  it("domain separation: same memo → same signature; different memo → different signature and different bytes", async () => {
+    const a1 = await buildWithdrawSolLamportsFromAgentTransaction(
+      AGENT_PK, USER_PK, SECRET, EXPECTED_LAMPORTS, buildAgentSolWithdrawMemo("crid-A"),
+    );
+    const a2 = await buildWithdrawSolLamportsFromAgentTransaction(
+      AGENT_PK, USER_PK, SECRET, EXPECTED_LAMPORTS, buildAgentSolWithdrawMemo("crid-A"),
+    );
+    const b = await buildWithdrawSolLamportsFromAgentTransaction(
+      AGENT_PK, USER_PK, SECRET, EXPECTED_LAMPORTS, buildAgentSolWithdrawMemo("crid-B"),
+    );
+
+    // Same identity under the same blockhash reproduces identical signed bytes.
+    expect(a2.signature).toBe(a1.signature);
+    expect(a2.transaction).toBe(a1.transaction);
+
+    // A different logical id can never share bytes or signature.
+    expect(b.signature).not.toBe(a1.signature);
+    expect(b.transaction).not.toBe(a1.transaction);
+  });
+
+  const badLamports: Array<{ label: string; lamports: number }> = [
+    { label: "zero", lamports: 0 },
+    { label: "negative", lamports: -1 },
+    { label: "fractional", lamports: 1.5 },
+    { label: "NaN", lamports: Number.NaN },
+    { label: "unsafe integer (2^53)", lamports: 2 ** 53 },
+  ];
+
+  it.each(badLamports)("rejects $label lamports before signing or any RPC call", async ({ lamports }) => {
+    await expect(
+      buildWithdrawSolLamportsFromAgentTransaction(AGENT_PK, USER_PK, SECRET, lamports, MEMO),
+    ).rejects.toThrow(/Invalid withdraw amount: lamports must be a positive safe integer/);
+    expect(connMock.getLatestBlockhash).not.toHaveBeenCalled();
+    expect(connMock.sendRawTransaction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: "empty string", memo: "" },
+    { label: "whitespace-only", memo: "   " },
+  ])("rejects a $label memo before any RPC call (memo is REQUIRED)", async ({ memo }) => {
+    await expect(
+      buildWithdrawSolLamportsFromAgentTransaction(AGENT_PK, USER_PK, SECRET, EXPECTED_LAMPORTS, memo),
+    ).rejects.toThrow(/domain-separated memo is required/);
+    expect(connMock.getLatestBlockhash).not.toHaveBeenCalled();
+    expect(connMock.sendRawTransaction).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized memo (>256 chars) before any RPC call", async () => {
+    await expect(
+      buildWithdrawSolLamportsFromAgentTransaction(AGENT_PK, USER_PK, SECRET, EXPECTED_LAMPORTS, "m".repeat(257)),
+    ).rejects.toThrow(/at most 256 characters/);
+    expect(connMock.getLatestBlockhash).not.toHaveBeenCalled();
+    expect(connMock.sendRawTransaction).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Durable executor (WO2B2B signature: raw lamports + clientRequestId)
 // ---------------------------------------------------------------------------
 
 describe("executeAgentSolWithdrawDurable", () => {
-  it("calls the durability callback once after signing, strictly before a single exact-byte broadcast, then confirms cleanly", async () => {
+  it("calls the durability callback once after signing, strictly before a single exact-byte broadcast (memo included), then confirms cleanly", async () => {
     const seen: DurableSolWithdrawPrecommit[] = [];
     const persist = vi.fn(async (p: DurableSolWithdrawPrecommit) => {
       seen.push(p);
@@ -150,7 +275,9 @@ describe("executeAgentSolWithdrawDurable", () => {
       expect(connMock.sendRawTransaction).not.toHaveBeenCalled();
     });
 
-    const res = await executeAgentSolWithdrawDurable(AGENT_PK, SECRET, USER_PK, AMOUNT_SOL, persist);
+    const res = await executeAgentSolWithdrawDurable(
+      AGENT_PK, SECRET, USER_PK, EXPECTED_LAMPORTS, CRID, persist,
+    );
 
     expect(res.state).toBe("confirmed");
     const ok = res as Extract<DurableSolWithdrawResult, { state: "confirmed" }>;
@@ -173,6 +300,11 @@ describe("executeAgentSolWithdrawDurable", () => {
     expect(Number(SystemInstruction.decodeTransfer(sentTx.instructions[0]).lamports)).toBe(EXPECTED_LAMPORTS);
     expect(sendOpts).toEqual({ skipPreflight: false, preflightCommitment: "confirmed" });
 
+    // The broadcast bytes carry the domain-separated memo for THIS request id.
+    expect(sentTx.instructions).toHaveLength(2);
+    expect(sentTx.instructions[1].programId.toBase58()).toBe(SOL_WITHDRAW_MEMO_PROGRAM_ID);
+    expect(Buffer.from(sentTx.instructions[1].data).toString("utf8")).toBe(MEMO);
+
     // Ordering: persist → send → confirm.
     expect(persist.mock.invocationCallOrder[0]).toBeLessThan(
       connMock.sendRawTransaction.mock.invocationCallOrder[0],
@@ -189,12 +321,49 @@ describe("executeAgentSolWithdrawDurable", () => {
     );
   });
 
+  it("same clientRequestId → same precomputed signature; different clientRequestId → different signature", async () => {
+    const sigs: string[] = [];
+    const persist = vi.fn(async (p: DurableSolWithdrawPrecommit) => {
+      sigs.push(p.signature);
+    });
+
+    await executeAgentSolWithdrawDurable(AGENT_PK, SECRET, USER_PK, EXPECTED_LAMPORTS, "crid-A", persist);
+    await executeAgentSolWithdrawDurable(AGENT_PK, SECRET, USER_PK, EXPECTED_LAMPORTS, "crid-A", persist);
+    await executeAgentSolWithdrawDurable(AGENT_PK, SECRET, USER_PK, EXPECTED_LAMPORTS, "crid-B", persist);
+
+    expect(sigs).toHaveLength(3);
+    expect(sigs[1]).toBe(sigs[0]); // deterministic replay identity under the same blockhash
+    expect(sigs[2]).not.toBe(sigs[0]); // domain separation across request ids
+  });
+
+  it.each([
+    { label: "empty", crid: "" },
+    { label: "whitespace-only", crid: "   " },
+    { label: "over 128 raw chars", crid: "x".repeat(129) },
+    { label: "128 trimmed but 129 raw chars", crid: ` ${"x".repeat(128)}` },
+  ])("invalid clientRequestId ($label) → not_broadcast before the callback and before ANY RPC traffic", async ({ crid }) => {
+    const persist = vi.fn(async () => {});
+
+    const res = await executeAgentSolWithdrawDurable(
+      AGENT_PK, SECRET, USER_PK, EXPECTED_LAMPORTS, crid, persist,
+    );
+
+    expect(res.state).toBe("not_broadcast");
+    expect("signature" in res).toBe(false);
+    expect((res as any).error).toContain("invalid clientRequestId");
+    expect(persist).not.toHaveBeenCalled();
+    expect(connMock.getLatestBlockhash).not.toHaveBeenCalled();
+    expect(connMock.sendRawTransaction).not.toHaveBeenCalled();
+  });
+
   it("callback rejection → not_broadcast: zero sends, zero confirms, and NO signature in the result", async () => {
     const persist = vi.fn(async () => {
       throw new Error("wal write failed");
     });
 
-    const res = await executeAgentSolWithdrawDurable(AGENT_PK, SECRET, USER_PK, AMOUNT_SOL, persist);
+    const res = await executeAgentSolWithdrawDurable(
+      AGENT_PK, SECRET, USER_PK, EXPECTED_LAMPORTS, CRID, persist,
+    );
 
     expect(res.state).toBe("not_broadcast");
     expect("signature" in res).toBe(false);
@@ -204,10 +373,10 @@ describe("executeAgentSolWithdrawDurable", () => {
     expect(connMock.confirmTransaction).not.toHaveBeenCalled();
   });
 
-  it("validation failure → not_broadcast before the callback and before ANY RPC traffic", async () => {
+  it("validation failure (zero lamports) → not_broadcast before the callback and before ANY RPC traffic", async () => {
     const persist = vi.fn(async () => {});
 
-    const res = await executeAgentSolWithdrawDurable(AGENT_PK, SECRET, USER_PK, 0, persist);
+    const res = await executeAgentSolWithdrawDurable(AGENT_PK, SECRET, USER_PK, 0, CRID, persist);
 
     expect(res.state).toBe("not_broadcast");
     expect("signature" in res).toBe(false);
@@ -221,7 +390,9 @@ describe("executeAgentSolWithdrawDurable", () => {
     connMock.getLatestBlockhash.mockRejectedValue(new Error("rpc down"));
     const persist = vi.fn(async () => {});
 
-    const res = await executeAgentSolWithdrawDurable(AGENT_PK, SECRET, USER_PK, AMOUNT_SOL, persist);
+    const res = await executeAgentSolWithdrawDurable(
+      AGENT_PK, SECRET, USER_PK, EXPECTED_LAMPORTS, CRID, persist,
+    );
 
     expect(res.state).toBe("not_broadcast");
     expect("signature" in res).toBe(false);
@@ -236,7 +407,8 @@ describe("executeAgentSolWithdrawDurable", () => {
       AGENT_PK,
       SECRET,
       USER_PK,
-      AMOUNT_SOL,
+      EXPECTED_LAMPORTS,
+      CRID,
       undefined as unknown as (p: DurableSolWithdrawPrecommit) => Promise<void>,
     );
 
@@ -255,7 +427,9 @@ describe("executeAgentSolWithdrawDurable", () => {
       seen.push(p);
     });
 
-    const res = await executeAgentSolWithdrawDurable(AGENT_PK, SECRET, USER_PK, AMOUNT_SOL, persist);
+    const res = await executeAgentSolWithdrawDurable(
+      AGENT_PK, SECRET, USER_PK, EXPECTED_LAMPORTS, CRID, persist,
+    );
 
     expect(res.state).toBe("failed_on_chain");
     const failed = res as Extract<DurableSolWithdrawResult, { state: "failed_on_chain" }>;
@@ -272,7 +446,9 @@ describe("executeAgentSolWithdrawDurable", () => {
       seen.push(p);
     });
 
-    const res = await executeAgentSolWithdrawDurable(AGENT_PK, SECRET, USER_PK, AMOUNT_SOL, persist);
+    const res = await executeAgentSolWithdrawDurable(
+      AGENT_PK, SECRET, USER_PK, EXPECTED_LAMPORTS, CRID, persist,
+    );
 
     expect(res.state).toBe("ambiguous");
     const amb = res as Extract<DurableSolWithdrawResult, { state: "ambiguous" }>;
@@ -291,7 +467,9 @@ describe("executeAgentSolWithdrawDurable", () => {
       seen.push(p);
     });
 
-    const res = await executeAgentSolWithdrawDurable(AGENT_PK, SECRET, USER_PK, AMOUNT_SOL, persist);
+    const res = await executeAgentSolWithdrawDurable(
+      AGENT_PK, SECRET, USER_PK, EXPECTED_LAMPORTS, CRID, persist,
+    );
 
     expect(res.state).toBe("ambiguous");
     const amb = res as Extract<DurableSolWithdrawResult, { state: "ambiguous" }>;
@@ -309,7 +487,9 @@ describe("executeAgentSolWithdrawDurable", () => {
       seen.push(p);
     });
 
-    const res = await executeAgentSolWithdrawDurable(AGENT_PK, SECRET, USER_PK, AMOUNT_SOL, persist);
+    const res = await executeAgentSolWithdrawDurable(
+      AGENT_PK, SECRET, USER_PK, EXPECTED_LAMPORTS, CRID, persist,
+    );
 
     expect(res.state).toBe("ambiguous");
     const amb = res as Extract<DurableSolWithdrawResult, { state: "ambiguous" }>;

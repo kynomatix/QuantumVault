@@ -424,6 +424,12 @@ export interface IStorage {
   updateBorrowOperation(id: string, patch: { status?: string; step?: string | null; error?: string | null; borrowPositionId?: string | null; appendTxSignature?: string; metadata?: Record<string, unknown> | null; mergeMetadata?: Record<string, unknown>; result?: Record<string, unknown> | null; }): Promise<BorrowOperation | undefined>;
   getBorrowOperationById(id: string): Promise<BorrowOperation | undefined>;
   getBorrowOperationByClientRequestId(walletAddress: string, clientRequestId: string): Promise<BorrowOperation | undefined>;
+  // WO2B2B — durable agent-SOL-withdraw state machine (orchestrated by
+  // server/vault/agent-sol-withdraw.ts; PG advisory-lock serialized).
+  getOrCreateAgentSolWithdrawIntent(p: { walletAddress: string; clientRequestId: string; pinned: AgentSolWithdrawPinned }): Promise<{ operation: BorrowOperation; created: boolean }>;
+  precommitAgentSolWithdrawSignature(p: { operationId: string; walletAddress: string; signedSourceAgentPublicKey: string; signedDestinationWallet: string; precommit: { signature: string; blockhash: string; lastValidBlockHeight: number; lamports: number } }): Promise<AgentSolWithdrawPrecommitOutcome>;
+  transitionAgentSolWithdraw(p: { operationId: string; walletAddress: string; toStatus?: string; step: string; error?: string | null; mergeMetadata?: Record<string, unknown>; result?: Record<string, unknown> | null; requireNoSignature?: boolean; requireSignature?: string }): Promise<boolean>;
+  finalizeAgentSolWithdrawSuccess(p: { operationId: string; walletAddress: string; expectedSignature: string }): Promise<AgentSolWithdrawFinalizeOutcome>;
   getPendingLoopHopOperations(): Promise<BorrowOperation[]>;
   claimLoopHopOpenAttempt(parentOpId: string, requestedVaultId: number): Promise<{
     adopted: boolean;
@@ -751,6 +757,63 @@ const PHANTOM_DUP_CLOSE_PREDICATE = `
 function notPhantomDupClose() {
   return sql.raw(`NOT (${PHANTOM_DUP_CLOSE_PREDICATE})`);
 }
+
+// ————————————————————————————————————————————————————————————————
+// WO2B2B — durable agent-SOL-withdraw state machine (storage side)
+// ————————————————————————————————————————————————————————————————
+
+export const AGENT_SOL_WITHDRAW_OP_TYPE = 'agent_sol_withdraw';
+
+// PG advisory-lock namespace for the per-wallet agent-SOL-withdraw critical
+// sections (signature write-ahead + finalize). PG-only on purpose: the lock
+// must be correct across processes AND instances, so in-process mutexes
+// (withBorrowLock) are FORBIDDEN here. Key = hashtext(wallet_address); taken
+// via pg_advisory_xact_lock inside a real transaction so it auto-releases on
+// commit/rollback/connection loss.
+export const AGENT_SOL_WITHDRAW_LOCK_NAMESPACE = 927411;
+
+// Terminal-status allowlist for the withdraw conflict gate. MUST stay in
+// parity with TERMINAL_OPERATION_STATUSES in server/vault/reset-blockers.ts;
+// that module imports ./storage, so importing it from here would be a cycle.
+// Anything NOT listed (pending, parked, or any unknown/malformed status)
+// BLOCKS a new withdrawal — fail closed.
+const AGENT_SOL_WITHDRAW_TERMINAL_STATUSES = new Set(['succeeded', 'completed', 'failed']);
+
+// Identity + amount pinned into the op row at intent creation.
+// requestedLamports is a decimal STRING (jsonb numbers lose 64-bit
+// precision); always compare via BigInt, never parseFloat/Number.
+export interface AgentSolWithdrawPinned {
+  requestedLamports: string;
+  destinationWallet: string;
+  sourceAgentPublicKey: string;
+}
+
+export type AgentSolWithdrawPrecommitOutcome =
+  | { won: true; operation: BorrowOperation }
+  | {
+      won: false;
+      reason:
+        | 'not_found'
+        | 'wallet_mismatch'
+        | 'wrong_type'
+        | 'not_pending'
+        | 'pinned_mismatch'
+        | 'already_signed'
+        | 'amount_mismatch'
+        | 'signer_rotated'
+        | 'conflict'
+        | 'duplicate_signature';
+      operation?: BorrowOperation;
+    };
+
+export type AgentSolWithdrawFinalizeOutcome =
+  | { outcome: 'already_succeeded'; operation: BorrowOperation }
+  | { outcome: 'finalized'; operation: BorrowOperation }
+  | {
+      outcome: 'not_finalized';
+      reason: 'not_found' | 'wallet_mismatch' | 'wrong_type' | 'not_pending' | 'malformed_provenance';
+      operation?: BorrowOperation;
+    };
 
 export class DatabaseStorage implements IStorage {
   async getUser(id: string): Promise<User | undefined> {
@@ -2577,6 +2640,286 @@ export class DatabaseStorage implements IStorage {
       .where(and(eq(borrowOperations.walletAddress, walletAddress), eq(borrowOperations.clientRequestId, clientRequestId)))
       .limit(1);
     return rows[0];
+  }
+
+  // ————— WO2B2B: durable agent-SOL-withdraw state machine —————
+
+  // Race-safe intent creation: the partial UNIQUE index
+  // uq_borrow_operations_client_req (wallet_address, client_request_id) makes
+  // exactly one contender create the row; everyone else adopts the existing
+  // one. Adoption returns the row AS-IS — the caller must verify the pinned
+  // metadata matches its request and REJECT on mismatch, never mutate the
+  // pins of an existing intent.
+  async getOrCreateAgentSolWithdrawIntent(p: {
+    walletAddress: string;
+    clientRequestId: string;
+    pinned: AgentSolWithdrawPinned;
+  }): Promise<{ operation: BorrowOperation; created: boolean }> {
+    const inserted = await db.insert(borrowOperations).values({
+      walletAddress: p.walletAddress,
+      borrowPositionId: null,
+      operationType: AGENT_SOL_WITHDRAW_OP_TYPE,
+      status: 'pending',
+      step: 'intent_created',
+      clientRequestId: p.clientRequestId,
+      metadata: {
+        requestedLamports: p.pinned.requestedLamports,
+        destinationWallet: p.pinned.destinationWallet,
+        sourceAgentPublicKey: p.pinned.sourceAgentPublicKey,
+      },
+    }).onConflictDoNothing().returning();
+    if (inserted[0]) return { operation: inserted[0], created: true };
+    const existing = await this.getBorrowOperationByClientRequestId(p.walletAddress, p.clientRequestId);
+    if (!existing) {
+      throw new Error('agent_sol_withdraw intent conflicted on insert but no row exists for this clientRequestId');
+    }
+    return { operation: existing, created: false };
+  }
+
+  // Signature write-ahead. Runs under the per-wallet PG advisory lock inside
+  // a real transaction with the op row SELECTed FOR UPDATE, so at most ONE
+  // executor attempt can ever attach a signature to an intent — every check
+  // below is race-free against sibling requests, other instances, and the
+  // pre-broadcast terminalizers (which require-no-signature).
+  async precommitAgentSolWithdrawSignature(p: {
+    operationId: string;
+    walletAddress: string;
+    signedSourceAgentPublicKey: string;
+    signedDestinationWallet: string;
+    precommit: { signature: string; blockhash: string; lastValidBlockHeight: number; lamports: number };
+  }): Promise<AgentSolWithdrawPrecommitOutcome> {
+    return await db.transaction(async (tx): Promise<AgentSolWithdrawPrecommitOutcome> => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${AGENT_SOL_WITHDRAW_LOCK_NAMESPACE}, hashtext(${p.walletAddress}))`);
+
+      const op = (await tx.select().from(borrowOperations)
+        .where(eq(borrowOperations.id, p.operationId))
+        .limit(1)
+        .for('update'))[0];
+      if (!op) return { won: false, reason: 'not_found' };
+      if (op.walletAddress !== p.walletAddress) return { won: false, reason: 'wallet_mismatch', operation: op };
+      if (op.operationType !== AGENT_SOL_WITHDRAW_OP_TYPE) return { won: false, reason: 'wrong_type', operation: op };
+      if (op.status !== 'pending') return { won: false, reason: 'not_pending', operation: op };
+
+      // Pinned metadata must be well-formed AND match the identities that
+      // were actually signed. Fail closed on any deviation — never "fix up"
+      // the pins of an existing intent.
+      const meta = (op.metadata ?? {}) as Record<string, unknown>;
+      const pinnedLamportsStr = typeof meta.requestedLamports === 'string' ? meta.requestedLamports : null;
+      let pinnedLamports: bigint | null = null;
+      if (pinnedLamportsStr && pinnedLamportsStr.length > 0) {
+        try { pinnedLamports = BigInt(pinnedLamportsStr); } catch { pinnedLamports = null; }
+      }
+      const pinnedDest = typeof meta.destinationWallet === 'string' ? meta.destinationWallet : null;
+      const pinnedSource = typeof meta.sourceAgentPublicKey === 'string' && meta.sourceAgentPublicKey.length > 0
+        ? meta.sourceAgentPublicKey
+        : null;
+      if (
+        pinnedLamports === null || pinnedLamports <= 0n ||
+        !pinnedDest || pinnedDest !== p.signedDestinationWallet || pinnedDest !== op.walletAddress ||
+        !pinnedSource || pinnedSource !== p.signedSourceAgentPublicKey
+      ) {
+        return { won: false, reason: 'pinned_mismatch', operation: op };
+      }
+
+      const sigs = Array.isArray(op.txSignatures) ? op.txSignatures : [];
+      if (sigs.length > 0 || typeof meta.withdrawTxSignature === 'string') {
+        return { won: false, reason: 'already_signed', operation: op };
+      }
+
+      let signedLamports: bigint | null = null;
+      try { signedLamports = BigInt(p.precommit.lamports); } catch { signedLamports = null; }
+      if (signedLamports === null || signedLamports !== pinnedLamports) {
+        return { won: false, reason: 'amount_mismatch', operation: op };
+      }
+
+      // Signer-rotation guard: the agent key pinned at intent time must still
+      // be the wallet's CURRENT agent key at write-ahead time.
+      const walletRow = (await tx.select().from(wallets)
+        .where(eq(wallets.address, p.walletAddress))
+        .limit(1))[0];
+      if (!walletRow || walletRow.agentPublicKey !== pinnedSource) {
+        return { won: false, reason: 'signer_rotated', operation: op };
+      }
+
+      // Concurrency + duplicate-signature gates against every OTHER op row of
+      // this wallet. Terminal = the explicit allowlist ONLY: unknown/parked/
+      // malformed statuses BLOCK (fail closed). NO equity_events scan here —
+      // op rows are the single source of truth for broadcast identities.
+      const siblings = await tx.select().from(borrowOperations)
+        .where(eq(borrowOperations.walletAddress, p.walletAddress));
+      for (const sib of siblings) {
+        if (sib.id === op.id) continue;
+        if (
+          (sib.operationType === AGENT_SOL_WITHDRAW_OP_TYPE || sib.operationType === 'loop_hop') &&
+          !AGENT_SOL_WITHDRAW_TERMINAL_STATUSES.has(sib.status)
+        ) {
+          return { won: false, reason: 'conflict', operation: op };
+        }
+      }
+      for (const sib of siblings) {
+        if (sib.id === op.id) continue;
+        if (sib.operationType !== AGENT_SOL_WITHDRAW_OP_TYPE) continue;
+        const sibSigs = Array.isArray(sib.txSignatures) ? sib.txSignatures : [];
+        const sibMeta = (sib.metadata ?? {}) as Record<string, unknown>;
+        if (sibSigs.includes(p.precommit.signature) || sibMeta.withdrawTxSignature === p.precommit.signature) {
+          return { won: false, reason: 'duplicate_signature', operation: op };
+        }
+      }
+
+      // Write-ahead: append the signature + merge the broadcast identity into
+      // metadata in the SAME statement, re-asserting the pinned trio so the
+      // signature-bearing row is always self-describing for reconciliation.
+      const mergePayload = {
+        withdrawTxSignature: p.precommit.signature,
+        withdrawBlockhash: p.precommit.blockhash,
+        withdrawLastValidBlockHeight: p.precommit.lastValidBlockHeight,
+        requestedLamports: pinnedLamportsStr,
+        destinationWallet: pinnedDest,
+        sourceAgentPublicKey: pinnedSource,
+      };
+      const updated = (await tx.update(borrowOperations)
+        .set({
+          txSignatures: sql`${borrowOperations.txSignatures} || ${JSON.stringify([p.precommit.signature])}::jsonb`,
+          metadata: sql`COALESCE(${borrowOperations.metadata}, '{}'::jsonb) || ${JSON.stringify(mergePayload)}::jsonb`,
+          step: 'withdraw_sig_writeahead',
+          updatedAt: new Date(),
+        })
+        .where(eq(borrowOperations.id, op.id))
+        .returning())[0];
+      return { won: true, operation: updated };
+    });
+  }
+
+  // Single guarded UPDATE (atomic): a transition applies only while the row
+  // is still the pending agent_sol_withdraw op of this wallet, with optional
+  // signature predicates:
+  // - requireNoSignature: only if NO signature evidence exists — used by the
+  //   pre-broadcast terminalizers so they can never race the write-ahead.
+  // - requireSignature: only if the persisted write-ahead signature is exactly
+  //   the given one — post-broadcast verdicts bind to the broadcast identity.
+  // Returns false when the guard didn't match; callers must re-read the row
+  // and resolve from its actual state, never assume.
+  async transitionAgentSolWithdraw(p: {
+    operationId: string;
+    walletAddress: string;
+    toStatus?: string;
+    step: string;
+    error?: string | null;
+    mergeMetadata?: Record<string, unknown>;
+    result?: Record<string, unknown> | null;
+    requireNoSignature?: boolean;
+    requireSignature?: string;
+  }): Promise<boolean> {
+    const conds = [
+      eq(borrowOperations.id, p.operationId),
+      eq(borrowOperations.walletAddress, p.walletAddress),
+      eq(borrowOperations.operationType, AGENT_SOL_WITHDRAW_OP_TYPE),
+      eq(borrowOperations.status, 'pending'),
+    ];
+    if (p.requireNoSignature) {
+      conds.push(sql`(${borrowOperations.metadata}->>'withdrawTxSignature') IS NULL`);
+      conds.push(sql`jsonb_array_length(COALESCE(${borrowOperations.txSignatures}, '[]'::jsonb)) = 0`);
+    }
+    if (p.requireSignature !== undefined) {
+      conds.push(sql`${borrowOperations.metadata}->>'withdrawTxSignature' = ${p.requireSignature}`);
+    }
+    const sets: Record<string, unknown> = { step: p.step, updatedAt: new Date() };
+    if (p.toStatus !== undefined) sets.status = p.toStatus;
+    if (p.error !== undefined) sets.error = p.error;
+    if (p.mergeMetadata !== undefined) {
+      sets.metadata = sql`COALESCE(${borrowOperations.metadata}, '{}'::jsonb) || ${JSON.stringify(p.mergeMetadata)}::jsonb`;
+    }
+    if (p.result !== undefined) sets.result = p.result;
+    const rows = await db.update(borrowOperations)
+      .set(sets)
+      .where(and(...conds))
+      .returning({ id: borrowOperations.id });
+    return rows.length > 0;
+  }
+
+  // Success + ledger, atomically, exactly once. Runs under the same advisory
+  // lock + FOR UPDATE as the precommit. The SOL equity event is inserted in
+  // the SAME transaction as the status flip: if the insert throws, the whole
+  // transaction rolls back and the op stays pending (caller answers 202; a
+  // later retry re-reconciles). Provenance is re-verified INSIDE the lock —
+  // a malformed row is never auto-failed and never writes anything here.
+  async finalizeAgentSolWithdrawSuccess(p: {
+    operationId: string;
+    walletAddress: string;
+    expectedSignature: string;
+  }): Promise<AgentSolWithdrawFinalizeOutcome> {
+    return await db.transaction(async (tx): Promise<AgentSolWithdrawFinalizeOutcome> => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${AGENT_SOL_WITHDRAW_LOCK_NAMESPACE}, hashtext(${p.walletAddress}))`);
+
+      const op = (await tx.select().from(borrowOperations)
+        .where(eq(borrowOperations.id, p.operationId))
+        .limit(1)
+        .for('update'))[0];
+      if (!op) return { outcome: 'not_finalized', reason: 'not_found' };
+      if (op.walletAddress !== p.walletAddress) return { outcome: 'not_finalized', reason: 'wallet_mismatch', operation: op };
+      if (op.operationType !== AGENT_SOL_WITHDRAW_OP_TYPE) return { outcome: 'not_finalized', reason: 'wrong_type', operation: op };
+      if (op.status === 'succeeded') return { outcome: 'already_succeeded', operation: op };
+      if (op.status !== 'pending') return { outcome: 'not_finalized', reason: 'not_pending', operation: op };
+
+      // Provenance: the row must self-describe EXACTLY the broadcast the
+      // caller confirmed — metadata signature === final txSignatures entry
+      // === expectedSignature; pinned lamports parse to a positive BigInt;
+      // destination is the op's own wallet; the signer pin is present.
+      const meta = (op.metadata ?? {}) as Record<string, unknown>;
+      const sigs = Array.isArray(op.txSignatures) ? op.txSignatures : [];
+      const finalSig = sigs.length > 0 ? sigs[sigs.length - 1] : undefined;
+      const metaSig = typeof meta.withdrawTxSignature === 'string' && meta.withdrawTxSignature.length > 0
+        ? meta.withdrawTxSignature
+        : null;
+      const metaDest = typeof meta.destinationWallet === 'string' ? meta.destinationWallet : null;
+      const metaSource = typeof meta.sourceAgentPublicKey === 'string' && meta.sourceAgentPublicKey.length > 0
+        ? meta.sourceAgentPublicKey
+        : null;
+      let lamportsBig: bigint | null = null;
+      if (typeof meta.requestedLamports === 'string' && meta.requestedLamports.length > 0) {
+        try { lamportsBig = BigInt(meta.requestedLamports); } catch { lamportsBig = null; }
+      }
+      if (
+        lamportsBig === null || lamportsBig <= 0n ||
+        !metaSig || metaSig !== p.expectedSignature ||
+        finalSig !== p.expectedSignature ||
+        !metaDest || metaDest !== op.walletAddress ||
+        !metaSource
+      ) {
+        return { outcome: 'not_finalized', reason: 'malformed_provenance', operation: op };
+      }
+
+      // decimal(20,6) SOL amount: lamports → micro-SOL (1e-6 SOL), rounded
+      // HALF UP, then a fixed 6-dp string. BigInt end-to-end — no float ever
+      // touches the money math.
+      const micro = (lamportsBig + 500n) / 1000n;
+      const solDisplay = `${(micro / 1_000_000n).toString()}.${(micro % 1_000_000n).toString().padStart(6, '0')}`;
+      const negAmount = `-${solDisplay}`;
+
+      const result = {
+        signature: p.expectedSignature,
+        withdrawnLamports: lamportsBig.toString(),
+        destinationWallet: op.walletAddress,
+        sourceAgentPublicKey: metaSource,
+        withdrawnSolDisplay: solDisplay,
+      };
+      const updated = (await tx.update(borrowOperations)
+        .set({ status: 'succeeded', step: 'withdraw_succeeded', error: null, result, updatedAt: new Date() })
+        .where(eq(borrowOperations.id, op.id))
+        .returning())[0];
+
+      await tx.insert(equityEvents).values({
+        walletAddress: op.walletAddress,
+        tradingBotId: null,
+        eventType: 'sol_withdraw',
+        amount: negAmount,
+        assetType: 'SOL',
+        txSignature: p.expectedSignature,
+        notes: `Agent SOL withdrawal (durable): ${lamportsBig.toString()} lamports to ${op.walletAddress} [op ${op.id}]`,
+      });
+
+      return { outcome: 'finalized', operation: updated };
+    });
   }
 
   // P4 HOP resume sweep: every loop_hop op that is NOT terminal (still pending)

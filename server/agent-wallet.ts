@@ -503,40 +503,57 @@ function createTransferInstruction(
   });
 }
 
-export async function buildWithdrawSolFromAgentTransaction(
-  agentPublicKey: string,
-  userWalletAddress: string,
-  encryptedPrivateKey: Uint8Array,
-  amountSol: number,
-): Promise<{
+/**
+ * SPL Memo program — used to domain-separate DURABLE agent SOL withdrawals so
+ * two different logical requests (clientRequestIds) can never share signed
+ * bytes/signatures even with identical amount, destination and blockhash.
+ * Legacy/reset transfers deliberately carry NO memo and stay
+ * instruction-identical to their historical shape.
+ */
+export const SOL_WITHDRAW_MEMO_PROGRAM_ID = 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr';
+
+/** Bounded, domain-separated memo identity for a durable agent SOL withdrawal. */
+export function buildAgentSolWithdrawMemo(clientRequestId: string): string {
+  return `qv:agent_sol_withdraw:${clientRequestId}`;
+}
+
+interface SignedSolWithdrawTx {
   transaction: string;
   blockhash: string;
   lastValidBlockHeight: number;
-  message: string;
   /** Deterministic base58 signature embedded in the signed transaction (fee payer = agent). */
   signature: string;
   /** Exact positive safe-integer lamports encoded in the SystemProgram transfer. */
   lamports: number;
-}> {
+}
+
+/**
+ * Shared signing core: EXACT integer lamports (no float round-tripping) and an
+ * optional single Memo instruction. Both public builders delegate here so the
+ * transfer construction, signing and signature extraction can never diverge.
+ */
+async function buildSignedSolWithdrawTransaction(
+  agentPublicKey: string,
+  userWalletAddress: string,
+  encryptedPrivateKey: Uint8Array,
+  lamports: number,
+  memo: string | null,
+): Promise<SignedSolWithdrawTx> {
   // Validate BEFORE touching keys, building, signing, or any RPC call.
-  if (!Number.isFinite(amountSol) || amountSol <= 0) {
-    throw new Error('Invalid withdraw amount: must be a finite positive SOL amount');
+  if (!Number.isSafeInteger(lamports) || lamports <= 0) {
+    throw new Error('Invalid withdraw amount: lamports must be a positive safe integer');
   }
-  const lamports = Math.round(amountSol * LAMPORTS_PER_SOL);
-  if (lamports <= 0) {
-    throw new Error('Invalid withdraw amount: rounds to zero lamports');
-  }
-  if (!Number.isSafeInteger(lamports)) {
-    throw new Error('Invalid withdraw amount: exceeds safe lamport range');
+  if (memo !== null && (typeof memo !== 'string' || memo.length === 0 || memo.length > 256)) {
+    throw new Error('Invalid withdraw memo: must be a nonempty string of at most 256 characters');
   }
 
   const connection = getConnection();
   const agentPubkey = new PublicKey(agentPublicKey);
   const userPubkey = new PublicKey(userWalletAddress);
   const agentKeypair = resolveAgentKeypair(encryptedPrivateKey);
-  
+
   const transaction = new Transaction();
-  
+
   transaction.add(
     SystemProgram.transfer({
       fromPubkey: agentPubkey,
@@ -544,12 +561,20 @@ export async function buildWithdrawSolFromAgentTransaction(
       lamports,
     })
   );
-  
+
+  if (memo !== null) {
+    transaction.add(new TransactionInstruction({
+      keys: [],
+      programId: new PublicKey(SOL_WITHDRAW_MEMO_PROGRAM_ID),
+      data: Buffer.from(memo, 'utf8'),
+    }));
+  }
+
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
-  
+
   transaction.feePayer = agentPubkey;
   transaction.recentBlockhash = blockhash;
-  
+
   transaction.sign(agentKeypair);
 
   // The fee payer's ed25519 signature is fixed the moment signing completes —
@@ -561,14 +586,77 @@ export async function buildWithdrawSolFromAgentTransaction(
   const signature = bs58.encode(transaction.signature);
 
   const serializedTx = transaction.serialize().toString('base64');
-  
+
   return {
     transaction: serializedTx,
     blockhash,
     lastValidBlockHeight,
-    message: `Withdraw ${amountSol} SOL from agent wallet`,
     signature,
     lamports,
+  };
+}
+
+export async function buildWithdrawSolFromAgentTransaction(
+  agentPublicKey: string,
+  userWalletAddress: string,
+  encryptedPrivateKey: Uint8Array,
+  amountSol: number,
+): Promise<SignedSolWithdrawTx & { message: string }> {
+  // Legacy float input enters here ONLY; validate BEFORE any RPC call.
+  // Instruction shape (single SystemProgram.transfer, NO memo) is pinned by tests.
+  if (!Number.isFinite(amountSol) || amountSol <= 0) {
+    throw new Error('Invalid withdraw amount: must be a finite positive SOL amount');
+  }
+  const lamports = Math.round(amountSol * LAMPORTS_PER_SOL);
+  if (lamports <= 0) {
+    throw new Error('Invalid withdraw amount: rounds to zero lamports');
+  }
+  if (!Number.isSafeInteger(lamports)) {
+    throw new Error('Invalid withdraw amount: exceeds safe lamport range');
+  }
+
+  const core = await buildSignedSolWithdrawTransaction(
+    agentPublicKey,
+    userWalletAddress,
+    encryptedPrivateKey,
+    lamports,
+    null,
+  );
+
+  return {
+    ...core,
+    message: `Withdraw ${amountSol} SOL from agent wallet`,
+  };
+}
+
+/**
+ * WO2B2B — exact raw-lamport withdrawal builder for the DURABLE state machine.
+ * Takes the already-validated integer lamports (never converts pinned lamports
+ * to floating SOL and back) and a REQUIRED domain-separated memo so different
+ * logical ids always produce different signed bytes/signatures.
+ */
+export async function buildWithdrawSolLamportsFromAgentTransaction(
+  agentPublicKey: string,
+  userWalletAddress: string,
+  encryptedPrivateKey: Uint8Array,
+  lamports: number,
+  memo: string,
+): Promise<SignedSolWithdrawTx & { message: string }> {
+  if (typeof memo !== 'string' || memo.trim().length === 0) {
+    throw new Error('Invalid withdraw memo: a domain-separated memo is required for raw-lamport withdrawals');
+  }
+
+  const core = await buildSignedSolWithdrawTransaction(
+    agentPublicKey,
+    userWalletAddress,
+    encryptedPrivateKey,
+    lamports,
+    memo,
+  );
+
+  return {
+    ...core,
+    message: `Withdraw ${lamports} lamports from agent wallet`,
   };
 }
 
@@ -698,6 +786,10 @@ export type DurableSolWithdrawResult =
  * - After callback success the already-signed bytes are sent exactly once
  *   (confirmed preflight). No rebuild, no re-sign, no internal retry — a
  *   retry with a fresh blockhash would mint a SECOND spendable transaction.
+ * - The signed transaction carries a memo binding it to the caller-supplied
+ *   clientRequestId (domain separation): two different request ids can never
+ *   produce byte-identical transactions, so one request's transfer can never
+ *   double as another's.
  * - The RPC-echoed signature must equal the precomputed one; any deviation is
  *   treated as ambiguous for the precomputed signature and NEVER triggers a
  *   replacement send.
@@ -712,7 +804,8 @@ export async function executeAgentSolWithdrawDurable(
   agentPublicKey: string,
   encryptedPrivateKey: Uint8Array,
   userWalletAddress: string,
-  amountSol: number,
+  lamports: number,
+  clientRequestId: string,
   persistPrecommit: (precommit: DurableSolWithdrawPrecommit) => Promise<void>,
 ): Promise<DurableSolWithdrawResult> {
   const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -721,19 +814,34 @@ export async function executeAgentSolWithdrawDurable(
     return { state: 'not_broadcast', error: 'durability callback is required' };
   }
 
-  let build: Awaited<ReturnType<typeof buildWithdrawSolFromAgentTransaction>>;
+  if (
+    typeof clientRequestId !== 'string' ||
+    clientRequestId.trim().length === 0 ||
+    clientRequestId.length > 128
+  ) {
+    return {
+      state: 'not_broadcast',
+      error: 'invalid clientRequestId: must be a non-empty string of at most 128 characters',
+    };
+  }
+
+  let build: Awaited<ReturnType<typeof buildWithdrawSolLamportsFromAgentTransaction>>;
   try {
-    build = await buildWithdrawSolFromAgentTransaction(
+    build = await buildWithdrawSolLamportsFromAgentTransaction(
       agentPublicKey,
       userWalletAddress,
       encryptedPrivateKey,
-      amountSol,
+      lamports,
+      buildAgentSolWithdrawMemo(clientRequestId),
     );
   } catch (error) {
     return { state: 'not_broadcast', error: `build failed: ${msg(error)}` };
   }
 
-  const { signature: expectedSignature, blockhash, lastValidBlockHeight, lamports } = build;
+  // NOTE: build.lamports is guaranteed identical to the validated `lamports`
+  // parameter (the builder encodes exactly that integer or throws), so the
+  // function parameter remains the single binding used below.
+  const { signature: expectedSignature, blockhash, lastValidBlockHeight } = build;
   const rawTx = Buffer.from(build.transaction, 'base64');
 
   try {
@@ -799,6 +907,55 @@ export async function executeAgentSolWithdrawDurable(
   }
 
   return { state: 'confirmed', signature: expectedSignature, lamports };
+}
+
+/**
+ * Strict lamports balance read for the durable withdraw orchestrator.
+ * Throws on any RPC/transport failure or malformed response — callers must
+ * fail closed (defer the withdrawal), never assume zero.
+ */
+export async function getAgentSolBalanceLamportsStrict(agentPublicKey: string): Promise<bigint> {
+  const connection = getConnection();
+  const pubkey = new PublicKey(agentPublicKey);
+  const lamports = await connection.getBalance(pubkey);
+  if (typeof lamports !== 'number' || !Number.isSafeInteger(lamports) || lamports < 0) {
+    throw new Error(`Malformed lamports balance from RPC: ${String(lamports)}`);
+  }
+  return BigInt(lamports);
+}
+
+/**
+ * Strict signature status probe (searches full transaction history).
+ * Returns null when the cluster does not know the signature; throws on
+ * transport failure or malformed response — null and "couldn't check" are
+ * deliberately NOT the same answer.
+ */
+export async function getSignatureStatusStrict(
+  signature: string,
+): Promise<{ err: unknown; confirmationStatus: string | null } | null> {
+  const connection = getConnection();
+  const res = await connection.getSignatureStatuses([signature], {
+    searchTransactionHistory: true,
+  });
+  if (!res || !Array.isArray(res.value)) {
+    throw new Error('Malformed signature status response from RPC');
+  }
+  const status = res.value[0] ?? null;
+  if (!status) return null;
+  return { err: status.err ?? null, confirmationStatus: status.confirmationStatus ?? null };
+}
+
+/**
+ * Strict current block height at 'confirmed'. Throws on transport failure or
+ * malformed response.
+ */
+export async function getBlockHeightStrict(): Promise<number> {
+  const connection = getConnection();
+  const height = await connection.getBlockHeight('confirmed');
+  if (typeof height !== 'number' || !Number.isFinite(height)) {
+    throw new Error(`Malformed block height from RPC: ${String(height)}`);
+  }
+  return height;
 }
 
 // Transfer USDC from agent wallet to any Solana wallet (for profit sharing)
