@@ -1,5 +1,6 @@
 /**
- * WO2B2DC3 — Cutover verification for agent-sol-withdraw-client.ts
+ * WO2B2DC3-E1 — Cutover + source-wiring verification for agent-sol-withdraw-client.ts
+ * and LoopVaultControls.tsx C1:LOOP-RETURN region.
  *
  * Covers: exact key names / field names / origins (no provisional variants);
  * HTTP 200-only success; pending / re-key / manual_review classification;
@@ -17,6 +18,12 @@
  * invariants; full lifecycle proof (blocked→invalid_request_record→cleanup→
  * success); countBlockingAnomalies UI helper; capProvider post-credit ordering,
  * failure/null/zero retention, concurrent waiter skip.
+ * Section AB: non-vacuous source-wiring over the actual C1:LOOP-RETURN-BEGIN…
+ * END region — boundary extraction, import wiring, countBlockingAnomalies in
+ * both new-request disabled gate and anomaly-count derivation, resolved-vs-
+ * blocking UI separation, text-loop-storage-unreadable truthfulness, branch
+ * ordering, activeReturn.amountLamports vs .lamports, autoReturnProceeds
+ * capProvider post-credit (no pre-fetch), negative controls.
  */
 
 import { readFileSync, readdirSync, statSync } from 'fs';
@@ -1846,5 +1853,294 @@ describe('AA — coordinateLoopReturn capProvider: post-credit invocation, failu
     expect(ledger.creditLamports).toBe(proceeds);
     expect(ledger.debitLamports).toBe(cap);
     expect(ledger.availableLamports).toBe(proceeds - cap);
+  });
+});
+
+// ─── AB: Source-wiring over LoopVaultControls C1:LOOP-RETURN region ──────────
+//
+// The [C1:LOOP-RETURN-BEGIN]…[C1:LOOP-RETURN-END] region (lines ~312–612 in LVC)
+// contains the logic declarations: state, hooks, derived values, and handler
+// functions.  The recovery-row JSX (testids, color classes, conditional text) is
+// in the component's return statement, after the END marker.
+//
+// Assertions therefore use two sources:
+//   lvcRegion() — the extracted logic band (boundary-checked, fails on bad markers)
+//   readFileSync(LVC_PATH) — full file for JSX/prop assertions outside the band
+//
+// Boundary extraction must throw (failing the calling test) if markers are absent
+// or duplicated; negative-control tests verify this property directly.
+
+const LVC_PATH = join(process.cwd(), 'client/src/components/LoopVaultControls.tsx');
+const LVC_BEGIN_MARKER = '// [C1:LOOP-RETURN-BEGIN]';
+const LVC_END_MARKER   = '// [C1:LOOP-RETURN-END]';
+
+/**
+ * Extracts the [C1:LOOP-RETURN-BEGIN]…[C1:LOOP-RETURN-END] logic band from LVC.
+ * Throws — failing the calling test — if either marker is absent or duplicated.
+ */
+function lvcRegion(): string {
+  const src = readFileSync(LVC_PATH, 'utf8');
+  const begins = [...src.matchAll(/\/\/ \[C1:LOOP-RETURN-BEGIN\]/g)];
+  const ends   = [...src.matchAll(/\/\/ \[C1:LOOP-RETURN-END\]/g)];
+  if (begins.length !== 1 || ends.length !== 1) {
+    throw new Error(
+      `LVC marker count wrong — expected exactly 1 BEGIN and 1 END; ` +
+      `found BEGIN=${begins.length} END=${ends.length}`,
+    );
+  }
+  const bi = src.indexOf(LVC_BEGIN_MARKER);
+  const ei = src.indexOf(LVC_END_MARKER);
+  if (ei <= bi) throw new Error('LVC END marker must appear after BEGIN');
+  return src.slice(bi, ei + LVC_END_MARKER.length);
+}
+
+describe('AB — LoopVaultControls source-wiring over C1:LOOP-RETURN region', () => {
+
+  // ── Boundary integrity ────────────────────────────────────────────────────
+
+  it('LVC has exactly one BEGIN and one END marker (unambiguous boundary extraction)', () => {
+    const src = readFileSync(LVC_PATH, 'utf8');
+    const begins = [...src.matchAll(/\/\/ \[C1:LOOP-RETURN-BEGIN\]/g)];
+    const ends   = [...src.matchAll(/\/\/ \[C1:LOOP-RETURN-END\]/g)];
+    expect(begins).toHaveLength(1);
+    expect(ends).toHaveLength(1);
+    expect(src.indexOf(LVC_BEGIN_MARKER)).toBeLessThan(src.indexOf(LVC_END_MARKER));
+  });
+
+  it('[NEG] missing BEGIN marker is detectable — lvcRegion() would throw', () => {
+    const src = readFileSync(LVC_PATH, 'utf8').replace(LVC_BEGIN_MARKER, '');
+    const begins = [...src.matchAll(/\/\/ \[C1:LOOP-RETURN-BEGIN\]/g)];
+    expect(begins).toHaveLength(0); // count ≠ 1 → extractor throws
+  });
+
+  it('[NEG] duplicated END marker is detectable — lvcRegion() would throw', () => {
+    const src = readFileSync(LVC_PATH, 'utf8') + '\n' + LVC_END_MARKER;
+    const ends = [...src.matchAll(/\/\/ \[C1:LOOP-RETURN-END\]/g)];
+    expect(ends.length).toBeGreaterThan(1); // count ≠ 1 → extractor throws
+  });
+
+  // ── Import: countBlockingAnomalies from the helper ────────────────────────
+
+  it('LVC imports countBlockingAnomalies by name from agent-sol-withdraw-client', () => {
+    const src = readFileSync(LVC_PATH, 'utf8');
+    const importBlock = src.match(
+      /import\s*\{[^}]*\bcountBlockingAnomalies\b[^}]*\}\s*from\s*["'][^"']*agent-sol-withdraw-client["']/s,
+    )?.[0];
+    expect(importBlock).toBeDefined();
+    expect(importBlock).toContain('countBlockingAnomalies');
+  });
+
+  // ── ledgerIsBlocked: countBlockingAnomalies, NOT raw anomalies.length ─────
+  // (These assertions use lvcRegion() — the logic band contains the declaration.)
+
+  it('ledgerIsBlocked uses countBlockingAnomalies(returnLedger) > 0', () => {
+    const region = lvcRegion();
+    expect(region).toMatch(/countBlockingAnomalies\(returnLedger\)\s*>\s*0/);
+  });
+
+  it('ledgerIsBlocked assignment does NOT reference anomalies.length directly', () => {
+    const region = lvcRegion();
+    const assignMatch = region.match(/ledgerIsBlocked\s*=\s*!!\([\s\S]*?\);/)?.[0] ?? '';
+    expect(assignMatch.length).toBeGreaterThan(20); // non-vacuous: assignment found
+    expect(assignMatch).not.toMatch(/anomalies\.length/);
+  });
+
+  it('[NEG] mutant using anomalies.length in ledgerIsBlocked lacks countBlockingAnomalies call', () => {
+    const region = lvcRegion();
+    const mutant = region.replace(
+      /countBlockingAnomalies\(returnLedger\)\s*>\s*0/g,
+      '(returnLedger?.anomalies.length ?? 0) > 0',
+    );
+    expect(mutant).not.toBe(region);
+    expect(mutant).not.toMatch(/countBlockingAnomalies\(returnLedger\)\s*>\s*0/);
+    expect(mutant).toMatch(/anomalies\.length.*>\s*0/);
+  });
+
+  // ── blockingAnomalyCount / nonBlockingAnomalyCount derivation ─────────────
+
+  it('blockingAnomalyCount is derived from countBlockingAnomalies(returnLedger)', () => {
+    const region = lvcRegion();
+    expect(region).toMatch(/\bblockingAnomalyCount\s*=.*\bcountBlockingAnomalies\(returnLedger\)/);
+  });
+
+  it('nonBlockingAnomalyCount = (anomalies.length ?? 0) - blockingAnomalyCount', () => {
+    const region = lvcRegion();
+    expect(region).toMatch(
+      /\bnonBlockingAnomalyCount\s*=\s*\(returnLedger\?\.anomalies\.length\s*\?\?\s*0\)\s*-\s*blockingAnomalyCount/,
+    );
+  });
+
+  // ── Button disabled prop: uses ledgerIsBlocked (full file — JSX is after END)
+
+  it('Return button disabled prop uses ledgerIsBlocked (not direct anomalies.length)', () => {
+    const src = readFileSync(LVC_PATH, 'utf8');
+    // There is exactly one disabled={...} on the loop-return button
+    const disabledExpr = src.match(/disabled=\{[^}]+ledgerIsBlocked[^}]*\}/)?.[0] ?? '';
+    expect(disabledExpr.length).toBeGreaterThan(10); // expression found
+    expect(disabledExpr).toContain('ledgerIsBlocked');
+    expect(disabledExpr).not.toMatch(/anomalies\.length/);
+  });
+
+  // ── text-loop-return-anomalies: amber, guarded by blockingAnomalyCount ─────
+  // (Full file — testid is in JSX after the END marker.)
+
+  it('text-loop-return-anomalies is guarded by blockingAnomalyCount > 0', () => {
+    const src = readFileSync(LVC_PATH, 'utf8');
+    const tidIdx = src.indexOf('data-testid="text-loop-return-anomalies"');
+    expect(tidIdx).toBeGreaterThan(-1);
+    // Look at the 200 chars immediately before the testid attribute — the guard
+    // expression {blockingAnomalyCount > 0 && ( is on the line above.
+    const before200 = src.slice(Math.max(0, tidIdx - 200), tidIdx);
+    expect(before200).toMatch(/\bblockingAnomalyCount\s*>\s*0/);
+  });
+
+  it('text-loop-return-anomalies element uses amber color class', () => {
+    const src = readFileSync(LVC_PATH, 'utf8');
+    const tidIdx = src.indexOf('data-testid="text-loop-return-anomalies"');
+    expect(tidIdx).toBeGreaterThan(-1);
+    const window = src.slice(Math.max(0, tidIdx - 200), tidIdx + 80);
+    expect(window).toMatch(/text-amber-\d+/);
+  });
+
+  // ── text-loop-return-audit: muted, NOT amber; distinct guard ──────────────
+
+  it('text-loop-return-audit is guarded by nonBlockingAnomalyCount > 0', () => {
+    const src = readFileSync(LVC_PATH, 'utf8');
+    const tidIdx = src.indexOf('data-testid="text-loop-return-audit"');
+    expect(tidIdx).toBeGreaterThan(-1);
+    // Look at the 200 chars immediately before the testid attribute — the guard
+    // expression {nonBlockingAnomalyCount > 0 && ( is on the line above.
+    const before200 = src.slice(Math.max(0, tidIdx - 200), tidIdx);
+    expect(before200).toMatch(/\bnonBlockingAnomalyCount\s*>\s*0/);
+  });
+
+  it('text-loop-return-audit element uses muted color, NOT amber', () => {
+    const src = readFileSync(LVC_PATH, 'utf8');
+    const tidIdx = src.indexOf('data-testid="text-loop-return-audit"');
+    expect(tidIdx).toBeGreaterThan(-1);
+    const window = src.slice(Math.max(0, tidIdx - 200), tidIdx + 80);
+    expect(window).toMatch(/muted-foreground/);
+    expect(window).not.toMatch(/text-amber-\d+/);
+  });
+
+  it('anomalies guard (blockingAnomalyCount) and audit guard (nonBlockingAnomalyCount) are distinct', () => {
+    const src = readFileSync(LVC_PATH, 'utf8');
+    const anomIdx  = src.indexOf('data-testid="text-loop-return-anomalies"');
+    const auditIdx = src.indexOf('data-testid="text-loop-return-audit"');
+    expect(anomIdx).toBeGreaterThan(-1);
+    expect(auditIdx).toBeGreaterThan(-1);
+    expect(anomIdx).toBeLessThan(auditIdx); // anomalies precedes audit in source
+    // Segment between the two testids contains the nonBlocking opener
+    const between = src.slice(anomIdx, auditIdx);
+    expect(between).toMatch(/\bnonBlockingAnomalyCount\s*>\s*0/);
+    // Segment just before anomalies contains the blocking opener
+    const beforeAnom = src.slice(0, anomIdx);
+    const nearAnom = beforeAnom.slice(Math.max(0, beforeAnom.lastIndexOf('{') - 80));
+    expect(nearAnom).toMatch(/\bblockingAnomalyCount\s*>\s*0/);
+  });
+
+  // ── text-loop-storage-unreadable: truthful warning ────────────────────────
+
+  it('text-loop-storage-unreadable testid is present with truthful "unknown" message', () => {
+    const src = readFileSync(LVC_PATH, 'utf8');
+    const tidIdx = src.indexOf('data-testid="text-loop-storage-unreadable"');
+    expect(tidIdx).toBeGreaterThan(-1);
+    const msgWindow = src.slice(tidIdx, tidIdx + 250);
+    expect(msgWindow).toMatch(/unknown/i);
+    expect(msgWindow).not.toMatch(/ready to go back/i); // no fake "0 SOL ready"
+  });
+
+  it('storageUnreadable branch condition gates on availableReturnLamports <= 0n', () => {
+    const src = readFileSync(LVC_PATH, 'utf8');
+    expect(src).toMatch(/storageUnreadable[\s\S]{0,80}availableReturnLamports\s*<=\s*0n/);
+  });
+
+  it('[NEG] replacing storageUnreadable warning with generic zero-ready text breaks the unknown check', () => {
+    const src    = readFileSync(LVC_PATH, 'utf8');
+    const tidIdx = src.indexOf('data-testid="text-loop-storage-unreadable"');
+    const spanEnd = src.indexOf('</span>', tidIdx);
+    expect(tidIdx).toBeGreaterThan(-1);
+    expect(spanEnd).toBeGreaterThan(tidIdx);
+    // Simulate the regression: replace the truthful warning span
+    const mutant =
+      src.slice(0, tidIdx) +
+      '<>{lamportsToSolDisplay(0n)} SOL is ready to go back to your wallet.</>' +
+      src.slice(spanEnd + '</span>'.length);
+    expect(mutant).not.toBe(src);
+    // Truthful "unknown" message is now gone
+    const mutantWindow = mutant.slice(Math.max(0, tidIdx - 50), tidIdx + 200);
+    expect(mutantWindow).not.toMatch(/unknown/i);
+    // Anti-pattern "ready to go back" appears where it should not
+    expect(mutantWindow).toMatch(/ready to go back/i);
+  });
+
+  // ── Branch ordering: negative → storageUnreadable → default ready ─────────
+
+  it('storageUnreadable branch is positioned after negative and before default "ready to go back" text', () => {
+    const src = readFileSync(LVC_PATH, 'utf8');
+    const negIdx    = src.indexOf('returnLedger?.negative');
+    const unreadIdx = src.indexOf('storageUnreadable && availableReturnLamports <= 0n');
+    const readyIdx  = src.indexOf('ready to go back to your wallet');
+    expect(negIdx).toBeGreaterThan(-1);
+    expect(unreadIdx).toBeGreaterThan(-1);
+    expect(readyIdx).toBeGreaterThan(-1);
+    expect(negIdx).toBeLessThan(unreadIdx);
+    expect(unreadIdx).toBeLessThan(readyIdx);
+  });
+
+  // ── activeReturn.amountLamports (no bare .lamports) ───────────────────────
+  // Logic band: manualReturnLamports = BigInt(activeReturn.amountLamports) is there.
+  // Full file: JSX also uses activeReturn.amountLamports. Both must hold.
+
+  it('region uses activeReturn.amountLamports; bare activeReturn.lamports is absent from whole file', () => {
+    const region = lvcRegion();
+    expect(region).toContain('activeReturn.amountLamports');
+    // activeReturn.amountLamports does NOT contain the sub-string "activeReturn.lamports"
+    // (field name starts with "amount", not "lamports"), so this regex cleanly detects
+    // the anti-pattern without false-positiving on the correct form.
+    const src = readFileSync(LVC_PATH, 'utf8');
+    expect(src).not.toMatch(/activeReturn\.lamports/);
+  });
+
+  // ── autoReturnProceeds: capProvider post-credit, no pre-fetch ────────────
+  // Uses lvcRegion() — the function declaration is inside the logic band.
+  // IMPORTANT: search for "const autoReturnProceeds" (declaration) not just
+  // "autoReturnProceeds" which would hit the call site at line ~447 first.
+
+  it('autoReturnProceeds declares capProvider and passes it to coordinateLoopReturn', () => {
+    const region  = lvcRegion();
+    const fnIdx   = region.indexOf('const autoReturnProceeds');
+    expect(fnIdx).toBeGreaterThan(-1);
+    const fnSlice = region.slice(fnIdx, fnIdx + 900);
+    // capProvider is defined
+    expect(fnSlice).toMatch(/\bcapProvider\b/);
+    // capProvider declaration precedes the coordinateLoopReturn call
+    const capDeclIdx     = fnSlice.indexOf('const capProvider');
+    const loopReturnIdx  = fnSlice.indexOf('coordinateLoopReturn');
+    expect(capDeclIdx).toBeGreaterThan(-1);
+    expect(loopReturnIdx).toBeGreaterThan(capDeclIdx);
+    // Opts object passes capProvider (shorthand), not capLamports
+    expect(fnSlice).toMatch(/\{\s*headers:[^}]+capProvider\s*\}/);
+    expect(fnSlice).not.toMatch(/\bcapLamports\s*:/);
+  });
+
+  it('autoReturnProceeds: balance refetch is inside capProvider closure, not a pre-fetch before coordinateLoopReturn', () => {
+    const region  = lvcRegion();
+    const fnIdx   = region.indexOf('const autoReturnProceeds');
+    expect(fnIdx).toBeGreaterThan(-1);
+    const fnSlice = region.slice(fnIdx, fnIdx + 900);
+    const capDeclIdx  = fnSlice.indexOf('const capProvider');
+    const refetchIdx  = fnSlice.indexOf('balanceQuery.refetch()');
+    const loopReturnIdx = fnSlice.indexOf('coordinateLoopReturn');
+    // All three must be present in the function body
+    expect(capDeclIdx).toBeGreaterThan(-1);
+    expect(refetchIdx).toBeGreaterThan(-1);
+    expect(loopReturnIdx).toBeGreaterThan(-1);
+    // refetch is AFTER capProvider declaration (inside the closure, not a pre-fetch)
+    expect(refetchIdx).toBeGreaterThan(capDeclIdx);
+    // coordinateLoopReturn is AFTER capProvider declaration
+    expect(loopReturnIdx).toBeGreaterThan(capDeclIdx);
+    // Anti-pattern proof: refetch does NOT precede capProvider declaration
+    expect(refetchIdx < capDeclIdx).toBe(false);
   });
 });
