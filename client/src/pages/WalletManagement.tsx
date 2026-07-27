@@ -465,7 +465,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
     }
   };
 
-  // [C2:WALLET-MGMT-BEGIN] Durable server-executed SOL withdrawal.
+  // [C3:WALLET-MGMT-BEGIN] Durable server-executed SOL withdrawal.
   // All coordinator actions run under the exclusive Web Lock; no low-level
   // begin/drive/finalize helpers are called directly from this surface.
   const refreshActiveSolWithdraw = () => {
@@ -584,7 +584,7 @@ export function WalletContent({ initialTab = 'deposit' }: WalletContentProps) {
       setSolWithdrawCleaningUp(false);
     }
   };
-  // [C2:WALLET-MGMT-END]
+  // [C3:WALLET-MGMT-END]
 
   const handleSolDeposit = async () => {
     const amount = parseFloat(solDepositAmount);

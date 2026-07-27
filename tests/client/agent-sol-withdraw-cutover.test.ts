@@ -1,5 +1,5 @@
 /**
- * WO2B2DC2 — Cutover verification for agent-sol-withdraw-client.ts
+ * WO2B2DC3 — Cutover verification for agent-sol-withdraw-client.ts
  *
  * Covers: exact key names / field names / origins (no provisional variants);
  * HTTP 200-only success; pending / re-key / manual_review classification;
@@ -12,8 +12,11 @@
  * stale amount binds inside lock; balance cap (capLamports) option; hostile
  * ledger validation (cross-prefix / suffix mismatch); withdraw_conflict terminal
  * clear; UUID/min/round-trip record validation; insecure random blocked; cleanup
- * evidence non-blocking; coordinateMigrateLegacy locked; debit-persist and
- * clear-failure one-debit invariants.
+ * evidence non-blocking (malformed_record_cleaned + invalid_request_record);
+ * coordinateMigrateLegacy locked; debit-persist and clear-failure one-debit
+ * invariants; full lifecycle proof (blocked→invalid_request_record→cleanup→
+ * success); countBlockingAnomalies UI helper; capProvider post-credit ordering,
+ * failure/null/zero retention, concurrent waiter skip.
  */
 
 import { readFileSync, readdirSync, statSync } from 'fs';
@@ -28,6 +31,7 @@ import {
   coordinateMigrateLegacy,
   readActiveRecordForDisplay,
   readLedgerViewForDisplay,
+  countBlockingAnomalies,
   migrateLegacyPendingReturn,
   putLedgerEntry,
   writeAnomaly,
@@ -1351,7 +1355,7 @@ describe('T — record validation: UUID form, min-lamports, round-trip; insecure
 
 // ─── U: Cleanup evidence is non-blocking ─────────────────────────────────────
 
-describe('U — malformed_record_cleaned evidence does not block future loop returns', () => {
+describe('U — malformed_record_cleaned and invalid_request_record do not block future loop returns', () => {
   it('after successful cleanup, loop return proceeds without blocked_by_ledger', async () => {
     const s = new FakeStorage();
     // Place a malformed record and clean it
@@ -1380,7 +1384,31 @@ describe('U — malformed_record_cleaned evidence does not block future loop ret
     expect(out.outcome).toBe('success');
   });
 
-  it('other anomaly codes (non-cleanup) still block new loop_return', async () => {
+  it('invalid_request_record evidence does not block future loop_return', async () => {
+    const s = new FakeStorage();
+    // Directly seed invalid_request_record anomaly (as written when a loop-return
+    // attempt encounters a malformed request slot)
+    writeAnomaly(s, WALLET, 'invalid_request_record', 'some-raw-content', { raw: 'bad-record', note: 'audit' });
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.anomalies.some(a => a.code === 'invalid_request_record')).toBe(true);
+
+    // Now seed a credit — invalid_request_record must NOT block loop return
+    const sig = 'sig-post-irr';
+    const proceeds = 5_000_000n;
+    s.put(creditKey(WALLET, sig), JSON.stringify({
+      v: 1, kind: 'credit', source: 'loop_close', sig, lamports: String(proceeds), at: new Date().toISOString(),
+    } satisfies LedgerEntry));
+    const out = await coordinateLoopReturn(WALLET, sig, proceeds, {
+      storage: s,
+      fetchImpl: async () => {
+        const rec = JSON.parse(s.raw(requestKey(WALLET))!) as DurableWithdrawRecord;
+        return mkRes(200, successBody(rec));
+      },
+    });
+    expect(out.outcome).toBe('success');
+  });
+
+  it('entry_conflict (true accounting anomaly) still blocks new loop_return', async () => {
     const s = new FakeStorage();
     writeAnomaly(s, WALLET, 'entry_conflict', 'some-seed', { note: 'real conflict' });
     const { fn, calls } = capturedFetch([]);
@@ -1531,5 +1559,292 @@ describe('X — clear-failure then retry: record stays but debit is idempotent',
     const ledger = readLedgerViewForDisplay(WALLET, s);
     expect(ledger.debitLamports).toBe(proceeds);
     expect(ledger.debitRequestIds).toHaveLength(1);
+  });
+});
+
+// ─── Y: Full lifecycle: malformed→blocked_invalid_record→cleanup→success ──────
+
+describe('Y — full lifecycle: malformed record → blocked attempt writes invalid_request_record → cleanup → later return succeeds', () => {
+  it('both audit entries remain after success; neither blocks; exactly one fetch+debit', async () => {
+    const s = new FakeStorage();
+    const creditSig = 'sig-lifecycle-y1';
+    const proceeds = 5_000_000n;
+
+    // Seed a credit
+    s.put(creditKey(WALLET, creditSig), JSON.stringify({
+      v: 1, kind: 'credit', source: 'loop_close', sig: creditSig, lamports: String(proceeds), at: new Date().toISOString(),
+    } satisfies LedgerEntry));
+
+    // Place a malformed record to trigger blocked_invalid_record
+    s.put(requestKey(WALLET), '{ malformed json !!! }');
+
+    // Attempt: blocked; writes invalid_request_record anomaly; zero fetches
+    const { fn: fn1, calls: calls1 } = capturedFetch([]);
+    const out1 = await coordinateLoopReturn(WALLET, creditSig, proceeds, { storage: s, fetchImpl: fn1 });
+    expect(out1.outcome).toBe('blocked_invalid_record');
+    expect(calls1).toHaveLength(0);
+
+    // invalid_request_record written as non-blocking audit evidence
+    const ledger1 = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger1.anomalies.some(a => a.code === 'invalid_request_record')).toBe(true);
+    // It does NOT block (countBlockingAnomalies ignores it)
+    expect(countBlockingAnomalies(ledger1)).toBe(0);
+
+    // Explicit cleanup: writes malformed_record_cleaned, removes slot
+    const cleanOut = await coordinateCleanupMalformed(WALLET, { storage: s });
+    expect(cleanOut.outcome).toBe('cleaned');
+    expect(s.raw(requestKey(WALLET))).toBeNull();
+
+    const ledger2 = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger2.anomalies.some(a => a.code === 'malformed_record_cleaned')).toBe(true);
+    expect(countBlockingAnomalies(ledger2)).toBe(0); // neither audit entry blocks
+
+    // Later loop return: slot is clear → one fetch + one debit → success
+    let fetchCount = 0;
+    const out2 = await coordinateLoopReturn(WALLET, creditSig, proceeds, {
+      storage: s,
+      fetchImpl: async () => {
+        fetchCount++;
+        const rec = JSON.parse(s.raw(requestKey(WALLET))!) as DurableWithdrawRecord;
+        return mkRes(200, successBody(rec));
+      },
+    });
+    expect(out2.outcome).toBe('success');
+    expect(fetchCount).toBe(1);
+
+    // Both audit entries remain; exactly one debit; neither blocks
+    const ledger3 = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger3.anomalies.some(a => a.code === 'invalid_request_record')).toBe(true);
+    expect(ledger3.anomalies.some(a => a.code === 'malformed_record_cleaned')).toBe(true);
+    expect(countBlockingAnomalies(ledger3)).toBe(0);
+    expect(ledger3.debitLamports).toBe(proceeds);
+    expect(ledger3.debitRequestIds).toHaveLength(1);
+  });
+});
+
+// ─── Z: countBlockingAnomalies helper ────────────────────────────────────────
+
+describe('Z — countBlockingAnomalies: non-blocking codes excluded from count', () => {
+  it('invalid_request_record anomaly → countBlockingAnomalies returns 0', () => {
+    const s = new FakeStorage();
+    writeAnomaly(s, WALLET, 'invalid_request_record', 'seed-irr', { note: 'blocked attempt' });
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.anomalies.some(a => a.code === 'invalid_request_record')).toBe(true);
+    expect(countBlockingAnomalies(ledger)).toBe(0);
+  });
+
+  it('malformed_record_cleaned anomaly → countBlockingAnomalies returns 0', () => {
+    const s = new FakeStorage();
+    writeAnomaly(s, WALLET, 'malformed_record_cleaned', 'seed-mrc', { note: 'cleaned' });
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(countBlockingAnomalies(ledger)).toBe(0);
+  });
+
+  it('entry_conflict anomaly → countBlockingAnomalies returns 1 (blocking)', () => {
+    const s = new FakeStorage();
+    writeAnomaly(s, WALLET, 'entry_conflict', 'seed-ec', { note: 'real conflict' });
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(countBlockingAnomalies(ledger)).toBe(1);
+  });
+
+  it('mix: entry_conflict + two non-blocking → countBlockingAnomalies returns 1', () => {
+    const s = new FakeStorage();
+    writeAnomaly(s, WALLET, 'entry_conflict', 'seed-ec2', { note: 'real conflict' });
+    writeAnomaly(s, WALLET, 'invalid_request_record', 'seed-irr2', { note: 'blocked' });
+    writeAnomaly(s, WALLET, 'malformed_record_cleaned', 'seed-mrc2', { note: 'cleaned' });
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(countBlockingAnomalies(ledger)).toBe(1); // only entry_conflict
+    expect(ledger.anomalies.length).toBe(3); // all three visible
+  });
+
+  it('invalid_request_record alone does NOT block coordinateWithdraw loop_return', async () => {
+    const s = new FakeStorage();
+    writeAnomaly(s, WALLET, 'invalid_request_record', 'seed-irr3', { note: 'audit' });
+    const sig = 'sig-z-no-block';
+    const proceeds = 5_000_000n;
+    s.put(creditKey(WALLET, sig), JSON.stringify({
+      v: 1, kind: 'credit', source: 'loop_close', sig, lamports: String(proceeds), at: new Date().toISOString(),
+    } satisfies LedgerEntry));
+    const out = await coordinateWithdraw(WALLET, proceeds, 'loop_return', {
+      storage: s,
+      fetchImpl: async () => {
+        const rec = JSON.parse(s.raw(requestKey(WALLET))!) as DurableWithdrawRecord;
+        return mkRes(200, successBody(rec));
+      },
+    });
+    expect(out.outcome).toBe('success');
+  });
+
+  it('both non-blocking codes present together → countBlockingAnomalies returns 0', () => {
+    const s = new FakeStorage();
+    writeAnomaly(s, WALLET, 'invalid_request_record', 'seed-both1', { note: 'blocked' });
+    writeAnomaly(s, WALLET, 'malformed_record_cleaned', 'seed-both2', { note: 'cleaned' });
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(countBlockingAnomalies(ledger)).toBe(0);
+  });
+});
+
+// ─── AA: capProvider post-credit ordering and failure retention ───────────────
+
+describe('AA — coordinateLoopReturn capProvider: post-credit invocation, failure/null/zero retention, concurrent-waiter skip', () => {
+  it('provider is invoked AFTER credit is durably present in storage', async () => {
+    const s = new FakeStorage();
+    const sig = 'sig-aa1';
+    const proceeds = 5_000_000n;
+    let creditLamportsAtProviderTime = 0n;
+
+    const out = await coordinateLoopReturn(WALLET, sig, proceeds, {
+      storage: s,
+      capProvider: async () => {
+        // Credit must already be in storage when provider runs
+        creditLamportsAtProviderTime = readLedgerViewForDisplay(WALLET, s).creditLamports;
+        return proceeds; // uncapped
+      },
+      fetchImpl: async () => {
+        const rec = JSON.parse(s.raw(requestKey(WALLET))!) as DurableWithdrawRecord;
+        return mkRes(200, successBody(rec));
+      },
+    });
+    expect(out.outcome).toBe('success');
+    // Provider saw the credit already durably recorded
+    expect(creditLamportsAtProviderTime).toBe(proceeds);
+  });
+
+  it('provider throws → no_funds_available, credit retained, zero fetch', async () => {
+    const s = new FakeStorage();
+    const sig = 'sig-aa2';
+    const proceeds = 5_000_000n;
+    const { fn, calls } = capturedFetch([]);
+
+    const out = await coordinateLoopReturn(WALLET, sig, proceeds, {
+      storage: s,
+      capProvider: async () => { throw new Error('balance fetch failed'); },
+      fetchImpl: fn,
+    });
+    expect(out.outcome).toBe('no_funds_available');
+    expect(calls).toHaveLength(0);
+    // Credit retained
+    expect(readLedgerViewForDisplay(WALLET, s).creditLamports).toBe(proceeds);
+  });
+
+  it('provider returns null → no_funds_available, credit retained, zero fetch', async () => {
+    const s = new FakeStorage();
+    const sig = 'sig-aa3';
+    const proceeds = 5_000_000n;
+    const { fn, calls } = capturedFetch([]);
+
+    const out = await coordinateLoopReturn(WALLET, sig, proceeds, {
+      storage: s,
+      capProvider: async () => null,
+      fetchImpl: fn,
+    });
+    expect(out.outcome).toBe('no_funds_available');
+    expect(calls).toHaveLength(0);
+    expect(readLedgerViewForDisplay(WALLET, s).creditLamports).toBe(proceeds);
+  });
+
+  it('provider returns 0n → no_funds_available, credit retained, zero fetch', async () => {
+    const s = new FakeStorage();
+    const sig = 'sig-aa4';
+    const proceeds = 5_000_000n;
+    const { fn, calls } = capturedFetch([]);
+
+    const out = await coordinateLoopReturn(WALLET, sig, proceeds, {
+      storage: s,
+      capProvider: async () => 0n,
+      fetchImpl: fn,
+    });
+    expect(out.outcome).toBe('no_funds_available');
+    expect(calls).toHaveLength(0);
+    expect(readLedgerViewForDisplay(WALLET, s).creditLamports).toBe(proceeds);
+  });
+
+  it('provider returns negative → no_funds_available, credit retained, zero fetch', async () => {
+    const s = new FakeStorage();
+    const sig = 'sig-aa5';
+    const proceeds = 5_000_000n;
+    const { fn, calls } = capturedFetch([]);
+
+    const out = await coordinateLoopReturn(WALLET, sig, proceeds, {
+      storage: s,
+      capProvider: async () => -1n,
+      fetchImpl: fn,
+    });
+    expect(out.outcome).toBe('no_funds_available');
+    expect(calls).toHaveLength(0);
+    expect(readLedgerViewForDisplay(WALLET, s).creditLamports).toBe(proceeds);
+  });
+
+  it('concurrent waiter at zero availability: never invokes capProvider', async () => {
+    const lock = makeSingleQueuedExclusiveLock();
+    setGlobalNavigator({ locks: lock });
+
+    const s = new FakeStorage();
+    const creditSig = 'sig-aa-conc';
+    const proceeds = 5_000_000n;
+
+    let providerCallCount = 0;
+    let firstRecord: DurableWithdrawRecord | null = null;
+    let releaseFetch!: () => void;
+    const fetchGate = new Promise<void>(r => { releaseFetch = r; });
+
+    const capProvider = async (): Promise<bigint | null> => {
+      providerCallCount++;
+      return proceeds; // uncapped
+    };
+    const fetchImpl = async () => {
+      if (!firstRecord) firstRecord = JSON.parse(s.raw(requestKey(WALLET))!) as DurableWithdrawRecord;
+      await fetchGate; // hold first caller until explicitly released
+      return mkRes(200, successBody(firstRecord!));
+    };
+
+    // Launch both concurrently; neither awaited before the other starts
+    const p1 = coordinateLoopReturn(WALLET, creditSig, proceeds, { storage: s, capProvider, fetchImpl });
+    const p2 = coordinateLoopReturn(WALLET, creditSig, proceeds, { storage: s, capProvider, fetchImpl });
+
+    await new Promise(r => setTimeout(r, 10));
+    // p1 entered lock, called provider once, is suspended at fetchGate
+    expect(providerCallCount).toBe(1);
+
+    releaseFetch();
+    const [out1, out2] = await Promise.all([p1, p2]);
+
+    expect(out1.outcome).toBe('success');
+    // p2 entered lock after p1's debit; availability = 0 → short-circuits before provider
+    expect(out2.outcome).toBe('no_funds_available');
+    // Provider called exactly once (p2's lock body exited early)
+    expect(providerCallCount).toBe(1);
+
+    // Ledger: one debit, credit preserved as-is
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.creditLamports).toBe(proceeds);
+    expect(ledger.debitLamports).toBe(proceeds);
+    expect(ledger.availableLamports).toBe(0n);
+
+    useSequentialLock();
+  });
+
+  it('capProvider cap < available: only cap amount sent, remainder stays', async () => {
+    const s = new FakeStorage();
+    const sig = 'sig-aa-partial';
+    const proceeds = 5_000_000n;
+    const cap = 3_000_000n;
+    let capturedLamports: string | null = null;
+
+    const out = await coordinateLoopReturn(WALLET, sig, proceeds, {
+      storage: s,
+      capProvider: async () => cap,
+      fetchImpl: async () => {
+        const rec = JSON.parse(s.raw(requestKey(WALLET))!) as DurableWithdrawRecord;
+        capturedLamports = rec.amountLamports;
+        return mkRes(200, successBody(rec));
+      },
+    });
+    expect(out.outcome).toBe('success');
+    expect(capturedLamports).toBe('3000000'); // capped
+    const ledger = readLedgerViewForDisplay(WALLET, s);
+    expect(ledger.creditLamports).toBe(proceeds);
+    expect(ledger.debitLamports).toBe(cap);
+    expect(ledger.availableLamports).toBe(proceeds - cap);
   });
 });

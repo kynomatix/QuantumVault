@@ -19,6 +19,7 @@ import {
   coordinateMigrateLegacy,
   readActiveRecordForDisplay,
   readLedgerViewForDisplay,
+  countBlockingAnomalies,
   computeReturnLamports,
   maxSendableLamportsFromSol,
   lamportsToSolDisplay,
@@ -481,9 +482,12 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
   const ledgerIsBlocked = !!(
     returnLedger?.storageUnreadable ||
     (returnLedger?.malformedKeys?.length ?? 0) > 0 ||
-    (returnLedger?.anomalies?.length ?? 0) > 0 ||
+    (returnLedger ? countBlockingAnomalies(returnLedger) > 0 : false) ||
     returnLedger?.negative
   );
+  /** Anomaly counts separated so UI shows audit evidence neutrally, not as warnings. */
+  const blockingAnomalyCount = returnLedger ? countBlockingAnomalies(returnLedger) : 0;
+  const nonBlockingAnomalyCount = (returnLedger?.anomalies.length ?? 0) - blockingAnomalyCount;
 
   const applyReturnOutcome = (out: CoordinatorOutcome, opts: { auto: boolean }) => {
     refreshReturnLedger();
@@ -563,20 +567,25 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
   // Auto-return EXACTLY what the close/unwind reported it credited. The credit
   // is recorded inside the coordinator's exclusive lock before any request is
   // made; a missing signature is noted as a visible anomaly.
-  // The fresh balance caps the send to the sendable amount (0.006 SOL reserve).
+  // A cap provider is passed so the coordinator fetches balance AFTER durably
+  // recording the credit under the exclusive lock — closes the pre-credit crash
+  // window that would exist if balance were fetched before coordinateLoopReturn.
   const autoReturnProceeds = async (proceedsLamports?: string, opSig?: string) => {
     if (!publicKeyString) return;
     let proceeds = 0n;
     try { proceeds = BigInt(proceedsLamports ?? "0"); } catch { proceeds = 0n; }
     if (proceeds <= 0n) return;
-    // Refetch balance inside the lock path to avoid using a stale agentSol.
-    const freshBalance = await balanceQuery.refetch();
-    const capLamports = maxSendableLamportsFromSol(freshBalance.data?.solBalance ?? null, RETURN_RESERVE_SOL);
+    // Provider invoked post-credit inside the coordinator lock. Any throw or
+    // insufficient balance retains the credit for manual return via the recovery row.
+    const capProvider = async (): Promise<bigint | null> => {
+      const fresh = await balanceQuery.refetch();
+      return maxSendableLamportsFromSol(fresh.data?.solBalance ?? null, RETURN_RESERVE_SOL);
+    };
     const out = await coordinateLoopReturn(
       publicKeyString,
       typeof opSig === "string" && opSig.length > 0 ? opSig : undefined,
       proceeds,
-      { headers: walletAuthHeaders(), capLamports },
+      { headers: walletAuthHeaders(), capProvider },
     );
     applyReturnOutcome(out, { auto: true });
     refreshReturnLedger();
@@ -1050,6 +1059,12 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
                           </span>
                         )}
                       </>
+                    ) : returnLedger?.storageUnreadable && availableReturnLamports <= 0n ? (
+                      // Truthful warning: storage unreadable, no confirmed availability —
+                      // do NOT claim "0 SOL is ready" when we cannot read the ledger.
+                      <span className="text-amber-500" data-testid="text-loop-storage-unreadable">
+                        Ledger storage could not be read — available balance is unknown. Resolve the issue below before starting a return.
+                      </span>
                     ) : (
                       <>
                         <span className="font-medium text-foreground tabular-nums">{lamportsToSolDisplay(availableReturnLamports > 0n ? availableReturnLamports : 0n)} SOL</span> from
@@ -1097,9 +1112,14 @@ export default function LoopVaultControls({ active, gridClass }: { active: boole
                     {returnLedger!.malformedKeys.length} unreadable ledger {returnLedger!.malformedKeys.length === 1 ? "entry needs" : "entries need"} review.
                   </p>
                 )}
-                {(returnLedger?.anomalies.length ?? 0) > 0 && (
+                {blockingAnomalyCount > 0 && (
                   <p className="text-[11px] text-amber-500" data-testid="text-loop-return-anomalies">
-                    {returnLedger!.anomalies.length} bookkeeping {returnLedger!.anomalies.length === 1 ? "entry needs" : "entries need"} review — nothing is auto-adjusted.
+                    {blockingAnomalyCount} bookkeeping {blockingAnomalyCount === 1 ? "entry needs" : "entries need"} review — nothing is auto-adjusted.
+                  </p>
+                )}
+                {nonBlockingAnomalyCount > 0 && (
+                  <p className="text-[11px] text-muted-foreground/70" data-testid="text-loop-return-audit">
+                    {nonBlockingAnomalyCount} resolved audit {nonBlockingAnomalyCount === 1 ? "entry" : "entries"} (cleanup history — no action needed).
                   </p>
                 )}
               </div>

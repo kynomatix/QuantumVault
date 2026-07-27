@@ -1,10 +1,23 @@
 /**
- * WO2B2DC2 — Canonical client coordinator for agent-wallet SOL withdrawals.
+ * WO2B2DC3 — Canonical client coordinator for agent-wallet SOL withdrawals.
  *
  * Both client surfaces (Wallet Management "Withdraw SOL" and SOL Loop
  * "Return to Wallet") drive the same wallet-scoped durable request record
  * through the server-executed withdrawal endpoint. The browser never decodes,
  * signs, sends, or confirms a withdrawal transaction.
+ *
+ * Changes from C2 → C3:
+ *  - invalid_request_record added to NON_BLOCKING_ANOMALY_CODES: it is audit
+ *    evidence from a blocked attempt, not an unresolved accounting error. The
+ *    malformed request slot is checked before the ledger blocker, so the slot
+ *    remains gated until cleanup succeeds.
+ *  - countBlockingAnomalies() exported: authoritative helper for UI surfaces so
+ *    they exclude non-blocking evidence from button-disabled / warning counts.
+ *  - capProvider option added to CoordinatorOpts: async provider invoked AFTER
+ *    the close credit is durably recorded inside the lock, eliminating the
+ *    pre-credit crash window present when balance was fetched before the call.
+ *    Provider throw / null / non-positive → credit retained, zero fetches.
+ *    Concurrent waiter at zero availability never invokes the provider.
  *
  * Changes from C1 → C2:
  *  - Stale-amount correction: coordinateWithdraw for loop_return binds the
@@ -658,19 +671,38 @@ function finalizeRecord(
 // ─── Ledger blocker check ────────────────────────────────────────────────────
 
 /**
- * Anomaly codes written by successful explicit cleanup. These represent audit
- * evidence, not unresolved accounting errors, so they do NOT block new
- * loop_return request creation.
+ * Anomaly codes that represent resolved audit evidence, NOT unresolved
+ * accounting errors. These do NOT block new loop_return request creation.
+ *
+ *  - malformed_record_cleaned: written by coordinateCleanupMalformed on success.
+ *  - invalid_request_record: written when coordinateWithdraw/coordinateLoopReturn
+ *    encounters a malformed request slot. The slot check itself (step 1:
+ *    blocked_invalid_record) gates all new requests until cleanup succeeds, so
+ *    this anomaly remaining in the ledger after cleanup is safe audit evidence.
  */
-const NON_BLOCKING_ANOMALY_CODES = new Set(['malformed_record_cleaned']);
+const NON_BLOCKING_ANOMALY_CODES = new Set([
+  'malformed_record_cleaned',
+  'invalid_request_record',
+]);
+
+/**
+ * Returns the count of anomalies that actually block new loop-return request
+ * creation. Excludes non-blocking audit evidence codes so UI surfaces can
+ * show truthful button-disabled states and "needs review" counts.
+ *
+ * Exported so LoopVaultControls and other surfaces can reuse the same
+ * authoritative classification logic rather than rolling their own count.
+ */
+export function countBlockingAnomalies(view: LedgerView): number {
+  return view.anomalies.filter(a => !NON_BLOCKING_ANOMALY_CODES.has(a.code)).length;
+}
 
 function ledgerBlocksNewLoopReturn(
   view: LedgerView,
 ): { blocked: false } | { blocked: true; reason: string } {
   if (view.storageUnreadable) return { blocked: true, reason: 'storage_unreadable' };
   if (view.malformedKeys.length > 0) return { blocked: true, reason: 'malformed_entries' };
-  const blockingAnomalies = view.anomalies.filter(a => !NON_BLOCKING_ANOMALY_CODES.has(a.code));
-  if (blockingAnomalies.length > 0) return { blocked: true, reason: 'anomalies_present' };
+  if (countBlockingAnomalies(view) > 0) return { blocked: true, reason: 'anomalies_present' };
   if (view.negative) return { blocked: true, reason: 'negative_balance' };
   return { blocked: false };
 }
@@ -839,8 +871,19 @@ export interface CoordinatorOpts extends FetchOpts {
    *  - Provided and positive: send min(ledger_availability, capLamports).
    *  - Provided and <= 0: credit retained for manual recovery, zero withdrawal fetches.
    *  - Omitted: uncapped (all ledger availability sent).
+   * Retained for deterministic tests. Production auto-return should use capProvider instead.
    */
   capLamports?: bigint | null;
+  /**
+   * Async cap provider for coordinateLoopReturn, invoked AFTER the close credit
+   * is durably recorded inside the exclusive lock — no pre-credit crash window.
+   * Takes precedence over capLamports when both are supplied.
+   *
+   *  - Returns positive bigint → cap applied (send min(availability, cap)).
+   *  - Returns null / 0n / negative / throws → credit retained, no request, zero fetches.
+   *  - A concurrent waiter already at zero availability never invokes the provider.
+   */
+  capProvider?: () => Promise<bigint | null>;
 }
 
 function resolveStorage(opts?: CoordinatorOpts): StorageLike {
@@ -1101,8 +1144,28 @@ export async function coordinateLoopReturn(
 
     // 5. Apply balance cap, then size.
     let amt = ledger.availableLamports;
+
+    // Concurrent-waiter fast-exit: the first caller's debit drained availability
+    // to zero. Skip the cap provider entirely — never invoke it at zero availability.
+    if (amt <= 0n) {
+      return { outcome: 'no_funds_available', message: 'Nothing to return yet.' };
+    }
+
     const capLamports = opts?.capLamports;
-    if (capLamports != null) {
+    const capProvider = opts?.capProvider;
+
+    if (capProvider != null) {
+      // Invoke AFTER credit is durably recorded under the lock — eliminates the
+      // pre-credit crash window that existed when balance was fetched before the
+      // call. Any failure (throw / null / non-positive) retains the credit and
+      // makes zero withdrawal fetches.
+      let cap: bigint | null = null;
+      try { cap = await capProvider(); } catch { cap = null; }
+      if (cap == null || cap <= 0n) {
+        return { outcome: 'no_funds_available', message: 'Insufficient agent balance for the reserve; SOL credit retained for manual return.' };
+      }
+      if (amt > cap) amt = cap;
+    } else if (capLamports != null) {
       if (capLamports <= 0n) {
         // Cap is zero or negative — insufficient balance; credit is retained for manual return.
         return { outcome: 'no_funds_available', message: 'Insufficient agent balance for the reserve; SOL credit retained for manual return.' };
