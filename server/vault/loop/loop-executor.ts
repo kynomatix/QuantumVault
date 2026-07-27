@@ -45,8 +45,9 @@ import {
   getAgentTokenBalanceRawStrict,
   NATIVE_SOL_MINT,
 } from "../../agent-wallet";
-import { storage } from "../../storage";
+import { storage, AGENT_SOL_WITHDRAW_OP_TYPE } from "../../storage";
 import { ensureVaultGas } from "../gas-funding";
+import { TERMINAL_OPERATION_STATUSES } from "../reset-blockers";
 import {
   JupiterLendBorrowRoute,
   WSOL_MINT,
@@ -2959,6 +2960,14 @@ export interface LoopHopResult {
    * never sweep-query timing.
    */
   parkedByThisInvocation?: boolean;
+  /**
+   * WO2B2C: true = a FRESH hop (durable parent persisted; zero close evidence)
+   * deferred because this wallet has an unfinished durable SOL withdrawal, or
+   * because that could not be verified (fail closed). Nothing was gated, read
+   * strictly, written, or broadcast — retry the SAME clientRequestId once the
+   * withdrawal reaches a terminal status.
+   */
+  deferredForSolWithdraw?: boolean;
   /** WO2A: how the recovered close output was attributed. */
   principalSource?: HopSolReturnedSource;
   error?: string;
@@ -3192,6 +3201,52 @@ export async function executeLoopHop(params: LoopHopParams): Promise<LoopHopResu
       if (sourceStillOpen) {
         // Money has NOT moved yet.
         if (baseline === null) {
+          // WO2B2C reciprocal withdraw↔hop gate — GENUINELY FRESH hops only:
+          // no pre-close baseline, no close-attempt write-ahead, no recorded
+          // close signature — nothing can have been broadcast, so deferring is
+          // free. Any close evidence at all BYPASSES this gate: recovering
+          // in-play money always outranks a withdrawal's claim on the wallet.
+          //
+          // The durable parent above is ALREADY persisted, and the withdraw
+          // side persists its own intent row BEFORE scanning for non-terminal
+          // loop_hop rows — each side scans only after its own row is durable,
+          // so whichever commits second sees the other and exactly one defers
+          // (a mutual miss is impossible). Deferral is deliberately writeless:
+          // the parent stays pending/'initialized' and the SAME clientRequestId
+          // retries cleanly once the withdrawal terminals.
+          //
+          // Allowlist semantics, matching the withdraw side's blocker scan:
+          // only proven-terminal statuses pass; unknown statuses and an
+          // unreadable or malformed scan defer FAIL-CLOSED. An abandoned
+          // pending withdrawal therefore defers fresh hops until it is
+          // resolved — the deliberate mirror of a parked hop blocking
+          // withdrawals.
+          if (priorCloseAttempts === 0 && closeSignature === undefined) {
+            let withdrawBlocker: BorrowOperation | undefined;
+            try {
+              const walletOps = await storage.getBorrowOperations(walletAddress);
+              withdrawBlocker = walletOps.find(
+                (o) =>
+                  o.operationType === AGENT_SOL_WITHDRAW_OP_TYPE &&
+                  !TERMINAL_OPERATION_STATUSES.has(String(o.status ?? "")),
+              );
+            } catch (e) {
+              return {
+                success: false,
+                resumable: true,
+                deferredForSolWithdraw: true,
+                error: `Could not verify that no SOL withdrawal is in flight for this wallet (${e instanceof Error ? e.message : "operation scan failed"}). The hop deferred before any carry check, balance read, or close attempt — your position is unchanged. Retry with the same request id.`,
+              };
+            }
+            if (withdrawBlocker) {
+              return {
+                success: false,
+                resumable: true,
+                deferredForSolWithdraw: true,
+                error: `A SOL withdrawal for this wallet is still settling (status '${withdrawBlocker.status}'). The hop deferred before any funds moved — your position is unchanged. Retry with the same request id once the withdrawal finishes.`,
+              };
+            }
+          }
           // FRESH: execution-time carry re-gate — a decline is clean and terminal
           // for THIS attempt (nothing has moved).
           const gate = await evaluateHopCarryGain(fromVaultId, targetVaultId);

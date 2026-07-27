@@ -25,6 +25,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // ---------------------------------------------------------------------------
 
 vi.mock("../../server/storage", () => ({
+  AGENT_SOL_WITHDRAW_OP_TYPE: "agent_sol_withdraw",
   storage: {
     getBorrowOperationByClientRequestId: vi.fn(),
     getBorrowOperationById: vi.fn(),
@@ -138,7 +139,13 @@ import {
   executeLoopHop,
 } from "../../server/vault/loop/loop-executor";
 import { storage } from "../../server/storage";
-import { getServerConnection, executeAgentInstructionsConfirmOnly } from "../../server/agent-wallet";
+import {
+  getServerConnection,
+  executeAgentInstructionsConfirmOnly,
+  executeAgentSwap,
+  getAgentTokenBalanceRawStrict,
+} from "../../server/agent-wallet";
+import { withBorrowLock } from "../../server/vault/jupiter-lend-borrow-executor";
 import { ensureVaultGas } from "../../server/vault/gas-funding";
 import { LOOP_HOP_RECOVERY_POLICY } from "../../server/vault/loop/loop-risk-policy";
 import { getFreshLoopRates, pickBestLoopVault } from "../../server/vault/loop/loop-rate-oracle";
@@ -1411,5 +1418,275 @@ describe("executeLoopHop — policy-deny fallback boundary (WO2A-C1)", () => {
     expect(res.success).toBe(false);
     expect((res as any).resumable).toBe(true);
     expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
+  });
+});
+
+// ============================================================================
+// I. WO2B2C — reciprocal SOL-withdraw gate (fresh hops defer; recovery bypasses)
+// ============================================================================
+
+describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
+  /** Open source loop position (vault 4) so the FRESH path reaches the gate. */
+  function openLoopPos(over?: Record<string, unknown>) {
+    return {
+      id: SRC_POS,
+      walletAddress: WALLET,
+      kind: "loop",
+      status: "open",
+      venueVaultId: 4,
+      venuePositionId: 77,
+      ...(over ?? {}),
+    } as any;
+  }
+
+  /** Prime a GENUINELY FRESH hop: no existing op row, open source position. */
+  function primeFreshHop() {
+    vi.mocked(storage.getBorrowPosition as any).mockResolvedValue(openLoopPos());
+    vi.mocked(storage.createBorrowOperation as any).mockImplementation(async (p: any) => ({
+      id: "fresh-hop-1",
+      txSignatures: [],
+      result: null,
+      error: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...p,
+    }));
+  }
+
+  /** Durable SOL-withdraw op row in the wallet-wide scan. */
+  let wdSeq = 0;
+  function wdOp(status: string, over?: Record<string, unknown>) {
+    return {
+      id: `wd-${status}-${++wdSeq}`,
+      walletAddress: WALLET,
+      operationType: "agent_sol_withdraw",
+      status,
+      step: "requested",
+      borrowPositionId: null,
+      clientRequestId: `wd-crid-${wdSeq}`,
+      txSignatures: [],
+      metadata: {},
+      result: null,
+      error: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...(over ?? {}),
+    } as any;
+  }
+
+  /** Only the ONE-ARG wallet-wide scans (":1577"-style linked-child reads pass a positionId). */
+  const walletWideScans = () =>
+    vi.mocked(storage.getBorrowOperations as any).mock.calls.filter((c: any[]) => c.length === 1 || c[1] == null);
+
+  it("ORDERING + ZERO MONEY WORK: parent persisted BEFORE the scan; a pending withdrawal defers writelessly", async () => {
+    primeFreshHop();
+    vi.mocked(storage.getBorrowOperations as any).mockResolvedValue([wdOp("pending")]);
+
+    const res = await executeLoopHop(hopParams);
+
+    expect(res.success).toBe(false);
+    expect((res as any).deferredForSolWithdraw).toBe(true);
+    expect((res as any).resumable).toBe(true);
+    expect((res as any).policyDenied).toBeUndefined();
+    expect((res as any).parked).toBeUndefined();
+    expect((res as any).terminal).toBeUndefined();
+    expect(res.error).toMatch(/SOL withdrawal .* still settling/i);
+    // Durable parent FIRST (our half of the create-then-scan Dekker property)…
+    expect(storage.createBorrowOperation).toHaveBeenCalledTimes(1);
+    expect(storage.createBorrowOperation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationType: "loop_hop",
+        status: "pending",
+        step: "initialized",
+        clientRequestId: HOP_CRID,
+      }),
+    );
+    const createOrder = vi.mocked(storage.createBorrowOperation as any).mock.invocationCallOrder[0];
+    const scanOrder = vi.mocked(storage.getBorrowOperations as any).mock.invocationCallOrder[0];
+    expect(createOrder).toBeLessThan(scanOrder);
+    // …then a WRITELESS defer: no carry gate, no strict balance read, no op
+    // writes (parent left pending/'initialized', never terminaled), no lock,
+    // no children, no gas, no broadcast.
+    expect(getFreshLoopRates).not.toHaveBeenCalled();
+    expect(getAgentTokenBalanceRawStrict).not.toHaveBeenCalled();
+    expect(storage.updateBorrowOperation).not.toHaveBeenCalled();
+    expect(storage.finalizeLoopHopParent).not.toHaveBeenCalled();
+    expect(storage.claimLoopHopOpenAttempt).not.toHaveBeenCalled();
+    expect(withBorrowLock).not.toHaveBeenCalled();
+    expect(ensureVaultGas).not.toHaveBeenCalled();
+    expect(executeAgentSwap).not.toHaveBeenCalled();
+    expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
+  });
+
+  it("terminal withdraw statuses (succeeded/completed/failed) NEVER block — the hop reaches the carry gate", async () => {
+    primeFreshHop();
+    vi.mocked(storage.getBorrowOperations as any).mockResolvedValue([
+      wdOp("succeeded"),
+      wdOp("completed"),
+      wdOp("failed"),
+    ]);
+
+    const res = await executeLoopHop(hopParams);
+
+    expect((res as any).deferredForSolWithdraw).toBeUndefined();
+    expect(getFreshLoopRates).toHaveBeenCalled(); // past the gate, into the carry re-gate
+    expect((res as any).policyDenied).toBe(true); // clean decline (rates unreadable here)
+  });
+
+  it("an UNKNOWN withdraw status blocks — allowlist semantics, only proven-terminal passes", async () => {
+    primeFreshHop();
+    vi.mocked(storage.getBorrowOperations as any).mockResolvedValue([wdOp("reconciling_v9")]);
+
+    const res = await executeLoopHop(hopParams);
+
+    expect((res as any).deferredForSolWithdraw).toBe(true);
+    expect(getFreshLoopRates).not.toHaveBeenCalled();
+    expect(storage.updateBorrowOperation).not.toHaveBeenCalled();
+  });
+
+  it("a terminal row PLUS a pending row still defers (any live withdrawal wins)", async () => {
+    primeFreshHop();
+    vi.mocked(storage.getBorrowOperations as any).mockResolvedValue([wdOp("succeeded"), wdOp("pending")]);
+
+    const res = await executeLoopHop(hopParams);
+
+    expect((res as any).deferredForSolWithdraw).toBe(true);
+    expect(storage.updateBorrowOperation).not.toHaveBeenCalled();
+  });
+
+  it("non-withdraw op types NEVER trigger this gate (type-scoped scan)", async () => {
+    primeFreshHop();
+    vi.mocked(storage.getBorrowOperations as any).mockResolvedValue([
+      wdOp("pending", { operationType: "loop_close" }),
+      wdOp("pending", { operationType: "loop_open" }),
+      wdOp("pending", { operationType: "loop_hop" }),
+      wdOp("pending", { operationType: "vault_park" }),
+    ]);
+
+    const res = await executeLoopHop(hopParams);
+
+    expect((res as any).deferredForSolWithdraw).toBeUndefined();
+    expect(getFreshLoopRates).toHaveBeenCalled();
+  });
+
+  it("READ FAILURE: an unreadable scan defers FAIL-CLOSED — resumable, zero writes, parent stays pending", async () => {
+    primeFreshHop();
+    vi.mocked(storage.getBorrowOperations as any).mockRejectedValue(new Error("pg pool drained"));
+
+    const res = await executeLoopHop(hopParams);
+
+    expect(res.success).toBe(false);
+    expect((res as any).deferredForSolWithdraw).toBe(true);
+    expect((res as any).resumable).toBe(true);
+    expect(res.error).toMatch(/Could not verify/i);
+    expect(res.error).toMatch(/pg pool drained/);
+    expect(getFreshLoopRates).not.toHaveBeenCalled();
+    expect(getAgentTokenBalanceRawStrict).not.toHaveBeenCalled();
+    expect(storage.updateBorrowOperation).not.toHaveBeenCalled();
+    expect(storage.createBorrowOperation).toHaveBeenCalledTimes(1); // parent only — no children
+    expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled();
+  });
+
+  it("a MALFORMED scan result (non-array) defers fail-closed rather than passing", async () => {
+    primeFreshHop();
+    vi.mocked(storage.getBorrowOperations as any).mockResolvedValue(undefined);
+
+    const res = await executeLoopHop(hopParams);
+
+    expect((res as any).deferredForSolWithdraw).toBe(true);
+    expect((res as any).resumable).toBe(true);
+    expect(storage.updateBorrowOperation).not.toHaveBeenCalled();
+  });
+
+  it("RETRY: the SAME clientRequestId adopts the parent (no duplicate) and proceeds once the withdrawal terminals", async () => {
+    primeFreshHop();
+    vi.mocked(storage.getBorrowOperations as any).mockResolvedValue([wdOp("pending")]);
+
+    const first = await executeLoopHop(hopParams);
+    expect((first as any).deferredForSolWithdraw).toBe(true);
+    expect(storage.createBorrowOperation).toHaveBeenCalledTimes(1);
+    const createdParent = await vi.mocked(storage.createBorrowOperation as any).mock.results[0].value;
+
+    // Withdrawal finishes; the retry finds the durable parent by crid.
+    vi.mocked(storage.getBorrowOperationByClientRequestId as any).mockImplementation(
+      async (_w: string, crid: string) => (crid === HOP_CRID ? createdParent : null),
+    );
+    vi.mocked(storage.getBorrowOperations as any).mockResolvedValue([wdOp("succeeded")]);
+
+    const second = await executeLoopHop(hopParams);
+
+    expect((second as any).deferredForSolWithdraw).toBeUndefined();
+    expect(storage.createBorrowOperation).toHaveBeenCalledTimes(1); // adopted, never duplicated
+    expect(getFreshLoopRates).toHaveBeenCalled(); // past the gate on retry
+    expect((second as any).policyDenied).toBe(true); // clean downstream decline (rates unreadable here)
+  });
+
+  it("BYPASS solReturned crumb: PHASE 1 (and the gate) skipped — recovery continues despite a pending withdrawal", async () => {
+    const parent = hopOp(); // solReturned + closeSignature + baseline persisted
+    wire({ [HOP_CRID]: parent }, parent);
+    vi.mocked(storage.getBorrowOperations as any).mockResolvedValue([wdOp("pending")]);
+
+    const res = await executeLoopHop(hopParams);
+
+    expect(walletWideScans()).toHaveLength(0); // the withdraw scan NEVER ran
+    expect((res as any).deferredForSolWithdraw).toBeUndefined();
+    expect((res as any).resumable).toBe(true); // benign preflight failure (null config) — recovery path owns it
+  });
+
+  it("BYPASS persisted baseline (pre_gated, close not yet attempted): close is in play — no scan, close leg advances", async () => {
+    const parent = hopOp({ closeAttempts: 0, preCloseAgentLamports: "5000000000" }, { step: "pre_gated" });
+    delete parent.metadata.solReturnedLamports;
+    delete parent.metadata.closeSignature;
+    delete parent.metadata.closeDoneAt;
+    wire({ [HOP_CRID]: parent }, parent);
+    vi.mocked(storage.getBorrowPosition as any).mockResolvedValue(openLoopPos()); // source still open
+    vi.mocked(storage.getBorrowOperations as any).mockResolvedValue([wdOp("pending")]);
+    vi.mocked(storage.createBorrowOperation as any).mockImplementation(async (p: any) => ({
+      id: "close-child-x",
+      metadata: {},
+      ...p,
+    }));
+
+    const res = await executeLoopHop(hopParams);
+
+    expect(walletWideScans()).toHaveLength(0); // gate bypassed outright
+    expect((res as any).deferredForSolWithdraw).toBeUndefined();
+    // Proof it advanced INTO the close leg past the gate: the per-attempt
+    // write-ahead landed (closeAttempts 0 → 1).
+    const attemptWrites = vi
+      .mocked(storage.updateBorrowOperation as any)
+      .mock.calls.filter((c: any[]) => c[1]?.mergeMetadata && "closeAttempts" in c[1].mergeMetadata);
+    expect(attemptWrites.length).toBeGreaterThan(0);
+    expect(executeAgentInstructionsConfirmOnly).not.toHaveBeenCalled(); // dies at null vault config, pre-broadcast
+  });
+
+  it("BYPASS close-attempt write-ahead WITHOUT baseline (anomalous crumb): no scan; existing re-gate behavior unchanged", async () => {
+    const parent = hopOp({ closeAttempts: 1 }, { step: "initialized" });
+    delete parent.metadata.solReturnedLamports;
+    delete parent.metadata.closeSignature;
+    delete parent.metadata.preCloseAgentLamports;
+    delete parent.metadata.closeDoneAt;
+    wire({ [HOP_CRID]: parent }, parent);
+    vi.mocked(storage.getBorrowPosition as any).mockResolvedValue(openLoopPos());
+    vi.mocked(storage.getBorrowOperations as any).mockResolvedValue([wdOp("pending")]);
+
+    const res = await executeLoopHop(hopParams);
+
+    expect(walletWideScans()).toHaveLength(0); // a close may be in flight — never defer
+    expect((res as any).deferredForSolWithdraw).toBeUndefined();
+    expect(getFreshLoopRates).toHaveBeenCalled(); // fell through to the EXISTING carry re-gate
+  });
+
+  it("BYPASS source no longer open: the closed-source recovery path owns it — no scan, no defer", async () => {
+    const parent = hopOp(); // close crumbs present…
+    delete parent.metadata.solReturnedLamports; // …but output not yet attributed
+    wire({ [HOP_CRID]: parent }, parent);
+    vi.mocked(storage.getBorrowPosition as any).mockResolvedValue(openLoopPos({ status: "closed" }));
+    vi.mocked(storage.getBorrowOperations as any).mockResolvedValue([wdOp("pending")]);
+
+    const res = await executeLoopHop(hopParams);
+
+    expect(walletWideScans()).toHaveLength(0);
+    expect((res as any).deferredForSolWithdraw).toBeUndefined();
   });
 });
