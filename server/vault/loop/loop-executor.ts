@@ -2969,8 +2969,8 @@ export interface LoopHopResult {
    *
    * CONTRACT (pinned by tests): a coordination-deferred result is EXACTLY
    *   { success: false, resumable: true, coordinationDeferred: true,
-   *     coordinationReason: 'sol_withdraw_in_flight'
-   *                       | 'sol_withdraw_state_unreadable',
+   *     coordinationReason: 'agent_sol_withdraw_in_flight'
+   *                       | 'withdraw_state_unreadable',
    *     error: HOP_DEFER_SOL_WITHDRAW_PENDING_MESSAGE
    *          | HOP_DEFER_SOL_WITHDRAW_UNREADABLE_MESSAGE }
    * — no other fields. coordinationDeferred + coordinationReason are the
@@ -2992,11 +2992,11 @@ export interface LoopHopResult {
  * Consumers must branch on coordinationDeferred/coordinationReason, never on
  * the human-readable error text.
  */
-export type HopCoordinationReason = 'sol_withdraw_in_flight' | 'sol_withdraw_state_unreadable';
+export type HopCoordinationReason = 'agent_sol_withdraw_in_flight' | 'withdraw_state_unreadable';
 export const HOP_COORDINATION_REASON_WITHDRAW_IN_FLIGHT: HopCoordinationReason =
-  'sol_withdraw_in_flight';
+  'agent_sol_withdraw_in_flight';
 export const HOP_COORDINATION_REASON_WITHDRAW_UNREADABLE: HopCoordinationReason =
-  'sol_withdraw_state_unreadable';
+  'withdraw_state_unreadable';
 
 /**
  * WO2B2C-A1/A2 — the ONLY two error texts a coordination-deferred hop may

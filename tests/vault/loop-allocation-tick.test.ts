@@ -933,7 +933,7 @@ describe("runLoopAllocationTick — WO2B2C-A2 coordination-deferred sources", ()
     success: false,
     resumable: true,
     coordinationDeferred: true,
-    coordinationReason: "sol_withdraw_in_flight",
+    coordinationReason: "agent_sol_withdraw_in_flight",
     error: "A SOL withdrawal for this wallet is still settling. (fixed wording)",
   } as any;
 

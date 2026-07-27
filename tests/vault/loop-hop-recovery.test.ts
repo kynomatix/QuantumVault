@@ -1490,7 +1490,7 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
 
     expect(res.success).toBe(false);
     expect((res as any).coordinationDeferred).toBe(true);
-    expect((res as any).coordinationReason).toBe(HOP_COORDINATION_REASON_WITHDRAW_IN_FLIGHT);
+    expect((res as any).coordinationReason).toBe("agent_sol_withdraw_in_flight");
     expect((res as any).resumable).toBe(true);
     expect((res as any).policyDenied).toBeUndefined();
     expect((res as any).parked).toBeUndefined();
@@ -1547,7 +1547,7 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
     const res = await executeLoopHop(hopParams);
 
     expect((res as any).coordinationDeferred).toBe(true);
-    expect((res as any).coordinationReason).toBe(HOP_COORDINATION_REASON_WITHDRAW_IN_FLIGHT);
+    expect((res as any).coordinationReason).toBe("agent_sol_withdraw_in_flight");
     expect(getFreshLoopRates).not.toHaveBeenCalled();
     expect(storage.updateBorrowOperation).not.toHaveBeenCalled();
   });
@@ -1559,7 +1559,7 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
     const res = await executeLoopHop(hopParams);
 
     expect((res as any).coordinationDeferred).toBe(true);
-    expect((res as any).coordinationReason).toBe(HOP_COORDINATION_REASON_WITHDRAW_IN_FLIGHT);
+    expect((res as any).coordinationReason).toBe("agent_sol_withdraw_in_flight");
     expect(storage.updateBorrowOperation).not.toHaveBeenCalled();
   });
 
@@ -1586,7 +1586,7 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
 
     expect(res.success).toBe(false);
     expect((res as any).coordinationDeferred).toBe(true);
-    expect((res as any).coordinationReason).toBe(HOP_COORDINATION_REASON_WITHDRAW_UNREADABLE);
+    expect((res as any).coordinationReason).toBe("withdraw_state_unreadable");
     expect((res as any).resumable).toBe(true);
     // A2 contract: fixed sanitized wording — the raw scan error must NOT leak.
     expect(res.error).toBe(HOP_DEFER_SOL_WITHDRAW_UNREADABLE_MESSAGE);
@@ -1605,7 +1605,7 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
     const res = await executeLoopHop(hopParams);
 
     expect((res as any).coordinationDeferred).toBe(true);
-    expect((res as any).coordinationReason).toBe(HOP_COORDINATION_REASON_WITHDRAW_UNREADABLE);
+    expect((res as any).coordinationReason).toBe("withdraw_state_unreadable");
     expect((res as any).resumable).toBe(true);
     expect(storage.updateBorrowOperation).not.toHaveBeenCalled();
   });
@@ -1616,7 +1616,7 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
 
     const first = await executeLoopHop(hopParams);
     expect((first as any).coordinationDeferred).toBe(true);
-    expect((first as any).coordinationReason).toBe(HOP_COORDINATION_REASON_WITHDRAW_IN_FLIGHT);
+    expect((first as any).coordinationReason).toBe("agent_sol_withdraw_in_flight");
     expect(storage.createBorrowOperation).toHaveBeenCalledTimes(1);
     const createdParent = await vi.mocked(storage.createBorrowOperation as any).mock.results[0].value;
 
@@ -1705,7 +1705,7 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
 
   // ——— WO2B2C-A2: exact coordination-deferred result contract ———
 
-  it("A2 CONTRACT (blocker path): result is EXACTLY {success,resumable,coordinationDeferred,coordinationReason,error} with reason sol_withdraw_in_flight and the fixed pending message", async () => {
+  it("A2 CONTRACT (blocker path): result is EXACTLY {success,resumable,coordinationDeferred,coordinationReason,error} with reason agent_sol_withdraw_in_flight and the fixed pending message", async () => {
     primeFreshHop();
     vi.mocked(storage.getBorrowOperations as any).mockResolvedValue([wdOp("pending")]);
 
@@ -1722,15 +1722,15 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
       success: false,
       resumable: true,
       coordinationDeferred: true,
-      coordinationReason: HOP_COORDINATION_REASON_WITHDRAW_IN_FLIGHT,
+      coordinationReason: "agent_sol_withdraw_in_flight",
       error: HOP_DEFER_SOL_WITHDRAW_PENDING_MESSAGE,
     });
-    expect(HOP_COORDINATION_REASON_WITHDRAW_IN_FLIGHT).toBe("sol_withdraw_in_flight");
+    expect(HOP_COORDINATION_REASON_WITHDRAW_IN_FLIGHT).toBe("agent_sol_withdraw_in_flight");
     // The obsolete A1 flag is REMOVED from the contract — never emitted again.
     expect("deferredForSolWithdraw" in (res as any)).toBe(false);
   });
 
-  it("A2 CONTRACT (unreadable path): same exact shape with reason sol_withdraw_state_unreadable and the fixed unreadable message", async () => {
+  it("A2 CONTRACT (unreadable path): same exact shape with reason withdraw_state_unreadable and the fixed unreadable message", async () => {
     primeFreshHop();
     vi.mocked(storage.getBorrowOperations as any).mockRejectedValue(new Error("boom"));
 
@@ -1747,10 +1747,10 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
       success: false,
       resumable: true,
       coordinationDeferred: true,
-      coordinationReason: HOP_COORDINATION_REASON_WITHDRAW_UNREADABLE,
+      coordinationReason: "withdraw_state_unreadable",
       error: HOP_DEFER_SOL_WITHDRAW_UNREADABLE_MESSAGE,
     });
-    expect(HOP_COORDINATION_REASON_WITHDRAW_UNREADABLE).toBe("sol_withdraw_state_unreadable");
+    expect(HOP_COORDINATION_REASON_WITHDRAW_UNREADABLE).toBe("withdraw_state_unreadable");
     // The obsolete A1 flag is REMOVED from the contract — never emitted again.
     expect("deferredForSolWithdraw" in (res as any)).toBe(false);
   });
@@ -1763,7 +1763,7 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
     const res = await executeLoopHop(hopParams);
 
     expect((res as any).coordinationDeferred).toBe(true);
-    expect((res as any).coordinationReason).toBe(HOP_COORDINATION_REASON_WITHDRAW_UNREADABLE);
+    expect((res as any).coordinationReason).toBe("withdraw_state_unreadable");
     expect(res.error).toBe(HOP_DEFER_SOL_WITHDRAW_UNREADABLE_MESSAGE);
     expect(res.error).not.toContain("hunter2");
     expect(res.error).not.toContain("10.0.0.7");
@@ -1773,7 +1773,7 @@ describe("executeLoopHop — WO2B2C reciprocal SOL-withdraw gate", () => {
     vi.mocked(storage.getBorrowOperations as any).mockResolvedValue([wdOp("reconciling_v9")]);
     const res2 = await executeLoopHop(hopParams);
     expect((res2 as any).coordinationDeferred).toBe(true);
-    expect((res2 as any).coordinationReason).toBe(HOP_COORDINATION_REASON_WITHDRAW_IN_FLIGHT);
+    expect((res2 as any).coordinationReason).toBe("agent_sol_withdraw_in_flight");
     expect(res2.error).toBe(HOP_DEFER_SOL_WITHDRAW_PENDING_MESSAGE);
     expect(res2.error).not.toContain("reconciling_v9");
   });
