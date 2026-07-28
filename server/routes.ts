@@ -30,6 +30,7 @@ import { FLASH_BOT_WALLET_SOL_SEED } from './protocol/flash/flash-constants';
 import { reconcileWalletDeposits } from './deposit-reconciler';
 import { publicPortfolioHandler } from './public-portfolio';
 import { initSnapshotModule, getWalletFinancialSnapshot, derivePerBotFinancialDataStatus, mapBotToApiResponse } from './bot-financial-snapshot';
+import { detachTradingBotAfterDriftCustodyHandoff } from './trading-bot-custody-handoff';
 
 function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
@@ -17335,6 +17336,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (balance <= 0.01) {
         // No meaningful balance, try to close subaccount to reclaim rent
         let rentReclaimed = false;
+        let rentReclaimError: string | null = null;
         if (agentSecret) {
           try {
             const closeResult = await closeDriftSubaccount(
@@ -17345,12 +17347,29 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             if (closeResult.success) {
               console.log(`[Delete] Subaccount ${bot.driftSubaccountId} closed, rent reclaimed`);
               rentReclaimed = true;
+            } else {
+              rentReclaimError = closeResult.error || "Subaccount close was not confirmed";
             }
-          } catch (closeErr) {
+          } catch (closeErr: any) {
+            rentReclaimError = closeErr?.message || String(closeErr);
             console.warn(`[Delete] Rent reclaim failed:`, closeErr);
           }
         }
-        await storage.deleteTradingBot(req.params.id);
+        const detach = await detachTradingBotAfterDriftCustodyHandoff({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: agentAddress,
+          driftSubaccountId: bot.driftSubaccountId,
+          subaccountAuthMode: bot.subaccountAuthMode,
+          closeConfirmed: rentReclaimed,
+          orphanReason: rentReclaimError,
+          createOrphanedSubaccount: (row) => storage.createOrphanedSubaccount(row),
+          deleteTradingBot: () => storage.deleteTradingBot(req.params.id),
+        });
+        if (!detach.deleted) {
+          return res.status(500).json({
+            error: "The bot could not be deleted because its trading-account recovery record was not secured. Nothing was detached; please retry.",
+          });
+        }
         return res.json({ success: true, swept: false, rentReclaimed });
       }
 
@@ -17373,6 +17392,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             
             // Try to close the now-empty subaccount
             let rentReclaimed = false;
+            let rentReclaimError: string | null = null;
             try {
               const closeResult = await closeDriftSubaccount(
                 agentSecret,
@@ -17382,12 +17402,29 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               if (closeResult.success) {
                 console.log(`[Delete] Subaccount ${bot.driftSubaccountId} closed, rent reclaimed`);
                 rentReclaimed = true;
+              } else {
+                rentReclaimError = closeResult.error || "Subaccount close was not confirmed after sweep";
               }
-            } catch (closeErr) {
+            } catch (closeErr: any) {
+              rentReclaimError = closeErr?.message || String(closeErr);
               console.warn(`[Delete] Rent reclaim failed:`, closeErr);
             }
-            
-            await storage.deleteTradingBot(req.params.id);
+
+            const detach = await detachTradingBotAfterDriftCustodyHandoff({
+              walletAddress: req.walletAddress!,
+              agentPublicKey: agentAddress,
+              driftSubaccountId: bot.driftSubaccountId,
+              subaccountAuthMode: bot.subaccountAuthMode,
+              closeConfirmed: rentReclaimed,
+              orphanReason: rentReclaimError,
+              createOrphanedSubaccount: (row) => storage.createOrphanedSubaccount(row),
+              deleteTradingBot: () => storage.deleteTradingBot(req.params.id),
+            });
+            if (!detach.deleted) {
+              return res.status(500).json({
+                error: "Funds were swept, but the bot remains linked because its trading-account recovery record was not secured. Please retry deletion.",
+              });
+            }
             return res.json({ 
               success: true, 
               swept: true, 
@@ -17434,6 +17471,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
   // Confirm deletion after sweep transaction is confirmed (legacy endpoint)
   app.post("/api/trading-bots/:id/confirm-delete", requireWallet, async (req, res) => {
+    let _confirmDeleteCleanup: (() => void) | null = null;
     try {
       const bot = await storage.getTradingBotById(req.params.id);
       if (!bot) {
@@ -17456,7 +17494,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       // Try to close the subaccount to reclaim rent (~0.035 SOL)
       let rentReclaimed = false;
-      let _confirmDeleteCleanup: (() => void) | null = null;
+      let rentReclaimError: string | null = null;
       if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined && wallet?.agentPrivateKeyEncryptedV3 && wallet?.agentPublicKey) {
         const _cdUmk = await getUmkForWebhook(req.walletAddress!);
         if (!_cdUmk) {
@@ -17478,19 +17516,36 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             console.log(`[Delete] Subaccount ${bot.driftSubaccountId} closed after sweep, rent reclaimed`);
             rentReclaimed = true;
           } else {
+            rentReclaimError = closeResult.error || "Subaccount close was not confirmed after sweep";
             console.warn(`[Delete] Could not reclaim rent after sweep: ${closeResult.error}`);
           }
-        } catch (closeErr) {
+        } catch (closeErr: any) {
+          rentReclaimError = closeErr?.message || String(closeErr);
           console.warn(`[Delete] Rent reclaim failed after sweep:`, closeErr);
         }
       }
 
-      await storage.deleteTradingBot(req.params.id);
-      res.json({ success: true, txSignature, rentReclaimed });
-      _confirmDeleteCleanup?.();
+      const detach = await detachTradingBotAfterDriftCustodyHandoff({
+        walletAddress: req.walletAddress!,
+        agentPublicKey: wallet?.agentPublicKey,
+        driftSubaccountId: bot.driftSubaccountId,
+        subaccountAuthMode: bot.subaccountAuthMode,
+        closeConfirmed: rentReclaimed,
+        orphanReason: rentReclaimError,
+        createOrphanedSubaccount: (row) => storage.createOrphanedSubaccount(row),
+        deleteTradingBot: () => storage.deleteTradingBot(req.params.id),
+      });
+      if (!detach.deleted) {
+        return res.status(500).json({
+          error: "The bot could not be deleted because its trading-account recovery record was not secured. Nothing was detached; please retry.",
+        });
+      }
+      return res.json({ success: true, txSignature, rentReclaimed });
     } catch (error) {
       console.error("Confirm delete trading bot error:", error);
-      res.status(500).json({ error: "Internal server error" });
+      return res.status(500).json({ error: "Internal server error" });
+    } finally {
+      _confirmDeleteCleanup?.();
     }
   });
 

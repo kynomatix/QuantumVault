@@ -229,8 +229,10 @@ describe.skipIf(!hasDb)("Reset Agent Wallet atomic finalizer (real DB)", () => {
       arrange: async (wallet: string, _oldKey: string) => pool.query(
         `INSERT INTO ai_trader_bots
            (wallet_address, protocol, protocol_subaccount_id,
-            bot_subaccount_key_encrypted_v3, market, timeframe, allocated_usdc)
-         VALUES ($1, 'pacifica', 'ai-keyed', 'ai-v3', 'SOL-PERP', '1h', '10')`,
+            bot_subaccount_key_encrypted_v3, market, timeframe, allocated_usdc,
+            graduation_criteria, policy_hmac)
+         VALUES ($1, 'pacifica', 'ai-keyed', 'ai-v3', 'SOL-PERP', '1h', '10',
+                 '{}'::jsonb, 'test-policy-hmac')`,
         [wallet],
       ),
     },
@@ -564,8 +566,10 @@ describe.skipIf(!hasDb)("Reset Agent Wallet atomic finalizer (real DB)", () => {
     await pool.query(
       `INSERT INTO ai_trader_bots
          (id, wallet_address, protocol, protocol_subaccount_id,
-          bot_subaccount_key_encrypted_v3, market, timeframe, allocated_usdc, paper_mode)
-       VALUES ($1, $2, 'pacifica', $3, 'bot-v3', 'SOL-PERP', '1h', '10', TRUE)`,
+          bot_subaccount_key_encrypted_v3, market, timeframe, allocated_usdc, paper_mode,
+          graduation_criteria, policy_hmac)
+       VALUES ($1, $2, 'pacifica', $3, 'bot-v3', 'SOL-PERP', '1h', '10', TRUE,
+               '{}'::jsonb, 'test-policy-hmac')`,
       [botId, wallet, subaccountId],
     );
     await pool.query(
@@ -598,8 +602,9 @@ describe.skipIf(!hasDb)("Reset Agent Wallet atomic finalizer (real DB)", () => {
     await pool.query(
       `INSERT INTO ai_trader_bots
          (id, wallet_address, protocol, protocol_subaccount_id,
-          market, timeframe, allocated_usdc, paper_mode)
-       VALUES ($1, $2, 'pacifica', $3, 'SOL-PERP', '1h', '10', TRUE)`,
+          market, timeframe, allocated_usdc, paper_mode, graduation_criteria, policy_hmac)
+       VALUES ($1, $2, 'pacifica', $3, 'SOL-PERP', '1h', '10', TRUE,
+               '{}'::jsonb, 'test-policy-hmac')`,
       [botId, wallet, subaccountId],
     );
     await pool.query(
