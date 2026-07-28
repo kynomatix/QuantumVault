@@ -70,6 +70,17 @@ export interface ReuseSubaccountResult {
 }
 
 /**
+ * Destructive agent-key rotation may proceed only after the venue has produced
+ * a fresh, complete account inventory. Implementations MUST throw on transport,
+ * authentication, decode, or shape failures; sentinel empty/zero fallbacks are
+ * forbidden on this path.
+ */
+export interface AgentWalletResetState {
+  hasOpenPositions: boolean;
+  hasExchangeFunds: boolean;
+}
+
+/**
  * Static capability descriptor read by the core recycling orchestrator
  * (Subaccount Recycling Plan §4.1 / §14.2). Adapters that leave this undefined
  * are treated as create-only (today's behavior) — no spare pool, no reuse.
@@ -202,6 +213,15 @@ export interface ProtocolAdapter {
   getOpenStopOrders?(agentPublicKey: string, subaccountId?: string, symbol?: string): Promise<Array<{ order_id: string; symbol: string }>>;
   /** True only when the subaccount has no equity above dust, no open positions, and no open/stop orders (§8). */
   verifySubaccountEmpty?(input: { agentPublicKey: string; subaccountId?: string }): Promise<boolean>;
+  /**
+   * Fresh authenticated venue assessment for Reset Agent Wallet. Optional at
+   * the general adapter layer, but reset fails closed when the active adapter
+   * does not implement it.
+   */
+  assessAgentWalletResetStateStrict?(input: {
+    agentPublicKey: string;
+    agentSecretKey: Uint8Array;
+  }): Promise<AgentWalletResetState>;
   /**
    * Re-fund an existing (swept-empty, pooled) subaccount so it can back a new bot
    * (§8). The subaccount already exists and its retained key is already held — this

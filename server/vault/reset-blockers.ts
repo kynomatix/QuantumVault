@@ -23,18 +23,16 @@
  * assessment that failed closed.
  */
 import { storage } from "../storage";
+import {
+  assessResetBlockerRows,
+  type ResetBlockerAssessment,
+} from "./reset-blocker-policy";
 
-export const TERMINAL_POSITION_STATUSES: ReadonlySet<string> = new Set(["closed", "failed"]);
-
-export const TERMINAL_OPERATION_STATUSES: ReadonlySet<string> = new Set([
-  "succeeded",
-  "completed",
-  "failed",
-]);
-
-export type ResetBlockerAssessment =
-  | { blocked: false }
-  | { blocked: true; reason: "active_vault_state" | "vault_state_unreadable" };
+export {
+  TERMINAL_OPERATION_STATUSES,
+  TERMINAL_POSITION_STATUSES,
+  type ResetBlockerAssessment,
+} from "./reset-blocker-policy";
 
 /**
  * Assess whether the wallet's vault borrow/loop state permits an agent-wallet
@@ -49,17 +47,7 @@ export async function assessResetBlockers(walletAddress: string): Promise<ResetB
       storage.getBorrowOperations(walletAddress),
     ]);
 
-    const hasActivePosition = [...classicPositions, ...loopPositions].some(
-      (p) => !TERMINAL_POSITION_STATUSES.has(String((p as { status?: unknown }).status ?? "")),
-    );
-    const hasActiveOperation = operations.some(
-      (o) => !TERMINAL_OPERATION_STATUSES.has(String((o as { status?: unknown }).status ?? "")),
-    );
-
-    if (hasActivePosition || hasActiveOperation) {
-      return { blocked: true, reason: "active_vault_state" };
-    }
-    return { blocked: false };
+    return assessResetBlockerRows(classicPositions, loopPositions, operations);
   } catch {
     return { blocked: true, reason: "vault_state_unreadable" };
   }

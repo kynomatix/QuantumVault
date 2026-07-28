@@ -4,6 +4,7 @@ import { vaultLockKey as computeVaultLockKey } from "./vault/scope";
 import { db } from "./db";
 import Decimal from "decimal.js";
 import { sumNetDepositedFromEvents, VAULT_INTERNAL_EVENT_TYPES } from "./equity-events-util";
+import { assessResetBlockerRows, type ResetBlockerAssessment } from "./vault/reset-blocker-policy";
 import {
   users,
   wallets,
@@ -192,6 +193,22 @@ export type BotListEnrichment = {
   borrowDebts: Map<string, number>;
 };
 
+export const AGENT_WALLET_RESET_LOCK_NAMESPACE = 927412;
+
+export interface AgentWalletResetReplacement {
+  walletAddress: string;
+  observedAgentPublicKey: string;
+  encryptedMnemonicWords: string;
+  newAgentPublicKey: string;
+  newAgentPrivateKeyEncryptedV3: string;
+}
+
+export type AgentWalletResetFinalizeOutcome =
+  | { outcome: "committed"; clearedBotCount: number }
+  | { outcome: "busy" }
+  | { outcome: "blocked"; reason: "active_vault_state" | "vault_state_unreadable" }
+  | { outcome: "lost_race"; keyChanged: boolean };
+
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
@@ -206,6 +223,7 @@ export interface IStorage {
   getOrCreateWallet(address: string): Promise<Wallet>;
   updateWalletAgentKeys(address: string, agentPublicKey: string, agentPrivateKeyEncrypted: string): Promise<void>;
   updateWalletAgentKeyV3(address: string, agentPrivateKeyEncryptedV3: string): Promise<void>;
+  finalizeAgentWalletReset(p: AgentWalletResetReplacement): Promise<AgentWalletResetFinalizeOutcome>;
   setWalletLlmApiKey(address: string, encryptedV3: string, last4: string, provider: string): Promise<void>;
   clearWalletLlmApiKey(address: string): Promise<void>;
   getWalletLlmApiKeyMeta(address: string): Promise<{ hasKey: boolean; last4: string | null; provider: string | null; updatedAt: Date | null }>;
@@ -933,6 +951,84 @@ export class DatabaseStorage implements IStorage {
   async updateWallet(address: string, updates: Partial<InsertWallet>): Promise<Wallet | undefined> {
     const result = await db.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
     return result[0];
+  }
+
+  /**
+   * Destructive agent-key rotation critical section.
+   *
+   * The advisory lock is deliberately NON-BLOCKING and this transaction owns
+   * DB work only: no caller may put RPC, transfers, or sleeps inside it. The
+   * guarded wallet-row UPDATE is the correctness mechanism; hashtext collisions
+   * can only cause a harmless spurious `busy` result.
+   */
+  async finalizeAgentWalletReset(
+    p: AgentWalletResetReplacement,
+  ): Promise<AgentWalletResetFinalizeOutcome> {
+    return db.transaction(async (tx) => {
+      const lockResult = await tx.execute(sql`
+        SELECT pg_try_advisory_xact_lock(
+          ${AGENT_WALLET_RESET_LOCK_NAMESPACE},
+          hashtext(${p.walletAddress})
+        ) AS acquired
+      `);
+      const lockRows = (lockResult as unknown as { rows?: Array<{ acquired?: unknown }> }).rows;
+      if (lockRows?.[0]?.acquired !== true) return { outcome: "busy" };
+
+      let assessment: ResetBlockerAssessment;
+      try {
+        const classicPositions = await tx.select().from(borrowPositions).where(and(
+          eq(borrowPositions.walletAddress, p.walletAddress),
+          eq(borrowPositions.kind, "borrow"),
+        ));
+        const loopPositions = await tx.select().from(borrowPositions).where(and(
+          eq(borrowPositions.walletAddress, p.walletAddress),
+          eq(borrowPositions.kind, "loop"),
+        ));
+        const operations = await tx.select().from(borrowOperations).where(
+          eq(borrowOperations.walletAddress, p.walletAddress),
+        );
+        assessment = assessResetBlockerRows(classicPositions, loopPositions, operations);
+      } catch {
+        return { outcome: "blocked", reason: "vault_state_unreadable" };
+      }
+      if (assessment.blocked) return { outcome: "blocked", reason: assessment.reason };
+
+      const updated = await tx
+        .update(wallets)
+        .set({
+          encryptedMnemonicWords: p.encryptedMnemonicWords,
+          agentPublicKey: p.newAgentPublicKey,
+          agentPrivateKeyEncryptedV3: p.newAgentPrivateKeyEncryptedV3,
+        })
+        .where(and(
+          eq(wallets.address, p.walletAddress),
+          eq(wallets.agentPublicKey, p.observedAgentPublicKey),
+        ))
+        .returning({ agentPublicKey: wallets.agentPublicKey });
+
+      if (updated.length !== 1) {
+        const [current] = await tx
+          .select({ agentPublicKey: wallets.agentPublicKey })
+          .from(wallets)
+          .where(eq(wallets.address, p.walletAddress))
+          .limit(1);
+        return {
+          outcome: "lost_race",
+          keyChanged: !!current && current.agentPublicKey !== p.observedAgentPublicKey,
+        };
+      }
+
+      const cleared = await tx
+        .update(tradingBots)
+        .set({ driftSubaccountId: null, updatedAt: sql`NOW()` })
+        .where(and(
+          eq(tradingBots.walletAddress, p.walletAddress),
+          isNotNull(tradingBots.driftSubaccountId),
+        ))
+        .returning({ id: tradingBots.id });
+
+      return { outcome: "committed", clearedBotCount: cleared.length };
+    });
   }
 
   // Atomically union `indices` into wallets.recovered_orphan_indices. Computed

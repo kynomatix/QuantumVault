@@ -1,4 +1,4 @@
-import type { ProtocolAdapter, CreateSubaccountInput, SubaccountCaps, ReuseSubaccountInput, ReuseSubaccountResult } from '../adapter.js';
+import type { ProtocolAdapter, CreateSubaccountInput, SubaccountCaps, ReuseSubaccountInput, ReuseSubaccountResult, AgentWalletResetState } from '../adapter.js';
 import type {
   ProtocolMarket,
   ProtocolPosition,
@@ -1290,6 +1290,69 @@ export class PacificaAdapter implements ProtocolAdapter {
     return true;
   }
 
+  /**
+   * Reset Agent Wallet safety read. Unlike the normal cached/read-model
+   * methods, this path performs a fresh authenticated inventory and never
+   * turns transport or malformed-response failures into empty state.
+   */
+  async assessAgentWalletResetStateStrict(input: {
+    agentPublicKey: string;
+    agentSecretKey: Uint8Array;
+  }): Promise<AgentWalletResetState> {
+    const signer = new PacificaSigner(input.agentSecretKey);
+    if (signer.getPublicKey() !== input.agentPublicKey) {
+      throw new Error('reset signer does not match observed agent key');
+    }
+
+    const subaccounts = await this.listSubaccountsWithKey(input.agentSecretKey);
+    const ids = new Set<string>();
+    for (const sub of subaccounts) {
+      if (typeof sub.subaccountId !== 'string' || sub.subaccountId.length === 0) {
+        throw new Error('reset subaccount identity malformed');
+      }
+      if (ids.has(sub.subaccountId)) {
+        throw new Error('reset subaccount inventory contains duplicates');
+      }
+      ids.add(sub.subaccountId);
+    }
+
+    const identities: Array<string | undefined> = [undefined, ...ids];
+    let hasOpenPositions = false;
+    let hasExchangeFunds = false;
+    for (const subaccountId of identities) {
+      const params: Record<string, string> = { account: input.agentPublicKey };
+      if (subaccountId) params.subaccount_id = subaccountId;
+      const snapshot = await this.getFreshResetAccountSnapshot(params);
+      if (snapshot === null) {
+        // A missing main account is a positive clean fact. A child returned by
+        // the authenticated inventory but then missing is an incomplete read.
+        if (subaccountId) throw new Error('reset subaccount inventory changed during read');
+        continue;
+      }
+
+      const positionsCount = this.resetNonNegativeInteger(snapshot.positions_count, 'positions_count');
+      const ordersCount = this.resetNonNegativeInteger(snapshot.orders_count, 'orders_count');
+      const stopOrdersCount = this.resetNonNegativeInteger(snapshot.stop_orders_count, 'stop_orders_count');
+      const marginUsed = this.resetFiniteNumber(snapshot.total_margin_used, 'total_margin_used');
+      if (positionsCount > 0 || ordersCount > 0 || stopOrdersCount > 0 || Math.abs(marginUsed) > 0.001) {
+        hasOpenPositions = true;
+      }
+
+      const custodyValues = [
+        this.resetFiniteNumber(snapshot.balance, 'balance'),
+        this.resetFiniteNumber(snapshot.account_equity, 'account_equity'),
+        this.resetFiniteNumber(snapshot.spot_collateral, 'spot_collateral'),
+        this.resetFiniteNumber(snapshot.pending_balance, 'pending_balance'),
+        this.resetFiniteNumber(snapshot.pending_interest, 'pending_interest'),
+      ];
+      if (custodyValues.some((value) => Math.abs(value) > 0.01)) {
+        hasExchangeFunds = true;
+      }
+    }
+
+    return { hasOpenPositions, hasExchangeFunds };
+  }
+
   async cancelTpSlOrders(params: {
     agentPublicKey: string;
     agentSecretKey: Uint8Array;
@@ -1976,13 +2039,25 @@ export class PacificaAdapter implements ProtocolAdapter {
       expiry_window: expiryWindow,
     });
 
-    const subaccounts = response?.data?.subaccounts || response?.subaccounts || [];
-    return subaccounts.map((s: any) => ({
-      subaccountId: s.address,
-      label: undefined,
-      equity: s.balance ? parseFloat(s.balance) : 0,
-      status: 'confirmed' as const,
-    }));
+    const subaccounts = Array.isArray(response?.subaccounts)
+      ? response.subaccounts
+      : Array.isArray(response?.data?.subaccounts)
+        ? response.data.subaccounts
+        : null;
+    if (!subaccounts) throw new Error('Pacifica subaccount inventory malformed');
+    return subaccounts.map((s: any) => {
+      if (!s || typeof s.address !== 'string' || s.address.length === 0) {
+        throw new Error('Pacifica subaccount identity malformed');
+      }
+      const equity = s.balance == null ? 0 : Number(s.balance);
+      if (!Number.isFinite(equity)) throw new Error('Pacifica subaccount balance malformed');
+      return {
+        subaccountId: s.address,
+        label: undefined,
+        equity,
+        status: 'confirmed' as const,
+      };
+    });
   }
 
   async listSubaccounts(agentPublicKey: string): Promise<SubaccountInfo[]> {
@@ -2458,6 +2533,53 @@ export class PacificaAdapter implements ProtocolAdapter {
       pacificaCache.set(cacheKey, path, data);
       return data;
     });
+  }
+
+  /** Fresh, uncached account read reserved for destructive key rotation. */
+  private async getFreshResetAccountSnapshot(
+    params: Record<string, string>,
+  ): Promise<PacificaAccountResponse | null> {
+    const searchParams = new URLSearchParams(params);
+    const url = `${this.config.baseUrl}/account?${searchParams.toString()}`;
+    let response: Response;
+    try {
+      response = await this.fetchBounded(
+        url,
+        { method: 'GET', headers: { 'Content-Type': 'application/json' } },
+        15_000,
+        20_000,
+        'GET /account reset-safety',
+      );
+    } finally {
+      pacificaQuota.record('/account');
+    }
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      throw new Error(`Pacifica reset account read failed with HTTP ${response.status}`);
+    }
+    const json = await this.readBodyBounded(response.json(), 10_000, 'GET /account reset-safety');
+    const data = this.unwrapEnvelope(json);
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new Error('Pacifica reset account response malformed');
+    }
+    return data as PacificaAccountResponse;
+  }
+
+  private resetFiniteNumber(value: unknown, field: string): number {
+    if ((typeof value !== 'string' && typeof value !== 'number') || String(value).trim() === '') {
+      throw new Error(`Pacifica reset ${field} missing`);
+    }
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) throw new Error(`Pacifica reset ${field} malformed`);
+    return parsed;
+  }
+
+  private resetNonNegativeInteger(value: unknown, field: string): number {
+    const parsed = this.resetFiniteNumber(value, field);
+    if (!Number.isSafeInteger(parsed) || parsed < 0) {
+      throw new Error(`Pacifica reset ${field} malformed`);
+    }
+    return parsed;
   }
 
   // ==========================================================================

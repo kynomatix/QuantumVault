@@ -1542,12 +1542,13 @@ async function settleAllPnl(
 }
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
-import { getAgentUsdcBalance, getAgentSolBalance, getAgentUsdcBalanceStrict, getAgentSolBalanceStrict, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
+import { getAgentUsdcBalance, getAgentSolBalance, getAgentUsdcBalanceStrict, getAgentUsdcBalanceRawStrict, getAgentSolBalanceStrict, getAgentSolBalanceLamportsStrict, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
 import { handleAgentSolWithdraw, handleConfirmSolWithdraw, sweepAbandonedSolWithdrawals } from "./vault/agent-sol-withdraw";
 import { getBestQuote } from "./swap/index.js";
 import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, valueVaultRowsForWallet, sumVaultPositionValueUsdc, type VaultPositionView, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
 import { cancelAutoRepark } from "./vault/auto-repark";
 import { assessResetBlockers } from "./vault/reset-blockers";
+import { assessResetAgentOnChainStrict } from "./vault/reset-agent-onchain";
 import { getCollateralStakingApyMap } from "./vault/collateral-apy";
 import { getEnabledYieldAssets, getYieldAssetByKey, getDetectableYieldAssets } from "./vault/yield-assets";
 import { getYieldTableCached } from "./vault/yield-oracle";
@@ -1587,7 +1588,7 @@ import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotific
 import { classifySignal } from "./trading/signal-classifier";
 import { registerTelegramMiniAppRoutes } from "./telegram-mini-app";
 import { registerAiTraderRoutes } from "./ai-trader/routes";
-import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, healExecutionUmkFromStorage, restoreWalletSecurityFromStorage, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, decryptBotSubaccountKey, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3, rebindRetainedKeyToBotUuidV3, decryptMnemonic, deriveBotKeypairFromAgentSeed, BOT_DERIVATION_PATH_VERSION } from "./session-v3";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, healExecutionUmkFromStorage, restoreWalletSecurityFromStorage, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, decryptBotSubaccountKey, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptMnemonicForStorage, encryptAgentKeyV3, encryptBotSubaccountKeyV3, rebindRetainedKeyToBotUuidV3, decryptMnemonic, deriveBotKeypairFromAgentSeed, BOT_DERIVATION_PATH_VERSION } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, isCollateralRetryError, getQueueStatus, registerRoutingCallback, cancelRetryJobsForBot } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { DOCS_MARKDOWN } from "./docs-markdown";
@@ -6912,34 +6913,40 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const log = (msg: string) => console.log(`[Reset Agent] ${msg}`);
       const progress: string[] = [];
 
-      log(`Starting agent wallet reset for ${agentPubKey.slice(0, 8)}...`);
-      progress.push("Checking Drift account status...");
+      // Bind every later CAS to the exact key decrypted and swept by THIS
+      // request. Never replace this with a post-lock re-read.
+      const observedAgentPublicKey = agentPubKey;
 
-      // Step 1: Check if there are any Drift subaccounts with positions or funds
-      const existingSubaccounts = await discoverOnChainSubaccounts(agentPubKey);
-      
-      for (const subId of existingSubaccounts) {
-        const positions = await getPerpPositions(agentPubKey, subId);
-        const openPositions = positions.filter((p: any) => Math.abs(p.baseAssetAmount) > 0.0001);
-        
-        if (openPositions.length > 0) {
-          return res.status(400).json({ 
-            error: "Cannot reset: You have open positions. Please close all positions first using 'Close All Positions' or 'Reset Trading Account'.",
-            hasOpenPositions: true 
-          });
-        }
+      log("Starting agent wallet reset");
+      progress.push("Checking trading account status...");
 
-        const accountInfo = await getExchangeAccountInfo(agentPubKey, subId);
-        if (accountInfo.usdcBalance > 0.01) {
-          return res.status(400).json({ 
-            error: `Cannot reset: You have $${accountInfo.usdcBalance.toFixed(2)} in trading subaccount ${subId}. Please use 'Reset Trading Account' to withdraw funds first.`,
-            hasDriftFunds: true 
-          });
-        }
+      // Step 1: strict adapter reads. Successful empty arrays/zero balances are
+      // clean; any throw or malformed shape is unreadable and blocks. There is
+      // deliberately ONE catch at this reset boundary and no error-text parsing.
+      let onChainAssessment;
+      try {
+        onChainAssessment = await assessResetAgentOnChainStrict(agentPubKey, agentKey);
+      } catch {
+        return res.status(409).json({
+          error: "reset-blocked",
+          phase: "pre-transfer",
+          message: "Could not verify that the trading account is empty, so the reset was not started. Nothing was transferred and your agent key is unchanged. Please try again shortly.",
+        });
+      }
+      if (onChainAssessment.blocked) {
+        return res.status(400).json({
+          error:
+            onChainAssessment.reason === "open_positions"
+              ? "Cannot reset: You have open trading positions. Close them first."
+              : "Cannot reset: The trading account still holds funds. Withdraw them first.",
+          ...(onChainAssessment.reason === "open_positions"
+            ? { hasOpenPositions: true }
+            : { hasDriftFunds: true }),
+        });
       }
 
-      progress.push("Drift account verified clean");
-      log("Drift account is clean, proceeding with agent wallet reset");
+      progress.push("Trading account verified clean");
+      log("Trading account is clean, proceeding with agent wallet reset");
 
       // WO2B1 checkpoint 1 (pre-transfer): the agent key being retired owns
       // every vault borrow/loop position and signs every resumable borrow
@@ -6960,59 +6967,86 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         });
       }
 
-      // Step 2: Check agent wallet balances
-      const usdcBalance = await getAgentUsdcBalance(agentPubKey);
-      const solBalance = await getAgentSolBalance(agentPubKey);
+      // Step 2: strict wallet balances. RPC failure is not a zero balance.
+      let usdcBalanceRaw: bigint;
+      let solBalanceLamports: bigint;
+      try {
+        usdcBalanceRaw = await getAgentUsdcBalanceRawStrict(agentPubKey);
+        solBalanceLamports = await getAgentSolBalanceLamportsStrict(agentPubKey);
+        if (
+          usdcBalanceRaw < 0n ||
+          usdcBalanceRaw > BigInt(Number.MAX_SAFE_INTEGER) ||
+          solBalanceLamports < 0n ||
+          solBalanceLamports > BigInt(Number.MAX_SAFE_INTEGER)
+        ) {
+          throw new Error("malformed reset balance");
+        }
+      } catch {
+        return res.status(409).json({
+          error: "reset-blocked",
+          phase: "pre-transfer",
+          message: "Could not verify the agent wallet balances, so the reset was not started. Nothing was transferred and your agent key is unchanged. Please try again shortly.",
+        });
+      }
+      const usdcBalance = Number(usdcBalanceRaw) / 1e6;
+      const solBalance = Number(solBalanceLamports) / 1e9;
       
       log(`Agent wallet balances: ${usdcBalance} USDC, ${solBalance} SOL`);
       progress.push(`Found ${usdcBalance.toFixed(2)} USDC, ${solBalance.toFixed(4)} SOL in agent wallet`);
 
       // Step 3: Withdraw USDC to user wallet
-      if (usdcBalance > 0.001) {
+      if (usdcBalanceRaw > 1_000n) {
         progress.push(`Withdrawing ${usdcBalance.toFixed(2)} USDC to your wallet...`);
-        log(`Withdrawing ${usdcBalance} USDC to ${userWallet.slice(0, 8)}...`);
+        log(`Withdrawing ${usdcBalance} USDC to the owner wallet`);
         
         try {
           const usdcWithdrawResult = await executeAgentWithdraw(agentPubKey, agentKey, userWallet, usdcBalance);
           if (!usdcWithdrawResult.success) {
             return res.status(400).json({ 
-              error: `USDC withdrawal failed: ${usdcWithdrawResult.error}. Your funds are safe, please try again.`,
+              error: "USDC withdrawal could not be completed. Your existing agent key remains active; retry from Wallet Management or contact support if the failure persists.",
               step: 'usdc_withdrawal' 
             });
           }
-          log(`USDC withdrawal successful: ${usdcWithdrawResult.signature}`);
+          log("USDC withdrawal successful");
           progress.push(`USDC withdrawn successfully`);
           
           // Wait for confirmation
           await new Promise(resolve => setTimeout(resolve, 2000));
         } catch (e: any) {
           return res.status(400).json({ 
-            error: `USDC withdrawal error: ${e.message}. Your funds are safe, please try again.`,
+            error: "USDC withdrawal could not be completed. Your existing agent key remains active; retry from Wallet Management or contact support if the failure persists.",
             step: 'usdc_withdrawal' 
           });
         }
       }
 
       // Step 4: Withdraw SOL to user wallet (leave minimum for rent-exempt)
-      const solToWithdraw = solBalance - 0.002; // Leave 0.002 SOL for final transaction fees
-      if (solToWithdraw > 0.001) {
+      const solReserveLamports = 2_000_000n;
+      const solWithdrawThresholdLamports = 1_000_000n;
+      const solToWithdrawLamports = solBalanceLamports - solReserveLamports;
+      let solToWithdraw = 0;
+      if (solToWithdrawLamports > solWithdrawThresholdLamports) {
+        solToWithdraw = Number(solToWithdrawLamports) / 1e9;
         progress.push(`Withdrawing ${solToWithdraw.toFixed(4)} SOL to your wallet...`);
-        log(`Withdrawing ${solToWithdraw} SOL to ${userWallet.slice(0, 8)}...`);
+        log(`Withdrawing ${solToWithdraw} SOL to the owner wallet`);
         
         try {
           const solWithdrawResult = await executeAgentSolWithdraw(agentPubKey, agentKey, userWallet, solToWithdraw);
           if (!solWithdrawResult.success) {
-            log(`SOL withdrawal failed (non-critical): ${solWithdrawResult.error}`);
-            progress.push(`SOL withdrawal failed (non-critical): Small amount may remain`);
-          } else {
-            log(`SOL withdrawal successful: ${solWithdrawResult.signature}`);
-            progress.push(`SOL withdrawn successfully`);
+            return res.status(400).json({
+              error: "SOL withdrawal could not be completed. Your existing agent key remains active; retry from Wallet Management or contact support if the failure persists.",
+              step: "sol_withdrawal",
+            });
           }
+          log("SOL withdrawal successful");
+          progress.push("SOL withdrawn successfully");
           
           await new Promise(resolve => setTimeout(resolve, 2000));
-        } catch (e: any) {
-          log(`SOL withdrawal error (non-critical): ${e.message}`);
-          progress.push(`SOL withdrawal error (non-critical): Small amount may remain`);
+        } catch {
+          return res.status(400).json({
+            error: "SOL withdrawal could not be completed. Your existing agent key remains active; retry from Wallet Management or contact support if the failure persists.",
+            step: "sol_withdrawal",
+          });
         }
       }
 
@@ -7034,7 +7068,36 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         });
       }
 
-      // Step 5: Generate new agent wallet with mnemonic
+      // Checkpoint 2a: repeat every strict on-chain read AFTER transfers and
+      // verify the attempted sweeps actually left only documented dust. This
+      // remains outside the short DB transaction — never hold a pool connection
+      // across RPC.
+      try {
+        const recheck = await assessResetAgentOnChainStrict(agentPubKey, agentKey);
+        const postUsdcRaw = await getAgentUsdcBalanceRawStrict(agentPubKey);
+        const postSol = await getAgentSolBalanceLamportsStrict(agentPubKey);
+        if (
+          recheck.blocked ||
+          postUsdcRaw < 0n ||
+          postUsdcRaw > 1_000n ||
+          postSol < 0n ||
+          postSol > solReserveLamports + solWithdrawThresholdLamports
+        ) {
+          return res.status(409).json({
+            error: "reset-blocked",
+            phase: "pre-key-rotation",
+            message: "Reset stopped before key rotation because the retired key's on-chain state is not clean. Completed transfers are not rolled back, and your existing agent key remains authoritative. Resolve the remaining activity in Wallet Management and retry.",
+          });
+        }
+      } catch {
+        return res.status(409).json({
+          error: "reset-blocked",
+          phase: "pre-key-rotation",
+          message: "Reset stopped before key rotation because the retired key's on-chain state could not be verified. Completed transfers are not rolled back, and your existing agent key remains authoritative. Please try again shortly.",
+        });
+      }
+
+      // Step 5: Prepare new wallet material without persisting it.
       progress.push("Generating new agent wallet...");
       log("Generating new agent wallet with mnemonic");
 
@@ -7045,28 +7108,58 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // `agent_private_key_encrypted` column is intentionally left NULL for
       // newly-generated wallets — Phase 6 will drop it entirely.
       const encryptedV3 = encryptAgentKeyV3(session.umk, generatedWallet.secretKeyBuffer, userWallet);
+      const encryptedMnemonicWords = encryptMnemonicForStorage(userWallet, generatedWallet.mnemonicBuffer, session.umk);
 
-      // Store mnemonic encrypted with UMK
-      await encryptAndStoreMnemonic(userWallet, generatedWallet.mnemonicBuffer, session.umk);
-
-      // Update database with new agent wallet (public key + V3 ciphertext only).
-      await storage.updateWallet(userWallet, { agentPublicKey: newAgentPublicKey });
-      await storage.updateWalletAgentKeyV3(userWallet, encryptedV3);
-      
-      log(`New agent wallet generated: ${newAgentPublicKey.slice(0, 8)}...`);
-      progress.push(`New agent wallet created: ${newAgentPublicKey.slice(0, 8)}...`);
-
-      // Step 6: Clear all bot subaccount assignments (they're linked to old wallet)
-      const bots = await storage.getTradingBots(userWallet);
-      for (const bot of bots) {
-        if (bot.driftSubaccountId !== null) {
-          await storage.clearTradingBotSubaccount(bot.id);
-          log(`Cleared driftSubaccountId for bot ${bot.id}`);
-        }
+      // Checkpoint 2b + atomic commit: the DB-only transaction takes a
+      // non-blocking advisory lock, rechecks vault rows, installs all three
+      // same-generation wallet columns with an entry-key CAS, and clears bot
+      // assignments. It contains no RPC, transfers, or sleeps.
+      let finalized;
+      try {
+        finalized = await storage.finalizeAgentWalletReset({
+          walletAddress: userWallet,
+          observedAgentPublicKey,
+          encryptedMnemonicWords,
+          newAgentPublicKey,
+          newAgentPrivateKeyEncryptedV3: encryptedV3,
+        });
+      } catch {
+        return res.status(503).json({
+          error: "reset-finalize-unavailable",
+          phase: "pre-key-rotation",
+          message: "Reset could not complete its final database safety check. Completed transfers are not rolled back, and your existing agent key remains authoritative. Please try again shortly.",
+        });
       }
+      if (finalized.outcome === "busy") {
+        return res.status(409).json({
+          error: "reset-in-progress",
+          phase: "pre-key-rotation",
+          message: "Another reset for this wallet is completing. This request installed no key. Any transfers already completed were not rolled back; refresh Wallet Management before retrying.",
+        });
+      }
+      if (finalized.outcome === "blocked") {
+        return res.status(409).json({
+          error: "reset-blocked",
+          phase: "pre-key-rotation",
+          message: "Reset stopped before key rotation because vault borrow/loop state appeared or could not be verified. Completed transfers are not rolled back, and your existing agent key remains authoritative. Resolve the activity and retry.",
+        });
+      }
+      if (finalized.outcome === "lost_race") {
+        return res.status(409).json({
+          error: "reset-race-lost",
+          phase: "pre-key-rotation",
+          message: finalized.keyChanged
+            ? "Another reset completed first. This request's generated key was not installed; the wallet's agent key has changed. Any transfers already completed were not rolled back. Refresh Wallet Management before taking another action."
+            : "The wallet changed before this reset could commit. This request's generated key was not installed. Any transfers already completed were not rolled back. Refresh Wallet Management before retrying.",
+        });
+      }
+      
+      log("New agent wallet committed atomically");
+      progress.push(`New agent wallet created: ${newAgentPublicKey.slice(0, 8)}...`);
+      if (finalized.clearedBotCount > 0) progress.push("Trading-bot subaccount assignments cleared");
 
       progress.push("Agent wallet reset complete!");
-      log(`Successfully reset agent wallet. Old: ${agentPubKey.slice(0, 8)}..., New: ${newAgentPublicKey.slice(0, 8)}...`);
+      log("Successfully reset agent wallet");
 
       res.json({
         success: true,
@@ -7081,9 +7174,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       } finally {
         agentKeyResult.cleanup();
       }
-    } catch (error: any) {
-      console.error("Reset agent wallet error:", error);
-      res.status(500).json({ error: error.message || "Failed to reset agent wallet" });
+    } catch {
+      console.error("Reset agent wallet failed safely (details suppressed)");
+      res.status(500).json({ error: "Failed to reset agent wallet safely. Your existing key remains authoritative unless Wallet Management shows a completed reset." });
     }
   });
 
