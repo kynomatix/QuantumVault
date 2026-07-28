@@ -2,9 +2,9 @@
  * server/vault/reset-blockers.ts — WO2B1
  *
  * Fail-closed ownership guard for Reset Agent Wallet. The reset rotates the
- * agent key that OWNS every vault borrow/loop position and signs every
- * resumable borrow operation; rotating while any such row is non-terminal
- * would strand collateral/debt behind a key we no longer persist.
+ * agent key that owns vault state and remains the return destination for linked
+ * trading accounts; rotating while either relationship exists can strand value
+ * behind a key we no longer persist.
  *
  * Terminal ALLOWLISTS — never blocklists — so unknown or future statuses
  * block by construction:
@@ -39,15 +39,52 @@ export {
  * reset. Returns a COARSE verdict only — callers must not receive (or leak)
  * row ids, operation types, amounts, or any other private detail.
  */
-export async function assessResetBlockers(walletAddress: string): Promise<ResetBlockerAssessment> {
+export async function assessResetBlockers(
+  walletAddress: string,
+  observedAgentPublicKey: string,
+): Promise<ResetBlockerAssessment> {
   try {
-    const [classicPositions, loopPositions, operations] = await Promise.all([
+    const [
+      classicPositions,
+      loopPositions,
+      operations,
+      tradingBots,
+      aiTraderBots,
+      protocolSubaccounts,
+      orphanedSubaccounts,
+    ] = await Promise.all([
       storage.getBorrowPositionsAllScopes(walletAddress, "borrow"),
       storage.getBorrowPositionsAllScopes(walletAddress, "loop"),
       storage.getBorrowOperations(walletAddress),
+      storage.getTradingBots(walletAddress),
+      storage.getAiTraderBotsByWallet(walletAddress),
+      storage.getProtocolSubaccountsByWallet(walletAddress),
+      storage.getOrphanedSubaccountsByWallet(walletAddress),
     ]);
 
-    return assessResetBlockerRows(classicPositions, loopPositions, operations);
+    return assessResetBlockerRows({
+      classicPositions,
+      loopPositions,
+      operations,
+      tradingBots: tradingBots.map((row) => ({
+        driftSubaccountId: row.driftSubaccountId,
+        protocolSubaccountId: row.protocolSubaccountId,
+      })),
+      aiTraderBots: aiTraderBots.map((row) => ({
+        protocolSubaccountId: row.protocolSubaccountId,
+      })),
+      protocolSubaccounts: protocolSubaccounts.map((row) => ({
+        protocolSubaccountId: row.protocolSubaccountId,
+        agentPublicKey: row.agentPublicKey,
+        status: row.status,
+        subaccountKeyEncryptedV3: row.subaccountKeyEncryptedV3,
+        lastVerifiedEmptyAt: row.lastVerifiedEmptyAt,
+      })),
+      orphanedSubaccounts: orphanedSubaccounts.map((row) => ({
+        agentPublicKey: row.agentPublicKey,
+      })),
+      observedAgentPublicKey,
+    });
   } catch {
     return { blocked: true, reason: "vault_state_unreadable" };
   }

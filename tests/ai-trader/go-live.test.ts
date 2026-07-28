@@ -26,11 +26,21 @@ import type { AiTraderBot } from "@shared/schema";
 const getAiTraderBotMock = vi.fn();
 const getWalletMock = vi.fn();
 const updateBotMock = vi.fn();
+const getProtocolRowsMock = vi.fn();
+const deleteReservationMock = vi.fn();
+const releaseReservationMock = vi.fn();
+const markStuckMock = vi.fn();
+const finalizeGoLiveReservationMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
     getAiTraderBot: (...a: unknown[]) => getAiTraderBotMock(...a),
     getWallet: (...a: unknown[]) => getWalletMock(...a),
     updateAiTraderBot: (...a: unknown[]) => updateBotMock(...a),
+    getProtocolSubaccountsByWallet: (...a: unknown[]) => getProtocolRowsMock(...a),
+    deleteReservedSubaccount: (...a: unknown[]) => deleteReservationMock(...a),
+    releaseReservationToSpare: (...a: unknown[]) => releaseReservationMock(...a),
+    markSubaccountStuckFunds: (...a: unknown[]) => markStuckMock(...a),
+    finalizeAiTraderGoLiveReservation: (...a: unknown[]) => finalizeGoLiveReservationMock(...a),
   },
 }));
 
@@ -206,6 +216,14 @@ function armHappyCrypto() {
   encryptSubKeyMock.mockReturnValue("V3_CIPHERTEXT");
   getWalletMock.mockResolvedValue({ address: WALLET, agentPublicKey: "AGENT_PUB", agentPrivateKeyEncryptedV3: "enc" });
   dbExecuteMock.mockResolvedValue({ rows: [{ used: 3 }] });
+  getProtocolRowsMock.mockResolvedValue([]);
+  deleteReservationMock.mockResolvedValue(true);
+  releaseReservationMock.mockResolvedValue(true);
+  markStuckMock.mockResolvedValue(true);
+  finalizeGoLiveReservationMock.mockImplementation(async (params: any) => ({
+    ...makeBot({ protocolSubaccountId: params.protocolSubaccountId, botSubaccountKeyEncryptedV3: "V3_CIPHERTEXT" }),
+    paperMode: false,
+  }));
   return { umkCleanup, keyCleanup };
 }
 
@@ -318,6 +336,7 @@ describe("go-live fresh accept path", () => {
       derivationIndex: 4,
       derivationPathVersion: 1,
       ambiguous: false,
+      reservationClaimToken: "reservation-token",
       provisionMeta: { funded: true, fundedAmount: 100, wasNewAccount: false, depositTxSignature: "tx1" },
     });
     return pendingKey;
@@ -349,9 +368,10 @@ describe("go-live fresh accept path", () => {
     expect(walletArg).toBe(WALLET);
     expect(botIdArg).toBe("ai-bot-1");
 
-    // Two writes, in order: (1) key persist with paperMode untouched, (2) the flip.
-    expect(updateBotMock).toHaveBeenCalledTimes(2);
-    const [persistCall, flipCall] = updateBotMock.mock.calls;
+    // Key persist happens first; the live flip + reservation deletion are one
+    // transaction-bound storage finalizer after it.
+    expect(updateBotMock).toHaveBeenCalledTimes(1);
+    const [persistCall] = updateBotMock.mock.calls;
     expect(persistCall[1]).toMatchObject({
       protocolSubaccountId: "SUB_PUB",
       botSubaccountKeyEncryptedV3: "V3_CIPHERTEXT",
@@ -359,7 +379,15 @@ describe("go-live fresh accept path", () => {
       derivationPathVersion: 1,
     });
     expect(persistCall[1].paperMode).toBeUndefined();
-    expect(flipCall[1]).toMatchObject({ paperMode: false, status: "idle", pauseReason: null });
+    expect(finalizeGoLiveReservationMock).toHaveBeenCalledWith({
+      botId: "ai-bot-1",
+      walletAddress: WALLET,
+      protocol: "pacifica",
+      protocolSubaccountId: "SUB_PUB",
+      claimToken: "reservation-token",
+    });
+    expect(updateBotMock.mock.invocationCallOrder[0])
+      .toBeLessThan(finalizeGoLiveReservationMock.mock.invocationCallOrder[0]);
 
     // In-memory sub key zeroized; crypto handles cleaned up; no sweep needed.
     expect(Array.from(pendingKey).every((b) => b === 0)).toBe(true);
@@ -381,6 +409,7 @@ describe("go-live fresh accept path", () => {
       derivationIndex: 4,
       derivationPathVersion: 1,
       ambiguous: false,
+      reservationClaimToken: "reservation-token",
       provisionMeta: { funded: false, fundedAmount: 0, warning: "transfer failed" },
     });
     updateBotMock.mockImplementation(async (_id: string, updates: any) => ({ ...makeBot(), ...updates }));
@@ -434,6 +463,27 @@ describe("go-live fresh accept path", () => {
     expect(updateBotMock).toHaveBeenCalledTimes(1);
   });
 
+  it("never rolls failed provisioning back to an agent generation that changed mid-flight", async () => {
+    getAiTraderBotMock.mockResolvedValue(makeBot());
+    getAdapterMock.mockReturnValue(makeAdapter());
+    armHappyCrypto();
+    getWalletMock
+      .mockResolvedValueOnce({ address: WALLET, agentPublicKey: "AGENT_PUB", agentPrivateKeyEncryptedV3: "enc" })
+      .mockResolvedValueOnce({ address: WALLET, agentPublicKey: "NEW_AGENT_PUB", agentPrivateKeyEncryptedV3: "enc-new" });
+    armProvisionSuccess();
+    updateBotMock.mockRejectedValueOnce(new Error("db write lost"));
+    sweepMock.mockResolvedValue({ swept: false, detail: "no current destination" });
+
+    const r = await invoke(routes, GO_LIVE, goLiveReq());
+
+    expect(r.statusCode).toBe(500);
+    expect(sweepMock.mock.calls[0][0].agentPublicKey).toBeNull();
+    expect(markStuckMock).toHaveBeenCalledWith(expect.objectContaining({
+      agentPublicKey: "AGENT_PUB",
+      claimToken: "reservation-token",
+    }));
+  });
+
   it("500 stays paper when provisioning throws atomically (nothing stranded, no writes)", async () => {
     getAiTraderBotMock.mockResolvedValue(makeBot());
     getAdapterMock.mockReturnValue(makeAdapter());
@@ -463,6 +513,53 @@ describe("go-live fresh accept path", () => {
 describe("go-live idempotent retry (subaccount + key already persisted)", () => {
   const provisionedBot = () =>
     makeBot({ protocolSubaccountId: "SUB_PUB", botSubaccountKeyEncryptedV3: "V3_CIPHERTEXT" });
+
+  it.each([
+    { status: "stuck_funds", claimToken: null, agentPublicKey: "AGENT_PUB" },
+    { status: "reserving", claimToken: "reservation-token", agentPublicKey: "OTHER_AGENT" },
+    { status: "reserving", claimToken: null, agentPublicKey: "AGENT_PUB" },
+  ])("blocks retry when the protocol marker is not the exact resumable lease ($status)", async (marker) => {
+    getAiTraderBotMock.mockResolvedValue(provisionedBot());
+    getAdapterMock.mockReturnValue(makeAdapter());
+    armHappyCrypto();
+    getProtocolRowsMock.mockResolvedValue([{ protocol: "pacifica", protocolSubaccountId: "SUB_PUB", ...marker }]);
+
+    const r = await invoke(routes, GO_LIVE, goLiveReq());
+
+    expect(r.statusCode).toBe(409);
+    expect(r.body.error).toMatch(/reconciled/i);
+    expect(provisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+  });
+
+  it("resumes the exact reserving lease after a crash between AI key persistence and finalization", async () => {
+    getAiTraderBotMock.mockResolvedValue(provisionedBot());
+    const adapter = makeAdapter();
+    (adapter.getAccountInfo as any).mockResolvedValue({ equity: 100, balance: 100 });
+    getAdapterMock.mockReturnValue(adapter);
+    armHappyCrypto();
+    getProtocolRowsMock.mockResolvedValue([{
+      protocol: "pacifica",
+      protocolSubaccountId: "SUB_PUB",
+      status: "reserving",
+      claimToken: "reservation-token",
+      agentPublicKey: "AGENT_PUB",
+    }]);
+
+    const r = await invoke(routes, GO_LIVE, goLiveReq());
+
+    expect(r.statusCode).toBe(200);
+    expect(r.body.live).toBe(true);
+    expect(provisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(finalizeGoLiveReservationMock).toHaveBeenCalledWith({
+      botId: "ai-bot-1",
+      walletAddress: WALLET,
+      protocol: "pacifica",
+      protocolSubaccountId: "SUB_PUB",
+      claimToken: "reservation-token",
+    });
+  });
 
   it("already funded → flips live without provisioning or transferring", async () => {
     getAiTraderBotMock.mockResolvedValue(provisionedBot());
@@ -501,6 +598,20 @@ describe("go-live idempotent retry (subaccount + key already persisted)", () => 
     expect(r.statusCode).toBe(200);
     expect(adapter.transferBetweenSubaccounts).toHaveBeenCalledOnce();
     expect(updateBotMock.mock.calls.at(-1)![1]).toMatchObject({ paperMode: false });
+  });
+
+  it("fails closed on a malformed pre-funding balance instead of treating it as zero", async () => {
+    getAiTraderBotMock.mockResolvedValue(provisionedBot());
+    const adapter = makeAdapter();
+    (adapter.getAccountInfo as any).mockResolvedValue({});
+    getAdapterMock.mockReturnValue(adapter);
+    armHappyCrypto();
+
+    const r = await invoke(routes, GO_LIVE, goLiveReq());
+
+    expect(r.statusCode).toBe(500);
+    expect(adapter.transferBetweenSubaccounts).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
   });
 
   it("409 rejects a concurrent go-live for the same bot (in-flight guard) — and releases the claim after completion", async () => {

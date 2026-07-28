@@ -23,6 +23,7 @@
  */
 
 import { describe, expect, it, vi, beforeAll, afterAll, beforeEach } from "vitest";
+import { Keypair } from "@solana/web3.js";
 
 // ---------------------------------------------------------------------------
 // Module mocks — hoisted before imports by vitest.
@@ -62,6 +63,7 @@ vi.mock("../../server/session-v3", async (importOriginal) => {
     generateAgentWalletWithMnemonic: vi.fn(),
     encryptAgentKeyV3: vi.fn(),
     encryptMnemonicForStorage: vi.fn(),
+    getUmkForWebhook: vi.fn(),
   };
 });
 
@@ -97,7 +99,7 @@ vi.mock("../../server/drift-service", async (importOriginal) => {
 
 import express from "express";
 import { createServer, type Server } from "http";
-import { registerRoutes } from "../../server/routes";
+import { provisionExternalKeyBotSubaccount, registerRoutes } from "../../server/routes";
 import { storage } from "../../server/storage";
 import {
   getSession,
@@ -105,6 +107,7 @@ import {
   generateAgentWalletWithMnemonic,
   encryptAgentKeyV3,
   encryptMnemonicForStorage,
+  getUmkForWebhook,
 } from "../../server/session-v3";
 import {
   getAgentUsdcBalanceRawStrict,
@@ -181,8 +184,13 @@ function primeClean() {
   });
   vi.mocked(encryptAgentKeyV3 as any).mockReturnValue("encrypted-v3-new");
   vi.mocked(encryptMnemonicForStorage as any).mockReturnValue("encrypted-mnemonic-new");
+  vi.mocked(getUmkForWebhook as any).mockResolvedValue({ umk: Buffer.alloc(32, 7), cleanup: vi.fn() });
   vi.mocked(storage.getBorrowPositionsAllScopes as any).mockResolvedValue([]);
   vi.mocked(storage.getBorrowOperations as any).mockResolvedValue([]);
+  vi.mocked(storage.getTradingBots as any).mockResolvedValue([]);
+  vi.mocked(storage.getAiTraderBotsByWallet as any).mockResolvedValue([]);
+  vi.mocked(storage.getProtocolSubaccountsByWallet as any).mockResolvedValue([]);
+  vi.mocked(storage.getOrphanedSubaccountsByWallet as any).mockResolvedValue([]);
   vi.mocked(storage.finalizeAgentWalletReset as any).mockResolvedValue({ outcome: "committed", clearedBotCount: 0 });
   vi.mocked(storage.updateWallet as any).mockResolvedValue(undefined);
   vi.mocked(storage.updateWalletAgentKeyV3 as any).mockResolvedValue(undefined);
@@ -314,6 +322,96 @@ describe("reset guard checkpoint 1 — non-terminal OPERATIONS block pre-transfe
 // ---------------------------------------------------------------------------
 
 describe("reset guard checkpoint 1 — DB read failures fail CLOSED", () => {
+  describe("all durable custody tables", () => {
+    const custodyCases = [
+      {
+        label: "linked main-plus-id trading bot",
+        method: "getTradingBots",
+        row: {
+          driftSubaccountId: 0,
+          protocolSubaccountId: null,
+          subaccountAuthMode: "main_plus_id",
+          subaccountStatus: "active",
+          botSubaccountKeyEncrypted: null,
+          botSubaccountKeyEncryptedV3: "stale-ciphertext",
+        },
+      },
+      {
+        label: "linked active independently-keyed trading bot",
+        method: "getTradingBots",
+        row: {
+          driftSubaccountId: null,
+          protocolSubaccountId: "active-external-account",
+          subaccountAuthMode: "external_key",
+          subaccountStatus: "active",
+          botSubaccountKeyEncrypted: null,
+          botSubaccountKeyEncryptedV3: "bot-v3-key",
+        },
+      },
+      {
+        label: "linked keyless AI bot",
+        method: "getAiTraderBotsByWallet",
+        row: { protocolSubaccountId: "ai-subaccount", botSubaccountKeyEncryptedV3: null },
+      },
+      {
+        label: "linked independently-keyed AI bot",
+        method: "getAiTraderBotsByWallet",
+        row: { protocolSubaccountId: "ai-keyed-subaccount", botSubaccountKeyEncryptedV3: "ai-v3-key" },
+      },
+      {
+        label: "in-flight protocol reservation",
+        method: "getProtocolSubaccountsByWallet",
+        row: {
+          protocolSubaccountId: "venue-subaccount",
+          agentPublicKey: AGENT_PK,
+          status: "reserving",
+          subaccountKeyEncryptedV3: "pooled-key",
+          lastVerifiedEmptyAt: null,
+        },
+      },
+      {
+        label: "active protocol registry account",
+        method: "getProtocolSubaccountsByWallet",
+        row: {
+          protocolSubaccountId: "active-registry-account",
+          agentPublicKey: AGENT_PK,
+          status: "active",
+          subaccountKeyEncryptedV3: "pooled-key",
+          lastVerifiedEmptyAt: null,
+        },
+      },
+      {
+        label: "retry-exhausted matching orphaned subaccount",
+        method: "getOrphanedSubaccountsByWallet",
+        row: { agentPublicKey: AGENT_PK, retryCount: 500 },
+      },
+    ] as const;
+
+    it.each(custodyCases)("checkpoint 1 blocks $label before transfers", async ({ method, row }) => {
+      vi.mocked((storage as any)[method]).mockResolvedValue([row]);
+      const { status, body } = await postReset();
+      expect(status).toBe(409);
+      expect(body).toMatchObject({ error: "reset-blocked", phase: "pre-transfer" });
+      expectNoTransfersAndNoKeyEffects();
+      expect(keyCleanup).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(body)).not.toContain("venue-subaccount");
+    });
+
+    it.each(custodyCases)("checkpoint 2 blocks $label after transfers", async ({ method, row }) => {
+      vi.mocked((storage as any)[method])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([row]);
+      vi.mocked(getAgentUsdcBalanceRawStrict as any).mockResolvedValue(10_000_000n);
+      const { status, body } = await postReset();
+      expect(status).toBe(409);
+      expect(body).toMatchObject({ error: "reset-blocked", phase: "pre-key-rotation" });
+      expect(executeAgentWithdraw).toHaveBeenCalledTimes(1);
+      expectNoKeyEffects();
+      expect(keyCleanup).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(body)).not.toContain("venue-subaccount");
+    });
+  });
+
   const readErrorCases = [
     {
       label: "classic positions read fails",
@@ -334,6 +432,22 @@ describe("reset guard checkpoint 1 — DB read failures fail CLOSED", () => {
     {
       label: "operations read fails",
       arrange: () => vi.mocked(storage.getBorrowOperations as any).mockRejectedValue(new Error("pg ops dead")),
+    },
+    {
+      label: "trading-bot custody read fails",
+      arrange: () => vi.mocked(storage.getTradingBots as any).mockRejectedValue(new Error("pg trading dead")),
+    },
+    {
+      label: "AI custody read fails",
+      arrange: () => vi.mocked(storage.getAiTraderBotsByWallet as any).mockRejectedValue(new Error("pg ai dead")),
+    },
+    {
+      label: "protocol registry read fails",
+      arrange: () => vi.mocked(storage.getProtocolSubaccountsByWallet as any).mockRejectedValue(new Error("pg registry dead")),
+    },
+    {
+      label: "orphan custody read fails",
+      arrange: () => vi.mocked(storage.getOrphanedSubaccountsByWallet as any).mockRejectedValue(new Error("pg orphan dead")),
     },
   ];
 
@@ -413,6 +527,14 @@ describe("reset proceeds over terminal-only vault rows", () => {
       expect(posCalls.filter((c: any[]) => c[0] === WALLET && c[1] === "loop")).toHaveLength(2);
       const opCalls = vi.mocked(storage.getBorrowOperations as any).mock.calls;
       expect(opCalls.filter((c: any[]) => c[0] === WALLET)).toHaveLength(2);
+      for (const method of [
+        "getTradingBots",
+        "getAiTraderBotsByWallet",
+        "getProtocolSubaccountsByWallet",
+        "getOrphanedSubaccountsByWallet",
+      ]) {
+        expect(vi.mocked((storage as any)[method]).mock.calls).toEqual([[WALLET], [WALLET]]);
+      }
 
       // PLACEMENT: checkpoint 1 precedes the first transfer; checkpoint 2 runs
       // after the last transfer and before the first persistent mutation.
@@ -591,6 +713,56 @@ describe("WO-R1 strict reset reads fail closed", () => {
   });
 });
 
+describe("WO-R1 checkpoint-2 expanded custody and strict-balance reads", () => {
+  it.each([
+    "getTradingBots",
+    "getAiTraderBotsByWallet",
+    "getProtocolSubaccountsByWallet",
+    "getOrphanedSubaccountsByWallet",
+  ])("%s failure at checkpoint 2 fails closed after transfers", async (method) => {
+    vi.mocked((storage as any)[method])
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error(`private ${method} failure`));
+    vi.mocked(getAgentUsdcBalanceRawStrict as any).mockResolvedValue(10_000_000n);
+
+    const { status, body } = await postReset();
+
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ error: "reset-blocked", phase: "pre-key-rotation" });
+    expect(executeAgentWithdraw).toHaveBeenCalledTimes(1);
+    expectNoKeyEffects();
+    expect(JSON.stringify(body)).not.toContain("private");
+  });
+
+  it.each([
+    {
+      label: "USDC strict re-read throws",
+      arrange: () => vi.mocked(getAgentUsdcBalanceRawStrict as any)
+        .mockResolvedValueOnce(10_000_000n)
+        .mockRejectedValueOnce(new Error("private post-usdc read")),
+    },
+    {
+      label: "SOL strict re-read throws",
+      arrange: () => vi.mocked(getAgentSolBalanceLamportsStrict as any)
+        .mockResolvedValueOnce(50_000_000n)
+        .mockRejectedValueOnce(new Error("private post-sol read")),
+    },
+    {
+      label: "SOL residue exceeds documented bound",
+      arrange: () => vi.mocked(getAgentSolBalanceLamportsStrict as any)
+        .mockResolvedValueOnce(50_000_000n)
+        .mockResolvedValueOnce(3_000_001n),
+    },
+  ])("$label blocks before key preparation", async ({ arrange }) => {
+    arrange();
+    const { status, body } = await postReset();
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ error: "reset-blocked", phase: "pre-key-rotation" });
+    expectNoKeyEffects();
+    expect(JSON.stringify(body)).not.toContain("private post");
+  });
+});
+
 describe("WO-R1 attempted transfers are both fail-closed", () => {
   it.each([
     {
@@ -632,6 +804,11 @@ describe("WO-R1 attempted transfers are both fail-closed", () => {
     expect(status).toBe(400);
     expect(body.step).toBe(step);
     expect(body.error).toMatch(/Wallet Management/i);
+    if (step === "sol_withdrawal") {
+      expect(body.error).toMatch(/USDC transfer already completed was not rolled back/i);
+    } else {
+      expect(body.error).not.toMatch(/USDC transfer already completed/i);
+    }
     expect(JSON.stringify(body)).not.toMatch(/raw (usdc|sol)/i);
     expectNoKeyEffects();
     expect(keyCleanup).toHaveBeenCalledTimes(1);
@@ -666,7 +843,93 @@ describe("WO-R1 atomic finalizer outcomes are truthful", () => {
     expect(status).toBe(503);
     expect(body.error).toBe("reset-finalize-unavailable");
     expect(body.message).toMatch(/existing agent key remains authoritative/i);
+    expect(body.message).toMatch(/unless Wallet Management shows that the reset completed/i);
     expect(JSON.stringify(body)).not.toContain("pg secret detail");
     expect(keyCleanup).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("WO-R1-C1 external-key provisioning write-ahead", () => {
+  function adapter(overrides: Record<string, unknown> = {}) {
+    return {
+      protocolName: "pacifica",
+      getCapabilities: () => ({ requiresExternalSubaccountKey: true, walletDerivation: "random" }),
+      provisionFundedSubaccount: vi.fn(async (p: any) => ({
+        subaccountId: Keypair.fromSecretKey(p.subSecretKey).publicKey.toString(),
+        transferSucceeded: true,
+        wasNewAccount: false,
+        fundedAmount: 10,
+      })),
+      approveBuilderCodeForUser: vi.fn(async () => {}),
+      claimReferralCodeForUser: vi.fn(async () => {}),
+      ...overrides,
+    } as any;
+  }
+
+  it("persists a pooled-key reservation before the first funding call", async () => {
+    const venue = adapter();
+    vi.mocked(storage.prepareExternalSubaccountReservation as any).mockResolvedValue({ outcome: "prepared" });
+
+    const result = await provisionExternalKeyBotSubaccount({
+      walletAddress: WALLET,
+      agentKeypair: Keypair.generate(),
+      agentMnemonic: null,
+      adapter: venue,
+      fundingAmount: 10,
+      umk: Buffer.alloc(32, 9),
+    });
+
+    expect(storage.prepareExternalSubaccountReservation).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(storage.prepareExternalSubaccountReservation as any).mock.invocationCallOrder[0])
+      .toBeLessThan(venue.provisionFundedSubaccount.mock.invocationCallOrder[0]);
+    expect(vi.mocked(storage.prepareExternalSubaccountReservation as any).mock.calls[0][0]).toMatchObject({
+      walletAddress: WALLET,
+      protocol: "pacifica",
+      observedAgentPublicKey: expect.any(String),
+      subaccountKeyEncryptedV3: expect.any(String),
+      claimToken: expect.any(String),
+    });
+    expect(result.reservationClaimToken).toEqual(expect.any(String));
+    result.pendingBotSecretKeyForV3.fill(0);
+  });
+
+  it.each(["stale_generation", "conflict"])("%s prepare result prevents every venue call", async (outcome) => {
+    const venue = adapter();
+    vi.mocked(storage.prepareExternalSubaccountReservation as any).mockResolvedValue({ outcome });
+
+    await expect(provisionExternalKeyBotSubaccount({
+      walletAddress: WALLET,
+      agentKeypair: Keypair.generate(),
+      agentMnemonic: null,
+      adapter: venue,
+      fundingAmount: 10,
+      umk: Buffer.alloc(32, 9),
+    })).rejects.toThrow();
+
+    expect(venue.provisionFundedSubaccount).not.toHaveBeenCalled();
+  });
+
+  it("a crash/failure after funding starts leaves the durable pooled-key marker and zeroizes the raw target key", async () => {
+    let capturedTargetKey: Uint8Array | null = null;
+    const venue = adapter({
+      provisionFundedSubaccount: vi.fn(async (p: any) => {
+        capturedTargetKey = p.subSecretKey;
+        throw new Error("simulated process-boundary failure");
+      }),
+    });
+    vi.mocked(storage.prepareExternalSubaccountReservation as any).mockResolvedValue({ outcome: "prepared" });
+
+    await expect(provisionExternalKeyBotSubaccount({
+      walletAddress: WALLET,
+      agentKeypair: Keypair.generate(),
+      agentMnemonic: null,
+      adapter: venue,
+      fundingAmount: 10,
+      umk: Buffer.alloc(32, 9),
+    })).rejects.toThrow(/process-boundary/);
+
+    expect(storage.prepareExternalSubaccountReservation).toHaveBeenCalledTimes(1);
+    expect(capturedTargetKey).not.toBeNull();
+    expect(Array.from(capturedTargetKey!).every((b) => b === 0)).toBe(true);
   });
 });

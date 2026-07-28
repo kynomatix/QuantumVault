@@ -56,6 +56,95 @@ function sleep(ms: number): Promise<void> {
 type SweepOutcome = 'swept' | 'stuck' | 'defer';
 
 /**
+ * A crashed creator may have inserted/keyed its durable bot row before the
+ * reservation finalizer ran. Such a lease is not an unowned pool slot: never
+ * sweep/recycle it into a second bot. Trading rows with a durable V3 key can
+ * safely finish the registry handoff; keyed AI rows stay reserving so the
+ * idempotent go-live route can re-check funding and atomically finish. Every
+ * malformed or multiply-linked case is quarantined under the exact claim token.
+ */
+async function reconcileLinkedReservation(
+  row: ProtocolSubaccount,
+): Promise<'unlinked' | 'handled'> {
+  const subId = row.protocolSubaccountId;
+  const claimToken = row.claimToken;
+  if (!subId || !claimToken) {
+    console.warn(`${LOG} reservation id=${row.id} has no exact claim identity â€” leaving fail-closed`);
+    return 'handled';
+  }
+
+  let tradingLinks: Awaited<ReturnType<typeof storage.getTradingBots>>;
+  let aiLinks: Awaited<ReturnType<typeof storage.getAiTraderBotsByWallet>>;
+  try {
+    [tradingLinks, aiLinks] = await Promise.all([
+      storage.getTradingBots(row.walletAddress),
+      storage.getAiTraderBotsByWallet(row.walletAddress),
+    ]);
+  } catch (err: any) {
+    console.warn(`${LOG} could not inspect durable links for ${subId} â€” deferring: ${err?.message || err}`);
+    return 'handled';
+  }
+
+  const matchingTrading = tradingLinks.filter((bot) => bot.protocolSubaccountId === subId);
+  const matchingAi = aiLinks.filter((bot) => bot.protocolSubaccountId === subId);
+  const linkCount = matchingTrading.length + matchingAi.length;
+  if (linkCount === 0) return 'unlinked';
+
+  const quarantine = async (reason: string) => {
+    await storage.markSubaccountStuckFunds({
+      walletAddress: row.walletAddress,
+      protocol: row.protocol,
+      protocolSubaccountId: subId,
+      botId: matchingTrading.length === 1 ? matchingTrading[0].id : null,
+      agentPublicKey: row.agentPublicKey,
+      lastError: reason,
+      claimToken,
+    });
+  };
+
+  if (linkCount !== 1) {
+    await quarantine('lease-recovery: reservation has multiple durable owners');
+    return 'handled';
+  }
+
+  if (matchingTrading.length === 1) {
+    const bot = matchingTrading[0];
+    if (
+      bot.activeProtocol === row.protocol &&
+      bot.subaccountAuthMode === 'external_key' &&
+      bot.botSubaccountKeyEncryptedV3
+    ) {
+      const finalized = await storage.finalizeReusedSubaccount({
+        protocol: row.protocol,
+        protocolSubaccountId: subId,
+        claimToken,
+        botId: bot.id,
+        // Recovery cannot promote a non-terminal/unknown owner to executable.
+        // The original creator can later adopt the same-owner finalization and
+        // atomically promote it after re-verifying its funding verdict.
+        terminalSubaccountStatus: bot.subaccountStatus === 'active' ? 'active' : 'error',
+      });
+      console.log(`${LOG} reconciled keyed trading-bot reservation ${subId}${finalized ? ' â†’ active' : ' (CAS no-op)'}`);
+      return 'handled';
+    }
+    await quarantine('lease-recovery: trading-bot linkage is not durably keyed');
+    return 'handled';
+  }
+
+  const aiBot = matchingAi[0];
+  if (
+    aiBot.protocol === row.protocol &&
+    aiBot.paperMode === true &&
+    aiBot.botSubaccountKeyEncryptedV3
+  ) {
+    console.warn(`${LOG} keyed AI go-live reservation ${subId} awaits idempotent route resume`);
+    return 'handled';
+  }
+  await quarantine('lease-recovery: AI linkage is not a resumable keyed paper bot');
+  return 'handled';
+}
+
+/**
  * Attempt to move all funds out of a funded reserved subaccount back to the agent
  * main account so the slot can be re-pooled. Returns:
  *   'swept' — transfer succeeded AND the subaccount now reads verified-empty.
@@ -112,7 +201,11 @@ async function sweepReservedSubaccountToMain(
 
     try {
       const info = await adapter.getAccountInfo(agentPub, subId);
-      const balance = info?.equity ?? 0;
+      const balance = info?.equity;
+      if (typeof balance !== 'number' || !Number.isFinite(balance) || balance < 0) {
+        console.warn(`${LOG} ${subId} returned an unreadable recovery balance â€” deferring`);
+        return 'defer';
+      }
       if (balance < adapter.minTransferAmount) {
         // Above the verify-empty dust threshold but below the exchange minimum
         // transfer — genuinely un-sweepable residual. Quarantine for follow-up.
@@ -169,14 +262,30 @@ export async function processExpiredReservation(
 ): Promise<void> {
   const subId = row.protocolSubaccountId;
   const agentPub = row.agentPublicKey;
-  if (!subId || !agentPub) {
-    console.warn(`${LOG} reserving row id=${row.id} missing subaccountId/agentPublicKey — skipping`);
+  const claimToken = row.claimToken;
+  if (!subId || !agentPub || !claimToken) {
+    console.warn(`${LOG} reserving row id=${row.id} missing exact lease identity — leaving fail-closed`);
+    return;
+  }
+  const currentWallet = await storage.getWallet(row.walletAddress);
+  if (!currentWallet || currentWallet.agentPublicKey !== agentPub) {
+    await storage.markSubaccountStuckFunds({
+      walletAddress: row.walletAddress,
+      protocol: row.protocol,
+      protocolSubaccountId: subId,
+      botId: null,
+      agentPublicKey: agentPub,
+      lastError: 'lease-recovery: reservation belongs to a retired agent generation',
+      claimToken: row.claimToken ?? undefined,
+    });
+    console.error(`${LOG} reservation ${subId} belongs to a retired agent generation — quarantined without transfer`);
     return;
   }
   // Only the active default adapter can verify/sweep its own protocol's slots.
   if (row.protocol !== adapter.protocolName) {
     return;
   }
+  if (await reconcileLinkedReservation(row) === 'handled') return;
 
   // (a) Is the subaccount already empty? (create crashed before/without funding,
   // or after a transfer-fail that left funds in main — read-only, no key needed.)
@@ -196,7 +305,7 @@ export async function processExpiredReservation(
     const released = await storage.releaseReservationToSpare({
       protocol: row.protocol,
       protocolSubaccountId: subId,
-      claimToken: row.claimToken ?? undefined,
+      claimToken,
     });
     console.log(`${LOG} reclaimed expired reservation ${subId} → spare${released ? '' : ' (CAS no-op — row changed concurrently)'}`);
     return;
@@ -211,7 +320,7 @@ export async function processExpiredReservation(
     const released = await storage.releaseReservationToSpare({
       protocol: row.protocol,
       protocolSubaccountId: subId,
-      claimToken: row.claimToken ?? undefined,
+      claimToken,
     });
     console.log(`${LOG} swept + reclaimed expired reservation ${subId} → spare${released ? '' : ' (CAS no-op — row changed concurrently)'}`);
   } else if (outcome === 'stuck') {
@@ -224,12 +333,130 @@ export async function processExpiredReservation(
       lastError: 'lease-recovery: funded reservation could not be swept back to main',
       // CAS-guard on our claim token: if the original create finalized this slot
       // mid-flight (active by another owner), do NOT clobber it (§5.1.4).
-      claimToken: row.claimToken ?? undefined,
+      claimToken,
     });
     console.error(`${LOG} quarantined ${subId} as stuck_funds (sweep failed)`);
   } else {
     // 'defer' — leave the row reserving; the next cycle re-evaluates it.
     console.warn(`${LOG} deferring ${subId} (sweep transient) — will retry next cycle`);
+  }
+}
+
+async function processExpiredFlashReservation(
+  adapter: import('./protocol/flash/flash-adapter').FlashAdapter,
+  row: ProtocolSubaccount,
+): Promise<void> {
+  const subId = row.protocolSubaccountId;
+  const agentPub = row.agentPublicKey;
+  const claimToken = row.claimToken;
+  if (!subId || !agentPub || !claimToken) {
+    console.warn(`${LOG} malformed Flash reservation id=${row.id} — leaving fail-closed for operator review`);
+    return;
+  }
+  const quarantine = async (reason: string) => {
+    await storage.markSubaccountStuckFunds({
+      walletAddress: row.walletAddress,
+      protocol: row.protocol,
+      protocolSubaccountId: subId,
+      botId: null,
+      agentPublicKey: agentPub,
+      lastError: reason,
+      claimToken,
+    });
+  };
+
+  const wallet = await storage.getWallet(row.walletAddress);
+  if (!wallet || wallet.agentPublicKey !== agentPub) {
+    await quarantine('lease-recovery: Flash reservation belongs to a retired agent generation');
+    return;
+  }
+  if (await reconcileLinkedReservation(row) === 'handled') return;
+
+  let beforeUsdc: number;
+  let beforeSol: number;
+  try {
+    [beforeUsdc, beforeSol] = await Promise.all([
+      adapter.getWalletCollateralBalanceStrict(subId),
+      adapter.getWalletSolBalance(subId),
+    ]);
+  } catch (err: any) {
+    console.warn(`${LOG} Flash reservation ${subId} unreadable — deferring: ${err?.message || err}`);
+    return;
+  }
+  if (
+    !Number.isFinite(beforeUsdc) || beforeUsdc < 0 ||
+    !Number.isFinite(beforeSol) || beforeSol < 0
+  ) {
+    console.warn(`${LOG} Flash reservation ${subId} returned malformed balances — deferring`);
+    return;
+  }
+  if (beforeUsdc === 0 && beforeSol <= 0.001) {
+    await storage.deleteReservedSubaccount({ protocol: row.protocol, protocolSubaccountId: subId, claimToken });
+    return;
+  }
+
+  if (!row.subaccountKeyEncryptedV3 || row.aadVersion == null) {
+    await quarantine('lease-recovery: funded Flash reservation has no retained key');
+    return;
+  }
+  const umkRes = await getUmkForWebhook(row.walletAddress);
+  if (!umkRes) {
+    console.warn(`${LOG} no UMK available for Flash reservation ${subId} — deferring`);
+    return;
+  }
+  try {
+    const subKey = decryptRetainedSubaccountKeyV3({
+      umk: umkRes.umk,
+      encryptedV3: row.subaccountKeyEncryptedV3,
+      aadVersion: row.aadVersion,
+      protocol: row.protocol,
+      walletAddress: row.walletAddress,
+      protocolSubaccountId: subId,
+      legacyBotId: row.botId,
+    });
+    if (!subKey) {
+      await quarantine('lease-recovery: Flash retained key decrypt/verify failed');
+      return;
+    }
+    try {
+      const swept = await adapter.sweepBotWallet({
+        subSecretKey: subKey.secretKey,
+        destWalletAddress: agentPub,
+      });
+      if (swept.error) {
+        await quarantine('lease-recovery: Flash sweep failed');
+        return;
+      }
+    } finally {
+      subKey.cleanup();
+    }
+  } catch (err: any) {
+    console.error(`${LOG} Flash reservation sweep threw for ${subId}: ${err?.message || err}`);
+    await quarantine('lease-recovery: Flash sweep threw');
+    return;
+  } finally {
+    try { umkRes.cleanup(); } catch { /* noop */ }
+  }
+
+  try {
+    const [afterUsdc, afterSol] = await Promise.all([
+      adapter.getWalletCollateralBalanceStrict(subId),
+      adapter.getWalletSolBalance(subId),
+    ]);
+    if (
+      !Number.isFinite(afterUsdc) || afterUsdc < 0 ||
+      !Number.isFinite(afterSol) || afterSol < 0
+    ) {
+      console.warn(`${LOG} Flash post-sweep balances malformed for ${subId} — deferring`);
+      return;
+    }
+    if (afterUsdc === 0 && afterSol <= 0.001) {
+      await storage.deleteReservedSubaccount({ protocol: row.protocol, protocolSubaccountId: subId, claimToken });
+      return;
+    }
+    await quarantine('lease-recovery: Flash residual remained after sweep');
+  } catch (err: any) {
+    console.warn(`${LOG} Flash post-sweep verification unreadable for ${subId} — deferring: ${err?.message || err}`);
   }
 }
 
@@ -254,6 +481,13 @@ export async function runLeaseRecoveryOnce(): Promise<void> {
         adapter = getAdapter(row.protocol);
       } catch {
         console.warn(`${LOG} no adapter registered for protocol "${row.protocol}" (reservation ${row.protocolSubaccountId}) — skipping`);
+        continue;
+      }
+      if (adapter.protocolName === 'flash') {
+        await processExpiredFlashReservation(
+          adapter as import('./protocol/flash/flash-adapter').FlashAdapter,
+          row,
+        );
         continue;
       }
       // Recycling only applies to adapters that implement the full lifecycle. If

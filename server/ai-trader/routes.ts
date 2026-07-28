@@ -1173,6 +1173,7 @@ export function registerAiTraderRoutes(app: Express): void {
   app.post("/api/ai-trader/:id/go-live", requireWallet, async (req: any, res) => {
     let umkHandle: { umk: Buffer; cleanup: () => void } | null = null;
     let agentKey: { secretKey: Uint8Array; cleanup: () => void } | null = null;
+    let agentKeypair: ReturnType<typeof resolveAgentKeypair> | null = null;
     let mnemonic: Buffer | null = null;
     let inFlightClaimedBotId: string | null = null;
     try {
@@ -1229,20 +1230,49 @@ export function registerAiTraderRoutes(app: Express): void {
       if (!agentKey) {
         return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
       }
-      const agentKeypair = resolveAgentKeypair(agentKey.secretKey);
+      agentKeypair = resolveAgentKeypair(agentKey.secretKey);
 
       const alreadyProvisioned = !!(bot.protocolSubaccountId && bot.botSubaccountKeyEncryptedV3);
       let subaccountId: string;
       let fundingDetail: string;
+      let freshReservation: { protocol: string; protocolSubaccountId: string; claimToken: string } | null = null;
 
       if (alreadyProvisioned) {
         // ---- Idempotent retry: provisioned earlier, funding didn't complete ----
         subaccountId = bot.protocolSubaccountId!;
+        const registryRows = await storage.getProtocolSubaccountsByWallet(req.walletAddress!);
+        const unresolvedReservation = registryRows.find((row) =>
+          row.protocol === bot.protocol &&
+          row.protocolSubaccountId === subaccountId &&
+          (row.status === "reserving" || row.status === "stuck_funds")
+        );
+        if (unresolvedReservation) {
+          const resumableSameGeneration =
+            unresolvedReservation.status === "reserving" &&
+            !!unresolvedReservation.claimToken &&
+            unresolvedReservation.agentPublicKey === agentPublicKey;
+          if (!resumableSameGeneration) {
+            return res.status(409).json({
+              error: "This live-account provisioning attempt is still being reconciled. The bot remains in paper mode; wait for recovery or contact support before retrying.",
+            });
+          }
+          // Crash-resume: the AI row already has its bot-UUID key while the exact
+          // write-ahead lease still blocks Reset. Reuse that lease through the
+          // normal strict balance/funding checks and atomic finalizer below.
+          freshReservation = {
+            protocol: unresolvedReservation.protocol,
+            protocolSubaccountId: subaccountId,
+            claimToken: unresolvedReservation.claimToken!,
+          };
+        }
         // getAccountInfo throws on any non-404 error → caught below → 500, stays
         // paper. It NEVER silently reads 0 on an unreadable venue, so this branch
         // cannot double-fund a funded subaccount.
         const info = await adapter.getAccountInfo(subaccountId);
-        const equity = info?.equity ?? info?.balance ?? 0;
+        const equity = info?.equity ?? info?.balance;
+        if (typeof equity !== "number" || !Number.isFinite(equity) || equity < 0) {
+          throw new Error("venue returned an unreadable live-account balance");
+        }
         // "Already funded" means the PREVIOUS attempt's transfer landed — that
         // transfer is atomic (full allocatedUsdc or nothing), so genuine success
         // leaves ~the full allocation. Gating on the venue minimum alone would
@@ -1266,7 +1296,10 @@ export function registerAiTraderRoutes(app: Express): void {
           }
           // Verify the transfer landed (fail closed: read failure = not live).
           const after = await adapter.getAccountInfo(subaccountId);
-          const afterEquity = after?.equity ?? after?.balance ?? 0;
+          const afterEquity = after?.equity ?? after?.balance;
+          if (typeof afterEquity !== "number" || !Number.isFinite(afterEquity) || afterEquity < 0) {
+            return res.status(502).json({ error: "Funding transfer sent but the subaccount balance could not be verified. The bot stays in paper mode — retry go-live." });
+          }
           if (afterEquity < adapter.minTransferAmount) {
             return res.status(502).json({ error: "Funding transfer sent but the subaccount balance could not be verified. The bot stays in paper mode — retry go-live." });
           }
@@ -1320,9 +1353,15 @@ export function registerAiTraderRoutes(app: Express): void {
           agentMnemonic: mnemonic,
           adapter,
           fundingAmount,
+          umk: umkBuf,
         });
         mnemonic = null; // consumed (zeroized) by the helper
         subaccountId = provision.botSubaccountPublicKey;
+        freshReservation = {
+          protocol: adapter.protocolName,
+          protocolSubaccountId: subaccountId,
+          claimToken: provision.reservationClaimToken,
+        };
 
         // Encrypt + persist the sub key BEFORE any flip, with paperMode STILL true.
         // On persist failure: sweep the funded subaccount back with the in-memory
@@ -1332,7 +1371,13 @@ export function registerAiTraderRoutes(app: Express): void {
           let persisted: AiTraderBot | undefined;
           let persistError: unknown = null;
           try {
-            const keyV3 = encryptBotSubaccountKeyV3(umkBuf, Buffer.from(pendingKey), req.walletAddress!, bot.id);
+            const botPlaintext = Buffer.from(pendingKey);
+            let keyV3: string;
+            try {
+              keyV3 = encryptBotSubaccountKeyV3(umkBuf, botPlaintext, req.walletAddress!, bot.id);
+            } finally {
+              botPlaintext.fill(0);
+            }
             persisted = await storage.updateAiTraderBot(bot.id, {
               protocolSubaccountId: subaccountId,
               botSubaccountKeyEncryptedV3: keyV3,
@@ -1344,15 +1389,40 @@ export function registerAiTraderRoutes(app: Express): void {
           }
           if (!persisted || persistError) {
             console.error(`[AiTrader] go-live key-persist FAILED for bot ${bot.id} — sweeping subaccount ${subaccountId} back to agent:`, persistError);
+            let currentDestination: string | null = null;
+            try {
+              const currentWallet = await storage.getWallet(req.walletAddress!);
+              if (currentWallet?.agentPublicKey === agentPublicKey) currentDestination = agentPublicKey;
+            } catch { /* unreadable current generation => no sweep */ }
             const sweep = await sweepProvisionedExternalKeyFunds({
               adapter,
               subSecretKey: pendingKey,
               subaccountPublicKey: subaccountId,
-              agentPublicKey,
+              agentPublicKey: currentDestination,
               logPrefix: "[AiTrader:GoLive]",
             });
             if (!sweep.swept) {
+              if (freshReservation) {
+                await storage.markSubaccountStuckFunds({
+                  walletAddress: req.walletAddress!,
+                  protocol: freshReservation.protocol,
+                  protocolSubaccountId: freshReservation.protocolSubaccountId,
+                  botId: null,
+                  agentPublicKey,
+                  lastError: currentDestination
+                    ? 'AI go-live key persistence failed; recovery sweep not confirmed'
+                    : 'AI go-live key persistence failed after agent generation changed; sweep suppressed',
+                  claimToken: freshReservation.claimToken,
+                }).catch(() => false);
+              }
               console.error(`[AiTrader] go-live rollback sweep INCOMPLETE for bot ${bot.id}: ${sweep.detail} — funds remain on subaccount ${subaccountId}, recoverable via the agent main key`);
+            } else if (freshReservation) {
+              const settled = freshReservation.protocol === 'flash'
+                ? await storage.deleteReservedSubaccount(freshReservation).catch(() => false)
+                : await storage.releaseReservationToSpare(freshReservation).catch(() => false);
+              if (!settled) {
+                console.error(`[AiTrader] go-live rollback confirmed empty but reservation settlement CAS was lost for ${subaccountId}`);
+              }
             }
             return res.status(500).json({
               error: sweep.swept
@@ -1377,11 +1447,22 @@ export function registerAiTraderRoutes(app: Express): void {
 
       // Everything verified — flip live. Single final write; every earlier failure
       // path returns with paperMode still true.
-      const updated = await storage.updateAiTraderBot(bot.id, {
-        paperMode: false,
-        status: "idle",
-        pauseReason: null,
-      });
+      const updated = freshReservation
+        ? await storage.finalizeAiTraderGoLiveReservation({
+            botId: bot.id,
+            walletAddress: req.walletAddress!,
+            ...freshReservation,
+          })
+        : await storage.updateAiTraderBot(bot.id, {
+            paperMode: false,
+            status: "idle",
+            pauseReason: null,
+          });
+      if (!updated) {
+        return res.status(500).json({
+          error: "The bot key and funding were secured, but go-live reconciliation did not finish. The bot stays in paper mode; contact support before retrying.",
+        });
+      }
       // A live Auto bot re-enters the hands-off cadence immediately.
       if (updated) armAutoNextIfEligible(updated);
       console.log(`[AiTrader] Bot ${bot.id} (${bot.market}) is LIVE on ${adapter.protocolName} — subaccount=${subaccountId} ${fundingDetail}`);
@@ -1391,6 +1472,7 @@ export function registerAiTraderRoutes(app: Express): void {
       res.status(500).json({ error: `Go-live failed: ${err?.message || "internal error"}. The bot stays in paper mode.` });
     } finally {
       try { mnemonic?.fill(0); } catch { /* noop */ }
+      try { agentKeypair?.secretKey.fill(0); } catch { /* noop */ }
       agentKey?.cleanup();
       umkHandle?.cleanup();
       if (inFlightClaimedBotId) goLiveInFlight.delete(inFlightClaimedBotId);

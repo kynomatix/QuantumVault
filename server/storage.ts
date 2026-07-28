@@ -4,7 +4,11 @@ import { vaultLockKey as computeVaultLockKey } from "./vault/scope";
 import { db } from "./db";
 import Decimal from "decimal.js";
 import { sumNetDepositedFromEvents, VAULT_INTERNAL_EVENT_TYPES } from "./equity-events-util";
-import { assessResetBlockerRows, type ResetBlockerAssessment } from "./vault/reset-blocker-policy";
+import {
+  assessResetBlockerRows,
+  type ResetBlockerAssessment,
+  type ResetBlockerReason,
+} from "./vault/reset-blocker-policy";
 import {
   users,
   wallets,
@@ -143,6 +147,20 @@ export type ClaimedSpare = {
   derivationPathVersion: number | null;
 };
 
+export type ClaimSpareOutcome =
+  | { outcome: "claimed"; spare: ClaimedSpare }
+  | { outcome: "none" }
+  | { outcome: "stale_generation" };
+
+export type PrepareExternalSubaccountOutcome =
+  | { outcome: "prepared" }
+  | { outcome: "stale_generation" }
+  | { outcome: "conflict" };
+
+export type CreateAgentAuthorityBotOutcome =
+  | { outcome: "created"; bot: TradingBot }
+  | { outcome: "stale_generation" };
+
 /** Input for storage.recordError — the central admin error-log upsert (see error_log table). */
 export type ErrorLogInput = {
   fingerprint: string;
@@ -206,7 +224,7 @@ export interface AgentWalletResetReplacement {
 export type AgentWalletResetFinalizeOutcome =
   | { outcome: "committed"; clearedBotCount: number }
   | { outcome: "busy" }
-  | { outcome: "blocked"; reason: "active_vault_state" | "vault_state_unreadable" }
+  | { outcome: "blocked"; reason: ResetBlockerReason }
   | { outcome: "lost_race"; keyChanged: boolean };
 
 export interface IStorage {
@@ -262,6 +280,7 @@ export interface IStorage {
   getNextSubaccountId(walletAddress: string): Promise<number>;
   getAllocatedSubaccountIds(walletAddress: string): Promise<number[]>;
   getAllocatedProtocolSubaccountIds(walletAddress: string, protocol?: string): Promise<string[]>;
+  /** @deprecated Direct linkage bypasses the reset/provisioning write-ahead contract. No production caller is permitted. */
   assignProtocolSubaccountId(botId: string, protocolSubaccountId: string, protocol: string): Promise<void>;
   clearProtocolSubaccount(botId: string): Promise<void>;
   findBotByProtocolSubaccount(walletAddress: string, protocolSubaccountId: string, protocol?: string): Promise<TradingBot | undefined>;
@@ -286,6 +305,8 @@ export interface IStorage {
     botId: string | null;
     agentPublicKey: string | null;
     lastError: string;
+    derivationIndex?: number | null;
+    derivationPathVersion?: number | null;
     // §5.1.4: when set, the quarantine is CAS-guarded on (status='reserving' AND
     // claim_token) so a stale lease holder cannot clobber a reclaimed/finalized row.
     // Returns false when the CAS is lost (lease no longer ours). Omit for paths that
@@ -302,28 +323,53 @@ export interface IStorage {
     protocol: string;
     agentPublicKey: string;
     claimToken: string;
-  }): Promise<ClaimedSpare | undefined>;
-  // §5.1. Finalize a reservation: reserving→active, attach the new bot, clear the
-  // token. CAS-guarded on (status='reserving' AND claim_token) so a lost race (token
-  // mismatch / already recovered) returns false instead of clobbering another owner.
+  }): Promise<ClaimSpareOutcome>;
+  prepareExternalSubaccountReservation(params: {
+    walletAddress: string;
+    protocol: string;
+    protocolSubaccountId: string;
+    observedAgentPublicKey: string;
+    claimToken: string;
+    subaccountKeyEncryptedV3: string;
+    aadVersion: number;
+    derivationIndex: number | null;
+    derivationPathVersion: number | null;
+  }): Promise<PrepareExternalSubaccountOutcome>;
+  // §5.1. Atomically finalize the bot's terminal status and its reservation:
+  // reserving→active, attach the bot, clear the token. CAS-guarded on the exact
+  // lease. An already-active assignment to the same bot is idempotent; every
+  // other lost race returns false instead of clobbering another owner.
   finalizeReusedSubaccount(params: {
     protocol: string;
     protocolSubaccountId: string;
     claimToken: string;
     botId: string;
+    terminalSubaccountStatus: "active" | "error";
   }): Promise<boolean>;
   // §5.1.4. Return a still-reserving slot to the spare pool (verified empty). CAS on
-  // status='reserving' (+ optional token). Refreshes released_at/last_verified_empty_at.
+  // the exact status='reserving' + claim token lease. Refreshes
+  // released_at/last_verified_empty_at.
   releaseReservationToSpare(params: {
     protocol: string;
     protocolSubaccountId: string;
-    claimToken?: string;
+    claimToken: string;
+  }): Promise<boolean>;
+  deleteReservedSubaccount(params: {
+    protocol: string;
+    protocolSubaccountId: string;
+    claimToken: string;
   }): Promise<boolean>;
   // §5.1.4. Reservations whose lease (claimed_at) is older than ttlMs — recovery input.
   findExpiredReservations(ttlMs: number): Promise<ProtocolSubaccount[]>;
   // §8. Record a successful verify-empty check (advisory freshness for the next reuse).
   markSubaccountVerifiedEmpty(protocol: string, protocolSubaccountId: string): Promise<void>;
+  getProtocolSubaccountsByWallet(walletAddress: string): Promise<ProtocolSubaccount[]>;
   createTradingBot(bot: InsertTradingBot): Promise<TradingBot>;
+  createAgentAuthorityTradingBot(params: {
+    walletAddress: string;
+    observedAgentPublicKey: string;
+    bot: InsertTradingBot;
+  }): Promise<CreateAgentAuthorityBotOutcome>;
   // Phase 4b (Flash agent-HD wallets): atomically allocate the next monotonic HD
   // index for a wallet's per-bot wallets. Burn-on-allocate (never decremented or
   // reused, even if bot creation later fails) so an index always maps to one wallet.
@@ -682,6 +728,13 @@ export interface IStorage {
   getAiTraderBot(id: string): Promise<AiTraderBot | undefined>;
   getAiTraderBotsByWallet(walletAddress: string): Promise<AiTraderBot[]>;
   getActiveAiTraderBots(): Promise<AiTraderBot[]>;
+  finalizeAiTraderGoLiveReservation(params: {
+    botId: string;
+    walletAddress: string;
+    protocol: string;
+    protocolSubaccountId: string;
+    claimToken: string;
+  }): Promise<AiTraderBot | undefined>;
   // graduatedAt/trialStartedAt are omitted from InsertAiTraderBot (never
   // client-set at creation); graduatedAt is written by the monitor's
   // graduation path, trialStartedAt by WO-7's restart-trial route (the only
@@ -975,6 +1028,7 @@ export class DatabaseStorage implements IStorage {
       if (lockRows?.[0]?.acquired !== true) return { outcome: "busy" };
 
       let assessment: ResetBlockerAssessment;
+      await tx.execute(sql`SAVEPOINT reset_blocker_reads`);
       try {
         const classicPositions = await tx.select().from(borrowPositions).where(and(
           eq(borrowPositions.walletAddress, p.walletAddress),
@@ -987,8 +1041,43 @@ export class DatabaseStorage implements IStorage {
         const operations = await tx.select().from(borrowOperations).where(
           eq(borrowOperations.walletAddress, p.walletAddress),
         );
-        assessment = assessResetBlockerRows(classicPositions, loopPositions, operations);
-      } catch {
+        const resetTradingBots = await tx.select({
+          driftSubaccountId: tradingBots.driftSubaccountId,
+          protocolSubaccountId: tradingBots.protocolSubaccountId,
+        }).from(tradingBots).where(eq(tradingBots.walletAddress, p.walletAddress));
+        const resetAiTraderBots = await tx.select({
+          protocolSubaccountId: aiTraderBots.protocolSubaccountId,
+        }).from(aiTraderBots).where(eq(aiTraderBots.walletAddress, p.walletAddress));
+        const resetProtocolSubaccounts = await tx.select({
+          protocolSubaccountId: protocolSubaccounts.protocolSubaccountId,
+          agentPublicKey: protocolSubaccounts.agentPublicKey,
+          status: protocolSubaccounts.status,
+          subaccountKeyEncryptedV3: protocolSubaccounts.subaccountKeyEncryptedV3,
+          lastVerifiedEmptyAt: protocolSubaccounts.lastVerifiedEmptyAt,
+        }).from(protocolSubaccounts).where(eq(protocolSubaccounts.walletAddress, p.walletAddress));
+        const resetOrphans = await tx.select({
+          agentPublicKey: orphanedSubaccounts.agentPublicKey,
+        }).from(orphanedSubaccounts).where(eq(orphanedSubaccounts.walletAddress, p.walletAddress));
+        assessment = assessResetBlockerRows({
+          classicPositions,
+          loopPositions,
+          operations,
+          tradingBots: resetTradingBots,
+          aiTraderBots: resetAiTraderBots,
+          protocolSubaccounts: resetProtocolSubaccounts,
+          orphanedSubaccounts: resetOrphans,
+          observedAgentPublicKey: p.observedAgentPublicKey,
+        });
+        await tx.execute(sql`RELEASE SAVEPOINT reset_blocker_reads`);
+      } catch (readError) {
+        try {
+          await tx.execute(sql`ROLLBACK TO SAVEPOINT reset_blocker_reads`);
+          await tx.execute(sql`RELEASE SAVEPOINT reset_blocker_reads`);
+        } catch {
+          // A lost/aborted connection cannot provide a trustworthy transaction
+          // outcome; let the route report commit ambiguity instead.
+          throw readError;
+        }
         return { outcome: "blocked", reason: "vault_state_unreadable" };
       }
       if (assessment.blocked) return { outcome: "blocked", reason: assessment.reason };
@@ -1024,8 +1113,22 @@ export class DatabaseStorage implements IStorage {
         .where(and(
           eq(tradingBots.walletAddress, p.walletAddress),
           isNotNull(tradingBots.driftSubaccountId),
+          or(
+            eq(tradingBots.subaccountAuthMode, "main_plus_id"),
+            isNull(tradingBots.subaccountAuthMode),
+          ),
         ))
         .returning({ id: tradingBots.id });
+
+      // Safe, verified-empty Pacifica pool rows belong to the retired agent
+      // generation and must never be reused after the wallet key changes.
+      await tx.delete(protocolSubaccounts).where(and(
+        eq(protocolSubaccounts.walletAddress, p.walletAddress),
+        eq(protocolSubaccounts.agentPublicKey, p.observedAgentPublicKey),
+        eq(protocolSubaccounts.status, "spare"),
+        isNotNull(protocolSubaccounts.subaccountKeyEncryptedV3),
+        isNotNull(protocolSubaccounts.lastVerifiedEmptyAt),
+      ));
 
       return { outcome: "committed", clearedBotCount: cleared.length };
     });
@@ -1190,6 +1293,8 @@ export class DatabaseStorage implements IStorage {
   }
 
   async assignProtocolSubaccountId(botId: string, protocolSubaccountId: string, protocol: string): Promise<void> {
+    // Deprecated compatibility seam only. New production flows must use the
+    // coordinated reservation lifecycle before creating durable linkage.
     await db.update(tradingBots)
       .set({
         protocolSubaccountId,
@@ -1371,12 +1476,60 @@ export class DatabaseStorage implements IStorage {
     return true;
   }
 
+  async prepareExternalSubaccountReservation(params: {
+    walletAddress: string;
+    protocol: string;
+    protocolSubaccountId: string;
+    observedAgentPublicKey: string;
+    claimToken: string;
+    subaccountKeyEncryptedV3: string;
+    aadVersion: number;
+    derivationIndex: number | null;
+    derivationPathVersion: number | null;
+  }): Promise<PrepareExternalSubaccountOutcome> {
+    return db.transaction(async (tx) => {
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(
+          ${AGENT_WALLET_RESET_LOCK_NAMESPACE},
+          hashtext(${params.walletAddress})
+        )
+      `);
+      const [wallet] = await tx.select({ agentPublicKey: wallets.agentPublicKey })
+        .from(wallets)
+        .where(eq(wallets.address, params.walletAddress))
+        .limit(1);
+      if (!wallet || wallet.agentPublicKey !== params.observedAgentPublicKey) {
+        return { outcome: "stale_generation" } as const;
+      }
+      const inserted = await tx.insert(protocolSubaccounts).values({
+        walletAddress: params.walletAddress,
+        botId: null,
+        protocol: params.protocol,
+        protocolSubaccountId: params.protocolSubaccountId,
+        status: "reserving",
+        agentPublicKey: params.observedAgentPublicKey,
+        subaccountKeyEncryptedV3: params.subaccountKeyEncryptedV3,
+        aadVersion: params.aadVersion,
+        claimToken: params.claimToken,
+        claimedAt: sql`NOW()`,
+        derivationIndex: params.derivationIndex,
+        derivationPathVersion: params.derivationPathVersion,
+        lastError: null,
+      } as any).onConflictDoNothing({
+        target: [protocolSubaccounts.protocol, protocolSubaccounts.protocolSubaccountId],
+      }).returning({ id: protocolSubaccounts.id });
+      return inserted.length === 1
+        ? { outcome: "prepared" } as const
+        : { outcome: "conflict" } as const;
+    });
+  }
+
   async claimSpareSubaccount(params: {
     walletAddress: string;
     protocol: string;
     agentPublicKey: string;
     claimToken: string;
-  }): Promise<ClaimedSpare | undefined> {
+  }): Promise<ClaimSpareOutcome> {
     // Single atomic statement: lock the oldest eligible spare with SKIP LOCKED so
     // concurrent creates fan out across distinct rows (never the same one), then
     // flip it to 'reserving' under our claim token. Only rows that still have a
@@ -1388,49 +1541,68 @@ export class DatabaseStorage implements IStorage {
     // the trading_bots (wallet_address, derivation_index) UNIQUE. So skip any HD spare
     // whose index is still held by a live trading_bots row; once the delete lands it
     // becomes claimable. Legacy random spares (derivation_index IS NULL) are unaffected.
-    const result = await db.execute(sql`
-      UPDATE protocol_subaccounts
-      SET status = 'reserving', claim_token = ${params.claimToken}, claimed_at = NOW()
-      WHERE id = (
-        SELECT ps.id FROM protocol_subaccounts ps
-        WHERE ps.wallet_address = ${params.walletAddress}
-          AND ps.protocol = ${params.protocol}
-          AND ps.agent_public_key = ${params.agentPublicKey}
-          AND ps.status = 'spare'
-          AND ps.protocol_subaccount_id IS NOT NULL
-          AND ps.subaccount_key_encrypted_v3 IS NOT NULL
-          AND (
-            ps.derivation_index IS NULL
-            OR NOT EXISTS (
-              SELECT 1 FROM trading_bots tb
-              WHERE tb.wallet_address = ps.wallet_address
-                AND tb.derivation_index = ps.derivation_index
+    return db.transaction(async (tx) => {
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(
+          ${AGENT_WALLET_RESET_LOCK_NAMESPACE},
+          hashtext(${params.walletAddress})
+        )
+      `);
+      const [wallet] = await tx.select({ agentPublicKey: wallets.agentPublicKey })
+        .from(wallets)
+        .where(eq(wallets.address, params.walletAddress))
+        .limit(1);
+      if (!wallet || wallet.agentPublicKey !== params.agentPublicKey) {
+        return { outcome: "stale_generation" } as const;
+      }
+      const result = await tx.execute(sql`
+        UPDATE protocol_subaccounts
+        SET status = 'reserving', claim_token = ${params.claimToken}, claimed_at = NOW()
+        WHERE id = (
+          SELECT ps.id FROM protocol_subaccounts ps
+          WHERE ps.wallet_address = ${params.walletAddress}
+            AND ps.protocol = ${params.protocol}
+            AND ps.agent_public_key = ${params.agentPublicKey}
+            AND ps.status = 'spare'
+            AND ps.protocol_subaccount_id IS NOT NULL
+            AND ps.subaccount_key_encrypted_v3 IS NOT NULL
+            AND ps.last_verified_empty_at IS NOT NULL
+            AND (
+              ps.derivation_index IS NULL
+              OR NOT EXISTS (
+                SELECT 1 FROM trading_bots tb
+                WHERE tb.wallet_address = ps.wallet_address
+                  AND tb.derivation_index = ps.derivation_index
+              )
             )
-          )
-        ORDER BY ps.released_at ASC NULLS FIRST
-        FOR UPDATE SKIP LOCKED
-        LIMIT 1
-      )
-      RETURNING id, wallet_address, protocol, protocol_subaccount_id, agent_public_key,
-                subaccount_key_encrypted_v3, aad_version, bot_id, claim_token, status,
-                derivation_index, derivation_path_version
-    `);
-    const row: any = (result as any).rows?.[0] ?? (result as any)[0];
-    if (!row) return undefined;
-    return {
-      id: Number(row.id),
-      walletAddress: row.wallet_address,
-      protocol: row.protocol,
-      protocolSubaccountId: row.protocol_subaccount_id,
-      agentPublicKey: row.agent_public_key,
-      subaccountKeyEncryptedV3: row.subaccount_key_encrypted_v3,
-      aadVersion: row.aad_version == null ? null : Number(row.aad_version),
-      botId: row.bot_id,
-      claimToken: row.claim_token,
-      status: row.status,
-      derivationIndex: row.derivation_index == null ? null : Number(row.derivation_index),
-      derivationPathVersion: row.derivation_path_version == null ? null : Number(row.derivation_path_version),
-    };
+          ORDER BY ps.released_at ASC NULLS FIRST
+          FOR UPDATE SKIP LOCKED
+          LIMIT 1
+        )
+        RETURNING id, wallet_address, protocol, protocol_subaccount_id, agent_public_key,
+                  subaccount_key_encrypted_v3, aad_version, bot_id, claim_token, status,
+                  derivation_index, derivation_path_version
+      `);
+      const row: any = (result as any).rows?.[0] ?? (result as any)[0];
+      if (!row) return { outcome: "none" } as const;
+      return {
+        outcome: "claimed",
+        spare: {
+          id: Number(row.id),
+          walletAddress: row.wallet_address,
+          protocol: row.protocol,
+          protocolSubaccountId: row.protocol_subaccount_id,
+          agentPublicKey: row.agent_public_key,
+          subaccountKeyEncryptedV3: row.subaccount_key_encrypted_v3,
+          aadVersion: row.aad_version == null ? null : Number(row.aad_version),
+          botId: row.bot_id,
+          claimToken: row.claim_token,
+          status: row.status,
+          derivationIndex: row.derivation_index == null ? null : Number(row.derivation_index),
+          derivationPathVersion: row.derivation_path_version == null ? null : Number(row.derivation_path_version),
+        },
+      } as const;
+    });
   }
 
   async finalizeReusedSubaccount(params: {
@@ -1438,37 +1610,79 @@ export class DatabaseStorage implements IStorage {
     protocolSubaccountId: string;
     claimToken: string;
     botId: string;
+    terminalSubaccountStatus: "active" | "error";
   }): Promise<boolean> {
-    const result = await db.update(protocolSubaccounts)
-      .set({
-        status: 'active',
-        botId: params.botId,
-        claimToken: null,
-        claimedAt: null,
-        confirmedAt: sql`NOW()`,
-        lastError: null,
-      } as any)
-      .where(and(
-        eq(protocolSubaccounts.protocol, params.protocol),
-        eq(protocolSubaccounts.protocolSubaccountId, params.protocolSubaccountId),
-        eq(protocolSubaccounts.status, 'reserving'),
-        eq(protocolSubaccounts.claimToken, params.claimToken),
-      ))
-      .returning({ id: protocolSubaccounts.id });
-    return result.length > 0;
+    return db.transaction(async (tx) => {
+      const result = await tx.update(protocolSubaccounts)
+        .set({
+          status: 'active',
+          botId: params.botId,
+          claimToken: null,
+          claimedAt: null,
+          confirmedAt: sql`NOW()`,
+          lastError: null,
+        } as any)
+        .where(and(
+          eq(protocolSubaccounts.protocol, params.protocol),
+          eq(protocolSubaccounts.protocolSubaccountId, params.protocolSubaccountId),
+          eq(protocolSubaccounts.status, 'reserving'),
+          eq(protocolSubaccounts.claimToken, params.claimToken),
+        ))
+        .returning({ id: protocolSubaccounts.id });
+
+      if (result.length === 0) {
+        // A lease-recovery worker may have completed this exact assignment.
+        // Adopt only the identical terminal owner; every other state conflicts.
+        const alreadyFinalized = await tx.select({ id: protocolSubaccounts.id })
+          .from(protocolSubaccounts)
+          .where(and(
+            eq(protocolSubaccounts.protocol, params.protocol),
+            eq(protocolSubaccounts.protocolSubaccountId, params.protocolSubaccountId),
+            eq(protocolSubaccounts.status, 'active'),
+            eq(protocolSubaccounts.botId, params.botId),
+          ))
+          .limit(1);
+        if (alreadyFinalized.length !== 1) return false;
+      }
+
+      // The owner row and registry marker become visible together. Exact bot
+      // linkage + V3 key are required, so a marker cannot bless a missing,
+      // sibling, or keyless owner. Throwing rolls the marker transition back.
+      const finalizedBot = await tx.update(tradingBots)
+        .set({
+          // A stale recovery worker may have read `pending` before the creator
+          // atomically finalized `active`. Its conservative `error` verdict
+          // must never downgrade that already-executable same-owner outcome.
+          subaccountStatus: params.terminalSubaccountStatus === 'active'
+            ? 'active'
+            : sql`CASE WHEN ${tradingBots.subaccountStatus} = 'active' THEN 'active' ELSE 'error' END`,
+          updatedAt: sql`NOW()`,
+        } as any)
+        .where(and(
+          eq(tradingBots.id, params.botId),
+          eq(tradingBots.protocolSubaccountId, params.protocolSubaccountId),
+          eq(tradingBots.subaccountAuthMode, 'external_key'),
+          isNotNull(tradingBots.botSubaccountKeyEncryptedV3),
+        ))
+        .returning({ id: tradingBots.id });
+      if (finalizedBot.length !== 1) {
+        throw new Error('reservation owner was not durably linked and keyed for finalization');
+      }
+      return true;
+    });
   }
 
   async releaseReservationToSpare(params: {
     protocol: string;
     protocolSubaccountId: string;
-    claimToken?: string;
+    claimToken: string;
   }): Promise<boolean> {
     const conditions = [
       eq(protocolSubaccounts.protocol, params.protocol),
       eq(protocolSubaccounts.protocolSubaccountId, params.protocolSubaccountId),
       eq(protocolSubaccounts.status, 'reserving'),
+      eq(protocolSubaccounts.claimToken, params.claimToken),
     ];
-    if (params.claimToken) conditions.push(eq(protocolSubaccounts.claimToken, params.claimToken));
     const result = await db.update(protocolSubaccounts)
       .set({
         status: 'spare',
@@ -1484,6 +1698,20 @@ export class DatabaseStorage implements IStorage {
     return result.length > 0;
   }
 
+  async deleteReservedSubaccount(params: {
+    protocol: string;
+    protocolSubaccountId: string;
+    claimToken: string;
+  }): Promise<boolean> {
+    const result = await db.delete(protocolSubaccounts).where(and(
+      eq(protocolSubaccounts.protocol, params.protocol),
+      eq(protocolSubaccounts.protocolSubaccountId, params.protocolSubaccountId),
+      eq(protocolSubaccounts.status, "reserving"),
+      eq(protocolSubaccounts.claimToken, params.claimToken),
+    )).returning({ id: protocolSubaccounts.id });
+    return result.length > 0;
+  }
+
   async findExpiredReservations(ttlMs: number): Promise<ProtocolSubaccount[]> {
     const cutoffEpochSec = Math.floor((Date.now() - ttlMs) / 1000);
     return await db.select()
@@ -1493,6 +1721,10 @@ export class DatabaseStorage implements IStorage {
         sql`${protocolSubaccounts.claimedAt} IS NOT NULL`,
         sql`${protocolSubaccounts.claimedAt} < to_timestamp(${cutoffEpochSec})`,
       ));
+  }
+
+  async getProtocolSubaccountsByWallet(walletAddress: string): Promise<ProtocolSubaccount[]> {
+    return db.select().from(protocolSubaccounts).where(eq(protocolSubaccounts.walletAddress, walletAddress));
   }
 
   async markSubaccountVerifiedEmpty(protocol: string, protocolSubaccountId: string): Promise<void> {
@@ -1507,6 +1739,33 @@ export class DatabaseStorage implements IStorage {
   async createTradingBot(bot: InsertTradingBot): Promise<TradingBot> {
     const result = await db.insert(tradingBots).values(bot as any).returning();
     return result[0];
+  }
+
+  async createAgentAuthorityTradingBot(params: {
+    walletAddress: string;
+    observedAgentPublicKey: string;
+    bot: InsertTradingBot;
+  }): Promise<CreateAgentAuthorityBotOutcome> {
+    if ((params.bot as { walletAddress?: unknown }).walletAddress !== params.walletAddress) {
+      throw new Error("agent-authority bot wallet identity mismatch");
+    }
+    return db.transaction(async (tx) => {
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(
+          ${AGENT_WALLET_RESET_LOCK_NAMESPACE},
+          hashtext(${params.walletAddress})
+        )
+      `);
+      const [wallet] = await tx.select({ agentPublicKey: wallets.agentPublicKey })
+        .from(wallets)
+        .where(eq(wallets.address, params.walletAddress))
+        .limit(1);
+      if (!wallet || wallet.agentPublicKey !== params.observedAgentPublicKey) {
+        return { outcome: "stale_generation" } as const;
+      }
+      const [bot] = await tx.insert(tradingBots).values(params.bot as any).returning();
+      return { outcome: "created", bot } as const;
+    });
   }
 
   // Phase 4b (Flash agent-HD wallets): single-statement atomic allocator. The
@@ -3780,8 +4039,23 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createOrphanedSubaccount(data: InsertOrphanedSubaccount): Promise<OrphanedSubaccount> {
-    const result = await db.insert(orphanedSubaccounts).values(data).returning();
-    return result[0];
+    return db.transaction(async (tx) => {
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(
+          ${AGENT_WALLET_RESET_LOCK_NAMESPACE},
+          hashtext(${data.walletAddress})
+        )
+      `);
+      const [wallet] = await tx.select({ agentPublicKey: wallets.agentPublicKey })
+        .from(wallets)
+        .where(eq(wallets.address, data.walletAddress))
+        .limit(1);
+      if (!wallet || wallet.agentPublicKey !== data.agentPublicKey) {
+        throw new Error("orphaned subaccount belongs to a retired agent generation");
+      }
+      const [created] = await tx.insert(orphanedSubaccounts).values(data).returning();
+      return created;
+    });
   }
 
   async getOrphanedSubaccounts(): Promise<OrphanedSubaccount[]> {
@@ -5182,6 +5456,41 @@ export class DatabaseStorage implements IStorage {
       .where(eq(aiTraderBots.id, id))
       .returning();
     return result[0];
+  }
+
+  async finalizeAiTraderGoLiveReservation(params: {
+    botId: string;
+    walletAddress: string;
+    protocol: string;
+    protocolSubaccountId: string;
+    claimToken: string;
+  }): Promise<AiTraderBot | undefined> {
+    return db.transaction(async (tx) => {
+      const deleted = await tx.delete(protocolSubaccounts).where(and(
+        eq(protocolSubaccounts.walletAddress, params.walletAddress),
+        eq(protocolSubaccounts.protocol, params.protocol),
+        eq(protocolSubaccounts.protocolSubaccountId, params.protocolSubaccountId),
+        eq(protocolSubaccounts.status, "reserving"),
+        eq(protocolSubaccounts.claimToken, params.claimToken),
+      )).returning({ id: protocolSubaccounts.id });
+      if (deleted.length !== 1) return undefined;
+
+      const [updated] = await tx.update(aiTraderBots)
+        .set({ paperMode: false, status: "idle", pauseReason: null, updatedAt: sql`NOW()` } as any)
+        .where(and(
+          eq(aiTraderBots.id, params.botId),
+          eq(aiTraderBots.walletAddress, params.walletAddress),
+          eq(aiTraderBots.protocol, params.protocol),
+          eq(aiTraderBots.paperMode, true),
+          eq(aiTraderBots.protocolSubaccountId, params.protocolSubaccountId),
+          isNotNull(aiTraderBots.botSubaccountKeyEncryptedV3),
+        ))
+        .returning();
+      if (!updated) {
+        throw new Error("AI go-live row was not durably keyed for reservation finalization");
+      }
+      return updated;
+    });
   }
 
   async insertAiTraderDecision(decision: InsertAiTraderDecision): Promise<AiTraderDecision> {
