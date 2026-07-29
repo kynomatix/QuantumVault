@@ -48,7 +48,7 @@ vi.mock("../../server/storage", () => {
 // the stub plants the session wallet on every request.
 vi.mock("../../server/session", () => ({
   sessionMiddleware: (req: any, _res: unknown, next: () => void) => {
-    req.session = { walletAddress: "wallet-reset-guard-test" };
+    req.session = { walletAddress: "AcGW3t57JSQ8VZAq81cEirfDjvtAvtA9r2jtumAjCRaP" };
     next();
   },
 }));
@@ -122,7 +122,9 @@ import { discoverOnChainSubaccounts } from "../../server/drift-service";
 // Fixtures
 // ---------------------------------------------------------------------------
 
-const WALLET = "wallet-reset-guard-test"; // must match the session stub literal
+// A real 32-byte Solana public key is required because the provisioning cells
+// exercise the production pooled-key AAD builder rather than mocking it.
+const WALLET = "AcGW3t57JSQ8VZAq81cEirfDjvtAvtA9r2jtumAjCRaP"; // must match the session stub literal
 const SESSION_ID = "sess-reset-1";
 const AGENT_PK = "AgentPkOld1111111111111111111111111111111111";
 const NEW_AGENT_PK = "AgentPkNew2222222222222222222222222222222222";
