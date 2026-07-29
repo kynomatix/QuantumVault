@@ -892,7 +892,10 @@ describe("WO-R1-C1 external-key provisioning write-ahead", () => {
       claimToken: expect.any(String),
     });
     expect(result.reservationClaimToken).toEqual(expect.any(String));
+    const fundedTargetKey = venue.provisionFundedSubaccount.mock.calls[0][0].subSecretKey as Uint8Array;
+    expect(result.pendingBotSecretKeyForV3).toBe(fundedTargetKey);
     result.pendingBotSecretKeyForV3.fill(0);
+    expect(Array.from(fundedTargetKey).every((b) => b === 0)).toBe(true);
   });
 
   it.each(["stale_generation", "conflict"])("%s prepare result prevents every venue call", async (outcome) => {

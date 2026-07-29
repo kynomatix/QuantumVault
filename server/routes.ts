@@ -3684,6 +3684,11 @@ export async function provisionExternalKeyBotSubaccount(params: {
     botKeypair = Keypair.generate();
   }
 
+  // Keypair.secretKey returns a fresh Uint8Array on every access. Retain one
+  // owned buffer so the exact bytes handed to the venue are also the bytes
+  // returned for persistence and zeroized on every failure path.
+  const botSecretKey = botKeypair.secretKey;
+
   // R1-C1 write-ahead: persist the stable pooled-AAD key and a leased
   // `reserving` marker before ANY venue/Solana funding call. Reset reads this
   // marker and cannot retire the source agent key while funding is in flight.
@@ -3697,7 +3702,7 @@ export async function provisionExternalKeyBotSubaccount(params: {
       pooledUmk = pooledUmkHandle?.umk ?? getSessionByWalletAddress(walletAddress)?.session.umk ?? null;
     }
     if (!pooledUmk) throw new Error('No active UMK available to secure provisioning write-ahead');
-    const pooledPlaintext = Buffer.from(botKeypair.secretKey);
+    const pooledPlaintext = Buffer.from(botSecretKey);
     let pooledCiphertext: string;
     try {
       pooledCiphertext = encryptPooledSubaccountKeyV3(
@@ -3729,7 +3734,7 @@ export async function provisionExternalKeyBotSubaccount(params: {
       throw new Error('A provisioning record already exists for this external account; nothing was funded');
     }
   } catch (prepareErr) {
-    try { botKeypair.secretKey.fill(0); } catch { /* noop */ }
+    try { botSecretKey.fill(0); } catch { /* noop */ }
     throw prepareErr;
   } finally {
     try { pooledUmkHandle?.cleanup(); } catch { /* noop */ }
@@ -3744,7 +3749,7 @@ export async function provisionExternalKeyBotSubaccount(params: {
     const pacificaAdapter = adapter as unknown as import('./protocol/pacifica/pacifica-adapter').PacificaAdapter;
     const result = await pacificaAdapter.provisionFundedSubaccount({
       mainSecretKey: agentKeypair.secretKey,
-      subSecretKey: botKeypair.secretKey,
+      subSecretKey: botSecretKey,
       agentPublicKey: agentKeypair.publicKey.toString(),
       fundingAmount,
     });
@@ -3775,7 +3780,7 @@ export async function provisionExternalKeyBotSubaccount(params: {
     const flashAdapter = adapter as unknown as import('./protocol/flash/flash-adapter').FlashAdapter;
     const result = await flashAdapter.provisionBotWallet({
       mainSecretKey: agentKeypair.secretKey,
-      subSecretKey: botKeypair.secretKey,
+      subSecretKey: botSecretKey,
       fundingAmount,
     });
     botSubaccountPublicKey = result.subaccountId;
@@ -3801,13 +3806,13 @@ export async function provisionExternalKeyBotSubaccount(params: {
     throw new Error(`Unsupported external-key protocol for provisioning: ${adapter.protocolName}`);
   }
   } catch (fundErr) {
-    try { botKeypair.secretKey.fill(0); } catch { /* noop */ }
+    try { botSecretKey.fill(0); } catch { /* noop */ }
     throw fundErr;
   }
 
   return {
     botSubaccountPublicKey,
-    pendingBotSecretKeyForV3: botKeypair.secretKey,
+    pendingBotSecretKeyForV3: botSecretKey,
     subaccountAuthMode: 'external_key',
     // Stay 'pending' until the V3 ciphertext is written post-insert (keeps the
     // CHECK constraint external_key+active ⇒ key satisfied at insert time).
