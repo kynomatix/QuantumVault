@@ -33,7 +33,7 @@ vi.mock("../../server/swap/index.js", () => ({
   getProviderByName: vi.fn(),
 }));
 
-import { getAgentTokenBalanceRawStrict } from "../../server/agent-wallet";
+import { getAgentTokenBalanceRawStrict, getAgentUsdcBalanceRawStrict } from "../../server/agent-wallet";
 
 // Any valid base58 pubkeys; the connection is mocked so identity does not matter.
 const AGENT = "D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59";
@@ -71,5 +71,28 @@ describe("getAgentTokenBalanceRawStrict (money-path baseline, fail closed)", () 
     getTokenAccountBalanceMock.mockRejectedValue(new Error("rpc down"));
     getAccountInfoMock.mockRejectedValue(new Error("rpc down"));
     await expect(getAgentTokenBalanceRawStrict(AGENT, KUSDC)).rejects.toThrow();
+  });
+});
+
+describe("getAgentUsdcBalanceRawStrict (reset sizing, exact base units)", () => {
+  it("returns bigint base units without consulting uiAmount", async () => {
+    getTokenAccountBalanceMock.mockResolvedValue({
+      value: { amount: "500250000", decimals: 6, uiAmount: null },
+    });
+    await expect(getAgentUsdcBalanceRawStrict(AGENT)).resolves.toBe(500_250_000n);
+  });
+
+  it("accepts a genuinely absent ATA as exact zero", async () => {
+    getTokenAccountBalanceMock.mockRejectedValue(new Error("missing"));
+    getAccountInfoMock.mockResolvedValue(null);
+    await expect(getAgentUsdcBalanceRawStrict(AGENT)).resolves.toBe(0n);
+  });
+
+  it.each([
+    { amount: "not-an-integer", decimals: 6 },
+    { amount: "1", decimals: 9 },
+  ])("throws on malformed raw USDC shape %#", async (value) => {
+    getTokenAccountBalanceMock.mockResolvedValue({ value: { ...value, uiAmount: 0 } });
+    await expect(getAgentUsdcBalanceRawStrict(AGENT)).rejects.toThrow();
   });
 });

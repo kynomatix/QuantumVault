@@ -1,5 +1,9 @@
 import { storage } from "./storage";
 import { getUmkForWebhook, decryptAgentKeyStrict } from "./session-v3";
+import {
+  ORPHANED_SUBACCOUNT_FAST_RETRY_LIMIT,
+  shouldAttemptOrphanCleanup,
+} from "./orphaned-subaccount-retry-policy";
 
 /**
  * V3 Phase 4: close an orphaned DRIFT subaccount to reclaim its ~0.023 SOL of
@@ -44,15 +48,14 @@ export async function cleanupOrphanedSubaccounts(): Promise<void> {
       return;
     }
     
-    const pending = orphaned.filter(o => o.retryCount < 5);
-    const maxedOut = orphaned.filter(o => o.retryCount >= 5);
+    const nowMs = Date.now();
+    const pending = orphaned.filter((o) => shouldAttemptOrphanCleanup(o, nowMs));
+    const slowDeferred = orphaned.filter((o) => !shouldAttemptOrphanCleanup(o, nowMs));
     
-    if (maxedOut.length > 0) {
-      console.warn(`[OrphanedCleanup] WARNING: ${maxedOut.length} subaccount(s) exceeded max retries and cannot be automatically recovered:`);
-      for (const entry of maxedOut) {
-        console.warn(`  - Subaccount ${entry.driftSubaccountId} for wallet ${entry.walletAddress} (${entry.retryCount} retries, reason: ${entry.reason || 'unknown'})`);
-      }
-      console.warn(`[OrphanedCleanup] These subaccounts have ~0.023 SOL locked rent. User may need to use "Reset Drift Account" in Settings.`);
+    if (slowDeferred.length > 0) {
+      console.warn(
+        `[OrphanedCleanup] ${slowDeferred.length} subaccount(s) remain custody blockers and are deferred to the slow retry cadence; none has been abandoned`,
+      );
     }
     
     if (pending.length === 0) {
@@ -62,15 +65,17 @@ export async function cleanupOrphanedSubaccounts(): Promise<void> {
     console.log(`[OrphanedCleanup] Found ${pending.length} orphaned subaccounts to clean up`);
     
     for (const entry of pending) {
-      console.log(`[OrphanedCleanup] Attempting to close subaccount ${entry.driftSubaccountId} (retry ${entry.retryCount + 1}/5)`);
+      const cadence = entry.retryCount < ORPHANED_SUBACCOUNT_FAST_RETRY_LIMIT
+        ? `fast retry ${entry.retryCount + 1}/${ORPHANED_SUBACCOUNT_FAST_RETRY_LIMIT}`
+        : `slow retry ${entry.retryCount + 1}`;
+      console.log(`[OrphanedCleanup] Attempting to close subaccount ${entry.driftSubaccountId} (${cadence})`);
       
       try {
         // V3 Phase 4: strict-decrypt the agent key via UMK + the wallet's v3
         // envelope. Auth-unavailable states (missing V3 envelope, execution
         // disabled / emergency-stopped, strict decrypt failure) DO NOT burn
-        // the 5-attempt retry budget — bumping retry_count for an auth-paused
-        // wallet would permanently max out cleanup before the user can
-        // re-enable execution. Defer to the next cleanup cycle instead.
+        // the fast-attempt budget or slow-retry timestamp. Defer until the user
+        // re-enables execution; the custody row continues to block Reset.
         const wallet = await storage.getWallet(entry.walletAddress);
         if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncryptedV3) {
           console.warn(`[OrphanedCleanup] Wallet ${entry.walletAddress.slice(0,8)}... missing V3 envelope or public key; deferring (retry budget preserved)`);

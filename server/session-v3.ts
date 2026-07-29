@@ -715,21 +715,33 @@ export function deriveBotKeypairFromAgentSeed(
   return Keypair.fromSeed(derivedSeed);
 }
 
+/**
+ * Encrypt mnemonic bytes for the wallets row without writing them. Destructive
+ * agent-key rotation uses this so mnemonic + public key + V3 private key can be
+ * committed by one guarded UPDATE instead of three independently crashable
+ * writes. The existing write-through helper below remains for wallet creation.
+ */
+export function encryptMnemonicForStorage(
+  walletAddress: string,
+  mnemonicBuffer: Buffer,
+  umk: Buffer
+): string {
+  const mnemonicKey = deriveSubkey(umk, SUBKEY_PURPOSES.MNEMONIC);
+  const aad = buildAAD(walletAddress, 'MNEMONIC');
+  try {
+    return encryptToBase64(mnemonicBuffer, mnemonicKey, aad);
+  } finally {
+    zeroizeBuffer(mnemonicKey);
+  }
+}
+
 export async function encryptAndStoreMnemonic(
   walletAddress: string,
   mnemonicBuffer: Buffer,
   umk: Buffer
 ): Promise<void> {
-  const mnemonicKey = deriveSubkey(umk, SUBKEY_PURPOSES.MNEMONIC);
-  const aad = buildAAD(walletAddress, 'MNEMONIC');
-  
-  const encryptedMnemonic = encryptToBase64(mnemonicBuffer, mnemonicKey, aad);
-  
-  await storage.updateWallet(walletAddress, {
-    encryptedMnemonicWords: encryptedMnemonic,
-  });
-  
-  zeroizeBuffer(mnemonicKey);
+  const encryptedMnemonic = encryptMnemonicForStorage(walletAddress, mnemonicBuffer, umk);
+  await storage.updateWallet(walletAddress, { encryptedMnemonicWords: encryptedMnemonic });
 }
 
 export async function decryptMnemonic(

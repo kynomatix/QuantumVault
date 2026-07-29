@@ -30,6 +30,7 @@ import { FLASH_BOT_WALLET_SOL_SEED } from './protocol/flash/flash-constants';
 import { reconcileWalletDeposits } from './deposit-reconciler';
 import { publicPortfolioHandler } from './public-portfolio';
 import { initSnapshotModule, getWalletFinancialSnapshot, derivePerBotFinancialDataStatus, mapBotToApiResponse } from './bot-financial-snapshot';
+import { detachTradingBotAfterDriftCustodyHandoff } from './trading-bot-custody-handoff';
 
 function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
@@ -1542,12 +1543,13 @@ async function settleAllPnl(
 }
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import { PositionService } from "./position-service";
-import { getAgentUsdcBalance, getAgentSolBalance, getAgentUsdcBalanceStrict, getAgentSolBalanceStrict, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
+import { getAgentUsdcBalance, getAgentSolBalance, getAgentUsdcBalanceStrict, getAgentUsdcBalanceRawStrict, getAgentSolBalanceStrict, getAgentSolBalanceLamportsStrict, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
 import { handleAgentSolWithdraw, handleConfirmSolWithdraw, sweepAbandonedSolWithdrawals } from "./vault/agent-sol-withdraw";
 import { getBestQuote } from "./swap/index.js";
 import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, valueVaultRowsForWallet, sumVaultPositionValueUsdc, type VaultPositionView, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
 import { cancelAutoRepark } from "./vault/auto-repark";
 import { assessResetBlockers } from "./vault/reset-blockers";
+import { assessResetAgentOnChainStrict } from "./vault/reset-agent-onchain";
 import { getCollateralStakingApyMap } from "./vault/collateral-apy";
 import { getEnabledYieldAssets, getYieldAssetByKey, getDetectableYieldAssets } from "./vault/yield-assets";
 import { getYieldTableCached } from "./vault/yield-oracle";
@@ -1587,7 +1589,7 @@ import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotific
 import { classifySignal } from "./trading/signal-classifier";
 import { registerTelegramMiniAppRoutes } from "./telegram-mini-app";
 import { registerAiTraderRoutes } from "./ai-trader/routes";
-import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, healExecutionUmkFromStorage, restoreWalletSecurityFromStorage, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, decryptBotSubaccountKey, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptAgentKeyV3, encryptBotSubaccountKeyV3, rebindRetainedKeyToBotUuidV3, decryptMnemonic, deriveBotKeypairFromAgentSeed, BOT_DERIVATION_PATH_VERSION } from "./session-v3";
+import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, healExecutionUmkFromStorage, restoreWalletSecurityFromStorage, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, decryptBotSubaccountKey, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptMnemonicForStorage, encryptAgentKeyV3, encryptBotSubaccountKeyV3, encryptPooledSubaccountKeyV3, rebindRetainedKeyToBotUuidV3, decryptMnemonic, deriveBotKeypairFromAgentSeed, BOT_DERIVATION_PATH_VERSION } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, isCollateralRetryError, getQueueStatus, registerRoutingCallback, cancelRetryJobsForBot } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
 import { DOCS_MARKDOWN } from "./docs-markdown";
@@ -3638,6 +3640,7 @@ export async function provisionExternalKeyBotSubaccount(params: {
   agentMnemonic: Buffer | null;
   adapter: ProtocolAdapter;
   fundingAmount: number;
+  umk?: Buffer;
 }): Promise<{
   botSubaccountPublicKey: string;
   pendingBotSecretKeyForV3: Uint8Array;
@@ -3646,6 +3649,7 @@ export async function provisionExternalKeyBotSubaccount(params: {
   derivationIndex: number | null;
   derivationPathVersion: number | null;
   ambiguous: boolean;
+  reservationClaimToken: string;
   provisionMeta: { funded: boolean; depositTxSignature?: string; fundedAmount: number; wasNewAccount?: boolean; warning?: string; solSeeded?: number };
 }> {
   const { walletAddress, agentKeypair, adapter, fundingAmount } = params;
@@ -3680,19 +3684,79 @@ export async function provisionExternalKeyBotSubaccount(params: {
     botKeypair = Keypair.generate();
   }
 
+  // Keypair.secretKey returns a fresh Uint8Array on every access. Retain one
+  // owned buffer so the exact bytes handed to the venue are also the bytes
+  // returned for persistence and zeroized on every failure path.
+  const botSecretKey = botKeypair.secretKey;
+
+  // R1-C1 write-ahead: persist the stable pooled-AAD key and a leased
+  // `reserving` marker before ANY venue/Solana funding call. Reset reads this
+  // marker and cannot retire the source agent key while funding is in flight.
+  const botSubaccountPublicKeyPrepared = botKeypair.publicKey.toString();
+  const reservationClaimToken = crypto.randomUUID();
+  let pooledUmkHandle: { umk: Buffer; cleanup: () => void } | null = null;
+  try {
+    let pooledUmk = params.umk ?? null;
+    if (!pooledUmk) {
+      pooledUmkHandle = await getUmkForWebhook(walletAddress);
+      pooledUmk = pooledUmkHandle?.umk ?? getSessionByWalletAddress(walletAddress)?.session.umk ?? null;
+    }
+    if (!pooledUmk) throw new Error('No active UMK available to secure provisioning write-ahead');
+    const pooledPlaintext = Buffer.from(botSecretKey);
+    let pooledCiphertext: string;
+    try {
+      pooledCiphertext = encryptPooledSubaccountKeyV3(
+        pooledUmk,
+        pooledPlaintext,
+        adapter.protocolName,
+        walletAddress,
+        botSubaccountPublicKeyPrepared,
+      );
+    } finally {
+      pooledPlaintext.fill(0);
+    }
+    const { SUBACCOUNT_AAD_VERSION } = await import('./crypto-v3');
+    const prepared = await storage.prepareExternalSubaccountReservation({
+      walletAddress,
+      protocol: adapter.protocolName,
+      protocolSubaccountId: botSubaccountPublicKeyPrepared,
+      observedAgentPublicKey: agentKeypair.publicKey.toString(),
+      claimToken: reservationClaimToken,
+      subaccountKeyEncryptedV3: pooledCiphertext,
+      aadVersion: SUBACCOUNT_AAD_VERSION.POOLED_SUBACCOUNT,
+      derivationIndex,
+      derivationPathVersion,
+    });
+    if (prepared.outcome === 'stale_generation') {
+      throw new Error('Trading account generation changed before provisioning; nothing was funded');
+    }
+    if (prepared.outcome !== 'prepared') {
+      throw new Error('A provisioning record already exists for this external account; nothing was funded');
+    }
+  } catch (prepareErr) {
+    try { botSecretKey.fill(0); } catch { /* noop */ }
+    throw prepareErr;
+  } finally {
+    try { pooledUmkHandle?.cleanup(); } catch { /* noop */ }
+  }
+
   let botSubaccountPublicKey: string;
   let ambiguous = false;
   let provisionMeta: { funded: boolean; depositTxSignature?: string; fundedAmount: number; wasNewAccount?: boolean; warning?: string; solSeeded?: number };
 
+  try {
   if (adapter.protocolName === 'pacifica') {
     const pacificaAdapter = adapter as unknown as import('./protocol/pacifica/pacifica-adapter').PacificaAdapter;
     const result = await pacificaAdapter.provisionFundedSubaccount({
       mainSecretKey: agentKeypair.secretKey,
-      subSecretKey: botKeypair.secretKey,
+      subSecretKey: botSecretKey,
       agentPublicKey: agentKeypair.publicKey.toString(),
       fundingAmount,
     });
     botSubaccountPublicKey = result.subaccountId;
+    if (botSubaccountPublicKey !== botSubaccountPublicKeyPrepared) {
+      throw new Error('Pacifica returned an identity that does not match the durable provisioning key');
+    }
     provisionMeta = {
       funded: result.transferSucceeded,
       wasNewAccount: result.wasNewAccount,
@@ -3716,10 +3780,13 @@ export async function provisionExternalKeyBotSubaccount(params: {
     const flashAdapter = adapter as unknown as import('./protocol/flash/flash-adapter').FlashAdapter;
     const result = await flashAdapter.provisionBotWallet({
       mainSecretKey: agentKeypair.secretKey,
-      subSecretKey: botKeypair.secretKey,
+      subSecretKey: botSecretKey,
       fundingAmount,
     });
     botSubaccountPublicKey = result.subaccountId;
+    if (botSubaccountPublicKey !== botSubaccountPublicKeyPrepared) {
+      throw new Error('Flash returned an identity that does not match the durable provisioning key');
+    }
     if (result.ambiguous) {
       // Funding tx was sent but its on-chain outcome could NOT be confirmed (RPC
       // degraded). Do NOT discard the key/funds: caller persists the key and flags
@@ -3738,10 +3805,14 @@ export async function provisionExternalKeyBotSubaccount(params: {
   } else {
     throw new Error(`Unsupported external-key protocol for provisioning: ${adapter.protocolName}`);
   }
+  } catch (fundErr) {
+    try { botSecretKey.fill(0); } catch { /* noop */ }
+    throw fundErr;
+  }
 
   return {
     botSubaccountPublicKey,
-    pendingBotSecretKeyForV3: botKeypair.secretKey,
+    pendingBotSecretKeyForV3: botSecretKey,
     subaccountAuthMode: 'external_key',
     // Stay 'pending' until the V3 ciphertext is written post-insert (keeps the
     // CHECK constraint external_key+active ⇒ key satisfied at insert time).
@@ -3749,6 +3820,7 @@ export async function provisionExternalKeyBotSubaccount(params: {
     derivationIndex,
     derivationPathVersion,
     ambiguous,
+    reservationClaimToken,
     provisionMeta,
   };
 }
@@ -3792,7 +3864,10 @@ export async function sweepProvisionedExternalKeyFunds(params: {
         residualUsdc = await flashAdapter.getWalletCollateralBalanceStrict(subaccountPublicKey);
         residualSol = await flashAdapter.getWalletSolBalance(subaccountPublicKey);
       } catch { /* leave sentinels → not swept */ }
-      if (residualUsdc === 0 && residualSol <= 0.001) swept = true;
+      if (
+        Number.isFinite(residualUsdc) && residualUsdc === 0 &&
+        Number.isFinite(residualSol) && residualSol >= 0 && residualSol <= 0.001
+      ) swept = true;
     }
     return { swept, detail: swept ? 'flash wallet confirmed empty' : 'flash wallet could not be confirmed empty' };
   }
@@ -3800,7 +3875,10 @@ export async function sweepProvisionedExternalKeyFunds(params: {
   if (adapter.protocolName === 'pacifica') {
     try {
       const info = await adapter.getAccountInfo(subaccountPublicKey);
-      const balance = info?.equity ?? info?.balance ?? 0;
+      const balance = info?.equity ?? info?.balance;
+      if (typeof balance !== 'number' || !Number.isFinite(balance) || balance < 0) {
+        return { swept: false, detail: 'pacifica pre-sweep balance was unreadable' };
+      }
       if (balance >= adapter.minTransferAmount) {
         const tr = await adapter.transferBetweenSubaccounts({
           agentSecretKey: subSecretKey,
@@ -3818,7 +3896,11 @@ export async function sweepProvisionedExternalKeyFunds(params: {
       let residual = Number.POSITIVE_INFINITY;
       try {
         const after = await adapter.getAccountInfo(subaccountPublicKey);
-        residual = after?.equity ?? after?.balance ?? 0;
+        const observedResidual = after?.equity ?? after?.balance;
+        if (typeof observedResidual !== 'number' || !Number.isFinite(observedResidual) || observedResidual < 0) {
+          return { swept: false, detail: 'pacifica post-sweep balance was unreadable' };
+        }
+        residual = observedResidual;
       } catch (verifyErr: any) {
         return { swept: false, detail: `could not verify pacifica subaccount empty: ${verifyErr?.message || verifyErr}` };
       }
@@ -3832,11 +3914,37 @@ export async function sweepProvisionedExternalKeyFunds(params: {
   return { swept: false, detail: `unsupported protocol for sweep: ${adapter.protocolName}` };
 }
 
+async function getUnchangedAgentSweepDestination(
+  walletAddress: string,
+  observedAgentPublicKey: string | null,
+): Promise<string | null> {
+  if (!observedAgentPublicKey) return null;
+  try {
+    const currentWallet = await storage.getWallet(walletAddress);
+    return currentWallet?.agentPublicKey === observedAgentPublicKey
+      ? observedAgentPublicKey
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function settleEmptyFreshReservation(params: {
+  protocol: string;
+  protocolSubaccountId: string;
+  claimToken: string;
+}): Promise<boolean> {
+  return params.protocol === 'flash'
+    ? storage.deleteReservedSubaccount(params)
+    : storage.releaseReservationToSpare(params);
+}
+
 /**
  * Phase 5.5: shared post-insert step that secures a freshly provisioned external-key
  * bot's secret key. Encrypts the key under the owner's UMK bound to the new bot.id
- * (AAD), persists the V3 ciphertext, and flips the bot to 'active' (or 'error' when
- * Flash funding was ambiguous). ALWAYS zeroizes the in-memory key.
+ * (AAD) and persists the V3 ciphertext while the bot remains pending. The caller
+ * flips it to 'active' (or ambiguous 'error') only after reservation ownership is
+ * proven. ALWAYS zeroizes the in-memory key.
  *
  * Fails CLOSED: on a key-write failure it sweeps the subaccount back to the agent
  * (protocol-aware: Flash wallet sweep / Pacifica sub→main transfer) and only deletes
@@ -3852,10 +3960,14 @@ async function persistBotSubaccountKeyV3WithRollback(params: {
   botSubaccountPublicKey: string;
   pendingBotSecretKeyForV3: Uint8Array;
   adapter: ProtocolAdapter;
-  ambiguous: boolean;
   agentPublicKey: string | null;
+  reservation: {
+    protocol: string;
+    protocolSubaccountId: string;
+    claimToken: string;
+  };
 }): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
-  const { walletAddress, botId, botSubaccountPublicKey, pendingBotSecretKeyForV3, adapter, ambiguous, agentPublicKey } = params;
+  const { walletAddress, botId, botSubaccountPublicKey, pendingBotSecretKeyForV3, adapter, agentPublicKey, reservation } = params;
   let _botSubUmk: { umk: Buffer; cleanup: () => void } | null = null;
   let v3Ciphertext: string | null = null;
   try {
@@ -3868,9 +3980,13 @@ async function persistBotSubaccountKeyV3WithRollback(params: {
       }
       umkBuf = sessionRes.session.umk;
     }
-    v3Ciphertext = encryptBotSubaccountKeyV3(umkBuf, Buffer.from(pendingBotSecretKeyForV3), walletAddress, botId);
+    const botPlaintext = Buffer.from(pendingBotSecretKeyForV3);
+    try {
+      v3Ciphertext = encryptBotSubaccountKeyV3(umkBuf, botPlaintext, walletAddress, botId);
+    } finally {
+      botPlaintext.fill(0);
+    }
     await storage.updateBotSubaccountKeyV3(botId, v3Ciphertext);
-    await storage.updateTradingBot(botId, { subaccountStatus: ambiguous ? 'error' : 'active' } as any);
     return { ok: true };
   } catch (v3Err: any) {
     console.error(`[Provision] Failed to write V3 bot-subaccount key for bot ${botId}:`, v3Err.message);
@@ -3880,11 +3996,12 @@ async function persistBotSubaccountKeyV3WithRollback(params: {
     // delete the row once the subaccount is CONFIRMED empty. If the sweep can't be
     // confirmed, preserve the row as 'error' and fail closed so the stranded funds
     // stay traceable rather than discarding the last key reference + audit trail.
+    const currentDestination = await getUnchangedAgentSweepDestination(walletAddress, agentPublicKey);
     const recovery = await sweepProvisionedExternalKeyFunds({
       adapter,
       subSecretKey: pendingBotSecretKeyForV3,
       subaccountPublicKey: botSubaccountPublicKey,
-      agentPublicKey,
+      agentPublicKey: currentDestination,
     });
     if (!recovery.swept) {
       // Last-resort durable key retention: if the encryption succeeded and only the
@@ -3899,13 +4016,32 @@ async function persistBotSubaccountKeyV3WithRollback(params: {
           console.error(`[Provision] Could not retain V3 key on 'error' row for bot ${botId}: ${retainErr?.message || retainErr}`);
         }
       }
+      try {
+        await storage.markSubaccountStuckFunds({
+          walletAddress,
+          protocol: reservation.protocol,
+          protocolSubaccountId: reservation.protocolSubaccountId,
+          botId,
+          agentPublicKey,
+          lastError: currentDestination
+            ? 'bot key persistence failed; recovery sweep not confirmed'
+            : 'bot key persistence failed after agent generation changed; sweep suppressed',
+          claimToken: reservation.claimToken,
+        });
+      } catch (quarantineErr: any) {
+        console.error(`[Provision] Could not quarantine reservation for bot ${botId}: ${quarantineErr?.message || quarantineErr}`);
+      }
       try { await storage.updateTradingBot(botId, { subaccountStatus: 'error' } as any); } catch { /* noop */ }
       console.error(`[Provision] CRITICAL: rollback could not confirm empty subaccount ${botSubaccountPublicKey} for bot ${botId} (${recovery.detail}) — preserving row for recovery`);
-      return { ok: false, status: 500, error: `Failed to secure bot subaccount key and could not fully return funds. Your bot subaccount ${botSubaccountPublicKey} may still hold funds — please contact support before subscribing again.` };
+      return { ok: false, status: 500, error: 'Failed to secure the bot trading-account key and could not confirm that all funds were returned. The account remains recoverable; please contact support before retrying.' };
     }
     // Subaccount confirmed empty — safe to delete the row.
+    const reservationSettled = await settleEmptyFreshReservation(reservation).catch(() => false);
+    if (!reservationSettled) {
+      console.error(`[Provision] Confirmed empty subaccount ${botSubaccountPublicKey}, but reservation settlement CAS was lost`);
+    }
     try { await storage.deleteTradingBot(botId); } catch { /* noop */ }
-    return { ok: false, status: 500, error: `Failed to secure bot subaccount key: ${v3Err.message}` };
+    return { ok: false, status: 500, error: 'Failed to secure the bot trading-account key. Any confirmed-empty provisional account was safely released; please retry.' };
   } finally {
     try { _botSubUmk?.cleanup(); } catch { /* noop */ }
     try { pendingBotSecretKeyForV3.fill(0); } catch { /* noop */ }
@@ -6912,34 +7048,40 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const log = (msg: string) => console.log(`[Reset Agent] ${msg}`);
       const progress: string[] = [];
 
-      log(`Starting agent wallet reset for ${agentPubKey.slice(0, 8)}...`);
-      progress.push("Checking Drift account status...");
+      // Bind every later CAS to the exact key decrypted and swept by THIS
+      // request. Never replace this with a post-lock re-read.
+      const observedAgentPublicKey = agentPubKey;
 
-      // Step 1: Check if there are any Drift subaccounts with positions or funds
-      const existingSubaccounts = await discoverOnChainSubaccounts(agentPubKey);
-      
-      for (const subId of existingSubaccounts) {
-        const positions = await getPerpPositions(agentPubKey, subId);
-        const openPositions = positions.filter((p: any) => Math.abs(p.baseAssetAmount) > 0.0001);
-        
-        if (openPositions.length > 0) {
-          return res.status(400).json({ 
-            error: "Cannot reset: You have open positions. Please close all positions first using 'Close All Positions' or 'Reset Trading Account'.",
-            hasOpenPositions: true 
-          });
-        }
+      log("Starting agent wallet reset");
+      progress.push("Checking trading account status...");
 
-        const accountInfo = await getExchangeAccountInfo(agentPubKey, subId);
-        if (accountInfo.usdcBalance > 0.01) {
-          return res.status(400).json({ 
-            error: `Cannot reset: You have $${accountInfo.usdcBalance.toFixed(2)} in trading subaccount ${subId}. Please use 'Reset Trading Account' to withdraw funds first.`,
-            hasDriftFunds: true 
-          });
-        }
+      // Step 1: strict adapter reads. Successful empty arrays/zero balances are
+      // clean; any throw or malformed shape is unreadable and blocks. There is
+      // deliberately ONE catch at this reset boundary and no error-text parsing.
+      let onChainAssessment;
+      try {
+        onChainAssessment = await assessResetAgentOnChainStrict(agentPubKey, agentKey);
+      } catch {
+        return res.status(409).json({
+          error: "reset-blocked",
+          phase: "pre-transfer",
+          message: "Could not verify that the trading account is empty, so the reset was not started. Nothing was transferred and your agent key is unchanged. Please try again shortly.",
+        });
+      }
+      if (onChainAssessment.blocked) {
+        return res.status(400).json({
+          error:
+            onChainAssessment.reason === "open_positions"
+              ? "Cannot reset: You have open trading positions. Close them first."
+              : "Cannot reset: The trading account still holds funds. Withdraw them first.",
+          ...(onChainAssessment.reason === "open_positions"
+            ? { hasOpenPositions: true }
+            : { hasDriftFunds: true }),
+        });
       }
 
-      progress.push("Drift account verified clean");
-      log("Drift account is clean, proceeding with agent wallet reset");
+      progress.push("Trading account verified clean");
+      log("Trading account is clean, proceeding with agent wallet reset");
 
       // WO2B1 checkpoint 1 (pre-transfer): the agent key being retired owns
       // every vault borrow/loop position and signs every resumable borrow
@@ -6947,7 +7089,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // vault state aborts the reset with nothing transferred and no
       // key/mnemonic mutation. Coarse verdict only: no row ids, types, or
       // amounts may leak into the response.
-      const preTransferAssessment = await assessResetBlockers(userWallet);
+      const preTransferAssessment = await assessResetBlockers(userWallet, agentPubKey);
       if (preTransferAssessment.blocked) {
         log(`Reset blocked pre-transfer (${preTransferAssessment.reason})`);
         return res.status(409).json({
@@ -6955,64 +7097,93 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           phase: "pre-transfer",
           message:
             preTransferAssessment.reason === "vault_state_unreadable"
-              ? "Could not verify your vault borrow/loop state, so the reset was not started. Nothing was transferred and your agent key is unchanged. Please try again shortly."
-              : "You have active vault borrow or loop activity tied to this agent wallet. Close or resolve it first — nothing was transferred and your agent key is unchanged.",
+              ? "Could not verify all activity tied to this trading account, so the reset was not started. Nothing was transferred and your agent key is unchanged. Please try again shortly."
+              : preTransferAssessment.reason === "active_vault_state"
+                ? "You have active vault borrow or loop activity tied to this agent wallet. Close or resolve it first — nothing was transferred and your agent key is unchanged."
+                : "A trading account or recovery record is still tied to your current agent key. Delete or unlink visible bots in Wallet Management. If none are shown, keep trading enabled so recovery can finish, retry later, or contact support — nothing was transferred and your agent key is unchanged.",
         });
       }
 
-      // Step 2: Check agent wallet balances
-      const usdcBalance = await getAgentUsdcBalance(agentPubKey);
-      const solBalance = await getAgentSolBalance(agentPubKey);
+      // Step 2: strict wallet balances. RPC failure is not a zero balance.
+      let usdcBalanceRaw: bigint;
+      let solBalanceLamports: bigint;
+      try {
+        usdcBalanceRaw = await getAgentUsdcBalanceRawStrict(agentPubKey);
+        solBalanceLamports = await getAgentSolBalanceLamportsStrict(agentPubKey);
+        if (
+          usdcBalanceRaw < 0n ||
+          usdcBalanceRaw > BigInt(Number.MAX_SAFE_INTEGER) ||
+          solBalanceLamports < 0n ||
+          solBalanceLamports > BigInt(Number.MAX_SAFE_INTEGER)
+        ) {
+          throw new Error("malformed reset balance");
+        }
+      } catch {
+        return res.status(409).json({
+          error: "reset-blocked",
+          phase: "pre-transfer",
+          message: "Could not verify the agent wallet balances, so the reset was not started. Nothing was transferred and your agent key is unchanged. Please try again shortly.",
+        });
+      }
+      const usdcBalance = Number(usdcBalanceRaw) / 1e6;
+      const solBalance = Number(solBalanceLamports) / 1e9;
       
       log(`Agent wallet balances: ${usdcBalance} USDC, ${solBalance} SOL`);
       progress.push(`Found ${usdcBalance.toFixed(2)} USDC, ${solBalance.toFixed(4)} SOL in agent wallet`);
 
       // Step 3: Withdraw USDC to user wallet
-      if (usdcBalance > 0.001) {
+      if (usdcBalanceRaw > 1_000n) {
         progress.push(`Withdrawing ${usdcBalance.toFixed(2)} USDC to your wallet...`);
-        log(`Withdrawing ${usdcBalance} USDC to ${userWallet.slice(0, 8)}...`);
+        log(`Withdrawing ${usdcBalance} USDC to the owner wallet`);
         
         try {
           const usdcWithdrawResult = await executeAgentWithdraw(agentPubKey, agentKey, userWallet, usdcBalance);
           if (!usdcWithdrawResult.success) {
             return res.status(400).json({ 
-              error: `USDC withdrawal failed: ${usdcWithdrawResult.error}. Your funds are safe, please try again.`,
+              error: "USDC withdrawal could not be completed. Your existing agent key remains active; retry from Wallet Management or contact support if the failure persists.",
               step: 'usdc_withdrawal' 
             });
           }
-          log(`USDC withdrawal successful: ${usdcWithdrawResult.signature}`);
+          log("USDC withdrawal successful");
           progress.push(`USDC withdrawn successfully`);
           
           // Wait for confirmation
           await new Promise(resolve => setTimeout(resolve, 2000));
         } catch (e: any) {
           return res.status(400).json({ 
-            error: `USDC withdrawal error: ${e.message}. Your funds are safe, please try again.`,
+            error: "USDC withdrawal could not be completed. Your existing agent key remains active; retry from Wallet Management or contact support if the failure persists.",
             step: 'usdc_withdrawal' 
           });
         }
       }
 
       // Step 4: Withdraw SOL to user wallet (leave minimum for rent-exempt)
-      const solToWithdraw = solBalance - 0.002; // Leave 0.002 SOL for final transaction fees
-      if (solToWithdraw > 0.001) {
+      const solReserveLamports = 2_000_000n;
+      const solWithdrawThresholdLamports = 1_000_000n;
+      const solToWithdrawLamports = solBalanceLamports - solReserveLamports;
+      let solToWithdraw = 0;
+      if (solToWithdrawLamports > solWithdrawThresholdLamports) {
+        solToWithdraw = Number(solToWithdrawLamports) / 1e9;
         progress.push(`Withdrawing ${solToWithdraw.toFixed(4)} SOL to your wallet...`);
-        log(`Withdrawing ${solToWithdraw} SOL to ${userWallet.slice(0, 8)}...`);
+        log(`Withdrawing ${solToWithdraw} SOL to the owner wallet`);
         
         try {
           const solWithdrawResult = await executeAgentSolWithdraw(agentPubKey, agentKey, userWallet, solToWithdraw);
           if (!solWithdrawResult.success) {
-            log(`SOL withdrawal failed (non-critical): ${solWithdrawResult.error}`);
-            progress.push(`SOL withdrawal failed (non-critical): Small amount may remain`);
-          } else {
-            log(`SOL withdrawal successful: ${solWithdrawResult.signature}`);
-            progress.push(`SOL withdrawn successfully`);
+            return res.status(400).json({
+              error: "SOL withdrawal could not be completed. Any USDC transfer already completed was not rolled back, and your existing agent key remains active. Retry from Wallet Management or contact support if the failure persists.",
+              step: "sol_withdrawal",
+            });
           }
+          log("SOL withdrawal successful");
+          progress.push("SOL withdrawn successfully");
           
           await new Promise(resolve => setTimeout(resolve, 2000));
-        } catch (e: any) {
-          log(`SOL withdrawal error (non-critical): ${e.message}`);
-          progress.push(`SOL withdrawal error (non-critical): Small amount may remain`);
+        } catch {
+          return res.status(400).json({
+            error: "SOL withdrawal could not be completed. Any USDC transfer already completed was not rolled back, and your existing agent key remains active. Retry from Wallet Management or contact support if the failure persists.",
+            step: "sol_withdrawal",
+          });
         }
       }
 
@@ -7023,18 +7194,47 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // public-key or encrypted-key replacement, no bot-subaccount clearing.
       // Completed transfers above are deliberately NOT rolled back, and the
       // decrypted-key cleanup in the finally below still runs exactly once.
-      const preRotationAssessment = await assessResetBlockers(userWallet);
+      const preRotationAssessment = await assessResetBlockers(userWallet, agentPubKey);
       if (preRotationAssessment.blocked) {
         log(`Reset blocked pre-key-rotation (${preRotationAssessment.reason})`);
         return res.status(409).json({
           error: "reset-blocked",
           phase: "pre-key-rotation",
           message:
-            "Reset stopped before key rotation: vault borrow/loop activity appeared (or could not be verified) after funds were moved. Completed transfers are not rolled back, and your existing agent key remains authoritative — no new key or mnemonic was stored. Resolve the vault activity and run the reset again.",
+            "Reset stopped before key rotation because activity, a linked bot, or a recovery record tied to the current trading account appeared or could not be verified after funds were moved. Completed transfers are not rolled back, and your existing agent key remains authoritative — no new key or mnemonic was stored. Keep trading enabled for recovery; delete or unlink visible bots in Wallet Management, then retry or contact support.",
         });
       }
 
-      // Step 5: Generate new agent wallet with mnemonic
+      // Checkpoint 2a: repeat every strict on-chain read AFTER transfers and
+      // verify the attempted sweeps actually left only documented dust. This
+      // remains outside the short DB transaction — never hold a pool connection
+      // across RPC.
+      try {
+        const recheck = await assessResetAgentOnChainStrict(agentPubKey, agentKey);
+        const postUsdcRaw = await getAgentUsdcBalanceRawStrict(agentPubKey);
+        const postSol = await getAgentSolBalanceLamportsStrict(agentPubKey);
+        if (
+          recheck.blocked ||
+          postUsdcRaw < 0n ||
+          postUsdcRaw > 1_000n ||
+          postSol < 0n ||
+          postSol > solReserveLamports + solWithdrawThresholdLamports
+        ) {
+          return res.status(409).json({
+            error: "reset-blocked",
+            phase: "pre-key-rotation",
+            message: "Reset stopped before key rotation because the retired key's on-chain state is not clean. Completed transfers are not rolled back, and your existing agent key remains authoritative. Resolve the remaining activity in Wallet Management and retry.",
+          });
+        }
+      } catch {
+        return res.status(409).json({
+          error: "reset-blocked",
+          phase: "pre-key-rotation",
+          message: "Reset stopped before key rotation because the retired key's on-chain state could not be verified. Completed transfers are not rolled back, and your existing agent key remains authoritative. Please try again shortly.",
+        });
+      }
+
+      // Step 5: Prepare new wallet material without persisting it.
       progress.push("Generating new agent wallet...");
       log("Generating new agent wallet with mnemonic");
 
@@ -7044,29 +7244,67 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // V3 Phase 5b: encrypt with v3 (UMK-based) only. The legacy
       // `agent_private_key_encrypted` column is intentionally left NULL for
       // newly-generated wallets — Phase 6 will drop it entirely.
-      const encryptedV3 = encryptAgentKeyV3(session.umk, generatedWallet.secretKeyBuffer, userWallet);
-
-      // Store mnemonic encrypted with UMK
-      await encryptAndStoreMnemonic(userWallet, generatedWallet.mnemonicBuffer, session.umk);
-
-      // Update database with new agent wallet (public key + V3 ciphertext only).
-      await storage.updateWallet(userWallet, { agentPublicKey: newAgentPublicKey });
-      await storage.updateWalletAgentKeyV3(userWallet, encryptedV3);
-      
-      log(`New agent wallet generated: ${newAgentPublicKey.slice(0, 8)}...`);
-      progress.push(`New agent wallet created: ${newAgentPublicKey.slice(0, 8)}...`);
-
-      // Step 6: Clear all bot subaccount assignments (they're linked to old wallet)
-      const bots = await storage.getTradingBots(userWallet);
-      for (const bot of bots) {
-        if (bot.driftSubaccountId !== null) {
-          await storage.clearTradingBotSubaccount(bot.id);
-          log(`Cleared driftSubaccountId for bot ${bot.id}`);
-        }
+      let encryptedV3: string;
+      let encryptedMnemonicWords: string;
+      try {
+        encryptedV3 = encryptAgentKeyV3(session.umk, generatedWallet.secretKeyBuffer, userWallet);
+        encryptedMnemonicWords = encryptMnemonicForStorage(userWallet, generatedWallet.mnemonicBuffer, session.umk);
+      } finally {
+        try { generatedWallet.secretKeyBuffer.fill(0); } catch { /* noop */ }
+        try { generatedWallet.mnemonicBuffer.fill(0); } catch { /* noop */ }
+        try { generatedWallet.keypair.secretKey.fill(0); } catch { /* noop */ }
       }
 
+      // Checkpoint 2b + atomic commit: the DB-only transaction takes a
+      // non-blocking advisory lock, rechecks vault rows, installs all three
+      // same-generation wallet columns with an entry-key CAS, and clears bot
+      // assignments. It contains no RPC, transfers, or sleeps.
+      let finalized;
+      try {
+        finalized = await storage.finalizeAgentWalletReset({
+          walletAddress: userWallet,
+          observedAgentPublicKey,
+          encryptedMnemonicWords,
+          newAgentPublicKey,
+          newAgentPrivateKeyEncryptedV3: encryptedV3,
+        });
+      } catch {
+        return res.status(503).json({
+          error: "reset-finalize-unavailable",
+          phase: "pre-key-rotation",
+          message: "Reset could not confirm whether its final database commit completed. Completed transfers are not rolled back. Your existing agent key remains authoritative unless Wallet Management shows that the reset completed; refresh there before retrying.",
+        });
+      }
+      if (finalized.outcome === "busy") {
+        return res.status(409).json({
+          error: "reset-in-progress",
+          phase: "pre-key-rotation",
+          message: "Another reset for this wallet is completing. This request installed no key. Any transfers already completed were not rolled back; refresh Wallet Management before retrying.",
+        });
+      }
+      if (finalized.outcome === "blocked") {
+        return res.status(409).json({
+          error: "reset-blocked",
+          phase: "pre-key-rotation",
+          message: "Reset stopped before key rotation because activity, a linked bot, or a recovery record tied to the current trading account appeared or could not be verified. Completed transfers are not rolled back, and your existing agent key remains authoritative. Keep trading enabled for recovery; delete or unlink visible bots in Wallet Management, then retry or contact support.",
+        });
+      }
+      if (finalized.outcome === "lost_race") {
+        return res.status(409).json({
+          error: "reset-race-lost",
+          phase: "pre-key-rotation",
+          message: finalized.keyChanged
+            ? "Another reset completed first. This request's generated key was not installed; the wallet's agent key has changed. Any transfers already completed were not rolled back. Refresh Wallet Management before taking another action."
+            : "The wallet changed before this reset could commit. This request's generated key was not installed. Any transfers already completed were not rolled back. Refresh Wallet Management before retrying.",
+        });
+      }
+      
+      log("New agent wallet committed atomically");
+      progress.push(`New agent wallet created: ${newAgentPublicKey.slice(0, 8)}...`);
+      if (finalized.clearedBotCount > 0) progress.push("Trading-bot subaccount assignments cleared");
+
       progress.push("Agent wallet reset complete!");
-      log(`Successfully reset agent wallet. Old: ${agentPubKey.slice(0, 8)}..., New: ${newAgentPublicKey.slice(0, 8)}...`);
+      log("Successfully reset agent wallet");
 
       res.json({
         success: true,
@@ -7081,9 +7319,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       } finally {
         agentKeyResult.cleanup();
       }
-    } catch (error: any) {
-      console.error("Reset agent wallet error:", error);
-      res.status(500).json({ error: error.message || "Failed to reset agent wallet" });
+    } catch {
+      console.error("Reset agent wallet failed safely (details suppressed)");
+      res.status(500).json({ error: "Failed to reset agent wallet safely. Your existing key remains authoritative unless Wallet Management shows a completed reset." });
     }
   });
 
@@ -14612,6 +14850,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         currentAadVersion: number;
         legacyBotId: string | null;
       } | null = null;
+      type FreshReservationContext = {
+        claimToken: string;
+        protocol: string;
+        protocolSubaccountId: string;
+        agentPublicKey: string;
+      };
+      let _freshReservationContext: FreshReservationContext | null = null;
 
       // Phase 5: create the bot against the protocol the client selected (defaults to
       // the platform default adapter). Only pacifica + flash are user-selectable; drift
@@ -14709,6 +14954,20 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           }
         }
 
+        let botCreateAgentReleased = false;
+        const releaseBotCreateAgent = () => {
+          if (botCreateAgentReleased) return;
+          botCreateAgentReleased = true;
+          try { agentKeypair.secretKey.fill(0); } catch { /* noop */ }
+          try { _botCreateAgentKey.cleanup(); } catch { /* noop */ }
+        };
+        const abortPreparedBotSecrets = () => {
+          try { botKeypair?.secretKey.fill(0); } catch { /* noop */ }
+          try { _botAgentMnemonic?.fill(0); } catch { /* noop */ }
+          _botAgentMnemonic = null;
+          releaseBotCreateAgent();
+        };
+
         // Pacifica atomic provision path: if the active adapter is Pacifica and a
         // funding amount was provided, use provisionFundedSubaccount which handles
         // the deposit-to-register quirk (Pacifica only registers the main_account
@@ -14740,6 +14999,101 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           botKeypair !== null &&
           Number.isFinite(fundingAmountNum) &&
           fundingAmountNum > 0;
+
+        const attemptReuse =
+          isReuseOnCreateEnabled() &&
+          usePacificaAtomicProvision &&
+          adapter.subaccountCaps?.recyclable === true &&
+          typeof (adapter as any).reuseSubaccount === 'function' &&
+          typeof adapter.verifySubaccountEmpty === 'function';
+        let preclaimedSpare: any | undefined;
+        if (attemptReuse) {
+          const claimToken = crypto.randomUUID();
+          let claim: Awaited<ReturnType<typeof storage.claimSpareSubaccount>>;
+          try {
+            claim = await storage.claimSpareSubaccount({
+              walletAddress: req.walletAddress!,
+              protocol: adapter.protocolName,
+              agentPublicKey: agentKeypair.publicKey.toString(),
+              claimToken,
+            });
+          } catch (claimErr) {
+            abortPreparedBotSecrets();
+            throw claimErr;
+          }
+          if (claim.outcome === 'stale_generation') {
+            abortPreparedBotSecrets();
+            return res.status(409).json({
+              error: 'Your trading account changed while bot creation was starting. Nothing was funded; refresh Wallet Management and retry.',
+            });
+          }
+          preclaimedSpare = claim.outcome === 'claimed' ? claim.spare : undefined;
+        }
+
+        const ensureFreshReservation = async (): Promise<FreshReservationContext | null> => {
+          try {
+            if (_freshReservationContext) return _freshReservationContext;
+            if (!caps.requiresExternalSubaccountKey) return null;
+            if (!botKeypair) throw new Error('external-key provisioning has no prepared keypair');
+            const claimToken = crypto.randomUUID();
+            const preparedPublicKey = botKeypair.publicKey.toString();
+            const markerUmk = await getUmkForWebhook(req.walletAddress!);
+            const markerUmkBuffer = markerUmk?.umk ?? getSessionByWalletAddress(req.walletAddress!)?.session.umk ?? null;
+            if (!markerUmkBuffer) {
+              throw new Error('No active UMK available to secure provisioning write-ahead');
+            }
+            try {
+              const pooledPlaintext = Buffer.from(botKeypair.secretKey);
+              let pooledCiphertext: string;
+              try {
+                pooledCiphertext = encryptPooledSubaccountKeyV3(
+                  markerUmkBuffer,
+                  pooledPlaintext,
+                  adapter.protocolName,
+                  req.walletAddress!,
+                  preparedPublicKey,
+                );
+              } finally {
+                pooledPlaintext.fill(0);
+              }
+              const { SUBACCOUNT_AAD_VERSION } = await import('./crypto-v3');
+              const prepared = await storage.prepareExternalSubaccountReservation({
+                walletAddress: req.walletAddress!,
+                protocol: adapter.protocolName,
+                protocolSubaccountId: preparedPublicKey,
+                observedAgentPublicKey: agentKeypair.publicKey.toString(),
+                claimToken,
+                subaccountKeyEncryptedV3: pooledCiphertext,
+                aadVersion: SUBACCOUNT_AAD_VERSION.POOLED_SUBACCOUNT,
+                derivationIndex: botDerivationIndex,
+                derivationPathVersion: botDerivationPathVersion,
+              });
+              if (prepared.outcome === 'stale_generation') {
+                throw new Error('Trading account generation changed before provisioning; nothing was funded');
+              }
+              if (prepared.outcome !== 'prepared') {
+                throw new Error('A provisioning record already exists for this external account; nothing was funded');
+              }
+              const reservation: FreshReservationContext = {
+                claimToken,
+                protocol: adapter.protocolName,
+                protocolSubaccountId: preparedPublicKey,
+                agentPublicKey: agentKeypair.publicKey.toString(),
+              };
+              _freshReservationContext = reservation;
+              return reservation;
+            } finally {
+              try { markerUmk?.cleanup(); } catch { /* noop */ }
+            }
+          } catch (prepareErr) {
+            abortPreparedBotSecrets();
+            throw prepareErr;
+          }
+        };
+
+        // The marker/claim must exist before the Vault-unpark funding source can
+        // move. A claimed spare already supplies the blocking `reserving` row.
+        if (!preclaimedSpare) _freshReservationContext = await ensureFreshReservation();
 
         console.log(`[Bot Creation] Creating ${adapter.protocolName} subaccount under agent ${agentKeypair.publicKey.toString()}${botKeypair ? ` with pre-generated sub key ${botKeypair.publicKey.toString()}` : ''}${usePacificaAtomicProvision ? ` (atomic provision, fundingAmount=$${fundingAmountNum})` : ''}${useFlashAtomicProvision ? ` (flash per-bot wallet, fundingAmount=$${fundingAmountNum})` : ''}`);
 
@@ -14797,23 +15151,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         // the claim. On no-spare / any failure we fall through to fresh provisioning so
         // the user still gets a working bot.
         let reuseHandled = false;
-        const attemptReuse =
-          isReuseOnCreateEnabled() &&
-          usePacificaAtomicProvision &&
-          adapter.subaccountCaps?.recyclable === true &&
-          typeof (adapter as any).reuseSubaccount === 'function' &&
-          typeof adapter.verifySubaccountEmpty === 'function';
-
-        if (attemptReuse) {
-          const { randomUUID } = await import('crypto');
-          const claimToken = randomUUID();
+        if (attemptReuse && preclaimedSpare) {
           const agentPub = agentKeypair.publicKey.toString();
-          const spare = await storage.claimSpareSubaccount({
-            walletAddress: req.walletAddress!,
-            protocol: adapter.protocolName,
-            agentPublicKey: agentPub,
-            claimToken,
-          });
+          const spare = preclaimedSpare;
+          const claimToken = spare.claimToken;
+          if (!claimToken) {
+            abortPreparedBotSecrets();
+            throw new Error('claimed spare is missing its reservation token');
+          }
           if (spare && spare.protocolSubaccountId && spare.subaccountKeyEncryptedV3 && spare.aadVersion != null) {
             const subId = spare.protocolSubaccountId;
             try {
@@ -14869,28 +15214,56 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                   fundedAmount: reuseResult.transferSucceeded ? fundingAmountNum : 0,
                 };
                 reuseHandled = true;
+                try { botKeypair?.secretKey.fill(0); } catch { /* noop */ }
+                botKeypair = null;
                 console.log(`[Bot Creation][Reuse] reused spare subaccount=${subId} funded=${reuseResult.transferSucceeded}${reuseResult.warning ? ` warning="${reuseResult.warning}"` : ''}`);
               }
             } catch (reuseErr: any) {
-              // Reuse failed AFTER claiming. reuseSubaccount keeps funds safe in the
-              // main account on any failure, and the slot is still a verified-empty
-              // spare, so return it to the pool and fall through to fresh provisioning.
-              console.error(`[Bot Creation][Reuse] reuse failed for spare ${subId}, releasing and provisioning fresh:`, reuseErr?.message || reuseErr);
+              // Any error after claim is UNKNOWN at this boundary: verification may
+              // have failed, or funding may have moved before the adapter threw. Never
+              // assert `spare`/empty without a fresh proof; quarantine the exact lease
+              // and let recovery inspect it with the retained pooled key.
+              console.error(`[Bot Creation][Reuse] reuse failed for spare ${subId}; quarantining before fresh provisioning:`, reuseErr?.message || reuseErr);
               try {
-                await storage.releaseReservationToSpare({ protocol: adapter.protocolName, protocolSubaccountId: subId, claimToken });
-              } catch (relErr: any) {
-                console.error(`[Bot Creation][Reuse] failed to release reservation ${subId}:`, relErr?.message || relErr);
+                const quarantined = await storage.markSubaccountStuckFunds({
+                  walletAddress: req.walletAddress!,
+                  protocol: adapter.protocolName,
+                  protocolSubaccountId: subId,
+                  botId: null,
+                  agentPublicKey: agentPub,
+                  lastError: 'reuse failed before a post-funding empty state was proven',
+                  claimToken,
+                });
+                if (!quarantined) throw new Error('reservation quarantine CAS was lost');
+              } catch (quarantineErr: any) {
+                console.error(`[Bot Creation][Reuse] failed to quarantine reservation ${subId}:`, quarantineErr?.message || quarantineErr);
+                abortPreparedBotSecrets();
+                throw new Error(`Could not secure failed reuse reservation ${subId}; retry later`);
               }
             }
           } else if (spare && spare.protocolSubaccountId) {
-            // Claimed a row missing its retained key/version (claim filters these out,
-            // so this is defensive). Return it to the pool rather than strand it.
-            console.warn(`[Bot Creation][Reuse] claimed spare ${spare.protocolSubaccountId} missing key/version; releasing`);
+            // Claimed a malformed row despite the query filters. Fail closed: a
+            // keyless row cannot safely re-enter the reusable pool.
+            console.warn(`[Bot Creation][Reuse] claimed spare ${spare.protocolSubaccountId} missing key/version; quarantining`);
             try {
-              await storage.releaseReservationToSpare({ protocol: adapter.protocolName, protocolSubaccountId: spare.protocolSubaccountId, claimToken });
-            } catch { /* best-effort */ }
+              const quarantined = await storage.markSubaccountStuckFunds({
+                walletAddress: req.walletAddress!,
+                protocol: adapter.protocolName,
+                protocolSubaccountId: spare.protocolSubaccountId,
+                botId: null,
+                agentPublicKey: agentPub,
+                lastError: 'claimed spare was missing retained-key metadata',
+                claimToken,
+              });
+              if (!quarantined) throw new Error('reservation quarantine CAS was lost');
+            } catch {
+              abortPreparedBotSecrets();
+              throw new Error(`Could not secure malformed reuse reservation ${spare.protocolSubaccountId}; retry later`);
+            }
           }
         }
+
+        if (!reuseHandled) _freshReservationContext = await ensureFreshReservation();
 
         try {
           if (usePacificaAtomicProvision && !reuseHandled) {
@@ -14903,6 +15276,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             });
 
             botSubaccountPublicKey = result.subaccountId;
+            if (!_freshReservationContext || result.subaccountId !== _freshReservationContext.protocolSubaccountId) {
+              throw new Error('Pacifica returned a subaccount identity that does not match the durable provisioning key');
+            }
             pendingBotSecretKeyForV3 = botKeypair!.secretKey;
             // Phase 4b: leave status as 'pending' until V3 ciphertext is written
             // post-insert. This keeps the CHECK constraint (external_key+active ⇒ key)
@@ -14953,6 +15329,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             });
 
             botSubaccountPublicKey = result.subaccountId;
+            if (!_freshReservationContext || result.subaccountId !== _freshReservationContext.protocolSubaccountId) {
+              throw new Error('Flash returned a wallet identity that does not match the durable provisioning key');
+            }
             pendingBotSecretKeyForV3 = botKeypair!.secretKey;
             // Phase 4b: stay 'pending' until the V3 ciphertext is written post-insert.
             subaccountStatus = 'pending';
@@ -15010,6 +15389,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             }
 
             botSubaccountPublicKey = sub.subaccountId;
+            if (
+              caps.requiresExternalSubaccountKey &&
+              (!_freshReservationContext || sub.subaccountId !== _freshReservationContext.protocolSubaccountId)
+            ) {
+              throw new Error(`${adapter.protocolName} returned an identity that does not match the durable provisioning key`);
+            }
             if (botKeypair) {
               pendingBotSecretKeyForV3 = botKeypair.secretKey;
               // Phase 4b: stay 'pending' until post-insert V3 write succeeds.
@@ -15032,8 +15417,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 );
               } catch (validationErr: any) {
                 console.error(`[Bot Creation] ${validationErr.message}`);
-                _botCreateAgentKey.cleanup();
-                _botCreateUmk.cleanup();
+                abortPreparedBotSecrets();
                 return res.status(500).json({
                   error: `Failed to create trading subaccount: adapter returned invalid subaccount ID format`,
                 });
@@ -15044,12 +15428,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           console.log(`[Bot Creation] ${adapter.protocolName} subaccount created: ${botSubaccountPublicKey}`);
         } catch (subErr: any) {
           console.error(`[Bot Creation] ${adapter.protocolName} subaccount creation failed:`, subErr.message);
-          _botCreateAgentKey.cleanup();
-          _botCreateUmk.cleanup();
+          abortPreparedBotSecrets();
           return res.status(500).json({ error: `Failed to create trading subaccount: ${subErr.message}` });
         }
-        _botCreateAgentKey.cleanup();
-        _botCreateUmk.cleanup();
+        releaseBotCreateAgent();
       }
 
       try {
@@ -15061,25 +15443,35 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             if (subId > 0 && !dbIdSet.has(subId)) {
               try {
                 const orphanedWebhookSecret = generateWebhookSecret();
-                const orphanedBot = await storage.createTradingBot({
+                const orphanedBotResult = await storage.createAgentAuthorityTradingBot({
                   walletAddress: req.walletAddress!,
-                  name: `Recovered Bot (SA${subId})`,
-                  market: 'SOL-PERP',
-                  webhookSecret: orphanedWebhookSecret,
-                  driftSubaccountId: subId,
-                  isActive: false,
-                  side: 'both',
-                  leverage: 1,
-                  totalInvestment: '0',
-                  maxPositionSize: null,
-                  signalConfig: { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
-                  riskConfig: {},
-                  subaccountAuthMode: 'main_plus_id',
-                  // Group D item 18: orphan recovery in main bot-creation flow scans
-                  // on-chain Drift subaccounts via discoverOnChainSubaccounts; any bot
-                  // created here is by definition a Drift bot.
-                  activeProtocol: 'drift',
-                } as any);
+                  observedAgentPublicKey: wallet.agentPublicKey!,
+                  bot: {
+                    walletAddress: req.walletAddress!,
+                    name: `Recovered Bot (SA${subId})`,
+                    market: 'SOL-PERP',
+                    webhookSecret: orphanedWebhookSecret,
+                    driftSubaccountId: subId,
+                    isActive: false,
+                    side: 'both',
+                    leverage: 1,
+                    totalInvestment: '0',
+                    maxPositionSize: null,
+                    signalConfig: { longKeyword: 'LONG', shortKeyword: 'SHORT', exitKeyword: 'CLOSE' },
+                    riskConfig: {},
+                    subaccountAuthMode: 'main_plus_id',
+                    // Group D item 18: orphan recovery in main bot-creation flow scans
+                    // on-chain Drift subaccounts via discoverOnChainSubaccounts; any bot
+                    // created here is by definition a Drift bot.
+                    activeProtocol: 'drift',
+                  } as any,
+                });
+                if (orphanedBotResult.outcome === 'stale_generation') {
+                  return res.status(409).json({
+                    error: 'Your trading account changed while orphan recovery was being recorded. Refresh Wallet Management and retry.',
+                  });
+                }
+                const orphanedBot = orphanedBotResult.bot;
                 console.log(`[Bot Creation] Created recovered bot ${orphanedBot.id} for orphaned subaccount ${subId}`);
               } catch (syncErr: any) {
                 console.error(`[Bot Creation] Failed to create placeholder for subaccount ${subId}:`, syncErr.message);
@@ -15156,18 +15548,39 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           const flashAdapter = createAdapter as import('./protocol/flash/flash-adapter').FlashAdapter;
           let rb = { swept: false, usdcSwept: 0, solReclaimed: 0 };
           try {
-            rb = await _rollbackFlashFundedWallet(
-              flashAdapter, pendingBotSecretKeyForV3, botSubaccountPublicKey, wallet.agentPublicKey, '[Bot Creation]',
-            );
+            const currentWallet = await storage.getWallet(req.walletAddress!);
+            if (currentWallet?.agentPublicKey === wallet.agentPublicKey) {
+              rb = await _rollbackFlashFundedWallet(
+                flashAdapter, pendingBotSecretKeyForV3, botSubaccountPublicKey, wallet.agentPublicKey, '[Bot Creation]',
+              );
+            }
           } catch (rbErr: any) {
             console.error(`[Bot Creation] Flash rollback after INSERT failure threw: ${rbErr?.message || rbErr}`);
           }
           try { pendingBotSecretKeyForV3.fill(0); } catch {}
           if (!rb.swept) {
+            if (_freshReservationContext) {
+              await storage.markSubaccountStuckFunds({
+                walletAddress: req.walletAddress!,
+                protocol: _freshReservationContext.protocol,
+                protocolSubaccountId: _freshReservationContext.protocolSubaccountId,
+                botId: null,
+                agentPublicKey: _freshReservationContext.agentPublicKey,
+                lastError: 'bot insert failed after funding; recovery sweep not confirmed',
+                claimToken: _freshReservationContext.claimToken,
+              }).catch(() => false);
+            }
             console.error(`[Bot Creation] CRITICAL: bot INSERT failed and Flash wallet ${botSubaccountPublicKey} could not be confirmed empty (insertErr: ${insertErr?.message}) — recoverable via orphaned-wallet recovery`);
             return res.status(500).json({
               error: `Could not create the bot, and we could not confirm your funds were returned. Your bot wallet ${botSubaccountPublicKey} may still hold funds — use "Recover stranded funds" or contact support before retrying.`,
             });
+          }
+          if (_freshReservationContext) {
+            await storage.deleteReservedSubaccount({
+              protocol: _freshReservationContext.protocol,
+              protocolSubaccountId: _freshReservationContext.protocolSubaccountId,
+              claimToken: _freshReservationContext.claimToken,
+            }).catch(() => false);
           }
           console.warn(`[Bot Creation] bot INSERT failed; swept $${rb.usdcSwept.toFixed(2)} USDC back to agent wallet. insertErr: ${insertErr?.message}`);
           return res.status(500).json({
@@ -15195,6 +15608,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               lastError: `bot INSERT failed after funding (derivationIndex=${botDerivationIndex ?? 'n/a'}, pathVersion=${botDerivationPathVersion ?? 'n/a'}): ${insertErr?.message || insertErr}`,
               derivationIndex: botDerivationIndex ?? null,
               derivationPathVersion: botDerivationPathVersion ?? null,
+              claimToken: _freshReservationContext?.claimToken,
             });
             console.error(`[Bot Creation] CRITICAL: bot INSERT failed after funding ${createAdapter.protocolName} subaccount ${botSubaccountPublicKey}; quarantined as stuck_funds for recovery (derivationIndex=${botDerivationIndex})`);
           } catch (quarErr: any) {
@@ -15233,11 +15647,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             error: `We couldn't finish creating your bot, but your funds are safe in your ${createAdapter.protocolName} subaccount and recoverable. Please contact support before retrying.`,
           });
         }
+        try { pendingBotSecretKeyForV3?.fill(0); } catch { /* noop */ }
         throw insertErr;
       }
-
-      const webhookUrl = generateWebhookUrl(bot.id, webhookSecret);
-      await storage.updateTradingBot(bot.id, { webhookUrl } as any);
 
       // Phase 4b: write V3 ciphertext for the bot-subaccount key now that we have bot.id.
       // We require the UMK to encrypt V3. Prefer the execution-UMK envelope
@@ -15259,19 +15671,41 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             }
             umkBuf = sessionRes.session.umk;
           }
-          const v3Ciphertext = encryptBotSubaccountKeyV3(
-            umkBuf,
-            Buffer.from(pendingBotSecretKeyForV3),
-            req.walletAddress!,
-            bot.id,
-          );
+          const botPlaintext = Buffer.from(pendingBotSecretKeyForV3);
+          let v3Ciphertext: string;
+          try {
+            v3Ciphertext = encryptBotSubaccountKeyV3(
+              umkBuf,
+              botPlaintext,
+              req.walletAddress!,
+              bot.id,
+            );
+          } finally {
+            botPlaintext.fill(0);
+          }
           await storage.updateBotSubaccountKeyV3(bot.id, v3Ciphertext);
-          // Ambiguous Flash funding stays 'error' (action-required) even though the
-          // key persisted — we are NOT sure the funds actually landed. Everything
-          // else goes 'active'.
-          await storage.updateTradingBot(bot.id, {
-            subaccountStatus: (req as any)._flashProvisionAmbiguous ? 'error' : 'active',
-          } as any);
+          if (_freshReservationContext) {
+            const finalized = await storage.finalizeReusedSubaccount({
+              protocol: _freshReservationContext.protocol,
+              protocolSubaccountId: _freshReservationContext.protocolSubaccountId,
+              claimToken: _freshReservationContext.claimToken,
+              botId: bot.id,
+              terminalSubaccountStatus: (req as any)._flashProvisionAmbiguous ? 'error' : 'active',
+            });
+            if (!finalized) {
+              try { await storage.updateTradingBot(bot.id, { subaccountStatus: 'error' } as any); } catch { /* noop */ }
+              try { await storage.deleteTradingBot(bot.id); } catch { /* pooled marker still preserves custody */ }
+              return res.status(500).json({
+                error: "Provisioning ownership could not be finalized. The incomplete bot was disabled or removed, and the provisional account remains recoverable; contact support before retrying.",
+              });
+            }
+            _freshReservationContext = null;
+          } else {
+            // Non-external legacy paths have no reservation marker to finalize.
+            await storage.updateTradingBot(bot.id, {
+              subaccountStatus: (req as any)._flashProvisionAmbiguous ? 'error' : 'active',
+            } as any);
+          }
         } catch (v3Err: any) {
           console.error(`[Bot Creation] Failed to write V3 bot-subaccount key for bot ${bot.id}:`, v3Err.message);
           // Flash: provisionBotWallet already moved funds into the bot's OWN wallet.
@@ -15283,35 +15717,97 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           // 'error' and fail closed so the stranded wallet stays traceable.
           if (createAdapter.protocolName === 'flash' && wallet?.agentPublicKey) {
             const flashAdapter = createAdapter as import('./protocol/flash/flash-adapter').FlashAdapter;
-            const { swept } = await _rollbackFlashFundedWallet(
-              flashAdapter, pendingBotSecretKeyForV3, botSubaccountPublicKey!, wallet.agentPublicKey, '[Bot Creation]',
+            const currentDestination = await getUnchangedAgentSweepDestination(
+              req.walletAddress!,
+              wallet.agentPublicKey,
             );
+            const { swept } = currentDestination
+              ? await _rollbackFlashFundedWallet(
+                  flashAdapter,
+                  pendingBotSecretKeyForV3,
+                  botSubaccountPublicKey!,
+                  currentDestination,
+                  '[Bot Creation]',
+                )
+              : { swept: false };
             if (!swept) {
+              if (_freshReservationContext) {
+                await storage.markSubaccountStuckFunds({
+                  walletAddress: req.walletAddress!,
+                  protocol: _freshReservationContext.protocol,
+                  protocolSubaccountId: _freshReservationContext.protocolSubaccountId,
+                  botId: bot.id,
+                  agentPublicKey: _freshReservationContext.agentPublicKey,
+                  lastError: currentDestination
+                    ? 'bot key persistence failed; Flash recovery sweep not confirmed'
+                    : 'bot key persistence failed after agent generation changed; sweep suppressed',
+                  claimToken: _freshReservationContext.claimToken,
+                }).catch(() => false);
+              }
               // Funds may remain in the bot wallet whose key we are about to lose.
               // Preserve the row (status 'error') so the wallet address stays on
               // record, and tell the user funds may be stranded. Fail closed.
               try { await storage.updateTradingBot(bot.id, { subaccountStatus: 'error' } as any); } catch {}
               console.error(`[Bot Creation] CRITICAL: Flash rollback could not confirm empty wallet ${botSubaccountPublicKey} — preserving bot row ${bot.id} for recovery`);
               return res.status(500).json({
-                error: `Failed to secure bot subaccount key and could not fully return funds. Your bot wallet ${botSubaccountPublicKey} may still hold funds — please contact support before creating another bot.`,
+                error: 'Failed to secure the bot trading-account key and could not confirm that all funds were returned. The account remains recoverable; please contact support before retrying.',
               });
             }
             // Flash wallet CONFIRMED empty — the per-bot wallet is disposable and is
             // itself re-derivable from the agent seed, so deleting the now-empty row
             // strands nothing.
+            if (_freshReservationContext) {
+              await storage.deleteReservedSubaccount({
+                protocol: _freshReservationContext.protocol,
+                protocolSubaccountId: _freshReservationContext.protocolSubaccountId,
+                claimToken: _freshReservationContext.claimToken,
+              }).catch(() => false);
+            }
             try { await storage.deleteTradingBot(bot.id); } catch {}
-            return res.status(500).json({ error: `Failed to secure bot subaccount key: ${v3Err.message}` });
+            return res.status(500).json({ error: 'Failed to secure the bot trading-account key. The provisional account was confirmed empty; please retry.' });
           }
-          // Non-Flash external-key venues (Pacifica): the deposit+transfer already
-          // landed funds INSIDE this subaccount BEFORE this V3 write. With agent_hd
-          // derivation the row's protocolSubaccountId + derivationIndex/
-          // derivationPathVersion IS the key's recovery source — the seed re-derives
-          // the key even with NO V3 blob (decryptBotSubaccountKey re-derives and
-          // rehydrates the cache on next access). Deleting the row here would discard
-          // that recovery metadata and STRAND the funds. Preserve the row as 'error'
-          // and fail closed — NEVER delete a funded external-key subaccount row.
+          // Pacifica: attempt the same immediate raw-key recovery, but only while the
+          // wallet still names the observed agent generation as the safe destination.
+          // A confirmed-empty result may release the reservation; every unknown or
+          // funded result keeps the pooled key and durable blocker for lease recovery.
+          if (_freshReservationContext && createAdapter.protocolName === 'pacifica') {
+            const currentDestination = await getUnchangedAgentSweepDestination(
+              req.walletAddress!,
+              _freshReservationContext.agentPublicKey,
+            );
+            const recovery = await sweepProvisionedExternalKeyFunds({
+              adapter: createAdapter,
+              subSecretKey: pendingBotSecretKeyForV3,
+              subaccountPublicKey: botSubaccountPublicKey!,
+              agentPublicKey: currentDestination,
+              logPrefix: '[Bot Creation]',
+            });
+            if (recovery.swept) {
+              await settleEmptyFreshReservation(_freshReservationContext).catch(() => false);
+              try { await storage.deleteTradingBot(bot.id); } catch { /* marker remains a blocker if deletion fails */ }
+              return res.status(500).json({
+                error: 'Failed to secure the bot trading-account key. The provisional account was confirmed empty; please retry.',
+              });
+            }
+          }
+
+          // Do not assume every Pacifica row is seed-re-derived: legacy random-key
+          // rows still exist. The pooled-AAD reservation is the authoritative
+          // recovery source for this fresh attempt. Preserve it and the bot linkage
+          // whenever a confirmed-empty result is unavailable.
+          if (_freshReservationContext) {
+            await storage.markSubaccountStuckFunds({
+              walletAddress: req.walletAddress!,
+              protocol: _freshReservationContext.protocol,
+              protocolSubaccountId: _freshReservationContext.protocolSubaccountId,
+              botId: bot.id,
+              agentPublicKey: _freshReservationContext.agentPublicKey,
+              lastError: 'bot key persistence failed; retained provisioning key requires recovery',
+              claimToken: _freshReservationContext.claimToken,
+            }).catch(() => false);
+          }
           try { await storage.updateTradingBot(bot.id, { subaccountStatus: 'error' } as any); } catch {}
-          console.error(`[Bot Creation] CRITICAL: V3 write failed for funded ${createAdapter.protocolName} subaccount ${botSubaccountPublicKey} (bot ${bot.id}); preserving row as 'error' — key re-derivable from seed (derivationIndex=${botDerivationIndex})`);
+          console.error(`[Bot Creation] CRITICAL: V3 write failed for funded ${createAdapter.protocolName} subaccount ${botSubaccountPublicKey} (bot ${bot.id}); preserving the bot row and pooled reservation as recoverable custody`);
           return res.status(500).json({
             error: `We couldn't finish setting up your bot, but your funds are safe and recoverable. Please reconnect your wallet and try again — if it keeps failing, contact support.`,
           });
@@ -15352,19 +15848,19 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             throw new Error(`retained-key rebind failed (pubkey verification) for reused subaccount ${_reuseContext.protocolSubaccountId}`);
           }
           await storage.updateBotSubaccountKeyV3(bot.id, rebind.encryptedV3);
-          await storage.updateTradingBot(bot.id, { subaccountStatus: 'active' } as any);
           const finalized = await storage.finalizeReusedSubaccount({
             protocol: _reuseContext.protocol,
             protocolSubaccountId: _reuseContext.protocolSubaccountId,
             claimToken: _reuseContext.claimToken,
             botId: bot.id,
+            terminalSubaccountStatus: 'active',
           });
           if (!finalized) {
-            // Lease TTL (10m) ≫ reuse duration, so this is effectively unreachable. If
-            // it ever happens the recovery job reclaimed the slot mid-flight; the bot
-            // already holds the key and the funds are in the subaccount, so keep the bot
-            // active and log loudly for reconciliation rather than tear the bot down.
-            console.error(`[Bot Creation][Reuse] finalize CAS lost for ${_reuseContext.protocolSubaccountId} (bot ${bot.id}); registry not flipped to active — needs reconciliation`);
+            // The lease may have been recovered or reassigned. Never leave a bot
+            // executable against an account whose registry ownership we cannot prove.
+            try { await storage.updateTradingBot(bot.id, { subaccountStatus: 'error' } as any); } catch { /* noop */ }
+            console.error(`[Bot Creation][Reuse] finalize CAS lost for ${_reuseContext.protocolSubaccountId} (bot ${bot.id}); bot held in error for reconciliation`);
+            throw new Error('reuse reservation ownership CAS was lost');
           }
         } catch (reuseKeyErr: any) {
           console.error(`[Bot Creation][Reuse] failed to bind retained key for reused subaccount ${_reuseContext.protocolSubaccountId} (bot ${bot.id}):`, reuseKeyErr?.message || reuseKeyErr);
@@ -15383,11 +15879,17 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               claimToken: _reuseContext.claimToken,
             });
           } catch { /* best-effort quarantine */ }
-          return res.status(500).json({ error: `Failed to secure reused subaccount key: ${reuseKeyErr?.message || reuseKeyErr}` });
+          return res.status(500).json({ error: 'The reused trading account could not be finalized safely. The incomplete bot was removed and the account remains recoverable; contact support before retrying.' });
         } finally {
           try { _reuseUmk?.cleanup(); } catch {}
         }
       }
+
+      // The durable trading-account key and reservation transition are more
+      // important than the derived webhook URL. Keep this non-custody update after
+      // all raw-key handling so a database error cannot bypass key zeroization.
+      const webhookUrl = generateWebhookUrl(bot.id, webhookSecret);
+      await storage.updateTradingBot(bot.id, { webhookUrl } as any);
 
       // Pacifica atomic-provision: surface funding status so frontend skips the
       // follow-up /api/exchange/deposit call (the deposit + transfer already happened
@@ -16129,24 +16631,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
 
-      // Recovery-metadata guard (HD external-key venues, non-Flash). A Pacifica row
-      // whose subaccount is funded on-chain but did NOT qualify for the active-context
-      // sweep above — e.g. status 'error' from a create-time V3-write failure, so it
-      // has no usable ciphertext and getBotSubaccountContext() returned null — still
-      // carries its protocolSubaccountId + derivationIndex, which IS the seed-recovery
-      // handle (the signing key == deriveBotKeypairFromAgentSeed(seed, index)). Unlike
-      // Flash (which has an orphaned-wallet recovery scanner + disposable wallets),
-      // a Pacifica subaccount's pubkey is only known FROM this row — falling through to
-      // the generic delete below would drop it and strand the funds with NO marker.
-      // Persist a durable stuck_funds quarantine in protocol_subaccounts (keyed by
-      // protocol+subaccountId, independent of the bot row, carrying the structured
-      // derivation index) BEFORE allowing deletion. Over-quarantine is benign: admin/
-      // recovery verifies-empty and clears it.
+      // Recovery guard for non-Flash external-key venues. A Pacifica row may
+      // still hold funds while getBotSubaccountContext() refuses to expose a
+      // signing context. Legacy Pacifica keys may be random, so a registry
+      // identifier cannot replace the bot-bound ciphertext. Record a durable
+      // blocker but KEEP the bot row and refuse deletion so the key survives.
       if (
         bot.subaccountAuthMode === 'external_key' &&
         bot.activeProtocol !== 'flash' &&
         bot.protocolSubaccountId &&
-        bot.derivationIndex !== null && bot.derivationIndex !== undefined &&
         !getBotSubaccountContext(bot)
       ) {
         try {
@@ -16154,13 +16647,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             walletAddress: bot.walletAddress,
             protocol: (bot.activeProtocol as string | null) ?? 'pacifica',
             protocolSubaccountId: bot.protocolSubaccountId,
-            botId: null,
+            botId: bot.id,
             agentPublicKey: agentAddress ?? null,
-            lastError: `bot deleted while subaccountStatus='${bot.subaccountStatus}' (no active signing context); funds may remain — key re-derivable from seed (derivationIndex=${bot.derivationIndex}, pathVersion=${bot.derivationPathVersion})`,
+            lastError: `bot deletion refused while subaccountStatus='${bot.subaccountStatus}' because no active signing context was available`,
             derivationIndex: bot.derivationIndex,
             derivationPathVersion: bot.derivationPathVersion,
           });
-          console.error(`[Delete] CRITICAL: external-key subaccount ${bot.protocolSubaccountId} (bot ${bot.id}, status=${bot.subaccountStatus}) had no active sweep context; quarantined as stuck_funds (derivationIndex=${bot.derivationIndex}) before deletion.`);
+          console.error(`[Delete] external-key subaccount ${bot.protocolSubaccountId} (bot ${bot.id}, status=${bot.subaccountStatus}) had no active sweep context; preserving the bot row and quarantining custody.`);
+          return res.status(409).json({
+            error: "This bot's trading account could not be safely accessed for recovery. The bot and its key were preserved; retry later or contact support.",
+          });
         } catch (quarErr: any) {
           // Fail CLOSED: if the recovery handle can't be recorded, do NOT delete the
           // row — deleting would lose the only copy of protocolSubaccountId + index.
@@ -16267,7 +16763,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             decryptedBotKey?.cleanup();
           }
         } else {
-          exists = await subaccountExists(agentAddress, bot.driftSubaccountId, getAdapterForBot(bot));
+          try {
+            const listed = await getAdapterForBot(bot).listSubaccounts(agentAddress);
+            exists = listed.some((s: any) => s.subaccountId === String(bot.driftSubaccountId));
+          } catch {
+            return res.status(500).json({
+              error: 'Could not verify the trading account before deletion. The bot remains linked; please retry.',
+            });
+          }
 
           if (exists) {
             const balance = await getExchangeBalance(agentAddress, bot.driftSubaccountId, getAdapterForBot(bot));
@@ -16312,6 +16815,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         // Try to close the subaccount to reclaim rent (~0.023 SOL)
         let rentReclaimed = false;
         let rentReclaimError: string | undefined;
+        let orphanHandoffComplete = false;
         
         // Edge case: subaccount exists but agent keys are missing (data corruption)
         if (exists && !agentSecret && bot.driftSubaccountId > 0) {
@@ -16362,10 +16866,34 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 driftSubaccountId: bot.driftSubaccountId,
                 reason: rentReclaimError,
               });
+              orphanHandoffComplete = true;
             } catch (orphanErr: any) {
               console.error(`[Delete] Failed to track orphaned subaccount:`, orphanErr.message);
             }
           }
+        }
+
+        const orphanHandoffRequired = exists
+          && !rentReclaimed
+          && bot.driftSubaccountId > 0
+          && bot.subaccountAuthMode !== 'external_key';
+        if (orphanHandoffRequired && !orphanHandoffComplete && !agentSecret) {
+          try {
+            await storage.createOrphanedSubaccount({
+              walletAddress: req.walletAddress!,
+              agentPublicKey: agentAddress,
+              driftSubaccountId: bot.driftSubaccountId,
+              reason: rentReclaimError,
+            });
+            orphanHandoffComplete = true;
+          } catch (orphanErr: any) {
+            console.error(`[Delete] Failed to preserve orphaned-subaccount custody before bot deletion:`, orphanErr.message);
+          }
+        }
+        if (orphanHandoffRequired && !orphanHandoffComplete) {
+          return res.status(500).json({
+            error: 'The bot could not be deleted because its trading-account recovery record was not secured. Nothing was detached; please retry.',
+          });
         }
         
         await storage.deleteTradingBot(req.params.id);
@@ -16813,6 +17341,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (balance <= 0.01) {
         // No meaningful balance, try to close subaccount to reclaim rent
         let rentReclaimed = false;
+        let rentReclaimError: string | null = null;
         if (agentSecret) {
           try {
             const closeResult = await closeDriftSubaccount(
@@ -16823,12 +17352,29 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             if (closeResult.success) {
               console.log(`[Delete] Subaccount ${bot.driftSubaccountId} closed, rent reclaimed`);
               rentReclaimed = true;
+            } else {
+              rentReclaimError = closeResult.error || "Subaccount close was not confirmed";
             }
-          } catch (closeErr) {
+          } catch (closeErr: any) {
+            rentReclaimError = closeErr?.message || String(closeErr);
             console.warn(`[Delete] Rent reclaim failed:`, closeErr);
           }
         }
-        await storage.deleteTradingBot(req.params.id);
+        const detach = await detachTradingBotAfterDriftCustodyHandoff({
+          walletAddress: req.walletAddress!,
+          agentPublicKey: agentAddress,
+          driftSubaccountId: bot.driftSubaccountId,
+          subaccountAuthMode: bot.subaccountAuthMode,
+          closeConfirmed: rentReclaimed,
+          orphanReason: rentReclaimError,
+          createOrphanedSubaccount: (row) => storage.createOrphanedSubaccount(row),
+          deleteTradingBot: () => storage.deleteTradingBot(req.params.id),
+        });
+        if (!detach.deleted) {
+          return res.status(500).json({
+            error: "The bot could not be deleted because its trading-account recovery record was not secured. Nothing was detached; please retry.",
+          });
+        }
         return res.json({ success: true, swept: false, rentReclaimed });
       }
 
@@ -16851,6 +17397,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             
             // Try to close the now-empty subaccount
             let rentReclaimed = false;
+            let rentReclaimError: string | null = null;
             try {
               const closeResult = await closeDriftSubaccount(
                 agentSecret,
@@ -16860,12 +17407,29 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               if (closeResult.success) {
                 console.log(`[Delete] Subaccount ${bot.driftSubaccountId} closed, rent reclaimed`);
                 rentReclaimed = true;
+              } else {
+                rentReclaimError = closeResult.error || "Subaccount close was not confirmed after sweep";
               }
-            } catch (closeErr) {
+            } catch (closeErr: any) {
+              rentReclaimError = closeErr?.message || String(closeErr);
               console.warn(`[Delete] Rent reclaim failed:`, closeErr);
             }
-            
-            await storage.deleteTradingBot(req.params.id);
+
+            const detach = await detachTradingBotAfterDriftCustodyHandoff({
+              walletAddress: req.walletAddress!,
+              agentPublicKey: agentAddress,
+              driftSubaccountId: bot.driftSubaccountId,
+              subaccountAuthMode: bot.subaccountAuthMode,
+              closeConfirmed: rentReclaimed,
+              orphanReason: rentReclaimError,
+              createOrphanedSubaccount: (row) => storage.createOrphanedSubaccount(row),
+              deleteTradingBot: () => storage.deleteTradingBot(req.params.id),
+            });
+            if (!detach.deleted) {
+              return res.status(500).json({
+                error: "Funds were swept, but the bot remains linked because its trading-account recovery record was not secured. Please retry deletion.",
+              });
+            }
             return res.json({ 
               success: true, 
               swept: true, 
@@ -16912,6 +17476,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
   // Confirm deletion after sweep transaction is confirmed (legacy endpoint)
   app.post("/api/trading-bots/:id/confirm-delete", requireWallet, async (req, res) => {
+    let _confirmDeleteCleanup: (() => void) | null = null;
     try {
       const bot = await storage.getTradingBotById(req.params.id);
       if (!bot) {
@@ -16934,7 +17499,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       // Try to close the subaccount to reclaim rent (~0.035 SOL)
       let rentReclaimed = false;
-      let _confirmDeleteCleanup: (() => void) | null = null;
+      let rentReclaimError: string | null = null;
       if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined && wallet?.agentPrivateKeyEncryptedV3 && wallet?.agentPublicKey) {
         const _cdUmk = await getUmkForWebhook(req.walletAddress!);
         if (!_cdUmk) {
@@ -16956,19 +17521,36 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             console.log(`[Delete] Subaccount ${bot.driftSubaccountId} closed after sweep, rent reclaimed`);
             rentReclaimed = true;
           } else {
+            rentReclaimError = closeResult.error || "Subaccount close was not confirmed after sweep";
             console.warn(`[Delete] Could not reclaim rent after sweep: ${closeResult.error}`);
           }
-        } catch (closeErr) {
+        } catch (closeErr: any) {
+          rentReclaimError = closeErr?.message || String(closeErr);
           console.warn(`[Delete] Rent reclaim failed after sweep:`, closeErr);
         }
       }
 
-      await storage.deleteTradingBot(req.params.id);
-      res.json({ success: true, txSignature, rentReclaimed });
-      _confirmDeleteCleanup?.();
+      const detach = await detachTradingBotAfterDriftCustodyHandoff({
+        walletAddress: req.walletAddress!,
+        agentPublicKey: wallet?.agentPublicKey,
+        driftSubaccountId: bot.driftSubaccountId,
+        subaccountAuthMode: bot.subaccountAuthMode,
+        closeConfirmed: rentReclaimed,
+        orphanReason: rentReclaimError,
+        createOrphanedSubaccount: (row) => storage.createOrphanedSubaccount(row),
+        deleteTradingBot: () => storage.deleteTradingBot(req.params.id),
+      });
+      if (!detach.deleted) {
+        return res.status(500).json({
+          error: "The bot could not be deleted because its trading-account recovery record was not secured. Nothing was detached; please retry.",
+        });
+      }
+      return res.json({ success: true, txSignature, rentReclaimed });
     } catch (error) {
       console.error("Confirm delete trading bot error:", error);
-      res.status(500).json({ error: "Internal server error" });
+      return res.status(500).json({ error: "Internal server error" });
+    } finally {
+      _confirmDeleteCleanup?.();
     }
   });
 
@@ -21851,8 +22433,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         });
       }
 
+      let marketplaceAgentKeypair: import('@solana/web3.js').Keypair | null = null;
       try {
-        const marketplaceAgentKeypair = Keypair.fromSecretKey(marketplaceAgentKeyResult.secretKey);
+        marketplaceAgentKeypair = Keypair.fromSecretKey(marketplaceAgentKeyResult.secretKey);
 
         // 1) Atomic provision + fund on the creator's protocol (consumes/zeroizes the mnemonic).
         let provision;
@@ -21900,17 +22483,40 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           // agent (protocol-aware, verified-empty) and zeroize the in-memory key —
           // never silently strand a funded subaccount with no recovery trail.
           console.error(`[Marketplace] Copy-bot DB insert failed after funding; rolling back funds: ${insertErr?.message || insertErr}`);
+          const currentDestination = await getUnchangedAgentSweepDestination(
+            req.walletAddress!,
+            wallet.agentPublicKey,
+          );
           const rb = await sweepProvisionedExternalKeyFunds({
             adapter: subAdapter,
             subSecretKey: provision.pendingBotSecretKeyForV3,
             subaccountPublicKey: provision.botSubaccountPublicKey,
-            agentPublicKey: wallet.agentPublicKey,
+            agentPublicKey: currentDestination,
             logPrefix: '[Marketplace]',
           });
           try { provision.pendingBotSecretKeyForV3.fill(0); } catch { /* noop */ }
           if (!rb.swept) {
+            await storage.markSubaccountStuckFunds({
+              walletAddress: req.walletAddress!,
+              protocol: subAdapter.protocolName,
+              protocolSubaccountId: provision.botSubaccountPublicKey,
+              botId: null,
+              agentPublicKey: wallet.agentPublicKey,
+              lastError: currentDestination
+                ? 'marketplace bot insert failed; recovery sweep not confirmed'
+                : 'marketplace bot insert failed after agent generation changed; sweep suppressed',
+              claimToken: provision.reservationClaimToken,
+            }).catch(() => false);
             console.error(`[Marketplace] CRITICAL: could not confirm empty subaccount ${provision.botSubaccountPublicKey} after insert failure (${rb.detail})`);
             return res.status(500).json({ error: `Failed to create your copy bot and could not fully return funds. Your subaccount ${provision.botSubaccountPublicKey} may still hold funds — please contact support before subscribing again.` });
+          }
+          const reservationSettled = await settleEmptyFreshReservation({
+            protocol: subAdapter.protocolName,
+            protocolSubaccountId: provision.botSubaccountPublicKey,
+            claimToken: provision.reservationClaimToken,
+          }).catch(() => false);
+          if (!reservationSettled) {
+            return res.status(500).json({ error: 'Your funds were returned, but provisioning cleanup could not be confirmed. Please contact support before retrying.' });
           }
           return res.status(500).json({ error: `Failed to create your copy bot. Your funds were returned to your account. Please try again.` });
         }
@@ -21924,11 +22530,31 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           botSubaccountPublicKey: provision.botSubaccountPublicKey,
           pendingBotSecretKeyForV3: provision.pendingBotSecretKeyForV3,
           adapter: subAdapter,
-          ambiguous: provision.ambiguous,
           agentPublicKey: wallet.agentPublicKey,
+          reservation: {
+            protocol: subAdapter.protocolName,
+            protocolSubaccountId: provision.botSubaccountPublicKey,
+            claimToken: provision.reservationClaimToken,
+          },
         });
         if (!persistResult.ok) {
           return res.status(persistResult.status).json({ error: persistResult.error });
+        }
+
+        const reservationFinalized = await storage.finalizeReusedSubaccount({
+          protocol: subAdapter.protocolName,
+          protocolSubaccountId: provision.botSubaccountPublicKey,
+          claimToken: provision.reservationClaimToken,
+          botId: subscriberBot.id,
+          terminalSubaccountStatus: provision.ambiguous ? 'error' : 'active',
+        });
+        if (!reservationFinalized) {
+          try { await storage.updateTradingBot(subscriberBot.id, { subaccountStatus: 'error' } as any); } catch { /* noop */ }
+          try { await storage.deleteTradingBot(subscriberBot.id); } catch { /* pooled marker still preserves custody */ }
+          console.error(`[Marketplace] provisioning reservation CAS lost for ${provision.botSubaccountPublicKey} (bot ${subscriberBot.id})`);
+          return res.status(500).json({
+            error: "Copy-bot provisioning ownership could not be finalized. The incomplete bot was disabled or removed, and the provisional account remains recoverable; contact support before retrying.",
+          });
         }
 
         // Re-read so the response reflects the finalized status.
@@ -21988,6 +22614,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           funded: provision.provisionMeta.funded,
         });
       } finally {
+        try { marketplaceAgentKeypair?.secretKey.fill(0); } catch { /* noop */ }
         try { marketplaceAgentKeyResult.cleanup(); } catch { /* noop */ }
         try { copyBotMnemonic?.fill(0); } catch { /* noop */ }
       }
@@ -22249,6 +22876,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         // the edge case where a Pacifica bot with an unresolvable signing context falls
         // through to the numeric branch above. Legacy Drift bots (authMode null) preserved.
         let rentReclaimed = false;
+        let orphanHandoffRequired = false;
+        let orphanHandoffComplete = false;
         if (hasSubaccount && subId > 0 && bot.subaccountAuthMode !== 'external_key') {
           // Adapter direct so a listing failure is distinguishable from "gone".
           let exists = false;
@@ -22267,6 +22896,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 rentReclaimed = true;
                 console.log(`[Unsubscribe] Closed subaccount ${subId}, rent reclaimed: ${closeResult.signature}`);
               } else {
+                orphanHandoffRequired = true;
                 console.error(`[Unsubscribe] Subaccount ${subId} close failed: ${closeResult.error}`);
                 try {
                   await storage.createOrphanedSubaccount({
@@ -22275,11 +22905,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                     driftSubaccountId: subId,
                     reason: closeResult.error,
                   });
+                  orphanHandoffComplete = true;
                 } catch (orphanErr: any) {
                   console.error(`[Unsubscribe] Failed to track orphaned subaccount ${subId}:`, orphanErr.message);
                 }
               }
             } catch (closeErr: any) {
+              orphanHandoffRequired = true;
               console.error(`[Unsubscribe] Subaccount ${subId} close threw:`, closeErr.message);
               try {
                 await storage.createOrphanedSubaccount({
@@ -22288,9 +22920,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                   driftSubaccountId: subId,
                   reason: closeErr.message,
                 });
-              } catch {}
+                orphanHandoffComplete = true;
+              } catch (orphanErr: any) {
+                console.error(`[Unsubscribe] Failed to track orphaned subaccount ${subId}:`, orphanErr.message);
+              }
             }
           } else if (existCheckFailed) {
+            orphanHandoffRequired = true;
             // Couldn't confirm whether the subaccount is gone. Capital was
             // already recovered (fail-closed above), but we're about to null the
             // link below — so record the subaccount to reclaim its rent later
@@ -22302,10 +22938,17 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 driftSubaccountId: subId,
                 reason: 'Existence check failed during unsubscribe',
               });
+              orphanHandoffComplete = true;
             } catch (orphanErr: any) {
               console.error(`[Unsubscribe] Failed to track unverified subaccount ${subId}:`, orphanErr.message);
             }
           }
+        }
+
+        if (orphanHandoffRequired && !orphanHandoffComplete) {
+          return res.status(500).json({
+            error: 'Unsubscribe paused because the trading-account recovery record could not be secured. The bot remains linked; please retry.',
+          });
         }
 
         // Null the subaccount link so the snapshot job stops reading a dead

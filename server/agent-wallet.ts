@@ -164,6 +164,22 @@ export async function getAgentUsdcBalanceStrict(agentPublicKey: string): Promise
   return tokenBalance.value.uiAmount || 0;
 }
 
+/**
+ * Exact USDC base-unit read for destructive reset sizing. A missing ATA is a
+ * truthful zero; transport, shape, amount, or decimal mismatches throw.
+ */
+export async function getAgentUsdcBalanceRawStrict(agentPublicKey: string): Promise<bigint> {
+  const balance = await getAgentTokenBalanceRawStrict(agentPublicKey, USDC_MINT);
+  if (typeof balance.amountRaw !== 'string' || !/^\d+$/.test(balance.amountRaw)) {
+    throw new Error('USDC raw balance malformed');
+  }
+  const amount = BigInt(balance.amountRaw);
+  // The generic reader represents a genuinely absent ATA as raw=0, decimals=0.
+  if (amount === 0n && balance.decimals === 0) return 0n;
+  if (balance.decimals !== 6) throw new Error('USDC decimals mismatch');
+  return amount;
+}
+
 export async function getAgentSolBalance(agentPublicKey: string): Promise<number> {
   const connection = getConnection();
   const agentPubkey = new PublicKey(agentPublicKey);
@@ -910,7 +926,8 @@ export async function executeAgentSolWithdrawDurable(
 }
 
 /**
- * Strict lamports balance read for the durable withdraw orchestrator.
+ * Strict lamports balance read for the durable withdraw orchestrator and the
+ * destructive agent-wallet reset preflight.
  * Throws on any RPC/transport failure or malformed response — callers must
  * fail closed (defer the withdrawal), never assume zero.
  */
