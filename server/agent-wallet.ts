@@ -1,4 +1,4 @@
-import { Connection, PublicKey, Keypair, Transaction, VersionedTransaction, TransactionMessage, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, LAMPORTS_PER_SOL, type AddressLookupTableAccount } from '@solana/web3.js';
+import { Connection, PublicKey, Keypair, Transaction, VersionedTransaction, TransactionMessage, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, LAMPORTS_PER_SOL, SendTransactionError, type AddressLookupTableAccount } from '@solana/web3.js';
 import bs58 from 'bs58';
 import BN from 'bn.js';
 import { getBestQuote, getProviderByName } from './swap/index.js';
@@ -11,6 +11,19 @@ export const NATIVE_SOL_MINT = 'So11111111111111111111111111111111111111112';
  * for subsequent trading gas. Never sweep an agent dry of gas.
  */
 const SWAP_SOL_GAS_RESERVE = 0.02;
+
+/**
+ * With `skipPreflight: false`, web3.js reports an RPC simulation rejection as
+ * a SendTransactionError with no signature. That result proves the signed
+ * transaction was not forwarded. Generic transport failures remain ambiguous:
+ * the RPC may have accepted the bytes before the connection failed.
+ */
+function isProvenPreflightRejection(error: unknown): boolean {
+  return (
+    error instanceof SendTransactionError &&
+    (error as SendTransactionError & { signature?: unknown }).signature === ''
+  );
+}
 
 const SOLANA_ENV = (process.env.DRIFT_ENV || process.env.SOLANA_ENV || 'mainnet-beta') as 'devnet' | 'mainnet-beta';
 const IS_MAINNET = SOLANA_ENV === 'mainnet-beta';
@@ -1339,6 +1352,8 @@ export interface AgentSwapResult {
   /** Price impact the quote was priced at (fraction), or null when unavailable. */
   priceImpactPct?: number | null;
   error?: string;
+  /** TRUE only when an authoritative signature status carried `err`. */
+  onChainFailed?: boolean;
 }
 
 /**
@@ -1362,6 +1377,9 @@ export async function executeAgentSwap(params: AgentSwapParams): Promise<AgentSw
     minSolGas,
   } = params;
 
+  let signedSignature: string | undefined;
+  let writeAheadCompleted = false;
+  let broadcastMayHaveOccurred = false;
   try {
     if (inputMint === outputMint) {
       return { success: false, error: 'Input and output token are the same, no swap needed' };
@@ -1432,6 +1450,7 @@ export async function executeAgentSwap(params: AgentSwapParams): Promise<AgentSw
     //     irreversible broadcast. FATAL: a throw here propagates to the outer catch
     //     (returns {success:false} with NO signature, so nothing moved, retry safe).
     const signature = bs58.encode(swapTx.signatures[0]);
+    signedSignature = signature;
     if (params.onBeforeBroadcast) {
       const blockhash = swapTx.message.recentBlockhash;
       let lastValidBlockHeight = 0; // 0 = unknown (see param doc): consumer omits the expiry hint.
@@ -1444,8 +1463,13 @@ export async function executeAgentSwap(params: AgentSwapParams): Promise<AgentSw
         // "expired" -> double-swap. Reconcile then stays in_flight (fail-closed).
       }
       await params.onBeforeBroadcast({ signature, blockhash, lastValidBlockHeight });
+      writeAheadCompleted = true;
     }
 
+    // Set before invoking send: a transport exception does not prove the RPC
+    // rejected the transaction. From this point the deterministic identity is
+    // the only safe result, even when the call throws.
+    broadcastMayHaveOccurred = true;
     const sentSignature = await connection.sendRawTransaction(swapTx.serialize(), {
       skipPreflight: false,
       preflightCommitment: 'confirmed',
@@ -1472,7 +1496,7 @@ export async function executeAgentSwap(params: AgentSwapParams): Promise<AgentSw
       await new Promise((r) => setTimeout(r, 1500));
     }
     if (confirmedErr) {
-      return { success: false, signature, error: `Swap transaction failed on-chain: ${JSON.stringify(confirmedErr)}` };
+      return { success: false, signature, onChainFailed: true, error: `Swap transaction failed on-chain: ${JSON.stringify(confirmedErr)}` };
     }
 
     // 7) Verify the realized output-token delta (retry for RPC lag / late finalization).
@@ -1503,7 +1527,13 @@ export async function executeAgentSwap(params: AgentSwapParams): Promise<AgentSw
       priceImpactPct: quote.priceImpactPct,
     };
   } catch (error: any) {
-    return { success: false, error: error?.message || 'Swap failed' };
+    return {
+      success: false,
+      ...(!isProvenPreflightRejection(error) && (writeAheadCompleted || broadcastMayHaveOccurred) && signedSignature
+        ? { signature: signedSignature }
+        : {}),
+      error: error?.message || 'Swap failed',
+    };
   }
 }
 
@@ -1591,6 +1621,9 @@ export async function executeAgentInstructions(
     label = 'Transaction',
   } = params;
 
+  let signedSignature: string | undefined;
+  let writeAheadCompleted = false;
+  let broadcastMayHaveOccurred = false;
   try {
     if (!instructions.length) {
       return { success: false, error: `${label}: no instructions to execute` };
@@ -1628,6 +1661,7 @@ export async function executeAgentInstructions(
     // The signature is deterministic once the tx is signed — it is the first
     // signature of the signed tx, identical to what sendRawTransaction returns.
     const signature = bs58.encode(tx.signatures[0]);
+    signedSignature = signature;
 
     // 3b) WRITE-AHEAD durability hook: record the signature + its blockhash window
     //     STRICTLY BEFORE the irreversible broadcast. This is FATAL — if it throws
@@ -1639,8 +1673,10 @@ export async function executeAgentInstructions(
     //     sig that never actually lands reconciles to "expired" once the window passes.
     if (params.onBeforeBroadcast) {
       await params.onBeforeBroadcast({ signature, blockhash, lastValidBlockHeight });
+      writeAheadCompleted = true;
     }
 
+    broadcastMayHaveOccurred = true;
     const sentSignature = await connection.sendRawTransaction(tx.serialize(), {
       skipPreflight: false,
       preflightCommitment: 'confirmed',
@@ -1696,7 +1732,13 @@ export async function executeAgentInstructions(
       outputReceived: Number(deltaRaw) / Math.pow(10, outDecimals || 0),
     };
   } catch (error: any) {
-    return { success: false, error: error?.message || `${label} failed` };
+    return {
+      success: false,
+      ...(!isProvenPreflightRejection(error) && (writeAheadCompleted || broadcastMayHaveOccurred) && signedSignature
+        ? { signature: signedSignature }
+        : {}),
+      error: error?.message || `${label} failed`,
+    };
   }
 }
 
@@ -1766,6 +1808,9 @@ export async function executeAgentInstructionsConfirmOnly(
     label = 'Transaction',
   } = params;
 
+  let signedSignature: string | undefined;
+  let writeAheadCompleted = false;
+  let broadcastMayHaveOccurred = false;
   try {
     if (!instructions.length) {
       return { success: false, error: `${label}: no instructions to execute` };
@@ -1798,6 +1843,7 @@ export async function executeAgentInstructionsConfirmOnly(
     // The signature is deterministic once the tx is signed — it is the first
     // signature of the signed tx, identical to what sendRawTransaction returns.
     const signature = bs58.encode(tx.signatures[0]);
+    signedSignature = signature;
 
     // 2b) WRITE-AHEAD durability hook: record the signature + its blockhash window
     //     STRICTLY BEFORE the irreversible broadcast. FATAL — a throw here aborts
@@ -1807,8 +1853,10 @@ export async function executeAgentInstructionsConfirmOnly(
     //     unrecorded -> a resume mistakes "no sig" for "never broadcast" -> double-send.
     if (params.onBeforeBroadcast) {
       await params.onBeforeBroadcast({ signature, blockhash, lastValidBlockHeight });
+      writeAheadCompleted = true;
     }
 
+    broadcastMayHaveOccurred = true;
     const sentSignature = await connection.sendRawTransaction(tx.serialize(), {
       skipPreflight: false,
       preflightCommitment: 'confirmed',
@@ -1843,7 +1891,13 @@ export async function executeAgentInstructionsConfirmOnly(
 
     return { success: true, signature };
   } catch (error: any) {
-    return { success: false, error: error?.message || `${label} failed` };
+    return {
+      success: false,
+      ...(!isProvenPreflightRejection(error) && (writeAheadCompleted || broadcastMayHaveOccurred) && signedSignature
+        ? { signature: signedSignature }
+        : {}),
+      error: error?.message || `${label} failed`,
+    };
   }
 }
 

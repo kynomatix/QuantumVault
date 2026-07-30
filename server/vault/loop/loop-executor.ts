@@ -1086,7 +1086,19 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
         lifecyclePositionId = position.id;
         lifecycleWasReuse = false;
       }
-      await storage.updateBorrowOperation(opId, { borrowPositionId: position.id });
+      // Link the exact row AND preserve the quote floor before the main-open
+      // write-ahead. Older bug-shaped exec_failed rows relied on the position
+      // row for minOut; the reuse restore path zeroed that row, making a landed
+      // transaction impossible to reconstruct. A missing return is therefore
+      // fatal before broadcast, just like the signature write-ahead itself.
+      const linkedOp = await storage.updateBorrowOperation(opId, {
+        borrowPositionId: position.id,
+        mergeMetadata: {
+          minCollateralRaw: minOut.toString(),
+          nftId,
+        },
+      });
+      if (!linkedOp) throw new Error("open position identity persist failed — refusing to broadcast");
 
       // Restore helper for provably-nothing-moved failures.
       const restorePositionRow = async () => {
@@ -1132,11 +1144,48 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
         },
       });
 
-      if (exec.onChainFailed || (!exec.success && !exec.signature)) {
-        // Provably nothing moved (atomic on-chain failure) or never broadcast.
+      if (exec.onChainFailed) {
+        // Authoritative st.err: the atomic transaction committed nothing.
         await restorePositionRow();
-        await failOp(opId, exec.onChainFailed ? "tx_failed_onchain" : "exec_failed", exec.error || "Loop open tx failed.");
+        await failOp(opId, "tx_failed_onchain", exec.error || "Loop open tx failed on-chain.");
         return { success: false, signature: exec.signature, error: exec.error || "Loop Open failed — nothing was moved." };
+      }
+
+      if (!exec.success && !exec.signature) {
+        // Defense in depth: never restore from an in-memory signatureless
+        // result. The durable operation row is the authority after write-ahead.
+        let opNow: BorrowOperation | undefined;
+        try {
+          opNow = await storage.getBorrowOperationById(opId);
+        } catch (reloadErr) {
+          console.warn(`[loop-executor] open result: op ${opId} reload failed; row ${position.id} stays pending:`, reloadErr);
+          return { success: false, borrowPositionId: position.id, error: "Loop Open could not verify whether its transaction was sent. The position remains pending for recovery." };
+        }
+        if (
+          !opNow ||
+          opNow.operationType !== "loop_open" ||
+          opNow.walletAddress !== walletAddress ||
+          opNow.borrowPositionId !== position.id
+        ) {
+          return { success: false, borrowPositionId: position.id, error: "Loop Open recovery identity could not be verified. The position remains pending for review." };
+        }
+        if (loopOpenWriteaheadRecorded(opNow)) {
+          const recovered = await reconcileAmbiguousLoopOpen({
+            op: opNow,
+            position,
+            walletAddress,
+            connection,
+            borrowRoute,
+          });
+          if (recovered.outcome === "finalized_open") return recovered.result;
+          if (recovered.outcome === "restored") {
+            return { success: false, error: "Loop Open transaction was proven not to have changed on-chain state; the pending row was restored." };
+          }
+          return { success: false, borrowPositionId: position.id, error: `Loop Open remains pending: ${recovered.reason}` };
+        }
+        await restorePositionRow();
+        await failOp(opId, "exec_failed", exec.error || "Loop open failed before its write-ahead was recorded.");
+        return { success: false, error: exec.error || "Loop Open failed before broadcast — nothing was moved." };
       }
 
       if (!exec.success) {
@@ -1260,6 +1309,8 @@ async function finalizeLoopOpen(p: {
   leverage: number;
   signature: string;
   preRead: LivePositionHealth | null;
+  /** Historical F1 repair may need failed→open or closed→open, never an unguarded write. */
+  expectedPositionStatus?: string;
 }): Promise<LoopOpenResult> {
   const live = p.preRead ?? (await p.borrowRoute.readLoopLivePositionHealth(p.vaultId, p.nftId).catch(() => null));
 
@@ -1305,7 +1356,7 @@ async function finalizeLoopOpen(p: {
       policyReason: "loop_open",
       policyStateChangedAt: new Date(),
     },
-    "pending",
+    p.expectedPositionStatus ?? "pending",
   );
   if (!opened) {
     console.warn(`[loop-executor] open finalize: position ${p.position.id} was not pending — recording anyway is skipped (CAS lost).`);
@@ -1384,28 +1435,33 @@ export async function reconcileAmbiguousLoopOpen(p: {
   const { op, position } = p;
   const meta = (op.metadata ?? {}) as Record<string, unknown>;
   const wasReuse = meta.reuseNftId != null;
+  const historicalExecFailed = op.status === "failed" && op.step === "exec_failed";
   const restoreBlocked: LoopOpenReconcileOutcome = {
     outcome: "blocked",
     reason: "its position row could not be restored (state changed underneath the repair — will re-check).",
   };
+  const rowAlreadyRestored = wasReuse
+    ? position.status === "closed" && position.collateralAmountRaw === "0" && position.debtAmountRaw === "0"
+    : position.status === "failed";
+  const restoreOrAdopt = async (): Promise<boolean> =>
+    rowAlreadyRestored || restoreLoopPendingRow(position.id, wasReuse);
 
   // (a) Steps that already PROVED the tx dead (their own row-restore is
   // best-effort and may have failed mid-crash) — just re-run the restore.
   if (
     op.status === "failed" &&
     (op.step === "tx_failed_onchain" ||
-      op.step === "exec_failed" ||
       op.step === "reconciled_tx_failed_onchain" ||
       op.step === "reconciled_tx_expired" ||
       op.step === "pre_broadcast_reconciled")
   ) {
-    return (await restoreLoopPendingRow(position.id, wasReuse)) ? { outcome: "restored" } : restoreBlocked;
+    return (await restoreOrAdopt()) ? { outcome: "restored" } : restoreBlocked;
   }
 
   // (b) No write-ahead record ⇒ the main open tx was provably never broadcast
   // (the FATAL hook persists step+signature or the send is aborted).
   if (!loopOpenWriteaheadRecorded(op)) {
-    if (!(await restoreLoopPendingRow(position.id, wasReuse))) return restoreBlocked;
+    if (!(await restoreOrAdopt())) return restoreBlocked;
     if (op.status === "pending") {
       await failOp(
         op.id,
@@ -1438,7 +1494,7 @@ export async function reconcileAmbiguousLoopOpen(p: {
   }
 
   if (verdict === "onchain_failed" || verdict === "expired") {
-    if (!(await restoreLoopPendingRow(position.id, wasReuse))) return restoreBlocked;
+    if (!(await restoreOrAdopt())) return restoreBlocked;
     const step = verdict === "expired" ? "reconciled_tx_expired" : "reconciled_tx_failed_onchain";
     const note =
       verdict === "expired"
@@ -1472,7 +1528,13 @@ export async function reconcileAmbiguousLoopOpen(p: {
   let principalLamports: bigint;
   try {
     flashLamports = BigInt(String(meta.flashLamports));
-    minOut = BigInt(String(position.collateralAmountRaw));
+    // New rows preserve the original quote floor on the op. Old fresh rows
+    // retain it on the failed position row. Old REUSE rows were zeroed by the
+    // historical bug and are handled from strict live truth below.
+    const rawMinOut = Object.prototype.hasOwnProperty.call(meta, "minCollateralRaw")
+      ? meta.minCollateralRaw
+      : position.collateralAmountRaw;
+    minOut = BigInt(String(rawMinOut));
     principalLamports = BigInt(String(meta.principalLamports));
   } catch {
     return {
@@ -1487,7 +1549,7 @@ export async function reconcileAmbiguousLoopOpen(p: {
     !Number.isInteger(nftId) ||
     nftId <= 0 ||
     flashLamports <= 0n ||
-    minOut <= 0n ||
+    (minOut <= 0n && !(historicalExecFailed && wasReuse)) ||
     principalLamports <= 0n ||
     !Number.isFinite(leverage) ||
     leverage < 1
@@ -1496,6 +1558,71 @@ export async function reconcileAmbiguousLoopOpen(p: {
       outcome: "blocked",
       reason: "its open LANDED but the original records are inconsistent — manual review required (never finalizing from guesses).",
     };
+  }
+  if (wasReuse && Number(meta.reuseNftId) !== nftId) {
+    return {
+      outcome: "blocked",
+      reason: "its open LANDED but the original reused position identity is inconsistent — manual review required.",
+    };
+  }
+
+  // The historical F1 path restored the row before writing exec_failed:
+  // fresh rows became `failed`; reused rows became `closed` and had their
+  // planned amounts zeroed. Never pretend the normal pending→open CAS can
+  // repair that shape. Require the exact historical status, a strict live
+  // position read, and debt consistency with the original flash leg before
+  // using a status-specific CAS to restore safety-tick visibility.
+  let expectedPositionStatus = "pending";
+  let historicalLive: LivePositionHealth | null = null;
+  if (historicalExecFailed) {
+    const restoredStatus = wasReuse ? "closed" : "failed";
+    expectedPositionStatus = position.status === "pending" ? "pending" : restoredStatus;
+    if (position.status !== "pending" && position.status !== restoredStatus) {
+      return {
+        outcome: "blocked",
+        reason: "its open LANDED but the historically restored row is no longer in the expected state — refusing to clobber it.",
+      };
+    }
+    historicalLive = await p.borrowRoute.readLoopLivePositionHealth(vaultId, nftId).catch(() => null);
+    if (!historicalLive) {
+      return {
+        outcome: "blocked",
+        reason: "its open LANDED but the historically restored position is unreadable — will retry without changing the row.",
+      };
+    }
+    let observedCol: bigint;
+    let observedDebt: bigint;
+    try {
+      observedCol = BigInt(historicalLive.collateralRaw);
+      observedDebt = BigInt(historicalLive.debtRaw);
+    } catch {
+      return {
+        outcome: "blocked",
+        reason: "its open LANDED but the historically restored live amounts are malformed — manual review required.",
+      };
+    }
+    if (observedCol <= 0n || observedDebt <= 0n) {
+      return {
+        outcome: "blocked",
+        reason: "its open LANDED but no live leveraged position is currently measurable — refusing to reopen the row.",
+      };
+    }
+    const strict = verifyLoopOpenOutcome({
+      flashDebtRaw: flashLamports,
+      minCollateralRaw: minOut > 0n ? minOut : 1n,
+      observedDebtRaw: observedDebt,
+      observedColRaw: observedCol,
+    });
+    if (!strict.ok) {
+      return {
+        outcome: "blocked",
+        reason: `its open LANDED but the historical live position failed strict verification (${strict.reason}) — manual review required.`,
+      };
+    }
+    // A pre-fix reused row destroyed its minOut. Exact signature identity plus
+    // the strictly verified live position is the only remaining authority for
+    // recording current collateral; this is not used to identify the tx.
+    if (minOut <= 0n) minOut = observedCol;
   }
   const cfg = await p.borrowRoute.getLoopVaultConfig(vaultId).catch(() => null);
   if (!cfg) {
@@ -1517,7 +1644,8 @@ export async function reconcileAmbiguousLoopOpen(p: {
     principalLamports,
     leverage,
     signature: sig,
-    preRead: null,
+    preRead: historicalLive,
+    expectedPositionStatus,
   });
   return { outcome: "finalized_open", result };
 }
@@ -1660,6 +1788,151 @@ export interface LoopLstDepositOpenResult {
   alreadyCompleted?: boolean;
 }
 
+export type LoopLstSwapTxVerdict =
+  | "landed"
+  | "onchain_failed"
+  | "expired"
+  | "still_valid"
+  | "unverifiable"
+  | "malformed";
+
+const LST_SWAP_EXPIRY_BLOCK_BUFFER = 30;
+
+/** Exact identity selector for the single LST->SOL conversion transaction. */
+export function pickLoopLstSwapTxSig(op: {
+  step: string | null;
+  txSignatures: unknown[] | null;
+  metadata: Record<string, unknown> | null | undefined;
+}): string | null {
+  if (op.step !== "swap_sent") return null;
+  const arr = Array.isArray(op.txSignatures) ? op.txSignatures : [];
+  const rawLast = arr.length > 0 ? arr[arr.length - 1] : undefined;
+  const last = typeof rawLast === "string" && rawLast.length > 0 ? rawLast : null;
+  const meta = (op.metadata ?? {}) as Record<string, unknown>;
+  const explicit = meta.swapSignature;
+  if (typeof explicit !== "string" || explicit.length === 0) return null;
+  if (last === null || explicit !== last) return null;
+  return explicit;
+}
+
+/**
+ * Detect any unresolved write-ahead evidence. `swap_retry_ready` is exempt only
+ * when its explicit death marker equals the final historical signature.
+ */
+function loopLstSwapWriteaheadRecorded(op: Pick<BorrowOperation, "step" | "txSignatures" | "metadata">): boolean {
+  const meta = (op.metadata ?? {}) as Record<string, unknown>;
+  if (op.step === "swap_sent") return true;
+  if (typeof meta.swapSignature === "string" && meta.swapSignature.length > 0) return true;
+  const arr = Array.isArray(op.txSignatures) ? op.txSignatures : [];
+  if (arr.length === 0) return false;
+  const rawLast = arr[arr.length - 1];
+  const last = typeof rawLast === "string" && rawLast.length > 0 ? rawLast : null;
+  return !(
+    op.step === "swap_retry_ready" &&
+    last !== null &&
+    typeof meta.swapResolvedDeadSignature === "string" &&
+    meta.swapResolvedDeadSignature === last
+  );
+}
+
+export async function verifyLoopLstSwapTx(
+  op: {
+    step: string | null;
+    txSignatures: unknown[] | null;
+    metadata: Record<string, unknown> | null | undefined;
+  },
+  connection: Pick<Connection, "getSignatureStatuses" | "getBlockHeight">,
+): Promise<LoopLstSwapTxVerdict> {
+  const signature = pickLoopLstSwapTxSig(op);
+  if (!signature) return "malformed";
+  let st: { err: unknown; confirmationStatus?: string | null } | null | undefined;
+  try {
+    const statuses = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+    st = statuses.value[0];
+  } catch {
+    return "unverifiable";
+  }
+  if (st) {
+    if (st.err) return "onchain_failed";
+    if (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized") return "landed";
+    return "still_valid";
+  }
+  const meta = (op.metadata ?? {}) as Record<string, unknown>;
+  const raw = meta.swapLastValidBlockHeight;
+  const lvbh =
+    typeof raw === "number"
+      ? raw
+      : typeof raw === "string" && raw.trim() !== ""
+        ? Number(raw)
+        : NaN;
+  if (!Number.isFinite(lvbh) || lvbh <= 0) return "still_valid";
+  let height: number;
+  try {
+    height = await connection.getBlockHeight("confirmed");
+  } catch {
+    return "unverifiable";
+  }
+  return height > lvbh + LST_SWAP_EXPIRY_BLOCK_BUFFER ? "expired" : "still_valid";
+}
+
+type LoopLstSwapReconcileResult =
+  | { outcome: "landed"; realizedLamports: bigint; signature: string; operation: BorrowOperation }
+  | { outcome: "retry_ready"; operation: BorrowOperation }
+  | { outcome: "blocked"; signature?: string; reason: string };
+
+async function reconcileLoopLstSwap(p: {
+  operation: BorrowOperation;
+  agentPublicKey: string;
+  connection: Pick<Connection, "getSignatureStatuses" | "getBlockHeight">;
+}): Promise<LoopLstSwapReconcileResult> {
+  const signature = pickLoopLstSwapTxSig(p.operation);
+  const verdict = await verifyLoopLstSwapTx(p.operation, p.connection);
+  if (verdict === "malformed") return { outcome: "blocked", reason: "conversion transaction provenance is malformed; refusing to guess" };
+  if (verdict === "unverifiable") return { outcome: "blocked", ...(signature ? { signature } : {}), reason: "the RPC could not verify the conversion transaction" };
+  if (verdict === "still_valid") return { outcome: "blocked", ...(signature ? { signature } : {}), reason: "the conversion transaction may still land" };
+  if (!signature) return { outcome: "blocked", reason: "conversion transaction identity is unavailable" };
+
+  if (verdict === "landed") {
+    const meta = (p.operation.metadata ?? {}) as Record<string, unknown>;
+    let before: bigint;
+    try {
+      before = BigInt(String(meta.solBeforeLamports ?? ""));
+    } catch {
+      return { outcome: "blocked", signature, reason: "the durable pre-conversion SOL baseline is unreadable" };
+    }
+    let now: bigint;
+    try {
+      now = BigInt((await getAgentTokenBalanceRawStrict(p.agentPublicKey, NATIVE_SOL_MINT)).amountRaw);
+    } catch {
+      return { outcome: "blocked", signature, reason: "the converted SOL balance is temporarily unreadable" };
+    }
+    const realizedLamports = now - before;
+    if (realizedLamports <= 0n) {
+      return { outcome: "blocked", signature, reason: "the landed conversion credit is not measurable yet" };
+    }
+    const updated = await storage.updateBorrowOperation(p.operation.id, {
+      step: "swapped",
+      mergeMetadata: { realizedLamports: realizedLamports.toString() },
+    });
+    if (!updated) return { outcome: "blocked", signature, reason: "the landed conversion could not be recorded durably" };
+    return { outcome: "landed", realizedLamports, signature, operation: updated };
+  }
+
+  // Exact status proved the final historical signature dead. Persist that
+  // identity before allowing a later attempt to append a new signature.
+  const updated = await storage.updateBorrowOperation(p.operation.id, {
+    step: "swap_retry_ready",
+    mergeMetadata: {
+      swapResolvedDeadSignature: signature,
+      swapSignature: null,
+      swapLastValidBlockHeight: null,
+      solBeforeLamports: null,
+    },
+  });
+  if (!updated) return { outcome: "blocked", signature, reason: "the dead conversion verdict could not be recorded durably" };
+  return { outcome: "retry_ready", operation: updated };
+}
+
 /**
  * Deposit-any-LST open: the user's LST is already in the agent wallet (client
  * transferred it via /api/agent/deposit-token); this converts it to SOL and
@@ -1784,60 +2057,23 @@ export async function executeLoopLstDepositOpen(
     }
 
     try {
-      // --- Resume an ambiguous swap by ON-CHAIN STATUS (never balance-only) ---
-      if (realizedLamports === null && op.step === "swap_sent" && swapSignature) {
-        const statuses = await connection.getSignatureStatuses([swapSignature], { searchTransactionHistory: true });
-        const st = statuses.value[0];
-        const landedOk = !!st && !st.err && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized");
-        if (landedOk) {
-          // The swap landed: realized = strict SOL now minus the write-ahead
-          // baseline. Both reads are strict (throw → fail closed, retryable).
-          const beforeRaw = BigInt(String(meta.solBeforeLamports ?? ""));
-          const nowRaw = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, NATIVE_SOL_MINT)).amountRaw);
-          const delta = nowRaw - beforeRaw;
-          if (delta <= 0n) {
-            return {
-              success: false,
-              resumable: true,
-              swapSignature,
-              error:
-                "The conversion landed on-chain but the credited SOL could not be measured yet. Wait a minute and retry.",
-            };
-          }
-          realizedLamports = delta;
-          await storage.updateBorrowOperation(opId, {
-            step: "swapped",
-            mergeMetadata: { realizedLamports: realizedLamports.toString() },
-          });
-        } else if (st && st.err) {
-          // Failed on-chain: the LST never left the wallet. Clear the
-          // breadcrumb and fall through to a fresh swap in this same call.
-          await storage.updateBorrowOperation(opId, {
-            step: "initialized",
-            mergeMetadata: { swapSignature: null, solBeforeLamports: null },
-          });
-          swapSignature = undefined;
+      // --- Resume only from exact durable provenance (never balance-only) ---
+      if (realizedLamports === null && loopLstSwapWriteaheadRecorded(op)) {
+        const recovered = await reconcileLoopLstSwap({ operation: op, agentPublicKey, connection });
+        if (recovered.outcome === "blocked") {
+          return {
+            success: false,
+            resumable: true,
+            ...(recovered.signature ? { swapSignature: recovered.signature } : {}),
+            error: `A previous conversion is unresolved: ${recovered.reason}. Wait and retry; no new swap was sent.`,
+          };
+        }
+        op = recovered.operation;
+        meta = (op.metadata ?? {}) as Record<string, any>;
+        if (recovered.outcome === "landed") {
+          realizedLamports = recovered.realizedLamports;
+          swapSignature = recovered.signature;
         } else {
-          // Not found: only safe to re-swap once the recorded blockhash window
-          // is provably over (the tx can never land afterwards). 0 = no hint.
-          const lvbh = Number(meta.swapLastValidBlockHeight ?? 0);
-          let expired = false;
-          if (Number.isFinite(lvbh) && lvbh > 0) {
-            const h = await connection.getBlockHeight("confirmed").catch(() => null);
-            if (h !== null && h > lvbh + 30) expired = true;
-          }
-          if (!expired) {
-            return {
-              success: false,
-              resumable: true,
-              swapSignature,
-              error: "A previous conversion is still unresolved on-chain. Wait a minute and retry.",
-            };
-          }
-          await storage.updateBorrowOperation(opId, {
-            step: "initialized",
-            mergeMetadata: { swapSignature: null, solBeforeLamports: null },
-          });
           swapSignature = undefined;
         }
       }
@@ -1864,9 +2100,12 @@ export async function executeLoopLstDepositOpen(
         // Write-ahead baseline BEFORE any broadcast: the ambiguous-swap
         // reconcile above depends on this exact pre-swap lamport reading.
         const solBefore = BigInt((await getAgentTokenBalanceRawStrict(agentPublicKey, NATIVE_SOL_MINT)).amountRaw);
-        await storage.updateBorrowOperation(opId, {
+        const baselineWritten = await storage.updateBorrowOperation(opId, {
           mergeMetadata: { swapAmountRaw: toSwap.toString(), solBeforeLamports: solBefore.toString() },
         });
+        if (!baselineWritten) throw new Error("pre-conversion SOL baseline persist failed — refusing to swap");
+        op = baselineWritten;
+        meta = (op.metadata ?? {}) as Record<string, any>;
 
         const swap = await executeAgentSwap({
           agentPublicKey,
@@ -1876,7 +2115,7 @@ export async function executeLoopLstDepositOpen(
           amountRaw: toSwap.toString(),
           slippageBps,
           onBeforeBroadcast: async (info) => {
-            await storage.updateBorrowOperation(opId, {
+            const writtenAhead = await storage.updateBorrowOperation(opId, {
               step: "swap_sent",
               appendTxSignature: info.signature,
               mergeMetadata: {
@@ -1884,6 +2123,7 @@ export async function executeLoopLstDepositOpen(
                 swapLastValidBlockHeight: info.lastValidBlockHeight,
               },
             });
+            if (!writtenAhead) throw new Error("conversion signature persist failed — refusing to broadcast");
           },
         });
 
@@ -1898,24 +2138,92 @@ export async function executeLoopLstDepositOpen(
               error: `${swap.error || "Conversion did not complete."} Your deposit is safe. Retry to reconcile.`,
             };
           }
-          // Nothing broadcast: the LST is untouched. Fully retryable.
-          await storage.updateBorrowOperation(opId, {
-            step: "initialized",
-            mergeMetadata: { swapSignature: null, solBeforeLamports: null },
-          });
+          // Never trust the in-memory absence of a signature. Reload the exact
+          // op: the hook may have persisted before a downstream helper bug.
+          let durable: BorrowOperation | undefined;
+          try {
+            durable = await storage.getBorrowOperationById(opId);
+          } catch {
+            durable = undefined;
+          }
+          if (
+            !durable ||
+            durable.operationType !== "loop_lst_deposit" ||
+            durable.walletAddress !== walletAddress ||
+            durable.clientRequestId !== params.clientRequestId
+          ) {
+            return {
+              success: false,
+              resumable: true,
+              error: "The conversion outcome could not be reloaded safely. Its durable state was left untouched for recovery.",
+            };
+          }
+          if (loopLstSwapWriteaheadRecorded(durable)) {
+            const recovered = await reconcileLoopLstSwap({ operation: durable, agentPublicKey, connection });
+            if (recovered.outcome === "landed") {
+              realizedLamports = recovered.realizedLamports;
+              swapSignature = recovered.signature;
+              op = recovered.operation;
+              meta = (op.metadata ?? {}) as Record<string, any>;
+            } else {
+              return {
+                success: false,
+                resumable: true,
+                ...(recovered.outcome === "blocked" && recovered.signature
+                  ? { swapSignature: recovered.signature }
+                  : {}),
+                error:
+                  recovered.outcome === "blocked"
+                    ? `The conversion remains unresolved: ${recovered.reason}. No new swap was sent.`
+                    : "The prior conversion was proven dead. Retry with the same request to continue safely.",
+              };
+            }
+          } else {
+            // Preserve the resolved-dead state across a later pre-hook failure.
+            // The old signature remains in txSignatures for audit history; if we
+            // rewrote this to `initialized`, the exact exemption above would be
+            // lost and the next retry would classify that dead signature as
+            // malformed live evidence forever.
+            const durableMeta = (durable.metadata ?? {}) as Record<string, unknown>;
+            const durableTxs = Array.isArray(durable.txSignatures) ? durable.txSignatures : [];
+            const durableLast = durableTxs.length > 0 ? durableTxs[durableTxs.length - 1] : undefined;
+            const preserveRetryReady =
+              durable.step === "swap_retry_ready" &&
+              typeof durableLast === "string" &&
+              durableLast.length > 0 &&
+              durableMeta.swapResolvedDeadSignature === durableLast;
+            const reset = await storage.updateBorrowOperation(opId, {
+              step: preserveRetryReady ? "swap_retry_ready" : "initialized",
+              mergeMetadata: { swapSignature: null, solBeforeLamports: null },
+            });
+            if (!reset) {
+              return {
+                success: false,
+                resumable: true,
+                error: "The pre-broadcast conversion failure could not be recorded. Retry to reconcile safely.",
+              };
+            }
+          }
+          if (realizedLamports !== null) {
+            // Exact on-chain recovery adopted the already-landed conversion.
+          } else {
           return {
             success: false,
             resumable: true,
             error: `${swap.error || "Conversion failed."} Your deposit is safe in the internal wallet. Retry in a moment.`,
           };
+          }
         }
 
-        realizedLamports = BigInt(swap.outputReceivedRaw!);
-        swapSignature = swap.signature;
-        await storage.updateBorrowOperation(opId, {
-          step: "swapped",
-          mergeMetadata: { realizedLamports: realizedLamports.toString() },
-        });
+        if (realizedLamports === null) {
+          realizedLamports = BigInt(swap.outputReceivedRaw!);
+          swapSignature = swap.signature;
+          const swappedWritten = await storage.updateBorrowOperation(opId, {
+            step: "swapped",
+            mergeMetadata: { realizedLamports: realizedLamports.toString() },
+          });
+          if (!swappedWritten) throw new Error("landed conversion could not be recorded durably");
+        }
 
         // Audit trail (best-effort): the deposit credited as realized SOL.
         // Distinct 'loop_deposit' type so the history feed labels it as a
@@ -3125,7 +3433,8 @@ export function pickOpenTxSig(oo: {
   txSignatures: unknown[] | null;
   metadata: Record<string, unknown> | null | undefined;
 }): string | null {
-  if (oo.step !== "loop_sig_writeahead" && oo.step !== "open_ambiguous") return null;
+  const bugShapedExecFailed = oo.step === "exec_failed";
+  if (oo.step !== "loop_sig_writeahead" && oo.step !== "open_ambiguous" && !bugShapedExecFailed) return null;
 
   const arr = Array.isArray(oo.txSignatures) ? oo.txSignatures : [];
   const rawLast = arr.length > 0 ? arr[arr.length - 1] : undefined;
@@ -3138,6 +3447,9 @@ export function pickOpenTxSig(oo: {
     if (lastSig === null || explicit !== lastSig) return null;
     return explicit;
   }
+  // `exec_failed` was also used by genuine pre-broadcast failures. Historical
+  // recovery therefore requires the explicit key; no keyless fallback.
+  if (bugShapedExecFailed) return null;
   return lastSig;
 }
 

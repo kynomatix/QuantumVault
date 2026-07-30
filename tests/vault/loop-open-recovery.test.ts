@@ -146,6 +146,7 @@ import { ensureVaultGas } from "../../server/vault/gas-funding";
 import { withBorrowLock } from "../../server/vault/jupiter-lend-borrow-executor";
 import { evaluateLoopOpenRequest } from "../../server/vault/loop/loop-risk-policy";
 import { getFreshLoopRates, pickBestLoopVault } from "../../server/vault/loop/loop-rate-oracle";
+import { buildLoopSafetyInputs } from "../../server/vault/loop/loop-safety-tick";
 import * as jlbr from "../../server/vault/jupiter-lend-borrow-route";
 import { getFlashloanIx } from "@jup-ag/lend/flashloan";
 import { getOperateIx } from "@jup-ag/lend/borrow";
@@ -348,11 +349,25 @@ describe("pickOpenTxSig", () => {
     ).toBe(OPEN_SIG);
   });
 
+  it("historical exec_failed requires an explicit exact signature and never gets keyless fallback", () => {
+    expect(
+      pickOpenTxSig(makeOpenOp({
+        sigs: [ATA_PREP_SIG, OPEN_SIG],
+        meta: { openTxSignature: OPEN_SIG },
+        step: "exec_failed",
+      })),
+    ).toBe(OPEN_SIG);
+    expect(pickOpenTxSig(makeOpenOp({ sigs: [OPEN_SIG], meta: {}, step: "exec_failed" }))).toBeNull();
+    expect(
+      pickOpenTxSig(makeOpenOp({ sigs: [OTHER_SIG], meta: { openTxSignature: OPEN_SIG }, step: "exec_failed" })),
+    ).toBeNull();
+  });
+
   it("wrong steps fail closed — including 'atas_prepared' where the ONLY sig is the ATA-prep tx", () => {
     // The exact bug class: an atas_prepared record's last sig IS the ATA-prep
     // sig. Promoting it to main-open identity would verify the WRONG tx.
     expect(pickOpenTxSig(makeOpenOp({ sigs: [ATA_PREP_SIG], step: "atas_prepared" }))).toBeNull();
-    for (const step of ["initialized", "final_read", "tx_failed_onchain", "exec_failed", "unexpected_error"]) {
+    for (const step of ["initialized", "final_read", "tx_failed_onchain", "unexpected_error"]) {
       expect(pickOpenTxSig(makeOpenOp({ sigs: [OPEN_SIG], step }))).toBeNull();
     }
     expect(pickOpenTxSig({ step: null, txSignatures: [OPEN_SIG], metadata: null })).toBeNull();
@@ -470,6 +485,159 @@ describe("reconcileAmbiguousLoopOpen", () => {
     });
     expect(out.outcome).toBe("restored");
     expect(storage.updateBorrowPosition).toHaveBeenCalledWith(...REUSE_RESTORE);
+  });
+
+  it("bug-shaped fresh failed/exec_failed reopens the actual failed row after strict live verification", async () => {
+    const op = makeOpenOp({
+      sigs: [ATA_PREP_SIG, OPEN_SIG],
+      meta: openMeta({ openTxSignature: OPEN_SIG }),
+      step: "exec_failed",
+      status: "failed",
+    });
+    const conn = connWith({ statuses: [{ confirmationStatus: "finalized" }] });
+    const route = stubRoute();
+    route.readLoopLivePositionHealth.mockResolvedValue({
+      collateralRaw: "5800000000",
+      debtRaw: "4000000000",
+      oraclePriceUsd: 1,
+    });
+    const out = await reconcileAmbiguousLoopOpen({
+      op,
+      position: makePendingRow({ status: "failed" }),
+      walletAddress: WALLET,
+      connection: conn,
+      borrowRoute: route,
+    });
+    expect(out.outcome).toBe("finalized_open");
+    expect(conn.getSignatureStatuses).toHaveBeenCalledWith([OPEN_SIG], { searchTransactionHistory: true });
+    expect(storage.updateBorrowPosition).toHaveBeenCalledWith(
+      "row-1",
+      expect.objectContaining({ status: "open" }),
+      "failed",
+    );
+    expect(storage.createEquityEvent).toHaveBeenCalledTimes(1);
+    expect(storage.updateBorrowPosition).not.toHaveBeenCalledWith("row-1", { status: "failed" }, "pending");
+  });
+
+  it("bug-shaped exec_failed also repairs a pending row when the old restore CAS never landed", async () => {
+    const op = makeOpenOp({
+      sigs: [OPEN_SIG],
+      meta: openMeta({ openTxSignature: OPEN_SIG }),
+      step: "exec_failed",
+      status: "failed",
+    });
+    const route = stubRoute();
+    route.readLoopLivePositionHealth.mockResolvedValue({
+      collateralRaw: "5800000000",
+      debtRaw: "4000000000",
+      oraclePriceUsd: 1,
+    });
+    const out = await reconcileAmbiguousLoopOpen({
+      op,
+      position: makePendingRow(),
+      walletAddress: WALLET,
+      connection: connWith({ statuses: [{ confirmationStatus: "finalized" }] }),
+      borrowRoute: route,
+    });
+    expect(out.outcome).toBe("finalized_open");
+    expect(storage.updateBorrowPosition).toHaveBeenCalledWith(
+      "row-1",
+      expect.objectContaining({ status: "open" }),
+      "pending",
+    );
+    expect(storage.createEquityEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it("bug-shaped reused exec_failed reopens the actual zeroed closed row from exact signature plus strict live truth", async () => {
+    const op = makeOpenOp({
+      sigs: [ATA_PREP_SIG, OPEN_SIG],
+      meta: openMeta({ openTxSignature: OPEN_SIG, reuseNftId: 777 }),
+      step: "exec_failed",
+      status: "failed",
+    });
+    const route = stubRoute();
+    route.readLoopLivePositionHealth.mockResolvedValue({
+      collateralRaw: "5800000000",
+      debtRaw: "4000000000",
+      oraclePriceUsd: 1,
+    });
+    const row = {
+      ...makePendingRow({ status: "closed" }),
+      collateralAmountRaw: "0",
+      debtAmountRaw: "0",
+    };
+    const out = await reconcileAmbiguousLoopOpen({
+      op,
+      position: row,
+      walletAddress: WALLET,
+      connection: connWith({ statuses: [{ confirmationStatus: "finalized" }] }),
+      borrowRoute: route,
+    });
+    expect(out.outcome).toBe("finalized_open");
+    expect(storage.updateBorrowPosition).toHaveBeenCalledWith(
+      "row-1",
+      expect.objectContaining({
+        status: "open",
+        collateralAmountRaw: "5800000000",
+        debtAmountRaw: "4000000000",
+      }),
+      "closed",
+    );
+    expect(storage.createEquityEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it("bug-shaped restored row stays closed when the live position is unreadable", async () => {
+    const op = makeOpenOp({
+      sigs: [OPEN_SIG],
+      meta: openMeta({ openTxSignature: OPEN_SIG, reuseNftId: 777 }),
+      step: "exec_failed",
+      status: "failed",
+    });
+    const row = {
+      ...makePendingRow({ status: "closed" }),
+      collateralAmountRaw: "0",
+      debtAmountRaw: "0",
+    };
+    const out = await reconcileAmbiguousLoopOpen({
+      op,
+      position: row,
+      walletAddress: WALLET,
+      connection: connWith({ statuses: [{ confirmationStatus: "finalized" }] }),
+      borrowRoute: stubRoute(),
+    });
+    expect(out.outcome).toBe("blocked");
+    expect(storage.updateBorrowPosition).not.toHaveBeenCalled();
+    expect(storage.createEquityEvent).not.toHaveBeenCalled();
+  });
+
+  it("proven-dead bug-shaped reuse adopts an already-zeroed closed row idempotently", async () => {
+    const op = makeOpenOp({
+      sigs: [OPEN_SIG],
+      meta: openMeta({
+        openTxSignature: OPEN_SIG,
+        lastValidBlockHeight: 1000,
+        reuseNftId: 777,
+      }),
+      step: "exec_failed",
+      status: "failed",
+    });
+    const row = {
+      ...makePendingRow({ status: "closed" }),
+      collateralAmountRaw: "0",
+      debtAmountRaw: "0",
+    };
+    const out = await reconcileAmbiguousLoopOpen({
+      op,
+      position: row,
+      walletAddress: WALLET,
+      connection: connWith({ statuses: [null], height: 2000 }),
+      borrowRoute: stubRoute(),
+    });
+    expect(out.outcome).toBe("restored");
+    expect(storage.updateBorrowPosition).not.toHaveBeenCalled();
+    expect(storage.updateBorrowOperation).toHaveBeenCalledWith("open-op-1", {
+      step: "reconciled_tx_expired",
+    });
   });
 
   it("restore CAS lost → blocked (never clobbers a row that moved on)", async () => {
@@ -1648,8 +1816,17 @@ describe("executeLoopOpen — outer-catch lifecycle repair", () => {
     expect(storage.createEquityEvent).toHaveBeenCalledTimes(1);
   });
 
-  it("regression: exec returns no-signature failure → existing exec_failed restore path unchanged", async () => {
+  it("proven pre-hook failure: reloaded no-evidence op still restores through exec_failed", async () => {
     wirePipeline();
+    vi.mocked(storage.getBorrowOperationById as any).mockResolvedValue(
+      makeOpenOp({
+        sigs: [],
+        meta: openMeta(),
+        step: "atas_prepared",
+        status: "pending",
+        borrowPositionId: "row-1",
+      }),
+    );
     vi.mocked(executeAgentInstructionsConfirmOnly as any).mockResolvedValue({
       success: false,
       onChainFailed: false,
@@ -1665,5 +1842,92 @@ describe("executeLoopOpen — outer-catch lifecycle repair", () => {
       "open-op-1",
       expect.objectContaining({ status: "failed", step: "exec_failed" }),
     );
+  });
+
+  it("signatureless helper result with a failed operation reload preserves the pending row and operation", async () => {
+    wirePipeline();
+    vi.mocked(executeAgentInstructionsConfirmOnly as any).mockResolvedValue({
+      success: false,
+      signature: undefined,
+      onChainFailed: false,
+      error: "preflight rejected",
+    });
+    vi.mocked(storage.getBorrowOperationById as any).mockRejectedValueOnce(new Error("operation reload down"));
+
+    const res = await executeLoopOpen(openParams);
+
+    expect(res.success).toBe(false);
+    expect(res.borrowPositionId).toBe("row-1");
+    expect(storage.updateBorrowPosition).not.toHaveBeenCalledWith("row-1", { status: "failed" }, "pending");
+    const terminalWrites = vi.mocked(storage.updateBorrowOperation as any).mock.calls.filter(
+      (call: any[]) => call[0] === "open-op-1" && call[1]?.status === "failed",
+    );
+    expect(terminalWrites).toHaveLength(0);
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["wrong operation type", makeOpenOp({ operationType: "loop_close" })],
+    ["wrong wallet", makeOpenOp({ walletAddress: "different-wallet" })],
+    ["wrong position link", makeOpenOp({ borrowPositionId: "different-row" })],
+  ])("signatureless helper result with a %s operation reload preserves the pending row", async (_case, reloaded) => {
+    wirePipeline();
+    vi.mocked(executeAgentInstructionsConfirmOnly as any).mockResolvedValue({
+      success: false,
+      signature: undefined,
+      onChainFailed: false,
+      error: "preflight rejected",
+    });
+    vi.mocked(storage.getBorrowOperationById as any).mockResolvedValueOnce(reloaded as any);
+
+    const res = await executeLoopOpen(openParams);
+
+    expect(res.success).toBe(false);
+    expect(res.borrowPositionId).toBe("row-1");
+    expect(storage.updateBorrowPosition).not.toHaveBeenCalledWith("row-1", { status: "failed" }, "pending");
+    const terminalWrites = vi.mocked(storage.updateBorrowOperation as any).mock.calls.filter(
+      (call: any[]) => call[0] === "open-op-1" && call[1]?.status === "failed",
+    );
+    expect(terminalWrites).toHaveLength(0);
+  });
+
+  it("defense-in-depth: signatureless result after persisted hook adopts exact landed tx without restore or rebroadcast", async () => {
+    const s = wireStatefulOpenLifecycle();
+    vi.mocked(executeAgentInstructionsConfirmOnly as any).mockImplementationOnce(async (args: any) => {
+      await args.onBeforeBroadcast?.({ signature: OPEN_SIG, blockhash: "bh", lastValidBlockHeight: 999_999 });
+      return { success: false, signature: undefined, onChainFailed: false, error: "legacy helper lost identity" };
+    });
+    s.conn.getSignatureStatuses.mockResolvedValue({ value: [{ confirmationStatus: "finalized", err: null }] });
+
+    const res = await executeLoopOpen(openParams);
+
+    expect(res.success).toBe(true);
+    expect(res.signature).toBe(OPEN_SIG);
+    expect(s.row.status).toBe("open");
+    expect(s.op.status).toBe("succeeded");
+    expect(s.op.metadata.minCollateralRaw).toBe("5800000000");
+    expect(s.op.metadata.nftId).toBe(777);
+    expect(executeAgentInstructionsConfirmOnly).toHaveBeenCalledTimes(1);
+    expect(storage.createEquityEvent).toHaveBeenCalledTimes(1);
+    expect(storage.updateBorrowPosition).not.toHaveBeenCalledWith("row-1", { status: "failed" }, "pending");
+
+    // Acceptance-matrix row 8: invoke the real safety-tick selection boundary
+    // with the exact recovered row. Restoring status=open is what makes the
+    // live leveraged position visible to the 60-second safety reflex again.
+    const safety = buildLoopSafetyInputs(
+      [{
+        row: s.row,
+        health: {
+          status: "available",
+          healthFactor: 1.5,
+          liveDebtRaw: "1000000000",
+          band: "healthy",
+        } as any,
+      }],
+      new Map(),
+      { liquidationFloor: 1.05 } as any,
+    );
+    expect(safety.skipped).toEqual([]);
+    expect(safety.candidates.map((candidate) => candidate.row.id)).toEqual(["row-1"]);
   });
 });
