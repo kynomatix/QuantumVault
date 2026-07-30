@@ -402,6 +402,65 @@ describe("runBorrowHealthScan (orchestrator)", () => {
     expect(res.loopObservations[0].health.band).toBe("urgent");
   });
 
+  it.each(["urgent", "liquidation"] as const)(
+    "suppresses classic %s alerts for an open managed loop without falsifying its alert baseline",
+    async (band) => {
+      const priorAlertAt = ms(T0, -60_000);
+      const loop = row({
+        id: "loop-open",
+        kind: "loop",
+        status: "open",
+        lastHealthAlertBand: "nudge",
+        lastHealthAlertAt: priorAlertAt,
+        lastObservedHealthBand: "nudge",
+        healthBandChangedAt: priorAlertAt,
+      } as Partial<BorrowPosition>);
+      const made = statefulDeps({
+        rows: [loop],
+        healthByRowId: {
+          "loop-open": health(band, band === "urgent" ? 1.2 : 1.0),
+        },
+      });
+      let scopeLabelCalls = 0;
+      made.deps.resolveScopeLabel = async () => {
+        scopeLabelCalls++;
+        return "Account";
+      };
+
+      const res = await runBorrowHealthScan(made.deps);
+
+      expect(res).toMatchObject({ scanned: 1, alerted: 0, failed: 0 });
+      expect(res.loopObservations).toHaveLength(1);
+      expect(scopeLabelCalls).toBe(0);
+      expect(made.notifications).toHaveLength(0);
+      expect(made.persisted).toEqual([{ id: "loop-open", band: "nudge" }]);
+      expect(made.rowsById.get("loop-open")!.lastHealthAlertBand).toBe("nudge");
+      expect(made.rowsById.get("loop-open")!.lastHealthAlertAt).toEqual(priorAlertAt);
+      expect(made.rowsById.get("loop-open")!.lastObservedHealthBand).toBe(band);
+    },
+  );
+
+  it("keeps the classic alert safety net for a pending loop row that neither reflex covers", async () => {
+    const pending = row({
+      id: "loop-pending",
+      kind: "loop",
+      status: "pending",
+    } as Partial<BorrowPosition>);
+    const made = statefulDeps({
+      rows: [pending],
+      healthByRowId: { "loop-pending": health("urgent", 1.2) },
+    });
+
+    const res = await runBorrowHealthScan(made.deps);
+
+    expect(res).toEqual({ scanned: 1, alerted: 1, failed: 0, loopObservations: [] });
+    expect(made.notifications).toEqual([
+      { wallet: "Wallet1", band: "urgent", scope: "Account" },
+    ]);
+    expect(made.persisted).toEqual([{ id: "loop-pending", band: "urgent" }]);
+    expect(made.rowsById.get("loop-pending")!.lastHealthAlertBand).toBe("urgent");
+  });
+
   it("FAIL CLOSED: a transient send failure keeps the baseline so the NEXT scan retries", async () => {
     const rows = [row({ id: "acct", tradingBotId: null })];
     let attempt = 0;

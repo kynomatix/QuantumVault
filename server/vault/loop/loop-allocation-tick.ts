@@ -415,8 +415,51 @@ export async function runLoopAllocationTick(deps: LoopAllocationTickDeps): Promi
             // WO2A: sweep-driven resumes are AUTOMATIC — budget-gated, may park.
             mode: "automatic",
           });
-          if (res.success) result.acted++;
-          else if (res.parked === true) {
+          if (res.success) {
+            result.acted++;
+            // The executor's CAS winner returns a fresh success; every
+            // already-terminal entry/rival-finalizer echo carries
+            // alreadyCompleted. Only the winner may append the terminal audit
+            // fact and attempt Telegram delivery, or overlapping sweeps would
+            // double-report one rotation.
+            if (res.alreadyCompleted !== true) {
+              const fromVaultId = Number(m.fromVaultId);
+              try {
+                await deps.persistDecision({
+                  walletAddress: op.walletAddress,
+                  borrowPositionId: sourceId,
+                  vaultId: toVaultId,
+                  tick: "allocation",
+                  action: "hop",
+                  fraction: null,
+                  reason: "hop_resume_completed",
+                  details: {
+                    intent: "hop",
+                    executed: true,
+                    hopRecovery: "completed",
+                    clientRequestId: op.clientRequestId,
+                    toVaultId,
+                    ...(Number.isInteger(fromVaultId) && fromVaultId > 0 ? { fromVaultId } : {}),
+                    closeSignaturePresent: res.closeSignature != null,
+                    openSignaturePresent: res.openSignature != null,
+                    ...(res.borrowPositionId ? { newBorrowPositionId: res.borrowPositionId } : {}),
+                  },
+                });
+                result.journaled++;
+              } catch (e) {
+                console.error(`[LoopAllocationTick] recovered-hop journal write failed for op ${op.id}:`, e);
+              }
+              await deps
+                .notify(op.walletAddress, {
+                  symbol: symbolFor(toVaultId),
+                  action: "hop",
+                  ok: true,
+                  reason: "automatic rotation recovery completed",
+                  detail: null,
+                })
+                .catch(() => {});
+            }
+          } else if (res.parked === true) {
             result.parked++;
             // WO2A-C1: journal + Telegram ONLY on the invocation that WON the
             // pending→parked CAS. Query exclusion alone is not enough across
@@ -959,7 +1002,10 @@ async function processAllocationCandidate(
   if (!skipNotify) {
     await deps
       .notify(row.walletAddress, {
-        symbol: symbolFor(vaultId),
+        symbol:
+          journalAction === "hop" && ok && hopTarget?.targetVaultId != null
+            ? symbolFor(hopTarget.targetVaultId)
+            : symbolFor(vaultId),
         action: journalAction as "relever" | "unwind_to_hold" | "hop",
         ok,
         reason: notifyReason,

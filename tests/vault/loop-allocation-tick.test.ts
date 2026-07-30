@@ -671,7 +671,11 @@ describe("runLoopAllocationTick", () => {
     expect(calls.decisions[0].reason).toBe("hop_carry_favorable");
     expect(calls.decisions[0].details.hopTargetVaultId).toBe(5);
     expect(calls.decisions[0].details.executed).toBe(true);
-    expect(calls.notifications[0]).toMatchObject({ action: "hop", ok: true });
+    expect(calls.notifications[0]).toMatchObject({
+      symbol: "JitoSOL",
+      action: "hop",
+      ok: true,
+    });
     expect(calls.cleanups).toBe(1);
     // Money-safety ordering: claim BEFORE key material.
     expect(calls.order.indexOf("claim")).toBeLessThan(calls.order.indexOf("resolveSigner"));
@@ -722,7 +726,14 @@ describe("runLoopAllocationTick", () => {
       getPendingHops: async () => {
         calls.pendingHopFetches++;
         calls.order.push("getPendingHops");
-        return [makeHopOp()];
+        return [makeHopOp({
+          metadata: {
+            sourceBorrowPositionId: "row-1",
+            fromVaultId: 4,
+            toVaultId: 5,
+            policyReason: "hop_carry_favorable",
+          },
+        })];
       },
       // source row is still open; if the resume didn't claim it, the per-row
       // pass could mint a rival hop once the cooldown lapses.
@@ -737,11 +748,142 @@ describe("runLoopAllocationTick", () => {
     expect(calls.hops[0].targetVaultId).toBe(5);
     expect(calls.hops[0].borrowPositionId).toBe("row-1");
     expect(res.acted).toBe(1);
+    expect(res.journaled).toBe(1);
     expect(res.skipped).toBe(1); // per-row pass skipped the in-flight source
     expect(calls.claims).toHaveLength(0); // the per-row pass never claimed it
-    expect(calls.decisions).toHaveLength(0); // skipped rows are not journaled
+    expect(calls.decisions).toHaveLength(1); // terminal recovery fact is appended
+    expect(calls.decisions[0]).toMatchObject({
+      borrowPositionId: "row-1",
+      vaultId: 5,
+      tick: "allocation",
+      action: "hop",
+      reason: "hop_resume_completed",
+      details: {
+        intent: "hop",
+        executed: true,
+        hopRecovery: "completed",
+        clientRequestId: "creq-1",
+        fromVaultId: 4,
+        toVaultId: 5,
+        closeSignaturePresent: true,
+        openSignaturePresent: true,
+        newBorrowPositionId: "NEW_LOOP",
+      },
+    });
+    expect(JSON.stringify(calls.decisions[0])).not.toContain("SIG_HOP");
+    expect(calls.notifications).toEqual([
+      {
+        symbol: "JitoSOL",
+        action: "hop",
+        ok: true,
+        reason: "automatic rotation recovery completed",
+        detail: null,
+      },
+    ]);
     // The resume (getPendingHops → executeHop) runs before the per-row pass.
     expect(calls.order.indexOf("getPendingHops")).toBeLessThan(calls.order.indexOf("executeHop"));
+  });
+
+  it("an already-completed success echo is counted locally but never journaled or notified again", async () => {
+    const { deps, calls } = makeDeps({
+      getPendingHops: async () => [makeHopOp()],
+      listActivePositions: async () => [],
+      executeHop: async () => ({
+        success: true,
+        alreadyCompleted: true,
+        borrowPositionId: "NEW_LOOP",
+        closeSignature: "CLOSE_SIG",
+        openSignature: "OPEN_SIG",
+      }),
+    });
+
+    const res = await runLoopAllocationTick(deps);
+
+    expect(res.acted).toBe(1);
+    expect(res.journaled).toBe(0);
+    expect(calls.decisions).toHaveLength(0);
+    expect(calls.notifications).toHaveLength(0);
+  });
+
+  it("two overlapping resume sweeps report one CAS-winning success exactly once", async () => {
+    let arrived = 0;
+    let release!: () => void;
+    const bothInsideExecutor = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { deps, calls } = makeDeps({
+      getPendingHops: async () => [makeHopOp()],
+      listActivePositions: async () => [],
+      executeHop: async () => {
+        const invocation = ++arrived;
+        if (arrived === 2) release();
+        await bothInsideExecutor;
+        return invocation === 1
+          ? {
+              success: true,
+              borrowPositionId: "NEW_LOOP",
+              closeSignature: "CLOSE_SIG",
+              openSignature: "OPEN_SIG",
+            }
+          : {
+              success: true,
+              alreadyCompleted: true,
+              borrowPositionId: "NEW_LOOP",
+              closeSignature: "CLOSE_SIG",
+              openSignature: "OPEN_SIG",
+            };
+      },
+    });
+
+    const results = await Promise.all([
+      runLoopAllocationTick(deps),
+      runLoopAllocationTick(deps),
+    ]);
+
+    expect(arrived).toBe(2); // non-vacuous overlap: both reached the executor gate
+    expect(results.reduce((n, r) => n + r.acted, 0)).toBe(2);
+    expect(results.reduce((n, r) => n + r.journaled, 0)).toBe(1);
+    expect(calls.decisions).toHaveLength(1);
+    expect(calls.notifications).toHaveLength(1);
+  });
+
+  it("a recovered-hop journal failure does not suppress its best-effort success notification", async () => {
+    const { deps, calls } = makeDeps({
+      getPendingHops: async () => [makeHopOp()],
+      listActivePositions: async () => [],
+      persistDecision: async () => {
+        throw new Error("db down");
+      },
+    });
+
+    const res = await runLoopAllocationTick(deps);
+
+    expect(res.acted).toBe(1);
+    expect(res.journaled).toBe(0);
+    expect(calls.notifications).toHaveLength(1);
+    expect(calls.notifications[0]).toMatchObject({
+      symbol: "JitoSOL",
+      action: "hop",
+      ok: true,
+    });
+  });
+
+  it("appends completed recovery truth without mutating the prior in-progress history", async () => {
+    const { deps, calls } = makeDeps({
+      getPendingHops: async () => [makeHopOp()],
+      listActivePositions: async () => [],
+    });
+    const historical = {
+      action: "hop",
+      details: { intent: "hop", executed: false, hopRecovery: "in_progress" },
+    };
+    calls.decisions.push(historical);
+
+    await runLoopAllocationTick(deps);
+
+    expect(calls.decisions).toHaveLength(2);
+    expect(calls.decisions[0]).toEqual(historical);
+    expect(calls.decisions[1].details.hopRecovery).toBe("completed");
   });
 
   it("a resumable hop failure is NOT counted as failed; a terminal one is", async () => {
@@ -752,6 +894,8 @@ describe("runLoopAllocationTick", () => {
     });
     const r1 = await runLoopAllocationTick(resumable.deps);
     expect(r1.acted).toBe(0);
+    expect(resumable.calls.decisions).toHaveLength(0);
+    expect(resumable.calls.notifications).toHaveLength(0);
     expect(r1.failed).toBe(0); // still in flight — will be retried next pass
 
     const terminal = makeDeps({
@@ -1152,6 +1296,7 @@ describe("runLoopAllocationTick — WO3 HOLD rotation cells", () => {
 
     expect(calls.notifications).toHaveLength(1);
     const n = calls.notifications[0];
+    expect(n.symbol).toBe("JitoSOL");
     expect(n.action).toBe("hop");
     expect(n.ok).toBe(true);
     const reason = String(n.reason);

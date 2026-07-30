@@ -330,7 +330,19 @@ export async function runBorrowHealthScan(
       // A transient delivery failure keeps the old baseline so the next scan
       // retries, never silently dropping a liquidation/urgent/unavailable alert.
       let persistNext = decision.next;
-      if (decision.shouldAlert && isAlertableBand(health.band)) {
+      const managedOpenLoop = (row.kind ?? "borrow") === "loop" && row.status === "open";
+      if (managedOpenLoop) {
+        // The loop reflex owns OPEN loop risk responses. Keep observed health
+        // current, but never falsify the classic alert baseline as though a
+        // suppressed message was delivered. Pending loop rows deliberately do
+        // NOT enter here: neither reflex covers a landed-but-not-finalized open,
+        // so its existing classic alert remains the safety net.
+        persistNext = {
+          ...decision.next,
+          lastHealthAlertBand: prev.lastHealthAlertBand,
+          lastHealthAlertAt: prev.lastHealthAlertAt,
+        };
+      } else if (decision.shouldAlert && isAlertableBand(health.band)) {
         const scopeLabel = await deps.resolveScopeLabel(row);
         const outcome = await deps.notify(row.walletAddress, {
           scopeLabel,

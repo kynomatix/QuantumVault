@@ -456,7 +456,7 @@ export interface LoopSafetyNotification {
   detail?: string | null;
 }
 
-function formatLoopSafetyMessage(n: LoopSafetyNotification): { title: string; body: string } {
+export function formatLoopSafetyMessage(n: LoopSafetyNotification): { title: string; body: string } {
   const symbol = escapeTelegramHtml(n.symbol);
   const reason = escapeTelegramHtml(n.reason);
   // Title-Case labels per owner preference.
@@ -476,7 +476,7 @@ function formatLoopSafetyMessage(n: LoopSafetyNotification): { title: string; bo
     if (n.action === "hop") {
       return {
         title: '🔀 Loop Hopped',
-        body: `A different staking pair now pays better (${reason}), so we moved your ${symbol} loop to it to earn more. Your funds stayed in the vault the whole time.`,
+        body: `Your ${symbol} loop is now active on the selected staking pair (${reason}). The rotation completed successfully, and automatic monitoring continues.`,
       };
     }
     return {
