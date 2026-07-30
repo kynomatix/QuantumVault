@@ -21,7 +21,7 @@ const SWAP_SOL_GAS_RESERVE = 0.02;
 function isProvenPreflightRejection(error: unknown): boolean {
   return (
     error instanceof SendTransactionError &&
-    (error as SendTransactionError & { signature?: unknown }).signature === ''
+    Reflect.get(error, 'signature') === ''
   );
 }
 
