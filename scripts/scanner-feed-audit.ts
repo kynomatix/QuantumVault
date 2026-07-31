@@ -24,6 +24,7 @@ import { fetchOHLCV } from "../server/lab/datafeed";
 import { marketToDatafeedTicker } from "../server/ai-trader/context-builder";
 import { getFlashMarketSpecs } from "../server/protocol/flash/flash-markets";
 import { PacificaAdapter } from "../server/protocol/pacifica/pacifica-adapter";
+import { getBenchmarksBase, hermesFetch } from "../server/pricing/hermes-config";
 
 // ── CLI args ──────────────────────────────────────────────────────────────────
 const venueFilter = (() => {
@@ -32,12 +33,8 @@ const venueFilter = (() => {
 })();
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const BENCHMARKS_BASE =
-  (process.env.PYTH_BENCHMARKS_BASE?.trim() ?? "https://benchmarks.pyth.network").replace(/\/+$/, "");
+const BENCHMARKS_BASE = getBenchmarksBase();
 const PYTH_HERMES_KEY = process.env.PYTH_HERMES_API_KEY?.trim() ?? null;
-const HERMES_HEADERS: Record<string, string> = PYTH_HERMES_KEY
-  ? { Authorization: `Bearer ${PYTH_HERMES_KEY}` }
-  : {};
 
 // Sleep ≥ 2 s between Pyth shim search probes to avoid 429 (plan §5)
 const PYTH_SEARCH_SLEEP_MS = 2200;
@@ -128,7 +125,12 @@ async function quickGateHasData(base: string): Promise<boolean> {
 // Pyth shim search — detect "shim-has-it, map-doesn't" gaps.
 async function pythShimSearch(symbol: string): Promise<{ found: boolean; hits?: string }> {
   const url = `${BENCHMARKS_BASE}/v1/shims/tradingview/search?query=${encodeURIComponent(symbol)}&limit=5`;
-  const res = await safeFetch(url, { headers: HERMES_HEADERS });
+  let res: Response;
+  try {
+    res = await hermesFetch(url, { signal: AbortSignal.timeout(15_000) });
+  } catch {
+    return { found: false };
+  }
   if (!res?.ok) return { found: false };
   const json = await res.json().catch(() => null) as Array<{ symbol?: string; full_name?: string }> | null;
   if (!Array.isArray(json) || json.length === 0) return { found: false };

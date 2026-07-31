@@ -14,6 +14,97 @@
 const DEFAULT_HERMES_BASE = 'https://hermes.pyth.network';
 const DEFAULT_BENCHMARKS_BASE = 'https://benchmarks.pyth.network';
 
+export type HermesMode = 'live' | 'unauthorized' | 'network_error' | 'blocked';
+
+let hermesAttemptCount = 0;
+let hermesEgressCount = 0;
+
+export class HermesEgressViolation extends Error {
+  constructor(caller: string) {
+    super(`Hermes egress blocked (caller: ${caller})`);
+    this.name = 'HermesEgressViolation';
+  }
+}
+
+function getHermesMode(): HermesMode {
+  const configured = process.env.PYTH_HERMES_MODE?.trim().toLowerCase();
+  if (
+    configured === 'live' ||
+    configured === 'unauthorized' ||
+    configured === 'network_error' ||
+    configured === 'blocked'
+  ) {
+    return configured;
+  }
+  if (process.env.PYTH_HERMES_ENABLED?.trim().toLowerCase() === 'false') {
+    return 'unauthorized';
+  }
+  return process.env.NODE_ENV === 'production' ? 'live' : 'unauthorized';
+}
+
+function getHermesCaller(): string {
+  const stack = new Error().stack?.split('\n').map((line) => line.trim()) ?? [];
+  return (
+    stack.find(
+      (line) =>
+        line.startsWith('at ') &&
+        !line.includes('getHermesCaller') &&
+        !line.includes('hermesFetch') &&
+        !line.includes('hermes-config'),
+    ) ?? 'unknown caller'
+  );
+}
+
+function withHermesHeaders(init?: RequestInit): RequestInit {
+  const headers = new Headers(init?.headers);
+  for (const [name, value] of Object.entries(getHermesHeaders())) {
+    headers.set(name, value);
+  }
+  return { ...init, headers };
+}
+
+/**
+ * Single outbound boundary for paid Pyth Hermes and Benchmarks HTTP transport.
+ * Logical attempts and actual network egress are counted independently.
+ */
+export async function hermesFetch(url: string | URL, init?: RequestInit): Promise<Response> {
+  hermesAttemptCount++;
+  const mode = getHermesMode();
+
+  if (mode === 'unauthorized') {
+    return new Response(
+      JSON.stringify({ error: 'Unauthorized', message: 'Invalid or missing authorization token' }),
+      {
+        status: 401,
+        statusText: 'Unauthorized',
+        headers: { 'Content-Type': 'application/json' },
+      },
+    );
+  }
+  if (mode === 'network_error') {
+    throw new TypeError('fetch failed: simulated Pyth Hermes network error');
+  }
+  if (mode === 'blocked') {
+    throw new HermesEgressViolation(getHermesCaller());
+  }
+
+  hermesEgressCount++;
+  return fetch(url, withHermesHeaders(init));
+}
+
+export function getHermesAttemptCount(): number {
+  return hermesAttemptCount;
+}
+
+export function getHermesEgressCount(): number {
+  return hermesEgressCount;
+}
+
+export function resetHermesCounters(): void {
+  hermesAttemptCount = 0;
+  hermesEgressCount = 0;
+}
+
 /** Hermes base URL, trailing slash stripped. Overridable via PYTH_HERMES_BASE. */
 export function getHermesBase(): string {
   const raw = process.env.PYTH_HERMES_BASE?.trim();

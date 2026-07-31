@@ -15,7 +15,7 @@
  */
 
 import type { PriceTick } from './types.js';
-import { getHermesBase, getHermesHeaders } from '../pricing/hermes-config.js';
+import { getHermesBase, hermesFetch } from '../pricing/hermes-config.js';
 
 const RECONNECT_INITIAL_MS = 1_000;
 const RECONNECT_MAX_MS = 60_000;
@@ -35,8 +35,6 @@ export interface FlashPythSseOptions {
   onTick: TickHandler;
   onHealth?: HealthHandler;
   onParseError?: ParseErrorHandler;
-  /** Injectable fetch for tests; defaults to the global fetch. */
-  fetchImpl?: typeof fetch;
   /** Injectable clock for tests; defaults to Date.now. */
   now?: () => number;
   /** No-data idle timeout (ms) before forcing a reconnect; default 45s. */
@@ -120,7 +118,6 @@ export class FlashPythSseManager {
   private readonly onTick: TickHandler;
   private readonly onHealth?: HealthHandler;
   private readonly onParseError?: ParseErrorHandler;
-  private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
   private readonly staleTimeoutMs: number;
   private readonly idToSymbol: Map<string, string>;
@@ -139,7 +136,6 @@ export class FlashPythSseManager {
     this.onTick = opts.onTick;
     this.onHealth = opts.onHealth;
     this.onParseError = opts.onParseError;
-    this.fetchImpl = opts.fetchImpl ?? fetch;
     this.now = opts.now ?? Date.now;
     this.staleTimeoutMs = opts.staleTimeoutMs ?? DEFAULT_STALE_TIMEOUT_MS;
     this.idToSymbol = new Map(
@@ -222,9 +218,9 @@ export class FlashPythSseManager {
   private async streamOnce(): Promise<void> {
     const controller = new AbortController();
     this.abortController = controller;
-    const res = await this.fetchImpl(this.buildUrl(), {
+    const res = await hermesFetch(this.buildUrl(), {
       signal: controller.signal,
-      headers: { Accept: 'text/event-stream', ...getHermesHeaders() },
+      headers: { Accept: 'text/event-stream' },
     });
     if (!res.ok || !res.body) {
       throw new Error(`Hermes SSE HTTP ${res.status}`);

@@ -138,7 +138,7 @@ import {
 } from './flash-referral.js';
 import { getPrimaryRpcUrl } from '../../rpc-config.js';
 import { confirmTxLanded } from './flash-confirm.js';
-import { hermesUrl, getHermesHeaders } from '../../pricing/hermes-config.js';
+import { hermesFetch, hermesUrl } from '../../pricing/hermes-config.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -1767,7 +1767,7 @@ export class FlashAdapter implements ProtocolAdapter {
 
     let data: PythHermesResponse;
     try {
-      const res = await fetch(url, { signal: controller.signal, headers: getHermesHeaders() });
+      const res = await hermesFetch(url, { signal: controller.signal });
       if (!res.ok) {
         throw new Error(`Pyth Hermes HTTP ${res.status}: ${res.statusText}`);
       }

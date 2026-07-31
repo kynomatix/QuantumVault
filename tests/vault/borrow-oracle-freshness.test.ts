@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   parseHermesParsed,
   computeDirectOracleContext,
@@ -83,6 +83,10 @@ function makeFetch(
     return okResponse(benchBody);
   }) as unknown as typeof fetch;
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 const NOW_MS = 1_782_293_543_000; // matches the verified INF reading window
 const NOW_SEC = Math.floor(NOW_MS / 1000);
@@ -192,8 +196,8 @@ describe("readBorrowOracleContext (registry + Hermes I/O)", () => {
   const benchOk = hermesBody(INF_FEED, 99.3204, targetSec);
 
   it("returns both facts on the happy path", async () => {
+    vi.stubGlobal("fetch", makeFetch(freshLatest, benchOk));
     const ctx = await readBorrowOracleContext(vault(), {
-      fetchImpl: makeFetch(freshLatest, benchOk),
       now: () => NOW_MS,
     });
     expect(ctx.publishAgeSec).toBe(2);
@@ -202,7 +206,6 @@ describe("readBorrowOracleContext (registry + Hermes I/O)", () => {
 
   it("fails closed when the vault is not in the registry", async () => {
     const ctx = await readBorrowOracleContext(vault({ vaultId: 999 }), {
-      fetchImpl: makeFetch(freshLatest, benchOk),
       now: () => NOW_MS,
     });
     expect(ctx).toEqual({ publishAgeSec: null, priceMove1hAbs: null });
@@ -210,15 +213,14 @@ describe("readBorrowOracleContext (registry + Hermes I/O)", () => {
 
   it("fails closed when the collateral mint does not match the registry", async () => {
     const ctx = await readBorrowOracleContext(vault({ collateralMint: "WRONGmint1111111111111111111111111111111111" }), {
-      fetchImpl: makeFetch(freshLatest, benchOk),
       now: () => NOW_MS,
     });
     expect(ctx).toEqual({ publishAgeSec: null, priceMove1hAbs: null });
   });
 
   it("fails closed on a non-2xx Hermes response", async () => {
+    vi.stubGlobal("fetch", makeFetch(freshLatest, benchOk, { latestStatus: 503 }));
     const ctx = await readBorrowOracleContext(vault(), {
-      fetchImpl: makeFetch(freshLatest, benchOk, { latestStatus: 503 }),
       now: () => NOW_MS,
     });
     expect(ctx).toEqual({ publishAgeSec: null, priceMove1hAbs: null });
@@ -226,8 +228,11 @@ describe("readBorrowOracleContext (registry + Hermes I/O)", () => {
 
   it("fails closed when the Hermes price diverges materially from the vault price", async () => {
     // Hermes says $200 but the vault's on-chain liquidation price is ~$99 -> wrong map.
+    vi.stubGlobal(
+      "fetch",
+      makeFetch(hermesBody(INF_FEED, 200, NOW_SEC - 2), hermesBody(INF_FEED, 200, targetSec)),
+    );
     const ctx = await readBorrowOracleContext(vault(), {
-      fetchImpl: makeFetch(hermesBody(INF_FEED, 200, NOW_SEC - 2), hermesBody(INF_FEED, 200, targetSec)),
       now: () => NOW_MS,
     });
     expect(ctx).toEqual({ publishAgeSec: null, priceMove1hAbs: null });
@@ -235,7 +240,6 @@ describe("readBorrowOracleContext (registry + Hermes I/O)", () => {
 
   it("fails closed when the vault has no readable liquidation price", async () => {
     const ctx = await readBorrowOracleContext(vault({ oraclePriceLiquidateUsd: 0 }), {
-      fetchImpl: makeFetch(freshLatest, benchOk),
       now: () => NOW_MS,
     });
     expect(ctx).toEqual({ publishAgeSec: null, priceMove1hAbs: null });
@@ -245,7 +249,8 @@ describe("readBorrowOracleContext (registry + Hermes I/O)", () => {
     const throwing = (async () => {
       throw new Error("network down");
     }) as unknown as typeof fetch;
-    const ctx = await readBorrowOracleContext(vault(), { fetchImpl: throwing, now: () => NOW_MS });
+    vi.stubGlobal("fetch", throwing);
+    const ctx = await readBorrowOracleContext(vault(), { now: () => NOW_MS });
     expect(ctx).toEqual({ publishAgeSec: null, priceMove1hAbs: null });
   });
 });

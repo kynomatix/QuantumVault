@@ -105,6 +105,7 @@ function pendingSseResponse(): Response {
 describe("FlashPythSseManager", () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   it("streams ticks from an SSE body and reports health", async () => {
@@ -118,11 +119,11 @@ describe("FlashPythSseManager", () => {
       "\n\n";
 
     const fetchImpl = vi.fn().mockResolvedValue(sseResponse([event]));
+    vi.stubGlobal("fetch", fetchImpl);
     const mgr = new FlashPythSseManager({
       feedMap: { "SOL-PERP": SOL_ID },
       onTick: (t) => ticks.push(t),
       onHealth: (h) => health.push(h),
-      fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 
     mgr.connect();
@@ -141,10 +142,10 @@ describe("FlashPythSseManager", () => {
 
   it("does not start when no feed ids are configured", async () => {
     const fetchImpl = vi.fn();
+    vi.stubGlobal("fetch", fetchImpl);
     const mgr = new FlashPythSseManager({
       feedMap: { "SOL-PERP": "" },
       onTick: () => {},
-      fetchImpl: fetchImpl as unknown as typeof fetch,
     });
     mgr.connect();
     await new Promise((r) => setTimeout(r, 10));
@@ -156,10 +157,10 @@ describe("FlashPythSseManager", () => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValue({ ok: false, status: 503, body: null } as unknown as Response);
+    vi.stubGlobal("fetch", fetchImpl);
     const mgr = new FlashPythSseManager({
       feedMap: { "SOL-PERP": SOL_ID },
       onTick: () => {},
-      fetchImpl: fetchImpl as unknown as typeof fetch,
     });
     mgr.connect();
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalled());
@@ -172,11 +173,11 @@ describe("FlashPythSseManager", () => {
     const fetchImpl = vi
       .fn()
       .mockImplementation(() => Promise.resolve(pendingSseResponse()));
+    vi.stubGlobal("fetch", fetchImpl);
     const mgr = new FlashPythSseManager({
       feedMap: { "SOL-PERP": SOL_ID },
       onTick: () => {},
       onHealth: (h) => health.push(h),
-      fetchImpl: fetchImpl as unknown as typeof fetch,
       staleTimeoutMs: 20,
     });
     mgr.connect();
