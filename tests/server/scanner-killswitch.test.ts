@@ -6,6 +6,7 @@
 // inversion or removal of the condition will cause it to fail.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { readFileSync } from "node:fs";
 
 const ORIGINAL = process.env.SCANNER_ENABLED;
 
@@ -33,6 +34,24 @@ function applyStartupGate(startScanner: () => void, logFn: (msg: string) => void
 }
 
 describe("SCANNER_ENABLED kill switch", () => {
+  it("keeps the observed helper and scanner import/start in the enabled arm", () => {
+    const source = readFileSync(new URL("../../server/index.ts", import.meta.url), "utf8");
+    const gateStart = source.indexOf("if (process.env.SCANNER_ENABLED === 'false')");
+    const gateEnd = source.indexOf("// Admin error-log retention", gateStart);
+    const gate = source.slice(gateStart, gateEnd);
+    const enabledArm = gate.indexOf("} else {");
+
+    expect(gateStart).toBeGreaterThan(-1);
+    expect(gateEnd).toBeGreaterThan(gateStart);
+    expect(enabledArm).toBeGreaterThan(-1);
+    expect(gate.slice(0, enabledArm)).not.toContain("startObservedBackgroundComponent({");
+    expect(gate.slice(0, enabledArm)).not.toContain("import('./ai-trader/scanner')");
+    expect(gate.slice(0, enabledArm)).not.toContain("startScanner();");
+    expect(gate.slice(enabledArm)).toContain("startObservedBackgroundComponent({");
+    expect(gate.slice(enabledArm)).toContain("import('./ai-trader/scanner')");
+    expect(gate.slice(enabledArm)).toContain("startScanner();");
+  });
+
   it("SCANNER_ENABLED=false: startScanner is never called", () => {
     const startScanner = vi.fn();
     const log = vi.fn();
