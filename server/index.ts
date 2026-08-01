@@ -24,6 +24,7 @@ import * as os from "node:os";
 import * as fs from "node:fs";
 import * as nodePath from "node:path";
 import { appendTelemetry, appendTelemetrySync, drainQueueSyncForExit, flushTelemetry } from "./telemetry";
+import { startObservedBackgroundComponent } from "./background-start";
 
 // Global crash capture for the admin "Errors" panel. Registered at module load so it catches
 // failures from any background job. Both handlers record the error then preserve Node's default
@@ -992,11 +993,14 @@ registerRequestTrace(app);
       // ai-trader module graph off the boot critical path. Kept early (it
       // reconciles live positions — trading-relevant) but headroom-gated.
       setTimeout(() => {
-        whenPoolHasHeadroom().then(() => {
-          log('[Staggered startup] Starting AI Trader monitor');
-          import('./ai-trader/monitor').then(({ startAiTraderMonitor }) => {
+        void startObservedBackgroundComponent({
+          component: 'ai-trader-monitor',
+          beforeStart: whenPoolHasHeadroom,
+          announce: () => log('[Staggered startup] Starting AI Trader monitor'),
+          loadAndStart: async () => {
+            const { startAiTraderMonitor } = await import('./ai-trader/monitor');
             startAiTraderMonitor();
-          }).catch(err => console.error('[AiTraderMonitor] failed to start:', err));
+          },
         });
       }, 77_000);
 
@@ -1010,10 +1014,14 @@ registerRequestTrace(app);
         log('[Scanner] disabled via SCANNER_ENABLED=false — startScanner will not be called');
       } else {
         setTimeout(() => {
-          log('[Staggered startup] Starting AI Trader scanner (shadow mode)');
-          import('./ai-trader/scanner').then(({ startScanner }) => {
-            startScanner();
-          }).catch(err => console.error('[Scanner] failed to start:', err));
+          void startObservedBackgroundComponent({
+            component: 'scanner',
+            announce: () => log('[Staggered startup] Starting AI Trader scanner (shadow mode)'),
+            loadAndStart: async () => {
+              const { startScanner } = await import('./ai-trader/scanner');
+              startScanner();
+            },
+          });
         }, 80_000);
       }
 
