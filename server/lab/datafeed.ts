@@ -6,7 +6,7 @@ import {
   type CandleReadCallerClass,
   type CandleReadPhases,
 } from "./candle-store";
-import { getBenchmarksBase, getHermesHeaders } from '../pricing/hermes-config.js';
+import { getBenchmarksBase, hermesFetch } from '../pricing/hermes-config.js';
 import { appendTelemetry } from "../telemetry";
 
 const OKX_BATCH_SIZE = 300;
@@ -420,6 +420,7 @@ async function fetchWithHardTimeout(
   ms: number,
   init?: RequestInit,
   externalSignal?: AbortSignal,
+  transport: 'default' | 'hermes' = 'default',
 ): Promise<Response> {
   throwIfAborted(externalSignal);
   const controller = new AbortController();
@@ -433,8 +434,9 @@ async function fetchWithHardTimeout(
   externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
   let raceTimer: NodeJS.Timeout | undefined;
   try {
+    const request = transport === 'hermes' ? hermesFetch : fetch;
     return await Promise.race([
-      fetch(url, { ...init, signal: controller.signal }),
+      request(url, { ...init, signal: controller.signal }),
       new Promise<never>((_, reject) => {
         raceTimer = setTimeout(
           () => reject(new Error(`fetch hard-timeout after ${ms + 5000}ms (abort never fired)`)),
@@ -698,7 +700,7 @@ async function fetchPythCandlesInner(
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const res = await fetchWithHardTimeout(url, 20000, { headers: getHermesHeaders() }, signal);
+      const res = await fetchWithHardTimeout(url, 20000, undefined, signal, 'hermes');
       if ((res.status === 401 || res.status === 403) && !pythBenchmarksAuthWarned) {
         pythBenchmarksAuthWarned = true;
         console.error(

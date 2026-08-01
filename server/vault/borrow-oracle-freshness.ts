@@ -29,7 +29,7 @@
 import type { BorrowOracleContext } from "./borrow-risk-policy";
 import type { BorrowVaultConfig } from "./jupiter-lend-borrow-route";
 import { getBorrowOracleSource, type BorrowOracleSource } from "./borrow-oracle-registry";
-import { getHermesBase, getHermesHeaders } from "../pricing/hermes-config.js";
+import { getHermesBase, hermesFetch } from "../pricing/hermes-config.js";
 const DEFAULT_TIMEOUT_MS = 8000;
 /** Tolerate the latest publish time up to this far in the "future" (clock skew). */
 const CLOCK_SKEW_SEC = 30;
@@ -46,8 +46,6 @@ export interface OraclePoint {
 }
 
 export interface BorrowOracleReaderDeps {
-  /** Injected for tests; defaults to the global fetch. */
-  fetchImpl?: typeof fetch;
   /** Injected for tests; defaults to Date.now (ms epoch). */
   now?: () => number;
   hermesBase?: string;
@@ -145,14 +143,12 @@ export function computeDirectOracleContext(
 
 async function fetchJson(
   url: string,
-  fetchImpl: typeof fetch,
   timeoutMs: number,
-  headers?: Record<string, string>,
 ): Promise<unknown | null> {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetchImpl(url, { signal: ctrl.signal, headers });
+    const res = await hermesFetch(url, { signal: ctrl.signal });
     if (!res || !res.ok) return null;
     return await res.json();
   } catch {
@@ -195,7 +191,6 @@ export async function readBorrowOracleContext(
       return UNREADABLE;
     }
 
-    const fetchImpl = deps.fetchImpl ?? fetch;
     const nowMs = (deps.now ?? Date.now)();
     if (!Number.isFinite(nowMs)) return UNREADABLE;
     const nowSec = Math.floor(nowMs / 1000);
@@ -207,8 +202,8 @@ export async function readBorrowOracleContext(
     const benchUrl = `${base}/v2/updates/price/${targetSec}?ids[]=${feedId}&parsed=true`;
 
     const [latestJson, benchJson] = await Promise.all([
-      fetchJson(latestUrl, fetchImpl, timeoutMs, getHermesHeaders()),
-      fetchJson(benchUrl, fetchImpl, timeoutMs, getHermesHeaders()),
+      fetchJson(latestUrl, timeoutMs),
+      fetchJson(benchUrl, timeoutMs),
     ]);
     if (!latestJson || !benchJson) return UNREADABLE;
 

@@ -23,7 +23,7 @@ import { oraclePriceSnapshots } from '@shared/schema';
 import { readFeedsAll, type OnchainPricePoint } from './onchain-pyth-reader.js';
 import { getAllBorrowOracleEntries } from './borrow-oracle-registry.js';
 import { FLASH_MARKET_SPECS } from '../protocol/flash/flash-constants.js';
-import { getHermesBase, getHermesHeaders } from '../pricing/hermes-config.js';
+import { getHermesBase, hermesFetch } from '../pricing/hermes-config.js';
 import { sql } from 'drizzle-orm';
 
 const TICK_INTERVAL_MS = 5 * 60 * 1000;   // 5 minutes
@@ -137,7 +137,7 @@ async function fetchHermesBatch(
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), HERMES_TIMEOUT_MS);
   try {
-    const res = await fetch(url, { signal: ctrl.signal, headers: getHermesHeaders() });
+    const res = await hermesFetch(url, { signal: ctrl.signal });
     clearTimeout(timer);
     if (!res.ok) return out;
     const json: unknown = await res.json();

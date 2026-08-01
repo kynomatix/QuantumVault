@@ -5,6 +5,7 @@ server/public
 vite.config.ts.*
 *.tar.gz
 attached_assets/
+# Private planning/specification material. Permanent owner rule: never track.
 docs/
 test-discover.ts
 QVC_plan.md
