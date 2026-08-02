@@ -1047,24 +1047,36 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   async setTpSl(params: TpSlParams): Promise<OrderResult> {
+    let positionSide: 'bid' | 'ask' | null = null;
+    try {
+      const positions = await this.getPositions(params.agentPublicKey, params.subaccountId);
+      const matches = positions.filter(p => p.internalSymbol === params.internalSymbol);
+      if (matches.length === 1) {
+        const positionSize = matches[0].baseSize;
+        if (Number.isFinite(positionSize) && positionSize !== 0) {
+          positionSide = positionSize > 0 ? 'bid' : 'ask';
+        }
+      }
+    } catch {
+      console.warn(`[SetTpSl] position_side_unavailable for ${params.internalSymbol}: position read failed`);
+    }
+
+    if (positionSide === null) {
+      console.warn(`[SetTpSl] position_side_unavailable for ${params.internalSymbol}: no unique finite nonzero position`);
+      return {
+        success: false,
+        status: 'rejected',
+        error: 'position_side_unavailable',
+        appliedTakeProfitPrice: null,
+        appliedStopLossPrice: null,
+      };
+    }
+
     const enrollment = await this.ensurePacificaEnrollment(params.agentPublicKey, params.agentSecretKey);
     const signer = new PacificaSigner(params.agentSecretKey);
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
 
     console.log(`[PacificaAdapter.setTpSl] account=${params.agentPublicKey.slice(0,8)}... symbol=${protocolSymbol} subaccountId=${params.subaccountId ?? 'none'} TP=${params.takeProfitPrice ?? 'none'} SL=${params.stopLossPrice ?? 'none'}`);
-
-    let positionSide: string = 'bid';
-    let havePosition = false;
-    try {
-      const positions = await this.getPositions(params.agentPublicKey, params.subaccountId);
-      const pos = positions.find(p => p.internalSymbol === params.internalSymbol);
-      if (pos && Math.abs(pos.baseSize) > 0.0001) {
-        positionSide = pos.baseSize >= 0 ? 'bid' : 'ask';
-        havePosition = true;
-      }
-    } catch (err) {
-      console.warn(`[SetTpSl] Could not fetch position side, defaulting to 'bid':`, err);
-    }
 
     const isLong = positionSide === 'bid';
     const TP_SLIPPAGE = 0.001;
@@ -1086,7 +1098,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const droppedLegs: Array<{ leg: 'tp' | 'sl'; reason: string }> = [];
     let tpInvalid = false;
     let slInvalid = false;
-    if (havePosition && (tpRequested || slRequested)) {
+    if (tpRequested || slRequested) {
       let mark: number | null = null;
       try {
         mark = await this.getPrice(params.internalSymbol);
