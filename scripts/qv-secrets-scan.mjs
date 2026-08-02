@@ -9,6 +9,8 @@ export const SCANNER_VERSION = 'qv-secrets-scan/1';
 
 const CANDIDATE_PATTERN = /(?<![A-Za-z0-9+/_=-])([A-Za-z0-9+/_=-]{16,256})(?![A-Za-z0-9+/_=-])/g;
 const SECRET_CONTEXT = /(?:secret|password|token|api[_ -]?key|private[_ -]?key|mnemonic|authorization)\s*[:=]\s*(?:bearer\s+)?["'`]?$/i;
+const PUBLIC_HASH_WORD_LABEL = /(?:\bsha-?256\b|\bdigest\b|\bhash\b|\bcommit\b|\bhead\b|\bbranch(?:\s+point)?\b|\bbase\b|\btip\b|\brevision\b|\borigin\/main\b)/i;
+const PUBLIC_HASH_FIELD_LABEL = /\b[A-Za-z0-9]+(?:Sha256|Digest|Hash|Commit|Head|Tip)\b/;
 
 const VENDOR_RULES = [
   ['vendor-anthropic-key', /\bsk-ant-[A-Za-z0-9_-]{16,}\b/g],
@@ -87,7 +89,7 @@ function tableHashColumn(lines, lineIndex, candidate) {
     if (!prior.trimStart().startsWith('|')) break;
     if (/^[\s|:-]+$/.test(prior)) continue;
     const headers = prior.split('|').slice(1, -1).map(cell => cell.trim().toLowerCase());
-    if (/sha-?256|digest|hash/.test(headers[column] ?? '')) return true;
+    if (PUBLIC_HASH_WORD_LABEL.test(headers[column] ?? '')) return true;
   }
   return false;
 }
@@ -99,11 +101,12 @@ function classifyOpaqueCandidate(value, line, lines, lineIndex, candidateIndex) 
   const secretContext = SECRET_CONTEXT.test(prefix);
 
   if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value)) {
-    const contextWindow = lines.slice(Math.max(0, lineIndex - 2), Math.min(lines.length, lineIndex + 2)).join(' ');
+    const contextWindow = lines.slice(Math.max(0, lineIndex - 1), Math.min(lines.length, lineIndex + 2)).join(' ');
     const atQualifiedCommit = value.length === 40
-      && new RegExp(`@\\s*[\x60]?${value}[\x60]?`, 'i').test(line)
+      && candidateIndex > 0 && line[candidateIndex - 1] === '@'
       && /(?:wo|commit|fix|head|accepted|verdict|code)/i.test(line);
-    const labelledPublic = /(?:sha-?256|digest|hash|commit|head|branch(?: point)?|base|tip|revision|origin\/main)/i.test(contextWindow)
+    const labelledPublic = PUBLIC_HASH_WORD_LABEL.test(contextWindow)
+      || PUBLIC_HASH_FIELD_LABEL.test(contextWindow)
       || atQualifiedCommit || tableHashColumn(lines, lineIndex, value);
     return secretContext || !labelledPublic ? 'unclassified-hex' : null;
   }
@@ -197,7 +200,9 @@ export function scanFiles(paths) {
   if (!Array.isArray(paths) || paths.length === 0) throw new ScanError('no_files');
   const normalized = new Set();
   const inputs = paths.map(input => {
-    const absolute = resolve(String(input));
+    const raw = String(input);
+    if (!isAbsolute(raw)) throw new ScanError('path_not_absolute', raw);
+    const absolute = resolve(raw);
     const key = process.platform === 'win32' ? absolute.toLowerCase() : absolute;
     if (normalized.has(key)) throw new ScanError('duplicate_file', absolute);
     normalized.add(key);

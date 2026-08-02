@@ -104,6 +104,46 @@ describe('qv-secrets-scan', () => {
     expect(green.status).toBe(0);
   });
 
+  it('does not let a two-lines-away or substring label exempt unclassified hex', () => {
+    const secretLike = createHash('sha256').update('raw private key shape').digest('hex');
+    for (const contents of [
+      `hash\nordinary prose\n${secretLike}\n`,
+      `baseline\n${secretLike}\n`,
+      `ahead\n${secretLike}\n`,
+      `hashed value\n${secretLike}\n`,
+    ]) {
+      const result = cli([fixture(contents)]);
+      expect(result.status).toBe(2);
+      expect(JSON.parse(result.stdout).files[0].findings).toEqual(
+        expect.arrayContaining([expect.objectContaining({ ruleId: 'unclassified-hex' })]),
+      );
+    }
+  });
+
+  it('requires a 40-hex commit identity to be immediately introduced by @', () => {
+    const commitLike = createHash('sha1').update('commit identity').digest('hex');
+    const immediate = cli([fixture(`accepted fix @${commitLike}\n`)]);
+    expect(immediate.status).toBe(0);
+    const spaced = cli([fixture(`accepted fix @   ${commitLike}\n`)]);
+    expect(spaced.status).toBe(2);
+    expect(JSON.parse(spaced.stdout).files[0].findings).toContainEqual(
+      { ruleId: 'unclassified-hex', line: 1 },
+    );
+  });
+
+  it('preserves exact structured hash fields and bounded table headers', () => {
+    const sha256 = createHash('sha256').update('structured public identity').digest('hex');
+    const commit = createHash('sha1').update('structured public commit').digest('hex');
+    const result = cli([fixture([
+      `{"initialFrozenWoSha256":"${sha256}","reviewedTip":"${commit}"}`,
+      '| File | Current accepted SHA-256 |',
+      '|---|---|',
+      `| qv-watch.mjs | ${sha256} |`,
+    ].join('\n'))]);
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).findingCount).toBe(0);
+  });
+
   it('returns deterministic safe file metadata from the importable module', () => {
     const path = fixture('ordinary prose\n');
     const first = scanFiles([path]);
@@ -123,6 +163,12 @@ describe('qv-secrets-scan', () => {
     expect(result.status).toBe(1);
     expect(result.stdout + result.stderr).not.toContain(marker);
     expect(JSON.parse(result.stdout).error.code).toBe('duplicate_file');
+  });
+
+  it('rejects relative file arguments before filesystem resolution', () => {
+    const result = cli(['relative-fixture.txt']);
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stdout).error.code).toBe('path_not_absolute');
   });
 
   it.each([
