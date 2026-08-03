@@ -4,6 +4,8 @@ export interface ProtocolMarket {
   internalSymbol: string;
   protocolSymbol: string;
   maxLeverage: number;
+  /** Whether maxLeverage is the parsed venue value or a compatibility fallback. */
+  maxLeverageSource?: 'venue' | 'fallback';
   minOrderSizeUsd: number;
   minOrderSizeBase: number;
   tickSize: number;

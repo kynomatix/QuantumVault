@@ -11,6 +11,7 @@ import { wallets } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import { getUmkForWebhook, decryptAgentKeyStrict } from "./session-v3";
 import { recordCriticalError } from "./error-log";
+import { checkSignalBotLeverageAdmission } from "./signal-bot-leverage-admission";
 
 const DEFAULT_EXCHANGE_FEE_RATE = 0.0004;
 
@@ -603,7 +604,49 @@ async function notifyRetryResult(job: RetryJob, success: boolean, error?: string
   }
 }
 
+async function rejectRetryAtLeverageAdmission(job: RetryJob, error: string): Promise<void> {
+  job.lastError = error;
+  console.error(`[TradeRetry] Signal Bot leverage admission rejected job ${job.id}: ${error}`);
+
+  if (job.originalTradeId) {
+    try {
+      await storage.updateBotTrade(job.originalTradeId, {
+        status: 'failed',
+        errorMessage: error,
+      });
+    } catch (dbErr) {
+      console.warn(`[TradeRetry] Failed to record leverage admission on trade ${job.originalTradeId}:`, dbErr);
+    }
+  }
+
+  try {
+    await storage.markTradeRetryJobFailed(job.id, error);
+  } catch (dbErr) {
+    console.warn(`[TradeRetry] Failed to mark leverage-rejected job ${job.id}:`, dbErr);
+  }
+  await notifyRetryResult(job, false, error);
+  retryQueue.delete(job.id);
+}
+
 async function processRetryJob(job: RetryJob): Promise<void> {
+  // Resolve the product adapter and perform unsigned Pacifica admission before
+  // UMK lookup or key decryption. Close jobs intentionally bypass this gate.
+  let preAuthJobBot: Awaited<ReturnType<typeof storage.getTradingBotById>> | null = null;
+  let preAuthJobAdapter: ReturnType<typeof getDefaultAdapter> | null = null;
+  if (job.side !== 'close') {
+    preAuthJobBot = await storage.getTradingBotById(job.botId);
+    preAuthJobAdapter = preAuthJobBot ? getAdapterForBot(preAuthJobBot) : getDefaultAdapter();
+    const admission = await checkSignalBotLeverageAdmission({
+      adapter: preAuthJobAdapter,
+      market: job.market,
+      configuredLeverage: job.leverage,
+    });
+    if (!admission.allowed) {
+      await rejectRetryAtLeverageAdmission(job, admission.error);
+      return;
+    }
+  }
+
   // V3 Phase 4: strict-decrypt the agent key on each run via UMK +
   // wallet.agentPrivateKeyEncryptedV3. Never use the legacy encrypted blob.
   // If execution is disabled (revoked / emergency-stopped) or V3 envelope
@@ -673,8 +716,8 @@ async function processRetryJob(job: RetryJob): Promise<void> {
   try {
     let result: { success: boolean; signature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: string; swiftOrderId?: string };
     let actualCloseSide: 'long' | 'short' = 'short';
-    const jobBot = await storage.getTradingBotById(job.botId);
-    const jobAdapter = jobBot ? getAdapterForBot(jobBot) : getDefaultAdapter();
+    const jobBot = preAuthJobBot ?? await storage.getTradingBotById(job.botId);
+    const jobAdapter = preAuthJobAdapter ?? (jobBot ? getAdapterForBot(jobBot) : getDefaultAdapter());
     const swiftAvailable = tryIsSwiftAvailable();
     const jobSwiftAttempts = job.swiftAttempts || 0;
     console.log(`[TradeRetry] Swift status: available=${swiftAvailable}, swiftAttempts=${jobSwiftAttempts}, originalMethod=${job.originalExecMethod || 'legacy'}`);
