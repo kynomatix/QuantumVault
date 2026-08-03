@@ -2203,7 +2203,16 @@ export class PacificaAdapter implements ProtocolAdapter {
       const protocolSymbol = m.symbol;
       const internalSymbol = protocolToInternal.get(protocolSymbol.toUpperCase()) || `${protocolSymbol.toUpperCase()}-PERP`;
 
-      const maxLev = typeof m.max_leverage === 'number' ? m.max_leverage : parseFloat(String(m.max_leverage)) || 1;
+      const parsedMaxLev = typeof m.max_leverage === 'number'
+        ? m.max_leverage
+        : parseFloat(String(m.max_leverage));
+      const maxLeverageSource = Number.isFinite(parsedMaxLev) && parsedMaxLev > 0
+        ? 'venue' as const
+        : 'fallback' as const;
+      // Preserve the existing compatibility value for non-admission consumers.
+      // Signal Bot admission checks maxLeverageSource and never treats this
+      // fallback as venue authority.
+      const maxLev = typeof m.max_leverage === 'number' ? m.max_leverage : parsedMaxLev || 1;
       const minOrderUsd = parseFloat(String(m.min_order_size)) || 10;
       const tickSz = parseFloat(String(m.tick_size)) || 0.01;
       const lotSz = parseFloat(String(m.lot_size)) || 0.01;
@@ -2213,6 +2222,7 @@ export class PacificaAdapter implements ProtocolAdapter {
         internalSymbol,
         protocolSymbol,
         maxLeverage: maxLev,
+        maxLeverageSource,
         minOrderSizeUsd: minOrderUsd,
         minOrderSizeBase: lotSz,
         tickSize: tickSz,

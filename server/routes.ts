@@ -24,6 +24,7 @@ import { ZodError } from "zod";
 import { getDefaultAdapter, getAdapterForBot, getAdapter } from './protocol/adapter-registry';
 import { normalizeMarket } from './protocol/symbol-registry';
 import type { ProtocolAdapter } from './protocol/adapter';
+import { checkSignalBotLeverageAdmission } from './signal-bot-leverage-admission';
 import { parseAndValidateAdapterSubaccountId } from './protocol/persist-canonical-subaccount-id';
 import { resolveAgentKeypair } from './agent-wallet';
 import { FLASH_BOT_WALLET_SOL_SEED } from './protocol/flash/flash-constants';
@@ -1218,6 +1219,17 @@ async function executePerpOrder(
   mainWalletOverride?: string,
   adapter = getDefaultAdapter(),
 ): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: string; swiftOrderId?: string | null }> {
+  if (!reduceOnly) {
+    const admission = await checkSignalBotLeverageAdmission({
+      adapter,
+      market,
+      configuredLeverage: leverage,
+    });
+    if (!admission.allowed) {
+      return { success: false, error: admission.error };
+    }
+  }
+
   let signing: Awaited<ReturnType<typeof _resolveSigningContext>> | null = null;
   try {
     signing = await _resolveSigningContext(encryptedPrivateKey, subAccountId, botCtx ?? null);
