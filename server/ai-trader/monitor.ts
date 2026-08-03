@@ -178,6 +178,26 @@ const botInFlight = new Map<string, number>();
 const BOT_IN_FLIGHT_WEDGE_MS = 5 * 60_000;
 
 /**
+ * One non-blocking close owner per bot across user, protective, and confirmed-
+ * flat reconciliation paths. The token prevents an older finally block from
+ * releasing a newer claim. There is deliberately no timer or expiry: every
+ * owner releases in finally, and process restart is the crash-recovery boundary.
+ */
+const closeInFlight = new Map<string, symbol>();
+
+function tryAcquireCloseClaim(botId: string): (() => void) | null {
+  if (closeInFlight.has(botId)) {
+    console.warn(`[AiTraderMonitor] Bot ${botId.slice(0, 8)}: close already in flight — deferring duplicate close path`);
+    return null;
+  }
+  const claim = Symbol(botId);
+  closeInFlight.set(botId, claim);
+  return () => {
+    if (closeInFlight.get(botId) === claim) closeInFlight.delete(botId);
+  };
+}
+
+/**
  * Runtime stale pre-open watchdog. A bot stranded in 'analyzing'/'executing'/
  * 'proposed' at RUNTIME (hung await mid-cycle, an auto-cycle promise that died
  * without throwing, a manual /analyze whose in-flight work was killed) used to
@@ -452,6 +472,107 @@ interface CloseRecord {
   realizedPnl: number | null;
   feesPaid: number | null;
   closedAt: Date;
+}
+
+type FreshCloseContext =
+  | { ok: true; bot: AiTraderBot; view: OpenDecisionView }
+  | { ok: false; detail: string };
+
+function sameCloseIdentity(snapshot: AiTraderBot, fresh: AiTraderBot): boolean {
+  return (
+    snapshot.id === fresh.id &&
+    snapshot.walletAddress === fresh.walletAddress &&
+    snapshot.protocol === fresh.protocol &&
+    snapshot.protocolSubaccountId === fresh.protocolSubaccountId &&
+    snapshot.market === fresh.market &&
+    snapshot.paperMode === fresh.paperMode
+  );
+}
+
+async function loadFreshCloseContext(bot: AiTraderBot, decisionId: string): Promise<FreshCloseContext> {
+  const [freshBot, freshDecision] = await Promise.all([
+    storage.getAiTraderBot(bot.id),
+    storage.getAiTraderDecision(decisionId),
+  ]);
+  if (!freshBot || !sameCloseIdentity(bot, freshBot)) {
+    return { ok: false, detail: "bot identity changed while close was pending" };
+  }
+  const freshView = freshDecision ? parseOpenDecision([freshDecision]) : null;
+  if (!freshView || freshView.decision.id !== decisionId) {
+    return { ok: false, detail: "decision is no longer open" };
+  }
+  return { ok: true, bot: freshBot, view: freshView };
+}
+
+function matchingClosePosition(
+  positions: ProtocolPosition[],
+  bot: AiTraderBot,
+  view: OpenDecisionView
+): ProtocolPosition | null {
+  const position = matchPosition(positions, bot.market);
+  if (!position) return null;
+  const side: PaperSide = position.baseSize > 0 ? "long" : "short";
+  return side === view.side ? position : null;
+}
+
+interface ProtectionRestoreResult {
+  restored: boolean;
+  detail: string;
+}
+
+async function restoreCloseProtection(
+  bot: AiTraderBot,
+  view: OpenDecisionView,
+  adapter: ProtocolAdapter
+): Promise<ProtectionRestoreResult> {
+  if (typeof adapter.setTpSl !== "function" || typeof adapter.getOpenStopOrders !== "function") {
+    return { restored: false, detail: "venue cannot restore and prove both bracket operations" };
+  }
+
+  try {
+    const currentDecision = await storage.getAiTraderDecision(view.decision.id);
+    const currentView = currentDecision ? parseOpenDecision([currentDecision]) : null;
+    if (!currentView) {
+      return { restored: false, detail: "decision is no longer open while restoring protection" };
+    }
+
+    const restored = await withSigningContext(bot, async (keyTrio) => {
+      const applied = await adapter.setTpSl!({
+        ...keyTrio,
+        internalSymbol: bot.market,
+        stopLossPrice: currentView.stopLossPrice,
+        takeProfitPrice: currentView.takeProfitPrice,
+        subaccountId: undefined,
+      });
+      const exact =
+        applied.success &&
+        applied.appliedStopLossPrice === currentView.stopLossPrice &&
+        applied.appliedTakeProfitPrice === currentView.takeProfitPrice &&
+        (applied.droppedLegs?.length ?? 0) === 0;
+      if (!exact) {
+        return {
+          restored: false,
+          detail: applied.error ?? "venue did not report both exact bracket legs as applied",
+        };
+      }
+      const resting = await adapter.getOpenStopOrders!(
+        keyTrio.agentPublicKey,
+        undefined,
+        bot.market
+      );
+      return resting.length > 0
+        ? { restored: true, detail: "original bracket restored and resting-order proof returned" }
+        : { restored: false, detail: "resting-order proof returned no open stop orders" };
+    });
+    return restored.ok
+      ? restored.value
+      : { restored: false, detail: restored.detail };
+  } catch (err) {
+    return {
+      restored: false,
+      detail: `bracket restore/proof threw: ${err instanceof Error ? err.message : err}`,
+    };
+  }
 }
 
 async function recordClose(bot: AiTraderBot, view: OpenDecisionView, close: CloseRecord): Promise<void> {
@@ -766,94 +887,139 @@ async function closeLivePositionAndPause(
   adapter: ProtocolAdapter,
   args: { pauseReason: string; exitReason: string; detail: string }
 ): Promise<void> {
-  // Stale-pass guard: a wedged monitor pass that resumes after its botInFlight
-  // claim was reclaimed can reach here with OLD position data. If this
-  // decision was already closed by a newer pass, canceling the bracket now
-  // would strip protection from a NEWER position opened since. Re-read first.
-  const freshDecision = await storage.getAiTraderDecision(view.decision.id);
-  if (!freshDecision || freshDecision.closedAt != null) {
-    console.warn(
-      `[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: skipping protective close — decision ${view.decision.id.slice(0, 8)} already closed (stale pass)`
-    );
-    return;
-  }
-  // WO-7.1: subaccountId is always undefined — a sub-provisioned bot signs AS
-  // its subaccount (keyTrio.agentPublicKey is the sub pubkey).
-  const subaccountId = undefined;
-  const result = await withSigningContext(bot, async (keyTrio) => {
-    try {
-      await adapter.cancelTpSlOrders?.({ ...keyTrio, internalSymbol: bot.market, subaccountId });
-    } catch (err) {
-      console.warn(`[AiTraderMonitor] cancelTpSlOrders failed before protective close: ${err instanceof Error ? err.message : err}`);
+  const releaseCloseClaim = tryAcquireCloseClaim(bot.id);
+  if (!releaseCloseClaim) return;
+  try {
+    const fresh = await loadFreshCloseContext(bot, view.decision.id);
+    if (!fresh.ok) {
+      console.warn(
+        `[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: skipping protective close — ${fresh.detail} (stale pass)`
+      );
+      return;
     }
-    return adapter.closePosition({
-      ...keyTrio,
-      internalSymbol: bot.market,
-      subaccountId,
-      maxSlippagePct: PROTECTIVE_CLOSE_MAX_SLIPPAGE_PCT,
-    });
-  });
+    bot = fresh.bot;
+    view = fresh.view;
 
-  if (!result.ok) {
-    // Could not even sign — pause anyway (fail closed) and say so loudly. The
-    // position (if any) is still protected by its venue-side bracket.
-    await pauseBot(bot, args.pauseReason, `${args.detail}; PROTECTIVE CLOSE FAILED (${result.detail}) — check the venue manually`);
-    return;
-  }
+    // WO-7.1: subaccountId is always undefined — a sub-provisioned bot signs AS
+    // its subaccount (keyTrio.agentPublicKey is the sub pubkey).
+    const subaccountId = undefined;
+    const runCloseMutation = () => withSigningContext(bot, async (keyTrio) => {
+      let positions: ProtocolPosition[];
+      try {
+        positions = await adapter.getPositions(keyTrio.agentPublicKey, subaccountId);
+      } catch (err) {
+        return {
+          kind: "identity_failure",
+          detail: `position re-read failed: ${err instanceof Error ? err.message : err}`,
+        } as const;
+      }
+      if (!matchingClosePosition(positions, bot, view)) {
+        return { kind: "identity_failure", detail: "live position market or side no longer matches" } as const;
+      }
 
-  const order = result.value;
-  if (!isTerminalCloseResult(order)) {
-    // FAIL CLOSED: the close order did NOT land, but the bracket was just
-    // canceled above — the position may be sitting NAKED on the venue. Do
-    // NOT record a close (the decision row stays open so the operator and
-    // reconciliation still see a live position). Best-effort: re-place the
-    // original bracket so the position is protected again, then pause loudly.
-    let restoredNote = "bracket restore not attempted (venue lacks setTpSl)";
-    if (typeof adapter.setTpSl === "function") {
-      const restore = await withSigningContext(bot, (keyTrio) =>
-        adapter.setTpSl!({
+      try {
+        const canceled = await adapter.cancelTpSlOrders?.({
           ...keyTrio,
           internalSymbol: bot.market,
-          stopLossPrice: view.stopLossPrice,
-          takeProfitPrice: view.takeProfitPrice,
           subaccountId,
-        })
+        });
+        if (canceled && !canceled.success) {
+          console.warn("[AiTraderMonitor] cancelTpSlOrders reported failure before protective close");
+        }
+      } catch (err) {
+        console.warn(`[AiTraderMonitor] cancelTpSlOrders failed before protective close: ${err instanceof Error ? err.message : err}`);
+      }
+
+      try {
+        const order = await adapter.closePosition({
+          ...keyTrio,
+          internalSymbol: bot.market,
+          subaccountId,
+          maxSlippagePct: PROTECTIVE_CLOSE_MAX_SLIPPAGE_PCT,
+        });
+        return { kind: "order", order } as const;
+      } catch (err) {
+        return {
+          kind: "close_threw",
+          detail: err instanceof Error ? err.message : String(err),
+        } as const;
+      }
+    });
+
+    let result: Awaited<ReturnType<typeof runCloseMutation>>;
+    try {
+      result = await runCloseMutation();
+    } catch (err) {
+      await pauseBot(
+        bot,
+        args.pauseReason,
+        `${args.detail}; PROTECTIVE CLOSE FAILED before venue mutation (${err instanceof Error ? err.message : err}) — check the venue manually`
       );
-      restoredNote =
-        restore.ok && restore.value.success
-          ? "original bracket re-placed"
-          : `bracket restore FAILED (${restore.ok ? restore.value.error ?? "unknown" : restore.detail}) — position may be UNPROTECTED`;
+      return;
     }
-    console.error(
-      `[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: PROTECTIVE CLOSE ORDER FAILED (${order.error ?? "no error detail"}); ${restoredNote}`
-    );
-    await pauseBot(
-      bot,
-      args.pauseReason,
-      `${args.detail}; PROTECTIVE CLOSE ORDER FAILED (${order.error ?? "no error detail"}) — position may still be OPEN on the venue; ${restoredNote}; check the venue manually`
-    );
-    return;
+
+    if (!result.ok) {
+      // Could not even sign — pause anyway (fail closed) and say so loudly. The
+      // position is still protected because the callback never reached cancel.
+      await pauseBot(bot, args.pauseReason, `${args.detail}; PROTECTIVE CLOSE FAILED (${result.detail}) — check the venue manually`);
+      return;
+    }
+    if (result.value.kind === "identity_failure") {
+      console.warn(
+        `[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: skipping protective close — ${result.value.detail} (stale pass)`
+      );
+      return;
+    }
+
+    const order = result.value.kind === "order" ? result.value.order : null;
+    if (!order || !isTerminalCloseResult(order)) {
+      const closeFailure =
+        result.value.kind === "close_threw"
+          ? `closePosition threw: ${result.value.detail}`
+          : order?.error ?? `close execution is not terminal (${order?.status ?? "unknown"})`;
+      const restoration = await restoreCloseProtection(bot, view, adapter);
+      console.error(
+        `[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: PROTECTIVE CLOSE FAILED (${closeFailure}); ${restoration.detail}`
+      );
+      if (!restoration.restored) {
+        await pauseBot(
+          bot,
+          "bracket_failed",
+          `${args.detail}; PROTECTIVE CLOSE FAILED (${closeFailure}); BRACKET RESTORE/PROOF FAILED (${restoration.detail}) — position may be OPEN and UNPROTECTED; check the venue manually`
+        );
+      } else {
+        await pauseBot(
+          bot,
+          args.pauseReason,
+          `${args.detail}; PROTECTIVE CLOSE FAILED (${closeFailure}); ${restoration.detail}; position may still be open — check the venue manually`
+        );
+      }
+      return;
+    }
+
+    const fillPrice = typeof order.fillPrice === "number" && Number.isFinite(order.fillPrice) ? order.fillPrice : null;
+    let realizedPnl: number | null = null;
+    let feesPaid: number | null = null;
+    if (fillPrice !== null && view.entryPrice !== null) {
+      const direction = view.side === "long" ? 1 : -1;
+      const grossPnl = (fillPrice - view.entryPrice) * view.sizeBase * direction;
+      feesPaid = EXCHANGE_TAKER_FEE_RATE * (view.entryPrice + fillPrice) * view.sizeBase;
+      realizedPnl = grossPnl - feesPaid;
+    }
+    const close: CloseRecord = {
+      exitPrice: fillPrice,
+      exitReason: args.exitReason,
+      realizedPnl,
+      feesPaid,
+      closedAt: new Date(),
+    };
+    await recordClose(bot, view, close);
+    await pauseBot(bot, args.pauseReason, args.detail);
+    await notifyClosed(bot, close, "Closed by Circuit Breaker");
+    await afterClose(bot, close, { alreadyPaused: true });
+  } finally {
+    releaseCloseClaim();
   }
-  const fillPrice = typeof order.fillPrice === "number" && Number.isFinite(order.fillPrice) ? order.fillPrice : null;
-  let realizedPnl: number | null = null;
-  let feesPaid: number | null = null;
-  if (fillPrice !== null && view.entryPrice !== null) {
-    const direction = view.side === "long" ? 1 : -1;
-    const grossPnl = (fillPrice - view.entryPrice) * view.sizeBase * direction;
-    feesPaid = EXCHANGE_TAKER_FEE_RATE * (view.entryPrice + fillPrice) * view.sizeBase;
-    realizedPnl = grossPnl - feesPaid;
-  }
-  const close: CloseRecord = {
-    exitPrice: fillPrice,
-    exitReason: args.exitReason,
-    realizedPnl,
-    feesPaid,
-    closedAt: new Date(),
-  };
-  await recordClose(bot, view, close);
-  await pauseBot(bot, args.pauseReason, args.detail);
-  await notifyClosed(bot, close, "Closed by Circuit Breaker");
-  await afterClose(bot, close, { alreadyPaused: true });
 }
 
 /**
@@ -874,92 +1040,157 @@ export async function userInitiatedClose(
   | { ok: true; closed: true; exitPrice: number | null; realizedPnl: number | null }
   | { ok: false; detail: string }
 > {
-  const decisions = await storage.getAiTraderDecisions(bot.id, 20);
-  const view = parseOpenDecision(decisions);
-  if (!view) {
-    // Nothing open to close — not an error, just a no-op the route can 200 on.
-    return { ok: true, closed: false };
+  const releaseCloseClaim = tryAcquireCloseClaim(bot.id);
+  if (!releaseCloseClaim) {
+    return { ok: false, detail: "a close is already in progress for this bot" };
   }
-
-  const adapter = getAdapter(bot.protocol);
-
-  if (bot.paperMode) {
-    let markPrice: number | null;
-    try {
-      markPrice = await adapter.getPrice(bot.market);
-    } catch (err) {
-      return { ok: false, detail: `price read failed: ${err instanceof Error ? err.message : err}` };
+  try {
+    const decisions = await storage.getAiTraderDecisions(bot.id, 20);
+    let view = parseOpenDecision(decisions);
+    if (!view) {
+      // Nothing open to close — not an error, just a no-op the route can 200 on.
+      return { ok: true, closed: false };
     }
-    if (markPrice === null || view.entryPrice === null) {
-      return { ok: false, detail: "no live price available to close the paper position" };
+
+    const fresh = await loadFreshCloseContext(bot, view.decision.id);
+    if (!fresh.ok) return { ok: false, detail: fresh.detail };
+    bot = fresh.bot;
+    view = fresh.view;
+    const adapter = getAdapter(bot.protocol);
+
+    if (bot.paperMode) {
+      let markPrice: number | null;
+      try {
+        markPrice = await adapter.getPrice(bot.market);
+      } catch (err) {
+        return { ok: false, detail: `price read failed: ${err instanceof Error ? err.message : err}` };
+      }
+      if (markPrice === null || view.entryPrice === null) {
+        return { ok: false, detail: "no live price available to close the paper position" };
+      }
+      const exitPrice = paperExitPrice(markPrice, view.side);
+      const pnl = paperRealizedPnl({
+        side: view.side,
+        entryPrice: view.entryPrice,
+        exitPrice,
+        sizeBase: view.sizeBase,
+        takerFeeRate: EXCHANGE_TAKER_FEE_RATE,
+      });
+      const close: CloseRecord = {
+        exitPrice,
+        exitReason: "user_close",
+        realizedPnl: pnl.netPnl,
+        feesPaid: pnl.fees,
+        closedAt: new Date(),
+      };
+      await recordClose(bot, view, close);
+      await notifyClosed(bot, close, "Closed by You");
+      await afterClose(bot, close, { alreadyPaused: false });
+      return { ok: true, closed: true, exitPrice, realizedPnl: pnl.netPnl };
     }
-    const exitPrice = paperExitPrice(markPrice, view.side);
-    const pnl = paperRealizedPnl({
-      side: view.side,
-      entryPrice: view.entryPrice,
-      exitPrice,
-      sizeBase: view.sizeBase,
-      takerFeeRate: EXCHANGE_TAKER_FEE_RATE,
+
+    const subaccountId = undefined; // WO-7.1: sub-provisioned bots sign AS the subaccount
+    const runCloseMutation = () => withSigningContext(bot, async (keyTrio) => {
+      let positions: ProtocolPosition[];
+      try {
+        positions = await adapter.getPositions(keyTrio.agentPublicKey, subaccountId);
+      } catch (err) {
+        return {
+          kind: "identity_failure",
+          detail: `position re-read failed: ${err instanceof Error ? err.message : err}`,
+        } as const;
+      }
+      if (!matchingClosePosition(positions, bot, view)) {
+        return { kind: "identity_failure", detail: "live position market or side no longer matches" } as const;
+      }
+
+      try {
+        const canceled = await adapter.cancelTpSlOrders?.({
+          ...keyTrio,
+          internalSymbol: bot.market,
+          subaccountId,
+        });
+        if (canceled && !canceled.success) {
+          console.warn("[AiTraderMonitor] cancelTpSlOrders reported failure before user-initiated close");
+        }
+      } catch (err) {
+        console.warn(`[AiTraderMonitor] cancelTpSlOrders failed before user-initiated close: ${err instanceof Error ? err.message : err}`);
+      }
+
+      try {
+        const order = await adapter.closePosition({
+          ...keyTrio,
+          internalSymbol: bot.market,
+          subaccountId,
+          maxSlippagePct: PROTECTIVE_CLOSE_MAX_SLIPPAGE_PCT,
+        });
+        return { kind: "order", order } as const;
+      } catch (err) {
+        return {
+          kind: "close_threw",
+          detail: err instanceof Error ? err.message : String(err),
+        } as const;
+      }
     });
+
+    let result: Awaited<ReturnType<typeof runCloseMutation>>;
+    try {
+      result = await runCloseMutation();
+    } catch (err) {
+      return { ok: false, detail: `close precondition failed: ${err instanceof Error ? err.message : err}` };
+    }
+    if (!result.ok) return { ok: false, detail: result.detail };
+    if (result.value.kind === "identity_failure") {
+      return { ok: false, detail: result.value.detail };
+    }
+
+    const order = result.value.kind === "order" ? result.value.order : null;
+    if (!order || !isTerminalCloseResult(order)) {
+      const closeFailure =
+        result.value.kind === "close_threw"
+          ? `closePosition threw: ${result.value.detail}`
+          : order?.error ?? `close execution is not terminal (${order?.status ?? "unknown"})`;
+      const restoration = await restoreCloseProtection(bot, view, adapter);
+      if (!restoration.restored) {
+        await pauseBot(
+          bot,
+          "bracket_failed",
+          `User close failed (${closeFailure}); bracket restore/proof failed (${restoration.detail}) — position may be OPEN and UNPROTECTED; check the venue manually`
+        );
+        return {
+          ok: false,
+          detail: `${closeFailure}; bracket restore/proof failed: ${restoration.detail}; bot paused for manual intervention`,
+        };
+      }
+      return {
+        ok: false,
+        detail: `${closeFailure}; ${restoration.detail}`,
+      };
+    }
+
+    const fillPrice = typeof order.fillPrice === "number" && Number.isFinite(order.fillPrice) ? order.fillPrice : null;
+    let realizedPnl: number | null = null;
+    let feesPaid: number | null = null;
+    if (fillPrice !== null && view.entryPrice !== null) {
+      const direction = view.side === "long" ? 1 : -1;
+      const grossPnl = (fillPrice - view.entryPrice) * view.sizeBase * direction;
+      feesPaid = EXCHANGE_TAKER_FEE_RATE * (view.entryPrice + fillPrice) * view.sizeBase;
+      realizedPnl = grossPnl - feesPaid;
+    }
     const close: CloseRecord = {
-      exitPrice,
+      exitPrice: fillPrice,
       exitReason: "user_close",
-      realizedPnl: pnl.netPnl,
-      feesPaid: pnl.fees,
+      realizedPnl,
+      feesPaid,
       closedAt: new Date(),
     };
     await recordClose(bot, view, close);
     await notifyClosed(bot, close, "Closed by You");
     await afterClose(bot, close, { alreadyPaused: false });
-    return { ok: true, closed: true, exitPrice, realizedPnl: pnl.netPnl };
+    return { ok: true, closed: true, exitPrice: fillPrice, realizedPnl };
+  } finally {
+    releaseCloseClaim();
   }
-
-  // Live: same cancel-survivor-leg + closePosition template as
-  // closeLivePositionAndPause, but ok:false on failure instead of pausing —
-  // an unclosed live position is still bracket-protected.
-  const subaccountId = undefined; // WO-7.1: sub-provisioned bots sign AS the subaccount
-  const result = await withSigningContext(bot, async (keyTrio) => {
-    try {
-      await adapter.cancelTpSlOrders?.({ ...keyTrio, internalSymbol: bot.market, subaccountId });
-    } catch (err) {
-      console.warn(`[AiTraderMonitor] cancelTpSlOrders failed before user-initiated close: ${err instanceof Error ? err.message : err}`);
-    }
-    return adapter.closePosition({
-      ...keyTrio,
-      internalSymbol: bot.market,
-      subaccountId,
-      maxSlippagePct: PROTECTIVE_CLOSE_MAX_SLIPPAGE_PCT,
-    });
-  });
-
-  if (!result.ok) {
-    return { ok: false, detail: result.detail };
-  }
-  const order = result.value;
-  if (!isTerminalCloseResult(order)) {
-    return { ok: false, detail: order.error ?? `close execution is not terminal (${order.status})` };
-  }
-
-  const fillPrice = typeof order.fillPrice === "number" && Number.isFinite(order.fillPrice) ? order.fillPrice : null;
-  let realizedPnl: number | null = null;
-  let feesPaid: number | null = null;
-  if (fillPrice !== null && view.entryPrice !== null) {
-    const direction = view.side === "long" ? 1 : -1;
-    const grossPnl = (fillPrice - view.entryPrice) * view.sizeBase * direction;
-    feesPaid = EXCHANGE_TAKER_FEE_RATE * (view.entryPrice + fillPrice) * view.sizeBase;
-    realizedPnl = grossPnl - feesPaid;
-  }
-  const close: CloseRecord = {
-    exitPrice: fillPrice,
-    exitReason: "user_close",
-    realizedPnl,
-    feesPaid,
-    closedAt: new Date(),
-  };
-  await recordClose(bot, view, close);
-  await notifyClosed(bot, close, "Closed by You");
-  await afterClose(bot, close, { alreadyPaused: false });
-  return { ok: true, closed: true, exitPrice: fillPrice, realizedPnl };
 }
 
 /** Live close detection: position is GONE — classify from fills, cancel survivor leg. */
@@ -969,6 +1200,9 @@ async function handleLiveClose(
   adapter: ProtocolAdapter,
   agentPublicKey: string
 ): Promise<void> {
+  const releaseCloseClaim = tryAcquireCloseClaim(bot.id);
+  if (!releaseCloseClaim) return;
+  try {
   // Stale-pass guard (mirrors closeLivePositionAndPause): if a newer pass
   // already recorded this close, bail before canceling the survivor leg —
   // it may belong to a NEWER position opened via auto-next since.
@@ -1064,6 +1298,9 @@ async function handleLiveClose(
   );
   await notifyClosed(bot, close, getCloseReasonLabel("tpsl", exitReason === "tp" ? "TP" : "SL"));
   await afterClose(bot, close, { alreadyPaused: false });
+  } finally {
+    releaseCloseClaim();
+  }
 }
 
 /**
@@ -2477,6 +2714,7 @@ export function stopAiTraderMonitor(): void {
   pendingReconciliation.clear();
   bracketReplaceAttempted.clear();
   botInFlight.clear();
+  closeInFlight.clear();
   preOpenFirstSeen.clear();
   // Clear every outstanding observability watchdog so no stale slow/terminal
   // lines can fire after shutdown. _allActiveObs covers overlapping in-flight

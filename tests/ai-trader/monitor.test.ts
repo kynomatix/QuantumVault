@@ -238,6 +238,16 @@ const botUpdates = () => updateBotMock.mock.calls.map((c) => c[1]);
 const decisionUpdates = () => updateDecisionMock.mock.calls.map((c) => c[1]);
 const notifications = () => notifyMock.mock.calls.map((c) => c[1]);
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 beforeEach(() => {
   vi.resetModules();
   vi.useFakeTimers();
@@ -261,6 +271,9 @@ beforeEach(() => {
   // default returns an open (not-yet-closed) decision so the guard proceeds normally.
   // Tests that need the guard to bail (duplicate-close race) override this directly.
   getAiTraderDecisionMock.mockImplementation(async () => makeOpenDecision());
+  // LIVE-04 fresh bot identity guard: most owning-suite venue paths use the
+  // default live bot. Individual paper/status variants override this explicitly.
+  getBotMock.mockImplementation(async () => makeBot({ paperMode: false }));
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -474,21 +487,235 @@ describe("paper close detection", () => {
 // --- Live monitoring ------------------------------------------------------------------
 
 describe("live close-result consumption", () => {
+  const openPosition = {
+    internalSymbol: "SOL-PERP",
+    baseSize: 2,
+    entryPrice: 150,
+    markPrice: 150,
+    unrealizedPnl: 0,
+    leverage: 2,
+    liquidationPrice: null,
+    marginMode: "cross" as const,
+  };
+  const exactRestore = vi.fn(async (p: { stopLossPrice?: number; takeProfitPrice?: number }) => ({
+    success: true,
+    status: "acknowledged",
+    appliedStopLossPrice: p.stopLossPrice ?? null,
+    appliedTakeProfitPrice: p.takeProfitPrice ?? null,
+  }));
+
   it("does not record or notify a user close that is only acknowledged", async () => {
     const { userInitiatedClose } = await importMonitor();
     armLiveAuth();
     const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
       closePosition: vi.fn(async () => ({ success: true, status: "acknowledged", fillPrice: 150 })),
+      setTpSl: exactRestore,
     });
     getAdapterMock.mockReturnValue(adapter);
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
 
     const result = await userInitiatedClose(makeBot({ paperMode: false }));
 
-    expect(result).toEqual({ ok: false, detail: "close execution is not terminal (acknowledged)" });
+    expect(result).toEqual({
+      ok: false,
+      detail: "close execution is not terminal (acknowledged); original bracket restored and resting-order proof returned",
+    });
+    expect((adapter as any).setTpSl).toHaveBeenCalledWith(expect.objectContaining({
+      stopLossPrice: 145,
+      takeProfitPrice: 160,
+    }));
     expect(updateDecisionMock).not.toHaveBeenCalled();
     expect(updateBotMock).not.toHaveBeenCalled();
     expect(notifyMock).not.toHaveBeenCalled();
+  });
+
+  it("restores and proves protection when closePosition throws", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      closePosition: vi.fn(async () => { throw new Error("venue timeout"); }),
+      setTpSl: exactRestore,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+
+    const result = await userInitiatedClose(makeBot({ paperMode: false }));
+
+    expect(result).toEqual({
+      ok: false,
+      detail: "closePosition threw: venue timeout; original bracket restored and resting-order proof returned",
+    });
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(notifyMock).not.toHaveBeenCalled();
+  });
+
+  it("pauses loudly when an uncertain user close cannot restore exact protection", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      closePosition: vi.fn(async () => ({ success: true, status: "submitted" })),
+      setTpSl: vi.fn(async () => ({
+        success: true,
+        status: "acknowledged",
+        appliedStopLossPrice: 145,
+        appliedTakeProfitPrice: null,
+        droppedLegs: [{ leg: "tp", reason: "not applied" }],
+      })),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+
+    const result = await userInitiatedClose(makeBot({ paperMode: false }));
+
+    expect(result).toMatchObject({ ok: false });
+    expect((result as { detail: string }).detail).toContain("bot paused for manual intervention");
+    expect(botUpdates()).toContainEqual({ status: "paused", pauseReason: "bracket_failed" });
+    expect(notifications().some((n) => n.type === "trade_failed")).toBe(true);
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+  });
+
+  it("pauses loudly when the restore-time decision re-read throws", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      closePosition: vi.fn(async () => ({ success: true, status: "submitted" })),
+      setTpSl: exactRestore,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    getAiTraderDecisionMock
+      .mockResolvedValueOnce(makeOpenDecision())
+      .mockRejectedValueOnce(new Error("database connection timeout"));
+
+    const result = await userInitiatedClose(makeBot({ paperMode: false }));
+
+    expect(result).toMatchObject({ ok: false });
+    expect((result as { detail: string }).detail).toContain(
+      "bracket restore/proof threw: database connection timeout"
+    );
+    expect((result as { detail: string }).detail).toContain("bot paused for manual intervention");
+    expect(botUpdates()).toContainEqual({ status: "paused", pauseReason: "bracket_failed" });
+    expect(notifications().some((n) => n.type === "trade_failed")).toBe(true);
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects stale bot, decision, and position identity before any venue mutation", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({ getPositions: vi.fn(async () => [openPosition]) });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    const bot = makeBot({ paperMode: false });
+
+    getBotMock.mockResolvedValueOnce(makeBot({ paperMode: false, market: "BTC-PERP" }));
+    expect(await userInitiatedClose(bot)).toEqual({
+      ok: false,
+      detail: "bot identity changed while close was pending",
+    });
+
+    getBotMock.mockResolvedValueOnce(bot);
+    getAiTraderDecisionMock.mockResolvedValueOnce(makeOpenDecision({ closedAt: new Date(NOW) }));
+    expect(await userInitiatedClose(bot)).toEqual({
+      ok: false,
+      detail: "decision is no longer open",
+    });
+
+    getBotMock.mockResolvedValueOnce(bot);
+    getAiTraderDecisionMock.mockResolvedValueOnce(makeOpenDecision());
+    (adapter as any).getPositions.mockResolvedValueOnce([{ ...openPosition, baseSize: -2 }]);
+    expect(await userInitiatedClose(bot)).toEqual({
+      ok: false,
+      detail: "live position market or side no longer matches",
+    });
+
+    expect((adapter as any).cancelTpSlOrders).not.toHaveBeenCalled();
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+  });
+
+  it("lets only one of two concurrent user closes reach the venue and accounting", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    const gate = deferred<{ success: true; status: "filled"; fillPrice: number }>();
+    const entered = deferred<void>();
+    const closePosition = vi.fn(() => {
+      entered.resolve();
+      return gate.promise;
+    });
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      closePosition,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    const bot = makeBot({ paperMode: false });
+
+    const first = userInitiatedClose(bot);
+    await entered.promise;
+    const duplicate = await userInitiatedClose(bot);
+    expect(duplicate).toEqual({ ok: false, detail: "a close is already in progress for this bot" });
+
+    gate.resolve({ success: true, status: "filled", fillPrice: 151 });
+    const result = await first;
+
+    expect(result).toMatchObject({ ok: true, closed: true, exitPrice: 151 });
+    expect(closePosition).toHaveBeenCalledTimes(1);
+    expect(decisionUpdates().filter((u) => u.exitReason === "user_close")).toHaveLength(1);
+  });
+
+  it("makes a confirmed-flat monitor pass defer while a user close owns the claim", async () => {
+    const { userInitiatedClose, monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const gate = deferred<{ success: true; status: "filled"; fillPrice: number }>();
+    const entered = deferred<void>();
+    const getPositions = vi.fn()
+      .mockResolvedValueOnce([openPosition])
+      .mockResolvedValueOnce([]);
+    const closePosition = vi.fn(() => {
+      entered.resolve();
+      return gate.promise;
+    });
+    const adapter = makeAdapter({ getPositions, closePosition });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    const bot = makeBot({ paperMode: false });
+
+    const userClose = userInitiatedClose(bot);
+    await entered.promise;
+    await monitorBotOnce(bot);
+
+    expect((adapter as any).getTradeHistory).not.toHaveBeenCalled();
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+
+    gate.resolve({ success: true, status: "filled", fillPrice: 151 });
+    await userClose;
+    expect(closePosition).toHaveBeenCalledTimes(1);
+    expect(decisionUpdates().filter((u) => u.exitReason === "user_close")).toHaveLength(1);
+  });
+
+  it("continues a terminal close after cancellation throws without restoring a flat position", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    const setTpSl = vi.fn();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      cancelTpSlOrders: vi.fn(async () => { throw new Error("cancel transport lost"); }),
+      closePosition: vi.fn(async () => ({ success: true, status: "filled", fillPrice: 151 })),
+      setTpSl,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+
+    const result = await userInitiatedClose(makeBot({ paperMode: false }));
+
+    expect(result).toMatchObject({ ok: true, closed: true, exitPrice: 151 });
+    expect(setTpSl).not.toHaveBeenCalled();
+    expect(decisionUpdates().filter((u) => u.exitReason === "user_close")).toHaveLength(1);
   });
 });
 
