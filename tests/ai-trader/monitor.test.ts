@@ -357,6 +357,7 @@ describe("extractExitFills", () => {
       subaccountId: "sub-1",
     });
     expect(res.avgExitPrice).toBeCloseTo(145.05, 8);
+    expect(res.exitSize).toBe(2);
     expect(res.exitFees).toBeCloseTo(0.1, 8);
     expect(res.entryFees).toBeCloseTo(0.1, 8);
   });
@@ -370,6 +371,7 @@ describe("extractExitFills", () => {
       sinceMs: 0,
     });
     expect(res.avgExitPrice).toBeNull();
+    expect(res.exitSize).toBe(0);
   });
 });
 
@@ -471,6 +473,25 @@ describe("paper close detection", () => {
 
 // --- Live monitoring ------------------------------------------------------------------
 
+describe("live close-result consumption", () => {
+  it("does not record or notify a user close that is only acknowledged", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      closePosition: vi.fn(async () => ({ success: true, status: "acknowledged", fillPrice: 150 })),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+
+    const result = await userInitiatedClose(makeBot({ paperMode: false }));
+
+    expect(result).toEqual({ ok: false, detail: "close execution is not terminal (acknowledged)" });
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(notifyMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("live close detection", () => {
   it("classifies a vanished position with an SL-priced fill as 'sl' and cancels the survivor leg", async () => {
     const { monitorBotOnce } = await importMonitor();
@@ -494,7 +515,7 @@ describe("live close detection", () => {
     expect(botUpdates().some((u) => u.status === "idle")).toBe(true);
   });
 
-  it("treats an unattributable exit (no fills) as liquidation: pause + alert, never fabricated PnL", async () => {
+  it("defers an uncorroborated flat read with no fills without recording, pausing, notifying, or canceling", async () => {
     const { monitorBotOnce } = await importMonitor();
     armLiveAuth();
     const adapter = makeAdapter({
@@ -506,12 +527,51 @@ describe("live close detection", () => {
 
     await monitorBotOnce(makeBot({ paperMode: false }));
 
-    const du = decisionUpdates();
-    expect(du).toHaveLength(1);
-    expect(du[0].exitReason).toBe("liquidation");
-    expect(du[0].exitPrice).toBeNull();
-    expect(du[0].realizedPnl).toBeNull();
-    expect(botUpdates().some((u) => u.status === "paused" && u.pauseReason === "liquidation")).toBe(true);
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(notifyMock).not.toHaveBeenCalled();
+    expect((adapter as any).cancelTpSlOrders).not.toHaveBeenCalled();
+    expect((adapter as any).getTradeHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it("defers a flat read corroborated by only a partial-size exit fill", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => []),
+      getTradeHistory: vi.fn(async () => [exitFill({ size: 1 })]),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+
+    await monitorBotOnce(makeBot({ paperMode: false }));
+
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(notifyMock).not.toHaveBeenCalled();
+    expect((adapter as any).cancelTpSlOrders).not.toHaveBeenCalled();
+  });
+
+  it("records an authoritative full-size flat reconciliation exactly once", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => []),
+      getTradeHistory: vi.fn(async () => [exitFill({ price: 145.02, size: 2 })]),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    getAiTraderDecisionMock
+      .mockResolvedValueOnce(makeOpenDecision())
+      .mockResolvedValue(makeOpenDecision({ closedAt: new Date(NOW) }));
+
+    const bot = makeBot({ paperMode: false });
+    await monitorBotOnce(bot);
+    await monitorBotOnce(bot);
+
+    expect(updateDecisionMock).toHaveBeenCalledTimes(1);
+    expect(notifications().filter((n) => n.type === "position_closed")).toHaveLength(1);
+    expect((adapter as any).cancelTpSlOrders).toHaveBeenCalledTimes(1);
   });
 
   it("NEVER treats a getPositions read failure as a close", async () => {
@@ -547,6 +607,25 @@ describe("live close detection", () => {
 
 describe("G10 bracket re-verification", () => {
   const openPosition = { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150, markPrice: 150, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" as const };
+
+  it("does not record a protective close that is only submitted", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      getOpenStopOrders: vi.fn(async () => []),
+      closePosition: vi.fn(async () => ({ success: true, status: "submitted", fillPrice: 150 })),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+
+    await monitorBotOnce(makeBot({ paperMode: false }));
+
+    expect((adapter as any).closePosition).toHaveBeenCalledTimes(1);
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(botUpdates().some((u) => u.status === "paused" && u.pauseReason === "bracket_failed")).toBe(true);
+    expect(notifications().some((n) => n.type === "position_closed")).toBe(false);
+  });
 
   it("re-places a missing bracket ONCE and verifies it rests", async () => {
     const { monitorBotOnce } = await importMonitor();

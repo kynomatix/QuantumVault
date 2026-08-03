@@ -74,6 +74,7 @@ import { evaluateGraduation, type GraduationTradeRecord } from "./graduation";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import type { ProtocolAdapter } from "../protocol/adapter";
 import type { ProtocolPosition, TradeRecord } from "../protocol/protocol-types";
+import { isTerminalCloseResult } from "./close-truth";
 
 // --- Constants ---------------------------------------------------------------------
 
@@ -345,7 +346,7 @@ export function classifyLiveExit(args: {
 export function extractExitFills(
   trades: TradeRecord[],
   args: { market: string; entrySide: PaperSide; decisionId: string; sinceMs: number; subaccountId?: string | null }
-): { avgExitPrice: number | null; exitFees: number; entryFees: number } {
+): { avgExitPrice: number | null; exitSize: number; exitFees: number; entryFees: number } {
   const exitSide: PaperSide = args.entrySide === "long" ? "short" : "long";
   const entryClientId = `aitrader-${args.decisionId}`;
   let notional = 0;
@@ -367,6 +368,7 @@ export function extractExitFills(
   }
   return {
     avgExitPrice: sizeSum > 0 ? notional / sizeSum : null,
+    exitSize: sizeSum,
     exitFees,
     entryFees,
   };
@@ -800,7 +802,7 @@ async function closeLivePositionAndPause(
   }
 
   const order = result.value;
-  if (!order.success) {
+  if (!isTerminalCloseResult(order)) {
     // FAIL CLOSED: the close order did NOT land, but the bracket was just
     // canceled above — the position may be sitting NAKED on the venue. Do
     // NOT record a close (the decision row stays open so the operator and
@@ -934,8 +936,8 @@ export async function userInitiatedClose(
     return { ok: false, detail: result.detail };
   }
   const order = result.value;
-  if (!order.success) {
-    return { ok: false, detail: order.error ?? "close order failed" };
+  if (!isTerminalCloseResult(order)) {
+    return { ok: false, detail: order.error ?? `close execution is not terminal (${order.status})` };
   }
 
   const fillPrice = typeof order.fillPrice === "number" && Number.isFinite(order.fillPrice) ? order.fillPrice : null;
@@ -998,6 +1000,13 @@ async function handleLiveClose(
     sinceMs: view.decidedAtMs,
     subaccountId,
   });
+  if (fills.exitSize < view.sizeBase) {
+    console.warn(
+      `[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: flat position is not corroborated by full-size exit fills ` +
+      `(${fills.exitSize}/${view.sizeBase}) — close handling deferred`
+    );
+    return;
+  }
   const exitReason = classifyLiveExit({
     side: view.side,
     avgExitPrice: fills.avgExitPrice,

@@ -932,17 +932,18 @@ export class PacificaAdapter implements ProtocolAdapter {
 
     if (!position || position.baseSize === 0) {
       return {
-        success: true,
-        status: 'filled',
+        success: false,
+        status: 'unknown',
         fillSize: 0,
         clientOrderId: params.clientOrderId,
+        error: 'close_position_flat_unconfirmed',
       };
     }
 
     const closeSide: 'long' | 'short' = position.baseSize > 0 ? 'short' : 'long';
     const closeSize = Math.abs(position.baseSize);
 
-    return this.placeMarketOrder({
+    const result = await this.placeMarketOrder({
       agentPublicKey: params.agentPublicKey,
       agentSecretKey: params.agentSecretKey,
       mainWalletAddress: params.mainWalletAddress,
@@ -955,6 +956,13 @@ export class PacificaAdapter implements ProtocolAdapter {
       builderCode: params.builderCode,
       maxSlippagePct: params.maxSlippagePct,
     });
+
+    if (result.success && result.status === 'filled') return result;
+    return {
+      ...result,
+      success: false,
+      error: result.error ?? `Close execution is not terminal (${result.status})`,
+    };
   }
 
   async setLeverage(params: SetLeverageParams): Promise<void> {
@@ -2296,7 +2304,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       case 'failed':
         return 'rejected';
       default:
-        return 'submitted';
+        return 'unknown';
     }
   }
 

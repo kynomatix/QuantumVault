@@ -31,6 +31,7 @@ import type { ProtocolAdapter } from "../protocol/adapter";
 import { isUnconfirmedLandingVerdict } from "../protocol/tx-verdicts";
 import type { ClampedDecision } from "./guardrails";
 import { paperEntryPrice, type PaperSide } from "./paper-math";
+import { isTerminalCloseResult } from "./close-truth";
 
 // --- G6 cadence rules (mirror of context-builder's advisory echo; THIS is the
 // enforcement point). Module-private there, so the values are pinned here too —
@@ -669,7 +670,7 @@ async function emergencyCloseAndPause(args: {
       clientOrderId: `aitrader-close-${decisionId}`,
       maxSlippagePct: ENTRY_MAX_SLIPPAGE_PCT,
     });
-    closeSucceeded = closeResult.success;
+    closeSucceeded = isTerminalCloseResult(closeResult);
     closeFill = closeResult.fillPrice;
   } catch (err) {
     console.error(`[AiTrader] Emergency close failed for bot ${bot.id.slice(0, 8)} (${pauseReason}):`, err);

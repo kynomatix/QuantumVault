@@ -68,7 +68,8 @@ export type OrderStatus =
   | 'partial_fill'
   | 'canceled'
   | 'expired'
-  | 'rejected';
+  | 'rejected'
+  | 'unknown';
 
 export interface OrderResult {
   success: boolean;

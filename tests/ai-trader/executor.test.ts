@@ -815,6 +815,38 @@ describe("live execution — failure handling (fail closed)", () => {
     expect(notifyMock).toHaveBeenCalledWith("WALLET_X", expect.objectContaining({ type: "trade_failed" }));
   });
 
+  it("does not record an emergency close when the venue only acknowledges it", async () => {
+    armLiveAuth();
+    const adapter = makeAdapter({
+      setTpSl: vi.fn(async () => ({ success: false, status: "rejected" as const, error: "wrong side" })),
+      closePosition: vi.fn(async () => ({
+        success: true,
+        status: "acknowledged" as const,
+        fillPrice: 150,
+      })),
+    });
+    const { executeDecision } = await importExecutor();
+    const r = await executeDecision({
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-1",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+
+    expect(r).toMatchObject({ ok: false, reason: "bracket_failed" });
+    expect((r as any).detail).toContain("EMERGENCY CLOSE FAILED");
+    const update = updateDecisionMock.mock.calls.find((c) => c[0] === "d-1")![1];
+    expect(update).toMatchObject({ outcome: "executed", entryPrice: "150.20000000", exitReason: "bracket_failed" });
+    expect(update.exitPrice).toBeUndefined();
+    expect(update.closedAt).toBeUndefined();
+    expect(update.realizedPnl).toBeUndefined();
+    expect(notifyMock).toHaveBeenCalledWith(
+      "WALLET_X",
+      expect.objectContaining({ error: expect.stringContaining("AUTOMATIC CLOSE FAILED") })
+    );
+  });
+
   it("setTpSl 'success' that DROPPED the SL leg is a bracket failure (naked-position guard)", async () => {
     armLiveAuth();
     const adapter = makeAdapter({
