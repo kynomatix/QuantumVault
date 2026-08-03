@@ -953,6 +953,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       clientOrderId: params.clientOrderId,
       subaccountId: params.subaccountId,
       builderCode: params.builderCode,
+      maxSlippagePct: params.maxSlippagePct,
     });
   }
 
