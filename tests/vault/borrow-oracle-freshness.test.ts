@@ -1,4 +1,4 @@
-import { afterEach, describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import {
   parseHermesParsed,
   computeDirectOracleContext,
@@ -84,8 +84,13 @@ function makeFetch(
   }) as unknown as typeof fetch;
 }
 
+beforeEach(() => {
+  vi.stubEnv("PYTH_HERMES_MODE", "live");
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 const NOW_MS = 1_782_293_543_000; // matches the verified INF reading window

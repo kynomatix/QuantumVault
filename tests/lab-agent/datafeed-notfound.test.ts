@@ -18,7 +18,7 @@
 //   C. Both sources are negative-cached: a second fetch for the same symbol
 //      makes ZERO additional OKX/Gate calls.
 
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 
 const { mockGetCached, mockSave } = vi.hoisted(() => ({
   mockGetCached: vi.fn<(...args: any[]) => Promise<any[] | null>>(),
@@ -93,8 +93,13 @@ async function runFetch(symbol: string) {
 // ---------------------------------------------------------------------------
 
 describe("fetchOHLCV — permanent not-found is non-retryable + negcached", () => {
+  beforeEach(() => {
+    vi.stubEnv("PYTH_HERMES_MODE", "live");
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     vi.clearAllMocks();
   });
 

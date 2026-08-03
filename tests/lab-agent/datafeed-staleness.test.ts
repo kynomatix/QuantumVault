@@ -9,7 +9,7 @@
 //   B. Live range with a fresh cached tail → cache hits, zero fetch calls.
 //   C. Live range with a stale cached tail → cache bypassed, fetch called.
 
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 
 // vi.mock is hoisted — mock objects must be declared via vi.hoisted().
 const { mockGetCached, mockSave } = vi.hoisted(() => ({
@@ -63,8 +63,13 @@ function makeEmptyFetch() {
 // ---------------------------------------------------------------------------
 
 describe("fetchOHLCV — live-range staleness gate", () => {
+  beforeEach(() => {
+    vi.stubEnv("PYTH_HERMES_MODE", "live");
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     vi.clearAllMocks();
   });
 

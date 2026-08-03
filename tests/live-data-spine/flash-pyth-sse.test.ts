@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import {
   parseHermesSseData,
   FlashPythSseManager,
@@ -103,9 +103,14 @@ function pendingSseResponse(): Response {
 }
 
 describe("FlashPythSseManager", () => {
+  beforeEach(() => {
+    vi.stubEnv("PYTH_HERMES_MODE", "live");
+  });
+
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   it("streams ticks from an SSE body and reports health", async () => {
