@@ -10,3 +10,9 @@
 import crypto from "crypto";
 
 export const SERVER_BOOT_ID = crypto.randomUUID();
+
+// Immutable process-start approximation, captured once from Node's monotonic
+// uptime so it describes this process even if the module loads after startup.
+export const SERVER_BOOT_STARTED_AT = new Date(
+  Date.now() - Math.floor(process.uptime() * 1000),
+).toISOString();

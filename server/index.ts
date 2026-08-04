@@ -20,6 +20,7 @@ import { startTelegramDailySummaryJob } from "./telegram-daily-summary-job";
 import { recordCriticalError, flushErrorLog } from "./error-log";
 import { registerRequestTrace, startSelfStats } from "./request-trace";
 import { SERVER_BOOT_ID } from "./boot-id";
+import { createRuntimeHealthPayload } from "./runtime-deployment-identity";
 import * as os from "node:os";
 import * as fs from "node:fs";
 import * as nodePath from "node:path";
@@ -225,7 +226,7 @@ app.use((req, res, next) => {
 let appFullyReady = false;
 
 app.get("/api/health", (_req, res) => {
-  res.status(200).json({ status: "ok", ready: appFullyReady, timestamp: Date.now() });
+  res.status(200).json(createRuntimeHealthPayload(appFullyReady));
 });
 
 const STARTING_PAGE = `<!doctype html>

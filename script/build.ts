@@ -3,6 +3,7 @@ import { build as viteBuild } from "vite";
 import { rm, readFile, stat, symlink, unlink } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
+import { resolveGitBuildIdentity } from "./git-build-identity";
 
 const allowlist = [
   "@google/generative-ai",
@@ -52,6 +53,15 @@ async function fixNestedDependencies() {
 }
 
 async function buildAll() {
+  const buildIdentity = resolveGitBuildIdentity();
+  if (buildIdentity.identityVerified) {
+    console.log(
+      `[BuildIdentity] commit=${buildIdentity.commitSha.slice(0, 12)} tree=${buildIdentity.treeSha.slice(0, 12)}`,
+    );
+  } else {
+    console.warn(`[BuildIdentity] unverified reason=${buildIdentity.reason}`);
+  }
+
   await fixNestedDependencies();
   await rm("dist", { recursive: true, force: true });
 
@@ -77,6 +87,9 @@ async function buildAll() {
       "process.env.NODE_ENV": '"production"',
       "import.meta.url": '""',
       "__ESBUILD_CJS_BUNDLE__": "true",
+      "__QV_BUILD_COMMIT_SHA__": JSON.stringify(buildIdentity.commitSha),
+      "__QV_BUILD_TREE_SHA__": JSON.stringify(buildIdentity.treeSha),
+      "__QV_BUILD_IDENTITY_VERIFIED__": JSON.stringify(buildIdentity.identityVerified),
     },
     minify: true,
     external: externals,
