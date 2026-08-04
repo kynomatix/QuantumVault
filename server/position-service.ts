@@ -398,6 +398,10 @@ export class PositionService {
       console.log(`[PositionService] getPositionForExecution: Using byte-parsing for ${market} (subaccount ${subAccountId})`);
       fetchResult = await fetchPerpPositions(agentPublicKey, subAccountId, adapter);
     }
+
+    if (fetchResult.fetchFailed) {
+      throw new Error(`PositionService: authoritative venue position read failed for ${market}`);
+    }
     
     const normalizedMarket = normalizeMarket(market);
     const onChainPos = fetchResult.positions.find((p: any) => 
