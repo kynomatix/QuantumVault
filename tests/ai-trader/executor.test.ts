@@ -13,6 +13,15 @@ import type { ProtocolAdapter } from "../../server/protocol/adapter";
 import type { ClampedDecision } from "../../server/ai-trader/guardrails";
 import { PAPER_SLIPPAGE_PER_LEG } from "../../server/ai-trader/paper-math";
 
+const scannerCapabilitiesMock = {
+  producerEnabled: true,
+  consumersEnabled: true,
+  liveExecutionEnabled: true,
+};
+vi.mock("../../server/ai-trader/scanner-capabilities", () => ({
+  SCANNER_CAPABILITIES: scannerCapabilitiesMock,
+}));
+
 const getWalletMock = vi.fn();
 const getRecentClosedMock = vi.fn();
 const updateBotMock = vi.fn();
@@ -169,6 +178,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
   callOrder = [];
+  scannerCapabilitiesMock.liveExecutionEnabled = true;
   for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getAiTraderBotMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock]) {
     m.mockReset();
   }
@@ -191,6 +201,35 @@ afterEach(() => {
 // --- Entry-shape refusals -------------------------------------------------------
 
 describe("executeDecision — entry-shape refusals", () => {
+  it("refuses scanner-source live entry at the final executor seam while paper remains available", async () => {
+    scannerCapabilitiesMock.liveExecutionEnabled = false;
+    const { executeDecision } = await importExecutor();
+    const adapter = makeAdapter();
+
+    const live = await executeDecision({
+      bot: makeBot({ paperMode: false, marketSource: "scanner" }),
+      decisionId: "d-live",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+
+    expect(live).toMatchObject({ ok: false, reason: "scanner_live_execution_disabled" });
+    expect(getAiTraderBotMock).not.toHaveBeenCalled();
+    expect(getWalletMock).not.toHaveBeenCalled();
+    expect(adapter.setLeverage).not.toHaveBeenCalled();
+    expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
+
+    const paper = await executeDecision({
+      bot: makeBot({ paperMode: true, marketSource: "scanner" }),
+      decisionId: "d-paper",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+    expect(paper).toMatchObject({ ok: true, mode: "paper" });
+  });
+
   it("refuses non-entry actions (close/flat) without touching storage writes", async () => {
     const { executeDecision } = await importExecutor();
     for (const action of ["close", "flat"] as const) {

@@ -68,6 +68,14 @@ vi.mock("../../server/ai-trader/scanner", () => ({
   getScannerStatus: vi.fn(),
   getScannerShortlist: (...a: unknown[]) => getScannerShortlistMock(...a),
 }));
+const scannerCapabilitiesMock = vi.hoisted(() => ({
+  producerEnabled: true,
+  consumersEnabled: false,
+  liveExecutionEnabled: false,
+}));
+vi.mock("../../server/ai-trader/scanner-capabilities", () => ({
+  SCANNER_CAPABILITIES: scannerCapabilitiesMock,
+}));
 vi.mock("../../server/ai-trader/calibration", () => ({ computeConfidenceCalibration: vi.fn() }));
 
 const isMarketAdmittedMock = vi.fn();
@@ -155,6 +163,7 @@ describe("AI Trader scanner route market admission", () => {
   });
 
   it("refuses an unadmitted fresh manual pick before UMK, bot write, context, LLM, or execution", async () => {
+    scannerCapabilitiesMock.consumersEnabled = true;
     const built = buildApp();
     registerAiTraderRoutes(built.app);
     const result = await invoke(
@@ -183,6 +192,7 @@ describe("AI Trader scanner route market admission", () => {
   });
 
   it("refuses a multiplier candidate before registry admission, UMK, bot write, LLM, or execution", async () => {
+    scannerCapabilitiesMock.consumersEnabled = true;
     isMultiplierQuarantinedMock.mockReturnValue(true);
     isMarketAdmittedMock.mockReturnValue(true);
     const built = buildApp();
