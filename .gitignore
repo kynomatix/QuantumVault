@@ -7,8 +7,10 @@ vite.config.ts.*
 attached_assets/
 # Private planning/specification material. Permanent owner rule: never track.
 docs/
+/*_[Pp][Ll][Aa][Nn].md
+/INCIDENT_REPORT_*.md
+/temp/**/*-SKILL.md
 test-discover.ts
-QVC_plan.md
 replit.md
 .replit
 .cache/
