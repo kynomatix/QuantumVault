@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "crypto";
 import { vaultLockKey as computeVaultLockKey } from "./vault/scope";
 import { db } from "./db";
 import Decimal from "decimal.js";
+import { buildConfirmedFlatPosition } from "./trading/signal-bot-close-integrity";
 import { sumNetDepositedFromEvents, VAULT_INTERNAL_EVENT_TYPES } from "./equity-events-util";
 import {
   assessResetBlockerRows,
@@ -398,6 +399,12 @@ export interface IStorage {
     insert?: InsertBotTrade;
     update?: { tradeId: string; fields: Partial<InsertBotTrade> };
     deltas: { totalPnlDelta?: number; totalVolumeDelta?: number; lastTradeAt?: string };
+    confirmedPositionClose?: {
+      walletAddress: string;
+      market: string;
+      realizedPnlDelta: number;
+      feeDelta: number;
+    };
   }): Promise<{ trade?: BotTrade; isNew: boolean }>;
   getRecentCanonicalCloseForBot(opts: {
     botId: string;
@@ -1999,6 +2006,12 @@ export class DatabaseStorage implements IStorage {
     insert?: InsertBotTrade;
     update?: { tradeId: string; fields: Partial<InsertBotTrade> };
     deltas: { totalPnlDelta?: number; totalVolumeDelta?: number; lastTradeAt?: string };
+    confirmedPositionClose?: {
+      walletAddress: string;
+      market: string;
+      realizedPnlDelta: number;
+      feeDelta: number;
+    };
   }): Promise<{ trade?: BotTrade; isNew: boolean }> {
     // Defense-in-depth: demote non-deterministic close IDs to pending
     // so the reconciler canonicalizes them later instead of double-counting.
@@ -2035,6 +2048,44 @@ export class DatabaseStorage implements IStorage {
     return await db.transaction(async (tx) => {
       let trade: BotTrade | undefined;
       let isNew = true;
+      const persistConfirmedPositionClose = async (): Promise<void> => {
+        if (!opts.confirmedPositionClose) return;
+        if (!trade) {
+          throw new Error("recordCloseEventAtomic: confirmed close has no canonical trade");
+        }
+
+        const positionRows = await tx
+          .select()
+          .from(botPositions)
+          .where(and(
+            eq(botPositions.tradingBotId, opts.botId),
+            eq(botPositions.market, opts.confirmedPositionClose.market),
+          ))
+          .for("update")
+          .limit(1);
+        const flatPosition = buildConfirmedFlatPosition(positionRows[0], {
+          realizedPnlDelta: opts.confirmedPositionClose.realizedPnlDelta,
+          feeDelta: opts.confirmedPositionClose.feeDelta,
+          tradeId: trade.id,
+          closedAt: new Date(),
+        });
+
+        await tx
+          .insert(botPositions)
+          .values({
+            tradingBotId: opts.botId,
+            walletAddress: opts.confirmedPositionClose.walletAddress,
+            market: opts.confirmedPositionClose.market,
+            ...flatPosition,
+          })
+          .onConflictDoUpdate({
+            target: [botPositions.tradingBotId, botPositions.market],
+            set: {
+              ...flatPosition,
+              updatedAt: sql`NOW()`,
+            },
+          });
+      };
       if (opts.insert) {
         if (opts.insert.protocolFillId) {
           const existing = await tx.select().from(botTrades).where(eq(botTrades.protocolFillId, opts.insert.protocolFillId)).limit(1);
@@ -2147,6 +2198,7 @@ export class DatabaseStorage implements IStorage {
         // Only recompute on update path when the row actually transitioned
         // INTO a canonical status (locked.status was non-canonical above).
         await this.recomputeAndMergeBotStats(opts.botId, opts.deltas, tx);
+        await persistConfirmedPositionClose();
         return { trade, isNew: true };
       }
       // Insert path: recompute only when we actually introduced a new
@@ -2154,6 +2206,7 @@ export class DatabaseStorage implements IStorage {
       // the original writer already merged deltas.
       if (opts.insert && isNew) {
         await this.recomputeAndMergeBotStats(opts.botId, opts.deltas, tx);
+        await persistConfirmedPositionClose();
       }
       return { trade, isNew };
     });
