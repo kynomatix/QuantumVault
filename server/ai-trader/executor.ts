@@ -32,6 +32,7 @@ import { isUnconfirmedLandingVerdict } from "../protocol/tx-verdicts";
 import type { ClampedDecision } from "./guardrails";
 import { paperEntryPrice, type PaperSide } from "./paper-math";
 import { isTerminalCloseResult } from "./close-truth";
+import { SCANNER_CAPABILITIES } from "./scanner-capabilities";
 
 // --- G6 cadence rules (mirror of context-builder's advisory echo; THIS is the
 // enforcement point). Module-private there, so the values are pinned here too —
@@ -79,6 +80,7 @@ export type ExecuteFailureReason =
   | "capability_missing"   // adapter lacks setTpSl/getOpenStopOrders — G10 unverifiable, refuse BEFORE entry
   | "auth_unavailable"     // wallet envelope/UMK/agent-key unavailable (execution disabled, e-stop, decrypt fail)
   | "policy_hmac_mismatch" // G15: bot row fails HMAC — paused, nothing sent
+  | "scanner_live_execution_disabled" // scanner-source live entry capability is off for this process
   | "insufficient_funding" // G11: free collateral below required margin
   | "bot_busy"             // bot already holds (or may hold) a position — refuse to stack a second entry
   | "order_failed"         // entry order rejected/failed, no position confirmed
@@ -153,6 +155,17 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
 
   if (clamped.action !== "long" && clamped.action !== "short") {
     return { ok: false, reason: "not_entry", detail: `action '${clamped.action}' is not an entry` };
+  }
+  if (
+    !bot.paperMode &&
+    bot.marketSource === "scanner" &&
+    !SCANNER_CAPABILITIES.liveExecutionEnabled
+  ) {
+    return {
+      ok: false,
+      reason: "scanner_live_execution_disabled",
+      detail: "Live execution for scanner-source bots is disabled for this process.",
+    };
   }
   const side: PaperSide = clamped.action;
   const { sizeBase, marginUsdc, leverage, stopLossPrice, takeProfitPrice } = clamped;

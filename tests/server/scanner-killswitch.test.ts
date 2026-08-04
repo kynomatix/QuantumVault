@@ -7,6 +7,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
+import { parseScannerCapabilities } from "../../server/ai-trader/scanner-capabilities";
 
 const ORIGINAL = process.env.SCANNER_ENABLED;
 
@@ -24,7 +25,8 @@ afterEach(() => {
 
 /** Mirrors the exact gate in server/index.ts — sync version for testability. */
 function applyStartupGate(startScanner: () => void, logFn: (msg: string) => void): void {
-  if (process.env.SCANNER_ENABLED === "false") {
+  const capabilities = parseScannerCapabilities(process.env);
+  if (!capabilities.producerEnabled) {
     logFn("[Scanner] disabled via SCANNER_ENABLED=false — startScanner will not be called");
   } else {
     // In production this is inside a setTimeout; calling directly here is
@@ -36,7 +38,7 @@ function applyStartupGate(startScanner: () => void, logFn: (msg: string) => void
 describe("SCANNER_ENABLED kill switch", () => {
   it("keeps the observed helper and scanner import/start in the enabled arm", () => {
     const source = readFileSync(new URL("../../server/index.ts", import.meta.url), "utf8");
-    const gateStart = source.indexOf("if (process.env.SCANNER_ENABLED === 'false')");
+    const gateStart = source.indexOf("if (!SCANNER_CAPABILITIES.producerEnabled)");
     const gateEnd = source.indexOf("// Admin error-log retention", gateStart);
     const gate = source.slice(gateStart, gateEnd);
     const enabledArm = gate.indexOf("} else {");
@@ -50,6 +52,9 @@ describe("SCANNER_ENABLED kill switch", () => {
     expect(gate.slice(enabledArm)).toContain("startObservedBackgroundComponent({");
     expect(gate.slice(enabledArm)).toContain("import('./ai-trader/scanner')");
     expect(gate.slice(enabledArm)).toContain("startScanner();");
+    expect(source).toContain(
+      "[Scanner] capabilities producer=${SCANNER_CAPABILITIES.producerEnabled} consumers=${SCANNER_CAPABILITIES.consumersEnabled} liveExecution=${SCANNER_CAPABILITIES.liveExecutionEnabled}",
+    );
   });
 
   it("SCANNER_ENABLED=false: startScanner is never called", () => {

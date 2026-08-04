@@ -70,6 +70,7 @@ import { isSelectableModel } from "../ai-assistant/models-catalog";
 import { executeDecision, checkCooldownAndCaps, aiTraderPolicyObject } from "./executor";
 import { computeBotPolicyHmac } from "../session-v3";
 import { getScannerShortlist } from "./scanner";
+import { SCANNER_CAPABILITIES } from "./scanner-capabilities";
 import { evaluateGraduation, type GraduationTradeRecord } from "./graduation";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import type { ProtocolAdapter } from "../protocol/adapter";
@@ -1727,6 +1728,13 @@ export async function runAutoCycle(botId: string): Promise<void> {
   let bot = await storage.getAiTraderBot(botId);
   if (!bot) return; // exitReason stays "status_gate" (default)
   if (bot.status !== "idle" || bot.mode !== "auto" || !bot.autoNext) return;
+
+  if (bot.marketSource === "scanner" && !SCANNER_CAPABILITIES.consumersEnabled) {
+    if (_obs) _obs.exitReason = "gate_skip";
+    console.log(`[AiTraderMonitor] scanner consumers disabled - skipping bot ${bot.id.slice(0, 8)}`);
+    scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
+    return;
+  }
 
   let adapter: ProtocolAdapter;
   try {

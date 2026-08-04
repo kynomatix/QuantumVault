@@ -26,6 +26,7 @@ import * as fs from "node:fs";
 import * as nodePath from "node:path";
 import { appendTelemetry, appendTelemetrySync, drainQueueSyncForExit, flushTelemetry } from "./telemetry";
 import { startObservedBackgroundComponent } from "./background-start";
+import { SCANNER_CAPABILITIES } from "./ai-trader/scanner-capabilities";
 
 // Global crash capture for the admin "Errors" panel. Registered at module load so it catches
 // failures from any background job. Both handlers record the error then preserve Node's default
@@ -1011,7 +1012,8 @@ registerRequestTrace(app);
       // Kill switch: set SCANNER_ENABLED=false to suppress startScanner entirely
       // while leaving the monitor, executor, and analyze path fully operational.
       // Absent (or any value other than 'false') means enabled — default ON.
-      if (process.env.SCANNER_ENABLED === 'false') {
+      log(`[Scanner] capabilities producer=${SCANNER_CAPABILITIES.producerEnabled} consumers=${SCANNER_CAPABILITIES.consumersEnabled} liveExecution=${SCANNER_CAPABILITIES.liveExecutionEnabled}`);
+      if (!SCANNER_CAPABILITIES.producerEnabled) {
         log('[Scanner] disabled via SCANNER_ENABLED=false — startScanner will not be called');
       } else {
         setTimeout(() => {
