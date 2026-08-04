@@ -89,6 +89,43 @@ function estimationCloseKey(botId: string, market: string): string {
   return `${botId}:${normalizeMarket(market)}`;
 }
 
+/**
+ * Canonical identity for reconciler-detected full closes.
+ *
+ * A venue fill ID is authoritative when present. A no-fill close must instead
+ * bind to the durable entry epoch already stored on bot_positions. Estimate
+ * price and observation time are intentionally absent: both changed across
+ * the two phantom closes observed for one continuously open BTC position.
+ */
+export function canonicalReconcilerFullCloseId(input: {
+  protocolFillId?: string | null;
+  botId: string;
+  market: string;
+  positionEpochId?: string | null;
+}): string | null {
+  if (input.protocolFillId) {
+    return DatabaseStorage.canonicalCloseFillId({
+      signature: input.protocolFillId,
+      botId: input.botId,
+      side: 'close',
+      size: 0,
+      market: normalizeMarket(input.market),
+    });
+  }
+
+  const positionEpochId = input.positionEpochId?.trim();
+  if (!positionEpochId) return null;
+
+  const normalizedMarket = normalizeMarket(input.market);
+  return DatabaseStorage.canonicalCloseFillId({
+    signature: `reconciler-position-epoch|${input.botId}|${normalizedMarket}|${positionEpochId}`,
+    botId: input.botId,
+    side: 'close',
+    size: 0,
+    market: normalizedMarket,
+  });
+}
+
 /** Bounded-cache guard: drop stale candidates so deleted bots can't leak entries. */
 function pruneEstimationCandidates(nowMs: number): void {
   if (estimationCloseFirstSeen.size < ESTIMATION_CANDIDATE_MAX) return;
@@ -1039,31 +1076,29 @@ export async function reconcileBotPosition(
           return { synced: true, discrepancy: true };
         }
 
-        // Canonical close-event ID. Reconciler-detected closes are keyed on
-        // the protocol's fill ID when available so retries / racing reconciler
-        // runs can never double-write. Falls back to a deterministic synthetic
-        // ID derived from bot+market+price+size when the protocol has no fill
-        // ID (so re-runs against the same on-chain state are still idempotent).
+        // Canonical close-event ID. Protocol fill identity remains primary.
+        // Without a fill, bind to the durable position-entry epoch rather than
+        // mutable estimate price or activity time. The reconciler's flat and
+        // venue-resync paths both preserve lastTradeId, so one continuously
+        // open economic position cannot mint a second close identity after a
+        // false flatten/reopen cycle.
         const closePnl = closeDetection.pnl ?? 0;
         const closeFillPrice = closeDetection.fillPrice ?? parseFloat(dbPosition!.avgEntryPrice);
         const closeNotional = closeFillPrice * Math.abs(dbBaseSize);
-        // Use the SAME canonical identity scheme as every other close
-        // writer. Primary input is the FIRST protocol fill ID (a single
-        // stable identifier), NOT the legacy joined-IDs string. When no
-        // fill ID is available (account-info-derived liquidation), we
-        // fall through to the deterministic nosig hash which includes
-        // market+side+size+price+5min-time-bucket so repeated reconciler
-        // runs against the same close still collide on the unique index.
-        const closeSideForId = dbBaseSize > 0 ? 'short' : 'long';
-        const dedupKey = DatabaseStorage.canonicalCloseFillId({
-          signature: closeDetection.protocolFillId,
+        const dedupKey = canonicalReconcilerFullCloseId({
+          protocolFillId: closeDetection.protocolFillId,
           botId,
-          side: closeSideForId,
-          size: Math.abs(dbBaseSize),
           market,
-          fillPrice: closeFillPrice,
-          timestampMs: closeDetection.fillTimestampMs,
+          positionEpochId: dbPosition!.lastTradeId,
         });
+        if (!dedupKey) {
+          console.error(
+            `[Reconcile] Refusing no-fill close accounting for bot ${botId} ${market} - ` +
+            `database position has no durable lastTradeId epoch`,
+          );
+          lastReconcileTime.set(botId, Date.now());
+          return { synced: false, discrepancy: true };
+        }
 
         console.log(`[Reconcile] Position closed on-chain for bot ${botId} ${market}: reason=${closeDetection.reason}, fill=$${closeFillPrice.toFixed(4)}, pnl=$${closePnl.toFixed(4)}`);
 
