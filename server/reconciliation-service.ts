@@ -63,6 +63,7 @@ const STALE_THRESHOLD_MS = 60 * 1000; // 60 seconds
 const RECONCILE_INTERVAL_MS = 60 * 1000; // 60 seconds
 
 let reconcileInterval: NodeJS.Timeout | null = null;
+let periodicReconciliationCycleInFlight = false;
 const lastReconcileTime = new Map<string, number>();
 
 // ── Phantom-close corroboration state ────────────────────────────────────
@@ -1348,12 +1349,18 @@ export function startPeriodicReconciliation(): void {
   console.log("[Reconcile] Starting periodic reconciliation (every 60s)");
   
   reconcileInterval = setInterval(async () => {
-    if (consecutiveDbTimeouts > 0) {
-      consecutiveDbTimeouts--;
-      console.log(`[Reconcile] DB pressure backoff — skipping cycle (${consecutiveDbTimeouts} remaining)`);
+    if (periodicReconciliationCycleInFlight) {
+      console.warn("[Reconcile] Skipping tick - previous cycle still running");
       return;
     }
+
+    periodicReconciliationCycleInFlight = true;
     try {
+      if (consecutiveDbTimeouts > 0) {
+        consecutiveDbTimeouts--;
+      console.log(`[Reconcile] DB pressure backoff — skipping cycle (${consecutiveDbTimeouts} remaining)`);
+        return;
+      }
       const allWallets = await storage.getWalletsWithActiveBots();
       
       for (const walletAddress of allWallets) {
@@ -1397,6 +1404,8 @@ export function startPeriodicReconciliation(): void {
       } else {
         console.error("[Reconcile] Periodic reconciliation error:", error);
       }
+    } finally {
+      periodicReconciliationCycleInFlight = false;
     }
   }, RECONCILE_INTERVAL_MS);
 }
