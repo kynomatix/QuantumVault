@@ -79,6 +79,12 @@ const ESTIMATION_CORROBORATION_MS = 90 * 1000; // ≥2 ticks at 60s cadence
 const ESTIMATION_CANDIDATE_TTL_MS = 30 * 60 * 1000;
 const ESTIMATION_CANDIDATE_MAX = 500;
 
+function unknownProtocolSymbol(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const symbol = value.trim();
+  return symbol.toUpperCase().startsWith('UNKNOWN-') ? symbol : null;
+}
+
 function estimationCloseKey(botId: string, market: string): string {
   return `${botId}:${normalizeMarket(market)}`;
 }
@@ -145,6 +151,7 @@ async function detectOnChainClose(
     const readSubaccountId = botSubaccountPublicKey ? undefined : undefined; // Pacifica direct-sub mode doesn't need subaccount_id; Drift path also passes undefined here for /account-style reads
 
     let tradeHistoryFetchFailed = false;
+    let unknownTradeSymbol: string | null = null;
     const fetchClosingFills = async (windowMs: number): Promise<TradeRecord[]> => {
       try {
         const startTime = Date.now() - windowMs;
@@ -153,6 +160,15 @@ async function detectOnChainClose(
           startTime,
           ...(readSubaccountId ? { subaccountId: readSubaccountId } : {}),
         });
+        const unknownTrade = trades.find(t => unknownProtocolSymbol(t.internalSymbol));
+        if (unknownTrade) {
+          unknownTradeSymbol = unknownProtocolSymbol(unknownTrade.internalSymbol);
+          console.error(
+            `[Reconcile] Refusing close detection for ${botId} ${market} - ` +
+            `trade-history evidence contains unknown protocol symbol "${unknownTradeSymbol}"`,
+          );
+          return [];
+        }
         return trades
           .filter(t =>
             normalizeMarket(t.internalSymbol) === normalizedMarket &&
@@ -169,9 +185,17 @@ async function detectOnChainClose(
     const sumFillSize = (fills: TradeRecord[]) => fills.reduce((s, f) => s + f.size, 0);
 
     let closingFills = await fetchClosingFills(5 * 60 * 1000);
+    if (unknownTradeSymbol) {
+      estimationCloseFirstSeen.delete(corroborationKey);
+      return noDetection;
+    }
     if (sumFillSize(closingFills) < absSize * 0.80) {
       console.log(`[Reconcile] Closing fills in 5min window insufficient for bot ${botId} (got ${sumFillSize(closingFills).toFixed(6)} of ${absSize.toFixed(6)}), retrying with 60min window`);
       const widerFills = await fetchClosingFills(60 * 60 * 1000);
+      if (unknownTradeSymbol) {
+        estimationCloseFirstSeen.delete(corroborationKey);
+        return noDetection;
+      }
       if (sumFillSize(widerFills) > sumFillSize(closingFills)) {
         closingFills = widerFills;
       }
@@ -183,6 +207,10 @@ async function detectOnChainClose(
     if (sumFillSize(closingFills) < absSize * 0.80) {
       console.log(`[Reconcile] Closing fills in 60min window still insufficient for bot ${botId}, retrying with 24h window`);
       const widestFills = await fetchClosingFills(24 * 60 * 60 * 1000);
+      if (unknownTradeSymbol) {
+        estimationCloseFirstSeen.delete(corroborationKey);
+        return noDetection;
+      }
       if (sumFillSize(widestFills) > sumFillSize(closingFills)) {
         closingFills = widestFills;
       }
@@ -371,6 +399,16 @@ async function detectOnChainClose(
         const confirmPositions = botSubaccountPublicKey
           ? await adapter.getPositions(botSubaccountPublicKey)
           : await adapter.getPositions(agentPublicKey, positionSubAccountId !== undefined ? _subIdStr(positionSubAccountId) : undefined);
+        const unknownConfirmPosition = confirmPositions.find(p => unknownProtocolSymbol(p.internalSymbol));
+        if (unknownConfirmPosition) {
+          const unknownSymbol = unknownProtocolSymbol(unknownConfirmPosition.internalSymbol);
+          estimationCloseFirstSeen.delete(corroborationKey);
+          console.error(
+            `[Reconcile] Refusing estimation close for ${botId} ${market} - ` +
+            `confirmation evidence contains unknown protocol symbol "${unknownSymbol}"`,
+          );
+          return noDetection;
+        }
         const stillOpen = confirmPositions.find(p =>
           normalizeMarket(p.internalSymbol) === normalizedMarket && Math.abs(p.baseSize) > 0.0001
         );
@@ -734,7 +772,7 @@ async function bookPartialReduction(opts: {
   closedSlice: number;
   onChainBaseSize: number;
   adapter: ProtocolAdapter;
-}): Promise<void> {
+}): Promise<'completed' | 'unknown-symbol-refusal'> {
   const {
     botId, walletAddress, market, agentPublicKey, botSubaccountPublicKey,
     dbBaseSize, dbPosition, closedSlice, adapter,
@@ -755,6 +793,15 @@ async function bookPartialReduction(opts: {
         limit: 200,
         startTime,
       });
+      const unknownTrade = trades.find(t => unknownProtocolSymbol(t.internalSymbol));
+      if (unknownTrade) {
+        const unknownSymbol = unknownProtocolSymbol(unknownTrade.internalSymbol);
+        console.error(
+          `[Reconcile] Refusing partial-reduction accounting for ${botId} ${market} - ` +
+          `trade-history evidence contains unknown protocol symbol "${unknownSymbol}"`,
+        );
+        return 'unknown-symbol-refusal';
+      }
       closingFills = trades
         .filter(t =>
           normalizeMarket(t.internalSymbol) === normalizedMarket &&
@@ -840,7 +887,7 @@ async function bookPartialReduction(opts: {
 
   if (!isNew) {
     console.log(`[Reconcile] Partial reduction already booked for ${botId} ${market} (dedupKey=${dedupKey})`);
-    return;
+    return 'completed';
   }
 
   // Fire notification (debounced so multi-stage exits don't spam).
@@ -859,6 +906,7 @@ async function bookPartialReduction(opts: {
   } catch (notifErr) {
     console.error(`[Reconcile] Partial-reduction notification error for ${botId}:`, notifErr);
   }
+  return 'completed';
 }
 
 export async function reconcileBotPosition(
@@ -903,6 +951,16 @@ export async function reconcileBotPosition(
       return { synced: false, discrepancy: false };
     }
     const normalizedMarket = normalizeMarket(market);
+    const unknownInitialPosition = fetchResult.positions.find(p => unknownProtocolSymbol(p.market));
+    if (unknownInitialPosition) {
+      const unknownSymbol = unknownProtocolSymbol(unknownInitialPosition.market);
+      estimationCloseFirstSeen.delete(estimationCloseKey(botId, market));
+      console.error(
+        `[Reconcile] Refusing reconciliation for ${botId} ${market} - ` +
+        `position evidence contains unknown protocol symbol "${unknownSymbol}"`,
+      );
+      return { synced: false, discrepancy: false };
+    }
     const onChainPos = fetchResult.positions.find(p => normalizeMarket(p.market) === normalizedMarket);
     const dbPosition = await storage.getBotPosition(botId, market);
     
@@ -1132,7 +1190,7 @@ export async function reconcileBotPosition(
             : Infinity;
 
           if (positionAgeMs >= 3 * 60 * 1000) {
-            await bookPartialReduction({
+            const partialResult = await bookPartialReduction({
               botId,
               walletAddress,
               market,
@@ -1144,6 +1202,10 @@ export async function reconcileBotPosition(
               onChainBaseSize,
               adapter,
             });
+            if (partialResult === 'unknown-symbol-refusal') {
+              lastReconcileTime.set(botId, Date.now());
+              return { synced: false, discrepancy: true };
+            }
           } else {
             console.log(`[Reconcile] Partial reduction detected for bot ${botId} ${market} but position is only ${(positionAgeMs / 1000).toFixed(0)}s old — likely propagation lag, skipping`);
           }
