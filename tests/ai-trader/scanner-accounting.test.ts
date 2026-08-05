@@ -19,6 +19,9 @@ vi.mock("../../server/ai-trader/session-context", () => ({
 
 import {
   ScannerAttemptLedger,
+  countParentCacheDegradation,
+  formatScannerSweepAccountingLine,
+  settleUnexpectedScannerDispatch,
   type ScannerAttemptDisposition,
 } from "../../server/ai-trader/scanner";
 
@@ -93,6 +96,70 @@ describe("scanner attempt terminal accounting", () => {
     expect(ledger.finalize("not-intended", "scanned")).toBe(false);
     expect(ledger.reconcile()).toMatchObject({ attempted: 0, scanned: 0, accountingValid: true });
   });
+
+  it("keeps budget-gated units outside attempted and serializes the gate separately", () => {
+    const ledger = new ScannerAttemptLedger();
+    const admitted = "flash|15m|BTC-PERP";
+    ledger.intend(admitted);
+    ledger.finalize(admitted, "scanned");
+
+    // Two whole protocol/timeframe units were budget-gated, so their markets
+    // were never admitted to the terminal ledger.
+    const accounting = ledger.reconcile();
+    const total = formatScannerSweepAccountingLine("TOTAL", accounting, {
+      parentCacheDegraded: 0,
+      budgetSkippedUnits: 2,
+      candidates: 0,
+      durationMs: 240_000,
+      fetchBudgetMs: 240_000,
+    });
+
+    expect(accounting).toMatchObject({ attempted: 1, scanned: 1, unclassified: 0 });
+    expect(total).toContain("1 attempted, 1 scanned");
+    expect(total).toContain("2 budget-gated units");
+  });
+
+  it("settles and logs an unexpected dispatch error exactly once", () => {
+    const ledger = new ScannerAttemptLedger();
+    const key = "pacifica|15m|SOL-PERP";
+    ledger.intend(key);
+
+    expect(settleUnexpectedScannerDispatch(ledger, key, new Error("evaluator exploded"), false))
+      .toEqual({ disposition: "error", finalized: true, shouldLog: true });
+    expect(settleUnexpectedScannerDispatch(ledger, key, new Error("late duplicate"), false))
+      .toEqual({ disposition: "error", finalized: false, shouldLog: false });
+    expect(ledger.reconcile()).toMatchObject({ attempted: 1, errors: 1, unclassified: 0 });
+  });
+
+  it("keeps parent cache degradation auxiliary to a scanned attempt on TOTAL and ABORT", () => {
+    const ledger = new ScannerAttemptLedger();
+    const key = "flash|15m|ETH-PERP";
+    ledger.intend(key);
+    const parentCacheDegraded = countParentCacheDegradation(0, {
+      name: "CacheDegradedError",
+    });
+    ledger.finalize(key, "scanned");
+    const accounting = ledger.reconcile();
+    const options = {
+      parentCacheDegraded,
+      budgetSkippedUnits: 0,
+      candidates: 0,
+      durationMs: 1_000,
+      fetchBudgetMs: 240_000,
+      errorMessage: "outer failure",
+    };
+
+    expect(accounting).toMatchObject({
+      attempted: 1,
+      scanned: 1,
+      primaryCacheDegraded: 0,
+      errors: 0,
+    });
+    expect(formatScannerSweepAccountingLine("TOTAL", accounting, options))
+      .toContain("0 primary-cache-degraded, 1 parent-cache-degraded");
+    expect(formatScannerSweepAccountingLine("ABORT", accounting, options))
+      .toContain("0 primary-cache-degraded, 1 parent-cache-degraded");
+  });
 });
 
 describe("scanner runSweep seam pins", () => {
@@ -119,11 +186,18 @@ describe("scanner runSweep seam pins", () => {
 
   it("keeps parent cache degradation auxiliary and abandonment exclusive", () => {
     const parent = between("// Parent fetch failure is non-fatal", "const candidate = evaluateCandidate");
-    expect(parent).toContain("parentCacheDegradedCount++");
+    expect(parent).toContain("countParentCacheDegradation(");
     expect(parent).not.toContain("primary-cache-degraded");
 
     const abandoned = between("if (!settledInTime)", "const accounting = sweepLedger.reconcile");
     expect(abandoned).toContain('finishAttempt(m, "abandoned")');
     expect(abandoned).not.toContain("errorCount += abandoned.length");
+  });
+
+  it("wires behavioral helpers into the three reviewed runSweep seams", () => {
+    expect(source).toContain('formatScannerSweepAccountingLine("TOTAL"');
+    expect(source).toContain('formatScannerSweepAccountingLine("ABORT"');
+    expect(source).toContain("settleUnexpectedScannerDispatch(");
+    expect(source).toContain("countParentCacheDegradation(");
   });
 });
