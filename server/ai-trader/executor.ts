@@ -32,6 +32,7 @@ import { isUnconfirmedLandingVerdict } from "../protocol/tx-verdicts";
 import type { ClampedDecision } from "./guardrails";
 import { paperEntryPrice, type PaperSide } from "./paper-math";
 import { isTerminalCloseResult } from "./close-truth";
+import { isAiTraderMarketAdmitted, SCANNER_MARKET_UNADMITTED_REASON } from "./market-admission";
 
 // --- G6 cadence rules (mirror of context-builder's advisory echo; THIS is the
 // enforcement point). Module-private there, so the values are pinned here too —
@@ -76,6 +77,7 @@ export type ExecuteFailureReason =
   | "invalid_clamp"        // ClampedDecision missing required numeric fields
   | "cooldown_active"      // G6: one-candle cooldown since last close not elapsed
   | "daily_cap_reached"    // G6: LTF 6 / HTF 2 trades already closed today (UTC)
+  | "scanner_market_unadmitted" // scanner-source bot's exact market is absent from the AI Trader registry
   | "capability_missing"   // adapter lacks setTpSl/getOpenStopOrders — G10 unverifiable, refuse BEFORE entry
   | "auth_unavailable"     // wallet envelope/UMK/agent-key unavailable (execution disabled, e-stop, decrypt fail)
   | "policy_hmac_mismatch" // G15: bot row fails HMAC — paused, nothing sent
@@ -183,6 +185,16 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
       ok: false,
       reason: "bot_busy",
       detail: "bot row missing on fresh re-read — refusing a new entry",
+    };
+  }
+  if (
+    (bot.marketSource === "scanner" || freshBot.marketSource === "scanner")
+    && !isAiTraderMarketAdmitted(bot.market)
+  ) {
+    return {
+      ok: false,
+      reason: SCANNER_MARKET_UNADMITTED_REASON,
+      detail: "scanner-source market '" + bot.market + "' is not admitted by the exact AI Trader market registry",
     };
   }
   const busyStatus = [bot.status, freshBot.status].find(
