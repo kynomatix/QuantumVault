@@ -124,19 +124,143 @@ export interface ScannerCandidate {
   evaluatedAt: number;
 }
 
+export type ScannerAttemptDisposition =
+  | "scanned"
+  | "feed-health-skipped"
+  | "venue-closed"
+  | "timeout-skipped"
+  | "primary-cache-degraded"
+  | "error"
+  | "abandoned";
+
+export interface ScannerAttemptReconciliation {
+  attempted: number;
+  scanned: number;
+  feedHealthSkipped: number;
+  venueClosed: number;
+  timeoutSkipped: number;
+  primaryCacheDegraded: number;
+  errors: number;
+  abandoned: number;
+  unclassified: number;
+  accountingValid: boolean;
+}
+
+export interface ScannerSweepAccountingLineOptions {
+  parentCacheDegraded: number;
+  budgetSkippedUnits: number;
+  candidates: number;
+  durationMs: number;
+  fetchBudgetMs?: number;
+  errorMessage?: string;
+}
+
+/**
+ * First terminal outcome wins. This keeps an abandoned dispatch terminal even
+ * when its underlying promise settles after the bounded teardown window.
+ */
+export class ScannerAttemptLedger {
+  private readonly intended = new Set<string>();
+  private readonly terminal = new Map<string, ScannerAttemptDisposition>();
+
+  intend(key: string): void {
+    this.intended.add(key);
+  }
+
+  finalize(key: string, disposition: ScannerAttemptDisposition): boolean {
+    if (!this.intended.has(key) || this.terminal.has(key)) return false;
+    this.terminal.set(key, disposition);
+    return true;
+  }
+
+  reconcile(keys?: readonly string[]): ScannerAttemptReconciliation {
+    const selectedKeys = keys ?? [...this.intended];
+    const selected = new Set(selectedKeys.filter((key) => this.intended.has(key)));
+    const counts: Record<ScannerAttemptDisposition, number> = {
+      scanned: 0,
+      "feed-health-skipped": 0,
+      "venue-closed": 0,
+      "timeout-skipped": 0,
+      "primary-cache-degraded": 0,
+      error: 0,
+      abandoned: 0,
+    };
+    for (const key of selected) {
+      const disposition = this.terminal.get(key);
+      if (disposition) counts[disposition]++;
+    }
+    const terminalTotal = Object.values(counts).reduce((sum, count) => sum + count, 0);
+    const attempted = selected.size;
+    const unclassified = attempted - terminalTotal;
+    return {
+      attempted,
+      scanned: counts.scanned,
+      feedHealthSkipped: counts["feed-health-skipped"],
+      venueClosed: counts["venue-closed"],
+      timeoutSkipped: counts["timeout-skipped"],
+      primaryCacheDegraded: counts["primary-cache-degraded"],
+      errors: counts.error,
+      abandoned: counts.abandoned,
+      unclassified,
+      accountingValid: unclassified === 0 && terminalTotal === attempted,
+    };
+  }
+}
+
+/**
+ * Shared TOTAL/ABORT serialization keeps every terminal bucket and auxiliary
+ * counter visible on both sweep exit paths.
+ */
+export function formatScannerSweepAccountingLine(
+  kind: "TOTAL" | "ABORT",
+  accounting: ScannerAttemptReconciliation,
+  options: ScannerSweepAccountingLineOptions,
+): string {
+  if (kind === "ABORT") {
+    const abortCounts =
+      `${accounting.attempted} attempted, ${accounting.scanned} scanned, ` +
+      `${accounting.feedHealthSkipped} feed-health-skipped, ${accounting.venueClosed} venue-closed, ` +
+      `${accounting.timeoutSkipped} timeout-skipped, ${accounting.primaryCacheDegraded} primary-cache-degraded, ` +
+      `${options.parentCacheDegraded} parent-cache-degraded, ${accounting.errors} errors, ` +
+      `${accounting.abandoned} abandoned, ${accounting.unclassified} unclassified, ` +
+      `accounting=${accounting.accountingValid ? "valid" : "INVALID"}`;
+    return `[Scanner] SWEEP ABORT: ${abortCounts}; crashed after ${(options.durationMs / 1000).toFixed(1)}s — ` +
+      (options.errorMessage ?? "unknown error");
+  }
+  const totalCounts =
+    `${accounting.attempted} attempted, ${accounting.scanned} scanned, ` +
+    `${accounting.feedHealthSkipped} feed-health-skipped, ` +
+    `${accounting.timeoutSkipped} skipped-by-timeout, ${accounting.venueClosed} venue-closed, ` +
+    `${accounting.errors} errors, ${accounting.abandoned} abandoned, ` +
+    `${accounting.primaryCacheDegraded} primary-cache-degraded, ` +
+    `${options.parentCacheDegraded} parent-cache-degraded, ${accounting.unclassified} unclassified, ` +
+    `accounting=${accounting.accountingValid ? "valid" : "INVALID"}`;
+  return `[Scanner] SWEEP TOTAL: ${totalCounts}, ${options.budgetSkippedUnits} budget-gated units, ` +
+    `${options.candidates} candidates in ${(options.durationMs / 1000).toFixed(1)}s ` +
+    `(fetch budget ${(options.fetchBudgetMs ?? 0) / 1000}s)`;
+}
+
 export interface ScannerBoundaryStats {
   protocol: string;
   timeframe: string;
   sweepStartedAt: number;
   sweepFinishedAt: number;
   durationMs: number;
+  marketsAttempted: number;
   marketsScanned: number;
   marketsFresh: number;
+  feedHealthSkipped: number;
+  marketsClosedSkipped: number;
   marketsSkippedByTimeout: number;
   errorCount: number;
   /** Reads that failed typed with CacheDegradedError (DB/cache pressure) —
    * counted separately: NOT feed-dead, NOT a budget timeout, NOT an error. */
   cacheDegradedCount: number;
+  /** Parent-timeframe cache degradation is auxiliary to a scanned primary. */
+  parentCacheDegradedCount: number;
+  abandonedCount: number;
+  unclassifiedCount: number;
+  accountingValid: boolean;
   candidateCount: number;
 }
 
@@ -279,6 +403,42 @@ export function classifySweepFetchError(
   if (sweepAborted && isAbortError(err)) return "timeout-skip";
   if (isCacheDegradedError(err)) return "cache-degraded";
   return "feed-error";
+}
+
+export interface UnexpectedDispatchSettlement {
+  disposition: ScannerAttemptDisposition;
+  finalized: boolean;
+  shouldLog: boolean;
+}
+
+/**
+ * Classify and terminally settle failures that escape a market dispatch's
+ * inner fetch handling. The first settlement owns both the count and logging.
+ */
+export function settleUnexpectedScannerDispatch(
+  ledger: ScannerAttemptLedger,
+  attemptKey: string,
+  err: unknown,
+  sweepAborted: boolean,
+): UnexpectedDispatchSettlement {
+  const classified = classifySweepFetchError(err, sweepAborted);
+  const disposition: ScannerAttemptDisposition =
+    classified === "timeout-skip"
+      ? "timeout-skipped"
+      : classified === "cache-degraded"
+        ? "primary-cache-degraded"
+        : "error";
+  const finalized = ledger.finalize(attemptKey, disposition);
+  return {
+    disposition,
+    finalized,
+    shouldLog: finalized && disposition === "error",
+  };
+}
+
+/** Parent-cache degradation is auxiliary; it never replaces the attempt's terminal result. */
+export function countParentCacheDegradation(current: number, err: unknown): number {
+  return current + (isCacheDegradedError(err) ? 1 : 0);
 }
 
 // ─── Core evaluator (pure, exported for unit tests) ───────────────────────────
@@ -463,10 +623,16 @@ async function runSweep(): Promise<void> {
   // remaining budget into fetchOHLCV (which cuts pagination/fallbacks at the
   // deadline); dispatches with <5s remaining are skipped outright.
   const fetchDeadlineAt = Date.now() + SWEEP_FETCH_DEADLINE_TOTAL_MS;
+  const sweepLedger = new ScannerAttemptLedger();
+  let boundaryTfs: string[] = [];
+  let sweepCandidates = 0;
+  let sweepParentCacheDegraded = 0;
+  let budgetSkippedUnits = 0;
+  const sweepAbandonedMarkets: string[] = [];
 
   try {
     const now = new Date();
-    const boundaryTfs = getBoundaryTfs(now);
+    boundaryTfs = getBoundaryTfs(now);
 
     // Accumulate candidates across all TFs per protocol, then rank and keep top K.
     const allCandidatesByProtocol = new Map<string, ScannerCandidate[]>();
@@ -478,20 +644,6 @@ async function runSweep(): Promise<void> {
     // Ensures BTC/USDT 15m candles are fetched exactly once even when both Flash and
     // Pacifica list BTC-PERP (both map to the same datafeed ticker via marketToDatafeedTicker).
     const candleCache = new Map<string, OHLCV[]>();
-
-    // Sweep-level totals for the SWEEP TOTAL summary line (prod diagnosis:
-    // shows at a glance whether the fetch budget starved the scan).
-    let sweepScanned = 0;
-    let sweepSkipped = 0;
-    let sweepErrors = 0;
-    let sweepCandidates = 0;
-    let sweepClosed = 0;
-    let sweepCacheDegraded = 0;    // reads failed typed on DB/cache pressure
-    // Formal-incident accounting (feeds the sweep-end error_log verdict).
-    let sweepAttempted = 0;        // markets whose scan this sweep INTENDED
-    let sweepAbandonedCount = 0;   // dispatches still unsettled after abort+teardown
-    let budgetSkippedUnits = 0;    // whole protocol×TF units skipped at the budget gate
-    const sweepAbandonedMarkets: string[] = []; // bounded sample for the error context
 
     for (const protocol of PROTOCOLS) {
       // Genuine wall-clock gate: once the sweep-global fetch budget is spent,
@@ -536,14 +688,14 @@ async function runSweep(): Promise<void> {
         const tfStart = Date.now();
         const parentTf = PARENT_TF[tf] ?? null;
         const tfMs = TIMEFRAME_MS[tf];
-        sweepAttempted += universe.length;
+        const attemptKeyFor = (market: string) => `${protocol}|${tf}|${market}`;
+        const attemptKeys = universe.map(attemptKeyFor);
+        for (const key of attemptKeys) sweepLedger.intend(key);
+        const finishAttempt = (market: string, disposition: ScannerAttemptDisposition): boolean =>
+          sweepLedger.finalize(attemptKeyFor(market), disposition);
 
-        let marketsScanned = 0;
         let marketsFresh = 0;
-        let marketsSkippedByTimeout = 0;
-        let marketsClosedSkipped = 0;
-        let errorCount = 0;
-        let cacheDegradedCount = 0;
+        let parentCacheDegradedCount = 0;
         const tfCandidates: ScannerCandidate[] = [];
 
         // Real cancellation for this TF's dispatches: when the drain cap
@@ -566,6 +718,7 @@ async function runSweep(): Promise<void> {
             // Feed health check: skip if recently failed (mirrors datafeed negcaches).
             const health = feedHealthMap.get(ticker);
             if (health && Date.now() - health.failedAt < FEED_HEALTH_TTL_MS) {
+              finishAttempt(market, "feed-health-skipped");
               return;
             }
 
@@ -577,7 +730,7 @@ async function runSweep(): Promise<void> {
             // fetch changes no decision. Counted separately — a closed venue
             // must NEVER look like a dead feed or a budget timeout.
             if (!isNonCryptoMarketOpen(ticker, now)) {
-              marketsClosedSkipped++;
+              finishAttempt(market, "venue-closed");
               return;
             }
 
@@ -605,7 +758,7 @@ async function runSweep(): Promise<void> {
                 if (remainingMs < 5_000) {
                   // Sweep fetch budget exhausted — skip without marking the
                   // feed dead (this is our budget, not the feed's fault).
-                  marketsSkippedByTimeout++;
+                  finishAttempt(market, "timeout-skipped");
                   return;
                 }
                 const perFetchDeadlineMs = Math.min(
@@ -635,15 +788,15 @@ async function runSweep(): Promise<void> {
               // feed error last.
               const disposition = classifySweepFetchError(err, tfAbort.signal.aborted);
               if (disposition === "timeout-skip") {
-                marketsSkippedByTimeout++;
+                finishAttempt(market, "timeout-skipped");
                 return;
               }
               if (disposition === "cache-degraded") {
-                cacheDegradedCount++;
+                finishAttempt(market, "primary-cache-degraded");
                 return;
               }
               feedHealthMap.set(ticker, { failedAt: Date.now() });
-              errorCount++;
+              finishAttempt(market, "error");
               return;
             }
 
@@ -651,20 +804,18 @@ async function runSweep(): Promise<void> {
               if (fetchDeadlineTruncated) {
                 // Our sweep budget cut this fetch short — skip WITHOUT the
                 // 30-min feed-dead exclusion; the feed may be perfectly fine.
-                marketsSkippedByTimeout++;
+                finishAttempt(market, "timeout-skipped");
                 return;
               }
               // Empty = feed dead for this ticker. Mark and skip.
               feedHealthMap.set(ticker, { failedAt: Date.now() });
+              finishAttempt(market, "error");
               return;
             }
-
-            marketsScanned++;
 
             // Track freshness (G9 check mirrored here for logging).
             const newestBarTime = bars[bars.length - 1].time;
             const ageMs = now.getTime() - newestBarTime;
-            if (ageMs < 2 * tfMs) marketsFresh++;
 
             // Fetch parent-TF bars (use cache to avoid duplicate fetches).
             let parentBars: OHLCV[] | null = null;
@@ -702,27 +853,30 @@ async function runSweep(): Promise<void> {
               } catch (err) {
                 // Parent fetch failure is non-fatal, but degraded reads are
                 // still counted so DB pressure stays visible in the summary.
-                if (isCacheDegradedError(err)) cacheDegradedCount++;
+                parentCacheDegradedCount = countParentCacheDegradation(
+                  parentCacheDegradedCount,
+                  err,
+                );
                 parentBars = null;
               }
             }
 
             const candidate = evaluateCandidate(market, protocol, bars, parentBars, tf, now);
-            if (candidate) tfCandidates.push(candidate);
+            if (finishAttempt(market, "scanned")) {
+              if (ageMs < 2 * tfMs) marketsFresh++;
+              if (candidate) tfCandidates.push(candidate);
+            }
           })().catch((err) => {
             // Dispatches must NEVER reject: a single rejection would blow up
             // the drain's Promise.all and abort the whole sweep. Anything
             // reaching here escaped the inner catches (e.g. an evaluator bug).
-            const disposition = classifySweepFetchError(err, tfAbort.signal.aborted);
-            if (disposition === "timeout-skip") {
-              marketsSkippedByTimeout++;
-              return;
-            }
-            if (disposition === "cache-degraded") {
-              cacheDegradedCount++;
-              return;
-            }
-            errorCount++;
+            const settlement = settleUnexpectedScannerDispatch(
+              sweepLedger,
+              attemptKeyFor(market),
+              err,
+              tfAbort.signal.aborted,
+            );
+            if (!settlement.shouldLog) return;
             const dispatchErrLine = `[Scanner] DISPATCH ERROR: ${market} ${tf} — ${err instanceof Error ? err.message : err}`;
             console.error(dispatchErrLine);
             appendTelemetry(dispatchErrLine);
@@ -739,7 +893,9 @@ async function runSweep(): Promise<void> {
           // kept iterating (stagger sleeps + slot waits) for ~13s of pure
           // grind before the drain even started — pushing the sweep to 278s.
           if (Date.now() - protocolStart > protocolBudgetMs || Date.now() >= fetchDeadlineAt) {
-            marketsSkippedByTimeout += universe.length - i;
+            for (let skipped = i; skipped < universe.length; skipped++) {
+              finishAttempt(universe[skipped], "timeout-skipped");
+            }
             break;
           }
 
@@ -759,7 +915,9 @@ async function runSweep(): Promise<void> {
             await sleep(10);
           }
           if (slotWaitTimedOut) {
-            marketsSkippedByTimeout += universe.length - i;
+            for (let skipped = i; skipped < universe.length; skipped++) {
+              finishAttempt(universe[skipped], "timeout-skipped");
+            }
             break;
           }
           inFlight++;
@@ -824,11 +982,14 @@ async function runSweep(): Promise<void> {
           ]);
           if (!settledInTime) {
             const abandoned = [...inFlightMarkets];
-            sweepAbandonedCount += abandoned.length;
             for (const m of abandoned) {
-              if (sweepAbandonedMarkets.length < 20) sweepAbandonedMarkets.push(`${protocol}:${m}:${tf}`);
+              if (
+                finishAttempt(m, "abandoned") &&
+                sweepAbandonedMarkets.length < 20
+              ) {
+                sweepAbandonedMarkets.push(`${protocol}:${m}:${tf}`);
+              }
             }
-            errorCount += abandoned.length;
             const hangLine =
               `[Scanner] SWEEP HANG: ${abandoned.length} dispatch(es) ignored cancellation for ` +
               `${SWEEP_TEARDOWN_ALLOWANCE_MS / 1000}s (${protocol} ${tf}) — abandoning: ${abandoned.join(", ") || "unknown"}`;
@@ -839,30 +1000,36 @@ async function runSweep(): Promise<void> {
           }
         }
 
-        if (marketsSkippedByTimeout > 0) {
-          const timeoutLine = `[Scanner] TIMEOUT: ${marketsSkippedByTimeout} markets skipped (${protocol} ${tf})`;
+        const accounting = sweepLedger.reconcile(attemptKeys);
+
+        if (accounting.timeoutSkipped > 0) {
+          const timeoutLine = `[Scanner] TIMEOUT: ${accounting.timeoutSkipped} markets skipped (${protocol} ${tf})`;
           console.log(timeoutLine);
           appendTelemetry(timeoutLine);
         }
 
-        if (marketsClosedSkipped > 0) {
-          const closedLine = `[Scanner] CLOSED: ${marketsClosedSkipped} markets skipped (${protocol} ${tf}, venue closed)`;
+        if (accounting.venueClosed > 0) {
+          const closedLine = `[Scanner] CLOSED: ${accounting.venueClosed} markets skipped (${protocol} ${tf}, venue closed)`;
           console.log(closedLine);
           appendTelemetry(closedLine);
         }
 
-        if (cacheDegradedCount > 0) {
-          const degradedLine = `[Scanner] CACHE DEGRADED: ${cacheDegradedCount} reads failed on DB/cache pressure (${protocol} ${tf}) — no network fallback, retry next boundary`;
+        if (accounting.feedHealthSkipped > 0) {
+          const feedHealthLine = `[Scanner] FEED HEALTH: ${accounting.feedHealthSkipped} negative-cache skips (${protocol} ${tf})`;
+          console.log(feedHealthLine);
+          appendTelemetry(feedHealthLine);
+        }
+
+        if (accounting.primaryCacheDegraded > 0 || parentCacheDegradedCount > 0) {
+          const degradedLine =
+            `[Scanner] CACHE DEGRADED: ${accounting.primaryCacheDegraded} primary-terminal, ` +
+            `${parentCacheDegradedCount} parent-auxiliary (${protocol} ${tf}) — no network fallback, retry next boundary`;
           console.log(degradedLine);
           appendTelemetry(degradedLine);
         }
 
-        sweepScanned += marketsScanned;
-        sweepSkipped += marketsSkippedByTimeout;
-        sweepErrors += errorCount;
         sweepCandidates += tfCandidates.length;
-        sweepClosed += marketsClosedSkipped;
-        sweepCacheDegraded += cacheDegradedCount;
+        sweepParentCacheDegraded += parentCacheDegradedCount;
 
         // Accumulate this TF's candidates into the per-protocol pool.
         const pool = allCandidatesByProtocol.get(protocol)!;
@@ -876,11 +1043,18 @@ async function runSweep(): Promise<void> {
           sweepStartedAt: tfStart,
           sweepFinishedAt: tfFinish,
           durationMs: tfFinish - tfStart,
-          marketsScanned,
+          marketsAttempted: accounting.attempted,
+          marketsScanned: accounting.scanned,
           marketsFresh,
-          marketsSkippedByTimeout,
-          errorCount,
-          cacheDegradedCount,
+          feedHealthSkipped: accounting.feedHealthSkipped,
+          marketsClosedSkipped: accounting.venueClosed,
+          marketsSkippedByTimeout: accounting.timeoutSkipped,
+          errorCount: accounting.errors,
+          cacheDegradedCount: accounting.primaryCacheDegraded,
+          parentCacheDegradedCount,
+          abandonedCount: accounting.abandoned,
+          unclassifiedCount: accounting.unclassified,
+          accountingValid: accounting.accountingValid,
           candidateCount: tfCandidates.length,
         };
         telemetryRing.push(stats);
@@ -896,7 +1070,7 @@ async function runSweep(): Promise<void> {
           .join(", ");
         const durationSec = ((tfFinish - tfStart) / 1000).toFixed(1);
         const sweepLine =
-          `[Scanner] ${protocol} ${tf}: ${marketsScanned} scanned, ${marketsFresh} fresh, ` +
+          `[Scanner] ${protocol} ${tf}: ${accounting.scanned} scanned, ${marketsFresh} fresh, ` +
           `${tfCandidates.length} candidates${tfCandidates.length > 0 ? ` (${candStr})` : ""} in ${durationSec}s`;
         console.log(sweepLine);
         appendTelemetry(sweepLine);
@@ -913,13 +1087,14 @@ async function runSweep(): Promise<void> {
 
     // One-line sweep summary: total time vs. fetch budget + starvation signal.
     const sweepDurationMs = Date.now() - sweepBeganAt;
-    const sweepSummary =
-      `[Scanner] SWEEP TOTAL: ${sweepScanned} scanned, ${sweepSkipped} skipped-by-timeout, ` +
-      `${sweepClosed} venue-closed, ${sweepErrors} errors, ${sweepAbandonedCount} abandoned, ` +
-      `${sweepCacheDegraded} cache-degraded, ` +
-      `${budgetSkippedUnits} budget-gated units, ${sweepCandidates} candidates in ` +
-      `${(sweepDurationMs / 1000).toFixed(1)}s ` +
-      `(fetch budget ${SWEEP_FETCH_DEADLINE_TOTAL_MS / 1000}s)`;
+    const sweepAccounting = sweepLedger.reconcile();
+    const sweepSummary = formatScannerSweepAccountingLine("TOTAL", sweepAccounting, {
+      parentCacheDegraded: sweepParentCacheDegraded,
+      budgetSkippedUnits,
+      candidates: sweepCandidates,
+      durationMs: sweepDurationMs,
+      fetchBudgetMs: SWEEP_FETCH_DEADLINE_TOTAL_MS,
+    });
     console.log(sweepSummary);
     appendTelemetry(sweepSummary);
 
@@ -931,31 +1106,47 @@ async function runSweep(): Promise<void> {
       env: process.env.NODE_ENV || "development",
       uptimeSec: Math.round(process.uptime()),
       boundaryTfs,
-      attempted: sweepAttempted,
-      scanned: sweepScanned,
-      skippedByTimeout: sweepSkipped,
-      venueClosed: sweepClosed,
-      errors: sweepErrors,
-      abandoned: sweepAbandonedCount,
-      cacheDegraded: sweepCacheDegraded,
+      attempted: sweepAccounting.attempted,
+      scanned: sweepAccounting.scanned,
+      feedHealthSkipped: sweepAccounting.feedHealthSkipped,
+      skippedByTimeout: sweepAccounting.timeoutSkipped,
+      venueClosed: sweepAccounting.venueClosed,
+      errors: sweepAccounting.errors,
+      abandoned: sweepAccounting.abandoned,
+      primaryCacheDegraded: sweepAccounting.primaryCacheDegraded,
+      parentCacheDegraded: sweepParentCacheDegraded,
+      unclassified: sweepAccounting.unclassified,
+      accountingValid: sweepAccounting.accountingValid,
       budgetSkippedUnits,
       candidates: sweepCandidates,
       durationMs: sweepDurationMs,
       ...(sweepAbandonedMarkets.length > 0 ? { abandonedMarkets: sweepAbandonedMarkets } : {}),
     };
-    if (sweepAttempted > 0 && sweepScanned === 0) {
+    if (!sweepAccounting.accountingValid) {
+      recordCriticalError({
+        category: "scanner",
+        severity: "critical",
+        source: "scanner-sweep",
+        message: `Scanner accounting invalid: ${sweepAccounting.unclassified} of ${sweepAccounting.attempted} attempts unclassified`,
+        context: incidentContext,
+      });
+    }
+    if (sweepAccounting.attempted > 0 && sweepAccounting.scanned === 0) {
       // Blackout: the sweep intended to scan markets and scanned NONE.
       recordCriticalError({
         category: "scanner",
         severity: "critical",
         source: "scanner-sweep",
-        message: `Scanner blackout: 0 of ${sweepAttempted} markets scanned (${sweepSkipped} timeout-skipped, ${sweepErrors} errors)`,
+        message:
+          `Scanner blackout: 0 of ${sweepAccounting.attempted} markets scanned ` +
+          `(${sweepAccounting.feedHealthSkipped} feed-health-skipped, ` +
+          `${sweepAccounting.timeoutSkipped} timeout-skipped, ${sweepAccounting.errors} errors)`,
         context: incidentContext,
       });
     } else if (
-      sweepAbandonedCount > 0 ||
+      sweepAccounting.abandoned > 0 ||
       budgetSkippedUnits > 0 ||
-      (sweepAttempted > 0 && sweepSkipped >= sweepAttempted * 0.25)
+      (sweepAccounting.attempted > 0 && sweepAccounting.timeoutSkipped >= sweepAccounting.attempted * 0.25)
     ) {
       // PARTIAL failure — was previously invisible outside telemetry grep.
       recordCriticalError({
@@ -963,8 +1154,9 @@ async function runSweep(): Promise<void> {
         severity: "error",
         source: "scanner-sweep",
         message:
-          `Scanner partial sweep: ${sweepScanned}/${sweepAttempted} scanned, ` +
-          `${sweepSkipped} timeout-skipped, ${sweepAbandonedCount} abandoned, ` +
+          `Scanner partial sweep: ${sweepAccounting.scanned}/${sweepAccounting.attempted} scanned, ` +
+          `${sweepAccounting.feedHealthSkipped} feed-health-skipped, ` +
+          `${sweepAccounting.timeoutSkipped} timeout-skipped, ${sweepAccounting.abandoned} abandoned, ` +
           `${budgetSkippedUnits} budget-gated unit(s)`,
         context: incidentContext,
       });
@@ -998,9 +1190,14 @@ async function runSweep(): Promise<void> {
   } catch (err) {
     // Invariant: no sweep may end without a SWEEP TOTAL or SWEEP ABORT line
     // reaching telemetry — external log readers only see the telemetry file.
-    const abortLine =
-      `[Scanner] SWEEP ABORT: crashed after ${((Date.now() - sweepBeganAt) / 1000).toFixed(1)}s — ` +
-      `${err instanceof Error ? err.message : err}`;
+    const abortAccounting = sweepLedger.reconcile();
+    const abortLine = formatScannerSweepAccountingLine("ABORT", abortAccounting, {
+      parentCacheDegraded: sweepParentCacheDegraded,
+      budgetSkippedUnits,
+      candidates: sweepCandidates,
+      durationMs: Date.now() - sweepBeganAt,
+      errorMessage: err instanceof Error ? err.message : String(err),
+    });
     console.error(abortLine);
     appendTelemetry(abortLine);
     recordCriticalError({
@@ -1013,6 +1210,21 @@ async function runSweep(): Promise<void> {
         pid: process.pid,
         env: process.env.NODE_ENV || "development",
         uptimeSec: Math.round(process.uptime()),
+        boundaryTfs,
+        attempted: abortAccounting.attempted,
+        scanned: abortAccounting.scanned,
+        feedHealthSkipped: abortAccounting.feedHealthSkipped,
+        venueClosed: abortAccounting.venueClosed,
+        skippedByTimeout: abortAccounting.timeoutSkipped,
+        primaryCacheDegraded: abortAccounting.primaryCacheDegraded,
+        parentCacheDegraded: sweepParentCacheDegraded,
+        errors: abortAccounting.errors,
+        abandoned: abortAccounting.abandoned,
+        unclassified: abortAccounting.unclassified,
+        accountingValid: abortAccounting.accountingValid,
+        budgetSkippedUnits,
+        candidates: sweepCandidates,
+        ...(sweepAbandonedMarkets.length > 0 ? { abandonedMarkets: sweepAbandonedMarkets } : {}),
       },
     });
   } finally {
