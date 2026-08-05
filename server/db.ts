@@ -893,8 +893,12 @@ export async function ensureSchema() {
         evaluated integer NOT NULL DEFAULT 0,
         acted integer NOT NULL DEFAULT 0,
         failed integer NOT NULL DEFAULT 0,
+        skipped integer,
+        skip_reason_counts jsonb,
         created_at timestamp NOT NULL DEFAULT now()
       )`,
+      `ALTER TABLE loop_tick_heartbeats ADD COLUMN IF NOT EXISTS skipped integer`,
+      `ALTER TABLE loop_tick_heartbeats ADD COLUMN IF NOT EXISTS skip_reason_counts jsonb`,
       `CREATE INDEX IF NOT EXISTS idx_loop_tick_heartbeats_tick_time ON loop_tick_heartbeats (tick, created_at)`,
 
       // --- Vaults borrow engine (Phase A scaffold): money-op AUDIT log. ---

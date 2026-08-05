@@ -12,7 +12,7 @@
  * Telemetry only: nothing in this module is ever a money gate.
  */
 
-import type { LoopPolicyDecision } from "@shared/schema";
+import type { LoopPolicyDecision, LoopTickHeartbeat } from "@shared/schema";
 
 // ---------------------------------------------------------------------------
 // Tick coverage
@@ -79,6 +79,129 @@ export function computeTickCoverage(opts: {
     maxGapMs,
     lastBeatAt: count > 0 ? new Date(times[count - 1]) : null,
     ok: count > 0 && maxGapMs <= allowedGapMs,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Safety-observation accounting
+// ---------------------------------------------------------------------------
+
+export const LOOP_SAFETY_SKIP_REASON_CODES = [
+  "not_open_loop",
+  "vault_identity_unreadable",
+  "health_unavailable",
+  "live_debt_unreadable",
+  "health_factor_unreadable",
+] as const;
+
+export type LoopSafetySkipReasonCode =
+  (typeof LOOP_SAFETY_SKIP_REASON_CODES)[number];
+export type LoopSafetySkipReasonCounts =
+  Partial<Record<LoopSafetySkipReasonCode, number>>;
+
+export interface SafetyTickAccountingSummary {
+  totalBeats: number;
+  accountedBeats: number;
+  unknownBeats: number;
+  observed: number;
+  assessed: number;
+  skipped: number;
+  acted: number;
+  failed: number;
+  skipReasonCounts: LoopSafetySkipReasonCounts;
+  firstAccountedAt: Date | null;
+  lastAccountedAt: Date | null;
+  complete: boolean;
+}
+
+const LOOP_SAFETY_SKIP_REASON_SET = new Set<string>(
+  LOOP_SAFETY_SKIP_REASON_CODES,
+);
+const isNonNegativeInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value >= 0;
+
+/**
+ * Summarize SAFETY heartbeats only. The route already fetches safety and
+ * allocation beats separately; allocation rows must never be passed here.
+ *
+ * A malformed or pre-contract row is unknown and contributes no counters.
+ * Its timestamp remains available to the separate cadence-coverage helper.
+ */
+export function summarizeSafetyTickAccounting(
+  safetyBeats: LoopTickHeartbeat[],
+): SafetyTickAccountingSummary {
+  let accountedBeats = 0;
+  let unknownBeats = 0;
+  let observed = 0;
+  let assessed = 0;
+  let skipped = 0;
+  let acted = 0;
+  let failed = 0;
+  let firstAccountedAt: Date | null = null;
+  let lastAccountedAt: Date | null = null;
+  const skipReasonCounts: LoopSafetySkipReasonCounts = {};
+
+  for (const beat of safetyBeats) {
+    const rawReasons = beat.skipReasonCounts;
+    if (
+      !isNonNegativeInteger(beat.evaluated) ||
+      !isNonNegativeInteger(beat.acted) ||
+      !isNonNegativeInteger(beat.failed) ||
+      !isNonNegativeInteger(beat.skipped) ||
+      beat.skipped > beat.evaluated ||
+      rawReasons === null ||
+      typeof rawReasons !== "object" ||
+      Array.isArray(rawReasons)
+    ) {
+      unknownBeats++;
+      continue;
+    }
+
+    let reasonTotal = 0;
+    let reasonsValid = true;
+    for (const [key, value] of Object.entries(rawReasons)) {
+      if (!LOOP_SAFETY_SKIP_REASON_SET.has(key) || !isNonNegativeInteger(value)) {
+        reasonsValid = false;
+        break;
+      }
+      reasonTotal += value;
+    }
+    if (!reasonsValid || reasonTotal !== beat.skipped) {
+      unknownBeats++;
+      continue;
+    }
+
+    accountedBeats++;
+    observed += beat.evaluated;
+    assessed += beat.evaluated - beat.skipped;
+    skipped += beat.skipped;
+    acted += beat.acted;
+    failed += beat.failed;
+    for (const [key, value] of Object.entries(rawReasons)) {
+      const code = key as LoopSafetySkipReasonCode;
+      skipReasonCounts[code] = (skipReasonCounts[code] ?? 0) + value;
+    }
+    if (!firstAccountedAt || beat.createdAt < firstAccountedAt) {
+      firstAccountedAt = beat.createdAt;
+    }
+    if (!lastAccountedAt || beat.createdAt > lastAccountedAt) {
+      lastAccountedAt = beat.createdAt;
+    }
+  }
+
+  return {
+    totalBeats: safetyBeats.length,
+    accountedBeats,
+    unknownBeats,
+    observed,
+    assessed,
+    skipped,
+    acted,
+    failed,
+    skipReasonCounts,
+    firstAccountedAt,
+    lastAccountedAt,
+    complete: accountedBeats > 0 && unknownBeats === 0,
   };
 }
 

@@ -778,6 +778,10 @@ export const loopTickHeartbeats = pgTable("loop_tick_heartbeats", {
   evaluated: integer("evaluated").notNull().default(0),
   acted: integer("acted").notNull().default(0),
   failed: integer("failed").notNull().default(0),
+  // Safety-only accounting. NULL means the producer predates or does not
+  // implement the skip-accounting contract; it must never be read as zero.
+  skipped: integer("skipped"),
+  skipReasonCounts: jsonb("skip_reason_counts").$type<Record<string, number>>(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => ({
   tickTimeIdx: index("idx_loop_tick_heartbeats_tick_time").on(table.tick, table.createdAt),
