@@ -76,6 +76,12 @@ vi.mock("../../server/ai-trader/market-admission", () => ({
   SCANNER_MARKET_UNADMITTED_REASON: "scanner_market_unadmitted",
 }));
 
+const isMultiplierQuarantinedMock = vi.fn();
+vi.mock("../../server/ai-trader/multiplier-market-quarantine", () => ({
+  isMultiplierMarketQuarantined: (...a: unknown[]) => isMultiplierQuarantinedMock(...a),
+  MULTIPLIER_UNQUALIFIED_REASON: "multiplier_unqualified",
+}));
+
 import { registerAiTraderRoutes } from "../../server/ai-trader/routes";
 
 type Handler = (req: any, res: any, next?: any) => unknown;
@@ -145,6 +151,7 @@ describe("AI Trader scanner route market admission", () => {
       evaluatedAt: Date.now(),
     }]);
     isMarketAdmittedMock.mockReturnValue(false);
+    isMultiplierQuarantinedMock.mockReturnValue(false);
   });
 
   it("refuses an unadmitted fresh manual pick before UMK, bot write, context, LLM, or execution", async () => {
@@ -169,6 +176,36 @@ describe("AI Trader scanner route market admission", () => {
     expect(isMarketAdmittedMock).toHaveBeenCalledWith("UNKNOWN-PERP");
     expect(getSessionMock).not.toHaveBeenCalled();
     expect(restoreSecurityMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(buildContextMock).not.toHaveBeenCalled();
+    expect(runDecisionMock).not.toHaveBeenCalled();
+    expect(executeDecisionMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a multiplier candidate before registry admission, UMK, bot write, LLM, or execution", async () => {
+    isMultiplierQuarantinedMock.mockReturnValue(true);
+    isMarketAdmittedMock.mockReturnValue(true);
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+    const result = await invoke(
+      built.routes,
+      "POST /api/ai-trader/:id/analyze",
+      {
+        params: { id: "scanner-bot-route" },
+        session: { walletAddress: "WALLET_ROUTE" },
+        body: {},
+        query: {},
+        headers: {},
+      },
+    );
+
+    expect(result).toMatchObject({
+      statusCode: 409,
+      body: { error: "multiplier_unqualified" },
+    });
+    expect(isMultiplierQuarantinedMock).toHaveBeenCalledWith("UNKNOWN-PERP");
+    expect(isMarketAdmittedMock).not.toHaveBeenCalled();
+    expect(getSessionMock).not.toHaveBeenCalled();
     expect(updateBotMock).not.toHaveBeenCalled();
     expect(buildContextMock).not.toHaveBeenCalled();
     expect(runDecisionMock).not.toHaveBeenCalled();

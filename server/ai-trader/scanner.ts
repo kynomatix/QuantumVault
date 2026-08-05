@@ -31,6 +31,7 @@ import { getAdapter } from "../protocol/adapter-registry";
 import { detectWM } from "./wm-detector";
 import { detectPivots, classifyDow, type DowClassification } from "./dow-structure";
 import { getSessionContext } from "./session-context";
+import { isMultiplierMarketQuarantined } from "./multiplier-market-quarantine";
 import { appendTelemetry } from "../telemetry";
 
 // ─── Feed-dead set (module-top const — edit-and-redeploy, no runtime config) ──
@@ -269,6 +270,7 @@ export interface ScannerStatus {
   lastBoundaryStats: ScannerBoundaryStats | null;
   recentHistory: ScannerBoundaryStats[];
   excludedMarkets: string[];
+  multiplierQuarantinedMarkets: string[];
   scannerRunning: boolean;
 }
 
@@ -282,6 +284,10 @@ const telemetryRing: ScannerBoundaryStats[] = [];
 
 // Universe cache per protocol: { data: market internal symbols[], expiresAt }.
 const universeCache = new Map<string, { data: string[]; expiresAt: number }>();
+// Successful universe builds replace their protocol's exact quarantine view.
+// Status flattens these protocol-scoped sets so stale entries do not accumulate
+// across independent cache refreshes.
+const multiplierQuarantineByProtocol = new Map<string, Set<string>>();
 
 // Runtime feed-health: datafeed ticker → { failedAt }. 30-min TTL.
 // Mirrors datafeed.ts's own negative caches. Closed-market equities/FX drop out
@@ -552,7 +558,7 @@ export function evaluateCandidate(
 
 // ─── Universe builder (cached 1h per protocol) ───────────────────────────────
 
-async function buildUniverse(protocol: string): Promise<string[]> {
+export async function buildScannerUniverse(protocol: string): Promise<string[]> {
   const cached = universeCache.get(protocol);
   if (cached && Date.now() < cached.expiresAt) return cached.data;
 
@@ -586,8 +592,16 @@ async function buildUniverse(protocol: string): Promise<string[]> {
     return stale ? stale.data : [];
   }
 
-  // Subtract feed-dead markets.
-  const filtered = markets.filter((m) => !SCANNER_FEED_EXCLUDE.has(m));
+  // Quarantine unqualified multiplier identities before the sweep constructs
+  // attempt keys or performs any candle fetch. Ordinary feed exclusions stay
+  // independent and the exhaustive attempt ledger remains unchanged.
+  multiplierQuarantineByProtocol.set(
+    protocol,
+    new Set(markets.filter(isMultiplierMarketQuarantined)),
+  );
+  const filtered = markets.filter(
+    (market) => !isMultiplierMarketQuarantined(market) && !SCANNER_FEED_EXCLUDE.has(market),
+  );
 
   universeCache.set(protocol, {
     data: filtered,
@@ -656,7 +670,7 @@ async function runSweep(): Promise<void> {
         appendTelemetry(gateLine);
         continue;
       }
-      const universe = await buildUniverse(protocol);
+      const universe = await buildScannerUniverse(protocol);
 
       // Per-protocol budget clock. The budget used to be measured from the GLOBAL
       // sweep start, which let the first protocol (flash) consume the entire 55s on
@@ -1394,6 +1408,7 @@ export function stopScanner(): void {
   sweepGeneration++;
   shortlistMap.clear();
   universeCache.clear();
+  multiplierQuarantineByProtocol.clear();
   feedHealthMap.clear();
   telemetryRing.splice(0, telemetryRing.length);
   console.log("[Scanner] stopped");
@@ -1418,11 +1433,15 @@ export function getScannerStatus(): ScannerStatus {
   const lastBoundaryStats = telemetryRing.length > 0
     ? telemetryRing[telemetryRing.length - 1]
     : null;
+  const multiplierQuarantinedMarkets = [...new Set(
+    [...multiplierQuarantineByProtocol.values()].flatMap((markets) => [...markets]),
+  )].sort();
   return {
     shortlist,
     lastBoundaryStats,
     recentHistory: [...telemetryRing],
     excludedMarkets: [...SCANNER_FEED_EXCLUDE],
+    multiplierQuarantinedMarkets,
     scannerRunning,
   };
 }

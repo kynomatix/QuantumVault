@@ -121,6 +121,25 @@ vi.mock("../../server/ai-trader/executor", async (importOriginal) => {
   };
 });
 
+const getScannerShortlistMock = vi.fn();
+const stopScannerMock = vi.fn();
+vi.mock("../../server/ai-trader/scanner", () => ({
+  getScannerShortlist: (...a: unknown[]) => getScannerShortlistMock(...a),
+  stopScanner: (...a: unknown[]) => stopScannerMock(...a),
+}));
+
+const isMarketAdmittedMock = vi.fn();
+vi.mock("../../server/ai-trader/market-admission", () => ({
+  isAiTraderMarketAdmitted: (...a: unknown[]) => isMarketAdmittedMock(...a),
+  SCANNER_MARKET_UNADMITTED_REASON: "scanner_market_unadmitted",
+}));
+
+const isMultiplierQuarantinedMock = vi.fn();
+vi.mock("../../server/ai-trader/multiplier-market-quarantine", () => ({
+  isMultiplierMarketQuarantined: (...a: unknown[]) => isMultiplierQuarantinedMock(...a),
+  MULTIPLIER_UNQUALIFIED_REASON: "multiplier_unqualified",
+}));
+
 // --- Fixtures -----------------------------------------------------------------
 
 const NOW = Date.UTC(2026, 6, 8, 12, 0, 0); // 2026-07-08T12:00:00Z — 15m boundary
@@ -257,11 +276,15 @@ beforeEach(() => {
     getBotMock, getActiveBotsMock, getLlmCiphertextMock, getAiTraderDecisionMock, getUmkMock,
     decryptKeyMock, decryptSubKeyMock, healUmkMock, getSessionByWalletMock, restoreSecurityMock,
     decryptLlmKeyMock, notifyMock, getAdapterMock, fetchOHLCVMock, buildContextMock,
-    runDecisionMock, executeDecisionMock, appendTelemetryMock,
+    runDecisionMock, executeDecisionMock, appendTelemetryMock, getScannerShortlistMock,
+    stopScannerMock, isMarketAdmittedMock, isMultiplierQuarantinedMock,
   ]) {
     m.mockReset();
   }
   getRecentClosedMock.mockResolvedValue([]);
+  getScannerShortlistMock.mockReturnValue([]);
+  isMarketAdmittedMock.mockReturnValue(true);
+  isMultiplierQuarantinedMock.mockReturnValue(false);
   updateBotMock.mockResolvedValue({});
   updateDecisionMock.mockResolvedValue({});
   notifyMock.mockResolvedValue(true);
@@ -1050,6 +1073,35 @@ describe("runAutoCycle", () => {
     await runAutoCycle("bot-1111-2222");
     expect(runDecisionMock).not.toHaveBeenCalled();
     expect(updateBotMock).not.toHaveBeenCalled();
+  });
+
+  it("scanner bot rejects multiplier candidate before registry admission, mutation, LLM, or execution", async () => {
+    const { runAutoCycle } = await importMonitor();
+    armAutoBot({ marketSource: "scanner" });
+    getSessionByWalletMock.mockReturnValue({ sessionId: "s", session: { umk: Buffer.from("umk") } });
+    getLlmCiphertextMock.mockResolvedValue("ct");
+    decryptLlmKeyMock.mockReturnValue(Buffer.from("test-key"));
+    getScannerShortlistMock.mockReturnValue([{
+      protocol: "pacifica",
+      market: "1MBONK-PERP",
+      timeframe: "15m",
+      direction: "long",
+      setup: "W",
+      score: 90,
+      necklineDistancePct: 0.1,
+      parentTrend: "uptrend",
+      evaluatedAt: NOW,
+    }]);
+    isMultiplierQuarantinedMock.mockReturnValue(true);
+
+    await runAutoCycle("bot-1111-2222");
+
+    expect(isMultiplierQuarantinedMock).toHaveBeenCalledWith("1MBONK-PERP");
+    expect(isMarketAdmittedMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(buildContextMock).not.toHaveBeenCalled();
+    expect(runDecisionMock).not.toHaveBeenCalled();
+    expect(executeDecisionMock).not.toHaveBeenCalled();
   });
 
   it("G6 cooldown blocks BEFORE any LLM spend and reschedules without pausing", async () => {

@@ -76,6 +76,7 @@ import type { ProtocolAdapter } from "../protocol/adapter";
 import type { ProtocolPosition, TradeRecord } from "../protocol/protocol-types";
 import { isTerminalCloseResult } from "./close-truth";
 import { isAiTraderMarketAdmitted, SCANNER_MARKET_UNADMITTED_REASON } from "./market-admission";
+import { isMultiplierMarketQuarantined, MULTIPLIER_UNQUALIFIED_REASON } from "./multiplier-market-quarantine";
 
 // --- Constants ---------------------------------------------------------------------
 
@@ -1829,6 +1830,13 @@ export async function runAutoCycle(botId: string): Promise<void> {
       // sweep leaves the old shortlist in place — never spend LLM calls on it).
       const eligible = shortlist.filter((c) => {
         if (Date.now() - c.evaluatedAt > SCANNER_CANDIDATE_MAX_AGE_MS) return false;
+        if (isMultiplierMarketQuarantined(c.market)) {
+          console.warn(
+            "[AiTraderMonitor] scanner: " + MULTIPLIER_UNQUALIFIED_REASON
+              + " market=" + c.market + " — skipped before registry admission or bot mutation"
+          );
+          return false;
+        }
         if (!isAiTraderMarketAdmitted(c.market)) {
           console.warn(
             "[AiTraderMonitor] scanner: " + SCANNER_MARKET_UNADMITTED_REASON
