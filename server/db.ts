@@ -367,6 +367,56 @@ const schemaMigrationSql = [
          (symbol, timeframe, basis, finality, proxy, time)`,
       `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS queue_order integer`,
       `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS config_snapshot jsonb`,
+      `CREATE TABLE IF NOT EXISTS ai_trader_execution_events (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        event_identity text NOT NULL UNIQUE,
+        attempt_id text NOT NULL,
+        bot_id varchar NOT NULL,
+        decision_id varchar,
+        action text NOT NULL CHECK (action IN ('entry','close','cancel')),
+        cause text NOT NULL CHECK (cause IN ('decision','paper','emergency_unwind','protective','user_requested','venue_detected','unconfirmed_orphan','startup_orphan','pre_close_bracket','survivor_leg')),
+        event_type text NOT NULL,
+        phase smallint,
+        protocol text NOT NULL,
+        account_scope text NOT NULL CHECK (account_scope IN ('main','bot_subaccount','unknown')),
+        account_ref text,
+        market text NOT NULL,
+        side text CHECK (side IS NULL OR side IN ('long','short')),
+        client_order_id text,
+        venue_order_id text,
+        transaction_signature text,
+        venue_status text CHECK (venue_status IS NULL OR venue_status IN ('submitted','acknowledged','filled','partial_fill','canceled','expired','rejected','unknown')),
+        price numeric(30,12) CHECK (price IS NULL OR price <> 'NaN'::numeric),
+        size_base numeric(30,12) CHECK (size_base IS NULL OR (size_base >= 0 AND size_base <> 'NaN'::numeric)),
+        fee numeric(30,12) CHECK (fee IS NULL OR (fee >= 0 AND fee <> 'NaN'::numeric)),
+        realized_pnl numeric(30,12) CHECK (realized_pnl IS NULL OR realized_pnl <> 'NaN'::numeric),
+        failure_code text CHECK (failure_code IS NULL OR failure_code IN ('venue_rejected','venue_unconfirmed','venue_error','identity_mismatch','signing_unavailable','position_not_confirmed','bracket_failed','unknown')),
+        recorded_after_broadcast boolean NOT NULL DEFAULT false,
+        observed_at timestamp NOT NULL,
+        recorded_at timestamp NOT NULL DEFAULT now(),
+        CONSTRAINT ai_trader_execution_phase_check CHECK (
+          (event_type = 'attempt_claimed' AND phase = 0) OR
+          (event_type = 'prebroadcast_authorized' AND action = 'entry' AND phase = 10) OR
+          (event_type = 'broadcast_attempted' AND action IN ('close','cancel') AND phase = 10) OR
+          (event_type = 'broadcast_result' AND phase = 20) OR
+          (event_type IN ('position_observed','fill_observed','bracket_verified','reconciliation_observed') AND phase IS NULL) OR
+          (event_type IN ('entry_terminal_open','entry_terminal_no_land','entry_terminal_unwound') AND action = 'entry' AND phase = 90) OR
+          (event_type IN ('close_terminal_confirmed','close_terminal_failed') AND action = 'close' AND phase = 90) OR
+          (event_type IN ('cancel_terminal_confirmed','cancel_terminal_failed') AND action = 'cancel' AND phase = 90)
+        )
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_ai_trader_execution_attempt ON ai_trader_execution_events (attempt_id, phase, observed_at, id)`,
+      `CREATE INDEX IF NOT EXISTS idx_ai_trader_execution_bot ON ai_trader_execution_events (bot_id, recorded_at DESC, id DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_ai_trader_execution_decision ON ai_trader_execution_events (decision_id, recorded_at, id)`,
+      `CREATE OR REPLACE FUNCTION qv_reject_ai_trader_execution_event_mutation()
+        RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+          RAISE EXCEPTION 'ai_trader_execution_events is append-only';
+        END $$`,
+      `DO $$ BEGIN
+         CREATE TRIGGER ai_trader_execution_events_append_only
+           BEFORE UPDATE OR DELETE ON ai_trader_execution_events
+           FOR EACH ROW EXECUTE FUNCTION qv_reject_ai_trader_execution_event_mutation();
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
       `CREATE TABLE IF NOT EXISTS platform_cumulative_stats (
         id text PRIMARY KEY DEFAULT 'singleton',
         cumulative_volume numeric(20,2) NOT NULL DEFAULT 0,

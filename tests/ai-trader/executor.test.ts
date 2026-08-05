@@ -68,6 +68,17 @@ vi.mock("../../server/notification-service", () => ({
   sendTradeNotification: (...a: unknown[]) => notifyMock(...a),
 }));
 
+const appendRequiredJournalMock = vi.fn(async ({ decisionId }: { decisionId: string }) => `entry:${decisionId}`);
+const safeJournalMock = vi.fn();
+vi.mock("../../server/ai-trader/execution-journal", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../server/ai-trader/execution-journal")>();
+  return {
+    ...actual,
+    appendRequiredEntryPrebroadcast: (...a: unknown[]) => appendRequiredJournalMock(...a as [{ decisionId: string }]),
+    safeAppendExecutionEvents: (...a: unknown[]) => safeJournalMock(...a),
+  };
+});
+
 // --- Fixtures -----------------------------------------------------------------
 
 const NOW = Date.UTC(2026, 6, 8, 12, 0, 0); // 2026-07-08T12:00:00Z — mid-day UTC
@@ -214,9 +225,10 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
   callOrder = [];
   scannerCapabilitiesMock.liveExecutionEnabled = true;
-  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getAiTraderBotMock, getAiTraderDecisionMock, claimExecutionMock, transitionStateMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock]) {
+  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getAiTraderBotMock, getAiTraderDecisionMock, claimExecutionMock, transitionStateMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock, appendRequiredJournalMock, safeJournalMock]) {
     m.mockReset();
   }
+  appendRequiredJournalMock.mockImplementation(async ({ decisionId }: { decisionId: string }) => `entry:${decisionId}`);
   getRecentClosedMock.mockResolvedValue([]);
   getAiTraderDecisionMock.mockImplementation(async (id: string) => makePersistedDecision({ id }));
   getWalletMock.mockResolvedValue({
@@ -817,6 +829,64 @@ describe("live execution — happy path", () => {
 // --- Live path: failure handling ----------------------------------------------------
 
 describe("live execution — failure handling (fail closed)", () => {
+  it("journal failure refuses live entry before placeMarketOrder", async () => {
+    armLiveAuth();
+    appendRequiredJournalMock.mockRejectedValueOnce(new Error("journal unavailable"));
+    const adapter = makeAdapter();
+    const { executeDecision } = await importExecutor();
+    const result = await executeDecision({
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-journal-refuse",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+
+    expect(result).toMatchObject({ ok: false, reason: "journal_unavailable" });
+    expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
+    expect(updateDecisionMock).toHaveBeenCalledWith("d-journal-refuse", { outcome: "aborted_order" });
+    expect(updateBotMock).toHaveBeenLastCalledWith("bot-1111-2222", { status: "idle" });
+  });
+
+  it("post-broadcast journal failure does not delay position confirmation or bracket protection", async () => {
+    armLiveAuth();
+    safeJournalMock.mockImplementation(() => undefined);
+    const adapter = makeAdapter();
+    const { executeDecision } = await importExecutor();
+    const result = await executeDecision({
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-journal-best-effort",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+
+    expect(result).toMatchObject({ ok: true, mode: "live" });
+    expect((adapter.getPositions as any)).toHaveBeenCalled();
+    expect((adapter.setTpSl as any)).toHaveBeenCalled();
+    expect((adapter.getOpenStopOrders as any)).toHaveBeenCalled();
+    expect(updateBotMock).toHaveBeenLastCalledWith("bot-1111-2222", { status: "open", pauseReason: null });
+  });
+
+  it("emergency close reaches closePosition when every journal append fails", async () => {
+    armLiveAuth();
+    safeJournalMock.mockImplementation(() => undefined);
+    const adapter = makeAdapter({
+      setTpSl: vi.fn(async () => ({ success: false, status: "rejected" as const, error: "wrong side" })),
+    });
+    const { executeDecision } = await importExecutor();
+    const result = await executeDecision({
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-journal-emergency",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+
+    expect(result).toMatchObject({ ok: false, reason: "bracket_failed" });
+    expect((adapter.closePosition as any)).toHaveBeenCalledTimes(1);
+  });
+
   it("clean order rejection (confirmed flat) → aborted_order, bot idle, NO pause, NO close", async () => {
     armLiveAuth();
     const adapter = makeAdapter({

@@ -39,6 +39,16 @@ import {
   evaluateAiTraderStateAuthority,
   type AiTraderAuthoritySource,
 } from "./state-authority";
+import type { OrderResult } from "../protocol/protocol-types";
+import { appendTelemetry } from "../telemetry";
+import {
+  appendRequiredEntryPrebroadcast,
+  entryAttemptId,
+  journalBase,
+  newMutationAttemptId,
+  orderResultEvent,
+  safeAppendExecutionEvents,
+} from "./execution-journal";
 
 // --- G6 cadence rules (mirror of context-builder's advisory echo; THIS is the
 // enforcement point). Module-private there, so the values are pinned here too —
@@ -90,6 +100,7 @@ export type ExecuteFailureReason =
   | "scanner_live_execution_disabled" // scanner-source live entry capability is off for this process
   | "insufficient_funding" // G11: free collateral below required margin
   | "fee_rate_unavailable" // no fresh, identity-bound retained taker quote for this admission
+  | "journal_unavailable"  // required pre-broadcast evidence failed; no entry sent
   | "bot_busy"             // bot already holds (or may hold) a position — refuse to stack a second entry
   | "order_failed"         // entry order rejected/failed, no position confirmed
   | "position_unconfirmed" // order accepted but position never appeared — emergency close attempted, bot paused
@@ -414,6 +425,15 @@ async function executePaperEntry(input: ExecuteDecisionInput, side: PaperSide): 
     decisionId,
     expectedDecisionOutcome: "executed",
   });
+  const attemptId = entryAttemptId(decisionId);
+  const journal = journalBase(bot, decisionId);
+  safeAppendExecutionEvents([
+    { ...journal, attemptId, action: "entry", cause: "paper", eventType: "attempt_claimed", side },
+    { ...journal, attemptId, action: "entry", cause: "paper", eventType: "fill_observed", side,
+      price: entryPrice, sizeBase: Number(input.clamped.sizeBase) },
+    { ...journal, attemptId, action: "entry", cause: "paper", eventType: "entry_terminal_open", side,
+      price: entryPrice, sizeBase: Number(input.clamped.sizeBase) },
+  ]);
   await sendTradeNotification(bot.walletAddress, {
     type: "trade_executed",
     botName: `AI Trader ${bot.market} (Paper)`,
@@ -577,14 +597,37 @@ async function executeLiveEntry(
       };
     }
 
-    let orderResult;
+    const clientOrderId = `aitrader-${decisionId}`;
+    let journalAttemptId: string;
+    try {
+      journalAttemptId = await appendRequiredEntryPrebroadcast({
+        bot,
+        decisionId,
+        side,
+        clientOrderId,
+        sizeBase: n.sizeBase,
+      });
+    } catch {
+      const line = "[AiTraderExecutionJournal] required pre-broadcast append failed action=entry event=prebroadcast_authorized — live entry refused";
+      console.warn(line);
+      appendTelemetry(line);
+      await storage.updateAiTraderDecision(decisionId, { outcome: "aborted_order" });
+      await storage.updateAiTraderBot(bot.id, { status: "idle" });
+      return {
+        ok: false,
+        reason: "journal_unavailable",
+        detail: "execution journal unavailable before broadcast — entry refused",
+      };
+    }
+
+    let orderResult: OrderResult;
     try {
       orderResult = await adapter.placeMarketOrder({
         ...keyTrio,
         internalSymbol: bot.market,
         side,
         sizeBase: n.sizeBase,
-        clientOrderId: `aitrader-${decisionId}`,
+        clientOrderId,
         subaccountId,
         maxSlippagePct: ENTRY_MAX_SLIPPAGE_PCT,
         leverage: n.leverage,
@@ -592,6 +635,19 @@ async function executeLiveEntry(
     } catch (err) {
       orderResult = { success: false, status: "rejected" as const, error: err instanceof Error ? err.message : String(err) };
     }
+    const entryJournal = journalBase(bot, decisionId);
+    safeAppendExecutionEvents([
+      orderResultEvent({
+        base: entryJournal,
+        attemptId: journalAttemptId,
+        action: "entry",
+        cause: "decision",
+        order: orderResult,
+        clientOrderId,
+        failureCode: orderResult.success ? null : isUnconfirmedLandingVerdict(orderResult.error)
+          ? "venue_unconfirmed" : orderResult.status === "rejected" ? "venue_rejected" : "venue_error",
+      }),
+    ]);
 
     if (!orderResult.success) {
       // Landing-verification timeout: the order tx was BROADCAST and may still
@@ -662,6 +718,11 @@ async function executeLiveEntry(
       if (confirmedFlat) {
         await storage.updateAiTraderDecision(decisionId, { outcome: "aborted_order" });
         await storage.updateAiTraderBot(bot.id, { status: "idle" });
+        safeAppendExecutionEvents([
+          { ...entryJournal, attemptId: journalAttemptId, action: "entry", cause: "decision",
+            eventType: "entry_terminal_no_land", side, clientOrderId,
+            failureCode: orderResult.status === "rejected" ? "venue_rejected" : "venue_error" },
+        ]);
         return { ok: false, reason: "order_failed", detail: `entry order failed cleanly (no position): ${orderResult.error ?? "unknown"}` };
       }
       // Can't prove we're flat — treat like an unconfirmed position: try to
@@ -740,6 +801,18 @@ async function executeLiveEntry(
       decisionId,
       expectedDecisionOutcome: "executed",
     });
+    safeAppendExecutionEvents([
+      { ...entryJournal, attemptId: journalAttemptId, action: "entry", cause: "decision",
+        eventType: "position_observed", side, price: confirmed.entryPrice, sizeBase: n.sizeBase },
+      { ...entryJournal, attemptId: journalAttemptId, action: "entry", cause: "decision",
+        eventType: "fill_observed", side, clientOrderId, venueOrderId: orderResult.orderId ?? null,
+        venueStatus: orderResult.status, price: entryPrice, sizeBase: orderResult.fillSize ?? n.sizeBase,
+        fee: orderResult.fee ?? null },
+      { ...entryJournal, attemptId: journalAttemptId, action: "entry", cause: "decision",
+        eventType: "bracket_verified", side },
+      { ...entryJournal, attemptId: journalAttemptId, action: "entry", cause: "decision",
+        eventType: "entry_terminal_open", side, price: entryPrice, sizeBase: n.sizeBase },
+    ]);
     await sendTradeNotification(bot.walletAddress, {
       type: "trade_executed",
       botName: `AI Trader ${bot.market}`,
@@ -850,19 +923,38 @@ async function emergencyCloseAndPause(args: {
 
   let closeFill: number | undefined;
   let closeSucceeded = false;
+  let closeOrder: OrderResult | null = null;
+  const closeAttemptId = newMutationAttemptId("close", decisionId);
+  const closeJournal = journalBase(bot, decisionId);
+  const closeClientOrderId = `aitrader-close-${decisionId}`;
   try {
     const closeResult = await adapter.closePosition({
       ...keyTrio,
       internalSymbol: bot.market,
       subaccountId,
-      clientOrderId: `aitrader-close-${decisionId}`,
+      clientOrderId: closeClientOrderId,
       maxSlippagePct: ENTRY_MAX_SLIPPAGE_PCT,
     });
     closeSucceeded = isTerminalCloseResult(closeResult);
     closeFill = closeResult.fillPrice;
+    closeOrder = closeResult;
   } catch (err) {
     console.error(`[AiTrader] Emergency close failed for bot ${bot.id.slice(0, 8)} (${pauseReason}):`, err);
   }
+  safeAppendExecutionEvents([
+    { ...closeJournal, attemptId: closeAttemptId, action: "close", cause: "emergency_unwind",
+      eventType: "attempt_claimed", side, recordedAfterBroadcast: true },
+    { ...closeJournal, attemptId: closeAttemptId, action: "close", cause: "emergency_unwind",
+      eventType: "broadcast_attempted", side, clientOrderId: closeClientOrderId, recordedAfterBroadcast: true },
+    orderResultEvent({ base: closeJournal, attemptId: closeAttemptId, action: "close", cause: "emergency_unwind",
+      order: closeOrder, clientOrderId: closeClientOrderId, recordedAfterBroadcast: true,
+      failureCode: closeOrder ? null : "venue_error" }),
+    { ...closeJournal, attemptId: closeAttemptId, action: "close", cause: "emergency_unwind",
+      eventType: closeSucceeded ? "close_terminal_confirmed" : "close_terminal_failed", side,
+      clientOrderId: closeClientOrderId, venueOrderId: closeOrder?.orderId ?? null,
+      venueStatus: closeOrder?.status ?? "unknown", price: closeFill ?? null,
+      failureCode: closeSucceeded ? null : "venue_error", recordedAfterBroadcast: true },
+  ]);
 
   await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason });
 

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, decimal, timestamp, boolean, jsonb, unique, uniqueIndex, json, index, serial, real, check } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, smallint, decimal, timestamp, boolean, jsonb, unique, uniqueIndex, json, index, serial, real, check } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -2185,6 +2185,63 @@ export const aiTraderDecisions = pgTable("ai_trader_decisions", {
   index("idx_ai_trader_decisions_bot_decided").on(table.botId, table.decidedAt.desc()),
 ]);
 
+// Append-only execution evidence. Bot/decision identifiers are snapshots rather
+// than foreign keys: deleting a mutable parent must never cascade venue truth.
+export const aiTraderExecutionEvents = pgTable("ai_trader_execution_events", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  eventIdentity: text("event_identity").notNull().unique(),
+  attemptId: text("attempt_id").notNull(),
+  botId: varchar("bot_id").notNull(),
+  decisionId: varchar("decision_id"),
+  action: text("action").notNull(),
+  cause: text("cause").notNull(),
+  eventType: text("event_type").notNull(),
+  phase: smallint("phase"),
+  protocol: text("protocol").notNull(),
+  accountScope: text("account_scope").notNull(),
+  accountRef: text("account_ref"),
+  market: text("market").notNull(),
+  side: text("side"),
+  clientOrderId: text("client_order_id"),
+  venueOrderId: text("venue_order_id"),
+  transactionSignature: text("transaction_signature"),
+  venueStatus: text("venue_status"),
+  price: decimal("price", { precision: 30, scale: 12 }),
+  sizeBase: decimal("size_base", { precision: 30, scale: 12 }),
+  fee: decimal("fee", { precision: 30, scale: 12 }),
+  realizedPnl: decimal("realized_pnl", { precision: 30, scale: 12 }),
+  failureCode: text("failure_code"),
+  recordedAfterBroadcast: boolean("recorded_after_broadcast").notNull().default(false),
+  observedAt: timestamp("observed_at").notNull(),
+  recordedAt: timestamp("recorded_at").notNull().defaultNow(),
+}, (table) => [
+  index("idx_ai_trader_execution_attempt").on(table.attemptId, table.phase, table.observedAt, table.id),
+  index("idx_ai_trader_execution_bot").on(table.botId, table.recordedAt.desc(), table.id.desc()),
+  index("idx_ai_trader_execution_decision").on(table.decisionId, table.recordedAt, table.id),
+  check("ai_trader_execution_action_check", sql`${table.action} IN ('entry','close','cancel')`),
+  check("ai_trader_execution_cause_check", sql`${table.cause} IN ('decision','paper','emergency_unwind','protective','user_requested','venue_detected','unconfirmed_orphan','startup_orphan','pre_close_bracket','survivor_leg')`),
+  check("ai_trader_execution_account_scope_check", sql`${table.accountScope} IN ('main','bot_subaccount','unknown')`),
+  check("ai_trader_execution_side_check", sql`${table.side} IS NULL OR ${table.side} IN ('long','short')`),
+  check("ai_trader_execution_status_check", sql`${table.venueStatus} IS NULL OR ${table.venueStatus} IN ('submitted','acknowledged','filled','partial_fill','canceled','expired','rejected','unknown')`),
+  check("ai_trader_execution_failure_check", sql`${table.failureCode} IS NULL OR ${table.failureCode} IN ('venue_rejected','venue_unconfirmed','venue_error','identity_mismatch','signing_unavailable','position_not_confirmed','bracket_failed','unknown')`),
+  check("ai_trader_execution_phase_check", sql`(
+    (${table.eventType} = 'attempt_claimed' AND ${table.phase} = 0) OR
+    (${table.eventType} = 'prebroadcast_authorized' AND ${table.action} = 'entry' AND ${table.phase} = 10) OR
+    (${table.eventType} = 'broadcast_attempted' AND ${table.action} IN ('close','cancel') AND ${table.phase} = 10) OR
+    (${table.eventType} = 'broadcast_result' AND ${table.phase} = 20) OR
+    (${table.eventType} IN ('position_observed','fill_observed','bracket_verified','reconciliation_observed') AND ${table.phase} IS NULL) OR
+    (${table.eventType} = 'entry_terminal_open' AND ${table.action} = 'entry' AND ${table.phase} = 90) OR
+    (${table.eventType} = 'entry_terminal_no_land' AND ${table.action} = 'entry' AND ${table.phase} = 90) OR
+    (${table.eventType} = 'entry_terminal_unwound' AND ${table.action} = 'entry' AND ${table.phase} = 90) OR
+    (${table.eventType} IN ('close_terminal_confirmed','close_terminal_failed') AND ${table.action} = 'close' AND ${table.phase} = 90) OR
+    (${table.eventType} IN ('cancel_terminal_confirmed','cancel_terminal_failed') AND ${table.action} = 'cancel' AND ${table.phase} = 90)
+  )`),
+  check("ai_trader_execution_size_check", sql`${table.sizeBase} IS NULL OR (${table.sizeBase} >= 0 AND ${table.sizeBase} <> 'NaN'::numeric)`),
+  check("ai_trader_execution_fee_check", sql`${table.fee} IS NULL OR (${table.fee} >= 0 AND ${table.fee} <> 'NaN'::numeric)`),
+  check("ai_trader_execution_price_check", sql`${table.price} IS NULL OR ${table.price} <> 'NaN'::numeric`),
+  check("ai_trader_execution_pnl_check", sql`${table.realizedPnl} IS NULL OR ${table.realizedPnl} <> 'NaN'::numeric`),
+]);
+
 export const insertAiTraderBotSchema = createInsertSchema(aiTraderBots).omit({
   id: true,
   createdAt: true,
@@ -2234,6 +2291,7 @@ export const insertAiTraderDecisionSchema = createInsertSchema(aiTraderDecisions
 });
 export type AiTraderDecision = typeof aiTraderDecisions.$inferSelect;
 export type InsertAiTraderDecision = z.infer<typeof insertAiTraderDecisionSchema>;
+export type AiTraderExecutionEvent = typeof aiTraderExecutionEvents.$inferSelect;
 
 // COT-A: CFTC Bitcoin Legacy futures-only COT positioning cache.
 // One row per weekly CFTC release. Single global BTC signal serving the whole fleet.
