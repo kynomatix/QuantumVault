@@ -1815,7 +1815,11 @@ export function registerAiTraderRoutes(app: Express): void {
         limit,
         ...(before && beforeId ? { before, beforeId } : {}),
       });
-      res.json(page);
+      // Keep the transport allowlist at the route boundary as well as in the
+      // storage reader. A future reader refactor must not make the public
+      // account reference reachable through this endpoint.
+      const events = page.events.map(({ accountRef: _accountRef, ...event }: any) => event);
+      res.json({ ...page, events });
     } catch (err) {
       console.error("[AiTrader] execution journal read error:", err);
       res.status(500).json({ error: "Internal server error" });

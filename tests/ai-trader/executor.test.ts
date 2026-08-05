@@ -885,6 +885,14 @@ describe("live execution — failure handling (fail closed)", () => {
 
     expect(result).toMatchObject({ ok: false, reason: "bracket_failed" });
     expect((adapter.closePosition as any)).toHaveBeenCalledTimes(1);
+    expect(safeJournalMock).toHaveBeenCalledWith(expect.arrayContaining([
+      expect.objectContaining({
+        attemptId: "entry:d-journal-emergency",
+        action: "entry",
+        eventType: "entry_terminal_unwound",
+        failureCode: "bracket_failed",
+      }),
+    ]));
   });
 
   it("clean order rejection (confirmed flat) → aborted_order, bot idle, NO pause, NO close", async () => {

@@ -504,7 +504,8 @@ describe("AI Trader execution journal route", () => {
 
     getBotMock.mockResolvedValueOnce(journalBot("owner-wallet"));
     readJournalMock.mockResolvedValueOnce({
-      events: [{ id: "event-1", botId: "bot-route-journal", market: "SOL-PERP", eventType: "attempt_claimed" }],
+      events: [{ id: "event-1", botId: "bot-route-journal", market: "SOL-PERP", eventType: "attempt_claimed",
+        accountRef: "public-subaccount-that-must-not-cross-the-route-boundary" }],
       nextCursor: null,
     });
     const allowed = await invoke(built.routes, key, {

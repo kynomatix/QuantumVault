@@ -976,6 +976,16 @@ async function emergencyCloseAndPause(args: {
     await storage.updateAiTraderDecision(decisionId, { outcome: "aborted_order" });
   }
 
+  if (closeSucceeded) {
+    const entryJournal = journalBase(bot, decisionId);
+    safeAppendExecutionEvents([
+      { ...entryJournal, attemptId: entryAttemptId(decisionId), action: "entry", cause: "decision",
+        eventType: "entry_terminal_unwound", side, price: closeFill ?? null,
+        failureCode: pauseReason === "bracket_failed" ? "bracket_failed" : "position_not_confirmed",
+        recordedAfterBroadcast: true },
+    ]);
+  }
+
   await sendTradeNotification(bot.walletAddress, {
     type: "trade_failed",
     botName: `AI Trader ${bot.market}`,
