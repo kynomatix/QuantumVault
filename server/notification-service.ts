@@ -190,12 +190,14 @@ export interface BorrowHealthNotification {
   scopeLabel: string;
   /** Collateral asset label, e.g. "INF" (escaped before send). */
   collateralLabel: string;
+  /** Selects truthful managed-loop copy without changing recipient or delivery policy. */
+  context?: 'borrow' | 'managed_loop';
   band: BorrowHealthAlertBand;
   healthFactor: number | null;
   ltv: number | null;
 }
 
-function formatBorrowHealthMessage(n: BorrowHealthNotification): { title: string; body: string } {
+export function formatBorrowHealthMessage(n: BorrowHealthNotification): { title: string; body: string } {
   const scope = escapeTelegramHtml(n.scopeLabel);
   const collateral = escapeTelegramHtml(n.collateralLabel);
   const hf =
@@ -225,6 +227,11 @@ function formatBorrowHealthMessage(n: BorrowHealthNotification): { title: string
       break;
     case 'unavailable':
     default:
+      if (n.context === 'managed_loop') {
+        title = 'Loop Safety Check Unreadable';
+        lead = `Automatic loop safety could not assess your ${scope} ${collateral} position this cycle. No automatic safety adjustment was attempted from this unreadable observation. Monitoring will continue; please review the position manually.`;
+        break;
+      }
       title = '⚪ Loan Health Unreadable';
       lead = `We could not read the health of your ${scope} loan (${collateral}) this cycle. We will keep checking — please review it when you can.`;
       break;
