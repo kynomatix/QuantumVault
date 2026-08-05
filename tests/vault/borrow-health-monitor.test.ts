@@ -12,6 +12,7 @@ import type {
   PerBotPositionHealth,
 } from "../../server/vault/borrow-health";
 import type { BorrowPosition } from "@shared/schema";
+import type { BorrowHealthNotification } from "../../server/notification-service";
 
 const T0 = new Date("2026-06-30T00:00:00.000Z");
 const ms = (base: Date, deltaMs: number) => new Date(base.getTime() + deltaMs);
@@ -439,6 +440,169 @@ describe("runBorrowHealthScan (orchestrator)", () => {
       expect(made.rowsById.get("loop-open")!.lastObservedHealthBand).toBe(band);
     },
   );
+
+  it("sends one managed-loop unavailable attention alert and suppresses duplicates", async () => {
+    const loop = row({
+      id: "loop-unavailable",
+      kind: "loop",
+      status: "open",
+    } as Partial<BorrowPosition>);
+    let attempts = 0;
+    const contexts: Array<BorrowHealthNotification["context"]> = [];
+    const made = statefulDeps({
+      rows: [loop],
+      healthByRowId: { "loop-unavailable": health("unavailable", null) },
+      notify: (notification) => {
+        attempts++;
+        contexts.push(notification.context);
+        return "sent";
+      },
+    });
+
+    const first = await runBorrowHealthScan(made.deps);
+    const second = await runBorrowHealthScan(made.deps);
+
+    expect(first).toMatchObject({ scanned: 1, alerted: 1, failed: 0 });
+    expect(second).toMatchObject({ scanned: 1, alerted: 0, failed: 0 });
+    expect(first.loopObservations).toHaveLength(1);
+    expect(second.loopObservations).toHaveLength(1);
+    expect(attempts).toBe(1);
+    expect(contexts).toEqual(["managed_loop"]);
+    expect(made.rowsById.get("loop-unavailable")!.lastHealthAlertBand).toBe("unavailable");
+  });
+
+  it("retries managed-loop unavailable attention after a transient delivery failure", async () => {
+    const loop = row({
+      id: "loop-retry",
+      kind: "loop",
+      status: "open",
+    } as Partial<BorrowPosition>);
+    let attempts = 0;
+    const made = statefulDeps({
+      rows: [loop],
+      healthByRowId: { "loop-retry": health("unavailable", null) },
+      notify: () => (++attempts === 1 ? "failed" : "sent"),
+    });
+
+    const first = await runBorrowHealthScan(made.deps);
+    expect(first.alerted).toBe(0);
+    expect(first.loopObservations).toHaveLength(1);
+    expect(made.rowsById.get("loop-retry")!.lastHealthAlertBand ?? null).toBeNull();
+
+    const second = await runBorrowHealthScan(made.deps);
+    expect(second.alerted).toBe(1);
+    expect(second.loopObservations).toHaveLength(1);
+    expect(attempts).toBe(2);
+    expect(made.rowsById.get("loop-retry")!.lastHealthAlertBand).toBe("unavailable");
+  });
+
+  it("keeps existing skipped-delivery semantics for managed-loop unavailable attention", async () => {
+    const loop = row({
+      id: "loop-no-recipient",
+      kind: "loop",
+      status: "open",
+    } as Partial<BorrowPosition>);
+    let attempts = 0;
+    const made = statefulDeps({
+      rows: [loop],
+      healthByRowId: { "loop-no-recipient": health("unavailable", null) },
+      notify: () => {
+        attempts++;
+        return "skipped";
+      },
+    });
+
+    const result = await runBorrowHealthScan(made.deps);
+    expect(result).toMatchObject({ scanned: 1, alerted: 0, failed: 0 });
+    expect(result.loopObservations).toHaveLength(1);
+    expect(attempts).toBe(1);
+    expect(made.rowsById.get("loop-no-recipient")!.lastHealthAlertBand).toBe("unavailable");
+  });
+
+  it("holds an unavailable open-loop baseline during readable recovery under four hours", async () => {
+    const loop = row({
+      id: "loop-recovering",
+      kind: "loop",
+      status: "open",
+      lastHealthAlertBand: "unavailable",
+      lastHealthAlertAt: T0,
+      lastObservedHealthBand: "urgent",
+      healthBandChangedAt: T0,
+    } as Partial<BorrowPosition>);
+    let attempts = 0;
+    const made = statefulDeps({
+      rows: [loop],
+      healthByRowId: { "loop-recovering": health("urgent", 1.2) },
+      notify: () => {
+        attempts++;
+        return "sent";
+      },
+      now: ms(T0, RECOVER_HYSTERESIS_FROM_UNAVAILABLE_MS - 1),
+    });
+
+    const result = await runBorrowHealthScan(made.deps);
+    expect(result.alerted).toBe(0);
+    expect(attempts).toBe(0);
+    expect(made.rowsById.get("loop-recovering")!.lastHealthAlertBand).toBe("unavailable");
+  });
+
+  it("silently clears the unavailable baseline after four readable hours and re-alerts on a later failure", async () => {
+    const loop = row({
+      id: "loop-recovered",
+      kind: "loop",
+      status: "open",
+      lastHealthAlertBand: "unavailable",
+      lastHealthAlertAt: T0,
+      lastObservedHealthBand: "urgent",
+      healthBandChangedAt: T0,
+    } as Partial<BorrowPosition>);
+    let attempts = 0;
+    const spec = {
+      rows: [loop],
+      healthByRowId: { "loop-recovered": health("urgent", 1.2) },
+      notify: (_notification: BorrowHealthNotification) => {
+        attempts++;
+        return "sent" as const;
+      },
+      now: ms(T0, RECOVER_HYSTERESIS_FROM_UNAVAILABLE_MS),
+    };
+    const made = statefulDeps(spec);
+
+    const recovered = await runBorrowHealthScan(made.deps);
+    expect(recovered.alerted).toBe(0);
+    expect(attempts).toBe(0);
+    expect(made.rowsById.get("loop-recovered")!.lastHealthAlertBand).toBe("urgent");
+
+    spec.healthByRowId["loop-recovered"] = health("unavailable", null);
+    spec.now = ms(T0, RECOVER_HYSTERESIS_FROM_UNAVAILABLE_MS + 60_000);
+    const failedRead = await runBorrowHealthScan(made.deps);
+    expect(failedRead.alerted).toBe(1);
+    expect(failedRead.loopObservations).toHaveLength(1);
+    expect(attempts).toBe(1);
+    expect(made.rowsById.get("loop-recovered")!.lastHealthAlertBand).toBe("unavailable");
+  });
+
+  it("keeps the generic unavailable safety net for a pending loop row", async () => {
+    const pending = row({
+      id: "loop-pending-unavailable",
+      kind: "loop",
+      status: "pending",
+    } as Partial<BorrowPosition>);
+    const contexts: Array<BorrowHealthNotification["context"]> = [];
+    const made = statefulDeps({
+      rows: [pending],
+      healthByRowId: { "loop-pending-unavailable": health("unavailable", null) },
+      notify: (notification) => {
+        contexts.push(notification.context);
+        return "sent";
+      },
+    });
+
+    const result = await runBorrowHealthScan(made.deps);
+    expect(result).toEqual({ scanned: 1, alerted: 1, failed: 0, loopObservations: [] });
+    expect(contexts).toEqual(["borrow"]);
+    expect(made.rowsById.get("loop-pending-unavailable")!.lastHealthAlertBand).toBe("unavailable");
+  });
 
   it("keeps the classic alert safety net for a pending loop row that neither reflex covers", async () => {
     const pending = row({
