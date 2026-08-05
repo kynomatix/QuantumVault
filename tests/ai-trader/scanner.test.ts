@@ -36,6 +36,7 @@ import type { OHLCV } from "../../server/lab/engine";
 const fetchOHLCVMock = vi.fn<[string, string, string, string], Promise<OHLCV[]>>();
 vi.mock("../../server/lab/datafeed", () => ({
   fetchOHLCV: (...a: unknown[]) => fetchOHLCVMock(...(a as Parameters<typeof fetchOHLCVMock>)),
+  setDatafeedIncidentReporter: vi.fn(),
 }));
 
 vi.mock("../../server/ai-trader/context-builder", () => ({
@@ -199,6 +200,9 @@ import {
   getBoundaryTfs,
   evaluateCandidate,
   SCANNER_FEED_EXCLUDE,
+  buildScannerUniverse,
+  getScannerStatus,
+  stopScanner,
 } from "../../server/ai-trader/scanner";
 
 // ─── Test constants ───────────────────────────────────────────────────────────
@@ -518,5 +522,41 @@ describe("excluded symbols — never forwarded to fetchOHLCV", () => {
     }
     // Only live markets remain.
     expect(filteredUniverse).toEqual(["SOL-PERP", "BTC-PERP"]);
+  });
+});
+
+describe("multiplier quarantine — real universe-build seam", () => {
+  it("removes all six before fetch and reports a sorted status set outside attempt accounting", async () => {
+    stopScanner();
+    const multiplierMarkets = [
+      "1MBONK-PERP",
+      "1MPEPE-PERP",
+      "1KWEN-PERP",
+      "1KMEW-PERP",
+      "1KPUMP-PERP",
+      "1KMON-PERP",
+    ];
+    getAdapterMock.mockReturnValue({
+      getMarkets: vi.fn(async () => [
+        ...multiplierMarkets.map((internalSymbol) => ({ internalSymbol, isActive: true })),
+        { internalSymbol: "BONK-PERP", isActive: true },
+        { internalSymbol: "PEPE-PERP", isActive: true },
+      ]),
+    });
+    fetchOHLCVMock.mockResolvedValue([]);
+
+    const universe = await buildScannerUniverse("pacifica");
+
+    expect(universe).toEqual(["BONK-PERP", "PEPE-PERP"]);
+    expect(fetchOHLCVMock).not.toHaveBeenCalled();
+    for (const market of universe) {
+      await fetchOHLCVMock(market, "15m", "pacifica", "test");
+    }
+    expect(fetchOHLCVMock.mock.calls.map(([market]) => market)).toEqual(["BONK-PERP", "PEPE-PERP"]);
+    expect(getScannerStatus().multiplierQuarantinedMarkets).toEqual([...multiplierMarkets].sort());
+    expect(getScannerStatus().lastBoundaryStats).toBeNull();
+
+    stopScanner();
+    expect(getScannerStatus().multiplierQuarantinedMarkets).toEqual([]);
   });
 });

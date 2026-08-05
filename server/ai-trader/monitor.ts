@@ -75,6 +75,8 @@ import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import type { ProtocolAdapter } from "../protocol/adapter";
 import type { ProtocolPosition, TradeRecord } from "../protocol/protocol-types";
 import { isTerminalCloseResult } from "./close-truth";
+import { isAiTraderMarketAdmitted, SCANNER_MARKET_UNADMITTED_REASON } from "./market-admission";
+import { isMultiplierMarketQuarantined, MULTIPLIER_UNQUALIFIED_REASON } from "./multiplier-market-quarantine";
 
 // --- Constants ---------------------------------------------------------------------
 
@@ -1826,10 +1828,24 @@ export async function runAutoCycle(botId: string): Promise<void> {
       // previous pick / placeholder. Apply G6 to each candidate's own TF.
       // Freshness: drop candidates older than the one-boundary lag allows (a crashed
       // sweep leaves the old shortlist in place — never spend LLM calls on it).
-      const eligible = shortlist.filter((c) =>
-        Date.now() - c.evaluatedAt <= SCANNER_CANDIDATE_MAX_AGE_MS &&
-        checkCooldownAndCaps(c.timeframe, recentClosed, Date.now()).ok
-      );
+      const eligible = shortlist.filter((c) => {
+        if (Date.now() - c.evaluatedAt > SCANNER_CANDIDATE_MAX_AGE_MS) return false;
+        if (isMultiplierMarketQuarantined(c.market)) {
+          console.warn(
+            "[AiTraderMonitor] scanner: " + MULTIPLIER_UNQUALIFIED_REASON
+              + " market=" + c.market + " — skipped before registry admission or bot mutation"
+          );
+          return false;
+        }
+        if (!isAiTraderMarketAdmitted(c.market)) {
+          console.warn(
+            "[AiTraderMonitor] scanner: " + SCANNER_MARKET_UNADMITTED_REASON
+              + " market=" + c.market + " — skipped before bot mutation"
+          );
+          return false;
+        }
+        return checkCooldownAndCaps(c.timeframe, recentClosed, Date.now()).ok;
+      });
       if (eligible.length === 0) {
         if (_obs) _obs.exitReason = "gate_skip";
         console.log(`[AiTraderMonitor] scanner: all candidates G6-capped or stale for bot ${bot.id.slice(0, 8)} — rescheduling`);

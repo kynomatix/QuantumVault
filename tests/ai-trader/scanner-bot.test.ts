@@ -89,6 +89,12 @@ vi.mock("../../server/ai-trader/scanner", () => ({
   getScannerShortlist: (...a: unknown[]) => getScannerShortlistMock(...a),
 }));
 
+const isMarketAdmittedMock = vi.fn(() => true);
+vi.mock("../../server/ai-trader/market-admission", () => ({
+  isAiTraderMarketAdmitted: (...a: unknown[]) => isMarketAdmittedMock(...a),
+  SCANNER_MARKET_UNADMITTED_REASON: "scanner_market_unadmitted",
+}));
+
 // --- Fixtures ─────────────────────────────────────────────────────────────────
 
 const AGENT_PUBKEY = "AgEntPubKey1111111111111111111111111111111";
@@ -189,6 +195,7 @@ const botUpdates = () => updateBotMock.mock.calls.map((c) => c[1]);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  isMarketAdmittedMock.mockReturnValue(true);
   computePolicyHmacMock.mockReturnValue("hmac-new-market");
   vi.useFakeTimers();
 });
@@ -432,6 +439,22 @@ describe("scanner bot: 2-call LLM cap and candidate retry", () => {
 });
 
 describe("scanner bot: happy path — market pick", () => {
+  it("skips an unadmitted candidate before bot mutation, LLM, decision, or execution", async () => {
+    armScannerBot();
+    const candidate = makeCandidate({ market: "UNKNOWN-PERP" });
+    getScannerShortlistMock.mockReturnValue([candidate]);
+    isMarketAdmittedMock.mockReturnValue(false);
+
+    const { runAutoCycle } = await importMonitor();
+    await runAutoCycle("bot-scanner-2222");
+
+    expect(isMarketAdmittedMock).toHaveBeenCalledWith("UNKNOWN-PERP");
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(buildContextMock).not.toHaveBeenCalled();
+    expect(runDecisionMock).not.toHaveBeenCalled();
+    expect(executeDecisionMock).not.toHaveBeenCalled();
+  });
+
   it("persists picked market+TF+policyHmac BEFORE status→analyzing", async () => {
     armScannerBot();
     const candidate = makeCandidate({ market: "BTC-PERP", timeframe: "15m" });

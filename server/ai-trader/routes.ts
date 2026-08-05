@@ -52,6 +52,8 @@ import { sanitizeGraduationCriteria, canGoLive } from "./graduation";
 import { getScannerStatus, getScannerShortlist } from "./scanner";
 import type { ClampedDecision } from "./guardrails";
 import { computeConfidenceCalibration } from "./calibration";
+import { isAiTraderMarketAdmitted, SCANNER_MARKET_UNADMITTED_REASON } from "./market-admission";
+import { isMultiplierMarketQuarantined, MULTIPLIER_UNQUALIFIED_REASON } from "./multiplier-market-quarantine";
 
 // --- Auth (duplicated verbatim from server/routes.ts requireWallet) --------------------
 // Kept as an exact copy rather than an import: server/routes.ts defines it as a
@@ -815,7 +817,30 @@ export function registerAiTraderRoutes(app: Express): void {
               "The scanner hasn't found any fresh candidates yet — it sweeps all markets every 15 minutes. Try again in a few minutes.",
           });
         }
-        const candidate = fresh[0];
+        const multiplierSafe = fresh.filter(
+          (entry) => !isMultiplierMarketQuarantined(entry.market),
+        );
+        if (multiplierSafe.length === 0) {
+          console.warn(
+            "[AiTrader] manual analyze: " + MULTIPLIER_UNQUALIFIED_REASON
+              + " — refusing " + fresh.length + " fresh candidate(s) before registry admission or bot mutation"
+          );
+          return res.status(409).json({
+            error: MULTIPLIER_UNQUALIFIED_REASON,
+            detail: "Fresh scanner candidates use an unqualified multiplier market. No bot state was changed.",
+          });
+        }
+        const candidate = multiplierSafe.find((entry) => isAiTraderMarketAdmitted(entry.market));
+        if (!candidate) {
+          console.warn(
+            "[AiTrader] manual analyze: " + SCANNER_MARKET_UNADMITTED_REASON
+              + " — refusing " + fresh.length + " fresh candidate(s) before bot mutation"
+          );
+          return res.status(409).json({
+            error: "scanner_no_candidates",
+            detail: "Fresh scanner candidates are not admitted by the current exact AI Trader market registry. No bot state was changed.",
+          });
+        }
         // Persist pick + recomputed policyHmac BEFORE building context, exactly like
         // the monitor path (executor verifies policyHmac on execute).
         const umkForPick = await getInteractiveUmk(req.walletAddress, res);

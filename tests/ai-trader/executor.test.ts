@@ -18,6 +18,7 @@ const getRecentClosedMock = vi.fn();
 const updateBotMock = vi.fn();
 const updateDecisionMock = vi.fn();
 const getAiTraderBotMock = vi.fn();
+const isMarketAdmittedMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
     getWallet: (...a: unknown[]) => getWalletMock(...a),
@@ -26,6 +27,11 @@ vi.mock("../../server/storage", () => ({
     updateAiTraderDecision: (...a: unknown[]) => updateDecisionMock(...a),
     getAiTraderBot: (...a: unknown[]) => getAiTraderBotMock(...a),
   },
+}));
+
+vi.mock("../../server/ai-trader/market-admission", () => ({
+  isAiTraderMarketAdmitted: (...a: unknown[]) => isMarketAdmittedMock(...a),
+  SCANNER_MARKET_UNADMITTED_REASON: "scanner_market_unadmitted",
 }));
 
 const getUmkMock = vi.fn();
@@ -167,6 +173,7 @@ beforeEach(() => {
     m.mockReset();
   }
   getRecentClosedMock.mockResolvedValue([]);
+  isMarketAdmittedMock.mockReturnValue(true);
   updateBotMock.mockResolvedValue({});
   updateDecisionMock.mockResolvedValue({});
   notifyMock.mockResolvedValue(true);
@@ -242,6 +249,27 @@ describe("executeDecision — entry-shape refusals", () => {
       });
       expect(r).toMatchObject({ ok: false, reason: "bot_busy" });
     }
+  });
+
+  it("refuses an unadmitted scanner-source market before G6, paper fill, or venue work", async () => {
+    isMarketAdmittedMock.mockReturnValue(false);
+    const adapter = makeAdapter();
+    const { executeDecision } = await importExecutor();
+    const r = await executeDecision({
+      bot: makeBot({ marketSource: "scanner", market: "UNKNOWN-PERP", paperMode: false }),
+      decisionId: "d-scanner-unadmitted",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+
+    expect(r).toMatchObject({ ok: false, reason: "scanner_market_unadmitted" });
+    expect(isMarketAdmittedMock).toHaveBeenCalledWith("UNKNOWN-PERP");
+    expect(getRecentClosedMock).not.toHaveBeenCalled();
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect((adapter.setLeverage as any)).not.toHaveBeenCalled();
+    expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
   });
 
   it("refuses a ClampedDecision with missing/invalid numeric fields", async () => {
