@@ -162,7 +162,7 @@ export function buildLoopSafetyInputs(
 
     if (health.status !== "available") {
       // Fail closed: no live read → no action. The monitor's 'unavailable'
-      // band alert already tells the owner; acting blind could size wrong.
+      // managed-loop attention path tells the owner; acting blind could size wrong.
       skipped.push({ rowId: row.id, reason: `health unavailable: ${health.reason ?? "unknown"}` });
       continue;
     }
