@@ -1579,10 +1579,18 @@ import { runFyMaturityScan } from "./vault/fixed-yield/fy-maturity-notify";
 import { LOOP_VAULT_ALLOWLIST, LOOP_RISK_POLICY, LOOP_ALLOCATION_POLICY, computeLoopTargetLeverage, maxLeverageForHealthBuffer } from "./vault/loop/loop-risk-policy";
 import { executeRepayFromWalletUsdc, executeDeleverageRepay, executeRepayFromWalletToken, executeRepayFromVaultSavings, executeRepayFromUsdcPool } from "./vault/jupiter-lend-repay-multihop";
 import { runBorrowHealthScan } from "./vault/borrow-health-monitor";
-import { runLoopSafetyTick, buildLoopSafetyDeps } from "./vault/loop/loop-safety-tick";
+import {
+  runLoopSafetyTick,
+  buildLoopSafetyDeps,
+  buildLoopSafetyHeartbeatCounts,
+} from "./vault/loop/loop-safety-tick";
 import { getVenueSolBorrowRates } from "./vault/loop/venue-watch";
 import { runLoopAllocationTick, buildLoopAllocationDeps } from "./vault/loop/loop-allocation-tick";
-import { computeTickCoverage, summarizeDecisionsForGate } from "./vault/loop/loop-status";
+import {
+  computeTickCoverage,
+  summarizeDecisionsForGate,
+  summarizeSafetyTickAccounting,
+} from "./vault/loop/loop-status";
 import { getFreshLoopRates, pickBestLoopVault, sampleAndPersistLoopRates, LOOP_RATE_REGISTRY, netCarryAt } from "./vault/loop/loop-rate-oracle";
 import { planPerbotCarve, runPerbotCarveOpen, runPerbotUnwindClose, selectBlockingBotPositions, resolveDisplayPrincipalRaw, runPerbotCollateralTopUp, runPerbotGrowLoan, runPerbotRemoveCollateral } from "./vault/jupiter-lend-perbot-carve";
 import { computePerBotPositionHealth, summarizeBotBorrowHealth, derivePerbotTopUpSuggestion, derivePerbotRemovableSpare, defaultRowHealthDeps, BAND_SEVERITY } from "./vault/borrow-health";
@@ -6124,7 +6132,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     borrowHealthScanInFlight = true;
     (async () => {
       const scan = await runBorrowHealthScan();
-      let safetyTickResult: { acted: number; failed: number } | null = null;
+      let safetyTickResult: Awaited<ReturnType<typeof runLoopSafetyTick>> | null = null;
       if (scan.loopObservations.length > 0) {
         safetyTickResult = await runLoopSafetyTick(scan.loopObservations, loopSafetyDeps);
       }
@@ -6133,9 +6141,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // Fail-soft — telemetry must never break the reflex.
       await storage.insertLoopTickHeartbeat({
         tick: "safety",
-        evaluated: scan.loopObservations.length,
-        acted: safetyTickResult?.acted ?? 0,
-        failed: safetyTickResult?.failed ?? 0,
+        ...buildLoopSafetyHeartbeatCounts(
+          scan.loopObservations.length,
+          safetyTickResult,
+        ),
       }).catch((e) => console.warn('[LoopSafetyTick] heartbeat write failed:', e instanceof Error ? e.message : e));
     })()
       .catch((e) => console.error('[BorrowHealthMonitor] scan error:', e))
@@ -24353,6 +24362,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         allowedGapMs: 5 * allocTickMs,
         now,
       });
+      // Safety-only by contract. Allocation rows intentionally leave the new
+      // accounting columns NULL and must never appear as spurious unknowns.
+      const safetyAccounting = summarizeSafetyTickAccounting(safetyBeats);
 
       const gateSummary = summarizeDecisionsForGate(decisions);
 
@@ -24413,7 +24425,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         now,
         windowHours: 24,
         ticks: {
-          safety: { intervalMs: safetyIntervalMs, ...safetyCoverage },
+          safety: {
+            intervalMs: safetyIntervalMs,
+            ...safetyCoverage,
+            accounting: safetyAccounting,
+          },
           allocation: { intervalMs: allocTickMs, ...allocationCoverage },
         },
         openLoopPositions: positions,
