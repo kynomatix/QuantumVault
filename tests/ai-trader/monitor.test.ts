@@ -1826,6 +1826,177 @@ describe("tick loop", () => {
   });
 });
 
+// --- Monitor liveness heartbeat ------------------------------------------------------
+
+describe("monitor liveness heartbeat", () => {
+  const telemetryHeartbeats = () =>
+    appendTelemetryMock.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.startsWith("[AiTraderMonitor] heartbeat "));
+  const consoleHeartbeats = () =>
+    vi.mocked(console.log).mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.startsWith("[AiTraderMonitor] heartbeat "));
+
+  async function runDegraded(runTick: () => Promise<void>): Promise<void> {
+    getActiveBotsMock.mockRejectedValue(new Error("private database detail"));
+    const pending = runTick();
+    await vi.advanceTimersByTimeAsync(9_000);
+    await pending;
+  }
+
+  it("emits the first completed tick once to both sinks with the exact safe format", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    getActiveBotsMock.mockResolvedValue([]);
+
+    await runMonitorTickOnce();
+
+    expect(consoleHeartbeats()).toHaveLength(1);
+    expect(telemetryHeartbeats()).toEqual(consoleHeartbeats());
+    expect(consoleHeartbeats()[0]).toMatch(
+      /^\[AiTraderMonitor\] heartbeat tick_completed pid=\d+ boot=[0-9a-f]{8} duration_ms=\d+ active_bots=0$/
+    );
+  });
+
+  it("classifies a caught per-bot failure as completed, never degraded", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    getActiveBotsMock.mockResolvedValue([makeBot({ id: "private-bot-id" })]);
+    getDecisionsMock.mockRejectedValue(new Error("private bot failure"));
+
+    await runMonitorTickOnce();
+
+    expect(telemetryHeartbeats()).toHaveLength(1);
+    expect(telemetryHeartbeats()[0]).toMatch(/tick_completed .* active_bots=1$/);
+    expect(telemetryHeartbeats()[0]).not.toContain("tick_degraded");
+    expect(telemetryHeartbeats()[0]).not.toContain("private-bot-id");
+    expect(telemetryHeartbeats()[0]).not.toContain("private bot failure");
+  });
+
+  it("emits degraded only after the existing three list attempts, with no error text", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+
+    await runDegraded(runMonitorTickOnce);
+
+    expect(getActiveBotsMock).toHaveBeenCalledTimes(3);
+    expect(consoleHeartbeats()).toHaveLength(1);
+    expect(telemetryHeartbeats()).toEqual(consoleHeartbeats());
+    expect(consoleHeartbeats()[0]).toMatch(
+      /^\[AiTraderMonitor\] heartbeat tick_degraded pid=\d+ boot=[0-9a-f]{8} duration_ms=9000 reason=bot_list_failed$/
+    );
+    expect(consoleHeartbeats()[0]).not.toContain("private database detail");
+  });
+
+  it("bounds completed and degraded independently and emits each again at exactly five minutes", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    getActiveBotsMock.mockResolvedValue([]);
+    await runMonitorTickOnce();
+    await runDegraded(runMonitorTickOnce);
+    expect(telemetryHeartbeats().filter((line) => line.includes("tick_completed"))).toHaveLength(1);
+    expect(telemetryHeartbeats().filter((line) => line.includes("tick_degraded"))).toHaveLength(1);
+
+    vi.setSystemTime(NOW + 4 * 60_000);
+    getActiveBotsMock.mockResolvedValue([]);
+    await runMonitorTickOnce();
+    await runDegraded(runMonitorTickOnce);
+    expect(telemetryHeartbeats().filter((line) => line.includes("tick_completed"))).toHaveLength(1);
+    expect(telemetryHeartbeats().filter((line) => line.includes("tick_degraded"))).toHaveLength(1);
+
+    vi.setSystemTime(NOW + 5 * 60_000);
+    getActiveBotsMock.mockResolvedValue([]);
+    await runMonitorTickOnce();
+    vi.setSystemTime(NOW + 5 * 60_000);
+    await runDegraded(runMonitorTickOnce);
+    expect(telemetryHeartbeats().filter((line) => line.includes("tick_completed"))).toHaveLength(2);
+    expect(telemetryHeartbeats().filter((line) => line.includes("tick_degraded"))).toHaveLength(2);
+    expect(consoleHeartbeats()).toEqual(telemetryHeartbeats());
+  });
+
+  it("emits nothing for a younger overlap and leaves the admitted tick eligible", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    const firstRead = deferred<AiTraderBot[]>();
+    getActiveBotsMock.mockImplementationOnce(() => firstRead.promise);
+
+    const firstTick = runMonitorTickOnce();
+    await vi.advanceTimersByTimeAsync(0);
+    await runMonitorTickOnce();
+
+    expect(getActiveBotsMock).toHaveBeenCalledTimes(1);
+    expect(consoleHeartbeats()).toHaveLength(0);
+    expect(telemetryHeartbeats()).toHaveLength(0);
+
+    firstRead.resolve([]);
+    await firstTick;
+    expect(consoleHeartbeats()).toHaveLength(1);
+    expect(telemetryHeartbeats()).toEqual(consoleHeartbeats());
+  });
+
+  it("does not emit when an overridden older generation settles after the replacement", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    const oldRead = deferred<AiTraderBot[]>();
+    getActiveBotsMock
+      .mockImplementationOnce(() => oldRead.promise)
+      .mockResolvedValueOnce([]);
+
+    const oldTick = runMonitorTickOnce();
+    await vi.advanceTimersByTimeAsync(0);
+    vi.setSystemTime(NOW + 121_000);
+    await runMonitorTickOnce();
+    expect(telemetryHeartbeats()).toHaveLength(1);
+
+    oldRead.resolve([]);
+    await oldTick;
+    expect(telemetryHeartbeats()).toHaveLength(1);
+    expect(consoleHeartbeats()).toEqual(telemetryHeartbeats());
+  });
+
+  it("invalidates a pre-stop tick and only a real restart resets the completed bound", async () => {
+    const { runMonitorTickOnce, startAiTraderMonitor, stopAiTraderMonitor } = await importMonitor();
+    const preStopRead = deferred<AiTraderBot[]>();
+    getActiveBotsMock.mockImplementationOnce(() => preStopRead.promise);
+
+    const preStopTick = runMonitorTickOnce();
+    await vi.advanceTimersByTimeAsync(0);
+    stopAiTraderMonitor();
+    preStopRead.resolve([]);
+    await preStopTick;
+    expect(telemetryHeartbeats()).toHaveLength(0);
+
+    getActiveBotsMock.mockResolvedValue([]);
+    startAiTraderMonitor();
+    await vi.advanceTimersByTimeAsync(0);
+    await runMonitorTickOnce();
+    expect(telemetryHeartbeats()).toHaveLength(1);
+
+    startAiTraderMonitor(); // singleton no-op: must not reset the bound
+    vi.setSystemTime(NOW + 60_000);
+    await runMonitorTickOnce();
+    expect(telemetryHeartbeats()).toHaveLength(1);
+    expect(consoleHeartbeats()).toEqual(telemetryHeartbeats());
+  });
+
+  it("still enqueues telemetry when console throws, without changing tick outcome", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    getActiveBotsMock.mockResolvedValue([]);
+    vi.mocked(console.log).mockImplementation(() => {
+      throw new Error("console unavailable");
+    });
+
+    await expect(runMonitorTickOnce()).resolves.toBeUndefined();
+    expect(telemetryHeartbeats()).toHaveLength(1);
+  });
+
+  it("still writes the console line when telemetry throws, without changing tick outcome", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    getActiveBotsMock.mockResolvedValue([]);
+    appendTelemetryMock.mockImplementation(() => {
+      throw new Error("telemetry unavailable");
+    });
+
+    await expect(runMonitorTickOnce()).resolves.toBeUndefined();
+    expect(consoleHeartbeats()).toHaveLength(1);
+  });
+});
+
 // --- AIT-CADENCE-SELF-HEAL-01: tick audit restores missing auto-next timers -----------
 
 describe("AIT-CADENCE-SELF-HEAL-01: idle-bot cadence audit", () => {

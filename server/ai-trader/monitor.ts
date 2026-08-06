@@ -37,6 +37,7 @@
 
 import { storage } from "../storage";
 import { appendTelemetry } from "../telemetry";
+import { SERVER_BOOT_ID } from "../boot-id";
 import { getAdapter } from "../protocol/adapter-registry";
 import {
   getUmkForWebhook,
@@ -81,6 +82,7 @@ import { isMultiplierMarketQuarantined, MULTIPLIER_UNQUALIFIED_REASON } from "./
 // --- Constants ---------------------------------------------------------------------
 
 const MONITOR_TICK_MS = 15_000;
+const MONITOR_HEARTBEAT_MS = 5 * 60_000;
 const DAILY_SWEEP_MS = 6 * 60 * 60 * 1000; // graduation sweep every 6h (cheap; catches period-elapsed)
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -133,6 +135,52 @@ let tickStartedAt: number | null = null;
 let tickGeneration = 0;
 /** How long a tick may run before a new tick is allowed to override it. */
 const TICK_WEDGE_MS = 120_000;
+let lastMonitorCompletedHeartbeatAt: number | null = null;
+let lastMonitorDegradedHeartbeatAt: number | null = null;
+
+function emitHeartbeatLine(line: string): void {
+  try {
+    console.log(line);
+  } catch {}
+  try {
+    appendTelemetry(line);
+  } catch {}
+}
+
+function emitMonitorCompletedHeartbeatIfDue(input: {
+  completedAt: number;
+  durationMs: number;
+  activeBotCount: number;
+}): void {
+  if (
+    lastMonitorCompletedHeartbeatAt !== null &&
+    input.completedAt - lastMonitorCompletedHeartbeatAt < MONITOR_HEARTBEAT_MS
+  ) return;
+
+  lastMonitorCompletedHeartbeatAt = input.completedAt;
+  const durationMs = Math.max(0, Math.round(input.durationMs));
+  const activeBotCount = Math.max(0, Math.trunc(input.activeBotCount));
+  emitHeartbeatLine(
+    `[AiTraderMonitor] heartbeat tick_completed pid=${process.pid} boot=${SERVER_BOOT_ID.slice(0, 8).toLowerCase()} duration_ms=${durationMs} active_bots=${activeBotCount}`
+  );
+}
+
+function emitMonitorDegradedHeartbeatIfDue(input: {
+  completedAt: number;
+  durationMs: number;
+  reason: "bot_list_failed";
+}): void {
+  if (
+    lastMonitorDegradedHeartbeatAt !== null &&
+    input.completedAt - lastMonitorDegradedHeartbeatAt < MONITOR_HEARTBEAT_MS
+  ) return;
+
+  lastMonitorDegradedHeartbeatAt = input.completedAt;
+  const durationMs = Math.max(0, Math.round(input.durationMs));
+  emitHeartbeatLine(
+    `[AiTraderMonitor] heartbeat tick_degraded pid=${process.pid} boot=${SERVER_BOOT_ID.slice(0, 8).toLowerCase()} duration_ms=${durationMs} reason=${input.reason}`
+  );
+}
 
 /** Bots whose startup reconciliation hit a venue read failure — retried each tick. */
 const pendingReconciliation = new Set<string>();
@@ -2542,6 +2590,7 @@ async function tick(): Promise<void> {
   }
   const gen = ++tickGeneration;
   tickStartedAt = Date.now();
+  const admittedTickStartedAt = tickStartedAt;
   try {
     // Bounded retry-with-backoff: a single stale connection eviction should not
     // kill the whole tick.  After the first failure the pool drops the dead
@@ -2564,6 +2613,14 @@ async function tick(): Promise<void> {
     }
     if (lastErr !== undefined || bots === undefined) {
       console.error(`[AiTraderMonitor] tick: getActiveAiTraderBots failed (3 attempts): ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
+      const completedAt = Date.now();
+      if (gen === tickGeneration) {
+        emitMonitorDegradedHeartbeatIfDue({
+          completedAt,
+          durationMs: completedAt - admittedTickStartedAt,
+          reason: "bot_list_failed",
+        });
+      }
       return;
     }
     for (const bot of bots) {
@@ -2657,6 +2714,14 @@ async function tick(): Promise<void> {
         if (botInFlight.get(bot.id) === myClaim) botInFlight.delete(bot.id);
       }
     }
+    const completedAt = Date.now();
+    if (gen === tickGeneration) {
+      emitMonitorCompletedHeartbeatIfDue({
+        completedAt,
+        durationMs: completedAt - admittedTickStartedAt,
+        activeBotCount: bots.length,
+      });
+    }
   } finally {
     // Only clear our own claim — a wedged tick that finally resumes after an
     // override must not wipe the newer tick's timestamp.
@@ -2686,6 +2751,8 @@ async function runDecisionCompressionSweep(): Promise<void> {
 
 export function startAiTraderMonitor(): void {
   if (tickTimer) return; // singleton
+  lastMonitorCompletedHeartbeatAt = null;
+  lastMonitorDegradedHeartbeatAt = null;
   console.log("[AiTraderMonitor] starting (15s tick + graduation sweep)");
   reconcileOnStartup()
     .catch((err) => console.error(`[AiTraderMonitor] startup reconciliation crashed: ${err instanceof Error ? err.message : err}`))
@@ -2725,6 +2792,8 @@ export function stopAiTraderMonitor(): void {
   sweepTimer = null;
   tickStartedAt = null;
   tickGeneration++;
+  lastMonitorCompletedHeartbeatAt = null;
+  lastMonitorDegradedHeartbeatAt = null;
   for (const t of autoNextTimers.values()) clearTimeout(t);
   autoNextTimers.clear();
   pendingReconciliation.clear();
