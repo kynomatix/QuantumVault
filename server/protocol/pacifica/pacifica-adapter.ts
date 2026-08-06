@@ -651,6 +651,83 @@ export class PacificaAdapter implements ProtocolAdapter {
     return response.map((p) => this.mapPosition(p, prices));
   }
 
+  async getStrictPositionForMarket(
+    agentPublicKey: string,
+    internalSymbol: string,
+    subaccountId?: string,
+  ): Promise<ProtocolPosition | null> {
+    const params: Record<string, string> = { account: agentPublicKey };
+    if (subaccountId) params.subaccount_id = subaccountId;
+
+    const response: unknown = await this.get('/positions', params, {
+      priority: 'critical',
+      cachePolicy: 'fresh-required',
+    });
+    if (!Array.isArray(response)) {
+      throw new Error('PacificaAdapter: strict /positions response is not an array');
+    }
+
+    const protocolSymbol = this.getRegistry().internalToProtocol(internalSymbol).toUpperCase();
+    const matches = response.filter((candidate): candidate is PacificaPositionResponse => (
+      candidate !== null
+      && typeof candidate === 'object'
+      && typeof (candidate as PacificaPositionResponse).symbol === 'string'
+      && (candidate as PacificaPositionResponse).symbol.toUpperCase() === protocolSymbol
+    ));
+    if (matches.length === 0) {
+      const hasUnclassifiedRow = response.some((candidate) => (
+        candidate === null
+        || typeof candidate !== 'object'
+        || typeof (candidate as PacificaPositionResponse).symbol !== 'string'
+      ));
+      if (hasUnclassifiedRow) {
+        throw new Error('PacificaAdapter: strict /positions cannot prove the requested market is absent');
+      }
+      return null;
+    }
+    if (matches.length !== 1) {
+      throw new Error(`PacificaAdapter: strict /positions returned duplicate ${internalSymbol} rows`);
+    }
+
+    const position = matches[0];
+    if (position.side !== 'bid' && position.side !== 'ask') {
+      throw new Error(`PacificaAdapter: strict ${internalSymbol} position has invalid side`);
+    }
+    const amountValue = position.amount ?? position.size;
+    const rawAmount = Number(amountValue);
+    if (
+      amountValue === null
+      || amountValue === undefined
+      || String(amountValue).trim() === ''
+      || !Number.isFinite(rawAmount)
+      || rawAmount < 0
+    ) {
+      throw new Error(`PacificaAdapter: strict ${internalSymbol} position has invalid amount`);
+    }
+    const entryValue = position.entry_price;
+    const entryPrice = Number(entryValue);
+    if (
+      entryValue === null
+      || entryValue === undefined
+      || String(entryValue).trim() === ''
+      || !Number.isFinite(entryPrice)
+      || entryPrice < 0
+      || (rawAmount > 0 && entryPrice <= 0)
+    ) {
+      throw new Error(`PacificaAdapter: strict ${internalSymbol} position has invalid entry price`);
+    }
+
+    const mapped = this.mapPosition(position, {});
+    if (!Number.isFinite(mapped.baseSize) || !Number.isFinite(mapped.entryPrice)) {
+      throw new Error(`PacificaAdapter: strict ${internalSymbol} position mapping is invalid`);
+    }
+    if (!Number.isFinite(mapped.markPrice) || mapped.markPrice <= 0) {
+      mapped.markPrice = mapped.entryPrice;
+    }
+    if (!Number.isFinite(mapped.unrealizedPnl)) mapped.unrealizedPnl = 0;
+    return mapped;
+  }
+
   async getBalances(agentPublicKey: string, subaccountId?: string): Promise<BalanceInfo> {
     const info = await this.getAccountInfo(agentPublicKey, subaccountId);
     return {
@@ -2450,11 +2527,17 @@ export class PacificaAdapter implements ProtocolAdapter {
   private async get(
     path: string,
     params?: Record<string, string>,
-    options?: { priority?: RequestPriority; bypassCache?: boolean },
+    options?: {
+      priority?: RequestPriority;
+      bypassCache?: boolean;
+      cachePolicy?: 'default' | 'fresh-required';
+    },
   ): Promise<any> {
     const priority = options?.priority ?? 'normal';
-    const bypassCache = options?.bypassCache === true;
+    const freshRequired = options?.cachePolicy === 'fresh-required';
+    const bypassCache = options?.bypassCache === true || freshRequired;
     const cacheKey = pacificaCache.buildKey(path, params);
+    const dedupKey = freshRequired ? `fresh-required:${cacheKey}` : cacheKey;
 
     if (!bypassCache) {
       const fresh = pacificaCache.getFresh(cacheKey);
@@ -2462,7 +2545,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     }
     pacificaCache.noteMiss();
 
-    return pacificaCache.dedup(cacheKey, async () => {
+    return pacificaCache.dedup(dedupKey, async () => {
       // Re-check cache inside the dedup gate in case a sibling caller filled
       // it between our miss and acquiring the dedup slot.
       if (!bypassCache) {
@@ -2476,7 +2559,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       //     credits before throwing. This handles cold-start fan-out without
       //     corrupting downstream callers that interpret "throw" as "value=0".
       if (!pacificaQuota.canAfford(path, priority)) {
-        const stale = pacificaCache.getStale(cacheKey);
+        const stale = freshRequired ? undefined : pacificaCache.getStale(cacheKey);
         if (stale) {
           pacificaQuota.noteRejection();
           console.warn(
@@ -2538,7 +2621,7 @@ export class PacificaAdapter implements ProtocolAdapter {
 
       if (!response.ok) {
         // Graceful fallback on rate-limit: serve stale cache if any.
-        if (response.status === 429) {
+        if (response.status === 429 && !freshRequired) {
           const stale = pacificaCache.getStale(cacheKey);
           if (stale) {
             console.warn(

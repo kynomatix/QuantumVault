@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   adapter: {
     getPositions: vi.fn(),
+    getStrictPositionForMarket: vi.fn(),
   },
   executeSwiftOrder: vi.fn(),
   getMarketPrice: vi.fn(),
@@ -156,6 +157,113 @@ describe('PositionService strict execution reads', () => {
     await expect(botSubaccountRead).rejects.toThrow('authoritative venue position read failed');
     await expect(byteParsingRead).rejects.toThrow('authoritative venue position read failed');
     expect(continueClose).not.toHaveBeenCalled();
+  });
+});
+
+describe('PositionService close-authority reads', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('uses the targeted adapter capability and preserves a proven flat result', async () => {
+    mocks.adapter.getStrictPositionForMarket.mockResolvedValueOnce(null);
+
+    await expect(PositionService.getPositionForCloseAuthority(
+      'bot-1',
+      'agent-public-key',
+      4,
+      'BTC-PERP',
+      'bot-subaccount-public-key',
+      adapter,
+    )).resolves.toEqual({
+      size: 0,
+      side: 'FLAT',
+      source: 'on-chain',
+      entryPrice: 0,
+    });
+    expect(mocks.adapter.getStrictPositionForMarket).toHaveBeenCalledWith(
+      'bot-subaccount-public-key',
+      'BTC-PERP',
+      undefined,
+    );
+    expect(mocks.adapter.getPositions).not.toHaveBeenCalled();
+  });
+
+  it('derives a risk-reducing cached fallback only from a valid nonzero requested-market row', () => {
+    expect(PositionService.getRiskReducingCachedCloseFallback({
+      market: 'BTC-PERP',
+      baseSize: '-0.25',
+      avgEntryPrice: '65000',
+    }, 'BTC-PERP')).toEqual({
+      size: -0.25,
+      side: 'SHORT',
+      source: 'database-cache-risk-reducing-fallback',
+      entryPrice: 65000,
+    });
+  });
+
+  it.each([
+    ['missing', null],
+    ['zero', { market: 'BTC-PERP', baseSize: '0', avgEntryPrice: '65000' }],
+    ['non-finite', { market: 'BTC-PERP', baseSize: 'not-a-number', avgEntryPrice: '65000' }],
+    ['wrong market', { market: 'ETH-PERP', baseSize: '1', avgEntryPrice: '3500' }],
+  ])('never turns %s cached state into close authority', (_label, cachedPosition) => {
+    expect(PositionService.getRiskReducingCachedCloseFallback(
+      cachedPosition,
+      'BTC-PERP',
+    )).toBeNull();
+  });
+
+  it('fails closed when the targeted venue read fails', async () => {
+    mocks.adapter.getStrictPositionForMarket.mockRejectedValueOnce(new Error('venue unavailable'));
+
+    await expect(PositionService.getPositionForCloseAuthority(
+      'bot-1',
+      'agent-public-key',
+      4,
+      'BTC-PERP',
+      undefined,
+      adapter,
+    )).rejects.toThrow('authoritative venue position read failed for BTC-PERP');
+  });
+
+  it('rejects a targeted response for the wrong market', async () => {
+    mocks.adapter.getStrictPositionForMarket.mockResolvedValueOnce({
+      ...openPosition,
+      internalSymbol: 'ETH-PERP',
+    });
+
+    await expect(PositionService.getPositionForCloseAuthority(
+      'bot-1',
+      'agent-public-key',
+      4,
+      'BTC-PERP',
+      undefined,
+      adapter,
+    )).rejects.toThrow('wrong market');
+  });
+
+  it('preserves existing adapter behavior when the optional capability is absent', async () => {
+    const previous = mocks.adapter.getStrictPositionForMarket;
+    (mocks.adapter as any).getStrictPositionForMarket = undefined;
+    mocks.adapter.getPositions.mockResolvedValueOnce([openPosition]);
+    try {
+      await expect(PositionService.getPositionForCloseAuthority(
+        'bot-1',
+        'agent-public-key',
+        4,
+        'BTC-PERP',
+        undefined,
+        adapter,
+      )).resolves.toMatchObject({
+        size: 1,
+        side: 'LONG',
+        source: 'on-chain',
+      });
+      expect(mocks.adapter.getPositions).toHaveBeenCalledTimes(1);
+    } finally {
+      (mocks.adapter as any).getStrictPositionForMarket = previous;
+    }
   });
 });
 

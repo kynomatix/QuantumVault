@@ -98,6 +98,13 @@ export interface PositionData {
   };
 }
 
+export interface CloseAuthorityPosition {
+  size: number;
+  side: 'LONG' | 'SHORT' | 'FLAT';
+  source: 'on-chain' | 'database-cache-risk-reducing-fallback';
+  entryPrice: number;
+}
+
 export class PositionService {
   private static readonly STALE_THRESHOLD_MS = 30000;
 
@@ -420,6 +427,88 @@ export class PositionService {
       side,
       source: 'on-chain',
       entryPrice: onChainPos?.entryPrice || 0,
+    };
+  }
+
+  static getRiskReducingCachedCloseFallback(
+    cachedPosition: unknown,
+    market: string,
+  ): CloseAuthorityPosition | null {
+    if (!cachedPosition || typeof cachedPosition !== 'object') return null;
+    const candidate = cachedPosition as Record<string, unknown>;
+    if (typeof candidate.market !== 'string'
+        || normalizeMarket(candidate.market) !== normalizeMarket(market)) return null;
+
+    const signedSize = Number(candidate.baseSize);
+    if (!Number.isFinite(signedSize) || Math.abs(signedSize) < 0.0001) return null;
+    const rawEntryPrice = Number(candidate.avgEntryPrice);
+    return {
+      size: signedSize,
+      side: signedSize > 0 ? 'LONG' : 'SHORT',
+      source: 'database-cache-risk-reducing-fallback',
+      entryPrice: Number.isFinite(rawEntryPrice) && rawEntryPrice > 0 ? rawEntryPrice : 0,
+    };
+  }
+
+  static async getPositionForCloseAuthority(
+    botId: string,
+    agentPublicKey: string,
+    subAccountId: number,
+    market: string,
+    botSubaccountPublicKey?: string,
+    adapterOverride?: ProtocolAdapter,
+  ): Promise<CloseAuthorityPosition> {
+    let adapter: ProtocolAdapter;
+    if (adapterOverride) {
+      adapter = adapterOverride;
+    } else {
+      const botRowForAdapter = await storage.getTradingBotById(botId);
+      if (!botRowForAdapter) {
+        throw new Error(`PositionService: bot ${botId} not found -- cannot resolve protocol adapter (fail-closed: refusing to default-route a read for an unknown bot)`);
+      }
+      adapter = getAdapterForBot(botRowForAdapter);
+    }
+
+    if (!adapter.getStrictPositionForMarket) {
+      return this.getPositionForExecution(
+        botId,
+        agentPublicKey,
+        subAccountId,
+        market,
+        botSubaccountPublicKey,
+        adapter,
+      );
+    }
+
+    const queryAccount = botSubaccountPublicKey ?? agentPublicKey;
+    const querySubaccount = botSubaccountPublicKey ? undefined : _subIdStr(subAccountId);
+    let position;
+    try {
+      position = await adapter.getStrictPositionForMarket(queryAccount, market, querySubaccount);
+    } catch (err) {
+      console.log(`[PositionService] strict close-authority read failed: ${err instanceof Error ? err.message : err}`);
+      throw new Error(`PositionService: authoritative venue position read failed for ${market}`);
+    }
+
+    if (position === null) {
+      return { size: 0, side: 'FLAT', source: 'on-chain', entryPrice: 0 };
+    }
+    if (!Number.isFinite(position.baseSize) || !Number.isFinite(position.entryPrice)) {
+      throw new Error(`PositionService: authoritative venue position read failed for ${market}`);
+    }
+    if (normalizeMarket(position.internalSymbol) !== normalizeMarket(market)) {
+      throw new Error(`PositionService: authoritative venue position read returned the wrong market for ${market}`);
+    }
+
+    const size = position.baseSize;
+    const side: 'LONG' | 'SHORT' | 'FLAT' = Math.abs(size) < 0.0001
+      ? 'FLAT'
+      : size > 0 ? 'LONG' : 'SHORT';
+    return {
+      size,
+      side,
+      source: 'on-chain',
+      entryPrice: position.entryPrice,
     };
   }
 
