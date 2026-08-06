@@ -26,6 +26,11 @@ import * as fs from "node:fs";
 import * as nodePath from "node:path";
 import { appendTelemetry, appendTelemetrySync, drainQueueSyncForExit, flushTelemetry } from "./telemetry";
 import { startObservedBackgroundComponent } from "./background-start";
+import {
+  BIND_RETRY_LIMIT,
+  BIND_RETRY_MS,
+  createGracefulHttpShutdown,
+} from "./graceful-http-shutdown";
 
 // Global crash capture for the admin "Errors" panel. Registered at module load so it catches
 // failures from any background job. Both handlers record the error then preserve Node's default
@@ -279,14 +284,11 @@ if (process.env.NODE_ENV === "production") {
 // scope finishes registering the boot-time responders above. PORT is the only
 // non-firewalled port and serves both the API and the client.
 //
-// EADDRINUSE retry: binding this early races the OLD instance on a restart —
-// its shutdown handler can hold the port for up to ~10s (hard-exit backstop).
-// Before this change the ~90s init masked that overlap. reusePort does not
-// help here (silently ignored on this Node version), so retry for up to 45s,
-// then fail fast like before. Any other listen error stays fatal immediately.
+// EADDRINUSE retry: binding this early races the OLD instance on a restart.
+// The shutdown contract permits a 120s drain, so this 135s retry window
+// exceeds it. reusePort is silently ignored on this Node version. Any other
+// listen error stays fatal immediately.
 const port = parseInt(process.env.PORT || "5000", 10);
-const BIND_RETRY_MS = 1_000;
-const BIND_RETRY_LIMIT = 45;
 let bindAttempts = 0;
 const onBindError = (err: NodeJS.ErrnoException) => {
   if (err.code === "EADDRINUSE" && bindAttempts < BIND_RETRY_LIMIT) {
@@ -689,7 +691,7 @@ registerRequestTrace(app);
   // (each with a lab child) on the production VM until it is starved. That zombie
   // pile-up was the root cause of the July 17, 2026 all-AI-Traders outage (DB/OKX
   // handshake timeouts, lab boot-loop, healthcheck deaths). Never remove the
-  // exit calls or the hard-exit backstop.
+  // explicit exit after the bounded HTTP and storage drain sequence.
   // Death canary: telemetry markers for every process birth and death, so a
   // future "what killed the app?" question is answerable from the log file
   // alone. Also critical for readers of the prod log API: publishing snapshots
@@ -709,40 +711,56 @@ registerRequestTrace(app);
   });
 
   let shuttingDown = false;
+  const runGracefulShutdown = createGracefulHttpShutdown({
+    server: httpServer,
+    beforeStorageClose: async () => {
+      // Stop order-producing background work after HTTP admission has stopped.
+      try {
+        const { stopAiTraderMonitor } = await import("./ai-trader/monitor");
+        stopAiTraderMonitor();
+      } catch (e) {
+        console.warn("[Main] AI Trader monitor stop error (non-fatal):", (e as Error)?.message);
+      }
+      try {
+        stopLiveDataSpine();
+      } catch (e) {
+        console.warn("[Main] Spine stop error (non-fatal):", (e as Error)?.message);
+      }
+      await flushErrorLog().catch(() => {});
+      await labSupervisor.shutdown().catch((e) => {
+        console.warn("[Main] Lab shutdown error (non-fatal):", (e as Error)?.message);
+      });
+    },
+    closeStorage: async () => {
+      await closePool();
+    },
+    onTimeout: (timeoutMs) => {
+      const line =
+        `[Lifecycle] shutdown environment_halt timeoutMs=${timeoutMs} ` +
+        "active HTTP connections forced closed";
+      console.error(`[Main] ${line}`);
+      appendTelemetry(line);
+    },
+    onStorageTimeout: (timeoutMs) => {
+      const line =
+        `[Lifecycle] shutdown storage_environment_halt timeoutMs=${timeoutMs} ` +
+        "storage close did not settle before process exit";
+      console.error(`[Main] ${line}`);
+      appendTelemetry(line);
+    },
+  });
   const shutdownHandler = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.log(`[Main] ${signal} received — shutting down...`);
+    console.log(`[Main] ${signal} received -- shutting down...`);
     appendTelemetry(
       `[Lifecycle] ${signal} received pid=${process.pid} uptime=${Math.round(process.uptime())}s`,
     );
-    // Backstop: if any cleanup step below hangs, force-exit anyway. unref'd so
-    // it never delays a clean exit.
-    const hardExit = setTimeout(() => {
-      console.error("[Main] Shutdown grace period (10s) expired — forcing exit");
-      process.exit(0);
-    }, 10_000);
-    if (typeof hardExit.unref === "function") hardExit.unref();
-    // Stop the AI Trader monitor FIRST so no tick can start a new venue order
-    // that would be cut mid-flight by the exit below.
-    try {
-      const { stopAiTraderMonitor } = await import("./ai-trader/monitor");
-      stopAiTraderMonitor();
-    } catch (e) {
-      console.warn("[Main] AI Trader monitor stop error (non-fatal):", (e as Error)?.message);
+    const outcome = await runGracefulShutdown();
+    if (outcome === "close_error") {
+      console.warn("[Main] Shutdown completed with a cleanup error");
     }
-    try {
-      stopLiveDataSpine();
-    } catch (e) {
-      console.warn("[Main] Spine stop error (non-fatal):", (e as Error)?.message);
-    }
-    await flushErrorLog().catch(() => {});
-    await labSupervisor.shutdown();
-    await closePool().catch((e) => console.warn("[Main] Pool close error (non-fatal):", e.message));
-    try {
-      httpServer.close();
-    } catch {}
-    console.log("[Main] Shutdown complete — exiting");
+    console.log(`[Main] Shutdown ${outcome} -- exiting`);
     await flushTelemetry(2000).catch(() => {});
     process.exit(0);
   };

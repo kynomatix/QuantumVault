@@ -18264,7 +18264,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         
         let onChainPosition;
         try {
-          onChainPosition = await PositionService.getPositionForExecution(
+          onChainPosition = await PositionService.getPositionForCloseAuthority(
             botId,
             queryAccount,
             querySubId,
@@ -18274,14 +18274,26 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           console.log(`[Webhook] On-chain position query result: size=${onChainPosition.size}, side=${onChainPosition.side}, entryPrice=${onChainPosition.entryPrice}`);
         } catch (onChainErr) {
           console.error(`[Webhook] CRITICAL: Failed to query on-chain position for close:`, onChainErr);
-          await storage.updateWebhookLog(log.id, { 
-            errorMessage: "Failed to query on-chain position - cannot safely close", 
-            processed: true 
-          });
-          const closeResponse = buildSignalBotCloseResponse("position_unavailable", {
-            error: "Failed to query authoritative venue position",
-          });
-          return res.status(closeResponse.statusCode).json(closeResponse.body);
+          const cachedFallback = PositionService.getRiskReducingCachedCloseFallback(
+            dbPositionForClassification,
+            bot.market,
+          );
+          if (cachedFallback) {
+            onChainPosition = cachedFallback;
+            console.warn(
+              `[Webhook] Close authority degraded for ${bot.market}; using validated durable position ` +
+              `only for a reduce-only close (size=${cachedFallback.size}, side=${cachedFallback.side})`,
+            );
+          } else {
+            await storage.updateWebhookLog(log.id, {
+              errorMessage: "Failed to query venue position and no valid nonzero cached close source exists",
+              processed: true,
+            });
+            const closeResponse = buildSignalBotCloseResponse("position_unavailable", {
+              error: "All declared close-position authority sources failed",
+            });
+            return res.status(closeResponse.statusCode).json(closeResponse.body);
+          }
         }
         
         if (onChainPosition.side === 'FLAT' || Math.abs(onChainPosition.size) < 0.0001) {
@@ -19911,7 +19923,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           
           let onChainPosition;
           try {
-            onChainPosition = await PositionService.getPositionForExecution(
+            onChainPosition = await PositionService.getPositionForCloseAuthority(
               botId,
               uwCloseQueryAccount,
               uwCloseQuerySubId,
@@ -19921,14 +19933,32 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             console.log(`[User Webhook] On-chain position query result: size=${onChainPosition.size}, side=${onChainPosition.side}, entryPrice=${onChainPosition.entryPrice}`);
           } catch (onChainErr) {
             console.error(`[User Webhook] CRITICAL: Failed to query on-chain position for close:`, onChainErr);
-            await storage.updateWebhookLog(log.id, { 
-              errorMessage: "Failed to query on-chain position - cannot safely close", 
-              processed: true 
-            });
-            const closeResponse = buildSignalBotCloseResponse("position_unavailable", {
-              error: "Failed to query authoritative venue position",
-            });
-            return res.status(closeResponse.statusCode).json(closeResponse.body);
+            let cachedFallback = null;
+            try {
+              const cachedPosition = await storage.getBotPosition(botId, bot.market);
+              cachedFallback = PositionService.getRiskReducingCachedCloseFallback(
+                cachedPosition,
+                bot.market,
+              );
+            } catch (cacheErr) {
+              console.error(`[User Webhook] Durable close-position fallback read failed:`, cacheErr);
+            }
+            if (cachedFallback) {
+              onChainPosition = cachedFallback;
+              console.warn(
+                `[User Webhook] Close authority degraded for ${bot.market}; using validated durable position ` +
+                `only for a reduce-only close (size=${cachedFallback.size}, side=${cachedFallback.side})`,
+              );
+            } else {
+              await storage.updateWebhookLog(log.id, {
+                errorMessage: "Failed to query venue position and no valid nonzero cached close source exists",
+                processed: true,
+              });
+              const closeResponse = buildSignalBotCloseResponse("position_unavailable", {
+                error: "All declared close-position authority sources failed",
+              });
+              return res.status(closeResponse.statusCode).json(closeResponse.body);
+            }
           }
           
           if (onChainPosition.side === 'FLAT' || Math.abs(onChainPosition.size) < 0.0001) {

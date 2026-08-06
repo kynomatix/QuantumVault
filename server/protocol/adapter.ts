@@ -161,6 +161,16 @@ export interface ProtocolAdapter {
 
   getAccountInfo(agentPublicKey: string, subaccountId?: string): Promise<AccountInfo>;
   getPositions(agentPublicKey: string, subaccountId?: string): Promise<ProtocolPosition[]>;
+  /**
+   * Fresh, fail-closed single-market position authority for latency-sensitive
+   * money paths. Implementations must return null only after a successful
+   * authoritative read proves that the requested market is absent.
+   */
+  getStrictPositionForMarket?(
+    agentPublicKey: string,
+    internalSymbol: string,
+    subaccountId?: string,
+  ): Promise<ProtocolPosition | null>;
   getBalances(agentPublicKey: string, subaccountId?: string): Promise<BalanceInfo>;
   getEquityHistory(agentPublicKey: string, params?: HistoryParams): Promise<EquityPoint[]>;
   getTradeHistory(agentPublicKey: string, params?: HistoryParams): Promise<TradeRecord[]>;
