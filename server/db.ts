@@ -3,7 +3,7 @@ import pkg from "pg";
 const { Pool } = pkg;
 import * as schema from "@shared/schema";
 import { appendTelemetry } from "./telemetry";
-import { formatPoolLoadTags } from "./pool-load";
+import { formatPoolLoadTags, registerPoolLoadTag } from "./pool-load";
 
 if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL must be set");
@@ -72,10 +72,23 @@ pool.on("connect", (client) => {
 // unhandled rejection; the count surfaces in the [DB Pool] telemetry line.
 let _hbFailCount = 0;
 let _hbFailStreak = 0;
+const activeKeepWarm = new Set<symbol>();
+registerPoolLoadTag("db_maintenance", () => ({ hb: activeKeepWarm.size }));
+
+function claimKeepWarm(): () => void {
+  const claim = Symbol();
+  activeKeepWarm.add(claim);
+  return () => {
+    activeKeepWarm.delete(claim);
+  };
+}
+
 setInterval(() => {
+  const releaseKeepWarm = claimKeepWarm();
   pool.query("SELECT 1")
     .then(() => { _hbFailStreak = 0; })
-    .catch(() => { _hbFailCount++; _hbFailStreak++; });
+    .catch(() => { _hbFailCount++; _hbFailStreak++; })
+    .finally(releaseKeepWarm);
 }, 20_000).unref();
 
 // ----- connect-slow visibility --------------------------------------------
