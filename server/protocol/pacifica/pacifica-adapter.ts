@@ -62,6 +62,8 @@ import type {
   PacificaMarketInfo,
   PacificaPositionResponse,
   PacificaAccountResponse,
+  PacificaAccountSettingsResponse,
+  PacificaMarginSettingResponse,
   PacificaOrderResponse,
   PacificaTradeResponse,
   PacificaEquityHistoryPoint,
@@ -651,6 +653,43 @@ export class PacificaAdapter implements ProtocolAdapter {
     return response.map((p) => this.mapPosition(p, prices));
   }
 
+  private async getStrictAccountLeverageForMarket(
+    agentPublicKey: string,
+    internalSymbol: string,
+    subaccountId?: string,
+  ): Promise<number | null> {
+    const params: Record<string, string> = { account: agentPublicKey };
+    if (subaccountId) params.subaccount_id = subaccountId;
+
+    const response: unknown = await this.get('/account/settings', params, {
+      priority: 'critical',
+      cachePolicy: 'fresh-required',
+    });
+    if (response === null || typeof response !== 'object' || Array.isArray(response)) return null;
+
+    const rows = (response as Partial<PacificaAccountSettingsResponse>).margin_settings;
+    if (!Array.isArray(rows)) return null;
+    if (rows.some((candidate) => (
+      candidate === null
+      || typeof candidate !== 'object'
+      || typeof (candidate as PacificaMarginSettingResponse).symbol !== 'string'
+      || (candidate as PacificaMarginSettingResponse).symbol.trim() === ''
+    ))) return null;
+
+    const protocolSymbol = this.getRegistry().internalToProtocol(internalSymbol).toUpperCase();
+    const matches = rows.filter((candidate): candidate is PacificaMarginSettingResponse => (
+      (candidate as PacificaMarginSettingResponse).symbol.toUpperCase() === protocolSymbol
+    ));
+    if (matches.length !== 1) return null;
+
+    const rawLeverage: unknown = matches[0].leverage;
+    if (rawLeverage === null || rawLeverage === undefined || String(rawLeverage).trim() === '') {
+      return null;
+    }
+    const leverage = Number(rawLeverage);
+    return Number.isSafeInteger(leverage) && leverage > 0 ? leverage : null;
+  }
+
   async getStrictPositionForMarket(
     agentPublicKey: string,
     internalSymbol: string,
@@ -832,15 +871,63 @@ export class PacificaAdapter implements ProtocolAdapter {
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
 
     if (params.leverage && params.leverage > 0 && !params.reduceOnly) {
-      await this.setLeverage({
-        agentPublicKey: params.agentPublicKey,
-        agentSecretKey: params.agentSecretKey,
-        mainWalletAddress: params.mainWalletAddress,
-        internalSymbol: params.internalSymbol,
-        leverage: params.leverage,
-        subaccountId: params.subaccountId,
-      });
-      console.log(`[PacificaAdapter] Set leverage to ${params.leverage}x for ${params.internalSymbol} before order`);
+      const requestedLeverage = Math.floor(params.leverage);
+      let currentLeverage: number | null = null;
+      try {
+        currentLeverage = await this.getStrictAccountLeverageForMarket(
+          params.agentPublicKey,
+          params.internalSymbol,
+          params.subaccountId,
+        );
+      } catch {
+        console.warn(
+          `[PacificaAdapter] Fresh leverage settings unavailable for ${params.internalSymbol}; `
+          + 'preserving signed leverage update gate',
+        );
+      }
+
+      let shouldSetLeverage = currentLeverage !== requestedLeverage;
+      if (currentLeverage !== null && currentLeverage > requestedLeverage) {
+        let position: ProtocolPosition | null;
+        try {
+          position = await this.getStrictPositionForMarket(
+            params.agentPublicKey,
+            params.internalSymbol,
+            params.subaccountId,
+          );
+        } catch {
+          throw new Error(
+            `${params.internalSymbol} position state could not be verified before applying lower leverage; `
+            + 'no leverage update or order was attempted',
+          );
+        }
+
+        if (position !== null && !Number.isFinite(position.baseSize)) {
+          throw new Error(
+            `${params.internalSymbol} position state could not be verified before applying lower leverage; `
+            + 'no leverage update or order was attempted',
+          );
+        }
+        if (position !== null && position.baseSize !== 0) {
+          throw new Error(
+            `${params.internalSymbol} position is already open; requested lower leverage cannot be applied while open; `
+            + 'no leverage update or order was attempted',
+          );
+        }
+        shouldSetLeverage = true;
+      }
+
+      if (shouldSetLeverage) {
+        await this.setLeverage({
+          agentPublicKey: params.agentPublicKey,
+          agentSecretKey: params.agentSecretKey,
+          mainWalletAddress: params.mainWalletAddress,
+          internalSymbol: params.internalSymbol,
+          leverage: params.leverage,
+          subaccountId: params.subaccountId,
+        });
+        console.log(`[PacificaAdapter] Set leverage to ${params.leverage}x for ${params.internalSymbol} before order`);
+      }
     }
 
     const slippagePct = params.maxSlippagePct ?? 0.5;
