@@ -203,6 +203,61 @@ describe('Signal Bot choke-point wiring', () => {
     expect(routesSource.match(/await executePerpOrder\(/g)).toHaveLength(6);
   });
 
+  it('preserves lower-leverage refusal truth through the existing Trade Failed boundary', () => {
+    const messages = [
+      'LDO-PERP position is already open; requested lower leverage cannot be applied while open; no leverage update or order was attempted',
+      'LDO-PERP position state could not be verified before applying lower leverage; no leverage update or order was attempted',
+    ];
+    const rateLimitStart = retrySource.indexOf('export function isRateLimitError(');
+    const rateLimitEnd = retrySource.indexOf('\nexport function isTransientError(', rateLimitStart);
+    const transientStart = rateLimitEnd;
+    const transientEnd = retrySource.indexOf('\nexport function isTimeoutError(', transientStart);
+    const collateralStart = retrySource.indexOf('export function isCollateralRetryError(');
+    const collateralEnd = retrySource.indexOf('\n// Categorize an error', collateralStart);
+    const transientBodies = [
+      retrySource.slice(rateLimitStart, rateLimitEnd),
+      retrySource.slice(transientStart, transientEnd),
+    ].join('\n');
+    const transientNeedles = [
+      ...transientBodies.matchAll(/lowerError\.includes\('([^']+)'\)/g),
+    ].map((match) => match[1]);
+    const collateralNeedles = [
+      ...retrySource.slice(collateralStart, collateralEnd).matchAll(/errorStr\.includes\('([^']+)'\)/g),
+    ].map((match) => match[1]);
+
+    expect(transientNeedles.length).toBeGreaterThan(0);
+    expect(collateralNeedles.length).toBeGreaterThan(0);
+    for (const message of messages) {
+      expect(message.length).toBeLessThanOrEqual(150);
+      expect(transientNeedles.some((needle) => message.toLowerCase().includes(needle))).toBe(false);
+      expect(collateralNeedles.some((needle) => message.includes(needle))).toBe(false);
+    }
+
+    const wrapperStart = routesSource.indexOf('async function executePerpOrder(');
+    const wrapperEnd = routesSource.indexOf('\nasync function getPerpPositions(', wrapperStart);
+    const wrapper = routesSource.slice(wrapperStart, wrapperEnd);
+    expect(wrapper).toContain("return { success: false, error: error.message || String(error) };");
+
+    const parserStart = routesSource.indexOf('function parseDriftError(');
+    const parserEnd = routesSource.indexOf('\n// Shared trade sizing', parserStart);
+    const parser = routesSource.slice(parserStart, parserEnd);
+    expect(parser).toContain('if (error.length > 150)');
+    expect(parser.lastIndexOf('return error;')).toBeGreaterThan(parser.indexOf('if (error.length > 150)'));
+
+    const failureAnchor = routesSource.indexOf(
+      'console.log(`[Webhook] Trade failed: ${orderResult.error}`);',
+    );
+    const failureStart = routesSource.lastIndexOf('if (!orderResult.success)', failureAnchor);
+    const failureEnd = routesSource.indexOf('\n      const fillPrice', failureAnchor);
+    const failureBranch = routesSource.slice(failureStart, failureEnd);
+    expect(failureAnchor).toBeGreaterThanOrEqual(0);
+    expect(failureBranch).toContain('const userFriendlyError = parseDriftError(orderResult.error);');
+    expect(failureBranch).toContain('const isTransient = isTransientError(errorToCheck);');
+    expect(failureBranch).toContain('const isCollateralError = isCollateralRetryError(errorToCheck);');
+    expect(failureBranch).toContain("type: 'trade_failed'");
+    expect(failureBranch).toContain('error: userFriendlyError,');
+  });
+
   it('guards automatic retries before UMK lookup/decryption and before the order wrapper', () => {
     const start = retrySource.indexOf('async function processRetryJob(');
     const end = retrySource.indexOf('\nasync function processQueue(', start);

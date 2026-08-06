@@ -63,6 +63,20 @@ export interface PacificaAccountResponse {
   subaccount_id?: string;
 }
 
+export interface PacificaMarginSettingResponse {
+  symbol: string;
+  isolated: boolean;
+  leverage: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface PacificaAccountSettingsResponse {
+  auto_lend_disabled: boolean | null;
+  margin_settings: PacificaMarginSettingResponse[];
+  spot_settings: unknown[];
+}
+
 export interface PacificaPositionResponse {
   symbol: string;
   side: string;
