@@ -285,8 +285,9 @@ if (process.env.NODE_ENV === "production") {
 // non-firewalled port and serves both the API and the client.
 //
 // EADDRINUSE retry: binding this early races the OLD instance on a restart.
-// The shutdown contract permits a 120s drain, so this 135s retry window
-// exceeds it. reusePort is silently ignored on this Node version. Any other
+// The shutdown contract permits a sequential 120s drain plus 60s storage
+// close, so this 195s retry window exceeds both. reusePort is silently ignored
+// on this Node version. Any other
 // listen error stays fatal immediately.
 const port = parseInt(process.env.PORT || "5000", 10);
 let bindAttempts = 0;
