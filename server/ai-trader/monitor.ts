@@ -77,6 +77,7 @@ import type { ProtocolPosition, TradeRecord } from "../protocol/protocol-types";
 import { isTerminalCloseResult } from "./close-truth";
 import { isAiTraderMarketAdmitted, SCANNER_MARKET_UNADMITTED_REASON } from "./market-admission";
 import { isMultiplierMarketQuarantined, MULTIPLIER_UNQUALIFIED_REASON } from "./multiplier-market-quarantine";
+import { registerPoolLoadTag } from "../pool-load";
 
 // --- Constants ---------------------------------------------------------------------
 
@@ -186,6 +187,28 @@ const BOT_IN_FLIGHT_WEDGE_MS = 5 * 60_000;
  * owner releases in finally, and process restart is the crash-recovery boundary.
  */
 const closeInFlight = new Map<string, symbol>();
+
+// Active async job owners, not checked-out pool clients. Identity-bearing
+// claims keep overlap and late settlement exact without serializing work.
+const activeTicks = new Set<symbol>();
+const activeCycles = new Set<symbol>();
+const activeGraduation = new Set<symbol>();
+const activeCompression = new Set<symbol>();
+
+registerPoolLoadTag("ai_trader", () => ({
+  t: activeTicks.size,
+  c: activeCycles.size,
+  g: activeGraduation.size,
+  d: activeCompression.size,
+}));
+
+function claimPoolLoadOwner(owners: Set<symbol>): () => void {
+  const claim = Symbol();
+  owners.add(claim);
+  return () => {
+    owners.delete(claim);
+  };
+}
 
 function tryAcquireCloseClaim(botId: string): (() => void) | null {
   if (closeInFlight.has(botId)) {
@@ -1594,6 +1617,8 @@ async function evaluateBotGraduation(bot: AiTraderBot, openPositionMtm: number):
 
 /** Periodic sweep: catches period-elapsed verdicts even for bots that never trade. */
 export async function runGraduationSweep(): Promise<void> {
+  const releasePoolLoadOwner = claimPoolLoadOwner(activeGraduation);
+  try {
   let bots: AiTraderBot[];
   try {
     bots = await storage.getActiveAiTraderBots();
@@ -1621,6 +1646,9 @@ export async function runGraduationSweep(): Promise<void> {
     } catch (err) {
       console.error(`[AiTraderMonitor] graduation sweep failed for bot ${bot.id.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
     }
+  }
+  } finally {
+    releasePoolLoadOwner();
   }
 }
 
@@ -1723,6 +1751,8 @@ export function scheduleAutoNext(botId: string, timeframe: string): void {
  * session UMK (unrestorable ⇒ pause 'reauth_required' + Telegram nudge).
  */
 export async function runAutoCycle(botId: string): Promise<void> {
+  const releasePoolLoadOwner = claimPoolLoadOwner(activeCycles);
+  try {
   // AIT-CYCLE-OBSERVABILITY-01: if invoked by the scheduled-timer wrapper the
   // obs entry is present; direct/manual callers leave it undefined (no-ops below).
   const _obs = _cycleObs.get(botId);
@@ -2031,6 +2061,9 @@ export async function runAutoCycle(botId: string): Promise<void> {
     // Position now open — the 15s loop takes over; next auto cycle fires after the close.
   } finally {
     keyBuf.fill(0);
+  }
+  } finally {
+    releasePoolLoadOwner();
   }
 }
 
@@ -2542,6 +2575,7 @@ async function tick(): Promise<void> {
   }
   const gen = ++tickGeneration;
   tickStartedAt = Date.now();
+  const releasePoolLoadOwner = claimPoolLoadOwner(activeTicks);
   try {
     // Bounded retry-with-backoff: a single stale connection eviction should not
     // kill the whole tick.  After the first failure the pool drops the dead
@@ -2661,12 +2695,15 @@ async function tick(): Promise<void> {
     // Only clear our own claim — a wedged tick that finally resumes after an
     // override must not wipe the newer tick's timestamp.
     if (gen === tickGeneration) tickStartedAt = null;
+    releasePoolLoadOwner();
   }
 }
 
 // --- Decision compression sweep ------------------------------------------------------
 
-async function runDecisionCompressionSweep(): Promise<void> {
+export async function runDecisionCompressionSweep(): Promise<void> {
+  const releasePoolLoadOwner = claimPoolLoadOwner(activeCompression);
+  try {
   let total = 0;
   const MAX_ITER = 20;
   for (let i = 0; i < MAX_ITER; i++) {
@@ -2679,6 +2716,9 @@ async function runDecisionCompressionSweep(): Promise<void> {
   }
   if (total > 0) {
     console.log(`[AiTraderMonitor] compression sweep: thinned ${total} old decision rows`);
+  }
+  } finally {
+    releasePoolLoadOwner();
   }
 }
 
@@ -2732,6 +2772,10 @@ export function stopAiTraderMonitor(): void {
   botInFlight.clear();
   closeInFlight.clear();
   preOpenFirstSeen.clear();
+  activeTicks.clear();
+  activeCycles.clear();
+  activeGraduation.clear();
+  activeCompression.clear();
   // Clear every outstanding observability watchdog so no stale slow/terminal
   // lines can fire after shutdown. _allActiveObs covers overlapping in-flight
   // cycles that are no longer the latest entry in _cycleObs.
