@@ -21,6 +21,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { AiTraderBot } from "@shared/schema";
 
+const scannerCapabilitiesMock = vi.hoisted(() => ({
+  producerEnabled: true,
+  consumersEnabled: true,
+  liveExecutionEnabled: true,
+}));
+vi.mock("../../server/ai-trader/scanner-capabilities", () => ({
+  SCANNER_CAPABILITIES: scannerCapabilitiesMock,
+}));
+
 // --- Mocks (must be declared before importing the module under test) -------------------
 
 const getAiTraderBotMock = vi.fn();
@@ -100,6 +109,11 @@ vi.mock("../../server/ai-trader/executor", () => ({
 vi.mock("../../server/ai-trader/monitor", () => ({
   userInitiatedClose: vi.fn(),
   parseOpenDecision: vi.fn(),
+}));
+const getScannerShortlistMock = vi.fn();
+vi.mock("../../server/ai-trader/scanner", () => ({
+  getScannerStatus: vi.fn(),
+  getScannerShortlist: (...a: unknown[]) => getScannerShortlistMock(...a),
 }));
 
 import { registerAiTraderRoutes } from "../../server/ai-trader/routes";
@@ -196,6 +210,7 @@ function goLiveReq(botId = "ai-bot-1") {
 }
 
 const GO_LIVE = "POST /api/ai-trader/:id/go-live";
+const ANALYZE = "POST /api/ai-trader/:id/analyze";
 const WAIVE = "POST /api/admin/ai-trader/waive";
 
 let routes: Map<string, Handler[]>;
@@ -229,6 +244,9 @@ function armHappyCrypto() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  scannerCapabilitiesMock.producerEnabled = true;
+  scannerCapabilitiesMock.consumersEnabled = true;
+  scannerCapabilitiesMock.liveExecutionEnabled = true;
   process.env.ADMIN_PASSWORD = "test-admin-pw";
   freshApp();
 });
@@ -236,6 +254,31 @@ beforeEach(() => {
 // === Gates (reject path) ====================================================================
 
 describe("go-live gates", () => {
+  it("409 scanner_live_execution_disabled before any scanner-source funding or venue work", async () => {
+    scannerCapabilitiesMock.liveExecutionEnabled = false;
+    getAiTraderBotMock.mockResolvedValue(makeBot({ marketSource: "scanner" }));
+
+    const r = await invoke(routes, GO_LIVE, goLiveReq());
+
+    expect(r).toMatchObject({ statusCode: 409, body: { error: "scanner_live_execution_disabled" } });
+    expect(getAdapterMock).not.toHaveBeenCalled();
+    expect(getWalletMock).not.toHaveBeenCalled();
+    expect(provisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+  });
+
+  it("409 scanner_consumers_disabled before manual scanner analysis reads the shortlist", async () => {
+    scannerCapabilitiesMock.consumersEnabled = false;
+    getAiTraderBotMock.mockResolvedValue(makeBot({ marketSource: "scanner" }));
+
+    const r = await invoke(routes, ANALYZE, goLiveReq());
+
+    expect(r).toMatchObject({ statusCode: 409, body: { error: "scanner_consumers_disabled" } });
+    expect(getScannerShortlistMock).not.toHaveBeenCalled();
+    expect(getWalletMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+  });
+
   it("409 when the bot is already live", async () => {
     getAiTraderBotMock.mockResolvedValue(makeBot({ paperMode: false }));
     const r = await invoke(routes, GO_LIVE, goLiveReq());

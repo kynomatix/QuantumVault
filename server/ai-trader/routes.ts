@@ -50,6 +50,7 @@ import { executeDecision, aiTraderPolicyObject } from "./executor";
 import { userInitiatedClose, parseOpenDecision, computeUnrealizedPnl, scheduleAutoNext, nextCycleTimeframe, SCANNER_CANDIDATE_MAX_AGE_MS } from "./monitor";
 import { sanitizeGraduationCriteria, canGoLive } from "./graduation";
 import { getScannerStatus, getScannerShortlist } from "./scanner";
+import { SCANNER_CAPABILITIES } from "./scanner-capabilities";
 import type { ClampedDecision } from "./guardrails";
 import { computeConfidenceCalibration } from "./calibration";
 import { isAiTraderMarketAdmitted, SCANNER_MARKET_UNADMITTED_REASON } from "./market-admission";
@@ -797,6 +798,13 @@ export function registerAiTraderRoutes(app: Express): void {
         return res.status(409).json({ error: "This bot already has an open position — close it before analyzing again." });
       }
 
+      if (bot.marketSource === "scanner" && !SCANNER_CAPABILITIES.consumersEnabled) {
+        return res.status(409).json({
+          error: "scanner_consumers_disabled",
+          detail: "Scanner analysis is disabled for this process.",
+        });
+      }
+
       // Scanner bots: manual Ask AI does a FRESH scanner pick instead of re-analyzing
       // the bot's saved market (which is the SOL-PERP placeholder until the first
       // auto-cycle pick, or the previous boundary's pick after that). Mirrors the
@@ -1024,7 +1032,7 @@ export function registerAiTraderRoutes(app: Express): void {
       const result = await executeDecision({ bot, decisionId: decision.id, clamped, adapter, markPrice });
       if (!result.ok) {
         const status =
-          result.reason === "cooldown_active" || result.reason === "daily_cap_reached" || result.reason === "bot_busy"
+          result.reason === "cooldown_active" || result.reason === "daily_cap_reached" || result.reason === "bot_busy" || result.reason === "scanner_live_execution_disabled"
             ? 409
             : result.reason === "auth_unavailable"
               ? 401
@@ -1204,6 +1212,12 @@ export function registerAiTraderRoutes(app: Express): void {
     try {
       const bot = await loadOwnedBot(req, res);
       if (!bot) return;
+      if (bot.marketSource === "scanner" && !SCANNER_CAPABILITIES.liveExecutionEnabled) {
+        return res.status(409).json({
+          error: "scanner_live_execution_disabled",
+          detail: "Live execution for scanner-source bots is disabled for this process.",
+        });
+      }
       // Claim the in-flight slot BEFORE any venue read or money movement.
       if (goLiveInFlight.has(bot.id)) {
         return res.status(409).json({ error: "A go-live attempt for this bot is already in progress — wait for it to finish." });

@@ -17,6 +17,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { AiTraderBot } from "@shared/schema";
 import type { ProtocolAdapter } from "../../server/protocol/adapter";
 
+const scannerCapabilitiesMock = {
+  producerEnabled: true,
+  consumersEnabled: true,
+  liveExecutionEnabled: false,
+};
+vi.mock("../../server/ai-trader/scanner-capabilities", () => ({
+  SCANNER_CAPABILITIES: scannerCapabilitiesMock,
+}));
+
 // --- Mocks ────────────────────────────────────────────────────────────────────
 
 const getWalletMock = vi.fn();
@@ -196,6 +205,9 @@ const botUpdates = () => updateBotMock.mock.calls.map((c) => c[1]);
 beforeEach(() => {
   vi.clearAllMocks();
   isMarketAdmittedMock.mockReturnValue(true);
+  scannerCapabilitiesMock.producerEnabled = true;
+  scannerCapabilitiesMock.consumersEnabled = true;
+  scannerCapabilitiesMock.liveExecutionEnabled = false;
   computePolicyHmacMock.mockReturnValue("hmac-new-market");
   vi.useFakeTimers();
 });
@@ -235,6 +247,25 @@ describe("nextCycleTimeframe (via scheduleAutoNext timer)", () => {
     await runAutoCycle("bot-fixed-1111");
 
     expect(getScannerShortlistMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+  });
+});
+
+describe("scanner consumer capability", () => {
+  it("consumer-off skips before adapter, shortlist, wallet, LLM, bot writes, or execution", async () => {
+    scannerCapabilitiesMock.consumersEnabled = false;
+    armScannerBot();
+
+    const { runAutoCycle } = await importMonitor();
+    await runAutoCycle("bot-scanner-2222");
+
+    expect(getAdapterMock).not.toHaveBeenCalled();
+    expect(getScannerShortlistMock).not.toHaveBeenCalled();
+    expect(getWalletMock).not.toHaveBeenCalled();
+    expect(decryptLlmKeyMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(runDecisionMock).not.toHaveBeenCalled();
+    expect(executeDecisionMock).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBeGreaterThan(0);
   });
 });
@@ -556,6 +587,7 @@ describe("scanner bot: happy path — market pick", () => {
 
 describe("fixed bots — byte-identical (no scanner branch)", () => {
   it("does NOT call getScannerShortlist for a fixed bot", async () => {
+    scannerCapabilitiesMock.consumersEnabled = false;
     const bot = makeFixedBot({ market: "SOL-PERP", timeframe: "15m" });
     getBotMock.mockResolvedValue(bot);
     getAdapterMock.mockReturnValue(makeAdapter());

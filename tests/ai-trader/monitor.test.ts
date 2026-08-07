@@ -128,6 +128,15 @@ vi.mock("../../server/ai-trader/scanner", () => ({
   stopScanner: (...a: unknown[]) => stopScannerMock(...a),
 }));
 
+const scannerCapabilitiesMock = vi.hoisted(() => ({
+  producerEnabled: true,
+  consumersEnabled: false,
+  liveExecutionEnabled: false,
+}));
+vi.mock("../../server/ai-trader/scanner-capabilities", () => ({
+  SCANNER_CAPABILITIES: scannerCapabilitiesMock,
+}));
+
 const isMarketAdmittedMock = vi.fn();
 vi.mock("../../server/ai-trader/market-admission", () => ({
   isAiTraderMarketAdmitted: (...a: unknown[]) => isMarketAdmittedMock(...a),
@@ -1076,6 +1085,7 @@ describe("runAutoCycle", () => {
   });
 
   it("scanner bot rejects multiplier candidate before registry admission, mutation, LLM, or execution", async () => {
+    scannerCapabilitiesMock.consumersEnabled = true;
     const { runAutoCycle } = await importMonitor();
     armAutoBot({ marketSource: "scanner" });
     getSessionByWalletMock.mockReturnValue({ sessionId: "s", session: { umk: Buffer.from("umk") } });
