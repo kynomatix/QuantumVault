@@ -12,6 +12,7 @@ import type { PerBotPositionHealth } from "../../server/vault/borrow-health";
 import type { FreshLoopRate } from "../../server/vault/loop/loop-rate-oracle";
 import { LOOP_DELEVERAGE_POLICY } from "../../server/vault/loop/loop-risk-policy";
 import {
+  buildLoopSafetyHeartbeatCounts,
   buildLoopSafetyInputs,
   runLoopSafetyTick,
   type LoopHealthObservation,
@@ -188,6 +189,12 @@ describe("buildLoopSafetyInputs", () => {
     );
     expect(candidates).toEqual([]);
     expect(skipped.map((s) => s.rowId).sort()).toEqual(["bad-debt", "bad-health", "bad-hf", "bad-vault"]);
+    expect(Object.fromEntries(skipped.map((s) => [s.rowId, s.code]))).toEqual({
+      "bad-health": "health_unavailable",
+      "bad-debt": "live_debt_unreadable",
+      "bad-hf": "health_factor_unreadable",
+      "bad-vault": "vault_identity_unreadable",
+    });
   });
 
   it("skips rows that are not open loop rows (defensive re-check)", () => {
@@ -200,6 +207,10 @@ describe("buildLoopSafetyInputs", () => {
     );
     expect(candidates).toEqual([]);
     expect(skipped).toHaveLength(2);
+    expect(skipped.map((s) => s.code)).toEqual([
+      "not_open_loop",
+      "not_open_loop",
+    ]);
   });
 
   it("builds a per-position VenueState with the carry at the position's ACTUAL leverage", () => {
@@ -245,10 +256,45 @@ describe("buildLoopSafetyInputs", () => {
 // ─── runLoopSafetyTick (orchestrator) ────────────────────────────────────────
 
 describe("runLoopSafetyTick", () => {
+  it("builds durable safety counts from observed total and sanitized skip counts", () => {
+    expect(buildLoopSafetyHeartbeatCounts(4, {
+      evaluated: 2,
+      acted: 1,
+      failed: 1,
+      skipped: 2,
+      skipReasonCounts: {
+        health_unavailable: 1,
+        live_debt_unreadable: 1,
+      },
+    })).toEqual({
+      evaluated: 4,
+      acted: 1,
+      failed: 1,
+      skipped: 2,
+      skipReasonCounts: {
+        health_unavailable: 1,
+        live_debt_unreadable: 1,
+      },
+    });
+    expect(buildLoopSafetyHeartbeatCounts(0, null)).toEqual({
+      evaluated: 0,
+      acted: 0,
+      failed: 0,
+      skipped: 0,
+      skipReasonCounts: {},
+    });
+  });
+
   it("does nothing for healthy positions: no claim, no signer, no execution", async () => {
     const { deps, calls } = makeDeps();
     const result = await runLoopSafetyTick([obs({}, { healthFactor: 1.9 })], deps);
-    expect(result).toEqual({ evaluated: 1, acted: 0, failed: 0, skipped: 0 });
+    expect(result).toEqual({
+      evaluated: 1,
+      acted: 0,
+      failed: 0,
+      skipped: 0,
+      skipReasonCounts: {},
+    });
     expect(calls.claims).toEqual([]);
     expect(calls.signerRequests).toEqual([]);
     expect(calls.decisions).toEqual([]); // no 'none' journal flood from the 60s tick
@@ -403,7 +449,13 @@ describe("runLoopSafetyTick", () => {
       [obs({ id: "r7" }, { status: "unavailable", healthFactor: null, liveDebtRaw: null } as Partial<PerBotPositionHealth>)],
       deps,
     );
-    expect(result).toEqual({ evaluated: 0, acted: 0, failed: 0, skipped: 1 });
+    expect(result).toEqual({
+      evaluated: 0,
+      acted: 0,
+      failed: 0,
+      skipped: 1,
+      skipReasonCounts: { health_unavailable: 1 },
+    });
     expect(calls.claims).toEqual([]);
   });
 
@@ -416,7 +468,13 @@ describe("runLoopSafetyTick", () => {
       },
     });
     const result = await runLoopSafetyTick([], deps);
-    expect(result).toEqual({ evaluated: 0, acted: 0, failed: 0, skipped: 0 });
+    expect(result).toEqual({
+      evaluated: 0,
+      acted: 0,
+      failed: 0,
+      skipped: 0,
+      skipReasonCounts: {},
+    });
     expect(ratesTouched).toBe(false);
   });
 });

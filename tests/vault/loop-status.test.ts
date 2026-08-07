@@ -2,8 +2,12 @@
 // computeTickCoverage: expected-vs-actual heartbeat coverage + max silent gap.
 // summarizeDecisionsForGate: decision-journal gate checks (anchors, forced deleverage).
 import { describe, it, expect } from "vitest";
-import { computeTickCoverage, summarizeDecisionsForGate } from "../../server/vault/loop/loop-status";
-import type { LoopPolicyDecision } from "../../shared/schema";
+import {
+  computeTickCoverage,
+  summarizeDecisionsForGate,
+  summarizeSafetyTickAccounting,
+} from "../../server/vault/loop/loop-status";
+import type { LoopPolicyDecision, LoopTickHeartbeat } from "../../shared/schema";
 
 const NOW = new Date("2026-07-03T12:00:00Z");
 const HOUR = 60 * 60 * 1000;
@@ -104,6 +108,164 @@ describe("computeTickCoverage", () => {
     expect(cov.coveragePct).toBe(100);
     expect(cov.count).toBe(2880);
     expect(cov.expected).toBe(1440);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+function heartbeat(over: Partial<LoopTickHeartbeat> = {}): LoopTickHeartbeat {
+  return {
+    id: "beat-1",
+    tick: "safety",
+    evaluated: 0,
+    acted: 0,
+    failed: 0,
+    skipped: 0,
+    skipReasonCounts: {},
+    createdAt: NOW,
+    ...over,
+  };
+}
+
+describe("summarizeSafetyTickAccounting", () => {
+  it("totals observed, assessed, skipped, acted, failed, and sanitized reasons", () => {
+    const earlier = new Date(NOW.getTime() - MIN);
+    const summary = summarizeSafetyTickAccounting([
+      heartbeat({
+        id: "a",
+        evaluated: 3,
+        skipped: 2,
+        acted: 1,
+        failed: 1,
+        skipReasonCounts: {
+          health_unavailable: 1,
+          live_debt_unreadable: 1,
+        },
+        createdAt: earlier,
+      }),
+      heartbeat({ id: "b", createdAt: NOW }),
+    ]);
+
+    expect(summary).toEqual({
+      totalBeats: 2,
+      accountedBeats: 2,
+      unknownBeats: 0,
+      observed: 3,
+      assessed: 1,
+      skipped: 2,
+      acted: 1,
+      failed: 1,
+      skipReasonCounts: {
+        health_unavailable: 1,
+        live_debt_unreadable: 1,
+      },
+      firstAccountedAt: earlier,
+      lastAccountedAt: NOW,
+      complete: true,
+    });
+  });
+
+  it("keeps historical NULL accounting unknown and excludes it from every total", () => {
+    const legacyAt = new Date(NOW.getTime() - MIN);
+    const summary = summarizeSafetyTickAccounting([
+      heartbeat({
+        id: "legacy",
+        evaluated: 7,
+        acted: 6,
+        failed: 5,
+        skipped: null,
+        skipReasonCounts: null,
+        createdAt: legacyAt,
+      }),
+      heartbeat({
+        id: "current",
+        evaluated: 2,
+        skipped: 1,
+        acted: 1,
+        skipReasonCounts: { vault_identity_unreadable: 1 },
+      }),
+    ]);
+
+    expect(summary.totalBeats).toBe(2);
+    expect(summary.accountedBeats).toBe(1);
+    expect(summary.unknownBeats).toBe(1);
+    expect(summary.observed).toBe(2);
+    expect(summary.assessed).toBe(1);
+    expect(summary.skipped).toBe(1);
+    expect(summary.acted).toBe(1);
+    expect(summary.failed).toBe(0);
+    expect(summary.skipReasonCounts).toEqual({
+      vault_identity_unreadable: 1,
+    });
+    expect(summary.firstAccountedAt).toEqual(NOW);
+    expect(summary.lastAccountedAt).toEqual(NOW);
+    expect(summary.complete).toBe(false);
+  });
+
+  it("fails closed on malformed counts, unknown reason keys, and reason mismatches", () => {
+    const malformed = [
+      heartbeat({
+        id: "negative",
+        evaluated: 1,
+        skipped: -1,
+        skipReasonCounts: {},
+      }),
+      heartbeat({
+        id: "too-many-skips",
+        evaluated: 0,
+        skipped: 1,
+        skipReasonCounts: { health_unavailable: 1 },
+      }),
+      heartbeat({
+        id: "unknown-key",
+        evaluated: 1,
+        skipped: 1,
+        skipReasonCounts: { dynamic_rpc_text: 1 },
+      }),
+      heartbeat({
+        id: "mismatch",
+        evaluated: 2,
+        skipped: 2,
+        skipReasonCounts: { health_unavailable: 1 },
+      }),
+      heartbeat({
+        id: "fractional",
+        evaluated: 1,
+        skipped: 1,
+        skipReasonCounts: { health_unavailable: 0.5 },
+      }),
+    ];
+
+    const summary = summarizeSafetyTickAccounting(malformed);
+    expect(summary.totalBeats).toBe(5);
+    expect(summary.accountedBeats).toBe(0);
+    expect(summary.unknownBeats).toBe(5);
+    expect(summary.observed).toBe(0);
+    expect(summary.assessed).toBe(0);
+    expect(summary.skipped).toBe(0);
+    expect(summary.acted).toBe(0);
+    expect(summary.failed).toBe(0);
+    expect(summary.skipReasonCounts).toEqual({});
+    expect(summary.firstAccountedAt).toBeNull();
+    expect(summary.lastAccountedAt).toBeNull();
+    expect(summary.complete).toBe(false);
+  });
+
+  it("empty input is incomplete with known zero totals", () => {
+    expect(summarizeSafetyTickAccounting([])).toEqual({
+      totalBeats: 0,
+      accountedBeats: 0,
+      unknownBeats: 0,
+      observed: 0,
+      assessed: 0,
+      skipped: 0,
+      acted: 0,
+      failed: 0,
+      skipReasonCounts: {},
+      firstAccountedAt: null,
+      lastAccountedAt: null,
+      complete: false,
+    });
   });
 });
 

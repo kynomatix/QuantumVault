@@ -45,6 +45,10 @@ import { decideDeleverage } from "./keeper/policy";
 import type { DeleverageDecision, PositionHealth, VenueState } from "./keeper/types";
 import { getFreshLoopRates, netCarryAt, type FreshLoopRate } from "./loop-rate-oracle";
 import { LOOP_DELEVERAGE_POLICY, LOOP_VAULT_ALLOWLIST } from "./loop-risk-policy";
+import type {
+  LoopSafetySkipReasonCode,
+  LoopSafetySkipReasonCounts,
+} from "./loop-status";
 import {
   executeLoopPartialUnwind,
   executeLoopDeleverToHold,
@@ -126,7 +130,11 @@ export interface LoopSafetyInputs {
   positions: PositionHealth[];
   states: Map<string, VenueState>;
   /** Rows that were open loop rows but could not be safely assessed. */
-  skipped: Array<{ rowId: string; reason: string }>;
+  skipped: Array<{
+    rowId: string;
+    code: LoopSafetySkipReasonCode;
+    reason: string;
+  }>;
 }
 
 const venueKey = (vaultId: number): string => `vault:${vaultId}`;
@@ -145,25 +153,37 @@ export function buildLoopSafetyInputs(
   const candidates: LoopSafetyCandidate[] = [];
   const positions: PositionHealth[] = [];
   const states = new Map<string, VenueState>();
-  const skipped: Array<{ rowId: string; reason: string }> = [];
+  const skipped: LoopSafetyInputs["skipped"] = [];
 
   for (const { row, health } of observations) {
     // Defensive re-check — the monitor should only hand us open loop rows.
     if ((row.kind ?? "borrow") !== "loop" || row.status !== "open") {
-      skipped.push({ rowId: row.id, reason: `not an open loop row (kind=${row.kind}, status=${row.status})` });
+      skipped.push({
+        rowId: row.id,
+        code: "not_open_loop",
+        reason: `not an open loop row (kind=${row.kind}, status=${row.status})`,
+      });
       continue;
     }
 
     const vaultId = Number(row.venueVaultId);
     if (!Number.isInteger(vaultId) || vaultId <= 0) {
-      skipped.push({ rowId: row.id, reason: `unreadable venueVaultId '${row.venueVaultId}'` });
+      skipped.push({
+        rowId: row.id,
+        code: "vault_identity_unreadable",
+        reason: `unreadable venueVaultId '${row.venueVaultId}'`,
+      });
       continue;
     }
 
     if (health.status !== "available") {
       // Fail closed: no live read → no action. The monitor's 'unavailable'
       // managed-loop attention path tells the owner; acting blind could size wrong.
-      skipped.push({ rowId: row.id, reason: `health unavailable: ${health.reason ?? "unknown"}` });
+      skipped.push({
+        rowId: row.id,
+        code: "health_unavailable",
+        reason: `health unavailable: ${health.reason ?? "unknown"}`,
+      });
       continue;
     }
 
@@ -175,7 +195,11 @@ export function buildLoopSafetyInputs(
       liveDebtRaw = BigInt(health.liveDebtRaw);
     }
     if (liveDebtRaw === null) {
-      skipped.push({ rowId: row.id, reason: "live debt unreadable" });
+      skipped.push({
+        rowId: row.id,
+        code: "live_debt_unreadable",
+        reason: "live debt unreadable",
+      });
       continue;
     }
     if (liveDebtRaw <= BigInt(0)) {
@@ -184,7 +208,11 @@ export function buildLoopSafetyInputs(
     }
 
     if (typeof health.healthFactor !== "number" || !Number.isFinite(health.healthFactor)) {
-      skipped.push({ rowId: row.id, reason: "health factor unreadable with live debt > 0" });
+      skipped.push({
+        rowId: row.id,
+        code: "health_factor_unreadable",
+        reason: "health factor unreadable with live debt > 0",
+      });
       continue;
     }
 
@@ -236,6 +264,29 @@ export interface LoopSafetyTickResult {
   acted: number;
   failed: number;
   skipped: number;
+  skipReasonCounts: LoopSafetySkipReasonCounts;
+}
+
+export interface LoopSafetyHeartbeatCounts {
+  evaluated: number;
+  acted: number;
+  failed: number;
+  skipped: number;
+  skipReasonCounts: LoopSafetySkipReasonCounts;
+}
+
+/** Build the safety-only durable payload; evaluated retains observed-count semantics. */
+export function buildLoopSafetyHeartbeatCounts(
+  observed: number,
+  result: LoopSafetyTickResult | null,
+): LoopSafetyHeartbeatCounts {
+  return {
+    evaluated: observed,
+    acted: result?.acted ?? 0,
+    failed: result?.failed ?? 0,
+    skipped: result?.skipped ?? 0,
+    skipReasonCounts: { ...(result?.skipReasonCounts ?? {}) },
+  };
 }
 
 const symbolFor = (vaultId: number): string =>
@@ -249,7 +300,13 @@ export async function runLoopSafetyTick(
   observations: LoopHealthObservation[],
   deps: LoopSafetyTickDeps,
 ): Promise<LoopSafetyTickResult> {
-  const result: LoopSafetyTickResult = { evaluated: 0, acted: 0, failed: 0, skipped: 0 };
+  const result: LoopSafetyTickResult = {
+    evaluated: 0,
+    acted: 0,
+    failed: 0,
+    skipped: 0,
+    skipReasonCounts: {},
+  };
   if (observations.length === 0) return result;
 
   let rates: Map<number, FreshLoopRate>;
@@ -264,6 +321,8 @@ export async function runLoopSafetyTick(
   const { candidates, positions, states, skipped } = buildLoopSafetyInputs(observations, rates);
   result.skipped = skipped.length;
   for (const s of skipped) {
+    result.skipReasonCounts[s.code] =
+      (result.skipReasonCounts[s.code] ?? 0) + 1;
     console.warn(`[LoopSafetyTick] skipped row ${s.rowId}: ${s.reason}`);
   }
   if (positions.length === 0) return result;
