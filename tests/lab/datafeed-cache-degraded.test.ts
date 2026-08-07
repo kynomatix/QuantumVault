@@ -21,7 +21,7 @@ vi.mock("../../server/lab/candle-store", () => ({
   CACHE_BUDGET_ABORT_REASON: "candle-cache-budget-exceeded",
 }));
 
-import { fetchOHLCV, isCacheDegradedError } from "../../server/lab/datafeed";
+import { fetchOHLCV, isCacheDegradedError, MONEY_CANDLE_POLICY } from "../../server/lab/datafeed";
 
 const TF_MS = 15 * 60 * 1000;
 
@@ -68,7 +68,7 @@ function runFetch(deadlineMs: number, signal?: AbortSignal) {
     new Date(now - 100 * TF_MS).toISOString(),
     new Date(now).toISOString(),
     undefined,
-    { deadlineMs, callerClass: "scanner", signal },
+    { basisPolicy: MONEY_CANDLE_POLICY, deadlineMs, callerClass: "scanner", signal },
   );
 }
 

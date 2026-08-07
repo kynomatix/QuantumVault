@@ -1,9 +1,11 @@
 import { compilePine } from "./index";
-import { fetchOHLCV } from "../datafeed";
+import { fetchOHLCV, LAB_DIRECT_PERP_CANDLE_POLICY } from "../datafeed";
 import { executePine } from "./runtime";
 
 async function main() {
-  const candles = await fetchOHLCV("SOL/USDT", "2h", "2022-12-31", "2026-03-19");
+  const candles = await fetchOHLCV("SOL/USDT", "2h", "2022-12-31", "2026-03-19", undefined, {
+    basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY,
+  });
   console.log(`Got ${candles.length} candles`);
 
   function run(label: string, code: string) {

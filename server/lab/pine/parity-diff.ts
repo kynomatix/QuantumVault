@@ -23,7 +23,7 @@ import { executePine } from "./runtime.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import type { OHLCV, PineEngineConfig } from "./runtime.js";
-import { fetchOHLCV } from "../datafeed.js";
+import { fetchOHLCV, LAB_DIRECT_PERP_CANDLE_POLICY, type ProvenancedOHLCV } from "../datafeed.js";
 import { getCachedCandles, saveCandlesToDb } from "../candle-store.js";
 
 interface TvTradeRow {
@@ -210,13 +210,25 @@ function collapseTvPositions(rows: TvTradeRow[]): TvPosition[] {
 }
 
 async function getCandles(symbol: string, timeframe: string, startMs: number, endMs: number): Promise<OHLCV[]> {
-  const cached = await getCachedCandles(symbol, timeframe, startMs, endMs);
+  const cached = await getCachedCandles(symbol, timeframe, startMs, endMs, {
+    basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY,
+  });
   if (cached && cached.length > 50) {
+    const identities = [...new Set(cached.map(({ provenance: p }) =>
+      `${p.source}/${p.venue}/${p.basis}/${p.proxy}/${p.finality}/${p.timeSemantic}`,
+    ))].sort().join(",");
+    console.log(`[candle-provenance] ${identities}`);
     console.log(`[candles] cache hit ${cached.length} bars ${symbol} ${timeframe}`);
     return cached as OHLCV[];
   }
   console.log(`[candles] cache miss — fetching from exchange...`);
-  const fresh: any = await (fetchOHLCV as any)(symbol, timeframe, startMs, endMs);
+  const fresh = await fetchOHLCV(symbol, timeframe, startMs, endMs, undefined, {
+    basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY,
+  });
+  const identities = [...new Set((fresh as ProvenancedOHLCV[]).map(({ provenance: p }) =>
+    `${p.source}/${p.venue}/${p.basis}/${p.proxy}/${p.finality}/${p.timeSemantic}`,
+  ))].sort().join(",");
+  console.log(`[candle-provenance] ${identities || "unavailable"}`);
   if (fresh && fresh.length) await saveCandlesToDb(symbol, timeframe, fresh);
   return (fresh ?? []) as OHLCV[];
 }

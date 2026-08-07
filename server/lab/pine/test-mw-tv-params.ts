@@ -1,18 +1,22 @@
 import { compilePine } from "./index.js";
 import { executePine } from "./runtime.js";
 import { getCachedCandles, saveCandlesToDb } from "../candle-store.js";
-import { fetchOHLCV } from "../datafeed.js";
+import { fetchOHLCV, LAB_DIRECT_PERP_CANDLE_POLICY } from "../datafeed.js";
 
 async function getCandles(symbol: string, timeframe: string, startDate: string = "2022-12-31T00:00:00Z") {
   const now = Date.now();
   const startMs = new Date(startDate).getTime();
-  const cached = await getCachedCandles(symbol, timeframe, startMs, now);
+  const cached = await getCachedCandles(symbol, timeframe, startMs, now, {
+    basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY,
+  });
   if (cached && cached.length > 1000) {
     console.log(`[CandleCache] Hit: ${cached.length} candles for ${symbol} ${timeframe}`);
     return cached;
   }
   console.log(`[CandleCache] Miss — fetching from exchange...`);
-  const fresh = await fetchOHLCV(symbol, timeframe, startMs, now);
+  const fresh = await fetchOHLCV(symbol, timeframe, startMs, now, undefined, {
+    basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY,
+  });
   await saveCandlesToDb(symbol, timeframe, fresh);
   return fresh;
 }

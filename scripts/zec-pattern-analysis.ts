@@ -28,9 +28,15 @@
 import { db } from "../server/db";
 import { aiTraderDecisions, aiTraderBots } from "@shared/schema";
 import { eq, and, isNotNull, inArray } from "drizzle-orm";
-import { fetchOHLCV } from "../server/lab/datafeed";
+import { fetchOHLCV, LAB_DIRECT_PERP_CANDLE_POLICY, type ProvenancedOHLCV } from "../server/lab/datafeed";
 import { marketToDatafeedTicker } from "../server/ai-trader/context-builder";
 import type { OHLCV } from "../server/lab/engine";
+
+function candleIdentities(candles: ProvenancedOHLCV[]): string {
+  return [...new Set(candles.map(({ provenance: p }) =>
+    `${p.source}/${p.venue}/${p.basis}/${p.proxy}/${p.finality}/${p.timeSemantic}`,
+  ))].sort().join(",");
+}
 
 const VERBOSE = process.argv.includes("--verbose");
 
@@ -261,9 +267,16 @@ async function main() {
 
     let candles: OHLCV[] = [];
     try {
-      candles = await fetchOHLCV(ticker, bot.timeframe, startIso, endIso);
+      candles = await fetchOHLCV(ticker, bot.timeframe, startIso, endIso, undefined, {
+        basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY,
+      });
     } catch {
       // fetchOHLCV throws on network/config errors; treat as no-data
+    }
+    if (candles.length > 0) {
+      console.log(`[candle-provenance] ${ticker} ${bot.timeframe} ${candleIdentities(candles as ProvenancedOHLCV[])} bars=${candles.length}`);
+    } else {
+      console.log(`[candle-provenance] ${ticker} ${bot.timeframe} unavailable bars=0`);
     }
 
     if (candles.length === 0) {

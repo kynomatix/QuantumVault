@@ -1,6 +1,6 @@
 import { labStorage } from "../storage";
 import { compilePine, runPineBacktest } from "./index";
-import { fetchOHLCV } from "../datafeed";
+import { fetchOHLCV, getTimeframeSeconds, LAB_DIRECT_PERP_CANDLE_POLICY } from "../datafeed";
 
 const tvParams = {
   bb_use_ema: false,
@@ -70,7 +70,11 @@ async function main() {
   console.log("Ticker: SOL/USDT:USDT, Timeframe: 8h");
   console.log("Params:", JSON.stringify(tvParams, null, 2));
 
-  const candles = await fetchOHLCV("SOL/USDT:USDT", "8h", 500);
+  const fetchEnd = Date.now();
+  const candles = await fetchOHLCV(
+    "SOL/USDT:USDT", "8h", fetchEnd - 500 * getTimeframeSeconds("8h") * 1000, fetchEnd, undefined,
+    { basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY },
+  );
   if (!candles || candles.length < 50) {
     console.log("Not enough candles:", candles?.length ?? 0);
     return;

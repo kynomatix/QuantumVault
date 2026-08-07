@@ -5,7 +5,14 @@
 // could ever flow through this module (an LLM's own past `rationale`/`invalidation`
 // text) are deliberately NOT included in the history block — WO-3 §6 pins that
 // block's fields to side/entry/exit/exitReason/realizedPnl/regime tag only.
-import { fetchOHLCV, isNonCryptoSymbol, isCacheDegradedError } from "../lab/datafeed";
+import {
+  fetchOHLCV,
+  isNonCryptoSymbol,
+  isCacheDegradedError,
+  AI_CONTEXT_CANDLE_POLICY,
+  type CandleProvenance,
+  type ProvenancedOHLCV,
+} from "../lab/datafeed";
 import type { OHLCV } from "../lab/engine";
 import { ema, rsi, macd, atr, adx, bollingerBands, supertrend, obv } from "../lab/indicators";
 import type { ProtocolAdapter } from "../protocol/adapter";
@@ -439,9 +446,10 @@ export async function buildMarketContext(
   const selectedStart = new Date(now - INDICATOR_BARS * tfMs).toISOString();
 
   const datafeedTicker = marketToDatafeedTicker(market);
-  let selectedRaw: OHLCV[];
+  let selectedRaw: ProvenancedOHLCV[];
   try {
     selectedRaw = await fetchOHLCV(datafeedTicker, timeframe, selectedStart, selectedEnd, undefined, {
+      basisPolicy: AI_CONTEXT_CANDLE_POLICY,
       deadlineMs: 45_000,
       callerClass: "context",
     });
@@ -477,6 +485,7 @@ export async function buildMarketContext(
   const parentTf = PARENT_TIMEFRAME[timeframe];
   let parentIndicatorCandles: OHLCV[] = [];
   let parentCandles: OHLCV[] = [];
+  let parentCandleProvenance: CandleProvenance | null = null;
   if (parentTf) {
     const parentTfMs = TIMEFRAME_MS[parentTf];
     // Brick 2+4: fetch PARENT_INDICATOR_BARS for pivot computation.
@@ -484,9 +493,11 @@ export async function buildMarketContext(
     const parentStart = new Date(now - PARENT_INDICATOR_BARS * parentTfMs).toISOString();
     try {
       const parentRaw = await fetchOHLCV(datafeedTicker, parentTf, parentStart, selectedEnd, undefined, {
+        basisPolicy: AI_CONTEXT_CANDLE_POLICY,
         deadlineMs: 45_000,
         callerClass: "context",
       });
+      parentCandleProvenance = parentRaw[parentRaw.length - 1]?.provenance ?? null;
       parentIndicatorCandles = parentRaw.slice(-PARENT_INDICATOR_BARS);
       parentCandles = parentIndicatorCandles.slice(-PARENT_BARS); // CSV render only
     } catch (err) {
@@ -962,6 +973,10 @@ export async function buildMarketContext(
     activeRange: activeRangeDigest,
     // WO-B: present only for scanner bots; undefined/absent for fixed-ticker bots.
     scannerNote: scannerNote ?? null,
+    candleProvenance: {
+      selected: selectedRaw[selectedRaw.length - 1]?.provenance ?? null,
+      parent: parentCandleProvenance,
+    },
     indicators: {
       ema20,
       ema50,

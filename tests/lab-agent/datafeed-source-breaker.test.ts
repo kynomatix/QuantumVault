@@ -28,7 +28,11 @@ vi.mock("../../server/lab/candle-store", () => ({
   saveCandlesToDb: (...a: any[]) => mockSave(...a),
 }));
 
-import { fetchOHLCV, __testResetOkxSourceBreaker } from "../../server/lab/datafeed";
+import {
+  fetchOHLCV,
+  __testResetOkxSourceBreaker,
+  LAB_ALL_KNOWN_CANDLE_POLICY,
+} from "../../server/lab/datafeed";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -68,10 +72,10 @@ function makeFetch(getOkxMode: () => OkxMode, rangeStartMs: number) {
           text: async () => "",
         };
       }
-      // "ok": one page of OKX candles [ts_ms, o, h, l, c, vol], newest-first.
+      // "ok": one page of OKX history candles including confirm at index 8.
       const data: string[][] = [];
       for (let i = 99; i >= 0; i--) {
-        data.push([String(rangeStartMs + i * TF_MS), "100", "101", "99", "100", "1000"]);
+        data.push([String(rangeStartMs + i * TF_MS), "100", "101", "99", "100", "1000", "1000", "1000", "1"]);
       }
       return {
         ok: true,
@@ -110,6 +114,8 @@ async function runFetch(symbol: string): Promise<any[]> {
     "15m",
     new Date(startMs).toISOString(),
     new Date(now).toISOString(),
+    undefined,
+    { basisPolicy: LAB_ALL_KNOWN_CANDLE_POLICY },
   );
   // Let all retry/backoff sleeps elapse instantly.
   await vi.runAllTimersAsync();
@@ -141,15 +147,16 @@ describe("fetchOHLCV — OKX source-level circuit breaker", () => {
     const r1 = await runFetch("BRKA1/USDT");
     const r2 = await runFetch("BRKA2/USDT");
     const r3 = await runFetch("BRKA3/USDT");
-    // Fallback stays intact: Gate served candles for every symbol.
-    expect(r1.length).toBeGreaterThan(0);
-    expect(r2.length).toBeGreaterThan(0);
-    expect(r3.length).toBeGreaterThan(0);
+    // Gate fallback still runs, but its unknown finality/open-time identity is
+    // provenance-ineligible and therefore cannot be returned as Lab data.
+    expect(r1).toEqual([]);
+    expect(r2).toEqual([]);
+    expect(r3).toEqual([]);
     const okxAfterTrip = callsTo(fetchSpy, "okx.com");
     expect(okxAfterTrip).toBeGreaterThan(0);
 
     const r4 = await runFetch("BRKA4/USDT");
-    expect(r4.length).toBeGreaterThan(0);
+    expect(r4).toEqual([]);
     // Breaker OPEN: no new OKX traffic at all for a fresh symbol.
     expect(callsTo(fetchSpy, "okx.com")).toBe(okxAfterTrip);
   });

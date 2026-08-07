@@ -1,5 +1,5 @@
 import { compilePine, runPineBacktest } from "./index";
-import { fetchOHLCV } from "../datafeed";
+import { fetchOHLCV, getTimeframeSeconds, LAB_DIRECT_PERP_CANDLE_POLICY } from "../datafeed";
 import { TA_WHITELIST } from "./compiler";
 import { TA_IMPL_REGISTRY } from "./runtime";
 
@@ -52,7 +52,11 @@ async function main() {
 
   const ticker = "SOL/USDT:USDT";
   const timeframe = "5m";
-  const candles = await fetchOHLCV(ticker, timeframe, 500);
+  const fetchEnd = Date.now();
+  const candles = await fetchOHLCV(
+    ticker, timeframe, fetchEnd - 500 * getTimeframeSeconds(timeframe) * 1000, fetchEnd, undefined,
+    { basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY },
+  );
   if (!candles || candles.length < 50) {
     console.log("Not enough candles");
     process.exit(1);

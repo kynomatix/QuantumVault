@@ -21,6 +21,14 @@ const NON_CRYPTO_BASES = new Set([
 vi.mock("../../server/lab/datafeed", () => ({
   fetchOHLCV: (...args: unknown[]) => fetchOHLCVMock(...args),
   isNonCryptoSymbol: (symbol: string) => NON_CRYPTO_BASES.has(symbol.split("/")[0]),
+  isCacheDegradedError: (err: unknown) =>
+    (err as { name?: string } | null)?.name === "CacheDegradedError",
+  AI_CONTEXT_CANDLE_POLICY: {
+    consumer: "ai_context",
+    acceptedBasis: ["perp"],
+    acceptedFinality: ["finalized"],
+    acceptedProxy: ["direct"],
+  },
 }));
 
 // WO-8f: hl-context.ts is a separate module with its own dedicated test file
@@ -116,9 +124,20 @@ const HL_FIXTURE = {
 
 const FIXED_NOW = Date.parse("2026-01-15T12:00:00.000Z");
 
-function makeCandles(count: number, tfMs: number, lastCandleAgeMs: number, basePrice: number): OHLCV[] {
+type TestCandle = OHLCV & {
+  provenance: {
+    source: "okx";
+    venue: "okx";
+    basis: "perp";
+    proxy: "direct";
+    finality: "finalized";
+    timeSemantic: "open_time";
+  };
+};
+
+function makeCandles(count: number, tfMs: number, lastCandleAgeMs: number, basePrice: number): TestCandle[] {
   const lastTime = FIXED_NOW - lastCandleAgeMs;
-  const candles: OHLCV[] = [];
+  const candles: TestCandle[] = [];
   for (let i = 0; i < count; i++) {
     const time = lastTime - (count - 1 - i) * tfMs;
     const close = basePrice + i * 0.05 + Math.sin(i / 5) * 2;
@@ -126,7 +145,22 @@ function makeCandles(count: number, tfMs: number, lastCandleAgeMs: number, baseP
     const high = Math.max(open, close) + 0.3;
     const low = Math.min(open, close) - 0.3;
     const volume = 1000 + i * 3;
-    candles.push({ time, open, high, low, close, volume });
+    candles.push({
+      time,
+      open,
+      high,
+      low,
+      close,
+      volume,
+      provenance: {
+        source: "okx",
+        venue: "okx",
+        basis: "perp",
+        proxy: "direct",
+        finality: "finalized",
+        timeSemantic: "open_time",
+      },
+    });
   }
   return candles;
 }
@@ -404,7 +438,18 @@ describe("buildMarketContext (WO-3)", () => {
 
     expect(result.system).toMatchSnapshot("system-prompt");
     expect(result.user).toMatchSnapshot("user-prompt");
-    expect(result.contextDigest).toMatchSnapshot("context-digest");
+    const { candleProvenance, ...legacyDigest } = result.contextDigest as any;
+    expect(legacyDigest).toMatchSnapshot("context-digest");
+    expect(candleProvenance).toEqual({
+      selected: {
+        source: "okx", venue: "okx", basis: "perp", proxy: "direct",
+        finality: "finalized", timeSemantic: "open_time",
+      },
+      parent: {
+        source: "okx", venue: "okx", basis: "perp", proxy: "direct",
+        finality: "finalized", timeSemantic: "open_time",
+      },
+    });
 
     // WO-7.1 read model: positions are read from the bot's OWN subaccount
     // pubkey (liveReadAccount — the sub IS the account on Pacifica's Phase 4b

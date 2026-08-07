@@ -44,7 +44,12 @@ import { getAdapter, getDefaultAdapter } from "../protocol/adapter-registry";
 import { getMarketInfo } from "../market-registry";
 import { isSelectableModel } from "../ai-assistant/models-catalog";
 import { buildMarketContext, marketToDatafeedTicker } from "./context-builder";
-import { fetchOHLCV } from "../lab/datafeed";
+import {
+  fetchOHLCV,
+  CHART_CANDLE_POLICY,
+  isCandleBasisUnavailableError,
+  type CandleProvenance,
+} from "../lab/datafeed";
 import { runDecision } from "./decide";
 import { executeDecision, aiTraderPolicyObject } from "./executor";
 import { userInitiatedClose, parseOpenDecision, computeUnrealizedPnl, scheduleAutoNext, nextCycleTimeframe, SCANNER_CANDIDATE_MAX_AGE_MS } from "./monitor";
@@ -294,6 +299,42 @@ const CHART_TRADE_SPAN_MIN = 200;
 // trade): only the newest few bars — enough to update the forming candle plus
 // the previous one or two even if a poll was missed. One OKX page, no paging.
 const CHART_TAIL_SPAN_CANDLES = 3;
+
+export function summarizeCandleProvenance(
+  candles: Array<{ provenance?: CandleProvenance }>,
+): {
+  source: CandleProvenance["source"];
+  venue: CandleProvenance["venue"];
+  basis: CandleProvenance["basis"];
+  proxy: CandleProvenance["proxy"];
+  timeSemantic: CandleProvenance["timeSemantic"];
+  finality: CandleProvenance["finality"][];
+} {
+  if (candles.length === 0 || !candles[0].provenance) {
+    throw new Error("Chart candles are missing provenance");
+  }
+  const first = candles[0].provenance;
+  const finality = new Set<CandleProvenance["finality"]>();
+  for (const candle of candles) {
+    const p = candle.provenance;
+    if (!p || Object.values(p).some((v) => v === "unknown")) {
+      throw new Error("Chart candles contain malformed provenance");
+    }
+    if (p.source !== first.source || p.venue !== first.venue || p.basis !== first.basis
+        || p.proxy !== first.proxy || p.timeSemantic !== first.timeSemantic) {
+      throw new Error("Chart candles contain mixed provenance identity");
+    }
+    finality.add(p.finality);
+  }
+  return {
+    source: first.source,
+    venue: first.venue,
+    basis: first.basis,
+    proxy: first.proxy,
+    timeSemantic: first.timeSemantic,
+    finality: [...finality].sort(),
+  };
+}
 
 export function registerAiTraderRoutes(app: Express): void {
   // --- Create -----------------------------------------------------------------------
@@ -905,15 +946,22 @@ export function registerAiTraderRoutes(app: Express): void {
         }
 
         const recentDecisions = await storage.getAiTraderDecisions(bot.id, 20);
-        const context = await buildMarketContext({
-          market: bot.market,
-          timeframe: bot.timeframe as "15m" | "1h" | "4h" | "1d",
-          adapter,
-          bot,
-          recentDecisions,
-          agentPublicKey: wallet.agentPublicKey,
-          scannerNote,
-        });
+        let context: Awaited<ReturnType<typeof buildMarketContext>>;
+        try {
+          context = await buildMarketContext({
+            market: bot.market,
+            timeframe: bot.timeframe as "15m" | "1h" | "4h" | "1d",
+            adapter,
+            bot,
+            recentDecisions,
+            agentPublicKey: wallet.agentPublicKey,
+            scannerNote,
+          });
+        } catch (err) {
+          if (!isCandleBasisUnavailableError(err)) throw err;
+          if (keyRes.usedFreeTrial) await storage.decrementAiTraderFreeCalls(req.walletAddress);
+          return res.status(409).json({ error: "candle_basis_unavailable" });
+        }
         if ("stale" in context) {
           if (keyRes.usedFreeTrial) await storage.decrementAiTraderFreeCalls(req.walletAddress);
           return res.status(409).json({ error: "stale_context", detail: context.reason });
@@ -1710,7 +1758,7 @@ export function registerAiTraderRoutes(app: Express): void {
           new Date(tailStartMs).toISOString(),
           new Date(now).toISOString(),
           undefined,
-          { skipSpotFallback: true, bypassCache: true }
+          { basisPolicy: CHART_CANDLE_POLICY, skipSpotFallback: true, bypassCache: true }
         );
         return res.json({
           candles: rawTail.map((c) => ({
@@ -1719,7 +1767,9 @@ export function registerAiTraderRoutes(app: Express): void {
             high: c.high,
             low: c.low,
             close: c.close,
+            provenance: c.provenance,
           })),
+          candleBasisLabel: summarizeCandleProvenance(rawTail),
           market: chartMarket,
           timeframe: chartTf,
         });
@@ -1753,7 +1803,7 @@ export function registerAiTraderRoutes(app: Express): void {
         new Date(startMs).toISOString(),
         new Date(endMs).toISOString(),
         undefined,
-        { skipSpotFallback: true, bypassCache: true }
+        { basisPolicy: CHART_CANDLE_POLICY, skipSpotFallback: true, bypassCache: true }
       );
       const candles = rawCandles.map((c) => ({
         time: Math.floor(c.time / 1000),
@@ -1761,8 +1811,14 @@ export function registerAiTraderRoutes(app: Express): void {
         high: c.high,
         low: c.low,
         close: c.close,
+        provenance: c.provenance,
       }));
-      res.json({ candles, market: chartMarket, timeframe: chartTf });
+      res.json({
+        candles,
+        candleBasisLabel: summarizeCandleProvenance(rawCandles),
+        market: chartMarket,
+        timeframe: chartTf,
+      });
     } catch (err) {
       console.error("[AiTrader] chart error:", err);
       res.status(500).json({ error: "Internal server error" });

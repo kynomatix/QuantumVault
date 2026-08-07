@@ -53,6 +53,45 @@ interface ChartCandle {
   close: number;
 }
 
+export interface CandleBasisLabel {
+  source: string;
+  venue: string;
+  basis: string;
+  proxy: string;
+  timeSemantic: string;
+  finality: string[];
+}
+
+function parseCandleBasisLabel(value: unknown): CandleBasisLabel | null {
+  if (!value || typeof value !== 'object') return null;
+  const v = value as Record<string, unknown>;
+  const accepted = {
+    source: ['okx', 'gate', 'pyth'],
+    venue: ['okx', 'gate', 'none'],
+    basis: ['perp', 'spot', 'index'],
+    proxy: ['direct', 'proxy'],
+    timeSemantic: ['open_time'],
+  } as const;
+  if (Object.entries(accepted).some(([key, literals]) =>
+    typeof v[key] !== 'string' || !(literals as readonly string[]).includes(v[key] as string))) return null;
+  if (!Array.isArray(v.finality) || v.finality.length === 0
+      || v.finality.some((x) => x !== 'finalized' && x !== 'forming')) return null;
+  return {
+    source: v.source as string,
+    venue: v.venue as string,
+    basis: v.basis as string,
+    proxy: v.proxy as string,
+    timeSemantic: v.timeSemantic as string,
+    finality: [...new Set(v.finality as string[])].sort(),
+  };
+}
+
+export function formatCandleBasisLabel(label: CandleBasisLabel): string {
+  return [label.source, label.basis, label.proxy, label.finality.join('/')]
+    .map((part) => part.toUpperCase())
+    .join(' \u00B7 ');
+}
+
 // The platform's four supported AI Trader timeframes — mirrors the server's
 // CHART_TIMEFRAME_MS keys (routes.ts); the chart endpoint 400s on anything else.
 const CHART_TIMEFRAMES = ['15m', '1h', '4h', '1d'] as const;
@@ -213,6 +252,7 @@ export function AiTraderDecisionChart({
   wmFormation,
 }: AiTraderDecisionChartProps) {
   const [candles, setCandles] = useState<ChartCandle[]>([]);
+  const [candleBasisLabel, setCandleBasisLabel] = useState<CandleBasisLabel | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hoverCandle, setHoverCandle] = useState<ChartCandle | null>(null);
@@ -279,6 +319,7 @@ export function AiTraderDecisionChart({
   useEffect(() => {
     if (!open || !botId || !decisionId) {
       setCandles([]);
+      setCandleBasisLabel(null);
       setError(null);
       setLoading(false);
       return;
@@ -287,28 +328,37 @@ export function AiTraderDecisionChart({
     setLoading(true);
     setError(null);
     setCandles([]);
+    setCandleBasisLabel(null);
     // A fresh load must never restore a view preserved for a previous decision
     // (rapid close/reopen can leave the ref set if the build effect never ran).
     preserveViewRef.current = null;
     // Live bars belong to the previous decision/timeframe — drop them.
     liveBarsRef.current = new Map();
     (async () => {
-      const fetchSpan = async (span: 'trade' | 'deep'): Promise<ChartCandle[]> => {
+      const fetchSpan = async (span: 'trade' | 'deep'): Promise<{
+        candles: ChartCandle[];
+        label: CandleBasisLabel;
+      }> => {
         const res = await fetch(
           `/api/ai-trader/${botId}/chart?decisionId=${encodeURIComponent(decisionId)}&tf=${encodeURIComponent(tf)}&span=${span}`,
           { credentials: 'include', headers: walletAuthHeaders() }
         );
         const data = await safeResponseJson(res);
         if (!res.ok) throw new Error(data?.error || 'Could not load chart');
-        return Array.isArray(data?.candles) ? data.candles : [];
+        const spanCandles: ChartCandle[] = Array.isArray(data?.candles) ? data.candles : [];
+        const label = parseCandleBasisLabel(data?.candleBasisLabel);
+        if (spanCandles.length > 0 && !label) throw new Error('Chart candle provenance is missing or malformed');
+        if (!label) throw new Error('Chart candle provenance is unavailable');
+        return { candles: spanCandles, label };
       };
       let fastCount = 0;
       try {
         // Stage 1: tight trade window — fast first paint.
         const fast = await fetchSpan('trade');
         if (cancelled) return;
-        fastCount = fast.length;
-        setCandles(fast);
+        fastCount = fast.candles.length;
+        setCandles(fast.candles);
+        setCandleBasisLabel(fast.label);
         setLoading(false);
       } catch (err: any) {
         if (!cancelled) {
@@ -322,10 +372,11 @@ export function AiTraderDecisionChart({
         // usually stitched in before the user starts scrolling left. Failure
         // is non-fatal: the trade window is already on screen.
         const deep = await fetchSpan('deep');
-        if (cancelled || deep.length <= fastCount) return;
+        if (cancelled || deep.candles.length <= fastCount) return;
         preserveViewRef.current =
           (chartRef.current?.timeScale().getVisibleRange() as { from: UTCTimestamp; to: UTCTimestamp } | null) ?? null;
-        setCandles(deep);
+        setCandles(deep.candles);
+        setCandleBasisLabel(deep.label);
       } catch {
         // keep the fast window
       }
@@ -911,7 +962,28 @@ export function AiTraderDecisionChart({
         if (!res.ok) return;
         const data = await safeResponseJson(res);
         const bars: ChartCandle[] = Array.isArray(data?.candles) ? data.candles : [];
+        const tailLabel = parseCandleBasisLabel(data?.candleBasisLabel);
+        if (bars.length > 0 && !tailLabel) {
+          setError('Chart candle provenance is missing or malformed');
+          return;
+        }
         if (cancelled || !seriesRef.current || bars.length === 0) return;
+        setCandleBasisLabel((current) => {
+          if (!current) return tailLabel;
+          const sameIdentity = current.source === tailLabel!.source
+            && current.venue === tailLabel!.venue
+            && current.basis === tailLabel!.basis
+            && current.proxy === tailLabel!.proxy
+            && current.timeSemantic === tailLabel!.timeSemantic;
+          if (!sameIdentity) {
+            setError('Chart candle provenance changed unexpectedly');
+            return current;
+          }
+          return {
+            ...current,
+            finality: [...new Set([...current.finality, ...tailLabel!.finality])].sort(),
+          };
+        });
         // Only bars at/after the newest bar already on the chart — the series
         // API rejects out-of-order updates, and older bars are already drawn.
         const lastLive = Math.max(0, ...liveBarsRef.current.keys());
@@ -971,6 +1043,14 @@ export function AiTraderDecisionChart({
             <div className="text-xs text-muted-foreground" data-testid="text-chart-market-timeframe">
               {market} · <span className={direction === 'long' ? 'text-emerald-400' : 'text-red-400'}>{direction.toUpperCase()}</span>
             </div>
+            {candleBasisLabel && (
+              <span
+                className="text-[10px] font-medium text-muted-foreground"
+                data-testid="text-chart-candle-provenance"
+              >
+                {formatCandleBasisLabel(candleBasisLabel)}
+              </span>
+            )}
             {wmFormation && (
               <button
                 type="button"

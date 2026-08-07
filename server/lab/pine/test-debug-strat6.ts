@@ -1,7 +1,7 @@
 import { labStorage } from "../storage";
 import { compilePine } from "./index";
 import { executePine, type PineEngineConfig } from "./runtime";
-import { fetchOHLCV } from "../datafeed";
+import { fetchOHLCV, getTimeframeSeconds, LAB_DIRECT_PERP_CANDLE_POLICY } from "../datafeed";
 
 async function main() {
   const stratId = parseInt(process.argv[2] || "6");
@@ -12,7 +12,11 @@ async function main() {
   const ticker = "SOL/USDT:USDT";
   const timeframe = "4h";
   const config: PineEngineConfig = { initialCapital: 10000, commission: 0.0005, positionSize: 100, processOrdersOnClose: false };
-  const candles = await fetchOHLCV(ticker, timeframe, 500);
+  const fetchEnd = Date.now();
+  const candles = await fetchOHLCV(
+    ticker, timeframe, fetchEnd - 500 * getTimeframeSeconds(timeframe) * 1000, fetchEnd, undefined,
+    { basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY },
+  );
   if (!candles || candles.length < 50) { console.log("Not enough candles"); process.exit(1); }
   
   const params = strategy.parameterRanges ? Object.fromEntries(

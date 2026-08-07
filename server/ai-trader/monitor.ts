@@ -64,7 +64,13 @@ import {
   countsAsSlLoss,
   type BreakevenProtectState,
 } from "./breakeven";
-import { fetchOHLCV, isCacheDegradedError } from "../lab/datafeed";
+import {
+  fetchOHLCV,
+  isCacheDegradedError,
+  PAPER_MONITOR_CANDLE_POLICY,
+  LIVE_MONITOR_CANDLE_POLICY,
+  isCandleBasisUnavailableError,
+} from "../lab/datafeed";
 import { buildMarketContext, marketToDatafeedTicker, type AiTraderTimeframe } from "./context-builder";
 import { runDecision } from "./decide";
 import { isSelectableModel } from "../ai-assistant/models-catalog";
@@ -203,7 +209,7 @@ const autoNextTimers = new Map<string, NodeJS.Timeout>();
 type CyclePhase = "initial" | "preflight" | "context" | "llm" | "execution";
 type CycleExitReason =
   | "status_gate" | "adapter_missing" | "gate_skip" | "paused"
-  | "stale_data"
+  | "stale_data" | "candle_basis_unavailable"
   | "llm_timeout" | "llm_gateway" | "llm_malformed"
   | "guardrail_rejected" | "flat" | "close_no_position"
   | "exec_rejected" | "entry_open" | "thrown" | "unclassified";
@@ -834,7 +840,11 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
       new Date(entryCandleOpen).toISOString(),
       new Date(now).toISOString(),
       undefined,
-      { deadlineMs: 30_000, callerClass: "paper_monitor" }
+      {
+        basisPolicy: PAPER_MONITOR_CANDLE_POLICY,
+        deadlineMs: 30_000,
+        callerClass: "paper_monitor",
+      }
     );
   } catch (err) {
     // CacheDegradedError included by design: fail fast, NO network fallback
@@ -1412,7 +1422,11 @@ async function maybeFireLiveBreakeven(
       new Date(entryCandleOpen).toISOString(),
       new Date(now).toISOString(),
       undefined,
-      { deadlineMs: 30_000, callerClass: "live_monitor" }
+      {
+        basisPolicy: LIVE_MONITOR_CANDLE_POLICY,
+        deadlineMs: 30_000,
+        callerClass: "live_monitor",
+      }
     );
   } catch (err) {
     // Degraded cache = fail fast (no network fallback); breakeven is a
@@ -1968,15 +1982,25 @@ export async function runAutoCycle(botId: string): Promise<void> {
         await storage.updateAiTraderBot(bot.id, { status: "analyzing" });
 
         if (_obs) { _obs.phase = "context"; _obs.exitReason = "stale_data"; }
-        const context = await buildMarketContext({
-          market: bot.market,
-          timeframe: bot.timeframe as AiTraderTimeframe,
-          adapter,
-          bot,
-          recentDecisions: recentClosed.slice(0, 5),
-          agentPublicKey: wallet.agentPublicKey,
-          scannerNote,
-        });
+        let context: Awaited<ReturnType<typeof buildMarketContext>>;
+        try {
+          context = await buildMarketContext({
+            market: bot.market,
+            timeframe: bot.timeframe as AiTraderTimeframe,
+            adapter,
+            bot,
+            recentDecisions: recentClosed.slice(0, 5),
+            agentPublicKey: wallet.agentPublicKey,
+            scannerNote,
+          });
+        } catch (err) {
+          if (!isCandleBasisUnavailableError(err)) throw err;
+          if (_obs) _obs.exitReason = "candle_basis_unavailable";
+          console.warn(`[AiTraderMonitor] scanner: candle_basis_unavailable for bot ${bot.id.slice(0, 8)}`);
+          await storage.updateAiTraderBot(bot.id, { status: "idle" });
+          scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
+          return;
+        }
         if ("stale" in context) {
           // exitReason already "stale_data"
           console.warn(`[AiTraderMonitor] scanner: stale context for bot ${bot.id.slice(0, 8)} (${context.reason})`);
@@ -2048,14 +2072,24 @@ export async function runAutoCycle(botId: string): Promise<void> {
     await storage.updateAiTraderBot(bot.id, { status: "analyzing" });
 
     if (_obs) { _obs.phase = "context"; _obs.exitReason = "stale_data"; }
-    const context = await buildMarketContext({
-      market: bot.market,
-      timeframe: bot.timeframe as AiTraderTimeframe,
-      adapter,
-      bot,
-      recentDecisions: recentClosed.slice(0, 5),
-      agentPublicKey: wallet.agentPublicKey,
-    });
+    let context: Awaited<ReturnType<typeof buildMarketContext>>;
+    try {
+      context = await buildMarketContext({
+        market: bot.market,
+        timeframe: bot.timeframe as AiTraderTimeframe,
+        adapter,
+        bot,
+        recentDecisions: recentClosed.slice(0, 5),
+        agentPublicKey: wallet.agentPublicKey,
+      });
+    } catch (err) {
+      if (!isCandleBasisUnavailableError(err)) throw err;
+      if (_obs) _obs.exitReason = "candle_basis_unavailable";
+      console.warn(`[AiTraderMonitor] auto cycle: candle_basis_unavailable for bot ${bot.id.slice(0, 8)}`);
+      await storage.updateAiTraderBot(bot.id, { status: "idle" });
+      scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
+      return;
+    }
     if ("stale" in context) {
       // G9 — never decide on stale data; retry at the next boundary.
       // exitReason already "stale_data"

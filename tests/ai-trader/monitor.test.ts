@@ -96,6 +96,20 @@ vi.mock("../../server/lab/datafeed", () => ({
   // candle-fetch errors keep working under this mock.
   isCacheDegradedError: (err: unknown) =>
     (err as { name?: string } | null)?.name === "CacheDegradedError",
+  isCandleBasisUnavailableError: (err: unknown) =>
+    (err as { name?: string } | null)?.name === "CandleBasisUnavailableError",
+  PAPER_MONITOR_CANDLE_POLICY: {
+    consumer: "paper_monitor",
+    acceptedBasis: ["perp"],
+    acceptedFinality: ["finalized", "forming"],
+    acceptedProxy: ["direct"],
+  },
+  LIVE_MONITOR_CANDLE_POLICY: {
+    consumer: "live_monitor",
+    acceptedBasis: ["perp"],
+    acceptedFinality: ["finalized", "forming"],
+    acceptedProxy: ["direct"],
+  },
 }));
 
 const buildContextMock = vi.fn();
@@ -1168,6 +1182,28 @@ describe("runAutoCycle", () => {
     expect(runDecisionMock).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBeGreaterThan(0);
     expect(keyBuf.every((b) => b === 0)).toBe(true); // zeroized in finally
+  });
+
+  it("fails closed before LLM or execution when context has no admissible candle basis", async () => {
+    const { runAutoCycle } = await importMonitor();
+    armAutoBot();
+    getSessionByWalletMock.mockReturnValue({ sessionId: "s", session: { umk: Buffer.from("umk") } });
+    getLlmCiphertextMock.mockResolvedValue("ct");
+    const keyBuf = Buffer.from("sk-or-secret");
+    decryptLlmKeyMock.mockReturnValue(keyBuf);
+    buildContextMock.mockRejectedValue(Object.assign(new Error("no acceptable candle basis"), {
+      name: "CandleBasisUnavailableError",
+      reason: "no_acceptable_source",
+    }));
+
+    await runAutoCycle("bot-1111-2222");
+
+    expect(botUpdates().some((u) => u.status === "analyzing")).toBe(true);
+    expect(botUpdates().some((u) => u.status === "idle")).toBe(true);
+    expect(runDecisionMock).not.toHaveBeenCalled();
+    expect(executeDecisionMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    expect(keyBuf.every((b) => b === 0)).toBe(true);
   });
 
   it("happy path: G6 clear → context → decision → executeDecision with the digest mark price", async () => {

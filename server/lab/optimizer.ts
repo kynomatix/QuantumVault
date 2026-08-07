@@ -1,6 +1,6 @@
 import type { LabPineInput, LabBacktestResult, LabOptimizationConfig, LabJobProgress, LabCheckpoint } from "@shared/schema";
 import { runBacktest, type OHLCV } from "./engine";
-import { fetchOHLCV } from "./datafeed";
+import { fetchOHLCV, LAB_ALL_KNOWN_CANDLE_POLICY } from "./datafeed";
 
 function generateRandomParams(inputs: LabPineInput[]): Record<string, any> {
   const params: Record<string, any> = {};
@@ -178,7 +178,8 @@ export async function runOptimization(
           percent: Math.round((globalCurrent / (totalSamples * combos.length)) * 100),
           elapsed: Date.now() - startTime,
           tickerProgress,
-        })
+        }),
+        { basisPolicy: LAB_ALL_KNOWN_CANDLE_POLICY },
       );
     } catch (err: any) {
       console.log(`Failed to fetch data for ${combo.ticker}: ${err.message}`);

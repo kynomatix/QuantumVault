@@ -1,5 +1,5 @@
 import { labStorage } from "../storage";
-import { fetchOHLCV } from "../datafeed";
+import { fetchOHLCV, LAB_DIRECT_PERP_CANDLE_POLICY } from "../datafeed";
 import { runSbrBacktest } from "../engine-sbr";
 
 const sbrParams = {
@@ -58,7 +58,9 @@ async function main() {
   console.log("=== SBR v1: Native Engine vs TradingView ===");
   console.log("Ticker: SOL/USDT:USDT, Timeframe: 2h");
 
-  const candles = await fetchOHLCV("SOL/USDT:USDT", "2h", "2022-01-01", "2026-05-05");
+  const candles = await fetchOHLCV("SOL/USDT:USDT", "2h", "2022-01-01", "2026-05-05", undefined, {
+    basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY,
+  });
   if (!candles || candles.length < 50) {
     console.log("Not enough candles:", candles?.length ?? 0);
     return;

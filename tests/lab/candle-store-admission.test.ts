@@ -50,6 +50,12 @@ function deferred<T>() {
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 const RANGE = { start: 0, end: 3_600_000 } as const;
+const TEST_BASIS_POLICY = {
+  consumer: "lab" as const,
+  acceptedBasis: ["perp"] as const,
+  acceptedFinality: ["finalized"] as const,
+  acceptedProxy: ["direct"] as const,
+};
 
 function read(
   signal: AbortSignal | undefined,
@@ -57,6 +63,7 @@ function read(
   symbol = "BTC-PERP",
 ) {
   return getCachedCandles(symbol, "1h", RANGE.start, RANGE.end, {
+    basisPolicy: TEST_BASIS_POLICY,
     queryTimeoutMs: 500,
     signal,
     callerClass: "scanner",
@@ -214,6 +221,7 @@ describe("getCachedCandles — cancellation-aware admission", () => {
     });
     let phases: CandleReadPhases | undefined;
     const result = await getCachedCandles("BTC-PERP", "1h", RANGE.start, RANGE.end, {
+      basisPolicy: TEST_BASIS_POLICY,
       queryTimeoutMs: 500,
       callerClass: "lab",
       onPhases: (p) => (phases = p),
