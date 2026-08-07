@@ -30,7 +30,7 @@ vi.mock("../../server/lab/candle-store", () => ({
   saveCandlesToDb: (...a: any[]) => mockSave(...a),
 }));
 
-import { fetchOHLCV } from "../../server/lab/datafeed";
+import { fetchOHLCV, LAB_ALL_KNOWN_CANDLE_POLICY } from "../../server/lab/datafeed";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -85,6 +85,8 @@ async function runFetch(symbol: string) {
     "15m",
     new Date(startMs).toISOString(),
     new Date(now).toISOString(),
+    undefined,
+    { basisPolicy: LAB_ALL_KNOWN_CANDLE_POLICY },
   );
 }
 

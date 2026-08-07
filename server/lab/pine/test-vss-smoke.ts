@@ -1,5 +1,5 @@
 import { compilePine, runPineBacktest } from "./index";
-import { fetchOHLCV } from "../datafeed";
+import { fetchOHLCV, getTimeframeSeconds, LAB_DIRECT_PERP_CANDLE_POLICY } from "../datafeed";
 
 const VSS_LIKE = `
 //@version=5
@@ -25,7 +25,11 @@ async function main() {
 
   console.log("=== VSS-like smoke (ta.vwma) ===");
   const plan = compilePine(VSS_LIKE);
-  const candles = await fetchOHLCV(ticker, timeframe, 500);
+  const fetchEnd = Date.now();
+  const candles = await fetchOHLCV(
+    ticker, timeframe, fetchEnd - 500 * getTimeframeSeconds(timeframe) * 1000, fetchEnd, undefined,
+    { basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY },
+  );
   console.log(`Bars: ${candles?.length ?? 0}`);
   if (!candles || candles.length < 50) {
     console.log("Not enough candles");

@@ -1,8 +1,17 @@
-import { labCandleCache } from "@shared/schema";
+import { labCandleCacheV2 } from "@shared/schema";
 import { db, pool } from "../db";
-import { eq, and, gte, lte, sql } from "drizzle-orm";
+import { eq, and, gte, lte, sql, inArray, ne } from "drizzle-orm";
 import type { PoolClient } from "pg";
-import type { OHLCV } from "./engine";
+import type {
+  CandleBasisPolicy,
+  CandleBasis,
+  CandleFinality,
+  CandleProxy,
+  CandleSource,
+  CandleVenue,
+  CandleTimeSemantic,
+  ProvenancedOHLCV,
+} from "./datafeed";
 import { appendTelemetry } from "../telemetry";
 import { registerPoolLoadTag } from "../pool-load";
 
@@ -162,9 +171,17 @@ type CandleCacheRow = {
   low: number;
   close: number;
   volume: number;
+  source: CandleSource;
+  venue: CandleVenue;
+  basis: CandleBasis;
+  proxy: CandleProxy;
+  finality: CandleFinality;
+  timeSemantic: CandleTimeSemantic;
 };
 
 export type GetCachedCandlesOpts = {
+  /** Explicit admission policy. There is intentionally no default. */
+  basisPolicy: CandleBasisPolicy;
   /**
    * Client-side per-query timeout. Deadline-bounded callers (the AI-trader
    * scanner/monitor via fetchOHLCV) previously abandoned slow cache reads
@@ -196,12 +213,15 @@ export async function getCachedCandles(
   timeframe: string,
   startMs: number,
   endMs: number,
-  opts?: GetCachedCandlesOpts
-): Promise<OHLCV[] | null> {
+  opts: GetCachedCandlesOpts
+): Promise<ProvenancedOHLCV[] | null> {
+  if (!opts?.basisPolicy) {
+    throw new Error("getCachedCandles requires an explicit basisPolicy");
+  }
   const startedAt = Date.now();
-  const signal = opts?.signal;
+  const signal = opts.signal;
   const phases: CandleReadPhases = {
-    callerClass: opts?.callerClass ?? "lab",
+    callerClass: opts.callerClass ?? "lab",
     symbol,
     timeframe,
     outcome: "miss",
@@ -218,7 +238,7 @@ export async function getCachedCandles(
     phases.totalMs = Date.now() - startedAt;
     phases.pool = poolSnapshot();
     try {
-      opts?.onPhases?.(phases);
+      opts.onPhases?.(phases);
     } catch {
       // Caller's observer must never break the read path.
     }
@@ -343,12 +363,14 @@ async function getCachedCandlesInner(
   timeframe: string,
   startMs: number,
   endMs: number,
-  opts: GetCachedCandlesOpts | undefined,
+  opts: GetCachedCandlesOpts,
   phases: CandleReadPhases
-): Promise<OHLCV[] | null> {
-  const signal = opts?.signal;
+): Promise<ProvenancedOHLCV[] | null> {
+  const signal = opts.signal;
+  const policy = opts.basisPolicy;
+  const requireDirectOkxIdentity = policy.consumer !== "lab";
   let rows: CandleCacheRow[];
-  const queryTimeoutMs = opts?.queryTimeoutMs;
+  const queryTimeoutMs = opts.queryTimeoutMs;
   if (queryTimeoutMs && Number.isFinite(queryTimeoutMs) && queryTimeoutMs > 0) {
     // Raw checked-out client: drizzle does not expose per-query timeout
     // overrides. Release discipline mirrors clearCandleCache — on ANY
@@ -359,10 +381,17 @@ async function getCachedCandlesInner(
     try {
       const result = await client.query({
         text:
-          "SELECT time, open, high, low, close, volume FROM lab_candle_cache " +
+          "SELECT time, open, high, low, close, volume, source, venue, basis, proxy, finality, time_semantic AS \"timeSemantic\" FROM lab_candle_cache_v2 " +
           "WHERE symbol = $1 AND timeframe = $2 AND time >= $3 AND time <= $4 " +
+          "AND basis = ANY($5::text[]) AND finality = ANY($6::text[]) AND proxy = ANY($7::text[]) " +
+          "AND source <> 'unknown' AND venue <> 'unknown' AND time_semantic <> 'unknown' " +
+          "AND (NOT $8::boolean OR (source = 'okx' AND venue = 'okx' AND time_semantic = 'open_time')) " +
           "ORDER BY time",
-        values: [symbol, timeframe, String(startMs), String(endMs)],
+        values: [
+          symbol, timeframe, String(startMs), String(endMs),
+          [...policy.acceptedBasis], [...policy.acceptedFinality], [...policy.acceptedProxy],
+          requireDirectOkxIdentity,
+        ],
         query_timeout: Math.max(1, Math.floor(queryTimeoutMs)),
       } as any);
       phases.queryMs = Date.now() - queryStart;
@@ -382,16 +411,22 @@ async function getCachedCandlesInner(
     const queryStart = Date.now();
     rows = await db
       .select()
-      .from(labCandleCache)
+      .from(labCandleCacheV2)
       .where(
         and(
-          eq(labCandleCache.symbol, symbol),
-          eq(labCandleCache.timeframe, timeframe),
-          gte(labCandleCache.time, String(startMs)),
-          lte(labCandleCache.time, String(endMs))
+          eq(labCandleCacheV2.symbol, symbol),
+          eq(labCandleCacheV2.timeframe, timeframe),
+          gte(labCandleCacheV2.time, String(startMs)),
+          lte(labCandleCacheV2.time, String(endMs)),
+          inArray(labCandleCacheV2.basis, [...policy.acceptedBasis]),
+          inArray(labCandleCacheV2.finality, [...policy.acceptedFinality]),
+          inArray(labCandleCacheV2.proxy, [...policy.acceptedProxy]),
+          requireDirectOkxIdentity ? eq(labCandleCacheV2.source, "okx") : ne(labCandleCacheV2.source, "unknown"),
+          requireDirectOkxIdentity ? eq(labCandleCacheV2.venue, "okx") : ne(labCandleCacheV2.venue, "unknown"),
+          requireDirectOkxIdentity ? eq(labCandleCacheV2.timeSemantic, "open_time") : ne(labCandleCacheV2.timeSemantic, "unknown"),
         )
       )
-      .orderBy(labCandleCache.time);
+      .orderBy(labCandleCacheV2.time) as unknown as CandleCacheRow[];
     phases.queryMs = Date.now() - queryStart;
   }
 
@@ -411,7 +446,26 @@ async function processCandleRows(
   endMs: number,
   rows: CandleCacheRow[],
   phases: CandleReadPhases
-): Promise<OHLCV[] | null> {
+): Promise<ProvenancedOHLCV[] | null> {
+  // Finality is part of immutable cache identity, so the same bar can be
+  // observed first as forming and later as finalized. OHLCV consumers require
+  // one monotonically ordered row per open time; prefer the strongest retained
+  // observation and use the complete identity only as a deterministic tie-break.
+  const finalityRank: Record<CandleFinality, number> = { finalized: 0, forming: 1, unknown: 2 };
+  const rowIdentity = (row: CandleCacheRow) =>
+    `${row.source}/${row.venue}/${row.basis}/${row.proxy}/${row.finality}/${row.timeSemantic}`;
+  const byTime = new Map<string, CandleCacheRow>();
+  for (const row of rows) {
+    const key = String(row.time);
+    const retained = byTime.get(key);
+    if (!retained
+        || finalityRank[row.finality] < finalityRank[retained.finality]
+        || (finalityRank[row.finality] === finalityRank[retained.finality]
+          && rowIdentity(row) < rowIdentity(retained))) {
+      byTime.set(key, row);
+    }
+  }
+  rows = [...byTime.values()].sort((a, b) => Number(a.time) - Number(b.time));
   phases.rows = rows.length;
   const tfSeconds = getTimeframeSecondsForCache(timeframe);
   const tfMs = tfSeconds * 1000;
@@ -452,8 +506,8 @@ async function processCandleRows(
     if (misaligned > 0 || wrongInterval > 0) {
       console.log(`[CandleCache] MISALIGNED: ${symbol} ${timeframe} — ${misaligned}/${sampleSize} off-boundary, ${wrongInterval}/${sampleSize - 1} wrong-interval — purging & refetching`);
       try {
-        await db.delete(labCandleCache)
-          .where(and(eq(labCandleCache.symbol, symbol), eq(labCandleCache.timeframe, timeframe)));
+        await db.delete(labCandleCacheV2)
+          .where(and(eq(labCandleCacheV2.symbol, symbol), eq(labCandleCacheV2.timeframe, timeframe)));
       } catch (err: any) {
         console.log(`[CandleCache] Purge error: ${err.message}`);
       }
@@ -461,14 +515,29 @@ async function processCandleRows(
     }
   }
 
-  return rows.map((r) => ({
+  const mapped = rows.map((r) => ({
     time: Number(r.time),
     open: r.open,
     high: r.high,
     low: r.low,
     close: r.close,
     volume: r.volume,
+    provenance: {
+      source: r.source,
+      venue: r.venue,
+      basis: r.basis,
+      proxy: r.proxy,
+      finality: r.finality,
+      timeSemantic: r.timeSemantic,
+    },
   }));
+  if (phases.callerClass === "lab") {
+    const identities = [...new Set(mapped.map(({ provenance: p }) =>
+      `${p.source}/${p.venue}/${p.basis}/${p.proxy}/${p.finality}/${p.timeSemantic}`,
+    ))].sort().join(",");
+    console.log(`[CandleProvenance] ${symbol} ${timeframe} ${identities} bars=${mapped.length}`);
+  }
+  return mapped;
 }
 
 function getTimeframeSecondsForCache(tf: string): number {
@@ -493,7 +562,7 @@ const MAX_QUEUED_CANDLE_WRITES = 12;
 export async function saveCandlesToDb(
   symbol: string,
   timeframe: string,
-  candles: OHLCV[]
+  candles: ProvenancedOHLCV[]
 ): Promise<void> {
   if (candles.length === 0) return;
   if (activeCandleWrites >= MAX_ACTIVE_CANDLE_WRITES) {
@@ -527,11 +596,38 @@ export async function saveCandlesToDb(
         low: c.low,
         close: c.close,
         volume: c.volume,
+        source: c.provenance.source,
+        venue: c.provenance.venue,
+        basis: c.provenance.basis,
+        proxy: c.provenance.proxy,
+        finality: c.provenance.finality,
+        timeSemantic: c.provenance.timeSemantic,
       }));
       await db
-        .insert(labCandleCache)
+        .insert(labCandleCacheV2)
         .values(values)
-        .onConflictDoNothing();
+        .onConflictDoUpdate({
+          target: [
+            labCandleCacheV2.symbol,
+            labCandleCacheV2.timeframe,
+            labCandleCacheV2.time,
+            labCandleCacheV2.source,
+            labCandleCacheV2.venue,
+            labCandleCacheV2.basis,
+            labCandleCacheV2.proxy,
+            labCandleCacheV2.finality,
+            labCandleCacheV2.timeSemantic,
+          ],
+          // A forming candle retains identity while its OHLCV observation
+          // evolves. Refresh values so monitor cache hits cannot miss a wick.
+          set: {
+            open: sql`excluded.open`,
+            high: sql`excluded.high`,
+            low: sql`excluded.low`,
+            close: sql`excluded.close`,
+            volume: sql`excluded.volume`,
+          },
+        });
       inserted += batch.length;
     }
     console.log(`[CandleCache] Saved ${inserted} candles for ${symbol} ${timeframe}`);
@@ -550,10 +646,10 @@ export async function getCacheStats(): Promise<{
   try {
     const countResult = await db
       .select({ count: sql<number>`count(*)` })
-      .from(labCandleCache);
+      .from(labCandleCacheV2);
     const symbolResult = await db
-      .select({ count: sql<number>`count(distinct ${labCandleCache.symbol})` })
-      .from(labCandleCache);
+      .select({ count: sql<number>`count(distinct ${labCandleCacheV2.symbol})` })
+      .from(labCandleCacheV2);
     const totalCandles = Number(countResult[0]?.count ?? 0);
     const symbols = Number(symbolResult[0]?.count ?? 0);
     const estimatedSizeMb = Math.round((totalCandles * 130) / (1024 * 1024) * 100) / 100;
@@ -585,7 +681,7 @@ export async function clearCandleCache(): Promise<number> {
     await client.query("BEGIN");
     await client.query("SET LOCAL statement_timeout = 0");
     const result = await client.query({
-      text: "DELETE FROM lab_candle_cache",
+      text: "DELETE FROM lab_candle_cache_v2",
       query_timeout: 15 * 60_000,
     } as any);
     await client.query("COMMIT");

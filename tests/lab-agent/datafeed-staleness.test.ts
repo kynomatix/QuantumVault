@@ -22,7 +22,7 @@ vi.mock("../../server/lab/candle-store", () => ({
   saveCandlesToDb: (...a: any[]) => mockSave(...a),
 }));
 
-import { fetchOHLCV } from "../../server/lab/datafeed";
+import { fetchOHLCV, LAB_ALL_KNOWN_CANDLE_POLICY } from "../../server/lab/datafeed";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -39,6 +39,14 @@ function makeCandles(n: number, startMs: number, intervalMs: number) {
     low: 99,
     close: 100,
     volume: 1,
+    provenance: {
+      source: "okx",
+      venue: "okx",
+      basis: "perp",
+      proxy: "direct",
+      finality: "finalized",
+      timeSemantic: "open_time",
+    },
   }));
 }
 
@@ -90,6 +98,8 @@ describe("fetchOHLCV — live-range staleness gate", () => {
       "15m",
       new Date(startMs).toISOString(),
       new Date(endMs).toISOString(),
+      undefined,
+      { basisPolicy: LAB_ALL_KNOWN_CANDLE_POLICY },
     );
 
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -113,6 +123,8 @@ describe("fetchOHLCV — live-range staleness gate", () => {
       "15m",
       new Date(now - 100 * INTERVAL_15M).toISOString(),
       new Date(now).toISOString(),
+      undefined,
+      { basisPolicy: LAB_ALL_KNOWN_CANDLE_POLICY },
     );
 
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -136,6 +148,8 @@ describe("fetchOHLCV — live-range staleness gate", () => {
       "15m",
       new Date(now - 100 * INTERVAL_15M).toISOString(),
       new Date(now).toISOString(),
+      undefined,
+      { basisPolicy: LAB_ALL_KNOWN_CANDLE_POLICY },
     );
 
     // Cache was bypassed — at least one network call was made

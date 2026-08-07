@@ -38,7 +38,17 @@ vi.mock("../../server/ai-trader/context-builder", () => ({
   buildMarketContext: (...a: unknown[]) => buildContextMock(...a),
   marketToDatafeedTicker: vi.fn(),
 }));
-vi.mock("../../server/lab/datafeed", () => ({ fetchOHLCV: vi.fn() }));
+vi.mock("../../server/lab/datafeed", () => ({
+  fetchOHLCV: vi.fn(),
+  CHART_CANDLE_POLICY: {
+    consumer: "chart",
+    acceptedBasis: ["perp"],
+    acceptedFinality: ["finalized", "forming"],
+    acceptedProxy: ["direct"],
+  },
+  isCandleBasisUnavailableError: (err: unknown) =>
+    (err as { name?: string } | null)?.name === "CandleBasisUnavailableError",
+}));
 
 const runDecisionMock = vi.fn();
 vi.mock("../../server/ai-trader/decide", () => ({
@@ -90,7 +100,42 @@ vi.mock("../../server/ai-trader/multiplier-market-quarantine", () => ({
   MULTIPLIER_UNQUALIFIED_REASON: "multiplier_unqualified",
 }));
 
-import { registerAiTraderRoutes } from "../../server/ai-trader/routes";
+import { registerAiTraderRoutes, summarizeCandleProvenance } from "../../server/ai-trader/routes";
+
+describe("AI Trader chart provenance summary", () => {
+  const row = (finality: "finalized" | "forming") => ({
+    provenance: {
+      source: "okx" as const,
+      venue: "okx" as const,
+      basis: "perp" as const,
+      proxy: "direct" as const,
+      finality,
+      timeSemantic: "open_time" as const,
+    },
+  });
+
+  it("preserves complete identity and sorted distinct finality", () => {
+    expect(summarizeCandleProvenance([row("forming"), row("finalized"), row("forming")])).toEqual({
+      source: "okx",
+      venue: "okx",
+      basis: "perp",
+      proxy: "direct",
+      timeSemantic: "open_time",
+      finality: ["finalized", "forming"],
+    });
+  });
+
+  it("rejects missing, unknown, and mixed identity", () => {
+    expect(() => summarizeCandleProvenance([])).toThrow("missing provenance");
+    expect(() => summarizeCandleProvenance([{
+      provenance: { ...row("finalized").provenance, source: "unknown" },
+    }])).toThrow("malformed provenance");
+    expect(() => summarizeCandleProvenance([
+      row("finalized"),
+      { provenance: { ...row("forming").provenance, venue: "gate" } },
+    ])).toThrow("mixed provenance identity");
+  });
+});
 
 type Handler = (req: any, res: any, next?: any) => unknown;
 

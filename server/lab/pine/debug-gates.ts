@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { compilePine } from "./index.js";
 import { executePine, type PineEngineConfig } from "./runtime.js";
 import { getCachedCandles, saveCandlesToDb } from "../candle-store.js";
-import { fetchOHLCV } from "../datafeed.js";
+import { fetchOHLCV, LAB_DIRECT_PERP_CANDLE_POLICY, type ProvenancedOHLCV } from "../datafeed.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -50,12 +50,24 @@ async function main() {
   const endMs   = Date.UTC(2026, 4, 20, 10);
   const symbol = "ETH/USDT:USDT", timeframe = "1h";
 
-  let candles: any = await getCachedCandles(symbol, timeframe, startMs, endMs);
+  let candles: any = await getCachedCandles(symbol, timeframe, startMs, endMs, {
+    basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY,
+  });
   if (!candles || candles.length < 50) {
     console.log("[candles] miss — fetching");
-    candles = await (fetchOHLCV as any)(symbol, timeframe, startMs, endMs);
+    candles = await fetchOHLCV(symbol, timeframe, startMs, endMs, undefined, {
+      basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY,
+    });
     if (candles?.length) await saveCandlesToDb(symbol, timeframe, candles);
   }
+  if (!candles?.length) {
+    console.log("[candle-provenance] unavailable");
+    return;
+  }
+  const identities = [...new Set((candles as ProvenancedOHLCV[]).map(({ provenance: p }) =>
+    `${p.source}/${p.venue}/${p.basis}/${p.proxy}/${p.finality}/${p.timeSemantic}`,
+  ))].sort().join(",");
+  console.log(`[candle-provenance] ${identities || "unavailable"}`);
   console.log(`[candles] ${candles.length} bars (${new Date(candles[0].time).toISOString()} → ${new Date(candles[candles.length-1].time).toISOString()})`);
 
   const config: PineEngineConfig = { initialCapital: 100, commission: 0.001, positionSize: 100, processOrdersOnClose: false };

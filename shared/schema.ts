@@ -1536,6 +1536,41 @@ export const labCandleCache = pgTable("lab_candle_cache", {
   index("lab_candle_cache_lookup").on(table.symbol, table.timeframe),
 ]);
 
+// Provenance-aware candle cache. The legacy lab_candle_cache remains
+// diagnostic-only so deploying this schema never rewrites or relabels its
+// roughly two million historical rows.
+export const labCandleCacheV2 = pgTable("lab_candle_cache_v2", {
+  id: serial("id").primaryKey(),
+  symbol: text("symbol").notNull(),
+  timeframe: text("timeframe").notNull(),
+  time: decimal("time", { precision: 20, scale: 0 }).notNull(),
+  open: real("open").notNull(),
+  high: real("high").notNull(),
+  low: real("low").notNull(),
+  close: real("close").notNull(),
+  volume: real("volume").notNull(),
+  source: text("source").notNull(),
+  venue: text("venue").notNull(),
+  basis: text("basis").notNull(),
+  proxy: text("proxy").notNull(),
+  finality: text("finality").notNull(),
+  timeSemantic: text("time_semantic").notNull(),
+}, (table) => [
+  unique("lab_candle_cache_v2_identity_unique").on(
+    table.symbol, table.timeframe, table.time, table.source, table.venue,
+    table.basis, table.proxy, table.finality, table.timeSemantic,
+  ),
+  index("lab_candle_cache_v2_lookup").on(
+    table.symbol, table.timeframe, table.basis, table.finality, table.proxy, table.time,
+  ),
+  check("lab_candle_cache_v2_source_check", sql`${table.source} IN ('okx', 'gate', 'pyth', 'unknown')`),
+  check("lab_candle_cache_v2_venue_check", sql`${table.venue} IN ('okx', 'gate', 'none', 'unknown')`),
+  check("lab_candle_cache_v2_basis_check", sql`${table.basis} IN ('perp', 'spot', 'index', 'unknown')`),
+  check("lab_candle_cache_v2_proxy_check", sql`${table.proxy} IN ('direct', 'proxy', 'unknown')`),
+  check("lab_candle_cache_v2_finality_check", sql`${table.finality} IN ('finalized', 'forming', 'unknown')`),
+  check("lab_candle_cache_v2_time_semantic_check", sql`${table.timeSemantic} IN ('open_time', 'unknown')`),
+]);
+
 export const labOptimizationResults = pgTable("lab_optimization_results", {
   id: serial("id").primaryKey(),
   runId: integer("run_id").notNull(),

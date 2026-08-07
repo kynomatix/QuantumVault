@@ -338,6 +338,29 @@ export async function ensureSchema() {
   const client = await pool.connect();
   try {
     const migrations = [
+      `CREATE TABLE IF NOT EXISTS lab_candle_cache_v2 (
+        id serial PRIMARY KEY,
+        symbol text NOT NULL,
+        timeframe text NOT NULL,
+        time numeric(20,0) NOT NULL,
+        open real NOT NULL,
+        high real NOT NULL,
+        low real NOT NULL,
+        close real NOT NULL,
+        volume real NOT NULL,
+        source text NOT NULL CHECK (source IN ('okx', 'gate', 'pyth', 'unknown')),
+        venue text NOT NULL CHECK (venue IN ('okx', 'gate', 'none', 'unknown')),
+        basis text NOT NULL CHECK (basis IN ('perp', 'spot', 'index', 'unknown')),
+        proxy text NOT NULL CHECK (proxy IN ('direct', 'proxy', 'unknown')),
+        finality text NOT NULL CHECK (finality IN ('finalized', 'forming', 'unknown')),
+        time_semantic text NOT NULL CHECK (time_semantic IN ('open_time', 'unknown'))
+      )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS lab_candle_cache_v2_identity_unique
+         ON lab_candle_cache_v2
+         (symbol, timeframe, time, source, venue, basis, proxy, finality, time_semantic)`,
+      `CREATE INDEX IF NOT EXISTS lab_candle_cache_v2_lookup
+         ON lab_candle_cache_v2
+         (symbol, timeframe, basis, finality, proxy, time)`,
       `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS queue_order integer`,
       `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS config_snapshot jsonb`,
       `CREATE TABLE IF NOT EXISTS platform_cumulative_stats (

@@ -20,7 +20,7 @@
  *   npx tsx scripts/scanner-feed-audit.ts --venue pacifica
  */
 
-import { fetchOHLCV } from "../server/lab/datafeed";
+import { fetchOHLCV, LAB_ALL_KNOWN_CANDLE_POLICY } from "../server/lab/datafeed";
 import { marketToDatafeedTicker } from "../server/ai-trader/context-builder";
 import { getFlashMarketSpecs } from "../server/protocol/flash/flash-markets";
 import { PacificaAdapter } from "../server/protocol/pacifica/pacifica-adapter";
@@ -152,9 +152,10 @@ async function pythShimSearch(symbol: string): Promise<{ found: boolean; hits?: 
 // ── Per-market feed health probe ──────────────────────────────────────────────
 
 interface ProbeResult {
-  source: "okx" | "gate" | "pyth" | "DEAD";
+  source: "okx" | "gate" | "pyth" | "provenance-ineligible" | "DEAD";
   count?: number;
   note?: string;
+  provenance?: string;
   shimFlag?: boolean;
   shimHits?: string;
 }
@@ -169,7 +170,11 @@ async function probeMarket(internalSymbol: string): Promise<ProbeResult> {
     // Passing bypassCache: true is valid for a fully cold-start audit but is ~30× slower
     // for dead crypto symbols (OKX 5-page × 3-retry). The canonical feed path is
     // identical either way — cache is populated by the same OKX→Gate→Pyth chain.
-    candles = await fetchOHLCV(ticker, "1h", startDate, endDate);
+    candles = await fetchOHLCV(ticker, "1h", startDate, endDate, undefined, {
+      basisPolicy: LAB_ALL_KNOWN_CANDLE_POLICY,
+      // Observe this run's source rather than an older retained identity.
+      bypassCache: true,
+    });
   } catch (err: unknown) {
     return {
       source: "DEAD",
@@ -183,24 +188,33 @@ async function probeMarket(internalSymbol: string): Promise<ProbeResult> {
   // exists.  Mark as "pyth" with a note rather than DEAD so the audit is not misleading.
   if (isNonCrypto(base)) {
     if (!candles || candles.length === 0) {
-      return { source: "pyth", count: 0, note: "0 bars (rate-limited or mkt-closed)" };
+      return {
+        source: "provenance-ineligible",
+        count: 0,
+        note: "Pyth index rows lack proven finality/open-time identity",
+      };
     }
-    return { source: "pyth", count: candles.length };
   }
 
   if (!candles || candles.length === 0) {
+    if (await quickGateHasData(base)) {
+      return {
+        source: "provenance-ineligible",
+        count: 0,
+        note: "Gate spot exists but lacks proven finality/open-time identity",
+      };
+    }
     return { source: "DEAD", note: "no candles" };
   }
 
   // Crypto 3-way probe — determine which exchange actually served the data.
-  const okxHas = await quickOkxHasData(base);
-  if (okxHas) return { source: "okx", count: candles.length };
-
-  const gateHas = await quickGateHasData(base);
-  if (gateHas) return { source: "gate", count: candles.length };
+  const identities = [...new Set(candles.map(({ provenance: p }) =>
+    `${p.source}/${p.venue}/${p.basis}/${p.proxy}/${p.finality}/${p.timeSemantic}`,
+  ))].sort();
+  const p = candles[0].provenance;
 
   // Neither OKX nor Gate → datafeed fell through to Pyth Crypto.BASE/USD path
-  return { source: "pyth", count: candles.length, note: "pyth-crypto" };
+  return { source: p.source, count: candles.length, provenance: identities.join(",") };
 }
 
 // ── Table printer ─────────────────────────────────────────────────────────────
@@ -233,9 +247,10 @@ function printTable(rows: TableRow[], title: string): void {
   for (const row of rows) {
     const srcLabel = row.source === "DEAD" ? "DEAD" : row.source;
     const bars     = row.count != null ? String(row.count) : "-";
+    const provenanceNote = row.provenance ? `candle-provenance=${row.provenance}` : "";
     const note     = row.shimFlag
       ? `⚠ SHIM HAS IT (${row.shimHits ?? "?"}) — add to map`
-      : (row.note ?? "");
+      : [provenanceNote, row.note].filter(Boolean).join("; ");
     console.log(
       row.symbol.padEnd(C_VENUE) + "  " +
       row.ticker.padEnd(C_TICK)  + "  " +

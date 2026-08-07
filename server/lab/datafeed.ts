@@ -9,6 +9,96 @@ import {
 import { getBenchmarksBase, hermesFetch } from '../pricing/hermes-config.js';
 import { appendTelemetry } from "../telemetry";
 
+export type CandleSource = "okx" | "gate" | "pyth" | "unknown";
+export type CandleVenue = "okx" | "gate" | "none" | "unknown";
+export type CandleBasis = "perp" | "spot" | "index" | "unknown";
+export type CandleProxy = "direct" | "proxy" | "unknown";
+export type CandleFinality = "finalized" | "forming" | "unknown";
+export type CandleTimeSemantic = "open_time" | "unknown";
+
+export interface CandleProvenance {
+  source: CandleSource;
+  venue: CandleVenue;
+  basis: CandleBasis;
+  proxy: CandleProxy;
+  finality: CandleFinality;
+  timeSemantic: CandleTimeSemantic;
+}
+
+export interface ProvenancedOHLCV extends OHLCV {
+  provenance: CandleProvenance;
+}
+
+export interface CandleBasisPolicy {
+  consumer: "scanner" | "ai_context" | "chart" | "lab" | "paper_monitor" | "live_monitor";
+  acceptedBasis: readonly CandleBasis[];
+  acceptedFinality: readonly CandleFinality[];
+  acceptedProxy: readonly CandleProxy[];
+}
+
+export const MONEY_CANDLE_POLICY: Readonly<CandleBasisPolicy> = Object.freeze({
+  consumer: "scanner",
+  acceptedBasis: Object.freeze(["perp"] as const),
+  acceptedFinality: Object.freeze(["finalized"] as const),
+  acceptedProxy: Object.freeze(["direct"] as const),
+});
+
+export const AI_CONTEXT_CANDLE_POLICY: Readonly<CandleBasisPolicy> = Object.freeze({
+  ...MONEY_CANDLE_POLICY,
+  consumer: "ai_context",
+});
+
+export const CHART_CANDLE_POLICY: Readonly<CandleBasisPolicy> = Object.freeze({
+  consumer: "chart",
+  acceptedBasis: Object.freeze(["perp"] as const),
+  acceptedFinality: Object.freeze(["finalized", "forming"] as const),
+  acceptedProxy: Object.freeze(["direct"] as const),
+});
+
+export const PAPER_MONITOR_CANDLE_POLICY: Readonly<CandleBasisPolicy> = Object.freeze({
+  ...CHART_CANDLE_POLICY,
+  consumer: "paper_monitor",
+});
+
+export const LIVE_MONITOR_CANDLE_POLICY: Readonly<CandleBasisPolicy> = Object.freeze({
+  ...CHART_CANDLE_POLICY,
+  consumer: "live_monitor",
+});
+
+export const LAB_DIRECT_PERP_CANDLE_POLICY: Readonly<CandleBasisPolicy> = Object.freeze({
+  consumer: "lab",
+  acceptedBasis: Object.freeze(["perp"] as const),
+  acceptedFinality: Object.freeze(["finalized"] as const),
+  acceptedProxy: Object.freeze(["direct"] as const),
+});
+
+export const LAB_ALL_KNOWN_CANDLE_POLICY: Readonly<CandleBasisPolicy> = Object.freeze({
+  consumer: "lab",
+  acceptedBasis: Object.freeze(["perp", "spot", "index"] as const),
+  acceptedFinality: Object.freeze(["finalized", "forming"] as const),
+  acceptedProxy: Object.freeze(["direct", "proxy"] as const),
+});
+
+export type CandleBasisUnavailableReason =
+  | "no_acceptable_source"
+  | "nonfinalized_only"
+  | "malformed_provenance";
+
+export class CandleBasisUnavailableError extends Error {
+  constructor(
+    public readonly reason: CandleBasisUnavailableReason,
+    public readonly symbol: string,
+    public readonly timeframe: string,
+  ) {
+    super(`No acceptable candle basis for ${symbol} ${timeframe}: ${reason}`);
+    this.name = "CandleBasisUnavailableError";
+  }
+}
+
+export function isCandleBasisUnavailableError(err: unknown): err is CandleBasisUnavailableError {
+  return err instanceof CandleBasisUnavailableError;
+}
+
 const OKX_BATCH_SIZE = 300;
 const GATE_BATCH_SIZE = 900;
 const PYTH_BATCH_SIZE = 5000;
@@ -120,9 +210,40 @@ function isValidNumber(v: unknown): v is number {
   return false;
 }
 
-function stripMultiplierPrefix(base: string): string {
+export function stripMultiplierPrefix(base: string): string {
   const match = base.match(/^1[KM](.+)$/i);
   return match ? match[1] : base;
+}
+
+function sourceProxy(symbol: string, selectedBase?: string): CandleProxy {
+  const requestedBase = symbol.split("/")[0];
+  if (stripMultiplierPrefix(requestedBase) !== requestedBase) return "proxy";
+  if (selectedBase && selectedBase !== requestedBase) return "proxy";
+  return "direct";
+}
+
+function hasCompleteKnownProvenance(candle: ProvenancedOHLCV): boolean {
+  const p = candle.provenance;
+  return !!p
+    && p.source !== "unknown"
+    && p.venue !== "unknown"
+    && p.basis !== "unknown"
+    && p.proxy !== "unknown"
+    && p.finality !== "unknown"
+    && p.timeSemantic !== "unknown";
+}
+
+export function candleMatchesBasisPolicy(
+  candle: ProvenancedOHLCV,
+  policy: CandleBasisPolicy,
+): boolean {
+  const p = candle.provenance;
+  return hasCompleteKnownProvenance(candle)
+    && (policy.consumer === "lab"
+      || (p.source === "okx" && p.venue === "okx" && p.timeSemantic === "open_time"))
+    && policy.acceptedBasis.includes(p.basis)
+    && policy.acceptedFinality.includes(p.finality)
+    && policy.acceptedProxy.includes(p.proxy);
 }
 
 function symbolToOkxInstId(symbol: string): string {
@@ -530,7 +651,7 @@ async function fetchAllGateCandles(
   onProgress?: (msg: string) => void,
   deadlineAt: number = Infinity,
   signal?: AbortSignal,
-): Promise<OHLCV[]> {
+): Promise<ProvenancedOHLCV[]> {
   const pair = symbolToGateSpotPair(symbol);
 
   if (isNegCached(gateFailedPairs, pair)) {
@@ -545,7 +666,7 @@ async function fetchAllGateCandles(
   onProgress?.(`Fetching ${symbol} ${timeframe} from Gate.io spot (fallback)...`);
   console.log(`Fetching OHLCV for ${pair} ${interval} from Gate.io spot (OKX fallback)`);
 
-  const allCandles: OHLCV[] = [];
+  const allCandles: ProvenancedOHLCV[] = [];
   let currentFrom = startSec;
   let page = 0;
   let consecutiveErrors = 0;
@@ -588,6 +709,14 @@ async function fetchAllGateCandles(
           low,
           close,
           volume: parseFloat(candle[1] || "0") || 0,
+          provenance: {
+            source: "gate",
+            venue: "gate",
+            basis: "spot",
+            proxy: sourceProxy(symbol),
+            finality: "unknown",
+            timeSemantic: "unknown",
+          },
         });
       }
 
@@ -746,7 +875,7 @@ async function fetchAllPythCandles(
   onProgress?: (msg: string) => void,
   deadlineAt: number = Infinity,
   signal?: AbortSignal,
-): Promise<OHLCV[]> {
+): Promise<ProvenancedOHLCV[]> {
   const pythSymbol = symbolToPythId(symbol);
 
   if (isNegCached(pythFailedSymbols, pythSymbol)) {
@@ -761,7 +890,7 @@ async function fetchAllPythCandles(
   onProgress?.(`Fetching ${symbol} ${timeframe} from Pyth Benchmarks (fallback)...`);
   console.log(`Fetching OHLCV for ${pythSymbol} ${resolution} from Pyth Benchmarks (Gate.io fallback)`);
 
-  const allCandles: OHLCV[] = [];
+  const allCandles: ProvenancedOHLCV[] = [];
   let currentFrom = startSec;
   let page = 0;
   let consecutiveErrors = 0;
@@ -828,6 +957,14 @@ async function fetchAllPythCandles(
           low,
           close,
           volume: data.v?.[i] || 0,
+          provenance: {
+            source: "pyth",
+            venue: "none",
+            basis: "index",
+            proxy: sourceProxy(symbol, NON_CRYPTO_PYTH_MAP[base]),
+            finality: "unknown",
+            timeSemantic: "unknown",
+          },
         });
       }
 
@@ -930,18 +1067,43 @@ const TIMEFRAME_MS: Record<string, number> = {
   "6h": 21_600_000, "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000,
 };
 
-function aggregateCandles(candles: OHLCV[], factor: number, targetTfMs?: number): OHLCV[] {
+function aggregateProvenance(group: ProvenancedOHLCV[], complete: boolean): CandleProvenance {
+  const same = <K extends keyof CandleProvenance>(key: K): CandleProvenance[K] | "unknown" => {
+    const first = group[0].provenance[key];
+    return group.every((c) => c.provenance[key] === first) ? first : "unknown";
+  };
+  const componentFinalities = group.map((c) => c.provenance.finality);
+  const finality: CandleFinality = complete && componentFinalities.every((f) => f === "finalized")
+    ? "finalized"
+    : componentFinalities.some((f) => f === "forming")
+      ? "forming"
+      : "unknown";
+  return {
+    source: same("source") as CandleSource,
+    venue: same("venue") as CandleVenue,
+    basis: same("basis") as CandleBasis,
+    proxy: same("proxy") as CandleProxy,
+    finality,
+    timeSemantic: same("timeSemantic") as CandleTimeSemantic,
+  };
+}
+
+export function aggregateCandles(
+  candles: ProvenancedOHLCV[],
+  factor: number,
+  targetTfMs?: number,
+): ProvenancedOHLCV[] {
   const sorted = [...candles].sort((a, b) => a.time - b.time);
   if (sorted.length === 0) return [];
 
   if (targetTfMs && targetTfMs > 0) {
-    const buckets = new Map<number, OHLCV[]>();
+    const buckets = new Map<number, ProvenancedOHLCV[]>();
     for (const c of sorted) {
       const bucket = Math.floor(c.time / targetTfMs) * targetTfMs;
       if (!buckets.has(bucket)) buckets.set(bucket, []);
       buckets.get(bucket)!.push(c);
     }
-    const result: OHLCV[] = [];
+    const result: ProvenancedOHLCV[] = [];
     const sortedKeys = [...buckets.keys()].sort((a, b) => a - b);
     for (const key of sortedKeys) {
       const group = buckets.get(key)!;
@@ -953,12 +1115,13 @@ function aggregateCandles(candles: OHLCV[], factor: number, targetTfMs?: number)
         low: Math.min(...group.map(c => c.low)),
         close: group[group.length - 1].close,
         volume: group.reduce((s, c) => s + c.volume, 0),
+        provenance: aggregateProvenance(group, group.length === factor),
       });
     }
     return result;
   }
 
-  const result: OHLCV[] = [];
+  const result: ProvenancedOHLCV[] = [];
   for (let i = 0; i + factor - 1 < sorted.length; i += factor) {
     const group = sorted.slice(i, i + factor);
     result.push({
@@ -968,6 +1131,7 @@ function aggregateCandles(candles: OHLCV[], factor: number, targetTfMs?: number)
       low: Math.min(...group.map(c => c.low)),
       close: group[group.length - 1].close,
       volume: group.reduce((s, c) => s + c.volume, 0),
+      provenance: aggregateProvenance(group, group.length === factor),
     });
   }
   return result;
@@ -979,13 +1143,31 @@ const SYNTHETIC_TIMEFRAMES: Record<string, { source: string; factor: number }> =
   "8H": { source: "4h", factor: 2 },
 };
 
+export interface FetchOHLCVOptions {
+  basisPolicy: CandleBasisPolicy;
+  skipSpotFallback?: boolean;
+  bypassCache?: boolean;
+  deadlineMs?: number;
+  signal?: AbortSignal;
+  callerClass?: CandleReadCallerClass;
+}
+
+export function fetchOHLCV(
+  symbol: string,
+  timeframe: string,
+  startDate: string | number,
+  endDate: string | number,
+  onProgress: ((msg: string) => void) | undefined,
+  options: FetchOHLCVOptions,
+): Promise<ProvenancedOHLCV[]>;
 export async function fetchOHLCV(
   symbol: string,
   timeframe: string,
-  startDate: string,
-  endDate: string,
+  startDate: string | number,
+  endDate: string | number,
   onProgress?: (msg: string) => void,
   options?: {
+    basisPolicy: CandleBasisPolicy;
     skipSpotFallback?: boolean;
     bypassCache?: boolean;
     deadlineMs?: number;
@@ -999,9 +1181,42 @@ export async function fetchOHLCV(
     /** Attribution for candle-read phase telemetry. */
     callerClass?: CandleReadCallerClass;
   }
-): Promise<OHLCV[]> {
+): Promise<ProvenancedOHLCV[]> {
+  if (!options?.basisPolicy) {
+    throw new Error("fetchOHLCV requires an explicit basisPolicy");
+  }
+  const basisPolicy = options.basisPolicy;
+  let sawMalformedProvenance = false;
+  const typedFailure = basisPolicy.consumer === "scanner" || basisPolicy.consumer === "ai_context";
+  const finishWithPolicy = (candles: ProvenancedOHLCV[]): ProvenancedOHLCV[] => {
+    const admitted = candles.filter((c) => candleMatchesBasisPolicy(c, basisPolicy));
+    if (basisPolicy.consumer === "lab") {
+      const identities = [...new Set(admitted.map(({ provenance: p }) =>
+        `${p.source}/${p.venue}/${p.basis}/${p.proxy}/${p.finality}/${p.timeSemantic}`,
+      ))].sort().join(",");
+      console.log(`[CandleProvenance] ${symbol} ${timeframe} ${identities || "unavailable"} bars=${admitted.length}`);
+    }
+    if (admitted.length > 0 || !typedFailure) return admitted;
+    const sawExcludedFinality = candles.some((c) => {
+      const p = c.provenance;
+      return p.source !== "unknown"
+        && p.venue !== "unknown"
+        && p.basis !== "unknown"
+        && p.proxy !== "unknown"
+        && p.timeSemantic !== "unknown"
+        && basisPolicy.acceptedBasis.includes(p.basis)
+        && basisPolicy.acceptedProxy.includes(p.proxy)
+        && !basisPolicy.acceptedFinality.includes(p.finality);
+    });
+    const reason: CandleBasisUnavailableReason = sawMalformedProvenance
+      ? "malformed_provenance"
+      : sawExcludedFinality
+        ? "nonfinalized_only"
+        : "no_acceptable_source";
+    throw new CandleBasisUnavailableError(reason, symbol, timeframe);
+  };
   timeframe = timeframe.toLowerCase();
-  const signal = options?.signal;
+  const signal = options.signal;
   throwIfAborted(signal);
   const startMs = new Date(startDate).getTime();
   const endMs = new Date(endDate).getTime();
@@ -1023,7 +1238,7 @@ export async function fetchOHLCV(
   // keep waiting unbounded — for them a slow cache read is still far cheaper
   // than refetching years of candles.
   const cacheStartedAt = Date.now();
-  let cached: OHLCV[] | null = null;
+  let cached: ProvenancedOHLCV[] | null = null;
   if (!options?.bypassCache) {
     if (Number.isFinite(deadlineAt)) {
       const cacheBudgetMs = Math.min(5_000, Math.max(1_000, Math.floor((options?.deadlineMs ?? 0) / 4)));
@@ -1054,6 +1269,7 @@ export async function fetchOHLCV(
       let phases: CandleReadPhases | undefined;
       try {
         cached = await getCachedCandles(symbol, timeframe, startMs, endMs, {
+          basisPolicy,
           queryTimeoutMs: cacheBudgetMs + 500,
           signal: budgetCtrl.signal,
           callerClass: options?.callerClass ?? "scanner",
@@ -1111,6 +1327,7 @@ export async function fetchOHLCV(
       }
     } else {
       cached = await getCachedCandles(symbol, timeframe, startMs, endMs, {
+        basisPolicy,
         callerClass: options?.callerClass ?? "lab",
       });
     }
@@ -1132,7 +1349,7 @@ export async function fetchOHLCV(
     if (!isLiveRequest || newestCachedTs > endMs - 2 * intervalMs) {
       console.log(`[CandleCache] Hit: ${cached.length} candles for ${symbol} ${timeframe}`);
       onProgress?.(`Loaded ${cached.length} cached candles for ${symbol} ${timeframe}`);
-      return cached;
+      return finishWithPolicy(cached);
     }
     console.log(
       `[CandleCache] Live miss: newest candle is ` +
@@ -1147,7 +1364,7 @@ export async function fetchOHLCV(
     onProgress?.(`Synthesizing ${timeframe} from ${synthetic.source} candles...`);
     const sourceCandles = await fetchOHLCV(symbol, synthetic.source, startDate, endDate, onProgress, options);
     const targetTfMs = TIMEFRAME_MS[timeframe.toLowerCase()] || 0;
-    const aggregated = aggregateCandles(sourceCandles, synthetic.factor, targetTfMs);
+    const aggregated = finishWithPolicy(aggregateCandles(sourceCandles, synthetic.factor, targetTfMs));
     console.log(`[Synthetic] Built ${aggregated.length} ${timeframe} candles from ${sourceCandles.length} ${synthetic.source} candles (aligned to ${targetTfMs}ms boundaries)`);
     onProgress?.(`Synthesized ${aggregated.length} ${timeframe} candles from ${synthetic.source}`);
 
@@ -1163,7 +1380,7 @@ export async function fetchOHLCV(
 
   const nonCrypto = isNonCryptoSymbol(symbol);
   const instId = symbolToOkxInstId(symbol);
-  let allCandles: OHLCV[] = [];
+  let allCandles: ProvenancedOHLCV[] = [];
 
   // Per-fetch source-chain trace: one compact line showing which sources ran,
   // what each returned, and where the time went. Emitted for every EMPTY or
@@ -1183,6 +1400,10 @@ export async function fetchOHLCV(
   };
 
   if (nonCrypto) {
+    if (!basisPolicy.acceptedBasis.includes("index")) {
+      emitTrace(0);
+      return finishWithPolicy([]);
+    }
     onProgress?.(`Fetching ${symbol} ${timeframe} from Pyth (non-crypto)...`);
     try {
       allCandles = await fetchAllPythCandles(symbol, timeframe, startMs, endMs, onProgress, deadlineAt, signal);
@@ -1195,7 +1416,7 @@ export async function fetchOHLCV(
     trace.push(`pyth=${allCandles.length}c/${((Date.now() - netStart) / 1000).toFixed(1)}s`);
 
     if (allCandles.length > 0) {
-      const deduped = deduplicateCandles(allCandles);
+      const deduped = deduplicateCandles(finishWithPolicy(allCandles));
       emitTrace(deduped.length);
       onProgress?.(`Fetched ${deduped.length} candles for ${symbol} ${timeframe}`);
       throwIfAborted(signal); // aborted fetches never fire background writes
@@ -1207,12 +1428,12 @@ export async function fetchOHLCV(
 
     emitTrace(0);
     onProgress?.(`No candle data available for ${symbol} ${timeframe} from Pyth`);
-    return allCandles;
+    return finishWithPolicy(allCandles);
   }
 
   const okxNegCachedAtEntry = isNegCached(okxFailedInstruments, instId);
   const okxSourceDownAtEntry = isOkxSourceDown();
-  if (!okxNegCachedAtEntry && !okxSourceDownAtEntry) {
+  if (basisPolicy.acceptedBasis.includes("perp") && !okxNegCachedAtEntry && !okxSourceDownAtEntry) {
     const bar = mapTimeframeToOkx(timeframe);
     onProgress?.(`Fetching ${symbol} ${timeframe} from OKX...`);
     console.log(`Fetching OHLCV for ${instId} ${bar} from ${startDate} to ${endDate} via OKX`);
@@ -1248,15 +1469,36 @@ export async function fetchOHLCV(
         emptyPages = 0;
 
         for (const candle of raw) {
+          if (!Array.isArray(candle) || candle.length < 9 || (candle[8] !== "0" && candle[8] !== "1")) {
+            sawMalformedProvenance = true;
+            continue;
+          }
           const ts = parseInt(candle[0]);
-          if (ts < startMs || ts > endMs) continue;
+          const open = parseFloat(candle[1]);
+          const high = parseFloat(candle[2]);
+          const low = parseFloat(candle[3]);
+          const close = parseFloat(candle[4]);
+          if (!Number.isFinite(ts) || ts < startMs || ts > endMs
+              || !isValidNumber(open) || !isValidNumber(high)
+              || !isValidNumber(low) || !isValidNumber(close)) {
+            sawMalformedProvenance = true;
+            continue;
+          }
           allCandles.push({
             time: ts,
-            open: parseFloat(candle[1]),
-            high: parseFloat(candle[2]),
-            low: parseFloat(candle[3]),
-            close: parseFloat(candle[4]),
+            open,
+            high,
+            low,
+            close,
             volume: parseFloat(candle[5] || "0"),
+            provenance: {
+              source: "okx",
+              venue: "okx",
+              basis: "perp",
+              proxy: sourceProxy(symbol),
+              finality: candle[8] === "1" ? "finalized" : "forming",
+              timeSemantic: "open_time",
+            },
           });
         }
 
@@ -1311,6 +1553,8 @@ export async function fetchOHLCV(
     } else {
       trace.push(`okx=${allCandles.length}c/${((Date.now() - netStart) / 1000).toFixed(1)}s`);
     }
+  } else if (!basisPolicy.acceptedBasis.includes("perp")) {
+    trace.push("okx=policy-skip");
   } else if (okxNegCachedAtEntry) {
     console.log(`[OKX] Skipping ${instId} (recently failed) — trying Gate.io spot`);
     trace.push("okx=negcached-skip");
@@ -1321,7 +1565,8 @@ export async function fetchOHLCV(
 
   throwIfAborted(signal); // no NEW source attempt after cancellation
 
-  if (allCandles.length === 0 && !options?.skipSpotFallback && Date.now() < deadlineAt) {
+  if (allCandles.length === 0 && basisPolicy.acceptedBasis.includes("spot")
+      && !options?.skipSpotFallback && Date.now() < deadlineAt) {
     const gateStart = Date.now();
     const gateNegCachedAtEntry = isNegCached(gateFailedPairs, symbolToGateSpotPair(symbol));
     try {
@@ -1338,7 +1583,8 @@ export async function fetchOHLCV(
     );
   }
 
-  if (allCandles.length === 0 && !options?.skipSpotFallback && Date.now() < deadlineAt) {
+  if (allCandles.length === 0 && basisPolicy.acceptedBasis.includes("index")
+      && !options?.skipSpotFallback && Date.now() < deadlineAt) {
     throwIfAborted(signal); // no NEW source attempt after cancellation
     const pythStart = Date.now();
     const pythNegCachedAtEntry = isNegCached(pythFailedSymbols, symbolToPythId(symbol));
@@ -1357,7 +1603,12 @@ export async function fetchOHLCV(
   }
 
   if (allCandles.length > 0) {
-    const deduped = deduplicateCandles(allCandles);
+    const deduped = deduplicateCandles(finishWithPolicy(allCandles));
+    if (deduped.length === 0) {
+      emitTrace(0);
+      onProgress?.(`Candle data for ${symbol} ${timeframe} was provenance-ineligible`);
+      return deduped;
+    }
     emitTrace(deduped.length);
     onProgress?.(`Fetched ${deduped.length} candles for ${symbol} ${timeframe}`);
 
@@ -1371,12 +1622,12 @@ export async function fetchOHLCV(
 
   emitTrace(0);
   onProgress?.(`No candle data available for ${symbol} ${timeframe} from OKX, Gate.io, or Pyth`);
-  return allCandles;
+  return finishWithPolicy(allCandles);
 }
 
-function deduplicateCandles(candles: OHLCV[]): OHLCV[] {
+function deduplicateCandles(candles: ProvenancedOHLCV[]): ProvenancedOHLCV[] {
   const seen = new Set<number>();
-  const result: OHLCV[] = [];
+  const result: ProvenancedOHLCV[] = [];
   for (const c of candles) {
     if (!seen.has(c.time)) {
       seen.add(c.time);
@@ -1387,7 +1638,7 @@ function deduplicateCandles(candles: OHLCV[]): OHLCV[] {
   return result;
 }
 
-function getTimeframeSeconds(tf: string): number {
+export function getTimeframeSeconds(tf: string): number {
   const map: Record<string, number> = {
     "1m": 60, "5m": 300, "15m": 900, "30m": 1800, "45m": 2700,
     "1h": 3600, "2h": 7200, "4h": 14400, "8h": 28800,

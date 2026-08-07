@@ -5,7 +5,7 @@
  * Measures, per timeframe (15m / 1h / 4h), how far price wicks BEYOND
  * an N-bar rolling range extreme before reversing at least 1×ATR back
  * inside the range. Outputs p50 / p75 / p90 in ATR units per TF across
- * major markets available in lab_candle_cache.
+ * major markets available in the provenance-aware lab_candle_cache_v2.
  *
  * These percentiles become the empirical sweep-buffer constants for Phase B.
  * A p90 buffer dodges 90 % of sweeps but costs RR on every trade — pick the
@@ -29,7 +29,7 @@
 import { pool, db, closePool } from "../server/db";
 import { aiTraderDecisions, aiTraderBots } from "@shared/schema";
 import { eq, and, isNotNull, inArray } from "drizzle-orm";
-import { fetchOHLCV } from "../server/lab/datafeed";
+import { fetchOHLCV, LAB_DIRECT_PERP_CANDLE_POLICY, type ProvenancedOHLCV } from "../server/lab/datafeed";
 import { marketToDatafeedTicker } from "../server/ai-trader/context-builder";
 import { SWEEP_BUFFER_ATR } from "../server/ai-trader/guardrails";
 import type { OHLCV } from "../server/lab/engine";
@@ -43,16 +43,31 @@ const M = parseInt(args[args.indexOf("--M") + 1] ?? "") || M_DEFAULT;
 
 interface Candle { time: number; open: number; high: number; low: number; close: number }
 
+function candleIdentities(candles: ProvenancedOHLCV[]): string {
+  return [...new Set(candles.map(({ provenance: p }) =>
+    `${p.source}/${p.venue}/${p.basis}/${p.proxy}/${p.finality}/${p.timeSemantic}`,
+  ))].sort().join(",");
+}
+
 async function fetchCandles(symbol: string, timeframe: string, limit?: number): Promise<Candle[]> {
   const q = limit
-    ? `SELECT time, open, high, low, close FROM lab_candle_cache WHERE symbol=$1 AND timeframe=$2 ORDER BY time DESC LIMIT $3`
-    : `SELECT time, open, high, low, close FROM lab_candle_cache WHERE symbol=$1 AND timeframe=$2 ORDER BY time ASC`;
+    ? `SELECT time, open, high, low, close FROM lab_candle_cache_v2
+       WHERE symbol=$1 AND timeframe=$2 AND source='okx' AND venue='okx'
+         AND basis='perp' AND proxy='direct' AND finality='finalized' AND time_semantic='open_time'
+       ORDER BY time DESC LIMIT $3`
+    : `SELECT time, open, high, low, close FROM lab_candle_cache_v2
+       WHERE symbol=$1 AND timeframe=$2 AND source='okx' AND venue='okx'
+         AND basis='perp' AND proxy='direct' AND finality='finalized' AND time_semantic='open_time'
+       ORDER BY time ASC`;
   const params = limit ? [symbol, timeframe, limit] : [symbol, timeframe];
   const { rows } = await pool.query(q, params);
   const candles = rows.map((r: Record<string, unknown>) => ({
     time: Number(r.time), open: Number(r.open), high: Number(r.high),
     low: Number(r.low), close: Number(r.close),
   }));
+  if (candles.length > 0) {
+    console.log(`[candle-provenance] ${symbol} ${timeframe} okx/okx/perp/direct/finalized/open_time bars=${candles.length}`);
+  }
   return limit ? candles.reverse() : candles;
 }
 
@@ -355,8 +370,17 @@ async function mainAave(): Promise<void> {
     const startIso = new Date(d.decidedAt.getTime() - 14 * aaveTfMs(bot.timeframe)).toISOString();
     const endIso   = new Date(d.closedAt.getTime()  + 10 * aaveTfMs(bot.timeframe)).toISOString();
     let candles: OHLCV[] = [];
-    try { candles = await fetchOHLCV(ticker, bot.timeframe, startIso, endIso); } catch { /* skip */ }
-    if (candles.length < 14) { noCandles++; continue; }
+    try {
+      candles = await fetchOHLCV(ticker, bot.timeframe, startIso, endIso, undefined, {
+        basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY,
+      });
+    } catch { /* skip */ }
+    if (candles.length < 14) {
+      console.log(`[candle-provenance] ${ticker} ${bot.timeframe} unavailable-or-insufficient bars=${candles.length}`);
+      noCandles++;
+      continue;
+    }
+    console.log(`[candle-provenance] ${ticker} ${bot.timeframe} ${candleIdentities(candles as ProvenancedOHLCV[])} bars=${candles.length}`);
 
     const tf = bot.timeframe as keyof typeof SWEEP_BUFFER_ATR;
     const sweepMult   = SWEEP_BUFFER_ATR[tf] ?? 0.75;

@@ -1,7 +1,7 @@
 import { compilePine } from "./index.js";
 import { executePine } from "./runtime.js";
 import { getCachedCandles } from "../candle-store.js";
-import { fetchOHLCV } from "../datafeed.js";
+import { fetchOHLCV, LAB_DIRECT_PERP_CANDLE_POLICY } from "../datafeed.js";
 import { db } from "../../db.js";
 import { labStrategies } from "@shared/schema";
 import { eq } from "drizzle-orm";
@@ -14,10 +14,16 @@ async function main() {
   const plan = compilePine(strat.pineScript!);
   console.log(`AST stmts: ${plan.ast.length}, inputs: ${plan.inputs.length}`);
 
-  let candles = getCachedCandles("SOL/USDT:USDT", "12h");
+  const startMs = new Date("2023-01-01").getTime();
+  const endMs = new Date("2026-03-20").getTime();
+  let candles = await getCachedCandles("SOL/USDT:USDT", "12h", startMs, endMs, {
+    basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY,
+  });
   if (!candles || candles.length === 0) {
     console.log("Fetching candles...");
-    candles = await fetchOHLCV("SOL/USDT:USDT", "12h", "2023-01-01", "2026-03-20");
+    candles = await fetchOHLCV("SOL/USDT:USDT", "12h", "2023-01-01", "2026-03-20", undefined, {
+      basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY,
+    });
   }
   console.log(`Candles: ${candles.length}`);
 

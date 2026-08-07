@@ -8,7 +8,7 @@
 
 import { Worker } from "worker_threads";
 import { resolve } from "path";
-import { fetchOHLCV } from "../datafeed";
+import { fetchOHLCV, LAB_DIRECT_PERP_CANDLE_POLICY } from "../datafeed";
 import { WorkerPool } from "../worker-pool";
 import { parsePineScript } from "../pine-parser";
 import { hashStringToSeed } from "../rng";
@@ -109,7 +109,9 @@ async function fetchCombos(
   const candlesByCombo: Record<string, OHLCV[]> = {};
   for (const t of tickers) {
     for (const tf of timeframes) {
-      const candles = await fetchOHLCV(t, tf, startDate, endDate);
+      const candles = await fetchOHLCV(t, tf, startDate, endDate, undefined, {
+        basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY,
+      });
       candlesByCombo[`${t}|${tf}`] = candles ?? [];
       console.log(`  ${t} ${tf}: ${candles?.length ?? 0} bars`);
     }

@@ -23,6 +23,8 @@ import {
   isAbortError,
   isCacheDegradedError,
   setDatafeedIncidentReporter,
+  MONEY_CANDLE_POLICY,
+  type CandleProvenance,
 } from "../lab/datafeed";
 import { recordCriticalError } from "../error-log";
 import { marketToDatafeedTicker } from "./context-builder";
@@ -123,6 +125,8 @@ export interface ScannerCandidate {
    */
   parentTrend: string;
   evaluatedAt: number;
+  /** Provenance of the admitted candle set used for this money-input score. */
+  candleProvenance: CandleProvenance | null;
 }
 
 export type ScannerAttemptDisposition =
@@ -553,6 +557,7 @@ export function evaluateCandidate(
     necklineDistancePct,
     parentTrend,
     evaluatedAt: now.getTime(),
+    candleProvenance: (bars[bars.length - 1] as OHLCV & { provenance?: CandleProvenance }).provenance ?? null,
   };
 }
 
@@ -781,6 +786,7 @@ async function runSweep(): Promise<void> {
                 );
                 const fetchStartedAt = Date.now();
                 bars = await fetchOHLCV(ticker, tf, startDate, endDate, undefined, {
+                  basisPolicy: MONEY_CANDLE_POLICY,
                   deadlineMs: perFetchDeadlineMs,
                   signal: tfAbort.signal,
                   callerClass: "scanner",
@@ -856,6 +862,7 @@ async function runSweep(): Promise<void> {
                       endDate,
                       undefined,
                       {
+                        basisPolicy: MONEY_CANDLE_POLICY,
                         deadlineMs: Math.min(SWEEP_PER_FETCH_DEADLINE_MS, remainingMs),
                         signal: tfAbort.signal,
                         callerClass: "scanner",

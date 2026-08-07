@@ -4,7 +4,7 @@ import { parsePineScript } from "./pine-parser";
 import { compilePine, runPineParityTest, type PineEngineConfig } from "./pine/index";
 import { labOptimizationConfigSchema, insertLabStrategyBodySchema, updateLabStrategyBodySchema, LAB_AVAILABLE_TICKERS, LAB_AVAILABLE_TIMEFRAMES, type LabCheckpoint, type LabOptimizationConfig, type LabBacktestResult, labOptimizationRuns, labOptimizationResults } from "@shared/schema";
 import { getCacheStats, clearCandleCache } from "./candle-store";
-import { fetchOHLCV } from "./datafeed";
+import { fetchOHLCV, LAB_ALL_KNOWN_CANDLE_POLICY } from "./datafeed";
 import { Worker } from "worker_threads";
 import { resolve, dirname } from "path";
 import type { OHLCV } from "./engine";
@@ -790,7 +790,14 @@ export function registerLabRoutes(app: Express): void {
         const key = `${ticker}|${tf}`;
         onProgress(`Fetching data for ${ticker.split("/")[0]} ${tf}`);
         try {
-          const candles = await fetchOHLCV(ticker, tf, config.startDate, config.endDate, onProgress);
+          const candles = await fetchOHLCV(
+            ticker,
+            tf,
+            config.startDate,
+            config.endDate,
+            onProgress,
+            { basisPolicy: LAB_ALL_KNOWN_CANDLE_POLICY },
+          );
           candlesByCombo[key] = candles;
         } catch (err: any) {
           console.log(`[QuantumLab] Failed to fetch data for ${ticker} ${tf}: ${err.message}`);
@@ -2740,7 +2747,21 @@ export function registerLabRoutes(app: Express): void {
       const plan = compilePineFn(strategy.pineScript);
       const useTicker = ticker || "SOL/USDT:USDT";
       const useTf = timeframe || "4h";
-      const candles = await fetchOHLCV(useTicker, useTf, 500);
+      const tfMs: Record<string, number> = {
+        "1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
+        "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000,
+        "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000,
+      };
+      const parityEnd = Date.now();
+      const parityStart = parityEnd - 500 * (tfMs[useTf] ?? 14_400_000);
+      const candles = await fetchOHLCV(
+        useTicker,
+        useTf,
+        new Date(parityStart).toISOString(),
+        new Date(parityEnd).toISOString(),
+        undefined,
+        { basisPolicy: LAB_ALL_KNOWN_CANDLE_POLICY },
+      );
       if (!candles || candles.length < 50) {
         return res.status(400).json({ error: `Not enough candle data for ${useTicker} ${useTf}` });
       }

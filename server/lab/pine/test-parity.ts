@@ -1,6 +1,6 @@
 import { labStorage } from "../storage";
 import { compilePine, runPineParityTest } from "./index";
-import { fetchOHLCV } from "../datafeed";
+import { fetchOHLCV, getTimeframeSeconds, LAB_DIRECT_PERP_CANDLE_POLICY } from "../datafeed";
 
 const paramSets: Record<number, Record<string, any>[]> = {
   1: [
@@ -38,7 +38,11 @@ async function main() {
 
       console.log(`\n=== Strategy ${sid}: ${strategy.name} ===`);
       const plan = compilePine(strategy.pineScript);
-      const candles = await fetchOHLCV(ticker, timeframe, 500);
+      const fetchEnd = Date.now();
+      const candles = await fetchOHLCV(
+        ticker, timeframe, fetchEnd - 500 * getTimeframeSeconds(timeframe) * 1000, fetchEnd, undefined,
+        { basisPolicy: LAB_DIRECT_PERP_CANDLE_POLICY },
+      );
       if (!candles || candles.length < 50) {
         console.log(`  Not enough candles: ${candles?.length ?? 0}`);
         allPassed = false;
