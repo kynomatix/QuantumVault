@@ -12,5 +12,8 @@ export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts'],
     environment: 'node',
+    env: {
+      PYTH_HERMES_MODE: process.env.PYTH_HERMES_MODE ?? 'live',
+    },
   },
 });
