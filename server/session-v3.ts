@@ -420,32 +420,61 @@ export function deriveSubkeyFromSession(
   return deriveSubkey(umk, purpose);
 }
 
+export type WalletSecurityRestoreOutcome =
+  | { status: 'restored'; sessionId: string }
+  | { status: 'transient_read_failed' }
+  | { status: 'reauth_required' };
+
+function logWalletSecurityRestoreOutcome(
+  walletAddress: string,
+  status: Exclude<WalletSecurityRestoreOutcome['status'], 'restored'>,
+): void {
+  console.error(
+    `[Security v3] restoreWalletSecurityFromStorageOutcome: ${status} for ${walletAddress.slice(0, 8)}...`,
+  );
+}
+
 /**
- * Restore a wallet's security session from at-rest storage (encrypted DB row),
- * without requiring a new user signature. Used on return visits when the
- * in-memory UMK session has expired or been wiped by a server restart, but
- * the Express session cookie (proven via prior signature) is still valid.
+ * Restore a wallet's security session from at-rest storage (encrypted DB row)
+ * while preserving the distinction between an unambiguous storage-read failure
+ * and every authority/material failure after a successful read.
  *
- * The signature is AUTH-ONLY (proves identity); the UMK is decrypted using
- * only server-side secrets (UMK_STORAGE_SECRET). So a valid, verified cookie
- * is sufficient evidence that this wallet already proved ownership.
- *
- * Fail-closed: returns null for missing/corrupt rows, v1 wallets (unrecoverable),
- * or decrypt failures.
+ * Only the initial storage read is allowed to return transient_read_failed.
+ * Missing, malformed, unsupported, undecryptable, and unexpected post-read
+ * conditions all fail closed as reauth_required.
  */
-export async function restoreWalletSecurityFromStorage(
-  walletAddress: string
-): Promise<{ sessionId: string } | null> {
+export async function restoreWalletSecurityFromStorageOutcome(
+  walletAddress: string,
+): Promise<WalletSecurityRestoreOutcome> {
+  let wallet: Awaited<ReturnType<typeof storage.getWallet>>;
   try {
-    const wallet = await storage.getWallet(walletAddress);
-    if (!wallet?.userSalt || !wallet.encryptedUserMasterKey) {
-      return null;
+    wallet = await storage.getWallet(walletAddress);
+  } catch {
+    logWalletSecurityRestoreOutcome(walletAddress, 'transient_read_failed');
+    return { status: 'transient_read_failed' };
+  }
+
+  let restoredUmk: Buffer | null = null;
+  let restoredSessionId: string | null = null;
+  try {
+    if (
+      !wallet
+      || typeof wallet.userSalt !== 'string'
+      || wallet.userSalt.length === 0
+      || wallet.userSalt.length % 2 !== 0
+      || !/^[0-9a-fA-F]+$/.test(wallet.userSalt)
+      || typeof wallet.encryptedUserMasterKey !== 'string'
+      || wallet.encryptedUserMasterKey.length === 0
+    ) {
+      logWalletSecurityRestoreOutcome(walletAddress, 'reauth_required');
+      return { status: 'reauth_required' };
     }
 
     const umkVersion = wallet.umkVersion || 1;
-    // v1 UMKs are not recoverable from storage (broken signature-derived key).
-    if (umkVersion === 1) {
-      return null;
+    // V1 is unrecoverable, and an unknown version must not be guessed as V2.
+    if (umkVersion !== 2 && umkVersion !== 3) {
+      logWalletSecurityRestoreOutcome(walletAddress, 'reauth_required');
+      return { status: 'reauth_required' };
     }
 
     const userSalt = Buffer.from(wallet.userSalt, 'hex');
@@ -457,12 +486,10 @@ export async function restoreWalletSecurityFromStorage(
     let umk: Buffer;
     try {
       umk = decryptFromBase64(wallet.encryptedUserMasterKey, storageKey, aad);
-    } catch (err) {
+    } finally {
       zeroizeBuffer(storageKey);
-      console.error(`[Security v3] restoreWalletSecurityFromStorage: UMK decrypt failed for ${walletAddress.slice(0, 8)}... version=${umkVersion} (check UMK_STORAGE_SECRET)`);
-      return null;
     }
-    zeroizeBuffer(storageKey);
+    restoredUmk = umk;
 
     const sessionId = generateSessionId();
     const now = Date.now();
@@ -472,6 +499,7 @@ export async function restoreWalletSecurityFromStorage(
       createdAt: now,
       expiresAt: now + SESSION_TTL_MS,
     });
+    restoredSessionId = sessionId;
 
     // Opportunistic background tasks (same as login path, non-blocking):
     if (wallet.agentPrivateKeyEncrypted && !wallet.agentPrivateKeyEncryptedV3) {
@@ -503,13 +531,28 @@ export async function restoreWalletSecurityFromStorage(
       .catch(e => console.error('[Security] Restore-time bot subaccount backfill failed (non-blocking):', e));
 
     console.log(`[Security v3] Restored UMK session from storage for ${walletAddress.slice(0, 8)}... (ttl=4h)`);
-    return { sessionId };
-  } catch (err) {
-    console.error(`[Security v3] restoreWalletSecurityFromStorage failed for ${walletAddress.slice(0, 8)}... (non-fatal):`, err);
-    return null;
+    return { status: 'restored', sessionId };
+  } catch {
+    if (restoredSessionId) {
+      invalidateSession(restoredSessionId);
+    } else if (restoredUmk) {
+      zeroizeBuffer(restoredUmk);
+    }
+    logWalletSecurityRestoreOutcome(walletAddress, 'reauth_required');
+    return { status: 'reauth_required' };
   }
 }
 
+/**
+ * Compatibility wrapper for callers that only distinguish restored from
+ * unavailable. The AI Trader auto-cycle consumes the typed outcome directly.
+ */
+export async function restoreWalletSecurityFromStorage(
+  walletAddress: string,
+): Promise<{ sessionId: string } | null> {
+  const outcome = await restoreWalletSecurityFromStorageOutcome(walletAddress);
+  return outcome.status === 'restored' ? { sessionId: outcome.sessionId } : null;
+}
 export async function createSigningNonce(
   walletAddress: string,
   purpose: string
