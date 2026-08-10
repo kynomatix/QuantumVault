@@ -14,6 +14,14 @@ import type {
 } from "./datafeed";
 import { appendTelemetry } from "../telemetry";
 import { registerPoolLoadTag } from "../pool-load";
+import { requireSchemaCapabilityReady } from "../schema-readiness";
+
+async function requireCandleCacheSchema(): Promise<void> {
+  await requireSchemaCapabilityReady("lab_scanner", async (text, values) => {
+    const result = await pool.query(text, values ? [...values] : undefined);
+    return { rows: result.rows as readonly Record<string, unknown>[] };
+  });
+}
 
 // ----- candle read bulkhead -------------------------------------------------
 // The scanner, position monitor and Lab all funnel candle-cache DB reads
@@ -226,6 +234,12 @@ export async function getCachedCandles(
   if (!opts?.basisPolicy) {
     throw new Error("getCachedCandles requires an explicit basisPolicy");
   }
+  // The Lab child is a separate OS process, so the web process's installed
+  // snapshot cannot be shared with it. The first child-process call performs
+  // one memoized catalog-only probe; web-process calls use the boot snapshot.
+  // This is also required after LabSupervisor's internal child respawn, which
+  // does not rerun the web process's boot-time ensureSchema check.
+  await requireCandleCacheSchema();
   const startedAt = Date.now();
   const signal = opts.signal;
   const phases: CandleReadPhases = {
@@ -718,6 +732,7 @@ export async function saveCandlesToDb(
   timeframe: string,
   candles: ProvenancedOHLCV[]
 ): Promise<void> {
+  await requireCandleCacheSchema();
   if (candles.length === 0) return;
   const newestByIdentity = new Map<string, ProvenancedOHLCV>();
   for (const candle of candles) {
@@ -776,6 +791,7 @@ export async function getCacheStats(): Promise<{
   symbols: number;
   estimatedSizeMb: number;
 }> {
+  await requireCandleCacheSchema();
   try {
     const countResult = await db
       .select({ count: sql<number>`count(*)` })
@@ -793,6 +809,7 @@ export async function getCacheStats(): Promise<{
 }
 
 export async function clearCandleCache(): Promise<number> {
+  await requireCandleCacheSchema();
   // Full-table delete over ~2M rows can exceed BOTH timeouts: the pool's 30s
   // server-side statement_timeout AND the pool-level 60s client-side
   // query_timeout (see server/db.ts — added after the 2026-07-19 pool-wedge

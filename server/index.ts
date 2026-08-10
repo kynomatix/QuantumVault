@@ -32,6 +32,7 @@ import {
   createGracefulHttpShutdown,
 } from "./graceful-http-shutdown";
 import { SCANNER_CAPABILITIES } from "./ai-trader/scanner-capabilities";
+import { isSchemaCapabilityReady } from "./schema-readiness";
 
 // Global crash capture for the admin "Errors" panel. Registered at module load so it catches
 // failures from any background job. Both handlers record the error then preserve Node's default
@@ -362,6 +363,15 @@ import { eq, sql } from "drizzle-orm";
 
 const labQueueBodyParser = express.json({ limit: "10mb" });
 
+app.use("/api/lab", (_req: Request, res: Response, next: NextFunction) => {
+  if (isSchemaCapabilityReady("lab_scanner")) return next();
+  res.set("Retry-After", "30");
+  return res.status(503).json({
+    error: "schema_capability_unavailable",
+    capability: "lab_scanner",
+  });
+});
+
 app.post("/api/lab/run-optimization", (req: Request, res: Response, next: NextFunction) => {
   if (labSupervisor.isReady) return next();
   sessionMiddleware(req, res, (err) => {
@@ -610,9 +620,13 @@ registerRequestTrace(app);
 
   await initializeProtocolAdapter();
 
-  labSupervisor.start().catch((err) => {
-    console.error(`[LabSupervisor] Initial start failed: ${err.message}`);
-  });
+  if (isSchemaCapabilityReady("lab_scanner")) {
+    labSupervisor.start().catch((err) => {
+      console.error(`[LabSupervisor] Initial start failed: ${err.message}`);
+    });
+  } else {
+    console.error("[LabSupervisor] withheld: schema capability unavailable capability=lab_scanner");
+  }
 
   await registerRoutes(httpServer, app);
 
@@ -1038,6 +1052,8 @@ registerRequestTrace(app);
       log(`[Scanner] capabilities producer=${SCANNER_CAPABILITIES.producerEnabled} consumers=${SCANNER_CAPABILITIES.consumersEnabled} liveExecution=${SCANNER_CAPABILITIES.liveExecutionEnabled}`);
       if (!SCANNER_CAPABILITIES.producerEnabled) {
         log('[Scanner] disabled via SCANNER_ENABLED=false — startScanner will not be called');
+      } else if (!isSchemaCapabilityReady("lab_scanner")) {
+        log('[Scanner] withheld: schema capability unavailable capability=lab_scanner');
       } else {
         setTimeout(() => {
           void startObservedBackgroundComponent({
