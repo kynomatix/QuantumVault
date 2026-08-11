@@ -30,7 +30,8 @@ function makeInput(overrides: Partial<GuardrailInput> = {}): GuardrailInput {
     takerFeeRate: 0.0004,
     maintenanceMarginWeight: 0.02,
     allocatedUsdc: 1000,
-    hasOpenPosition: false,
+    positionAuthority: "paper_ledger",
+    positionState: "flat",
     quantizeOrderSize: (s: number) => s, // identity — quantization cases override
     sizingMode: "risk_based",
     riskMinPct: 0.5,
@@ -362,7 +363,7 @@ describe("risk_based sizing — fail-closed inputs", () => {
     expect(flat.ok).toBe(true);
     const close = applyGuardrails(
       { action: "close", confidence: 5, invalidation: "n/a", rationale: "exit" },
-      makeInput({ currentEquity: undefined, hasOpenPosition: true })
+      makeInput({ currentEquity: undefined, positionState: "open" })
     );
     expect(close.ok).toBe(true);
   });
