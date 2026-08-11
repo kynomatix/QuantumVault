@@ -30,6 +30,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { OHLCV } from "../../server/lab/engine";
+import { classifyDow, detectPivots } from "../../server/ai-trader/dow-structure";
 
 // ─── Module mocks ─────────────────────────────────────────────────────────────
 
@@ -199,6 +200,7 @@ function textbookMBars(nowMs: number, tfMs: number): OHLCV[] {
 import {
   getBoundaryTfs,
   evaluateCandidate,
+  evaluateCandidateResult,
   SCANNER_FEED_EXCLUDE,
   buildScannerUniverse,
   getScannerStatus,
@@ -210,6 +212,61 @@ import {
 // Fixed "now": 2026-07-15T00:00:00Z (midnight → all 4 TFs fire at this boundary).
 const NOW_MS = new Date("2026-07-15T00:00:00Z").getTime();
 const TF_15M = 15 * 60_000;
+const TF_1H = 60 * 60_000;
+const TF_1D = 24 * TF_1H;
+
+type ParentPoint = readonly [high: number, low: number];
+
+const MIXED_PARENT_POINTS: readonly ParentPoint[] = [
+  [95, 88], [93, 86], [94, 87],
+  [90, 80],
+  [90, 84], [95, 86], [100, 88],
+  [110, 102],
+  [105, 96], [100, 90], [95, 85],
+  [85, 72],
+  [90, 78], [95, 82], [100, 88],
+  [120, 110],
+  [115, 105], [110, 100], [105, 95],
+  [100, 90],
+];
+
+const UP_PARENT_POINTS: readonly ParentPoint[] = [
+  [100, 93], [98, 92], [99, 91],
+  [95, 88],
+  [100, 93], [105, 96], [108, 99],
+  [112, 104],
+  [108, 100], [105, 98], [102, 96],
+  [100, 93],
+  [105, 96], [110, 100], [115, 105],
+  [122, 110],
+  [115, 105], [110, 100], [108, 98],
+  [105, 95],
+];
+
+const DOWN_PARENT_POINTS: readonly ParentPoint[] = [
+  [108, 98], [107, 97], [106, 96],
+  [120, 110],
+  [115, 105], [110, 100], [106, 96],
+  [104, 94],
+  [107, 97], [108, 98], [109, 99],
+  [112, 102],
+  [108, 98], [106, 96], [103, 93],
+  [102, 90],
+  [104, 92], [105, 93], [106, 94],
+  [107, 95],
+];
+
+function parentBars(points: readonly ParentPoint[]): OHLCV[] {
+  const baseTime = NOW_MS - points.length * TF_1H;
+  return points.map(([high, low], index) => {
+    const midpoint = (high + low) / 2;
+    return { time: baseTime + index * TF_1H, open: midpoint, high, low, close: midpoint, volume: 500 };
+  });
+}
+
+const healthyMixedParentBars = (): OHLCV[] => parentBars(MIXED_PARENT_POINTS);
+const alignedUpParentBars = (): OHLCV[] => parentBars(UP_PARENT_POINTS);
+const alignedDownParentBars = (): OHLCV[] => parentBars(DOWN_PARENT_POINTS);
 
 // ─── Setup / teardown ─────────────────────────────────────────────────────────
 
@@ -257,7 +314,8 @@ describe("evaluateCandidate — G9 staleness", () => {
     // Override forming bar time to be very stale.
     bars[bars.length - 1].time = NOW_MS - 3 * TF_15M;
 
-    const result = evaluateCandidate("SOL-PERP", "flash", bars, null, "15m", new Date(NOW_MS));
+    const result = evaluateCandidate(
+      "SOL-PERP", "flash", bars, healthyMixedParentBars(), "15m", new Date(NOW_MS));
     expect(result).toBeNull();
   });
 
@@ -265,18 +323,9 @@ describe("evaluateCandidate — G9 staleness", () => {
     const bars = textbookWBars(NOW_MS, TF_15M);
     // textbookWBars places forming bar at NOW_MS - TF_15M (1 interval old < 2×TF_15M).
 
-    const result = evaluateCandidate("SOL-PERP", "flash", bars, null, "15m", new Date(NOW_MS));
-    // Should not be null due to staleness; may still be null if detectWM rejects.
-    // We separately test W detection; here we only assert staleness does not kill it.
-    if (result === null) {
-      // Re-check: confirm it's not null due to stale bars (the stale test above IS null).
-      // If detectWM doesn't find a pattern here, the test is inconclusive for this criterion.
-      // This is acceptable — we test G9 rejection definitively above.
-    }
-    // Just confirm the stale-reject path (above) is distinct from a fresh bar (this one).
-    // Fresh bar should at least pass the G9 check (may still fail on W/M detection).
-    // The non-null assertion is moved to the W-detection test which fully validates this fixture.
-    expect(true).toBe(true); // G9 freshness test covered by reject above
+    const result = evaluateCandidate(
+      "SOL-PERP", "flash", bars, healthyMixedParentBars(), "15m", new Date(NOW_MS));
+    expect(result).not.toBeNull();
   });
 });
 
@@ -285,7 +334,8 @@ describe("evaluateCandidate — G9 staleness", () => {
 describe("evaluateCandidate — W pattern", () => {
   it("returns a long ScannerCandidate for an actionable textbook W (n=3 fixture)", () => {
     const bars = textbookWBars(NOW_MS, TF_15M);
-    const result = evaluateCandidate("SOL-PERP", "flash", bars, null, "15m", new Date(NOW_MS));
+    const result = evaluateCandidate(
+      "SOL-PERP", "flash", bars, healthyMixedParentBars(), "15m", new Date(NOW_MS));
 
     expect(result).not.toBeNull();
     if (!result) throw new Error("expected non-null");
@@ -300,7 +350,7 @@ describe("evaluateCandidate — W pattern", () => {
     expect(Number.isFinite(result.score)).toBe(true);
     expect(result.score).toBeGreaterThan(60);
     expect(result.evaluatedAt).toBe(NOW_MS);
-    expect(result.parentTrend).toBe("none"); // no parent bars passed
+    expect(result.parentTrend).toBe("mixed");
   });
 
   it("returns null for an empty bar array", () => {
@@ -318,7 +368,8 @@ describe("evaluateCandidate — W pattern", () => {
 describe("evaluateCandidate — M pattern", () => {
   it("returns a short ScannerCandidate for an actionable textbook M (n=3 fixture)", () => {
     const bars = textbookMBars(NOW_MS, TF_15M);
-    const result = evaluateCandidate("BTC-PERP", "pacifica", bars, null, "15m", new Date(NOW_MS));
+    const result = evaluateCandidate(
+      "BTC-PERP", "pacifica", bars, healthyMixedParentBars(), "15m", new Date(NOW_MS));
 
     expect(result).not.toBeNull();
     if (!result) throw new Error("expected non-null");
@@ -329,70 +380,131 @@ describe("evaluateCandidate — M pattern", () => {
     expect(result.protocol).toBe("pacifica");
     expect(result.necklineDistancePct).toBeGreaterThanOrEqual(0);
     expect(result.necklineDistancePct).toBeLessThanOrEqual(0.5);
+    expect(result.parentTrend).toBe("mixed");
   });
 });
 
 // ─── evaluateCandidate — parent Dow alignment ────────────────────────────────
 
 describe("evaluateCandidate — parent Dow filtering", () => {
-  // Build a structurally clear downtrend for the parent (LH/LL):
-  // Alternating spikeHighs and flatBars at steadily declining prices,
-  // with n=3 buffers so detectPivots finds clean pivots.
-  function buildDowntrendBars(nowMs: number, parentTfMs: number): OHLCV[] {
-    const bars: OHLCV[] = [];
-    const nBars = 100;
-    const baseTime = nowMs - nBars * parentTfMs;
-    // Slow decline: each segment drops 2 units in the high, creating LH/LL.
-    // Produce 4 clear swing-high pivots and 4 swing-low pivots.
-    const t = (i: number) => baseTime + i * parentTfMs;
-    for (let i = 0; i < nBars; i++) {
-      // Monotonically declining bars: high drops, creating LH; low drops, creating LL.
-      const level = 60 - i * 0.3;
-      bars.push({ time: t(i), open: level, high: level + 1, low: level - 1, close: level - 0.1, volume: 500 });
+  it("proves the shared one-hour parent fixture is finite, spaced, sufficient, and mixed", () => {
+    const parent = healthyMixedParentBars();
+    expect(parent.every((bar) =>
+      [bar.time, bar.open, bar.high, bar.low, bar.close, bar.volume].every(Number.isFinite)))
+      .toBe(true);
+    for (let index = 1; index < parent.length; index++) {
+      expect(parent[index].time - parent[index - 1].time).toBe(TF_1H);
     }
-    return bars;
-  }
-
-  // Build a clear uptrend (HH/HL): monotonically rising bars.
-  function buildUptrendBars(nowMs: number, parentTfMs: number): OHLCV[] {
-    const bars: OHLCV[] = [];
-    const nBars = 100;
-    const baseTime = nowMs - nBars * parentTfMs;
-    const t = (i: number) => baseTime + i * parentTfMs;
-    for (let i = 0; i < nBars; i++) {
-      const level = 40 + i * 0.3;
-      bars.push({ time: t(i), open: level, high: level + 1, low: level - 1, close: level + 0.1, volume: 500 });
-    }
-    return bars;
-  }
-
-  it("passes through when parentBars is null (1d or short history)", () => {
-    const bars = textbookWBars(NOW_MS, TF_15M);
-    const result = evaluateCandidate("SOL-PERP", "flash", bars, null, "15m", new Date(NOW_MS));
-
-    // null parentBars → parentOpposed=false → evaluation continues on other axes.
-    // The result may or may not be null depending on W/M detection; just check parentTrend.
-    if (result !== null) {
-      expect(result.parentTrend).toBe("none");
-    }
-    // At minimum, the null-parentBars path does not crash.
-    expect(true).toBe(true);
+    expect(classifyDow(detectPivots(parent)).classification).toBe("mixed");
   });
 
-  it("passes through when parentBars has fewer than 4 bars", () => {
+  it.each([
+    "missing",
+    "budget-exhausted",
+    "aborted",
+    "cache-degraded",
+    "fetch-error",
+  ])("configured-parent %s input normalized to null is parent_inconclusive", () => {
+    const bars = textbookWBars(NOW_MS, TF_15M);
+    expect(evaluateCandidateResult("SOL-PERP", "flash", bars, null, "15m", new Date(NOW_MS)))
+      .toEqual({ kind: "parent_inconclusive", reason: "parent_inconclusive" });
+    expect(evaluateCandidate("SOL-PERP", "flash", bars, null, "15m", new Date(NOW_MS)))
+      .toBeNull();
+  });
+
+  it("finite but insufficient configured-parent bars are parent_inconclusive", () => {
     const bars = textbookWBars(NOW_MS, TF_15M);
     const shortParent: OHLCV[] = [
-      flatBarAt(NOW_MS - 3 * TF_15M),
-      flatBarAt(NOW_MS - 2 * TF_15M),
-      flatBarAt(NOW_MS - TF_15M),
+      flatBarAt(NOW_MS - 3 * TF_1H),
+      flatBarAt(NOW_MS - 2 * TF_1H),
+      flatBarAt(NOW_MS - TF_1H),
     ];
+    expect(evaluateCandidateResult(
+      "SOL-PERP", "flash", bars, shortParent, "15m", new Date(NOW_MS)))
+      .toEqual({ kind: "parent_inconclusive", reason: "parent_inconclusive" });
+  });
 
-    const result = evaluateCandidate("SOL-PERP", "flash", bars, shortParent, "15m", new Date(NOW_MS));
-    // Short parent → parentAligned=false, parentOpposed=false → evaluation continues.
-    if (result !== null) {
-      // classification would be "insufficient" — not "none" (parentBars was provided)
-      expect(result.parentTrend).toBe("insufficient");
+  it.each(["time", "open", "high", "low", "close", "volume"] as const)(
+    "rejects nonfinite parent field %s before pivot detection",
+    (field) => {
+      const bars = textbookWBars(NOW_MS, TF_15M);
+      const parent = healthyMixedParentBars();
+      parent[0] = { ...parent[0], [field]: Number.NaN };
+      expect(evaluateCandidateResult(
+        "SOL-PERP", "flash", bars, parent, "15m", new Date(NOW_MS)))
+        .toEqual({ kind: "parent_inconclusive", reason: "parent_inconclusive" });
+    },
+  );
+
+  it("preserves mixed neutrality and the exact no-bonus score", () => {
+    const bars = textbookWBars(NOW_MS, TF_15M);
+    const result = evaluateCandidateResult(
+      "SOL-PERP", "flash", bars, healthyMixedParentBars(), "15m", new Date(NOW_MS));
+    expect(result.kind).toBe("candidate");
+    if (result.kind !== "candidate") throw new Error("expected mixed-parent candidate");
+    expect(result.candidate.parentTrend).toBe("mixed");
+    expect(result.candidate.score)
+      .toBeCloseTo(100 - result.candidate.necklineDistancePct * 40, 12);
+  });
+
+  it("preserves W alignment bonus and W opposition rejection", () => {
+    const bars = textbookWBars(NOW_MS, TF_15M);
+    const neutral = evaluateCandidateResult(
+      "SOL-PERP", "flash", bars, healthyMixedParentBars(), "15m", new Date(NOW_MS));
+    const aligned = evaluateCandidateResult(
+      "SOL-PERP", "flash", bars, alignedUpParentBars(), "15m", new Date(NOW_MS));
+    const opposed = evaluateCandidateResult(
+      "SOL-PERP", "flash", bars, alignedDownParentBars(), "15m", new Date(NOW_MS));
+    expect(neutral.kind).toBe("candidate");
+    expect(aligned.kind).toBe("candidate");
+    if (neutral.kind !== "candidate" || aligned.kind !== "candidate") {
+      throw new Error("expected healthy W candidates");
     }
+    expect(aligned.candidate.parentTrend).toBe("HH/HL");
+    expect(aligned.candidate.score).toBeCloseTo(neutral.candidate.score + 20, 12);
+    expect(opposed).toEqual({ kind: "no_candidate" });
+  });
+
+  it("preserves M alignment bonus and M opposition rejection", () => {
+    const bars = textbookMBars(NOW_MS, TF_15M);
+    const neutral = evaluateCandidateResult(
+      "BTC-PERP", "pacifica", bars, healthyMixedParentBars(), "15m", new Date(NOW_MS));
+    const aligned = evaluateCandidateResult(
+      "BTC-PERP", "pacifica", bars, alignedDownParentBars(), "15m", new Date(NOW_MS));
+    const opposed = evaluateCandidateResult(
+      "BTC-PERP", "pacifica", bars, alignedUpParentBars(), "15m", new Date(NOW_MS));
+    expect(neutral.kind).toBe("candidate");
+    expect(aligned.kind).toBe("candidate");
+    if (neutral.kind !== "candidate" || aligned.kind !== "candidate") {
+      throw new Error("expected healthy M candidates");
+    }
+    expect(aligned.candidate.parentTrend).toBe("LH/LL");
+    expect(aligned.candidate.score).toBeCloseTo(neutral.candidate.score + 20, 12);
+    expect(opposed).toEqual({ kind: "no_candidate" });
+  });
+
+  it("keeps 1d parent-not-applicable output byte-exact and outside inconclusive", () => {
+    const bars = textbookWBars(NOW_MS, TF_1D);
+    const typed = evaluateCandidateResult(
+      "SOL-PERP", "flash", bars, null, "1d", new Date(NOW_MS));
+    expect(typed).toEqual({
+      kind: "candidate",
+      candidate: {
+        protocol: "flash",
+        market: "SOL-PERP",
+        timeframe: "1d",
+        direction: "long",
+        setup: "W",
+        score: 92.7927927927927,
+        necklineDistancePct: 0.18018018018018275,
+        parentTrend: "none",
+        evaluatedAt: NOW_MS,
+        candleProvenance: null,
+      },
+    });
+    if (typed.kind !== "candidate") throw new Error("expected not-applicable candidate");
+    expect(evaluateCandidate("SOL-PERP", "flash", bars, null, "1d", new Date(NOW_MS)))
+      .toEqual(typed.candidate);
   });
 });
 
@@ -400,11 +512,13 @@ describe("evaluateCandidate — parent Dow filtering", () => {
 
 describe("evaluateCandidate — scoring formula", () => {
   it("score follows base formula: 100 − necklineDistancePct×40 (no bonuses)", () => {
-    // Prime session (no thin penalty), no parent bars (no alignment bonus).
+    // Prime session (no thin penalty), mixed parent (no alignment bonus).
     getSessionContextMock.mockReturnValue({ label: "london_new_york" });
     const bars = textbookWBars(NOW_MS, TF_15M);
-    const result = evaluateCandidate("SOL-PERP", "flash", bars, null, "15m", new Date(NOW_MS));
-    if (!result) return; // skip if detectWM rejects (fixture issue, not scoring issue)
+    const result = evaluateCandidate(
+      "SOL-PERP", "flash", bars, healthyMixedParentBars(), "15m", new Date(NOW_MS));
+    expect(result).not.toBeNull();
+    if (!result) throw new Error("expected candidate from healthy neutral fixture");
 
     // No parent bonus (+0), no thin session penalty (−0).
     const expected = 100 - result.necklineDistancePct * 40;
@@ -415,12 +529,16 @@ describe("evaluateCandidate — scoring formula", () => {
     const bars = textbookWBars(NOW_MS, TF_15M);
 
     getSessionContextMock.mockReturnValue({ label: "london_new_york" });
-    const primeResult = evaluateCandidate("SOL-PERP", "flash", bars, null, "15m", new Date(NOW_MS));
+    const primeResult = evaluateCandidate(
+      "SOL-PERP", "flash", bars, healthyMixedParentBars(), "15m", new Date(NOW_MS));
 
     getSessionContextMock.mockReturnValue({ label: "weekend" });
-    const weekendResult = evaluateCandidate("SOL-PERP", "flash", bars, null, "15m", new Date(NOW_MS));
+    const weekendResult = evaluateCandidate(
+      "SOL-PERP", "flash", bars, healthyMixedParentBars(), "15m", new Date(NOW_MS));
 
-    if (!primeResult || !weekendResult) return; // skip if detectWM rejects
+    expect(primeResult).not.toBeNull();
+    expect(weekendResult).not.toBeNull();
+    if (!primeResult || !weekendResult) throw new Error("expected healthy candidates");
 
     // All else equal, weekend score is exactly 10 lower.
     expect(weekendResult.score).toBeCloseTo(primeResult.score - 10, 5);
@@ -429,8 +547,10 @@ describe("evaluateCandidate — scoring formula", () => {
   it("score stays within the documented range [70, 120]", () => {
     const bars = textbookWBars(NOW_MS, TF_15M);
     getSessionContextMock.mockReturnValue({ label: "london" });
-    const result = evaluateCandidate("SOL-PERP", "flash", bars, null, "15m", new Date(NOW_MS));
-    if (!result) return;
+    const result = evaluateCandidate(
+      "SOL-PERP", "flash", bars, healthyMixedParentBars(), "15m", new Date(NOW_MS));
+    expect(result).not.toBeNull();
+    if (!result) throw new Error("expected candidate from healthy neutral fixture");
 
     expect(result.score).toBeGreaterThan(60);   // loose lower bound (worst case: 70 − ε)
     expect(result.score).toBeLessThanOrEqual(120); // upper bound: 100 + 20 aligned
@@ -438,8 +558,10 @@ describe("evaluateCandidate — scoring formula", () => {
 
   it("evaluatedAt equals now.getTime()", () => {
     const bars = textbookWBars(NOW_MS, TF_15M);
-    const result = evaluateCandidate("SOL-PERP", "flash", bars, null, "15m", new Date(NOW_MS));
-    if (!result) return;
+    const result = evaluateCandidate(
+      "SOL-PERP", "flash", bars, healthyMixedParentBars(), "15m", new Date(NOW_MS));
+    expect(result).not.toBeNull();
+    if (!result) throw new Error("expected candidate from healthy neutral fixture");
     expect(result.evaluatedAt).toBe(NOW_MS);
   });
 });

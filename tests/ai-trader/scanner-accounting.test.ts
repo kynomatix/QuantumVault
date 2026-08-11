@@ -31,6 +31,7 @@ const ALL_TERMINAL: ScannerAttemptDisposition[] = [
   "venue-closed",
   "timeout-skipped",
   "primary-cache-degraded",
+  "parent-inconclusive",
   "error",
   "abandoned",
 ];
@@ -45,12 +46,13 @@ describe("scanner attempt terminal accounting", () => {
     });
 
     expect(ledger.reconcile()).toEqual({
-      attempted: 7,
+      attempted: 8,
       scanned: 1,
       feedHealthSkipped: 1,
       venueClosed: 1,
       timeoutSkipped: 1,
       primaryCacheDegraded: 1,
+      parentInconclusive: 1,
       errors: 1,
       abandoned: 1,
       unclassified: 0,
@@ -131,14 +133,16 @@ describe("scanner attempt terminal accounting", () => {
     expect(ledger.reconcile()).toMatchObject({ attempted: 1, errors: 1, unclassified: 0 });
   });
 
-  it("keeps parent cache degradation auxiliary to a scanned attempt on TOTAL and ABORT", () => {
+  it("keeps parent cache degradation auxiliary to one parent-inconclusive terminal", () => {
     const ledger = new ScannerAttemptLedger();
     const key = "flash|15m|ETH-PERP";
     ledger.intend(key);
     const parentCacheDegraded = countParentCacheDegradation(0, {
       name: "CacheDegradedError",
     });
-    ledger.finalize(key, "scanned");
+    expect(ledger.finalize(key, "parent-inconclusive")).toBe(true);
+    expect(ledger.finalize(key, "scanned")).toBe(false);
+    expect(ledger.finalize(key, "error")).toBe(false);
     const accounting = ledger.reconcile();
     const options = {
       parentCacheDegraded,
@@ -151,14 +155,17 @@ describe("scanner attempt terminal accounting", () => {
 
     expect(accounting).toMatchObject({
       attempted: 1,
-      scanned: 1,
+      scanned: 0,
       primaryCacheDegraded: 0,
+      parentInconclusive: 1,
       errors: 0,
+      unclassified: 0,
+      accountingValid: true,
     });
     expect(formatScannerSweepAccountingLine("TOTAL", accounting, options))
-      .toContain("0 primary-cache-degraded, 1 parent-cache-degraded");
+      .toContain("0 primary-cache-degraded, 1 parent-inconclusive, 1 parent-cache-degraded");
     expect(formatScannerSweepAccountingLine("ABORT", accounting, options))
-      .toContain("0 primary-cache-degraded, 1 parent-cache-degraded");
+      .toContain("0 primary-cache-degraded, 1 parent-inconclusive, 1 parent-cache-degraded");
   });
 });
 
@@ -185,13 +192,40 @@ describe("scanner runSweep seam pins", () => {
   });
 
   it("keeps parent cache degradation auxiliary and abandonment exclusive", () => {
-    const parent = between("// Parent fetch failure is non-fatal", "const candidate = evaluateCandidate");
-    expect(parent).toContain("countParentCacheDegradation(");
-    expect(parent).not.toContain("primary-cache-degraded");
+    const parentFetch = between("// Fetch parent-TF bars", "const evaluation = evaluateCandidateResult");
+    const budgetNull = parentFetch.indexOf("if (remainingMs < 5_000)");
+    const abortSignal = parentFetch.indexOf("signal: tfAbort.signal");
+    const failureCounter = parentFetch.indexOf("countParentCacheDegradation(");
+    const caughtNull = parentFetch.indexOf("parentBars = null;", failureCounter);
+
+    expect(budgetNull).toBeGreaterThanOrEqual(0);
+    expect(parentFetch.indexOf("parentBars = null;", budgetNull)).toBeGreaterThan(budgetNull);
+    expect(abortSignal).toBeGreaterThan(budgetNull);
+    expect(failureCounter).toBeGreaterThan(abortSignal);
+    expect(caughtNull).toBeGreaterThan(failureCounter);
+    expect(parentFetch).not.toContain("primary-cache-degraded");
+    expect(source.indexOf("const evaluation = evaluateCandidateResult"))
+      .toBeGreaterThan(source.indexOf("parentBars = null;", failureCounter));
+
+    const evaluation = between("const evaluation = evaluateCandidateResult", "})().catch((err) =>");
+    const parentInconclusiveBranch = between(
+      'evaluation.kind === "parent_inconclusive"',
+      'const candidate = evaluation.kind === "candidate"',
+    );
+    expect(parentInconclusiveBranch).toContain('finishAttempt(market, "parent-inconclusive")');
+    expect(parentInconclusiveBranch).toContain("return;");
+    expect(parentInconclusiveBranch).not.toContain('finishAttempt(market, "scanned")');
 
     const abandoned = between("if (!settledInTime)", "const accounting = sweepLedger.reconcile");
     expect(abandoned).toContain('finishAttempt(m, "abandoned")');
     expect(abandoned).not.toContain("errorCount += abandoned.length");
+  });
+
+  it("publishes parent-inconclusive through boundary and sweep accounting", () => {
+    expect(source).toContain("parentInconclusiveCount: accounting.parentInconclusive");
+    expect(source).toContain("parentInconclusive: sweepAccounting.parentInconclusive");
+    expect(source).toContain("${accounting.parentInconclusive} parent-inconclusive");
+    expect(source).toContain("marketsFresh remains a subset of successfully scanned attempts");
   });
 
   it("wires behavioral helpers into the three reviewed runSweep seams", () => {

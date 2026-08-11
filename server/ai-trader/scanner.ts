@@ -135,6 +135,7 @@ export type ScannerAttemptDisposition =
   | "venue-closed"
   | "timeout-skipped"
   | "primary-cache-degraded"
+  | "parent-inconclusive"
   | "error"
   | "abandoned";
 
@@ -145,6 +146,7 @@ export interface ScannerAttemptReconciliation {
   venueClosed: number;
   timeoutSkipped: number;
   primaryCacheDegraded: number;
+  parentInconclusive: number;
   errors: number;
   abandoned: number;
   unclassified: number;
@@ -187,6 +189,7 @@ export class ScannerAttemptLedger {
       "venue-closed": 0,
       "timeout-skipped": 0,
       "primary-cache-degraded": 0,
+      "parent-inconclusive": 0,
       error: 0,
       abandoned: 0,
     };
@@ -204,6 +207,7 @@ export class ScannerAttemptLedger {
       venueClosed: counts["venue-closed"],
       timeoutSkipped: counts["timeout-skipped"],
       primaryCacheDegraded: counts["primary-cache-degraded"],
+      parentInconclusive: counts["parent-inconclusive"],
       errors: counts.error,
       abandoned: counts.abandoned,
       unclassified,
@@ -226,6 +230,7 @@ export function formatScannerSweepAccountingLine(
       `${accounting.attempted} attempted, ${accounting.scanned} scanned, ` +
       `${accounting.feedHealthSkipped} feed-health-skipped, ${accounting.venueClosed} venue-closed, ` +
       `${accounting.timeoutSkipped} timeout-skipped, ${accounting.primaryCacheDegraded} primary-cache-degraded, ` +
+      `${accounting.parentInconclusive} parent-inconclusive, ` +
       `${options.parentCacheDegraded} parent-cache-degraded, ${accounting.errors} errors, ` +
       `${accounting.abandoned} abandoned, ${accounting.unclassified} unclassified, ` +
       `accounting=${accounting.accountingValid ? "valid" : "INVALID"}`;
@@ -238,6 +243,7 @@ export function formatScannerSweepAccountingLine(
     `${accounting.timeoutSkipped} skipped-by-timeout, ${accounting.venueClosed} venue-closed, ` +
     `${accounting.errors} errors, ${accounting.abandoned} abandoned, ` +
     `${accounting.primaryCacheDegraded} primary-cache-degraded, ` +
+    `${accounting.parentInconclusive} parent-inconclusive, ` +
     `${options.parentCacheDegraded} parent-cache-degraded, ${accounting.unclassified} unclassified, ` +
     `accounting=${accounting.accountingValid ? "valid" : "INVALID"}`;
   return `[Scanner] SWEEP TOTAL: ${totalCounts}, ${options.budgetSkippedUnits} budget-gated units, ` +
@@ -263,6 +269,8 @@ export interface ScannerBoundaryStats {
   cacheDegradedCount: number;
   /** Parent-timeframe cache degradation is auxiliary to a scanned primary. */
   parentCacheDegradedCount: number;
+  /** Configured parent data was unavailable or not conclusively classifiable. */
+  parentInconclusiveCount: number;
   abandonedCount: number;
   unclassifiedCount: number;
   accountingValid: boolean;
@@ -456,42 +464,68 @@ export function countParentCacheDegradation(current: number, err: unknown): numb
 // Takes already-fetched bar arrays so tests can pass synthetic fixtures without
 // making any network calls. The sweep orchestration handles fetching.
 
+export type ScannerCandidateEvaluation =
+  | { kind: "candidate"; candidate: ScannerCandidate }
+  | { kind: "no_candidate" }
+  | { kind: "parent_inconclusive"; reason: "parent_inconclusive" };
+
+function allParentFieldsFinite(parentBars: readonly OHLCV[]): boolean {
+  return parentBars.every((bar) =>
+    Number.isFinite(bar.time) &&
+    Number.isFinite(bar.open) &&
+    Number.isFinite(bar.high) &&
+    Number.isFinite(bar.low) &&
+    Number.isFinite(bar.close) &&
+    Number.isFinite(bar.volume));
+}
+
 /**
- * Evaluate a single market+TF candidate given pre-fetched bars.
- *
- * Steps (in order):
- *   1. G9 staleness: newest candle must be < 2 × tfMs old, else return null.
- *   2. detectWM: require an actionable pattern (within NECKLINE_WINDOW 0.5%).
- *      No actionable W/M → return null. v1 pins W/M as the sole setup trigger.
- *   3. detectPivots + classifyDow on parent-TF bars. OPPOSE setup direction → null.
- *      (Neutral / mixed / insufficient → allow with score penalty from missing +20.)
- *   4. getSessionContext(now): weekend (thin liquidity) → −10 score penalty (not rejected).
- *   5. Compute deterministic score and return a full ScannerCandidate.
+ * Typed evaluator seam. A configured parent that cannot be classified is
+ * distinct from an ordinary no-candidate result so missing hard-reject input
+ * can never be treated as neutral.
  */
-export function evaluateCandidate(
+export function evaluateCandidateResult(
   market: string,
   protocol: string,
   bars: OHLCV[],
   parentBars: OHLCV[] | null,
   tf: string,
   now: Date,
-): ScannerCandidate | null {
-  if (bars.length < 2) return null;
+): ScannerCandidateEvaluation {
+  if (bars.length < 2) return { kind: "no_candidate" };
 
   const tfMs = TIMEFRAME_MS[tf];
-  if (!tfMs) return null;
+  if (!tfMs) return { kind: "no_candidate" };
+
+  // Applicability belongs to the configured primary timeframe, not to whether
+  // a nullable parent value happened to reach this function.
+  const parentTf = PARENT_TF[tf] ?? null;
+  let parentTrend: string = "none";
+  let parentClassification: DowClassification | null = null;
+  if (parentTf !== null) {
+    if (parentBars === null || !allParentFieldsFinite(parentBars)) {
+      return { kind: "parent_inconclusive", reason: "parent_inconclusive" };
+    }
+    const pivots = detectPivots(parentBars);
+    const cls: DowClassification = classifyDow(pivots).classification;
+    if (cls === "insufficient") {
+      return { kind: "parent_inconclusive", reason: "parent_inconclusive" };
+    }
+    parentTrend = cls;
+    parentClassification = cls;
+  }
 
   // ── Step 1: G9 staleness ──────────────────────────────────────────────────
   // bars[bars.length - 1] is the forming bar / most recent. Its .time is the
   // bar-open timestamp in ms. A fresh bar is one whose open is < 2 intervals ago.
   const newestBarTime = bars[bars.length - 1].time;
   const ageMs = now.getTime() - newestBarTime;
-  if (ageMs >= 2 * tfMs) return null;
+  if (ageMs >= 2 * tfMs) return { kind: "no_candidate" };
 
   // ── Step 2: W/M detection ─────────────────────────────────────────────────
   // detectWM already enforces NECKLINE_WINDOW (0.5%) actionability criterion.
   const wm = detectWM(bars);
-  if (!wm) return null;
+  if (!wm) return { kind: "no_candidate" };
 
   const setup: "W" | "M" = wm.type;
   const direction: "long" | "short" = setup === "W" ? "long" : "short";
@@ -503,19 +537,12 @@ export function evaluateCandidate(
   // ── Step 3: Parent-TF Dow alignment ──────────────────────────────────────
   // W-bottom (long) is aligned with HH/HL (parent uptrend); M-top (short)
   // with LH/LL (parent downtrend). Opposing alignment is a hard reject.
-  // Neutral / mixed / insufficient → allow (no +20 bonus on the score).
-  let parentTrend: string = "none";
+  // Neutral / mixed / not-applicable → allow (no +20 bonus on the score).
   let parentAligned = false;
   let parentOpposed = false;
 
-  if (parentBars !== null) {
-    // Always classify even when bars are few — classifyDow returns "insufficient"
-    // for short input, which is the correct label and is never a hard-reject.
-    const pivots = detectPivots(parentBars);
-    const dowResult = classifyDow(pivots);
-    const cls: DowClassification = dowResult.classification;
-    parentTrend = cls;
-
+  if (parentClassification !== null) {
+    const cls = parentClassification;
     if (setup === "W") {
       // Long setup: HH/HL uptrend = aligned; LH/LL downtrend = opposed.
       if (cls === "LH/LL") parentOpposed = true;
@@ -527,7 +554,7 @@ export function evaluateCandidate(
     }
   }
 
-  if (parentOpposed) return null;
+  if (parentOpposed) return { kind: "no_candidate" };
 
   // ── Step 4: Session context ───────────────────────────────────────────────
   // "weekend" = thin liquidity (explicitly flagged in session-context.ts description).
@@ -548,17 +575,33 @@ export function evaluateCandidate(
     (thinSession ? 10 : 0);
 
   return {
-    protocol,
-    market,
-    timeframe: tf,
-    direction,
-    setup,
-    score,
-    necklineDistancePct,
-    parentTrend,
-    evaluatedAt: now.getTime(),
-    candleProvenance: (bars[bars.length - 1] as OHLCV & { provenance?: CandleProvenance }).provenance ?? null,
+    kind: "candidate",
+    candidate: {
+      protocol,
+      market,
+      timeframe: tf,
+      direction,
+      setup,
+      score,
+      necklineDistancePct,
+      parentTrend,
+      evaluatedAt: now.getTime(),
+      candleProvenance: (bars[bars.length - 1] as OHLCV & { provenance?: CandleProvenance }).provenance ?? null,
+    },
   };
+}
+
+/** Compatibility wrapper retained for callers that only distinguish candidate/null. */
+export function evaluateCandidate(
+  market: string,
+  protocol: string,
+  bars: OHLCV[],
+  parentBars: OHLCV[] | null,
+  tf: string,
+  now: Date,
+): ScannerCandidate | null {
+  const result = evaluateCandidateResult(market, protocol, bars, parentBars, tf, now);
+  return result.kind === "candidate" ? result.candidate : null;
 }
 
 // ─── Universe builder (cached 1h per protocol) ───────────────────────────────
@@ -853,7 +896,8 @@ async function runSweep(): Promise<void> {
                     protocolStart + protocolBudgetMs - Date.now(),
                   );
                   if (remainingMs < 5_000) {
-                    parentBars = null; // budget exhausted — parent is optional
+                    // The typed evaluator reports a configured parent as inconclusive.
+                    parentBars = null;
                   } else {
                     parentBars = await fetchOHLCV(
                       ticker,
@@ -882,7 +926,14 @@ async function runSweep(): Promise<void> {
               }
             }
 
-            const candidate = evaluateCandidate(market, protocol, bars, parentBars, tf, now);
+            const evaluation = evaluateCandidateResult(market, protocol, bars, parentBars, tf, now);
+            if (evaluation.kind === "parent_inconclusive") {
+              // marketsFresh remains a subset of successfully scanned attempts;
+              // a fresh primary with an inconclusive parent is not counted there.
+              finishAttempt(market, "parent-inconclusive");
+              return;
+            }
+            const candidate = evaluation.kind === "candidate" ? evaluation.candidate : null;
             if (finishAttempt(market, "scanned")) {
               if (ageMs < 2 * tfMs) marketsFresh++;
               if (candidate) tfCandidates.push(candidate);
@@ -1073,6 +1124,7 @@ async function runSweep(): Promise<void> {
           errorCount: accounting.errors,
           cacheDegradedCount: accounting.primaryCacheDegraded,
           parentCacheDegradedCount,
+          parentInconclusiveCount: accounting.parentInconclusive,
           abandonedCount: accounting.abandoned,
           unclassifiedCount: accounting.unclassified,
           accountingValid: accounting.accountingValid,
@@ -1092,6 +1144,7 @@ async function runSweep(): Promise<void> {
         const durationSec = ((tfFinish - tfStart) / 1000).toFixed(1);
         const sweepLine =
           `[Scanner] ${protocol} ${tf}: ${accounting.scanned} scanned, ${marketsFresh} fresh, ` +
+          `${accounting.parentInconclusive} parent-inconclusive, ` +
           `${tfCandidates.length} candidates${tfCandidates.length > 0 ? ` (${candStr})` : ""} in ${durationSec}s`;
         console.log(sweepLine);
         appendTelemetry(sweepLine);
@@ -1136,6 +1189,7 @@ async function runSweep(): Promise<void> {
       abandoned: sweepAccounting.abandoned,
       primaryCacheDegraded: sweepAccounting.primaryCacheDegraded,
       parentCacheDegraded: sweepParentCacheDegraded,
+      parentInconclusive: sweepAccounting.parentInconclusive,
       unclassified: sweepAccounting.unclassified,
       accountingValid: sweepAccounting.accountingValid,
       budgetSkippedUnits,
@@ -1161,7 +1215,8 @@ async function runSweep(): Promise<void> {
         message:
           `Scanner blackout: 0 of ${sweepAccounting.attempted} markets scanned ` +
           `(${sweepAccounting.feedHealthSkipped} feed-health-skipped, ` +
-          `${sweepAccounting.timeoutSkipped} timeout-skipped, ${sweepAccounting.errors} errors)`,
+          `${sweepAccounting.timeoutSkipped} timeout-skipped, ` +
+          `${sweepAccounting.parentInconclusive} parent-inconclusive, ${sweepAccounting.errors} errors)`,
         context: incidentContext,
       });
     } else if (
