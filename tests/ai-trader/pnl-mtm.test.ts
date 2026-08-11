@@ -3,8 +3,8 @@
 // the detail-route PnL block, and (via the daily-loss breaker) the monitor.
 // Tests verify correctness for long/short paper cases and all null-safety guards.
 import { describe, it, expect } from "vitest";
-import { computeUnrealizedPnl } from "../../server/ai-trader/monitor";
-import type { OpenDecisionView } from "../../server/ai-trader/monitor";
+import { computeUnrealizedPnl } from "../../server/ai-trader/paper-position-authority";
+import type { OpenDecisionView } from "../../server/ai-trader/paper-position-authority";
 import type { AiTraderDecision } from "@shared/schema";
 
 // Minimal stub — computeUnrealizedPnl only reads side, sizeBase, entryPrice.

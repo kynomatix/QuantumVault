@@ -128,6 +128,60 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
     expect(closed.every((d) => d.closedAt !== null)).toBe(true);
   });
 
+  it("getOpenAiTraderDecisions returns only unclosed executed rows, newest first, honoring limit", async () => {
+    const openBot = await storage.createAiTraderBot({
+      walletAddress: "ai-trader-open-test-" + Math.random().toString(36).slice(2),
+      protocol: "pacifica",
+      market: "SOL-PERP",
+      timeframe: "15m",
+      allocatedUsdc: "100.00",
+      graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
+      policyHmac: "open-test-hmac",
+    } as any);
+    try {
+      const baseTime = Date.now() - 60_000;
+      await storage.insertAiTraderDecision({
+        botId: openBot.id,
+        rawDecision: { action: "long" },
+        outcome: "executed",
+        closedAt: new Date(baseTime + 50_000),
+        decidedAt: new Date(baseTime + 1_000),
+      } as any);
+      await storage.insertAiTraderDecision({
+        botId: openBot.id,
+        rawDecision: { action: "flat" },
+        outcome: "flat",
+        decidedAt: new Date(baseTime + 40_000),
+      } as any);
+      const oldest = await storage.insertAiTraderDecision({
+        botId: openBot.id,
+        rawDecision: { action: "long" },
+        outcome: "executed",
+        decidedAt: new Date(baseTime + 10_000),
+      } as any);
+      const middle = await storage.insertAiTraderDecision({
+        botId: openBot.id,
+        rawDecision: { action: "long" },
+        outcome: "executed",
+        decidedAt: new Date(baseTime + 20_000),
+      } as any);
+      const newest = await storage.insertAiTraderDecision({
+        botId: openBot.id,
+        rawDecision: { action: "short" },
+        outcome: "executed",
+        decidedAt: new Date(baseTime + 30_000),
+      } as any);
+
+      const rows = await storage.getOpenAiTraderDecisions(openBot.id, 2);
+      expect(rows.map((row) => row.id)).toEqual([newest.id, middle.id]);
+      expect(rows).not.toContainEqual(expect.objectContaining({ id: oldest.id }));
+      expect(rows.every((row) => row.outcome === "executed" && row.closedAt === null)).toBe(true);
+    } finally {
+      await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, openBot.id));
+      await db.delete(aiTraderBots).where(eq(aiTraderBots.id, openBot.id));
+    }
+  });
+
   // getExecutedDecisions: returns only executed rows (including open trades with closedAt null),
   // and surfaces a trade buried under many flat rows.
   it("getExecutedDecisions returns executed rows and surfaces trades beyond flat-row window", async () => {

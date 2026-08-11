@@ -25,7 +25,8 @@ function makeInput(overrides: Partial<GuardrailInput> = {}): GuardrailInput {
     takerFeeRate: 0.0004,
     maintenanceMarginWeight: 0.02,
     allocatedUsdc: 1000,
-    hasOpenPosition: false,
+    positionAuthority: "paper_ledger",
+    positionState: "flat",
     quantizeOrderSize: (s) => s,
     ...overrides,
   };
@@ -118,7 +119,7 @@ describe("applyGuardrails — non-entry actions", () => {
   it("close passes with an open position", () => {
     const r = applyGuardrails(
       { action: "close", confidence: 8, invalidation: "n/a", rationale: "target hit" },
-      makeInput({ hasOpenPosition: true })
+      makeInput({ positionState: "open" })
     );
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -129,12 +130,40 @@ describe("applyGuardrails — non-entry actions", () => {
   it("close WITHOUT an open position is a fatal contract violation", () => {
     const r = applyGuardrails(
       { action: "close", confidence: 8, invalidation: "n/a", rationale: "target hit" },
-      makeInput({ hasOpenPosition: false })
+      makeInput({ positionState: "flat" })
     );
     expect(r.ok).toBe(false);
     expect(codes(r.violations)).toEqual(["close_without_position"]);
     expect(r.violations[0].rule).toBe("CONTRACT");
     expect(r.violations[0].fatal).toBe(true);
+  });
+});
+
+describe("applyGuardrails — degraded position truth", () => {
+  it("unknown position truth permits close", () => {
+    const result = applyGuardrails(
+      { action: "close", confidence: 8, invalidation: "n/a", rationale: "reduce risk" },
+      makeInput({ positionAuthority: "unknown", positionState: "unknown" }),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("unknown position truth rejects long", () => {
+    const result = applyGuardrails(
+      makeLong(),
+      makeInput({ positionAuthority: "unknown", positionState: "unknown" }),
+    );
+    expect(result.ok).toBe(false);
+    expect(codes(result.violations)).toEqual(["position_truth_unknown"]);
+  });
+
+  it("unknown position truth rejects short", () => {
+    const result = applyGuardrails(
+      makeShort(),
+      makeInput({ positionAuthority: "unknown", positionState: "unknown" }),
+    );
+    expect(result.ok).toBe(false);
+    expect(codes(result.violations)).toEqual(["position_truth_unknown"]);
   });
 });
 

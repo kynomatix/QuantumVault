@@ -54,7 +54,6 @@ import { evaluatePaperBracket, paperRealizedPnl, paperExitPrice, type PaperSide,
 import {
   BREAKEVEN_TRIGGER_PROGRESS,
   BREAKEVEN_MAX_MOVE_ATTEMPTS,
-  parseBreakevenProtect,
   favorableExtreme,
   progressTowardTp,
   breakevenStopPrice,
@@ -86,6 +85,13 @@ import { isTerminalCloseResult } from "./close-truth";
 import { isAiTraderMarketAdmitted, SCANNER_MARKET_UNADMITTED_REASON } from "./market-admission";
 import { isMultiplierMarketQuarantined, MULTIPLIER_UNQUALIFIED_REASON } from "./multiplier-market-quarantine";
 import { registerPoolLoadTag } from "../pool-load";
+
+import {
+  computeUnrealizedPnl,
+  parseOpenDecision,
+  type OpenDecisionView,
+} from "./paper-position-authority";
+export { computeUnrealizedPnl, parseOpenDecision } from "./paper-position-authority";
 
 // --- Constants ---------------------------------------------------------------------
 
@@ -320,84 +326,6 @@ function matchPosition(positions: ProtocolPosition[], market: string): ProtocolP
       (p) => p.internalSymbol.toUpperCase() === market.toUpperCase() && Math.abs(p.baseSize) > 0
     ) ?? null
   );
-}
-
-// --- Open-decision view ---------------------------------------------------------------
-
-export interface OpenDecisionView {
-  decision: AiTraderDecision;
-  side: PaperSide;
-  sizeBase: number;
-  marginUsdc: number;
-  stopLossPrice: number;
-  takeProfitPrice: number;
-  /** Recorded entry fill (may be null pre-reconciliation for crashed live entries). */
-  entryPrice: number | null;
-  decidedAtMs: number;
-  /** Breakeven-protect ratchet state — presence means it already fired. */
-  breakevenProtect: BreakevenProtectState | null;
-}
-
-/**
- * Parse the bot's currently-open decision row (outcome 'executed', not yet
- * closed) into validated numbers. Returns null when there is no such row or
- * the clamped payload is unusable — callers treat that as an inconsistency to
- * self-heal, never as "everything is fine".
- */
-export function parseOpenDecision(decisions: AiTraderDecision[]): OpenDecisionView | null {
-  const row = decisions.find((d) => d.outcome === "executed" && !d.closedAt);
-  if (!row) return null;
-  const clamped = (row.clampedDecision ?? {}) as Record<string, unknown>;
-  const action = clamped.action;
-  if (action !== "long" && action !== "short") return null;
-  const sizeBase = num(clamped.sizeBase);
-  const marginUsdc = num(clamped.marginUsdc);
-  const stopLossPrice = num(clamped.stopLossPrice);
-  const takeProfitPrice = num(clamped.takeProfitPrice);
-  if (!sizeBase || sizeBase <= 0 || !stopLossPrice || stopLossPrice <= 0 || !takeProfitPrice || takeProfitPrice <= 0) {
-    return null;
-  }
-  const decidedAtMs = row.decidedAt ? new Date(row.decidedAt).getTime() : Date.now();
-  return {
-    decision: row,
-    side: action,
-    sizeBase,
-    marginUsdc: marginUsdc ?? 0,
-    stopLossPrice,
-    takeProfitPrice,
-    entryPrice: num(row.entryPrice),
-    decidedAtMs,
-    breakevenProtect: parseBreakevenProtect(clamped.breakevenProtect, stopLossPrice, decidedAtMs),
-  };
-}
-
-/**
- * Display-grade mark-to-market for an open paper or live position.
- *
- * Shared by the list-route and detail-route PnL DTO blocks so both endpoints
- * use the same arithmetic. The monitor's internal G7 breaker and graduation
- * sweep keep their own inline copies — different input sources, different call
- * sites — so do not attempt to unify them here.
- *
- * Returns null when:
- *   - entryPrice is null (live bot pre-reconciliation) or ≤ 0 (bad data)
- *   - markPrice is non-finite or ≤ 0 (price feed unavailable)
- *   - sizeBase is non-positive (invalid view)
- */
-export function computeUnrealizedPnl(view: OpenDecisionView, markPrice: number): number | null {
-  if (
-    view.entryPrice === null ||
-    !Number.isFinite(view.entryPrice) ||
-    view.entryPrice <= 0 ||
-    !Number.isFinite(markPrice) ||
-    markPrice <= 0 ||
-    !Number.isFinite(view.sizeBase) ||
-    view.sizeBase <= 0
-  ) {
-    return null;
-  }
-  const direction = view.side === "long" ? 1 : -1;
-  return (markPrice - view.entryPrice) * view.sizeBase * direction;
 }
 
 // --- Live exit classification (pure, exported for tests) --------------------------------
@@ -1842,6 +1770,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
   if (_obs) _obs.phase = "preflight";
   // Cheap gates BEFORE LLM spend (G6 + always-on ceiling).
   const recentClosed = await storage.getRecentClosedDecisions(bot.id, 60);
+  const paperPositionRows = bot.paperMode ? await storage.getOpenAiTraderDecisions(bot.id, 2) : [];
   // Scanner bots skip the top-level G6 check — bot.timeframe is the stale previous pick /
   // placeholder, not the candidate TF. G6 is applied per-candidate inside the scanner branch.
   if (bot.marketSource !== "scanner") {
@@ -1989,7 +1918,8 @@ export async function runAutoCycle(botId: string): Promise<void> {
             timeframe: bot.timeframe as AiTraderTimeframe,
             adapter,
             bot,
-            recentDecisions: recentClosed.slice(0, 5),
+            recentClosedDecisions: recentClosed.slice(0, 5),
+            paperPositionRows,
             agentPublicKey: wallet.agentPublicKey,
             scannerNote,
           });
@@ -2079,7 +2009,8 @@ export async function runAutoCycle(botId: string): Promise<void> {
         timeframe: bot.timeframe as AiTraderTimeframe,
         adapter,
         bot,
-        recentDecisions: recentClosed.slice(0, 5),
+        recentClosedDecisions: recentClosed.slice(0, 5),
+        paperPositionRows,
         agentPublicKey: wallet.agentPublicKey,
       });
     } catch (err) {

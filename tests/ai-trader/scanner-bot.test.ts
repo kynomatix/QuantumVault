@@ -30,6 +30,7 @@ vi.mock("../../server/ai-trader/scanner-capabilities", () => ({
 
 const getWalletMock = vi.fn();
 const getRecentClosedMock = vi.fn();
+const getOpenDecisionsMock = vi.fn().mockResolvedValue([]);
 const updateBotMock = vi.fn();
 const getBotMock = vi.fn();
 const getLlmCiphertextMock = vi.fn();
@@ -37,6 +38,7 @@ vi.mock("../../server/storage", () => ({
   storage: {
     getWallet: (...a: unknown[]) => getWalletMock(...a),
     getRecentClosedDecisions: (...a: unknown[]) => getRecentClosedMock(...a),
+    getOpenAiTraderDecisions: (...a: unknown[]) => getOpenDecisionsMock(...a),
     updateAiTraderBot: (...a: unknown[]) => updateBotMock(...a),
     updateAiTraderDecision: vi.fn(),
     getAiTraderDecisions: vi.fn().mockResolvedValue([]),

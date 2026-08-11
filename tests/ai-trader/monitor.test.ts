@@ -25,6 +25,7 @@ const getRecentClosedMock = vi.fn();
 const updateBotMock = vi.fn();
 const updateDecisionMock = vi.fn();
 const getDecisionsMock = vi.fn();
+const getOpenDecisionsMock = vi.fn();
 const getBotMock = vi.fn();
 const getActiveBotsMock = vi.fn();
 const getLlmCiphertextMock = vi.fn();
@@ -36,6 +37,7 @@ vi.mock("../../server/storage", () => ({
     updateAiTraderBot: (...a: unknown[]) => updateBotMock(...a),
     updateAiTraderDecision: (...a: unknown[]) => updateDecisionMock(...a),
     getAiTraderDecisions: (...a: unknown[]) => getDecisionsMock(...a),
+    getOpenAiTraderDecisions: (...a: unknown[]) => getOpenDecisionsMock(...a),
     getAiTraderBot: (...a: unknown[]) => getBotMock(...a),
     getActiveAiTraderBots: (...a: unknown[]) => getActiveBotsMock(...a),
     getWalletLlmApiKeyCiphertext: (...a: unknown[]) => getLlmCiphertextMock(...a),
@@ -296,7 +298,7 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
   for (const m of [
     getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getDecisionsMock,
-    getBotMock, getActiveBotsMock, getLlmCiphertextMock, getAiTraderDecisionMock, getUmkMock,
+    getOpenDecisionsMock, getBotMock, getActiveBotsMock, getLlmCiphertextMock, getAiTraderDecisionMock, getUmkMock,
     decryptKeyMock, decryptSubKeyMock, healUmkMock, getSessionByWalletMock, restoreSecurityMock,
     decryptLlmKeyMock, notifyMock, getAdapterMock, fetchOHLCVMock, buildContextMock,
     runDecisionMock, executeDecisionMock, appendTelemetryMock, getScannerShortlistMock,
@@ -305,6 +307,7 @@ beforeEach(() => {
     m.mockReset();
   }
   getRecentClosedMock.mockResolvedValue([]);
+  getOpenDecisionsMock.mockResolvedValue([]);
   getScannerShortlistMock.mockReturnValue([]);
   isMarketAdmittedMock.mockReturnValue(true);
   isMultiplierQuarantinedMock.mockReturnValue(false);
@@ -1209,6 +1212,8 @@ describe("runAutoCycle", () => {
   it("happy path: G6 clear → context → decision → executeDecision with the digest mark price", async () => {
     const { runAutoCycle } = await importMonitor();
     const bot = armAutoBot();
+    const openRows = [makeOpenDecision({ id: "paper-open-for-context" })];
+    getOpenDecisionsMock.mockResolvedValue(openRows);
     getSessionByWalletMock.mockReturnValue({ sessionId: "s", session: { umk: Buffer.from("umk") } });
     getLlmCiphertextMock.mockResolvedValue("ct");
     decryptLlmKeyMock.mockReturnValue(Buffer.from("sk-or-secret"));
@@ -1226,6 +1231,29 @@ describe("runAutoCycle", () => {
     expect(execArgs.decisionId).toBe("dec-9");
     expect(execArgs.markPrice).toBe(150.25);
     expect(execArgs.bot.id).toBe(bot.id);
+    expect(getOpenDecisionsMock).toHaveBeenCalledWith(bot.id, 2);
+    expect(buildContextMock.mock.calls[0][0]).toMatchObject({
+      recentClosedDecisions: [],
+      paperPositionRows: openRows,
+    });
+  });
+
+  it("live automatic context never reads or supplies paper-position rows", async () => {
+    const { runAutoCycle } = await importMonitor();
+    armAutoBot({ paperMode: false });
+    getSessionByWalletMock.mockReturnValue({ sessionId: "s", session: { umk: Buffer.from("umk") } });
+    getLlmCiphertextMock.mockResolvedValue("ct");
+    decryptLlmKeyMock.mockReturnValue(Buffer.from("sk"));
+    buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "dec-live", decision: {}, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
+
+    await runAutoCycle("bot-1111-2222");
+
+    expect(getOpenDecisionsMock).not.toHaveBeenCalled();
+    expect(buildContextMock.mock.calls[0][0]).toMatchObject({
+      recentClosedDecisions: [],
+      paperPositionRows: [],
+    });
   });
 
   it("a flat/rejected decision is a clean no-trade cycle: idle + reschedule", async () => {

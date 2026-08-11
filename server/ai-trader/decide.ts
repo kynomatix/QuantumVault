@@ -395,6 +395,22 @@ async function finalizeDecision(args: {
   const currentEquity =
     sizingMode === "risk_based" && isEntry ? await readCurrentEquity(bot, adapter) : undefined;
 
+  const accountDigest = digest?.account as Record<string, unknown> | undefined;
+  const positionState =
+    accountDigest?.positionState === "open" || accountDigest?.positionState === "flat" || accountDigest?.positionState === "unknown"
+      ? accountDigest.positionState
+      : accountDigest?.hasPosition === true
+        ? "open"
+        : accountDigest?.hasPosition === false
+          ? "flat"
+          : "unknown";
+  const positionAuthority =
+    accountDigest?.positionAuthority === "paper_ledger" ||
+    accountDigest?.positionAuthority === "venue" ||
+    accountDigest?.positionAuthority === "unknown"
+      ? accountDigest.positionAuthority
+      : "unknown";
+
   const guardrailResult = applyGuardrails(decision, {
     entryPrice: finiteOrNaN(digest?.price),
     atr14: finiteOrNaN(digest?.indicators?.atr14?.value),
@@ -403,7 +419,8 @@ async function finalizeDecision(args: {
     takerFeeRate: GUARDRAIL_TAKER_FEE_RATE,
     maintenanceMarginWeight: adapter.getMaintenanceMarginWeight(bot.market),
     allocatedUsdc: parseFloat(bot.allocatedUsdc),
-    hasOpenPosition: digest?.account?.hasPosition === true,
+    positionAuthority,
+    positionState,
     quantizeOrderSize: (sizeBase: number) => adapter.quantizeOrderSize(bot.market, sizeBase),
     sizingMode,
     // Decimal columns are strings; a malformed value parses to NaN and guardrails

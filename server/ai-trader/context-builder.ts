@@ -25,6 +25,7 @@ import { detectHTFLevels, type HtfLevel } from "./htf-levels";
 import { detectWM, type WMFormation } from "./wm-detector";
 import { detectActiveRange, type ActiveRange } from "./active-range";
 import { SWEEP_BUFFER_ATR } from "./guardrails";
+import { computeUnrealizedPnl, resolvePaperPositionState } from "./paper-position-authority";
 
 export type AiTraderTimeframe = "15m" | "1h" | "4h" | "1d";
 
@@ -33,7 +34,8 @@ export interface BuildMarketContextInput {
   timeframe: AiTraderTimeframe;
   adapter: ProtocolAdapter;
   bot: AiTraderBot;
-  recentDecisions: AiTraderDecision[];
+  recentClosedDecisions: AiTraderDecision[];
+  paperPositionRows: AiTraderDecision[];
   /**
    * The server-managed agent SIGNING pubkey for this bot's venue account
    * (wallet.agentPublicKey), resolved by the caller via storage.getWallet —
@@ -438,7 +440,7 @@ W/M formations (double bottom/top, when present in this context) mark a complete
 export async function buildMarketContext(
   input: BuildMarketContextInput
 ): Promise<BuildMarketContextResult> {
-  const { market, timeframe, adapter, bot, recentDecisions, scannerNote } = input;
+  const { market, timeframe, adapter, bot, recentClosedDecisions, paperPositionRows, scannerNote } = input;
 
   const tfMs = TIMEFRAME_MS[timeframe];
   const now = Date.now();
@@ -794,35 +796,76 @@ export async function buildMarketContext(
       ].join("\n")
     : "Participation data: unavailable this cycle";
 
-  // WO-5 corrective (was a flagged WO-3 spec gap): positions are read with the
-  // caller-resolved agent SIGNING pubkey (input.agentPublicKey), never the
-  // user's connected wallet address — bot.walletAddress owns nothing on any
-  // venue, so the old placeholder always read an empty account and would have
-  // told the model "no open position" while one was open.
-  // WO-7.1: a sub-provisioned live bot's positions live on its OWN subaccount
-  // (read with the sub pubkey, no subaccountId param); canary/paper bots read
-  // the main agent account as before.
-  const positions = await adapter.getPositions(bot.protocolSubaccountId ?? input.agentPublicKey, undefined);
-  const openPosition = positions.find((p) => p.internalSymbol.toUpperCase() === market.toUpperCase());
   const allocatedUsdc = parseFloat(bot.allocatedUsdc);
-  const accountBlock = openPosition
-    ? [
-        `Allocated collateral: $${fmtPrice(allocatedUsdc)}`,
-        `Open position: ${openPosition.baseSize > 0 ? "long" : "short"} ${Math.abs(
-          openPosition.baseSize
-        )} @ entry ${fmtPrice(openPosition.entryPrice)}, mark ${fmtPrice(openPosition.markPrice)}, leverage ${
-          openPosition.leverage
-        }x`,
-        `Unrealized PnL: $${fmtPrice(openPosition.unrealizedPnl)}`,
-      ].join("\n")
-    : [`Allocated collateral: $${fmtPrice(allocatedUsdc)}`, `Open position: none (flat)`, `Unrealized PnL: $0.00`].join(
-        "\n"
-      );
+  let accountBlock: string;
+  let accountDigest: Record<string, unknown>;
 
+  if (bot.paperMode) {
+    const resolution = resolvePaperPositionState(bot.status, paperPositionRows);
+    const paperPnl = resolution.view ? computeUnrealizedPnl(resolution.view, price) : null;
+    if (resolution.positionState === "open" && resolution.view) {
+      const entryLabel = resolution.view.entryPrice === null ? "unavailable" : fmtPrice(resolution.view.entryPrice);
+      const pnlLabel = paperPnl === null ? "unavailable" : `$${fmtPrice(paperPnl)}`;
+      accountBlock = [
+        `Allocated collateral: $${fmtPrice(allocatedUsdc)}`,
+        "Position authority: paper ledger",
+        `Open position: ${resolution.view.side} ${Math.abs(resolution.view.sizeBase)} @ entry ${entryLabel}, mark ${fmtPrice(price)}`,
+        `Unrealized PnL: ${pnlLabel}`,
+      ].join("\n");
+    } else if (resolution.positionState === "flat") {
+      accountBlock = [
+        `Allocated collateral: $${fmtPrice(allocatedUsdc)}`,
+        "Position authority: paper ledger",
+        "Open position: none (flat)",
+        "Unrealized PnL: $0.00",
+      ].join("\n");
+    } else {
+      accountBlock = [
+        `Allocated collateral: $${fmtPrice(allocatedUsdc)}`,
+        `Position authority: unknown (paper ledger reason: ${resolution.reason})`,
+        "Open position: unavailable (paper ledger inconsistent)",
+        "Unrealized PnL: unavailable",
+      ].join("\n");
+    }
+    accountDigest = {
+      allocatedUsdc,
+      positionAuthority: resolution.positionAuthority,
+      positionState: resolution.positionState,
+      hasPosition: resolution.positionState === "open" ? true : resolution.positionState === "flat" ? false : null,
+      unrealizedPnl: resolution.positionState === "open" ? paperPnl : resolution.positionState === "flat" ? 0 : null,
+      positionReason: resolution.reason,
+    };
+  } else {
+    // Live mode remains freshly venue-authoritative. Any thrown read prevents
+    // the context, digest, and decision from being produced.
+    const positions = await adapter.getPositions(bot.protocolSubaccountId ?? input.agentPublicKey, undefined);
+    const openPosition = positions.find((position) => position.internalSymbol.toUpperCase() === market.toUpperCase());
+    accountBlock = openPosition
+      ? [
+          `Allocated collateral: $${fmtPrice(allocatedUsdc)}`,
+          "Position authority: venue (authoritative)",
+          `Open position: ${openPosition.baseSize > 0 ? "long" : "short"} ${Math.abs(openPosition.baseSize)} @ entry ${fmtPrice(openPosition.entryPrice)}, mark ${fmtPrice(openPosition.markPrice)}, leverage ${openPosition.leverage}x`,
+          `Unrealized PnL: $${fmtPrice(openPosition.unrealizedPnl)}`,
+        ].join("\n")
+      : [
+          `Allocated collateral: $${fmtPrice(allocatedUsdc)}`,
+          "Position authority: venue (authoritative)",
+          "Open position: none (flat)",
+          "Unrealized PnL: $0.00",
+        ].join("\n");
+    accountDigest = {
+      allocatedUsdc,
+      positionAuthority: "venue",
+      positionState: openPosition ? "open" : "flat",
+      hasPosition: !!openPosition,
+      unrealizedPnl: openPosition ? openPosition.unrealizedPnl : 0,
+      positionReason: null,
+    };
+  }
   const historyLines =
-    recentDecisions.length === 0
+    recentClosedDecisions.length === 0
       ? ["No closed trades yet."]
-      : recentDecisions.map((d, i) => {
+      : recentClosedDecisions.map((d, i) => {
           const digest = d.contextDigest as { indicators?: { adx14?: { value?: number } } } | null | undefined;
           const regime = adxRegimeTag(digest?.indicators?.adx14?.value);
           const entry = d.entryPrice !== null && d.entryPrice !== undefined ? fmtPrice(parseFloat(d.entryPrice)) : "n/a";
@@ -835,7 +878,7 @@ export async function buildMarketContext(
         });
   const historyBlock = historyLines.join("\n");
 
-  const closedWithTimes = recentDecisions.filter((d) => d.closedAt);
+  const closedWithTimes = recentClosedDecisions.filter((d) => d.closedAt);
   const lastClosedAt = closedWithTimes.length > 0 ? new Date(closedWithTimes[0].closedAt as Date).getTime() : null;
   const cooldownRemainingMs = lastClosedAt !== null ? Math.max(0, tfMs - (now - lastClosedAt)) : 0;
   const startOfDay = new Date(now);
@@ -900,7 +943,7 @@ export async function buildMarketContext(
     participationBlock,
     `## Account state`,
     accountBlock,
-    `## Last ${recentDecisions.length} closed trades (most recent first)`,
+    `## Last ${recentClosedDecisions.length} closed trades (most recent first)`,
     historyBlock,
     `## Guardrails (self-censor before the enforced clamp)`,
     guardrailBlock,
@@ -991,11 +1034,7 @@ export async function buildMarketContext(
       supertrend: { value: stValue, direction: stDir },
       obv: obvVals,
     },
-    account: {
-      allocatedUsdc,
-      hasPosition: !!openPosition,
-      unrealizedPnl: openPosition ? openPosition.unrealizedPnl : 0,
-    },
+    account: accountDigest,
     guardrailEcho: {
       maxLeverage,
       smartLeverageCap,
