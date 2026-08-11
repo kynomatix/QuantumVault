@@ -973,6 +973,56 @@ export const insertErrorLogSchema = createInsertSchema(errorLog).omit({
 export type InsertErrorLog = z.infer<typeof insertErrorLogSchema>;
 export type ErrorLog = typeof errorLog.$inferSelect;
 
+// Owner-controlled scanner incident evidence. Unlike error_log, occurrences are
+// append-only and never fingerprint-coalesced or included in ordinary pruning.
+// activeSlot is the database-enforced single-visible-hold semaphore: Postgres
+// permits multiple NULLs but only one unreleased row may carry slot 1.
+export const scannerIncidentHolds = pgTable("scanner_incident_holds", {
+  id: text("id").primaryKey(),
+  state: text("state").$type<"baseline" | "canary" | "exported" | "released">().notNull(),
+  activeSlot: integer("active_slot").default(1),
+  exportRowCount: integer("export_row_count"),
+  exportDigest: text("export_digest"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  canaryStartedAt: timestamp("canary_started_at", { withTimezone: true }),
+  exportedAt: timestamp("exported_at", { withTimezone: true }),
+  releasedAt: timestamp("released_at", { withTimezone: true }),
+}, (table) => [
+  uniqueIndex("scanner_incident_holds_active_slot_unique").on(table.activeSlot),
+  check(
+    "scanner_incident_holds_state_check",
+    sql`${table.state} IN ('baseline', 'canary', 'exported', 'released')`,
+  ),
+  check(
+    "scanner_incident_holds_active_slot_check",
+    sql`(${table.state} = 'released' AND ${table.activeSlot} IS NULL) OR (${table.state} <> 'released' AND ${table.activeSlot} = 1)`,
+  ),
+  check(
+    "scanner_incident_holds_export_proof_check",
+    sql`(${table.state} IN ('exported', 'released') AND ${table.exportRowCount} IS NOT NULL AND ${table.exportDigest} IS NOT NULL) OR (${table.state} IN ('baseline', 'canary') AND ${table.exportRowCount} IS NULL AND ${table.exportDigest} IS NULL)`,
+  ),
+]);
+
+export const scannerIncidentOccurrences = pgTable("scanner_incident_occurrences", {
+  eventId: varchar("event_id").primaryKey(),
+  holdId: text("hold_id").notNull().references(() => scannerIncidentHolds.id, { onDelete: "cascade" }),
+  window: text("window").$type<"baseline" | "canary">().notNull(),
+  fingerprint: text("fingerprint").notNull(),
+  observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
+  category: text("category").notNull().default("scanner"),
+  source: text("source").notNull(),
+  summary: text("summary").notNull(),
+  context: jsonb("context").notNull().default(sql`'{}'::jsonb`),
+}, (table) => [
+  index("scanner_incident_occurrences_hold_order_idx").on(table.holdId, table.observedAt, table.eventId),
+  index("scanner_incident_occurrences_hold_fingerprint_idx").on(table.holdId, table.fingerprint),
+  check("scanner_incident_occurrences_window_check", sql`${table.window} IN ('baseline', 'canary')`),
+  check("scanner_incident_occurrences_category_check", sql`${table.category} = 'scanner'`),
+]);
+
+export type ScannerIncidentHold = typeof scannerIncidentHolds.$inferSelect;
+export type ScannerIncidentOccurrence = typeof scannerIncidentOccurrences.$inferSelect;
+
 // Marketplace: Published bots that can be subscribed to
 export const publishedBots = pgTable("published_bots", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),

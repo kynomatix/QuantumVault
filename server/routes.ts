@@ -16,6 +16,7 @@ import { appendTelemetry } from "./telemetry";
 import { storage, DatabaseStorage } from "./storage";
 import { sumNetDepositedFromEvents, isVaultInternalEvent } from "./equity-events-util";
 import { recordCriticalError } from "./error-log";
+import { normalizeScannerIncidentHoldId } from "./ai-trader/scanner-incident-evidence";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot, type BorrowPosition, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents, marketplaceEquitySnapshots, userApiTokens, labOptimizationRuns } from "@shared/schema";
 import type { Request as ExpressRequest, Response as ExpressResponse, NextFunction } from "express";
 import { db, isConnectionClassError } from "./db";
@@ -24727,7 +24728,67 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     }
   });
 
-  // ─── Admin "Errors" panel ──────────────────────────────────────────────────
+  // ─── Owner-controlled scanner incident evidence ────────────────────────────────
+  app.post("/api/admin/scanner-incident-evidence/holds", requireAdminAuth, async (req, res) => {
+    const holdId = normalizeScannerIncidentHoldId(req.body?.holdId);
+    if (!holdId) return res.status(400).json({ error: "Invalid holdId" });
+    try {
+      const result = await storage.activateScannerIncidentHold(holdId);
+      if (result.outcome === "activated") return res.status(201).json(result);
+      return res.status(409).json(result);
+    } catch (error) {
+      console.error("[Admin] Scanner incident hold activation failed:", error);
+      return res.status(500).json({ error: "Failed to activate scanner incident hold" });
+    }
+  });
+
+  app.post("/api/admin/scanner-incident-evidence/holds/:holdId/canary", requireAdminAuth, async (req, res) => {
+    const holdId = normalizeScannerIncidentHoldId(req.params.holdId);
+    if (!holdId) return res.status(400).json({ error: "Invalid holdId" });
+    try {
+      const result = await storage.transitionScannerIncidentHoldToCanary(holdId);
+      if (result.outcome === "transitioned" || result.outcome === "already_canary") return res.json(result);
+      if (result.outcome === "not_found") return res.status(404).json(result);
+      return res.status(409).json(result);
+    } catch (error) {
+      console.error("[Admin] Scanner incident canary transition failed:", error);
+      return res.status(500).json({ error: "Failed to transition scanner incident hold" });
+    }
+  });
+
+  app.post("/api/admin/scanner-incident-evidence/holds/:holdId/export", requireAdminAuth, async (req, res) => {
+    const holdId = normalizeScannerIncidentHoldId(req.params.holdId);
+    if (!holdId) return res.status(400).json({ error: "Invalid holdId" });
+    try {
+      const result = await storage.exportScannerIncidentHold(holdId);
+      if (result.outcome === "exported") return res.json(result);
+      if (result.outcome === "not_found") return res.status(404).json(result);
+      return res.status(409).json(result);
+    } catch (error) {
+      console.error("[Admin] Scanner incident export failed:", error);
+      return res.status(500).json({ error: "Failed to export scanner incident hold" });
+    }
+  });
+
+  app.post("/api/admin/scanner-incident-evidence/holds/:holdId/release", requireAdminAuth, async (req, res) => {
+    const holdId = normalizeScannerIncidentHoldId(req.params.holdId);
+    const rowCount = req.body?.rowCount;
+    const digest = typeof req.body?.digest === "string" ? req.body.digest.trim().toUpperCase() : "";
+    if (!holdId || !Number.isInteger(rowCount) || rowCount < 0 || !/^[0-9A-F]{64}$/.test(digest)) {
+      return res.status(400).json({ error: "Valid holdId, rowCount, and SHA-256 digest are required" });
+    }
+    try {
+      const result = await storage.releaseScannerIncidentHold(holdId, { rowCount, digest });
+      if (result.outcome === "released") return res.json(result);
+      if (result.outcome === "not_found") return res.status(404).json(result);
+      return res.status(409).json(result);
+    } catch (error) {
+      console.error("[Admin] Scanner incident release failed:", error);
+      return res.status(500).json({ error: "Failed to release scanner incident hold" });
+    }
+  });
+
+  // ─── Admin "Errors" panel ───────────────────────────────────────────────────
   // Resolve the "since" window from a ?days= query (default 7d, capped at 90d).
   const errorsSinceFromQuery = (req: ExpressRequest): Date | undefined => {
     const raw = req.query.days as string | undefined;

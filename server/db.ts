@@ -1007,6 +1007,46 @@ export async function ensureSchema() {
       )`,
       `CREATE INDEX IF NOT EXISTS idx_oracle_snapshots_feed_taken ON oracle_price_snapshots (feed_id, taken_at)`,
 
+      // --- Controlled scanner incident evidence retention. ---
+      // Independent of error_log coalescing and pruneErrors. active_slot=1 is
+      // unique for every unreleased hold; released rows clear it to NULL.
+      `CREATE TABLE IF NOT EXISTS scanner_incident_holds (
+        id text PRIMARY KEY,
+        state text NOT NULL CHECK (state IN ('baseline', 'canary', 'exported', 'released')),
+        active_slot integer DEFAULT 1,
+        export_row_count integer,
+        export_digest text,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        canary_started_at timestamptz,
+        exported_at timestamptz,
+        released_at timestamptz,
+        CONSTRAINT scanner_incident_holds_active_slot_check CHECK (
+          (state = 'released' AND active_slot IS NULL)
+          OR (state <> 'released' AND active_slot = 1)
+        ),
+        CONSTRAINT scanner_incident_holds_export_proof_check CHECK (
+          (state IN ('exported', 'released') AND export_row_count IS NOT NULL AND export_digest IS NOT NULL)
+          OR (state IN ('baseline', 'canary') AND export_row_count IS NULL AND export_digest IS NULL)
+        )
+      )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS scanner_incident_holds_active_slot_unique
+         ON scanner_incident_holds (active_slot)`,
+      `CREATE TABLE IF NOT EXISTS scanner_incident_occurrences (
+        event_id varchar PRIMARY KEY,
+        hold_id text NOT NULL REFERENCES scanner_incident_holds(id) ON DELETE CASCADE,
+        "window" text NOT NULL CHECK ("window" IN ('baseline', 'canary')),
+        fingerprint text NOT NULL,
+        observed_at timestamptz NOT NULL,
+        category text NOT NULL DEFAULT 'scanner' CHECK (category = 'scanner'),
+        source text NOT NULL,
+        summary text NOT NULL,
+        context jsonb NOT NULL DEFAULT '{}'::jsonb
+      )`,
+      `CREATE INDEX IF NOT EXISTS scanner_incident_occurrences_hold_order_idx
+         ON scanner_incident_occurrences (hold_id, observed_at, event_id)`,
+      `CREATE INDEX IF NOT EXISTS scanner_incident_occurrences_hold_fingerprint_idx
+         ON scanner_incident_occurrences (hold_id, fingerprint)`,
+
       // --- AGENTIC_TRADER_PLAN WO-2: AI Trader bots + decision audit trail. ---
       // Additive + idempotent, mirrors the shared/schema.ts pgTable definitions
       // verbatim (see AGENTIC_TRADER_PLAN.md §7). Schema/storage only for WO-2 —
