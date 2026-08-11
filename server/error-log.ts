@@ -15,6 +15,7 @@
 
 import { createHash } from "crypto";
 import { storage, type ErrorLogInput } from "./storage";
+import { createScannerIncidentCaptureInput } from "./ai-trader/scanner-incident-evidence";
 
 export type ErrorCategory =
   | "crash"
@@ -115,6 +116,19 @@ export function recordCriticalError(opts: RecordErrorOptions): void {
         .slice(0, 32);
 
     const now = new Date();
+    if (opts.category === "scanner") {
+      // One event per accepted call, before any fingerprint coalescing. This is
+      // deliberately fire-and-forget: evidence failure cannot affect callers.
+      const capture = createScannerIncidentCaptureInput({
+        fingerprint,
+        observedAt: now,
+        source: opts.source,
+        message,
+        context: opts.context,
+      });
+      void storage.captureScannerIncidentOccurrence(capture).catch(() => {});
+    }
+
     const existing = buffer.get(fingerprint);
     if (existing) {
       existing.pendingCount += 1;

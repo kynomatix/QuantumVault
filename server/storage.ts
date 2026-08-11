@@ -2,6 +2,13 @@ import { eq, ne, desc, asc, sql, and, or, ilike, gte, lte, lt, inArray, notInArr
 import { createHash, randomBytes } from "crypto";
 import { vaultLockKey as computeVaultLockKey } from "./vault/scope";
 import { db } from "./db";
+import {
+  buildScannerIncidentExport,
+  SCANNER_INCIDENT_EXPORT_TIMEOUT_MS,
+  type ScannerIncidentCaptureInput,
+  type ScannerIncidentExportPacket,
+  type ScannerIncidentOccurrenceExportRow,
+} from "./ai-trader/scanner-incident-evidence";
 import Decimal from "decimal.js";
 import { buildConfirmedFlatPosition } from "./trading/signal-bot-close-integrity";
 import { sumNetDepositedFromEvents, VAULT_INTERNAL_EVENT_TYPES } from "./equity-events-util";
@@ -37,8 +44,11 @@ import {
   leaderboardStats,
   orphanedSubaccounts,
   errorLog,
+  scannerIncidentHolds,
+  scannerIncidentOccurrences,
   type ErrorLog,
   type InsertErrorLog,
+  type ScannerIncidentHold,
   publishedBots,
   botSubscriptions,
   pnlSnapshots,
@@ -194,6 +204,36 @@ export type ErrorStatRow = {
   unresolved: number;
 };
 
+export type ScannerIncidentCaptureOutcome =
+  | { outcome: "captured"; holdId: string; window: "baseline" | "canary" }
+  | { outcome: "inactive" }
+  | { outcome: "ambiguous_active_hold" }
+  | { outcome: "duplicate_event" };
+
+export type ScannerIncidentActivateOutcome =
+  | { outcome: "activated"; hold: ScannerIncidentHold }
+  | { outcome: "busy" }
+  | { outcome: "active_hold_exists"; holdId: string; state: string }
+  | { outcome: "hold_exists"; holdId: string; state: string };
+
+export type ScannerIncidentCanaryOutcome =
+  | { outcome: "transitioned"; hold: ScannerIncidentHold }
+  | { outcome: "already_canary"; hold: ScannerIncidentHold }
+  | { outcome: "busy" | "not_found" }
+  | { outcome: "invalid_state"; state: string };
+
+export type ScannerIncidentExportOutcome =
+  | { outcome: "exported"; hold: ScannerIncidentHold; packet: ScannerIncidentExportPacket; alreadyExported: boolean }
+  | { outcome: "busy" | "not_found" }
+  | { outcome: "invalid_state"; state: string }
+  | { outcome: "proof_mismatch" };
+
+export type ScannerIncidentReleaseOutcome =
+  | { outcome: "released"; hold: ScannerIncidentHold; deletedRows: number; alreadyReleased: boolean }
+  | { outcome: "busy" | "not_found" }
+  | { outcome: "invalid_state"; state: string }
+  | { outcome: "proof_mismatch" };
+
 /**
  * WO-15A: batch financial-enrichment result keyed by trading-bot ID.
  * Returned by getTradingBotListEnrichment; consumed by the route slice (WO-15B/15C).
@@ -277,6 +317,14 @@ export interface IStorage {
   getErrorStats(since?: Date): Promise<ErrorStatRow[]>;
   setErrorResolved(id: string, resolved: boolean): Promise<void>;
   pruneErrors(opts?: { maxAgeDays?: number; maxRows?: number }): Promise<{ deletedByAge: number; deletedByCap: number }>;
+  captureScannerIncidentOccurrence(input: ScannerIncidentCaptureInput): Promise<ScannerIncidentCaptureOutcome>;
+  activateScannerIncidentHold(holdId: string): Promise<ScannerIncidentActivateOutcome>;
+  transitionScannerIncidentHoldToCanary(holdId: string): Promise<ScannerIncidentCanaryOutcome>;
+  exportScannerIncidentHold(holdId: string): Promise<ScannerIncidentExportOutcome>;
+  releaseScannerIncidentHold(
+    holdId: string,
+    proof: { rowCount: number; digest: string },
+  ): Promise<ScannerIncidentReleaseOutcome>;
 
   getNextSubaccountId(walletAddress: string): Promise<number>;
   getAllocatedSubaccountIds(walletAddress: string): Promise<number[]>;
@@ -5468,6 +5516,210 @@ export class DatabaseStorage implements IStorage {
       deletedByCap = byCap.length;
     }
     return { deletedByAge: byAge.length, deletedByCap };
+  }
+
+  // --- Owner-controlled scanner incident evidence retention -----------------
+  // Control operations use one global, non-blocking transaction advisory lock.
+  // The unique active_slot constraint is the durable single-visible-hold guard.
+  async captureScannerIncidentOccurrence(input: ScannerIncidentCaptureInput): Promise<ScannerIncidentCaptureOutcome> {
+    return db.transaction(async (tx) => {
+      // KEY SHARE lets concurrent captures coexist, while export/release's row
+      // UPDATE waits for all accepted appends before freezing the packet.
+      const active = await tx.select()
+        .from(scannerIncidentHolds)
+        .where(and(
+          eq(scannerIncidentHolds.activeSlot, 1),
+          inArray(scannerIncidentHolds.state, ["baseline", "canary"]),
+        ))
+        .limit(2)
+        .for("key share");
+      if (active.length === 0) return { outcome: "inactive" };
+      if (active.length !== 1) return { outcome: "ambiguous_active_hold" };
+
+      const hold = active[0];
+      const inserted = await tx.insert(scannerIncidentOccurrences).values({
+        eventId: input.eventId,
+        holdId: hold.id,
+        window: hold.state as "baseline" | "canary",
+        fingerprint: input.fingerprint,
+        observedAt: input.observedAt,
+        category: "scanner",
+        source: input.source,
+        summary: input.summary,
+        context: input.context as any,
+      }).onConflictDoNothing({ target: scannerIncidentOccurrences.eventId })
+        .returning({ eventId: scannerIncidentOccurrences.eventId });
+      if (inserted.length === 0) return { outcome: "duplicate_event" };
+      return { outcome: "captured", holdId: hold.id, window: hold.state as "baseline" | "canary" };
+    });
+  }
+
+  async activateScannerIncidentHold(holdId: string): Promise<ScannerIncidentActivateOutcome> {
+    return db.transaction(async (tx) => {
+      const lockResult = await tx.execute(sql`
+        SELECT pg_try_advisory_xact_lock(${981205}, ${1}) AS acquired
+      `);
+      const lockRows = (lockResult as unknown as { rows?: Array<{ acquired?: unknown }> }).rows;
+      if (lockRows?.[0]?.acquired !== true) return { outcome: "busy" };
+
+      const active = await tx.select({ id: scannerIncidentHolds.id, state: scannerIncidentHolds.state })
+        .from(scannerIncidentHolds)
+        .where(eq(scannerIncidentHolds.activeSlot, 1))
+        .limit(1)
+        .for("update");
+      if (active[0]) {
+        return { outcome: "active_hold_exists", holdId: active[0].id, state: active[0].state };
+      }
+      const prior = await tx.select({ id: scannerIncidentHolds.id, state: scannerIncidentHolds.state })
+        .from(scannerIncidentHolds)
+        .where(eq(scannerIncidentHolds.id, holdId))
+        .limit(1)
+        .for("update");
+      if (prior[0]) return { outcome: "hold_exists", holdId: prior[0].id, state: prior[0].state };
+
+      const [hold] = await tx.insert(scannerIncidentHolds).values({
+        id: holdId,
+        state: "baseline",
+        activeSlot: 1,
+      }).returning();
+      return { outcome: "activated", hold };
+    });
+  }
+
+  async transitionScannerIncidentHoldToCanary(holdId: string): Promise<ScannerIncidentCanaryOutcome> {
+    return db.transaction(async (tx) => {
+      const lockResult = await tx.execute(sql`
+        SELECT pg_try_advisory_xact_lock(${981205}, ${1}) AS acquired
+      `);
+      const lockRows = (lockResult as unknown as { rows?: Array<{ acquired?: unknown }> }).rows;
+      if (lockRows?.[0]?.acquired !== true) return { outcome: "busy" };
+
+      const [hold] = await tx.select().from(scannerIncidentHolds)
+        .where(eq(scannerIncidentHolds.id, holdId)).limit(1).for("update");
+      if (!hold) return { outcome: "not_found" };
+      if (hold.state === "canary") return { outcome: "already_canary", hold };
+      if (hold.state !== "baseline") return { outcome: "invalid_state", state: hold.state };
+      const [updated] = await tx.update(scannerIncidentHolds).set({
+        state: "canary",
+        canaryStartedAt: new Date(),
+      }).where(and(
+        eq(scannerIncidentHolds.id, holdId),
+        eq(scannerIncidentHolds.state, "baseline"),
+      )).returning();
+      if (!updated) return { outcome: "invalid_state", state: hold.state };
+      return { outcome: "transitioned", hold: updated };
+    });
+  }
+
+  async exportScannerIncidentHold(holdId: string): Promise<ScannerIncidentExportOutcome> {
+    return db.transaction(async (tx) => {
+      const lockResult = await tx.execute(sql`
+        SELECT pg_try_advisory_xact_lock(${981205}, ${1}) AS acquired
+      `);
+      const lockRows = (lockResult as unknown as { rows?: Array<{ acquired?: unknown }> }).rows;
+      if (lockRows?.[0]?.acquired !== true) return { outcome: "busy" };
+      await tx.execute(sql`SELECT set_config('statement_timeout', ${`${SCANNER_INCIDENT_EXPORT_TIMEOUT_MS}ms`}, true)`);
+
+      const [hold] = await tx.select().from(scannerIncidentHolds)
+        .where(eq(scannerIncidentHolds.id, holdId)).limit(1).for("update");
+      if (!hold) return { outcome: "not_found" };
+      if (!(["baseline", "canary", "exported"] as string[]).includes(hold.state)) {
+        return { outcome: "invalid_state", state: hold.state };
+      }
+      const rows = await tx.select().from(scannerIncidentOccurrences)
+        .where(eq(scannerIncidentOccurrences.holdId, holdId))
+        .orderBy(asc(scannerIncidentOccurrences.observedAt), asc(scannerIncidentOccurrences.eventId));
+      const packet = buildScannerIncidentExport(
+        holdId,
+        rows.map((row): ScannerIncidentOccurrenceExportRow => ({
+          eventId: row.eventId,
+          holdId: row.holdId,
+          window: row.window,
+          fingerprint: row.fingerprint,
+          observedAt: row.observedAt,
+          category: "scanner",
+          source: row.source,
+          summary: row.summary,
+          context: (row.context ?? {}) as ScannerIncidentOccurrenceExportRow["context"],
+        })),
+      );
+      if (hold.state === "exported") {
+        if (hold.exportRowCount !== packet.payload.rawRowCount || hold.exportDigest !== packet.digest) {
+          return { outcome: "proof_mismatch" };
+        }
+        return { outcome: "exported", hold, packet, alreadyExported: true };
+      }
+      const [updated] = await tx.update(scannerIncidentHolds).set({
+        state: "exported",
+        exportRowCount: packet.payload.rawRowCount,
+        exportDigest: packet.digest,
+        exportedAt: new Date(),
+      }).where(and(
+        eq(scannerIncidentHolds.id, holdId),
+        inArray(scannerIncidentHolds.state, ["baseline", "canary"]),
+      )).returning();
+      if (!updated) return { outcome: "invalid_state", state: hold.state };
+      return { outcome: "exported", hold: updated, packet, alreadyExported: false };
+    });
+  }
+
+  async releaseScannerIncidentHold(
+    holdId: string,
+    proof: { rowCount: number; digest: string },
+  ): Promise<ScannerIncidentReleaseOutcome> {
+    return db.transaction(async (tx) => {
+      const lockResult = await tx.execute(sql`
+        SELECT pg_try_advisory_xact_lock(${981205}, ${1}) AS acquired
+      `);
+      const lockRows = (lockResult as unknown as { rows?: Array<{ acquired?: unknown }> }).rows;
+      if (lockRows?.[0]?.acquired !== true) return { outcome: "busy" };
+      await tx.execute(sql`SELECT set_config('statement_timeout', ${`${SCANNER_INCIDENT_EXPORT_TIMEOUT_MS}ms`}, true)`);
+
+      const [hold] = await tx.select().from(scannerIncidentHolds)
+        .where(eq(scannerIncidentHolds.id, holdId)).limit(1).for("update");
+      if (!hold) return { outcome: "not_found" };
+      if (hold.state === "released") {
+        return { outcome: "released", hold, deletedRows: 0, alreadyReleased: true };
+      }
+      if (hold.state !== "exported") return { outcome: "invalid_state", state: hold.state };
+      if (hold.exportRowCount !== proof.rowCount || hold.exportDigest !== proof.digest) {
+        return { outcome: "proof_mismatch" };
+      }
+
+      const rows = await tx.select().from(scannerIncidentOccurrences)
+        .where(eq(scannerIncidentOccurrences.holdId, holdId))
+        .orderBy(asc(scannerIncidentOccurrences.observedAt), asc(scannerIncidentOccurrences.eventId));
+      const packet = buildScannerIncidentExport(
+        holdId,
+        rows.map((row): ScannerIncidentOccurrenceExportRow => ({
+          eventId: row.eventId,
+          holdId: row.holdId,
+          window: row.window,
+          fingerprint: row.fingerprint,
+          observedAt: row.observedAt,
+          category: "scanner",
+          source: row.source,
+          summary: row.summary,
+          context: (row.context ?? {}) as ScannerIncidentOccurrenceExportRow["context"],
+        })),
+      );
+      if (packet.payload.rawRowCount !== proof.rowCount || packet.digest !== proof.digest) {
+        return { outcome: "proof_mismatch" };
+      }
+      const deleted = await tx.delete(scannerIncidentOccurrences)
+        .where(eq(scannerIncidentOccurrences.holdId, holdId))
+        .returning({ eventId: scannerIncidentOccurrences.eventId });
+      const [released] = await tx.update(scannerIncidentHolds).set({
+        state: "released",
+        activeSlot: null,
+        releasedAt: new Date(),
+      }).where(and(
+        eq(scannerIncidentHolds.id, holdId),
+        eq(scannerIncidentHolds.state, "exported"),
+      )).returning();
+      if (!released) return { outcome: "invalid_state", state: hold.state };
+      return { outcome: "released", hold: released, deletedRows: deleted.length, alreadyReleased: false };
+    });
   }
 
   // --- AI Trader (Agentic Trader plan §7 / WO-2) — schema + storage only. ---
