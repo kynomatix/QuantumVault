@@ -259,6 +259,22 @@ const RECENT_DECISIONS: AiTraderDecision[] = [
   }),
 ];
 
+const OPEN_POSITION_ROWS: AiTraderDecision[] = [
+  makeDecision({
+    id: "paper-open",
+    outcome: "executed",
+    clampedDecision: {
+      action: "long",
+      sizeBase: 2.5,
+      marginUsdc: 125,
+      stopLossPrice: 140,
+      takeProfitPrice: 160,
+    },
+    entryPrice: "145.00",
+    closedAt: null,
+  }),
+];
+
 // WO-5 corrective: positions are read with the agent SIGNING pubkey, resolved by
 // the caller — the tests pin that the placeholder walletAddress is gone.
 const AGENT_PUBKEY = "AgEntPubKey1111111111111111111111111111111";
@@ -429,7 +445,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter,
       bot: makeBot(),
-      recentDecisions: RECENT_DECISIONS,
+      recentClosedDecisions: RECENT_DECISIONS,
+      paperPositionRows: OPEN_POSITION_ROWS,
       agentPublicKey: AGENT_PUBKEY,
     });
 
@@ -455,7 +472,7 @@ describe("buildMarketContext (WO-3)", () => {
     // pubkey (liveReadAccount — the sub IS the account on Pacifica's Phase 4b
     // model), with the adapter subaccountId param always undefined. Never
     // bot.walletAddress (the old WO-3 placeholder).
-    expect(adapter.getPositions).toHaveBeenCalledWith("sub-1", undefined);
+    expect(adapter.getPositions).not.toHaveBeenCalled();
 
     // Targeted, human-readable assertions on top of the snapshot so intent survives
     // even if someone regenerates the snapshot without reading the diff closely.
@@ -506,7 +523,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter,
       bot: makeBot({ market: "NVDA-PERP" }),
-      recentDecisions: RECENT_DECISIONS,
+      recentClosedDecisions: RECENT_DECISIONS,
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
 
@@ -547,7 +565,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -569,7 +588,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect(result).toEqual({ stale: true, reason: expect.stringContaining("candle is") });
@@ -583,7 +603,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect(result).toEqual({ stale: true, reason: expect.stringContaining("No 15m candle data") });
@@ -609,7 +630,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter({ getPrice: vi.fn().mockResolvedValue(null) }),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect(result).toEqual({ stale: true, reason: expect.stringContaining("No live price available") });
@@ -626,7 +648,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "1d",
       adapter: makeAdapter(),
       bot: makeBot({ timeframe: "1d" }),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -642,7 +665,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [makeDecision({ closedAt: new Date(FIXED_NOW - 60_000) })],
+      recentClosedDecisions: [makeDecision({ closedAt: new Date(FIXED_NOW - 60_000) })],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -674,7 +698,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot({ maxLeverage: 5 }),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -691,8 +716,9 @@ describe("buildMarketContext (WO-3)", () => {
       market: "SOL-PERP",
       timeframe: "15m",
       adapter: makeAdapter({ getPositions: vi.fn().mockResolvedValue([]) }),
-      bot: makeBot(),
-      recentDecisions: [],
+      bot: makeBot({ status: "idle" }),
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -703,6 +729,103 @@ describe("buildMarketContext (WO-3)", () => {
     expect((result.contextDigest as any).account.hasPosition).toBe(false);
   });
 
+  it("paper-open/live-flat uses paper ledger and zero getPositions", async () => {
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const getPositions = vi.fn().mockResolvedValue([]);
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter({ getPositions }),
+      bot: makeBot({ status: "open", paperMode: true }),
+      recentClosedDecisions: [],
+      paperPositionRows: OPEN_POSITION_ROWS,
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    if ("stale" in result) throw new Error("expected built context");
+    expect(getPositions).not.toHaveBeenCalled();
+    expect((result.contextDigest as any).account).toMatchObject({
+      positionAuthority: "paper_ledger", positionState: "open", hasPosition: true,
+    });
+    expect(result.user).toContain("Position authority: paper ledger");
+    expect(result.user).toContain("Open position: long 2.5 @ entry 145.00");
+  });
+
+  it("paper-flat/live-open ignores venue and reports flat", async () => {
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const getPositions = vi.fn().mockResolvedValue([{ internalSymbol: "SOL-PERP", baseSize: 9 }]);
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter({ getPositions }),
+      bot: makeBot({ status: "idle", paperMode: true }),
+      recentClosedDecisions: [],
+      paperPositionRows: [],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    if ("stale" in result) throw new Error("expected built context");
+    expect(getPositions).not.toHaveBeenCalled();
+    expect((result.contextDigest as any).account).toMatchObject({
+      positionAuthority: "paper_ledger", positionState: "flat", hasPosition: false,
+    });
+    expect(result.user).toContain("Open position: none (flat)");
+  });
+
+  it("paper/live both open uses paper ledger only", async () => {
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const getPositions = vi.fn().mockResolvedValue([{ internalSymbol: "SOL-PERP", baseSize: -9 }]);
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter({ getPositions }),
+      bot: makeBot({ status: "paused", paperMode: true }),
+      recentClosedDecisions: [],
+      paperPositionRows: OPEN_POSITION_ROWS,
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    if ("stale" in result) throw new Error("expected built context");
+    expect(getPositions).not.toHaveBeenCalled();
+    expect((result.contextDigest as any).account.positionAuthority).toBe("paper_ledger");
+    expect(result.user).toContain("Open position: long 2.5");
+  });
+
+  it("paper inconsistency stamps unknown and zero getPositions", async () => {
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const getPositions = vi.fn().mockResolvedValue([]);
+    const duplicate = { ...OPEN_POSITION_ROWS[0], id: "paper-open-duplicate" } as AiTraderDecision;
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter({ getPositions }),
+      bot: makeBot({ status: "open", paperMode: true }),
+      recentClosedDecisions: [],
+      paperPositionRows: [OPEN_POSITION_ROWS[0], duplicate],
+      agentPublicKey: AGENT_PUBKEY,
+    });
+    if ("stale" in result) throw new Error("expected built context");
+    expect(getPositions).not.toHaveBeenCalled();
+    expect((result.contextDigest as any).account).toMatchObject({
+      positionAuthority: "unknown", positionState: "unknown", hasPosition: null,
+      positionReason: "multiple_open_rows",
+    });
+    expect(result.user).toContain("Open position: unavailable (paper ledger inconsistent)");
+    expect(result.user).not.toContain("Open position: none (flat)");
+  });
+
+  it("live read failure does not produce flat", async () => {
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const getPositions = vi.fn().mockRejectedValue(new Error("venue down"));
+    await expect(buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter({ getPositions }),
+      bot: makeBot({ paperMode: false }),
+      recentClosedDecisions: [],
+      paperPositionRows: [],
+      agentPublicKey: AGENT_PUBKEY,
+    })).rejects.toThrow("venue down");
+    expect(getPositions).toHaveBeenCalledTimes(1);
+  });
+
   it("WO-8f: renders 'unavailable this cycle' and a null contextDigest.participation when Hyperliquid data is null", async () => {
     getHlParticipationSnapshotMock.mockResolvedValue(null);
     const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
@@ -711,7 +834,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -731,7 +855,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -750,7 +875,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -789,7 +915,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -807,7 +934,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -826,7 +954,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -845,7 +974,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot({ sizingMode: "risk_based" } as any),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -870,7 +1000,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(), // sizingMode field absent → discretionary
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -887,7 +1018,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot({ sizingMode: "discretionary" } as any),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -906,7 +1038,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -937,7 +1070,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -965,7 +1099,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -993,7 +1128,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -1018,7 +1154,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -1061,7 +1198,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -1088,7 +1226,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -1114,7 +1253,8 @@ describe("buildMarketContext (WO-3)", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -1152,7 +1292,8 @@ describe("Brick 4, Phase 4B — HTF levels enrichment", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -1203,7 +1344,8 @@ describe("Brick 4, Phase 4B — HTF levels enrichment", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -1225,7 +1367,8 @@ describe("Brick 4, Phase 4B — HTF levels enrichment", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -1272,7 +1415,8 @@ describe("Brick 3, Phase 3B — W/M formation enrichment", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -1312,7 +1456,8 @@ describe("Brick 3, Phase 3B — W/M formation enrichment", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -1334,7 +1479,8 @@ describe("Brick 3, Phase 3B — W/M formation enrichment", () => {
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -1370,7 +1516,8 @@ describe("PRICE-STARVE fix — priority + fallback chain", () => {
       timeframe: "15m",
       adapter,
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     // The first positional arg is the symbol; second must be { priority: 'normal' }.
@@ -1388,7 +1535,8 @@ describe("PRICE-STARVE fix — priority + fallback chain", () => {
       timeframe: "15m",
       adapter: makeAdapter({ getPrice: vi.fn().mockResolvedValue(null) }),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -1410,7 +1558,8 @@ describe("PRICE-STARVE fix — priority + fallback chain", () => {
       timeframe: "15m",
       adapter: makeAdapter({ getPrice: vi.fn().mockResolvedValue(null) }),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -1432,7 +1581,8 @@ describe("PRICE-STARVE fix — priority + fallback chain", () => {
       timeframe: "15m",
       adapter: makeAdapter({ getPrice: vi.fn().mockResolvedValue(null) }),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -1459,7 +1609,8 @@ describe("PRICE-STARVE fix — priority + fallback chain", () => {
       timeframe: "15m",
       adapter: makeAdapter({ getPrice: vi.fn().mockResolvedValue(null) }),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(true);
@@ -1501,7 +1652,8 @@ describe("buildMarketContext — SL-PLACE Phase A: active-range enrichment", () 
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -1530,7 +1682,8 @@ describe("buildMarketContext — SL-PLACE Phase A: active-range enrichment", () 
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -1554,7 +1707,8 @@ describe("buildMarketContext — SL-PLACE Phase A: active-range enrichment", () 
         timeframe: "15m",
         adapter: makeAdapter(),
         bot: makeBot(),
-        recentDecisions: [],
+        recentClosedDecisions: [],
+        paperPositionRows: [],
         agentPublicKey: AGENT_PUBKEY,
       })
     ).resolves.not.toThrow();
@@ -1564,7 +1718,8 @@ describe("buildMarketContext — SL-PLACE Phase A: active-range enrichment", () 
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     expect("stale" in result).toBe(false);
@@ -1593,7 +1748,8 @@ describe("buildMarketContext — SL-PLACE Phase A: active-range enrichment", () 
       timeframe: "15m",
       adapter: makeAdapter(),
       bot: makeBot(),
-      recentDecisions: [],
+      recentClosedDecisions: [],
+      paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
     if ("stale" in result) throw new Error("expected built context");

@@ -5,7 +5,10 @@ exports[`buildMarketContext (WO-3) > golden file: builds the full system+user pr
   "account": {
     "allocatedUsdc": 500,
     "hasPosition": true,
-    "unrealizedPnl": 12.5,
+    "positionAuthority": "paper_ledger",
+    "positionReason": null,
+    "positionState": "open",
+    "unrealizedPnl": 12.80850000000001,
   },
   "activeRange": null,
   "cotSignal": {
@@ -198,8 +201,9 @@ HL-vs-Pacifica funding spread: -0.0111% (positive = HL funding richer than Pacif
 ## Account state
 
 Allocated collateral: $500.00
-Open position: long 2.5 @ entry 145.00, mark 150.12, leverage 3x
-Unrealized PnL: $12.50
+Position authority: paper ledger
+Open position: long 2.5 @ entry 145.00, mark 150.12
+Unrealized PnL: $12.81
 
 ## Last 3 closed trades (most recent first)
 

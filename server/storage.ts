@@ -800,6 +800,7 @@ export interface IStorage {
   getAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
   getExecutedDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
   getRecentClosedDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
+  getOpenAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
   compressOldAiTraderDecisions(olderThanDays: number, batchSize: number): Promise<number>;
   /**
    * Paginated history fetch with server-side outcome filtering.
@@ -5830,6 +5831,18 @@ export class DatabaseStorage implements IStorage {
   async getRecentClosedDecisions(botId: string, limit: number): Promise<AiTraderDecision[]> {
     return db.select().from(aiTraderDecisions)
       .where(and(eq(aiTraderDecisions.botId, botId), isNotNull(aiTraderDecisions.closedAt)))
+      .orderBy(desc(aiTraderDecisions.decidedAt))
+      .limit(limit);
+  }
+  // Durable paper-position truth: preserve up to two unresolved rows so the
+  // authority resolver can detect duplicates instead of collapsing them.
+  async getOpenAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]> {
+    return db.select().from(aiTraderDecisions)
+      .where(and(
+        eq(aiTraderDecisions.botId, botId),
+        eq(aiTraderDecisions.outcome, "executed"),
+        isNull(aiTraderDecisions.closedAt),
+      ))
       .orderBy(desc(aiTraderDecisions.decidedAt))
       .limit(limit);
   }

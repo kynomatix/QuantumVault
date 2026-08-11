@@ -45,8 +45,10 @@ export interface GuardrailInput {
   maintenanceMarginWeight: number;
   /** The bot's allocated collateral in USDC. */
   allocatedUsdc: number;
-  /** Whether the bot currently holds an open position ('close' contract check). */
-  hasOpenPosition: boolean;
+  /** Which durable source established position truth for this decision. */
+  positionAuthority: "paper_ledger" | "venue" | "unknown";
+  /** Tri-state position truth; unknown remains potentially open for risk-reducing close. */
+  positionState: "open" | "flat" | "unknown";
   /**
    * Adapter-bound size quantizer (`(sizeBase) => adapter.quantizeOrderSize(market, sizeBase)`),
    * injected as a function so this module stays pure and deterministic per inputs.
@@ -273,7 +275,7 @@ export function applyGuardrails(
 
   if (decision.action === "close") {
     // Decision contract §4: 'close' is only valid with an open position.
-    if (!input.hasOpenPosition) {
+    if (input.positionState === "flat") {
       violations.push(
         violation(
           "CONTRACT",
@@ -298,6 +300,18 @@ export function applyGuardrails(
 
   // ---- Entry actions (long/short) ------------------------------------------------
   const side = decision.action;
+
+  if (input.positionState === "unknown") {
+    violations.push(
+      violation(
+        "CONTRACT",
+        "position_truth_unknown",
+        "cannot increase risk while position truth is unknown",
+        true
+      )
+    );
+    return { ok: false, violations };
+  }
 
   // Defensive contract re-checks. The zod schema (decide.ts) already enforces these
   // for long/short; a pure module must still fail closed on bad standalone input.

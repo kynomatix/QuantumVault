@@ -52,7 +52,8 @@ import {
 } from "../lab/datafeed";
 import { runDecision } from "./decide";
 import { executeDecision, aiTraderPolicyObject } from "./executor";
-import { userInitiatedClose, parseOpenDecision, computeUnrealizedPnl, scheduleAutoNext, nextCycleTimeframe, SCANNER_CANDIDATE_MAX_AGE_MS } from "./monitor";
+import { userInitiatedClose, scheduleAutoNext, nextCycleTimeframe, SCANNER_CANDIDATE_MAX_AGE_MS } from "./monitor";
+import { parseOpenDecision, computeUnrealizedPnl } from "./paper-position-authority";
 import { sanitizeGraduationCriteria, canGoLive } from "./graduation";
 import { getScannerStatus, getScannerShortlist } from "./scanner";
 import { SCANNER_CAPABILITIES } from "./scanner-capabilities";
@@ -945,7 +946,8 @@ export function registerAiTraderRoutes(app: Express): void {
           return res.status(400).json({ error: `Unknown protocol '${bot.protocol}'.` });
         }
 
-        const recentDecisions = await storage.getAiTraderDecisions(bot.id, 20);
+        const recentClosedDecisions = await storage.getRecentClosedDecisions(bot.id, 20);
+        const paperPositionRows = bot.paperMode ? await storage.getOpenAiTraderDecisions(bot.id, 2) : [];
         let context: Awaited<ReturnType<typeof buildMarketContext>>;
         try {
           context = await buildMarketContext({
@@ -953,7 +955,8 @@ export function registerAiTraderRoutes(app: Express): void {
             timeframe: bot.timeframe as "15m" | "1h" | "4h" | "1d",
             adapter,
             bot,
-            recentDecisions,
+            recentClosedDecisions,
+            paperPositionRows,
             agentPublicKey: wallet.agentPublicKey,
             scannerNote,
           });

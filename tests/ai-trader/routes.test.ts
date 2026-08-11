@@ -3,19 +3,28 @@ import type { AiTraderBot } from "@shared/schema";
 
 const getBotMock = vi.fn();
 const updateBotMock = vi.fn();
+const getWalletLlmCiphertextMock = vi.fn();
+const getWalletMock = vi.fn();
+const getRecentClosedMock = vi.fn();
+const getOpenDecisionsMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
     getAiTraderBot: (...a: unknown[]) => getBotMock(...a),
     updateAiTraderBot: (...a: unknown[]) => updateBotMock(...a),
+    getWalletLlmApiKeyCiphertext: (...a: unknown[]) => getWalletLlmCiphertextMock(...a),
+    getWallet: (...a: unknown[]) => getWalletMock(...a),
+    getRecentClosedDecisions: (...a: unknown[]) => getRecentClosedMock(...a),
+    getOpenAiTraderDecisions: (...a: unknown[]) => getOpenDecisionsMock(...a),
   },
 }));
 
 const getSessionMock = vi.fn();
 const restoreSecurityMock = vi.fn();
+const decryptLlmApiKeyMock = vi.fn();
 vi.mock("../../server/session-v3", () => ({
   getSessionByWalletAddress: (...a: unknown[]) => getSessionMock(...a),
   restoreWalletSecurityFromStorage: (...a: unknown[]) => restoreSecurityMock(...a),
-  decryptLlmApiKeyV3: vi.fn(),
+  decryptLlmApiKeyV3: (...a: unknown[]) => decryptLlmApiKeyMock(...a),
   computeBotPolicyHmac: vi.fn(),
   getUmkForWebhook: vi.fn(),
   healExecutionUmkFromStorage: vi.fn(),
@@ -25,8 +34,9 @@ vi.mock("../../server/session-v3", () => ({
 }));
 
 vi.mock("../../server/agent-wallet", () => ({ resolveAgentKeypair: vi.fn() }));
+const getAdapterMock = vi.fn();
 vi.mock("../../server/protocol/adapter-registry", () => ({
-  getAdapter: vi.fn(),
+  getAdapter: (...a: unknown[]) => getAdapterMock(...a),
   getDefaultAdapter: vi.fn(),
 }));
 vi.mock("../../server/db", () => ({ db: {} }));
@@ -265,5 +275,95 @@ describe("AI Trader scanner route market admission", () => {
     expect(buildContextMock).not.toHaveBeenCalled();
     expect(runDecisionMock).not.toHaveBeenCalled();
     expect(executeDecisionMock).not.toHaveBeenCalled();
+  });
+});
+
+function fixedBot(paperMode: boolean): AiTraderBot {
+  return {
+    id: paperMode ? "paper-route" : "live-route",
+    walletAddress: "WALLET_ROUTE",
+    protocol: "pacifica",
+    market: "SOL-PERP",
+    timeframe: "15m",
+    marketSource: "fixed",
+    model: "anthropic/claude-opus-4.8",
+    mode: "suggest",
+    autoNext: false,
+    status: "idle",
+    paperMode,
+  } as unknown as AiTraderBot;
+}
+
+describe("AI Trader manual analyze position-authority inputs", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getWalletLlmCiphertextMock.mockResolvedValue("ciphertext");
+    getSessionMock.mockReturnValue({ session: { umk: Buffer.from("umk") } });
+    decryptLlmApiKeyMock.mockReturnValue(Buffer.from("test-key"));
+    getWalletMock.mockResolvedValue({ agentPublicKey: "agent-public-key" });
+    getAdapterMock.mockReturnValue({});
+    getRecentClosedMock.mockResolvedValue([]);
+    getOpenDecisionsMock.mockResolvedValue([]);
+    buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
+    runDecisionMock.mockResolvedValue({
+      ok: true,
+      decisionId: "decision-route",
+      decision: { action: "flat" },
+      clamped: { action: "flat" },
+      rejected: false,
+      violations: [],
+      latencyMs: 1,
+    });
+  });
+
+  it("paper manual analyze supplies open rows separately from closed history", async () => {
+    const bot = fixedBot(true);
+    const closedRows = [{ id: "closed-row", closedAt: new Date() }];
+    const openRows = [{ id: "open-row", outcome: "executed", closedAt: null }];
+    getBotMock.mockResolvedValue(bot);
+    getRecentClosedMock.mockResolvedValue(closedRows);
+    getOpenDecisionsMock.mockResolvedValue(openRows);
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+
+    const result = await invoke(built.routes, "POST /api/ai-trader/:id/analyze", {
+      params: { id: bot.id },
+      session: { walletAddress: bot.walletAddress },
+      body: {},
+      query: {},
+      headers: {},
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(getRecentClosedMock).toHaveBeenCalledWith(bot.id, 20);
+    expect(getOpenDecisionsMock).toHaveBeenCalledWith(bot.id, 2);
+    expect(buildContextMock.mock.calls[0][0]).toMatchObject({
+      recentClosedDecisions: closedRows,
+      paperPositionRows: openRows,
+    });
+  });
+
+  it("live manual analyze does not read or supply paper-position rows", async () => {
+    const bot = fixedBot(false);
+    const closedRows = [{ id: "closed-row", closedAt: new Date() }];
+    getBotMock.mockResolvedValue(bot);
+    getRecentClosedMock.mockResolvedValue(closedRows);
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+
+    const result = await invoke(built.routes, "POST /api/ai-trader/:id/analyze", {
+      params: { id: bot.id },
+      session: { walletAddress: bot.walletAddress },
+      body: {},
+      query: {},
+      headers: {},
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(getOpenDecisionsMock).not.toHaveBeenCalled();
+    expect(buildContextMock.mock.calls[0][0]).toMatchObject({
+      recentClosedDecisions: closedRows,
+      paperPositionRows: [],
+    });
   });
 });
