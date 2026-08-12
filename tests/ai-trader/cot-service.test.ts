@@ -8,11 +8,12 @@
 //
 // No real network calls, no real database — all external dependencies are mocked.
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   cotIndex,
   computeRollingIndices,
   classifyState,
+  fetchCftcRows,
   getCotSnapshot,
   warmCotCache,
   INDEX_WINDOW,
@@ -263,7 +264,127 @@ describe('classifyState()', () => {
   });
 });
 
-// ─── 4. Backfill-then-incremental path (DB + fetch mocked) ───────────────────
+// ─── 4. CFTC request hard settlement ───────────────────────────────────────
+
+describe('fetchCftcRows() — request-wide dual deadline', () => {
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('soft-aborts a hanging header read at 18s when the transport observes abort', async () => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    vi.spyOn(global, 'fetch').mockImplementation((_input, init) => {
+      signal = init?.signal ?? undefined;
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => {
+          reject(Object.assign(new Error('transport observed abort'), { name: 'AbortError' }));
+        }, { once: true });
+      });
+    });
+
+    const outcome = fetchCftcRows(1).then(
+      value => ({ value, error: null as Error | null }),
+      error => ({ value: null, error: error as Error }),
+    );
+    await vi.advanceTimersByTimeAsync(17_999);
+    expect(signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    const result = await outcome;
+    expect(signal?.aborted).toBe(true);
+    expect(result.value).toBeNull();
+    expect(result.error).toMatchObject({ name: 'AbortError', message: 'transport observed abort' });
+  });
+
+  it('hard-settles a header hang at 20s when abort does not propagate', async () => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    vi.spyOn(global, 'fetch').mockImplementation((_input, init) => {
+      signal = init?.signal ?? undefined;
+      return new Promise(() => {});
+    });
+
+    let settled = false;
+    const outcome = fetchCftcRows(1).then(
+      value => ({ value, error: null as Error | null }),
+      error => ({ value: null, error: error as Error }),
+    ).finally(() => { settled = true; });
+
+    await vi.advanceTimersByTimeAsync(18_000);
+    expect(signal?.aborted).toBe(true);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    const result = await outcome;
+    expect(result.value).toBeNull();
+    expect(result.error?.message).toBe(
+      'CFTC Socrata response headers hard deadline exceeded after 20000ms',
+    );
+  });
+
+  it('gives a hanging body only the time remaining in the request-wide 20s budget', async () => {
+    vi.useFakeTimers();
+    let resolveHeaders!: (response: Response) => void;
+    vi.spyOn(global, 'fetch').mockReturnValue(new Promise(resolve => {
+      resolveHeaders = resolve;
+    }));
+
+    let settled = false;
+    const outcome = fetchCftcRows(1).then(
+      value => ({ value, error: null as Error | null }),
+      error => ({ value: null, error: error as Error }),
+    ).finally(() => { settled = true; });
+
+    await vi.advanceTimersByTimeAsync(19_000);
+    resolveHeaders({
+      ok: true,
+      json: () => new Promise(() => {}),
+    } as unknown as Response);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    const result = await outcome;
+    expect(result.value).toBeNull();
+    expect(result.error?.message).toBe(
+      'CFTC Socrata response body hard deadline exceeded after 20000ms',
+    );
+  });
+
+  it('observes and ignores a transport rejection arriving after hard settlement', async () => {
+    vi.useFakeTimers();
+    let rejectTransport!: (error: Error) => void;
+    vi.spyOn(global, 'fetch').mockReturnValue(new Promise((_resolve, reject) => {
+      rejectTransport = reject;
+    }));
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+
+    try {
+      const outcome = fetchCftcRows(1).then(
+        value => ({ value, error: null as Error | null }),
+        error => ({ value: null, error: error as Error }),
+      );
+      await vi.advanceTimersByTimeAsync(20_000);
+      const settled = await outcome;
+      expect(settled.error?.message).toContain('response headers hard deadline exceeded');
+
+      rejectTransport(new Error('late transport rejection'));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+});
+
+// ─── 5. Backfill-then-incremental path (DB + fetch mocked) ───────────────────
 
 describe('getCotSnapshot() — backfill-then-incremental path', () => {
   // Build a realistic mock DB snapshot representing a valid cached row.
@@ -330,6 +451,43 @@ describe('getCotSnapshot() — backfill-then-incremental path', () => {
     fetchMock.mockRestore();
   });
 
+  it('deduplicates concurrent empty-cache backfill onto one in-flight fetch', async () => {
+    mockDbSelect.mockReturnValue({ from: mockDbFrom });
+    mockDbFrom.mockResolvedValue([{ n: 0 }]);
+    let rejectFetch!: (error: Error) => void;
+    const fetchMock = vi.spyOn(global, 'fetch').mockReturnValue(new Promise((_resolve, reject) => {
+      rejectFetch = reject;
+    }));
+
+    const first = getCotSnapshot();
+    const second = getCotSnapshot();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    rejectFetch(new Error('bounded backfill failure'));
+    await expect(Promise.all([first, second])).resolves.toEqual([null, null]);
+    fetchMock.mockRestore();
+  });
+
+  it('fails open to null after the hard deadline when empty-cache transport ignores abort', async () => {
+    vi.useFakeTimers();
+    mockDbSelect.mockReturnValue({ from: mockDbFrom });
+    mockDbFrom.mockResolvedValue([{ n: 0 }]);
+    const fetchMock = vi.spyOn(global, 'fetch').mockReturnValue(new Promise(() => {}));
+
+    try {
+      const outcome = getCotSnapshot();
+      await vi.advanceTimersByTimeAsync(20_000);
+      await expect(outcome).resolves.toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      fetchMock.mockRestore();
+    }
+  });
+
   it('returns valid CotSnapshot when DB is fresh and row has full window', async () => {
     // count → 120 (skip backfill)
     mockDbFrom.mockReturnValueOnce([{ n: 120 }]);
@@ -381,7 +539,7 @@ describe('getCotSnapshot() — backfill-then-incremental path', () => {
   });
 });
 
-// ─── 5. Integration: full computeRollingIndices + classifyState pipeline ─────
+// ─── 6. Integration: full computeRollingIndices + classifyState pipeline ─────
 
 describe('pipeline: computeRollingIndices → classifyState sequence', () => {
   // 125 rows: first 121 rows have smart > dumb, row 121 flips to smart < dumb,
