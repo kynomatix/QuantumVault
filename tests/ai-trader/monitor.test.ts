@@ -60,6 +60,7 @@ vi.mock("../../server/session-v3", () => ({
   healExecutionUmkFromStorage: (...a: unknown[]) => healUmkMock(...a),
   getSessionByWalletAddress: (...a: unknown[]) => getSessionByWalletMock(...a),
   restoreWalletSecurityFromStorage: (...a: unknown[]) => restoreSecurityMock(...a),
+  restoreWalletSecurityFromStorageOutcome: (...a: unknown[]) => restoreSecurityMock(...a),
   decryptLlmApiKeyV3: (...a: unknown[]) => decryptLlmKeyMock(...a),
   // executor's real module (imported for checkCooldownAndCaps) also pulls this:
   verifyBotPolicyHmac: vi.fn(() => true),
@@ -315,7 +316,7 @@ beforeEach(() => {
   updateDecisionMock.mockResolvedValue({});
   notifyMock.mockResolvedValue(true);
   healUmkMock.mockResolvedValue(undefined);
-  restoreSecurityMock.mockResolvedValue(undefined);
+  restoreSecurityMock.mockResolvedValue({ status: "reauth_required" });
   // Fresh-decision re-read guard (monitor.ts handleLiveClose / closeLivePositionAndPause):
   // default returns an open (not-yet-closed) decision so the guard proceeds normally.
   // Tests that need the guard to bail (duplicate-close race) override this directly.
@@ -1144,19 +1145,45 @@ describe("runAutoCycle", () => {
     expect(vi.getTimerCount()).toBeGreaterThan(0); // rescheduled
   });
 
-  it("pauses 'reauth_required' when the session UMK cannot be restored — no LLM spend", async () => {
+  it("defers transient storage-read failure to the existing next-candle cadence without state or spend", async () => {
     const { runAutoCycle } = await importMonitor();
     armAutoBot();
     getSessionByWalletMock.mockReturnValue(null);
+    restoreSecurityMock.mockResolvedValue({ status: "transient_read_failed" });
+
+    await runAutoCycle("bot-1111-2222");
+
+    expect(restoreSecurityMock).toHaveBeenCalledTimes(1);
+    expect(restoreSecurityMock).toHaveBeenCalledWith("WALLET_X");
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(notifyMock).not.toHaveBeenCalled();
+    expect(getLlmCiphertextMock).not.toHaveBeenCalled();
+    expect(buildContextMock).not.toHaveBeenCalled();
+    expect(runDecisionMock).not.toHaveBeenCalled();
+    expect(executeDecisionMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(1);
+    expect(console.warn).toHaveBeenCalledTimes(1);
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("transient_read_failed"));
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("next-candle cadence is retained"));
+  });
+
+  it("pauses 'reauth_required' when the restore outcome is authority-ambiguous — no LLM spend", async () => {
+    const { runAutoCycle } = await importMonitor();
+    armAutoBot();
+    getSessionByWalletMock.mockReturnValue(null);
+    restoreSecurityMock.mockResolvedValue({ status: "reauth_required" });
 
     await runAutoCycle("bot-1111-2222");
 
     expect(restoreSecurityMock).toHaveBeenCalledWith("WALLET_X");
-    expect(botUpdates().some((u) => u.status === "paused" && u.pauseReason === "reauth_required")).toBe(true);
-    expect(notifications().some((n) => n.type === "trade_failed")).toBe(true);
+    expect(botUpdates().filter((u) => u.status === "paused" && u.pauseReason === "reauth_required")).toHaveLength(1);
+    expect(notifications().filter((n) => n.type === "trade_failed")).toHaveLength(1);
+    expect(buildContextMock).not.toHaveBeenCalled();
     expect(runDecisionMock).not.toHaveBeenCalled();
+    expect(executeDecisionMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("reauth_required"));
   });
-
   it("pauses 'no_api_key' when there is no stored LLM key ciphertext", async () => {
     const { runAutoCycle } = await importMonitor();
     armAutoBot();
