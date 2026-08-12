@@ -4686,8 +4686,7 @@ async function readSignalBotFlipCloseAuthority(
 
 interface CanonicalCloseFinalizationInput {
   bot: TradingBot;
-  tradeId?: string;
-  insert?: Record<string, unknown>;
+  tradeId: string;
   signature: string;
   size: number;
   fillPrice: number;
@@ -4706,32 +4705,20 @@ async function finalizePerBotConfirmedClose(input: CanonicalCloseFinalizationInp
     fillPrice: input.fillPrice,
     timestampMs: Date.now(),
   });
-  const tradeMutation = input.tradeId
-    ? {
-        update: {
-          tradeId: input.tradeId,
-          fields: {
-            status: "executed",
-            txSignature: input.signature,
-            price: String(input.fillPrice),
-            fee: String(input.fee),
-            pnl: String(input.pnl),
-            executionMethod: input.executionMethod || "legacy",
-            protocolFillId: fillId,
-          },
-        },
-      }
-    : {
-        insert: {
-          ...input.insert,
-          status: "executed",
-          txSignature: input.signature,
-          protocolFillId: fillId,
-        },
-      };
   const result = await storage.recordCloseEventAtomic({
     botId: input.bot.id,
-    ...tradeMutation,
+    update: {
+      tradeId: input.tradeId,
+      fields: {
+        status: "executed",
+        txSignature: input.signature,
+        price: String(input.fillPrice),
+        fee: String(input.fee),
+        pnl: String(input.pnl),
+        executionMethod: input.executionMethod || "legacy",
+        protocolFillId: fillId,
+      },
+    },
     deltas: {
       totalPnlDelta: input.pnl,
       totalVolumeDelta: input.size * input.fillPrice,
@@ -4743,7 +4730,7 @@ async function finalizePerBotConfirmedClose(input: CanonicalCloseFinalizationInp
       realizedPnlDelta: input.pnl,
       feeDelta: input.fee,
     },
-  } as any);
+  });
   return { ...result, fillId };
 }
 
@@ -4768,7 +4755,6 @@ async function finalizeUserWebhookConfirmedClose(input: CanonicalCloseFinalizati
         price: String(input.fillPrice),
         fee: String(input.fee),
         pnl: String(input.pnl),
-        executionMethod: input.executionMethod || "legacy",
         protocolFillId: fillId,
       },
     },
@@ -4936,10 +4922,10 @@ async function executeSignalBotFlipClose(
 
   if (closeTradeId && disposition.close.kind !== "executed") {
     const signature = closeExecution?.signature || null;
-    const unresolvedWithVenueEvidence = ["partial", "post_close_unreadable", "finalization_failed"]
+    const unresolvedWithVenueEvidence = ["no_signature", "partial", "post_close_unreadable", "finalization_failed"]
       .includes(disposition.close.kind);
     await storage.updateBotTrade(closeTradeId, {
-      status: unresolvedWithVenueEvidence ? "pending" : disposition.close.kind === "no_signature" ? "superseded" : "failed",
+      status: unresolvedWithVenueEvidence ? "pending" : "failed",
       txSignature: signature,
       errorMessage: `FLIP close terminal: ${disposition.close.kind}`,
     });
@@ -4978,7 +4964,7 @@ function acquireBotWebhookLock(key: string): Promise<() => void> {
   return current.then(() => release);
 }
 
-async function routeSignalToSubscribers(
+export async function routeSignalToSubscribers(
   sourceBotId: string,
   signal: {
     action: 'buy' | 'sell';
@@ -5022,33 +5008,35 @@ async function routeSignalToSubscribers(
     const processSubscriber = async (subBot: typeof subscriberBots[0]): Promise<SubscriberResult> => {
       console.log(`[Subscriber Routing] Processing subscriber bot ${subBot.id} (${subBot.name}), isActive=${subBot.isActive}, market=${subBot.market}`);
 
-      const subscriberDbPosition = await storage.getBotPosition(subBot.id, subBot.market);
-      const subscriberClassified = classifySignal(
-        {
-          side: subscriberDbPosition
-            ? (parseFloat(subscriberDbPosition.baseSize) > 0 ? 'LONG' : parseFloat(subscriberDbPosition.baseSize) < 0 ? 'SHORT' : 'FLAT')
-            : 'FLAT',
-          size: subscriberDbPosition ? Math.abs(parseFloat(subscriberDbPosition.baseSize)) : 0,
-          entryPrice: subscriberDbPosition ? parseFloat(subscriberDbPosition.avgEntryPrice) : 0,
-        },
-        {
-          action: signal.action,
-          contracts: parseFloat(signal.contracts),
-          strategyPositionSize: signal.strategyPositionSize !== null ? parseFloat(signal.strategyPositionSize) : null,
-        },
-      );
-      // Carrying source FLIP intent makes fan-out observable, but it is not
-      // subscriber authority. Each subscriber's own classifier verdict is the
-      // sole gate for resolving that subscriber's own close leg.
-      const subscriberFlip = subscriberClassified.type === 'FLIP';
-
-      // Allow close signals to route to inactive (paused) bots to prevent orphaned positions
-      if (!subBot.isActive && !signal.isCloseSignal && !subscriberFlip) {
-        console.log(`[Subscriber Routing] Skipping inactive subscriber bot ${subBot.id} for non-close signal`);
-        return 'skippedInactive';
-      }
-
       try {
+        const subscriberDbPosition = await storage.getBotPosition(subBot.id, subBot.market);
+        const subscriberClassified = classifySignal(
+          {
+            side: subscriberDbPosition
+              ? (parseFloat(subscriberDbPosition.baseSize) > 0 ? 'LONG' : parseFloat(subscriberDbPosition.baseSize) < 0 ? 'SHORT' : 'FLAT')
+              : 'FLAT',
+            size: subscriberDbPosition ? Math.abs(parseFloat(subscriberDbPosition.baseSize)) : 0,
+            entryPrice: subscriberDbPosition ? parseFloat(subscriberDbPosition.avgEntryPrice) : 0,
+          },
+          {
+            action: signal.action,
+            contracts: parseFloat(signal.contracts),
+            strategyPositionSize: signal.strategyPositionSize !== null ? parseFloat(signal.strategyPositionSize) : null,
+          },
+        );
+        // Carrying source FLIP intent makes fan-out observable, but it is not
+        // subscriber authority. Each subscriber's own classifier verdict is the
+        // sole gate for resolving that subscriber's own close leg.
+        const subscriberFlip = subscriberClassified.type === 'FLIP';
+
+        // Paused subscribers retain risk-reducing close authority. Their FLIP
+        // close leg may proceed, but the opposite risk-increasing open is
+        // rejected below after close truth has been resolved.
+        if (!subBot.isActive && !signal.isCloseSignal && !subscriberFlip) {
+          console.log(`[Subscriber Routing] Skipping inactive subscriber bot ${subBot.id} for non-close signal`);
+          return 'skippedInactive';
+        }
+
         const subWallet = await storage.getWallet(subBot.walletAddress);
         console.log(`[Subscriber Routing] Wallet lookup for ${subBot.walletAddress}: found=${!!subWallet}, hasAgentKey=${!!subWallet?.agentPublicKey}`);
         if (!subWallet) {
@@ -5444,6 +5432,24 @@ async function routeSignalToSubscribers(
               return 'closeFailed';
             }
             const requestedSide = signal.action === 'buy' ? 'long' : 'short';
+            if (!subBot.isActive) {
+              const reason = 'Bot is paused';
+              subscriberFlipDisposition = rejectSignalBotFlipOpen(subscriberFlipDisposition, 'admission', reason);
+              await storage.createBotTrade({
+                tradingBotId: subBot.id,
+                walletAddress: subBot.walletAddress,
+                market: subBot.market,
+                side: requestedSide.toUpperCase(),
+                size: '0',
+                price: signal.price,
+                status: 'failed',
+                fee: '0',
+                errorMessage: reason,
+                webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, reversal: subscriberFlipDisposition },
+                executionMethod: 'legacy',
+              });
+              return 'closeSuccess';
+            }
             if (subBot.side !== 'both' && subBot.side !== requestedSide) {
               const reason = `Bot only accepts ${subBot.side} signals`;
               subscriberFlipDisposition = rejectSignalBotFlipOpen(subscriberFlipDisposition, 'direction', reason);
