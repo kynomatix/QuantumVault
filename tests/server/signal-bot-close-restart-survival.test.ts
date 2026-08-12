@@ -452,12 +452,17 @@ describe('close-path and restart contract wiring', () => {
     );
   });
 
-  it('uses the strict authority read only at the two initial Signal Bot full-close decisions', () => {
+  it('keeps two full-close authority pairs plus one centralized FLIP adapter and three delegations', () => {
     const routes = readFileSync('server/routes.ts', 'utf8');
     const strictReads = routes.match(/getPositionForCloseAuthority\(/g) ?? [];
     const cacheFallbacks = routes.match(/getRiskReducingCachedCloseFallback\(/g) ?? [];
-    expect(strictReads).toHaveLength(2);
-    expect(cacheFallbacks).toHaveLength(2);
+    const flipDelegations = routes.match(/await executeSignalBotFlipClose\(/g) ?? [];
+    expect(strictReads).toHaveLength(3);
+    expect(cacheFallbacks).toHaveLength(3);
+    expect(flipDelegations).toHaveLength(3);
+    expect(routes).toContain('executionLabel: "per_bot"');
+    expect(routes).toContain('executionLabel: "user_webhook"');
+    expect(routes).toContain('executionLabel: "subscriber"');
     expect(routes).toContain('getPositionForExecution(');
     expect(routes).toContain('only for a reduce-only close');
     expect(routes).toContain('All declared close-position authority sources failed');
