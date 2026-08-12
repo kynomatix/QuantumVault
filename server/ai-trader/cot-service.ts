@@ -30,6 +30,8 @@ const SOCRATA_URL = `https://publicreporting.cftc.gov/resource/${DATASET_ID}.jso
 export const INDEX_WINDOW = 120;       // weeks required for a valid index
 const BACKFILL_LIMIT = 135;            // fetch 135 rows: 120 window + 15 buffer
 const STALE_THRESHOLD_MS = 9 * 24 * 60 * 60 * 1000;  // 9 days (tolerates holiday shifts)
+const COT_READ_SOFT_ABORT_MS = 18_000;
+const COT_READ_HARD_SETTLE_MS = 20_000;
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -175,6 +177,53 @@ function parseCftcRow(raw: Record<string, string>): CftcRawRow {
 }
 
 /**
+ * Settle an observed operation by one request-wide absolute deadline.
+ *
+ * Both handlers are attached before the timer is armed. A transport or body
+ * promise that ignores abort is therefore still observed after local timeout,
+ * preventing a late rejection from becoming unhandled while its result is
+ * ignored.
+ */
+function settleByCotDeadline<T>(
+  operation: Promise<T>,
+  deadlineAt: number,
+  stage: 'response headers' | 'response body',
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    Promise.resolve(operation).then(
+      value => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve(value);
+      },
+      error => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        reject(error);
+      },
+    );
+
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      settled = true;
+      reject(new Error(`CFTC Socrata ${stage} hard deadline exceeded after ${COT_READ_HARD_SETTLE_MS}ms`));
+      return;
+    }
+
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`CFTC Socrata ${stage} hard deadline exceeded after ${COT_READ_HARD_SETTLE_MS}ms`));
+    }, remainingMs);
+  });
+}
+
+/**
  * Fetch N rows from the CFTC Socrata API (futures-only, BTC CME).
  * Returns rows sorted ASC (oldest first) for index computation.
  * Throws on network or HTTP error — caller handles fail-open.
@@ -192,15 +241,29 @@ export async function fetchCftcRows(limit: number): Promise<CftcRawRow[]> {
     ].join(','),
   });
 
-  const res = await fetch(`${SOCRATA_URL}?${params}`, {
-    headers: { Accept: 'application/json' },
-    signal: AbortSignal.timeout(20_000),
-  });
-  if (!res.ok) throw new Error(`CFTC Socrata ${res.status}: ${res.statusText}`);
+  const controller = new AbortController();
+  const deadlineAt = Date.now() + COT_READ_HARD_SETTLE_MS;
+  const softAbortTimer = setTimeout(() => controller.abort(), COT_READ_SOFT_ABORT_MS);
 
-  const json = (await res.json()) as Record<string, string>[];
-  // Sort ASC for rolling index computation
-  return json.map(parseCftcRow).sort((a, b) => a.reportDate.localeCompare(b.reportDate));
+  try {
+    const responsePromise = fetch(`${SOCRATA_URL}?${params}`, {
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    const res = await settleByCotDeadline(responsePromise, deadlineAt, 'response headers');
+    if (!res.ok) throw new Error(`CFTC Socrata ${res.status}: ${res.statusText}`);
+
+    const bodyPromise = Promise.resolve().then(() => res.json());
+    const json = (await settleByCotDeadline(
+      bodyPromise,
+      deadlineAt,
+      'response body',
+    )) as Record<string, string>[];
+    // Sort ASC for rolling index computation
+    return json.map(parseCftcRow).sort((a, b) => a.reportDate.localeCompare(b.reportDate));
+  } finally {
+    clearTimeout(softAbortTimer);
+  }
 }
 
 // ─── DB helpers ───────────────────────────────────────────────────────────────
