@@ -1938,6 +1938,10 @@ describe("monitor liveness heartbeat", () => {
     vi.mocked(console.log).mock.calls
       .map((call) => String(call[0]))
       .filter((line) => line.startsWith("[AiTraderMonitor] heartbeat "));
+  const tickObservations = () =>
+    appendTelemetryMock.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.startsWith("[AiTraderMonitor] tick_"));
 
   async function runDegraded(runTick: () => Promise<void>): Promise<void> {
     getActiveBotsMock.mockRejectedValue(new Error("private database detail"));
@@ -2012,7 +2016,7 @@ describe("monitor liveness heartbeat", () => {
     expect(consoleHeartbeats()).toEqual(telemetryHeartbeats());
   });
 
-  it("emits nothing for a younger overlap and leaves the admitted tick eligible", async () => {
+  it("rejects a younger overlap without observations and leaves the admitted generation eligible", async () => {
     const { runMonitorTickOnce } = await importMonitor();
     const firstRead = deferred<AiTraderBot[]>();
     getActiveBotsMock.mockImplementationOnce(() => firstRead.promise);
@@ -2024,14 +2028,22 @@ describe("monitor liveness heartbeat", () => {
     expect(getActiveBotsMock).toHaveBeenCalledTimes(1);
     expect(consoleHeartbeats()).toHaveLength(0);
     expect(telemetryHeartbeats()).toHaveLength(0);
+    expect(tickObservations()).toHaveLength(1);
+    expect(tickObservations()[0]).toMatch(
+      /^\[AiTraderMonitor\] tick_start boot=[0-9a-f]{8} generation=\d+$/,
+    );
 
     firstRead.resolve([]);
     await firstTick;
     expect(consoleHeartbeats()).toHaveLength(1);
     expect(telemetryHeartbeats()).toEqual(consoleHeartbeats());
+    expect(tickObservations()).toHaveLength(2);
+    const startIdentity = tickObservations()[0].match(/boot=([0-9a-f]{8}) generation=(\d+)/);
+    const endIdentity = tickObservations()[1].match(/boot=([0-9a-f]{8}) generation=(\d+) state=current$/);
+    expect(startIdentity?.slice(1)).toEqual(endIdentity?.slice(1));
   });
 
-  it("does not emit when an overridden older generation settles after the replacement", async () => {
+  it("attributes replacement-first settlement and a late older terminal without refreshing liveness", async () => {
     const { runMonitorTickOnce } = await importMonitor();
     const oldRead = deferred<AiTraderBot[]>();
     getActiveBotsMock
@@ -2043,11 +2055,19 @@ describe("monitor liveness heartbeat", () => {
     vi.setSystemTime(NOW + 121_000);
     await runMonitorTickOnce();
     expect(telemetryHeartbeats()).toHaveLength(1);
+    expect(tickObservations()).toHaveLength(3);
+    expect(tickObservations().filter((line) => line.includes("tick_start"))).toHaveLength(2);
+    expect(tickObservations().filter((line) => line.endsWith("state=current"))).toHaveLength(1);
 
     oldRead.resolve([]);
     await oldTick;
     expect(telemetryHeartbeats()).toHaveLength(1);
     expect(consoleHeartbeats()).toEqual(telemetryHeartbeats());
+    expect(tickObservations()).toHaveLength(4);
+    expect(tickObservations().filter((line) => line.includes("tick_end"))).toHaveLength(2);
+    expect(tickObservations().filter((line) => line.endsWith("state=superseded"))).toHaveLength(1);
+    const bootTags = tickObservations().map((line) => line.match(/boot=([0-9a-f]{8})/)?.[1]);
+    expect(new Set(bootTags).size).toBe(1);
   });
 
   it("invalidates a pre-stop tick and only a real restart resets the completed bound", async () => {
@@ -2061,18 +2081,24 @@ describe("monitor liveness heartbeat", () => {
     preStopRead.resolve([]);
     await preStopTick;
     expect(telemetryHeartbeats()).toHaveLength(0);
+    expect(tickObservations()).toHaveLength(2);
+    expect(tickObservations()[1]).toMatch(/tick_end .* state=superseded$/);
 
     getActiveBotsMock.mockResolvedValue([]);
     startAiTraderMonitor();
     await vi.advanceTimersByTimeAsync(0);
     await runMonitorTickOnce();
     expect(telemetryHeartbeats()).toHaveLength(1);
+    expect(tickObservations().filter((line) => line.includes("tick_start"))).toHaveLength(2);
+    expect(tickObservations().filter((line) => line.endsWith("state=current"))).toHaveLength(1);
 
     startAiTraderMonitor(); // singleton no-op: must not reset the bound
     vi.setSystemTime(NOW + 60_000);
     await runMonitorTickOnce();
     expect(telemetryHeartbeats()).toHaveLength(1);
     expect(consoleHeartbeats()).toEqual(telemetryHeartbeats());
+    expect(tickObservations().filter((line) => line.includes("tick_start"))).toHaveLength(3);
+    expect(tickObservations().filter((line) => line.includes("tick_end"))).toHaveLength(3);
   });
 
   it("still enqueues telemetry when console throws, without changing tick outcome", async () => {
@@ -2335,6 +2361,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     expect(start).toContain("cid=bot-obs-"); // 8-char prefix, not the full id
     expect(start).toContain("tf=15m");
     expect(start).toContain("ts=");
+    expect(start).toMatch(/boot=[0-9a-f]{8}$/);
     expect(start).not.toContain("WALLET_X");
     expect(start).not.toContain("bot-obs-1234"); // full id must never appear
 
@@ -2342,6 +2369,10 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     expect(end).toContain("exit=flat");
     expect(end).toContain("phase=llm");
     expect(end).toContain("elapsed_ms=");
+    expect(end).toMatch(/boot=[0-9a-f]{8}$/);
+    expect(start.match(/boot=([0-9a-f]{8})$/)?.[1]).toBe(
+      end.match(/boot=([0-9a-f]{8})$/)?.[1],
+    );
     expect(end).not.toContain("WALLET_X");
     expect(end).not.toContain("bot-obs-1234");
   });
@@ -2392,6 +2423,9 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
 
     expect(endLines()).toHaveLength(1);
     expect(slowLines()).toHaveLength(1); // still exactly one slow line
+    const bootTags = obsTelLines().map((line) => line.match(/boot=([0-9a-f]{8})$/)?.[1]);
+    expect(bootTags.every(Boolean)).toBe(true);
+    expect(new Set(bootTags).size).toBe(1);
   });
 
   it("releasing a hung cycle: clears watchdog; emits exactly one terminal; total obs = 3 lines", async () => {

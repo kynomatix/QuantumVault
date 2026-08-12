@@ -700,7 +700,8 @@ registerRequestTrace(app);
   // the workspace INCLUDING logs/telemetry.log, so the prod file starts with
   // dev-workspace history — these [Boot] env= markers let any reader segment
   // process generations and tell workspace lines from live deployment lines.
-  const bootEnv = process.env.REPLIT_DEPLOYMENT ? "production" : "workspace";
+  const ownsProductionBackgroundJobs = process.env.REPLIT_DEPLOYMENT === "1";
+  const bootEnv = ownsProductionBackgroundJobs ? "production" : "workspace";
   appendTelemetry(`[Boot] pid=${process.pid} env=${bootEnv} node=${process.version}`);
   process.on("exit", (code) => {
     // Drain the async queue first — lines queued since the last drainer flush
@@ -1009,6 +1010,9 @@ registerRequestTrace(app);
       // own explicitly versioned, cross-process-safe work order — do not
       // re-add an unconditional boot-time recompute here.
 
+      if (!ownsProductionBackgroundJobs) {
+        log('[Background ownership] AI Trader monitor and scanner suppressed: REPLIT_DEPLOYMENT is not exactly 1');
+      } else {
       // ~77s: AI Trader monitor (WO-6): startup reconciliation + 15s
       // close-detection tick + graduation sweep. Dynamic import keeps the
       // ai-trader module graph off the boot critical path. Kept early (it
@@ -1045,6 +1049,7 @@ registerRequestTrace(app);
             },
           });
         }, 80_000);
+      }
       }
 
       // Admin error-log retention: prune on startup, then daily. Bounded table

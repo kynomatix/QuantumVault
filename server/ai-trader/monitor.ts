@@ -151,6 +151,13 @@ let tickGeneration = 0;
 const TICK_WEDGE_MS = 120_000;
 let lastMonitorCompletedHeartbeatAt: number | null = null;
 let lastMonitorDegradedHeartbeatAt: number | null = null;
+const MONITOR_BOOT_TAG = SERVER_BOOT_ID.slice(0, 8).toLowerCase();
+
+function emitTickObservation(line: string): void {
+  try {
+    appendTelemetry(line);
+  } catch {}
+}
 
 function emitHeartbeatLine(line: string): void {
   try {
@@ -1690,14 +1697,14 @@ export function scheduleAutoNext(botId: string, timeframe: string): void {
     const obs: CycleObs = { id: cycleId, phase: "initial", exitReason: "status_gate", watchdog: null, stopped: false };
     _cycleObs.set(botId, obs);
     _allActiveObs.add(obs);
-    appendTelemetry(`[AIT-OBS] cycle_start cid=${cycleId} tf=${timeframe} ts=${cycleStart}`);
+    appendTelemetry(`[AIT-OBS] cycle_start cid=${cycleId} tf=${timeframe} ts=${cycleStart} boot=${MONITOR_BOOT_TAG}`);
     // Unref'd slow-cycle watchdog: fires once at 60 s if still unsettled.
     // Never cancels, retries, or mutates trading state.
     let settled = false;
     obs.watchdog = setTimeout(() => {
       if (!settled && !obs.stopped) {
         appendTelemetry(
-          `[AIT-OBS] cycle_slow cid=${cycleId} elapsed_ms=${Date.now() - cycleStart} phase=${obs.phase}`
+          `[AIT-OBS] cycle_slow cid=${cycleId} elapsed_ms=${Date.now() - cycleStart} phase=${obs.phase} boot=${MONITOR_BOOT_TAG}`
         );
       }
     }, 60_000);
@@ -1712,7 +1719,7 @@ export function scheduleAutoNext(botId: string, timeframe: string): void {
       // by this cycle or by a concurrent callback for the same bot (overlap window).
       const rearmed = autoNextTimers.has(botId);
       appendTelemetry(
-        `[AIT-OBS] cycle_end cid=${cycleId} elapsed_ms=${Date.now() - cycleStart} phase=${obs.phase} exit=${exitOverride ?? obs.exitReason} rearmed=${rearmed}`
+        `[AIT-OBS] cycle_end cid=${cycleId} elapsed_ms=${Date.now() - cycleStart} phase=${obs.phase} exit=${exitOverride ?? obs.exitReason} rearmed=${rearmed} boot=${MONITOR_BOOT_TAG}`
       );
     };
     runAutoCycle(botId).then(() => {
@@ -2624,6 +2631,7 @@ async function tick(): Promise<void> {
   }
   const gen = ++tickGeneration;
   tickStartedAt = Date.now();
+  emitTickObservation(`[AiTraderMonitor] tick_start boot=${MONITOR_BOOT_TAG} generation=${gen}`);
   const releasePoolLoadOwner = claimPoolLoadOwner(activeTicks);
   const admittedTickStartedAt = tickStartedAt;
   try {
@@ -2758,6 +2766,10 @@ async function tick(): Promise<void> {
       });
     }
   } finally {
+    const tickState = gen === tickGeneration ? "current" : "superseded";
+    emitTickObservation(
+      `[AiTraderMonitor] tick_end boot=${MONITOR_BOOT_TAG} generation=${gen} state=${tickState}`
+    );
     // Only clear our own claim — a wedged tick that finally resumes after an
     // override must not wipe the newer tick's timestamp.
     if (gen === tickGeneration) tickStartedAt = null;
