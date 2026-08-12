@@ -55,6 +55,7 @@ vi.mock("../../server/session-v3", () => ({
   healExecutionUmkFromStorage: (...a: unknown[]) => healUmkMock(...a),
   getSessionByWalletAddress: (...a: unknown[]) => getSessionByWalletMock(...a),
   restoreWalletSecurityFromStorage: (...a: unknown[]) => restoreSecurityMock(...a),
+  restoreWalletSecurityFromStorageOutcome: (...a: unknown[]) => restoreSecurityMock(...a),
   decryptLlmApiKeyV3: (...a: unknown[]) => decryptLlmKeyMock(...a),
   verifyBotPolicyHmac: vi.fn(() => true),
 }));
@@ -206,7 +207,7 @@ beforeEach(() => {
   updateDecisionMock.mockResolvedValue({});
   notifyMock.mockResolvedValue(true);
   healUmkMock.mockResolvedValue(undefined);
-  restoreSecurityMock.mockResolvedValue(undefined);
+  restoreSecurityMock.mockResolvedValue({ status: "reauth_required" });
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -291,22 +292,66 @@ describe("DRILL 2 — LLM key removed mid-lifecycle", () => {
 // --- Drill 3: UMK expiry during auto-next ----------------------------------------
 
 describe("DRILL 3 — UMK expiry during auto-next: paused at a flat point", () => {
-  it("session gone + restore fails → paused 'reauth_required'; no LLM spend, no order", async () => {
+  it("session gone + transient storage read failure → fail-closed defer; no state, spend, signing, or venue call", async () => {
     const { runAutoCycle } = await importMonitor();
-    armAutoBot();
-    getSessionByWalletMock.mockReturnValue(null); // UMK expired / wiped by deploy
-    restoreSecurityMock.mockRejectedValue(new Error("no stored security material"));
+    const bot = makeBot();
+    const adapter = makeAdapter();
+    getBotMock.mockResolvedValue(bot);
+    getAdapterMock.mockReturnValue(adapter);
+    getWalletMock.mockResolvedValue({ address: "WALLET_X", agentPublicKey: AGENT_PUBKEY, agentPrivateKeyEncryptedV3: "v3" });
+    getSessionByWalletMock.mockReturnValue(null);
+    restoreSecurityMock.mockResolvedValue({ status: "transient_read_failed" });
 
     await runAutoCycle("bot-1111-2222");
 
-    expect(restoreSecurityMock).toHaveBeenCalledWith("WALLET_X"); // it TRIED to self-heal first
-    expect(botUpdates().some((u) => u.status === "paused" && u.pauseReason === "reauth_required")).toBe(true);
+    expect(restoreSecurityMock).toHaveBeenCalledTimes(1);
+    expect(restoreSecurityMock).toHaveBeenCalledWith("WALLET_X");
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(notifyMock).not.toHaveBeenCalled();
     expect(buildContextMock).not.toHaveBeenCalled();
-    expect(runDecisionMock).not.toHaveBeenCalled(); // zero LLM spend
-    expect(executeDecisionMock).not.toHaveBeenCalled(); // paused FLAT — no order in flight
-    expect(notifyMock).toHaveBeenCalled(); // owner is told why the bot stopped
+    expect(runDecisionMock).not.toHaveBeenCalled();
+    expect(executeDecisionMock).not.toHaveBeenCalled();
+    expect(getUmkMock).not.toHaveBeenCalled();
+    expect(decryptKeyMock).not.toHaveBeenCalled();
+    expect(decryptSubKeyMock).not.toHaveBeenCalled();
+    expect((adapter as any).getPositions).not.toHaveBeenCalled();
+    expect((adapter as any).getTradeHistory).not.toHaveBeenCalled();
+    expect((adapter as any).getPrice).not.toHaveBeenCalled();
+    expect((adapter as any).setTpSl).not.toHaveBeenCalled();
+    expect((adapter as any).cancelTpSlOrders).not.toHaveBeenCalled();
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(1);
   });
 
+  it("session gone + authority failure → paused 'reauth_required'; no LLM spend, signing, or venue call", async () => {
+    const { runAutoCycle } = await importMonitor();
+    const bot = makeBot();
+    const adapter = makeAdapter();
+    getBotMock.mockResolvedValue(bot);
+    getAdapterMock.mockReturnValue(adapter);
+    getWalletMock.mockResolvedValue({ address: "WALLET_X", agentPublicKey: AGENT_PUBKEY, agentPrivateKeyEncryptedV3: "v3" });
+    getSessionByWalletMock.mockReturnValue(null);
+    restoreSecurityMock.mockResolvedValue({ status: "reauth_required" });
+
+    await runAutoCycle("bot-1111-2222");
+
+    expect(restoreSecurityMock).toHaveBeenCalledWith("WALLET_X");
+    expect(botUpdates().filter((u) => u.status === "paused" && u.pauseReason === "reauth_required")).toHaveLength(1);
+    expect(buildContextMock).not.toHaveBeenCalled();
+    expect(runDecisionMock).not.toHaveBeenCalled();
+    expect(executeDecisionMock).not.toHaveBeenCalled();
+    expect(getUmkMock).not.toHaveBeenCalled();
+    expect(decryptKeyMock).not.toHaveBeenCalled();
+    expect(decryptSubKeyMock).not.toHaveBeenCalled();
+    expect((adapter as any).getPositions).not.toHaveBeenCalled();
+    expect((adapter as any).getTradeHistory).not.toHaveBeenCalled();
+    expect((adapter as any).getPrice).not.toHaveBeenCalled();
+    expect((adapter as any).setTpSl).not.toHaveBeenCalled();
+    expect((adapter as any).cancelTpSlOrders).not.toHaveBeenCalled();
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
+    expect(notifyMock).toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it("stored key present but UNDECRYPTABLE with the restored UMK → same flat pause", async () => {
     const { runAutoCycle } = await importMonitor();
     armAutoBot();

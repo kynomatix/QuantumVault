@@ -44,7 +44,7 @@ import {
   decryptAgentKeyStrict,
   healExecutionUmkFromStorage,
   getSessionByWalletAddress,
-  restoreWalletSecurityFromStorage,
+  restoreWalletSecurityFromStorageOutcome,
   decryptLlmApiKeyV3,
 } from "../session-v3";
 import { fireReflection } from "./reflection-service";
@@ -1801,15 +1801,43 @@ export async function runAutoCycle(botId: string): Promise<void> {
 
   // BYO LLM key: session UMK (auto-restored from storage), then V3 decrypt.
   if (!getSessionByWalletAddress(bot.walletAddress)?.session?.umk) {
+    let restoreStatus: "restored" | "transient_read_failed" | "reauth_required" = "reauth_required";
     try {
-      await restoreWalletSecurityFromStorage(bot.walletAddress);
-    } catch (err) {
-      console.warn(`[AiTraderMonitor] auto cycle: UMK restore threw: ${err instanceof Error ? err.message : err}`);
+      const restoreOutcome = await restoreWalletSecurityFromStorageOutcome(bot.walletAddress);
+      restoreStatus = restoreOutcome?.status === "restored" || restoreOutcome?.status === "transient_read_failed"
+        ? restoreOutcome.status
+        : "reauth_required";
+    } catch {
+      // An unexpected or malformed outcome is authority-ambiguous and therefore
+      // permanently fail-closed rather than deferred forever.
+      restoreStatus = "reauth_required";
+    }
+
+    if (restoreStatus === "transient_read_failed") {
+      if (_obs) _obs.exitReason = "gate_skip";
+      console.warn(
+        `[AiTraderMonitor] auto cycle: bot ${bot.id.slice(0, 8)} security restore classified transient_read_failed; `
+        + "current cycle stays fail-closed and next-candle cadence is retained",
+      );
+      scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
+      return;
+    }
+
+    if (restoreStatus === "reauth_required") {
+      if (_obs) _obs.exitReason = "paused";
+      console.warn(
+        `[AiTraderMonitor] auto cycle: bot ${bot.id.slice(0, 8)} security restore classified reauth_required; pausing`,
+      );
+      await pauseBot(bot, "reauth_required", "session locked — reconnect your wallet in the app so the bot can keep trading hands-off");
+      return;
     }
   }
   const umk = getSessionByWalletAddress(bot.walletAddress)?.session?.umk;
   if (!umk) {
     if (_obs) _obs.exitReason = "paused";
+    console.warn(
+      `[AiTraderMonitor] auto cycle: bot ${bot.id.slice(0, 8)} restored outcome produced no usable session; classified reauth_required`,
+    );
     await pauseBot(bot, "reauth_required", "session locked — reconnect your wallet in the app so the bot can keep trading hands-off");
     return;
   }
