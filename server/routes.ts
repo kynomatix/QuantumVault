@@ -1555,7 +1555,18 @@ async function settleAllPnl(
   }
 }
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
-import { buildSignalBotCloseResponse } from "./trading/signal-bot-close-integrity";
+import {
+  buildSignalBotCloseResponse,
+  deferSignalBotFlipOpen,
+  markSignalBotFlipOpenExecuted,
+  rejectSignalBotFlipOpen,
+  resolveSignalBotFlipCloseThenOpen,
+  type SignalBotFlipAuthorityRead,
+  type SignalBotFlipCloseExecution,
+  type SignalBotFlipDisposition,
+  type SignalBotFlipOpenRejectionCategory,
+  type SignalBotFlipPosition,
+} from "./trading/signal-bot-close-integrity";
 import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, getAgentUsdcBalanceStrict, getAgentUsdcBalanceRawStrict, getAgentSolBalanceStrict, getAgentSolBalanceLamportsStrict, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
 import { handleAgentSolWithdraw, handleConfirmSolWithdraw, sweepAbandonedSolWithdrawals } from "./vault/agent-sol-withdraw";
@@ -4605,6 +4616,323 @@ function parseSignalForRouting(body: any): { action: string | null; contracts: s
   return { action, contracts, isCloseSignal, price, strategyPositionSize };
 }
 
+interface SignalBotFlipAuthorityContext {
+  botId: string;
+  market: string;
+  queryAccount: string;
+  querySubaccountId: number;
+  botPublicKey?: string;
+}
+
+/** One strict/fallback adapter shared by all three FLIP consumers. */
+async function readSignalBotFlipCloseAuthority(
+  context: SignalBotFlipAuthorityContext,
+  stage: "initial" | "post_close",
+): Promise<SignalBotFlipAuthorityRead> {
+  try {
+    const position = await PositionService.getPositionForCloseAuthority(
+      context.botId,
+      context.queryAccount,
+      context.querySubaccountId,
+      context.market,
+      context.botPublicKey,
+    );
+    if (position.side === "FLAT" || Math.abs(position.size) < 0.0001) {
+      return { kind: "authoritative_flat" };
+    }
+    if ((position.side !== "LONG" && position.side !== "SHORT") || !Number.isFinite(position.size)) {
+      return { kind: "unavailable", reason: "venue position shape is invalid" };
+    }
+    return {
+      kind: "position",
+      position: {
+        side: position.side,
+        size: Math.abs(position.size),
+        entryPrice: position.entryPrice || 0,
+        source: "venue_authoritative",
+      },
+    };
+  } catch (error) {
+    const strictReason = error instanceof Error ? error.message : String(error);
+    if (stage === "post_close") {
+      return { kind: "unavailable", reason: strictReason };
+    }
+    try {
+      const cachedPosition = await storage.getBotPosition(context.botId, context.market);
+      const fallback = PositionService.getRiskReducingCachedCloseFallback(cachedPosition, context.market);
+      if (fallback && (fallback.side === "LONG" || fallback.side === "SHORT")) {
+        return {
+          kind: "position",
+          position: {
+            side: fallback.side,
+            size: Math.abs(fallback.size),
+            entryPrice: fallback.entryPrice || 0,
+            source: "durable_risk_reducing_fallback",
+          },
+        };
+      }
+    } catch (fallbackError) {
+      return {
+        kind: "unavailable",
+        reason: `strict venue read failed (${strictReason}); durable fallback read failed (${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)})`,
+      };
+    }
+    return {
+      kind: "unavailable",
+      reason: `strict venue read failed (${strictReason}); no valid durable close source`,
+    };
+  }
+}
+
+interface CanonicalCloseFinalizationInput {
+  bot: TradingBot;
+  tradeId: string;
+  signature: string;
+  size: number;
+  fillPrice: number;
+  fee: number;
+  pnl: number;
+  executionMethod?: string;
+}
+
+async function finalizePerBotConfirmedClose(input: CanonicalCloseFinalizationInput) {
+  const fillId = DatabaseStorage.canonicalCloseFillId({
+    signature: input.signature,
+    botId: input.bot.id,
+    side: "CLOSE",
+    size: input.size,
+    market: input.bot.market,
+    fillPrice: input.fillPrice,
+    timestampMs: Date.now(),
+  });
+  const result = await storage.recordCloseEventAtomic({
+    botId: input.bot.id,
+    update: {
+      tradeId: input.tradeId,
+      fields: {
+        status: "executed",
+        txSignature: input.signature,
+        price: String(input.fillPrice),
+        fee: String(input.fee),
+        pnl: String(input.pnl),
+        executionMethod: input.executionMethod || "legacy",
+        protocolFillId: fillId,
+      },
+    },
+    deltas: {
+      totalPnlDelta: input.pnl,
+      totalVolumeDelta: input.size * input.fillPrice,
+      lastTradeAt: new Date().toISOString(),
+    },
+    confirmedPositionClose: {
+      walletAddress: input.bot.walletAddress,
+      market: input.bot.market,
+      realizedPnlDelta: input.pnl,
+      feeDelta: input.fee,
+    },
+  });
+  return { ...result, fillId };
+}
+
+async function finalizeUserWebhookConfirmedClose(input: CanonicalCloseFinalizationInput) {
+  if (!input.tradeId) throw new Error("user-webhook finalizer requires an existing close trade");
+  const fillId = DatabaseStorage.canonicalCloseFillId({
+    signature: input.signature,
+    botId: input.bot.id,
+    side: "CLOSE",
+    size: input.size,
+    market: input.bot.market,
+    fillPrice: input.fillPrice,
+    timestampMs: Date.now(),
+  });
+  const result = await storage.recordCloseEventAtomic({
+    botId: input.bot.id,
+    update: {
+      tradeId: input.tradeId,
+      fields: {
+        status: "executed",
+        txSignature: input.signature,
+        price: String(input.fillPrice),
+        fee: String(input.fee),
+        pnl: String(input.pnl),
+        protocolFillId: fillId,
+      },
+    },
+    deltas: {
+      totalPnlDelta: input.pnl,
+      totalVolumeDelta: input.size * input.fillPrice,
+      lastTradeAt: new Date().toISOString(),
+    },
+    confirmedPositionClose: {
+      walletAddress: input.bot.walletAddress,
+      market: input.bot.market,
+      realizedPnlDelta: input.pnl,
+      feeDelta: input.fee,
+    },
+  });
+  return { ...result, fillId };
+}
+
+function signalBotFlipHttpPayload<T extends Record<string, unknown>>(
+  disposition: SignalBotFlipDisposition | null,
+  body: T,
+): T | (T & { reversal: SignalBotFlipDisposition }) {
+  return disposition ? { ...body, reversal: disposition } : body;
+}
+
+function signalBotFlipRejectedPayload<T extends Record<string, unknown>>(
+  disposition: SignalBotFlipDisposition | null,
+  category: SignalBotFlipOpenRejectionCategory,
+  reason: string,
+  body: T,
+) {
+  return signalBotFlipHttpPayload(
+    disposition ? rejectSignalBotFlipOpen(disposition, category, reason) : null,
+    body,
+  );
+}
+
+interface ExecuteSignalBotFlipInput {
+  bot: TradingBot;
+  classifiedSignal: ReturnType<typeof classifySignal> & { type: "FLIP" };
+  authority: SignalBotFlipAuthorityContext;
+  agentSecretKey: Uint8Array;
+  subaccountId: number;
+  slippageBps: number;
+  privateKeyBase58?: string;
+  agentPublicKey?: string;
+  botCtx?: BotSubaccountContext | null;
+  walletAddress: string;
+  signalPrice: string;
+  webhookPayload: unknown;
+  executionLabel: "per_bot" | "user_webhook" | "subscriber";
+  finalizer: "per_bot" | "user_webhook";
+}
+
+async function executeSignalBotFlipClose(
+  input: ExecuteSignalBotFlipInput,
+): Promise<SignalBotFlipDisposition> {
+  let closeTradeId: string | undefined;
+  let closeExecution: SignalBotFlipCloseExecution | undefined;
+
+  const disposition = await resolveSignalBotFlipCloseThenOpen({
+    classifiedSignal: input.classifiedSignal,
+    readAuthority: stage => readSignalBotFlipCloseAuthority(input.authority, stage),
+    executeReduceOnlyClose: async position => {
+      const pending = await storage.createBotTrade({
+        tradingBotId: input.bot.id,
+        walletAddress: input.bot.walletAddress,
+        market: input.bot.market,
+        side: "CLOSE",
+        size: String(position.size),
+        price: input.signalPrice,
+        status: "pending",
+        webhookPayload: {
+          ...(typeof input.webhookPayload === "object" && input.webhookPayload !== null
+            ? input.webhookPayload as Record<string, unknown>
+            : { payload: input.webhookPayload }),
+          reversalClose: true,
+          reversalConsumer: input.executionLabel,
+          positionSource: position.source,
+        },
+        executionMethod: "legacy",
+      });
+      closeTradeId = pending.id;
+      const result = await closePerpPosition(
+        input.agentSecretKey,
+        input.bot.market,
+        input.subaccountId,
+        position.size,
+        input.slippageBps,
+        input.privateKeyBase58,
+        input.agentPublicKey,
+        position.side === "LONG" ? "long" : "short",
+        input.botCtx ?? undefined,
+        input.walletAddress,
+        getAdapterForBot(input.bot),
+      );
+      closeExecution = {
+        success: result.success,
+        signature: result.signature || null,
+        fillPrice: result.fillPrice,
+        executionMethod: result.executionMethod,
+        error: result.error,
+      };
+      return closeExecution;
+    },
+    finalizeConfirmedClose: async (position, execution) => {
+      if (!closeTradeId) throw new Error("confirmed FLIP close has no pending trade identity");
+      const fillPrice = execution.fillPrice ?? parseFloat(input.signalPrice || "0");
+      const safeFillPrice = Number.isFinite(fillPrice) ? fillPrice : 0;
+      const fee = position.size * safeFillPrice * getExchangeFeeRate();
+      const pnl = position.entryPrice > 0 && safeFillPrice > 0
+        ? position.side === "LONG"
+          ? (safeFillPrice - position.entryPrice) * position.size - fee
+          : (position.entryPrice - safeFillPrice) * position.size - fee
+        : 0;
+      const finalize = input.finalizer === "user_webhook"
+        ? finalizeUserWebhookConfirmedClose
+        : finalizePerBotConfirmedClose;
+      const finalized = await finalize({
+        bot: input.bot,
+        tradeId: closeTradeId,
+        signature: execution.signature,
+        size: position.size,
+        fillPrice: safeFillPrice,
+        fee,
+        pnl,
+        executionMethod: execution.executionMethod,
+      });
+
+      // Preserve the existing confirmed-close side effects without allowing
+      // either one to become authority for the opposite open. Profit sharing
+      // remains deduped by the canonical close fill, and settlement remains a
+      // best-effort balance operation after durable close truth is committed.
+      if (pnl > 0 && finalized.isNew && input.agentPublicKey) {
+        const profitShareKeyCopy = new Uint8Array(input.agentSecretKey);
+        distributeCreatorProfitShare({
+          subscriberBotId: input.bot.id,
+          subscriberWalletAddress: input.bot.walletAddress,
+          subscriberAgentPublicKey: input.agentPublicKey,
+          subscriberEncryptedPrivateKey: profitShareKeyCopy,
+          driftSubaccountId: input.subaccountId,
+          realizedPnl: pnl,
+          tradeId: finalized.fillId,
+        }).catch(error => {
+          console.error(`[Signal Bot FLIP] Profit share failed for ${input.bot.id}:`, error);
+        }).finally(() => profitShareKeyCopy.fill(0));
+      }
+
+      if (input.bot.profitReinvest && getAdapterForBot(input.bot).getCapabilities().supportsSettlePnl) {
+        try {
+          const settlement = await settleAllPnl(
+            input.agentSecretKey,
+            input.subaccountId,
+            getAdapterForBot(input.bot),
+          );
+          if (!settlement.success) {
+            console.warn(`[Signal Bot FLIP] PnL settlement failed (non-blocking): ${settlement.error}`);
+          }
+        } catch (error) {
+          console.warn(`[Signal Bot FLIP] PnL settlement error (non-blocking): ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    },
+  });
+
+  if (closeTradeId && disposition.close.kind !== "executed") {
+    const signature = closeExecution?.signature || null;
+    const unresolvedWithVenueEvidence = ["no_signature", "partial", "post_close_unreadable", "finalization_failed"]
+      .includes(disposition.close.kind);
+    await storage.updateBotTrade(closeTradeId, {
+      status: unresolvedWithVenueEvidence ? "pending" : "failed",
+      txSignature: signature,
+      errorMessage: `FLIP close terminal: ${disposition.close.kind}`,
+    });
+  }
+  return disposition;
+}
+
 // V3 Phase 3b: Subscriber fan-out now uses the V3 strict-decrypt path on a
 // per-subscriber basis. Each subscriber wallet must have executionEnabled and
 // a valid stored UMK_STORAGE_SECRET-wrapped UMK (see getUmkForWebhook +
@@ -4636,7 +4964,7 @@ function acquireBotWebhookLock(key: string): Promise<() => void> {
   return current.then(() => release);
 }
 
-async function routeSignalToSubscribers(
+export async function routeSignalToSubscribers(
   sourceBotId: string,
   signal: {
     action: 'buy' | 'sell';
@@ -4645,6 +4973,8 @@ async function routeSignalToSubscribers(
     price: string;
     isCloseSignal: boolean;
     strategyPositionSize: string | null;
+    /** Source classifier verdict; subscribers still resolve their own position authority. */
+    isFlipSignal?: boolean;
     /** Fraction of source position closed [0,1]; present for PARTIAL_CLOSE signals. */
     partialCloseFraction?: number;
   }
@@ -4677,14 +5007,36 @@ async function routeSignalToSubscribers(
     // Process subscriber function - returns result for aggregation after parallel execution
     const processSubscriber = async (subBot: typeof subscriberBots[0]): Promise<SubscriberResult> => {
       console.log(`[Subscriber Routing] Processing subscriber bot ${subBot.id} (${subBot.name}), isActive=${subBot.isActive}, market=${subBot.market}`);
-      
-      // Allow close signals to route to inactive (paused) bots to prevent orphaned positions
-      if (!subBot.isActive && !signal.isCloseSignal) {
-        console.log(`[Subscriber Routing] Skipping inactive subscriber bot ${subBot.id} for non-close signal`);
-        return 'skippedInactive';
-      }
 
       try {
+        const subscriberDbPosition = await storage.getBotPosition(subBot.id, subBot.market);
+        const subscriberClassified = classifySignal(
+          {
+            side: subscriberDbPosition
+              ? (parseFloat(subscriberDbPosition.baseSize) > 0 ? 'LONG' : parseFloat(subscriberDbPosition.baseSize) < 0 ? 'SHORT' : 'FLAT')
+              : 'FLAT',
+            size: subscriberDbPosition ? Math.abs(parseFloat(subscriberDbPosition.baseSize)) : 0,
+            entryPrice: subscriberDbPosition ? parseFloat(subscriberDbPosition.avgEntryPrice) : 0,
+          },
+          {
+            action: signal.action,
+            contracts: parseFloat(signal.contracts),
+            strategyPositionSize: signal.strategyPositionSize !== null ? parseFloat(signal.strategyPositionSize) : null,
+          },
+        );
+        // Carrying source FLIP intent makes fan-out observable, but it is not
+        // subscriber authority. Each subscriber's own classifier verdict is the
+        // sole gate for resolving that subscriber's own close leg.
+        const subscriberFlip = subscriberClassified.type === 'FLIP';
+
+        // Paused subscribers retain risk-reducing close authority. Their FLIP
+        // close leg may proceed, but the opposite risk-increasing open is
+        // rejected below after close truth has been resolved.
+        if (!subBot.isActive && !signal.isCloseSignal && !subscriberFlip) {
+          console.log(`[Subscriber Routing] Skipping inactive subscriber bot ${subBot.id} for non-close signal`);
+          return 'skippedInactive';
+        }
+
         const subWallet = await storage.getWallet(subBot.walletAddress);
         console.log(`[Subscriber Routing] Wallet lookup for ${subBot.walletAddress}: found=${!!subWallet}, hasAgentKey=${!!subWallet?.agentPublicKey}`);
         if (!subWallet) {
@@ -5037,13 +5389,96 @@ async function routeSignalToSubscribers(
             return 'partialCloseFailed';
           }
         } else {
+          let subscriberFlipDisposition: SignalBotFlipDisposition | null = null;
+          if (subscriberFlip) {
+            const subFlipQueryAccount = subCloseCtx ? subCloseCtx.botPublicKey : subWallet.agentPublicKey!;
+            const subFlipQuerySubId = subCloseCtx ? 0 : subAccountId;
+            const classifiedFlip = subscriberClassified as ReturnType<typeof classifySignal> & { type: 'FLIP' };
+            subscriberFlipDisposition = await executeSignalBotFlipClose({
+              bot: subBot,
+              classifiedSignal: classifiedFlip,
+              authority: {
+                botId: subBot.id,
+                market: subBot.market,
+                queryAccount: subFlipQueryAccount,
+                querySubaccountId: subFlipQuerySubId,
+                botPublicKey: subCloseCtx?.botPublicKey,
+              },
+              agentSecretKey: subAgentSecretKey,
+              subaccountId: subFlipQuerySubId,
+              slippageBps: subWallet.slippageBps ?? 50,
+              agentPublicKey: subWallet.agentPublicKey || undefined,
+              botCtx: subCloseCtx,
+              walletAddress: subBot.walletAddress,
+              signalPrice: signal.price,
+              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
+              executionLabel: "subscriber",
+              finalizer: "per_bot",
+            });
+            if (subscriberFlipDisposition.open.kind !== 'admitted') {
+              await storage.createBotTrade({
+                tradingBotId: subBot.id,
+                walletAddress: subBot.walletAddress,
+                market: subBot.market,
+                side: signal.action === 'buy' ? 'LONG' : 'SHORT',
+                size: '0',
+                price: signal.price,
+                status: 'failed',
+                fee: '0',
+                errorMessage: `FLIP open not evaluated: ${subscriberFlipDisposition.close.kind}`,
+                webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, reversal: subscriberFlipDisposition },
+                executionMethod: 'legacy',
+              });
+              return 'closeFailed';
+            }
+            const requestedSide = signal.action === 'buy' ? 'long' : 'short';
+            if (!subBot.isActive) {
+              const reason = 'Bot is paused';
+              subscriberFlipDisposition = rejectSignalBotFlipOpen(subscriberFlipDisposition, 'admission', reason);
+              await storage.createBotTrade({
+                tradingBotId: subBot.id,
+                walletAddress: subBot.walletAddress,
+                market: subBot.market,
+                side: requestedSide.toUpperCase(),
+                size: '0',
+                price: signal.price,
+                status: 'failed',
+                fee: '0',
+                errorMessage: reason,
+                webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, reversal: subscriberFlipDisposition },
+                executionMethod: 'legacy',
+              });
+              return 'closeSuccess';
+            }
+            if (subBot.side !== 'both' && subBot.side !== requestedSide) {
+              const reason = `Bot only accepts ${subBot.side} signals`;
+              subscriberFlipDisposition = rejectSignalBotFlipOpen(subscriberFlipDisposition, 'direction', reason);
+              await storage.createBotTrade({
+                tradingBotId: subBot.id,
+                walletAddress: subBot.walletAddress,
+                market: subBot.market,
+                side: requestedSide.toUpperCase(),
+                size: '0',
+                price: signal.price,
+                status: 'failed',
+                fee: '0',
+                errorMessage: reason,
+                webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, reversal: subscriberFlipDisposition },
+                executionMethod: 'legacy',
+              });
+              return 'tradeFailed';
+            }
+          }
+
           const oraclePrice = parseFloat(signal.price);
           const maxPos = parseFloat(subBot.maxPositionSize || '0');
           const profitReinvestEnabled = subBot.profitReinvest === true;
           
           // Allow profit reinvest bots to proceed even without maxPositionSize
           if (maxPos <= 0 && !profitReinvestEnabled) {
-            
+            if (subscriberFlipDisposition) {
+              subscriberFlipDisposition = rejectSignalBotFlipOpen(subscriberFlipDisposition, 'sizing', 'Bot has no Max Position Size configured');
+            }
             // Create a failed trade record for visibility
             const oraclePriceForLog = parseFloat(signal.price);
             await storage.createBotTrade({
@@ -5056,7 +5491,7 @@ async function routeSignalToSubscribers(
               status: 'failed',
               fee: '0',
               errorMessage: 'Bot has no Max Position Size configured',
-              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'no_max_position_size' },
+              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'no_max_position_size', reversal: subscriberFlipDisposition },
               executionMethod: 'legacy',
             });
             return 'tradeFailed';
@@ -5069,7 +5504,7 @@ async function routeSignalToSubscribers(
           const signalPercent = tradePercent * 100; // Convert to 0-100 range
 
           // Use shared trade sizing helper
-          const subBotCtx = getBotSubaccountContext(subBot);
+          const subBotCtx = subCloseCtx;
           const sizingResult = await computeTradeSizingAndTopUp({
             agentPublicKey: subWallet.agentPublicKey!,
             agentPrivateKeyEncrypted: subAgentSecretKey,
@@ -5090,7 +5525,11 @@ async function routeSignalToSubscribers(
           });
 
           if (!sizingResult.success) {
-            
+            if (subscriberFlipDisposition) {
+              const reason = sizingResult.error || 'Trade sizing failed';
+              const category: SignalBotFlipOpenRejectionCategory = /fund|collateral|margin/i.test(reason) ? 'funding' : 'sizing';
+              subscriberFlipDisposition = rejectSignalBotFlipOpen(subscriberFlipDisposition, category, reason);
+            }
             // Create a failed trade record for visibility
             await storage.createBotTrade({
               tradingBotId: subBot.id,
@@ -5102,7 +5541,7 @@ async function routeSignalToSubscribers(
               status: 'failed',
               fee: '0',
               errorMessage: sizingResult.error || 'Trade sizing failed',
-              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'sizing_failed' },
+              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'sizing_failed', reversal: subscriberFlipDisposition },
               executionMethod: 'legacy',
             });
             
@@ -5116,7 +5555,9 @@ async function routeSignalToSubscribers(
           const contractSize = sizingResult.finalContractSize;
 
           if (contractSize < 0.001) {
-            
+            if (subscriberFlipDisposition) {
+              subscriberFlipDisposition = rejectSignalBotFlipOpen(subscriberFlipDisposition, 'sizing', 'Trade size too small (minimum 0.001 contracts)');
+            }
             // Create a failed trade record for visibility
             await storage.createBotTrade({
               tradingBotId: subBot.id,
@@ -5128,7 +5569,7 @@ async function routeSignalToSubscribers(
               status: 'failed',
               fee: '0',
               errorMessage: 'Trade size too small (minimum 0.001 contracts)',
-              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'size_too_small' },
+              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, failReason: 'size_too_small', reversal: subscriberFlipDisposition },
               executionMethod: 'legacy',
             });
             return 'tradeFailed';
@@ -5139,36 +5580,6 @@ async function routeSignalToSubscribers(
           // by decryptAgentKeyStrict above; the encrypted blob is never used.
           const side = signal.action === 'buy' ? 'long' : 'short';
           const subSlippageBps = subWallet.slippageBps ?? 50;
-
-          // FLIP DETECTION: Snapshot existing position before trade execution
-          // If subscriber has an opposite position, this trade will close it (flip)
-          // We need to track this to calculate realized PnL and trigger profit sharing
-          let preTradePosition: { side: string; size: number; entryPrice: number } | null = null;
-          try {
-            const subQueryAccount = subBotCtx ? subBotCtx.botPublicKey : subWallet.agentPublicKey!;
-            const subQuerySubId = subBotCtx ? 0 : subAccountId;
-            const existingPos = await PositionService.getPositionForExecution(
-              subBot.id,
-              subQueryAccount,
-              subQuerySubId,
-              subBot.market,
-              subBotCtx?.botPublicKey
-            );
-            if (existingPos.side !== 'FLAT' && Math.abs(existingPos.size) >= 0.0001) {
-              const isOpposite = (existingPos.side === 'LONG' && side === 'short') || 
-                                 (existingPos.side === 'SHORT' && side === 'long');
-              if (isOpposite) {
-                preTradePosition = {
-                  side: existingPos.side,
-                  size: Math.abs(existingPos.size),
-                  entryPrice: existingPos.entryPrice || 0,
-                };
-                console.log(`[Subscriber Routing] FLIP DETECTED for ${subBot.id}: existing ${preTradePosition.side} ${preTradePosition.size} @ $${preTradePosition.entryPrice.toFixed(2)} will be closed by incoming ${side.toUpperCase()}`);
-              }
-            }
-          } catch (err) {
-            console.error(`[Subscriber Routing] Pre-trade position check failed for ${subBot.id}:`, err);
-          }
 
           const orderResult = await executePerpOrder(
             subAgentSecretKey,
@@ -5187,6 +5598,12 @@ async function routeSignalToSubscribers(
           );
 
           if (orderResult.success) {
+            if (subscriberFlipDisposition) {
+              subscriberFlipDisposition = markSignalBotFlipOpenExecuted(
+                subscriberFlipDisposition,
+                orderResult.txSignature || orderResult.signature || null,
+              );
+            }
             let fillPrice = orderResult.fillPrice ?? oraclePrice;
 
             const tradeNotional = contractSize * fillPrice;
@@ -5202,7 +5619,7 @@ async function routeSignalToSubscribers(
               status: 'executed',
               fee: tradeFee.toFixed(6),
               txSignature: orderResult.txSignature || orderResult.signature || null,
-              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
+              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, reversal: subscriberFlipDisposition },
               executionMethod: orderResult.executionMethod || 'legacy',
               swiftOrderId: orderResult.swiftOrderId || null,
             });
@@ -5234,74 +5651,10 @@ async function routeSignalToSubscribers(
               await storage.updateBotTrade(subTrade.id, tradeUpdate);
             }
 
-            // FLIP PROFIT SHARE: If a flip occurred, calculate realized PnL from closing the old position
-            // The closed portion is the minimum of pre-trade position size and new order size
-            // (handles both full flips and partial reduces that flip direction)
-            let flipPnl: number = 0;
-            if (preTradePosition && preTradePosition.entryPrice > 0) {
-              const closedSize = Math.min(preTradePosition.size, contractSize);
-              const closedEntryPrice = preTradePosition.entryPrice;
-              const exitPrice = fillPrice;
-              // Fee on the close leg only (proportional to closed size, not full order)
-              const closeFee = closedSize * exitPrice * getExchangeFeeRate();
-              
-              if (preTradePosition.side === 'LONG') {
-                flipPnl = (exitPrice - closedEntryPrice) * closedSize - closeFee;
-              } else {
-                flipPnl = (closedEntryPrice - exitPrice) * closedSize - closeFee;
-              }
-              
-              console.log(`[Subscriber Routing] Flip PnL for ${subBot.id}: closed ${preTradePosition.side} ${closedSize}/${preTradePosition.size} @ entry=$${closedEntryPrice.toFixed(2)}, exit=$${exitPrice.toFixed(2)}, pnl=$${flipPnl.toFixed(4)}`);
-              
-              // Update the trade record with realized PnL from the flip (always
-              // record a number — '0' for breakeven, never null — so the
-              // canonical SQL count picks it up).
-              await storage.updateBotTrade(subTrade.id, {
-                pnl: flipPnl.toFixed(6),
-              });
-              
-              // Trigger profit sharing if the flip realized a profit
-              if (flipPnl > 0) {
-                // Flip close is recorded via updateBotTrade (no recordCloseEventAtomic
-                // isNew here) and fires once per signal — it is not reconciler-replayed.
-                // Use a deterministic canonical fill id as tradeId so any IOU still
-                // dedupes on the (subscriber_bot_id, trade_id) unique index (5.5/T4).
-                const flipTradeId = DatabaseStorage.canonicalCloseFillId({
-                  signature: orderResult.txSignature || orderResult.signature || undefined,
-                  botId: subBot.id,
-                  side: 'CLOSE',
-                  size: closedSize.toFixed(8),
-                  market: subBot.market,
-                  fillPrice,
-                  timestampMs: Date.now(),
-                });
-                console.log(`[Subscriber Routing] Initiating profit share for FLIP on ${subBot.id}: pnl=$${flipPnl.toFixed(4)}`);
-                // V3 Phase 3b fund-safety: see close-path note above — hand
-                // the profit-share an isolated key copy so the outer finally
-                // doesn't zeroize the buffer mid-settlement.
-                const flipProfitShareKeyCopy = new Uint8Array(subAgentSecretKey);
-                distributeCreatorProfitShare({
-                  subscriberBotId: subBot.id,
-                  subscriberWalletAddress: subBot.walletAddress,
-                  subscriberAgentPublicKey: subWallet.agentPublicKey!,
-                  subscriberEncryptedPrivateKey: flipProfitShareKeyCopy,
-                  driftSubaccountId: subAccountId,
-                  realizedPnl: flipPnl,
-                  tradeId: flipTradeId,
-                }).then(result => {
-                  if (result.success && result.amount) {
-                    console.log(`[Subscriber Routing] Flip profit share distributed: $${result.amount.toFixed(4)} from ${subBot.id}`);
-                  } else if (!result.success && result.error) {
-                    console.error(`[Subscriber Routing] Flip profit share failed for ${subBot.id}: ${result.error}`);
-                  }
-                }).catch(err => console.error(`[Subscriber Routing] Flip profit share error for ${subBot.id}:`, err))
-                  .finally(() => { flipProfitShareKeyCopy.fill(0); });
-              }
-            }
-
-            // Open + (optional) flip-close; counters come from canonical SQL.
+            // The close leg, when present, was finalized separately before this
+            // open. Do not attribute its PnL to the open trade.
             await storage.recomputeAndMergeBotStats(subBot.id, {
-              totalPnlDelta: flipPnl,
+              totalPnlDelta: 0,
               totalVolumeDelta: contractSize * fillPrice,
               lastTradeAt: new Date().toISOString(),
             });
@@ -5319,6 +5672,9 @@ async function routeSignalToSubscribers(
           } else {
             console.error(`[Subscriber Routing] Order failed for subscriber bot ${subBot.id}:`, orderResult.error);
             const errorMsg = parseDriftError(orderResult.error);
+            if (subscriberFlipDisposition) {
+              subscriberFlipDisposition = rejectSignalBotFlipOpen(subscriberFlipDisposition, 'execution', errorMsg);
+            }
             
             const failedTrade = await storage.createBotTrade({
               tradingBotId: subBot.id,
@@ -5330,7 +5686,7 @@ async function routeSignalToSubscribers(
               status: 'failed',
               fee: '0',
               errorMessage: errorMsg,
-              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
+              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, reversal: subscriberFlipDisposition },
               executionMethod: 'legacy',
             });
 
@@ -18198,18 +18554,6 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         side = 'short';
       }
 
-      // Check if bot allows this side
-      if (side && bot.side !== 'both') {
-        if (bot.side === 'long' && side !== 'long') {
-          await storage.updateWebhookLog(log.id, { errorMessage: "Bot only accepts long signals", processed: true });
-          return res.status(400).json({ error: "Bot only accepts long signals" });
-        }
-        if (bot.side === 'short' && side !== 'short') {
-          await storage.updateWebhookLog(log.id, { errorMessage: "Bot only accepts short signals", processed: true });
-          return res.status(400).json({ error: "Bot only accepts short signals" });
-        }
-      }
-
       if (!side) {
         await storage.updateWebhookLog(log.id, { errorMessage: "No valid action found (expected buy or sell)", processed: true });
         return res.status(400).json({ error: "No valid action found", received: payload });
@@ -18242,6 +18586,37 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const isPartialClose = !isCloseSignal && classifiedSignal.type === 'PARTIAL_CLOSE';
       const partialCloseSize = isPartialClose ? classifiedSignal.closeSize : 0;
       const partialCloseFraction = isPartialClose ? classifiedSignal.closedFraction : 0;
+      const isFlipSignal = classifiedSignal.type === 'FLIP';
+
+      // A published source's own close/open outcome is not authority for any
+      // subscriber. Dispatch the reversal intent once, before source close
+      // resolution, so every subscriber can classify and resolve its own
+      // position even if this source's later open is rejected.
+      if (isFlipSignal && botPublishedInfo?.isActive) {
+        routeSignalToSubscribers(botId, {
+          action: action as 'buy' | 'sell',
+          contracts,
+          positionSize,
+          price: signalPrice,
+          isCloseSignal: false,
+          strategyPositionSize,
+          isFlipSignal: true,
+        }).catch(error => console.error(`[Subscriber Routing] Independent FLIP routing failed for ${botId}:`, error));
+      }
+
+      // Direction restrictions are entry admission.  A full/partial/FLIP close
+      // is never rejected merely because its signal points at a disallowed new
+      // direction.  FLIP admission is applied only after its close leg below.
+      if (!isFlipSignal && !isCloseSignal && !isPartialClose && bot.side !== 'both') {
+        if (bot.side === 'long' && side !== 'long') {
+          await storage.updateWebhookLog(log.id, { errorMessage: "Bot only accepts long signals", processed: true });
+          return res.status(400).json({ error: "Bot only accepts long signals" });
+        }
+        if (bot.side === 'short' && side !== 'short') {
+          await storage.updateWebhookLog(log.id, { errorMessage: "Bot only accepts short signals", processed: true });
+          return res.status(400).json({ error: "Bot only accepts short signals" });
+        }
+      }
       if (isPartialClose) {
         console.log(`[Webhook] *** PARTIAL CLOSE DETECTED *** (slice=${partialCloseSize.toFixed(4)}, fraction=${(partialCloseFraction * 100).toFixed(1)}%, classified=${classifiedSignal.type})`);
       }
@@ -18582,43 +18957,21 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             const webhookCloseVolume = closeSize * (Number.isFinite(webhookClosePrice) ? webhookClosePrice : 0);
             // Canonical fill id computed once → stored protocolFillId and the
             // profit-share tradeId match so any IOU dedupes (5.5/T4).
-            const webhookCloseFillId = DatabaseStorage.canonicalCloseFillId({
-              signature: finalTxSignature,
-              botId,
-              side: 'CLOSE',
-              size: closeSize,
-              market: bot.market,
-              fillPrice: result.fillPrice ?? parseFloat(signalPrice || '0'),
-              timestampMs: Date.now(),
-            });
+            let webhookCloseFillId: string;
             let webhookCloseAtomic;
             try {
-              webhookCloseAtomic = await storage.recordCloseEventAtomic({
-                botId,
-                update: {
-                  tradeId: closeTrade.id,
-                  fields: {
-                    status: "executed",
-                    txSignature: finalTxSignature,
-                    price: result.fillPrice ? String(result.fillPrice) : signalPrice,
-                    fee: String(closeFee),
-                    pnl: String(closeTradePnl),
-                    executionMethod: result.executionMethod || 'legacy',
-                    protocolFillId: webhookCloseFillId,
-                  },
-                },
-                deltas: {
-                  totalPnlDelta: closeTradePnl,
-                  totalVolumeDelta: webhookCloseVolume,
-                  lastTradeAt: new Date().toISOString(),
-                },
-                confirmedPositionClose: {
-                  walletAddress: bot.walletAddress,
-                  market: bot.market,
-                  realizedPnlDelta: closeTradePnl,
-                  feeDelta: closeFee,
-                },
+              const finalized = await finalizePerBotConfirmedClose({
+                bot,
+                tradeId: closeTrade.id,
+                signature: finalTxSignature,
+                size: closeSize,
+                fillPrice: Number.isFinite(webhookClosePrice) ? webhookClosePrice : 0,
+                fee: closeFee,
+                pnl: closeTradePnl,
+                executionMethod: result.executionMethod,
               });
+              webhookCloseAtomic = finalized;
+              webhookCloseFillId = finalized.fillId;
             } catch (atomicCloseErr) {
               console.error(`[Webhook] Signed close could not finalize canonical DB state:`, atomicCloseErr);
               await Promise.allSettled([
@@ -19056,234 +19409,52 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         });
       }
 
-      // POSITION FLIP DETECTION: Check if signal direction conflicts with existing position
-      // If we're LONG and receive a SHORT signal (or vice versa), we need to:
-      // 1. First close the existing position completely
-      // 2. Then execute the new order in the opposite direction
-      
-      // Get wallet for execution (needed for on-chain position check)
+      // The classifier's FLIP verdict is authoritative. Do not re-derive it
+      // from another venue read: a read failure must never manufacture FLAT.
       const wallet = await storage.getWallet(bot.walletAddress);
       if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
         await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured", processed: true });
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
-      
+
       const subAccountId = bot.driftSubaccountId ?? 0;
       const openQueryAccount = webhookBotCtx ? webhookBotCtx.botPublicKey : wallet.agentPublicKey;
       const openQuerySubId = webhookBotCtx ? 0 : subAccountId;
-      let onChainPosition;
-      try {
-        onChainPosition = await PositionService.getPositionForExecution(
-          botId,
-          openQueryAccount,
-          openQuerySubId,
-          bot.market,
-          webhookBotCtx?.botPublicKey
-        );
-        console.log(`[Webhook] Position flip check: on-chain position is ${onChainPosition.side} ${Math.abs(onChainPosition.size).toFixed(6)} on ${bot.market}`);
-      } catch (posErr) {
-        console.warn(`[Webhook] Could not query on-chain position for flip detection:`, posErr);
-        onChainPosition = { side: 'FLAT', size: 0 };
-      }
-      
-      // Use on-chain position size for accurate flip detection
-      const actualOnChainSize = onChainPosition.side === 'LONG' ? onChainPosition.size : 
-                                onChainPosition.side === 'SHORT' ? -onChainPosition.size : 0;
-      const isCurrentlyLong = onChainPosition.side === 'LONG';
-      const isCurrentlyShort = onChainPosition.side === 'SHORT';
-      const signalIsLong = side === 'long';
-      const signalIsShort = side === 'short';
-      
-      console.log(`[Webhook] On-chain position check: ${bot.market} size=${actualOnChainSize.toFixed(6)} (${isCurrentlyLong ? 'LONG' : isCurrentlyShort ? 'SHORT' : 'FLAT'})`);
-      
-      // Detect position flip: signal direction opposite to current position
-      const isPositionFlip = (isCurrentlyLong && signalIsShort) || (isCurrentlyShort && signalIsLong);
-      
-      if (isPositionFlip && Math.abs(actualOnChainSize) > 0) {
-        console.log(`[Webhook] POSITION FLIP detected: On-chain ${isCurrentlyLong ? 'LONG' : 'SHORT'} ${Math.abs(actualOnChainSize).toFixed(6)} contracts, signal wants to go ${side.toUpperCase()}`);
-        
-        // Step 1: Close existing position first using ACTUAL on-chain size
-        const closeSide = isCurrentlyLong ? 'short' : 'long';
-        const closeSize = Math.abs(actualOnChainSize); // Use actual on-chain size, not tracked
-        
-        console.log(`[Webhook] Step 1: Closing existing ${isCurrentlyLong ? 'LONG' : 'SHORT'} position of ${closeSize} contracts`);
-        
-        // Pending row — canonical `tx-<sig>` is set in the executed
-        // update below, matching the cross-path identity scheme.
-        const closeTrade = await storage.createBotTrade({
-          tradingBotId: botId,
+      let flipDisposition: SignalBotFlipDisposition | null = null;
+      if (isFlipSignal) {
+        flipDisposition = await executeSignalBotFlipClose({
+          bot,
+          classifiedSignal: classifiedSignal as typeof classifiedSignal & { type: "FLIP" },
+          authority: {
+            botId,
+            market: bot.market,
+            queryAccount: openQueryAccount,
+            querySubaccountId: openQuerySubId,
+            botPublicKey: webhookBotCtx?.botPublicKey,
+          },
+          agentSecretKey: agentKeyResult.secretKey,
+          subaccountId: openQuerySubId,
+          slippageBps: wallet.slippageBps ?? 50,
+          privateKeyBase58,
+          agentPublicKey: wallet.agentPublicKey,
+          botCtx: webhookBotCtx,
           walletAddress: bot.walletAddress,
-          market: bot.market,
-          side: "CLOSE",
-          size: String(closeSize),
-          price: signalPrice,
-          status: "pending",
-          webhookPayload: { ...payload, _flipClose: true },
-          executionMethod: 'legacy',
+          signalPrice,
+          webhookPayload: payload,
+          executionLabel: "per_bot",
+          finalizer: "per_bot",
         });
-        
-        try {
-          // Use closePerpPosition for exact BN precision (prevents float precision dust)
-          const flipSlippageBps = wallet.slippageBps ?? 50;
-          console.log(`[Webhook] Using closePerpPosition (exact BN) for position flip close, slippage=${flipSlippageBps}bps`);
-          const closeResult = await closePerpPosition(
-            agentKeyResult.secretKey,
-            bot.market,
-            webhookBotCtx ? 0 : subAccountId,
-            closeSize,
-            flipSlippageBps,
-            privateKeyBase58,
-            wallet.agentPublicKey!,
-            isCurrentlyLong ? 'long' : 'short',
-            webhookBotCtx,
-            bot.walletAddress,
-            getAdapterForBot(bot),
-          );
-          
-          if (!closeResult.success) {
-            await storage.updateBotTrade(closeTrade.id, { status: "failed", errorMessage: `Position flip close failed: ${closeResult.error}` });
-            await storage.updateWebhookLog(log.id, { errorMessage: `Position flip close failed: ${closeResult.error}`, processed: true });
-            return res.status(500).json({ error: `Position flip close failed: ${closeResult.error}` });
-          }
-          
-          // closePerpPosition returns signature, not txSignature
-          const flipTxSignature = closeResult.signature || null;
-          
-          // Calculate PnL for the flip close regardless of whether we have a signature
-          // This ensures PnL is recorded even if position was closed by another process
-          const closeFillPrice = parseFloat(signalPrice || "0");
-          const closeNotional = closeSize * closeFillPrice;
-          const closeFee = closeNotional * getExchangeFeeRate();
-          
-          // Calculate trade PnL for position flip close
-          const flipEntryPrice = onChainPosition.entryPrice || 0;
-          let flipClosePnl = 0;
-          if (flipEntryPrice > 0 && closeFillPrice > 0) {
-            if (closeSide === 'short') {
-              // Closing LONG: profit if exitPrice > entryPrice
-              flipClosePnl = (closeFillPrice - flipEntryPrice) * closeSize - closeFee;
-            } else {
-              // Closing SHORT: profit if entryPrice > exitPrice
-              flipClosePnl = (flipEntryPrice - closeFillPrice) * closeSize - closeFee;
-            }
-            console.log(`[Webhook] Flip close PnL: entry=$${flipEntryPrice.toFixed(2)}, exit=$${closeFillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${flipClosePnl.toFixed(4)}`);
-          }
-
-          // Handle case where subprocess found no position to close (success=true, signature=null)
-          // This is unexpected for flip since we verified position exists, but handle gracefully
-          if (closeResult.success && !flipTxSignature) {
-            console.warn(`[Webhook] Position flip close: success but no signature - position may have been closed by another process`);
-            // Still save the PnL + atomically recompute stats so counters
-            // stay correct even when there's no on-chain signature.
-            await storage.recordCloseEventAtomic({
-              botId,
-              update: {
-                tradeId: closeTrade.id,
-                fields: {
-                  status: "executed",
-                  txSignature: null,
-                  price: String(closeFillPrice),
-                  fee: String(closeFee),
-                  pnl: String(flipClosePnl),
-                  protocolFillId: DatabaseStorage.canonicalCloseFillId({
-                    signature: null,
-                    botId,
-                    side: 'CLOSE',
-                    size: closeSize,
-                    market: bot.market,
-                    fillPrice: closeFillPrice,
-                    timestampMs: bot.stats?.lastTradeAt
-                      ? new Date(bot.stats.lastTradeAt).getTime()
-                      : Date.now(),
-                  }),
-                  errorMessage: "Position was already closed (no trade executed)",
-                },
-              },
-              deltas: {
-                totalPnlDelta: flipClosePnl,
-                totalVolumeDelta: closeSize * closeFillPrice,
-                lastTradeAt: new Date().toISOString(),
-              },
-            });
-            
-            // Defer sync for no-signature case (fire-and-forget)
-            (async () => {
-              try {
-                await syncPositionFromOnChain(botId, bot.walletAddress, wallet.agentPublicKey!, subAccountId, bot.market, closeTrade.id, closeFee, closeFillPrice, closeSide, closeSize, webhookBotCtx?.botPublicKey);
-              } catch (err) {
-                console.error(`[Webhook] Deferred flip close sync failed (non-blocking): ${err}`);
-              }
-            })();
-            
-            // Continue to execute the new position anyway
-            console.log(`[Webhook] Proceeding to open ${side.toUpperCase()} position despite no close signature`);
-          } else {
-            // Update close trade with execution details + atomic recompute.
-            await storage.recordCloseEventAtomic({
-              botId,
-              update: {
-                tradeId: closeTrade.id,
-                fields: {
-                  status: "executed",
-                  txSignature: flipTxSignature,
-                  price: String(closeFillPrice),
-                  fee: String(closeFee),
-                  pnl: String(flipClosePnl),
-                  protocolFillId: DatabaseStorage.canonicalCloseFillId({
-                    signature: flipTxSignature,
-                    botId,
-                    side: 'CLOSE',
-                    size: closeSize,
-                    market: bot.market,
-                    fillPrice: closeFillPrice,
-                    timestampMs: Date.now(),
-                  }),
-                },
-              },
-              deltas: {
-                totalPnlDelta: flipClosePnl,
-                totalVolumeDelta: closeSize * closeFillPrice,
-                lastTradeAt: new Date().toISOString(),
-              },
-            });
-          
-            console.log(`[Webhook] Position closed successfully. Now proceeding to open ${side.toUpperCase()} position.`);
-            
-            // SETTLE PNL after flip close to make profits available for the new position
-            // This MUST stay blocking - profits need to be available as margin for the new OPEN
-            if (bot.profitReinvest && getAdapterForBot(bot).getCapabilities().supportsSettlePnl) {
-              try {
-                console.log(`[Webhook] Settling PnL for subaccount ${subAccountId} after flip close (profit reinvest enabled)`);
-                const settleResult = await settleAllPnl(agentKeyResult.secretKey, subAccountId, getAdapterForBot(bot));
-                if (settleResult.success) {
-                  console.log(`[Webhook] PnL settled for ${settleResult.settledMarkets?.length || 0} market(s)`);
-                } else {
-                  console.warn(`[Webhook] PnL settlement failed (non-blocking): ${settleResult.error}`);
-                }
-              } catch (settleErr: any) {
-                console.warn(`[Webhook] PnL settlement error (non-blocking): ${settleErr.message}`);
-              }
-            }
-          
-            // Defer position sync only — stats already recomputed atomically above.
-            (async () => {
-              try {
-                await syncPositionFromOnChain(botId, bot.walletAddress, wallet.agentPublicKey!, subAccountId, bot.market, closeTrade.id, closeFee, closeFillPrice, closeSide, closeSize, webhookBotCtx?.botPublicKey);
-              } catch (err) {
-                console.error(`[Webhook] Deferred flip close sync failed (non-blocking): ${err}`);
-              }
-            })();
-          }
-          
-        } catch (closeError: any) {
-          console.error(`[Webhook] Position flip close failed:`, closeError);
-          await storage.updateBotTrade(closeTrade.id, { status: "failed", errorMessage: `Position flip close failed: ${closeError.message}` });
-          await storage.updateWebhookLog(log.id, { errorMessage: `Position flip close failed: ${closeError.message}`, processed: true });
-          return res.status(500).json({ error: `Position flip close failed: ${closeError.message}` });
+        if (flipDisposition.open.kind !== "admitted") {
+          const reason = `FLIP close terminal: ${flipDisposition.close.kind}`;
+          await storage.updateWebhookLog(log.id, { errorMessage: reason, processed: true });
+          return res.status(409).json(signalBotFlipHttpPayload(flipDisposition, { error: reason }));
         }
-        
-        // Step 2: Now fall through to execute the new position in the opposite direction
-        console.log(`[Webhook] Step 2: Opening new ${side.toUpperCase()} position`);
+        if (bot.side !== "both" && bot.side !== side) {
+          const reason = `Bot only accepts ${bot.side} signals`;
+          flipDisposition = rejectSignalBotFlipOpen(flipDisposition, "direction", reason);
+          await storage.updateWebhookLog(log.id, { errorMessage: reason, processed: true, tradeExecuted: true });
+          return res.status(400).json(signalBotFlipHttpPayload(flipDisposition, { error: reason }));
+        }
       }
 
       // Regular order execution (not a close signal)
@@ -19322,7 +19493,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           txSignature: null,
         });
         await storage.updateWebhookLog(log.id, { errorMessage: "Could not get market price", processed: true });
-        return res.status(500).json({ error: "Could not get market price" });
+        const reason = "Could not get market price";
+        return res.status(500).json(signalBotFlipRejectedPayload(flipDisposition, "admission", reason, { error: reason }));
       }
 
       // USDT-to-Percentage Translation:
@@ -19375,7 +19547,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
         await storage.updateBotTrade(trade.id, { status: "failed", txSignature: null, errorMessage: errorMsg });
         await storage.updateWebhookLog(log.id, { errorMessage: errorMsg, processed: true });
-        return res.status(400).json({ error: errorMsg });
+        const category: SignalBotFlipOpenRejectionCategory = /fund|collateral|margin/i.test(errorMsg) ? "funding" : "sizing";
+        return res.status(400).json(signalBotFlipRejectedPayload(flipDisposition, category, errorMsg, { error: errorMsg }));
       }
 
       const finalContractSize = sizingResult.finalContractSize;
@@ -19447,11 +19620,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           });
           await storage.updateWebhookLog(log.id, { errorMessage: `${retryReason} - retry queued: ${retryJobId}`, processed: true });
           
-          return res.status(202).json({ 
+          return res.status(202).json(signalBotFlipHttpPayload(
+            flipDisposition ? deferSignalBotFlipOpen(flipDisposition, `${retryReason} - automatic retry scheduled`) : null,
+            {
             status: "queued_for_retry",
             retryJobId,
             message: `${retryReason} - automatic retry scheduled`
-          });
+            },
+          ));
         }
         
         await storage.updateBotTrade(trade.id, {
@@ -19471,7 +19647,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           error: userFriendlyError,
         }).catch(err => console.error('[Notifications] Failed to send trade_failed notification:', err));
         
-        return res.status(500).json({ error: userFriendlyError });
+        return res.status(500).json(signalBotFlipRejectedPayload(flipDisposition, "execution", userFriendlyError, { error: userFriendlyError }));
       }
 
       const fillPrice = orderResult.fillPrice || parseFloat(signalPrice || "0");
@@ -19496,12 +19672,17 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       } catch (dbError: any) {
         if (dbError?.code === '23505') {
           console.log(`[Webhook] Concurrent duplicate detected at DB level, signal already executed: hash=${signalHash}`);
-          return res.status(200).json({ status: "skipped", reason: "concurrent duplicate" });
+          return res.status(200).json(signalBotFlipHttpPayload(
+            flipDisposition ? markSignalBotFlipOpenExecuted(flipDisposition, orderResult.txSignature || orderResult.signature || null) : null,
+            { status: "skipped", reason: "concurrent duplicate" },
+          ));
         }
         throw dbError;
       }
 
-      res.json({
+      res.json(signalBotFlipHttpPayload(
+        flipDisposition ? markSignalBotFlipOpenExecuted(flipDisposition, orderResult.txSignature || orderResult.signature || null) : null,
+        {
         success: true,
         action: action,
         side: side,
@@ -19509,24 +19690,27 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         market: bot.market,
         size: positionSize,
         signalHash,
-      });
+        },
+      ));
 
       console.log(`[WEBHOOK-TRACE] ========== ROUTING SUBSCRIBER BOTS (OPEN) ==========`);
       console.log(`[WEBHOOK-TRACE] Calling routeSignalToSubscribers for bot ${botId}`);
       console.log(`[WEBHOOK-TRACE] Signal: action=${action}, contracts=${contracts}, isCloseSignal=false, price=${signalPrice || fillPrice.toString()}`);
-      routeSignalToSubscribers(botId, {
-        action: action as 'buy' | 'sell',
-        contracts,
-        positionSize,
-        price: signalPrice || fillPrice.toString(),
-        isCloseSignal: false,
-        strategyPositionSize,
-      }).then(() => {
-        console.log(`[WEBHOOK-TRACE] OPEN routing completed successfully for bot ${botId}`);
-      }).catch(routingErr => {
-        console.error(`[WEBHOOK-TRACE] OPEN routing FAILED for bot ${botId}:`, routingErr);
-        console.error(`[Subscriber Routing] Deferred routing error for bot ${botId}:`, routingErr);
-      });
+      if (!isFlipSignal) {
+        routeSignalToSubscribers(botId, {
+          action: action as 'buy' | 'sell',
+          contracts,
+          positionSize,
+          price: signalPrice || fillPrice.toString(),
+          isCloseSignal: false,
+          strategyPositionSize,
+        }).then(() => {
+          console.log(`[WEBHOOK-TRACE] OPEN routing completed successfully for bot ${botId}`);
+        }).catch(routingErr => {
+          console.error(`[WEBHOOK-TRACE] OPEN routing FAILED for bot ${botId}:`, routingErr);
+          console.error(`[Subscriber Routing] Deferred routing error for bot ${botId}:`, routingErr);
+        });
+      }
 
       // --- Deferred post-trade work (fire-and-forget, non-blocking) ---
       console.log('[Webhook] Response sent, deferring post-trade work...');
@@ -19871,18 +20055,6 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         side = 'short';
       }
 
-      // Check bot side restrictions
-      if (side && bot.side !== 'both') {
-        if (bot.side === 'long' && side !== 'long') {
-          await storage.updateWebhookLog(log.id, { errorMessage: "Bot only accepts long signals", processed: true });
-          return res.status(400).json({ error: "Bot only accepts long signals" });
-        }
-        if (bot.side === 'short' && side !== 'short') {
-          await storage.updateWebhookLog(log.id, { errorMessage: "Bot only accepts short signals", processed: true });
-          return res.status(400).json({ error: "Bot only accepts short signals" });
-        }
-      }
-
       if (!side) {
         await storage.updateWebhookLog(log.id, { errorMessage: "No valid action found (expected buy or sell)", processed: true });
         return res.status(400).json({ error: "No valid action found", received: payload });
@@ -20158,42 +20330,21 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             // Atomic close-event update + stats recompute in a single tx.
             // Canonical fill id computed once → stored protocolFillId and the
             // profit-share tradeId match so any IOU dedupes (5.5/T4).
-            const userWebhookCloseFillId = DatabaseStorage.canonicalCloseFillId({
-              signature: result.signature,
-              botId,
-              side: 'CLOSE',
-              size: closeSize,
-              market: bot.market,
-              fillPrice: closeFillPrice,
-              timestampMs: Date.now(),
-            });
+            let userWebhookCloseFillId: string;
             let userWebhookCloseAtomic;
             try {
-              userWebhookCloseAtomic = await storage.recordCloseEventAtomic({
-                botId,
-                update: {
-                  tradeId: closeTrade.id,
-                  fields: {
-                    status: "executed",
-                    txSignature: result.signature,
-                    price: closeFillPrice.toString(),
-                    fee: closeFee.toString(),
-                    pnl: closeTradePnl.toString(),
-                    protocolFillId: userWebhookCloseFillId,
-                  },
-                },
-                deltas: {
-                  totalPnlDelta: closeTradePnl,
-                  totalVolumeDelta: closeNotional,
-                  lastTradeAt: new Date().toISOString(),
-                },
-                confirmedPositionClose: {
-                  walletAddress: bot.walletAddress,
-                  market: bot.market,
-                  realizedPnlDelta: closeTradePnl,
-                  feeDelta: closeFee,
-                },
+              const finalized = await finalizeUserWebhookConfirmedClose({
+                bot,
+                tradeId: closeTrade.id,
+                signature: result.signature,
+                size: closeSize,
+                fillPrice: closeFillPrice,
+                fee: closeFee,
+                pnl: closeTradePnl,
+                executionMethod: result.executionMethod,
               });
+              userWebhookCloseAtomic = finalized;
+              userWebhookCloseFillId = finalized.fillId;
             } catch (atomicCloseErr) {
               console.error(`[User Webhook] Signed close could not finalize canonical DB state:`, atomicCloseErr);
               await Promise.allSettled([
@@ -20491,6 +20642,33 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const uwIsPartialClose = !isCloseSignal && uwClassified.type === 'PARTIAL_CLOSE';
       const uwPartialCloseSize = uwIsPartialClose ? uwClassified.closeSize : 0;
       const uwPartialCloseFraction = uwIsPartialClose ? uwClassified.closedFraction : 0;
+      const uwIsFlipSignal = uwClassified.type === 'FLIP';
+
+      if (uwIsFlipSignal) {
+        const publishedFlipSource = await storage.getPublishedBotByTradingBotId(botId);
+        if (publishedFlipSource?.isActive) {
+          routeSignalToSubscribers(botId, {
+            action: action as 'buy' | 'sell',
+            contracts,
+            positionSize,
+            price: signalPrice,
+            isCloseSignal: false,
+            strategyPositionSize,
+            isFlipSignal: true,
+          }).catch(error => console.error(`[User Webhook] Independent FLIP routing failed for ${botId}:`, error));
+        }
+      }
+
+      if (!uwIsFlipSignal && !uwIsPartialClose && bot.side !== 'both') {
+        if (bot.side === 'long' && side !== 'long') {
+          await storage.updateWebhookLog(log.id, { errorMessage: "Bot only accepts long signals", processed: true });
+          return res.status(400).json({ error: "Bot only accepts long signals" });
+        }
+        if (bot.side === 'short' && side !== 'short') {
+          await storage.updateWebhookLog(log.id, { errorMessage: "Bot only accepts short signals", processed: true });
+          return res.status(400).json({ error: "Bot only accepts short signals" });
+        }
+      }
 
       if (uwIsPartialClose) {
         console.log(`[User Webhook] *** PARTIAL CLOSE DETECTED *** (slice=${uwPartialCloseSize.toFixed(4)}, fraction=${(uwPartialCloseFraction * 100).toFixed(1)}%, classified=${uwClassified.type})`);
@@ -20636,6 +20814,45 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
 
+      let uwFlipDisposition: SignalBotFlipDisposition | null = null;
+      if (uwIsFlipSignal) {
+        const uwFlipSubaccountId = userWebhookBotCtx ? 0 : (bot.driftSubaccountId ?? 0);
+        const uwFlipQueryAccount = userWebhookBotCtx ? userWebhookBotCtx.botPublicKey : wallet.agentPublicKey!;
+        uwFlipDisposition = await executeSignalBotFlipClose({
+          bot,
+          classifiedSignal: uwClassified as typeof uwClassified & { type: "FLIP" },
+          authority: {
+            botId,
+            market: bot.market,
+            queryAccount: uwFlipQueryAccount,
+            querySubaccountId: uwFlipSubaccountId,
+            botPublicKey: userWebhookBotCtx?.botPublicKey,
+          },
+          agentSecretKey: agentKeyResult.secretKey,
+          subaccountId: uwFlipSubaccountId,
+          slippageBps: wallet.slippageBps ?? 50,
+          privateKeyBase58,
+          agentPublicKey: wallet.agentPublicKey || undefined,
+          botCtx: userWebhookBotCtx,
+          walletAddress,
+          signalPrice,
+          webhookPayload: payload,
+          executionLabel: "user_webhook",
+          finalizer: "user_webhook",
+        });
+        if (uwFlipDisposition.open.kind !== "admitted") {
+          const reason = `FLIP close terminal: ${uwFlipDisposition.close.kind}`;
+          await storage.updateWebhookLog(log.id, { errorMessage: reason, processed: true });
+          return res.status(409).json(signalBotFlipHttpPayload(uwFlipDisposition, { error: reason }));
+        }
+        if (bot.side !== "both" && bot.side !== side) {
+          const reason = `Bot only accepts ${bot.side} signals`;
+          uwFlipDisposition = rejectSignalBotFlipOpen(uwFlipDisposition, "direction", reason);
+          await storage.updateWebhookLog(log.id, { errorMessage: reason, processed: true, tradeExecuted: true });
+          return res.status(400).json(signalBotFlipHttpPayload(uwFlipDisposition, { error: reason }));
+        }
+      }
+
       // Create trade record
       const trade = await storage.createBotTrade({
         tradingBotId: botId,
@@ -20665,7 +20882,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           txSignature: null,
         });
         await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured", processed: true });
-        return res.status(400).json({ error: "Agent wallet not configured" });
+        const reason = "Agent wallet not configured";
+        return res.status(400).json(signalBotFlipRejectedPayload(uwFlipDisposition, "admission", reason, { error: reason }));
       }
 
       // Get current market price from oracle (used for order execution)
@@ -20676,7 +20894,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           txSignature: null,
         });
         await storage.updateWebhookLog(log.id, { errorMessage: "Could not get market price", processed: true });
-        return res.status(500).json({ error: "Could not get market price" });
+        const reason = "Could not get market price";
+        return res.status(500).json(signalBotFlipRejectedPayload(uwFlipDisposition, "admission", reason, { error: reason }));
       }
 
       // USDT-to-Percentage Translation:
@@ -20732,7 +20951,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
         await storage.updateBotTrade(trade.id, { status: "failed", txSignature: null, errorMessage: errorMsg });
         await storage.updateWebhookLog(log.id, { errorMessage: errorMsg, processed: true });
-        return res.status(400).json({ error: errorMsg });
+        const category: SignalBotFlipOpenRejectionCategory = /fund|collateral|margin/i.test(errorMsg) ? "funding" : "sizing";
+        return res.status(400).json(signalBotFlipRejectedPayload(uwFlipDisposition, category, errorMsg, { error: errorMsg }));
       }
 
       const contractSize = sizingResult.finalContractSize;
@@ -20795,11 +21015,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           });
           await storage.updateWebhookLog(log.id, { errorMessage: `${retryReason} - retry queued: ${retryJobId}`, processed: true });
           
-          return res.status(202).json({ 
+          return res.status(202).json(signalBotFlipHttpPayload(
+            uwFlipDisposition ? deferSignalBotFlipOpen(uwFlipDisposition, `${retryReason} - automatic retry scheduled`) : null,
+            {
             status: "queued_for_retry",
             retryJobId,
             message: `${retryReason} - automatic retry scheduled`
-          });
+            },
+          ));
         }
         
         await storage.updateBotTrade(trade.id, {
@@ -20819,7 +21042,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           error: userFriendlyError,
         }).catch(err => console.error('[Notifications] Failed to send trade_failed notification:', err));
         
-        return res.status(500).json({ error: userFriendlyError });
+        return res.status(500).json(signalBotFlipRejectedPayload(uwFlipDisposition, "execution", userFriendlyError, { error: userFriendlyError }));
       }
 
       let userFillPrice = orderResult.fillPrice || parseFloat(signalPrice || "0");
@@ -20888,12 +21111,17 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         // Unique constraint violation means another request already executed this signal
         if (dbError?.code === '23505') {
           console.log(`[User Webhook] Concurrent duplicate detected at DB level, signal already executed: hash=${signalHash}`);
-          return res.status(200).json({ status: "skipped", reason: "concurrent duplicate" });
+          return res.status(200).json(signalBotFlipHttpPayload(
+            uwFlipDisposition ? markSignalBotFlipOpenExecuted(uwFlipDisposition, orderResult.txSignature || orderResult.signature || null) : null,
+            { status: "skipped", reason: "concurrent duplicate" },
+          ));
         }
         throw dbError;
       }
 
-      res.json({
+      res.json(signalBotFlipHttpPayload(
+        uwFlipDisposition ? markSignalBotFlipOpenExecuted(uwFlipDisposition, orderResult.txSignature || orderResult.signature || null) : null,
+        {
         success: true,
         action: action,
         side: side,
@@ -20903,23 +21131,26 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         botId: botId,
         txSignature: orderResult.txSignature || orderResult.signature,
         signalHash,
-      });
+        },
+      ));
 
       // SUBSCRIBER ROUTING: Route open signal to subscriber bots
       console.log(`[User Webhook] ========== ROUTING SUBSCRIBER BOTS (OPEN) ==========`);
       console.log(`[User Webhook] Calling routeSignalToSubscribers for bot ${botId}`);
-      routeSignalToSubscribers(botId, {
-        action: action as 'buy' | 'sell',
-        contracts,
-        positionSize,
-        price: signalPrice || userFillPrice.toString(),
-        isCloseSignal: false,
-        strategyPositionSize,
-      }).then(() => {
-        console.log(`[User Webhook] OPEN routing completed successfully for bot ${botId}`);
-      }).catch(routingErr => {
-        console.error(`[User Webhook] OPEN routing FAILED for bot ${botId}:`, routingErr);
-      });
+      if (!uwIsFlipSignal) {
+        routeSignalToSubscribers(botId, {
+          action: action as 'buy' | 'sell',
+          contracts,
+          positionSize,
+          price: signalPrice || userFillPrice.toString(),
+          isCloseSignal: false,
+          strategyPositionSize,
+        }).then(() => {
+          console.log(`[User Webhook] OPEN routing completed successfully for bot ${botId}`);
+        }).catch(routingErr => {
+          console.error(`[User Webhook] OPEN routing FAILED for bot ${botId}:`, routingErr);
+        });
+      }
       } finally {
         // PHASE 6.2: Ensure agent key is cleaned up after execution
         cleanupAgentKey();

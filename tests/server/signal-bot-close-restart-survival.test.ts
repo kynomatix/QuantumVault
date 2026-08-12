@@ -91,7 +91,7 @@ import {
   STORAGE_CLOSE_TIMEOUT_MS,
   createGracefulHttpShutdown,
 } from '../../server/graceful-http-shutdown';
-import { registerRoutes } from '../../server/routes';
+import { registerRoutes, routeSignalToSubscribers } from '../../server/routes';
 import { storage } from '../../server/storage';
 import { decryptAgentKeyStrict, getUmkForWebhook } from '../../server/session-v3';
 
@@ -154,28 +154,96 @@ async function postFullClose(endpoint: 'tradingview' | 'user') {
   };
 }
 
+async function postFlip(
+  endpoint: 'tradingview' | 'user',
+  direction: 'short_to_long' | 'long_to_short' = 'short_to_long',
+) {
+  const opensLong = direction === 'short_to_long';
+  const payload: Record<string, unknown> = {
+    action: opensLong ? 'buy' : 'sell',
+    contracts: '0.25',
+    position_size: opensLong ? '0.25' : '-0.25',
+    price: '65000',
+    symbol: 'BTCUSD',
+    time: '2026-08-12T00:00:00.000Z',
+  };
+  let url = `${routeBaseUrl}/api/webhook/tradingview/${ROUTE_BOT_ID}?secret=${ROUTE_TV_SECRET}`;
+  if (endpoint === 'user') {
+    payload.botId = ROUTE_BOT_ID;
+    url = `${routeBaseUrl}/api/webhook/user/${ROUTE_WALLET}?secret=${ROUTE_USER_SECRET}`;
+  }
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return {
+    status: response.status,
+    body: await response.json() as Record<string, any>,
+  };
+}
+
 function primeCloseRoute(cachedPosition: unknown) {
-  vi.mocked(storage.createWebhookLog as any).mockResolvedValue({ id: 'webhook-log-1' });
-  vi.mocked(storage.getTradingBotById as any).mockResolvedValue(routeBot);
-  vi.mocked(storage.getPublishedBotByTradingBotId as any).mockResolvedValue(null);
-  vi.mocked(storage.getWallet as any).mockResolvedValue(routeWallet);
-  vi.mocked(storage.getBotPosition as any).mockResolvedValue(cachedPosition);
-  vi.mocked(storage.createBotTrade as any).mockResolvedValue({ id: 'close-trade-1' });
-  vi.mocked(storage.updateWebhookLog as any).mockResolvedValue(undefined);
-  vi.mocked(storage.updateBotTrade as any).mockResolvedValue(undefined);
-  vi.mocked(storage.createCloseRetry as any).mockResolvedValue(undefined);
-  vi.mocked(getUmkForWebhook as any).mockResolvedValue({
+  vi.mocked(storage.createWebhookLog as any).mockReset().mockResolvedValue({ id: 'webhook-log-1' });
+  vi.mocked(storage.getTradingBotById as any).mockReset().mockResolvedValue(routeBot);
+  vi.mocked(storage.getPublishedBotByTradingBotId as any).mockReset().mockResolvedValue(null);
+  vi.mocked(storage.getWallet as any).mockReset().mockResolvedValue(routeWallet);
+  vi.mocked(storage.getBotPosition as any).mockReset().mockResolvedValue(cachedPosition);
+  vi.mocked(storage.createBotTrade as any).mockReset().mockResolvedValue({ id: 'close-trade-1' });
+  vi.mocked(storage.recordCloseEventAtomic as any).mockReset().mockResolvedValue(undefined);
+  vi.mocked(storage.updateWebhookLog as any).mockReset().mockResolvedValue(undefined);
+  vi.mocked(storage.updateBotTrade as any).mockReset().mockResolvedValue(undefined);
+  vi.mocked(storage.createCloseRetry as any).mockReset().mockResolvedValue(undefined);
+  vi.mocked(getUmkForWebhook as any).mockReset().mockResolvedValue({
     umk: Buffer.alloc(32, 7),
     cleanup: vi.fn(),
   });
-  vi.mocked(decryptAgentKeyStrict as any).mockResolvedValue({
+  vi.mocked(decryptAgentKeyStrict as any).mockReset().mockResolvedValue({
     secretKey: routeKeypair.secretKey,
     cleanup: vi.fn(),
   });
-  routeMocks.adapter.getStrictPositionForMarket.mockRejectedValue(new Error('venue unavailable'));
-  routeMocks.adapter.placeMarketOrder.mockResolvedValue({
+  routeMocks.adapter.getStrictPositionForMarket.mockReset().mockRejectedValue(new Error('venue unavailable'));
+  routeMocks.adapter.placeMarketOrder.mockReset().mockResolvedValue({
     success: false,
     error: 'expected test stop after order submission',
+  });
+}
+
+function primeFlipRoute(options: {
+  bot?: Record<string, unknown>;
+  cachedPosition?: unknown;
+  initialAuthority?: unknown | Error;
+  postCloseAuthority?: unknown | Error;
+  closeResult?: Record<string, unknown>;
+} = {}) {
+  const cachedPosition = options.cachedPosition ?? {
+    market: 'BTC-PERP',
+    baseSize: '-0.25',
+    avgEntryPrice: '64000',
+  };
+  primeCloseRoute(cachedPosition);
+  vi.mocked(storage.getTradingBotById as any).mockResolvedValue({ ...routeBot, ...options.bot });
+  vi.mocked(storage.recordCloseEventAtomic as any).mockResolvedValue({
+    isNew: true,
+    trade: { id: 'close-trade-1' },
+  });
+
+  routeMocks.adapter.getStrictPositionForMarket.mockReset();
+  const initial = Object.prototype.hasOwnProperty.call(options, 'initialAuthority')
+    ? options.initialAuthority
+    : new Error('venue unavailable');
+  const post = Object.prototype.hasOwnProperty.call(options, 'postCloseAuthority')
+    ? options.postCloseAuthority
+    : null;
+  if (initial instanceof Error) routeMocks.adapter.getStrictPositionForMarket.mockRejectedValueOnce(initial);
+  else routeMocks.adapter.getStrictPositionForMarket.mockResolvedValueOnce(initial);
+  if (post instanceof Error) routeMocks.adapter.getStrictPositionForMarket.mockRejectedValueOnce(post);
+  else routeMocks.adapter.getStrictPositionForMarket.mockResolvedValueOnce(post);
+
+  routeMocks.adapter.placeMarketOrder.mockReset().mockResolvedValue(options.closeResult ?? {
+    success: true,
+    orderId: 'flip-close-signature',
+    fillPrice: 65000,
   });
 }
 
@@ -379,6 +447,133 @@ describe('close-path and restart contract wiring', () => {
       vi.clearAllMocks();
     });
 
+    it.each([
+      ['tradingview', 'short_to_long', '-0.25', 'short', 'long'],
+      ['tradingview', 'long_to_short', '0.25', 'long', 'short'],
+      ['user', 'short_to_long', '-0.25', 'short', 'long'],
+      ['user', 'long_to_short', '0.25', 'long', 'short'],
+    ] as const)(
+      '%s resolves a %s FLIP close from the validated durable fallback before rejecting the direction-mismatched open',
+      async (endpoint, direction, baseSize, permittedSide, closeSide) => {
+        primeFlipRoute({
+          bot: { side: permittedSide },
+          cachedPosition: { market: 'BTC-PERP', baseSize, avgEntryPrice: '64000' },
+        });
+
+        const response = await postFlip(endpoint, direction);
+
+        expect(response.status).toBe(400);
+        expect(response.body.reversal).toMatchObject({
+          close: { kind: 'executed', signature: 'flip-close-signature' },
+          open: { kind: 'rejected', category: 'direction' },
+        });
+        expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledTimes(1);
+        expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
+          internalSymbol: 'BTC-PERP',
+          side: closeSide,
+          sizeBase: 0.25,
+          reduceOnly: true,
+        }));
+        expect(storage.recordCloseEventAtomic).toHaveBeenCalledTimes(1);
+        const atomic = vi.mocked(storage.recordCloseEventAtomic as any).mock.calls[0][0];
+        expect(atomic.update.tradeId).toBe('close-trade-1');
+        if (endpoint === 'tradingview') {
+          expect(atomic.update.fields.executionMethod).toBe('adapter');
+        } else {
+          expect(atomic.update.fields).not.toHaveProperty('executionMethod');
+        }
+      },
+    );
+
+    it.each(['tradingview', 'user'] as const)(
+      '%s distinguishes authoritative venue flat from failed-read flat and evaluates only the open leg',
+      async (endpoint) => {
+        primeFlipRoute({ bot: { side: 'short' }, initialAuthority: null });
+
+        const response = await postFlip(endpoint);
+
+        expect(response.status).toBe(400);
+        expect(response.body.reversal).toEqual({
+          close: { kind: 'authoritative_flat' },
+          open: expect.objectContaining({ kind: 'rejected', category: 'direction' }),
+        });
+        expect(routeMocks.adapter.placeMarketOrder).not.toHaveBeenCalled();
+        expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      ['tradingview', 'failed', new Error('venue unavailable')],
+      ['tradingview', 'malformed', { internalSymbol: 'BTC-PERP', baseSize: Number.NaN, entryPrice: 64000 }],
+      ['user', 'failed', new Error('venue unavailable')],
+      ['user', 'malformed', { internalSymbol: 'BTC-PERP', baseSize: Number.NaN, entryPrice: 64000 }],
+    ] as const)(
+      '%s never converts a %s strict FLIP read into flat when the durable fallback is invalid',
+      async (endpoint, _readCase, initialAuthority) => {
+        const cached = { market: 'BTC-PERP', baseSize: '-0.25', avgEntryPrice: '64000' };
+        primeFlipRoute({ cachedPosition: cached, initialAuthority });
+        vi.mocked(storage.getBotPosition as any)
+          .mockReset()
+          .mockResolvedValueOnce(cached)
+          .mockResolvedValueOnce(null);
+
+        const response = await postFlip(endpoint);
+
+        expect(response.status).toBe(409);
+        expect(response.body.reversal).toMatchObject({
+          close: { kind: 'position_unavailable' },
+          open: { kind: 'not_evaluated', reason: 'position_unavailable' },
+        });
+        expect(routeMocks.adapter.placeMarketOrder).not.toHaveBeenCalled();
+        expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      ['tradingview', 'no signature', undefined, null, 'no_signature'],
+      ['tradingview', 'partial residual', 'flip-close-signature', { internalSymbol: 'BTC-PERP', baseSize: -0.1, entryPrice: 64000 }, 'partial'],
+      ['tradingview', 'post-close unreadable', 'flip-close-signature', new Error('post-close timeout'), 'post_close_unreadable'],
+      ['user', 'no signature', undefined, null, 'no_signature'],
+      ['user', 'partial residual', 'flip-close-signature', { internalSymbol: 'BTC-PERP', baseSize: -0.1, entryPrice: 64000 }, 'partial'],
+      ['user', 'post-close unreadable', 'flip-close-signature', new Error('post-close timeout'), 'post_close_unreadable'],
+    ] as const)(
+      '%s keeps the opposite open forbidden after a %s close terminal and leaves the close pending for reconciliation',
+      async (endpoint, _terminal, orderId, postCloseAuthority, expectedCloseKind) => {
+        primeFlipRoute({
+          initialAuthority: { internalSymbol: 'BTC-PERP', baseSize: -0.25, entryPrice: 64000 },
+          postCloseAuthority,
+          closeResult: { success: true, orderId, fillPrice: 65000 },
+        });
+
+        const response = await postFlip(endpoint);
+
+        expect(response.status).toBe(409);
+        expect(response.body.reversal).toMatchObject({
+          close: { kind: expectedCloseKind },
+          open: { kind: 'not_evaluated' },
+        });
+        expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();
+        expect(storage.updateBotTrade).toHaveBeenCalledWith('close-trade-1', expect.objectContaining({
+          status: 'pending',
+        }));
+      },
+    );
+
+    it.each(['tradingview', 'user'] as const)(
+      '%s duplicate gate returns before any FLIP close or open execution',
+      async (endpoint) => {
+        primeFlipRoute();
+        vi.mocked(storage.createWebhookLog as any).mockRejectedValue(Object.assign(new Error('duplicate'), { code: '23505' }));
+
+        const response = await postFlip(endpoint);
+
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({ status: 'skipped', reason: 'duplicate signal' });
+        expect(routeMocks.adapter.placeMarketOrder).not.toHaveBeenCalled();
+        expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();
+      },
+    );
+
     it.each(['tradingview', 'user'] as const)(
       '%s submits exactly one reduce-only close from a valid cached SHORT after the strict read fails',
       async (endpoint) => {
@@ -445,6 +640,124 @@ describe('close-path and restart contract wiring', () => {
         expect(storage.getBotPosition).toHaveBeenCalledTimes(endpoint === 'tradingview' ? 1 : 0);
       },
     );
+
+    it('contains one subscriber classification failure and still closes the next paused subscriber without reopening it', async () => {
+      const sourceBotId = 'published-source-bot';
+      const failingSubscriber = { ...routeBot, id: 'subscriber-failing', walletAddress: 'wallet-failing' };
+      const pausedSubscriber = {
+        ...routeBot,
+        id: 'subscriber-paused',
+        walletAddress: 'wallet-paused',
+        isActive: false,
+        side: 'both',
+      };
+      const pausedWallet = { ...routeWallet, walletAddress: 'wallet-paused', address: 'wallet-paused' };
+
+      vi.mocked(storage.getPublishedBotByTradingBotId as any).mockResolvedValue({ id: 'published-1', name: 'Source', isActive: true });
+      vi.mocked(storage.getSubscriberBotsBySourceId as any).mockResolvedValue([failingSubscriber, pausedSubscriber]);
+      vi.mocked(storage.getBotPosition as any)
+        .mockRejectedValueOnce(new Error('first subscriber DB read failed'))
+        .mockResolvedValueOnce({ market: 'BTC-PERP', baseSize: '-0.25', avgEntryPrice: '64000' });
+      vi.mocked(storage.getTradingBotById as any).mockResolvedValue(pausedSubscriber);
+      vi.mocked(storage.getWallet as any).mockResolvedValue(pausedWallet);
+      vi.mocked(storage.createBotTrade as any)
+        .mockResolvedValueOnce({ id: 'subscriber-close-trade' })
+        .mockResolvedValueOnce({ id: 'subscriber-rejected-open' });
+      vi.mocked(storage.updateBotTrade as any).mockResolvedValue(undefined);
+      vi.mocked(storage.recordCloseEventAtomic as any).mockResolvedValue({
+        isNew: true,
+        trade: { id: 'subscriber-close-trade' },
+      });
+      vi.mocked(getUmkForWebhook as any).mockResolvedValue({ umk: Buffer.alloc(32, 8), cleanup: vi.fn() });
+      vi.mocked(decryptAgentKeyStrict as any).mockResolvedValue({ secretKey: routeKeypair.secretKey, cleanup: vi.fn() });
+      routeMocks.adapter.getStrictPositionForMarket
+        .mockResolvedValueOnce({ internalSymbol: 'BTC-PERP', baseSize: -0.25, entryPrice: 64000 })
+        .mockResolvedValueOnce(null);
+      routeMocks.adapter.placeMarketOrder.mockResolvedValue({
+        success: true,
+        orderId: 'subscriber-close-signature',
+        fillPrice: 65000,
+      });
+
+      await routeSignalToSubscribers(sourceBotId, {
+        action: 'buy',
+        contracts: '0.25',
+        positionSize: '0.25',
+        price: '65000',
+        isCloseSignal: false,
+        strategyPositionSize: '0.25',
+        isFlipSignal: true,
+      });
+
+      expect(storage.getBotPosition).toHaveBeenCalledTimes(2);
+      expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledTimes(1);
+      expect(storage.recordCloseEventAtomic).toHaveBeenCalledTimes(1);
+      expect(storage.createBotTrade).toHaveBeenLastCalledWith(expect.objectContaining({
+        tradingBotId: pausedSubscriber.id,
+        status: 'failed',
+        errorMessage: 'Bot is paused',
+        webhookPayload: expect.objectContaining({
+          reversal: expect.objectContaining({
+            close: expect.objectContaining({ kind: 'executed' }),
+            open: expect.objectContaining({ kind: 'rejected', category: 'admission' }),
+          }),
+        }),
+      }));
+    }, 10_000);
+
+    it('keeps a subscriber FLIP unresolved after a signature-less close and reaches neither finalizer nor open execution', async () => {
+      const sourceBotId = 'published-source-bot';
+      const subscriber = {
+        ...routeBot,
+        id: 'subscriber-unresolved',
+        walletAddress: 'wallet-unresolved',
+        side: 'both',
+      };
+      const wallet = { ...routeWallet, walletAddress: 'wallet-unresolved', address: 'wallet-unresolved' };
+
+      vi.mocked(storage.getPublishedBotByTradingBotId as any).mockResolvedValue({ id: 'published-1', name: 'Source', isActive: true });
+      vi.mocked(storage.getSubscriberBotsBySourceId as any).mockResolvedValue([subscriber]);
+      vi.mocked(storage.getBotPosition as any).mockResolvedValue({
+        market: 'BTC-PERP',
+        baseSize: '-0.25',
+        avgEntryPrice: '64000',
+      });
+      vi.mocked(storage.getTradingBotById as any).mockResolvedValue(subscriber);
+      vi.mocked(storage.getWallet as any).mockResolvedValue(wallet);
+      vi.mocked(storage.createBotTrade as any).mockResolvedValue({ id: 'subscriber-close-trade' });
+      vi.mocked(storage.updateBotTrade as any).mockResolvedValue(undefined);
+      vi.mocked(storage.recordCloseEventAtomic as any).mockResolvedValue(undefined);
+      vi.mocked(getUmkForWebhook as any).mockResolvedValue({ umk: Buffer.alloc(32, 9), cleanup: vi.fn() });
+      vi.mocked(decryptAgentKeyStrict as any).mockResolvedValue({ secretKey: routeKeypair.secretKey, cleanup: vi.fn() });
+      routeMocks.adapter.getStrictPositionForMarket.mockReset()
+        .mockResolvedValueOnce({ internalSymbol: 'BTC-PERP', baseSize: -0.25, entryPrice: 64000 });
+      routeMocks.adapter.placeMarketOrder.mockReset().mockResolvedValue({
+        success: true,
+        fillPrice: 65000,
+      });
+
+      await routeSignalToSubscribers(sourceBotId, {
+        action: 'buy',
+        contracts: '0.25',
+        positionSize: '0.25',
+        price: '65000',
+        isCloseSignal: false,
+        strategyPositionSize: '0.25',
+        isFlipSignal: true,
+      });
+
+      expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledTimes(1);
+      expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();
+      expect(storage.updateBotTrade).toHaveBeenCalledWith('subscriber-close-trade', expect.objectContaining({
+        status: 'pending',
+      }));
+      expect(storage.createBotTrade).toHaveBeenCalledTimes(2);
+      expect(storage.createBotTrade).toHaveBeenLastCalledWith(expect.objectContaining({
+        tradingBotId: subscriber.id,
+        status: 'failed',
+        errorMessage: 'FLIP open not evaluated: no_signature',
+      }));
+    }, 10_000);
   });
   it('keeps the bind retry window above both sequential shutdown deadlines', () => {
     expect(BIND_RETRY_MS * BIND_RETRY_LIMIT).toBeGreaterThan(
@@ -452,12 +765,17 @@ describe('close-path and restart contract wiring', () => {
     );
   });
 
-  it('uses the strict authority read only at the two initial Signal Bot full-close decisions', () => {
+  it('keeps two full-close authority pairs plus one centralized FLIP adapter and three delegations', () => {
     const routes = readFileSync('server/routes.ts', 'utf8');
     const strictReads = routes.match(/getPositionForCloseAuthority\(/g) ?? [];
     const cacheFallbacks = routes.match(/getRiskReducingCachedCloseFallback\(/g) ?? [];
-    expect(strictReads).toHaveLength(2);
-    expect(cacheFallbacks).toHaveLength(2);
+    const flipDelegations = routes.match(/await executeSignalBotFlipClose\(/g) ?? [];
+    expect(strictReads).toHaveLength(3);
+    expect(cacheFallbacks).toHaveLength(3);
+    expect(flipDelegations).toHaveLength(3);
+    expect(routes).toContain('executionLabel: "per_bot"');
+    expect(routes).toContain('executionLabel: "user_webhook"');
+    expect(routes).toContain('executionLabel: "subscriber"');
     expect(routes).toContain('getPositionForExecution(');
     expect(routes).toContain('only for a reduce-only close');
     expect(routes).toContain('All declared close-position authority sources failed');
