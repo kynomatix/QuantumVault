@@ -1373,9 +1373,11 @@ export async function fetchOHLCV(
 
     throwIfAborted(signal); // aborted fetches never fire background writes
     if (aggregated.length > 0) {
-      saveCandlesToDb(symbol, timeframe, aggregated).catch((err) =>
-        console.log(`[CandleCache] Background save error: ${err.message}`)
-      );
+      saveCandlesToDb(symbol, timeframe, aggregated).catch((err) => {
+        const line = `[CandleCache] Background save error: ${err instanceof Error ? err.message : String(err)}`;
+        console.log(line);
+        appendTelemetry(line);
+      });
     }
 
     return aggregated;
@@ -1423,9 +1425,11 @@ export async function fetchOHLCV(
       emitTrace(deduped.length);
       onProgress?.(`Fetched ${deduped.length} candles for ${symbol} ${timeframe}`);
       throwIfAborted(signal); // aborted fetches never fire background writes
-      saveCandlesToDb(symbol, timeframe, deduped).catch((err) =>
-        console.log(`[CandleCache] Background save error: ${err.message}`)
-      );
+      saveCandlesToDb(symbol, timeframe, deduped).catch((err) => {
+        const line = `[CandleCache] Background save error: ${err instanceof Error ? err.message : String(err)}`;
+        console.log(line);
+        appendTelemetry(line);
+      });
       return deduped;
     }
 
@@ -1616,9 +1620,11 @@ export async function fetchOHLCV(
     onProgress?.(`Fetched ${deduped.length} candles for ${symbol} ${timeframe}`);
 
     throwIfAborted(signal); // aborted fetches never fire background writes
-    saveCandlesToDb(symbol, timeframe, deduped).catch((err) =>
-      console.log(`[CandleCache] Background save error: ${err.message}`)
-    );
+    saveCandlesToDb(symbol, timeframe, deduped).catch((err) => {
+      const line = `[CandleCache] Background save error: ${err instanceof Error ? err.message : String(err)}`;
+      console.log(line);
+      appendTelemetry(line);
+    });
 
     return deduped;
   }
