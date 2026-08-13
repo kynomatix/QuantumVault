@@ -15,6 +15,7 @@ vi.mock("../../server/lab/candle-store", () => ({
 }));
 
 import {
+  AI_CONTEXT_CANDLE_POLICY,
   CHART_CANDLE_POLICY,
   LIVE_MONITOR_CANDLE_POLICY,
   MONEY_CANDLE_POLICY,
@@ -221,7 +222,7 @@ describe("fetchOHLCV provenance admission", () => {
     expect(rows.map((r) => r.provenance.finality).sort()).toEqual(["finalized", "forming"]);
   });
 
-  it("rejects a known but non-OKX venue from every non-Lab consumer", () => {
+  it("admits cross-venue direct finalized perp only for scanner/context money consumers", () => {
     const candle: ProvenancedOHLCV = {
       time: Date.now(), open: 100, high: 101, low: 99, close: 100, volume: 1,
       provenance: {
@@ -229,8 +230,29 @@ describe("fetchOHLCV provenance admission", () => {
         finality: "finalized", timeSemantic: "open_time",
       },
     };
-    expect(candleMatchesBasisPolicy(candle, MONEY_CANDLE_POLICY)).toBe(false);
+    expect(candleMatchesBasisPolicy(candle, MONEY_CANDLE_POLICY)).toBe(true);
+    expect(candleMatchesBasisPolicy(candle, AI_CONTEXT_CANDLE_POLICY)).toBe(true);
     expect(candleMatchesBasisPolicy(candle, CHART_CANDLE_POLICY)).toBe(false);
+    expect(candleMatchesBasisPolicy(candle, PAPER_MONITOR_CANDLE_POLICY)).toBe(false);
+    expect(candleMatchesBasisPolicy(candle, LIVE_MONITOR_CANDLE_POLICY)).toBe(false);
+
+    const inadmissible = [
+      { basis: "spot" },
+      { source: "pyth", venue: "none", basis: "index" },
+      { proxy: "proxy" },
+      { finality: "forming" },
+      { source: "unknown" },
+      { venue: "unknown" },
+      { timeSemantic: "unknown" },
+    ] as const;
+    for (const override of inadmissible) {
+      const changed = {
+        ...candle,
+        provenance: { ...candle.provenance, ...override },
+      } as ProvenancedOHLCV;
+      expect(candleMatchesBasisPolicy(changed, MONEY_CANDLE_POLICY), JSON.stringify(override)).toBe(false);
+      expect(candleMatchesBasisPolicy(changed, AI_CONTEXT_CANDLE_POLICY), JSON.stringify(override)).toBe(false);
+    }
   });
 
   it("admits forming direct OKX candles for paper/live monitor consumers only", () => {

@@ -77,7 +77,22 @@ describe.runIf(HAS_DB)("provenance-aware candle cache on real PostgreSQL", () =>
     expect(rows).toHaveLength(1);
     expect(rows?.[0].close).toBe(100);
     expect(rows?.[0].provenance).toEqual({
-      source: "okx", venue: "okx", basis: "perp", proxy: "direct",
+      source: "gate", venue: "gate", basis: "perp", proxy: "direct",
+      finality: "finalized", timeSemantic: "open_time",
+    });
+
+    const contextRows = await getCachedCandles(uniqueSymbol, "1h", time, time + 3_600_000, {
+      basisPolicy: {
+        consumer: "ai_context",
+        acceptedBasis: ["perp"],
+        acceptedFinality: ["finalized"],
+        acceptedProxy: ["direct"],
+      },
+      callerClass: "context",
+    });
+    expect(contextRows).toHaveLength(1);
+    expect(contextRows?.[0].provenance).toEqual({
+      source: "gate", venue: "gate", basis: "perp", proxy: "direct",
       finality: "finalized", timeSemantic: "open_time",
     });
 
