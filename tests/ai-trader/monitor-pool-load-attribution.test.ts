@@ -115,6 +115,18 @@ afterEach(async () => {
 });
 
 describe("AI Trader pool-load attribution", () => {
+  it("manifest publication preserves scanner pool-attribution reporting", async () => {
+    const { formatPoolLoadTags } = await loadModules();
+    expect(formatPoolLoadTags()).toBe("");
+    const run = deferred<null>();
+    getBotMock.mockReturnValueOnce(run.promise);
+    const { monitor } = await loadModules();
+    const cycle = monitor.runAutoCycle("scanner-manifest");
+    expect(formatPoolLoadTags()).toBe(" ai_trader=t0/c1/g0/d0");
+    run.resolve(null);
+    await cycle;
+    expect(formatPoolLoadTags()).toBe("");
+  });
   it("suppresses the fixed tag while every owner count is idle", async () => {
     const { formatPoolLoadTags } = await loadModules();
     expect(formatPoolLoadTags()).toBe("");

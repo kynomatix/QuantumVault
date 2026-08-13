@@ -64,6 +64,24 @@ describe("scanner attempt terminal accounting", () => {
   it("rejects unclassified abandoned and unreconciled generations", () => {
     expect(manifest(["abandoned"]).verdict).toBe("diagnostic_only");
     expect(manifest([], false).diagnosticReasons).toContain("interrupted");
+    const unclassifiedLedger = new ScannerAttemptLedger();
+    unclassifiedLedger.intend("flash|15m|UNFINISHED");
+    const unclassified = createScannerSweepManifest({
+      generation: 2, boundaryTimeframes: ["15m"], startedAt: 1, finishedAt: 2,
+      accounting: unclassifiedLedger.reconcile(), budgetSkippedUnits: 0,
+      parentCacheDegraded: false, candidatesByProtocol: new Map(), completed: true,
+    });
+    expect(unclassified.verdict).toBe("diagnostic_only");
+    expect(unclassified.diagnosticReasons).toEqual(expect.arrayContaining([
+      "accounting_invalid", "unclassified_attempt",
+    ]));
+    const unreconciled = createScannerSweepManifest({
+      generation: 3, boundaryTimeframes: ["15m"], startedAt: 1, finishedAt: 2,
+      accounting: { ...unclassified.accounting, unclassified: 0, accountingValid: false },
+      budgetSkippedUnits: 0, parentCacheDegraded: false,
+      candidatesByProtocol: new Map(), completed: true,
+    });
+    expect(unreconciled.diagnosticReasons).toEqual(["accounting_invalid"]);
   });
   it("reconciles a mixed terminal population exactly once", () => {
     const ledger = new ScannerAttemptLedger();
