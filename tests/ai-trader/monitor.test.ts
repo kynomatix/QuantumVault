@@ -139,9 +139,11 @@ vi.mock("../../server/ai-trader/executor", async (importOriginal) => {
 });
 
 const getScannerShortlistMock = vi.fn();
+const getScannerShortlistResultMock = vi.fn();
 const stopScannerMock = vi.fn();
 vi.mock("../../server/ai-trader/scanner", () => ({
   getScannerShortlist: (...a: unknown[]) => getScannerShortlistMock(...a),
+  getScannerShortlistResult: (...a: unknown[]) => getScannerShortlistResultMock(...a),
   stopScanner: (...a: unknown[]) => stopScannerMock(...a),
 }));
 
@@ -310,6 +312,9 @@ beforeEach(() => {
   getRecentClosedMock.mockResolvedValue([]);
   getOpenDecisionsMock.mockResolvedValue([]);
   getScannerShortlistMock.mockReturnValue([]);
+  getScannerShortlistResultMock.mockImplementation((...a: unknown[]) => ({
+    authority: "tradable", candidates: getScannerShortlistMock(...a),
+  }));
   isMarketAdmittedMock.mockReturnValue(true);
   isMultiplierQuarantinedMock.mockReturnValue(false);
   updateBotMock.mockResolvedValue({});

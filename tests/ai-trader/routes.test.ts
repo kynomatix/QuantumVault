@@ -84,9 +84,11 @@ vi.mock("../../server/ai-trader/graduation", () => ({
 }));
 
 const getScannerShortlistMock = vi.fn();
+const getScannerShortlistResultMock = vi.fn();
 vi.mock("../../server/ai-trader/scanner", () => ({
   getScannerStatus: vi.fn(),
   getScannerShortlist: (...a: unknown[]) => getScannerShortlistMock(...a),
+  getScannerShortlistResult: (...a: unknown[]) => getScannerShortlistResultMock(...a),
 }));
 const scannerCapabilitiesMock = vi.hoisted(() => ({
   producerEnabled: true,
@@ -213,8 +215,32 @@ describe("AI Trader scanner route market admission", () => {
       timeframe: "15m",
       evaluatedAt: Date.now(),
     }]);
+    getScannerShortlistResultMock.mockImplementation(() => ({
+      authority: "tradable",
+      candidates: getScannerShortlistMock(),
+    }));
     isMarketAdmittedMock.mockReturnValue(false);
     isMultiplierQuarantinedMock.mockReturnValue(false);
+  });
+
+  it("manual scanner consumer rejects a stale absent or diagnostic-only generation before LLM or mutation", async () => {
+    scannerCapabilitiesMock.consumersEnabled = true;
+    for (const authority of ["stale", "absent", "diagnostic_only"] as const) {
+      vi.clearAllMocks();
+      getBotMock.mockResolvedValue(scannerBot());
+      getScannerShortlistResultMock.mockReturnValue({ authority, candidates: [] });
+      const built = buildApp();
+      registerAiTraderRoutes(built.app);
+      const result = await invoke(built.routes, "POST /api/ai-trader/:id/analyze", {
+        params: { id: "scanner-bot-route" }, session: { walletAddress: "WALLET_ROUTE" },
+        body: {}, query: {}, headers: {},
+      });
+      expect(result.statusCode).toBe(409);
+      expect(updateBotMock).not.toHaveBeenCalled();
+      expect(buildContextMock).not.toHaveBeenCalled();
+      expect(runDecisionMock).not.toHaveBeenCalled();
+      expect(executeDecisionMock).not.toHaveBeenCalled();
+    }
   });
 
   it("refuses an unadmitted fresh manual pick before UMK, bot write, context, LLM, or execution", async () => {

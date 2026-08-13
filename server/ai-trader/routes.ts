@@ -55,7 +55,7 @@ import { executeDecision, aiTraderPolicyObject } from "./executor";
 import { userInitiatedClose, scheduleAutoNext, nextCycleTimeframe, SCANNER_CANDIDATE_MAX_AGE_MS } from "./monitor";
 import { parseOpenDecision, computeUnrealizedPnl } from "./paper-position-authority";
 import { sanitizeGraduationCriteria, canGoLive } from "./graduation";
-import { getScannerStatus, getScannerShortlist } from "./scanner";
+import { getScannerStatus, getScannerShortlistResult } from "./scanner";
 import { SCANNER_CAPABILITIES } from "./scanner-capabilities";
 import type { ClampedDecision } from "./guardrails";
 import { computeConfidenceCalibration } from "./calibration";
@@ -857,7 +857,15 @@ export function registerAiTraderRoutes(app: Express): void {
       // shortlist never burns a free-trial call.
       let scannerNote: string | undefined;
       if (bot.marketSource === "scanner") {
-        const fresh = getScannerShortlist(bot.protocol).filter(
+        const shortlistRead = getScannerShortlistResult(bot.protocol);
+        if (shortlistRead.authority !== "tradable") {
+          return res.status(409).json({
+            error: "scanner_generation_unavailable",
+            reason: shortlistRead.authority,
+            detail: "The current scanner generation is not safe for decision use. Try again after a healthy sweep.",
+          });
+        }
+        const fresh = shortlistRead.candidates.filter(
           (c) => Date.now() - c.evaluatedAt <= SCANNER_CANDIDATE_MAX_AGE_MS
         );
         if (fresh.length === 0) {

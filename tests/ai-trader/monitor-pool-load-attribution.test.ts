@@ -65,6 +65,7 @@ vi.mock("../../server/ai-trader/executor", () => ({
 }));
 vi.mock("../../server/ai-trader/scanner", () => ({
   getScannerShortlist: vi.fn(() => []),
+  getScannerShortlistResult: vi.fn(() => ({ authority: "tradable", candidates: [] })),
   stopScanner: vi.fn(),
 }));
 vi.mock("../../server/ai-trader/graduation", () => ({ evaluateGraduation: vi.fn() }));

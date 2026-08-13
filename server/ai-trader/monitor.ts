@@ -75,7 +75,7 @@ import { runDecision } from "./decide";
 import { isSelectableModel } from "../ai-assistant/models-catalog";
 import { executeDecision, checkCooldownAndCaps, aiTraderPolicyObject } from "./executor";
 import { computeBotPolicyHmac } from "../session-v3";
-import { getScannerShortlist } from "./scanner";
+import { getScannerShortlistResult } from "./scanner";
 import { SCANNER_CAPABILITIES } from "./scanner-capabilities";
 import { evaluateGraduation, type GraduationTradeRecord } from "./graduation";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
@@ -1880,7 +1880,14 @@ export async function runAutoCycle(botId: string): Promise<void> {
     // Failed calls count against the cap. The branch handles the full pipeline and returns;
     // the fixed-ticker path continues below.
     if (bot.marketSource === "scanner") {
-      const shortlist = getScannerShortlist(bot.protocol);
+      const shortlistRead = getScannerShortlistResult(bot.protocol);
+      if (shortlistRead.authority !== "tradable") {
+        if (_obs) _obs.exitReason = "gate_skip";
+        console.warn(`[AiTraderMonitor] scanner: ${shortlistRead.authority} generation for ${bot.protocol} — fail-closed before bot mutation or LLM`);
+        scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
+        return;
+      }
+      const shortlist = shortlistRead.candidates;
       if (shortlist.length === 0) {
         if (_obs) _obs.exitReason = "gate_skip";
         console.log(`[AiTraderMonitor] scanner: no candidates for ${bot.protocol} at this boundary — skipping bot ${bot.id.slice(0, 8)}`);
