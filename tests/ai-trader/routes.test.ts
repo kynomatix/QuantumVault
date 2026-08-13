@@ -91,8 +91,9 @@ vi.mock("../../server/ai-trader/graduation", () => ({
 
 const getScannerShortlistMock = vi.fn();
 const getScannerShortlistResultMock = vi.fn();
+const getScannerStatusMock = vi.fn();
 vi.mock("../../server/ai-trader/scanner", () => ({
-  getScannerStatus: vi.fn(),
+  getScannerStatus: (...a: unknown[]) => getScannerStatusMock(...a),
   getScannerShortlist: (...a: unknown[]) => getScannerShortlistMock(...a),
   getScannerShortlistResult: (...a: unknown[]) => getScannerShortlistResultMock(...a),
 }));
@@ -437,5 +438,33 @@ describe("AI Trader manual analyze position-authority inputs", () => {
       expectedDecisionOutcome: null,
       decisionOutcome: "flat",
     }));
+  });
+});
+
+describe("AI Trader scanner status reporting", () => {
+  it("status distinguishes healthy zero setups from diagnostic-only coverage", async () => {
+    const healthy = {
+      shortlist: { flash: [], pacifica: [] }, currentGeneration: {
+        generation: 7, verdict: "tradable", candidateCounts: { flash: 0, pacifica: 0 },
+      }, lastTradableGeneration: { generation: 7 }, recentHistory: [], lastBoundaryStats: null,
+      excludedMarkets: [], multiplierQuarantinedMarkets: [], scannerRunning: true,
+    };
+    const diagnostic = {
+      ...healthy,
+      currentGeneration: { generation: 8, verdict: "diagnostic_only", candidateCounts: { flash: 0, pacifica: 0 } },
+      lastTradableGeneration: { generation: 7 },
+    };
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+    getScannerStatusMock.mockReturnValueOnce(healthy);
+    expect((await invoke(built.routes, "GET /api/ai-trader/scanner/status", {
+      query: {}, body: {}, headers: {}, session: { walletAddress: "WALLET_ROUTE" },
+    })).body.currentGeneration.verdict).toBe("tradable");
+    getScannerStatusMock.mockReturnValueOnce(diagnostic);
+    const degraded = await invoke(built.routes, "GET /api/ai-trader/scanner/status", {
+      query: {}, body: {}, headers: {}, session: { walletAddress: "WALLET_ROUTE" },
+    });
+    expect(degraded.body.currentGeneration.verdict).toBe("diagnostic_only");
+    expect(degraded.body.lastTradableGeneration.generation).toBe(7);
   });
 });
