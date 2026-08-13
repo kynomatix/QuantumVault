@@ -59,6 +59,14 @@ interface ScannerStatusResponse {
   lastBoundaryStats: ScannerBoundaryStats | null;
   recentHistory: ScannerBoundaryStats[];
   scannerRunning: boolean;
+  currentGeneration: {
+    verdict: 'tradable' | 'diagnostic_only';
+    candidateCounts: Record<string, number>;
+  } | null;
+  lastTradableGeneration: {
+    generation: number;
+    finishedAt: number;
+  } | null;
 }
 
 const SELECTABLE_MODELS = [
@@ -271,6 +279,7 @@ export function CreateAiTraderModal({
   })();
 
   const exchangeLabel = form.protocol === 'flash' ? 'Flash' : 'Pacifica';
+  const scannerCoverageUnknown = scannerStatus?.currentGeneration?.verdict === 'diagnostic_only';
 
   const handleClose = () => {
     if (isCreating) return;
@@ -481,7 +490,7 @@ export function CreateAiTraderModal({
             <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-primary/5 border border-primary/20 text-sm text-muted-foreground" data-testid="scanner-status-line">
               <Search className="w-3.5 h-3.5 text-primary flex-shrink-0" />
               <span>
-                Scanning{' '}
+                {scannerCoverageUnknown ? 'Coverage unknown for ' : 'Scanning '}
                 <span className="text-foreground font-medium">
                   {scannerMarketCount != null ? scannerMarketCount : 'all'}
                 </span>

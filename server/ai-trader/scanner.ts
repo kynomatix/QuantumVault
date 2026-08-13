@@ -25,6 +25,7 @@ import {
   setDatafeedIncidentReporter,
   MONEY_CANDLE_POLICY,
   type CandleProvenance,
+  type ProvenancedOHLCV,
 } from "../lab/datafeed";
 import { recordCriticalError } from "../error-log";
 import { marketToDatafeedTicker } from "./context-builder";
@@ -127,7 +128,38 @@ export interface ScannerCandidate {
   evaluatedAt: number;
   /** Provenance of the admitted candle set used for this money-input score. */
   candleProvenance: CandleProvenance | null;
+  /** Provenance of the configured parent candle set; null only when no parent TF exists. */
+  parentCandleProvenance: CandleProvenance | null;
 }
+
+export type ScannerGenerationVerdict = "tradable" | "diagnostic_only";
+export type ScannerDiagnosticReason =
+  | "interrupted"
+  | "accounting_invalid"
+  | "unclassified_attempt"
+  | "abandoned_attempt"
+  | "candidate_provenance_invalid";
+
+export type ScannerCandidateProvenance = Readonly<{
+  market: string;
+  timeframe: string;
+  selected: CandleProvenance;
+  requiredParent: CandleProvenance | null;
+}>;
+
+export type ScannerSweepManifest = Readonly<{
+  generation: number;
+  boundaryTimeframes: readonly string[];
+  startedAt: number;
+  finishedAt: number;
+  accounting: Readonly<ScannerAttemptReconciliation>;
+  budgetSkippedUnits: number;
+  parentCacheDegraded: boolean;
+  candidateProvenance: readonly ScannerCandidateProvenance[];
+  candidatesByProtocol: ReadonlyMap<string, readonly ScannerCandidate[]>;
+  verdict: ScannerGenerationVerdict;
+  diagnosticReasons: readonly ScannerDiagnosticReason[];
+}>;
 
 export type ScannerAttemptDisposition =
   | "scanned"
@@ -279,6 +311,8 @@ export interface ScannerBoundaryStats {
 
 export interface ScannerStatus {
   shortlist: Record<string, ScannerCandidate[]>;
+  currentGeneration: ScannerGenerationStatus | null;
+  lastTradableGeneration: ScannerGenerationStatus | null;
   lastBoundaryStats: ScannerBoundaryStats | null;
   recentHistory: ScannerBoundaryStats[];
   excludedMarkets: string[];
@@ -286,10 +320,22 @@ export interface ScannerStatus {
   scannerRunning: boolean;
 }
 
+export type ScannerGenerationStatus = Omit<ScannerSweepManifest, "candidatesByProtocol"> & {
+  candidateCounts: Readonly<Record<string, number>>;
+};
+
 // ─── Module state (all bounded) ───────────────────────────────────────────────
 
 // Current ranked shortlist per protocol — replaced wholesale each boundary.
-const shortlistMap = new Map<string, ScannerCandidate[]>();
+type ScannerPublicationState = Readonly<{
+  currentGeneration: ScannerSweepManifest | null;
+  lastTradableGeneration: ScannerSweepManifest | null;
+}>;
+
+let scannerPublicationState: ScannerPublicationState = Object.freeze({
+  currentGeneration: null,
+  lastTradableGeneration: null,
+});
 
 // Telemetry ring buffer: plain array, push + trim to 200. In-memory only; resets on restart.
 const telemetryRing: ScannerBoundaryStats[] = [];
@@ -459,6 +505,86 @@ export function countParentCacheDegradation(current: number, err: unknown): numb
   return current + (isCacheDegradedError(err) ? 1 : 0);
 }
 
+function isAdmissibleScannerProvenance(provenance: CandleProvenance | null): provenance is CandleProvenance {
+  return provenance !== null
+    && provenance.source !== "unknown"
+    && provenance.venue !== "unknown"
+    && provenance.basis !== "unknown"
+    && provenance.proxy !== "unknown"
+    && provenance.finality !== "unknown"
+    && provenance.timeSemantic !== "unknown"
+    && MONEY_CANDLE_POLICY.acceptedBasis.includes(provenance.basis)
+    && MONEY_CANDLE_POLICY.acceptedFinality.includes(provenance.finality)
+    && MONEY_CANDLE_POLICY.acceptedProxy.includes(provenance.proxy);
+}
+
+export interface ScannerManifestInput {
+  generation: number;
+  boundaryTimeframes: readonly string[];
+  startedAt: number;
+  finishedAt: number;
+  accounting: ScannerAttemptReconciliation;
+  budgetSkippedUnits: number;
+  parentCacheDegraded: boolean;
+  candidatesByProtocol: ReadonlyMap<string, readonly ScannerCandidate[]>;
+  completed: boolean;
+}
+
+export function createScannerSweepManifest(input: ScannerManifestInput): ScannerSweepManifest {
+  const candidates = [...input.candidatesByProtocol.values()].flatMap((entries) => [...entries]);
+  const candidateProvenance = candidates.flatMap((candidate): ScannerCandidateProvenance[] => {
+    if (!candidate.candleProvenance) return [];
+    return [{
+      market: candidate.market,
+      timeframe: candidate.timeframe,
+      selected: candidate.candleProvenance,
+      requiredParent: candidate.parentCandleProvenance,
+    }];
+  });
+  const provenanceValid = candidates.every((candidate) => {
+    if (!isAdmissibleScannerProvenance(candidate.candleProvenance)) return false;
+    const configuredParent = PARENT_TF[candidate.timeframe] ?? null;
+    return configuredParent === null
+      ? candidate.parentCandleProvenance === null
+      : isAdmissibleScannerProvenance(candidate.parentCandleProvenance);
+  });
+  const diagnosticReasons: ScannerDiagnosticReason[] = [];
+  if (!input.completed) diagnosticReasons.push("interrupted");
+  if (!input.accounting.accountingValid) diagnosticReasons.push("accounting_invalid");
+  if (input.accounting.unclassified !== 0) diagnosticReasons.push("unclassified_attempt");
+  if (input.accounting.abandoned !== 0) diagnosticReasons.push("abandoned_attempt");
+  if (!provenanceValid) diagnosticReasons.push("candidate_provenance_invalid");
+  return Object.freeze({
+    generation: input.generation,
+    boundaryTimeframes: Object.freeze([...input.boundaryTimeframes]),
+    startedAt: input.startedAt,
+    finishedAt: input.finishedAt,
+    accounting: Object.freeze({ ...input.accounting }),
+    budgetSkippedUnits: input.budgetSkippedUnits,
+    parentCacheDegraded: input.parentCacheDegraded,
+    candidateProvenance: Object.freeze(candidateProvenance),
+    candidatesByProtocol: input.candidatesByProtocol,
+    verdict: diagnosticReasons.length === 0 ? "tradable" : "diagnostic_only",
+    diagnosticReasons: Object.freeze(diagnosticReasons),
+  });
+}
+
+export function publishScannerSweepManifest(manifest: ScannerSweepManifest): boolean {
+  const current = scannerPublicationState.currentGeneration;
+  if (current && manifest.generation < current.generation) return false;
+  scannerPublicationState = Object.freeze({
+    currentGeneration: manifest,
+    lastTradableGeneration:
+      manifest.verdict === "tradable" ? manifest : scannerPublicationState.lastTradableGeneration,
+  });
+  return true;
+}
+
+/** Test-only reset for publication-state acceptance cells. */
+export function resetScannerPublicationForTest(): void {
+  scannerPublicationState = Object.freeze({ currentGeneration: null, lastTradableGeneration: null });
+}
+
 // ─── Core evaluator (pure, exported for unit tests) ───────────────────────────
 //
 // Takes already-fetched bar arrays so tests can pass synthetic fixtures without
@@ -488,7 +614,7 @@ export function evaluateCandidateResult(
   market: string,
   protocol: string,
   bars: OHLCV[],
-  parentBars: OHLCV[] | null,
+  parentBars: ProvenancedOHLCV[] | null,
   tf: string,
   now: Date,
 ): ScannerCandidateEvaluation {
@@ -587,6 +713,7 @@ export function evaluateCandidateResult(
       parentTrend,
       evaluatedAt: now.getTime(),
       candleProvenance: (bars[bars.length - 1] as OHLCV & { provenance?: CandleProvenance }).provenance ?? null,
+      parentCandleProvenance: parentBars?.[parentBars.length - 1]?.provenance ?? null,
     },
   };
 }
@@ -596,7 +723,7 @@ export function evaluateCandidate(
   market: string,
   protocol: string,
   bars: OHLCV[],
-  parentBars: OHLCV[] | null,
+  parentBars: ProvenancedOHLCV[] | null,
   tf: string,
   now: Date,
 ): ScannerCandidate | null {
@@ -691,21 +818,18 @@ async function runSweep(): Promise<void> {
   let sweepParentCacheDegraded = 0;
   let budgetSkippedUnits = 0;
   const sweepAbandonedMarkets: string[] = [];
+  const allCandidatesByProtocol = new Map<string, ScannerCandidate[]>();
+  for (const protocol of PROTOCOLS) allCandidatesByProtocol.set(protocol, []);
 
   try {
     const now = new Date();
     boundaryTfs = getBoundaryTfs(now);
 
     // Accumulate candidates across all TFs per protocol, then rank and keep top K.
-    const allCandidatesByProtocol = new Map<string, ScannerCandidate[]>();
-    for (const protocol of PROTOCOLS) {
-      allCandidatesByProtocol.set(protocol, []);
-    }
-
     // Boundary-level candle cache: shared across ALL protocols and TFs in this sweep.
     // Ensures BTC/USDT 15m candles are fetched exactly once even when both Flash and
     // Pacifica list BTC-PERP (both map to the same datafeed ticker via marketToDatafeedTicker).
-    const candleCache = new Map<string, OHLCV[]>();
+    const candleCache = new Map<string, ProvenancedOHLCV[]>();
 
     for (const protocol of PROTOCOLS) {
       // Genuine wall-clock gate: once the sweep-global fetch budget is spent,
@@ -801,7 +925,7 @@ async function runSweep(): Promise<void> {
             const startDate = new Date(startMs).toISOString();
             const endDate = new Date(endMs).toISOString();
 
-            let bars: OHLCV[] = [];
+            let bars: ProvenancedOHLCV[] = [];
             let fetchDeadlineTruncated = false;
             try {
               const cacheKey = `${ticker}:${tf}`;
@@ -881,7 +1005,7 @@ async function runSweep(): Promise<void> {
             const ageMs = now.getTime() - newestBarTime;
 
             // Fetch parent-TF bars (use cache to avoid duplicate fetches).
-            let parentBars: OHLCV[] | null = null;
+            let parentBars: ProvenancedOHLCV[] | null = null;
             if (parentTf) {
               const parentTfMs = TIMEFRAME_MS[parentTf];
               const parentStartMs = endMs - (INDICATOR_BARS + 1) * parentTfMs;
@@ -1151,17 +1275,29 @@ async function runSweep(): Promise<void> {
       } // end TF loop
     } // end protocol loop
 
-    // After all TFs for all protocols: rank accumulated candidates, keep top K=3,
-    // and replace the shortlist wholesale.
+    // Rank locally, then publish candidates and their final governing verdict
+    // through one atomic replacement before any diagnostic sink is invoked.
+    const rankedCandidatesByProtocol = new Map<string, readonly ScannerCandidate[]>();
     for (const protocol of PROTOCOLS) {
       const all = allCandidatesByProtocol.get(protocol) ?? [];
       all.sort((a, b) => b.score - a.score);
-      shortlistMap.set(protocol, all.slice(0, TOP_K));
+      rankedCandidatesByProtocol.set(protocol, Object.freeze(all.slice(0, TOP_K)));
     }
 
     // One-line sweep summary: total time vs. fetch budget + starvation signal.
     const sweepDurationMs = Date.now() - sweepBeganAt;
     const sweepAccounting = sweepLedger.reconcile();
+    publishScannerSweepManifest(createScannerSweepManifest({
+      generation: gen,
+      boundaryTimeframes: boundaryTfs,
+      startedAt: sweepBeganAt,
+      finishedAt: Date.now(),
+      accounting: sweepAccounting,
+      budgetSkippedUnits,
+      parentCacheDegraded: sweepParentCacheDegraded > 0,
+      candidatesByProtocol: rankedCandidatesByProtocol,
+      completed: true,
+    }));
     const sweepSummary = formatScannerSweepAccountingLine("TOTAL", sweepAccounting, {
       parentCacheDegraded: sweepParentCacheDegraded,
       budgetSkippedUnits,
@@ -1267,6 +1403,22 @@ async function runSweep(): Promise<void> {
     // Invariant: no sweep may end without a SWEEP TOTAL or SWEEP ABORT line
     // reaching telemetry — external log readers only see the telemetry file.
     const abortAccounting = sweepLedger.reconcile();
+    publishScannerSweepManifest(createScannerSweepManifest({
+      generation: gen,
+      boundaryTimeframes: boundaryTfs,
+      startedAt: sweepBeganAt,
+      finishedAt: Date.now(),
+      accounting: abortAccounting,
+      budgetSkippedUnits,
+      parentCacheDegraded: sweepParentCacheDegraded > 0,
+      candidatesByProtocol: new Map(
+        [...allCandidatesByProtocol].map(([protocol, entries]) => [
+          protocol,
+          Object.freeze([...entries].sort((a, b) => b.score - a.score).slice(0, TOP_K)),
+        ]),
+      ),
+      completed: false,
+    }));
     const abortLine = formatScannerSweepAccountingLine("ABORT", abortAccounting, {
       parentCacheDegraded: sweepParentCacheDegraded,
       budgetSkippedUnits,
@@ -1468,7 +1620,7 @@ export function stopScanner(): void {
   }
   sweepStartedAt = null;
   sweepGeneration++;
-  shortlistMap.clear();
+  scannerPublicationState = Object.freeze({ currentGeneration: null, lastTradableGeneration: null });
   universeCache.clear();
   multiplierQuarantineByProtocol.clear();
   feedHealthMap.clear();
@@ -1481,7 +1633,40 @@ export function stopScanner(): void {
  * Empty array if no boundary sweep has completed yet.
  */
 export function getScannerShortlist(protocol: string): ScannerCandidate[] {
-  return shortlistMap.get(protocol) ?? [];
+  return getScannerShortlistResult(protocol).candidates;
+}
+
+export type ScannerShortlistRead = Readonly<{
+  authority: "tradable" | "absent" | "diagnostic_only" | "stale";
+  candidates: ScannerCandidate[];
+}>;
+
+export function getScannerShortlistResult(protocol: string): ScannerShortlistRead {
+  const current = scannerPublicationState.currentGeneration;
+  if (!current) return { authority: "absent", candidates: [] };
+  if (current.verdict !== "tradable") return { authority: "diagnostic_only", candidates: [] };
+  if (Date.now() - current.finishedAt > SCANNER_SHORTLIST_MAX_AGE_MS) {
+    return { authority: "stale", candidates: [] };
+  }
+  return {
+    authority: "tradable",
+    candidates: [...(current.candidatesByProtocol.get(protocol) ?? [])].filter(
+      (candidate) => Date.now() - candidate.evaluatedAt <= SCANNER_SHORTLIST_MAX_AGE_MS,
+    ),
+  };
+}
+
+/** Same 20-minute one-boundary-lag policy formerly enforced only by consumers. */
+export const SCANNER_SHORTLIST_MAX_AGE_MS = 20 * 60_000;
+
+function toGenerationStatus(manifest: ScannerSweepManifest | null): ScannerGenerationStatus | null {
+  if (!manifest) return null;
+  const candidateCounts: Record<string, number> = {};
+  for (const protocol of PROTOCOLS) {
+    candidateCounts[protocol] = manifest.candidatesByProtocol.get(protocol)?.length ?? 0;
+  }
+  const { candidatesByProtocol: _candidatesByProtocol, ...status } = manifest;
+  return { ...status, candidateCounts: Object.freeze(candidateCounts) };
 }
 
 /**
@@ -1490,7 +1675,7 @@ export function getScannerShortlist(protocol: string): ScannerCandidate[] {
 export function getScannerStatus(): ScannerStatus {
   const shortlist: Record<string, ScannerCandidate[]> = {};
   for (const protocol of PROTOCOLS) {
-    shortlist[protocol] = shortlistMap.get(protocol) ?? [];
+    shortlist[protocol] = getScannerShortlist(protocol);
   }
   const lastBoundaryStats = telemetryRing.length > 0
     ? telemetryRing[telemetryRing.length - 1]
@@ -1500,6 +1685,8 @@ export function getScannerStatus(): ScannerStatus {
   )].sort();
   return {
     shortlist,
+    currentGeneration: toGenerationStatus(scannerPublicationState.currentGeneration),
+    lastTradableGeneration: toGenerationStatus(scannerPublicationState.lastTradableGeneration),
     lastBoundaryStats,
     recentHistory: [...telemetryRing],
     excludedMarkets: [...SCANNER_FEED_EXCLUDE],
