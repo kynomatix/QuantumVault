@@ -238,8 +238,11 @@ export function candleMatchesBasisPolicy(
   policy: CandleBasisPolicy,
 ): boolean {
   const p = candle.provenance;
+  const requireDirectOkxIdentity = policy.consumer !== "lab"
+    && policy.consumer !== "scanner"
+    && policy.consumer !== "ai_context";
   return hasCompleteKnownProvenance(candle)
-    && (policy.consumer === "lab"
+    && (!requireDirectOkxIdentity
       || (p.source === "okx" && p.venue === "okx" && p.timeSemantic === "open_time"))
     && policy.acceptedBasis.includes(p.basis)
     && policy.acceptedFinality.includes(p.finality)

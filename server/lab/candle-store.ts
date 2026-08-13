@@ -368,7 +368,9 @@ async function getCachedCandlesInner(
 ): Promise<ProvenancedOHLCV[] | null> {
   const signal = opts.signal;
   const policy = opts.basisPolicy;
-  const requireDirectOkxIdentity = policy.consumer !== "lab";
+  const requireDirectOkxIdentity = policy.consumer !== "lab"
+    && policy.consumer !== "scanner"
+    && policy.consumer !== "ai_context";
   let rows: CandleCacheRow[];
   const queryTimeoutMs = opts.queryTimeoutMs;
   if (queryTimeoutMs && Number.isFinite(queryTimeoutMs) && queryTimeoutMs > 0) {
