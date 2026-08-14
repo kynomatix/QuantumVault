@@ -7,6 +7,7 @@ const getWalletLlmCiphertextMock = vi.fn();
 const getWalletMock = vi.fn();
 const getRecentClosedMock = vi.fn();
 const getOpenDecisionsMock = vi.fn();
+const qualificationEraMutationPatchMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
     getAiTraderBot: (...a: unknown[]) => getBotMock(...a),
@@ -81,6 +82,7 @@ vi.mock("../../server/ai-trader/monitor", () => ({
 vi.mock("../../server/ai-trader/graduation", () => ({
   sanitizeGraduationCriteria: vi.fn(),
   canGoLive: vi.fn(),
+  qualificationEraMutationPatch: (...a: unknown[]) => qualificationEraMutationPatchMock(...a),
 }));
 
 const getScannerShortlistMock = vi.fn();
@@ -215,6 +217,12 @@ describe("AI Trader scanner route market admission", () => {
     }]);
     isMarketAdmittedMock.mockReturnValue(false);
     isMultiplierQuarantinedMock.mockReturnValue(false);
+    qualificationEraMutationPatchMock.mockReturnValue({
+      graduationState: "in_trial",
+      currentQualificationEraDigest: null,
+      graduatedQualificationEraDigest: null,
+      qualificationEraInvalidationReason: "scanner_market_selection_changed",
+    });
   });
 
   it("refuses an unadmitted fresh manual pick before UMK, bot write, context, LLM, or execution", async () => {
@@ -275,6 +283,108 @@ describe("AI Trader scanner route market admission", () => {
     expect(buildContextMock).not.toHaveBeenCalled();
     expect(runDecisionMock).not.toHaveBeenCalled();
     expect(executeDecisionMock).not.toHaveBeenCalled();
+  });
+
+  it("persists a manual scanner pick with qualification-era invalidation before context", async () => {
+    scannerCapabilitiesMock.consumersEnabled = true;
+    isMarketAdmittedMock.mockReturnValue(true);
+    const bot = scannerBot();
+    getBotMock.mockResolvedValue(bot);
+    getScannerShortlistMock.mockReturnValue([{
+      protocol: "pacifica",
+      market: "BTC-PERP",
+      timeframe: "1h",
+      direction: "long",
+      setup: "W",
+      score: 90,
+      necklineDistancePct: 0.1,
+      parentTrend: "uptrend",
+      evaluatedAt: Date.now(),
+    }]);
+    getSessionMock.mockReturnValue({ session: { umk: Buffer.from("umk") } });
+    getWalletLlmCiphertextMock.mockResolvedValue("ciphertext");
+    decryptLlmApiKeyMock.mockReturnValue(Buffer.from("test-key"));
+    getWalletMock.mockResolvedValue({ agentPublicKey: "agent-public-key" });
+    getRecentClosedMock.mockResolvedValue([]);
+    getOpenDecisionsMock.mockResolvedValue([]);
+    buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
+    runDecisionMock.mockResolvedValue({
+      ok: true,
+      decisionId: "decision-route",
+      decision: { action: "flat" },
+      clamped: { action: "flat" },
+      rejected: false,
+      violations: [],
+      latencyMs: 1,
+    });
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+
+    const result = await invoke(built.routes, "POST /api/ai-trader/:id/analyze", {
+      params: { id: bot.id },
+      session: { walletAddress: bot.walletAddress },
+      body: {},
+      query: {},
+      headers: {},
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(qualificationEraMutationPatchMock).toHaveBeenCalledWith(
+      bot,
+      expect.objectContaining({ market: "BTC-PERP", timeframe: "1h" }),
+      "scanner_market_selection_changed",
+    );
+    expect(updateBotMock.mock.calls[0]).toEqual([
+      bot.id,
+      expect.objectContaining({
+        market: "BTC-PERP",
+        timeframe: "1h",
+        graduationState: "in_trial",
+        currentQualificationEraDigest: null,
+      }),
+    ]);
+    expect(buildContextMock.mock.calls[0][0].bot).toMatchObject({
+      market: "BTC-PERP",
+      timeframe: "1h",
+      graduationState: "in_trial",
+    });
+  });
+});
+
+describe("AI Trader material mutation qualification-era invalidation", () => {
+  it("applies the centralized invalidation patch in the bot PATCH seam", async () => {
+    vi.clearAllMocks();
+    const bot = fixedBot(true);
+    getBotMock.mockResolvedValue(bot);
+    qualificationEraMutationPatchMock.mockReturnValue({
+      graduationState: "in_trial",
+      currentQualificationEraDigest: null,
+      graduatedQualificationEraDigest: null,
+      qualificationEraInvalidationReason: "material_bot_settings_changed",
+    });
+    updateBotMock.mockResolvedValue({ ...bot, model: "different/model", graduationState: "in_trial" });
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+
+    const result = await invoke(built.routes, "PATCH /api/ai-trader/:id", {
+      params: { id: bot.id },
+      session: { walletAddress: bot.walletAddress },
+      body: { model: "different/model" },
+      query: {},
+      headers: {},
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(qualificationEraMutationPatchMock).toHaveBeenCalledWith(
+      bot,
+      expect.objectContaining({ model: "different/model" }),
+      "material_bot_settings_changed",
+    );
+    expect(updateBotMock).toHaveBeenCalledWith(bot.id, expect.objectContaining({
+      model: "different/model",
+      graduationState: "in_trial",
+      currentQualificationEraDigest: null,
+    }));
   });
 });
 

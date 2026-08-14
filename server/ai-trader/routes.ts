@@ -934,11 +934,12 @@ export function registerAiTraderRoutes(app: Express): void {
           pickUpdates,
           qualificationEraMutationPatch(bot, pickUpdates, "scanner_market_selection_changed") ?? {},
         );
-        const pickedBot = await storage.updateAiTraderBot(bot.id, pickUpdates as any);
-        if (!pickedBot) throw new Error("scanner pick lost the AI Trader bot row");
+        await storage.updateAiTraderBot(bot.id, pickUpdates as any);
         // Refresh local copy so buildMarketContext and runDecision operate on the
         // PICKED market, never the stale placeholder.
-        bot = pickedBot;
+        // Do not depend on the storage adapter returning the updated row: the durable
+        // write is authoritative, and this exact patch is the state this request consumes.
+        bot = { ...bot, ...pickUpdates } as AiTraderBot;
         scannerNote = `Scanner selected: ${candidate.market} ${candidate.timeframe} — setup=${candidate.setup} direction=${candidate.direction} score=${Math.round(candidate.score)} dist=${candidate.necklineDistancePct.toFixed(3)}% parentTrend=${candidate.parentTrend}`;
         console.log(`[AiTrader] manual analyze: scanner picked ${candidate.market} ${candidate.timeframe} (score=${Math.round(candidate.score)}) for bot ${bot.id.slice(0, 8)}`);
       }
