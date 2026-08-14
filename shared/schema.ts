@@ -2129,6 +2129,11 @@ export const aiTraderBots = pgTable("ai_trader_bots", {
   // { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 } — floors enforced server-side
   trialStartedAt: timestamp("trial_started_at").defaultNow(),
   graduatedAt: timestamp("graduated_at"),
+  // Qualification-era identity is nullable by design: null is the only legacy/
+  // unknown representation and can never authorize live promotion.
+  currentQualificationEraDigest: text("current_qualification_era_digest"),
+  graduatedQualificationEraDigest: text("graduated_qualification_era_digest"),
+  qualificationEraInvalidationReason: text("qualification_era_invalidation_reason"),
   policyHmac: text("policy_hmac").notNull(),
   status: text("status").notNull().default("idle"),
   // 'idle'|'analyzing'|'proposed'|'executing'|'open'|'paused'|'stopped'
@@ -2165,6 +2170,7 @@ export const aiTraderDecisions = pgTable("ai_trader_decisions", {
   botId: varchar("bot_id").references(() => aiTraderBots.id, { onDelete: 'cascade' }),
   // Full audit trail: what the AI saw, said, and what actually happened
   contextDigest: jsonb("context_digest"),               // compact snapshot of inputs (not full candles)
+  qualificationEraDigest: text("qualification_era_digest"), // null = legacy/unknown; never inferred
   rawDecision: jsonb("raw_decision").notNull(),          // as returned by the model
   clampedDecision: jsonb("clamped_decision"),            // after guardrails (null if rejected)
   guardrailViolations: jsonb("guardrail_violations"),    // which G-rules fired
@@ -2191,6 +2197,9 @@ export const insertAiTraderBotSchema = createInsertSchema(aiTraderBots).omit({
   updatedAt: true,
   trialStartedAt: true, // server-set at creation (§2e trial start)
   graduatedAt: true,    // server-set on graduation, never client-set
+  currentQualificationEraDigest: true,
+  graduatedQualificationEraDigest: true,
+  qualificationEraInvalidationReason: true,
 }).superRefine((b, ctx) => {
   // risk-based-sizing-spec Phase A: 0.1 <= riskMinPct <= riskMaxPct <= 3.0.
   // Decimal columns are strings in drizzle-zod, so validate numerically here.

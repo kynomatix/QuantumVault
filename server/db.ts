@@ -1073,6 +1073,9 @@ export async function ensureSchema() {
         graduation_criteria jsonb NOT NULL,
         trial_started_at timestamp DEFAULT now(),
         graduated_at timestamp,
+        current_qualification_era_digest text,
+        graduated_qualification_era_digest text,
+        qualification_era_invalidation_reason text,
         policy_hmac text NOT NULL,
         status text NOT NULL DEFAULT 'idle',
         pause_reason text,
@@ -1087,6 +1090,7 @@ export async function ensureSchema() {
         id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
         bot_id varchar REFERENCES ai_trader_bots(id) ON DELETE CASCADE,
         context_digest jsonb,
+        qualification_era_digest text,
         raw_decision jsonb NOT NULL,
         clamped_decision jsonb,
         guardrail_violations jsonb,
@@ -1122,6 +1126,10 @@ export async function ensureSchema() {
       // used at decision time so track records stay attributable when models change
       // mid-flight). Backfill existing rows from the bot's current model.
       `ALTER TABLE ai_trader_decisions ADD COLUMN IF NOT EXISTS model_used text`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS current_qualification_era_digest text`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS graduated_qualification_era_digest text`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS qualification_era_invalidation_reason text`,
+      `ALTER TABLE ai_trader_decisions ADD COLUMN IF NOT EXISTS qualification_era_digest text`,
       `UPDATE ai_trader_decisions d
          SET model_used = b.model
          FROM ai_trader_bots b

@@ -77,7 +77,13 @@ import { executeDecision, checkCooldownAndCaps, aiTraderPolicyObject } from "./e
 import { computeBotPolicyHmac } from "../session-v3";
 import { getScannerShortlist } from "./scanner";
 import { SCANNER_CAPABILITIES } from "./scanner-capabilities";
-import { evaluateGraduation, type GraduationTradeRecord } from "./graduation";
+import {
+  computeQualificationEraDigest,
+  evaluateGraduation,
+  qualificationEraDecisionPatch,
+  qualificationEraMutationPatch,
+  type GraduationTradeRecord,
+} from "./graduation";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import type { ProtocolAdapter } from "../protocol/adapter";
 import type { ProtocolPosition, TradeRecord } from "../protocol/protocol-types";
@@ -1577,8 +1583,30 @@ async function evaluateBotGraduation(bot: AiTraderBot, openPositionMtm: number):
   if (!trialStartedAt) return;
 
   const recentClosed = await storage.getRecentClosedDecisions(bot.id, 500);
+  const latestContext = recentClosed.find((decision) => decision.contextDigest)?.contextDigest;
+  if (!latestContext) return;
+  let recomputedEra: string;
+  try {
+    recomputedEra = computeQualificationEraDigest({
+      bot,
+      contextDigest: latestContext as Record<string, unknown>,
+    });
+  } catch {
+    return;
+  }
+  const eraPatch = qualificationEraDecisionPatch(bot, recomputedEra);
+  if (eraPatch) {
+    await storage.updateAiTraderBot(bot.id, eraPatch as any);
+    return;
+  }
+  if (!bot.currentQualificationEraDigest) return;
   const trades: GraduationTradeRecord[] = recentClosed
-    .filter((d) => d.closedAt && new Date(d.closedAt).getTime() >= trialStartedAt && num(d.realizedPnl) !== null)
+    .filter((d) =>
+      d.closedAt &&
+      new Date(d.closedAt).getTime() >= trialStartedAt &&
+      num(d.realizedPnl) !== null &&
+      d.qualificationEraDigest === bot.currentQualificationEraDigest
+    )
     .map((d) => ({ closedAt: new Date(d.closedAt!).getTime(), netPnl: num(d.realizedPnl)! }));
 
   let result;
@@ -1596,7 +1624,12 @@ async function evaluateBotGraduation(bot: AiTraderBot, openPositionMtm: number):
   }
 
   if (result.verdict === "graduated") {
-    await storage.updateAiTraderBot(bot.id, { graduationState: "graduated", graduatedAt: new Date() });
+    await storage.updateAiTraderBot(bot.id, {
+      graduationState: "graduated",
+      graduatedAt: new Date(),
+      graduatedQualificationEraDigest: bot.currentQualificationEraDigest,
+      qualificationEraInvalidationReason: null,
+    });
     console.log(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)} GRADUATED: ${result.tradeCount} trades, net ${result.netPnl.toFixed(2)}, PF ${Number.isFinite(result.profitFactor) ? result.profitFactor.toFixed(2) : "∞"}, maxDD ${result.maxDrawdownPct.toFixed(1)}%`);
     await sendTradeNotification(bot.walletAddress, {
       type: "ai_trader_graduation",
@@ -1932,14 +1965,20 @@ export async function runAutoCycle(botId: string): Promise<void> {
           umk,
           aiTraderPolicyObject({ market: candidate.market, maxLeverage: bot.maxLeverage, allocatedUsdc: bot.allocatedUsdc })
         );
-        await storage.updateAiTraderBot(bot.id, {
+        const pickUpdates: Record<string, unknown> = {
           market: candidate.market,
           timeframe: candidate.timeframe,
           policyHmac: newPolicyHmac,
-        });
+        };
+        Object.assign(
+          pickUpdates,
+          qualificationEraMutationPatch(bot, pickUpdates, "scanner_market_selection_changed") ?? {},
+        );
+        const pickedBot = await storage.updateAiTraderBot(bot.id, pickUpdates as any);
+        if (!pickedBot) throw new Error("scanner pick lost the AI Trader bot row");
         // CRITICAL money-safety: refresh local copy so buildMarketContext, runDecision,
         // and executeDecision all operate on the PICKED market, never the stale placeholder.
-        bot = { ...bot, market: candidate.market, timeframe: candidate.timeframe as AiTraderTimeframe, policyHmac: newPolicyHmac };
+        bot = pickedBot;
         const scannerNote = `Scanner selected: ${candidate.market} ${candidate.timeframe} — setup=${candidate.setup} direction=${candidate.direction} score=${Math.round(candidate.score)} dist=${candidate.necklineDistancePct.toFixed(3)}% parentTrend=${candidate.parentTrend}`;
         console.log(`[AiTraderMonitor] scanner: picked ${candidate.market} ${candidate.timeframe} (score=${Math.round(candidate.score)}) for bot ${bot.id.slice(0, 8)} [call ${ci + 1}/${MAX_LLM_CALLS}]`);
 

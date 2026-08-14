@@ -794,7 +794,13 @@ export interface IStorage {
   // client-set at creation); graduatedAt is written by the monitor's
   // graduation path, trialStartedAt by WO-7's restart-trial route (the only
   // other legitimate server-side writer of either field).
-  updateAiTraderBot(id: string, updates: Partial<InsertAiTraderBot> & { graduatedAt?: Date; trialStartedAt?: Date }): Promise<AiTraderBot | undefined>;
+  updateAiTraderBot(id: string, updates: Partial<InsertAiTraderBot> & {
+    graduatedAt?: Date | null;
+    trialStartedAt?: Date | null;
+    currentQualificationEraDigest?: string | null;
+    graduatedQualificationEraDigest?: string | null;
+    qualificationEraInvalidationReason?: string | null;
+  }): Promise<AiTraderBot | undefined>;
   insertAiTraderDecision(decision: InsertAiTraderDecision): Promise<AiTraderDecision>;
   updateAiTraderDecision(id: string, updates: Partial<InsertAiTraderDecision>): Promise<AiTraderDecision | undefined>;
   getAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
@@ -5756,7 +5762,13 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(aiTraderBots).where(ne(aiTraderBots.status, 'stopped'));
   }
 
-  async updateAiTraderBot(id: string, updates: Partial<InsertAiTraderBot> & { graduatedAt?: Date; trialStartedAt?: Date }): Promise<AiTraderBot | undefined> {
+  async updateAiTraderBot(id: string, updates: Partial<InsertAiTraderBot> & {
+    graduatedAt?: Date | null;
+    trialStartedAt?: Date | null;
+    currentQualificationEraDigest?: string | null;
+    graduatedQualificationEraDigest?: string | null;
+    qualificationEraInvalidationReason?: string | null;
+  }): Promise<AiTraderBot | undefined> {
     const result = await db.update(aiTraderBots)
       .set({ ...updates, updatedAt: sql`NOW()` } as any)
       .where(eq(aiTraderBots.id, id))

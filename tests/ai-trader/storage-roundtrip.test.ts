@@ -20,7 +20,9 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
 
   beforeAll(async () => {
     ({ storage } = await import("../../server/storage"));
-    ({ db } = await import("../../server/db"));
+    const dbModule = await import("../../server/db");
+    db = dbModule.db;
+    await dbModule.ensureSchema();
     ({ aiTraderBots, aiTraderDecisions } = await import("@shared/schema"));
   });
 
@@ -79,6 +81,24 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
     );
   });
 
+  it("round-trips qualification-era bot fields without inferring legacy values", async () => {
+    const legacy = await storage.getAiTraderBot(botId);
+    expect(legacy?.currentQualificationEraDigest).toBeNull();
+    expect(legacy?.graduatedQualificationEraDigest).toBeNull();
+    expect(legacy?.qualificationEraInvalidationReason).toBeNull();
+    const era = "A".repeat(64);
+    const updated = await storage.updateAiTraderBot(botId, {
+      currentQualificationEraDigest: era,
+      graduatedQualificationEraDigest: era,
+      qualificationEraInvalidationReason: "test_round_trip",
+    });
+    expect(updated).toMatchObject({
+      currentQualificationEraDigest: era,
+      graduatedQualificationEraDigest: era,
+      qualificationEraInvalidationReason: "test_round_trip",
+    });
+  });
+
   it("getActiveAiTraderBots excludes a stopped bot", async () => {
     await storage.updateAiTraderBot(botId, { status: "stopped" as any });
     const active = await storage.getActiveAiTraderBots();
@@ -91,9 +111,11 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
     const decision = await storage.insertAiTraderDecision({
       botId,
       rawDecision: { action: "open_long", confidence: 0.8 },
+      qualificationEraDigest: "B".repeat(64),
     } as any);
     expect(decision.id).toBeTruthy();
     expect(decision.botId).toBe(botId);
+    expect(decision.qualificationEraDigest).toBe("B".repeat(64));
     decisionId = decision.id;
   });
 
