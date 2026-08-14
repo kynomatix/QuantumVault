@@ -411,16 +411,21 @@ describe("qualification era forgotten-declaration gate", () => {
     const mergeBase = execFileSync("git", ["merge-base", "HEAD", "origin/main"], { cwd: root, encoding: "utf8" }).trim();
     const changedPaths = execFileSync("git", ["diff", "--name-only", mergeBase, "HEAD"], { cwd: root, encoding: "utf8" })
       .trim().split(/\r?\n/).filter(Boolean);
+    const source = execFileSync("git", ["show", `${mergeBase}:server/ai-trader/graduation.ts`], { cwd: root, encoding: "utf8" });
+    const beginMarker = "QV_QUALIFICATION_ERA_REGISTRY_LITERAL_BEGIN";
+    const endMarker = "QV_QUALIFICATION_ERA_REGISTRY_LITERAL_END";
+    const hasBegin = source.includes(beginMarker);
+    const hasEnd = source.includes(endMarker);
     let base: QualificationEraRegistry | null = null;
-    try {
-      const source = execFileSync("git", ["show", `${mergeBase}:server/ai-trader/graduation.ts`], { cwd: root, encoding: "utf8" });
-      const match = /QV_QUALIFICATION_ERA_REGISTRY_JSON_BEGIN[\s\S]*?`([\s\S]*?)` as const;[\s\S]*?QV_QUALIFICATION_ERA_REGISTRY_JSON_END/.exec(source);
-      if (match) base = JSON.parse(match[1]) as QualificationEraRegistry;
-    } catch {
-      base = null;
+    if (hasBegin || hasEnd) {
+      expect(hasBegin && hasEnd, "base registry markers must be complete").toBe(true);
+      const match = /QV_QUALIFICATION_ERA_REGISTRY_LITERAL_BEGIN[\s\S]*?=\s*(\{[\s\S]*\})\s*as const satisfies QualificationEraRegistry;[\s\S]*?QV_QUALIFICATION_ERA_REGISTRY_LITERAL_END/.exec(source);
+      expect(match, "base registry literal must be parseable").not.toBeNull();
+      base = JSON.parse(match![1]) as QualificationEraRegistry;
     }
     const currentSource = readFileSync(resolve(root, "server/ai-trader/graduation.ts"), "utf8");
-    expect(currentSource).toContain("QV_QUALIFICATION_ERA_REGISTRY_JSON_BEGIN");
+    expect(currentSource).toContain(beginMarker);
+    expect(currentSource).toContain(endMarker);
     expect(validateQualificationEraDeclarationChanges({ base, current: QUALIFICATION_ERA_REGISTRY, changedPaths })).toEqual([]);
   });
 });

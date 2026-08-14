@@ -363,6 +363,11 @@ function TrialStrip({ bot, tradesCount, netPnl, maxDdPct, onGoLive, onRestartTri
             Qualification era {bot.qualificationEraStatus} — a new paper trial is required
           </span>
         </div>
+        {bot.qualificationEraInvalidationReason && (
+          <div className="mt-1 text-[11px] text-amber-300/80">
+            Reason: {bot.qualificationEraInvalidationReason}
+          </div>
+        )}
       </div>
     );
   }

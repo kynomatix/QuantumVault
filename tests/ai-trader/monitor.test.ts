@@ -1834,6 +1834,50 @@ describe("runAutoCycle", () => {
     expect(executeDecisionMock).not.toHaveBeenCalled();
   });
 
+  it("persists scanner selection with qualification-era invalidation before context or decision", async () => {
+    scannerCapabilitiesMock.consumersEnabled = true;
+    const { runAutoCycle } = await importMonitor();
+    const bot = armAutoBot({ marketSource: "scanner", graduationState: "graduated", graduatedQualificationEraDigest: DEFAULT_ERA });
+    getSessionByWalletMock.mockReturnValue({ sessionId: "s", session: { umk: Buffer.from("umk") } });
+    getLlmCiphertextMock.mockResolvedValue("ct");
+    decryptLlmKeyMock.mockReturnValue(Buffer.from("test-key"));
+    getScannerShortlistMock.mockReturnValue([{
+      protocol: "pacifica",
+      market: "BTC-PERP",
+      timeframe: "1h",
+      direction: "long",
+      setup: "W",
+      score: 90,
+      necklineDistancePct: 0.1,
+      parentTrend: "uptrend",
+      evaluatedAt: NOW,
+    }]);
+    buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "scanner-era", decision: {}, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
+
+    await runAutoCycle(bot.id);
+
+    expect(updateBotMock.mock.calls[0]).toEqual([
+      bot.id,
+      expect.objectContaining({
+        market: "BTC-PERP",
+        timeframe: "1h",
+        policyHmac: "hmac-scanner-recomputed",
+        graduationState: "in_trial",
+        currentQualificationEraDigest: null,
+        graduatedQualificationEraDigest: null,
+        qualificationEraInvalidationReason: "scanner_market_selection_changed",
+      }),
+    ]);
+    expect(buildContextMock.mock.calls[0][0].bot).toMatchObject({
+      market: "BTC-PERP",
+      timeframe: "1h",
+      graduationState: "in_trial",
+      currentQualificationEraDigest: null,
+    });
+    expect(runDecisionMock).toHaveBeenCalledTimes(1);
+  });
+
   it("G6 cooldown blocks BEFORE any LLM spend and reschedules without pausing", async () => {
     const { runAutoCycle } = await importMonitor();
     armAutoBot();

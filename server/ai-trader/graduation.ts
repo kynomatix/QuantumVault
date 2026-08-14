@@ -42,8 +42,8 @@ export interface QualificationEraRegistryEntry {
 
 export type QualificationEraRegistry = Record<QualificationEraComponent, QualificationEraRegistryEntry>;
 
-// QV_QUALIFICATION_ERA_REGISTRY_JSON_BEGIN
-export const QUALIFICATION_ERA_REGISTRY_SOURCE = `{
+// QV_QUALIFICATION_ERA_REGISTRY_LITERAL_BEGIN
+export const QUALIFICATION_ERA_REGISTRY = {
   "scanner_capability_policy": {
     "materialVersion": 1,
     "decisionGeneration": 1,
@@ -80,12 +80,8 @@ export const QUALIFICATION_ERA_REGISTRY_SOURCE = `{
     "decision": "no_bump",
     "ownerPaths": ["server/ai-trader/paper-math.ts", "server/ai-trader/monitor.ts"]
   }
-}` as const;
-// QV_QUALIFICATION_ERA_REGISTRY_JSON_END
-
-export const QUALIFICATION_ERA_REGISTRY = Object.freeze(
-  JSON.parse(QUALIFICATION_ERA_REGISTRY_SOURCE) as QualificationEraRegistry,
-);
+} as const satisfies QualificationEraRegistry;
+// QV_QUALIFICATION_ERA_REGISTRY_LITERAL_END
 
 const QUALIFICATION_ERA_COMPONENTS = Object.freeze([
   "scanner_capability_policy",
