@@ -54,7 +54,13 @@ import { runDecision } from "./decide";
 import { executeDecision, aiTraderPolicyObject } from "./executor";
 import { userInitiatedClose, scheduleAutoNext, nextCycleTimeframe, SCANNER_CANDIDATE_MAX_AGE_MS } from "./monitor";
 import { parseOpenDecision, computeUnrealizedPnl } from "./paper-position-authority";
-import { sanitizeGraduationCriteria, canGoLive } from "./graduation";
+import {
+  sanitizeGraduationCriteria,
+  canGoLive,
+  computeQualificationEraDigest,
+  qualificationEraDecisionPatch,
+  qualificationEraMutationPatch,
+} from "./graduation";
 import { getScannerStatus, getScannerShortlistResult } from "./scanner";
 import { SCANNER_CAPABILITIES } from "./scanner-capabilities";
 import type { ClampedDecision } from "./guardrails";
@@ -131,9 +137,26 @@ const PRICE_DRIFT_STALE_PCT = 0.5;
 // matches the single-process model — same pattern as other money-path locks.
 const goLiveInFlight = new Set<string>();
 
-function toBotDto(bot: AiTraderBot): Omit<AiTraderBot, "policyHmac"> {
-  const { policyHmac, ...rest } = bot;
-  return rest;
+function toBotDto(bot: AiTraderBot): Omit<
+  AiTraderBot,
+  "policyHmac" | "currentQualificationEraDigest" | "graduatedQualificationEraDigest"
+> & {
+  qualificationEraStatus: "waived" | "unknown" | "matched" | "stale" | "in_trial";
+} {
+  const { policyHmac, currentQualificationEraDigest, graduatedQualificationEraDigest, ...rest } = bot;
+  const qualificationEraStatus =
+    bot.graduationState === "waived"
+      ? "waived"
+      : bot.graduationState === "graduated"
+        ? !currentQualificationEraDigest || !graduatedQualificationEraDigest
+          ? "unknown"
+          : graduatedQualificationEraDigest === currentQualificationEraDigest
+            ? "matched"
+            : "stale"
+        : !currentQualificationEraDigest
+          ? "unknown"
+          : "in_trial";
+  return { ...rest, qualificationEraStatus };
 }
 
 // --- Hands-off cadence arming ------------------------------------------------------------
@@ -777,6 +800,9 @@ export function registerAiTraderRoutes(app: Express): void {
         return res.status(400).json({ error: "No mutable fields provided." });
       }
 
+      const eraInvalidation = qualificationEraMutationPatch(bot, updates, "material_bot_settings_changed");
+      if (eraInvalidation) Object.assign(updates, eraInvalidation);
+
       const updated = await storage.updateAiTraderBot(bot.id, updates as any);
       if (!updated) return res.status(404).json({ error: "Bot not found." });
 
@@ -914,14 +940,18 @@ export function registerAiTraderRoutes(app: Express): void {
           umkForPick,
           aiTraderPolicyObject({ market: candidate.market, maxLeverage: bot.maxLeverage, allocatedUsdc: bot.allocatedUsdc })
         );
-        analysisClaimUpdates = {
+        const pickUpdates: Record<string, unknown> = {
           market: candidate.market,
           timeframe: candidate.timeframe,
           policyHmac: newPolicyHmac,
         };
-        // Refresh local copy so buildMarketContext and runDecision operate on the
-        // PICKED market, never the stale placeholder.
-        bot = { ...bot, market: candidate.market, timeframe: candidate.timeframe as AiTraderBot["timeframe"], policyHmac: newPolicyHmac };
+        Object.assign(
+          pickUpdates,
+          qualificationEraMutationPatch(bot, pickUpdates, "scanner_market_selection_changed") ?? {},
+        );
+        analysisClaimUpdates = pickUpdates as any;
+        // The exact post-claim row becomes the local bot below. Do not expose the
+        // scanner pick or its era invalidation before the guarded durable claim wins.
         scannerNote = `Scanner selected: ${candidate.market} ${candidate.timeframe} — setup=${candidate.setup} direction=${candidate.direction} score=${Math.round(candidate.score)} dist=${candidate.necklineDistancePct.toFixed(3)}% parentTrend=${candidate.parentTrend}`;
         console.log(`[AiTrader] manual analyze: scanner picked ${candidate.market} ${candidate.timeframe} (score=${Math.round(candidate.score)}) for bot ${bot.id.slice(0, 8)}`);
       }
@@ -1384,6 +1414,8 @@ export function registerAiTraderRoutes(app: Express): void {
         nextPauseReason: null,
         botUpdates: {
           graduationState: "in_trial",
+          graduatedQualificationEraDigest: null,
+          qualificationEraInvalidationReason: "trial_restarted",
           dailyRealizedPnl: "0",
           consecutiveLosses: 0,
           trialStartedAt: new Date(),
@@ -1450,7 +1482,7 @@ export function registerAiTraderRoutes(app: Express): void {
     let mnemonic: Buffer | null = null;
     let inFlightClaimedBotId: string | null = null;
     try {
-      const bot = await loadOwnedBot(req, res);
+      let bot = await loadOwnedBot(req, res);
       if (!bot) return;
       if (bot.marketSource === "scanner" && !SCANNER_CAPABILITIES.liveExecutionEnabled) {
         return res.status(409).json({
@@ -1467,9 +1499,40 @@ export function registerAiTraderRoutes(app: Express): void {
       if (!bot.paperMode) {
         return res.status(409).json({ error: "This bot is already live." });
       }
-      const gate = canGoLive(bot.graduationState);
-      if (!gate.ok) {
-        return res.status(403).json({ error: gate.error });
+      if (bot.graduationState !== "waived") {
+        const [latestDecision] = await storage.getAiTraderDecisions(bot.id, 1);
+        let recomputedEra: string | null = null;
+        try {
+          recomputedEra = latestDecision
+            ? computeQualificationEraDigest({
+                bot,
+                contextDigest: latestDecision.contextDigest as Record<string, unknown> | null,
+              })
+            : null;
+        } catch {
+          recomputedEra = null;
+        }
+        if (recomputedEra) {
+          const eraPatch = qualificationEraDecisionPatch(bot, recomputedEra);
+          if (eraPatch) {
+            const synchronized = await storage.updateAiTraderBot(bot.id, eraPatch as any);
+            if (!synchronized) throw new Error("qualification era synchronization lost the bot row");
+            bot = synchronized;
+          }
+        }
+        const gate = canGoLive(
+          bot.graduationState,
+          recomputedEra,
+          bot.graduatedQualificationEraDigest,
+        );
+        if (!gate.ok) {
+          return res.status(403).json({ error: gate.error });
+        }
+      } else {
+        const gate = canGoLive(bot.graduationState);
+        if (!gate.ok) {
+          return res.status(403).json({ error: gate.error });
+        }
       }
       if (bot.status === "open" || bot.status === "executing" || bot.status === "analyzing" || bot.status === "proposed") {
         return res.status(409).json({ error: "Close the open paper position (or wait for the in-flight cycle to finish) before going live." });

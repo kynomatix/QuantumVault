@@ -1070,11 +1070,43 @@ export interface IStorage {
   // client-set at creation); graduatedAt is written by the monitor's
   // graduation path, trialStartedAt by WO-7's restart-trial route (the only
   // other legitimate server-side writer of either field).
-  updateAiTraderBot(id: string, updates: Partial<InsertAiTraderBot> & { graduatedAt?: Date; trialStartedAt?: Date }): Promise<AiTraderBot | undefined>;
-  claimAiTraderAnalysis(params: { botId: string; expectedStatus: "idle"; updates?: Pick<InsertAiTraderBot, "market" | "timeframe" | "policyHmac"> }): Promise<AiTraderBot | undefined>;
+  updateAiTraderBot(id: string, updates: Partial<InsertAiTraderBot> & {
+    graduatedAt?: Date | null;
+    trialStartedAt?: Date | null;
+    currentQualificationEraDigest?: string | null;
+    graduatedQualificationEraDigest?: string | null;
+    qualificationEraInvalidationReason?: string | null;
+  }): Promise<AiTraderBot | undefined>;
+  claimAiTraderAnalysis(params: {
+    botId: string;
+    expectedStatus: "idle";
+    updates?: Partial<InsertAiTraderBot> & {
+      graduatedAt?: Date | null;
+      trialStartedAt?: Date | null;
+      currentQualificationEraDigest?: string | null;
+      graduatedQualificationEraDigest?: string | null;
+      qualificationEraInvalidationReason?: string | null;
+    };
+  }): Promise<AiTraderBot | undefined>;
   bindAiTraderProposal(params: { botId: string; decisionId: string }): Promise<{ bot: AiTraderBot; decision: AiTraderDecision } | undefined>;
   claimAiTraderExecution(params: { botId: string; decisionId: string; expectedStatus: "proposed" | "analyzing"; now: Date; expiryMs: number }): Promise<{ bot: AiTraderBot; decision: AiTraderDecision } | undefined>;
-  transitionAiTraderState(params: { botId: string; expectedStatus: string; expectedPauseReason: string | null; nextStatus: string; nextPauseReason: string | null; decisionId?: string; expectedDecisionOutcome?: string | null; decisionOutcome?: string; botUpdates?: Partial<InsertAiTraderBot> & { trialStartedAt?: Date } }): Promise<AiTraderBot | undefined>;
+  transitionAiTraderState(params: {
+    botId: string;
+    expectedStatus: string;
+    expectedPauseReason: string | null;
+    nextStatus: string;
+    nextPauseReason: string | null;
+    decisionId?: string;
+    expectedDecisionOutcome?: string | null;
+    decisionOutcome?: string;
+    botUpdates?: Partial<InsertAiTraderBot> & {
+      graduatedAt?: Date | null;
+      trialStartedAt?: Date | null;
+      currentQualificationEraDigest?: string | null;
+      graduatedQualificationEraDigest?: string | null;
+      qualificationEraInvalidationReason?: string | null;
+    };
+  }): Promise<AiTraderBot | undefined>;
   commitAiTraderPaperEntryTransition(params: AiTraderPaperEntryTransitionParams): Promise<AiTraderPaperEntryTransitionResult>;
   commitAiTraderDirectLiveEntryTransition(params: AiTraderDirectLiveEntryTransitionParams): Promise<AiTraderDirectLiveEntryTransitionResult>;
   commitAiTraderConfirmedCloseTransition(params: AiTraderConfirmedCloseTransitionParams): Promise<AiTraderConfirmedCloseTransitionResult>;
@@ -6055,7 +6087,13 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(aiTraderBots).where(ne(aiTraderBots.status, 'stopped'));
   }
 
-  async updateAiTraderBot(id: string, updates: Partial<InsertAiTraderBot> & { graduatedAt?: Date; trialStartedAt?: Date }): Promise<AiTraderBot | undefined> {
+  async updateAiTraderBot(id: string, updates: Partial<InsertAiTraderBot> & {
+    graduatedAt?: Date | null;
+    trialStartedAt?: Date | null;
+    currentQualificationEraDigest?: string | null;
+    graduatedQualificationEraDigest?: string | null;
+    qualificationEraInvalidationReason?: string | null;
+  }): Promise<AiTraderBot | undefined> {
     const result = await db.update(aiTraderBots)
       .set({ ...updates, updatedAt: sql`NOW()` } as any)
       .where(eq(aiTraderBots.id, id))
@@ -6066,7 +6104,13 @@ export class DatabaseStorage implements IStorage {
   async claimAiTraderAnalysis(params: {
     botId: string;
     expectedStatus: "idle";
-    updates?: Pick<InsertAiTraderBot, "market" | "timeframe" | "policyHmac">;
+    updates?: Partial<InsertAiTraderBot> & {
+      graduatedAt?: Date | null;
+      trialStartedAt?: Date | null;
+      currentQualificationEraDigest?: string | null;
+      graduatedQualificationEraDigest?: string | null;
+      qualificationEraInvalidationReason?: string | null;
+    };
   }): Promise<AiTraderBot | undefined> {
     const [claimed] = await db.update(aiTraderBots)
       .set({ ...(params.updates ?? {}), status: "analyzing", pauseReason: null, updatedAt: sql`NOW()` } as any)
@@ -6135,7 +6179,13 @@ export class DatabaseStorage implements IStorage {
     decisionId?: string;
     expectedDecisionOutcome?: string | null;
     decisionOutcome?: string;
-    botUpdates?: Partial<InsertAiTraderBot> & { trialStartedAt?: Date };
+    botUpdates?: Partial<InsertAiTraderBot> & {
+      graduatedAt?: Date | null;
+      trialStartedAt?: Date | null;
+      currentQualificationEraDigest?: string | null;
+      graduatedQualificationEraDigest?: string | null;
+      qualificationEraInvalidationReason?: string | null;
+    };
   }): Promise<AiTraderBot | undefined> {
     // A bot-CAS miss after a decision update must roll the transaction back.
     // Returning undefined from the transaction callback commits in Drizzle,

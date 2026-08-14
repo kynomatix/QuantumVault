@@ -5,6 +5,9 @@
 // mark-to-market drawdown (open-position MTM counts), profit-factor edge
 // cases (no losses ⇒ Infinity, no wins ⇒ 0), drawdown measured as % of
 // ALLOCATION, fail-closed throws on garbage inputs, and the canGoLive gate.
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, it, expect } from "vitest";
 import {
   sanitizeGraduationCriteria,
@@ -12,8 +15,17 @@ import {
   canGoLive,
   GRADUATION_FLOORS,
   DEFAULT_MIN_PROFIT_FACTOR,
+  QUALIFICATION_ERA_REGISTRY,
+  buildQualificationEraObject,
+  canonicalEraDecimal,
+  computeQualificationEraDigest,
+  qualificationEraMutationPatch,
+  validateQualificationEraDeclarationChanges,
+  type QualificationEraComponent,
+  type QualificationEraRegistry,
   type GraduationTradeRecord,
 } from "../../server/ai-trader/graduation";
+import type { AiTraderBot } from "@shared/schema";
 
 const NOW = Date.UTC(2026, 6, 8, 12, 0, 0); // 2026-07-08T12:00:00Z
 const DAY = 86_400_000;
@@ -267,9 +279,14 @@ describe("evaluateGraduation — verdict semantics", () => {
 });
 
 describe("canGoLive", () => {
-  it("allows 'graduated' and 'waived' only", () => {
-    expect(canGoLive("graduated")).toEqual({ ok: true });
+  it("allows an exact graduated era and keeps waiver separate", () => {
+    expect(canGoLive("graduated", "ERA", "ERA")).toEqual({ ok: true });
     expect(canGoLive("waived")).toEqual({ ok: true });
+  });
+
+  it("fails closed for missing and stale graduated eras", () => {
+    expect(canGoLive("graduated", null, null).ok).toBe(false);
+    expect(canGoLive("graduated", "CURRENT", "OLD").ok).toBe(false);
   });
 
   it("blocks 'in_trial' and 'failed' with distinct messages", () => {
@@ -281,5 +298,129 @@ describe("canGoLive", () => {
     if (!failed.ok) expect(failed.error).toMatch(/failed/);
     const junk = canGoLive("something_else");
     expect(junk.ok).toBe(false);
+  });
+});
+
+const ERA_BOT = {
+  protocol: "pacifica",
+  marketSource: "scanner",
+  market: "btc-perp",
+  timeframe: "15m",
+  mode: "auto",
+  riskProfile: "guarded",
+  model: "anthropic/claude-opus-4.8",
+  sizingMode: "risk_based",
+  riskMinPct: "0.50",
+  riskMaxPct: "1.50",
+  allocatedUsdc: "00100.00",
+  maxLeverage: 3,
+  stopPolicy: "static",
+} as AiTraderBot;
+
+function provenance(finality: "forming" | "finalized" = "finalized") {
+  return { source: "okx", venue: "okx", basis: "perp", proxy: "direct", finality };
+}
+
+describe("qualification era identity", () => {
+  it("canonicalizes decimal representations without floating-point conversion", () => {
+    expect(canonicalEraDecimal("0.50")).toBe("0.5");
+    expect(canonicalEraDecimal(".5")).toBe("0.5");
+    expect(canonicalEraDecimal("-0.000")).toBe("0");
+    expect(() => canonicalEraDecimal("1e3")).toThrow(/malformed/);
+  });
+
+  it("is deterministic and binds venue/basis while grouping admitted finality", () => {
+    const base = { candleProvenance: { selected: provenance("forming"), parent: provenance() } };
+    const finalized = { candleProvenance: { selected: provenance("finalized"), parent: provenance() } };
+    expect(computeQualificationEraDigest({ bot: ERA_BOT, contextDigest: base }))
+      .toBe(computeQualificationEraDigest({ bot: ERA_BOT, contextDigest: finalized }));
+    const gate = { candleProvenance: { selected: { ...provenance(), source: "gate", venue: "gate" }, parent: provenance() } };
+    expect(computeQualificationEraDigest({ bot: ERA_BOT, contextDigest: gate }))
+      .not.toBe(computeQualificationEraDigest({ bot: ERA_BOT, contextDigest: finalized }));
+    const spot = { candleProvenance: { selected: { ...provenance(), basis: "spot" }, parent: provenance() } };
+    expect(computeQualificationEraDigest({ bot: ERA_BOT, contextDigest: spot }))
+      .not.toBe(computeQualificationEraDigest({ bot: ERA_BOT, contextDigest: finalized }));
+    expect(buildQualificationEraObject({ bot: ERA_BOT, contextDigest: finalized }).bot.allocatedUsdc).toBe("100");
+  });
+
+  it("invalidates only material bot mutations", () => {
+    expect(qualificationEraMutationPatch(ERA_BOT, { autoNext: false }, "test")).toBeNull();
+    expect(qualificationEraMutationPatch(ERA_BOT, { market: " BTC-PERP ", riskMinPct: ".5" }, "test")).toBeNull();
+    expect(qualificationEraMutationPatch(ERA_BOT, { model: "different/model" }, "test"))
+      .toMatchObject({ graduationState: "in_trial", currentQualificationEraDigest: null });
+  });
+
+  it("fails closed on malformed integer identity", () => {
+    expect(() => computeQualificationEraDigest({
+      bot: { ...ERA_BOT, maxLeverage: Number.NaN },
+      contextDigest: { candleProvenance: { selected: provenance(), parent: provenance() } },
+    })).toThrow(/integer is malformed/);
+  });
+});
+
+function cloneRegistry(): QualificationEraRegistry {
+  return JSON.parse(JSON.stringify(QUALIFICATION_ERA_REGISTRY)) as QualificationEraRegistry;
+}
+
+describe("qualification era forgotten-declaration gate", () => {
+  const components = Object.keys(QUALIFICATION_ERA_REGISTRY) as QualificationEraComponent[];
+
+  for (const component of components) {
+    const changedPath = QUALIFICATION_ERA_REGISTRY[component].ownerPaths[0];
+    it(`${component}: rejects silence`, () => {
+      const base = cloneRegistry();
+      const current = cloneRegistry();
+      delete (current[component] as any).decision;
+      expect(validateQualificationEraDeclarationChanges({ base, current, changedPaths: [changedPath] })).not.toEqual([]);
+    });
+    it(`${component}: rejects stale generation`, () => {
+      expect(validateQualificationEraDeclarationChanges({ base: cloneRegistry(), current: cloneRegistry(), changedPaths: [changedPath] })).not.toEqual([]);
+    });
+    it(`${component}: rejects bump with unchanged version`, () => {
+      const base = cloneRegistry();
+      const current = cloneRegistry();
+      current[component].decisionGeneration += 1;
+      current[component].decision = "bump";
+      expect(validateQualificationEraDeclarationChanges({ base, current, changedPaths: [changedPath] })).not.toEqual([]);
+    });
+    it(`${component}: accepts one declared bump`, () => {
+      const base = cloneRegistry();
+      const current = cloneRegistry();
+      for (const affected of components.filter((candidate) =>
+        current[candidate].ownerPaths.includes(changedPath))) {
+        current[affected].decisionGeneration += 1;
+        current[affected].materialVersion += 1;
+        current[affected].decision = "bump";
+      }
+      expect(validateQualificationEraDeclarationChanges({ base, current, changedPaths: [changedPath] })).toEqual([]);
+    });
+    it(`${component}: accepts one reviewed no_bump`, () => {
+      const base = cloneRegistry();
+      const current = cloneRegistry();
+      for (const affected of components.filter((candidate) =>
+        current[candidate].ownerPaths.includes(changedPath))) {
+        current[affected].decisionGeneration += 1;
+        current[affected].decision = "no_bump";
+      }
+      expect(validateQualificationEraDeclarationChanges({ base, current, changedPaths: [changedPath] })).toEqual([]);
+    });
+  }
+
+  it("binds the real changed-path inventory to the base registry", () => {
+    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
+    const mergeBase = execFileSync("git", ["merge-base", "HEAD", "origin/main"], { cwd: root, encoding: "utf8" }).trim();
+    const changedPaths = execFileSync("git", ["diff", "--name-only", mergeBase, "HEAD"], { cwd: root, encoding: "utf8" })
+      .trim().split(/\r?\n/).filter(Boolean);
+    let base: QualificationEraRegistry | null = null;
+    try {
+      const source = execFileSync("git", ["show", `${mergeBase}:server/ai-trader/graduation.ts`], { cwd: root, encoding: "utf8" });
+      const match = /QV_QUALIFICATION_ERA_REGISTRY_JSON_BEGIN[\s\S]*?`([\s\S]*?)` as const;[\s\S]*?QV_QUALIFICATION_ERA_REGISTRY_JSON_END/.exec(source);
+      if (match) base = JSON.parse(match[1]) as QualificationEraRegistry;
+    } catch {
+      base = null;
+    }
+    const currentSource = readFileSync(resolve(root, "server/ai-trader/graduation.ts"), "utf8");
+    expect(currentSource).toContain("QV_QUALIFICATION_ERA_REGISTRY_JSON_BEGIN");
+    expect(validateQualificationEraDeclarationChanges({ base, current: QUALIFICATION_ERA_REGISTRY, changedPaths })).toEqual([]);
   });
 });

@@ -131,6 +131,8 @@ interface AiTraderBot {
   graduationCriteria: unknown;
   trialStartedAt: string | null;
   graduatedAt: string | null;
+  qualificationEraInvalidationReason: string | null;
+  qualificationEraStatus: 'waived' | 'unknown' | 'matched' | 'stale' | 'in_trial';
   status: string;
   pauseReason: string | null;
   dailyRealizedPnl: string;
@@ -351,6 +353,19 @@ function TrialStrip({ bot, tradesCount, netPnl, maxDdPct, onGoLive, onRestartTri
   const dayPct = (daysElapsed / periodDays) * 100;
   const tradePct = Math.min(100, (tradesCount / minTrades) * 100);
   const overallPct = Math.round(Math.min(dayPct, tradePct));
+
+  if (bot.graduationState === 'graduated' && bot.qualificationEraStatus !== 'matched') {
+    return (
+      <div className="px-4 py-2.5 bg-amber-500/10 border-b border-amber-500/20">
+        <div className="flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 text-amber-400" />
+          <span className="text-xs font-medium text-amber-400">
+            Qualification era {bot.qualificationEraStatus} — a new paper trial is required
+          </span>
+        </div>
+      </div>
+    );
+  }
 
   if (bot.graduationState === 'graduated') {
     return (

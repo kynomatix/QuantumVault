@@ -31,10 +31,12 @@ vi.mock("../../server/ai-assistant/router", async (importOriginal) => {
 
 const insertMock = vi.fn();
 const pnlMapMock = vi.fn();
+const updateBotMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
     insertAiTraderDecision: (...args: unknown[]) => insertMock(...args),
     getAiTraderTotalRealizedPnlMap: (...args: unknown[]) => pnlMapMock(...args),
+    updateAiTraderBot: (...args: unknown[]) => updateBotMock(...args),
   },
 }));
 
@@ -83,10 +85,16 @@ function makeBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
     protocol: "pacifica",
     market: "SOL-PERP",
     timeframe: "15m",
+    marketSource: "fixed",
     mode: "auto",
+    riskProfile: "guarded",
     model: "moonshotai/kimi-k2.6",
+    sizingMode: "discretionary",
+    riskMinPct: "0.50",
+    riskMaxPct: "1.50",
     allocatedUsdc: "1000",
     maxLeverage: 5,
+    stopPolicy: "static",
     status: "analyzing",
     ...overrides,
   } as unknown as AiTraderBot;
@@ -142,8 +150,13 @@ beforeEach(() => {
   insertMock.mockReset();
   costMock.mockReset();
   pnlMapMock.mockReset();
+  updateBotMock.mockReset();
   capturedCalls.length = 0;
   insertMock.mockResolvedValue({ id: "dec-1" });
+  updateBotMock.mockImplementation(async (_id: string, updates: Record<string, unknown>) => ({
+    ...makeBot(),
+    ...updates,
+  }));
   costMock.mockResolvedValue(0.012345);
   pnlMapMock.mockResolvedValue(new Map());
 });
@@ -272,8 +285,13 @@ describe("runDecision — happy path", () => {
     expect(row.clampedDecision).toMatchObject({ leverage: 2, sizeBase: 10 });
     expect(row.guardrailViolations).toBeNull();
     expect(row.outcome).toBeNull();
+    expect(row.qualificationEraDigest).toMatch(/^[0-9A-F]{64}$/);
     expect(row.llmCostUsd).toBe("0.012345");
     expect(typeof row.llmLatencyMs).toBe("number");
+    expect(updateBotMock).toHaveBeenCalledWith("bot-1", expect.objectContaining({
+      currentQualificationEraDigest: row.qualificationEraDigest,
+      graduationState: "in_trial",
+    }));
   });
 
   it("records unknown spend (null cost) when pricing is unavailable", async () => {
