@@ -795,6 +795,10 @@ export interface IStorage {
   // graduation path, trialStartedAt by WO-7's restart-trial route (the only
   // other legitimate server-side writer of either field).
   updateAiTraderBot(id: string, updates: Partial<InsertAiTraderBot> & { graduatedAt?: Date; trialStartedAt?: Date }): Promise<AiTraderBot | undefined>;
+  claimAiTraderAnalysis(params: { botId: string; expectedStatus: "idle"; updates?: Pick<InsertAiTraderBot, "market" | "timeframe" | "policyHmac"> }): Promise<AiTraderBot | undefined>;
+  bindAiTraderProposal(params: { botId: string; decisionId: string }): Promise<{ bot: AiTraderBot; decision: AiTraderDecision } | undefined>;
+  claimAiTraderExecution(params: { botId: string; decisionId: string; expectedStatus: "proposed" | "analyzing"; now: Date; expiryMs: number }): Promise<{ bot: AiTraderBot; decision: AiTraderDecision } | undefined>;
+  transitionAiTraderState(params: { botId: string; expectedStatus: string; expectedPauseReason: string | null; nextStatus: string; nextPauseReason: string | null; decisionId?: string; expectedDecisionOutcome?: string | null; decisionOutcome?: string; botUpdates?: Partial<InsertAiTraderBot> & { trialStartedAt?: Date } }): Promise<AiTraderBot | undefined>;
   insertAiTraderDecision(decision: InsertAiTraderDecision): Promise<AiTraderDecision>;
   updateAiTraderDecision(id: string, updates: Partial<InsertAiTraderDecision>): Promise<AiTraderDecision | undefined>;
   getAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
@@ -5762,6 +5766,126 @@ export class DatabaseStorage implements IStorage {
       .where(eq(aiTraderBots.id, id))
       .returning();
     return result[0];
+  }
+
+  async claimAiTraderAnalysis(params: {
+    botId: string;
+    expectedStatus: "idle";
+    updates?: Pick<InsertAiTraderBot, "market" | "timeframe" | "policyHmac">;
+  }): Promise<AiTraderBot | undefined> {
+    const [claimed] = await db.update(aiTraderBots)
+      .set({ ...(params.updates ?? {}), status: "analyzing", pauseReason: null, updatedAt: sql`NOW()` } as any)
+      .where(and(
+        eq(aiTraderBots.id, params.botId),
+        eq(aiTraderBots.status, params.expectedStatus),
+        isNull(aiTraderBots.pauseReason),
+      ))
+      .returning();
+    return claimed;
+  }
+
+  async bindAiTraderProposal(params: {
+    botId: string;
+    decisionId: string;
+  }): Promise<{ bot: AiTraderBot; decision: AiTraderDecision } | undefined> {
+    return db.transaction(async (tx) => {
+      const unresolved = await tx.select().from(aiTraderDecisions)
+        .where(and(eq(aiTraderDecisions.botId, params.botId), isNull(aiTraderDecisions.outcome)))
+        .limit(2);
+      if (unresolved.length !== 1 || unresolved[0].id !== params.decisionId) return undefined;
+      const [bot] = await tx.update(aiTraderBots)
+        .set({ status: "proposed", pauseReason: null, updatedAt: sql`NOW()` } as any)
+        .where(and(
+          eq(aiTraderBots.id, params.botId),
+          eq(aiTraderBots.status, "analyzing"),
+          isNull(aiTraderBots.pauseReason),
+        ))
+        .returning();
+      return bot ? { bot, decision: unresolved[0] } : undefined;
+    });
+  }
+
+  async claimAiTraderExecution(params: {
+    botId: string;
+    decisionId: string;
+    expectedStatus: "proposed" | "analyzing";
+    now: Date;
+    expiryMs: number;
+  }): Promise<{ bot: AiTraderBot; decision: AiTraderDecision } | undefined> {
+    return db.transaction(async (tx) => {
+      const unresolved = await tx.select().from(aiTraderDecisions)
+        .where(and(eq(aiTraderDecisions.botId, params.botId), isNull(aiTraderDecisions.outcome)))
+        .limit(2);
+      if (unresolved.length !== 1 || unresolved[0].id !== params.decisionId) return undefined;
+      const decidedAtMs = unresolved[0].decidedAt ? new Date(unresolved[0].decidedAt).getTime() : Number.NaN;
+      if (!Number.isFinite(decidedAtMs) || params.now.getTime() - decidedAtMs > params.expiryMs) return undefined;
+      const [bot] = await tx.update(aiTraderBots)
+        .set({ status: "executing", pauseReason: null, updatedAt: sql`NOW()` } as any)
+        .where(and(
+          eq(aiTraderBots.id, params.botId),
+          eq(aiTraderBots.status, params.expectedStatus),
+          isNull(aiTraderBots.pauseReason),
+        ))
+        .returning();
+      return bot ? { bot, decision: unresolved[0] } : undefined;
+    });
+  }
+
+  async transitionAiTraderState(params: {
+    botId: string;
+    expectedStatus: string;
+    expectedPauseReason: string | null;
+    nextStatus: string;
+    nextPauseReason: string | null;
+    decisionId?: string;
+    expectedDecisionOutcome?: string | null;
+    decisionOutcome?: string;
+    botUpdates?: Partial<InsertAiTraderBot> & { trialStartedAt?: Date };
+  }): Promise<AiTraderBot | undefined> {
+    return db.transaction(async (tx) => {
+      if (params.decisionId !== undefined) {
+        const outcomePredicate = params.expectedDecisionOutcome == null
+          ? isNull(aiTraderDecisions.outcome)
+          : eq(aiTraderDecisions.outcome, params.expectedDecisionOutcome);
+        if (params.decisionOutcome !== undefined) {
+          const [decision] = await tx.update(aiTraderDecisions)
+            .set({ outcome: params.decisionOutcome } as any)
+            .where(and(
+              eq(aiTraderDecisions.id, params.decisionId),
+              eq(aiTraderDecisions.botId, params.botId),
+              outcomePredicate,
+            ))
+            .returning();
+          if (!decision) return undefined;
+        } else {
+          const [decision] = await tx.select().from(aiTraderDecisions)
+            .where(and(
+              eq(aiTraderDecisions.id, params.decisionId),
+              eq(aiTraderDecisions.botId, params.botId),
+              outcomePredicate,
+            ))
+            .limit(1);
+          if (!decision) return undefined;
+        }
+      }
+      const pausePredicate = params.expectedPauseReason === null
+        ? isNull(aiTraderBots.pauseReason)
+        : eq(aiTraderBots.pauseReason, params.expectedPauseReason);
+      const [bot] = await tx.update(aiTraderBots)
+        .set({
+          ...(params.botUpdates ?? {}),
+          status: params.nextStatus,
+          pauseReason: params.nextPauseReason,
+          updatedAt: sql`NOW()`,
+        } as any)
+        .where(and(
+          eq(aiTraderBots.id, params.botId),
+          eq(aiTraderBots.status, params.expectedStatus),
+          pausePredicate,
+        ))
+        .returning();
+      return bot;
+    });
   }
 
   async finalizeAiTraderGoLiveReservation(params: {

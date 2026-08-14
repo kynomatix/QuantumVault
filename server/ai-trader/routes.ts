@@ -61,6 +61,10 @@ import type { ClampedDecision } from "./guardrails";
 import { computeConfidenceCalibration } from "./calibration";
 import { isAiTraderMarketAdmitted, SCANNER_MARKET_UNADMITTED_REASON } from "./market-admission";
 import { isMultiplierMarketQuarantined, MULTIPLIER_UNQUALIFIED_REASON } from "./multiplier-market-quarantine";
+import {
+  AI_TRADER_PROPOSAL_EXPIRY_MS,
+  evaluateAiTraderStateAuthority,
+} from "./state-authority";
 
 // --- Auth (duplicated verbatim from server/routes.ts requireWallet) --------------------
 // Kept as an exact copy rather than an import: server/routes.ts defines it as a
@@ -117,7 +121,7 @@ const MAX_ALLOCATED_USDC = 1_000_000; // sanity ceiling only — paper allocatio
 // Plan L751: "Proposals expire after N minutes or ±0.5% price drift; re-analyze on
 // execute if stale." N is left an open question in the plan (open question #5) — 10
 // minutes is this WO's chosen default, documented here rather than silently picked.
-const DECISION_EXPIRY_MS = 10 * 60 * 1000;
+const DECISION_EXPIRY_MS = AI_TRADER_PROPOSAL_EXPIRY_MS;
 const PRICE_DRIFT_STALE_PCT = 0.5;
 
 // Per-bot go-live in-flight guard (WO-7.1). Two overlapping go-live requests
@@ -830,6 +834,7 @@ export function registerAiTraderRoutes(app: Express): void {
 
   // --- Analyze (run one decision cycle) ------------------------------------------------
   app.post("/api/ai-trader/:id/analyze", requireWallet, async (req: any, res) => {
+    let analysisClaimedBotId: string | null = null;
     try {
       let bot = await loadOwnedBot(req, res);
       if (!bot) return;
@@ -856,6 +861,7 @@ export function registerAiTraderRoutes(app: Express): void {
       // gate if the user chooses to execute. Runs BEFORE key resolution so an empty
       // shortlist never burns a free-trial call.
       let scannerNote: string | undefined;
+      let analysisClaimUpdates: Pick<AiTraderBot, "market" | "timeframe" | "policyHmac"> | undefined;
       if (bot.marketSource === "scanner") {
         const fresh = getScannerShortlist(bot.protocol).filter(
           (c) => Date.now() - c.evaluatedAt <= SCANNER_CANDIDATE_MAX_AGE_MS
@@ -899,11 +905,11 @@ export function registerAiTraderRoutes(app: Express): void {
           umkForPick,
           aiTraderPolicyObject({ market: candidate.market, maxLeverage: bot.maxLeverage, allocatedUsdc: bot.allocatedUsdc })
         );
-        await storage.updateAiTraderBot(bot.id, {
+        analysisClaimUpdates = {
           market: candidate.market,
           timeframe: candidate.timeframe,
           policyHmac: newPolicyHmac,
-        });
+        };
         // Refresh local copy so buildMarketContext and runDecision operate on the
         // PICKED market, never the stale placeholder.
         bot = { ...bot, market: candidate.market, timeframe: candidate.timeframe as AiTraderBot["timeframe"], policyHmac: newPolicyHmac };
@@ -948,6 +954,32 @@ export function registerAiTraderRoutes(app: Express): void {
 
         const recentClosedDecisions = await storage.getRecentClosedDecisions(bot.id, 20);
         const paperPositionRows = bot.paperMode ? await storage.getOpenAiTraderDecisions(bot.id, 2) : [];
+        const unresolved = bot.paperMode ? paperPositionRows : await storage.getOpenAiTraderDecisions(bot.id, 2);
+        const authority = evaluateAiTraderStateAuthority({
+          action: "analyze",
+          source: "external_http",
+          bot,
+          requestedDecisionId: null,
+          decision: null,
+          unresolvedDecisionCount: unresolved.length,
+          positionTruth: unresolved.length === 0 ? "flat" : "maybe_open",
+          internalAnalysisClaimHeld: false,
+          nowMs: Date.now(),
+          proposalExpiryMs: DECISION_EXPIRY_MS,
+        });
+        if (!authority.allowed) {
+          return res.status(409).json({ error: authority.reason, detail: "Durable bot state does not authorize analysis." });
+        }
+        const claimedBot = await storage.claimAiTraderAnalysis({
+          botId: bot.id,
+          expectedStatus: "idle",
+          updates: analysisClaimUpdates,
+        });
+        if (!claimedBot) {
+          return res.status(409).json({ error: "bot_busy", detail: "Another cycle acquired this bot first." });
+        }
+        bot = claimedBot;
+        analysisClaimedBotId = bot.id;
         let context: Awaited<ReturnType<typeof buildMarketContext>>;
         try {
           context = await buildMarketContext({
@@ -963,10 +995,20 @@ export function registerAiTraderRoutes(app: Express): void {
         } catch (err) {
           if (!isCandleBasisUnavailableError(err)) throw err;
           if (keyRes.usedFreeTrial) await storage.decrementAiTraderFreeCalls(req.walletAddress);
+          await storage.transitionAiTraderState({
+            botId: bot.id, expectedStatus: "analyzing", expectedPauseReason: null,
+            nextStatus: "idle", nextPauseReason: null,
+          });
+          analysisClaimedBotId = null;
           return res.status(409).json({ error: "candle_basis_unavailable" });
         }
         if ("stale" in context) {
           if (keyRes.usedFreeTrial) await storage.decrementAiTraderFreeCalls(req.walletAddress);
+          await storage.transitionAiTraderState({
+            botId: bot.id, expectedStatus: "analyzing", expectedPauseReason: null,
+            nextStatus: "idle", nextPauseReason: null,
+          });
+          analysisClaimedBotId = null;
           return res.status(409).json({ error: "stale_context", detail: context.reason });
         }
 
@@ -978,8 +1020,41 @@ export function registerAiTraderRoutes(app: Express): void {
         // From here on the call reached the LLM gateway — no refund, win or lose
         // (matches storage.ts's decrementAiTraderFreeCalls contract).
         if (!result.ok) {
+          await storage.transitionAiTraderState({
+            botId: bot.id, expectedStatus: "analyzing", expectedPauseReason: null,
+            nextStatus: "idle", nextPauseReason: null,
+          });
+          analysisClaimedBotId = null;
           const status = result.reason === "timeout" ? 504 : result.reason === "gateway" ? 502 : 422;
           return res.status(status).json({ error: result.reason, detail: result.detail });
+        }
+
+        const actionable = !result.rejected
+          && result.clamped !== null
+          && (result.clamped.action === "long" || result.clamped.action === "short");
+        if (actionable) {
+          const bound = await storage.bindAiTraderProposal({ botId: bot.id, decisionId: result.decisionId });
+          if (!bound) {
+            await storage.transitionAiTraderState({
+              botId: bot.id,
+              expectedStatus: "analyzing",
+              expectedPauseReason: null,
+              nextStatus: "idle",
+              nextPauseReason: null,
+              decisionId: result.decisionId,
+              expectedDecisionOutcome: null,
+              decisionOutcome: "aborted_guard",
+            });
+            analysisClaimedBotId = null;
+            return res.status(409).json({ error: "bot_busy", detail: "Decision ownership could not be bound atomically." });
+          }
+          analysisClaimedBotId = null;
+        } else {
+          await storage.transitionAiTraderState({
+            botId: bot.id, expectedStatus: "analyzing", expectedPauseReason: null,
+            nextStatus: "idle", nextPauseReason: null,
+          });
+          analysisClaimedBotId = null;
         }
 
         res.json({
@@ -994,6 +1069,15 @@ export function registerAiTraderRoutes(app: Express): void {
         keyRes.cleanup();
       }
     } catch (err) {
+      if (analysisClaimedBotId) {
+        await storage.transitionAiTraderState({
+          botId: analysisClaimedBotId,
+          expectedStatus: "analyzing",
+          expectedPauseReason: null,
+          nextStatus: "idle",
+          nextPauseReason: null,
+        }).catch(() => undefined);
+      }
       console.error("[AiTrader] analyze error:", err);
       res.status(500).json({ error: "Internal server error" });
     }
@@ -1031,7 +1115,11 @@ export function registerAiTraderRoutes(app: Express): void {
       // Fails open when the digest has no market (older decisions predate the field).
       const decisionMarket = (decision.contextDigest as any)?.market;
       if (typeof decisionMarket === "string" && decisionMarket.length > 0 && decisionMarket !== bot.market) {
-        await storage.updateAiTraderDecision(decision.id, { outcome: "expired" });
+        await storage.transitionAiTraderState({
+          botId: bot.id, expectedStatus: "proposed", expectedPauseReason: null,
+          nextStatus: "idle", nextPauseReason: null,
+          decisionId: decision.id, expectedDecisionOutcome: null, decisionOutcome: "expired",
+        });
         return res.status(409).json({
           error: "market_changed",
           detail: `This proposal was for ${decisionMarket}, but the bot has since moved to ${bot.market} — analyze again for a fresh decision.`,
@@ -1066,7 +1154,11 @@ export function registerAiTraderRoutes(app: Express): void {
         Math.abs(livePrice - recordedPrice) / recordedPrice * 100 > PRICE_DRIFT_STALE_PCT;
 
       if (timeStale || priceStale) {
-        await storage.updateAiTraderDecision(decision.id, { outcome: "expired" });
+        await storage.transitionAiTraderState({
+          botId: bot.id, expectedStatus: "proposed", expectedPauseReason: null,
+          nextStatus: "idle", nextPauseReason: null,
+          decisionId: decision.id, expectedDecisionOutcome: null, decisionOutcome: "expired",
+        });
         return res.status(409).json({
           error: "expired",
           detail: timeStale
@@ -1080,7 +1172,14 @@ export function registerAiTraderRoutes(app: Express): void {
         return res.status(400).json({ error: "No usable mark price available to execute this decision." });
       }
 
-      const result = await executeDecision({ bot, decisionId: decision.id, clamped, adapter, markPrice });
+      const result = await executeDecision({
+        bot,
+        decisionId: decision.id,
+        clamped,
+        adapter,
+        markPrice,
+        authoritySource: "external_http",
+      });
       if (!result.ok) {
         const status =
           result.reason === "cooldown_active" || result.reason === "daily_cap_reached" || result.reason === "bot_busy" || result.reason === "scanner_live_execution_disabled"
@@ -1135,7 +1234,17 @@ export function registerAiTraderRoutes(app: Express): void {
       if (decision.outcome !== null && decision.outcome !== undefined) {
         return res.status(409).json({ error: `Decision already resolved (${decision.outcome}).` });
       }
-      await storage.updateAiTraderDecision(decision.id, { outcome: "user_skipped" });
+      const skipped = await storage.transitionAiTraderState({
+        botId: bot.id,
+        expectedStatus: "proposed",
+        expectedPauseReason: null,
+        nextStatus: "idle",
+        nextPauseReason: null,
+        decisionId: decision.id,
+        expectedDecisionOutcome: null,
+        decisionOutcome: "user_skipped",
+      });
+      if (!skipped) return res.status(409).json({ error: "bot_busy", detail: "Proposal ownership changed before skip." });
       res.json({ ok: true });
     } catch (err) {
       console.error("[AiTrader] skip error:", err);
@@ -1183,8 +1292,32 @@ export function registerAiTraderRoutes(app: Express): void {
       // back into 'open' so the monitor picks the position up again.
       const recentDecisions = await storage.getAiTraderDecisions(bot.id, 10);
       const openView = parseOpenDecision(recentDecisions);
+      const unresolved = await storage.getOpenAiTraderDecisions(bot.id, 2);
+      const last = recentDecisions[0] ?? null;
+      const authority = evaluateAiTraderStateAuthority({
+        action: "resume",
+        source: "external_http",
+        bot,
+        requestedDecisionId: last?.id ?? null,
+        decision: last ? {
+          id: last.id, botId: last.botId ?? "", outcome: last.outcome ?? null,
+          decidedAtMs: last.decidedAt ? new Date(last.decidedAt).getTime() : Number.NaN,
+        } : null,
+        unresolvedDecisionCount: unresolved.length,
+        positionTruth: openView ? "open" : "flat",
+        internalAnalysisClaimHeld: false,
+        nowMs: Date.now(),
+        proposalExpiryMs: DECISION_EXPIRY_MS,
+      });
+      if (!authority.allowed) return res.status(409).json({ error: authority.reason });
       const resumeStatus = openView ? ("open" as const) : ("idle" as const);
-      const updated = await storage.updateAiTraderBot(bot.id, { status: resumeStatus, pauseReason: null });
+      const updated = await storage.transitionAiTraderState({
+        botId: bot.id,
+        expectedStatus: "paused",
+        expectedPauseReason: bot.pauseReason,
+        nextStatus: resumeStatus,
+        nextPauseReason: null,
+      });
       // A resumed Auto bot must re-enter the hands-off cadence right away —
       // but only when it lands on 'idle'; an 'open' bot re-arms after close.
       if (updated && resumeStatus === "idle") armAutoNextIfEligible(updated);
@@ -1203,13 +1336,32 @@ export function registerAiTraderRoutes(app: Express): void {
       if (bot.status === "open" || bot.status === "executing" || bot.status === "analyzing") {
         return res.status(409).json({ error: "Close the open position (or wait for it to finish) before restarting the trial." });
       }
-      const updated = await storage.updateAiTraderBot(bot.id, {
-        graduationState: "in_trial",
-        status: "idle",
-        pauseReason: null,
-        dailyRealizedPnl: "0",
-        consecutiveLosses: 0,
-        trialStartedAt: new Date(),
+      const unresolved = await storage.getOpenAiTraderDecisions(bot.id, 2);
+      const authority = evaluateAiTraderStateAuthority({
+        action: "restart_trial",
+        source: "external_http",
+        bot,
+        requestedDecisionId: null,
+        decision: null,
+        unresolvedDecisionCount: unresolved.length,
+        positionTruth: unresolved.length === 0 ? "flat" : "maybe_open",
+        internalAnalysisClaimHeld: false,
+        nowMs: Date.now(),
+        proposalExpiryMs: DECISION_EXPIRY_MS,
+      });
+      if (!authority.allowed) return res.status(409).json({ error: authority.reason });
+      const updated = await storage.transitionAiTraderState({
+        botId: bot.id,
+        expectedStatus: bot.status,
+        expectedPauseReason: bot.pauseReason,
+        nextStatus: "idle",
+        nextPauseReason: null,
+        botUpdates: {
+          graduationState: "in_trial",
+          dailyRealizedPnl: "0",
+          consecutiveLosses: 0,
+          trialStartedAt: new Date(),
+        },
       });
       // A restarted-trial Auto bot goes back to idle — re-arm the cadence.
       if (updated) armAutoNextIfEligible(updated);

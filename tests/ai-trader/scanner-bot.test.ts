@@ -34,6 +34,8 @@ const getOpenDecisionsMock = vi.fn().mockResolvedValue([]);
 const updateBotMock = vi.fn();
 const getBotMock = vi.fn();
 const getLlmCiphertextMock = vi.fn();
+const claimAnalysisMock = vi.fn();
+const transitionStateMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
     getWallet: (...a: unknown[]) => getWalletMock(...a),
@@ -45,6 +47,8 @@ vi.mock("../../server/storage", () => ({
     getAiTraderBot: (...a: unknown[]) => getBotMock(...a),
     getActiveAiTraderBots: vi.fn().mockResolvedValue([]),
     getWalletLlmApiKeyCiphertext: (...a: unknown[]) => getLlmCiphertextMock(...a),
+    claimAiTraderAnalysis: (...a: unknown[]) => claimAnalysisMock(...a),
+    transitionAiTraderState: (...a: unknown[]) => transitionStateMock(...a),
   },
 }));
 
@@ -79,10 +83,10 @@ vi.mock("../../server/lab/datafeed", () => ({
 }));
 
 const buildContextMock = vi.fn();
-vi.mock("../../server/ai-trader/context-builder", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../server/ai-trader/context-builder")>();
-  return { ...actual, buildMarketContext: (...a: unknown[]) => buildContextMock(...a) };
-});
+vi.mock("../../server/ai-trader/context-builder", () => ({
+  buildMarketContext: (...a: unknown[]) => buildContextMock(...a),
+  marketToDatafeedTicker: (market: string) => market.replace(/-PERP$/i, "USDT"),
+}));
 
 const runDecisionMock = vi.fn();
 vi.mock("../../server/ai-trader/decide", () => ({
@@ -211,6 +215,19 @@ beforeEach(() => {
   scannerCapabilitiesMock.consumersEnabled = true;
   scannerCapabilitiesMock.liveExecutionEnabled = false;
   computePolicyHmacMock.mockReturnValue("hmac-new-market");
+  claimAnalysisMock.mockImplementation(async ({ botId, updates }: { botId: string; updates?: Record<string, unknown> }) => {
+    const patch = { ...(updates ?? {}), status: "analyzing", pauseReason: null };
+    await updateBotMock(botId, patch);
+    const fixture = botId === "bot-scanner-2222" ? makeScannerBot() : makeFixedBot();
+    return { ...fixture, ...patch };
+  });
+  transitionStateMock.mockImplementation(async ({ botId, nextStatus, nextPauseReason, botUpdates }: {
+    botId: string; nextStatus: string; nextPauseReason: string | null; botUpdates?: Record<string, unknown>;
+  }) => {
+    const patch = { ...(botUpdates ?? {}), status: nextStatus, pauseReason: nextPauseReason };
+    await updateBotMock(botId, patch);
+    return { ...(botId === "bot-scanner-2222" ? makeScannerBot() : makeFixedBot()), ...patch };
+  });
   vi.useFakeTimers();
 });
 
@@ -488,7 +505,7 @@ describe("scanner bot: happy path — market pick", () => {
     expect(executeDecisionMock).not.toHaveBeenCalled();
   });
 
-  it("persists picked market+TF+policyHmac BEFORE status→analyzing", async () => {
+  it("atomically persists picked market+TF+policyHmac with status→analyzing", async () => {
     armScannerBot();
     const candidate = makeCandidate({ market: "BTC-PERP", timeframe: "15m" });
     getScannerShortlistMock.mockReturnValue([candidate]);
@@ -508,9 +525,8 @@ describe("scanner bot: happy path — market pick", () => {
       policyHmac: "hmac-btcperp",
     });
 
-    const pickIdx = allUpdates.indexOf(pickUpdate!);
-    const analyzingIdx = allUpdates.findIndex((c) => c[1]?.status === "analyzing");
-    expect(pickIdx).toBeLessThan(analyzingIdx);
+    expect(pickUpdate![1]).toMatchObject({ status: "analyzing", pauseReason: null });
+    expect(allUpdates.filter((c) => c[1]?.market === "BTC-PERP" || c[1]?.status === "analyzing")).toHaveLength(1);
   });
 
   it("buildMarketContext receives the PICKED market — not the placeholder", async () => {

@@ -34,6 +34,11 @@ import { paperEntryPrice, type PaperSide } from "./paper-math";
 import { isTerminalCloseResult } from "./close-truth";
 import { isAiTraderMarketAdmitted, SCANNER_MARKET_UNADMITTED_REASON } from "./market-admission";
 import { SCANNER_CAPABILITIES } from "./scanner-capabilities";
+import {
+  AI_TRADER_PROPOSAL_EXPIRY_MS,
+  evaluateAiTraderStateAuthority,
+  type AiTraderAuthoritySource,
+} from "./state-authority";
 
 // --- G6 cadence rules (mirror of context-builder's advisory echo; THIS is the
 // enforcement point). Module-private there, so the values are pinned here too —
@@ -106,6 +111,83 @@ export interface ExecuteDecisionInput {
    * the venue).
    */
   markPrice: number;
+  /**
+   * Distinguishes a user-owned proposal from the exact internal analysis claim.
+   * Legacy callers that omit it are treated as external and therefore cannot
+   * bypass the required durable `proposed` state.
+   */
+  authoritySource?: Extract<AiTraderAuthoritySource, "external_http" | "internal_cycle">;
+}
+
+function executionAuthoritySource(input: ExecuteDecisionInput): Extract<AiTraderAuthoritySource, "external_http" | "internal_cycle"> {
+  return input.authoritySource ?? "external_http";
+}
+
+const NON_RACE_GUARD_REASONS = new Set<ExecuteFailureReason>([
+  "bot_busy",
+  "cooldown_active",
+  "daily_cap_reached",
+  "capability_missing",
+  "auth_unavailable",
+  "invalid_clamp",
+  "not_entry",
+  "scanner_market_unadmitted",
+  "scanner_live_execution_disabled",
+  "insufficient_funding",
+]);
+
+async function unwindRejectedInternalDecision(
+  input: ExecuteDecisionInput,
+  result: Extract<ExecuteDecisionResult, { ok: false }>,
+): Promise<Extract<ExecuteDecisionResult, { ok: false }>> {
+  if (executionAuthoritySource(input) === "internal_cycle" && NON_RACE_GUARD_REASONS.has(result.reason)) {
+    await storage.transitionAiTraderState({
+      botId: input.bot.id,
+      expectedStatus: "analyzing",
+      expectedPauseReason: null,
+      nextStatus: "idle",
+      nextPauseReason: null,
+      decisionId: input.decisionId,
+      expectedDecisionOutcome: null,
+      decisionOutcome: "aborted_guard",
+    });
+  }
+  return result;
+}
+
+async function claimExecution(input: ExecuteDecisionInput): Promise<AiTraderBot | null> {
+  const freshBot = await storage.getAiTraderBot(input.bot.id);
+  if (!freshBot) return null;
+  const authoritySource = executionAuthoritySource(input);
+  // The storage claim below re-reads and proves exact-one unresolved decision
+  // identity transactionally. This pure preflight cannot grant authority.
+  const decision = {
+    id: input.decisionId,
+    botId: input.bot.id,
+    outcome: null,
+    decidedAtMs: Date.now(),
+  };
+  const verdict = evaluateAiTraderStateAuthority({
+    action: "execute",
+    source: authoritySource,
+    bot: freshBot,
+    requestedDecisionId: input.decisionId,
+    decision,
+    unresolvedDecisionCount: 1,
+    positionTruth: "flat",
+    internalAnalysisClaimHeld: authoritySource === "internal_cycle",
+    nowMs: Date.now(),
+    proposalExpiryMs: AI_TRADER_PROPOSAL_EXPIRY_MS,
+  });
+  if (!verdict.allowed) return null;
+  const claimed = await storage.claimAiTraderExecution({
+    botId: input.bot.id,
+    decisionId: input.decisionId,
+    expectedStatus: authoritySource === "external_http" ? "proposed" : "analyzing",
+    now: new Date(),
+    expiryMs: AI_TRADER_PROPOSAL_EXPIRY_MS,
+  });
+  return claimed?.bot ?? null;
 }
 
 /** G6 check result, exported pure for tests. Mirrors context-builder's advisory math. */
@@ -156,18 +238,18 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
   const { bot, decisionId, clamped } = input;
 
   if (clamped.action !== "long" && clamped.action !== "short") {
-    return { ok: false, reason: "not_entry", detail: `action '${clamped.action}' is not an entry` };
+    return unwindRejectedInternalDecision(input, { ok: false, reason: "not_entry", detail: `action '${clamped.action}' is not an entry` });
   }
   if (
     !bot.paperMode &&
     bot.marketSource === "scanner" &&
     !SCANNER_CAPABILITIES.liveExecutionEnabled
   ) {
-    return {
+    return unwindRejectedInternalDecision(input, {
       ok: false,
       reason: "scanner_live_execution_disabled",
       detail: "Live execution for scanner-source bots is disabled for this process.",
-    };
+    });
   }
   const side: PaperSide = clamped.action;
   const { sizeBase, marginUsdc, leverage, stopLossPrice, takeProfitPrice } = clamped;
@@ -178,11 +260,11 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
     !Number.isFinite(stopLossPrice) || (stopLossPrice as number) <= 0 ||
     !Number.isFinite(takeProfitPrice) || (takeProfitPrice as number) <= 0
   ) {
-    return {
+    return unwindRejectedInternalDecision(input, {
       ok: false,
       reason: "invalid_clamp",
       detail: "ClampedDecision missing/invalid sizeBase, marginUsdc, leverage, stopLossPrice or takeProfitPrice",
-    };
+    });
   }
 
   // Already-open guard (architect, WO-5 review): a retried or mis-orchestrated
@@ -210,9 +292,8 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
       detail: "scanner-source market '" + bot.market + "' is not admitted by the exact AI Trader market registry",
     };
   }
-  const busyStatus = [bot.status, freshBot.status].find(
-    (s) => s === "open" || s === "executing" || s === "proposed"
-  );
+  const expectedAuthorityStatus = executionAuthoritySource(input) === "external_http" ? "proposed" : "analyzing";
+  const busyStatus = freshBot.status !== expectedAuthorityStatus ? freshBot.status : null;
   if (busyStatus) {
     return {
       ok: false,
@@ -225,18 +306,20 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
   // must obey the same cadence it will be held to live.
   const recentClosed = await storage.getRecentClosedDecisions(bot.id, 30);
   const g6 = checkCooldownAndCaps(bot.timeframe, recentClosed, Date.now());
-  if (!g6.ok) return { ok: false, reason: g6.reason, detail: g6.detail };
+  if (!g6.ok) return unwindRejectedInternalDecision(input, { ok: false, reason: g6.reason, detail: g6.detail });
 
   if (bot.paperMode) {
-    return executePaperEntry(input, side);
+    const result = await executePaperEntry(input, side);
+    return result.ok ? result : unwindRejectedInternalDecision(input, result);
   }
-  return executeLiveEntry(input, side, {
+  const result = await executeLiveEntry(input, side, {
     sizeBase: sizeBase as number,
     marginUsdc: marginUsdc as number,
     leverage: leverage as number,
     stopLossPrice: stopLossPrice as number,
     takeProfitPrice: takeProfitPrice as number,
   });
+  return result.ok ? result : unwindRejectedInternalDecision(input, result);
 }
 
 // --- Paper path -------------------------------------------------------------------
@@ -253,12 +336,24 @@ async function executePaperEntry(input: ExecuteDecisionInput, side: PaperSide): 
   if (!Number.isFinite(markPrice) || markPrice <= 0) {
     return { ok: false, reason: "invalid_mark", detail: `paper entry needs a positive mark price, got ${markPrice}` };
   }
+  const claimedBot = await claimExecution(input);
+  if (!claimedBot) {
+    return { ok: false, reason: "bot_busy", detail: "exact decision/status execution claim was lost" };
+  }
   const entryPrice = paperEntryPrice(markPrice, side);
   await storage.updateAiTraderDecision(decisionId, {
     outcome: "executed",
     entryPrice: entryPrice.toFixed(8),
   });
-  await storage.updateAiTraderBot(bot.id, { status: "open", pauseReason: null });
+  await storage.transitionAiTraderState({
+    botId: bot.id,
+    expectedStatus: "executing",
+    expectedPauseReason: null,
+    nextStatus: "open",
+    nextPauseReason: null,
+    decisionId,
+    expectedDecisionOutcome: "executed",
+  });
   await sendTradeNotification(bot.walletAddress, {
     type: "trade_executed",
     botName: `AI Trader ${bot.market} (Paper)`,
@@ -404,7 +499,10 @@ async function executeLiveEntry(
     // Step 3 — crash marker FIRST (a crash between order-send and the status
     // write must leave a state the WO-6 startup reconciliation treats as
     // "possibly holding a live position").
-    await storage.updateAiTraderBot(bot.id, { status: "executing" });
+    const claimedBot = await claimExecution(input);
+    if (!claimedBot) {
+      return { ok: false, reason: "bot_busy", detail: "exact decision/status execution claim was lost before venue mutation" };
+    }
 
     // setLeverage throw = clean abort (architect, WO-5 review): nothing has
     // been sent to the venue yet, so idle + 'aborted_order' is provably safe —
@@ -576,7 +674,15 @@ async function executeLiveEntry(
       outcome: "executed",
       entryPrice: entryPrice.toFixed(8),
     });
-    await storage.updateAiTraderBot(bot.id, { status: "open", pauseReason: null });
+    await storage.transitionAiTraderState({
+      botId: bot.id,
+      expectedStatus: "executing",
+      expectedPauseReason: null,
+      nextStatus: "open",
+      nextPauseReason: null,
+      decisionId,
+      expectedDecisionOutcome: "executed",
+    });
     await sendTradeNotification(bot.walletAddress, {
       type: "trade_executed",
       botName: `AI Trader ${bot.market}`,
