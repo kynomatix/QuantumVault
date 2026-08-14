@@ -805,6 +805,7 @@ export interface IStorage {
   getExecutedDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
   getRecentClosedDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
   getOpenAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
+  getUnresolvedAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
   compressOldAiTraderDecisions(olderThanDays: number, batchSize: number): Promise<number>;
   /**
    * Paginated history fetch with server-side outcome filtering.
@@ -5842,50 +5843,60 @@ export class DatabaseStorage implements IStorage {
     decisionOutcome?: string;
     botUpdates?: Partial<InsertAiTraderBot> & { trialStartedAt?: Date };
   }): Promise<AiTraderBot | undefined> {
-    return db.transaction(async (tx) => {
-      if (params.decisionId !== undefined) {
-        const outcomePredicate = params.expectedDecisionOutcome == null
-          ? isNull(aiTraderDecisions.outcome)
-          : eq(aiTraderDecisions.outcome, params.expectedDecisionOutcome);
-        if (params.decisionOutcome !== undefined) {
-          const [decision] = await tx.update(aiTraderDecisions)
-            .set({ outcome: params.decisionOutcome } as any)
-            .where(and(
-              eq(aiTraderDecisions.id, params.decisionId),
-              eq(aiTraderDecisions.botId, params.botId),
-              outcomePredicate,
-            ))
-            .returning();
-          if (!decision) return undefined;
-        } else {
-          const [decision] = await tx.select().from(aiTraderDecisions)
-            .where(and(
-              eq(aiTraderDecisions.id, params.decisionId),
-              eq(aiTraderDecisions.botId, params.botId),
-              outcomePredicate,
-            ))
-            .limit(1);
-          if (!decision) return undefined;
+    // A bot-CAS miss after a decision update must roll the transaction back.
+    // Returning undefined from the transaction callback commits in Drizzle,
+    // which would leave a terminalized decision beside an unchanged bot row.
+    const casMiss = new Error("ai_trader_state_cas_miss");
+    try {
+      return await db.transaction(async (tx) => {
+        if (params.decisionId !== undefined) {
+          const outcomePredicate = params.expectedDecisionOutcome == null
+            ? isNull(aiTraderDecisions.outcome)
+            : eq(aiTraderDecisions.outcome, params.expectedDecisionOutcome);
+          if (params.decisionOutcome !== undefined) {
+            const [decision] = await tx.update(aiTraderDecisions)
+              .set({ outcome: params.decisionOutcome } as any)
+              .where(and(
+                eq(aiTraderDecisions.id, params.decisionId),
+                eq(aiTraderDecisions.botId, params.botId),
+                outcomePredicate,
+              ))
+              .returning();
+            if (!decision) return undefined;
+          } else {
+            const [decision] = await tx.select().from(aiTraderDecisions)
+              .where(and(
+                eq(aiTraderDecisions.id, params.decisionId),
+                eq(aiTraderDecisions.botId, params.botId),
+                outcomePredicate,
+              ))
+              .limit(1);
+            if (!decision) return undefined;
+          }
         }
-      }
-      const pausePredicate = params.expectedPauseReason === null
-        ? isNull(aiTraderBots.pauseReason)
-        : eq(aiTraderBots.pauseReason, params.expectedPauseReason);
-      const [bot] = await tx.update(aiTraderBots)
-        .set({
-          ...(params.botUpdates ?? {}),
-          status: params.nextStatus,
-          pauseReason: params.nextPauseReason,
-          updatedAt: sql`NOW()`,
-        } as any)
-        .where(and(
-          eq(aiTraderBots.id, params.botId),
-          eq(aiTraderBots.status, params.expectedStatus),
-          pausePredicate,
-        ))
-        .returning();
-      return bot;
-    });
+        const pausePredicate = params.expectedPauseReason === null
+          ? isNull(aiTraderBots.pauseReason)
+          : eq(aiTraderBots.pauseReason, params.expectedPauseReason);
+        const [bot] = await tx.update(aiTraderBots)
+          .set({
+            ...(params.botUpdates ?? {}),
+            status: params.nextStatus,
+            pauseReason: params.nextPauseReason,
+            updatedAt: sql`NOW()`,
+          } as any)
+          .where(and(
+            eq(aiTraderBots.id, params.botId),
+            eq(aiTraderBots.status, params.expectedStatus),
+            pausePredicate,
+          ))
+          .returning();
+        if (!bot && params.decisionId !== undefined && params.decisionOutcome !== undefined) throw casMiss;
+        return bot;
+      });
+    } catch (err) {
+      if (err === casMiss) return undefined;
+      throw err;
+    }
   }
 
   async finalizeAiTraderGoLiveReservation(params: {
@@ -5967,6 +5978,15 @@ export class DatabaseStorage implements IStorage {
         eq(aiTraderDecisions.outcome, "executed"),
         isNull(aiTraderDecisions.closedAt),
       ))
+      .orderBy(desc(aiTraderDecisions.decidedAt))
+      .limit(limit);
+  }
+
+  // Exact proposal/decision ownership truth. This is intentionally distinct
+  // from getOpenAiTraderDecisions(), which returns executed open positions.
+  async getUnresolvedAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]> {
+    return db.select().from(aiTraderDecisions)
+      .where(and(eq(aiTraderDecisions.botId, botId), isNull(aiTraderDecisions.outcome)))
       .orderBy(desc(aiTraderDecisions.decidedAt))
       .limit(limit);
   }

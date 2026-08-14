@@ -29,6 +29,7 @@ const getBotMock = vi.fn();
 const getActiveBotsMock = vi.fn();
 const getLlmCiphertextMock = vi.fn();
 const getOpenDecisionsMock = vi.fn();
+const getUnresolvedDecisionsMock = vi.fn();
 const claimAnalysisMock = vi.fn();
 const transitionStateMock = vi.fn();
 vi.mock("../../server/storage", () => ({
@@ -42,6 +43,7 @@ vi.mock("../../server/storage", () => ({
     getActiveAiTraderBots: (...a: unknown[]) => getActiveBotsMock(...a),
     getWalletLlmApiKeyCiphertext: (...a: unknown[]) => getLlmCiphertextMock(...a),
     getOpenAiTraderDecisions: (...a: unknown[]) => getOpenDecisionsMock(...a),
+    getUnresolvedAiTraderDecisions: (...a: unknown[]) => getUnresolvedDecisionsMock(...a),
     claimAiTraderAnalysis: (...a: unknown[]) => claimAnalysisMock(...a),
     transitionAiTraderState: (...a: unknown[]) => transitionStateMock(...a),
   },
@@ -203,7 +205,7 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
   for (const m of [
     getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getDecisionsMock,
-    getBotMock, getActiveBotsMock, getLlmCiphertextMock, getOpenDecisionsMock,
+    getBotMock, getActiveBotsMock, getLlmCiphertextMock, getOpenDecisionsMock, getUnresolvedDecisionsMock,
     claimAnalysisMock, transitionStateMock, getUmkMock, decryptKeyMock, decryptSubKeyMock,
     healUmkMock, getSessionByWalletMock, restoreSecurityMock, decryptLlmKeyMock, notifyMock,
     getAdapterMock, fetchOHLCVMock, buildContextMock, runDecisionMock, executeDecisionMock,
@@ -212,6 +214,7 @@ beforeEach(() => {
   }
   getRecentClosedMock.mockResolvedValue([]);
   getOpenDecisionsMock.mockResolvedValue([]);
+  getUnresolvedDecisionsMock.mockResolvedValue([]);
   updateBotMock.mockResolvedValue({});
   updateDecisionMock.mockResolvedValue({});
   claimAnalysisMock.mockImplementation(async ({ botId, updates }: { botId: string; updates?: Record<string, unknown> }) => {

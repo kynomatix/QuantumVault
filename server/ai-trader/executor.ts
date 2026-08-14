@@ -130,6 +130,7 @@ const NON_RACE_GUARD_REASONS = new Set<ExecuteFailureReason>([
   "capability_missing",
   "auth_unavailable",
   "invalid_clamp",
+  "invalid_mark",
   "not_entry",
   "scanner_market_unadmitted",
   "scanner_live_execution_disabled",
@@ -286,11 +287,11 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
     (bot.marketSource === "scanner" || freshBot.marketSource === "scanner")
     && !isAiTraderMarketAdmitted(bot.market)
   ) {
-    return {
+    return unwindRejectedInternalDecision(input, {
       ok: false,
       reason: SCANNER_MARKET_UNADMITTED_REASON,
       detail: "scanner-source market '" + bot.market + "' is not admitted by the exact AI Trader market registry",
-    };
+    });
   }
   const expectedAuthorityStatus = executionAuthoritySource(input) === "external_http" ? "proposed" : "analyzing";
   const busyStatus = freshBot.status !== expectedAuthorityStatus ? freshBot.status : null;

@@ -97,13 +97,16 @@ function decisionMatches(input: AiTraderAuthorityInput): boolean {
 export function evaluateAiTraderStateAuthority(input: Readonly<AiTraderAuthorityInput>): AiTraderAuthorityVerdict {
   const { action, source, bot, positionTruth } = input;
 
-  if (!KNOWN_STATUSES.has(bot.status)) return denied("malformed_authority");
-  if ((bot.status === "paused") !== (bot.pauseReason !== null)) return denied("malformed_authority");
-
+  // Risk-reducing authority is deliberately evaluated before lifecycle-shape
+  // validation. A malformed bot row may block every new-risk action, but it
+  // must not take away close/cancel authority when exposure may exist.
   if (action === "close" || action === "cancel") {
     if (source !== "risk_reducing") return denied("state_denied");
     return positionTruth === "flat" ? denied("state_denied") : { allowed: true, requiredClaim: "none" };
   }
+
+  if (!KNOWN_STATUSES.has(bot.status)) return denied("malformed_authority");
+  if ((bot.status === "paused") !== (bot.pauseReason !== null)) return denied("malformed_authority");
 
   if (positionTruth === "read_failed" || positionTruth === "maybe_open") return denied("position_uncertain");
   if (positionTruth === "open" && action !== "reconcile") return denied("bot_busy");
@@ -132,7 +135,8 @@ export function evaluateAiTraderStateAuthority(input: Readonly<AiTraderAuthority
   }
 
   if (action === "proposal_skip" || action === "proposal_expire") {
-    if (source !== "external_http" && source !== "state_reconciler") return denied("state_denied");
+    if (action === "proposal_skip" && source !== "external_http") return denied("state_denied");
+    if (action === "proposal_expire" && source !== "state_reconciler") return denied("state_denied");
     if (bot.status !== "proposed" || !decisionMatches(input)) return denied("decision_mismatch");
     if (action === "proposal_expire"
       && input.nowMs - input.decision!.decidedAtMs <= input.proposalExpiryMs) {
@@ -148,6 +152,7 @@ export function evaluateAiTraderStateAuthority(input: Readonly<AiTraderAuthority
     }
     if (bot.pauseReason === "position_unconfirmed_expired"
       && input.decision?.outcome === "aborted_order"
+      && input.unresolvedDecisionCount === 0
       && positionTruth === "flat") {
       return { allowed: true, requiredClaim: "conditional_lifecycle_transition" };
     }
@@ -158,7 +163,9 @@ export function evaluateAiTraderStateAuthority(input: Readonly<AiTraderAuthority
     if (source !== "external_http" || input.unresolvedDecisionCount !== 0 || positionTruth !== "flat") {
       return denied("state_denied");
     }
-    if (bot.status === "stopped" || (bot.status === "paused" && bot.pauseReason === "user_requested")) {
+    if (bot.status === "idle"
+      || bot.status === "stopped"
+      || (bot.status === "paused" && bot.pauseReason === "user_requested")) {
       return { allowed: true, requiredClaim: "conditional_lifecycle_transition" };
     }
     return denied("state_denied");

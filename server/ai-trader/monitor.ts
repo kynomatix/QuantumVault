@@ -109,7 +109,10 @@ async function claimInternalAnalysis(
   bot: AiTraderBot,
   updates?: Pick<AiTraderBot, "market" | "timeframe" | "policyHmac">,
 ): Promise<AiTraderBot | undefined> {
-  const unresolved = await storage.getOpenAiTraderDecisions(bot.id, 2);
+  const [openPositions, unresolved] = await Promise.all([
+    storage.getOpenAiTraderDecisions(bot.id, 2),
+    storage.getUnresolvedAiTraderDecisions(bot.id, 2),
+  ]);
   const verdict = evaluateAiTraderStateAuthority({
     action: "analyze",
     source: "internal_cycle",
@@ -117,7 +120,7 @@ async function claimInternalAnalysis(
     requestedDecisionId: null,
     decision: null,
     unresolvedDecisionCount: unresolved.length,
-    positionTruth: unresolved.length === 0 ? "flat" : "maybe_open",
+    positionTruth: openPositions.length === 0 ? "flat" : "maybe_open",
     internalAnalysisClaimHeld: false,
     nowMs: Date.now(),
     proposalExpiryMs: AI_TRADER_PROPOSAL_EXPIRY_MS,
@@ -126,13 +129,21 @@ async function claimInternalAnalysis(
   return storage.claimAiTraderAnalysis({ botId: bot.id, expectedStatus: "idle", updates });
 }
 
-async function releaseInternalAnalysis(botId: string): Promise<AiTraderBot | undefined> {
+async function releaseInternalAnalysis(
+  botId: string,
+  terminalDecision?: { id: string; outcome: string },
+): Promise<AiTraderBot | undefined> {
   return storage.transitionAiTraderState({
     botId,
     expectedStatus: "analyzing",
     expectedPauseReason: null,
     nextStatus: "idle",
     nextPauseReason: null,
+    ...(terminalDecision ? {
+      decisionId: terminalDecision.id,
+      expectedDecisionOutcome: null,
+      decisionOutcome: terminalDecision.outcome,
+    } : {}),
   });
 }
 
@@ -2071,7 +2082,12 @@ export async function runAutoCycle(botId: string): Promise<void> {
             _obs.exitReason = clamped ? "close_no_position" : "unclassified";
           }
         }
-        const released = await releaseInternalAnalysis(bot.id);
+        const released = await releaseInternalAnalysis(
+          bot.id,
+          decision.ok && !decision.rejected && clamped?.action === "close"
+            ? { id: decision.decisionId, outcome: "flat" }
+            : undefined,
+        );
         if (!released) {
           if (_obs) _obs.exitReason = "gate_skip";
           return;
@@ -2151,7 +2167,12 @@ export async function runAutoCycle(botId: string): Promise<void> {
           _obs.exitReason = decision.clamped ? "close_no_position" : "unclassified";
         }
       }
-      await releaseInternalAnalysis(bot.id);
+      await releaseInternalAnalysis(
+        bot.id,
+        decision.ok && !decision.rejected && decision.clamped?.action === "close"
+          ? { id: decision.decisionId, outcome: "flat" }
+          : undefined,
+      );
       scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
       return;
     }
@@ -2664,7 +2685,7 @@ export async function monitorBotOnce(bot: AiTraderBot): Promise<void> {
     return;
   }
   if (bot.status === "proposed") {
-    const unresolved = await storage.getOpenAiTraderDecisions(bot.id, 2);
+    const unresolved = await storage.getUnresolvedAiTraderDecisions(bot.id, 2);
     const decision = unresolved.length === 1 ? unresolved[0] : null;
     // The proposal itself is not a position. Re-evaluate with flat truth only
     // after exact-one decision identity is established; duplicate/missing rows

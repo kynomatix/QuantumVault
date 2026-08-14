@@ -344,6 +344,13 @@ describe("executeDecision — entry-shape refusals", () => {
     expect(updateBotMock).not.toHaveBeenCalled();
     expect((adapter.setLeverage as any)).not.toHaveBeenCalled();
     expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
+    expect(transitionStateMock).toHaveBeenCalledWith(expect.objectContaining({
+      botId: "bot-1111-2222",
+      expectedStatus: "analyzing",
+      nextStatus: "idle",
+      decisionId: "d-scanner-unadmitted",
+      decisionOutcome: "aborted_guard",
+    }));
   });
 
   it("refuses a ClampedDecision with missing/invalid numeric fields", async () => {

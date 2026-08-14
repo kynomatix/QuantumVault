@@ -954,7 +954,8 @@ export function registerAiTraderRoutes(app: Express): void {
 
         const recentClosedDecisions = await storage.getRecentClosedDecisions(bot.id, 20);
         const paperPositionRows = bot.paperMode ? await storage.getOpenAiTraderDecisions(bot.id, 2) : [];
-        const unresolved = bot.paperMode ? paperPositionRows : await storage.getOpenAiTraderDecisions(bot.id, 2);
+        const openPositionRows = bot.paperMode ? paperPositionRows : await storage.getOpenAiTraderDecisions(bot.id, 2);
+        const unresolved = await storage.getUnresolvedAiTraderDecisions(bot.id, 2);
         const authority = evaluateAiTraderStateAuthority({
           action: "analyze",
           source: "external_http",
@@ -962,7 +963,7 @@ export function registerAiTraderRoutes(app: Express): void {
           requestedDecisionId: null,
           decision: null,
           unresolvedDecisionCount: unresolved.length,
-          positionTruth: unresolved.length === 0 ? "flat" : "maybe_open",
+          positionTruth: openPositionRows.length === 0 ? "flat" : "maybe_open",
           internalAnalysisClaimHeld: false,
           nowMs: Date.now(),
           proposalExpiryMs: DECISION_EXPIRY_MS,
@@ -1053,6 +1054,11 @@ export function registerAiTraderRoutes(app: Express): void {
           await storage.transitionAiTraderState({
             botId: bot.id, expectedStatus: "analyzing", expectedPauseReason: null,
             nextStatus: "idle", nextPauseReason: null,
+            ...(result.ok && !result.rejected && result.clamped?.action === "close" ? {
+              decisionId: result.decisionId,
+              expectedDecisionOutcome: null,
+              decisionOutcome: "flat",
+            } : {}),
           });
           analysisClaimedBotId = null;
         }
@@ -1292,7 +1298,7 @@ export function registerAiTraderRoutes(app: Express): void {
       // back into 'open' so the monitor picks the position up again.
       const recentDecisions = await storage.getAiTraderDecisions(bot.id, 10);
       const openView = parseOpenDecision(recentDecisions);
-      const unresolved = await storage.getOpenAiTraderDecisions(bot.id, 2);
+      const unresolved = await storage.getUnresolvedAiTraderDecisions(bot.id, 2);
       const last = recentDecisions[0] ?? null;
       const authority = evaluateAiTraderStateAuthority({
         action: "resume",
@@ -1336,7 +1342,10 @@ export function registerAiTraderRoutes(app: Express): void {
       if (bot.status === "open" || bot.status === "executing" || bot.status === "analyzing") {
         return res.status(409).json({ error: "Close the open position (or wait for it to finish) before restarting the trial." });
       }
-      const unresolved = await storage.getOpenAiTraderDecisions(bot.id, 2);
+      const [openPositions, unresolved] = await Promise.all([
+        storage.getOpenAiTraderDecisions(bot.id, 2),
+        storage.getUnresolvedAiTraderDecisions(bot.id, 2),
+      ]);
       const authority = evaluateAiTraderStateAuthority({
         action: "restart_trial",
         source: "external_http",
@@ -1344,7 +1353,7 @@ export function registerAiTraderRoutes(app: Express): void {
         requestedDecisionId: null,
         decision: null,
         unresolvedDecisionCount: unresolved.length,
-        positionTruth: unresolved.length === 0 ? "flat" : "maybe_open",
+        positionTruth: openPositions.length === 0 ? "flat" : "maybe_open",
         internalAnalysisClaimHeld: false,
         nowMs: Date.now(),
         proposalExpiryMs: DECISION_EXPIRY_MS,

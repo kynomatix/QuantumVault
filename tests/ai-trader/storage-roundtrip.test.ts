@@ -123,6 +123,26 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
       nextStatus: "idle",
       nextPauseReason: null,
     })).toBeUndefined();
+
+    const raceDecision = await storage.insertAiTraderDecision({
+      botId: authorityBotId,
+      rawDecision: { action: "long" },
+      decidedAt: new Date(),
+    } as any);
+    const lostBotCas = await storage.transitionAiTraderState({
+      botId: authorityBotId,
+      expectedStatus: "proposed",
+      expectedPauseReason: null,
+      nextStatus: "idle",
+      nextPauseReason: null,
+      decisionId: raceDecision.id,
+      expectedDecisionOutcome: null,
+      decisionOutcome: "expired",
+    });
+    expect(lostBotCas).toBeUndefined();
+    expect((await storage.getAiTraderDecision(raceDecision.id))?.outcome).toBeNull();
+    expect((await storage.getUnresolvedAiTraderDecisions(authorityBotId, 2)).map((row) => row.id))
+      .toContain(raceDecision.id);
   });
 
   it("getAiTraderBotsByWallet returns the bot for its wallet", async () => {

@@ -7,6 +7,7 @@ const getWalletLlmCiphertextMock = vi.fn();
 const getWalletMock = vi.fn();
 const getRecentClosedMock = vi.fn();
 const getOpenDecisionsMock = vi.fn();
+const getUnresolvedDecisionsMock = vi.fn();
 const claimAnalysisMock = vi.fn();
 const transitionStateMock = vi.fn();
 vi.mock("../../server/storage", () => ({
@@ -17,6 +18,7 @@ vi.mock("../../server/storage", () => ({
     getWallet: (...a: unknown[]) => getWalletMock(...a),
     getRecentClosedDecisions: (...a: unknown[]) => getRecentClosedMock(...a),
     getOpenAiTraderDecisions: (...a: unknown[]) => getOpenDecisionsMock(...a),
+    getUnresolvedAiTraderDecisions: (...a: unknown[]) => getUnresolvedDecisionsMock(...a),
     claimAiTraderAnalysis: (...a: unknown[]) => claimAnalysisMock(...a),
     transitionAiTraderState: (...a: unknown[]) => transitionStateMock(...a),
   },
@@ -310,6 +312,7 @@ describe("AI Trader manual analyze position-authority inputs", () => {
     getAdapterMock.mockReturnValue({});
     getRecentClosedMock.mockResolvedValue([]);
     getOpenDecisionsMock.mockResolvedValue([]);
+    getUnresolvedDecisionsMock.mockResolvedValue([]);
     claimAnalysisMock.mockImplementation(async ({ updates }: { updates?: Record<string, unknown> }) => {
       const bot = await getBotMock.mock.results[0]?.value;
       return { ...bot, ...(updates ?? {}), status: "analyzing", pauseReason: null };
@@ -375,5 +378,39 @@ describe("AI Trader manual analyze position-authority inputs", () => {
       recentClosedDecisions: closedRows,
       paperPositionRows: [],
     });
+  });
+
+  it("terminalizes a manual close-with-no-position in the same analyzing-to-idle release", async () => {
+    const bot = fixedBot(true);
+    getBotMock.mockResolvedValue(bot);
+    runDecisionMock.mockResolvedValue({
+      ok: true,
+      decisionId: "decision-close-route",
+      decision: { action: "close" },
+      clamped: { action: "close" },
+      rejected: false,
+      violations: [],
+      latencyMs: 1,
+    });
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+
+    const result = await invoke(built.routes, "POST /api/ai-trader/:id/analyze", {
+      params: { id: bot.id },
+      session: { walletAddress: bot.walletAddress },
+      body: {},
+      query: {},
+      headers: {},
+    });
+
+    expect(result.statusCode, JSON.stringify(result.body)).toBe(200);
+    expect(transitionStateMock).toHaveBeenCalledWith(expect.objectContaining({
+      botId: bot.id,
+      expectedStatus: "analyzing",
+      nextStatus: "idle",
+      decisionId: "decision-close-route",
+      expectedDecisionOutcome: null,
+      decisionOutcome: "flat",
+    }));
   });
 });
