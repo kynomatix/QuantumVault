@@ -151,6 +151,10 @@ registerPoolLoadTag("candles", () => ({
   rq: queuedCandleReads,
   w: activeCandleWrites,
   wq: queuedCandleWrites,
+  wc: coalescedCandleWrites,
+  ws: supersededCandleWrites,
+  wd: droppedCandleWrites,
+  wcv: durablyConvergedCandleWrites,
 }));
 
 /** Test/telemetry snapshot of candle-store pool pressure. */
@@ -160,6 +164,10 @@ export function getCandleStoreLoad() {
     queuedReads: queuedCandleReads,
     activeWrites: activeCandleWrites,
     queuedWrites: queuedCandleWrites,
+    coalescedWrites: coalescedCandleWrites,
+    supersededWrites: supersededCandleWrites,
+    droppedWrites: droppedCandleWrites,
+    durablyConvergedWrites: durablyConvergedCandleWrites,
   };
 }
 
@@ -561,83 +569,206 @@ let queuedCandleWrites = 0;
 const MAX_ACTIVE_CANDLE_WRITES = 2;
 const MAX_QUEUED_CANDLE_WRITES = 12;
 
+type CandleWriteJob = {
+  symbol: string;
+  timeframe: string;
+  candles: Map<string, ProvenancedOHLCV>;
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+  coalesced: boolean;
+};
+
+const candleWriteQueue: CandleWriteJob[] = [];
+const pendingCandleWritesByIdentity = new Map<string, CandleWriteJob>();
+const activeCandleWriteIdentities = new Set<string>();
+let coalescedCandleWrites = 0;
+let supersededCandleWrites = 0;
+let droppedCandleWrites = 0;
+let durablyConvergedCandleWrites = 0;
+
+export class CandleWriteQueueFullError extends Error {
+  readonly code = "candle_write_queue_full";
+  readonly dropped: number;
+
+  constructor(dropped: number) {
+    super(`Candle write queue full — ${dropped} observation(s) were not admitted`);
+    this.name = "CandleWriteQueueFullError";
+    this.dropped = dropped;
+  }
+}
+
+function candleWriteIdentity(symbol: string, timeframe: string, candle: ProvenancedOHLCV): string {
+  const p = candle.provenance;
+  return [
+    symbol,
+    timeframe,
+    String(candle.time),
+    p.source,
+    p.venue,
+    p.basis,
+    p.proxy,
+    p.finality,
+    p.timeSemantic,
+  ].join("\u001f");
+}
+
+function makeCandleWriteJob(
+  symbol: string,
+  timeframe: string,
+  candles: Map<string, ProvenancedOHLCV>,
+): CandleWriteJob {
+  let resolve!: () => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { symbol, timeframe, candles, promise, resolve, reject, coalesced: false };
+}
+
+async function persistCandleWriteJob(job: CandleWriteJob): Promise<void> {
+  const candles = [...job.candles.values()];
+  const batchSize = 500;
+  let inserted = 0;
+  for (let i = 0; i < candles.length; i += batchSize) {
+    const batch = candles.slice(i, i + batchSize);
+    const values = batch.map((c) => ({
+      symbol: job.symbol,
+      timeframe: job.timeframe,
+      time: String(c.time),
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      volume: c.volume,
+      source: c.provenance.source,
+      venue: c.provenance.venue,
+      basis: c.provenance.basis,
+      proxy: c.provenance.proxy,
+      finality: c.provenance.finality,
+      timeSemantic: c.provenance.timeSemantic,
+    }));
+    await db
+      .insert(labCandleCacheV2)
+      .values(values)
+      .onConflictDoUpdate({
+        target: [
+          labCandleCacheV2.symbol,
+          labCandleCacheV2.timeframe,
+          labCandleCacheV2.time,
+          labCandleCacheV2.source,
+          labCandleCacheV2.venue,
+          labCandleCacheV2.basis,
+          labCandleCacheV2.proxy,
+          labCandleCacheV2.finality,
+          labCandleCacheV2.timeSemantic,
+        ],
+        set: {
+          open: sql`excluded.open`,
+          high: sql`excluded.high`,
+          low: sql`excluded.low`,
+          close: sql`excluded.close`,
+          volume: sql`excluded.volume`,
+        },
+      });
+    inserted += batch.length;
+  }
+  console.log(`[CandleCache] Saved ${inserted} candles for ${job.symbol} ${job.timeframe}`);
+}
+
+function startCandleWriteJob(job: CandleWriteJob): void {
+  activeCandleWrites++;
+  for (const identity of job.candles.keys()) activeCandleWriteIdentities.add(identity);
+  void (async () => {
+    try {
+      await persistCandleWriteJob(job);
+      if (job.coalesced) durablyConvergedCandleWrites++;
+      job.resolve();
+    } catch (error) {
+      console.log(`[CandleCache] Write error: ${error instanceof Error ? error.message : String(error)}`);
+      job.reject(error);
+    } finally {
+      activeCandleWrites--;
+      for (const identity of job.candles.keys()) activeCandleWriteIdentities.delete(identity);
+      drainCandleWriteQueue();
+    }
+  })();
+}
+
+function drainCandleWriteQueue(): void {
+  while (activeCandleWrites < MAX_ACTIVE_CANDLE_WRITES && candleWriteQueue.length > 0) {
+    const index = candleWriteQueue.findIndex((job) =>
+      [...job.candles.keys()].every((identity) => !activeCandleWriteIdentities.has(identity))
+    );
+    if (index < 0) return;
+    const [job] = candleWriteQueue.splice(index, 1);
+    queuedCandleWrites = candleWriteQueue.length;
+    for (const identity of job.candles.keys()) {
+      if (pendingCandleWritesByIdentity.get(identity) === job) {
+        pendingCandleWritesByIdentity.delete(identity);
+      }
+    }
+    startCandleWriteJob(job);
+  }
+}
+
 export async function saveCandlesToDb(
   symbol: string,
   timeframe: string,
   candles: ProvenancedOHLCV[]
 ): Promise<void> {
   if (candles.length === 0) return;
-  if (activeCandleWrites >= MAX_ACTIVE_CANDLE_WRITES) {
-    if (queuedCandleWrites >= MAX_QUEUED_CANDLE_WRITES) {
-      const wqLine = `[CandleCache] Write queue full — dropping best-effort save of ${candles.length} candles for ${symbol} ${timeframe}`;
+  const newestByIdentity = new Map<string, ProvenancedOHLCV>();
+  for (const candle of candles) {
+    newestByIdentity.set(candleWriteIdentity(symbol, timeframe, candle), candle);
+  }
+
+  const waits = new Set<Promise<void>>();
+  const unmerged = new Map<string, ProvenancedOHLCV>();
+  for (const [identity, candle] of newestByIdentity) {
+    const pending = pendingCandleWritesByIdentity.get(identity);
+    if (!pending) {
+      unmerged.set(identity, candle);
+      continue;
+    }
+    pending.candles.set(identity, candle);
+    pending.coalesced = true;
+    coalescedCandleWrites++;
+    supersededCandleWrites++;
+    waits.add(pending.promise);
+  }
+
+  let droppedError: CandleWriteQueueFullError | null = null;
+  if (unmerged.size > 0) {
+    const conflictsWithActive = [...unmerged.keys()].some((identity) =>
+      activeCandleWriteIdentities.has(identity)
+    );
+    const canStartNow = activeCandleWrites < MAX_ACTIVE_CANDLE_WRITES
+      && candleWriteQueue.length === 0
+      && !conflictsWithActive;
+    if (canStartNow) {
+      const job = makeCandleWriteJob(symbol, timeframe, unmerged);
+      waits.add(job.promise);
+      startCandleWriteJob(job);
+    } else if (candleWriteQueue.length < MAX_QUEUED_CANDLE_WRITES) {
+      const job = makeCandleWriteJob(symbol, timeframe, unmerged);
+      candleWriteQueue.push(job);
+      queuedCandleWrites = candleWriteQueue.length;
+      for (const identity of unmerged.keys()) pendingCandleWritesByIdentity.set(identity, job);
+      waits.add(job.promise);
+      drainCandleWriteQueue();
+    } else {
+      droppedCandleWrites += unmerged.size;
+      droppedError = new CandleWriteQueueFullError(unmerged.size);
+      const wqLine = `[CandleCache] Write queue full — dropping ${unmerged.size} observation(s) for ${symbol} ${timeframe}`;
       console.log(wqLine);
       appendTelemetry(wqLine);
-      return;
-    }
-    queuedCandleWrites++;
-    try {
-      while (activeCandleWrites >= MAX_ACTIVE_CANDLE_WRITES) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-    } finally {
-      queuedCandleWrites--;
     }
   }
-  activeCandleWrites++;
-  try {
-    const batchSize = 500;
-    let inserted = 0;
-    for (let i = 0; i < candles.length; i += batchSize) {
-      const batch = candles.slice(i, i + batchSize);
-      const values = batch.map((c) => ({
-        symbol,
-        timeframe,
-        time: String(c.time),
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-        volume: c.volume,
-        source: c.provenance.source,
-        venue: c.provenance.venue,
-        basis: c.provenance.basis,
-        proxy: c.provenance.proxy,
-        finality: c.provenance.finality,
-        timeSemantic: c.provenance.timeSemantic,
-      }));
-      await db
-        .insert(labCandleCacheV2)
-        .values(values)
-        .onConflictDoUpdate({
-          target: [
-            labCandleCacheV2.symbol,
-            labCandleCacheV2.timeframe,
-            labCandleCacheV2.time,
-            labCandleCacheV2.source,
-            labCandleCacheV2.venue,
-            labCandleCacheV2.basis,
-            labCandleCacheV2.proxy,
-            labCandleCacheV2.finality,
-            labCandleCacheV2.timeSemantic,
-          ],
-          // A forming candle retains identity while its OHLCV observation
-          // evolves. Refresh values so monitor cache hits cannot miss a wick.
-          set: {
-            open: sql`excluded.open`,
-            high: sql`excluded.high`,
-            low: sql`excluded.low`,
-            close: sql`excluded.close`,
-            volume: sql`excluded.volume`,
-          },
-        });
-      inserted += batch.length;
-    }
-    console.log(`[CandleCache] Saved ${inserted} candles for ${symbol} ${timeframe}`);
-  } catch (err: any) {
-    console.log(`[CandleCache] Write error: ${err.message}`);
-  } finally {
-    activeCandleWrites--;
-  }
+
+  await Promise.all(waits);
+  if (droppedError) throw droppedError;
 }
 
 export async function getCacheStats(): Promise<{

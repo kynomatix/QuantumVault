@@ -19,24 +19,28 @@
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-const { fakePool } = vi.hoisted(() => ({
+const { fakePool, fakeDb } = vi.hoisted(() => ({
   fakePool: {
     totalCount: 0,
     idleCount: 0,
     waitingCount: 0,
     connect: vi.fn<() => Promise<unknown>>(),
   },
+  fakeDb: { insert: vi.fn() },
 }));
 
-vi.mock("../../server/db", () => ({ db: {}, pool: fakePool }));
+vi.mock("../../server/db", () => ({ db: fakeDb, pool: fakePool }));
 vi.mock("../../server/telemetry", () => ({ appendTelemetry: vi.fn() }));
 
 import {
   getCachedCandles,
   getCandleStoreLoad,
+  saveCandlesToDb,
+  CandleWriteQueueFullError,
   CACHE_BUDGET_ABORT_REASON,
   type CandleReadPhases,
 } from "../../server/lab/candle-store";
+import type { CandleFinality, ProvenancedOHLCV } from "../../server/lab/datafeed";
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
@@ -73,6 +77,168 @@ function read(
 
 beforeEach(() => {
   fakePool.connect.mockReset();
+});
+
+function candle(
+  time: number,
+  close: number,
+  finality: CandleFinality = "finalized",
+): ProvenancedOHLCV {
+  return {
+    time,
+    open: close - 1,
+    high: close + 1,
+    low: close - 2,
+    close,
+    volume: 10,
+    provenance: {
+      source: "okx",
+      venue: "okx",
+      basis: "perp",
+      proxy: "direct",
+      finality,
+      timeSemantic: "open_time",
+    },
+  };
+}
+
+function insertTerminal(result: Promise<void> | void = undefined) {
+  return {
+    values: vi.fn().mockReturnValue({
+      onConflictDoUpdate: vi.fn().mockReturnValue(result),
+    }),
+  };
+}
+
+async function waitForLoad(predicate: (load: ReturnType<typeof getCandleStoreLoad>) => boolean) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const load = getCandleStoreLoad();
+    if (predicate(load)) return load;
+    await tick();
+  }
+  throw new Error(`candle-write load did not converge: ${JSON.stringify(getCandleStoreLoad())}`);
+}
+
+describe("candle write queue convergence", () => {
+  beforeEach(async () => {
+    await waitForLoad((load) => load.activeWrites === 0 && load.queuedWrites === 0);
+    fakeDb.insert.mockReset();
+  });
+
+  it("coalesces more than twelve updates for one cold key and persists the newest", async () => {
+    const activeA = deferred<void>();
+    const activeB = deferred<void>();
+    const persisted: unknown[][] = [];
+    fakeDb.insert
+      .mockReturnValueOnce(insertTerminal(activeA.promise))
+      .mockReturnValueOnce(insertTerminal(activeB.promise))
+      .mockImplementation(() => {
+        const terminal = vi.fn().mockResolvedValue(undefined);
+        return {
+          values: vi.fn((rows: unknown[]) => {
+            persisted.push(rows);
+            return { onConflictDoUpdate: terminal };
+          }),
+        };
+      });
+
+    const occupyingA = saveCandlesToDb("ACTIVE-A", "1h", [candle(1, 1)]);
+    const occupyingB = saveCandlesToDb("ACTIVE-B", "1h", [candle(2, 2)]);
+    await waitForLoad((load) => load.activeWrites === 2);
+
+    const updates = Array.from({ length: 16 }, (_, index) =>
+      saveCandlesToDb("COLD", "1h", [candle(3, 100 + index)])
+    );
+    expect(getCandleStoreLoad().queuedWrites).toBe(1);
+    expect(getCandleStoreLoad().coalescedWrites).toBeGreaterThanOrEqual(15);
+
+    activeA.resolve();
+    activeB.resolve();
+    await Promise.all([occupyingA, occupyingB, ...updates]);
+    const coldRows = persisted.flat().filter((row: any) => row.symbol === "COLD") as any[];
+    expect(coldRows).toHaveLength(1);
+    expect(coldRows[0].close).toBe(115);
+    expect(getCandleStoreLoad().durablyConvergedWrites).toBeGreaterThanOrEqual(1);
+  });
+
+  it("drops excess distinct keys with truthful accounting", async () => {
+    const activeA = deferred<void>();
+    const activeB = deferred<void>();
+    fakeDb.insert
+      .mockReturnValueOnce(insertTerminal(activeA.promise))
+      .mockReturnValueOnce(insertTerminal(activeB.promise))
+      .mockImplementation(() => insertTerminal(Promise.resolve()));
+
+    const occupyingA = saveCandlesToDb("ACTIVE-A", "1h", [candle(10, 1)]);
+    const occupyingB = saveCandlesToDb("ACTIVE-B", "1h", [candle(11, 2)]);
+    await waitForLoad((load) => load.activeWrites === 2);
+    const admitted = Array.from({ length: 12 }, (_, index) =>
+      saveCandlesToDb(`KEY-${index}`, "1h", [candle(20 + index, index)])
+    );
+    const before = getCandleStoreLoad().droppedWrites;
+    await expect(saveCandlesToDb("EXCESS", "1h", [candle(99, 99)]))
+      .rejects.toBeInstanceOf(CandleWriteQueueFullError);
+    expect(getCandleStoreLoad().queuedWrites).toBe(12);
+    expect(getCandleStoreLoad().droppedWrites).toBe(before + 1);
+
+    activeA.resolve();
+    activeB.resolve();
+    await Promise.all([occupyingA, occupyingB, ...admitted]);
+  });
+
+  it("drains an admitted cold key despite repeated hot-key replacement", async () => {
+    const activeA = deferred<void>();
+    const activeB = deferred<void>();
+    const order: string[] = [];
+    fakeDb.insert
+      .mockReturnValueOnce(insertTerminal(activeA.promise))
+      .mockReturnValueOnce(insertTerminal(activeB.promise))
+      .mockImplementation(() => ({
+        values: vi.fn((rows: any[]) => ({
+          onConflictDoUpdate: vi.fn(async () => { order.push(rows[0].symbol); }),
+        })),
+      }));
+
+    const occupyingA = saveCandlesToDb("ACTIVE-A", "1h", [candle(100, 1)]);
+    const occupyingB = saveCandlesToDb("ACTIVE-B", "1h", [candle(101, 2)]);
+    await waitForLoad((load) => load.activeWrites === 2);
+    const hot = saveCandlesToDb("HOT", "1h", [candle(102, 1)]);
+    const cold = saveCandlesToDb("COLD", "1h", [candle(103, 1)]);
+    const replacements = Array.from({ length: 20 }, (_, index) =>
+      saveCandlesToDb("HOT", "1h", [candle(102, 2 + index)])
+    );
+
+    activeA.resolve();
+    activeB.resolve();
+    await Promise.all([occupyingA, occupyingB, hot, cold, ...replacements]);
+    expect(order).toEqual(["HOT", "COLD"]);
+  });
+
+  it("keeps forming and finalized identities separate", async () => {
+    const activeA = deferred<void>();
+    const activeB = deferred<void>();
+    const finalities: string[] = [];
+    fakeDb.insert
+      .mockReturnValueOnce(insertTerminal(activeA.promise))
+      .mockReturnValueOnce(insertTerminal(activeB.promise))
+      .mockImplementation(() => ({
+        values: vi.fn((rows: any[]) => ({
+          onConflictDoUpdate: vi.fn(async () => { finalities.push(rows[0].finality); }),
+        })),
+      }));
+
+    const occupyingA = saveCandlesToDb("ACTIVE-A", "1h", [candle(200, 1)]);
+    const occupyingB = saveCandlesToDb("ACTIVE-B", "1h", [candle(201, 2)]);
+    await waitForLoad((load) => load.activeWrites === 2);
+    const forming = saveCandlesToDb("BAR", "1h", [candle(202, 10, "forming")]);
+    const finalized = saveCandlesToDb("BAR", "1h", [candle(202, 11, "finalized")]);
+    expect(getCandleStoreLoad().queuedWrites).toBe(2);
+
+    activeA.resolve();
+    activeB.resolve();
+    await Promise.all([occupyingA, occupyingB, forming, finalized]);
+    expect(finalities).toEqual(["forming", "finalized"]);
+  });
 });
 
 describe("getCachedCandles — cancellation-aware admission", () => {
