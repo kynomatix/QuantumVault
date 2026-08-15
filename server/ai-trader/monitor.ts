@@ -85,6 +85,10 @@ import { isTerminalCloseResult } from "./close-truth";
 import { isAiTraderMarketAdmitted, SCANNER_MARKET_UNADMITTED_REASON } from "./market-admission";
 import { isMultiplierMarketQuarantined, MULTIPLIER_UNQUALIFIED_REASON } from "./multiplier-market-quarantine";
 import { registerPoolLoadTag } from "../pool-load";
+import {
+  AI_TRADER_PROPOSAL_EXPIRY_MS,
+  evaluateAiTraderStateAuthority,
+} from "./state-authority";
 
 import {
   computeUnrealizedPnl,
@@ -100,6 +104,48 @@ const MONITOR_HEARTBEAT_MS = 5 * 60_000;
 const DAILY_SWEEP_MS = 6 * 60 * 60 * 1000; // graduation sweep every 6h (cheap; catches period-elapsed)
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+async function claimInternalAnalysis(
+  bot: AiTraderBot,
+  updates?: Pick<AiTraderBot, "market" | "timeframe" | "policyHmac">,
+): Promise<AiTraderBot | undefined> {
+  const [openPositions, unresolved] = await Promise.all([
+    storage.getOpenAiTraderDecisions(bot.id, 2),
+    storage.getUnresolvedAiTraderDecisions(bot.id, 2),
+  ]);
+  const verdict = evaluateAiTraderStateAuthority({
+    action: "analyze",
+    source: "internal_cycle",
+    bot,
+    requestedDecisionId: null,
+    decision: null,
+    unresolvedDecisionCount: unresolved.length,
+    positionTruth: openPositions.length === 0 ? "flat" : "maybe_open",
+    internalAnalysisClaimHeld: false,
+    nowMs: Date.now(),
+    proposalExpiryMs: AI_TRADER_PROPOSAL_EXPIRY_MS,
+  });
+  if (!verdict.allowed) return undefined;
+  return storage.claimAiTraderAnalysis({ botId: bot.id, expectedStatus: "idle", updates });
+}
+
+async function releaseInternalAnalysis(
+  botId: string,
+  terminalDecision?: { id: string; outcome: string },
+): Promise<AiTraderBot | undefined> {
+  return storage.transitionAiTraderState({
+    botId,
+    expectedStatus: "analyzing",
+    expectedPauseReason: null,
+    nextStatus: "idle",
+    nextPauseReason: null,
+    ...(terminalDecision ? {
+      decisionId: terminalDecision.id,
+      expectedDecisionOutcome: null,
+      decisionOutcome: terminalDecision.outcome,
+    } : {}),
+  });
+}
 
 // Mirrors context-builder/decide (module-private there by WO scoping).
 const TIMEFRAME_MS: Record<string, number> = {
@@ -1932,18 +1978,21 @@ export async function runAutoCycle(botId: string): Promise<void> {
           umk,
           aiTraderPolicyObject({ market: candidate.market, maxLeverage: bot.maxLeverage, allocatedUsdc: bot.allocatedUsdc })
         );
-        await storage.updateAiTraderBot(bot.id, {
+        const claimed = await claimInternalAnalysis(bot, {
           market: candidate.market,
           timeframe: candidate.timeframe,
           policyHmac: newPolicyHmac,
         });
+        if (!claimed) {
+          if (_obs) _obs.exitReason = "gate_skip";
+          console.warn(`[AiTraderMonitor] scanner: bot ${bot.id.slice(0, 8)} lost idle-to-analyzing claim`);
+          return;
+        }
         // CRITICAL money-safety: refresh local copy so buildMarketContext, runDecision,
         // and executeDecision all operate on the PICKED market, never the stale placeholder.
-        bot = { ...bot, market: candidate.market, timeframe: candidate.timeframe as AiTraderTimeframe, policyHmac: newPolicyHmac };
+        bot = claimed;
         const scannerNote = `Scanner selected: ${candidate.market} ${candidate.timeframe} — setup=${candidate.setup} direction=${candidate.direction} score=${Math.round(candidate.score)} dist=${candidate.necklineDistancePct.toFixed(3)}% parentTrend=${candidate.parentTrend}`;
         console.log(`[AiTraderMonitor] scanner: picked ${candidate.market} ${candidate.timeframe} (score=${Math.round(candidate.score)}) for bot ${bot.id.slice(0, 8)} [call ${ci + 1}/${MAX_LLM_CALLS}]`);
-
-        await storage.updateAiTraderBot(bot.id, { status: "analyzing" });
 
         if (_obs) { _obs.phase = "context"; _obs.exitReason = "stale_data"; }
         let context: Awaited<ReturnType<typeof buildMarketContext>>;
@@ -1959,24 +2008,33 @@ export async function runAutoCycle(botId: string): Promise<void> {
             scannerNote,
           });
         } catch (err) {
-          if (!isCandleBasisUnavailableError(err)) throw err;
+          if (!isCandleBasisUnavailableError(err)) {
+            await releaseInternalAnalysis(bot.id);
+            throw err;
+          }
           if (_obs) _obs.exitReason = "candle_basis_unavailable";
           console.warn(`[AiTraderMonitor] scanner: candle_basis_unavailable for bot ${bot.id.slice(0, 8)}`);
-          await storage.updateAiTraderBot(bot.id, { status: "idle" });
+          await releaseInternalAnalysis(bot.id);
           scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
           return;
         }
         if ("stale" in context) {
           // exitReason already "stale_data"
           console.warn(`[AiTraderMonitor] scanner: stale context for bot ${bot.id.slice(0, 8)} (${context.reason})`);
-          await storage.updateAiTraderBot(bot.id, { status: "idle" });
+          await releaseInternalAnalysis(bot.id);
           scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
           return;
         }
 
         if (_obs) { _obs.phase = "llm"; _obs.exitReason = "unclassified"; }
         llmCalls++;
-        const decision = await runDecision({ bot, apiKey, context, adapter });
+        let decision: Awaited<ReturnType<typeof runDecision>>;
+        try {
+          decision = await runDecision({ bot, apiKey, context, adapter });
+        } catch (err) {
+          await releaseInternalAnalysis(bot.id);
+          throw err;
+        }
         // Same no-trade taxonomy as the fixed-bot path below; narrowed inline so
         // TS proves decisionId/clamped exist on the executed branch.
         const clamped = decision.ok && !decision.rejected ? decision.clamped : null;
@@ -1990,12 +2048,13 @@ export async function runAutoCycle(botId: string): Promise<void> {
             clamped,
             adapter,
             markPrice: markPrice ?? NaN,
+            authoritySource: "internal_cycle",
           });
           if (!exec.ok) {
             // exitReason stays "exec_rejected"
             const fresh = await storage.getAiTraderBot(bot.id);
             if (fresh?.status === "analyzing") {
-              await storage.updateAiTraderBot(bot.id, { status: "idle" });
+              await releaseInternalAnalysis(bot.id);
             }
             console.warn(`[AiTraderMonitor] scanner: entry not executed for bot ${bot.id.slice(0, 8)}: ${exec.reason} — ${exec.detail}`);
             const after = await storage.getAiTraderBot(bot.id);
@@ -2023,7 +2082,17 @@ export async function runAutoCycle(botId: string): Promise<void> {
             _obs.exitReason = clamped ? "close_no_position" : "unclassified";
           }
         }
-        await storage.updateAiTraderBot(bot.id, { status: "idle" });
+        const released = await releaseInternalAnalysis(
+          bot.id,
+          decision.ok && !decision.rejected && clamped?.action === "close"
+            ? { id: decision.decisionId, outcome: "flat" }
+            : undefined,
+        );
+        if (!released) {
+          if (_obs) _obs.exitReason = "gate_skip";
+          return;
+        }
+        bot = released;
       }
 
       // All eligible candidates tried within the call cap — no entry this boundary.
@@ -2034,7 +2103,12 @@ export async function runAutoCycle(botId: string): Promise<void> {
     }
 
     // Fixed-ticker bot path (scanner bots have already returned above).
-    await storage.updateAiTraderBot(bot.id, { status: "analyzing" });
+    const claimed = await claimInternalAnalysis(bot);
+    if (!claimed) {
+      if (_obs) _obs.exitReason = "gate_skip";
+      return;
+    }
+    bot = claimed;
 
     if (_obs) { _obs.phase = "context"; _obs.exitReason = "stale_data"; }
     let context: Awaited<ReturnType<typeof buildMarketContext>>;
@@ -2049,10 +2123,13 @@ export async function runAutoCycle(botId: string): Promise<void> {
         agentPublicKey: wallet.agentPublicKey,
       });
     } catch (err) {
-      if (!isCandleBasisUnavailableError(err)) throw err;
+      if (!isCandleBasisUnavailableError(err)) {
+        await releaseInternalAnalysis(bot.id);
+        throw err;
+      }
       if (_obs) _obs.exitReason = "candle_basis_unavailable";
       console.warn(`[AiTraderMonitor] auto cycle: candle_basis_unavailable for bot ${bot.id.slice(0, 8)}`);
-      await storage.updateAiTraderBot(bot.id, { status: "idle" });
+      await releaseInternalAnalysis(bot.id);
       scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
       return;
     }
@@ -2060,13 +2137,19 @@ export async function runAutoCycle(botId: string): Promise<void> {
       // G9 — never decide on stale data; retry at the next boundary.
       // exitReason already "stale_data"
       console.warn(`[AiTraderMonitor] auto cycle: stale context for bot ${bot.id.slice(0, 8)} (${context.reason})`);
-      await storage.updateAiTraderBot(bot.id, { status: "idle" });
+      await releaseInternalAnalysis(bot.id);
       scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
       return;
     }
 
     if (_obs) { _obs.phase = "llm"; _obs.exitReason = "unclassified"; }
-    const decision = await runDecision({ bot, apiKey, context, adapter });
+    let decision: Awaited<ReturnType<typeof runDecision>>;
+    try {
+      decision = await runDecision({ bot, apiKey, context, adapter });
+    } catch (err) {
+      await releaseInternalAnalysis(bot.id);
+      throw err;
+    }
     if (!decision.ok || decision.rejected || !decision.clamped || (decision.clamped.action !== "long" && decision.clamped.action !== "short")) {
       // Classify the actual no-trade outcome before the common return so the
       // terminal line is truthful (ok:false=timeout/gateway/malformed,
@@ -2084,7 +2167,12 @@ export async function runAutoCycle(botId: string): Promise<void> {
           _obs.exitReason = decision.clamped ? "close_no_position" : "unclassified";
         }
       }
-      await storage.updateAiTraderBot(bot.id, { status: "idle" });
+      await releaseInternalAnalysis(
+        bot.id,
+        decision.ok && !decision.rejected && decision.clamped?.action === "close"
+          ? { id: decision.decisionId, outcome: "flat" }
+          : undefined,
+      );
       scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
       return;
     }
@@ -2097,13 +2185,14 @@ export async function runAutoCycle(botId: string): Promise<void> {
       clamped: decision.clamped,
       adapter,
       markPrice: markPrice ?? NaN,
+      authoritySource: "internal_cycle",
     });
     if (!exec.ok) {
       // The executor writes terminal statuses (idle/paused) on its abort paths;
       // for result-only rejections make sure the bot isn't stranded in 'analyzing'.
       const fresh = await storage.getAiTraderBot(bot.id);
       if (fresh?.status === "analyzing") {
-        await storage.updateAiTraderBot(bot.id, { status: "idle" });
+        await releaseInternalAnalysis(bot.id);
       }
       console.warn(`[AiTraderMonitor] auto cycle: entry not executed for bot ${bot.id.slice(0, 8)}: ${exec.reason} — ${exec.detail}`);
       const after = await storage.getAiTraderBot(bot.id);
@@ -2593,6 +2682,45 @@ export async function monitorBotOnce(bot: AiTraderBot): Promise<void> {
   // tick — the pause is a quarantine from NEW entries, not from monitoring.
   if (bot.status === "paused" && bot.pauseReason === "position_unconfirmed") {
     await reconcileUnconfirmedLanding(bot);
+    return;
+  }
+  if (bot.status === "proposed") {
+    const unresolved = await storage.getUnresolvedAiTraderDecisions(bot.id, 2);
+    const decision = unresolved.length === 1 ? unresolved[0] : null;
+    // The proposal itself is not a position. Re-evaluate with flat truth only
+    // after exact-one decision identity is established; duplicate/missing rows
+    // stay fail-closed in proposed for owner-visible reconciliation.
+    if (decision) {
+      const expiryVerdict = evaluateAiTraderStateAuthority({
+        action: "proposal_expire",
+        source: "state_reconciler",
+        bot,
+        requestedDecisionId: decision.id,
+        decision: {
+          id: decision.id,
+          botId: decision.botId ?? "",
+          outcome: decision.outcome ?? null,
+          decidedAtMs: decision.decidedAt ? new Date(decision.decidedAt).getTime() : Number.NaN,
+        },
+        unresolvedDecisionCount: unresolved.length,
+        positionTruth: "flat",
+        internalAnalysisClaimHeld: false,
+        nowMs: Date.now(),
+        proposalExpiryMs: AI_TRADER_PROPOSAL_EXPIRY_MS,
+      });
+      if (expiryVerdict.allowed) {
+        await storage.transitionAiTraderState({
+          botId: bot.id,
+          expectedStatus: "proposed",
+          expectedPauseReason: null,
+          nextStatus: "idle",
+          nextPauseReason: null,
+          decisionId: decision.id,
+          expectedDecisionOutcome: null,
+          decisionOutcome: "expired",
+        });
+      }
+    }
     return;
   }
   if (bot.status !== "open") return;

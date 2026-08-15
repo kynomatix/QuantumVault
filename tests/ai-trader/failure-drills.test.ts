@@ -28,6 +28,10 @@ const getDecisionsMock = vi.fn();
 const getBotMock = vi.fn();
 const getActiveBotsMock = vi.fn();
 const getLlmCiphertextMock = vi.fn();
+const getOpenDecisionsMock = vi.fn();
+const getUnresolvedDecisionsMock = vi.fn();
+const claimAnalysisMock = vi.fn();
+const transitionStateMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
     getWallet: (...a: unknown[]) => getWalletMock(...a),
@@ -38,6 +42,10 @@ vi.mock("../../server/storage", () => ({
     getAiTraderBot: (...a: unknown[]) => getBotMock(...a),
     getActiveAiTraderBots: (...a: unknown[]) => getActiveBotsMock(...a),
     getWalletLlmApiKeyCiphertext: (...a: unknown[]) => getLlmCiphertextMock(...a),
+    getOpenAiTraderDecisions: (...a: unknown[]) => getOpenDecisionsMock(...a),
+    getUnresolvedAiTraderDecisions: (...a: unknown[]) => getUnresolvedDecisionsMock(...a),
+    claimAiTraderAnalysis: (...a: unknown[]) => claimAnalysisMock(...a),
+    transitionAiTraderState: (...a: unknown[]) => transitionStateMock(...a),
   },
 }));
 
@@ -81,10 +89,10 @@ vi.mock("../../server/lab/datafeed", () => ({
 }));
 
 const buildContextMock = vi.fn();
-vi.mock("../../server/ai-trader/context-builder", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../server/ai-trader/context-builder")>();
-  return { ...actual, buildMarketContext: (...a: unknown[]) => buildContextMock(...a) };
-});
+vi.mock("../../server/ai-trader/context-builder", () => ({
+  buildMarketContext: (...a: unknown[]) => buildContextMock(...a),
+  marketToDatafeedTicker: (market: string) => market.replace(/-PERP$/i, "USDT"),
+}));
 
 const runDecisionMock = vi.fn();
 vi.mock("../../server/ai-trader/decide", () => ({
@@ -123,6 +131,7 @@ function makeBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
     maxLeverage: 5,
     policyHmac: "hmac-abc",
     status: "idle",
+    pauseReason: null,
     graduationState: "graduated",
     graduationCriteria: null,
     trialStartedAt: null,
@@ -196,15 +205,30 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
   for (const m of [
     getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getDecisionsMock,
-    getBotMock, getActiveBotsMock, getLlmCiphertextMock, getUmkMock, decryptKeyMock, decryptSubKeyMock,
+    getBotMock, getActiveBotsMock, getLlmCiphertextMock, getOpenDecisionsMock, getUnresolvedDecisionsMock,
+    claimAnalysisMock, transitionStateMock, getUmkMock, decryptKeyMock, decryptSubKeyMock,
     healUmkMock, getSessionByWalletMock, restoreSecurityMock, decryptLlmKeyMock, notifyMock,
     getAdapterMock, fetchOHLCVMock, buildContextMock, runDecisionMock, executeDecisionMock,
   ]) {
     m.mockReset();
   }
   getRecentClosedMock.mockResolvedValue([]);
+  getOpenDecisionsMock.mockResolvedValue([]);
+  getUnresolvedDecisionsMock.mockResolvedValue([]);
   updateBotMock.mockResolvedValue({});
   updateDecisionMock.mockResolvedValue({});
+  claimAnalysisMock.mockImplementation(async ({ botId, updates }: { botId: string; updates?: Record<string, unknown> }) => {
+    const patch = { ...(updates ?? {}), status: "analyzing", pauseReason: null };
+    await updateBotMock(botId, patch);
+    return makeBot({ id: botId, ...patch } as Partial<AiTraderBot>);
+  });
+  transitionStateMock.mockImplementation(async ({ botId, nextStatus, nextPauseReason, botUpdates }: {
+    botId: string; nextStatus: string; nextPauseReason: string | null; botUpdates?: Record<string, unknown>;
+  }) => {
+    const patch = { ...(botUpdates ?? {}), status: nextStatus, pauseReason: nextPauseReason };
+    await updateBotMock(botId, patch);
+    return makeBot({ id: botId, ...patch } as Partial<AiTraderBot>);
+  });
   notifyMock.mockResolvedValue(true);
   healUmkMock.mockResolvedValue(undefined);
   restoreSecurityMock.mockResolvedValue({ status: "reauth_required" });

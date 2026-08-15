@@ -17,6 +17,7 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
 
   let botId: string;
   let decisionId: string;
+  let authorityBotId: string;
 
   beforeAll(async () => {
     ({ storage } = await import("../../server/storage"));
@@ -30,6 +31,10 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
     if (botId) {
       await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, botId));
       await db.delete(aiTraderBots).where(eq(aiTraderBots.id, botId));
+    }
+    if (authorityBotId) {
+      await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, authorityBotId));
+      await db.delete(aiTraderBots).where(eq(aiTraderBots.id, authorityBotId));
     }
   });
 
@@ -57,6 +62,87 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
     const bot = await storage.getAiTraderBot(botId);
     expect(bot).toBeDefined();
     expect(bot!.id).toBe(botId);
+  });
+
+  it("serializes analysis, proposal, execution, and terminal release with compare-and-swap guards", async () => {
+    const authorityBot = await storage.createAiTraderBot({
+      walletAddress: WALLET,
+      protocol: "pacifica",
+      market: "BTC-PERP",
+      timeframe: "15m",
+      allocatedUsdc: "100.00",
+      graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
+      policyHmac: "authority-hmac",
+    } as any);
+    authorityBotId = authorityBot.id;
+
+    const claimed = await storage.claimAiTraderAnalysis({ botId: authorityBotId, expectedStatus: "idle" });
+    expect(claimed?.status).toBe("analyzing");
+    expect(await storage.claimAiTraderAnalysis({ botId: authorityBotId, expectedStatus: "idle" })).toBeUndefined();
+
+    const decision = await storage.insertAiTraderDecision({
+      botId: authorityBotId,
+      rawDecision: { action: "long" },
+      decidedAt: new Date(),
+    } as any);
+    const bound = await storage.bindAiTraderProposal({ botId: authorityBotId, decisionId: decision.id });
+    expect(bound?.bot.status).toBe("proposed");
+    expect(bound?.decision.id).toBe(decision.id);
+
+    const executed = await storage.claimAiTraderExecution({
+      botId: authorityBotId,
+      decisionId: decision.id,
+      expectedStatus: "proposed",
+      now: new Date(),
+      expiryMs: 10 * 60_000,
+    });
+    expect(executed?.bot.status).toBe("executing");
+    expect(await storage.claimAiTraderExecution({
+      botId: authorityBotId,
+      decisionId: decision.id,
+      expectedStatus: "proposed",
+      now: new Date(),
+      expiryMs: 10 * 60_000,
+    })).toBeUndefined();
+
+    const released = await storage.transitionAiTraderState({
+      botId: authorityBotId,
+      expectedStatus: "executing",
+      expectedPauseReason: null,
+      nextStatus: "idle",
+      nextPauseReason: null,
+      decisionId: decision.id,
+      expectedDecisionOutcome: null,
+      decisionOutcome: "aborted_guard",
+    });
+    expect(released?.status).toBe("idle");
+    expect(await storage.transitionAiTraderState({
+      botId: authorityBotId,
+      expectedStatus: "executing",
+      expectedPauseReason: null,
+      nextStatus: "idle",
+      nextPauseReason: null,
+    })).toBeUndefined();
+
+    const raceDecision = await storage.insertAiTraderDecision({
+      botId: authorityBotId,
+      rawDecision: { action: "long" },
+      decidedAt: new Date(),
+    } as any);
+    const lostBotCas = await storage.transitionAiTraderState({
+      botId: authorityBotId,
+      expectedStatus: "proposed",
+      expectedPauseReason: null,
+      nextStatus: "idle",
+      nextPauseReason: null,
+      decisionId: raceDecision.id,
+      expectedDecisionOutcome: null,
+      decisionOutcome: "expired",
+    });
+    expect(lostBotCas).toBeUndefined();
+    expect((await storage.getAiTraderDecision(raceDecision.id))?.outcome).toBeNull();
+    expect((await storage.getUnresolvedAiTraderDecisions(authorityBotId, 2)).map((row) => row.id))
+      .toContain(raceDecision.id);
   });
 
   it("getAiTraderBotsByWallet returns the bot for its wallet", async () => {

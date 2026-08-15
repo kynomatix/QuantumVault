@@ -27,6 +27,8 @@ const getRecentClosedMock = vi.fn();
 const updateBotMock = vi.fn();
 const updateDecisionMock = vi.fn();
 const getAiTraderBotMock = vi.fn();
+const claimExecutionMock = vi.fn();
+const transitionStateMock = vi.fn();
 const isMarketAdmittedMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
@@ -35,6 +37,8 @@ vi.mock("../../server/storage", () => ({
     updateAiTraderBot: (...a: unknown[]) => updateBotMock(...a),
     updateAiTraderDecision: (...a: unknown[]) => updateDecisionMock(...a),
     getAiTraderBot: (...a: unknown[]) => getAiTraderBotMock(...a),
+    claimAiTraderExecution: (...a: unknown[]) => claimExecutionMock(...a),
+    transitionAiTraderState: (...a: unknown[]) => transitionStateMock(...a),
   },
 }));
 
@@ -86,6 +90,7 @@ function makeBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
     maxLeverage: 5,
     policyHmac: "hmac-abc",
     status: "analyzing",
+    pauseReason: null,
     ...overrides,
   } as unknown as AiTraderBot;
 }
@@ -179,7 +184,7 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
   callOrder = [];
   scannerCapabilitiesMock.liveExecutionEnabled = true;
-  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getAiTraderBotMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock]) {
+  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getAiTraderBotMock, claimExecutionMock, transitionStateMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock]) {
     m.mockReset();
   }
   getRecentClosedMock.mockResolvedValue([]);
@@ -192,6 +197,14 @@ beforeEach(() => {
   // status so all non-busy-guard tests proceed normally. Tests that exercise the
   // bot_busy or missing-row paths override this mock directly.
   getAiTraderBotMock.mockImplementation(async () => makeBot());
+  claimExecutionMock.mockImplementation(async () => {
+    callOrder.push("status:executing");
+    return { bot: makeBot({ status: "executing" }), decision: { id: "d-1" } };
+  });
+  transitionStateMock.mockImplementation(async (params: any) => {
+    callOrder.push(`status:${params.nextStatus}`);
+    return makeBot({ status: params.nextStatus, pauseReason: params.nextPauseReason });
+  });
 });
 
 afterEach(() => {
@@ -207,6 +220,7 @@ describe("executeDecision — entry-shape refusals", () => {
     const adapter = makeAdapter();
 
     const live = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false, marketSource: "scanner" }),
       decisionId: "d-live",
       clamped: makeClamped(),
@@ -221,6 +235,7 @@ describe("executeDecision — entry-shape refusals", () => {
     expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
 
     const paper = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: true, marketSource: "scanner" }),
       decisionId: "d-paper",
       clamped: makeClamped(),
@@ -234,6 +249,7 @@ describe("executeDecision — entry-shape refusals", () => {
     const { executeDecision } = await importExecutor();
     for (const action of ["close", "flat"] as const) {
       const r = await executeDecision({
+        authoritySource: "internal_cycle",
         bot: makeBot(),
         decisionId: "d-1",
         clamped: makeClamped({ action }),
@@ -250,7 +266,9 @@ describe("executeDecision — entry-shape refusals", () => {
     const { executeDecision } = await importExecutor();
     for (const status of ["open", "executing", "proposed"] as const) {
       const adapter = makeAdapter();
+      getAiTraderBotMock.mockResolvedValueOnce(makeBot({ status }));
       const r = await executeDecision({
+        authoritySource: "internal_cycle",
         bot: makeBot({ status, paperMode: false }),
         decisionId: "d-1",
         clamped: makeClamped(),
@@ -262,6 +280,7 @@ describe("executeDecision — entry-shape refusals", () => {
     }
     // idle/analyzing bots proceed past the guard (paper bot hits G6 next, which passes).
     const ok = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ status: "idle", paperMode: true }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -280,6 +299,7 @@ describe("executeDecision — entry-shape refusals", () => {
     for (const freshStatus of ["open", "executing", "proposed"] as const) {
       getAiTraderBotMock.mockResolvedValueOnce(makeBot({ status: freshStatus }));
       const r = await executeDecision({
+        authoritySource: "internal_cycle",
         bot: makeBot({ status: "analyzing", paperMode: false }),
         decisionId: "d-fresh",
         clamped: makeClamped(),
@@ -290,11 +310,26 @@ describe("executeDecision — entry-shape refusals", () => {
     }
   });
 
+  it("legacy callers that omit authoritySource fail closed instead of inheriting an internal claim", async () => {
+    const { executeDecision } = await importExecutor();
+    getAiTraderBotMock.mockResolvedValueOnce(makeBot({ status: "analyzing", paperMode: true }));
+    const result = await executeDecision({
+      bot: makeBot({ status: "analyzing", paperMode: true }),
+      decisionId: "d-legacy",
+      clamped: makeClamped(),
+      adapter: makeAdapter(),
+      markPrice: 150,
+    });
+    expect(result).toMatchObject({ ok: false, reason: "bot_busy" });
+    expect(claimExecutionMock).not.toHaveBeenCalled();
+  });
+
   it("refuses an unadmitted scanner-source market before G6, paper fill, or venue work", async () => {
     isMarketAdmittedMock.mockReturnValue(false);
     const adapter = makeAdapter();
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ marketSource: "scanner", market: "UNKNOWN-PERP", paperMode: false }),
       decisionId: "d-scanner-unadmitted",
       clamped: makeClamped(),
@@ -309,6 +344,13 @@ describe("executeDecision — entry-shape refusals", () => {
     expect(updateBotMock).not.toHaveBeenCalled();
     expect((adapter.setLeverage as any)).not.toHaveBeenCalled();
     expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
+    expect(transitionStateMock).toHaveBeenCalledWith(expect.objectContaining({
+      botId: "bot-1111-2222",
+      expectedStatus: "analyzing",
+      nextStatus: "idle",
+      decisionId: "d-scanner-unadmitted",
+      decisionOutcome: "aborted_guard",
+    }));
   });
 
   it("refuses a ClampedDecision with missing/invalid numeric fields", async () => {
@@ -323,6 +365,7 @@ describe("executeDecision — entry-shape refusals", () => {
     ];
     for (const overrides of bad) {
       const r = await executeDecision({
+        authoritySource: "internal_cycle",
         bot: makeBot(),
         decisionId: "d-1",
         clamped: makeClamped(overrides),
@@ -372,6 +415,7 @@ describe("G6 — cooldown and daily caps (checkCooldownAndCaps + executeDecision
     getRecentClosedMock.mockResolvedValue([closedAt(60_000)]);
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: true }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -391,6 +435,7 @@ describe("paper execution", () => {
     const adapter = makeAdapter();
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: true }),
       decisionId: "d-paper",
       clamped: makeClamped({ action: "long" }),
@@ -403,7 +448,12 @@ describe("paper execution", () => {
       outcome: "executed",
       entryPrice: expectedEntry.toFixed(8),
     });
-    expect(updateBotMock).toHaveBeenCalledWith("bot-1111-2222", { status: "open", pauseReason: null });
+    expect(transitionStateMock).toHaveBeenCalledWith(expect.objectContaining({
+      botId: "bot-1111-2222",
+      expectedStatus: "executing",
+      nextStatus: "open",
+      nextPauseReason: null,
+    }));
     // Paper must never touch the venue or the key material.
     expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
     expect((adapter.setTpSl as any)).not.toHaveBeenCalled();
@@ -415,6 +465,7 @@ describe("paper execution", () => {
   it("short paper entry slips DOWN (adverse for a seller)", async () => {
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: true }),
       decisionId: "d-paper-s",
       clamped: makeClamped({ action: "short", stopLossPrice: 155, takeProfitPrice: 140 }),
@@ -428,6 +479,7 @@ describe("paper execution", () => {
     const { executeDecision } = await importExecutor();
     for (const mark of [0, NaN, -1]) {
       const r = await executeDecision({
+        authoritySource: "internal_cycle",
         bot: makeBot({ paperMode: true }),
         decisionId: "d-paper",
         clamped: makeClamped(),
@@ -447,6 +499,7 @@ describe("live execution — pre-flight", () => {
     const adapter = makeAdapter({ setTpSl: undefined });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false, protocol: "flash" }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -462,6 +515,7 @@ describe("live execution — pre-flight", () => {
     getWalletMock.mockResolvedValue({ address: "WALLET_X", agentPublicKey: null, agentPrivateKeyEncryptedV3: null });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -481,6 +535,7 @@ describe("live execution — pre-flight", () => {
     getUmkMock.mockResolvedValue(null);
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -496,6 +551,7 @@ describe("live execution — pre-flight", () => {
     const adapter = makeAdapter();
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -524,6 +580,7 @@ describe("live execution — pre-flight", () => {
     });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped({ marginUsdc: 500 }),
@@ -551,6 +608,7 @@ describe("live execution — happy path", () => {
     const adapter = makeAdapter();
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-live",
       clamped: makeClamped(),
@@ -563,13 +621,13 @@ describe("live execution — happy path", () => {
     // position confirm; G10 verification last.
     expect(callOrder).toEqual([
       "getBalances",
-      "updateBot:executing",
+      "status:executing",
       "setLeverage",
       "placeMarketOrder",
       "getPositions",
       "setTpSl",
       "getOpenStopOrders",
-      "updateBot:open",
+      "status:open",
     ]);
 
     // WO-7.1 signing model: the signed account IS the bot's own subaccount pubkey
@@ -597,7 +655,12 @@ describe("live execution — happy path", () => {
       outcome: "executed",
       entryPrice: "150.20000000",
     });
-    expect(updateBotMock).toHaveBeenLastCalledWith("bot-1111-2222", { status: "open", pauseReason: null });
+    expect(transitionStateMock).toHaveBeenLastCalledWith(expect.objectContaining({
+      botId: "bot-1111-2222",
+      expectedStatus: "executing",
+      nextStatus: "open",
+      nextPauseReason: null,
+    }));
     expect(notifyMock).toHaveBeenCalledWith("WALLET_X", expect.objectContaining({ type: "trade_executed", side: "LONG" }));
     expect(cleanupUmk).toHaveBeenCalled();
     expect(cleanupKey).toHaveBeenCalled();
@@ -610,6 +673,7 @@ describe("live execution — happy path", () => {
     });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-live",
       clamped: makeClamped(),
@@ -631,6 +695,7 @@ describe("live execution — failure handling (fail closed)", () => {
     });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -653,6 +718,7 @@ describe("live execution — failure handling (fail closed)", () => {
     });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -690,6 +756,7 @@ describe("live execution — failure handling (fail closed)", () => {
     });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -747,6 +814,7 @@ describe("live execution — failure handling (fail closed)", () => {
     const { executeDecision } = await importExecutor();
     await expect(
       executeDecision({
+        authoritySource: "internal_cycle",
         bot: makeBot({ paperMode: false }),
         decisionId: "d-1",
         clamped: makeClamped(),
@@ -786,6 +854,7 @@ describe("live execution — failure handling (fail closed)", () => {
     });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -815,6 +884,7 @@ describe("live execution — failure handling (fail closed)", () => {
     });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -833,6 +903,7 @@ describe("live execution — failure handling (fail closed)", () => {
     const adapter = makeAdapter({ getPositions: getPositionsMock });
     const { executeDecision } = await importExecutor();
     const promise = executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -860,6 +931,7 @@ describe("live execution — failure handling (fail closed)", () => {
     });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -894,6 +966,7 @@ describe("live execution — failure handling (fail closed)", () => {
     });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -925,6 +998,7 @@ describe("live execution — failure handling (fail closed)", () => {
     });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -946,6 +1020,7 @@ describe("live execution — failure handling (fail closed)", () => {
     });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -961,6 +1036,7 @@ describe("live execution — failure handling (fail closed)", () => {
     const adapter = makeAdapter({ getOpenStopOrders: stopsMock });
     const { executeDecision } = await importExecutor();
     const promise = executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -985,6 +1061,7 @@ describe("live execution — failure handling (fail closed)", () => {
     });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -1014,6 +1091,7 @@ describe("live execution — failure handling (fail closed)", () => {
       .mockResolvedValueOnce({ secretKey: new Uint8Array([9]), cleanup: cleanupKey });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -1033,6 +1111,7 @@ describe("live execution — failure handling (fail closed)", () => {
     const adapter = makeAdapter();
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -1051,6 +1130,7 @@ describe("live execution — failure handling (fail closed)", () => {
     const adapter = makeAdapter();
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false, botSubaccountKeyEncryptedV3: null, derivationIndex: null, derivationPathVersion: null }),
       decisionId: "d-1",
       clamped: makeClamped(),
@@ -1067,6 +1147,7 @@ describe("live execution — failure handling (fail closed)", () => {
     const adapter = makeAdapter();
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
+        authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false, protocolSubaccountId: null, botSubaccountKeyEncryptedV3: null }),
       decisionId: "d-1",
       clamped: makeClamped(),

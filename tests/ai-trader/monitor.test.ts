@@ -26,10 +26,13 @@ const updateBotMock = vi.fn();
 const updateDecisionMock = vi.fn();
 const getDecisionsMock = vi.fn();
 const getOpenDecisionsMock = vi.fn();
+const getUnresolvedDecisionsMock = vi.fn();
 const getBotMock = vi.fn();
 const getActiveBotsMock = vi.fn();
 const getLlmCiphertextMock = vi.fn();
 const getAiTraderDecisionMock = vi.fn();
+const claimAnalysisMock = vi.fn();
+const transitionStateMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
     getWallet: (...a: unknown[]) => getWalletMock(...a),
@@ -38,10 +41,13 @@ vi.mock("../../server/storage", () => ({
     updateAiTraderDecision: (...a: unknown[]) => updateDecisionMock(...a),
     getAiTraderDecisions: (...a: unknown[]) => getDecisionsMock(...a),
     getOpenAiTraderDecisions: (...a: unknown[]) => getOpenDecisionsMock(...a),
+    getUnresolvedAiTraderDecisions: (...a: unknown[]) => getUnresolvedDecisionsMock(...a),
     getAiTraderBot: (...a: unknown[]) => getBotMock(...a),
     getActiveAiTraderBots: (...a: unknown[]) => getActiveBotsMock(...a),
     getWalletLlmApiKeyCiphertext: (...a: unknown[]) => getLlmCiphertextMock(...a),
     getAiTraderDecision: (...a: unknown[]) => getAiTraderDecisionMock(...a),
+    claimAiTraderAnalysis: (...a: unknown[]) => claimAnalysisMock(...a),
+    transitionAiTraderState: (...a: unknown[]) => transitionStateMock(...a),
   },
 }));
 
@@ -116,13 +122,10 @@ vi.mock("../../server/lab/datafeed", () => ({
 }));
 
 const buildContextMock = vi.fn();
-vi.mock("../../server/ai-trader/context-builder", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../server/ai-trader/context-builder")>();
-  return {
-    ...actual,
-    buildMarketContext: (...a: unknown[]) => buildContextMock(...a),
-  };
-});
+vi.mock("../../server/ai-trader/context-builder", () => ({
+  buildMarketContext: (...a: unknown[]) => buildContextMock(...a),
+  marketToDatafeedTicker: (market: string) => market.replace(/-PERP$/i, "USDT"),
+}));
 
 const runDecisionMock = vi.fn();
 vi.mock("../../server/ai-trader/decide", () => ({
@@ -194,6 +197,7 @@ function makeBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
     maxLeverage: 5,
     policyHmac: "hmac-abc",
     status: "open",
+    pauseReason: null,
     graduationState: "in_trial",
     graduationCriteria: { periodDays: 7, minTrades: 3, minNetPnl: 0, maxDrawdownPct: 30, minProfitFactor: 1.1 },
     trialStartedAt: new Date(NOW - 10 * DAY),
@@ -299,7 +303,8 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
   for (const m of [
     getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getDecisionsMock,
-    getOpenDecisionsMock, getBotMock, getActiveBotsMock, getLlmCiphertextMock, getAiTraderDecisionMock, getUmkMock,
+    getOpenDecisionsMock, getUnresolvedDecisionsMock, getBotMock, getActiveBotsMock, getLlmCiphertextMock, getAiTraderDecisionMock,
+    claimAnalysisMock, transitionStateMock, getUmkMock,
     decryptKeyMock, decryptSubKeyMock, healUmkMock, getSessionByWalletMock, restoreSecurityMock,
     decryptLlmKeyMock, notifyMock, getAdapterMock, fetchOHLCVMock, buildContextMock,
     runDecisionMock, executeDecisionMock, appendTelemetryMock, getScannerShortlistMock,
@@ -309,11 +314,24 @@ beforeEach(() => {
   }
   getRecentClosedMock.mockResolvedValue([]);
   getOpenDecisionsMock.mockResolvedValue([]);
+  getUnresolvedDecisionsMock.mockResolvedValue([]);
   getScannerShortlistMock.mockReturnValue([]);
   isMarketAdmittedMock.mockReturnValue(true);
   isMultiplierQuarantinedMock.mockReturnValue(false);
   updateBotMock.mockResolvedValue({});
   updateDecisionMock.mockResolvedValue({});
+  claimAnalysisMock.mockImplementation(async ({ botId, updates }: { botId: string; updates?: Record<string, unknown> }) => {
+    const patch = { ...(updates ?? {}), status: "analyzing", pauseReason: null };
+    await updateBotMock(botId, patch);
+    return makeBot({ id: botId, ...patch } as Partial<AiTraderBot>);
+  });
+  transitionStateMock.mockImplementation(async ({ botId, nextStatus, nextPauseReason, botUpdates }: {
+    botId: string; nextStatus: string; nextPauseReason: string | null; botUpdates?: Record<string, unknown>;
+  }) => {
+    const patch = { ...(botUpdates ?? {}), status: nextStatus, pauseReason: nextPauseReason };
+    await updateBotMock(botId, patch);
+    return makeBot({ id: botId, ...patch } as Partial<AiTraderBot>);
+  });
   notifyMock.mockResolvedValue(true);
   healUmkMock.mockResolvedValue(undefined);
   restoreSecurityMock.mockResolvedValue({ status: "reauth_required" });
@@ -1239,7 +1257,7 @@ describe("runAutoCycle", () => {
   it("happy path: G6 clear → context → decision → executeDecision with the digest mark price", async () => {
     const { runAutoCycle } = await importMonitor();
     const bot = armAutoBot();
-    const openRows = [makeOpenDecision({ id: "paper-open-for-context" })];
+    const openRows: AiTraderDecision[] = [];
     getOpenDecisionsMock.mockResolvedValue(openRows);
     getSessionByWalletMock.mockReturnValue({ sessionId: "s", session: { umk: Buffer.from("umk") } });
     getLlmCiphertextMock.mockResolvedValue("ct");
@@ -1267,7 +1285,7 @@ describe("runAutoCycle", () => {
 
   it("live automatic context never reads or supplies paper-position rows", async () => {
     const { runAutoCycle } = await importMonitor();
-    armAutoBot({ paperMode: false });
+    const bot = armAutoBot({ paperMode: false });
     getSessionByWalletMock.mockReturnValue({ sessionId: "s", session: { umk: Buffer.from("umk") } });
     getLlmCiphertextMock.mockResolvedValue("ct");
     decryptLlmKeyMock.mockReturnValue(Buffer.from("sk"));
@@ -1276,7 +1294,7 @@ describe("runAutoCycle", () => {
 
     await runAutoCycle("bot-1111-2222");
 
-    expect(getOpenDecisionsMock).not.toHaveBeenCalled();
+    expect(getOpenDecisionsMock).toHaveBeenCalledWith(bot.id, 2);
     expect(buildContextMock.mock.calls[0][0]).toMatchObject({
       recentClosedDecisions: [],
       paperPositionRows: [],
@@ -1297,6 +1315,31 @@ describe("runAutoCycle", () => {
     expect(executeDecisionMock).not.toHaveBeenCalled();
     expect(botUpdates().some((u) => u.status === "idle")).toBe(true);
     expect(vi.getTimerCount()).toBeGreaterThan(0);
+  });
+
+  it("terminalizes close-with-no-position before release so the next cycle is not wedged", async () => {
+    const { runAutoCycle } = await importMonitor();
+    armAutoBot();
+    getSessionByWalletMock.mockReturnValue({ sessionId: "s", session: { umk: Buffer.from("umk") } });
+    getLlmCiphertextMock.mockResolvedValue("ct");
+    decryptLlmKeyMock.mockReturnValue(Buffer.from("sk"));
+    buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
+    runDecisionMock
+      .mockResolvedValueOnce({ ok: true, decisionId: "dec-close-1", decision: {}, clamped: { action: "close" }, rejected: false, violations: [], latencyMs: 5 })
+      .mockResolvedValueOnce({ ok: true, decisionId: "dec-close-2", decision: {}, clamped: { action: "close" }, rejected: false, violations: [], latencyMs: 5 });
+
+    await runAutoCycle("bot-1111-2222");
+    await runAutoCycle("bot-1111-2222");
+
+    expect(claimAnalysisMock).toHaveBeenCalledTimes(2);
+    expect(transitionStateMock).toHaveBeenCalledWith(expect.objectContaining({
+      decisionId: "dec-close-1",
+      expectedDecisionOutcome: null,
+      decisionOutcome: "flat",
+      expectedStatus: "analyzing",
+      nextStatus: "idle",
+    }));
+    expect(transitionStateMock).toHaveBeenCalledWith(expect.objectContaining({ decisionId: "dec-close-2", decisionOutcome: "flat" }));
   });
 });
 
@@ -1844,6 +1887,31 @@ describe("unconfirmed-landing reconciliation", () => {
 // --- Tick loop plumbing ---------------------------------------------------------------
 
 describe("tick loop", () => {
+  it("expires the exact outcome-null proposal through one atomic transition", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    const proposal = makeOpenDecision({
+      id: "proposal-expired",
+      outcome: null,
+      decidedAt: new Date(NOW - 10 * 60_000 - 1),
+    });
+    getUnresolvedDecisionsMock.mockResolvedValue([proposal]);
+
+    await monitorBotOnce(makeBot({ status: "proposed" }));
+
+    expect(getUnresolvedDecisionsMock).toHaveBeenCalledWith("bot-1111-2222", 2);
+    expect(getOpenDecisionsMock).not.toHaveBeenCalled();
+    expect(transitionStateMock).toHaveBeenCalledWith({
+      botId: "bot-1111-2222",
+      expectedStatus: "proposed",
+      expectedPauseReason: null,
+      nextStatus: "idle",
+      nextPauseReason: null,
+      decisionId: "proposal-expired",
+      expectedDecisionOutcome: null,
+      decisionOutcome: "expired",
+    });
+  });
+
   it("self-heals an 'open' paper bot with no open decision row to idle", async () => {
     const { monitorBotOnce } = await importMonitor();
     getDecisionsMock.mockResolvedValue([]);
