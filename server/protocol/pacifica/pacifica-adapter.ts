@@ -1,4 +1,13 @@
-import type { ProtocolAdapter, CreateSubaccountInput, SubaccountCaps, ReuseSubaccountInput, ReuseSubaccountResult, AgentWalletResetState } from '../adapter.js';
+import type {
+  ProtocolAdapter,
+  CreateSubaccountInput,
+  SubaccountCaps,
+  ReuseSubaccountInput,
+  ReuseSubaccountResult,
+  AgentWalletResetState,
+  FeeRateQuoteRequest,
+  FeeRateQuoteResult,
+} from '../adapter.js';
 import type {
   ProtocolMarket,
   ProtocolPosition,
@@ -106,6 +115,12 @@ function countDecimals(val: number): number {
   const s = String(val);
   const dotIndex = s.indexOf('.');
   return dotIndex < 0 ? 0 : s.length - dotIndex - 1;
+}
+
+function parseFeeRateDecimal(value: unknown): number | null {
+  if (typeof value !== 'string' || value.trim().length === 0) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 interface CacheEntry<T> {
@@ -585,6 +600,53 @@ export class PacificaAdapter implements ProtocolAdapter {
     const decimals = countDecimals(tickSize);
     const raw = Math.round(price / tickSize) * tickSize;
     return parseFloat(raw.toFixed(decimals));
+  }
+
+  /**
+   * Fresh Pacifica account-tier fee authority for risk-increasing admission.
+   * The approval max is deliberately absent here: it is not the current
+   * builder charge. Until Pacifica exposes the actual configured builder rate,
+   * any order that may attach a builder is unavailable rather than guessed.
+   */
+  async getFeeRateQuote(input: FeeRateQuoteRequest): Promise<FeeRateQuoteResult> {
+    if (input.liquidityRole !== 'taker') {
+      return { availability: 'unavailable', reason: 'malformed_quote' };
+    }
+    const params: Record<string, string> = { account: input.account };
+    if (input.subaccountId) params.subaccount_id = input.subaccountId;
+
+    const response: PacificaAccountResponse = await this.get('/account', params, {
+      priority: 'critical',
+      cachePolicy: 'fresh-required',
+    });
+    const makerRate = parseFeeRateDecimal(response?.maker_fee);
+    const takerRate = parseFeeRateDecimal(response?.taker_fee);
+    if (makerRate === null || takerRate === null) {
+      return { availability: 'unavailable', reason: 'malformed_quote' };
+    }
+
+    const requestedSubaccount = input.subaccountId ?? null;
+    const responseSubaccount = response?.subaccount_id ?? null;
+    if (responseSubaccount !== requestedSubaccount) {
+      return { availability: 'unavailable', reason: 'identity_mismatch' };
+    }
+
+    if (input.builderCode || this.config.builderCode) {
+      return { availability: 'unavailable', reason: 'builder_rate_unknown' };
+    }
+
+    return {
+      availability: 'available',
+      protocol: this.protocolName,
+      account: input.account,
+      subaccountId: requestedSubaccount,
+      liquidityRole: input.liquidityRole,
+      baseRate: takerRate,
+      effectiveRate: takerRate,
+      provenance: 'pacifica:/account.taker_fee:fresh-required',
+      observedAt: Date.now(),
+      builder: { status: 'absent' },
+    };
   }
 
   async getAccountInfo(agentPublicKey: string, subaccountId?: string): Promise<AccountInfo> {

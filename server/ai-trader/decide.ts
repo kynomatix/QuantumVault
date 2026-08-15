@@ -23,7 +23,7 @@ import {
 } from "../ai-assistant/router";
 import { estimateCallCostUsd } from "../ai-assistant/models-catalog";
 import { storage } from "../storage";
-import type { ProtocolAdapter } from "../protocol/adapter";
+import { validateFeeRateQuote, type ProtocolAdapter } from "../protocol/adapter";
 import type { AiTraderBot } from "@shared/schema";
 import {
   applyGuardrails,
@@ -31,11 +31,6 @@ import {
   type GuardrailTimeframe,
   type GuardrailViolation,
 } from "./guardrails";
-
-// Platform-wide taker fee convention — mirrors EXCHANGE_TAKER_FEE_RATE in
-// context-builder.ts (itself mirroring routes.ts DEFAULT_EXCHANGE_FEE_RATE);
-// no ProtocolAdapter method exposes a numeric fee rate today.
-const GUARDRAIL_TAKER_FEE_RATE = 0.0004;
 
 // --- Decision contract (§4) — the zod schema is the single source of truth. ------
 // Trade-level fields are structurally optional (flat/close carry none) and made
@@ -392,6 +387,65 @@ async function finalizeDecision(args: {
   const sizingMode: "discretionary" | "risk_based" =
     bot.sizingMode === "risk_based" ? "risk_based" : "discretionary";
   const isEntry = decision.action === "long" || decision.action === "short";
+
+  // The action is known only after the forced tool call, so this is the first
+  // point at which unavailable fee authority can reject entries without also
+  // suppressing legitimate flat/close decisions. Validate the retained stamp;
+  // never perform a second economic read or synthesize a fallback rate.
+  const retainedFee = digest?.feeRateQuote as unknown;
+  const retainedIdentity = digest?.feeRateIdentity as Record<string, unknown> | null | undefined;
+  const expectedSubaccountId = bot.protocolSubaccountId ?? null;
+  const retainedIdentityMatchesBot =
+    retainedIdentity?.protocol === bot.protocol &&
+    typeof retainedIdentity?.account === "string" &&
+    retainedIdentity.account.length > 0 &&
+    retainedIdentity?.subaccountId === expectedSubaccountId &&
+    retainedIdentity?.liquidityRole === "taker";
+  const feeRateQuote = retainedIdentityMatchesBot
+    ? validateFeeRateQuote(
+        retainedFee,
+        {
+          protocol: bot.protocol,
+          account: retainedIdentity.account as string,
+          subaccountId: expectedSubaccountId,
+          liquidityRole: "taker",
+        },
+        { now: Date.now() },
+      )
+    : { availability: "unavailable" as const, reason: "identity_mismatch" as const };
+  if (isEntry && feeRateQuote.availability !== "available") {
+    const violations: GuardrailViolation[] = [{
+      rule: "CONTRACT",
+      code: "fee_rate_unavailable",
+      message: `Entry refused: retained taker fee authority is unavailable (${feeRateQuote.reason}).`,
+      fatal: true,
+    }];
+    console.warn(
+      `[AiTraderDecide] guardrails REJECTED bot=${bot.id.slice(0, 8)} market=${bot.market} ` +
+        `violations=fee_rate_unavailable rawDecision=${JSON.stringify(decision)}`,
+    );
+    const row = await storage.insertAiTraderDecision({
+      botId: bot.id,
+      contextDigest: digest,
+      rawDecision: decision,
+      clampedDecision: null,
+      guardrailViolations: violations,
+      outcome: "rejected_guardrails",
+      llmCostUsd,
+      llmLatencyMs: latencyMs,
+      modelUsed: bot.model,
+    });
+    return {
+      ok: true,
+      decisionId: row.id,
+      decision,
+      clamped: null,
+      rejected: true,
+      violations,
+      usage,
+      latencyMs,
+    };
+  }
   const currentEquity =
     sizingMode === "risk_based" && isEntry ? await readCurrentEquity(bot, adapter) : undefined;
 
@@ -416,7 +470,9 @@ async function finalizeDecision(args: {
     atr14: finiteOrNaN(digest?.indicators?.atr14?.value),
     botMaxLeverage: bot.maxLeverage,
     timeframe: bot.timeframe as GuardrailTimeframe,
-    takerFeeRate: GUARDRAIL_TAKER_FEE_RATE,
+    // Flat/close do not consume G4. Entry reached here only with an available,
+    // validated retained quote, so this cannot be a fabricated substitute.
+    takerFeeRate: feeRateQuote.availability === "available" ? feeRateQuote.effectiveRate : 0,
     maintenanceMarginWeight: adapter.getMaintenanceMarginWeight(bot.market),
     allocatedUsdc: parseFloat(bot.allocatedUsdc),
     positionAuthority,

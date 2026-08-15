@@ -15,7 +15,7 @@ import {
 } from "../lab/datafeed";
 import type { OHLCV } from "../lab/engine";
 import { ema, rsi, macd, atr, adx, bollingerBands, supertrend, obv } from "../lab/indicators";
-import type { ProtocolAdapter } from "../protocol/adapter";
+import { resolveFeeRateQuote, type ProtocolAdapter } from "../protocol/adapter";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import { getHlParticipationSnapshot, type HlParticipationSnapshot } from "./hl-context";
 import { getCotSnapshot, type CotSnapshot } from "./cot-service";
@@ -96,12 +96,6 @@ const PARENT_BARS = 30;
 // split as the INDICATOR_BARS/SELECTED_BARS EMA fix. Brick 4 (HTF levels / ZEC
 // pattern) reuses the parentIndicatorCandles variable produced by this fetch.
 const PARENT_INDICATOR_BARS = 400;
-
-// Platform-wide taker fee convention already duplicated in server/routes.ts
-// (DEFAULT_EXCHANGE_FEE_RATE) and server/trade-retry-service.ts — no ProtocolAdapter
-// method exposes a numeric fee rate today, so this mirrors that existing constant
-// rather than inventing a second source of truth.
-const EXCHANGE_TAKER_FEE_RATE = 0.0004;
 
 // G6 trade-frequency day-caps (plan §5): 6/day for LTF (15m/1h), 2/day for HTF (4h/1d).
 const LTF_TIMEFRAMES = new Set<AiTraderTimeframe>(["15m", "1h"]);
@@ -734,6 +728,26 @@ export async function buildMarketContext(
   // COT-B: fetch COT snapshot and fundingRate concurrently — both are cached reads.
   // getCotSnapshot() is fail-open; the IIFE applies the omission threshold so
   // cotSnapshot is null whenever the line must be absent from the prompt.
+  // Admission fee authority: one fresh adapter read per built context. An
+  // unavailable result remains explicit and nonnumeric so the LLM can still
+  // choose flat/close; decide.ts independently refuses only risk-increasing
+  // actions that lack a valid retained quote.
+  const feeRateIdentity = {
+    protocol: bot.protocol,
+    account: input.agentPublicKey,
+    subaccountId: bot.protocolSubaccountId ?? null,
+    liquidityRole: "taker" as const,
+  };
+  const feeRateQuote = await resolveFeeRateQuote(
+    adapter,
+    {
+      account: feeRateIdentity.account,
+      subaccountId: feeRateIdentity.subaccountId,
+      liquidityRole: feeRateIdentity.liquidityRole,
+    },
+    { now },
+  );
+
   const [fundingInfo, cotSnapshot] = await Promise.all([
     adapter.getFundingRate(market),
     (async (): Promise<CotSnapshot | null> => {
@@ -750,7 +764,9 @@ export async function buildMarketContext(
       }
     })(),
   ]);
-  const roundTripFeePct = 2 * EXCHANGE_TAKER_FEE_RATE * 100;
+  const feeRateLine = feeRateQuote.availability === "available"
+    ? `Taker fee: ${(feeRateQuote.effectiveRate * 100).toFixed(4)}% per side, ${(2 * feeRateQuote.effectiveRate * 100).toFixed(4)}% round-trip (source: ${feeRateQuote.provenance}). TP distance must clear this by a wide margin (guardrail G4 requires ≥ 4x).`
+    : `Taker fee: unavailable this cycle (${feeRateQuote.reason}). Entries must be refused; flat and close remain available.`;
   // The ProtocolAdapter contract types nextFundingTime as a required number, but
   // the Pacifica adapter (server/protocol/pacifica/pacifica-adapter.ts) violates
   // it in two paths (fast-path market-cache read and its own catch fallback),
@@ -767,9 +783,7 @@ export async function buildMarketContext(
     `Funding rate (Pacifica — this is what your position actually pays): ${(fundingInfo.rate * 100).toFixed(
       4
     )}% (next funding at ${nextFundingLabel})`,
-    `Taker fee: ${(EXCHANGE_TAKER_FEE_RATE * 100).toFixed(2)}% per side, ${roundTripFeePct.toFixed(
-      2
-    )}% round-trip. TP distance must clear this by a wide margin (guardrail G4 requires ≥ 4x).`,
+    feeRateLine,
     // COT-B: inject one line near the funding line when snapshot passes omission threshold.
     ...(cotSnapshot ? [buildCotBiasLine(cotSnapshot)] : []),
   ].join("\n");
@@ -968,6 +982,8 @@ export async function buildMarketContext(
     priceSource,
     fundingRate: fundingInfo.rate,
     nextFundingTime: fundingInfo.nextFundingTime,
+    feeRateIdentity,
+    feeRateQuote,
     participation: hlSnapshot
       ? {
           hlSymbol: hlSnapshot.hlSymbol,

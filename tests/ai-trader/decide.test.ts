@@ -53,6 +53,24 @@ const DIGEST = {
   market: "SOL-PERP",
   timeframe: "15m",
   price: 100,
+  feeRateIdentity: {
+    protocol: "pacifica",
+    account: "AGENT_ACCOUNT",
+    subaccountId: null,
+    liquidityRole: "taker",
+  },
+  feeRateQuote: {
+    availability: "available",
+    protocol: "pacifica",
+    account: "AGENT_ACCOUNT",
+    subaccountId: null,
+    liquidityRole: "taker",
+    baseRate: 0.0012,
+    effectiveRate: 0.0014,
+    provenance: "pacifica:/account:taker_fee",
+    observedAt: Date.now(),
+    builder: { status: "included", code: "QuantumVault", rate: 0.0002, provenance: "pacifica:builder_actual" },
+  },
   indicators: { atr14: { value: 0.1, prev: 0.11 } },
   account: { allocatedUsdc: 1000, hasPosition: false, unrealizedPnl: 0 },
   guardrailEcho: { maxLeverage: 5, smartLeverageCap: 5 },
@@ -85,6 +103,14 @@ function makeAdapter(overrides: Record<string, unknown> = {}): ProtocolAdapter {
 
 function makeContext() {
   return { system: "SYSTEM PROMPT", user: "USER PROMPT", contextDigest: { ...DIGEST } };
+}
+
+function makeContextForSubaccount(subaccountId: string | null) {
+  const context = makeContext() as any;
+  context.contextDigest = structuredClone(context.contextDigest);
+  context.contextDigest.feeRateIdentity.subaccountId = subaccountId;
+  context.contextDigest.feeRateQuote.subaccountId = subaccountId;
+  return context;
 }
 
 const VALID_LONG_ARGS = {
@@ -533,6 +559,73 @@ describe("runDecision — flat and guardrail rejection", () => {
   });
 });
 
+describe("admission fee-rate authority", () => {
+  it.each([
+    ["missing", (c: any) => { delete c.contextDigest.feeRateQuote; }],
+    ["unavailable", (c: any) => { c.contextDigest.feeRateQuote = { availability: "unavailable", reason: "capability_unavailable" }; }],
+    ["stale", (c: any) => { c.contextDigest.feeRateQuote.observedAt = Date.now() - 10 * 60_000 - 1; }],
+    ["future", (c: any) => { c.contextDigest.feeRateQuote.observedAt = Date.now() + 60_000; }],
+    ["malformed", (c: any) => { c.contextDigest.feeRateQuote.effectiveRate = Number.NaN; }],
+    ["identity mismatch", (c: any) => { c.contextDigest.feeRateIdentity.subaccountId = "other"; }],
+  ])("refuses a long with %s retained fee authority before admission", async (_label, mutate) => {
+    const { runDecision } = await importDecide();
+    const context = makeContext() as any;
+    context.contextDigest = structuredClone(context.contextDigest);
+    mutate(context);
+    callMock.mockResolvedValueOnce(toolResponse(VALID_LONG_ARGS));
+
+    const result = await runDecision({ bot: makeBot(), apiKey: "k", context, adapter: makeAdapter() });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.rejected).toBe(true);
+    expect(result.clamped).toBeNull();
+    expect(result.violations.map((v) => v.code)).toEqual(["fee_rate_unavailable"]);
+    expect(insertMock.mock.calls[0][0]).toMatchObject({
+      outcome: "rejected_guardrails",
+      clampedDecision: null,
+    });
+    expect(pnlMapMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps flat available when the retained quote is explicitly unavailable", async () => {
+    const { runDecision } = await importDecide();
+    const context = makeContext() as any;
+    context.contextDigest = structuredClone(context.contextDigest);
+    context.contextDigest.feeRateQuote = { availability: "unavailable", reason: "builder_rate_unknown" };
+    callMock.mockResolvedValueOnce(toolResponse({
+      action: "flat",
+      confidence: 4,
+      invalidation: "n/a",
+      rationale: "no edge",
+    }));
+
+    const result = await runDecision({ bot: makeBot(), apiKey: "k", context, adapter: makeAdapter() });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.rejected).toBe(false);
+    expect(result.clamped?.action).toBe("flat");
+    expect(insertMock.mock.calls[0][0].outcome).toBe("flat");
+  });
+
+  it("passes the exact retained effective rate to unchanged G4", async () => {
+    const { runDecision } = await importDecide();
+    callMock.mockResolvedValueOnce(toolResponse({
+      ...VALID_LONG_ARGS,
+      stopLossPrice: 99.5,
+      takeProfitPrice: 101,
+    }));
+
+    const result = await runDecision({ bot: makeBot(), apiKey: "k", context: makeContext(), adapter: makeAdapter() });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const feeViolation = result.violations.find((v) => v.code === "tp_below_fee_floor");
+    expect(feeViolation?.message).toContain("1.120%");
+  });
+});
+
 // --- risk-based-sizing-spec Phase A: equity-read wiring ------------------------------
 
 describe("risk_based sizing — decide.ts equity wiring", () => {
@@ -576,7 +669,7 @@ describe("risk_based sizing — decide.ts equity wiring", () => {
     const result = await runDecision({
       bot: makeBot({ ...RISK_BOT, paperMode: false, protocolSubaccountId: "sub-9" } as any),
       apiKey: "k",
-      context: makeContext(),
+      context: makeContextForSubaccount("sub-9"),
       adapter,
     });
 
@@ -597,7 +690,7 @@ describe("risk_based sizing — decide.ts equity wiring", () => {
     const result = await runDecision({
       bot: makeBot({ ...RISK_BOT, paperMode: false, protocolSubaccountId: "sub-9" } as any),
       apiKey: "k",
-      context: makeContext(),
+      context: makeContextForSubaccount("sub-9"),
       adapter,
     });
 
