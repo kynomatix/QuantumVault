@@ -144,6 +144,25 @@ describe('qv-secrets-scan', () => {
     expect(JSON.parse(result.stdout).findingCount).toBe(0);
   });
 
+  it.each(['operationId', 'reviewedOperationId'])(
+    'recognizes the generated operation-envelope field %s',
+    (field) => {
+      const operationId = createHash('sha256').update(`public ${field}`).digest('hex');
+      const result = cli([fixture(`${JSON.stringify({ [field]: operationId })}\n`)]);
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout).findingCount).toBe(0);
+    },
+  );
+
+  it('does not broaden operation-envelope recognition to similarly named secret fields', () => {
+    const secretLike = createHash('sha256').update('genuine secret-shaped api key id').digest('hex');
+    const result = cli([fixture(`${JSON.stringify({ apiKeyId: secretLike })}\n`)]);
+    expect(result.status).toBe(2);
+    expect(JSON.parse(result.stdout).files[0].findings).toContainEqual(
+      { ruleId: 'unclassified-hex', line: 1 },
+    );
+  });
+
   it('returns deterministic safe file metadata from the importable module', () => {
     const path = fixture('ordinary prose\n');
     const first = scanFiles([path]);

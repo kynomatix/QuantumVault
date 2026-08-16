@@ -10,7 +10,7 @@ export const SCANNER_VERSION = 'qv-secrets-scan/1';
 const CANDIDATE_PATTERN = /(?<![A-Za-z0-9+/_=-])([A-Za-z0-9+/_=-]{16,256})(?![A-Za-z0-9+/_=-])/g;
 const SECRET_CONTEXT = /(?:secret|password|token|api[_ -]?key|private[_ -]?key|mnemonic|authorization)\s*[:=]\s*(?:bearer\s+)?["'`]?$/i;
 const PUBLIC_HASH_WORD_LABEL = /(?:\bsha-?256\b|\bdigest\b|\bhash\b|\bcommit\b|\bhead\b|\bbranch(?:\s+point)?\b|\bbase\b|\btip\b|\brevision\b|\borigin\/main\b)/i;
-const PUBLIC_HASH_FIELD_LABEL = /\b[A-Za-z0-9]+(?:Sha256|Digest|Hash|Commit|Head|Tip)\b/;
+const PUBLIC_HASH_FIELD_LABEL = /\b(?:[A-Za-z0-9]+(?:Sha256|Digest|Hash|Commit|Head|Tip)|operationId|reviewedOperationId)\b/;
 
 const VENDOR_RULES = [
   ['vendor-anthropic-key', /\bsk-ant-[A-Za-z0-9_-]{16,}\b/g],
