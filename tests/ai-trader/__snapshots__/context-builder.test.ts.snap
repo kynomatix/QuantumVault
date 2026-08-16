@@ -22,6 +22,29 @@ exports[`buildMarketContext (WO-3) > golden file: builds the full system+user pr
     "parent": "HH/HL",
     "selected": "HH/HL",
   },
+  "feeRateIdentity": {
+    "account": "AgEntPubKey1111111111111111111111111111111",
+    "liquidityRole": "taker",
+    "protocol": "pacifica",
+    "subaccountId": "sub-1",
+  },
+  "feeRateQuote": {
+    "account": "AgEntPubKey1111111111111111111111111111111",
+    "availability": "available",
+    "baseRate": 0.0012,
+    "builder": {
+      "code": "QuantumVault",
+      "provenance": "pacifica:builder_actual",
+      "rate": 0.0002,
+      "status": "included",
+    },
+    "effectiveRate": 0.0014,
+    "liquidityRole": "taker",
+    "observedAt": 1768478400000,
+    "protocol": "pacifica",
+    "provenance": "pacifica:/account:taker_fee",
+    "subaccountId": "sub-1",
+  },
   "fundingRate": 0.0001234,
   "generatedAt": "2026-01-15T12:00:00.000Z",
   "guardrailEcho": {
@@ -182,7 +205,7 @@ Structure (Dow): 15m HH/HL (last swing high 64230.00 > 63940.00; last swing low 
 
 Mark price: 150.12
 Funding rate (Pacifica — this is what your position actually pays): 0.0123% (next funding at 2026-01-15T13:00:00.000Z)
-Taker fee: 0.04% per side, 0.08% round-trip. TP distance must clear this by a wide margin (guardrail G4 requires ≥ 4x).
+Taker fee: 0.1400% per side, 0.2800% round-trip (source: pacifica:/account:taker_fee). TP distance must clear this by a wide margin (guardrail G4 requires ≥ 4x).
 BTC positioning (COT, weekly): commercials distributing — smart 19/100, retail/spec 82/100 — macro bias short.
 
 ## Session context (UTC)

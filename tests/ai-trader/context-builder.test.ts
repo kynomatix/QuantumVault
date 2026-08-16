@@ -281,6 +281,19 @@ const AGENT_PUBKEY = "AgEntPubKey1111111111111111111111111111111";
 
 function makeAdapter(overrides: Partial<ProtocolAdapter> = {}): ProtocolAdapter {
   return {
+    protocolName: "pacifica",
+    getFeeRateQuote: vi.fn(async (request: any) => ({
+      availability: "available",
+      protocol: "pacifica",
+      account: request.account,
+      subaccountId: request.subaccountId ?? null,
+      liquidityRole: "taker",
+      baseRate: 0.0012,
+      effectiveRate: 0.0014,
+      provenance: "pacifica:/account:taker_fee",
+      observedAt: FIXED_NOW,
+      builder: { status: "included", code: "QuantumVault", rate: 0.0002, provenance: "pacifica:builder_actual" },
+    })),
     getPrice: vi.fn().mockResolvedValue(150.1234),
     getFundingRate: vi.fn().mockResolvedValue({
       internalSymbol: "SOL-PERP",
@@ -496,6 +509,24 @@ describe("buildMarketContext (WO-3)", () => {
     expect(result.user).toContain("Mark/oracle premium: -0.0384%");
     expect(result.user).toContain("HL-vs-Pacifica funding spread:");
     expect(result.user).toContain("Funding rate (Pacifica — this is what your position actually pays):");
+    expect(result.user).toContain("Taker fee: 0.1400% per side, 0.2800% round-trip");
+    expect(adapter.getFeeRateQuote).toHaveBeenCalledTimes(1);
+    expect(adapter.getFeeRateQuote).toHaveBeenCalledWith({
+      account: AGENT_PUBKEY,
+      subaccountId: "sub-1",
+      liquidityRole: "taker",
+    });
+    expect((result.contextDigest as any).feeRateIdentity).toEqual({
+      protocol: "pacifica",
+      account: AGENT_PUBKEY,
+      subaccountId: "sub-1",
+      liquidityRole: "taker",
+    });
+    expect((result.contextDigest as any).feeRateQuote).toMatchObject({
+      availability: "available",
+      effectiveRate: 0.0014,
+      observedAt: FIXED_NOW,
+    });
     expect(result.system).toContain("corroboration only, from a reference venue you do not trade on");
     expect((result.contextDigest as any).participation).toMatchObject({ hlSymbol: "SOL" });
 
@@ -513,6 +544,98 @@ describe("buildMarketContext (WO-3)", () => {
     const fixtureOldestSerialized = SELECTED_CANDLES_15M[SELECTED_CANDLES_15M.length - 100];
     expect(csvRows[1]).toContain(new Date(fixtureOldestSerialized.time).toISOString().slice(0, 16));
     expect(csvRows[csvRows.length - 1]).toContain(new Date(fixtureNewest.time).toISOString().slice(0, 16));
+  });
+
+  it("validates a fresh fee quote against the post-read real clock", async () => {
+    vi.useRealTimers();
+    const wallClockOffset = Date.now() - FIXED_NOW;
+    const shiftToWallClock = (candles: TestCandle[]): TestCandle[] =>
+      candles.map((candle) => ({ ...candle, time: candle.time + wallClockOffset }));
+
+    let firstFetchObservedAt = 0;
+    fetchOHLCVMock.mockImplementation(async (_symbol: string, timeframe: string) => {
+      if (firstFetchObservedAt === 0) {
+        firstFetchObservedAt = Date.now();
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      }
+      if (timeframe === "15m") return shiftToWallClock(SELECTED_CANDLES_15M);
+      if (timeframe === "1h") return shiftToWallClock(PARENT_CANDLES_1H);
+      throw new Error(`unexpected timeframe requested in test: ${timeframe}`);
+    });
+
+    let quoteObservedAt = 0;
+    const getFeeRateQuote = vi.fn(async (request: any) => {
+      quoteObservedAt = Date.now();
+      return {
+        availability: "available" as const,
+        protocol: "pacifica" as const,
+        account: request.account,
+        subaccountId: request.subaccountId ?? null,
+        liquidityRole: "taker" as const,
+        baseRate: 0.0012,
+        effectiveRate: 0.0014,
+        provenance: "pacifica:/account:taker_fee",
+        observedAt: quoteObservedAt,
+        builder: {
+          status: "included" as const,
+          code: "QuantumVault",
+          rate: 0.0002,
+          provenance: "pacifica:builder_actual",
+        },
+      };
+    });
+
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter({ getFeeRateQuote }),
+      bot: makeBot(),
+      recentClosedDecisions: RECENT_DECISIONS,
+      paperPositionRows: OPEN_POSITION_ROWS,
+      agentPublicKey: AGENT_PUBKEY,
+    });
+
+    expect(quoteObservedAt).toBeGreaterThan(firstFetchObservedAt);
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+    const retainedQuote = (result.contextDigest as any).feeRateQuote;
+    if (retainedQuote.availability !== "available") {
+      throw new Error(`expected an available post-read quote, got ${retainedQuote.reason}`);
+    }
+    expect(retainedQuote).toMatchObject({
+      availability: "available",
+      effectiveRate: 0.0014,
+      observedAt: quoteObservedAt,
+    });
+    expect(result.user).toContain("Taker fee: 0.1400% per side, 0.2800% round-trip");
+  });
+
+  it("retains an explicit nonnumeric unavailable fee result while keeping flat/close context available", async () => {
+    const getFeeRateQuote = vi.fn().mockResolvedValue({
+      availability: "unavailable",
+      reason: "builder_rate_unknown",
+    });
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter({ getFeeRateQuote }),
+      bot: makeBot(),
+      recentClosedDecisions: RECENT_DECISIONS,
+      paperPositionRows: OPEN_POSITION_ROWS,
+      agentPublicKey: AGENT_PUBKEY,
+    });
+
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected unavailable fee authority to preserve non-entry decisions");
+    expect(getFeeRateQuote).toHaveBeenCalledTimes(1);
+    expect(result.user).toContain("Taker fee: unavailable this cycle (builder_rate_unknown)");
+    expect(result.user).not.toMatch(/Taker fee: unavailable[^\n]*\d+\.\d+%/);
+    expect((result.contextDigest as any).feeRateQuote).toEqual({
+      availability: "unavailable",
+      reason: "builder_rate_unknown",
+    });
   });
 
   it("non-crypto market (NVDA-PERP): skips HL + COT fetches and injects 'not applicable' instead of 'unavailable'", async () => {

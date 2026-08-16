@@ -24,7 +24,12 @@ import { desc, eq, sql, asc, and } from "drizzle-orm";
 import { ZodError } from "zod";
 import { getDefaultAdapter, getAdapterForBot, getAdapter } from './protocol/adapter-registry';
 import { normalizeMarket } from './protocol/symbol-registry';
-import type { ProtocolAdapter } from './protocol/adapter';
+import {
+  placeMarketOrderWithFeeAuthority,
+  type AvailableFeeRateQuote,
+  type FeeAuthorizedMarketOrderResult,
+  type ProtocolAdapter,
+} from './protocol/adapter';
 import { checkSignalBotLeverageAdmission } from './signal-bot-leverage-admission';
 import { parseAndValidateAdapterSubaccountId } from './protocol/persist-canonical-subaccount-id';
 import { resolveAgentKeypair } from './agent-wallet';
@@ -1219,7 +1224,7 @@ async function executePerpOrder(
   botCtx?: BotSubaccountContext | null,
   mainWalletOverride?: string,
   adapter = getDefaultAdapter(),
-): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: string; swiftOrderId?: string | null }> {
+): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number; admissionFeeQuote?: AvailableFeeRateQuote; executionMethod?: string; swiftOrderId?: string | null }> {
   if (!reduceOnly) {
     const admission = await checkSignalBotLeverageAdmission({
       adapter,
@@ -1239,7 +1244,7 @@ async function executePerpOrder(
     // Avoid legacy decrypt of the agent key just to look it up by agent pubkey.
     const mainWalletAddress = mainWalletOverride
       || (botCtx ? botCtx.walletAddress : await _lookupMainWallet(agentPubKey));
-    const orderResult = await adapter.placeMarketOrder({
+    const orderParams = {
       agentPublicKey: agentPubKey,
       agentSecretKey: signing.secretKey,
       mainWalletAddress,
@@ -1250,13 +1255,19 @@ async function executePerpOrder(
       subaccountId: signing.subaccountId,
       maxSlippagePct: _slippageBps / 100,
       leverage,
-    });
+    };
+    // Close calls retain their pre-existing direct adapter path. Only a
+    // risk-increasing order must acquire fresh, identity-bound fee authority.
+    const orderResult: FeeAuthorizedMarketOrderResult = reduceOnly
+      ? await adapter.placeMarketOrder(orderParams)
+      : await placeMarketOrderWithFeeAuthority(adapter, orderParams);
     return {
       success: orderResult.success,
       signature: orderResult.orderId,
       txSignature: orderResult.orderId,
       fillPrice: orderResult.fillPrice,
       actualFee: orderResult.fee,
+      admissionFeeQuote: orderResult.admissionFeeQuote,
       error: orderResult.error,
       executionMethod: 'adapter',
       swiftOrderId: null,
@@ -5607,7 +5618,8 @@ export async function routeSignalToSubscribers(
             let fillPrice = orderResult.fillPrice ?? oraclePrice;
 
             const tradeNotional = contractSize * fillPrice;
-            const tradeFee = orderResult.actualFee ?? (tradeNotional * getExchangeFeeRate());
+            const tradeFee = orderResult.actualFee
+              ?? (tradeNotional * orderResult.admissionFeeQuote!.effectiveRate);
             
             const subTrade = await storage.createBotTrade({
               tradingBotId: subBot.id,
@@ -5646,7 +5658,7 @@ export async function routeSignalToSubscribers(
               };
               if (!orderResult.actualFee) {
                 const updatedNotional = contractSize * fillPrice;
-                tradeUpdate.fee = (updatedNotional * getExchangeFeeRate()).toFixed(6);
+                tradeUpdate.fee = (updatedNotional * orderResult.admissionFeeQuote!.effectiveRate).toFixed(6);
               }
               await storage.updateBotTrade(subTrade.id, tradeUpdate);
             }
@@ -9751,7 +9763,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       let fillPrice = orderResult.fillPrice || oraclePrice;
       const tradeNotional = contractSize * fillPrice;
       // Use actual fee from executor if available, otherwise estimate
-      const tradeFee = orderResult.actualFee ?? (tradeNotional * getExchangeFeeRate());
+      const tradeFee = orderResult.actualFee
+        ?? (tradeNotional * orderResult.admissionFeeQuote!.effectiveRate);
 
       await storage.updateBotTrade(trade.id, {
         status: "executed",
@@ -9787,7 +9800,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         };
         if (!orderResult.actualFee) {
           const updatedNotional = contractSize * fillPrice;
-          tradeUpdate.fee = (updatedNotional * getExchangeFeeRate()).toFixed(6);
+          tradeUpdate.fee = (updatedNotional * orderResult.admissionFeeQuote!.effectiveRate).toFixed(6);
         }
         await storage.updateBotTrade(trade.id, tradeUpdate);
       }
@@ -19654,7 +19667,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       
       // Calculate fee - use actual fee from executor if available
       const tradeNotional = finalContractSize * fillPrice;
-      const tradeFee = orderResult.actualFee ?? (tradeNotional * getExchangeFeeRate());
+      const tradeFee = orderResult.actualFee
+        ?? (tradeNotional * orderResult.admissionFeeQuote!.effectiveRate);
       
       await storage.updateBotTrade(trade.id, {
         status: "executed",
@@ -21047,9 +21061,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       let userFillPrice = orderResult.fillPrice || parseFloat(signalPrice || "0");
       
-      // Calculate fee (0.05% taker fee on notional value)
+      // Preserve this path's estimate-only behavior, using the retained
+      // adapter-authoritative taker rate instead of a venue-blind constant.
       const userTradeNotional = contractSize * userFillPrice;
-      const userTradeFee = userTradeNotional * getExchangeFeeRate();
+      const userTradeFee = userTradeNotional * orderResult.admissionFeeQuote!.effectiveRate;
       
       await storage.updateBotTrade(trade.id, {
         status: "executed",
@@ -21082,7 +21097,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         };
         if (!orderResult.actualFee) {
           const updatedNotional = contractSize * userFillPrice;
-          tradeUpdate.fee = (updatedNotional * getExchangeFeeRate()).toFixed(6);
+          tradeUpdate.fee = (updatedNotional * orderResult.admissionFeeQuote!.effectiveRate).toFixed(6);
         }
         await storage.updateBotTrade(trade.id, tradeUpdate);
       }
@@ -24132,9 +24147,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         // Get fill price for trade record
         const fillPrice = result.fillPrice || 0;
         
-        // Estimate fee (0.05% taker fee)
+        // Preserve this path's estimate-only behavior with the exact quote that
+        // admitted this order; exact-fill propagation belongs to its companion.
         const notionalValue = size * fillPrice;
-        const estimatedFee = notionalValue * getExchangeFeeRate();
+        const estimatedFee = notionalValue * result.admissionFeeQuote!.effectiveRate;
         
         // Create a new trade record for the retry
         const newTrade = await storage.createBotTrade({

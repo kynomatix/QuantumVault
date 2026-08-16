@@ -5,6 +5,11 @@ import { getMarketBySymbol } from "./market-liquidity-service";
 import { transferUsdcToWallet, resolveAgentKeypair } from "./agent-wallet";
 import { PublicKey } from "@solana/web3.js";
 import { getDefaultAdapter, getAdapterForBot } from "./protocol/adapter-registry";
+import {
+  placeMarketOrderWithFeeAuthority,
+  type AvailableFeeRateQuote,
+  type FeeAuthorizedMarketOrderResult,
+} from "./protocol/adapter";
 import { isUnconfirmedLandingVerdict } from "./protocol/tx-verdicts";
 import { db } from "./db";
 import { wallets } from "@shared/schema";
@@ -58,7 +63,7 @@ async function driftExecutePerpOrder(
   const keypair = resolveAgentKeypair(encryptedKey);
   const pubKey = agentPublicKey || keypair.publicKey.toBase58();
   const mainWalletAddress = await _lookupMainWallet(pubKey);
-  const orderResult = await adapter.placeMarketOrder({
+  const orderParams = {
     agentPublicKey: pubKey,
     agentSecretKey: keypair.secretKey,
     mainWalletAddress,
@@ -68,13 +73,19 @@ async function driftExecutePerpOrder(
     reduceOnly,
     subaccountId: _subIdStr(subAccountId),
     leverage,
-  });
+  };
+  // Preserve the legacy reduce-only route exactly. OPEN retries require one
+  // fresh fee-authority read against the same account identity sent to venue.
+  const orderResult: FeeAuthorizedMarketOrderResult = reduceOnly
+    ? await adapter.placeMarketOrder(orderParams)
+    : await placeMarketOrderWithFeeAuthority(adapter, orderParams);
   return {
     success: orderResult.success,
     signature: orderResult.orderId,
     txSignature: orderResult.orderId,
     fillPrice: orderResult.fillPrice,
     actualFee: orderResult.fee,
+    admissionFeeQuote: orderResult.admissionFeeQuote,
     error: orderResult.error,
     executionMethod: 'adapter',
     swiftOrderId: null,
@@ -714,7 +725,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
   }
 
   try {
-    let result: { success: boolean; signature?: string; error?: string; fillPrice?: number; actualFee?: number; executionMethod?: string; swiftOrderId?: string };
+    let result: { success: boolean; signature?: string; error?: string; fillPrice?: number; actualFee?: number; admissionFeeQuote?: AvailableFeeRateQuote; executionMethod?: string; swiftOrderId?: string };
     let actualCloseSide: 'long' | 'short' = 'short';
     const jobBot = preAuthJobBot ?? await storage.getTradingBotById(job.botId);
     const jobAdapter = preAuthJobAdapter ?? (jobBot ? getAdapterForBot(jobBot) : getDefaultAdapter());
@@ -881,7 +892,9 @@ async function processRetryJob(job: RetryJob): Promise<void> {
       if (bot && wallet) {
         const fillPrice = result.fillPrice || 0;
         const notional = job.size * fillPrice;
-        const fee = result.actualFee || notional * getExchangeFeeRate();
+        const fee = job.side === 'close'
+          ? (result.actualFee || notional * getExchangeFeeRate())
+          : (result.actualFee || notional * result.admissionFeeQuote!.effectiveRate);
         
         // Update original trade if it exists, otherwise create new
         let tradeId: string;

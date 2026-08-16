@@ -27,6 +27,7 @@ const getRecentClosedMock = vi.fn();
 const updateBotMock = vi.fn();
 const updateDecisionMock = vi.fn();
 const getAiTraderBotMock = vi.fn();
+const getAiTraderDecisionMock = vi.fn();
 const claimExecutionMock = vi.fn();
 const transitionStateMock = vi.fn();
 const isMarketAdmittedMock = vi.fn();
@@ -37,6 +38,7 @@ vi.mock("../../server/storage", () => ({
     updateAiTraderBot: (...a: unknown[]) => updateBotMock(...a),
     updateAiTraderDecision: (...a: unknown[]) => updateDecisionMock(...a),
     getAiTraderBot: (...a: unknown[]) => getAiTraderBotMock(...a),
+    getAiTraderDecision: (...a: unknown[]) => getAiTraderDecisionMock(...a),
     claimAiTraderExecution: (...a: unknown[]) => claimExecutionMock(...a),
     transitionAiTraderState: (...a: unknown[]) => transitionStateMock(...a),
   },
@@ -113,6 +115,34 @@ function makeClamped(overrides: Partial<ClampedDecision> = {}): ClampedDecision 
   };
 }
 
+function makePersistedDecision(overrides: Partial<AiTraderDecision> = {}): AiTraderDecision {
+  return {
+    id: "d-1",
+    botId: "bot-1111-2222",
+    contextDigest: {
+      feeRateIdentity: {
+        protocol: "pacifica",
+        account: AGENT_PUBKEY,
+        subaccountId: "sub-1",
+        liquidityRole: "taker",
+      },
+      feeRateQuote: {
+        availability: "available",
+        protocol: "pacifica",
+        account: AGENT_PUBKEY,
+        subaccountId: "sub-1",
+        liquidityRole: "taker",
+        baseRate: 0.0012,
+        effectiveRate: 0.0014,
+        provenance: "pacifica:/account:taker_fee",
+        observedAt: NOW,
+        builder: { status: "included", code: "QuantumVault", rate: 0.0002, provenance: "pacifica:builder_actual" },
+      },
+    },
+    ...overrides,
+  } as unknown as AiTraderDecision;
+}
+
 /** Call-order recorder shared by the storage + adapter mocks in live tests. */
 let callOrder: string[];
 
@@ -184,10 +214,17 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
   callOrder = [];
   scannerCapabilitiesMock.liveExecutionEnabled = true;
-  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getAiTraderBotMock, claimExecutionMock, transitionStateMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock]) {
+  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getAiTraderBotMock, getAiTraderDecisionMock, claimExecutionMock, transitionStateMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock]) {
     m.mockReset();
   }
   getRecentClosedMock.mockResolvedValue([]);
+  getAiTraderDecisionMock.mockImplementation(async (id: string) => makePersistedDecision({ id }));
+  getWalletMock.mockResolvedValue({
+    address: "WALLET_X",
+    agentPublicKey: AGENT_PUBKEY,
+    agentPrivateKeyEncryptedV3: "v3-envelope",
+    emergencyStopTriggered: false,
+  });
   isMarketAdmittedMock.mockReturnValue(true);
   updateBotMock.mockResolvedValue({});
   updateDecisionMock.mockResolvedValue({});
@@ -377,6 +414,98 @@ describe("executeDecision — entry-shape refusals", () => {
   });
 });
 
+describe("executeDecision — retained fee-rate admission authority", () => {
+  it.each([
+    ["missing decision", () => getAiTraderDecisionMock.mockResolvedValueOnce(undefined)],
+    ["pre-change missing quote", () => getAiTraderDecisionMock.mockResolvedValueOnce(makePersistedDecision({ contextDigest: {} }))],
+    ["stale quote", () => {
+      const row = makePersistedDecision();
+      (row.contextDigest as any).feeRateQuote.observedAt = NOW - 10 * 60_000 - 1;
+      getAiTraderDecisionMock.mockResolvedValueOnce(row);
+    }],
+    ["protocol mismatch", () => {
+      const row = makePersistedDecision();
+      (row.contextDigest as any).feeRateIdentity.protocol = "drift";
+      getAiTraderDecisionMock.mockResolvedValueOnce(row);
+    }],
+    ["account mismatch", () => {
+      const row = makePersistedDecision();
+      (row.contextDigest as any).feeRateIdentity.account = "OTHER_ACCOUNT";
+      getAiTraderDecisionMock.mockResolvedValueOnce(row);
+    }],
+    ["subaccount mismatch", () => {
+      const row = makePersistedDecision();
+      (row.contextDigest as any).feeRateIdentity.subaccountId = "other-sub";
+      getAiTraderDecisionMock.mockResolvedValueOnce(row);
+    }],
+  ])("refuses %s before paper claim or venue mutation", async (_label, arrange) => {
+    arrange();
+    const adapter = makeAdapter();
+    const { executeDecision } = await importExecutor();
+
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot(),
+      decisionId: "d-1",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+
+    expect(result).toMatchObject({ ok: false, reason: "fee_rate_unavailable" });
+    expect(claimExecutionMock).not.toHaveBeenCalled();
+    expect(updateDecisionMock).not.toHaveBeenCalledWith("d-1", expect.objectContaining({ outcome: "executed" }));
+    expect(adapter.setLeverage).not.toHaveBeenCalled();
+    expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
+  });
+
+  it("validates the durable quote without requiring a caller-supplied input field", async () => {
+    const { executeDecision } = await importExecutor();
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot(),
+      decisionId: "d-1",
+      clamped: makeClamped(),
+      adapter: makeAdapter(),
+      markPrice: 150,
+    });
+
+    expect(result).toMatchObject({ ok: true, mode: "paper" });
+    expect(getAiTraderDecisionMock).toHaveBeenCalledWith("d-1");
+  });
+
+  it("refuses live admission if the execution account changes after quote validation", async () => {
+    getWalletMock
+      .mockResolvedValueOnce({
+        address: "WALLET_X",
+        agentPublicKey: AGENT_PUBKEY,
+        agentPrivateKeyEncryptedV3: "v3-envelope",
+        emergencyStopTriggered: false,
+      })
+      .mockResolvedValueOnce({
+        address: "WALLET_X",
+        agentPublicKey: "DIFFERENT_ACCOUNT",
+        agentPrivateKeyEncryptedV3: "v3-envelope",
+        emergencyStopTriggered: false,
+      });
+    const adapter = makeAdapter();
+    const { executeDecision } = await importExecutor();
+
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-1",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+
+    expect(result).toMatchObject({ ok: false, reason: "fee_rate_unavailable" });
+    expect(adapter.setLeverage).not.toHaveBeenCalled();
+    expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
+  });
+});
+
 // --- G6 -------------------------------------------------------------------------
 
 describe("G6 — cooldown and daily caps (checkCooldownAndCaps + executeDecision wiring)", () => {
@@ -454,10 +583,11 @@ describe("paper execution", () => {
       nextStatus: "open",
       nextPauseReason: null,
     }));
-    // Paper must never touch the venue or the key material.
+    // Paper reads the wallet identity only to bind the retained quote; it must
+    // never touch the venue or unwrap key material.
     expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
     expect((adapter.setTpSl as any)).not.toHaveBeenCalled();
-    expect(getWalletMock).not.toHaveBeenCalled();
+    expect(getWalletMock).toHaveBeenCalledWith("WALLET_X");
     expect(getUmkMock).not.toHaveBeenCalled();
     expect(verifyHmacMock).not.toHaveBeenCalled();
   });
@@ -511,7 +641,7 @@ describe("live execution — pre-flight", () => {
     expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
   });
 
-  it("auth_unavailable when the wallet has no V3 envelope", async () => {
+  it("fee authority fails closed when the wallet no longer exposes the bound venue account", async () => {
     getWalletMock.mockResolvedValue({ address: "WALLET_X", agentPublicKey: null, agentPrivateKeyEncryptedV3: null });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
@@ -522,7 +652,7 @@ describe("live execution — pre-flight", () => {
       adapter: makeAdapter(),
       markPrice: 150,
     });
-    expect(r).toMatchObject({ ok: false, reason: "auth_unavailable" });
+    expect(r).toMatchObject({ ok: false, reason: "fee_rate_unavailable" });
   });
 
   it("auth_unavailable when execution authorization (UMK) is off", async () => {
@@ -1144,6 +1274,10 @@ describe("live execution — failure handling (fail closed)", () => {
 
   it("legacy founder-canary bot (no subaccount) still signs with the main agent key", async () => {
     armLiveAuth();
+    const legacyDecision = makePersistedDecision();
+    (legacyDecision.contextDigest as any).feeRateIdentity.subaccountId = null;
+    (legacyDecision.contextDigest as any).feeRateQuote.subaccountId = null;
+    getAiTraderDecisionMock.mockResolvedValueOnce(legacyDecision);
     const adapter = makeAdapter();
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({

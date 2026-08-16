@@ -27,7 +27,7 @@ import { getUmkForWebhook, decryptAgentKeyStrict, verifyBotPolicyHmac, healExecu
 import { resolveAiTraderSubaccountSigner } from "./signing";
 import { sendTradeNotification } from "../notification-service";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
-import type { ProtocolAdapter } from "../protocol/adapter";
+import { validateFeeRateQuote, type ProtocolAdapter } from "../protocol/adapter";
 import { isUnconfirmedLandingVerdict } from "../protocol/tx-verdicts";
 import type { ClampedDecision } from "./guardrails";
 import { paperEntryPrice, type PaperSide } from "./paper-math";
@@ -89,6 +89,7 @@ export type ExecuteFailureReason =
   | "policy_hmac_mismatch" // G15: bot row fails HMAC — paused, nothing sent
   | "scanner_live_execution_disabled" // scanner-source live entry capability is off for this process
   | "insufficient_funding" // G11: free collateral below required margin
+  | "fee_rate_unavailable" // no fresh, identity-bound retained taker quote for this admission
   | "bot_busy"             // bot already holds (or may hold) a position — refuse to stack a second entry
   | "order_failed"         // entry order rejected/failed, no position confirmed
   | "position_unconfirmed" // order accepted but position never appeared — emergency close attempted, bot paused
@@ -127,6 +128,7 @@ const NON_RACE_GUARD_REASONS = new Set<ExecuteFailureReason>([
   "bot_busy",
   "cooldown_active",
   "daily_cap_reached",
+  "fee_rate_unavailable",
   "capability_missing",
   "auth_unavailable",
   "invalid_clamp",
@@ -309,6 +311,62 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
   const g6 = checkCooldownAndCaps(bot.timeframe, recentClosed, Date.now());
   if (!g6.ok) return unwindRejectedInternalDecision(input, { ok: false, reason: g6.reason, detail: g6.detail });
 
+  // Preserve the existing live bracket-capability refusal ahead of any wallet
+  // or fee-authority read. It is a structural property of the adapter and does
+  // not weaken the fee gate: a capable live adapter must still pass that gate
+  // below before setLeverage or placeMarketOrder.
+  if (
+    !bot.paperMode &&
+    (typeof input.adapter.setTpSl !== "function" || typeof input.adapter.getOpenStopOrders !== "function")
+  ) {
+    return unwindRejectedInternalDecision(input, {
+      ok: false,
+      reason: "capability_missing",
+      detail: `adapter for protocol '${bot.protocol}' lacks setTpSl/getOpenStopOrders — G10 bracket guarantee unenforceable`,
+    });
+  }
+
+  // Stored and pre-change proposals must not bypass the decision-time fee
+  // authority. Load the persisted row by decisionId and validate its retained
+  // quote against the exact bot execution identity before any paper fill,
+  // execution claim, leverage mutation, or venue order. This is deliberately
+  // not a required ExecuteDecisionInput field: every caller shares the same
+  // durable gate, and caller-supplied economics cannot override the ledger.
+  const [persistedDecision, wallet] = await Promise.all([
+    storage.getAiTraderDecision(decisionId),
+    storage.getWallet(bot.walletAddress),
+  ]);
+  const digest = persistedDecision?.contextDigest as Record<string, unknown> | null | undefined;
+  const retainedIdentity = digest?.feeRateIdentity as Record<string, unknown> | null | undefined;
+  const expectedSubaccountId = bot.protocolSubaccountId ?? null;
+  const retainedIdentityMatchesBot =
+    persistedDecision?.id === decisionId &&
+    persistedDecision?.botId === bot.id &&
+    retainedIdentity?.protocol === bot.protocol &&
+    typeof wallet?.agentPublicKey === "string" &&
+    retainedIdentity?.account === wallet.agentPublicKey &&
+    retainedIdentity?.subaccountId === expectedSubaccountId &&
+    retainedIdentity?.liquidityRole === "taker";
+  const feeRateQuote = retainedIdentityMatchesBot
+    ? validateFeeRateQuote(
+        digest?.feeRateQuote,
+        {
+          protocol: bot.protocol,
+          account: wallet.agentPublicKey as string,
+          subaccountId: expectedSubaccountId,
+          liquidityRole: "taker",
+        },
+        { now: Date.now() },
+      )
+    : { availability: "unavailable" as const, reason: "identity_mismatch" as const };
+  if (feeRateQuote.availability !== "available") {
+    return unwindRejectedInternalDecision(input, {
+      ok: false,
+      reason: "fee_rate_unavailable",
+      detail: `Entry refused: persisted taker fee authority is unavailable (${feeRateQuote.reason}).`,
+    });
+  }
+
   if (bot.paperMode) {
     const result = await executePaperEntry(input, side);
     return result.ok ? result : unwindRejectedInternalDecision(input, result);
@@ -319,6 +377,7 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
     leverage: leverage as number,
     stopLossPrice: stopLossPrice as number,
     takeProfitPrice: takeProfitPrice as number,
+    feeRateAccount: feeRateQuote.account,
   });
   return result.ok ? result : unwindRejectedInternalDecision(input, result);
 }
@@ -376,6 +435,8 @@ interface LiveEntryNumbers {
   leverage: number;
   stopLossPrice: number;
   takeProfitPrice: number;
+  /** Root venue account proven by the retained admission quote. */
+  feeRateAccount: string;
 }
 
 async function executeLiveEntry(
@@ -391,22 +452,17 @@ async function executeLiveEntry(
   // Legacy canary bots (protocolSubaccountId=null) trade the main account.
   const subaccountId = undefined;
 
-  // Capability pre-flight (BEFORE any order): if the adapter cannot place or
-  // verify a native bracket, G10 is unenforceable — refuse to open at all.
-  // This intentionally blocks Flash-style adapters (no getOpenStopOrders);
-  // the MVP is Pacifica-only for exactly this reason.
-  if (typeof adapter.setTpSl !== "function" || typeof adapter.getOpenStopOrders !== "function") {
-    return {
-      ok: false,
-      reason: "capability_missing",
-      detail: `adapter for protocol '${bot.protocol}' lacks setTpSl/getOpenStopOrders — G10 bracket guarantee unenforceable`,
-    };
-  }
-
   // --- Signing context (canonical headless pattern, trade-retry-service) ----------
   const wallet = await storage.getWallet(bot.walletAddress);
   if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncryptedV3) {
     return { ok: false, reason: "auth_unavailable", detail: "wallet missing V3 envelope or agent public key" };
+  }
+  if (wallet.agentPublicKey !== n.feeRateAccount) {
+    return {
+      ok: false,
+      reason: "fee_rate_unavailable",
+      detail: "Entry refused: execution account changed after retained fee-authority validation.",
+    };
   }
   let umkResult = await getUmkForWebhook(bot.walletAddress);
   if (!umkResult) {

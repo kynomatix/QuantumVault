@@ -81,6 +81,272 @@ export interface AgentWalletResetState {
 }
 
 /**
+ * Fee rates are decimal fractions (0.0004 = four basis points), never
+ * percentages or basis-point integers. Admission callers in this unit are
+ * taker-only; maker execution remains outside this authority.
+ */
+export type FeeRateLiquidityRole = 'taker';
+
+export interface FeeRateQuoteRequest {
+  /** Root venue account whose authenticated fee tier is being quoted. */
+  account: string;
+  /** Exact child account used for the order, or null/undefined for main. */
+  subaccountId?: string | null;
+  liquidityRole: FeeRateLiquidityRole;
+  /** A caller-supplied builder that may be attached to this order. */
+  builderCode?: string;
+}
+
+export interface FeeRateQuoteExpectedIdentity extends FeeRateQuoteRequest {
+  protocol: string;
+}
+
+export type FeeRateQuoteUnavailableReason =
+  | 'capability_unavailable'
+  | 'read_failed'
+  | 'malformed_quote'
+  | 'identity_mismatch'
+  | 'stale_quote'
+  | 'future_quote'
+  | 'ambiguous_builder'
+  | 'builder_rate_unknown';
+
+export type FeeRateBuilderState =
+  | { status: 'absent' }
+  | {
+      status: 'included';
+      /** Exact builder identifier the order will carry. */
+      code: string;
+      /** Venue-proven actual builder charge, in decimal-fraction units. */
+      rate: number;
+      provenance: string;
+    };
+
+export interface AvailableFeeRateQuote extends FeeRateQuoteExpectedIdentity {
+  availability: 'available';
+  /** Venue base charge for the requested liquidity role. */
+  baseRate: number;
+  /** Exact sum of baseRate and every proven charge the order will carry. */
+  effectiveRate: number;
+  provenance: string;
+  observedAt: number;
+  builder: FeeRateBuilderState;
+}
+
+export interface UnavailableFeeRateQuote {
+  availability: 'unavailable';
+  reason: FeeRateQuoteUnavailableReason;
+}
+
+export type FeeRateQuoteResult = AvailableFeeRateQuote | UnavailableFeeRateQuote;
+
+/** The exact admission quote accompanies the open result for estimate reuse. */
+export type FeeAuthorizedMarketOrderResult = OrderResult & {
+  admissionFeeQuote?: AvailableFeeRateQuote;
+};
+
+export interface FeeRateQuoteValidationOptions {
+  /** Injectable only for deterministic validation/tests. Defaults to Date.now(). */
+  now?: number;
+  /** Defaults to the ten-minute proposal lifetime. */
+  maxAgeMs?: number;
+}
+
+export const FEE_RATE_QUOTE_MAX_AGE_MS = 10 * 60 * 1000;
+
+const FEE_RATE_UNAVAILABLE_REASONS: ReadonlySet<string> = new Set([
+  'capability_unavailable',
+  'read_failed',
+  'malformed_quote',
+  'identity_mismatch',
+  'stale_quote',
+  'future_quote',
+  'ambiguous_builder',
+  'builder_rate_unknown',
+]);
+
+function unavailableFeeRate(reason: FeeRateQuoteUnavailableReason): UnavailableFeeRateQuote {
+  return { availability: 'unavailable', reason };
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function isFiniteNonnegative(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+/**
+ * Pure fail-closed validator for both freshly fetched and decision-retained
+ * quotes. It returns a normalized result and never carries a numeric fallback
+ * on an unavailable branch.
+ */
+export function validateFeeRateQuote(
+  value: unknown,
+  expected: FeeRateQuoteExpectedIdentity,
+  options: FeeRateQuoteValidationOptions = {},
+): FeeRateQuoteResult {
+  if (!value || typeof value !== 'object') {
+    return unavailableFeeRate('malformed_quote');
+  }
+
+  const candidate = value as Record<string, unknown>;
+  if (candidate.availability === 'unavailable') {
+    return typeof candidate.reason === 'string' && FEE_RATE_UNAVAILABLE_REASONS.has(candidate.reason)
+      ? unavailableFeeRate(candidate.reason as FeeRateQuoteUnavailableReason)
+      : unavailableFeeRate('malformed_quote');
+  }
+  if (candidate.availability !== 'available') {
+    return unavailableFeeRate('malformed_quote');
+  }
+
+  const expectedSubaccount = expected.subaccountId ?? null;
+  if (
+    !isNonEmptyString(expected.protocol)
+    || !isNonEmptyString(expected.account)
+    || expected.liquidityRole !== 'taker'
+    || candidate.protocol !== expected.protocol
+    || candidate.account !== expected.account
+    || candidate.subaccountId !== expectedSubaccount
+    || candidate.liquidityRole !== expected.liquidityRole
+  ) {
+    return unavailableFeeRate('identity_mismatch');
+  }
+
+  if (
+    !isFiniteNonnegative(candidate.baseRate)
+    || !isFiniteNonnegative(candidate.effectiveRate)
+    || !isNonEmptyString(candidate.provenance)
+    || !isFiniteNonnegative(candidate.observedAt)
+  ) {
+    return unavailableFeeRate('malformed_quote');
+  }
+
+  const builder = candidate.builder;
+  let normalizedBuilder: FeeRateBuilderState;
+  let expectedEffectiveRate = candidate.baseRate;
+  if (!builder || typeof builder !== 'object') {
+    return unavailableFeeRate('ambiguous_builder');
+  }
+  const builderRecord = builder as Record<string, unknown>;
+  if (builderRecord.status === 'absent') {
+    if ('rate' in builderRecord || 'provenance' in builderRecord) {
+      return unavailableFeeRate('ambiguous_builder');
+    }
+    normalizedBuilder = { status: 'absent' };
+  } else if (builderRecord.status === 'included') {
+    if (
+      !isNonEmptyString(builderRecord.code)
+      || !isFiniteNonnegative(builderRecord.rate)
+      || !isNonEmptyString(builderRecord.provenance)
+      || (isNonEmptyString(expected.builderCode) && builderRecord.code !== expected.builderCode)
+    ) {
+      return unavailableFeeRate('ambiguous_builder');
+    }
+    normalizedBuilder = {
+      status: 'included',
+      code: builderRecord.code,
+      rate: builderRecord.rate,
+      provenance: builderRecord.provenance,
+    };
+    expectedEffectiveRate += builderRecord.rate;
+  } else {
+    return unavailableFeeRate('ambiguous_builder');
+  }
+
+  if (isNonEmptyString(expected.builderCode) && normalizedBuilder.status !== 'included') {
+    return unavailableFeeRate('ambiguous_builder');
+  }
+
+  if (candidate.effectiveRate !== expectedEffectiveRate) {
+    return unavailableFeeRate('ambiguous_builder');
+  }
+
+  const now = options.now ?? Date.now();
+  const maxAgeMs = options.maxAgeMs ?? FEE_RATE_QUOTE_MAX_AGE_MS;
+  if (!Number.isFinite(now) || !Number.isFinite(maxAgeMs) || maxAgeMs < 0) {
+    return unavailableFeeRate('malformed_quote');
+  }
+  if (candidate.observedAt > now) {
+    return unavailableFeeRate('future_quote');
+  }
+  if (now - candidate.observedAt > maxAgeMs) {
+    return unavailableFeeRate('stale_quote');
+  }
+
+  return {
+    availability: 'available',
+    protocol: expected.protocol,
+    account: expected.account,
+    subaccountId: expectedSubaccount,
+    liquidityRole: expected.liquidityRole,
+    baseRate: candidate.baseRate,
+    effectiveRate: candidate.effectiveRate,
+    provenance: candidate.provenance,
+    observedAt: candidate.observedAt,
+    builder: normalizedBuilder,
+  };
+}
+
+/**
+ * Fresh admission resolver. Missing adapter support, transport failures and
+ * malformed responses are all unavailable; none can become an economic value.
+ */
+export async function resolveFeeRateQuote(
+  adapter: ProtocolAdapter,
+  input: FeeRateQuoteRequest,
+  options: FeeRateQuoteValidationOptions = {},
+): Promise<FeeRateQuoteResult> {
+  if (typeof adapter.getFeeRateQuote !== 'function') {
+    return unavailableFeeRate('capability_unavailable');
+  }
+  try {
+    const value = await adapter.getFeeRateQuote(input);
+    return validateFeeRateQuote(value, {
+      protocol: adapter.protocolName,
+      account: input.account,
+      subaccountId: input.subaccountId ?? null,
+      liquidityRole: input.liquidityRole,
+      builderCode: input.builderCode,
+    }, options);
+  } catch {
+    return unavailableFeeRate('read_failed');
+  }
+}
+
+/**
+ * Shared Signal Bot admission choke point. Existing reduce-only behavior is
+ * deliberately untouched; every risk-increasing market order proves fresh fee
+ * authority before the adapter can observe the order.
+ */
+export async function placeMarketOrderWithFeeAuthority(
+  adapter: ProtocolAdapter,
+  params: MarketOrderParams,
+  options: FeeRateQuoteValidationOptions = {},
+): Promise<FeeAuthorizedMarketOrderResult> {
+  if (params.reduceOnly === true) {
+    return adapter.placeMarketOrder(params);
+  }
+
+  const quote = await resolveFeeRateQuote(adapter, {
+    account: params.agentPublicKey,
+    subaccountId: params.subaccountId ?? null,
+    liquidityRole: 'taker',
+    builderCode: params.builderCode,
+  }, options);
+  if (quote.availability === 'unavailable') {
+    return {
+      success: false,
+      status: 'rejected',
+      error: `FEE_RATE_UNAVAILABLE:${quote.reason}`,
+    };
+  }
+  const result = await adapter.placeMarketOrder(params);
+  return { ...result, admissionFeeQuote: quote };
+}
+
+/**
  * Static capability descriptor read by the core recycling orchestrator
  * (Subaccount Recycling Plan §4.1 / §14.2). Adapters that leave this undefined
  * are treated as create-only (today's behavior) — no spare pool, no reuse.
@@ -160,6 +426,12 @@ export interface ProtocolAdapter {
   quantizePrice(internalSymbol: string, price: number): number;
 
   getAccountInfo(agentPublicKey: string, subaccountId?: string): Promise<AccountInfo>;
+  /**
+   * Fresh venue authority for risk-increasing admission. Optional adapters are
+   * fail-closed by resolveFeeRateQuote; implementers must not serve cached or
+   * configured fee constants through this capability.
+   */
+  getFeeRateQuote?(input: FeeRateQuoteRequest): Promise<FeeRateQuoteResult>;
   getPositions(agentPublicKey: string, subaccountId?: string): Promise<ProtocolPosition[]>;
   /**
    * Fresh, fail-closed single-market position authority for latency-sensitive
