@@ -546,6 +546,71 @@ describe("buildMarketContext (WO-3)", () => {
     expect(csvRows[csvRows.length - 1]).toContain(new Date(fixtureNewest.time).toISOString().slice(0, 16));
   });
 
+  it("validates a fresh fee quote against the post-read real clock", async () => {
+    vi.useRealTimers();
+    const wallClockOffset = Date.now() - FIXED_NOW;
+    const shiftToWallClock = (candles: TestCandle[]): TestCandle[] =>
+      candles.map((candle) => ({ ...candle, time: candle.time + wallClockOffset }));
+
+    let firstFetchObservedAt = 0;
+    fetchOHLCVMock.mockImplementation(async (_symbol: string, timeframe: string) => {
+      if (firstFetchObservedAt === 0) {
+        firstFetchObservedAt = Date.now();
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      }
+      if (timeframe === "15m") return shiftToWallClock(SELECTED_CANDLES_15M);
+      if (timeframe === "1h") return shiftToWallClock(PARENT_CANDLES_1H);
+      throw new Error(`unexpected timeframe requested in test: ${timeframe}`);
+    });
+
+    let quoteObservedAt = 0;
+    const getFeeRateQuote = vi.fn(async (request: any) => {
+      quoteObservedAt = Date.now();
+      return {
+        availability: "available" as const,
+        protocol: "pacifica" as const,
+        account: request.account,
+        subaccountId: request.subaccountId ?? null,
+        liquidityRole: "taker" as const,
+        baseRate: 0.0012,
+        effectiveRate: 0.0014,
+        provenance: "pacifica:/account:taker_fee",
+        observedAt: quoteObservedAt,
+        builder: {
+          status: "included" as const,
+          code: "QuantumVault",
+          rate: 0.0002,
+          provenance: "pacifica:builder_actual",
+        },
+      };
+    });
+
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const result = await buildMarketContext({
+      market: "SOL-PERP",
+      timeframe: "15m",
+      adapter: makeAdapter({ getFeeRateQuote }),
+      bot: makeBot(),
+      recentClosedDecisions: RECENT_DECISIONS,
+      paperPositionRows: OPEN_POSITION_ROWS,
+      agentPublicKey: AGENT_PUBKEY,
+    });
+
+    expect(quoteObservedAt).toBeGreaterThan(firstFetchObservedAt);
+    expect("stale" in result).toBe(false);
+    if ("stale" in result) throw new Error("expected a built context, not stale");
+    const retainedQuote = (result.contextDigest as any).feeRateQuote;
+    if (retainedQuote.availability !== "available") {
+      throw new Error(`expected an available post-read quote, got ${retainedQuote.reason}`);
+    }
+    expect(retainedQuote).toMatchObject({
+      availability: "available",
+      effectiveRate: 0.0014,
+      observedAt: quoteObservedAt,
+    });
+    expect(result.user).toContain("Taker fee: 0.1400% per side, 0.2800% round-trip");
+  });
+
   it("retains an explicit nonnumeric unavailable fee result while keeping flat/close context available", async () => {
     const getFeeRateQuote = vi.fn().mockResolvedValue({
       availability: "unavailable",

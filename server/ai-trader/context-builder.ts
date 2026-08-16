@@ -745,7 +745,6 @@ export async function buildMarketContext(
       subaccountId: feeRateIdentity.subaccountId,
       liquidityRole: feeRateIdentity.liquidityRole,
     },
-    { now },
   );
 
   const [fundingInfo, cotSnapshot] = await Promise.all([
