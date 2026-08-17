@@ -220,8 +220,12 @@ describe("candle write queue convergence", () => {
     const occupyingB = saveCandlesToDb("ACTIVE-B", "1h", [candle(2, 2)]);
     await waitForLoad((load) => load.activeWrites === 2);
 
+    const coalescedBefore = getCandleStoreLoad().coalescedWrites;
     const updates = Array.from({ length: 16 }, (_, index) =>
       saveCandlesToDb("COLD", "1h", [candle(3, 100 + index)])
+    );
+    await waitForLoad((load) =>
+      load.activeWrites + load.queuedWrites + (load.coalescedWrites - coalescedBefore) === 18
     );
     expect(getCandleStoreLoad().queuedWrites).toBe(1);
     expect(getCandleStoreLoad().coalescedWrites).toBeGreaterThanOrEqual(15);
@@ -278,8 +282,12 @@ describe("candle write queue convergence", () => {
     await waitForLoad((load) => load.activeWrites === 2);
     const hot = saveCandlesToDb("HOT", "1h", [candle(102, 1)]);
     const cold = saveCandlesToDb("COLD", "1h", [candle(103, 1)]);
+    const coalescedBefore = getCandleStoreLoad().coalescedWrites;
     const replacements = Array.from({ length: 20 }, (_, index) =>
       saveCandlesToDb("HOT", "1h", [candle(102, 2 + index)])
+    );
+    await waitForLoad((load) =>
+      load.activeWrites + load.queuedWrites + (load.coalescedWrites - coalescedBefore) === 24
     );
 
     activeA.resolve();
@@ -306,6 +314,7 @@ describe("candle write queue convergence", () => {
     await waitForLoad((load) => load.activeWrites === 2);
     const forming = saveCandlesToDb("BAR", "1h", [candle(202, 10, "forming")]);
     const finalized = saveCandlesToDb("BAR", "1h", [candle(202, 11, "finalized")]);
+    await waitForLoad((load) => load.activeWrites + load.queuedWrites === 4);
     expect(getCandleStoreLoad().queuedWrites).toBe(2);
 
     activeA.resolve();
