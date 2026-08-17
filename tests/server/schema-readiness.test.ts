@@ -122,7 +122,7 @@ describe("schema readiness", () => {
     });
   });
 
-  it("retains all 161 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 166 SQL entries exactly once, in order, with explicit metadata", () => {
     const sourcePath = new URL("../../server/db.ts", import.meta.url);
     const sourceText = readFileSync(sourcePath, "utf8");
     const source = ts.createSourceFile(sourcePath.pathname, sourceText, ts.ScriptTarget.Latest, true);
@@ -154,12 +154,12 @@ describe("schema readiness", () => {
       capabilities: string[];
       requirements: unknown[];
     }>;
-    expect(sqlEntries).toHaveLength(161);
-    expect(metadata).toHaveLength(161);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(161);
+    expect(sqlEntries).toHaveLength(166);
+    expect(metadata).toHaveLength(166);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(166);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
     expect(createHash("sha256").update(sqlEntries.join("\u0000"), "utf8").digest("hex").toUpperCase())
-      .toBe("2CEB1263FF591172AD4C9AE0DB5E68456F14665D93BA14F27F197BBDA7B0EBEB");
+      .toBe("0E28017F6BD3EDD0BFE005EC007F365846586787D411722E93DC58915A94D12C");
   });
 
   it("runs one memoized postcondition-only probe when the Lab child has no snapshot", async () => {
