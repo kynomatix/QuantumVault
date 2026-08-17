@@ -5,7 +5,12 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-import { SCANNER_VERSION, isPlaceholder, scanFiles } from '../../scripts/qv-secrets-scan.mjs';
+import {
+  GIT_OBJECT_MAX_CANDIDATES,
+  SCANNER_VERSION,
+  isPlaceholder,
+  scanFiles,
+} from '../../scripts/qv-secrets-scan.mjs';
 
 const scanner = resolve('scripts/qv-secrets-scan.mjs');
 const roots: string[] = [];
@@ -16,6 +21,22 @@ function fixture(contents: string | Buffer, name = 'fixture.txt') {
   const path = join(root, name);
   writeFileSync(path, contents);
   return path;
+}
+
+function repositoryFixture(contents: string | Buffer, name = 'fixture.txt') {
+  const root = mkdtempSync(join(resolve('.'), '.qv-secret-scan-'));
+  roots.push(root);
+  const path = join(root, name);
+  writeFileSync(path, contents);
+  return path;
+}
+
+function gitObject(revision: string) {
+  const result = spawnSync('git', ['rev-parse', revision], {
+    cwd: resolve('.'), encoding: 'utf8', shell: false,
+  });
+  expect(result.status).toBe(0);
+  return result.stdout.trim();
 }
 
 function opaque(bytes = 32) {
@@ -157,6 +178,68 @@ describe('qv-secrets-scan', () => {
   it('does not broaden operation-envelope recognition to similarly named secret fields', () => {
     const secretLike = createHash('sha256').update('genuine secret-shaped api key id').digest('hex');
     const result = cli([fixture(`${JSON.stringify({ apiKeyId: secretLike })}\n`)]);
+    expect(result.status).toBe(2);
+    expect(JSON.parse(result.stdout).files[0].findings).toContainEqual(
+      { ruleId: 'unclassified-hex', line: 1 },
+    );
+  });
+
+  it('recognizes real repository commits in refreshed-main and landed-at prose', () => {
+    const refreshedMain = gitObject('HEAD');
+    const landedPredecessor = gitObject('HEAD^');
+    const result = cli([repositoryFixture([
+      `Refreshed main: ${refreshedMain}`,
+      `The predecessor landed at ${landedPredecessor}.`,
+    ].join('\n'))]);
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).findingCount).toBe(0);
+  });
+
+  it('keeps a real object-shaped value outside a repository fail-closed', () => {
+    const commit = gitObject('HEAD');
+    const result = cli([fixture(`Refreshed main: ${commit}\n`)]);
+    expect(result.status).toBe(2);
+    expect(JSON.parse(result.stdout).files[0].findings).toContainEqual(
+      { ruleId: 'unclassified-hex', line: 1 },
+    );
+  });
+
+  it('keeps explicit secret assignments red even when the value is a real Git object', () => {
+    const commit = gitObject('HEAD');
+    const result = cli([repositoryFixture(`api_key=${commit}\n`)]);
+    expect(result.status).toBe(2);
+    expect(JSON.parse(result.stdout).files[0].findings).toEqual(
+      expect.arrayContaining([
+        { ruleId: 'api-key-assignment', line: 1 },
+        { ruleId: 'unclassified-hex', line: 1 },
+      ]),
+    );
+  });
+
+  it('keeps lookup errors fail-closed', () => {
+    const commit = gitObject('HEAD');
+    const root = mkdtempSync(join(tmpdir(), 'qv-secret-scan-broken-git-'));
+    roots.push(root);
+    mkdirSync(join(root, '.git'));
+    const path = join(root, 'fixture.txt');
+    writeFileSync(path, `Refreshed main: ${commit}\n`);
+    const result = cli([path]);
+    expect(result.status).toBe(2);
+    expect(JSON.parse(result.stdout).files[0].findings).toContainEqual(
+      { ruleId: 'unclassified-hex', line: 1 },
+    );
+  });
+
+  it('keeps the candidate-count bound fail-closed', () => {
+    const commit = gitObject('HEAD');
+    const excess = Array.from(
+      { length: GIT_OBJECT_MAX_CANDIDATES },
+      (_, index) => createHash('sha1').update(`bounded candidate ${index}`).digest('hex'),
+    );
+    const result = cli([repositoryFixture([
+      `Refreshed main: ${commit}`,
+      ...excess.map(value => `unlabelled ${value}`),
+    ].join('\n'))]);
     expect(result.status).toBe(2);
     expect(JSON.parse(result.stdout).files[0].findings).toContainEqual(
       { ruleId: 'unclassified-hex', line: 1 },

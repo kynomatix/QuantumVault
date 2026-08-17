@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const SCANNER_VERSION = 'qv-secrets-scan/1';
@@ -11,6 +12,10 @@ const CANDIDATE_PATTERN = /(?<![A-Za-z0-9+/_=-])([A-Za-z0-9+/_=-]{16,256})(?![A-
 const SECRET_CONTEXT = /(?:secret|password|token|api[_ -]?key|private[_ -]?key|mnemonic|authorization)\s*[:=]\s*(?:bearer\s+)?["'`]?$/i;
 const PUBLIC_HASH_WORD_LABEL = /(?:\bsha-?256\b|\bdigest\b|\bhash\b|\bcommit\b|\bhead\b|\bbranch(?:\s+point)?\b|\bbase\b|\btip\b|\brevision\b|\borigin\/main\b)/i;
 const PUBLIC_HASH_FIELD_LABEL = /\b(?:[A-Za-z0-9]+(?:Sha256|Digest|Hash|Commit|Head|Tip)|operationId|reviewedOperationId)\b/;
+const GIT_OBJECT_TYPES = new Set(['commit', 'tree', 'blob', 'tag']);
+export const GIT_OBJECT_MAX_CANDIDATES = 512;
+export const GIT_OBJECT_TIMEOUT_MS = 2_000;
+export const GIT_OBJECT_MAX_BUFFER = 1_048_576;
 
 const VENDOR_RULES = [
   ['vendor-anthropic-key', /\bsk-ant-[A-Za-z0-9_-]{16,}\b/g],
@@ -94,7 +99,7 @@ function tableHashColumn(lines, lineIndex, candidate) {
   return false;
 }
 
-function classifyOpaqueCandidate(value, line, lines, lineIndex, candidateIndex) {
+function classifyOpaqueCandidate(value, line, lines, lineIndex, candidateIndex, resolvedGitObjects) {
   if (isPlaceholder(value)) return null;
   const measuredEntropy = shannonEntropy(value);
   const prefix = line.slice(Math.max(0, candidateIndex - 100), candidateIndex);
@@ -107,7 +112,8 @@ function classifyOpaqueCandidate(value, line, lines, lineIndex, candidateIndex) 
       && /(?:wo|commit|fix|head|accepted|verdict|code)/i.test(line);
     const labelledPublic = PUBLIC_HASH_WORD_LABEL.test(contextWindow)
       || PUBLIC_HASH_FIELD_LABEL.test(contextWindow)
-      || atQualifiedCommit || tableHashColumn(lines, lineIndex, value);
+      || atQualifiedCommit || tableHashColumn(lines, lineIndex, value)
+      || resolvedGitObjects.has(value.toLowerCase());
     return secretContext || !labelledPublic ? 'unclassified-hex' : null;
   }
 
@@ -133,7 +139,7 @@ function assignmentValue(line, pattern) {
   return match[1].trim().replace(/^["'`]|["'`,;]+$/g, '');
 }
 
-function findingsForLines(lines) {
+function findingsForLines(lines, resolvedGitObjects = new Set()) {
   const findings = [];
   const seen = new Set();
   const add = (ruleId, line) => {
@@ -174,11 +180,72 @@ function findingsForLines(lines) {
 
     CANDIDATE_PATTERN.lastIndex = 0;
     for (const match of line.matchAll(CANDIDATE_PATTERN)) {
-      const ruleId = classifyOpaqueCandidate(match[1], line, lines, lineIndex, match.index);
+      const ruleId = classifyOpaqueCandidate(
+        match[1], line, lines, lineIndex, match.index, resolvedGitObjects,
+      );
       if (ruleId) add(ruleId, number);
     }
   });
   return findings.sort((left, right) => left.line - right.line || left.ruleId.localeCompare(right.ruleId));
+}
+
+function gitRepositoryForFile(path) {
+  let current = dirname(path);
+  while (true) {
+    try {
+      const marker = lstatSync(join(current, '.git'));
+      if (marker.isDirectory() || marker.isFile()) return realpathSync.native(current);
+    } catch {
+      // Absence or an unreadable marker is not repository authority; keep walking.
+    }
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+function hexCandidates(lines) {
+  const candidates = new Set();
+  for (const line of lines) {
+    CANDIDATE_PATTERN.lastIndex = 0;
+    for (const match of line.matchAll(CANDIDATE_PATTERN)) {
+      if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(match[1])) {
+        candidates.add(match[1].toLowerCase());
+      }
+    }
+  }
+  return candidates;
+}
+
+function resolveGitObjects(repository, candidates) {
+  if (candidates.size === 0 || candidates.size > GIT_OBJECT_MAX_CANDIDATES) return new Set();
+  const ordered = [...candidates];
+  const result = spawnSync(
+    'git',
+    ['-C', repository, 'cat-file', '--batch-check=%(objectname) %(objecttype)'],
+    {
+      input: `${ordered.join('\n')}\n`,
+      encoding: 'utf8',
+      shell: false,
+      timeout: GIT_OBJECT_TIMEOUT_MS,
+      maxBuffer: GIT_OBJECT_MAX_BUFFER,
+      windowsHide: true,
+    },
+  );
+  if (result.error || result.signal || result.status !== 0 || typeof result.stdout !== 'string') {
+    return new Set();
+  }
+  const output = result.stdout.replace(/\r/g, '').replace(/\n$/, '').split('\n');
+  if (output.length !== ordered.length) return new Set();
+  const resolved = new Set();
+  for (let index = 0; index < ordered.length; index += 1) {
+    const parts = output[index].trim().split(/\s+/);
+    if (parts.length !== 2) return new Set();
+    const [objectName, objectType] = parts;
+    if (objectName.toLowerCase() !== ordered[index] || !GIT_OBJECT_TYPES.has(objectType)) continue;
+    resolved.add(ordered[index]);
+  }
+  return resolved;
 }
 
 function readTextFile(path) {
@@ -208,15 +275,43 @@ export function scanFiles(paths) {
     normalized.add(key);
     return absolute;
   });
-  const files = inputs.map(input => {
+  const sources = inputs.map(input => {
     const source = readTextFile(input);
     const lines = source.text.split(/\r?\n/);
+    return {
+      ...source,
+      lines,
+      repository: gitRepositoryForFile(source.path),
+    };
+  });
+  const candidatesByRepository = new Map();
+  for (const source of sources) {
+    if (!source.repository) continue;
+    const key = process.platform === 'win32' ? source.repository.toLowerCase() : source.repository;
+    const entry = candidatesByRepository.get(key) ?? {
+      repository: source.repository,
+      candidates: new Set(),
+    };
+    for (const candidate of hexCandidates(source.lines)) entry.candidates.add(candidate);
+    candidatesByRepository.set(key, entry);
+  }
+  const resolvedByRepository = new Map();
+  for (const [key, entry] of candidatesByRepository) {
+    resolvedByRepository.set(key, resolveGitObjects(entry.repository, entry.candidates));
+  }
+  const files = sources.map(source => {
+    const repositoryKey = source.repository
+      ? (process.platform === 'win32' ? source.repository.toLowerCase() : source.repository)
+      : null;
     return {
       path: source.path,
       sha256: sha256(source.bytes),
       bytes: source.bytes.length,
-      lines: lines.length,
-      findings: findingsForLines(lines),
+      lines: source.lines.length,
+      findings: findingsForLines(
+        source.lines,
+        repositoryKey ? resolvedByRepository.get(repositoryKey) ?? new Set() : new Set(),
+      ),
     };
   });
   return {
